@@ -93,19 +93,6 @@ func formatTelegram(m canonical.Message) string {
 	return sb.String()
 }
 
-func emojiFor(level string) string {
-	switch level {
-	case "warn":
-		return "⚠️"
-	case "error":
-		return "🚨"
-	case "success":
-		return "✅"
-	default:
-		return "ℹ️"
-	}
-}
-
 // escapeMDV2 escapes the characters Telegram MarkdownV2 requires escaping
 // when they appear in text (per Bot API docs).
 func escapeMDV2(s string) string {
