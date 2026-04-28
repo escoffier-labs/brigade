@@ -6,10 +6,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/solomonneas/agent-notify/internal/canonical"
 )
+
+// Compile-time assertion that *Discord satisfies the Channel interface.
+var _ Channel = (*Discord)(nil)
 
 // Color values for Discord embed sidebar (RGB ints).
 const (
@@ -22,7 +26,6 @@ const (
 type Discord struct {
 	name       string
 	webhookURL string
-	timeout    time.Duration
 	client     *http.Client
 }
 
@@ -30,7 +33,6 @@ func NewDiscord(name, webhookURL string, timeout time.Duration) *Discord {
 	return &Discord{
 		name:       name,
 		webhookURL: webhookURL,
-		timeout:    timeout,
 		client:     &http.Client{Timeout: timeout},
 	}
 }
@@ -72,7 +74,7 @@ func (d *Discord) Send(ctx context.Context, m canonical.Message) error {
 	if len(m.Tags) > 0 {
 		embed.Fields = []discordField{{
 			Name:   "tags",
-			Value:  joinTags(m.Tags),
+			Value:  strings.Join(m.Tags, ", "),
 			Inline: true,
 		}}
 	}
@@ -114,13 +116,3 @@ func colorFor(level string) int {
 	}
 }
 
-func joinTags(tags []string) string {
-	out := ""
-	for i, t := range tags {
-		if i > 0 {
-			out += ", "
-		}
-		out += t
-	}
-	return out
-}

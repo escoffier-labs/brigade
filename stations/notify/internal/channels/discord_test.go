@@ -31,6 +31,12 @@ type discordPayload struct {
 func TestDiscord_Send_PostsExpectedShape(t *testing.T) {
 	var got discordPayload
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Errorf("expected POST, got %s", r.Method)
+		}
+		if ct := r.Header.Get("Content-Type"); ct != "application/json" {
+			t.Errorf("expected Content-Type application/json, got %q", ct)
+		}
 		body, _ := io.ReadAll(r.Body)
 		if err := json.Unmarshal(body, &got); err != nil {
 			t.Fatalf("invalid JSON to webhook: %v", err)
