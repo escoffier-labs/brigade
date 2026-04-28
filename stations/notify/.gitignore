@@ -1,0 +1,7 @@
+agent-notify
+agent-notify-*
+*.test
+*.out
+.idea/
+.vscode/
+.claude/
