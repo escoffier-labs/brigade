@@ -22,6 +22,9 @@ func TestCodexNotify_ExtractsMessageAndSession(t *testing.T) {
 	if !strings.Contains(m.Body, "Done. Tests pass.") {
 		t.Errorf("body should contain last-assistant-message, got %q", m.Body)
 	}
+	if m.Title != "Codex (turn-42)" {
+		t.Errorf("title = %q, want %q", m.Title, "Codex (turn-42)")
+	}
 }
 
 func TestCodexNotify_FallsBackOnMissingMessage(t *testing.T) {
@@ -30,8 +33,11 @@ func TestCodexNotify_FallsBackOnMissingMessage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if m.Body == "" {
-		t.Error("body should fall back to a default")
+	if m.Body != "Codex turn complete" {
+		t.Errorf("body fallback = %q, want %q", m.Body, "Codex turn complete")
+	}
+	if m.Title != "Codex" {
+		t.Errorf("title without ID = %q, want %q", m.Title, "Codex")
 	}
 }
 
