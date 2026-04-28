@@ -1,5 +1,6 @@
 /agent-notify
 /agent-notify-*
+/dist/
 *.test
 *.out
 .idea/
