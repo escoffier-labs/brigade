@@ -1,5 +1,5 @@
-agent-notify
-agent-notify-*
+/agent-notify
+/agent-notify-*
 *.test
 *.out
 .idea/
