@@ -20,11 +20,11 @@ func FromString(s string) canonical.Message {
 //
 // Detection rules:
 //   - Empty input returns an error.
-//   - If the input is valid JSON AND has a non-empty "body" field, it is
-//     treated as canonical JSON (any extra fields are accepted but ignored).
-//   - If the input is valid JSON but lacks a "body" field, it is treated
-//     as a non-canonical structured message and returns a helpful error.
-//   - Otherwise the entire input is treated as a plain string body.
+//   - If the input is a JSON object (starts with "{") it is parsed as
+//     canonical: success requires a non-empty Body field. Malformed JSON
+//     and JSON missing Body produce distinct error messages.
+//   - JSON arrays, scalars, and other non-object inputs are treated as
+//     plain string bodies.
 func AutoDetect(r io.Reader) (canonical.Message, error) {
 	raw, err := io.ReadAll(r)
 	if err != nil {
@@ -38,11 +38,13 @@ func AutoDetect(r io.Reader) (canonical.Message, error) {
 	// Try canonical JSON first if it looks like a JSON object.
 	if strings.HasPrefix(trimmed, "{") {
 		var m canonical.Message
-		if err := json.Unmarshal([]byte(trimmed), &m); err == nil && m.Body != "" {
-			return m, nil
+		if err := json.Unmarshal([]byte(trimmed), &m); err != nil {
+			return canonical.Message{}, fmt.Errorf("input looks like JSON but failed to parse: %w", err)
 		}
-		// Looks like JSON but not canonical (missing body or unparseable).
-		return canonical.Message{}, fmt.Errorf("input parsed as JSON but missing required \"body\" field; pass plain string or canonical {title,body,level,source,tags} JSON")
+		if m.Body == "" {
+			return canonical.Message{}, fmt.Errorf("input parsed as JSON but missing required \"body\" field; pass plain string or canonical {title,body,level,source,tags} JSON")
+		}
+		return m, nil
 	}
 
 	return FromString(trimmed), nil
