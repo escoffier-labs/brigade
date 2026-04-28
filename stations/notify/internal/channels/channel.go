@@ -20,6 +20,12 @@ type Channel interface {
 }
 
 // Registry maps channel names to Channel implementations.
+//
+// Registry is NOT safe for concurrent Register calls. Callers must finish
+// all Register calls (typically during CLI bootstrap) before any Get or
+// AllNames calls. Channel.Send may be called from multiple goroutines
+// concurrently because it operates on the registered Channel value
+// directly, not on the Registry.
 type Registry struct {
 	channels map[string]Channel
 }
