@@ -1,4 +1,4 @@
-# agent-notify — Design Spec
+# agent-notify - Design Spec
 
 **Date:** 2026-04-28
 **Status:** Approved (brainstorming complete; ready for implementation plan)
@@ -27,9 +27,9 @@ The motivation is concrete: the user has chosen to keep `DISABLE_TELEMETRY=1` se
 
 - Retry queue or persistent state (rate-limited or down channels are dropped, not queued)
 - Message templating engine
-- Additional channels (Pushover, ntfy, Slack, email, generic webhook) — straightforward to add later
+- Additional channels (Pushover, ntfy, Slack, email, generic webhook) - straightforward to add later
 - Rate limiting or dedup (the n8n failure classifier already handles dedup at its source)
-- Auto-update / self-update logic — install path is "build and copy"
+- Auto-update / self-update logic - install path is "build and copy"
 
 ## Architecture
 
@@ -57,9 +57,9 @@ The motivation is concrete: the user has chosen to keep `DISABLE_TELEMETRY=1` se
 
 Three internal layers, each independently testable:
 
-1. **Adapter layer** — converts heterogeneous input (string, canonical JSON, hook event JSON) to a canonical message struct.
-2. **Router** — resolves the canonical message + flags + config into a final list of channels.
-3. **Channel adapters** — one per channel type; each takes a canonical message + channel config and performs the HTTP call.
+1. **Adapter layer** - converts heterogeneous input (string, canonical JSON, hook event JSON) to a canonical message struct.
+2. **Router** - resolves the canonical message + flags + config into a final list of channels.
+3. **Channel adapters** - one per channel type; each takes a canonical message + channel config and performs the HTTP call.
 
 Each layer can be unit-tested without the others present.
 
@@ -132,7 +132,7 @@ This means the simplest install (drop binary, set one or more channel env vars, 
 ### TOML schema (when present)
 
 ```toml
-# Channels — one named definition per channel instance.
+# Channels - one named definition per channel instance.
 # Multiple instances of the same type are allowed (e.g., two Discord webhooks).
 # Secrets stay in env vars; this file holds only structure + env-var references.
 
@@ -151,7 +151,7 @@ url_env  = "SIGNAL_CLI_URL"   # e.g., http://signal-cli:8080/v2/send
 from_env = "SIGNAL_FROM"      # sender phone number
 to_env   = "SIGNAL_TO"        # recipient UUID or phone
 
-# Profiles — named groups that select channels and (optionally) override formatting.
+# Profiles - named groups that select channels and (optionally) override formatting.
 
 [profiles.agent-stop]
 channels = ["telegram-personal", "discord-main"]
@@ -174,10 +174,10 @@ Config does NOT contain secrets. Channels reference env-var names; the binary re
 
 When `agent-notify` runs, the channel selection flows in this order (first match wins):
 
-1. **`--to <names>`** — explicit comma-separated channel names. Overrides everything else.
-2. **`--profile <name>`** — named profile from config; uses its `channels` list.
+1. **`--to <names>`** - explicit comma-separated channel names. Overrides everything else.
+2. **`--profile <name>`** - named profile from config; uses its `channels` list.
 3. **Config-defined default profile** (the profile with `default = true`).
-4. **Fallback to all configured channels** — implicit default if no profile is set anywhere.
+4. **Fallback to all configured channels** - implicit default if no profile is set anywhere.
 
 Then `--skip <names>` (comma-separated channel names) filters from the resolved list.
 
@@ -218,7 +218,7 @@ Per-profile overrides (e.g., `prefix = "🚨 "` in `[profiles.error]`) prepend t
 - **Install:** drop binary in `~/bin/` (already on `$PATH` per existing setup)
 - **Cross-build:** Makefile targets for AMD64 (automation-host, dev box) and ARM64 (LXC containers, Pi targets if any)
 - **License:** MIT (matches other small tools in this stack)
-- **README** documents all five install paths per the project convention: Claude Code hooks, Claude Desktop (N/A — note this), OpenClaw delivery integration, Hermes Agent integration, Codex CLI notify. Also includes the no-config fast-path quickstart and a TOML reference.
+- **README** documents all five install paths per the project convention: Claude Code hooks, Claude Desktop (N/A - note this), OpenClaw delivery integration, Hermes Agent integration, Codex CLI notify. Also includes the no-config fast-path quickstart and a TOML reference.
 - **Privacy posture statement** in README: no telemetry, no update checks, no third-party calls beyond user-configured channel endpoints.
 
 ## Hook integration examples
@@ -267,7 +267,7 @@ A simple test asserts the binary's outbound HTTP behavior: in a sandbox with no 
 
 ## Open questions for the implementation plan
 
-(None blocking — these are decisions the plan will resolve.)
+(None blocking - these are decisions the plan will resolve.)
 
 - Test harness: `testify` or stdlib only? Lean: stdlib for v1.
 - Go module name: `github.com/solomonneas/agent-notify`.
