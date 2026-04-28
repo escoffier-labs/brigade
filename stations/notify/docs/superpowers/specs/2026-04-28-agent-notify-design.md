@@ -216,7 +216,7 @@ Per-profile overrides (e.g., `prefix = "🚨 "` in `[profiles.error]`) prepend t
 - **New repo:** `solomonneas/agent-notify`
 - **Build:** `go build -o agent-notify ./cmd/agent-notify`
 - **Install:** drop binary in `~/bin/` (already on `$PATH` per existing setup)
-- **Cross-build:** Makefile targets for AMD64 (automation-host, dev box) and ARM64 (LXC containers, Pi targets if any)
+- **Cross-build:** Makefile targets for AMD64 and ARM64 (covers typical Linux servers, Macs, LXC containers, Pi targets)
 - **License:** MIT (matches other small tools in this stack)
 - **README** documents all five install paths per the project convention: Claude Code hooks, Claude Desktop (N/A - note this), OpenClaw delivery integration, Hermes Agent integration, Codex CLI notify. Also includes the no-config fast-path quickstart and a TOML reference.
 - **Privacy posture statement** in README: no telemetry, no update checks, no third-party calls beyond user-configured channel endpoints.
