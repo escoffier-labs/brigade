@@ -34,10 +34,16 @@ def test_workspace_profile_includes_memory_cards(tmp_target: Path):
         "HEARTBEAT.md",
         "SAFETY_RULES.md",
         "INSTALL_FOR_AGENTS.md",
-        "DREAMS.md",
     ):
         assert (tmp_target / fname).is_file(), f"missing {fname}"
-    for card in ("memory-architecture.md", "handoff-flow.md", "content-safety.md"):
+    for card in (
+        "memory-architecture.md",
+        "handoff-flow.md",
+        "content-safety.md",
+        "memory-scanner.md",
+        "chat-surface-crawlers.md",
+        "pipeline-standups.md",
+    ):
         assert (tmp_target / "memory" / "cards" / card).is_file(), f"missing card {card}"
     assert (tmp_target / "memory" / "handoff-inbox").is_dir()
     assert (tmp_target / ".claude" / "memory-handoffs" / "processed").is_dir()

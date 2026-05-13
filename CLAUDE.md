@@ -1,24 +1,40 @@
 # CLAUDE.md - Claude Code Rules
 
-## Project Rules
+## Project rules
 
 - Follow repo-local `AGENTS.md` when present.
-- Use this file only for Claude Code-specific behavior.
+- This file is the Claude Code-specific bridge. Cross-harness behavior lives in `AGENTS.md` and `SOUL.md`.
 
-## Memory Handoff
+## Memory handoff
 
-The canonical memory owner on this workspace is **OpenClaw**. Claude Code may keep local session context, but durable knowledge must be written as a Memory Handoff in `.claude/memory-handoffs/`. See `AGENTS.md` for the full rule.
+The canonical memory owner on this workspace is **OpenClaw**. Claude Code may keep local session context, but durable knowledge must be written as a Memory Handoff in `.claude/memory-handoffs/`. Full contract in `AGENTS.md`.
 
-At the end of any substantial task, check whether the session produced durable knowledge. If yes, create a Memory Handoff using the standard format in `.claude/memory-handoffs/TEMPLATE.md`. Do this without waiting to be reminded.
+At the end of any substantial task, check whether the session produced durable knowledge. If yes, write a handoff using `.claude/memory-handoffs/TEMPLATE.md`. Do not wait to be reminded.
 
 ## Closeout
 
-- Report the verification command that was run.
+- Report the exact verification command you ran.
 - If verification could not run, state the blocker.
-- If a Memory Handoff was warranted, confirm it was written.
+- If a Memory Handoff was warranted, confirm where it landed.
+
+## Tool use
+
+- Say it = call it. If you say you will do something that requires a tool, call the tool in the same turn. Silent intent is a lie. Full rule in `SOUL.md`.
+- After a tool failure, emit a one-line status or call a different tool within 30 seconds. Do not silently reason for minutes.
 
 ## Git
 
-- Do not add `Co-Authored-By` or AI-attribution trailers to commits.
-- Use conventional commit messages.
-- Never bypass pre-push hooks unless the user has explicitly accepted the risk.
+- Do not add `Co-Authored-By` or AI-attribution trailers to commits, PR bodies, or public docs.
+- Use conventional commits.
+- Never bypass pre-push hooks (`--no-verify`) unless the user has explicitly accepted the risk.
+- Never push to `main` directly on shared repos. Feature branch + PR.
+
+## Chat surfaces
+
+If this workspace is connected to chat archives (`discrawl`, `slackcrawl`, etc.), do not quote raw messages back. Summarize. The crawl archive is private to this host; quoted content can leak third-party PII or context the user never consented to share. See `memory/cards/chat-surface-crawlers.md`.
+
+## When in doubt
+
+- Default to reading more before writing more.
+- Ask one specific question rather than guess.
+- Surface tradeoffs rather than presenting decisions as facts.
