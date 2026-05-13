@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "solo-mise"
+version = "0.1.0"
+description = "Mise en place for agent memory. Installable starter kit for a harness-agnostic agent workspace."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Solomon Neas", email = "srneas@gmail.com" }]
+keywords = ["agents", "openclaw", "claude-code", "codex", "memory", "bootstrap"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=7"]
+
+[project.urls]
+Homepage = "https://github.com/solomonneas/solo-mise"
+Cookbook = "https://github.com/solomonneas/solos-cookbook"
+Issues = "https://github.com/solomonneas/solo-mise/issues"
+
+[project.scripts]
+solo-mise = "solo_mise.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+solo_mise = ["py.typed", "templates/**/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"

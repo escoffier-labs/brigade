@@ -1,0 +1,42 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+*.egg
+.eggs/
+
+# venv
+.venv/
+venv/
+env/
+
+# tests
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# editor
+.vscode/
+.idea/
+*.swp
+*~
+
+# os
+.DS_Store
+Thumbs.db
+
+# claude / agent local state
+.claude/
+.codex/
+.openclaw/
+
+# scratch
+/scratch/
+*.bak
+*.tmp

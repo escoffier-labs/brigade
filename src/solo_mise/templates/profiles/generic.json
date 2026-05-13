@@ -1,0 +1,14 @@
+{
+  "id": "generic",
+  "description": "Contract docs and templates only. No orchestrator-specific config.",
+  "memory_owner_default": "this-repo",
+  "extends": "workspace",
+  "files": [
+    {"src": "generic/memory-contract.md", "dst": ".solo-mise/generic/memory-contract.md"},
+    {"src": "generic/harness-adapter-checklist.md", "dst": ".solo-mise/generic/harness-adapter-checklist.md"}
+  ],
+  "post_install_notes": [
+    "Read `.solo-mise/generic/memory-contract.md` to understand the six fields any harness must answer.",
+    "Use `.solo-mise/generic/harness-adapter-checklist.md` when wiring a new harness."
+  ]
+}

@@ -1,0 +1,61 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python: ["3.10", "3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
+      - name: Pytest
+        run: python -m pytest -q
+
+  content-guard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: solo-mise
+      - uses: actions/checkout@v4
+        with:
+          repository: solomonneas/content-guard
+          path: content-guard
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Scan
+        run: |
+          cd solo-mise
+          PYTHONPATH=../content-guard/src python -m content_guard scan . \
+            --policy ../content-guard/policies/public-repo.json
+
+  install-from-source:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: pipx install
+        run: |
+          python -m pip install --upgrade pip pipx
+          pipx install .
+          solo-mise --version
+          solo-mise init --target /tmp/ci-smoke --profile workspace
+          solo-mise doctor --target /tmp/ci-smoke

@@ -1,0 +1,268 @@
+"""Tests for solo-mise ingest."""
+from __future__ import annotations
+
+import textwrap
+from pathlib import Path
+
+import pytest
+
+from solo_mise import ingest as ingest_mod
+from solo_mise import init as init_mod
+
+
+def _seed(tmp_target: Path) -> Path:
+    init_mod.run(target=tmp_target, profile_id="workspace")
+    return tmp_target / ".claude" / "memory-handoffs"
+
+
+def _write_handoff(dir_: Path, name: str, body: str) -> Path:
+    p = dir_ / name
+    p.write_text(textwrap.dedent(body))
+    return p
+
+
+def test_create_card_handoff_promotes_to_memory_cards(tmp_target: Path):
+    inbox = _seed(tmp_target)
+    _write_handoff(
+        inbox,
+        "2026-05-13-1000-promote-me.md",
+        """\
+        # Memory Handoff
+
+        ## Type
+        decision
+
+        ## Title
+        Promote test card
+
+        ## Recommended memory action
+        create-card
+
+        ## Target card
+        promote-test.md
+
+        ## Suggested card content
+        ---
+        topic: promote-test
+        category: test
+        tags: [test]
+        ---
+
+        # Promote test
+
+        Body line.
+        """,
+    )
+    rc = ingest_mod.run(target=tmp_target, dry_run=False, promote_cards=True, route_documents=True)
+    assert rc == 0
+    card = tmp_target / "memory" / "cards" / "promote-test.md"
+    assert card.is_file()
+    assert card.read_text().startswith("---\ntopic: promote-test\n")
+    processed = (tmp_target / ".claude" / "memory-handoffs" / "processed" / "2026-05-13-1000-promote-me.md")
+    assert processed.is_file()
+
+
+def test_default_run_does_not_mutate_without_flags(tmp_target: Path):
+    """Conservative default: no flags = everything routes to inbox."""
+    inbox = _seed(tmp_target)
+    _write_handoff(
+        inbox,
+        "2026-05-13-1001-default.md",
+        """\
+        # Memory Handoff
+
+        ## Recommended memory action
+        create-card
+
+        ## Target card
+        default-card.md
+
+        ## Suggested card content
+        ---
+        topic: default
+        ---
+        body
+        """,
+    )
+    rc = ingest_mod.run(target=tmp_target)
+    assert rc == 0
+    # No promote → no card written
+    assert not (tmp_target / "memory" / "cards" / "default-card.md").exists()
+    # Routed to inbox instead
+    review = list((tmp_target / "memory" / "handoff-inbox").iterdir())
+    assert len(review) == 1
+
+
+def test_no_card_handoff_routes_to_tools(tmp_target: Path):
+    inbox = _seed(tmp_target)
+    (tmp_target / "TOOLS.md").write_text("# TOOLS.md\n\nexisting body\n")
+    _write_handoff(
+        inbox,
+        "2026-05-13-1010-tool-note.md",
+        """\
+        # Memory Handoff
+
+        ## Recommended memory action
+        no-card
+
+        ## Target document
+        TOOLS.md
+
+        ## Suggested document content
+        ### New runbook
+        - run `solo-mise doctor`
+        """,
+    )
+    rc = ingest_mod.run(target=tmp_target, dry_run=False, promote_cards=True, route_documents=True)
+    assert rc == 0
+    body = (tmp_target / "TOOLS.md").read_text()
+    assert "existing body" in body
+    assert "New runbook" in body
+
+
+def test_unsafe_card_name_routes_to_inbox(tmp_target: Path):
+    inbox = _seed(tmp_target)
+    _write_handoff(
+        inbox,
+        "2026-05-13-1020-bad-name.md",
+        """\
+        # Memory Handoff
+
+        ## Recommended memory action
+        create-card
+
+        ## Target card
+        ../escape.md
+
+        ## Suggested card content
+        ---
+        topic: x
+        ---
+        body
+        """,
+    )
+    rc = ingest_mod.run(target=tmp_target, dry_run=False, promote_cards=True, route_documents=True)
+    assert rc == 0
+    review = list((tmp_target / "memory" / "handoff-inbox").iterdir())
+    assert len(review) == 1
+    assert not (tmp_target / "memory" / "cards" / "..escape.md").exists()
+
+
+def test_card_content_without_frontmatter_routes_to_inbox(tmp_target: Path):
+    inbox = _seed(tmp_target)
+    _write_handoff(
+        inbox,
+        "2026-05-13-1030-no-fm.md",
+        """\
+        # Memory Handoff
+
+        ## Recommended memory action
+        create-card
+
+        ## Target card
+        valid-name.md
+
+        ## Suggested card content
+        # missing frontmatter
+
+        body
+        """,
+    )
+    ingest_mod.run(target=tmp_target, dry_run=False, promote_cards=True, route_documents=True)
+    assert not (tmp_target / "memory" / "cards" / "valid-name.md").exists()
+    review = list((tmp_target / "memory" / "handoff-inbox").iterdir())
+    assert len(review) == 1
+
+
+def test_unsafe_document_target_routes_to_inbox(tmp_target: Path):
+    inbox = _seed(tmp_target)
+    _write_handoff(
+        inbox,
+        "2026-05-13-1040-bad-doc.md",
+        """\
+        # Memory Handoff
+
+        ## Recommended memory action
+        no-card
+
+        ## Target document
+        /etc/passwd
+
+        ## Suggested document content
+        attack
+        """,
+    )
+    ingest_mod.run(target=tmp_target, dry_run=False, promote_cards=True, route_documents=True)
+    review = list((tmp_target / "memory" / "handoff-inbox").iterdir())
+    assert len(review) == 1
+
+
+def test_document_content_with_double_hash_routes_to_inbox(tmp_target: Path):
+    inbox = _seed(tmp_target)
+    _write_handoff(
+        inbox,
+        "2026-05-13-1050-double-hash.md",
+        """\
+        # Memory Handoff
+
+        ## Recommended memory action
+        no-card
+
+        ## Target document
+        TOOLS.md
+
+        ## Suggested document content
+        Some intro line.
+
+        ## This second-level heading should fail
+        more text
+        """,
+    )
+    ingest_mod.run(target=tmp_target, dry_run=False, promote_cards=True, route_documents=True)
+    review = list((tmp_target / "memory" / "handoff-inbox").iterdir())
+    assert len(review) == 1
+    # TOOLS.md (workspace template) should not have been appended to with the bad content
+    if (tmp_target / "TOOLS.md").is_file():
+        assert "should fail" not in (tmp_target / "TOOLS.md").read_text()
+
+
+def test_template_md_is_ignored(tmp_target: Path):
+    inbox = _seed(tmp_target)
+    assert (inbox / "TEMPLATE.md").is_file()
+    rc = ingest_mod.run(target=tmp_target, dry_run=False, promote_cards=True, route_documents=True)
+    assert rc == 0
+    # TEMPLATE.md is still in place
+    assert (inbox / "TEMPLATE.md").is_file()
+
+
+def test_dry_run_makes_no_changes(tmp_target: Path):
+    inbox = _seed(tmp_target)
+    _write_handoff(
+        inbox,
+        "2026-05-13-1100-dry.md",
+        """\
+        # Memory Handoff
+
+        ## Recommended memory action
+        create-card
+
+        ## Target card
+        dry-card.md
+
+        ## Suggested card content
+        ---
+        topic: x
+        ---
+        body
+        """,
+    )
+    rc = ingest_mod.run(target=tmp_target, dry_run=True, promote_cards=True, route_documents=True)
+    assert rc == 0
+    assert not (tmp_target / "memory" / "cards" / "dry-card.md").exists()
+    assert (inbox / "2026-05-13-1100-dry.md").exists()  # not archived
+
+
+def test_missing_inbox_returns_error(tmp_target: Path):
+    tmp_target.mkdir()
+    rc = ingest_mod.run(target=tmp_target)
+    assert rc == 2

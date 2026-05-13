@@ -1,0 +1,17 @@
+{
+  "_comment": [
+    "EXPERIMENTAL fragment for Hermes integration.",
+    "",
+    "Suggested model lane names. Same shape as the OpenClaw alias map so",
+    "knowledge cards and runbooks can talk about lanes without naming providers."
+  ],
+  "_solo_mise_version": "0.1.0",
+  "_solo_mise_status": "experimental",
+  "model_lanes": {
+    "main": "<provider/main-model-id>",
+    "coder": "<provider/coder-model-id>",
+    "cron": "<provider/cron-model-id>",
+    "fast": "<provider/fast-model-id>",
+    "escalation": "<provider/escalation-model-id>"
+  }
+}

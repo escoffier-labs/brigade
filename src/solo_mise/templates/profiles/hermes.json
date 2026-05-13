@@ -1,0 +1,16 @@
+{
+  "id": "hermes",
+  "description": "Workspace profile plus Hermes adapter fragments (experimental).",
+  "memory_owner_default": "hermes",
+  "extends": "workspace",
+  "files": [
+    {"src": "hermes/workspace.harness.json", "dst": ".solo-mise/hermes/workspace.harness.json"},
+    {"src": "hermes/memory-handoff.harness.json", "dst": ".solo-mise/hermes/memory-handoff.harness.json"},
+    {"src": "hermes/model-lanes.harness.json", "dst": ".solo-mise/hermes/model-lanes.harness.json"},
+    {"src": "hermes/README.md", "dst": ".solo-mise/hermes/README.md"}
+  ],
+  "post_install_notes": [
+    "Hermes support is experimental. Validate against your real Hermes install before relying on it.",
+    "Open an issue with your config layout to help promote the adapter from experimental to tested."
+  ]
+}

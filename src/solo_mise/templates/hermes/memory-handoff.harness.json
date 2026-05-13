@@ -1,0 +1,36 @@
+{
+  "_comment": [
+    "EXPERIMENTAL fragment for Hermes integration.",
+    "",
+    "Describes the handoff inbox + routing targets that Hermes should treat",
+    "as the canonical memory contract."
+  ],
+  "_solo_mise_version": "0.1.0",
+  "_solo_mise_status": "experimental",
+  "memory_handoff": {
+    "inbox_dir": ".claude/memory-handoffs",
+    "processed_dir": ".claude/memory-handoffs/processed",
+    "review_inbox": "memory/handoff-inbox",
+    "routing_targets": {
+      "cards": "memory/cards",
+      "tools": "TOOLS.md",
+      "user_prefs": "USER.md",
+      "rules": "rules",
+      "errors": ".learnings/ERRORS.md",
+      "learnings": ".learnings/LEARNINGS.md",
+      "feature_requests": ".learnings/FEATURE_REQUESTS.md"
+    },
+    "auto_promote": {
+      "card_filename_regex": "^[A-Za-z0-9._-]+\\.md$",
+      "card_content_must_start_with": "---",
+      "document_targets_allowed": [
+        "TOOLS.md",
+        "USER.md",
+        "rules/*.md",
+        ".learnings/LEARNINGS.md",
+        ".learnings/ERRORS.md",
+        ".learnings/FEATURE_REQUESTS.md"
+      ]
+    }
+  }
+}

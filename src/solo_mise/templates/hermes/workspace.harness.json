@@ -1,0 +1,30 @@
+{
+  "_comment": [
+    "EXPERIMENTAL fragment for Hermes integration.",
+    "",
+    "Hermes support follows the same contract as OpenClaw; only the file names",
+    "and command paths change. This fragment is a placeholder until validated",
+    "against a real Hermes install.",
+    "",
+    "Replace <hermes-config-path> with your Hermes config location."
+  ],
+  "_solo_mise_version": "0.1.0",
+  "_solo_mise_status": "experimental",
+  "workspace": {
+    "root": "<workspace-root>",
+    "bootstrap_files": [
+      "AGENTS.md",
+      "CLAUDE.md",
+      "SOUL.md",
+      "USER.md",
+      "TOOLS.md",
+      "MEMORY.md",
+      "IDENTITY.md",
+      "HEARTBEAT.md",
+      "SAFETY_RULES.md",
+      "INSTALL_FOR_AGENTS.md"
+    ],
+    "memory_owner": "hermes",
+    "handoff_inbox": ".claude/memory-handoffs"
+  }
+}

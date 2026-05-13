@@ -1,0 +1,19 @@
+{
+  "id": "publisher",
+  "description": "Content-guard policies, scrub commands, publish gates. For users who publish blog posts, docs, or social drafts.",
+  "memory_owner_default": "this-repo",
+  "files": [
+    {"src": "hooks/pre-push", "dst": "hooks/pre-push", "mode": "0755"},
+    {"src": "policies/public-repo.json", "dst": ".solo-mise/policies/public-repo.json"},
+    {"src": "policies/public-content.json", "dst": ".solo-mise/policies/public-content.json"},
+    {"src": "memory/cards/content-safety.md", "dst": "memory/cards/content-safety.md"}
+  ],
+  "dirs": [
+    ".solo-mise/scrub-cache"
+  ],
+  "post_install_notes": [
+    "Activate the hook: `git config core.hooksPath hooks`",
+    "Run `solo-mise scrub --target . --policy public-content` before publishing user-facing content (blogs, social, docs).",
+    "Add `solo-mise scrub` to your publish workflow as a hard gate."
+  ]
+}
