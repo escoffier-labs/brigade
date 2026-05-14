@@ -40,6 +40,13 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Override the safety guard that refuses to install directly into $HOME.",
     )
+    p_init.add_argument(
+        "--no-gitignore",
+        dest="update_gitignore",
+        action="store_false",
+        default=True,
+        help="Do not create or update the target's .gitignore.",
+    )
     p_init.add_argument("--dry-run", action="store_true", help="Show what would happen.")
 
     # doctor
@@ -112,6 +119,7 @@ def main(argv=None) -> int:
             dry_run=args.dry_run,
             harness=args.harness,
             allow_home=args.allow_home,
+            update_gitignore=args.update_gitignore,
         )
     if cmd == "doctor":
         from . import doctor as doctor_mod

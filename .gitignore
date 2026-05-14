@@ -31,8 +31,8 @@ htmlcov/
 .DS_Store
 Thumbs.db
 
-# claude / agent local state
-.claude/
+# claude / agent local state (side-harness only; solo-mise block below
+# handles the handoff path with TEMPLATE.md kept tracked)
 .codex/
 .openclaw/
 
@@ -40,3 +40,26 @@ Thumbs.db
 /scratch/
 *.bak
 *.tmp
+
+# >>> solo-mise gitignore block >>>
+# Managed by `solo-mise init`. Edit between the markers to customize.
+# Re-running `solo-mise init` replaces only the content between markers.
+
+# Memory handoffs are session-local and may contain private context
+# (commands run, file paths, error strings). The TEMPLATE.md is the
+# only handoff file tracked in git.
+.claude/memory-handoffs/*
+!.claude/memory-handoffs/TEMPLATE.md
+!.claude/memory-handoffs/.gitkeep
+
+# Daily session logs are machine-local raw context. Promote durable
+# findings into memory/cards/ via the handoff flow instead.
+memory/20[0-9][0-9]-[0-1][0-9]-[0-3][0-9].md
+
+# Review inbox: ambiguous handoffs awaiting human triage. Private.
+memory/handoff-inbox/
+
+# solo-mise local state (logs, scrub cache).
+.solo-mise/logs/
+.solo-mise/scrub-cache/
+# <<< solo-mise gitignore block <<<

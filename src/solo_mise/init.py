@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import sys
 from pathlib import Path, PurePosixPath
@@ -16,6 +17,34 @@ from .templates import (
 )
 
 
+GITIGNORE_BEGIN = "# >>> solo-mise gitignore block >>>"
+GITIGNORE_END = "# <<< solo-mise gitignore block <<<"
+
+GITIGNORE_BLOCK = f"""{GITIGNORE_BEGIN}
+# Managed by `solo-mise init`. Edit between the markers to customize.
+# Re-running `solo-mise init` replaces only the content between markers.
+
+# Memory handoffs are session-local and may contain private context
+# (commands run, file paths, error strings). The TEMPLATE.md is the
+# only handoff file tracked in git.
+.claude/memory-handoffs/*
+!.claude/memory-handoffs/TEMPLATE.md
+!.claude/memory-handoffs/.gitkeep
+
+# Daily session logs are machine-local raw context. Promote durable
+# findings into memory/cards/ via the handoff flow instead.
+memory/20[0-9][0-9]-[0-1][0-9]-[0-3][0-9].md
+
+# Review inbox: ambiguous handoffs awaiting human triage. Private.
+memory/handoff-inbox/
+
+# solo-mise local state (logs, scrub cache).
+.solo-mise/logs/
+.solo-mise/scrub-cache/
+{GITIGNORE_END}
+"""
+
+
 def run(
     target: Path,
     profile_id: str = "repo",
@@ -23,6 +52,7 @@ def run(
     dry_run: bool = False,
     harness: str | None = None,
     allow_home: bool = False,
+    update_gitignore: bool = True,
 ) -> int:
     """Materialize `profile_id` into `target`. Returns process exit code."""
     target = target.expanduser().resolve()
@@ -79,6 +109,10 @@ def run(
             print(f"  dir   {target / d}")
         for entry in files:
             print(f"  file  {target / entry['dst']}")
+        if update_gitignore:
+            gi = target / ".gitignore"
+            verb = "update" if gi.exists() else "create"
+            print(f"  gitignore  {verb} {gi} with solo-mise block")
         return 0
 
     target.mkdir(parents=True, exist_ok=True)
@@ -117,6 +151,12 @@ def run(
         if mode_str:
             dst.chmod(int(mode_str, 8))
 
+    # Update or create .gitignore with the solo-mise block.
+    if update_gitignore:
+        result = _apply_gitignore(target / ".gitignore")
+        if result:
+            print(f"solo-mise: gitignore {result}")
+
     # Post-install notes.
     print(f"solo-mise: installed profile '{profile_id}' to {target}")
     print(f"solo-mise: memory owner -> {memory_owner_name}")
@@ -142,3 +182,35 @@ def _ensure_safe_rel(raw: str, label: str) -> None:
         raise ValueError(f"{label}: absolute paths not allowed: {raw!r}")
     if any(part == ".." for part in p.parts):
         raise ValueError(f"{label}: parent-dir segments not allowed: {raw!r}")
+
+
+def _apply_gitignore(path: Path) -> str:
+    """Create or update `.gitignore` with the solo-mise block.
+
+    Idempotent: a re-run replaces only the content between
+    `GITIGNORE_BEGIN` and `GITIGNORE_END`. Returns a short status word
+    describing what changed (`created`, `appended`, `updated`, `unchanged`).
+    """
+    if not path.exists():
+        path.write_text(GITIGNORE_BLOCK)
+        return f"created {path}"
+
+    existing = path.read_text()
+    block = GITIGNORE_BLOCK.rstrip("\n")
+
+    if GITIGNORE_BEGIN in existing and GITIGNORE_END in existing:
+        # Replace existing block.
+        pattern = re.compile(
+            re.escape(GITIGNORE_BEGIN) + r".*?" + re.escape(GITIGNORE_END),
+            re.DOTALL,
+        )
+        new = pattern.sub(block, existing)
+        if new == existing:
+            return f"unchanged {path}"
+        path.write_text(new)
+        return f"updated {path}"
+
+    # No block present: append. Make sure we land after exactly one blank line.
+    sep = "" if existing.endswith("\n\n") else ("\n" if existing.endswith("\n") else "\n\n")
+    path.write_text(existing + sep + block + "\n")
+    return f"appended to {path}"

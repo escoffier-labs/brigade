@@ -42,7 +42,10 @@ your-project/
     TEMPLATE.md
   hooks/
     pre-push
+  .gitignore     # adds a managed solo-mise block (handoffs, daily logs, review inbox)
 ```
+
+The `.gitignore` block is bounded by `# >>> solo-mise gitignore block >>>` markers so re-running `init` is idempotent and your hand-written rules outside the block are preserved. Pass `--no-gitignore` to skip the gitignore step.
 
 Enable the pre-push hook once:
 
