@@ -25,6 +25,17 @@ solo-mise ingest --target . --promote-cards --route-documents  # apply
 
 Wrap in a cron or end-of-day script. See `memory/cards/memory-scanner.md`.
 
+If you administer multiple agent homes, pull remote handoffs into staging directories on the canonical owner before ingesting. See `memory/cards/multi-workspace-handoff-admin.md`.
+
+## Memory Care
+
+```bash
+test -f memory/cards/decay/scan-latest.json
+jq '.counts, .refresh_queue_size' memory/cards/decay/scan-latest.json
+```
+
+Use a staleness scan once the card set is operationally important. See `memory/cards/memory-care-staleness.md`.
+
 ## Chat Surface Crawlers
 
 If chat surfaces feed memory, list their commands here. Examples:

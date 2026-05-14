@@ -41,6 +41,8 @@ def test_workspace_profile_includes_memory_cards(tmp_target: Path):
         "handoff-flow.md",
         "content-safety.md",
         "memory-scanner.md",
+        "memory-care-staleness.md",
+        "multi-workspace-handoff-admin.md",
         "chat-surface-crawlers.md",
         "pipeline-standups.md",
     ):

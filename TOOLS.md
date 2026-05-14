@@ -73,6 +73,10 @@ See `RELEASE.md`.
 | `generic` | workspace + contract docs |
 | `publisher` | publish gate only (hook + policies + content-safety card) |
 
+## Multi-workspace memory
+
+Use `memory/cards/multi-workspace-handoff-admin.md` as the public-safe pattern for pulling handoffs from secondary agent homes into one canonical owner. Use `memory/cards/memory-care-staleness.md` for the card decay scanner and safe refresh loop.
+
 ## Where things live
 
 - Source: `src/solo_mise/`

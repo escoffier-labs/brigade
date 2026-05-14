@@ -23,6 +23,7 @@ def run(target: Path, harness: str = "generic") -> int:
 
     checks.extend(_check_workspace_files(target))
     checks.extend(_check_handoff_inbox(target))
+    checks.extend(_check_memory_care(target))
     checks.extend(_check_publish_gate(target))
 
     if harness == "openclaw":
@@ -90,6 +91,58 @@ def _check_handoff_inbox(target: Path) -> List[CheckResult]:
     return results
 
 
+def _check_memory_care(target: Path) -> List[CheckResult]:
+    results: List[CheckResult] = []
+    decay_dir = target / "memory" / "cards" / "decay"
+    scan = decay_dir / "scan-latest.json"
+    queue = decay_dir / "refresh-queue.json"
+
+    if decay_dir.is_dir():
+        results.append((OK, "memory-care: decay/", str(decay_dir)))
+    else:
+        results.append(
+            (
+                WARN,
+                "memory-care: decay/",
+                f"missing at {decay_dir}; staleness scanner not wired",
+            )
+        )
+        return results
+
+    if scan.is_file():
+        detail = str(scan)
+        try:
+            data = json.loads(scan.read_text())
+            scan_date = data.get("scan_date")
+            counts = data.get("counts", {})
+            if scan_date:
+                detail = f"{scan} (scan_date={scan_date}, stale={counts.get('stale', 'unknown')})"
+        except json.JSONDecodeError:
+            detail = f"invalid JSON: {scan}"
+            results.append((WARN, "memory-care: scan-latest", detail))
+        else:
+            results.append((OK, "memory-care: scan-latest", detail))
+    else:
+        results.append((WARN, "memory-care: scan-latest", f"missing at {scan}"))
+
+    if queue.is_file():
+        detail = str(queue)
+        try:
+            data = json.loads(queue.read_text())
+            cards = data.get("cards", [])
+            if isinstance(cards, list):
+                detail = f"{queue} ({len(cards)} queued)"
+        except json.JSONDecodeError:
+            detail = f"invalid JSON: {queue}"
+            results.append((WARN, "memory-care: refresh-queue", detail))
+        else:
+            results.append((OK, "memory-care: refresh-queue", detail))
+    else:
+        results.append((WARN, "memory-care: refresh-queue", f"missing at {queue}"))
+
+    return results
+
+
 def _check_publish_gate(target: Path) -> List[CheckResult]:
     results: List[CheckResult] = []
     hook = target / "hooks" / "pre-push"
@@ -145,7 +198,71 @@ def _check_openclaw() -> List[CheckResult]:
         results.append((OK, "openclaw: jq", "present"))
     else:
         results.append((WARN, "openclaw: jq", "missing; merge helpers will not work"))
+    results.extend(_check_openclaw_cron_jobs())
     return results
+
+
+def _check_openclaw_cron_jobs() -> List[CheckResult]:
+    results: List[CheckResult] = []
+    jobs_path = Path.home() / ".openclaw" / "cron" / "jobs.json"
+    if not jobs_path.is_file():
+        return [
+            (
+                WARN,
+                "openclaw: cron jobs",
+                f"not found at {jobs_path}; handoff ingest and memory-care schedules unknown",
+            )
+        ]
+
+    try:
+        data = json.loads(jobs_path.read_text())
+    except json.JSONDecodeError as exc:
+        return [(WARN, "openclaw: cron jobs", f"invalid JSON: {exc}")]
+
+    jobs = data.get("jobs", [])
+    if not isinstance(jobs, list):
+        return [(WARN, "openclaw: cron jobs", "jobs.json has no jobs array")]
+
+    expected = [
+        ("openclaw: handoff ingest cron", "Claude Memory Handoff Ingest"),
+        ("openclaw: card decay scanner", "Card Decay Scanner (Daily)"),
+        ("openclaw: card decay refresh", "Card Decay Auto-Refresh (Safe)"),
+    ]
+    for check_name, job_name in expected:
+        job = _find_job(jobs, job_name)
+        if job is None:
+            results.append((WARN, check_name, f"missing job named {job_name!r}"))
+            continue
+        if not job.get("enabled", False):
+            results.append((WARN, check_name, f"{job_name!r} exists but is disabled"))
+            continue
+        results.append((OK, check_name, _format_schedule(job.get("schedule"))))
+
+    weekly = _find_job(jobs, "Card Decay Deep Report (Weekly)")
+    if weekly is not None and weekly.get("enabled", False):
+        results.append((OK, "openclaw: card decay weekly", _format_schedule(weekly.get("schedule"))))
+    return results
+
+
+def _find_job(jobs: list, name: str) -> dict | None:
+    for job in jobs:
+        if isinstance(job, dict) and job.get("name") == name:
+            return job
+    return None
+
+
+def _format_schedule(schedule) -> str:
+    if not isinstance(schedule, dict):
+        return "enabled; schedule not specified"
+    kind = schedule.get("kind")
+    if kind == "cron":
+        return f"enabled; cron {schedule.get('expr', '<missing expr>')} {schedule.get('tz', '')}".strip()
+    if kind == "every":
+        every_ms = schedule.get("everyMs")
+        if isinstance(every_ms, int):
+            return f"enabled; every {every_ms // 60000} min"
+        return "enabled; every schedule"
+    return f"enabled; {kind or 'unknown'} schedule"
 
 
 def _check_hermes(target: Path) -> List[CheckResult]:

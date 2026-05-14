@@ -118,9 +118,10 @@ A typical day has two short cross-harness summaries plus a session-review pass a
 |-----|----------|----------|
 | Nightshift standup | typical: `0 21 * * *` | `memory/cards/pipeline-standups.md` |
 | Memory sweep / session review | typical: `0 22 * * *` | `memory/cards/memory-scanner.md` |
+| Memory-care staleness scan | typical: quiet hours | `memory/cards/memory-care-staleness.md` |
 | Morning report | typical: `0 8 * * *` | `memory/cards/pipeline-standups.md` |
 
-Standups summarize state already in memory. The memory scanner promotes durable findings *into* memory from the day's sessions. Run order: standup -> scanner -> overnight ingester sweeps -> morning report next day.
+Standups summarize state already in memory. The memory scanner promotes durable findings *into* memory from the day's sessions. Memory care checks existing cards for stale facts. Run order: standup -> scanner -> overnight ingester sweeps -> memory-care scan -> morning report next day.
 
 ## Multi-Agent Workflow
 

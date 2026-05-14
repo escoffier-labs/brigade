@@ -32,6 +32,10 @@ You may be invoked as the agent behind any of these. They are isolated sessions;
 
 See `memory/cards/pipeline-standups.md` and `memory/cards/memory-scanner.md` for the full job shape.
 
+If this workspace is one of several agent homes, read `memory/cards/multi-workspace-handoff-admin.md`. Secondary setups should inform the canonical owner through handoffs rather than keeping separate durable truth.
+
+If you are maintaining an established card set, read `memory/cards/memory-care-staleness.md` before editing stale cards. Refresh only from current source-of-truth files or route to manual review.
+
 ## If your harness loads a compact context
 
 Some harnesses load a generated `llms.txt` or `llms-full.txt` instead of every bootstrap file individually. If those exist in this workspace, follow them and rebuild via the workspace's build script when source docs change. If they do not exist, default to reading the files listed in "Start here" directly.

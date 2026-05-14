@@ -17,6 +17,12 @@ Claude Code, Codex, and other side harnesses write Memory Handoffs to `.claude/m
 5. Handoffs route to: a memory card, an appendable document, or the review inbox.
 6. Processed handoffs move to `.claude/memory-handoffs/processed/`.
 
+## Multiple Workspaces
+
+If you administer more than one agent setup, keep this flow hub-and-spoke. Secondary workspaces write local handoffs, then the canonical owner pulls them into staging directories and runs the same ingester. This lets agents on separate machines or repos inform each other about what changed without creating competing memory stores.
+
+See [multi-workspace-handoff-admin](multi-workspace-handoff-admin.md) for the full pattern.
+
 ## Auto-promotion rules
 
 Only three handoff shapes can silently mutate canonical memory. Everything else lands in `memory/handoff-inbox/` for manual review.

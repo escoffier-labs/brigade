@@ -54,6 +54,7 @@ Replace this with your actual agent roster. Example shape:
 | Night (~21:00) | Pipeline standup | [pipeline-standups](memory/cards/pipeline-standups.md) |
 | Night (~22:00) | Memory sweep / session review | [memory-scanner](memory/cards/memory-scanner.md) |
 | Continuous | Handoff ingester | [handoff-flow](memory/cards/handoff-flow.md) |
+| Quiet hours | Memory-care staleness scan | [memory-care-staleness](memory/cards/memory-care-staleness.md) |
 | Morning (~08:00) | Morning report | [pipeline-standups](memory/cards/pipeline-standups.md) |
 
 ## Card Categories
@@ -62,12 +63,13 @@ Build out this table as you learn the shape of your durable knowledge. Starter s
 
 | Category | Topics |
 |----------|--------|
-| foundation | memory architecture, handoff flow, content safety, memory scanner, chat-surface crawlers, pipeline standups |
+| foundation | memory architecture, handoff flow, content safety, memory scanner, memory care, chat-surface crawlers, pipeline standups |
 | system | identity, memory-search system, sub-agent patterns, agent-wrapper patterns |
 | user | personal context, communication style, preferences |
 | infrastructure | hosts, ports, deploys, mounts, local services |
 | models | subscriptions, assignment rules, benchmarks |
 | workflow | pipeline rules, content strategy, publishing checklist |
+| admin | multi-workspace handoff routing |
 | tools | local APIs, browser stacks, MCPs, skills |
 | security | hardening, audits, runbooks |
 | lessons | hard-won gotchas, corrections, prior-incident learnings |
@@ -79,6 +81,8 @@ Add categories as the workspace grows. One topic per card; one card per topic.
 - [memory-architecture](memory/cards/memory-architecture.md) - how this workspace stores durable knowledge
 - [handoff-flow](memory/cards/handoff-flow.md) - how Memory Handoffs flow into canonical memory
 - [memory-scanner](memory/cards/memory-scanner.md) - session-review pass that promotes durable findings
+- [memory-care-staleness](memory/cards/memory-care-staleness.md) - card decay scans and safe refresh rules
+- [multi-workspace-handoff-admin](memory/cards/multi-workspace-handoff-admin.md) - pulling remote setup handoffs into one canonical owner
 - [pipeline-standups](memory/cards/pipeline-standups.md) - nightshift + morning cross-harness recaps
 - [chat-surface-crawlers](memory/cards/chat-surface-crawlers.md) - discrawl-shaped local archives for Discord, Slack, WhatsApp, etc.
 - [content-safety](memory/cards/content-safety.md) - publish gates and what they block

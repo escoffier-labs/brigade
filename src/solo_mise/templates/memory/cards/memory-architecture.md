@@ -23,6 +23,7 @@ This workspace uses a single canonical memory owner. Side harnesses may keep loc
   INSTALL_FOR_AGENTS.md
   memory/
     cards/             # durable knowledge cards (auto-promotion target)
+      decay/           # optional staleness scan output + refresh queue
     handoff-inbox/     # ambiguous handoffs land here for review
   rules/               # workflow rules (appendable target)
   .learnings/          # concrete failures + lessons (appendable target)

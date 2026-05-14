@@ -36,6 +36,8 @@ The cookbook explains the why. This package gives you the kitchen.
 - a canonical memory layout where one configured owner holds durable knowledge
 - a shared `.claude/memory-handoffs/` inbox for Claude Code, Codex, and other side harnesses
 - starter memory cards and routing rules
+- multi-workspace handoff patterns for people administering more than one agent setup
+- memory-care staleness checks so durable cards do not quietly rot
 - content-guard publish gates so private infrastructure does not leak into public docs
 - adapter fragments for OpenClaw (tested), Hermes (stubbed), and generic harnesses
 - doctor checks that prove the system is wired before you trust it
@@ -93,6 +95,8 @@ memory/cards/*.md, TOOLS.md, USER.md, rules/*.md, .learnings/*.md
 ```
 
 The ingester is intentionally conservative. Safe card handoffs become cards. Targeted updates append to the right file. Ambiguous material gets kicked out for review instead of being trusted automatically.
+
+For users running multiple agent homes, treat the owner workspace as the hub. Remote or secondary workspaces can write handoffs into their own `.claude/memory-handoffs/` directories, then a trusted sync pulls those files into a staging inbox on the owner. That keeps agents informed about what happened elsewhere without creating multiple canonical memories.
 
 ## Related
 

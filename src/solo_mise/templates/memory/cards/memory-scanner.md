@@ -86,6 +86,10 @@ Avoid promoting during active sessions because card writes invalidate prefix cac
 - the prompt should embed the skip-rules and cost controls above
 - output goes either directly to `memory/cards/*.md` (if your harness can write there) or through `.claude/memory-handoffs/` for the conservative ingester to route
 
+## Relationship to Memory Care
+
+The memory scanner captures new durable knowledge. The memory-care staleness loop reviews old cards for drift. Run both: scanner for new facts, staleness checker for old facts that may no longer be true. See [memory-care-staleness](memory-care-staleness.md).
+
 ## Anti-patterns
 
 - **Auto-promoting raw session fragments into `MEMORY.md`.** The index loads on every session; appending fragments nightly bloats it past the bootstrap budget and turns the on-load cache cost into a monthly tax. Write cards instead.

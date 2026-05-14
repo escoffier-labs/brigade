@@ -84,6 +84,8 @@ solo-mise ingest --target ~/agent-kitchen
 
 The ingester is conservative. Handoffs with `Recommended memory action: create-card` and a safe filename + frontmatter become memory cards. Handoffs that route to `TOOLS.md`, `USER.md`, `rules/*.md`, or `.learnings/*.md` get appended. Anything ambiguous lands in `memory/handoff-inbox/` for manual review.
 
+If you administer multiple agent setups, keep one canonical owner and pull remote handoffs into staging directories before ingesting them. See `memory/cards/multi-workspace-handoff-admin.md`.
+
 ## 7. Scrub before publishing
 
 ```bash
@@ -106,3 +108,4 @@ The fragments are JSON files you can inspect and merge into your `openclaw.json`
 - Read [the cookbook](https://github.com/solomonneas/solos-cookbook) for the deep version of every concept here.
 - Customize `USER.md` and `TOOLS.md` with your real preferences and runbooks (kept private; do not commit personal details).
 - Wire the ingester on a cron or a manual end-of-day workflow.
+- Add a memory-care staleness scan when your card set starts to matter. See `memory/cards/memory-care-staleness.md`.
