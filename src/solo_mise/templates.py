@@ -58,6 +58,11 @@ def load_harness_manifest(harness_id: str) -> Dict[str, Any]:
     return _load_layered("harnesses", harness_id)
 
 
+def load_include_manifest(include_id: str) -> Dict[str, Any]:
+    """Load an include (add-on) manifest, e.g. `publisher`."""
+    return _load_layered("includes", include_id)
+
+
 def _load_layered(kind: str, manifest_id: str) -> Dict[str, Any]:
     base = template_root() / kind
     path = base / f"{manifest_id}.json"

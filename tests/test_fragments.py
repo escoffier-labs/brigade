@@ -5,7 +5,12 @@ import json
 from pathlib import Path
 
 from solo_mise import fragments as frag_mod
-from solo_mise.templates import load_depth_manifest, load_harness_manifest, template_root
+from solo_mise.templates import (
+    load_depth_manifest,
+    load_harness_manifest,
+    load_include_manifest,
+    template_root,
+)
 
 
 def test_openclaw_fragments(tmp_path: Path):
@@ -127,3 +132,11 @@ def test_all_harness_files_exist():
         m = load_harness_manifest(h)
         for entry in m["files"]:
             assert (template_root() / entry["src"]).is_file(), f"{h}: {entry['src']}"
+
+
+def test_load_include_publisher():
+    m = load_include_manifest("publisher")
+    assert m["id"] == "publisher"
+    dsts = [f["dst"] for f in m["files"]]
+    assert ".solo-mise/policies/public-content.json" in dsts
+    assert "memory/cards/content-safety.md" in dsts

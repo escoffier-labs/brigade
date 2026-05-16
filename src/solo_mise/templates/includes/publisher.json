@@ -1,0 +1,15 @@
+{
+  "id": "publisher",
+  "description": "content-guard policies + scrub cache for users who publish blogs, social, or docs.",
+  "files": [
+    {"src": "policies/public-content.json", "dst": ".solo-mise/policies/public-content.json"},
+    {"src": "memory/cards/content-safety.md", "dst": "memory/cards/content-safety.md"}
+  ],
+  "dirs": [
+    ".solo-mise/scrub-cache"
+  ],
+  "post_install_notes": [
+    "Run `solo-mise scrub --target . --policy public-content` before publishing user-facing content.",
+    "Add `solo-mise scrub` to your publish workflow as a hard gate."
+  ]
+}
