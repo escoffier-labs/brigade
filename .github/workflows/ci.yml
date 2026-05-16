@@ -51,7 +51,25 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        profile: [repo, workspace, openclaw, hermes, generic, publisher]
+        combo:
+          - name: "repo+claude"
+            flags: "--depth repo --harnesses claude"
+          - name: "repo+codex"
+            flags: "--depth repo --harnesses codex"
+          - name: "workspace+claude+openclaw"
+            flags: "--depth workspace --harnesses claude,openclaw"
+          - name: "workspace+codex+openclaw"
+            flags: "--depth workspace --harnesses codex,openclaw"
+          - name: "kitchen-sink"
+            flags: "--depth workspace --harnesses claude,codex,openclaw,hermes"
+          - name: "workspace+none"
+            flags: "--depth workspace --harnesses none"
+          - name: "repo+claude+publisher"
+            flags: "--depth repo --harnesses claude --include publisher"
+          - name: "legacy-workspace"
+            flags: "--profile workspace"
+          - name: "legacy-openclaw"
+            flags: "--profile openclaw"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -64,17 +82,9 @@ jobs:
           solo-mise --version
       - name: Init + doctor
         run: |
-          target="/tmp/ci-smoke-${{ matrix.profile }}"
+          target="/tmp/sm-${{ matrix.combo.name }}"
           rm -rf "$target"
           mkdir -p "$target"
-          # The 'repo' profile installs a pre-push hook; that wants a git repo.
-          # Other profiles do not require one but it is harmless.
           git init -q -b main "$target"
-          solo-mise init --target "$target" --profile ${{ matrix.profile }}
-          # Doctor is harness-aware. Map the profile to the right --harness value.
-          case "${{ matrix.profile }}" in
-            openclaw) harness=openclaw ;;
-            hermes)   harness=hermes ;;
-            *)        harness=generic ;;
-          esac
-          solo-mise doctor --target "$target" --harness "$harness"
+          solo-mise init --target "$target" ${{ matrix.combo.flags }}
+          solo-mise doctor --target "$target"
