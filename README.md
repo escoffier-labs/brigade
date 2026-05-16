@@ -16,7 +16,7 @@
   <img src="https://img.shields.io/github/actions/workflow/status/solomonneas/solo-mise/ci.yml?branch=main&style=for-the-badge&label=ci" alt="CI status">
   <img src="https://img.shields.io/badge/python-3.10%2B-blue?style=for-the-badge&logo=python&logoColor=white" alt="Python 3.10+">
   <img src="https://img.shields.io/badge/license-MIT-green?style=for-the-badge" alt="MIT license">
-  <img src="https://img.shields.io/badge/profiles-6-orange?style=for-the-badge" alt="6 profiles">
+  <img src="https://img.shields.io/badge/harnesses-4-orange?style=for-the-badge" alt="4 harnesses">
 </p>
 
 <p align="center">
@@ -66,12 +66,56 @@ pipx install git+https://github.com/solomonneas/solo-mise
 
 ## Quick path
 
+Run `solo-mise init` with no flags for the interactive picker:
+
 ```bash
-solo-mise init --target .                     # repo-local handoff flow + publish guard
-solo-mise init --target ~/agent-kitchen --profile workspace
-solo-mise doctor --target ~/agent-kitchen
-solo-mise scrub --target .
+solo-mise init --target ~/agent-kitchen
 ```
+
+For CI or scripts, pass flags directly:
+
+```bash
+solo-mise init --target ~/agent-kitchen --depth workspace --harnesses claude,codex,openclaw
+solo-mise init --target ./repo --depth repo --harnesses codex
+solo-mise init --target ./repo --harnesses none           # generic install
+```
+
+## Two axes: depth + harnesses
+
+solo-mise installs material on two independent axes:
+
+**Depth, how much shared baseline you want:**
+
+| Depth | Installs |
+|---|---|
+| `repo` *(default)* | `AGENTS.md`, `SAFETY_RULES.md`, `INSTALL_FOR_AGENTS.md`, `hooks/pre-push`, `.solo-mise/policies/public-repo.json` |
+| `workspace` | repo + `MEMORY.md`, `TOOLS.md`, `USER.md`, `SOUL.md`, `IDENTITY.md`, `HEARTBEAT.md`, `memory/cards/`, starter cards |
+
+**Harnesses, which tools you actually use:**
+
+| Harness | Role | Adds |
+|---|---|---|
+| `claude` | writer | `CLAUDE.md` + `.claude/memory-handoffs/` inbox |
+| `codex` | writer | `.codex/memory-handoffs/` inbox (AGENTS.md is in the baseline) |
+| `openclaw` | reader | `.solo-mise/openclaw/` config fragments + cron stubs |
+| `hermes` | reader | `.solo-mise/hermes/` adapter fragments (experimental) |
+
+**Includes, optional add-ons:**
+
+| Include | Adds |
+|---|---|
+| `publisher` | `.solo-mise/policies/public-content.json` + content-safety memory card + scrub-cache |
+
+## Picking your harnesses
+
+Four common combos:
+
+- **Claude Code only:** `--harnesses claude`, the lightest setup, just one writer.
+- **Claude Code + OpenClaw:** `--harnesses claude,openclaw`, durable memory owner (OpenClaw) plus side writer (Claude Code).
+- **Claude Code + Codex + OpenClaw:** `--harnesses claude,codex,openclaw`, both writers feed into OpenClaw as the canonical owner.
+- **Codex + OpenClaw:** `--harnesses codex,openclaw`, Codex-first user with OpenClaw as the canonical store.
+
+The canonical memory owner is picked automatically by priority (`openclaw > hermes > claude > codex > this-repo`). Override with `--owner`.
 
 Re-running `solo-mise init` against an existing target is safe. It refuses to overwrite tracked files without `--force`, and the `.gitignore` block it manages is replaced between its markers without touching the rest of your file.
 
@@ -104,39 +148,30 @@ Anything `[warn]` is fine; `[fail]` means the install is incomplete. The `opencl
 
 solo-mise makes no network calls. It does not phone home, collect telemetry, or sync anything to a server. Everything happens on your local filesystem against the templates packaged with the install. The only file that touches the network is the `pre-push` hook, and it runs the local `content-guard` scanner against your own commits before they leave the machine.
 
-## Profiles
-
-| Profile | What it installs | When to use |
-|---------|------------------|-------------|
-| `repo` *(default)* | `AGENTS.md`, `CLAUDE.md`, `.claude/memory-handoffs/`, pre-push hook | A project wants the handoff flow and a public-leak guard. |
-| `workspace` | Full bootstrap file set, memory folders, starter cards, safety files | A user wants a home agent workspace. |
-| `openclaw` | `workspace` plus OpenClaw config fragments and doctor checks | An OpenClaw user. |
-| `hermes` | `workspace` plus Hermes adapter fragments and doctor checks | A Hermes user. Experimental. |
-| `generic` | Contract docs and templates, no orchestrator config | A user wants the layout without picking a harness yet. |
-| `publisher` | content-guard policies, scrub commands, publish gates | A user who publishes blog posts, docs, or social drafts. |
-
 ## The design
 
-One memory owner stays canonical. Side harnesses keep local context, but durable findings move through a shared handoff inbox and into the right destination.
+One memory owner stays canonical (typically OpenClaw or Hermes when present, otherwise `this-repo`). Writer harnesses drop handoffs into their own inboxes; the ingester scans all of them.
 
 ```text
-Claude Code / Codex / other harness
-        |
-        v
-<repo>/.claude/memory-handoffs/*.md
-        |
-        v
-solo-mise ingest (or your harness's equivalent)
-        |
-        v
-memory/cards/*.md, TOOLS.md, USER.md, rules/*.md, .learnings/*.md
+Claude Code              Codex
+     |                     |
+     v                     v
+.claude/memory-handoffs/ .codex/memory-handoffs/
+     \                   /
+      \                 /
+       v               v
+      solo-mise ingest
+              |
+              v
+  memory/cards/*.md, TOOLS.md, USER.md,
+  rules/*.md, .learnings/*.md
 ```
 
 The ingester is intentionally conservative. Safe card handoffs become cards. Targeted updates append to the right file. Ambiguous material gets kicked out for review instead of being trusted automatically.
 
-For users running multiple agent homes, treat the owner workspace as the hub. Remote or secondary workspaces can write handoffs into their own `.claude/memory-handoffs/` directories, then a trusted sync pulls those files into a staging inbox on the owner. That keeps agents informed about what happened elsewhere without creating multiple canonical memories.
+For users running multiple agent homes, treat the owner workspace as the hub. Remote or secondary workspaces can write handoffs into their own per-harness inboxes, then a trusted sync pulls those files into a staging inbox on the owner. That keeps agents informed about what happened elsewhere without creating multiple canonical memories.
 
-Token-heavy terminal work gets the same treatment: make the wrapper explicit, make the escape hatch obvious, and tell every harness what is happening. The TokenJuice starter card documents Claude Code's PreToolUse wrapper path while the upstream PostToolUse fix is still pending, Codex's hook setup, and the savings model: observed output/context compaction can be huge, but billing-token savings depend on whether compacted output is fed into later turns.
+Token-heavy terminal work gets the same treatment: make the wrapper explicit, make the escape hatch obvious, and tell every harness what is happening. The TokenJuice starter card documents Claude Code's PreToolUse wrapper path, Codex's hook setup, and the savings model.
 
 ## Related
 

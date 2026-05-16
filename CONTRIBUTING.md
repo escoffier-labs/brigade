@@ -5,14 +5,14 @@ solo-mise is the installable kit behind [Solomon's Cookbook](https://github.com/
 ## What kinds of changes land easily
 
 - **Bug fixes** for `solo-mise init`, `doctor`, `scrub`, or the ingester.
-- **Profile improvements**: new bootstrap content, sharper post-install notes, better defaults.
-- **New harness adapters** (with doctor checks) under `src/solo_mise/templates/<harness>/`.
+- **Harness / depth / include improvements**: new bootstrap content, sharper post-install notes, better defaults.
+- **New harness adapters** (with doctor checks) under `src/solo_mise/templates/harnesses/<id>.json`.
 - **Doctor checks** that catch real, observed failure modes.
 - **Test coverage** for any of the above.
 
 ## What needs a conversation first
 
-- **A new top-level profile.** Open an issue first describing the user story. Profiles are the public surface and renaming or splitting them later is painful.
+- **A new top-level harness, depth, or include.** Open an issue first describing the user story. These are the public surface and renaming or splitting them later is painful.
 - **Breaking changes** to template paths, the handoff TEMPLATE.md fields, or the ingester routing rules.
 - **Anything that adds a runtime dependency.** solo-mise has zero runtime deps on purpose, and we want to keep it that way.
 
@@ -32,25 +32,36 @@ pip install -e ".[dev]"
 pytest -q
 ```
 
-To smoke-test a profile end-to-end the same way CI does:
+To smoke-test an install end-to-end the same way CI does:
 
 ```bash
 target=/tmp/solo-mise-smoke
 rm -rf "$target" && mkdir -p "$target" && git init -q "$target"
-python -m solo_mise init --target "$target" --profile workspace
+python -m solo_mise init --target "$target" --depth workspace --harnesses claude,codex,openclaw
 python -m solo_mise doctor --target "$target"
 ```
 
-## Adding a profile
+## Adding a harness
 
-A profile is a single JSON manifest in `src/solo_mise/templates/profiles/<id>.json` and any template files it references. Manifests support `extends` for inheritance. See `publisher.json` (extends `repo`) for the simplest example.
+A harness is a manifest under `src/solo_mise/templates/harnesses/<id>.json` plus any template files it references. The manifest declares `role: "writer"` (gets an inbox) or `role: "reader"` (gets adapter fragments).
 
-When you add a profile:
+To add a harness:
 
-1. Add it to the `choices=[...]` list in `src/solo_mise/cli.py` (the `--profile` flag).
-2. Add a row to the profile table in `README.md`.
-3. Add it to the matrix in `.github/workflows/ci.yml` so the smoke job exercises it.
-4. If it has post-install steps, list them in `post_install_notes`. They are printed at the end of `solo-mise init`.
+1. Create the manifest at `src/solo_mise/templates/harnesses/<id>.json`.
+2. Add template files under a harness-named directory (e.g. `src/solo_mise/templates/<id>/`).
+3. Add the harness id to `KNOWN_HARNESSES` in `src/solo_mise/selection.py`.
+4. Update `HARNESS_PRIORITY` if the new harness should be an owner candidate (readers usually want to land near OpenClaw/Hermes in the priority list).
+5. If it's a writer, add it to `_WRITER_INBOXES` in `src/solo_mise/install.py`, `src/solo_mise/doctor.py`, and `src/solo_mise/ingest.py`.
+6. Add the harness to the CI matrix in `.github/workflows/ci.yml`.
+7. Add a row to the harness table in `README.md`.
+
+## Adding a depth
+
+Depths live at `src/solo_mise/templates/depth/<id>.json` and may use `extends` to inherit from another depth. Add the id to `KNOWN_DEPTHS` in `selection.py` and to the `--depth` choices in `cli.py`.
+
+## Adding an include
+
+Includes live at `src/solo_mise/templates/includes/<id>.json`. Add the id to `KNOWN_INCLUDES` in `selection.py`.
 
 ## Adding a doctor check
 
@@ -68,7 +79,7 @@ Open a PR with all three and we'll land it.
 
 ## Filing issues
 
-Please use the templates under `.github/ISSUE_TEMPLATE/` - they exist to save you from re-typing the version and profile every time.
+Please use the templates under `.github/ISSUE_TEMPLATE/` - they exist to save you from re-typing the version and install shape every time.
 
 The `ingester-misclassified` template is the most useful one to file early. If a handoff that should have promoted to a card got bounced (or vice versa), that is a real bug in the routing rules, not a corner case. We want to see it.
 

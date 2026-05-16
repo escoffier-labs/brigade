@@ -15,96 +15,82 @@ python3 -m pip install --user pipx
 python3 -m pipx ensurepath
 ```
 
-## 2. Pick a profile
+## First install
 
-The default `repo` profile adds the handoff flow and a publish guard to an existing project.
-
-The `workspace` profile creates a home-style agent workspace from scratch.
-
-## 3. Initialize
-
-### Repo profile (lightest)
-
-In a project you already work in:
+The fastest path is to run `solo-mise init` with no flags and answer the prompts:
 
 ```bash
-cd ~/repos/your-project
-solo-mise init --target .
+$ solo-mise init --target ~/agent-kitchen
+
+Which harnesses do you use? (type numbers separated by space/comma to toggle, enter to confirm)
+  [x] 1. Claude Code
+  [ ] 2. Codex
+  [ ] 3. OpenClaw
+  [ ] 4. Hermes (experimental)
+
+Depth? (type a number, enter for default)
+  * 1. repo       (handoff flow + publish guard)
+    2. workspace  (full home: MEMORY.md, TOOLS.md, USER.md, ...)
+
+Add-ons? (type numbers separated by space/comma to toggle, enter to confirm)
+  [ ] 1. publisher  (content-guard policies for blog/social/docs)
 ```
 
-This creates:
+Defaults are claude harness, repo depth, no includes. Enter ships the install.
 
-```text
-your-project/
-  AGENTS.md
-  CLAUDE.md
-  .claude/memory-handoffs/
-    TEMPLATE.md
-  hooks/
-    pre-push
-  .gitignore     # adds a managed solo-mise block (handoffs, daily logs, review inbox)
-```
+## CI / scripted install
 
-The `.gitignore` block is bounded by `# >>> solo-mise gitignore block >>>` markers so re-running `init` is idempotent and your hand-written rules outside the block are preserved. Pass `--no-gitignore` to skip the gitignore step.
-
-Enable the pre-push hook once:
+Pass flags directly to skip the prompt:
 
 ```bash
-git config core.hooksPath hooks
+# Claude Code + Codex + OpenClaw, full workspace
+solo-mise init --target ~/agent-kitchen \
+  --depth workspace \
+  --harnesses claude,codex,openclaw
+
+# Codex-only project, minimal install
+solo-mise init --target ./my-project --depth repo --harnesses codex
+
+# Generic layout, no harness-specific files
+solo-mise init --target ./my-project --harnesses none
 ```
 
-### Workspace profile
+## Verifying
+
+After install, `solo-mise doctor --target <path>` reports the apparent harness shape and checks every configured inbox and adapter:
+
+```
+solo-mise doctor: target /home/you/agent-kitchen
+  harnesses: claude, codex, openclaw (owner=openclaw, depth=workspace)
+  [ok]   bootstrap: AGENTS.md   /home/you/agent-kitchen/AGENTS.md
+  [ok]   handoff: claude inbox  /home/you/agent-kitchen/.claude/memory-handoffs
+  [ok]   handoff: codex inbox   /home/you/agent-kitchen/.codex/memory-handoffs
+  [ok]   openclaw: config        /home/you/.openclaw/openclaw.json
+  ...
+```
+
+A `[fail]` line means the install is incomplete; `[warn]` is informational; `[todo]` means the check needs your attention (e.g. Hermes is experimental).
+
+## Reconfiguring
+
+To change which harnesses are installed on an existing target:
 
 ```bash
-solo-mise init --target ~/agent-kitchen --profile workspace
+# Add a harness
+solo-mise reconfigure --target . --harnesses claude,codex
+
+# Drop one (without removing its files)
+solo-mise reconfigure --target . --harnesses claude
+
+# Drop one and remove its files
+solo-mise reconfigure --target . --harnesses claude --prune
 ```
 
-This creates the full bootstrap file set: `AGENTS.md`, `CLAUDE.md`, `SOUL.md`, `USER.md`, `TOOLS.md`, `MEMORY.md`, `IDENTITY.md`, `HEARTBEAT.md`, `SAFETY_RULES.md`, `INSTALL_FOR_AGENTS.md`, plus `memory/cards/` with starter cards, a `.claude/memory-handoffs/` inbox, and the publish hook.
+## The handoff flow
 
-## 4. Verify
+The starter handoff template lives at `<inbox>/TEMPLATE.md`. Copy it to a new dated file (e.g. `2026-05-16-1430-fixed-X.md`), fill it in, and the ingester promotes safe card handoffs into `memory/cards/`, appends targeted updates to the right file, and kicks ambiguous material to the review inbox.
 
-```bash
-solo-mise doctor --target ~/agent-kitchen
-```
-
-The doctor checks that the bootstrap files exist, the handoff inbox is in place, and (if you chose `--profile openclaw`) the OpenClaw config can see your workspace. It prints `OK` or `MANUAL ACTION NEEDED` per check; it never edits your config.
-
-## 5. Write your first handoff
-
-```bash
-solo-mise handoff-template --target ~/agent-kitchen > \
-  ~/agent-kitchen/.claude/memory-handoffs/$(date -u +%Y-%m-%dT%H%MZ)-first-handoff.md
-```
-
-Edit the file with whatever durable knowledge your agent just produced.
-
-## 6. Ingest
-
-```bash
-solo-mise ingest --target ~/agent-kitchen --dry-run
-solo-mise ingest --target ~/agent-kitchen
-```
-
-The ingester is conservative. Handoffs with `Recommended memory action: create-card` and a safe filename + frontmatter become memory cards. Handoffs that route to `TOOLS.md`, `USER.md`, `rules/*.md`, or `.learnings/*.md` get appended. Anything ambiguous lands in `memory/handoff-inbox/` for manual review.
-
-If you administer multiple agent setups, keep one canonical owner and pull remote handoffs into staging directories before ingesting them. See `memory/cards/multi-workspace-handoff-admin.md`.
-
-## 7. Scrub before publishing
-
-```bash
-solo-mise scrub --target . --dry-run
-```
-
-If you have [content-guard](https://github.com/solomonneas/content-guard) installed, the pre-push hook will block pushes that contain private IPs, secrets, or AI attribution trailers. `solo-mise scrub` is the deterministic counterpart that runs the same scanner with the public-repo policy.
-
-## 8. OpenClaw users
-
-```bash
-solo-mise doctor --target ~/.openclaw/workspace --harness openclaw
-solo-mise openclaw-fragments --out ./openclaw-fragments
-```
-
-The fragments are JSON files you can inspect and merge into your `openclaw.json` by hand. `solo-mise` never mutates your live OpenClaw config.
+See the [Solo Cookbook](https://github.com/solomonneas/solos-cookbook) for the longer-form guidance on what makes a good handoff and when to use which routing.
 
 ## Next steps
 
