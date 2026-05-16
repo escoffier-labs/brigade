@@ -64,3 +64,29 @@ def resolve_owner(harnesses: List[str], override: Optional[str] = None) -> str:
         if candidate in harnesses:
             return candidate
     return "this-repo"
+
+
+_PROFILE_MAP = {
+    "repo":      Selection(depth="repo",      harnesses=["claude"],             owner="claude",    includes=[]),
+    "workspace": Selection(depth="workspace", harnesses=["claude"],             owner="claude",    includes=[]),
+    "openclaw":  Selection(depth="workspace", harnesses=["claude", "openclaw"], owner="openclaw",  includes=[]),
+    "hermes":    Selection(depth="workspace", harnesses=["claude", "hermes"],   owner="hermes",    includes=[]),
+    "generic":   Selection(depth="workspace", harnesses=[],                     owner="this-repo", includes=[]),
+    "publisher": Selection(depth="repo",      harnesses=["claude"],             owner="claude",    includes=["publisher"]),
+}
+
+
+def profile_to_selection(profile_id: str) -> Selection:
+    """Translate a legacy --profile id into a Selection. Used by the deprecation shim."""
+    if profile_id not in _PROFILE_MAP:
+        raise ValueError(
+            f"unknown profile: {profile_id!r} (valid: {sorted(_PROFILE_MAP)})"
+        )
+    sel = _PROFILE_MAP[profile_id]
+    # Return a copy to keep callers from mutating the map.
+    return Selection(
+        depth=sel.depth,
+        harnesses=list(sel.harnesses),
+        owner=sel.owner,
+        includes=list(sel.includes),
+    )

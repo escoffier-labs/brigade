@@ -74,3 +74,60 @@ def test_known_constants():
     assert set(KNOWN_HARNESSES) == {"claude", "codex", "openclaw", "hermes"}
     assert set(KNOWN_DEPTHS) == {"repo", "workspace"}
     assert set(KNOWN_INCLUDES) == {"publisher"}
+
+
+from solo_mise.selection import profile_to_selection
+
+
+def test_profile_to_selection_repo():
+    s = profile_to_selection("repo")
+    assert s.depth == "repo"
+    assert s.harnesses == ["claude"]
+    assert s.owner == "claude"
+    assert s.includes == []
+
+
+def test_profile_to_selection_workspace():
+    s = profile_to_selection("workspace")
+    assert s.depth == "workspace"
+    assert s.harnesses == ["claude"]
+    assert s.owner == "claude"
+    assert s.includes == []
+
+
+def test_profile_to_selection_openclaw():
+    s = profile_to_selection("openclaw")
+    assert s.depth == "workspace"
+    assert s.harnesses == ["claude", "openclaw"]
+    assert s.owner == "openclaw"
+    assert s.includes == []
+
+
+def test_profile_to_selection_hermes():
+    s = profile_to_selection("hermes")
+    assert s.depth == "workspace"
+    assert s.harnesses == ["claude", "hermes"]
+    assert s.owner == "hermes"
+    assert s.includes == []
+
+
+def test_profile_to_selection_generic():
+    s = profile_to_selection("generic")
+    assert s.depth == "workspace"
+    assert s.harnesses == []
+    assert s.owner == "this-repo"
+    assert s.includes == []
+
+
+def test_profile_to_selection_publisher():
+    s = profile_to_selection("publisher")
+    assert s.depth == "repo"
+    assert s.harnesses == ["claude"]
+    assert s.owner == "claude"
+    assert s.includes == ["publisher"]
+
+
+def test_profile_to_selection_unknown_raises():
+    import pytest as _p
+    with _p.raises(ValueError, match="unknown profile"):
+        profile_to_selection("nope")
