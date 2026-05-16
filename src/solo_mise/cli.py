@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 
 from . import __version__
+from .prompt import prompt_for_selection  # imported here so tests can monkeypatch cli.prompt_for_selection
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -188,11 +189,14 @@ def main(argv=None) -> int:
                 allow_home=getattr(args, "allow_home", False),
             )
 
-        # No flags and no --profile: default to repo+claude for now.
-        # Task 12 wires the interactive prompt here.
-        from .selection import Selection
+        # No flags and no --profile: interactive prompt.
+        from .prompt import NonInteractiveError
         from .install import install_selection
-        sel = Selection(depth="repo", harnesses=["claude"], owner="claude", includes=[])
+        try:
+            sel = prompt_for_selection()
+        except NonInteractiveError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
         return install_selection(
             target=args.target,
             selection=sel,

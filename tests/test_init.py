@@ -215,3 +215,28 @@ def test_legacy_profile_openclaw_translates(tmp_path):
     rc = main(["init", "--target", str(tmp_path), "--profile", "openclaw"])
     assert rc == 0
     assert (tmp_path / ".solo-mise" / "openclaw" / "README.md").is_file()
+
+
+def test_cli_invokes_prompt_when_no_selection_flags(monkeypatch, tmp_path):
+    """init without any selection flags should call prompt_for_selection."""
+    called = {}
+    from solo_mise import cli
+    from solo_mise.selection import Selection
+
+    def fake_prompt():
+        called["yes"] = True
+        return Selection(depth="repo", harnesses=["claude"], owner="claude", includes=[])
+
+    monkeypatch.setattr(cli, "prompt_for_selection", fake_prompt)
+    rc = cli.main(["init", "--target", str(tmp_path)])
+    assert rc == 0
+    assert called.get("yes") is True
+
+
+def test_cli_skips_prompt_when_depth_given(monkeypatch, tmp_path):
+    from solo_mise import cli
+    def fail():
+        raise AssertionError("prompt should not be called")
+    monkeypatch.setattr(cli, "prompt_for_selection", fail)
+    rc = cli.main(["init", "--target", str(tmp_path), "--depth", "repo", "--harnesses", "claude"])
+    assert rc == 0
