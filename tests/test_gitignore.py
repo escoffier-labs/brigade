@@ -4,6 +4,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from solo_mise import init as init_mod
+from solo_mise.selection import Selection
 
 
 def _read_gi(target: Path) -> str:
@@ -101,3 +102,38 @@ def test_workspace_profile_also_adds_block(tmp_target: Path):
     gi = _read_gi(tmp_target)
     assert init_mod.GITIGNORE_BEGIN in gi
     assert "memory/handoff-inbox/" in gi
+
+
+def test_gitignore_block_includes_claude_section_when_selected():
+    from solo_mise.install import build_gitignore_block
+    sel = Selection(depth="repo", harnesses=["claude"], owner="claude", includes=[])
+    block = build_gitignore_block(sel)
+    assert ".claude/memory-handoffs/*" in block
+    assert "!.claude/memory-handoffs/TEMPLATE.md" in block
+    assert ".codex/memory-handoffs" not in block
+
+
+def test_gitignore_block_includes_codex_section_when_selected():
+    from solo_mise.install import build_gitignore_block
+    sel = Selection(depth="repo", harnesses=["claude", "codex"], owner="claude", includes=[])
+    block = build_gitignore_block(sel)
+    assert ".claude/memory-handoffs/*" in block
+    assert ".codex/memory-handoffs/*" in block
+    assert "!.codex/memory-handoffs/TEMPLATE.md" in block
+
+
+def test_gitignore_block_no_inbox_section_for_readers_only():
+    from solo_mise.install import build_gitignore_block
+    sel = Selection(depth="workspace", harnesses=["openclaw"], owner="openclaw", includes=[])
+    block = build_gitignore_block(sel)
+    assert "memory-handoffs" not in block
+
+
+def test_install_writes_gitignore_block(tmp_path):
+    from solo_mise.install import install_selection
+    sel = Selection(depth="repo", harnesses=["claude", "codex"], owner="claude", includes=[])
+    install_selection(tmp_path, sel)
+    gi = (tmp_path / ".gitignore").read_text()
+    assert "# >>> solo-mise gitignore block >>>" in gi
+    assert ".claude/memory-handoffs/*" in gi
+    assert ".codex/memory-handoffs/*" in gi

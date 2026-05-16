@@ -24,6 +24,68 @@ from .templates import (
     template_root,
 )
 
+GITIGNORE_BEGIN = "# >>> solo-mise gitignore block >>>"
+GITIGNORE_END = "# <<< solo-mise gitignore block <<<"
+
+# Writer harness -> inbox-dir prefix. Only writer harnesses have an inbox.
+_WRITER_INBOX = {
+    "claude": ".claude/memory-handoffs",
+    "codex": ".codex/memory-handoffs",
+}
+
+
+def build_gitignore_block(selection: Selection) -> str:
+    lines = [
+        GITIGNORE_BEGIN,
+        "# Managed by `solo-mise init`. Edit between the markers to customize.",
+        "# Re-running `solo-mise init` replaces only the content between markers.",
+        "",
+    ]
+    for h in selection.harnesses:
+        inbox = _WRITER_INBOX.get(h)
+        if inbox:
+            lines.extend([
+                f"# {h}: handoffs are session-local and may contain private context.",
+                f"{inbox}/*",
+                f"!{inbox}/TEMPLATE.md",
+                f"!{inbox}/.gitkeep",
+                "",
+            ])
+    lines.extend([
+        "# Daily session logs are machine-local raw context.",
+        "memory/20[0-9][0-9]-[0-1][0-9]-[0-3][0-9].md",
+        "",
+        "# Review inbox: ambiguous handoffs awaiting human triage.",
+        "memory/handoff-inbox/",
+        "",
+        "# solo-mise local state (logs, scrub cache).",
+        ".solo-mise/logs/",
+        ".solo-mise/scrub-cache/",
+        GITIGNORE_END,
+        "",
+    ])
+    return "\n".join(lines)
+
+
+def apply_gitignore(target: Path, selection: Selection) -> str:
+    """Insert or replace the managed block in target's .gitignore. Returns 'created' or 'updated'."""
+    gi = target / ".gitignore"
+    block = build_gitignore_block(selection)
+    if not gi.exists():
+        gi.write_text(block)
+        return "created"
+    existing = gi.read_text()
+    if GITIGNORE_BEGIN in existing and GITIGNORE_END in existing:
+        prefix, _, rest = existing.partition(GITIGNORE_BEGIN)
+        _, _, suffix = rest.partition(GITIGNORE_END)
+        # Strip a trailing newline from prefix and a leading newline from suffix to avoid drift.
+        new_text = prefix.rstrip("\n") + ("\n\n" if prefix.strip() else "") + block + suffix.lstrip("\n")
+        gi.write_text(new_text)
+        return "updated"
+    sep = "" if existing.endswith("\n") else "\n"
+    gi.write_text(existing + sep + "\n" + block)
+    return "updated"
+
 
 def resolve_manifests(selection: Selection) -> Tuple[List[dict], List[str], List[str]]:
     """Return (files, dirs, post_install_notes) for a Selection.
@@ -133,6 +195,9 @@ def install_selection(
 
     # Persist config.json.
     write_config(target, Config(version=1, selection=selection))
+
+    result = apply_gitignore(target, selection)
+    print(f"solo-mise: gitignore {result}")
 
     # Post-install output.
     print(f"solo-mise: installed depth={selection.depth} harnesses={','.join(selection.harnesses) or '(none)'} -> {target}")
