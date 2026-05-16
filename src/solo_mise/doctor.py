@@ -18,18 +18,52 @@ MANUAL = "MANUAL"
 
 def run(target: Path, harness: str = "generic") -> int:
     target = target.expanduser().resolve()
-    print(f"solo-mise doctor: target {target} ({harness})")
-    checks: List[CheckResult] = []
+    print(f"solo-mise doctor: target {target}")
 
+    from .config import load_config
+
+    cfg = None
+    try:
+        cfg = load_config(target)
+    except (ValueError, json.JSONDecodeError) as exc:
+        print(f"  [fail] config: {exc}")
+
+    if cfg is not None:
+        sel = cfg.selection
+        print(
+            f"  harnesses: {', '.join(sel.harnesses) or '(none)'} "
+            f"(owner={sel.owner}, depth={sel.depth})"
+        )
+        selected_harnesses = list(sel.harnesses)
+    else:
+        # Legacy fall-through: no config.json present.
+        sel = None
+        if harness in ("openclaw", "hermes"):
+            print(
+                f"  harnesses: (legacy target, no .solo-mise/config.json; "
+                f"--harness={harness} so assuming claude + {harness})"
+            )
+            selected_harnesses = ["claude", harness]
+        else:
+            print(
+                "  harnesses: (legacy target, no .solo-mise/config.json; "
+                "assuming claude)"
+            )
+            selected_harnesses = ["claude"]
+
+    checks: List[CheckResult] = []
     checks.extend(_check_workspace_files(target))
-    checks.extend(_check_handoff_inbox(target))
+    checks.extend(_check_handoff_inboxes(target, sel, selected_harnesses))
     checks.extend(_check_memory_care(target))
     checks.extend(_check_publish_gate(target))
 
-    if harness == "openclaw":
+    if "openclaw" in selected_harnesses:
         checks.extend(_check_openclaw())
-    elif harness == "hermes":
+    if "hermes" in selected_harnesses:
         checks.extend(_check_hermes(target))
+
+    # Orphan-inbox warnings.
+    checks.extend(_check_orphan_inboxes(target, selected_harnesses))
 
     return _report(checks)
 
@@ -60,34 +94,72 @@ def _check_workspace_files(target: Path) -> List[CheckResult]:
     return results
 
 
-def _check_handoff_inbox(target: Path) -> List[CheckResult]:
+# Writer harness -> inbox-dir prefix. Only writer harnesses have an inbox.
+_WRITER_INBOXES = {
+    "claude": ".claude/memory-handoffs",
+    "codex": ".codex/memory-handoffs",
+}
+
+
+def _check_handoff_inboxes(
+    target: Path, sel, selected_harnesses: List[str]
+) -> List[CheckResult]:
     results: List[CheckResult] = []
-    inbox = target / ".claude" / "memory-handoffs"
-    template = inbox / "TEMPLATE.md"
-    processed = inbox / "processed"
-
-    if inbox.is_dir():
-        results.append((OK, "handoff: inbox", str(inbox)))
-    else:
-        results.append((FAIL, "handoff: inbox", f"missing at {inbox}"))
-
-    if template.is_file():
-        results.append((OK, "handoff: TEMPLATE.md", str(template)))
-    else:
-        results.append((WARN, "handoff: TEMPLATE.md", f"missing at {template}"))
-
-    if processed.is_dir():
-        results.append((OK, "handoff: processed/", str(processed)))
-    else:
-        results.append((WARN, "handoff: processed/", f"missing at {processed}"))
-
+    writers = selected_harnesses
+    for h in writers:
+        rel = _WRITER_INBOXES.get(h)
+        if rel is None:
+            continue  # reader harness, no inbox
+        inbox = target / rel
+        if inbox.is_dir():
+            results.append((OK, f"handoff: {h} inbox", str(inbox)))
+        else:
+            results.append((FAIL, f"handoff: {h} inbox", f"missing at {inbox}"))
+        tmpl = inbox / "TEMPLATE.md"
+        if tmpl.is_file():
+            results.append((OK, f"handoff: {h} TEMPLATE.md", str(tmpl)))
+        else:
+            results.append(
+                (WARN, f"handoff: {h} TEMPLATE.md", f"missing at {tmpl}")
+            )
+        processed = inbox / "processed"
+        if processed.is_dir():
+            results.append((OK, f"handoff: {h} processed/", str(processed)))
+        else:
+            results.append(
+                (WARN, f"handoff: {h} processed/", f"missing at {processed}")
+            )
     cards = target / "memory" / "cards"
     if cards.is_dir():
         results.append((OK, "memory: cards/", str(cards)))
     else:
         results.append(
-            (WARN, "memory: cards/", f"missing at {cards}; ingester cannot promote cards")
+            (
+                WARN,
+                "memory: cards/",
+                f"missing at {cards}; ingester cannot promote cards",
+            )
         )
+    return results
+
+
+def _check_orphan_inboxes(
+    target: Path, selected_harnesses: List[str]
+) -> List[CheckResult]:
+    results: List[CheckResult] = []
+    for h, rel in _WRITER_INBOXES.items():
+        if h in selected_harnesses:
+            continue
+        inbox = target / rel
+        if inbox.is_dir():
+            results.append(
+                (
+                    WARN,
+                    f"orphan: {h} inbox",
+                    f"{inbox} exists but {h} is not in config; "
+                    f"remove or add to config (unselected harness)",
+                )
+            )
     return results
 
 

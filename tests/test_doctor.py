@@ -8,6 +8,8 @@ import pytest
 
 from solo_mise import doctor as doctor_mod
 from solo_mise import init as init_mod
+from solo_mise.install import install_selection
+from solo_mise.selection import Selection
 
 
 def test_doctor_passes_against_workspace_profile(tmp_target: Path, capsys):
@@ -130,3 +132,57 @@ def test_doctor_openclaw_reports_cron_memory_jobs(tmp_target: Path, monkeypatch,
     assert "openclaw: card decay scanner" in out
     assert "openclaw: card decay refresh" in out
     assert "openclaw: card decay weekly" in out
+
+
+def test_doctor_reports_apparent_harness_shape(tmp_target: Path, capsys):
+    sel = Selection(
+        depth="workspace",
+        harnesses=["claude", "codex", "openclaw"],
+        owner="openclaw",
+        includes=[],
+    )
+    install_selection(tmp_target, sel)
+    doctor_mod.run(tmp_target)
+    out = capsys.readouterr().out
+    assert "harnesses:" in out
+    assert "claude" in out
+    assert "codex" in out
+    assert "openclaw" in out
+    assert "owner=openclaw" in out
+
+
+def test_doctor_checks_codex_inbox_when_selected(tmp_target: Path, capsys):
+    sel = Selection(
+        depth="repo",
+        harnesses=["claude", "codex"],
+        owner="claude",
+        includes=[],
+    )
+    install_selection(tmp_target, sel)
+    doctor_mod.run(tmp_target)
+    out = capsys.readouterr().out
+    assert ".codex/memory-handoffs" in out
+
+
+def test_doctor_warns_for_orphan_inbox(tmp_target: Path, capsys):
+    """If config says claude only, but .codex/memory-handoffs exists, warn."""
+    sel = Selection(
+        depth="repo",
+        harnesses=["claude"],
+        owner="claude",
+        includes=[],
+    )
+    install_selection(tmp_target, sel)
+    (tmp_target / ".codex" / "memory-handoffs").mkdir(parents=True)
+    doctor_mod.run(tmp_target)
+    out = capsys.readouterr().out
+    assert "orphan" in out.lower() or "unselected" in out.lower()
+
+
+def test_doctor_falls_back_to_v0_2_behavior_when_no_config(tmp_target: Path, capsys):
+    """A target without .solo-mise/config.json should still run (legacy targets)."""
+    tmp_target.mkdir()
+    (tmp_target / "AGENTS.md").write_text("# Agents")
+    doctor_mod.run(tmp_target)
+    out = capsys.readouterr().out
+    assert "doctor" in out
