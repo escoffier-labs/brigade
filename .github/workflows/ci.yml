@@ -66,10 +66,6 @@ jobs:
             flags: "--depth workspace --harnesses none"
           - name: "repo+claude+publisher"
             flags: "--depth repo --harnesses claude --include publisher"
-          - name: "legacy-workspace"
-            flags: "--profile workspace"
-          - name: "legacy-openclaw"
-            flags: "--profile openclaw"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
