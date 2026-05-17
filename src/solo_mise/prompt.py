@@ -46,7 +46,7 @@ def prompt_for_selection() -> Selection:
     if not sys.stdin.isatty():
         raise NonInteractiveError(
             "solo-mise init needs a TTY for the interactive prompt. "
-            "Pass --depth and --harnesses (or --profile) for scripting."
+            "Pass --depth and --harnesses for scripting."
         )
 
     selected_harnesses = _toggle_prompt(
