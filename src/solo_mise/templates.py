@@ -26,28 +26,6 @@ def template_root() -> Path:
     return Path(str(resources.files(TEMPLATE_PKG))) / "templates"
 
 
-def load_profile(profile_id: str) -> Dict[str, Any]:
-    """Load a profile manifest. Resolves `extends` chains."""
-    profiles_dir = template_root() / "profiles"
-    path = profiles_dir / f"{profile_id}.json"
-    if not path.is_file():
-        raise FileNotFoundError(f"Unknown profile: {profile_id} (looked at {path})")
-    manifest = json.loads(path.read_text())
-
-    parent_id = manifest.get("extends")
-    if parent_id:
-        parent = load_profile(parent_id)
-        merged_files = list(parent.get("files", [])) + list(manifest.get("files", []))
-        merged_dirs = list(parent.get("dirs", [])) + list(manifest.get("dirs", []))
-        merged_notes = list(parent.get("post_install_notes", [])) + list(
-            manifest.get("post_install_notes", [])
-        )
-        manifest["files"] = _dedupe_files(merged_files)
-        manifest["dirs"] = sorted(set(merged_dirs))
-        manifest["post_install_notes"] = merged_notes
-    return manifest
-
-
 def load_depth_manifest(depth_id: str) -> Dict[str, Any]:
     """Load and merge a depth manifest, resolving `extends` chains."""
     return _load_layered("depth", depth_id)

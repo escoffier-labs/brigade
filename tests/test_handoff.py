@@ -4,7 +4,8 @@ from __future__ import annotations
 from pathlib import Path
 
 from solo_mise import handoff as handoff_mod
-from solo_mise import init as init_mod
+from solo_mise.install import install_selection
+from solo_mise.selection import Selection
 
 
 def test_handoff_template_prints_packaged(capsys):
@@ -16,7 +17,10 @@ def test_handoff_template_prints_packaged(capsys):
 
 
 def test_handoff_template_prefers_local_install(tmp_target: Path, capsys):
-    init_mod.run(target=tmp_target, profile_id="repo")
+    install_selection(
+        tmp_target,
+        Selection(depth="repo", harnesses=["claude"], owner="claude", includes=[]),
+    )
     local = tmp_target / ".claude" / "memory-handoffs" / "TEMPLATE.md"
     local.write_text("# Local override\n")
     rc = handoff_mod.run(target=tmp_target)

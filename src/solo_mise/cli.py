@@ -21,20 +21,8 @@ def _build_parser() -> argparse.ArgumentParser:
     sub.required = True
 
     # init
-    p_init = sub.add_parser("init", help="Materialize a profile into a target directory.")
+    p_init = sub.add_parser("init", help="Materialize a selection into a target directory.")
     p_init.add_argument("--target", "-t", type=Path, default=Path("."), help="Where to install.")
-    p_init.add_argument(
-        "--profile",
-        "-p",
-        default=None,
-        choices=["repo", "workspace", "openclaw", "hermes", "generic", "publisher"],
-        help="(Deprecated) Profile to install. Use --depth/--harnesses instead.",
-    )
-    p_init.add_argument(
-        "--harness",
-        help="Override the memory-owner label rendered into bootstrap files. "
-        "Defaults to the profile's memory_owner_default.",
-    )
     p_init.add_argument("--force", action="store_true", help="Overwrite existing files.")
     p_init.add_argument(
         "--allow-home",
@@ -54,7 +42,7 @@ def _build_parser() -> argparse.ArgumentParser:
         choices=["repo", "workspace"],
         default=None,
         help="Install depth: 'repo' (minimal) or 'workspace' (full home). "
-             "Required unless --profile is used.",
+             "Omit for an interactive prompt.",
     )
     p_init.add_argument(
         "--harnesses",
@@ -176,30 +164,7 @@ def main(argv=None) -> int:
                 allow_home=getattr(args, "allow_home", False),
             )
 
-        # Legacy --profile path: translate to a Selection, warn, install.
-        if args.profile:
-            from .selection import profile_to_selection
-            from .install import install_selection
-            sel = profile_to_selection(args.profile)
-            equivalent = f"--depth {sel.depth} --harnesses {','.join(sel.harnesses) or 'none'}"
-            if sel.owner != "this-repo" and sel.owner in sel.harnesses:
-                equivalent += f" --owner {sel.owner}"
-            for inc in sel.includes:
-                equivalent += f" --include {inc}"
-            print(
-                f"warning: --profile is deprecated. The v0.3.0+ equivalent is "
-                f"`{equivalent}`. --profile will be removed in v0.4.0.",
-                file=sys.stderr,
-            )
-            return install_selection(
-                target=args.target,
-                selection=sel,
-                force=getattr(args, "force", False),
-                dry_run=getattr(args, "dry_run", False),
-                allow_home=getattr(args, "allow_home", False),
-            )
-
-        # No flags and no --profile: interactive prompt.
+        # No selection flags: interactive prompt.
         from .prompt import NonInteractiveError
         from .install import install_selection
         try:
