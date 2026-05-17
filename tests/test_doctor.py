@@ -7,13 +7,15 @@ import json
 import pytest
 
 from solo_mise import doctor as doctor_mod
-from solo_mise import init as init_mod
 from solo_mise.install import install_selection
 from solo_mise.selection import Selection
 
 
 def test_doctor_passes_against_workspace_profile(tmp_target: Path, capsys):
-    init_mod.run(target=tmp_target, profile_id="workspace")
+    install_selection(
+        tmp_target,
+        Selection(depth="workspace", harnesses=["claude"], owner="claude", includes=[]),
+    )
     rc = doctor_mod.run(target=tmp_target, harness="generic")
     assert rc == 0
     out = capsys.readouterr().out
@@ -30,19 +32,30 @@ def test_doctor_reports_failures_on_empty_dir(tmp_target: Path, capsys):
 
 
 def test_doctor_openclaw_reports_manual_when_config_missing(tmp_target: Path, monkeypatch, capsys):
-    init_mod.run(target=tmp_target, profile_id="workspace")
+    install_selection(
+        tmp_target,
+        Selection(
+            depth="workspace",
+            harnesses=["claude", "openclaw"],
+            owner="openclaw",
+            includes=[],
+        ),
+    )
     monkeypatch.setenv("HOME", str(tmp_target))  # so ~/.openclaw resolves into the temp dir
     monkeypatch.setattr(Path, "home", lambda: tmp_target)
     rc = doctor_mod.run(target=tmp_target, harness="openclaw")
     out = capsys.readouterr().out
     assert "openclaw: config" in out
-    # missing config is MANUAL, not FAIL → exit 0
+    # missing config is MANUAL, not FAIL -> exit 0
     assert rc == 0
     assert "[todo]" in out
 
 
 def test_doctor_hermes_flags_experimental(tmp_target: Path, capsys):
-    init_mod.run(target=tmp_target, profile_id="hermes")
+    install_selection(
+        tmp_target,
+        Selection(depth="workspace", harnesses=["claude", "hermes"], owner="hermes", includes=[]),
+    )
     rc = doctor_mod.run(target=tmp_target, harness="hermes")
     out = capsys.readouterr().out
     assert "hermes:" in out
@@ -51,9 +64,12 @@ def test_doctor_hermes_flags_experimental(tmp_target: Path, capsys):
 
 
 def test_doctor_reports_memory_care_files(tmp_target: Path, capsys):
-    init_mod.run(target=tmp_target, profile_id="workspace")
+    install_selection(
+        tmp_target,
+        Selection(depth="workspace", harnesses=["claude"], owner="claude", includes=[]),
+    )
     decay = tmp_target / "memory" / "cards" / "decay"
-    decay.mkdir()
+    decay.mkdir(exist_ok=True)
     (decay / "scan-latest.json").write_text(
         json.dumps({"scan_date": "2026-05-13", "counts": {"stale": 2}})
     )
@@ -69,7 +85,15 @@ def test_doctor_reports_memory_care_files(tmp_target: Path, capsys):
 
 
 def test_doctor_openclaw_reports_cron_memory_jobs(tmp_target: Path, monkeypatch, capsys):
-    init_mod.run(target=tmp_target, profile_id="workspace")
+    install_selection(
+        tmp_target,
+        Selection(
+            depth="workspace",
+            harnesses=["claude", "openclaw"],
+            owner="openclaw",
+            includes=[],
+        ),
+    )
     openclaw_dir = tmp_target / ".openclaw"
     cron_dir = openclaw_dir / "cron"
     cron_dir.mkdir(parents=True)

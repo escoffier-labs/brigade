@@ -7,11 +7,15 @@ from pathlib import Path
 import pytest
 
 from solo_mise import ingest as ingest_mod
-from solo_mise import init as init_mod
+from solo_mise.install import install_selection
+from solo_mise.selection import Selection
 
 
 def _seed(tmp_target: Path) -> Path:
-    init_mod.run(target=tmp_target, profile_id="workspace")
+    install_selection(
+        tmp_target,
+        Selection(depth="workspace", harnesses=["claude"], owner="claude", includes=[]),
+    )
     return tmp_target / ".claude" / "memory-handoffs"
 
 

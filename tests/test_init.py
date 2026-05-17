@@ -1,15 +1,55 @@
-"""Tests for solo-mise init."""
+"""Tests for solo-mise init (CLI + install_selection behavior)."""
 from __future__ import annotations
 
 from pathlib import Path
 
 import pytest
 
-from solo_mise import init as init_mod
+from solo_mise.install import install_selection
+from solo_mise.selection import Selection
 
 
-def test_repo_profile_lays_down_expected_files(tmp_target: Path):
-    rc = init_mod.run(target=tmp_target, profile_id="repo")
+def _repo_sel() -> Selection:
+    return Selection(depth="repo", harnesses=["claude"], owner="claude", includes=[])
+
+
+def _workspace_sel() -> Selection:
+    return Selection(depth="workspace", harnesses=["claude"], owner="claude", includes=[])
+
+
+def _openclaw_sel() -> Selection:
+    return Selection(
+        depth="workspace",
+        harnesses=["claude", "openclaw"],
+        owner="openclaw",
+        includes=[],
+    )
+
+
+def _hermes_sel() -> Selection:
+    return Selection(
+        depth="workspace",
+        harnesses=["claude", "hermes"],
+        owner="hermes",
+        includes=[],
+    )
+
+
+def _generic_sel() -> Selection:
+    return Selection(depth="workspace", harnesses=[], owner="this-repo", includes=[])
+
+
+def _publisher_sel() -> Selection:
+    return Selection(
+        depth="repo",
+        harnesses=["claude"],
+        owner="claude",
+        includes=["publisher"],
+    )
+
+
+def test_repo_install_lays_down_expected_files(tmp_target: Path):
+    rc = install_selection(tmp_target, _repo_sel())
     assert rc == 0
     assert (tmp_target / "AGENTS.md").is_file()
     assert (tmp_target / "CLAUDE.md").is_file()
@@ -20,8 +60,8 @@ def test_repo_profile_lays_down_expected_files(tmp_target: Path):
     assert mode & 0o100, f"hooks/pre-push not executable: {oct(mode)}"
 
 
-def test_workspace_profile_includes_memory_cards(tmp_target: Path):
-    rc = init_mod.run(target=tmp_target, profile_id="workspace")
+def test_workspace_install_includes_memory_cards(tmp_target: Path):
+    rc = install_selection(tmp_target, _workspace_sel())
     assert rc == 0
     for fname in (
         "AGENTS.md",
@@ -59,8 +99,8 @@ def test_workspace_profile_includes_memory_cards(tmp_target: Path):
     assert backup.stat().st_mode & 0o111, "backup-restic.sh should be executable"
 
 
-def test_openclaw_profile_extends_workspace(tmp_target: Path):
-    rc = init_mod.run(target=tmp_target, profile_id="openclaw")
+def test_openclaw_install_extends_workspace(tmp_target: Path):
+    rc = install_selection(tmp_target, _openclaw_sel())
     assert rc == 0
     # workspace files present
     assert (tmp_target / "MEMORY.md").is_file()
@@ -71,8 +111,8 @@ def test_openclaw_profile_extends_workspace(tmp_target: Path):
     assert (fragments_dir / "acp-escalation.openclaw.json").is_file()
 
 
-def test_hermes_profile_writes_experimental_fragments(tmp_target: Path):
-    rc = init_mod.run(target=tmp_target, profile_id="hermes")
+def test_hermes_install_writes_experimental_fragments(tmp_target: Path):
+    rc = install_selection(tmp_target, _hermes_sel())
     assert rc == 0
     fragments_dir = tmp_target / ".solo-mise" / "hermes"
     assert (fragments_dir / "workspace.harness.json").is_file()
@@ -80,69 +120,50 @@ def test_hermes_profile_writes_experimental_fragments(tmp_target: Path):
     assert (fragments_dir / "model-lanes.harness.json").is_file()
 
 
-def test_generic_profile_writes_contract_docs(tmp_target: Path):
-    rc = init_mod.run(target=tmp_target, profile_id="generic")
+def test_generic_install_writes_baseline_workspace(tmp_target: Path):
+    """`--harnesses none` still produces a workspace baseline with AGENTS.md + memory folders."""
+    rc = install_selection(tmp_target, _generic_sel())
     assert rc == 0
-    docs = tmp_target / ".solo-mise" / "generic"
-    assert (docs / "memory-contract.md").is_file()
-    assert (docs / "harness-adapter-checklist.md").is_file()
+    assert (tmp_target / "AGENTS.md").is_file()
+    assert (tmp_target / "MEMORY.md").is_file()
+    # No harness writer => no .claude/.codex inbox.
+    assert not (tmp_target / ".claude" / "memory-handoffs").exists()
+    assert not (tmp_target / ".codex" / "memory-handoffs").exists()
 
 
-def test_publisher_profile_writes_policies(tmp_target: Path):
-    rc = init_mod.run(target=tmp_target, profile_id="publisher")
+def test_publisher_include_writes_policies(tmp_target: Path):
+    rc = install_selection(tmp_target, _publisher_sel())
     assert rc == 0
     assert (tmp_target / "hooks" / "pre-push").is_file()
     assert (tmp_target / ".solo-mise" / "policies" / "public-repo.json").is_file()
     assert (tmp_target / ".solo-mise" / "policies" / "public-content.json").is_file()
 
 
-def test_unknown_profile_returns_error(tmp_target: Path):
-    rc = init_mod.run(target=tmp_target, profile_id="nonsense")
-    assert rc == 2
-
-
 def test_dry_run_creates_no_files_or_dirs(tmp_target: Path):
-    rc = init_mod.run(target=tmp_target, profile_id="workspace", dry_run=True)
+    rc = install_selection(tmp_target, _workspace_sel(), dry_run=True)
     assert rc == 0
     # Dry-run must not even materialize the target directory.
     assert not tmp_target.exists()
 
 
-def test_init_refuses_home_directory(tmp_path: Path, monkeypatch):
+def test_install_refuses_home_directory(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
-    rc = init_mod.run(target=tmp_path, profile_id="repo")
+    rc = install_selection(tmp_path, _repo_sel())
     assert rc == 5
     assert not (tmp_path / "AGENTS.md").exists()
 
 
-def test_init_allow_home_overrides(tmp_path: Path, monkeypatch):
+def test_install_allow_home_overrides(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
-    rc = init_mod.run(target=tmp_path, profile_id="repo", allow_home=True)
+    rc = install_selection(tmp_path, _repo_sel(), allow_home=True)
     assert rc == 0
     assert (tmp_path / "AGENTS.md").exists()
 
 
-def test_init_rejects_unsafe_profile_paths(tmp_target: Path, tmp_path: Path, monkeypatch):
-    """Inject a hostile profile JSON and confirm we refuse to apply it."""
-    # Build a fake template tree under tmp_path/fake_templates.
-    fake_root = tmp_path / "fake_templates"
-    (fake_root / "profiles").mkdir(parents=True)
-    (fake_root / "profiles" / "evil.json").write_text(
-        '{"id": "evil", "memory_owner_default": "x", '
-        '"files": [{"src": "../../etc/passwd", "dst": "AGENTS.md"}]}'
-    )
-    from solo_mise import templates as tmpls
-
-    monkeypatch.setattr(tmpls, "template_root", lambda: fake_root)
-    rc = init_mod.run(target=tmp_target, profile_id="evil")
-    assert rc == 6
-    assert not (tmp_target / "AGENTS.md").exists()
-
-
-def test_init_refuses_overwrite_without_force(tmp_target: Path):
+def test_install_refuses_overwrite_without_force(tmp_target: Path):
     tmp_target.mkdir()
     (tmp_target / "AGENTS.md").write_text("# pre-existing\n")
-    rc = init_mod.run(target=tmp_target, profile_id="repo")
+    rc = install_selection(tmp_target, _repo_sel())
     assert rc == 3
     # original content untouched
     assert (tmp_target / "AGENTS.md").read_text() == "# pre-existing\n"
@@ -151,22 +172,28 @@ def test_init_refuses_overwrite_without_force(tmp_target: Path):
 def test_force_overwrites_existing(tmp_target: Path):
     tmp_target.mkdir()
     (tmp_target / "AGENTS.md").write_text("# pre-existing\n")
-    rc = init_mod.run(target=tmp_target, profile_id="repo", force=True)
+    rc = install_selection(tmp_target, _repo_sel(), force=True)
     assert rc == 0
     text = (tmp_target / "AGENTS.md").read_text()
     assert "# pre-existing" not in text
     assert "AGENTS.md" in text or "Memory Owner" in text
 
 
-def test_memory_owner_placeholder_renders_per_profile(tmp_target: Path):
-    init_mod.run(target=tmp_target, profile_id="openclaw")
+def test_memory_owner_placeholder_renders_per_selection(tmp_target: Path):
+    install_selection(tmp_target, _openclaw_sel())
     agents = (tmp_target / "AGENTS.md").read_text()
     assert "OpenClaw" in agents
     assert "{{" not in agents and "}}" not in agents
 
 
-def test_harness_override(tmp_target: Path):
-    init_mod.run(target=tmp_target, profile_id="repo", harness="hermes")
+def test_owner_override_renders_in_bootstrap(tmp_target: Path):
+    sel = Selection(
+        depth="repo",
+        harnesses=["claude", "hermes"],
+        owner="hermes",
+        includes=[],
+    )
+    install_selection(tmp_target, sel)
     agents = (tmp_target / "AGENTS.md").read_text()
     assert "Hermes" in agents
 
@@ -195,26 +222,6 @@ def test_cli_rejects_unknown_harness(tmp_path):
         "--harnesses", "claude,weird",
     ])
     assert rc != 0
-
-
-def test_legacy_profile_translates_and_warns(tmp_path, capsys):
-    from solo_mise.cli import main
-    rc = main(["init", "--target", str(tmp_path), "--profile", "workspace"])
-    assert rc == 0
-    captured = capsys.readouterr()
-    assert "deprecated" in captured.err.lower()
-    assert "workspace" in captured.err
-    # Workspace install includes MEMORY.md
-    assert (tmp_path / "MEMORY.md").is_file()
-    # And CLAUDE.md from the claude harness
-    assert (tmp_path / "CLAUDE.md").is_file()
-
-
-def test_legacy_profile_openclaw_translates(tmp_path):
-    from solo_mise.cli import main
-    rc = main(["init", "--target", str(tmp_path), "--profile", "openclaw"])
-    assert rc == 0
-    assert (tmp_path / ".solo-mise" / "openclaw" / "README.md").is_file()
 
 
 def test_cli_invokes_prompt_when_no_selection_flags(monkeypatch, tmp_path):
