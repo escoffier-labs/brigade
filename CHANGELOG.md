@@ -7,11 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.4.0] - 2026-05-17
 
-### Removed
-- `solo-mise init --profile <x>` flag and all supporting code paths. The flag has been deprecated since v0.3.0 with a stderr warning showing the new equivalent. Anyone still using it must switch to `--depth ... --harnesses ...` (see the v0.3.0 migration table below).
-- Internal: `src/solo_mise/init.py` module (superseded by `install.install_selection`).
-- Internal: `templates/profiles/` directory and the six legacy profile manifests.
-- Internal: `templates.load_profile` and `selection.profile_to_selection`.
+### Breaking
+- Removed the `--profile <name>` flag from `solo-mise init`. The flag has been deprecated since v0.3.0 with a stderr migration warning. Use `--depth <minimal|standard|deep>` plus `--harnesses <list>` instead. Migration table in the v0.3.0 notes below.
+
+### Internal cleanup
+Removed `src/solo_mise/init.py`, the `templates/profiles/` directory and its six legacy profile manifests, plus `templates.load_profile` and `selection.profile_to_selection`. No user-facing impact beyond the flag removal above.
 
 ### Migration
 
