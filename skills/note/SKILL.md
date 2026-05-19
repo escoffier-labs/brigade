@@ -46,12 +46,12 @@ Every note MUST start with YAML frontmatter:
 tags:
   - tag1
   - tag2
-created: YYYY-MMM-DD
+created: YYYY-MM-DD
 ---
 ```
 
 - 3-5 relevant tags. Lowercase, hyphenated for multi-word.
-- Date format `YYYY-MMM-DD` (e.g. `2026-Jan-24`).
+- Date format `YYYY-MM-DD` (e.g. `2026-01-24`).
 - Add `mode: verbatim` or `mode: concept` if you want the mode visible in frontmatter.
 
 ### Structure: verbatim fix
