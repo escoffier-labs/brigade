@@ -6,3 +6,14 @@
 .idea/
 .vscode/
 .claude/
+
+# Claude Code + research surface
+.claude/
+.codex/
+.learnings/
+docs/superpowers/
+**/memory-handoffs/
+
+# OpenClaw files
+.openclaw/
+*.sqlite
