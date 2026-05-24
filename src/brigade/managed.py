@@ -35,31 +35,36 @@ def _noop_wire(ctx: DoctorContext) -> List[CheckResult]:
     return []
 
 
+# memory-doctor and bootstrap-doctor inspect the operator's canonical memory and
+# bootstrap files (host-global), not a per-target workspace, so their findings are
+# advisory: labeled operator-scoped and never FAIL a workspace doctor run.
 def _memory_doctor_doctor(ctx: DoctorContext) -> List[CheckResult]:
+    name = "memory-doctor (operator memory)"
     r = proc.run(["memory-doctor", "status", "--json"])
     if r.code == 2:
-        return [(WARN, "memory-doctor", "installed but unwired (memory/handoffs dir missing)")]
+        return [(WARN, name, "installed but unwired (memory/handoffs dir missing)")]
     data = r.json()
     if data is None:
-        return [(WARN, "memory-doctor", f"unexpected output (exit {r.code})")]
+        return [(WARN, name, f"unexpected output (exit {r.code})")]
     dead = data.get("dead_links", 0)
     status = WARN if dead else OK
-    return [(status, "memory-doctor", f"cards={data.get('cards')}, dead_links={dead}, pending={data.get('pending_handoffs')}")]
+    return [(status, name, f"cards={data.get('cards')}, dead_links={dead}, pending={data.get('pending_handoffs')}")]
 
 
 def _bootstrap_doctor_doctor(ctx: DoctorContext) -> List[CheckResult]:
+    name = "bootstrap-doctor (operator files)"
     r = proc.run(["bootstrap-doctor", "status", "--json"])
     data = r.json()
     if data is None:
-        return [(WARN, "bootstrap-doctor", f"installed but unwired or errored (exit {r.code})")]
+        return [(WARN, name, f"installed but unwired or errored (exit {r.code})")]
     rows = data.get("rows", [])
     bad = [row for row in rows if row.get("severity") in ("hard", "missing", "unreadable")]
     soft = [row for row in rows if row.get("severity") == "soft"]
     if bad:
-        return [(FAIL, "bootstrap-doctor", f"{len(bad)} file(s) over hard limit / missing")]
+        return [(WARN, name, f"{len(bad)} file(s) over hard limit / missing (advisory)")]
     if soft:
-        return [(WARN, "bootstrap-doctor", f"{len(soft)} file(s) in soft band")]
-    return [(OK, "bootstrap-doctor", f"{len(rows)} bootstrap file(s) within limits")]
+        return [(WARN, name, f"{len(soft)} file(s) in soft band")]
+    return [(OK, name, f"{len(rows)} bootstrap file(s) within limits")]
 
 
 def _content_guard_doctor(ctx: DoctorContext) -> List[CheckResult]:
