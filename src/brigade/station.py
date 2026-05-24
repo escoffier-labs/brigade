@@ -31,6 +31,7 @@ class Station:
     doctor: Optional[Callable[[DoctorContext], List[CheckResult]]]
     aliases: Tuple[str, ...] = ()
     kind: str = "builtin"
+    tools: Tuple[str, ...] = ()
 
     def matches(self, name_or_alias: str) -> bool:
         return name_or_alias == self.name or name_or_alias in self.aliases

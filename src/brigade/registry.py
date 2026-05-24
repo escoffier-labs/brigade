@@ -17,15 +17,24 @@ MEMORY = Station(
     summary="handoff inbox, ingest, and memory-care",
     aliases=("garde",),
     doctor=_doctor.memory_station_checks,
+    tools=("memory-doctor", "bootstrap-doctor"),
 )
 GUARD = Station(
     name="guard",
     summary="publish safety and content scrub",
     aliases=("pass",),
     doctor=_doctor.guard_station_checks,
+    tools=("content-guard",),
+)
+TOKENS = Station(
+    name="tokens",
+    summary="output compaction",
+    aliases=(),
+    doctor=_doctor.tokens_station_checks,
+    tools=("tokenjuice",),
 )
 
-_BUILTIN: Tuple[Station, ...] = (CORE, MEMORY, GUARD)
+_BUILTIN: Tuple[Station, ...] = (CORE, MEMORY, GUARD, TOKENS)
 
 
 def all_stations() -> Tuple[Station, ...]:

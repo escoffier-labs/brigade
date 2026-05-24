@@ -59,6 +59,10 @@ def guard_station_checks(ctx: DoctorContext) -> List[CheckResult]:
     return _check_publish_gate(ctx.target)
 
 
+def tokens_station_checks(ctx: DoctorContext) -> List[CheckResult]:
+    return []
+
+
 def run(target: Path, harness: str = "generic") -> int:
     from .registry import all_stations
 
