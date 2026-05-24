@@ -13,14 +13,14 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/github/actions/workflow/status/solomonneas/solo-mise/ci.yml?branch=main&style=for-the-badge&label=ci" alt="CI status">
+  <img src="https://img.shields.io/github/actions/workflow/status/escoffier-labs/brigade/ci.yml?branch=main&style=for-the-badge&label=ci" alt="CI status">
   <img src="https://img.shields.io/badge/python-3.10%2B-blue?style=for-the-badge&logo=python&logoColor=white" alt="Python 3.10+">
   <img src="https://img.shields.io/badge/license-MIT-green?style=for-the-badge" alt="MIT license">
   <img src="https://img.shields.io/badge/harnesses-4-orange?style=for-the-badge" alt="4 harnesses">
 </p>
 
 <p align="center">
-  <code>solo-mise</code> is the installable starter kit behind <a href="https://github.com/solomonneas/solos-cookbook">Solomon's Guide to Cookin' with Gas</a>.
+  <code>brigade</code> is the installable starter kit behind <a href="https://github.com/solomonneas/solos-cookbook">Solomon's Guide to Cookin' with Gas</a>.
   It gives you the workspace skeleton, handoff inbox, conservative ingester, and publish guard that make a multi-agent setup usable without leaking private junk into public repos.
 </p>
 
@@ -61,7 +61,7 @@ pipx install brigade-cli
 Or, to track `main`:
 
 ```bash
-pipx install git+https://github.com/solomonneas/solo-mise
+pipx install git+https://github.com/escoffier-labs/brigade
 ```
 
 The workspace config directory is `.brigade` (older `.solo-mise` installs are still read), and the `solo-mise` command is a deprecated alias for `brigade`.
@@ -86,13 +86,13 @@ Once installed, `brigade doctor` verifies the wiring and `brigade status` report
 
 ## Two axes: depth + harnesses
 
-solo-mise installs material on two independent axes:
+brigade installs material on two independent axes:
 
 **Depth, how much shared baseline you want:**
 
 | Depth | Installs |
 |---|---|
-| `repo` *(default)* | `AGENTS.md`, `SAFETY_RULES.md`, `INSTALL_FOR_AGENTS.md`, `hooks/pre-push`, `.solo-mise/policies/public-repo.json` |
+| `repo` *(default)* | `AGENTS.md`, `SAFETY_RULES.md`, `INSTALL_FOR_AGENTS.md`, `hooks/pre-push`, `.brigade/policies/public-repo.json` |
 | `workspace` | repo + `MEMORY.md`, `TOOLS.md`, `USER.md`, `SOUL.md`, `IDENTITY.md`, `HEARTBEAT.md`, `memory/cards/`, starter cards |
 
 **Harnesses, which tools you actually use:**
@@ -101,14 +101,14 @@ solo-mise installs material on two independent axes:
 |---|---|---|
 | `claude` | writer | `CLAUDE.md` + `.claude/memory-handoffs/` inbox |
 | `codex` | writer | `.codex/memory-handoffs/` inbox (AGENTS.md is in the baseline) |
-| `openclaw` | reader | `.solo-mise/openclaw/` config fragments + cron stubs |
-| `hermes` | reader | `.solo-mise/hermes/` adapter fragments (experimental) |
+| `openclaw` | reader | `.brigade/openclaw/` config fragments + cron stubs |
+| `hermes` | reader | `.brigade/hermes/` adapter fragments (experimental) |
 
 **Includes, optional add-ons:**
 
 | Include | Adds |
 |---|---|
-| `publisher` | `.solo-mise/policies/public-content.json` + content-safety memory card + scrub-cache |
+| `publisher` | `.brigade/policies/public-content.json` + content-safety memory card + scrub-cache |
 
 ## Picking your harnesses
 
@@ -150,7 +150,7 @@ Anything `[warn]` is fine; `[fail]` means the install is incomplete. The `opencl
 
 ### Privacy
 
-solo-mise makes no network calls. It does not phone home, collect telemetry, or sync anything to a server. Everything happens on your local filesystem against the templates packaged with the install. The only file that touches the network is the `pre-push` hook, and it runs the local `content-guard` scanner against your own commits before they leave the machine.
+brigade makes no network calls. It does not phone home, collect telemetry, or sync anything to a server. Everything happens on your local filesystem against the templates packaged with the install. The only file that touches the network is the `pre-push` hook, and it runs the local `content-guard` scanner against your own commits before they leave the machine.
 
 ## The design
 
