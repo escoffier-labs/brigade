@@ -55,7 +55,7 @@ The cookbook explains the why. This package gives you the kitchen.
 ## Install
 
 ```bash
-pipx install solo-mise
+pipx install brigade-cli
 ```
 
 Or, to track `main`:
@@ -64,21 +64,25 @@ Or, to track `main`:
 pipx install git+https://github.com/solomonneas/solo-mise
 ```
 
+The workspace config directory is `.brigade` (older `.solo-mise` installs are still read), and the `solo-mise` command is a deprecated alias for `brigade`.
+
 ## Quick path
 
-Run `solo-mise init` with no flags for the interactive picker:
+Run `brigade init` with no flags for the interactive picker:
 
 ```bash
-solo-mise init --target ~/agent-kitchen
+brigade init --target ~/agent-kitchen
 ```
 
 For CI or scripts, pass flags directly:
 
 ```bash
-solo-mise init --target ~/agent-kitchen --depth workspace --harnesses claude,codex,openclaw
-solo-mise init --target ./repo --depth repo --harnesses codex
-solo-mise init --target ./repo --harnesses none           # generic install
+brigade init --target ~/agent-kitchen --depth workspace --harnesses claude,codex,openclaw
+brigade init --target ./repo --depth repo --harnesses codex
+brigade init --target ./repo --harnesses none           # generic install
 ```
+
+Once installed, `brigade doctor` verifies the wiring and `brigade status` reports over the station registry.
 
 ## Two axes: depth + harnesses
 
@@ -117,14 +121,14 @@ Four common combos:
 
 The canonical memory owner is picked automatically by priority (`openclaw > hermes > claude > codex > this-repo`). Override with `--owner`.
 
-Re-running `solo-mise init` against an existing target is safe. It refuses to overwrite tracked files without `--force`, and the `.gitignore` block it manages is replaced between its markers without touching the rest of your file.
+Re-running `brigade init` against an existing target is safe. It refuses to overwrite tracked files without `--force`, and the `.gitignore` block it manages is replaced between its markers without touching the rest of your file.
 
 See [QUICKSTART.md](QUICKSTART.md) for setup, verification, and the ingest flow.
 
 ### What a green doctor looks like
 
 ```text
-solo-mise doctor: target /home/you/agent-kitchen (generic)
+brigade doctor: target /home/you/agent-kitchen (generic)
   [ok]   bootstrap: AGENTS.md              /home/you/agent-kitchen/AGENTS.md
   [ok]   bootstrap: CLAUDE.md              /home/you/agent-kitchen/CLAUDE.md
   [ok]   bootstrap: MEMORY.md              /home/you/agent-kitchen/MEMORY.md
@@ -160,7 +164,7 @@ Claude Code              Codex
      \                   /
       \                 /
        v               v
-      solo-mise ingest
+      brigade ingest
               |
               v
   memory/cards/*.md, TOOLS.md, USER.md,

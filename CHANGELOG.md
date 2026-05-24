@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] - 2026-05-24
+
+### Changed
+- Renamed the project to **Brigade**. The PyPI distribution is now `brigade-cli` and the command is `brigade`. The workspace config directory is now `.brigade`, with a `.solo-mise` read fallback so older installs keep working.
+
+### Added
+- Built-in station registry that drives the doctor checks.
+- `brigade status` command, alongside `brigade init` and `brigade doctor`, reporting over the station registry.
+
+### Deprecated
+- The `solo-mise` command is kept as a deprecated alias for `brigade`.
+
 ## [0.4.0] - 2026-05-17
 
 ### Breaking
@@ -103,7 +115,8 @@ Initial release.
 - OpenClaw adapter fragments and harness-aware doctor checks.
 - Experimental Hermes adapter fragments.
 
-[Unreleased]: https://github.com/solomonneas/solo-mise/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/solomonneas/solo-mise/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/solomonneas/solo-mise/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/solomonneas/solo-mise/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/solomonneas/solo-mise/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/solomonneas/solo-mise/compare/v0.1.0...v0.2.0
