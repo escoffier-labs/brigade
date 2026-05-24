@@ -1,11 +1,11 @@
 <p align="center">
-  <img src="docs/assets/solo-mise-banner.png" alt="Solomon's Mise en Place banner">
+  <img src="docs/assets/brigade-social-preview.png" alt="Brigade">
 </p>
 
-<h1 align="center">Solomon's Mise en Place</h1>
+<h1 align="center">Brigade</h1>
 
 <p align="center">
-  <strong>Mise en place for agent memory.</strong>
+  <strong>Run your agent brigade.</strong>
 </p>
 
 <p align="center">
@@ -20,8 +20,7 @@
 </p>
 
 <p align="center">
-  <code>brigade</code> is the installable starter kit behind <a href="https://github.com/solomonneas/solos-cookbook">Solomon's Guide to Cookin' with Gas</a>.
-  It gives you the workspace skeleton, handoff inbox, conservative ingester, and publish guard that make a multi-agent setup usable without leaking private junk into public repos.
+  <code>brigade</code> is the operator-system CLI for agent workspaces. It gives you the workspace skeleton, handoff inbox, conservative ingester, and publish guards that make a multi-agent setup usable without leaking private junk into public repos.
 </p>
 
 ## What this is
@@ -179,7 +178,7 @@ Token-heavy terminal work gets the same treatment: make the wrapper explicit, ma
 
 ## Related
 
-- [Solomon's Cookbook](https://github.com/solomonneas/solos-cookbook): the long-form guide and reference docs
+- [Cookbook](https://github.com/solomonneas/solos-cookbook): the long-form companion guide and reference docs
 - [content-guard](https://github.com/solomonneas/content-guard): the publish-gate scanner used by the pre-push hook
 - [OpenClaw](https://github.com/openclaw/openclaw): the reference memory owner
 
