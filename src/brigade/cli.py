@@ -72,6 +72,10 @@ def _build_parser() -> argparse.ArgumentParser:
         default="generic",
     )
 
+    # status
+    p_status = sub.add_parser("status", help="Show which stations are present and healthy.")
+    p_status.add_argument("--target", "-t", type=Path, default=Path("."))
+
     # scrub
     p_scrub = sub.add_parser("scrub", help="Run content-guard against a target.")
     p_scrub.add_argument("--target", "-t", type=Path, default=Path("."))
@@ -183,6 +187,10 @@ def main(argv=None) -> int:
         from . import doctor as doctor_mod
 
         return doctor_mod.run(target=args.target, harness=args.harness)
+    if cmd == "status":
+        from . import status as status_mod
+
+        return status_mod.run(target=args.target)
     if cmd == "scrub":
         from . import scrub as scrub_mod
 
