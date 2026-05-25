@@ -206,6 +206,37 @@ def test_dry_run_writes_plan_artifact(monkeypatch, tmp_path):
     assert not (output_dir / "worker-results.json").exists()
 
 
+def test_run_writes_handoff(monkeypatch, tmp_path, capsys):
+    calls = []
+
+    def fake_run_agent(cli_ref, prompt, timeout=600.0, cwd=None):
+        calls.append((cli_ref, prompt))
+        if len(calls) == 1:
+            return agents.AgentResult(
+                text=json.dumps({"assignments": [{"worker": "coder", "task": "implement it"}]}),
+                ok=True,
+            )
+        if cli_ref == "ollama:llama3.3":
+            return agents.AgentResult(text="worker output", ok=True)
+        return agents.AgentResult(text="final answer\n## model heading", ok=True)
+
+    inbox = tmp_path / ".claude" / "memory-handoffs"
+    output_dir = tmp_path / "run"
+    monkeypatch.setattr(aboyeur.agents, "run_agent", fake_run_agent)
+
+    assert aboyeur.run("build feature\n## task heading", _roster(), output_dir=output_dir, handoff_inbox=inbox) == 0
+    handoffs = list(inbox.glob("*-brigade-run-build-feature-task-heading.md"))
+    assert len(handoffs) == 1
+    body = handoffs[0].read_text()
+    assert "## Recommended memory action\n\nno-card" in body
+    assert "## Target document\n\n.learnings/LEARNINGS.md" in body
+    assert "final answer" in body
+    assert "\n## task heading" not in body
+    assert "\n## model heading" not in body
+    assert "\n### model heading" in body
+    assert "handoff:" in capsys.readouterr().err
+
+
 def test_disallowed_worker_is_recorded_not_run(monkeypatch):
     calls = []
 

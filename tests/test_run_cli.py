@@ -42,6 +42,7 @@ role = "code"
         verbose=False,
         cwd=None,
         output_dir=None,
+        handoff_inbox=None,
     ):
         seen["task"] = task
         seen["orchestrator"] = loaded_roster.orchestrator
@@ -50,6 +51,7 @@ role = "code"
         seen["verbose"] = verbose
         seen["cwd"] = cwd
         seen["output_dir"] = output_dir
+        seen["handoff_inbox"] = handoff_inbox
         return 0
 
     monkeypatch.setattr(aboyeur, "run", fake_run)
@@ -59,24 +61,27 @@ role = "code"
             "do something",
             "--roster",
             str(roster_path),
-            "--dry-run",
             "--show-plan",
             "--verbose",
             "--cwd",
             str(tmp_path),
             "--output-dir",
             str(tmp_path / "runs" / "one"),
+            "--handoff",
+            "--handoff-inbox",
+            str(tmp_path / "handoffs"),
         ]
     )
     assert rc == 0
     assert seen == {
         "task": "do something",
         "orchestrator": "chef",
-        "dry_run": True,
+        "dry_run": False,
         "show_plan": True,
         "verbose": True,
         "cwd": tmp_path,
         "output_dir": tmp_path / "runs" / "one",
+        "handoff_inbox": tmp_path / "handoffs",
     }
 
 
@@ -100,9 +105,31 @@ role = "code"
     monkeypatch.setattr(
         aboyeur,
         "run",
-        lambda task, loaded_roster, dry_run=False, show_plan=False, verbose=False, cwd=None, output_dir=None: 0,
+        lambda task, loaded_roster, dry_run=False, show_plan=False, verbose=False, cwd=None, output_dir=None, handoff_inbox=None: 0,
     )
     assert cli.main(["run", json.dumps({"task": "x"}), "--dry-run"]) == 0
+
+
+def test_run_cli_rejects_handoff_with_dry_run(tmp_path, capsys, monkeypatch):
+    config_dir = tmp_path / ".brigade"
+    config_dir.mkdir()
+    (config_dir / "roster.toml").write_text(
+        """
+orchestrator = "chef"
+
+[agents.chef]
+cli = "codex"
+role = "plan"
+
+[agents.coder]
+cli = "codex"
+role = "code"
+"""
+    )
+    monkeypatch.chdir(tmp_path)
+    rc = cli.main(["run", "x", "--dry-run", "--handoff"])
+    assert rc == 2
+    assert "--handoff cannot be used with --dry-run" in capsys.readouterr().err
 
 
 def test_run_cli_can_disable_artifacts(tmp_path, monkeypatch):
@@ -123,7 +150,16 @@ role = "code"
     )
     seen = {}
 
-    def fake_run(task, loaded_roster, dry_run=False, show_plan=False, verbose=False, cwd=None, output_dir=None):
+    def fake_run(
+        task,
+        loaded_roster,
+        dry_run=False,
+        show_plan=False,
+        verbose=False,
+        cwd=None,
+        output_dir=None,
+        handoff_inbox=None,
+    ):
         seen["output_dir"] = output_dir
         return 0
 

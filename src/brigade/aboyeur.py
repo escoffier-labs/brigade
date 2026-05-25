@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
@@ -95,6 +96,101 @@ def make_run_dir(base: Path, now: datetime | None = None) -> Path:
 def _write_json(path: Path, payload: object) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2) + "\n")
+
+
+def _slug(text: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
+    return slug[:48] or "brigade-run"
+
+
+def _safe_document_content(text: str) -> str:
+    # The ingester treats `##` as handoff section boundaries, so keep routed
+    # document content at ### or below.
+    return re.sub(r"(?m)^##(?!#)", "###", text).strip()
+
+
+def _one_line(text: str) -> str:
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def write_run_handoff(
+    inbox: Path,
+    *,
+    task: str,
+    cwd: Path | None,
+    output_dir: Path | None,
+    assignments: list[Assignment],
+    worker_results: list[WorkerResult],
+    final_text: str,
+    now: datetime | None = None,
+) -> Path:
+    timestamp = (now or datetime.now(timezone.utc)).strftime("%Y-%m-%d-%H%M")
+    safe_task = _one_line(task)
+    path = inbox / f"{timestamp}-brigade-run-{_slug(safe_task)}.md"
+    worker_summary = "\n".join(
+        f"- {result.worker}: {'ok' if result.ok else 'failed'}"
+        + (f" ({_one_line(result.detail)})" if result.detail else "")
+        for result in worker_results
+    ) or "- no workers dispatched"
+    assignment_summary = "\n".join(
+        f"- {assignment.worker}: {_one_line(assignment.task)}" for assignment in assignments
+    ) or "- no worker assignments"
+    artifact_line = f"- artifacts: `{output_dir}`" if output_dir is not None else "- artifacts: none"
+    cwd_line = f"- cwd: `{cwd}`" if cwd is not None else "- cwd: not set"
+    document_content = _safe_document_content(
+        f"""### Brigade run: {_slug(safe_task)}
+- task: {safe_task}
+{artifact_line}
+{cwd_line}
+
+Final answer:
+{final_text}
+"""
+    )
+    body = f"""# Memory Handoff
+
+## Type
+
+project-context
+
+## Title
+
+Brigade run completed: {_slug(safe_task)}
+
+## Summary
+
+Brigade completed a bounded plan-dispatch-synthesize run and produced a final answer. This handoff captures the task, assignments, worker status, artifact path, and final result for memory ingestion.
+
+## Durable facts
+
+- task: {safe_task}
+{cwd_line}
+{artifact_line}
+- orchestrated assignments:
+{assignment_summary}
+- worker status:
+{worker_summary}
+
+## Evidence
+
+{artifact_line}
+- final answer captured in this handoff
+
+## Recommended memory action
+
+no-card
+
+## Target document
+
+.learnings/LEARNINGS.md
+
+## Suggested document content
+
+{document_content}
+"""
+    inbox.mkdir(parents=True, exist_ok=True)
+    path.write_text(body)
+    return path
 
 
 def parse_plan(text: str, roster: Roster) -> list[Assignment]:
@@ -292,9 +388,11 @@ def run(
     verbose: bool = False,
     cwd: Path | None = None,
     output_dir: Path | None = None,
+    handoff_inbox: Path | None = None,
 ) -> int:
     cwd = cwd.expanduser().resolve() if cwd is not None else None
     output_dir = output_dir.expanduser() if output_dir is not None else None
+    handoff_inbox = handoff_inbox.expanduser() if handoff_inbox is not None else None
     if output_dir is not None:
         output_dir.mkdir(parents=True, exist_ok=True)
         _write_json(
@@ -387,5 +485,16 @@ def run(
                 "artifacts": str(output_dir),
             },
         )
+    if handoff_inbox is not None:
+        handoff = write_run_handoff(
+            handoff_inbox,
+            task=task,
+            cwd=cwd,
+            output_dir=output_dir,
+            assignments=assignments,
+            worker_results=worker_results,
+            final_text=final.text,
+        )
+        print(f"handoff: {handoff}", file=sys.stderr)
     print(final.text)
     return 0

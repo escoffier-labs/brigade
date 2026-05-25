@@ -106,6 +106,17 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Directory for run artifacts. Defaults to .brigade/runs/<id> under --cwd.",
     )
     p_run.add_argument("--no-artifacts", action="store_true", help="Do not write run artifacts.")
+    p_run.add_argument(
+        "--handoff",
+        action="store_true",
+        help="Write a Memory Handoff for a successful non-dry run.",
+    )
+    p_run.add_argument(
+        "--handoff-inbox",
+        type=Path,
+        default=None,
+        help="Memory Handoff inbox. Defaults to .claude/memory-handoffs under --cwd.",
+    )
 
     # roster
     p_roster = sub.add_parser("roster", help="Create and check aboyeur rosters.")
@@ -256,6 +267,9 @@ def main(argv=None) -> int:
         if not run_cwd.is_dir():
             print(f"error: --cwd is not a directory: {run_cwd}", file=sys.stderr)
             return 2
+        if args.handoff and args.dry_run:
+            print("error: --handoff cannot be used with --dry-run", file=sys.stderr)
+            return 2
         roster_path = args.roster or (run_cwd / ".brigade" / "roster.toml")
         try:
             loaded_roster = roster_mod.load_roster(roster_path)
@@ -271,6 +285,9 @@ def main(argv=None) -> int:
         output_dir = None
         if not args.no_artifacts:
             output_dir = args.output_dir or aboyeur_mod.make_run_dir(run_cwd / ".brigade" / "runs")
+        handoff_inbox = None
+        if args.handoff:
+            handoff_inbox = args.handoff_inbox or (run_cwd / ".claude" / "memory-handoffs")
         rc = aboyeur_mod.run(
             args.task,
             loaded_roster,
@@ -279,6 +296,7 @@ def main(argv=None) -> int:
             verbose=args.verbose,
             cwd=run_cwd,
             output_dir=output_dir,
+            handoff_inbox=handoff_inbox,
         )
         if output_dir is not None:
             print(f"artifacts: {output_dir}", file=sys.stderr)

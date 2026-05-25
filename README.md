@@ -124,9 +124,10 @@ brigade run "plan the migration" --dry-run
 brigade run "review this repo" --show-plan
 brigade run "review this repo" --verbose
 brigade run "review this repo" --cwd /path/to/repo
+brigade run "review this repo" --handoff
 ```
 
-`--dry-run` prints the planned assignments as JSON and stops before worker dispatch. `--show-plan` prints assignments before a normal run. `--verbose` prints the plan, worker statuses, and synthesis status. `--cwd` sets the working directory for the agent CLI calls and defaults to the current directory. The `cli` values are adapters for installed command-line tools: `codex`, `claude`, and `ollama:<model>`. Pick the ones you already use. Brigade shells out to those tools and keeps no provider keys. `brigade roster doctor` validates the roster syntax and reports which CLIs are present on `PATH`.
+`--dry-run` prints the planned assignments as JSON and stops before worker dispatch. `--show-plan` prints assignments before a normal run. `--verbose` prints the plan, worker statuses, and synthesis status. `--cwd` sets the working directory for the agent CLI calls and defaults to the current directory. `--handoff` writes a Memory Handoff for a successful non-dry run. The `cli` values are adapters for installed command-line tools: `codex`, `claude`, and `ollama:<model>`. Pick the ones you already use. Brigade shells out to those tools and keeps no provider keys. `brigade roster doctor` validates the roster syntax and reports which CLIs are present on `PATH`.
 
 CLI runs write artifacts by default under `.brigade/runs/<id>` below `--cwd`:
 
@@ -138,6 +139,8 @@ CLI runs write artifacts by default under `.brigade/runs/<id>` below `--cwd`:
 | `final.txt` | final synthesized answer for non-dry runs |
 
 Use `--output-dir <path>` to pick the artifact directory, or `--no-artifacts` for a throwaway run.
+
+Use `--handoff` to bridge a completed run back into the memory system. By default it writes a reviewable handoff to `.claude/memory-handoffs/` under `--cwd`; override with `--handoff-inbox <path>`. The handoff targets `.learnings/LEARNINGS.md` as a `no-card` document update, so the normal `brigade ingest` route can review or ingest it. `--handoff` is not allowed with `--dry-run` because dry runs have no final answer.
 
 Live smoke test, using a temporary Codex-only roster:
 
@@ -161,7 +164,7 @@ allow_models = ["codex"]
 EOF
 
 brigade roster doctor --target "$tmpdir"
-timeout 360 brigade run "Integration test: assign the coder worker to return its required success sentence, then synthesize one sentence saying the full Brigade dispatch path succeeded." --cwd "$tmpdir" --show-plan
+timeout 360 brigade run "Integration test: assign the coder worker to return its required success sentence, then synthesize one sentence saying the full Brigade dispatch path succeeded." --cwd "$tmpdir" --show-plan --handoff
 ```
 
 Live runs invoke authenticated model CLIs and may consume whatever quota or subscription those CLIs use. `--dry-run` still invokes the orchestrator, but it does not dispatch workers or synthesize.
