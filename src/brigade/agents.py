@@ -6,6 +6,7 @@ does not store provider keys or import provider SDKs.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Callable, List
 
 from . import proc
@@ -51,11 +52,16 @@ def detect(cli_ref: str) -> bool:
     return proc.which(command_for(cli_ref)) is not None
 
 
-def run_agent(cli_ref: str, prompt: str, timeout: float = 600.0) -> AgentResult:
+def run_agent(
+    cli_ref: str,
+    prompt: str,
+    timeout: float = 600.0,
+    cwd: Path | None = None,
+) -> AgentResult:
     if not detect(cli_ref):
         return AgentResult(text="", ok=False, detail=f"{command_for(cli_ref)} not installed")
 
-    result = proc.run(build_argv(cli_ref, prompt), timeout=timeout)
+    result = proc.run(build_argv(cli_ref, prompt), timeout=timeout, cwd=cwd)
     text = result.stdout.strip()
     if result.code != 0:
         detail = result.stderr.strip() or f"exit {result.code}"

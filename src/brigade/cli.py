@@ -93,6 +93,19 @@ def _build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("--dry-run", action="store_true", help="Print the plan without dispatching workers.")
     p_run.add_argument("--show-plan", action="store_true", help="Print parsed assignments before dispatch.")
     p_run.add_argument("--verbose", action="store_true", help="Print plan, worker status, and synthesis status.")
+    p_run.add_argument(
+        "--cwd",
+        type=Path,
+        default=Path("."),
+        help="Working directory for agent CLI calls and default run artifacts.",
+    )
+    p_run.add_argument(
+        "--output-dir",
+        type=Path,
+        default=None,
+        help="Directory for run artifacts. Defaults to .brigade/runs/<id> under --cwd.",
+    )
+    p_run.add_argument("--no-artifacts", action="store_true", help="Do not write run artifacts.")
 
     # roster
     p_roster = sub.add_parser("roster", help="Create and check aboyeur rosters.")
@@ -239,7 +252,11 @@ def main(argv=None) -> int:
         from . import aboyeur as aboyeur_mod
         from . import roster as roster_mod
 
-        roster_path = args.roster or (Path(".") / ".brigade" / "roster.toml")
+        run_cwd = args.cwd.expanduser().resolve()
+        if not run_cwd.is_dir():
+            print(f"error: --cwd is not a directory: {run_cwd}", file=sys.stderr)
+            return 2
+        roster_path = args.roster or (run_cwd / ".brigade" / "roster.toml")
         try:
             loaded_roster = roster_mod.load_roster(roster_path)
         except FileNotFoundError:
@@ -251,13 +268,21 @@ def main(argv=None) -> int:
         except ValueError as exc:
             print(f"error: invalid roster: {exc}", file=sys.stderr)
             return 2
-        return aboyeur_mod.run(
+        output_dir = None
+        if not args.no_artifacts:
+            output_dir = args.output_dir or aboyeur_mod.make_run_dir(run_cwd / ".brigade" / "runs")
+        rc = aboyeur_mod.run(
             args.task,
             loaded_roster,
             dry_run=args.dry_run,
             show_plan=args.show_plan,
             verbose=args.verbose,
+            cwd=run_cwd,
+            output_dir=output_dir,
         )
+        if output_dir is not None:
+            print(f"artifacts: {output_dir}", file=sys.stderr)
+        return rc
     if cmd == "roster":
         from . import roster_cmd
 

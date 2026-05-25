@@ -5,6 +5,7 @@ import json
 import shutil
 import subprocess
 from dataclasses import dataclass
+from pathlib import Path
 from typing import List, Optional
 
 
@@ -25,10 +26,21 @@ def which(cmd: str) -> Optional[str]:
     return shutil.which(cmd)
 
 
-def run(args: List[str], timeout: float = 30.0, env: Optional[dict] = None) -> Result:
+def run(
+    args: List[str],
+    timeout: float = 30.0,
+    env: Optional[dict] = None,
+    cwd: Optional[Path] = None,
+) -> Result:
     try:
         cp = subprocess.run(
-            args, capture_output=True, text=True, timeout=timeout, env=env, check=False
+            args,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            env=env,
+            cwd=cwd,
+            check=False,
         )
         return Result(code=cp.returncode, stdout=cp.stdout, stderr=cp.stderr)
     except FileNotFoundError:

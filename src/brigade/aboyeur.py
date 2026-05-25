@@ -5,7 +5,10 @@ import json
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from json import JSONDecoder
+from pathlib import Path
+from uuid import uuid4
 
 from . import agents
 from .roster import Agent, Roster, is_cli_allowed, workers
@@ -84,6 +87,16 @@ def _loads_first_json_object(text: str) -> object:
     return json.loads(text)
 
 
+def make_run_dir(base: Path, now: datetime | None = None) -> Path:
+    stamp = (now or datetime.now(timezone.utc)).strftime("%Y%m%d-%H%M%S")
+    return base / f"{stamp}-{uuid4().hex[:8]}"
+
+
+def _write_json(path: Path, payload: object) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2) + "\n")
+
+
 def parse_plan(text: str, roster: Roster) -> list[Assignment]:
     try:
         payload = _extract_json(text)
@@ -121,7 +134,7 @@ def parse_plan(text: str, roster: Roster) -> list[Assignment]:
     return assignments
 
 
-def _run_orchestrator(roster: Roster, prompt: str) -> agents.AgentResult:
+def _run_orchestrator(roster: Roster, prompt: str, cwd: Path | None = None) -> agents.AgentResult:
     orchestrator = roster.agents[roster.orchestrator]
     if not is_cli_allowed(orchestrator.cli, roster):
         return agents.AgentResult(
@@ -129,17 +142,17 @@ def _run_orchestrator(roster: Roster, prompt: str) -> agents.AgentResult:
             ok=False,
             detail=f"{orchestrator.cli} is not allowed by limits.allow_models",
         )
-    return agents.run_agent(orchestrator.cli, prompt)
+    return agents.run_agent(orchestrator.cli, prompt, cwd=cwd)
 
 
-def plan(task: str, roster: Roster) -> list[Assignment]:
-    first = _run_orchestrator(roster, build_plan_prompt(task, roster))
+def plan(task: str, roster: Roster, cwd: Path | None = None) -> list[Assignment]:
+    first = _run_orchestrator(roster, build_plan_prompt(task, roster), cwd=cwd)
     if not first.ok:
         raise RuntimeError(f"orchestrator failed during plan: {first.detail}")
     try:
         return parse_plan(first.text, roster)
     except ValueError as exc:
-        second = _run_orchestrator(roster, build_plan_prompt(task, roster, corrective_note=str(exc)))
+        second = _run_orchestrator(roster, build_plan_prompt(task, roster, corrective_note=str(exc)), cwd=cwd)
         if not second.ok:
             raise RuntimeError(f"orchestrator failed during plan correction: {second.detail}") from exc
         try:
@@ -157,7 +170,7 @@ def _worker_prompt(agent: Agent, assignment: Assignment) -> str:
     )
 
 
-def dispatch(assignments: list[Assignment], roster: Roster) -> list[WorkerResult]:
+def dispatch(assignments: list[Assignment], roster: Roster, cwd: Path | None = None) -> list[WorkerResult]:
     def run_one(assignment: Assignment) -> WorkerResult:
         agent = roster.agents[assignment.worker]
         if not is_cli_allowed(agent.cli, roster):
@@ -168,7 +181,7 @@ def dispatch(assignments: list[Assignment], roster: Roster) -> list[WorkerResult
                 ok=False,
                 detail=f"{agent.cli} is not allowed by limits.allow_models",
             )
-        result = agents.run_agent(agent.cli, _worker_prompt(agent, assignment))
+        result = agents.run_agent(agent.cli, _worker_prompt(agent, assignment), cwd=cwd)
         return WorkerResult(
             worker=assignment.worker,
             task=assignment.task,
@@ -250,6 +263,26 @@ def _print_worker_status(results: list[WorkerResult]) -> None:
         print(f"  [{marker}] {result.worker}{detail}")
 
 
+def _assignment_payload(assignments: list[Assignment]) -> list[dict[str, str]]:
+    return [
+        {"worker": assignment.worker, "task": assignment.task}
+        for assignment in assignments
+    ]
+
+
+def _worker_payload(results: list[WorkerResult]) -> list[dict[str, object]]:
+    return [
+        {
+            "worker": result.worker,
+            "task": result.task,
+            "ok": result.ok,
+            "detail": result.detail,
+            "text": result.text,
+        }
+        for result in results
+    ]
+
+
 def run(
     task: str,
     roster: Roster,
@@ -257,35 +290,102 @@ def run(
     dry_run: bool = False,
     show_plan: bool = False,
     verbose: bool = False,
+    cwd: Path | None = None,
+    output_dir: Path | None = None,
 ) -> int:
+    cwd = cwd.expanduser().resolve() if cwd is not None else None
+    output_dir = output_dir.expanduser() if output_dir is not None else None
+    if output_dir is not None:
+        output_dir.mkdir(parents=True, exist_ok=True)
+        _write_json(
+            output_dir / "run.json",
+            {
+                "task": task,
+                "cwd": str(cwd) if cwd is not None else None,
+                "orchestrator": roster.orchestrator,
+                "dry_run": dry_run,
+                "status": "started",
+            },
+        )
+
     try:
-        assignments = plan(task, roster)
+        assignments = plan(task, roster, cwd=cwd)
     except RuntimeError as exc:
+        if output_dir is not None:
+            _write_json(
+                output_dir / "run.json",
+                {
+                    "task": task,
+                    "cwd": str(cwd) if cwd is not None else None,
+                    "orchestrator": roster.orchestrator,
+                    "dry_run": dry_run,
+                    "status": "failed",
+                    "error": str(exc),
+                },
+            )
         print(f"error: {exc}", file=sys.stderr)
         return 2
 
+    if output_dir is not None:
+        _write_json(output_dir / "plan.json", {"assignments": _assignment_payload(assignments)})
+
     if dry_run:
-        payload = {
-            "assignments": [
-                {"worker": assignment.worker, "task": assignment.task}
-                for assignment in assignments
-            ]
-        }
+        payload = {"assignments": _assignment_payload(assignments)}
+        if output_dir is not None:
+            _write_json(
+                output_dir / "run.json",
+                {
+                    "task": task,
+                    "cwd": str(cwd) if cwd is not None else None,
+                    "orchestrator": roster.orchestrator,
+                    "dry_run": dry_run,
+                    "status": "dry-run",
+                    "artifacts": str(output_dir),
+                },
+            )
         print(json.dumps(payload, indent=2))
         return 0
 
     if show_plan or verbose:
         _print_plan(assignments)
 
-    worker_results = dispatch(assignments, roster)
+    worker_results = dispatch(assignments, roster, cwd=cwd)
+    if output_dir is not None:
+        _write_json(output_dir / "worker-results.json", {"results": _worker_payload(worker_results)})
     if verbose:
         _print_worker_status(worker_results)
         print("synthesis:")
         print(f"  -> {roster.orchestrator}")
 
-    final = _run_orchestrator(roster, build_synth_prompt(task, worker_results))
+    final = _run_orchestrator(roster, build_synth_prompt(task, worker_results), cwd=cwd)
     if not final.ok:
+        if output_dir is not None:
+            _write_json(
+                output_dir / "run.json",
+                {
+                    "task": task,
+                    "cwd": str(cwd) if cwd is not None else None,
+                    "orchestrator": roster.orchestrator,
+                    "dry_run": dry_run,
+                    "status": "failed",
+                    "error": final.detail,
+                    "artifacts": str(output_dir),
+                },
+            )
         print(f"error: orchestrator failed during synthesis: {final.detail}", file=sys.stderr)
         return 2
+    if output_dir is not None:
+        (output_dir / "final.txt").write_text(final.text + "\n")
+        _write_json(
+            output_dir / "run.json",
+            {
+                "task": task,
+                "cwd": str(cwd) if cwd is not None else None,
+                "orchestrator": roster.orchestrator,
+                "dry_run": dry_run,
+                "status": "ok",
+                "artifacts": str(output_dir),
+            },
+        )
     print(final.text)
     return 0
