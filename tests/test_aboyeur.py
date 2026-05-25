@@ -236,11 +236,17 @@ def test_run_writes_artifacts(monkeypatch, tmp_path):
 
     assert aboyeur.run("build feature", _roster(), cwd=run_cwd, output_dir=output_dir) == 0
     assert (output_dir / "plan.json").is_file()
+    assert (output_dir / "roster.json").is_file()
     assert (output_dir / "worker-results.json").is_file()
     assert (output_dir / "final.txt").read_text() == "final answer\n"
     run_meta = json.loads((output_dir / "run.json").read_text())
     assert run_meta["status"] == "ok"
     assert run_meta["cwd"] == str(run_cwd)
+    roster_meta = json.loads((output_dir / "roster.json").read_text())
+    assert roster_meta["orchestrator"] == "chef"
+    assert roster_meta["max_workers"] == 2
+    assert roster_meta["allow_models"] == []
+    assert roster_meta["agents"]["coder"]["cli"] == "ollama:llama3.3"
     assert {call[2] for call in calls} == {run_cwd}
 
 
@@ -257,6 +263,7 @@ def test_dry_run_writes_plan_artifact(monkeypatch, tmp_path):
     assert aboyeur.run("build feature", _roster(), dry_run=True, output_dir=output_dir) == 0
     assert json.loads((output_dir / "plan.json").read_text())["assignments"][0]["worker"] == "coder"
     assert json.loads((output_dir / "run.json").read_text())["status"] == "dry-run"
+    assert json.loads((output_dir / "roster.json").read_text())["agents"]["chef"]["cli"] == "codex"
     assert not (output_dir / "worker-results.json").exists()
 
 

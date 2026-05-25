@@ -436,6 +436,23 @@ def _worker_payload(results: list[WorkerResult]) -> list[dict[str, object]]:
     ]
 
 
+def _roster_payload(roster: Roster) -> dict[str, object]:
+    return {
+        "orchestrator": roster.orchestrator,
+        "max_workers": roster.max_workers,
+        "timeout_seconds": roster.timeout_seconds,
+        "allow_models": list(roster.allow_models),
+        "agents": {
+            name: {
+                "cli": agent.cli,
+                "role": agent.role,
+                "timeout_seconds": agent.timeout_seconds,
+            }
+            for name, agent in roster.agents.items()
+        },
+    }
+
+
 def run(
     task: str,
     roster: Roster,
@@ -453,6 +470,7 @@ def run(
     handoff_inbox = handoff_inbox.expanduser() if handoff_inbox is not None else None
     if output_dir is not None:
         output_dir.mkdir(parents=True, exist_ok=True)
+        _write_json(output_dir / "roster.json", _roster_payload(roster))
         _write_json(
             output_dir / "run.json",
             {

@@ -137,6 +137,7 @@ CLI runs write artifacts by default under `.brigade/runs/<id>` below `--cwd`:
 | File | Contents |
 |---|---|
 | `run.json` | task, cwd, orchestrator, dry-run flag, status, artifact path |
+| `roster.json` | effective orchestrator, agents, limits, allow-list, and timeouts |
 | `plan.json` | parsed worker assignments |
 | `worker-results.json` | worker status, details, and text output for non-dry runs |
 | `final.txt` | final synthesized answer for non-dry runs |
