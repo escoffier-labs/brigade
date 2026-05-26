@@ -514,7 +514,7 @@ def test_work_task_ledger_add_list_show_and_done(tmp_path, monkeypatch, capsys):
     assert payload["tasks"][0]["completed_at"] == "2026-05-26T12:30:00+00:00"
 
 
-def test_work_task_add_from_next(tmp_path, monkeypatch, capsys):
+def test_work_task_add_from_next_deduplicates_pending_task(tmp_path, monkeypatch, capsys):
     _init_git_repo(tmp_path)
     dogfood_cmd.init(target=tmp_path)
     run_dir = tmp_path / ".brigade" / "runs" / "latest"
@@ -530,6 +530,12 @@ def test_work_task_add_from_next(tmp_path, monkeypatch, capsys):
     assert work_cmd.task_add(target=tmp_path, from_next=True) == 0
     out = capsys.readouterr().out
     assert "Build from extracted next." in out
+    assert "created: True" in out
+    first_id = out.split("task: ", 1)[1].splitlines()[0]
+    assert work_cmd.task_add(target=tmp_path, from_next=True) == 0
+    out = capsys.readouterr().out
+    assert f"task: {first_id}" in out
+    assert "created: False" in out
     assert work_cmd.next(target=tmp_path, json_output=True) == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["next_source"] == "task_ledger"
@@ -813,6 +819,95 @@ def test_work_run_consumes_pending_task_before_latest_next(tmp_path, monkeypatch
     assert ledger["tasks"][0]["completed_session_title"] == "Build queued task"
 
 
+def test_work_run_queue_next_adds_extracted_followup(tmp_path, monkeypatch, capsys):
+    _init_git_repo(tmp_path)
+    artifacts_dir = tmp_path / ".brigade" / "runs"
+    dogfood_cmd.init(target=tmp_path, artifacts_dir=artifacts_dir)
+    times = iter(
+        [
+            datetime(2026, 5, 26, 12, 0, 0, tzinfo=timezone.utc),
+            datetime(2026, 5, 26, 13, 0, 0, tzinfo=timezone.utc),
+            datetime(2026, 5, 26, 13, 0, 1, tzinfo=timezone.utc),
+        ]
+    )
+    monkeypatch.setattr(work_cmd, "_now", lambda: next(times))
+
+    def fake_dogfood_run(task, **kwargs):
+        run_dir = kwargs["output_dir"]
+        run_dir.mkdir(parents=True)
+        _write_json(
+            run_dir / "run.json",
+            {"started_at": "2026-05-26T12:10:00Z", "status": "ok", "task": task},
+        )
+        (run_dir / "final.txt").write_text("Done.\n\nNext step: Build queued follow-up.\n")
+        return 0
+
+    monkeypatch.setattr(dogfood_cmd, "run", fake_dogfood_run)
+
+    assert (
+        work_cmd.run(
+            "review the repo",
+            target=tmp_path,
+            output_dir=artifacts_dir / "new",
+            handoff=False,
+            queue_next=True,
+        )
+        == 0
+    )
+    out = capsys.readouterr().out
+    assert "queued_next:" in out
+    assert "(created)" in out
+    ledger = json.loads((tmp_path / ".brigade" / "work" / "tasks.json").read_text())
+    assert ledger["tasks"][0]["status"] == "pending"
+    assert ledger["tasks"][0]["text"] == "Build queued follow-up."
+    assert ledger["tasks"][0]["source"] == "latest_dogfood_run"
+    assert ledger["tasks"][0]["metadata"]["run_path"] == str(artifacts_dir / "new")
+    assert ledger["tasks"][0]["metadata"]["session_title"] == "review the repo"
+
+
+def test_work_run_queue_next_reuses_existing_pending_task(tmp_path, monkeypatch, capsys):
+    _init_git_repo(tmp_path)
+    artifacts_dir = tmp_path / ".brigade" / "runs"
+    dogfood_cmd.init(target=tmp_path, artifacts_dir=artifacts_dir)
+    times = iter(
+        [
+            datetime(2026, 5, 26, 11, 30, 0, tzinfo=timezone.utc),
+            datetime(2026, 5, 26, 12, 0, 0, tzinfo=timezone.utc),
+            datetime(2026, 5, 26, 13, 0, 0, tzinfo=timezone.utc),
+        ]
+    )
+    monkeypatch.setattr(work_cmd, "_now", lambda: next(times))
+    assert work_cmd.task_add(target=tmp_path, text="Build queued follow-up.") == 0
+    capsys.readouterr()
+
+    def fake_dogfood_run(task, **kwargs):
+        run_dir = kwargs["output_dir"]
+        run_dir.mkdir(parents=True)
+        _write_json(
+            run_dir / "run.json",
+            {"started_at": "2026-05-26T12:10:00Z", "status": "ok", "task": task},
+        )
+        (run_dir / "final.txt").write_text("Done.\n\nNext step: Build queued follow-up.\n")
+        return 0
+
+    monkeypatch.setattr(dogfood_cmd, "run", fake_dogfood_run)
+
+    assert (
+        work_cmd.run(
+            "review the repo",
+            target=tmp_path,
+            output_dir=artifacts_dir / "new",
+            handoff=False,
+            queue_next=True,
+        )
+        == 0
+    )
+    out = capsys.readouterr().out
+    assert "(existing)" in out
+    ledger = json.loads((tmp_path / ".brigade" / "work" / "tasks.json").read_text())
+    assert len(ledger["tasks"]) == 1
+
+
 def test_work_run_closes_session_when_dogfood_fails(tmp_path, monkeypatch):
     _init_git_repo(tmp_path)
     dogfood_cmd.init(target=tmp_path)
@@ -1085,6 +1180,7 @@ def test_work_run_cli(tmp_path, monkeypatch):
                 "12",
                 "--recap-limit",
                 "2",
+                "--queue-next",
             ]
         )
         == 0
@@ -1101,6 +1197,7 @@ def test_work_run_cli(tmp_path, monkeypatch):
         "native_read_only_sandbox": True,
         "timeout_seconds": 12.0,
         "recap_limit": 2,
+        "queue_next": True,
     }
 
 

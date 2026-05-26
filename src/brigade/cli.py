@@ -188,6 +188,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p_work_run.add_argument("--timeout-seconds", type=float, default=DEFAULT_TIMEOUT_SECONDS, help="Per-agent timeout.")
     p_work_run.add_argument("--recap-limit", type=int, default=1, help="Maximum sessions to include in the final recap.")
+    p_work_run.add_argument("--queue-next", action="store_true", help="Queue the extracted next step after a successful run.")
     p_work_start = work_sub.add_parser("start", help="Start a local Brigade work session.")
     p_work_start.add_argument("title", nargs="*", help="Optional session title.")
     p_work_start.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace for the session.")
@@ -531,6 +532,7 @@ def main(argv=None) -> int:
                 native_read_only_sandbox=args.native_read_only_sandbox,
                 timeout_seconds=args.timeout_seconds,
                 recap_limit=args.recap_limit,
+                queue_next=args.queue_next,
             )
         if args.work_command == "start":
             title = " ".join(args.title) if args.title else None

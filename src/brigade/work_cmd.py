@@ -158,6 +158,10 @@ def _task_sort_key(task: dict[str, Any]) -> str:
     return str(task.get("created_at") or task.get("id") or "")
 
 
+def _task_text_key(text: str) -> str:
+    return " ".join(text.casefold().split())
+
+
 def _pending_tasks(target: Path) -> list[dict[str, Any]]:
     ledger = _read_task_ledger(target)
     tasks = [
@@ -170,6 +174,16 @@ def _pending_tasks(target: Path) -> list[dict[str, Any]]:
     ]
     tasks.sort(key=_task_sort_key)
     return tasks
+
+
+def _find_pending_task_by_text(target: Path, text: str) -> dict[str, Any] | None:
+    wanted = _task_text_key(text)
+    if not wanted:
+        return None
+    for task in _pending_tasks(target):
+        if _task_text_key(str(task.get("text") or "")) == wanted:
+            return task
+    return None
 
 
 def _find_task(target: Path, task_id: str) -> tuple[dict[str, Any] | None, dict[str, Any]]:
@@ -187,10 +201,10 @@ def _find_task(target: Path, task_id: str) -> tuple[dict[str, Any] | None, dict[
     return None, ledger
 
 
-def _make_task(text: str, *, source: str = "manual") -> dict[str, Any]:
+def _make_task(text: str, *, source: str = "manual", metadata: dict[str, Any] | None = None) -> dict[str, Any]:
     now = _now()
     created = now.isoformat()
-    return {
+    task = {
         "id": f"{now.strftime('%Y%m%d-%H%M%S')}-{_slug(text)}-{uuid4().hex[:6]}",
         "text": text,
         "status": "pending",
@@ -198,14 +212,67 @@ def _make_task(text: str, *, source: str = "manual") -> dict[str, Any]:
         "created_at": created,
         "updated_at": created,
     }
+    if metadata:
+        task["metadata"] = metadata
+    return task
 
 
-def _add_task(target: Path, text: str, *, source: str = "manual") -> dict[str, Any]:
+def _add_task(
+    target: Path,
+    text: str,
+    *,
+    source: str = "manual",
+    metadata: dict[str, Any] | None = None,
+) -> tuple[dict[str, Any], bool]:
     ledger = _read_task_ledger(target)
-    task = _make_task(text, source=source)
+    existing = _find_pending_task_by_text(target, text)
+    if existing is not None:
+        return existing, False
+    task = _make_task(text, source=source, metadata=metadata)
     ledger["tasks"].append(task)
     _write_task_ledger(target, ledger)
-    return task
+    return task, True
+
+
+def _latest_run_next_metadata(target: Path) -> tuple[str | None, dict[str, Any]]:
+    dogfood = _dogfood_snapshot(target)
+    next_step = dogfood.get("next") if isinstance(dogfood.get("next"), str) else None
+    latest = dogfood.get("latest_run") if isinstance(dogfood.get("latest_run"), dict) else None
+    metadata: dict[str, Any] = {
+        "dogfood_next_source": dogfood.get("next_source"),
+    }
+    if isinstance(latest, dict):
+        metadata.update(
+            {
+                "run_path": latest.get("path"),
+                "run_started_at": latest.get("started_at"),
+                "run_status": latest.get("status"),
+                "run_task": latest.get("task"),
+            }
+        )
+    return next_step.strip() if next_step and next_step.strip() else None, metadata
+
+
+def _queue_latest_next(
+    target: Path,
+    *,
+    session_dir: Path | None = None,
+    session_title: str | None = None,
+) -> tuple[dict[str, Any] | None, bool, str | None]:
+    next_step, metadata = _latest_run_next_metadata(target)
+    if not next_step:
+        return None, False, "no extracted next step is available"
+    if session_dir is not None:
+        metadata["session_path"] = str(session_dir)
+    if session_title:
+        metadata["session_title"] = session_title
+    task, created = _add_task(
+        target,
+        next_step,
+        source="latest_dogfood_run",
+        metadata=metadata,
+    )
+    return task, created, None
 
 
 def _read_session(path: Path) -> dict[str, Any] | None:
@@ -558,6 +625,16 @@ def _active_session_info(target: Path) -> dict[str, Any] | None:
         "title": payload.get("title"),
         "started_at": payload.get("started_at"),
     }
+
+
+def _active_session_dir(target: Path) -> Path | None:
+    current = _current_path(target)
+    if not current.exists():
+        return None
+    session_id = current.read_text().strip()
+    if not session_id:
+        return None
+    return _work_root(target) / session_id
 
 
 def _next_payload(target: Path) -> dict[str, Any]:
@@ -1087,6 +1164,11 @@ def tasks(*, target: Path, all_tasks: bool = False, json_output: bool = False) -
         print(f"- {task.get('id')} [{status_text}] {_short(str(task.get('text', '')))}")
         if task.get("source"):
             print(f"  source: {task['source']}")
+        metadata = task.get("metadata") if isinstance(task.get("metadata"), dict) else {}
+        if metadata.get("run_path"):
+            print(f"  run: {metadata['run_path']}")
+        if metadata.get("session_path"):
+            print(f"  session: {metadata['session_path']}")
         if task.get("completed_at"):
             print(f"  completed_at: {task['completed_at']}")
     return 0
@@ -1103,19 +1185,21 @@ def task_add(*, target: Path, text: str | None = None, from_next: bool = False) 
     task_text = (text or "").strip()
     source = "manual"
     if from_next:
-        dogfood = _dogfood_snapshot(target)
-        next_step = dogfood.get("next") if isinstance(dogfood.get("next"), str) else None
-        if not next_step or not next_step.strip():
+        next_step, metadata = _latest_run_next_metadata(target)
+        if not next_step:
             print("error: no extracted next step is available", file=sys.stderr)
             return 1
-        task_text = next_step.strip()
+        task_text = next_step
         source = "latest_dogfood_run"
+    else:
+        metadata = None
     if not task_text:
         print("error: task text is required", file=sys.stderr)
         return 2
-    task = _add_task(target, task_text, source=source)
+    task, created = _add_task(target, task_text, source=source, metadata=metadata)
     print(f"task: {task['id']}")
     print(f"status: {task['status']}")
+    print(f"created: {created}")
     print(f"text: {task['text']}")
     return 0
 
@@ -1134,6 +1218,11 @@ def task_show(*, target: Path, task_id: str) -> int:
     print(f"source: {task.get('source', '')}")
     print(f"created_at: {task.get('created_at', '')}")
     print(f"updated_at: {task.get('updated_at', '')}")
+    metadata = task.get("metadata") if isinstance(task.get("metadata"), dict) else {}
+    if metadata:
+        print("metadata:")
+        for key in sorted(metadata):
+            print(f"  {key}: {metadata[key]}")
     if task.get("completed_at"):
         print(f"completed_at: {task['completed_at']}")
     print(f"text: {task.get('text', '')}")
@@ -1341,6 +1430,7 @@ def run(
     native_read_only_sandbox: bool = False,
     timeout_seconds: float = dogfood_cmd.DEFAULT_TIMEOUT_SECONDS,
     recap_limit: int = 1,
+    queue_next: bool = False,
 ) -> int:
     if recap_limit < 1:
         print("error: --recap-limit must be a positive integer", file=sys.stderr)
@@ -1358,6 +1448,7 @@ def run(
     start_rc = start(target=target, title=session_title)
     if start_rc != 0:
         return start_rc
+    session_dir = _active_session_dir(target)
 
     dogfood_rc = 1
     try:
@@ -1386,6 +1477,16 @@ def run(
             task["completed_at"] = now
             task["completed_session_title"] = session_title
             _write_task_ledger(target, ledger)
+    if dogfood_rc == 0 and queue_next:
+        queued_task, created, reason = _queue_latest_next(
+            target,
+            session_dir=session_dir,
+            session_title=session_title,
+        )
+        if queued_task is None:
+            print(f"queued_next: skipped ({reason})")
+        else:
+            print(f"queued_next: {queued_task.get('id')} ({'created' if created else 'existing'})")
     recap(target=target, limit=recap_limit)
     return dogfood_rc
 
