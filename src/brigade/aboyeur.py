@@ -105,6 +105,10 @@ def _write_json(path: Path, payload: object) -> None:
     path.write_text(json.dumps(payload, indent=2) + "\n")
 
 
+def _utc_iso(value: datetime) -> str:
+    return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
 def _slug(text: str) -> str:
     slug = re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
     return slug[:48] or "brigade-run"
@@ -502,6 +506,38 @@ def _roster_payload(roster: Roster) -> dict[str, object]:
     }
 
 
+def _run_payload(
+    *,
+    task: str,
+    cwd: Path | None,
+    roster: Roster,
+    dry_run: bool,
+    read_only: bool,
+    status: str,
+    started_at: datetime,
+    finished_at: datetime | None = None,
+    output_dir: Path | None = None,
+    error: str | None = None,
+) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "task": task,
+        "cwd": str(cwd) if cwd is not None else None,
+        "orchestrator": roster.orchestrator,
+        "dry_run": dry_run,
+        "read_only": read_only,
+        "status": status,
+        "started_at": _utc_iso(started_at),
+    }
+    if finished_at is not None:
+        payload["finished_at"] = _utc_iso(finished_at)
+        payload["duration_seconds"] = max(0.0, round((finished_at - started_at).total_seconds(), 3))
+    if output_dir is not None:
+        payload["artifacts"] = str(output_dir)
+    if error is not None:
+        payload["error"] = error
+    return payload
+
+
 def run(
     task: str,
     roster: Roster,
@@ -514,6 +550,7 @@ def run(
     handoff_inbox: Path | None = None,
     read_only: bool = False,
 ) -> int:
+    started_at = datetime.now(timezone.utc)
     cwd = cwd.expanduser().resolve() if cwd is not None else None
     output_dir = output_dir.expanduser() if output_dir is not None else None
     handoff_inbox = handoff_inbox.expanduser() if handoff_inbox is not None else None
@@ -522,14 +559,16 @@ def run(
         _write_json(output_dir / "roster.json", _roster_payload(roster))
         _write_json(
             output_dir / "run.json",
-            {
-                "task": task,
-                "cwd": str(cwd) if cwd is not None else None,
-                "orchestrator": roster.orchestrator,
-                "dry_run": dry_run,
-                "read_only": read_only,
-                "status": "started",
-            },
+            _run_payload(
+                task=task,
+                cwd=cwd,
+                roster=roster,
+                dry_run=dry_run,
+                read_only=read_only,
+                status="started",
+                started_at=started_at,
+                output_dir=output_dir,
+            ),
         )
 
     plan_attempts: list[dict[str, object]] | None = [] if output_dir is not None else None
@@ -537,18 +576,22 @@ def run(
         assignments = plan(task, roster, cwd=cwd, read_only=read_only, attempts=plan_attempts)
     except RuntimeError as exc:
         if output_dir is not None:
+            finished_at = datetime.now(timezone.utc)
             _write_json(output_dir / "plan-attempts.json", {"attempts": plan_attempts or []})
             _write_json(
                 output_dir / "run.json",
-                {
-                    "task": task,
-                    "cwd": str(cwd) if cwd is not None else None,
-                    "orchestrator": roster.orchestrator,
-                    "dry_run": dry_run,
-                    "read_only": read_only,
-                    "status": "failed",
-                    "error": str(exc),
-                },
+                _run_payload(
+                    task=task,
+                    cwd=cwd,
+                    roster=roster,
+                    dry_run=dry_run,
+                    read_only=read_only,
+                    status="failed",
+                    started_at=started_at,
+                    finished_at=finished_at,
+                    output_dir=output_dir,
+                    error=str(exc),
+                ),
             )
         print(f"error: {exc}", file=sys.stderr)
         return 2
@@ -560,17 +603,20 @@ def run(
     if dry_run:
         payload = {"assignments": _assignment_payload(assignments)}
         if output_dir is not None:
+            finished_at = datetime.now(timezone.utc)
             _write_json(
                 output_dir / "run.json",
-                {
-                    "task": task,
-                    "cwd": str(cwd) if cwd is not None else None,
-                    "orchestrator": roster.orchestrator,
-                    "dry_run": dry_run,
-                    "read_only": read_only,
-                    "status": "dry-run",
-                    "artifacts": str(output_dir),
-                },
+                _run_payload(
+                    task=task,
+                    cwd=cwd,
+                    roster=roster,
+                    dry_run=dry_run,
+                    read_only=read_only,
+                    status="dry-run",
+                    started_at=started_at,
+                    finished_at=finished_at,
+                    output_dir=output_dir,
+                ),
             )
         print(json.dumps(payload, indent=2))
         return 0
@@ -602,34 +648,40 @@ def run(
         )
     if not final.ok:
         if output_dir is not None:
+            finished_at = datetime.now(timezone.utc)
             _write_json(
                 output_dir / "run.json",
-                {
-                    "task": task,
-                    "cwd": str(cwd) if cwd is not None else None,
-                    "orchestrator": roster.orchestrator,
-                    "dry_run": dry_run,
-                    "read_only": read_only,
-                    "status": "failed",
-                    "error": final.detail,
-                    "artifacts": str(output_dir),
-                },
+                _run_payload(
+                    task=task,
+                    cwd=cwd,
+                    roster=roster,
+                    dry_run=dry_run,
+                    read_only=read_only,
+                    status="failed",
+                    started_at=started_at,
+                    finished_at=finished_at,
+                    output_dir=output_dir,
+                    error=final.detail,
+                ),
             )
         print(f"error: orchestrator failed during synthesis: {final.detail}", file=sys.stderr)
         return 2
     if output_dir is not None:
+        finished_at = datetime.now(timezone.utc)
         (output_dir / "final.txt").write_text(final.text + "\n")
         _write_json(
             output_dir / "run.json",
-            {
-                "task": task,
-                "cwd": str(cwd) if cwd is not None else None,
-                "orchestrator": roster.orchestrator,
-                "dry_run": dry_run,
-                "read_only": read_only,
-                "status": "ok",
-                "artifacts": str(output_dir),
-            },
+            _run_payload(
+                task=task,
+                cwd=cwd,
+                roster=roster,
+                dry_run=dry_run,
+                read_only=read_only,
+                status="ok",
+                started_at=started_at,
+                finished_at=finished_at,
+                output_dir=output_dir,
+            ),
         )
     if handoff_inbox is not None:
         handoff = write_run_handoff(

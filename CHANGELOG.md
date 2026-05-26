@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `brigade roster init` and `brigade roster doctor` to scaffold a Codex/Ollama starter roster and validate roster syntax plus installed CLI availability.
 - `brigade run --show-plan` and `--verbose` visibility modes, plus defensive runtime enforcement of roster `allow_models`.
 - `brigade run --cwd`, `--output-dir`, and default `.brigade/runs/<id>` artifacts for dogfooding auditable runs.
+- Start, finish, and duration metadata in `run.json` artifacts.
 - `roster.json` run artifacts that capture the effective orchestrator, agents, limits, allow-list, and timeouts for later review.
 - `plan-attempts.json` run artifacts that capture raw planner outputs and parse errors for debugging failed planning runs.
 - `synthesis.json` run artifacts that capture orchestrator synthesis status, detail, and raw text for non-dry runs.

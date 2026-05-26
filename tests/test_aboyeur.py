@@ -244,6 +244,10 @@ def test_run_writes_artifacts(monkeypatch, tmp_path):
     run_meta = json.loads((output_dir / "run.json").read_text())
     assert run_meta["status"] == "ok"
     assert run_meta["cwd"] == str(run_cwd)
+    assert run_meta["artifacts"] == str(output_dir)
+    assert run_meta["started_at"].endswith("Z")
+    assert run_meta["finished_at"].endswith("Z")
+    assert run_meta["duration_seconds"] >= 0
     roster_meta = json.loads((output_dir / "roster.json").read_text())
     assert roster_meta["orchestrator"] == "chef"
     assert roster_meta["max_workers"] == 2
@@ -273,7 +277,12 @@ def test_dry_run_writes_plan_artifact(monkeypatch, tmp_path):
     assert aboyeur.run("build feature", _roster(), dry_run=True, output_dir=output_dir) == 0
     assert json.loads((output_dir / "plan.json").read_text())["assignments"][0]["worker"] == "coder"
     assert json.loads((output_dir / "plan-attempts.json").read_text())["attempts"][0]["parsed"] is True
-    assert json.loads((output_dir / "run.json").read_text())["status"] == "dry-run"
+    run_meta = json.loads((output_dir / "run.json").read_text())
+    assert run_meta["status"] == "dry-run"
+    assert run_meta["artifacts"] == str(output_dir)
+    assert run_meta["started_at"].endswith("Z")
+    assert run_meta["finished_at"].endswith("Z")
+    assert run_meta["duration_seconds"] >= 0
     assert json.loads((output_dir / "roster.json").read_text())["agents"]["chef"]["cli"] == "codex"
     assert not (output_dir / "worker-results.json").exists()
     assert not (output_dir / "synthesis.json").exists()
@@ -292,7 +301,12 @@ def test_invalid_plan_writes_attempt_artifact(monkeypatch, tmp_path, capsys):
     assert aboyeur.run("build feature", _roster(), output_dir=output_dir) == 2
     assert "invalid plan" in capsys.readouterr().err
     assert len(calls) == 2
-    assert json.loads((output_dir / "run.json").read_text())["status"] == "failed"
+    run_meta = json.loads((output_dir / "run.json").read_text())
+    assert run_meta["status"] == "failed"
+    assert run_meta["artifacts"] == str(output_dir)
+    assert run_meta["started_at"].endswith("Z")
+    assert run_meta["finished_at"].endswith("Z")
+    assert run_meta["duration_seconds"] >= 0
     attempts = json.loads((output_dir / "plan-attempts.json").read_text())["attempts"]
     assert [attempt["stage"] for attempt in attempts] == ["initial", "correction"]
     assert [attempt["parsed"] for attempt in attempts] == [False, False]
@@ -320,7 +334,12 @@ def test_synthesis_failure_writes_artifact(monkeypatch, tmp_path, capsys):
 
     assert aboyeur.run("build feature", _roster(), output_dir=output_dir) == 2
     assert "synthesis failed" in capsys.readouterr().err
-    assert json.loads((output_dir / "run.json").read_text())["status"] == "failed"
+    run_meta = json.loads((output_dir / "run.json").read_text())
+    assert run_meta["status"] == "failed"
+    assert run_meta["artifacts"] == str(output_dir)
+    assert run_meta["started_at"].endswith("Z")
+    assert run_meta["finished_at"].endswith("Z")
+    assert run_meta["duration_seconds"] >= 0
     synthesis = json.loads((output_dir / "synthesis.json").read_text())
     assert synthesis["orchestrator"] == "chef"
     assert synthesis["result"] == {
