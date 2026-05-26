@@ -38,8 +38,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `brigade work recap` to summarize recent or date-filtered work sessions.
 - `brigade work run` to start a work session, run dogfood, close the session, write a work handoff, and print a recap in one command.
 - `brigade work resume` to show the active or latest work session, latest dogfood run, extracted next step, and suggested command.
+- `brigade work next` to resolve the next daily task without inspecting artifacts, plus `brigade work run` now uses the latest extracted next step when no task is passed.
 - `brigade work note` to append timestamped checkpoints to the active work session without ending it.
 - `brigade work doctor` to check dogfood config, Codex availability, local artifact paths, handoff inbox, ignore coverage, and latest run context for the daily work loop.
+- Workspace installs now include `.brigade/memory-care.example.json` as a scanner wiring contract for memory-care decay output.
 - Roster-level and per-agent `timeout_seconds` controls for bounded CLI calls.
 - `brigade run --read-only` prompt policy for planning and review runs that should inspect and recommend only, with native `codex exec --sandbox read-only` enforcement for Codex agents.
 

@@ -418,6 +418,37 @@ def test_work_resume_suggests_work_run_from_latest_next(tmp_path, monkeypatch, c
     assert "suggested_command: brigade work run 'Build resume.'" in out
 
 
+def test_work_next_reports_latest_next_as_default_task(tmp_path, monkeypatch, capsys):
+    _init_git_repo(tmp_path)
+    dogfood_cmd.init(target=tmp_path)
+    run_dir = tmp_path / ".brigade" / "runs" / "latest"
+    run_dir.mkdir(parents=True)
+    _write_json(run_dir / "run.json", {"started_at": "2026-05-26T12:10:00Z", "status": "ok", "task": "review"})
+    (run_dir / "final.txt").write_text("Done.\n\nNext step: Build next command.\n")
+    monkeypatch.setattr(work_cmd.shutil, "which", lambda name: f"/usr/bin/{name}")
+
+    assert work_cmd.next(target=tmp_path) == 0
+    out = capsys.readouterr().out
+    assert "work next:" in out
+    assert "active_session: none" in out
+    assert "dogfood_ready: True" in out
+    assert "latest_run: 2026-05-26T12:10:00Z [ok]" in out
+    assert "next_source: latest_dogfood_run" in out
+    assert "next: Build next command." in out
+    assert "suggested_command: brigade work run" in out
+
+
+def test_work_next_falls_back_to_default_review(tmp_path, capsys):
+    _init_git_repo(tmp_path)
+
+    assert work_cmd.next(target=tmp_path) == 0
+    out = capsys.readouterr().out
+    assert "dogfood_ready: False" in out
+    assert "latest_run: none" in out
+    assert "next_source: default_review" in out
+    assert f"next: {dogfood_cmd.DEFAULT_TASK}" in out
+
+
 def test_work_resume_empty_state(tmp_path, capsys):
     _init_git_repo(tmp_path)
 
@@ -488,6 +519,46 @@ def test_work_run_wraps_dogfood_session(tmp_path, monkeypatch, capsys):
     assert "next: Build work run." in out
 
 
+def test_work_run_uses_latest_next_when_task_is_omitted(tmp_path, monkeypatch):
+    _init_git_repo(tmp_path)
+    artifacts_dir = tmp_path / ".brigade" / "runs"
+    dogfood_cmd.init(target=tmp_path, artifacts_dir=artifacts_dir)
+    latest_dir = artifacts_dir / "latest"
+    latest_dir.mkdir(parents=True)
+    _write_json(
+        latest_dir / "run.json",
+        {"started_at": "2026-05-26T11:00:00Z", "status": "ok", "task": "review"},
+    )
+    (latest_dir / "final.txt").write_text("Done.\n\nNext step: Build consumed task.\n")
+    times = iter(
+        [
+            datetime(2026, 5, 26, 12, 0, 0, tzinfo=timezone.utc),
+            datetime(2026, 5, 26, 13, 0, 0, tzinfo=timezone.utc),
+        ]
+    )
+    monkeypatch.setattr(work_cmd, "_now", lambda: next(times))
+    seen = {}
+
+    def fake_dogfood_run(task, **kwargs):
+        seen["task"] = task
+        run_dir = kwargs["output_dir"]
+        run_dir.mkdir(parents=True)
+        _write_json(
+            run_dir / "run.json",
+            {"started_at": "2026-05-26T12:10:00Z", "status": "ok", "task": task},
+        )
+        (run_dir / "final.txt").write_text("Done.\n\nNext step: Build follow-up.\n")
+        return 0
+
+    monkeypatch.setattr(dogfood_cmd, "run", fake_dogfood_run)
+
+    assert work_cmd.run(None, target=tmp_path, output_dir=artifacts_dir / "new", handoff=False) == 0
+    assert seen["task"] == "Build consumed task."
+    session_dir = tmp_path / ".brigade" / "work" / "20260526-120000-build-consumed-task"
+    payload = json.loads((session_dir / "session.json").read_text())
+    assert payload["title"] == "Build consumed task."
+
+
 def test_work_run_closes_session_when_dogfood_fails(tmp_path, monkeypatch):
     _init_git_repo(tmp_path)
     dogfood_cmd.init(target=tmp_path)
@@ -539,6 +610,19 @@ def test_work_resume_cli(tmp_path, monkeypatch):
     monkeypatch.setattr(work_cmd, "resume", fake_resume)
 
     assert cli.main(["work", "resume", "--target", str(tmp_path)]) == 0
+    assert seen == {"target": tmp_path}
+
+
+def test_work_next_cli(tmp_path, monkeypatch):
+    seen = {}
+
+    def fake_next(**kwargs):
+        seen.update(kwargs)
+        return 0
+
+    monkeypatch.setattr(work_cmd, "next", fake_next)
+
+    assert cli.main(["work", "next", "--target", str(tmp_path)]) == 0
     assert seen == {"target": tmp_path}
 
 

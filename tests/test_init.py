@@ -92,6 +92,7 @@ def test_workspace_install_includes_memory_cards(tmp_target: Path):
         assert (tmp_target / "memory" / "cards" / card).is_file(), f"missing card {card}"
     assert (tmp_target / "memory" / "handoff-inbox").is_dir()
     assert (tmp_target / ".claude" / "memory-handoffs" / "processed").is_dir()
+    assert (tmp_target / ".brigade" / "memory-care.example.json").is_file()
     # skill + script land at the right paths, executable bit on the script
     assert (tmp_target / "skills" / "note" / "SKILL.md").is_file()
     backup = tmp_target / "scripts" / "backup-restic.sh"

@@ -33,6 +33,39 @@ Store scan state under `memory/cards/decay/`:
 
 The scanner should report at least total cards, fresh count, aging count, stale count, critical count, and refresh queue size.
 
+`brigade init --depth workspace` also installs `.brigade/memory-care.example.json` as a local wiring contract for whatever scanner you use. Adapt that file for your scheduler or memory owner, but keep the output paths stable unless you also update the doctor integration.
+
+Minimal `scan-latest.json` shape:
+
+```json
+{
+  "scan_date": "2026-05-26",
+  "counts": {
+    "total": 12,
+    "fresh": 9,
+    "aging": 2,
+    "stale": 1,
+    "critical": 0
+  },
+  "refresh_queue_size": 1
+}
+```
+
+Minimal `refresh-queue.json` shape:
+
+```json
+{
+  "cards": [
+    {
+      "file": "memory/cards/example.md",
+      "reason": "source-of-truth changed"
+    }
+  ]
+}
+```
+
+`brigade doctor` treats missing decay output as advisory, stale scans older than 7 days as a warning, and corrupt scan or queue JSON as a failure.
+
 ## Safe Refresh Rules
 
 Only auto-refresh cards when current facts are grounded in local source-of-truth files read during the run. Good sources include `TOOLS.md`, `MEMORY.md`, recent `memory/YYYY-MM-DD.md`, local project docs, local scripts, and repo health reports.

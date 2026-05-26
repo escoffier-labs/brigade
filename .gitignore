@@ -31,7 +31,7 @@ htmlcov/
 .DS_Store
 Thumbs.db
 
-# claude / agent local state (side-harness only; solo-mise block below
+# claude / agent local state (side-harness only; brigade block below
 # handles the handoff path with TEMPLATE.md kept tracked)
 .codex/
 .openclaw/

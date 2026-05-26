@@ -211,6 +211,22 @@ def _next_step(snapshot: dict[str, Any]) -> str | None:
     return None
 
 
+def _resolve_next_task(target: Path) -> dict[str, Any]:
+    dogfood = _dogfood_snapshot(target)
+    next_step = dogfood.get("next") if isinstance(dogfood.get("next"), str) else None
+    if next_step and next_step.strip():
+        return {
+            "task": next_step.strip(),
+            "source": "latest_dogfood_run",
+            "dogfood": dogfood,
+        }
+    return {
+        "task": dogfood_cmd.DEFAULT_TASK,
+        "source": "default_review",
+        "dogfood": dogfood,
+    }
+
+
 def _display_session(path: Path, payload: dict[str, Any]) -> None:
     print(f"session: {path}")
     print(f"id: {payload.get('id', path.name)}")
@@ -732,6 +748,58 @@ def resume(*, target: Path) -> int:
     return 0
 
 
+def next(*, target: Path) -> int:
+    target = target.expanduser().resolve()
+    if not target.is_dir():
+        print(f"error: --target is not a directory: {target}", file=sys.stderr)
+        return 2
+
+    print(f"work next: {target}")
+    root = _work_root(target)
+    current = _current_path(target)
+    active_payload: dict[str, Any] | None = None
+    if current.exists():
+        active_dir = root / current.read_text().strip()
+        active_payload = _read_session(active_dir)
+        if active_payload is None:
+            print(f"active_session: invalid ({active_dir})")
+        else:
+            print(f"active_session: {active_dir}")
+            print(f"active_session_status: {active_payload.get('status', 'unknown')}")
+            if active_payload.get("title"):
+                print(f"active_session_title: {_short(str(active_payload['title']))}")
+    else:
+        print("active_session: none")
+
+    resolved = _resolve_next_task(target)
+    dogfood = resolved["dogfood"]
+    print(f"dogfood_ready: {dogfood.get('ready')}")
+    if dogfood.get("error"):
+        print(f"dogfood_error: {dogfood['error']}")
+    latest_run = dogfood.get("latest_run")
+    if isinstance(latest_run, dict):
+        print(
+            "latest_run: "
+            f"{latest_run.get('started_at', '')} "
+            f"[{latest_run.get('status', 'unknown')}] {latest_run.get('path')}"
+        )
+        if latest_run.get("task"):
+            print(f"latest_task: {_short(str(latest_run['task']))}")
+    else:
+        print("latest_run: none")
+
+    task = str(resolved["task"])
+    print(f"next_source: {resolved['source']}")
+    print(f"next: {_short(task)}")
+    if active_payload is not None:
+        print('suggested_command: brigade work end --note "..." --handoff')
+    elif resolved["source"] == "latest_dogfood_run":
+        print("suggested_command: brigade work run")
+    else:
+        print("suggested_command: brigade work run")
+    return 0
+
+
 def run(
     task: str | None,
     *,
@@ -755,7 +823,8 @@ def run(
         print(f"error: --target is not a directory: {target}", file=sys.stderr)
         return 2
 
-    task_text = task or dogfood_cmd.DEFAULT_TASK
+    resolved = _resolve_next_task(target)
+    task_text = task or str(resolved["task"])
     session_title = title or task_text
     start_rc = start(target=target, title=session_title)
     if start_rc != 0:

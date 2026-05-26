@@ -26,6 +26,8 @@ from .templates import (
 
 GITIGNORE_BEGIN = "# >>> brigade gitignore block >>>"
 GITIGNORE_END = "# <<< brigade gitignore block <<<"
+LEGACY_GITIGNORE_BEGIN = "# >>> solo-mise gitignore block >>>"
+LEGACY_GITIGNORE_END = "# <<< solo-mise gitignore block <<<"
 
 # Writer harness -> inbox-dir prefix. Only writer harnesses have an inbox.
 _WRITER_INBOX = {
@@ -78,9 +80,15 @@ def apply_gitignore(target: Path, selection: Selection) -> str:
         gi.write_text(block)
         return "created"
     existing = gi.read_text()
-    if GITIGNORE_BEGIN in existing and GITIGNORE_END in existing:
-        prefix, _, rest = existing.partition(GITIGNORE_BEGIN)
-        _, _, suffix = rest.partition(GITIGNORE_END)
+    markers = (
+        (GITIGNORE_BEGIN, GITIGNORE_END),
+        (LEGACY_GITIGNORE_BEGIN, LEGACY_GITIGNORE_END),
+    )
+    for begin, end in markers:
+        if begin not in existing or end not in existing:
+            continue
+        prefix, _, rest = existing.partition(begin)
+        _, _, suffix = rest.partition(end)
         # Strip a trailing newline from prefix and a leading newline from suffix to avoid drift.
         new_text = prefix.rstrip("\n") + ("\n\n" if prefix.strip() else "") + block + suffix.lstrip("\n")
         gi.write_text(new_text)

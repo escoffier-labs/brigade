@@ -20,6 +20,7 @@
     {"src": "memory/cards/pipeline-standups.md", "dst": "memory/cards/pipeline-standups.md"},
     {"src": "memory/cards/obsidian-notes.md", "dst": "memory/cards/obsidian-notes.md"},
     {"src": "memory/cards/backup-restic.md", "dst": "memory/cards/backup-restic.md"},
+    {"src": "memory/memory-care.example.json", "dst": ".brigade/memory-care.example.json"},
     {"src": "skills/note/SKILL.md", "dst": "skills/note/SKILL.md"},
     {"src": "scripts/backup-restic.sh", "dst": "scripts/backup-restic.sh", "mode": "0755"}
   ],

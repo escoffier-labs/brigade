@@ -63,6 +63,39 @@ def test_init_idempotent_replaces_block(tmp_target: Path):
     assert second.count(install_mod.GITIGNORE_BEGIN) == 1
 
 
+def test_init_replaces_legacy_solo_mise_gitignore_block(tmp_target: Path):
+    tmp_target.mkdir()
+    (tmp_target / ".gitignore").write_text(
+        "\n".join(
+            [
+                "# user rules",
+                "*.log",
+                "",
+                install_mod.LEGACY_GITIGNORE_BEGIN,
+                "GARBAGE_LINE",
+                install_mod.LEGACY_GITIGNORE_END,
+                "",
+                "# after block",
+                ".local-cache/",
+                "",
+            ]
+        )
+    )
+
+    rc = install_selection(tmp_target, _repo_selection())
+
+    assert rc == 0
+    gi = _read_gi(tmp_target)
+    assert "# user rules" in gi
+    assert ".local-cache/" in gi
+    assert install_mod.GITIGNORE_BEGIN in gi
+    assert install_mod.GITIGNORE_END in gi
+    assert install_mod.LEGACY_GITIGNORE_BEGIN not in gi
+    assert install_mod.LEGACY_GITIGNORE_END not in gi
+    assert "GARBAGE_LINE" not in gi
+    assert gi.count(install_mod.GITIGNORE_BEGIN) == 1
+
+
 def test_init_preserves_user_edits_outside_block(tmp_target: Path):
     tmp_target.mkdir()
     pre = "node_modules/\n# user rules\n*.swp\n"

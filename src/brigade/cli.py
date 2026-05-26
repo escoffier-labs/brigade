@@ -118,6 +118,8 @@ def _build_parser() -> argparse.ArgumentParser:
     p_work_doctor.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
     p_work_resume = work_sub.add_parser("resume", help="Show the current work handoff point and next command.")
     p_work_resume.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_work_next = work_sub.add_parser("next", help="Show the next daily work task and suggested command.")
+    p_work_next.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
     p_work_list = work_sub.add_parser("list", help="List recent Brigade work sessions.")
     p_work_list.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
     p_work_list.add_argument("--limit", type=int, default=10, help="Maximum sessions to show.")
@@ -443,6 +445,8 @@ def main(argv=None) -> int:
             return work_cmd.doctor(target=args.target)
         if args.work_command == "resume":
             return work_cmd.resume(target=args.target)
+        if args.work_command == "next":
+            return work_cmd.next(target=args.target)
         if args.work_command == "list":
             return work_cmd.list_sessions(target=args.target, limit=args.limit)
         if args.work_command == "latest":
