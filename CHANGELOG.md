@@ -33,6 +33,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `brigade work list`, `brigade work latest`, and `brigade work show` to inspect local work session artifacts.
 - `brigade work recap` to summarize recent or date-filtered work sessions.
 - `brigade work run` to start a work session, run dogfood, close the session, write a work handoff, and print a recap in one command.
+- `brigade work resume` to show the active or latest work session, latest dogfood run, extracted next step, and suggested command.
 - Roster-level and per-agent `timeout_seconds` controls for bounded CLI calls.
 - `brigade run --read-only` prompt policy for planning and review runs that should inspect and recommend only, with native `codex exec --sandbox read-only` enforcement for Codex agents.
 

@@ -285,6 +285,69 @@ def test_work_recap_rejects_bad_since(tmp_path, capsys):
     assert "--since must use YYYY-MM-DD" in capsys.readouterr().err
 
 
+def test_work_resume_reports_active_session(tmp_path, monkeypatch, capsys):
+    _init_git_repo(tmp_path)
+    dogfood_cmd.init(target=tmp_path)
+    run_dir = tmp_path / ".brigade" / "runs" / "latest"
+    run_dir.mkdir(parents=True)
+    _write_json(run_dir / "run.json", {"started_at": "2026-05-26T12:10:00Z", "status": "ok", "task": "review"})
+    (run_dir / "final.txt").write_text("Done.\n\nNext step: Build resume.\n")
+    monkeypatch.setattr(
+        work_cmd,
+        "_now",
+        lambda: datetime(2026, 5, 26, 12, 0, 0, tzinfo=timezone.utc),
+    )
+    assert work_cmd.start(target=tmp_path, title="Active Work") == 0
+
+    assert work_cmd.resume(target=tmp_path) == 0
+    out = capsys.readouterr().out
+    assert "work resume:" in out
+    assert "active_session:" in out
+    assert "active_session_title: Active Work" in out
+    assert "latest_run: 2026-05-26T12:10:00Z [ok]" in out
+    assert "next: Build resume." in out
+    assert 'suggested_command: brigade work end --note "..." --handoff' in out
+
+
+def test_work_resume_suggests_work_run_from_latest_next(tmp_path, monkeypatch, capsys):
+    _init_git_repo(tmp_path)
+    dogfood_cmd.init(target=tmp_path)
+    run_dir = tmp_path / ".brigade" / "runs" / "latest"
+    run_dir.mkdir(parents=True)
+    _write_json(run_dir / "run.json", {"started_at": "2026-05-26T12:10:00Z", "status": "ok", "task": "review"})
+    (run_dir / "final.txt").write_text("Done.\n\nNext step: Build resume.\n")
+    times = iter(
+        [
+            datetime(2026, 5, 26, 12, 0, 0, tzinfo=timezone.utc),
+            datetime(2026, 5, 26, 13, 0, 0, tzinfo=timezone.utc),
+        ]
+    )
+    monkeypatch.setattr(work_cmd, "_now", lambda: next(times))
+    assert work_cmd.start(target=tmp_path, title="Ended Work") == 0
+    assert work_cmd.end(target=tmp_path, note="done", handoff=True, handoff_inbox=tmp_path / "handoffs") == 0
+
+    assert work_cmd.resume(target=tmp_path) == 0
+    out = capsys.readouterr().out
+    assert "active_session: none" in out
+    assert "latest_session:" in out
+    assert "latest_session_title: Ended Work" in out
+    assert "latest_session_handoff:" in out
+    assert "next: Build resume." in out
+    assert "suggested_command: brigade work run 'Build resume.'" in out
+
+
+def test_work_resume_empty_state(tmp_path, capsys):
+    _init_git_repo(tmp_path)
+
+    assert work_cmd.resume(target=tmp_path) == 0
+    out = capsys.readouterr().out
+    assert "active_session: none" in out
+    assert "latest_session: none" in out
+    assert "latest_run: none" in out
+    assert "next: none" in out
+    assert "suggested_command: brigade work run" in out
+
+
 def test_work_run_wraps_dogfood_session(tmp_path, monkeypatch, capsys):
     _init_git_repo(tmp_path)
     artifacts_dir = tmp_path / ".brigade" / "runs"
@@ -382,6 +445,19 @@ def test_work_status_cli(tmp_path, monkeypatch):
 
     assert cli.main(["work", "status", "--target", str(tmp_path), "--limit", "3"]) == 0
     assert seen == {"target": tmp_path, "limit": 3}
+
+
+def test_work_resume_cli(tmp_path, monkeypatch):
+    seen = {}
+
+    def fake_resume(**kwargs):
+        seen.update(kwargs)
+        return 0
+
+    monkeypatch.setattr(work_cmd, "resume", fake_resume)
+
+    assert cli.main(["work", "resume", "--target", str(tmp_path)]) == 0
+    assert seen == {"target": tmp_path}
 
 
 def test_work_start_and_end_cli(tmp_path, monkeypatch):

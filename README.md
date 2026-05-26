@@ -135,6 +135,7 @@ brigade dogfood
 brigade dogfood next
 brigade dogfood --target /path/to/repo
 brigade work status
+brigade work resume
 brigade work run
 brigade work run "review today's changes"
 brigade work start "next slice"
@@ -163,7 +164,7 @@ CLI runs write artifacts by default under `.brigade/runs/<id>` below `--cwd`; do
 
 Use `--output-dir <path>` to pick the artifact directory, or `--no-artifacts` for a throwaway run.
 
-Use `brigade work status` as the quick daily dashboard for a repo. It reports the current branch, dirty files, dogfood readiness, configured dogfood paths, latest dogfood run, and extracted next step without starting a new orchestration. `brigade work run` is the one-command daily loop: it starts a work session, runs `brigade dogfood`, ends the session, writes a work-session Memory Handoff by default, and prints a compact recap. Pass a task to override the default next-slice review, `--title` to name the session, `--no-handoff` to skip the work handoff, or `--dogfood-handoff` to also let the underlying dogfood run write its own handoff. `brigade work start "title"` opens a local work session under `.brigade/work/<id>/`, records the starting git and dogfood context, and writes `start.md`. `brigade work end --note "what happened"` closes the active session, records ending context, and writes `end.md`. Add `--handoff` to also write a Memory Handoff for the closed session; it defaults to the configured dogfood handoff inbox or `.claude/memory-handoffs`.
+Use `brigade work status` as the quick daily dashboard for a repo. It reports the current branch, dirty files, dogfood readiness, configured dogfood paths, latest dogfood run, and extracted next step without starting a new orchestration. Use `brigade work resume` when returning to a repo; it shows the active or latest work session, latest dogfood run, extracted next step, and the suggested command to continue. `brigade work run` is the one-command daily loop: it starts a work session, runs `brigade dogfood`, ends the session, writes a work-session Memory Handoff by default, and prints a compact recap. Pass a task to override the default next-slice review, `--title` to name the session, `--no-handoff` to skip the work handoff, or `--dogfood-handoff` to also let the underlying dogfood run write its own handoff. `brigade work start "title"` opens a local work session under `.brigade/work/<id>/`, records the starting git and dogfood context, and writes `start.md`. `brigade work end --note "what happened"` closes the active session, records ending context, and writes `end.md`. Add `--handoff` to also write a Memory Handoff for the closed session; it defaults to the configured dogfood handoff inbox or `.codex/memory-handoffs`.
 
 Inspect local work sessions with `brigade work list`, `brigade work latest`, or `brigade work show <session-id-or-path>`. Use `brigade work recap` for a compact summary of recent sessions, or add `--since YYYY-MM-DD` for a day-range recap.
 

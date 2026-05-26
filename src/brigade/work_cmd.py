@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -577,6 +578,81 @@ def recap(*, target: Path, limit: int = 5, since: str | None = None) -> int:
         next_text = _next_step(snapshot)
         if next_text:
             print(f"  next: {_short(next_text)}")
+    return 0
+
+
+def _print_resume_session(label: str, path: Path, payload: dict[str, Any]) -> None:
+    print(f"{label}: {path}")
+    print(f"{label}_status: {payload.get('status', 'unknown')}")
+    if payload.get("title"):
+        print(f"{label}_title: {_short(str(payload['title']))}")
+    print(f"{label}_started: {payload.get('started_at', '')}")
+    if payload.get("ended_at"):
+        print(f"{label}_ended: {payload['ended_at']}")
+    if payload.get("note"):
+        print(f"{label}_note: {_short(str(payload['note']))}")
+    if payload.get("handoff"):
+        print(f"{label}_handoff: {payload['handoff']}")
+
+
+def resume(*, target: Path) -> int:
+    target = target.expanduser().resolve()
+    if not target.is_dir():
+        print(f"error: --target is not a directory: {target}", file=sys.stderr)
+        return 2
+
+    print(f"work resume: {target}")
+    root = _work_root(target)
+    current = _current_path(target)
+    active_payload: dict[str, Any] | None = None
+    if current.exists():
+        active_dir = root / current.read_text().strip()
+        active_payload = _read_session(active_dir)
+        if active_payload is None:
+            print(f"active_session: invalid ({active_dir})")
+        else:
+            _print_resume_session("active_session", active_dir, active_payload)
+    else:
+        print("active_session: none")
+
+    sessions, skipped = _collect_sessions(root)
+    if skipped:
+        print(f"skipped: {skipped}", file=sys.stderr)
+    if sessions:
+        latest_path, latest_payload = sessions[0]
+        if active_payload is None or latest_payload.get("id") != active_payload.get("id"):
+            _print_resume_session("latest_session", latest_path, latest_payload)
+    else:
+        print(f"latest_session: none ({root})")
+
+    dogfood = _dogfood_snapshot(target)
+    print(f"dogfood_ready: {dogfood.get('ready')}")
+    if dogfood.get("error"):
+        print(f"dogfood_error: {dogfood['error']}")
+    if dogfood.get("target"):
+        print(f"dogfood_target: {dogfood['target']}")
+    if dogfood.get("artifacts_dir"):
+        print(f"dogfood_artifacts: {dogfood['artifacts_dir']}")
+    latest_run = dogfood.get("latest_run")
+    if isinstance(latest_run, dict):
+        print(
+            "latest_run: "
+            f"{latest_run.get('started_at', '')} "
+            f"[{latest_run.get('status', 'unknown')}] {latest_run.get('path')}"
+        )
+        if latest_run.get("task"):
+            print(f"latest_task: {_short(str(latest_run['task']))}")
+    else:
+        print("latest_run: none")
+
+    next_step = dogfood.get("next") if isinstance(dogfood.get("next"), str) else None
+    print(f"next: {_short(next_step) if next_step else 'none'}")
+    if active_payload is not None:
+        print('suggested_command: brigade work end --note "..." --handoff')
+    elif next_step:
+        print(f"suggested_command: brigade work run {shlex.quote(next_step)}")
+    else:
+        print("suggested_command: brigade work run")
     return 0
 
 
