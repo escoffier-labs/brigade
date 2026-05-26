@@ -134,6 +134,7 @@ brigade dogfood status
 brigade dogfood
 brigade dogfood next
 brigade dogfood --target /path/to/repo
+brigade work status
 ```
 
 `--dry-run` prints the planned assignments as JSON and stops before worker dispatch. `--show-plan` prints assignments before a normal run. `--verbose` prints the plan, worker statuses, and synthesis status. `--cwd` sets the working directory for the agent CLI calls and defaults to the current directory. `--handoff` writes a Memory Handoff for a successful non-dry run. `--inspect` prints the same readable artifact summary as `brigade runs show` after the run completes. `--read-only` tells the orchestrator and workers to inspect and recommend only, without modifying files or external state. For `codex` agents, Brigade also passes `codex exec --sandbox read-only`; other adapters receive the prompt policy only. The `cli` values are adapters for installed command-line tools: `codex`, `claude`, and `ollama:<model>`. Pick the ones you already use. Brigade shells out to those tools and keeps no provider keys. `brigade roster doctor` validates the roster syntax and reports which CLIs are present on `PATH`.
@@ -154,6 +155,8 @@ CLI runs write artifacts by default under `.brigade/runs/<id>` below `--cwd`; do
 | `summary.md` | dogfood summary with run metadata, final answer, and extracted next step when present |
 
 Use `--output-dir <path>` to pick the artifact directory, or `--no-artifacts` for a throwaway run.
+
+Use `brigade work status` as the quick daily dashboard for a repo. It reports the current branch, dirty files, dogfood readiness, configured dogfood paths, latest dogfood run, and extracted next step without starting a new orchestration.
 
 Inspect a completed run without opening each JSON file:
 

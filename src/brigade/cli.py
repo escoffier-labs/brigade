@@ -107,6 +107,14 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p_dogfood.add_argument("--timeout-seconds", type=float, default=DEFAULT_TIMEOUT_SECONDS, help="Per-agent timeout.")
 
+    # work
+    p_work = sub.add_parser("work", help="Inspect and manage a daily Brigade work session.")
+    work_sub = p_work.add_subparsers(dest="work_command", metavar="<work-command>")
+    work_sub.required = True
+    p_work_status = work_sub.add_parser("status", help="Show current repo and dogfood work state.")
+    p_work_status.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_work_status.add_argument("--limit", type=int, default=12, help="Maximum dirty file entries to show.")
+
     # run
     p_run = sub.add_parser("run", help="Run a bounded cross-model orchestration task.")
     p_run.add_argument("task", help="Task for the aboyeur to plan, dispatch, and synthesize.")
@@ -373,6 +381,13 @@ def main(argv=None) -> int:
             native_read_only_sandbox=args.native_read_only_sandbox,
             timeout_seconds=args.timeout_seconds,
         )
+    if cmd == "work":
+        from . import work_cmd
+
+        if args.work_command == "status":
+            return work_cmd.status(target=args.target, limit=args.limit)
+        parser.error(f"unknown work command: {args.work_command}")
+        return 2
     if cmd == "run":
         from . import aboyeur as aboyeur_mod
         from . import roster as roster_mod
