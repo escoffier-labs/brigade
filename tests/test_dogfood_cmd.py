@@ -291,6 +291,43 @@ def test_dogfood_next_prints_latest_extracted_step(tmp_path, capsys):
     assert "- Build a thing.\n- Verify it." in capsys.readouterr().out
 
 
+def test_dogfood_extracts_next_from_markdown_heading(tmp_path):
+    run_dir = tmp_path / ".brigade" / "runs" / "latest"
+    run_dir.mkdir(parents=True)
+    (run_dir / "final.txt").write_text("Result.\n\n## Next\n\n- Build the brief.\n- Run it.\n\n## Notes\n")
+
+    next_step, source = dogfood_cmd.extract_next_step_from_run(run_dir)
+
+    assert source == "final"
+    assert next_step == "- Build the brief.\n- Run it."
+
+
+def test_dogfood_extracts_next_from_summary_when_final_has_no_label(tmp_path):
+    run_dir = tmp_path / ".brigade" / "runs" / "latest"
+    run_dir.mkdir(parents=True)
+    (run_dir / "final.txt").write_text("No recommendation here.\n")
+    (run_dir / "summary.md").write_text("# Summary\n\n## Next\n\nBuild the morning brief.\n\n## Final\n")
+
+    next_step, source = dogfood_cmd.extract_next_step_from_run(run_dir)
+
+    assert source == "summary"
+    assert next_step == "Build the morning brief."
+
+
+def test_dogfood_next_uses_summary_fallback(tmp_path, capsys):
+    run_dir = tmp_path / ".brigade" / "runs" / "latest"
+    run_dir.mkdir(parents=True)
+    _write_json(
+        run_dir / "run.json",
+        {"started_at": "2026-05-26T12:00:00Z", "status": "ok", "task": "review"},
+    )
+    (run_dir / "final.txt").write_text("No recommendation here.\n")
+    (run_dir / "summary.md").write_text("# Summary\n\n## Next\n\nBuild from summary.\n\n## Final\n")
+
+    assert dogfood_cmd.next_step(target=tmp_path) == 0
+    assert "Build from summary." in capsys.readouterr().out
+
+
 def test_dogfood_next_reports_missing_step(tmp_path, capsys):
     run_dir = tmp_path / ".brigade" / "runs" / "latest"
     run_dir.mkdir(parents=True)

@@ -418,6 +418,65 @@ def test_work_resume_suggests_work_run_from_latest_next(tmp_path, monkeypatch, c
     assert "suggested_command: brigade work run 'Build resume.'" in out
 
 
+def test_work_brief_reports_morning_entrypoint(tmp_path, monkeypatch, capsys):
+    _init_git_repo(tmp_path)
+    dogfood_cmd.init(target=tmp_path)
+    run_dir = tmp_path / ".brigade" / "runs" / "latest"
+    run_dir.mkdir(parents=True)
+    _write_json(run_dir / "run.json", {"started_at": "2026-05-26T12:10:00Z", "status": "ok", "task": "review"})
+    (run_dir / "final.txt").write_text("Done.\n")
+    (run_dir / "summary.md").write_text("# Summary\n\n## Next\n\nBuild the morning brief.\n\n## Final\n")
+    times = iter(
+        [
+            datetime(2026, 5, 26, 12, 0, 0, tzinfo=timezone.utc),
+            datetime(2026, 5, 26, 13, 0, 0, tzinfo=timezone.utc),
+        ]
+    )
+    monkeypatch.setattr(work_cmd, "_now", lambda: next(times))
+    monkeypatch.setattr(work_cmd.shutil, "which", lambda name: f"/usr/bin/{name}")
+    assert work_cmd.start(target=tmp_path, title="Ended Work") == 0
+    assert work_cmd.end(target=tmp_path, note="done", handoff=True, handoff_inbox=tmp_path / "handoffs") == 0
+
+    assert work_cmd.brief(target=tmp_path, limit=2) == 0
+    out = capsys.readouterr().out
+    assert "work brief:" in out
+    assert "active_session: none" in out
+    assert "latest_session:" in out
+    assert "latest_session_title: Ended Work" in out
+    assert "dogfood_ready: True" in out
+    assert "latest_run: 2026-05-26T12:10:00Z [ok]" in out
+    assert "next_source: latest_dogfood_run" in out
+    assert "next: Build the morning brief." in out
+    assert "suggested_command: brigade work run 'Build the morning brief.'" in out
+    assert "recent_sessions:" in out
+
+
+def test_work_brief_json_reports_recent_sessions(tmp_path, monkeypatch, capsys):
+    _init_git_repo(tmp_path)
+    dogfood_cmd.init(target=tmp_path)
+    run_dir = tmp_path / ".brigade" / "runs" / "latest"
+    run_dir.mkdir(parents=True)
+    _write_json(run_dir / "run.json", {"started_at": "2026-05-26T12:10:00Z", "status": "ok", "task": "review"})
+    (run_dir / "final.txt").write_text("Done.\n\n## Next\n\nBuild JSON brief.\n")
+    monkeypatch.setattr(
+        work_cmd,
+        "_now",
+        lambda: datetime(2026, 5, 26, 12, 0, 0, tzinfo=timezone.utc),
+    )
+    monkeypatch.setattr(work_cmd.shutil, "which", lambda name: f"/usr/bin/{name}")
+    assert work_cmd.start(target=tmp_path, title="Active Work") == 0
+    capsys.readouterr()
+
+    assert work_cmd.brief(target=tmp_path, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["active_session"]["title"] == "Active Work"
+    assert payload["latest_session"]["title"] == "Active Work"
+    assert payload["recent_sessions"][0]["status"] == "active"
+    assert payload["dogfood"]["next_source"] == "final"
+    assert payload["next"] == "Build JSON brief."
+    assert payload["suggested_command"] == 'brigade work end --note "..." --handoff'
+
+
 def test_work_next_reports_latest_next_as_default_task(tmp_path, monkeypatch, capsys):
     _init_git_repo(tmp_path)
     dogfood_cmd.init(target=tmp_path)
@@ -685,6 +744,22 @@ def test_work_resume_cli(tmp_path, monkeypatch):
 
     assert cli.main(["work", "resume", "--target", str(tmp_path)]) == 0
     assert seen == {"target": tmp_path}
+
+
+def test_work_brief_cli(tmp_path, monkeypatch):
+    seen = {}
+
+    def fake_brief(**kwargs):
+        seen.update(kwargs)
+        return 0
+
+    monkeypatch.setattr(work_cmd, "brief", fake_brief)
+
+    assert cli.main(["work", "brief", "--target", str(tmp_path), "--limit", "4"]) == 0
+    assert seen == {"target": tmp_path, "limit": 4, "json_output": False}
+    seen.clear()
+    assert cli.main(["work", "brief", "--target", str(tmp_path), "--json"]) == 0
+    assert seen == {"target": tmp_path, "limit": 3, "json_output": True}
 
 
 def test_work_next_cli(tmp_path, monkeypatch):
