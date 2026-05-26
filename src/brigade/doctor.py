@@ -15,6 +15,19 @@ WARN = "WARN"
 FAIL = "FAIL"
 MANUAL = "MANUAL"
 
+BOOTSTRAP_BUDGETS = {
+    "AGENTS.md": 12_000,
+    "CLAUDE.md": 6_000,
+    "MEMORY.md": 7_000,
+    "TOOLS.md": 10_000,
+    "USER.md": 8_000,
+    "SAFETY_RULES.md": 10_000,
+    "INSTALL_FOR_AGENTS.md": 8_000,
+    "SOUL.md": 8_000,
+    "IDENTITY.md": 4_000,
+    "HEARTBEAT.md": 5_000,
+}
+
 from .station import DoctorContext
 
 
@@ -115,6 +128,35 @@ def _check_workspace_files(target: Path) -> List[CheckResult]:
             results.append((OK, f"bootstrap: {name}", str(path)))
         else:
             results.append((WARN, f"bootstrap: {name}", f"not present at {path}"))
+    results.extend(_check_bootstrap_budgets(target))
+    return results
+
+
+def _check_bootstrap_budgets(target: Path) -> List[CheckResult]:
+    results: List[CheckResult] = []
+    for name, limit in BOOTSTRAP_BUDGETS.items():
+        path = target / name
+        if not path.exists():
+            continue
+        if not path.is_file():
+            results.append((FAIL, f"bootstrap-budget: {name}", f"not a file: {path}"))
+            continue
+        try:
+            size = path.stat().st_size
+        except OSError as exc:
+            results.append((FAIL, f"bootstrap-budget: {name}", f"unreadable: {exc}"))
+            continue
+        detail = f"{size}/{limit} bytes"
+        if size > limit:
+            results.append(
+                (
+                    FAIL,
+                    f"bootstrap-budget: {name}",
+                    f"{detail}; over hard limit, split durable context into memory/cards before agents load it",
+                )
+            )
+        else:
+            results.append((OK, f"bootstrap-budget: {name}", detail))
     return results
 
 

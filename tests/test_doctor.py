@@ -31,6 +31,35 @@ def test_doctor_reports_failures_on_empty_dir(tmp_target: Path, capsys):
     assert "[fail]" in out
 
 
+def test_doctor_fails_when_bootstrap_file_exceeds_budget(tmp_target: Path, capsys):
+    install_selection(
+        tmp_target,
+        Selection(depth="workspace", harnesses=["claude"], owner="claude", includes=[]),
+    )
+    limit = doctor_mod.BOOTSTRAP_BUDGETS["MEMORY.md"]
+    (tmp_target / "MEMORY.md").write_text("x" * (limit + 1))
+
+    rc = doctor_mod.run(target=tmp_target, harness="generic")
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "[fail]" in out
+    assert "bootstrap-budget: MEMORY.md" in out
+    assert "over hard limit" in out
+
+
+def test_doctor_reports_bootstrap_budget_ok(tmp_target: Path, capsys):
+    install_selection(
+        tmp_target,
+        Selection(depth="workspace", harnesses=["claude"], owner="claude", includes=[]),
+    )
+
+    rc = doctor_mod.run(target=tmp_target, harness="generic")
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "bootstrap-budget: AGENTS.md" in out
+    assert "bootstrap-budget: MEMORY.md" in out
+
+
 def test_doctor_openclaw_reports_manual_when_config_missing(tmp_target: Path, monkeypatch, capsys):
     install_selection(
         tmp_target,
