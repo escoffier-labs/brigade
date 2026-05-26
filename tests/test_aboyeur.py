@@ -395,6 +395,41 @@ def test_run_writes_handoff(monkeypatch, tmp_path, capsys):
     assert "handoff:" in capsys.readouterr().err
 
 
+def test_handoff_failure_preserves_final_artifacts(monkeypatch, tmp_path, capsys):
+    calls = []
+
+    def fake_run_agent(cli_ref, prompt, timeout=600.0, cwd=None, read_only=False):
+        calls.append((cli_ref, prompt))
+        if len(calls) == 1:
+            return agents.AgentResult(
+                text=json.dumps({"assignments": [{"worker": "coder", "task": "implement it"}]}),
+                ok=True,
+            )
+        if cli_ref == "ollama:llama3.3":
+            return agents.AgentResult(text="worker output", ok=True)
+        return agents.AgentResult(text="final answer", ok=True)
+
+    def fail_handoff(*args, **kwargs):
+        raise OSError("cannot write handoff")
+
+    output_dir = tmp_path / "run"
+    monkeypatch.setattr(aboyeur.agents, "run_agent", fake_run_agent)
+    monkeypatch.setattr(aboyeur, "write_run_handoff", fail_handoff)
+
+    assert aboyeur.run("build feature", _roster(), output_dir=output_dir, handoff_inbox=tmp_path / "handoffs") == 2
+    captured = capsys.readouterr()
+    assert captured.out.strip() == "final answer"
+    assert "handoff failed: cannot write handoff" in captured.err
+    assert (output_dir / "final.txt").read_text() == "final answer\n"
+    run_meta = json.loads((output_dir / "run.json").read_text())
+    assert run_meta["status"] == "handoff-failed"
+    assert run_meta["error"] == "handoff failed: cannot write handoff"
+    assert run_meta["artifacts"] == str(output_dir)
+    assert run_meta["started_at"].endswith("Z")
+    assert run_meta["finished_at"].endswith("Z")
+    assert run_meta["duration_seconds"] >= 0
+
+
 def test_disallowed_worker_is_recorded_not_run(monkeypatch):
     calls = []
 

@@ -146,7 +146,7 @@ CLI runs write artifacts by default under `.brigade/runs/<id>` below `--cwd`:
 
 Use `--output-dir <path>` to pick the artifact directory, or `--no-artifacts` for a throwaway run.
 
-Use `--handoff` to bridge a completed run back into the memory system. By default it writes a reviewable handoff to `.claude/memory-handoffs/` under `--cwd`; override with `--handoff-inbox <path>`. The handoff targets `.learnings/LEARNINGS.md` as a `no-card` document update, so the normal `brigade ingest` route can review or ingest it. `--handoff` is not allowed with `--dry-run` because dry runs have no final answer.
+Use `--handoff` to bridge a completed run back into the memory system. By default it writes a reviewable handoff to `.claude/memory-handoffs/` under `--cwd`; override with `--handoff-inbox <path>`. The handoff targets `.learnings/LEARNINGS.md` as a `no-card` document update, so the normal `brigade ingest` route can review or ingest it. If handoff writing fails after synthesis, Brigade still prints the final answer and keeps the final artifacts, but exits nonzero and marks `run.json` as `handoff-failed`. `--handoff` is not allowed with `--dry-run` because dry runs have no final answer.
 
 Live smoke test, using a temporary Codex-only roster:
 

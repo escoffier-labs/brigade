@@ -687,16 +687,39 @@ def run(
             ),
         )
     if handoff_inbox is not None:
-        handoff = write_run_handoff(
-            handoff_inbox,
-            task=task,
-            cwd=cwd,
-            output_dir=output_dir,
-            assignments=assignments,
-            worker_results=worker_results,
-            final_text=final.text,
-            read_only=read_only,
-        )
+        try:
+            handoff = write_run_handoff(
+                handoff_inbox,
+                task=task,
+                cwd=cwd,
+                output_dir=output_dir,
+                assignments=assignments,
+                worker_results=worker_results,
+                final_text=final.text,
+                read_only=read_only,
+            )
+        except OSError as exc:
+            detail = f"handoff failed: {exc}"
+            if output_dir is not None:
+                finished_at = datetime.now(timezone.utc)
+                _write_json(
+                    output_dir / "run.json",
+                    _run_payload(
+                        task=task,
+                        cwd=cwd,
+                        roster=roster,
+                        dry_run=dry_run,
+                        read_only=read_only,
+                        status="handoff-failed",
+                        started_at=started_at,
+                        finished_at=finished_at,
+                        output_dir=output_dir,
+                        error=detail,
+                    ),
+                )
+            print(f"error: {detail}", file=sys.stderr)
+            print(final.text)
+            return 2
         print(f"handoff: {handoff}", file=sys.stderr)
         if output_dir is not None:
             finished_at = datetime.now(timezone.utc)
