@@ -63,6 +63,10 @@ def _current_path(target: Path) -> Path:
     return _work_root(target) / "current"
 
 
+def _tasks_path(target: Path) -> Path:
+    return _work_root(target) / "tasks.json"
+
+
 def _git_snapshot(target: Path) -> dict[str, Any]:
     repo_root = _git_value(target, "rev-parse", "--show-toplevel")
     if repo_root is None:
@@ -122,7 +126,86 @@ def _session_snapshot(target: Path) -> dict[str, Any]:
 
 
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+
+
+def _read_task_ledger(target: Path) -> dict[str, Any]:
+    path = _tasks_path(target)
+    if not path.exists():
+        return {"version": 1, "tasks": []}
+    try:
+        payload = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return {"version": 1, "tasks": []}
+    if not isinstance(payload, dict):
+        return {"version": 1, "tasks": []}
+    tasks = payload.get("tasks")
+    if not isinstance(tasks, list):
+        payload["tasks"] = []
+    payload["version"] = 1
+    return payload
+
+
+def _write_task_ledger(target: Path, payload: dict[str, Any]) -> None:
+    payload["version"] = 1
+    if not isinstance(payload.get("tasks"), list):
+        payload["tasks"] = []
+    _write_json(_tasks_path(target), payload)
+
+
+def _task_sort_key(task: dict[str, Any]) -> str:
+    return str(task.get("created_at") or task.get("id") or "")
+
+
+def _pending_tasks(target: Path) -> list[dict[str, Any]]:
+    ledger = _read_task_ledger(target)
+    tasks = [
+        task
+        for task in ledger["tasks"]
+        if isinstance(task, dict)
+        and task.get("status", "pending") == "pending"
+        and isinstance(task.get("text"), str)
+        and task["text"].strip()
+    ]
+    tasks.sort(key=_task_sort_key)
+    return tasks
+
+
+def _find_task(target: Path, task_id: str) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+    ledger = _read_task_ledger(target)
+    matches: list[dict[str, Any]] = []
+    for task in ledger["tasks"]:
+        if not isinstance(task, dict):
+            continue
+        if task.get("id") == task_id:
+            return task, ledger
+        if isinstance(task.get("id"), str) and task["id"].startswith(task_id):
+            matches.append(task)
+    if len(matches) == 1:
+        return matches[0], ledger
+    return None, ledger
+
+
+def _make_task(text: str, *, source: str = "manual") -> dict[str, Any]:
+    now = _now()
+    created = now.isoformat()
+    return {
+        "id": f"{now.strftime('%Y%m%d-%H%M%S')}-{_slug(text)}-{uuid4().hex[:6]}",
+        "text": text,
+        "status": "pending",
+        "source": source,
+        "created_at": created,
+        "updated_at": created,
+    }
+
+
+def _add_task(target: Path, text: str, *, source: str = "manual") -> dict[str, Any]:
+    ledger = _read_task_ledger(target)
+    task = _make_task(text, source=source)
+    ledger["tasks"].append(task)
+    _write_task_ledger(target, ledger)
+    return task
 
 
 def _read_session(path: Path) -> dict[str, Any] | None:
@@ -240,17 +323,29 @@ def _session_info(path: Path, payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def _resolve_next_task(target: Path) -> dict[str, Any]:
+    pending = _pending_tasks(target)
+    if pending:
+        task = pending[0]
+        return {
+            "task": str(task.get("text", "")).strip(),
+            "source": "task_ledger",
+            "task_id": task.get("id"),
+            "ledger_task": task,
+            "dogfood": _dogfood_snapshot(target),
+        }
     dogfood = _dogfood_snapshot(target)
     next_step = dogfood.get("next") if isinstance(dogfood.get("next"), str) else None
     if next_step and next_step.strip():
         return {
             "task": next_step.strip(),
             "source": "latest_dogfood_run",
+            "task_id": None,
             "dogfood": dogfood,
         }
     return {
         "task": dogfood_cmd.DEFAULT_TASK,
         "source": "default_review",
+        "task_id": None,
         "dogfood": dogfood,
     }
 
@@ -476,6 +571,7 @@ def _next_payload(target: Path) -> dict[str, Any]:
         "active_session": active,
         "dogfood": dogfood,
         "next_source": resolved["source"],
+        "task_id": resolved.get("task_id"),
         "next": str(resolved["task"]),
         "suggested_command": suggested,
     }
@@ -484,6 +580,8 @@ def _next_payload(target: Path) -> dict[str, Any]:
 def _suggested_command(active: dict[str, Any] | None, next_text: object, source: object) -> str:
     if active is not None:
         return 'brigade work end --note "..." --handoff'
+    if source == "task_ledger":
+        return "brigade work run"
     if isinstance(next_text, str) and next_text.strip() and source != "default_review":
         return f"brigade work run {shlex.quote(next_text.strip())}"
     return "brigade work run"
@@ -498,6 +596,7 @@ def _brief_payload(target: Path, *, limit: int = 3) -> dict[str, Any]:
     resolved = _resolve_next_task(target)
     git = _git_snapshot(target)
     suggested = _suggested_command(active, resolved["task"], resolved["source"])
+    pending = _pending_tasks(target)
     return {
         "target": str(target),
         "git": git,
@@ -505,8 +604,11 @@ def _brief_payload(target: Path, *, limit: int = 3) -> dict[str, Any]:
         "latest_session": latest_session,
         "recent_sessions": recent_sessions,
         "skipped_sessions": skipped,
+        "tasks_path": str(_tasks_path(target)),
+        "pending_tasks": pending,
         "dogfood": resolved["dogfood"],
         "next_source": resolved["source"],
+        "task_id": resolved.get("task_id"),
         "next": str(resolved["task"]),
         "suggested_command": suggested,
     }
@@ -932,8 +1034,20 @@ def brief(*, target: Path, limit: int = 3, json_output: bool = False) -> int:
         print("latest_run: none")
 
     print(f"next_source: {payload['next_source']}")
+    if payload.get("task_id"):
+        print(f"task_id: {payload['task_id']}")
     print(f"next: {_short(str(payload['next']))}")
     print(f"suggested_command: {payload['suggested_command']}")
+
+    pending = payload["pending_tasks"]
+    if isinstance(pending, list) and pending:
+        print("pending_tasks:")
+        for task in pending[:5]:
+            if not isinstance(task, dict):
+                continue
+            print(f"  - {task.get('id')} {_short(str(task.get('text', '')))}")
+        if len(pending) > 5:
+            print(f"  ... {len(pending) - 5} more")
 
     recent = payload["recent_sessions"]
     if isinstance(recent, list) and recent:
@@ -945,6 +1059,103 @@ def brief(*, target: Path, limit: int = 3, json_output: bool = False) -> int:
             print(f"  - {item.get('started_at')} [{item.get('status')}] {_short(str(title))}")
     if payload.get("skipped_sessions"):
         print(f"skipped_sessions: {payload['skipped_sessions']}", file=sys.stderr)
+    return 0
+
+
+def tasks(*, target: Path, all_tasks: bool = False, json_output: bool = False) -> int:
+    target = target.expanduser().resolve()
+    if not target.is_dir():
+        print(f"error: --target is not a directory: {target}", file=sys.stderr)
+        return 2
+    ledger = _read_task_ledger(target)
+    task_items = [task for task in ledger["tasks"] if isinstance(task, dict)]
+    task_items.sort(key=_task_sort_key)
+    if not all_tasks:
+        task_items = [task for task in task_items if task.get("status", "pending") == "pending"]
+
+    if json_output:
+        print(json.dumps({"tasks_path": str(_tasks_path(target)), "tasks": task_items}, indent=2, sort_keys=True))
+        return 0
+
+    print(f"work tasks: {target}")
+    print(f"tasks_path: {_tasks_path(target)}")
+    if not task_items:
+        print("tasks: none")
+        return 0
+    for task in task_items:
+        status_text = task.get("status", "pending")
+        print(f"- {task.get('id')} [{status_text}] {_short(str(task.get('text', '')))}")
+        if task.get("source"):
+            print(f"  source: {task['source']}")
+        if task.get("completed_at"):
+            print(f"  completed_at: {task['completed_at']}")
+    return 0
+
+
+def task_add(*, target: Path, text: str | None = None, from_next: bool = False) -> int:
+    target = target.expanduser().resolve()
+    if not target.is_dir():
+        print(f"error: --target is not a directory: {target}", file=sys.stderr)
+        return 2
+    if from_next and text:
+        print("error: pass task text or --from-next, not both", file=sys.stderr)
+        return 2
+    task_text = (text or "").strip()
+    source = "manual"
+    if from_next:
+        dogfood = _dogfood_snapshot(target)
+        next_step = dogfood.get("next") if isinstance(dogfood.get("next"), str) else None
+        if not next_step or not next_step.strip():
+            print("error: no extracted next step is available", file=sys.stderr)
+            return 1
+        task_text = next_step.strip()
+        source = "latest_dogfood_run"
+    if not task_text:
+        print("error: task text is required", file=sys.stderr)
+        return 2
+    task = _add_task(target, task_text, source=source)
+    print(f"task: {task['id']}")
+    print(f"status: {task['status']}")
+    print(f"text: {task['text']}")
+    return 0
+
+
+def task_show(*, target: Path, task_id: str) -> int:
+    target = target.expanduser().resolve()
+    if not target.is_dir():
+        print(f"error: --target is not a directory: {target}", file=sys.stderr)
+        return 2
+    task, _ = _find_task(target, task_id)
+    if task is None:
+        print(f"error: task not found: {task_id}", file=sys.stderr)
+        return 1
+    print(f"task: {task.get('id')}")
+    print(f"status: {task.get('status', 'pending')}")
+    print(f"source: {task.get('source', '')}")
+    print(f"created_at: {task.get('created_at', '')}")
+    print(f"updated_at: {task.get('updated_at', '')}")
+    if task.get("completed_at"):
+        print(f"completed_at: {task['completed_at']}")
+    print(f"text: {task.get('text', '')}")
+    return 0
+
+
+def task_done(*, target: Path, task_id: str) -> int:
+    target = target.expanduser().resolve()
+    if not target.is_dir():
+        print(f"error: --target is not a directory: {target}", file=sys.stderr)
+        return 2
+    task, ledger = _find_task(target, task_id)
+    if task is None:
+        print(f"error: task not found: {task_id}", file=sys.stderr)
+        return 1
+    now = _now().isoformat()
+    task["status"] = "done"
+    task["updated_at"] = now
+    task["completed_at"] = now
+    _write_task_ledger(target, ledger)
+    print(f"task: {task.get('id')}")
+    print("status: done")
     return 0
 
 
@@ -990,6 +1201,8 @@ def next(*, target: Path, json_output: bool = False) -> int:
 
     task = str(payload["next"])
     print(f"next_source: {payload['next_source']}")
+    if payload.get("task_id"):
+        print(f"task_id: {payload['task_id']}")
     print(f"next: {_short(task)}")
     print(f"suggested_command: {payload['suggested_command']}")
     return 0
@@ -1140,6 +1353,7 @@ def run(
 
     resolved = _resolve_next_task(target)
     task_text = task or str(resolved["task"])
+    consumed_task_id = resolved.get("task_id") if task is None and resolved.get("source") == "task_ledger" else None
     session_title = title or task_text
     start_rc = start(target=target, title=session_title)
     if start_rc != 0:
@@ -1163,6 +1377,15 @@ def run(
 
     if end_rc != 0:
         return end_rc if dogfood_rc == 0 else dogfood_rc
+    if dogfood_rc == 0 and isinstance(consumed_task_id, str):
+        task, ledger = _find_task(target, consumed_task_id)
+        if task is not None:
+            now = _now().isoformat()
+            task["status"] = "done"
+            task["updated_at"] = now
+            task["completed_at"] = now
+            task["completed_session_title"] = session_title
+            _write_task_ledger(target, ledger)
     recap(target=target, limit=recap_limit)
     return dogfood_rc
 

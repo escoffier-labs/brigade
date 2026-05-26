@@ -477,6 +477,84 @@ def test_work_brief_json_reports_recent_sessions(tmp_path, monkeypatch, capsys):
     assert payload["suggested_command"] == 'brigade work end --note "..." --handoff'
 
 
+def test_work_task_ledger_add_list_show_and_done(tmp_path, monkeypatch, capsys):
+    _init_git_repo(tmp_path)
+    times = iter(
+        [
+            datetime(2026, 5, 26, 12, 0, 0, tzinfo=timezone.utc),
+            datetime(2026, 5, 26, 12, 30, 0, tzinfo=timezone.utc),
+        ]
+    )
+    monkeypatch.setattr(work_cmd, "_now", lambda: next(times))
+
+    assert work_cmd.task_add(target=tmp_path, text="Build task ledger") == 0
+    out = capsys.readouterr().out
+    assert "task:" in out
+    task_id = out.split("task: ", 1)[1].splitlines()[0]
+
+    assert work_cmd.tasks(target=tmp_path) == 0
+    out = capsys.readouterr().out
+    assert "work tasks:" in out
+    assert task_id in out
+    assert "[pending] Build task ledger" in out
+
+    assert work_cmd.task_show(target=tmp_path, task_id=task_id[:12]) == 0
+    out = capsys.readouterr().out
+    assert f"task: {task_id}" in out
+    assert "status: pending" in out
+    assert "text: Build task ledger" in out
+
+    assert work_cmd.task_done(target=tmp_path, task_id=task_id[:12]) == 0
+    assert "status: done" in capsys.readouterr().out
+    assert work_cmd.tasks(target=tmp_path) == 0
+    assert "tasks: none" in capsys.readouterr().out
+    assert work_cmd.tasks(target=tmp_path, all_tasks=True, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["tasks"][0]["status"] == "done"
+    assert payload["tasks"][0]["completed_at"] == "2026-05-26T12:30:00+00:00"
+
+
+def test_work_task_add_from_next(tmp_path, monkeypatch, capsys):
+    _init_git_repo(tmp_path)
+    dogfood_cmd.init(target=tmp_path)
+    run_dir = tmp_path / ".brigade" / "runs" / "latest"
+    run_dir.mkdir(parents=True)
+    _write_json(run_dir / "run.json", {"started_at": "2026-05-26T12:10:00Z", "status": "ok", "task": "review"})
+    (run_dir / "final.txt").write_text("Done.\n\nNext step: Build from extracted next.\n")
+    monkeypatch.setattr(
+        work_cmd,
+        "_now",
+        lambda: datetime(2026, 5, 26, 12, 0, 0, tzinfo=timezone.utc),
+    )
+
+    assert work_cmd.task_add(target=tmp_path, from_next=True) == 0
+    out = capsys.readouterr().out
+    assert "Build from extracted next." in out
+    assert work_cmd.next(target=tmp_path, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["next_source"] == "task_ledger"
+    assert payload["next"] == "Build from extracted next."
+    assert payload["task_id"]
+
+
+def test_work_brief_includes_pending_tasks(tmp_path, monkeypatch, capsys):
+    _init_git_repo(tmp_path)
+    monkeypatch.setattr(
+        work_cmd,
+        "_now",
+        lambda: datetime(2026, 5, 26, 12, 0, 0, tzinfo=timezone.utc),
+    )
+    assert work_cmd.task_add(target=tmp_path, text="Build queued task") == 0
+    capsys.readouterr()
+
+    assert work_cmd.brief(target=tmp_path, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["next_source"] == "task_ledger"
+    assert payload["next"] == "Build queued task"
+    assert payload["pending_tasks"][0]["text"] == "Build queued task"
+    assert payload["suggested_command"] == "brigade work run"
+
+
 def test_work_next_reports_latest_next_as_default_task(tmp_path, monkeypatch, capsys):
     _init_git_repo(tmp_path)
     dogfood_cmd.init(target=tmp_path)
@@ -692,6 +770,49 @@ def test_work_run_uses_latest_next_when_task_is_omitted(tmp_path, monkeypatch):
     assert payload["title"] == "Build consumed task."
 
 
+def test_work_run_consumes_pending_task_before_latest_next(tmp_path, monkeypatch):
+    _init_git_repo(tmp_path)
+    artifacts_dir = tmp_path / ".brigade" / "runs"
+    dogfood_cmd.init(target=tmp_path, artifacts_dir=artifacts_dir)
+    latest_dir = artifacts_dir / "latest"
+    latest_dir.mkdir(parents=True)
+    _write_json(
+        latest_dir / "run.json",
+        {"started_at": "2026-05-26T11:00:00Z", "status": "ok", "task": "review"},
+    )
+    (latest_dir / "final.txt").write_text("Done.\n\nNext step: Build extracted task.\n")
+    times = iter(
+        [
+            datetime(2026, 5, 26, 11, 30, 0, tzinfo=timezone.utc),
+            datetime(2026, 5, 26, 12, 0, 0, tzinfo=timezone.utc),
+            datetime(2026, 5, 26, 13, 0, 0, tzinfo=timezone.utc),
+            datetime(2026, 5, 26, 13, 0, 1, tzinfo=timezone.utc),
+        ]
+    )
+    monkeypatch.setattr(work_cmd, "_now", lambda: next(times))
+    assert work_cmd.task_add(target=tmp_path, text="Build queued task") == 0
+    seen = {}
+
+    def fake_dogfood_run(task, **kwargs):
+        seen["task"] = task
+        run_dir = kwargs["output_dir"]
+        run_dir.mkdir(parents=True)
+        _write_json(
+            run_dir / "run.json",
+            {"started_at": "2026-05-26T12:10:00Z", "status": "ok", "task": task},
+        )
+        (run_dir / "final.txt").write_text("Done.\n\nNext step: Build follow-up.\n")
+        return 0
+
+    monkeypatch.setattr(dogfood_cmd, "run", fake_dogfood_run)
+
+    assert work_cmd.run(None, target=tmp_path, output_dir=artifacts_dir / "new", handoff=False) == 0
+    assert seen["task"] == "Build queued task"
+    ledger = json.loads((tmp_path / ".brigade" / "work" / "tasks.json").read_text())
+    assert ledger["tasks"][0]["status"] == "done"
+    assert ledger["tasks"][0]["completed_session_title"] == "Build queued task"
+
+
 def test_work_run_closes_session_when_dogfood_fails(tmp_path, monkeypatch):
     _init_git_repo(tmp_path)
     dogfood_cmd.init(target=tmp_path)
@@ -776,6 +897,44 @@ def test_work_next_cli(tmp_path, monkeypatch):
     seen.clear()
     assert cli.main(["work", "next", "--target", str(tmp_path), "--json"]) == 0
     assert seen == {"target": tmp_path, "json_output": True}
+
+
+def test_work_tasks_cli(tmp_path, monkeypatch):
+    seen = []
+
+    def fake_tasks(**kwargs):
+        seen.append(("tasks", kwargs))
+        return 0
+
+    def fake_task_add(**kwargs):
+        seen.append(("add", kwargs))
+        return 0
+
+    def fake_task_show(**kwargs):
+        seen.append(("show", kwargs))
+        return 0
+
+    def fake_task_done(**kwargs):
+        seen.append(("done", kwargs))
+        return 0
+
+    monkeypatch.setattr(work_cmd, "tasks", fake_tasks)
+    monkeypatch.setattr(work_cmd, "task_add", fake_task_add)
+    monkeypatch.setattr(work_cmd, "task_show", fake_task_show)
+    monkeypatch.setattr(work_cmd, "task_done", fake_task_done)
+
+    assert cli.main(["work", "tasks", "--target", str(tmp_path), "--all", "--json"]) == 0
+    assert cli.main(["work", "task", "add", "build", "queue", "--target", str(tmp_path)]) == 0
+    assert cli.main(["work", "task", "add", "--target", str(tmp_path), "--from-next"]) == 0
+    assert cli.main(["work", "task", "show", "abc123", "--target", str(tmp_path)]) == 0
+    assert cli.main(["work", "task", "done", "abc123", "--target", str(tmp_path)]) == 0
+    assert seen == [
+        ("tasks", {"target": tmp_path, "all_tasks": True, "json_output": True}),
+        ("add", {"target": tmp_path, "text": "build queue", "from_next": False}),
+        ("add", {"target": tmp_path, "text": None, "from_next": True}),
+        ("show", {"target": tmp_path, "task_id": "abc123"}),
+        ("done", {"target": tmp_path, "task_id": "abc123"}),
+    ]
 
 
 def test_work_bootstrap_cli(tmp_path, monkeypatch):

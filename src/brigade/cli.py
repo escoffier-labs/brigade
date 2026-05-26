@@ -139,6 +139,23 @@ def _build_parser() -> argparse.ArgumentParser:
     p_work_next = work_sub.add_parser("next", help="Show the next daily work task and suggested command.")
     p_work_next.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
     p_work_next.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_work_tasks = work_sub.add_parser("tasks", help="List pending work tasks.")
+    p_work_tasks.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_work_tasks.add_argument("--all", action="store_true", help="Include completed tasks.")
+    p_work_tasks.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_work_task = work_sub.add_parser("task", help="Add, show, or complete one work task.")
+    task_sub = p_work_task.add_subparsers(dest="task_command", metavar="<task-command>")
+    task_sub.required = True
+    p_work_task_add = task_sub.add_parser("add", help="Add a pending work task.")
+    p_work_task_add.add_argument("text", nargs="*", help="Task text.")
+    p_work_task_add.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
+    p_work_task_add.add_argument("--from-next", action="store_true", help="Add the latest extracted dogfood next step.")
+    p_work_task_show = task_sub.add_parser("show", help="Show one work task.")
+    p_work_task_show.add_argument("task_id", help="Task id or unique prefix.")
+    p_work_task_show.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_work_task_done = task_sub.add_parser("done", help="Mark one work task done.")
+    p_work_task_done.add_argument("task_id", help="Task id or unique prefix.")
+    p_work_task_done.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
     p_work_list = work_sub.add_parser("list", help="List recent Brigade work sessions.")
     p_work_list.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
     p_work_list.add_argument("--limit", type=int, default=10, help="Maximum sessions to show.")
@@ -480,6 +497,18 @@ def main(argv=None) -> int:
             return work_cmd.brief(target=args.target, limit=args.limit, json_output=args.json)
         if args.work_command == "next":
             return work_cmd.next(target=args.target, json_output=args.json)
+        if args.work_command == "tasks":
+            return work_cmd.tasks(target=args.target, all_tasks=args.all, json_output=args.json)
+        if args.work_command == "task":
+            if args.task_command == "add":
+                text = " ".join(args.text) if args.text else None
+                return work_cmd.task_add(target=args.target, text=text, from_next=args.from_next)
+            if args.task_command == "show":
+                return work_cmd.task_show(target=args.target, task_id=args.task_id)
+            if args.task_command == "done":
+                return work_cmd.task_done(target=args.target, task_id=args.task_id)
+            parser.error(f"unknown task command: {args.task_command}")
+            return 2
         if args.work_command == "list":
             return work_cmd.list_sessions(target=args.target, limit=args.limit)
         if args.work_command == "latest":
