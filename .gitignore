@@ -70,18 +70,15 @@ Thumbs.db
 # Managed by `brigade init`. Edit between the markers to customize.
 # Re-running `brigade init` replaces only the content between markers.
 
-# Memory handoffs are session-local and may contain private context
-# (commands run, file paths, error strings). The TEMPLATE.md is the
-# only handoff file tracked in git.
+# claude: handoffs are session-local and may contain private context.
 .claude/memory-handoffs/*
 !.claude/memory-handoffs/TEMPLATE.md
 !.claude/memory-handoffs/.gitkeep
 
-# Daily session logs are machine-local raw context. Promote durable
-# findings into memory/cards/ via the handoff flow instead.
+# Daily session logs are machine-local raw context.
 memory/20[0-9][0-9]-[0-1][0-9]-[0-3][0-9].md
 
-# Review inbox: ambiguous handoffs awaiting human triage. Private.
+# Review inbox: ambiguous handoffs awaiting human triage.
 memory/handoff-inbox/
 
 # brigade local state (logs, scrub cache, dogfood runs, work sessions).

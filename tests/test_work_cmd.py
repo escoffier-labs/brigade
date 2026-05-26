@@ -438,6 +438,27 @@ def test_work_next_reports_latest_next_as_default_task(tmp_path, monkeypatch, ca
     assert "suggested_command: brigade work run" in out
 
 
+def test_work_next_json_reports_resolved_task(tmp_path, monkeypatch, capsys):
+    _init_git_repo(tmp_path)
+    dogfood_cmd.init(target=tmp_path)
+    run_dir = tmp_path / ".brigade" / "runs" / "latest"
+    run_dir.mkdir(parents=True)
+    _write_json(run_dir / "run.json", {"started_at": "2026-05-26T12:10:00Z", "status": "ok", "task": "review"})
+    (run_dir / "final.txt").write_text("Done.\n\nNext step: Build JSON output.\n")
+    monkeypatch.setattr(work_cmd.shutil, "which", lambda name: f"/usr/bin/{name}")
+    capsys.readouterr()
+
+    assert work_cmd.next(target=tmp_path, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["target"] == str(tmp_path.resolve())
+    assert payload["active_session"] is None
+    assert payload["dogfood"]["ready"] is True
+    assert payload["dogfood"]["latest_run"]["status"] == "ok"
+    assert payload["next_source"] == "latest_dogfood_run"
+    assert payload["next"] == "Build JSON output."
+    assert payload["suggested_command"] == "brigade work run"
+
+
 def test_work_next_falls_back_to_default_review(tmp_path, capsys):
     _init_git_repo(tmp_path)
 
@@ -447,6 +468,59 @@ def test_work_next_falls_back_to_default_review(tmp_path, capsys):
     assert "latest_run: none" in out
     assert "next_source: default_review" in out
     assert f"next: {dogfood_cmd.DEFAULT_TASK}" in out
+
+
+def test_work_bootstrap_prepares_daily_loop(tmp_path, monkeypatch, capsys):
+    _init_git_repo(tmp_path)
+    monkeypatch.setattr(work_cmd.shutil, "which", lambda name: f"/usr/bin/{name}" if name == "codex" else None)
+
+    assert work_cmd.bootstrap(target=tmp_path, timeout_seconds=44) == 0
+    out = capsys.readouterr().out
+    assert "work bootstrap:" in out
+    assert "[ok] dogfood_config:" in out
+    assert "[ok] gitignore:" in out
+    assert "[ok] ready: daily work loop is usable" in out
+    assert "next_command: brigade work run" in out
+    assert (tmp_path / ".brigade" / "dogfood.toml").is_file()
+    assert (tmp_path / ".brigade" / "runs").is_dir()
+    assert (tmp_path / ".brigade" / "work").is_dir()
+    assert (tmp_path / ".codex" / "memory-handoffs").is_dir()
+    gitignore = (tmp_path / ".gitignore").read_text()
+    assert ".brigade/dogfood.toml" in gitignore
+    assert ".brigade/runs/" in gitignore
+    assert ".brigade/work/" in gitignore
+    assert ".codex/memory-handoffs/*" in gitignore
+    config = (tmp_path / ".brigade" / "dogfood.toml").read_text()
+    assert "timeout_seconds = 44" in config
+
+
+def test_work_bootstrap_preserves_existing_config_without_force(tmp_path, monkeypatch, capsys):
+    _init_git_repo(tmp_path)
+    dogfood_cmd.init(
+        target=tmp_path,
+        handoff_inbox=tmp_path / ".claude" / "memory-handoffs",
+        timeout_seconds=12,
+    )
+    monkeypatch.setattr(work_cmd.shutil, "which", lambda name: f"/usr/bin/{name}" if name == "codex" else None)
+
+    assert work_cmd.bootstrap(target=tmp_path, timeout_seconds=44) == 0
+    out = capsys.readouterr().out
+    assert "exists at" in out
+    config = (tmp_path / ".brigade" / "dogfood.toml").read_text()
+    assert "timeout_seconds = 12" in config
+    gitignore = (tmp_path / ".gitignore").read_text()
+    assert ".claude/memory-handoffs/*" in gitignore
+    assert ".codex/memory-handoffs/*" not in gitignore
+
+
+def test_work_bootstrap_reports_missing_codex(tmp_path, monkeypatch, capsys):
+    _init_git_repo(tmp_path)
+    monkeypatch.setattr(work_cmd.shutil, "which", lambda name: None)
+
+    assert work_cmd.bootstrap(target=tmp_path) == 1
+    out = capsys.readouterr().out
+    assert "[fail] codex: missing on PATH" in out
+    assert "[fail] ready: 1 blocker" in out
 
 
 def test_work_resume_empty_state(tmp_path, capsys):
@@ -623,7 +697,54 @@ def test_work_next_cli(tmp_path, monkeypatch):
     monkeypatch.setattr(work_cmd, "next", fake_next)
 
     assert cli.main(["work", "next", "--target", str(tmp_path)]) == 0
-    assert seen == {"target": tmp_path}
+    assert seen == {"target": tmp_path, "json_output": False}
+    seen.clear()
+    assert cli.main(["work", "next", "--target", str(tmp_path), "--json"]) == 0
+    assert seen == {"target": tmp_path, "json_output": True}
+
+
+def test_work_bootstrap_cli(tmp_path, monkeypatch):
+    seen = {}
+
+    def fake_bootstrap(**kwargs):
+        seen.update(kwargs)
+        return 0
+
+    monkeypatch.setattr(work_cmd, "bootstrap", fake_bootstrap)
+
+    assert (
+        cli.main(
+            [
+                "work",
+                "bootstrap",
+                "--target",
+                str(tmp_path),
+                "--artifacts-dir",
+                str(tmp_path / "runs"),
+                "--handoff-inbox",
+                str(tmp_path / "handoffs"),
+                "--force",
+                "--no-handoff",
+                "--no-inspect",
+                "--native-read-only-sandbox",
+                "--timeout-seconds",
+                "55",
+                "--no-gitignore",
+            ]
+        )
+        == 0
+    )
+    assert seen == {
+        "target": tmp_path,
+        "artifacts_dir": tmp_path / "runs",
+        "handoff_inbox": tmp_path / "handoffs",
+        "force": True,
+        "handoff": False,
+        "inspect": False,
+        "native_read_only_sandbox": True,
+        "timeout_seconds": 55.0,
+        "update_gitignore": False,
+    }
 
 
 def test_work_doctor_cli(tmp_path, monkeypatch):

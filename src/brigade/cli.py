@@ -116,10 +116,25 @@ def _build_parser() -> argparse.ArgumentParser:
     p_work_status.add_argument("--limit", type=int, default=12, help="Maximum dirty file entries to show.")
     p_work_doctor = work_sub.add_parser("doctor", help="Check whether the daily work loop is ready.")
     p_work_doctor.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_work_bootstrap = work_sub.add_parser("bootstrap", help="Initialize and verify the daily work loop.")
+    p_work_bootstrap.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to prepare.")
+    p_work_bootstrap.add_argument("--artifacts-dir", type=Path, default=None, help="Directory for dogfood artifacts.")
+    p_work_bootstrap.add_argument("--handoff-inbox", type=Path, default=None, help="Memory Handoff inbox.")
+    p_work_bootstrap.add_argument("--force", action="store_true", help="Overwrite an existing dogfood config.")
+    p_work_bootstrap.add_argument("--no-handoff", action="store_true", help="Disable work handoff defaults.")
+    p_work_bootstrap.add_argument("--no-inspect", action="store_true", help="Do not inspect dogfood artifacts by default.")
+    p_work_bootstrap.add_argument(
+        "--native-read-only-sandbox",
+        action="store_true",
+        help="Use Codex's native read-only sandbox for dogfood runs.",
+    )
+    p_work_bootstrap.add_argument("--timeout-seconds", type=float, default=DEFAULT_TIMEOUT_SECONDS, help="Per-agent timeout.")
+    p_work_bootstrap.add_argument("--no-gitignore", action="store_true", help="Do not update the target .gitignore.")
     p_work_resume = work_sub.add_parser("resume", help="Show the current work handoff point and next command.")
     p_work_resume.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
     p_work_next = work_sub.add_parser("next", help="Show the next daily work task and suggested command.")
     p_work_next.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_work_next.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_work_list = work_sub.add_parser("list", help="List recent Brigade work sessions.")
     p_work_list.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
     p_work_list.add_argument("--limit", type=int, default=10, help="Maximum sessions to show.")
@@ -443,10 +458,22 @@ def main(argv=None) -> int:
             return work_cmd.status(target=args.target, limit=args.limit)
         if args.work_command == "doctor":
             return work_cmd.doctor(target=args.target)
+        if args.work_command == "bootstrap":
+            return work_cmd.bootstrap(
+                target=args.target,
+                artifacts_dir=args.artifacts_dir,
+                handoff_inbox=args.handoff_inbox,
+                force=args.force,
+                handoff=not args.no_handoff,
+                inspect=not args.no_inspect,
+                native_read_only_sandbox=args.native_read_only_sandbox,
+                timeout_seconds=args.timeout_seconds,
+                update_gitignore=not args.no_gitignore,
+            )
         if args.work_command == "resume":
             return work_cmd.resume(target=args.target)
         if args.work_command == "next":
-            return work_cmd.next(target=args.target)
+            return work_cmd.next(target=args.target, json_output=args.json)
         if args.work_command == "list":
             return work_cmd.list_sessions(target=args.target, limit=args.limit)
         if args.work_command == "latest":

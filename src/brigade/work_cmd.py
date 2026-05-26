@@ -13,6 +13,8 @@ from typing import Any
 from uuid import uuid4
 
 from . import dogfood_cmd
+from .install import apply_gitignore
+from .selection import Selection
 
 OK = "ok"
 WARN = "warn"
@@ -417,6 +419,63 @@ def _doctor_ignore_level(value: str) -> str:
     return WARN
 
 
+def _active_session_info(target: Path) -> dict[str, Any] | None:
+    current = _current_path(target)
+    if not current.exists():
+        return None
+    active_dir = _work_root(target) / current.read_text().strip()
+    payload = _read_session(active_dir)
+    if payload is None:
+        return {
+            "path": str(active_dir),
+            "valid": False,
+        }
+    return {
+        "path": str(active_dir),
+        "valid": True,
+        "status": payload.get("status", "unknown"),
+        "title": payload.get("title"),
+        "started_at": payload.get("started_at"),
+    }
+
+
+def _next_payload(target: Path) -> dict[str, Any]:
+    target = target.expanduser().resolve()
+    active = _active_session_info(target)
+    resolved = _resolve_next_task(target)
+    dogfood = resolved["dogfood"]
+    suggested = 'brigade work end --note "..." --handoff' if active is not None else "brigade work run"
+    return {
+        "target": str(target),
+        "active_session": active,
+        "dogfood": dogfood,
+        "next_source": resolved["source"],
+        "next": str(resolved["task"]),
+        "suggested_command": suggested,
+    }
+
+
+def _print_bootstrap_line(level: str, name: str, detail: object) -> None:
+    print(f"[{level}] {name}: {detail}")
+
+
+def _work_selection(target: Path, handoff_inbox: Path | None) -> Selection:
+    harnesses = ["codex"]
+    if handoff_inbox is not None:
+        try:
+            relative = handoff_inbox.expanduser().resolve().relative_to(target)
+        except ValueError:
+            relative = None
+        if relative is not None:
+            parts = relative.parts
+            if len(parts) >= 2 and parts[:2] == (".claude", "memory-handoffs"):
+                harnesses = ["claude"]
+            elif len(parts) >= 2 and parts[:2] == (".codex", "memory-handoffs"):
+                harnesses = ["codex"]
+    owner = harnesses[0] if harnesses else "this-repo"
+    return Selection(depth="repo", harnesses=harnesses, owner=owner, includes=[])
+
+
 def start(*, target: Path, title: str | None = None, force: bool = False) -> int:
     target = target.expanduser().resolve()
     if not target.is_dir():
@@ -748,31 +807,31 @@ def resume(*, target: Path) -> int:
     return 0
 
 
-def next(*, target: Path) -> int:
+def next(*, target: Path, json_output: bool = False) -> int:
     target = target.expanduser().resolve()
     if not target.is_dir():
         print(f"error: --target is not a directory: {target}", file=sys.stderr)
         return 2
 
+    if json_output:
+        print(json.dumps(_next_payload(target), indent=2, sort_keys=True))
+        return 0
+
     print(f"work next: {target}")
-    root = _work_root(target)
-    current = _current_path(target)
-    active_payload: dict[str, Any] | None = None
-    if current.exists():
-        active_dir = root / current.read_text().strip()
-        active_payload = _read_session(active_dir)
-        if active_payload is None:
-            print(f"active_session: invalid ({active_dir})")
+    payload = _next_payload(target)
+    active = payload["active_session"]
+    if isinstance(active, dict):
+        if not active.get("valid"):
+            print(f"active_session: invalid ({active.get('path')})")
         else:
-            print(f"active_session: {active_dir}")
-            print(f"active_session_status: {active_payload.get('status', 'unknown')}")
-            if active_payload.get("title"):
-                print(f"active_session_title: {_short(str(active_payload['title']))}")
+            print(f"active_session: {active.get('path')}")
+            print(f"active_session_status: {active.get('status')}")
+            if active.get("title"):
+                print(f"active_session_title: {_short(str(active['title']))}")
     else:
         print("active_session: none")
 
-    resolved = _resolve_next_task(target)
-    dogfood = resolved["dogfood"]
+    dogfood = payload["dogfood"]
     print(f"dogfood_ready: {dogfood.get('ready')}")
     if dogfood.get("error"):
         print(f"dogfood_error: {dogfood['error']}")
@@ -788,16 +847,131 @@ def next(*, target: Path) -> int:
     else:
         print("latest_run: none")
 
-    task = str(resolved["task"])
-    print(f"next_source: {resolved['source']}")
+    task = str(payload["next"])
+    print(f"next_source: {payload['next_source']}")
     print(f"next: {_short(task)}")
-    if active_payload is not None:
-        print('suggested_command: brigade work end --note "..." --handoff')
-    elif resolved["source"] == "latest_dogfood_run":
-        print("suggested_command: brigade work run")
-    else:
-        print("suggested_command: brigade work run")
+    print(f"suggested_command: {payload['suggested_command']}")
     return 0
+
+
+def bootstrap(
+    *,
+    target: Path,
+    artifacts_dir: Path | None = None,
+    handoff_inbox: Path | None = None,
+    force: bool = False,
+    handoff: bool = True,
+    inspect: bool = True,
+    native_read_only_sandbox: bool = False,
+    timeout_seconds: float = dogfood_cmd.DEFAULT_TIMEOUT_SECONDS,
+    update_gitignore: bool = True,
+) -> int:
+    if timeout_seconds <= 0:
+        print("error: --timeout-seconds must be positive", file=sys.stderr)
+        return 2
+
+    target = target.expanduser().resolve()
+    print(f"work bootstrap: {target}")
+    if not target.is_dir():
+        _print_bootstrap_line(FAIL, "target", f"not a directory: {target}")
+        return 2
+    _print_bootstrap_line(OK, "target", target)
+
+    failures = 0
+    repo_root = _git_value(target, "rev-parse", "--show-toplevel")
+    if repo_root is None:
+        failures += 1
+        _print_bootstrap_line(FAIL, "git", "not a git repository")
+    else:
+        _print_bootstrap_line(OK, "git", repo_root)
+
+    config = dogfood_cmd.config_path(target)
+    if config.exists() and not force:
+        _print_bootstrap_line(OK, "dogfood_config", f"exists at {config}")
+    else:
+        rc = dogfood_cmd.init(
+            target=target,
+            artifacts_dir=artifacts_dir,
+            handoff_inbox=handoff_inbox,
+            force=force,
+            handoff=handoff,
+            inspect=inspect,
+            native_read_only_sandbox=native_read_only_sandbox,
+            timeout_seconds=timeout_seconds,
+        )
+        if rc != 0:
+            failures += 1
+            _print_bootstrap_line(FAIL, "dogfood_config", f"init failed with exit code {rc}")
+        else:
+            _print_bootstrap_line(OK, "dogfood_config", config)
+
+    try:
+        effective_target, effective_artifacts_dir, cfg = dogfood_cmd._load_effective_paths(target)
+    except (FileNotFoundError, ValueError) as exc:
+        failures += 1
+        effective_target = target
+        effective_artifacts_dir = artifacts_dir or (target / ".brigade" / "runs")
+        cfg = None
+        _print_bootstrap_line(FAIL, "dogfood_paths", exc)
+    else:
+        _print_bootstrap_line(OK, "dogfood_target", effective_target)
+        _print_bootstrap_line(OK, "dogfood_artifacts", effective_artifacts_dir)
+
+    work_root = _work_root(effective_target)
+    effective_artifacts_dir.mkdir(parents=True, exist_ok=True)
+    work_root.mkdir(parents=True, exist_ok=True)
+    _print_bootstrap_line(OK, "artifacts_dir", effective_artifacts_dir)
+    _print_bootstrap_line(OK, "work_root", work_root)
+
+    effective_handoff = cfg.handoff if cfg is not None else handoff
+    effective_handoff_inbox = (
+        cfg.handoff_inbox
+        if cfg is not None and cfg.handoff_inbox is not None
+        else handoff_inbox.expanduser()
+        if handoff_inbox is not None
+        else dogfood_cmd.default_handoff_inbox(effective_target)
+    )
+    if effective_handoff:
+        effective_handoff_inbox.mkdir(parents=True, exist_ok=True)
+        _print_bootstrap_line(OK, "handoff_inbox", effective_handoff_inbox)
+    else:
+        _print_bootstrap_line(WARN, "handoff_inbox", "handoff disabled")
+
+    if update_gitignore:
+        result = apply_gitignore(effective_target, _work_selection(effective_target, effective_handoff_inbox))
+        _print_bootstrap_line(OK, "gitignore", result)
+    else:
+        _print_bootstrap_line(WARN, "gitignore", "skipped")
+
+    codex_path = shutil.which("codex")
+    if codex_path is None:
+        failures += 1
+        _print_bootstrap_line(FAIL, "codex", "missing on PATH")
+    else:
+        _print_bootstrap_line(OK, "codex", codex_path)
+
+    config_ignored = dogfood_cmd._check_git_ignored(effective_target, config)
+    artifacts_ignored = dogfood_cmd._check_git_ignored(effective_target, effective_artifacts_dir)
+    work_ignored = dogfood_cmd._check_git_ignored(effective_target, work_root)
+    handoff_ignored = (
+        dogfood_cmd._check_git_ignored(effective_target, effective_handoff_inbox)
+        if effective_handoff
+        else "disabled"
+    )
+    ignore_values = {
+        "config_ignored": config_ignored,
+        "artifacts_ignored": artifacts_ignored,
+        "work_ignored": work_ignored,
+        "handoff_ignored": handoff_ignored,
+    }
+    for name, value in ignore_values.items():
+        level = OK if value in {"yes", "outside-target", "disabled"} else WARN
+        _print_bootstrap_line(level, name, value)
+
+    ready = failures == 0
+    _print_bootstrap_line(OK if ready else FAIL, "ready", "daily work loop is usable" if ready else f"{failures} blocker{'s' if failures != 1 else ''}")
+    print("next_command: brigade work run")
+    return 0 if ready else 1
 
 
 def run(
