@@ -17,6 +17,13 @@ from .roster import Agent, Roster
 DEFAULT_TASK = "Review this repo and recommend the next implementation slice."
 DEFAULT_TIMEOUT_SECONDS = 600.0
 CONFIG_REL_PATH = ".brigade/dogfood.toml"
+NEXT_LABELS = (
+    "next practical slice",
+    "smallest follow-up slice",
+    "next implementation slice",
+    "recommended next slice",
+    "next step",
+)
 
 
 @dataclass(frozen=True)
@@ -184,6 +191,109 @@ def _setting_line(label: str, value: object) -> None:
     print(f"{label}: {value}")
 
 
+def _load_effective_paths(target: Path) -> tuple[Path, Path, DogfoodConfig | None]:
+    target = target.expanduser().resolve()
+    if not target.is_dir():
+        raise FileNotFoundError(f"--target is not a directory: {target}")
+    cfg = load_config(target)
+    effective_target = cfg.target if cfg and cfg.target is not None else target
+    effective_target = effective_target.expanduser().resolve()
+    if not effective_target.is_dir():
+        raise FileNotFoundError(f"configured target is not a directory: {effective_target}")
+    artifacts_dir = cfg.artifacts_dir if cfg and cfg.artifacts_dir is not None else effective_target / ".brigade" / "runs"
+    return effective_target, artifacts_dir, cfg
+
+
+def _read_run_json(run_dir: Path) -> dict[str, Any] | None:
+    try:
+        payload = json.loads((run_dir / "run.json").read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _read_final(run_dir: Path) -> str:
+    try:
+        return (run_dir / "final.txt").read_text().strip()
+    except OSError:
+        return ""
+
+
+def extract_next_step(final_text: str) -> str | None:
+    lines = final_text.splitlines()
+    for index, line in enumerate(lines):
+        stripped = line.strip().strip("*")
+        lowered = stripped.lower()
+        for label in NEXT_LABELS:
+            if not lowered.startswith(label):
+                continue
+            _, _, after = stripped.partition(":")
+            if after.strip():
+                return after.strip()
+            collected: list[str] = []
+            for follow in lines[index + 1 :]:
+                follow_stripped = follow.strip()
+                if not follow_stripped:
+                    if collected:
+                        break
+                    continue
+                if collected and follow_stripped.endswith(":") and not follow_stripped.startswith(("-", "*")):
+                    break
+                collected.append(follow_stripped)
+            return "\n".join(collected).strip() or None
+    return None
+
+
+def _write_summary(run_dir: Path) -> None:
+    run_meta = _read_run_json(run_dir)
+    if run_meta is None:
+        return
+    final_text = _read_final(run_dir)
+    next_step = extract_next_step(final_text)
+    lines = [
+        "# Brigade Dogfood Run Summary",
+        "",
+        f"- Task: {run_meta.get('task', '')}",
+        f"- Status: {run_meta.get('status', 'unknown')}",
+        f"- Started: {run_meta.get('started_at', '')}",
+        f"- Duration: {run_meta.get('duration_seconds', '')}",
+        f"- Artifacts: {run_meta.get('artifacts') or run_dir}",
+    ]
+    if run_meta.get("handoff"):
+        lines.append(f"- Handoff: {run_meta['handoff']}")
+    lines.extend(["", "## Next", "", next_step or "(none extracted)", "", "## Final", "", final_text or "(empty)", ""])
+    (run_dir / "summary.md").write_text("\n".join(lines))
+
+
+def latest(*, target: Path) -> int:
+    try:
+        _, artifacts_dir, _ = _load_effective_paths(target)
+    except (FileNotFoundError, ValueError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    return runs_cmd.show_latest(cwd=target, runs_dir=artifacts_dir)
+
+
+def next_step(*, target: Path) -> int:
+    try:
+        _, artifacts_dir, _ = _load_effective_paths(target)
+    except (FileNotFoundError, ValueError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    latest_run = _latest_run(artifacts_dir)
+    if latest_run is None:
+        print(f"error: no runs found in {artifacts_dir}", file=sys.stderr)
+        return 1
+    run_dir, _ = latest_run
+    final_text = _read_final(run_dir)
+    extracted = extract_next_step(final_text)
+    if not extracted:
+        print(f"error: no next step found in {run_dir / 'final.txt'}", file=sys.stderr)
+        return 1
+    print(extracted)
+    return 0
+
+
 def status(*, target: Path) -> int:
     target = target.expanduser().resolve()
     if not target.is_dir():
@@ -253,6 +363,9 @@ def status(*, target: Path) -> int:
         )
         if task:
             _setting_line("latest_task", task)
+        next_step_text = extract_next_step(_read_final(latest_path))
+        if next_step_text:
+            _setting_line("latest_next", " ".join(next_step_text.split()))
     else:
         _setting_line("latest_run", "none")
 
@@ -373,6 +486,8 @@ def run(
         read_only=True,
         sandbox="read-only" if effective_native else "danger-full-access",
     )
+    if chosen_output_dir.is_dir():
+        _write_summary(chosen_output_dir)
     print(f"artifacts: {chosen_output_dir}", file=sys.stderr)
     if effective_inspect:
         runs_cmd.show(chosen_output_dir)

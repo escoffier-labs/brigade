@@ -352,6 +352,16 @@ def main(argv=None) -> int:
                 print("error: dogfood status does not accept a task argument", file=sys.stderr)
                 return 2
             return dogfood_cmd.status(target=args.target)
+        if dogfood_args and dogfood_args[0] == "latest":
+            if len(dogfood_args) > 1:
+                print("error: dogfood latest does not accept a task argument", file=sys.stderr)
+                return 2
+            return dogfood_cmd.latest(target=args.target)
+        if dogfood_args and dogfood_args[0] == "next":
+            if len(dogfood_args) > 1:
+                print("error: dogfood next does not accept a task argument", file=sys.stderr)
+                return 2
+            return dogfood_cmd.next_step(target=args.target)
         task = " ".join(dogfood_args) if dogfood_args else None
         return dogfood_cmd.run(
             task,
