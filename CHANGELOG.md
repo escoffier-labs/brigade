@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Public `templates/` index that points fresh-start users at the packaged starter templates without exposing local dogfood workspace files.
 - Built-in `brigade doctor` bootstrap budget checks that fail hard when installed bootstrap files exceed conservative byte limits.
 - Built-in `brigade doctor` memory-card budget checks that fail when `memory/cards/*.md` cards become too large.
 - Built-in `brigade doctor` memory-index checks that fail when `MEMORY.md` links to missing `memory/cards/*.md` files.

@@ -44,6 +44,8 @@ The cookbook explains the why. This package gives you the kitchen.
 - adapter fragments for OpenClaw (tested), Hermes (stubbed), and generic harnesses
 - doctor checks that prove the system is wired before you trust it
 
+Browse the public template index in [`templates/`](templates/). The installable source files live under `src/brigade/templates/`; root workspace files are local dogfood state and stay ignored.
+
 ## What you do not get
 
 - private hostnames, IPs, account IDs, or personal details
