@@ -2,6 +2,7 @@ import json
 
 from brigade import aboyeur
 from brigade import cli
+from brigade import runs_cmd
 
 
 def test_run_cli_missing_roster_errors(tmp_path, capsys, monkeypatch):
@@ -172,3 +173,70 @@ role = "code"
     monkeypatch.setattr(aboyeur, "run", fake_run)
     assert cli.main(["run", "x", "--no-artifacts"]) == 0
     assert seen["output_dir"] is None
+
+
+def test_run_cli_rejects_inspect_without_artifacts(tmp_path, capsys):
+    rc = cli.main(["run", "x", "--cwd", str(tmp_path), "--inspect", "--no-artifacts"])
+    assert rc == 2
+    assert "--inspect cannot be used with --no-artifacts" in capsys.readouterr().err
+
+
+def test_run_cli_inspect_shows_artifacts_and_preserves_run_code(tmp_path, monkeypatch, capsys):
+    roster_path = tmp_path / "roster.toml"
+    roster_path.write_text(
+        """
+orchestrator = "chef"
+
+[agents.chef]
+cli = "codex"
+role = "plan"
+
+[agents.coder]
+cli = "codex"
+role = "code"
+"""
+    )
+    output_dir = tmp_path / "run"
+    seen = {}
+
+    def fake_run(
+        task,
+        loaded_roster,
+        dry_run=False,
+        show_plan=False,
+        verbose=False,
+        cwd=None,
+        output_dir=None,
+        handoff_inbox=None,
+        read_only=False,
+    ):
+        seen["output_dir"] = output_dir
+        return 2
+
+    def fake_show(run_dir):
+        seen["inspect_dir"] = run_dir
+        print(f"summary for {run_dir}")
+        return 0
+
+    monkeypatch.setattr(aboyeur, "run", fake_run)
+    monkeypatch.setattr(runs_cmd, "show", fake_show)
+
+    rc = cli.main(
+        [
+            "run",
+            "x",
+            "--roster",
+            str(roster_path),
+            "--cwd",
+            str(tmp_path),
+            "--output-dir",
+            str(output_dir),
+            "--inspect",
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert seen == {"output_dir": output_dir, "inspect_dir": output_dir}
+    assert f"summary for {output_dir}" in captured.out
+    assert f"artifacts: {output_dir}" in captured.err

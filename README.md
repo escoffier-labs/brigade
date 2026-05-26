@@ -128,9 +128,10 @@ brigade run "review this repo" --verbose
 brigade run "review this repo" --cwd /path/to/repo
 brigade run "review this repo" --handoff
 brigade run "review this repo" --read-only
+brigade run "review this repo" --read-only --inspect
 ```
 
-`--dry-run` prints the planned assignments as JSON and stops before worker dispatch. `--show-plan` prints assignments before a normal run. `--verbose` prints the plan, worker statuses, and synthesis status. `--cwd` sets the working directory for the agent CLI calls and defaults to the current directory. `--handoff` writes a Memory Handoff for a successful non-dry run. `--read-only` tells the orchestrator and workers to inspect and recommend only, without modifying files or external state. For `codex` agents, Brigade also passes `codex exec --sandbox read-only`; other adapters receive the prompt policy only. The `cli` values are adapters for installed command-line tools: `codex`, `claude`, and `ollama:<model>`. Pick the ones you already use. Brigade shells out to those tools and keeps no provider keys. `brigade roster doctor` validates the roster syntax and reports which CLIs are present on `PATH`.
+`--dry-run` prints the planned assignments as JSON and stops before worker dispatch. `--show-plan` prints assignments before a normal run. `--verbose` prints the plan, worker statuses, and synthesis status. `--cwd` sets the working directory for the agent CLI calls and defaults to the current directory. `--handoff` writes a Memory Handoff for a successful non-dry run. `--inspect` prints the same readable artifact summary as `brigade runs show` after the run completes. `--read-only` tells the orchestrator and workers to inspect and recommend only, without modifying files or external state. For `codex` agents, Brigade also passes `codex exec --sandbox read-only`; other adapters receive the prompt policy only. The `cli` values are adapters for installed command-line tools: `codex`, `claude`, and `ollama:<model>`. Pick the ones you already use. Brigade shells out to those tools and keeps no provider keys. `brigade roster doctor` validates the roster syntax and reports which CLIs are present on `PATH`.
 
 CLI runs write artifacts by default under `.brigade/runs/<id>` below `--cwd`:
 

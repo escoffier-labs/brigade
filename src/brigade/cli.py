@@ -99,6 +99,11 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Tell agents to inspect and recommend only, without modifying files or external state.",
     )
     p_run.add_argument(
+        "--inspect",
+        action="store_true",
+        help="Print a readable artifact summary after the run completes.",
+    )
+    p_run.add_argument(
         "--cwd",
         type=Path,
         default=Path("."),
@@ -296,6 +301,9 @@ def main(argv=None) -> int:
         if args.handoff and args.dry_run:
             print("error: --handoff cannot be used with --dry-run", file=sys.stderr)
             return 2
+        if args.inspect and args.no_artifacts:
+            print("error: --inspect cannot be used with --no-artifacts", file=sys.stderr)
+            return 2
         roster_path = args.roster or (run_cwd / ".brigade" / "roster.toml")
         try:
             loaded_roster = roster_mod.load_roster(roster_path)
@@ -327,6 +335,10 @@ def main(argv=None) -> int:
         )
         if output_dir is not None:
             print(f"artifacts: {output_dir}", file=sys.stderr)
+            if args.inspect:
+                from . import runs_cmd
+
+                runs_cmd.show(output_dir)
         return rc
     if cmd == "roster":
         from . import roster_cmd
