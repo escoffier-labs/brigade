@@ -33,8 +33,33 @@ Thumbs.db
 
 # claude / agent local state (side-harness only; brigade block below
 # handles the handoff path with TEMPLATE.md kept tracked)
+.brigade/
+.claude/
 .codex/
 .openclaw/
+.solo-mise/
+
+# Source-repo dogfood workspace files. Public templates live under
+# src/brigade/templates/ instead.
+/AGENTS.md
+/CLAUDE.md
+/HEARTBEAT.md
+/IDENTITY.md
+/INSTALL_FOR_AGENTS.md
+/MEMORY.md
+/SAFETY_RULES.md
+/SOUL.md
+/TOOLS.md
+/USER.md
+/hooks/
+/memory/
+/scripts/
+/skills/
+
+# Internal implementation plans and stale generated branding assets.
+/docs/plans/
+/docs/specs/
+/docs/assets/solo-mise-banner.png
 
 # scratch
 /scratch/
