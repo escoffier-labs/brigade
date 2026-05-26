@@ -113,6 +113,35 @@ def test_doctor_reports_memory_care_files(tmp_target: Path, capsys):
     assert "1 queued" in out
 
 
+def test_doctor_verifies_memory_index_card_links(tmp_target: Path, capsys):
+    install_selection(
+        tmp_target,
+        Selection(depth="workspace", harnesses=["claude"], owner="claude", includes=[]),
+    )
+
+    rc = doctor_mod.run(target=tmp_target, harness="generic")
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "memory-index: card links" in out
+    assert "verified" in out
+
+
+def test_doctor_fails_broken_memory_index_card_link(tmp_target: Path, capsys):
+    install_selection(
+        tmp_target,
+        Selection(depth="workspace", harnesses=["claude"], owner="claude", includes=[]),
+    )
+    memory = tmp_target / "MEMORY.md"
+    memory.write_text(memory.read_text() + "\n- [missing-card](memory/cards/missing-card.md)\n")
+
+    rc = doctor_mod.run(target=tmp_target, harness="generic")
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "memory-index: card links" in out
+    assert "broken link" in out
+    assert "memory/cards/missing-card.md" in out
+
+
 def test_doctor_openclaw_reports_cron_memory_jobs(tmp_target: Path, monkeypatch, capsys):
     install_selection(
         tmp_target,

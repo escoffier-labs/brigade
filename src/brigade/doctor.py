@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -64,6 +65,7 @@ def core_station_checks(ctx: DoctorContext) -> List[CheckResult]:
 def memory_station_checks(ctx: DoctorContext) -> List[CheckResult]:
     checks: List[CheckResult] = []
     checks.extend(_check_handoff_inboxes(ctx.target, ctx.selection, ctx.harnesses))
+    checks.extend(_check_memory_index(ctx.target))
     checks.extend(_check_memory_care(ctx.target))
     return checks
 
@@ -197,7 +199,8 @@ def _check_handoff_inboxes(
             )
     cards = target / "memory" / "cards"
     if cards.is_dir():
-        results.append((OK, "memory: cards/", str(cards)))
+        card_count = len([path for path in cards.rglob("*.md") if path.is_file()])
+        results.append((OK, "memory: cards/", f"{cards} ({card_count} card{'s' if card_count != 1 else ''})"))
     else:
         results.append(
             (
@@ -207,6 +210,36 @@ def _check_handoff_inboxes(
             )
         )
     return results
+
+
+def _check_memory_index(target: Path) -> List[CheckResult]:
+    index = target / "MEMORY.md"
+    if not index.is_file():
+        return []
+    try:
+        text = index.read_text()
+    except OSError as exc:
+        return [(FAIL, "memory-index: MEMORY.md", f"unreadable: {exc}")]
+
+    linked_cards = sorted(
+        {
+            match.group("path")
+            for match in re.finditer(
+                r"\[[^\]]+\]\((?P<path>memory/cards/[^)#\s]+\.md)(?:#[^)]+)?\)",
+                text,
+            )
+        }
+    )
+    if not linked_cards:
+        return [(WARN, "memory-index: card links", "MEMORY.md links no memory cards")]
+
+    missing = [path for path in linked_cards if not (target / path).is_file()]
+    if missing:
+        preview = ", ".join(missing[:5])
+        if len(missing) > 5:
+            preview += f", ... {len(missing) - 5} more"
+        return [(FAIL, "memory-index: card links", f"{len(missing)} broken link{'s' if len(missing) != 1 else ''}: {preview}")]
+    return [(OK, "memory-index: card links", f"{len(linked_cards)} verified")]
 
 
 def _check_orphan_inboxes(
