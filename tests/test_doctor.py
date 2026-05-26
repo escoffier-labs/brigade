@@ -142,6 +142,38 @@ def test_doctor_fails_broken_memory_index_card_link(tmp_target: Path, capsys):
     assert "memory/cards/missing-card.md" in out
 
 
+def test_doctor_fails_when_memory_card_exceeds_budget(tmp_target: Path, capsys):
+    install_selection(
+        tmp_target,
+        Selection(depth="workspace", harnesses=["claude"], owner="claude", includes=[]),
+    )
+    limit = doctor_mod.MEMORY_CARD_BUDGET_BYTES
+    oversized = tmp_target / "memory" / "cards" / "oversized.md"
+    oversized.write_text("x" * (limit + 1))
+
+    rc = doctor_mod.run(target=tmp_target, harness="generic")
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "memory-card: budget" in out
+    assert "over hard limit" in out
+    assert "memory/cards/oversized.md" in out
+
+
+def test_doctor_warns_when_memory_card_is_empty(tmp_target: Path, capsys):
+    install_selection(
+        tmp_target,
+        Selection(depth="workspace", harnesses=["claude"], owner="claude", includes=[]),
+    )
+    empty = tmp_target / "memory" / "cards" / "empty.md"
+    empty.write_text("")
+
+    rc = doctor_mod.run(target=tmp_target, harness="generic")
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "memory-card: empty" in out
+    assert "memory/cards/empty.md" in out
+
+
 def test_doctor_openclaw_reports_cron_memory_jobs(tmp_target: Path, monkeypatch, capsys):
     install_selection(
         tmp_target,

@@ -28,6 +28,7 @@ BOOTSTRAP_BUDGETS = {
     "IDENTITY.md": 4_000,
     "HEARTBEAT.md": 5_000,
 }
+MEMORY_CARD_BUDGET_BYTES = 8_000
 
 from .station import DoctorContext
 
@@ -65,6 +66,7 @@ def core_station_checks(ctx: DoctorContext) -> List[CheckResult]:
 def memory_station_checks(ctx: DoctorContext) -> List[CheckResult]:
     checks: List[CheckResult] = []
     checks.extend(_check_handoff_inboxes(ctx.target, ctx.selection, ctx.harnesses))
+    checks.extend(_check_memory_cards(ctx.target))
     checks.extend(_check_memory_index(ctx.target))
     checks.extend(_check_memory_care(ctx.target))
     return checks
@@ -240,6 +242,51 @@ def _check_memory_index(target: Path) -> List[CheckResult]:
             preview += f", ... {len(missing) - 5} more"
         return [(FAIL, "memory-index: card links", f"{len(missing)} broken link{'s' if len(missing) != 1 else ''}: {preview}")]
     return [(OK, "memory-index: card links", f"{len(linked_cards)} verified")]
+
+
+def _check_memory_cards(target: Path) -> List[CheckResult]:
+    cards = target / "memory" / "cards"
+    if not cards.is_dir():
+        return []
+
+    results: List[CheckResult] = []
+    oversized: list[str] = []
+    empty: list[str] = []
+    for path in sorted(cards.rglob("*.md")):
+        if not path.is_file():
+            continue
+        rel = path.relative_to(target)
+        try:
+            size = path.stat().st_size
+        except OSError as exc:
+            results.append((FAIL, f"memory-card: {rel}", f"unreadable: {exc}"))
+            continue
+        if size == 0:
+            empty.append(str(rel))
+        if size > MEMORY_CARD_BUDGET_BYTES:
+            oversized.append(f"{rel} ({size}/{MEMORY_CARD_BUDGET_BYTES} bytes)")
+
+    if empty:
+        preview = ", ".join(empty[:5])
+        if len(empty) > 5:
+            preview += f", ... {len(empty) - 5} more"
+        results.append((WARN, "memory-card: empty", f"{len(empty)} empty card{'s' if len(empty) != 1 else ''}: {preview}"))
+
+    if oversized:
+        preview = ", ".join(oversized[:5])
+        if len(oversized) > 5:
+            preview += f", ... {len(oversized) - 5} more"
+        results.append(
+            (
+                FAIL,
+                "memory-card: budget",
+                f"{len(oversized)} over hard limit; split cards into atomic topics: {preview}",
+            )
+        )
+    else:
+        count = len([path for path in cards.rglob("*.md") if path.is_file()])
+        results.append((OK, "memory-card: budget", f"{count} card{'s' if count != 1 else ''} <= {MEMORY_CARD_BUDGET_BYTES} bytes"))
+    return results
 
 
 def _check_orphan_inboxes(
