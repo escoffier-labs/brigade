@@ -14,6 +14,10 @@ from uuid import uuid4
 
 from . import dogfood_cmd
 
+OK = "ok"
+WARN = "warn"
+FAIL = "fail"
+
 
 def _git(target: Path, *args: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
@@ -383,6 +387,18 @@ def _print_dirty(lines: list[str], *, limit: int) -> None:
     remaining = len(lines) - limit
     if remaining > 0:
         print(f"  ... {remaining} more")
+
+
+def _doctor_line(level: str, name: str, detail: object) -> None:
+    print(f"[{level}] {name}: {detail}")
+
+
+def _doctor_ignore_level(value: str) -> str:
+    if value in {"yes", "outside-target"}:
+        return OK
+    if value == "no":
+        return WARN
+    return WARN
 
 
 def start(*, target: Path, title: str | None = None, force: bool = False) -> int:
@@ -828,4 +844,91 @@ def status(*, target: Path, limit: int = 12) -> int:
     print(f"next: {_short(next_step) if next_step else 'none'}")
     print("next_command: brigade dogfood next")
     print("inspect_command: brigade dogfood latest")
+    return 0
+
+
+def doctor(*, target: Path) -> int:
+    target = target.expanduser().resolve()
+    failures = 0
+
+    print(f"work doctor: {target}")
+    if not target.is_dir():
+        _doctor_line(FAIL, "target", f"not a directory: {target}")
+        return 2
+    _doctor_line(OK, "target", target)
+
+    repo_root = _git_value(target, "rev-parse", "--show-toplevel")
+    if repo_root is None:
+        failures += 1
+        _doctor_line(FAIL, "git", "not a git repository")
+    else:
+        _doctor_line(OK, "git", repo_root)
+
+    config = dogfood_cmd.config_path(target)
+    try:
+        effective_target, artifacts_dir, cfg = dogfood_cmd._load_effective_paths(target)
+    except (FileNotFoundError, ValueError) as exc:
+        failures += 1
+        _doctor_line(FAIL, "dogfood_config", exc)
+        effective_target = target
+        artifacts_dir = target / ".brigade" / "runs"
+        cfg = None
+    else:
+        if config.is_file():
+            _doctor_line(OK, "dogfood_config", config)
+        else:
+            failures += 1
+            _doctor_line(FAIL, "dogfood_config", f"missing, run `brigade dogfood init --target {target}`")
+        _doctor_line(OK, "dogfood_target", effective_target)
+        _doctor_line(OK, "dogfood_artifacts", artifacts_dir)
+
+    codex_path = shutil.which("codex")
+    if codex_path is None:
+        failures += 1
+        _doctor_line(FAIL, "codex", "missing on PATH")
+    else:
+        _doctor_line(OK, "codex", codex_path)
+
+    work_root = _work_root(effective_target)
+    _doctor_line(OK if work_root.parent.exists() else WARN, "work_root", work_root)
+    current = _current_path(effective_target)
+    if current.exists():
+        active_dir = work_root / current.read_text().strip()
+        if _read_session(active_dir) is None:
+            failures += 1
+            _doctor_line(FAIL, "active_session", f"invalid: {active_dir}")
+        else:
+            _doctor_line(WARN, "active_session", f"active: {active_dir}")
+    else:
+        _doctor_line(OK, "active_session", "none")
+
+    handoff_inbox = (
+        cfg.handoff_inbox
+        if cfg and cfg.handoff_inbox is not None
+        else dogfood_cmd.default_handoff_inbox(effective_target)
+    )
+    _doctor_line(OK if handoff_inbox.parent.exists() else WARN, "handoff_inbox", handoff_inbox)
+
+    config_ignored = dogfood_cmd._check_git_ignored(effective_target, config)
+    _doctor_line(_doctor_ignore_level(config_ignored), "config_ignored", config_ignored)
+    artifacts_ignored = dogfood_cmd._check_git_ignored(effective_target, artifacts_dir)
+    _doctor_line(_doctor_ignore_level(artifacts_ignored), "artifacts_ignored", artifacts_ignored)
+    work_ignored = dogfood_cmd._check_git_ignored(effective_target, work_root)
+    _doctor_line(_doctor_ignore_level(work_ignored), "work_ignored", work_ignored)
+    handoff_ignored = dogfood_cmd._check_git_ignored(effective_target, handoff_inbox)
+    _doctor_line(_doctor_ignore_level(handoff_ignored), "handoff_ignored", handoff_ignored)
+
+    latest = dogfood_cmd._latest_run(artifacts_dir)
+    if latest is None:
+        _doctor_line(WARN, "latest_run", "none")
+    else:
+        latest_path, latest_meta = latest
+        _doctor_line(OK, "latest_run", f"{latest_meta.get('started_at', latest_path.name)} {latest_path}")
+        next_step = dogfood_cmd.extract_next_step(dogfood_cmd._read_final(latest_path))
+        _doctor_line(OK if next_step else WARN, "latest_next", _short(next_step) if next_step else "none")
+
+    if failures:
+        _doctor_line(FAIL, "ready", f"{failures} blocker{'s' if failures != 1 else ''}")
+        return 1
+    _doctor_line(OK, "ready", "daily work loop is usable")
     return 0

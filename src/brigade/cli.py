@@ -114,6 +114,8 @@ def _build_parser() -> argparse.ArgumentParser:
     p_work_status = work_sub.add_parser("status", help="Show current repo and dogfood work state.")
     p_work_status.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
     p_work_status.add_argument("--limit", type=int, default=12, help="Maximum dirty file entries to show.")
+    p_work_doctor = work_sub.add_parser("doctor", help="Check whether the daily work loop is ready.")
+    p_work_doctor.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
     p_work_resume = work_sub.add_parser("resume", help="Show the current work handoff point and next command.")
     p_work_resume.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
     p_work_list = work_sub.add_parser("list", help="List recent Brigade work sessions.")
@@ -437,6 +439,8 @@ def main(argv=None) -> int:
 
         if args.work_command == "status":
             return work_cmd.status(target=args.target, limit=args.limit)
+        if args.work_command == "doctor":
+            return work_cmd.doctor(target=args.target)
         if args.work_command == "resume":
             return work_cmd.resume(target=args.target)
         if args.work_command == "list":

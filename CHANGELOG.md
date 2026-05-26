@@ -35,11 +35,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `brigade work run` to start a work session, run dogfood, close the session, write a work handoff, and print a recap in one command.
 - `brigade work resume` to show the active or latest work session, latest dogfood run, extracted next step, and suggested command.
 - `brigade work note` to append timestamped checkpoints to the active work session without ending it.
+- `brigade work doctor` to check dogfood config, Codex availability, local artifact paths, handoff inbox, ignore coverage, and latest run context for the daily work loop.
 - Roster-level and per-agent `timeout_seconds` controls for bounded CLI calls.
 - `brigade run --read-only` prompt policy for planning and review runs that should inspect and recommend only, with native `codex exec --sandbox read-only` enforcement for Codex agents.
 
 ### Changed
 - Dogfood handoff defaults now use `.codex/memory-handoffs/` for new Codex-driven local configs while preserving explicit configured inbox paths such as `.claude/memory-handoffs/`.
+- The roadmap now treats memory/bootstrap doctor checks as daily-readiness work, with bootstrap truncation as a hard failure to prevent.
 - Dogfood runs now default to a 600 second per-agent timeout for practical daily repo reviews.
 - The managed gitignore block now treats `.brigade/dogfood.toml` and `.brigade/runs/` as local state.
 - Live smoke docs now keep Codex agent execution in a trusted repo cwd while writing temporary roster, artifacts, and handoff output under `/tmp`.

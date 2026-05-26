@@ -69,6 +69,44 @@ def test_work_status_rejects_bad_limit(tmp_path, capsys):
     assert "--limit must be a positive integer" in capsys.readouterr().err
 
 
+def test_work_doctor_reports_ready_repo(tmp_path, monkeypatch, capsys):
+    _init_git_repo(tmp_path)
+    dogfood_cmd.init(target=tmp_path)
+    run_dir = tmp_path / ".brigade" / "runs" / "latest"
+    run_dir.mkdir(parents=True)
+    _write_json(run_dir / "run.json", {"started_at": "2026-05-26T12:00:00Z", "status": "ok", "task": "review"})
+    (run_dir / "final.txt").write_text("Done.\n\nNext step: Build doctor.\n")
+    monkeypatch.setattr(work_cmd.shutil, "which", lambda name: f"/usr/bin/{name}" if name == "codex" else None)
+    monkeypatch.setattr(dogfood_cmd, "_check_git_ignored", lambda repo, path: "yes")
+
+    assert work_cmd.doctor(target=tmp_path) == 0
+    out = capsys.readouterr().out
+    assert "work doctor:" in out
+    assert "[ok] target:" in out
+    assert "[ok] git:" in out
+    assert "[ok] dogfood_config:" in out
+    assert "[ok] codex: /usr/bin/codex" in out
+    assert "[ok] latest_next: Build doctor." in out
+    assert "[ok] ready: daily work loop is usable" in out
+
+
+def test_work_doctor_reports_blockers(tmp_path, monkeypatch, capsys):
+    _init_git_repo(tmp_path)
+    monkeypatch.setattr(work_cmd.shutil, "which", lambda name: None)
+
+    assert work_cmd.doctor(target=tmp_path) == 1
+    out = capsys.readouterr().out
+    assert "[fail] dogfood_config:" in out
+    assert "brigade dogfood init" in out
+    assert "[fail] codex: missing on PATH" in out
+    assert "[fail] ready: 2 blockers" in out
+
+
+def test_work_doctor_rejects_missing_target(tmp_path, capsys):
+    assert work_cmd.doctor(target=tmp_path / "missing") == 2
+    assert "not a directory" in capsys.readouterr().out
+
+
 def test_work_start_creates_active_session(tmp_path, monkeypatch, capsys):
     _init_git_repo(tmp_path)
     monkeypatch.setattr(
@@ -501,6 +539,19 @@ def test_work_resume_cli(tmp_path, monkeypatch):
     monkeypatch.setattr(work_cmd, "resume", fake_resume)
 
     assert cli.main(["work", "resume", "--target", str(tmp_path)]) == 0
+    assert seen == {"target": tmp_path}
+
+
+def test_work_doctor_cli(tmp_path, monkeypatch):
+    seen = {}
+
+    def fake_doctor(**kwargs):
+        seen.update(kwargs)
+        return 0
+
+    monkeypatch.setattr(work_cmd, "doctor", fake_doctor)
+
+    assert cli.main(["work", "doctor", "--target", str(tmp_path)]) == 0
     assert seen == {"target": tmp_path}
 
 
