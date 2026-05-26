@@ -65,6 +65,4 @@ memory/handoff-inbox/
 .brigade/runs/
 .brigade/scrub-cache/
 .brigade/work/
-.solo-mise/logs/
-.solo-mise/scrub-cache/
 # <<< brigade gitignore block <<<

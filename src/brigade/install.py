@@ -84,18 +84,50 @@ def apply_gitignore(target: Path, selection: Selection) -> str:
         (GITIGNORE_BEGIN, GITIGNORE_END),
         (LEGACY_GITIGNORE_BEGIN, LEGACY_GITIGNORE_END),
     )
-    for begin, end in markers:
-        if begin not in existing or end not in existing:
-            continue
-        prefix, _, rest = existing.partition(begin)
-        _, _, suffix = rest.partition(end)
-        # Strip a trailing newline from prefix and a leading newline from suffix to avoid drift.
-        new_text = prefix.rstrip("\n") + ("\n\n" if prefix.strip() else "") + block + suffix.lstrip("\n")
+    new_text, replaced = _replace_managed_gitignore_blocks(existing, block, markers)
+    if replaced:
         gi.write_text(new_text)
         return "updated"
     sep = "" if existing.endswith("\n") else "\n"
     gi.write_text(existing + sep + "\n" + block)
     return "updated"
+
+
+def _replace_managed_gitignore_blocks(
+    existing: str,
+    block: str,
+    markers: tuple[tuple[str, str], ...],
+) -> tuple[str, bool]:
+    """Replace all complete known managed blocks with one regenerated block."""
+    output: list[str] = []
+    cursor = 0
+    inserted = False
+    replaced = False
+    while True:
+        next_block: tuple[int, int] | None = None
+        for begin, end in markers:
+            start = existing.find(begin, cursor)
+            if start == -1:
+                continue
+            end_start = existing.find(end, start + len(begin))
+            if end_start == -1:
+                continue
+            stop = end_start + len(end)
+            if next_block is None or start < next_block[0]:
+                next_block = (start, stop)
+        if next_block is None:
+            break
+        start, stop = next_block
+        output.append(existing[cursor:start])
+        if not inserted:
+            output.append(block)
+            inserted = True
+        cursor = stop
+        replaced = True
+    if not replaced:
+        return existing, False
+    output.append(existing[cursor:])
+    return "".join(output), True
 
 
 def resolve_manifests(selection: Selection) -> Tuple[List[dict], List[str], List[str]]:
