@@ -157,6 +157,7 @@ Inspect a completed run without opening each JSON file:
 
 ```bash
 brigade runs list --cwd /path/to/repo
+brigade runs latest --cwd /path/to/repo
 brigade runs show .brigade/runs/<run-id>
 ```
 
