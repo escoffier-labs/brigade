@@ -2,9 +2,13 @@
 from __future__ import annotations
 
 import ast
+import json
+import shutil
+import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from . import aboyeur
 from . import runs_cmd
@@ -132,6 +136,131 @@ def load_config(target: Path) -> DogfoodConfig | None:
         ),
         timeout_seconds=_as_positive_float(data.get("timeout_seconds", DEFAULT_TIMEOUT_SECONDS), "timeout_seconds"),
     )
+
+
+def _check_git_ignored(repo: Path, path: Path) -> str:
+    try:
+        relative = path.expanduser().resolve().relative_to(repo)
+    except ValueError:
+        return "outside-target"
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(repo), "check-ignore", "-q", str(relative)],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except OSError:
+        return "unknown"
+    if result.returncode == 0:
+        return "yes"
+    if result.returncode == 1:
+        return "no"
+    return "unknown"
+
+
+def _latest_run(runs_dir: Path) -> tuple[Path, dict[str, Any]] | None:
+    if not runs_dir.is_dir():
+        return None
+    latest: tuple[Path, dict[str, Any]] | None = None
+    latest_key = ""
+    for child in runs_dir.iterdir():
+        if not child.is_dir():
+            continue
+        try:
+            payload = json.loads((child / "run.json").read_text())
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        key = str(payload.get("started_at") or child.name)
+        if latest is None or key > latest_key:
+            latest = (child, payload)
+            latest_key = key
+    return latest
+
+
+def _setting_line(label: str, value: object) -> None:
+    print(f"{label}: {value}")
+
+
+def status(*, target: Path) -> int:
+    target = target.expanduser().resolve()
+    if not target.is_dir():
+        print(f"error: --target is not a directory: {target}", file=sys.stderr)
+        return 2
+
+    path = config_path(target)
+    try:
+        cfg = load_config(target)
+    except ValueError as exc:
+        print(f"error: invalid dogfood config: {exc}", file=sys.stderr)
+        return 2
+
+    effective_target = cfg.target if cfg and cfg.target is not None else target
+    effective_target = effective_target.expanduser().resolve()
+    artifacts_dir = cfg.artifacts_dir if cfg and cfg.artifacts_dir is not None else effective_target / ".brigade" / "runs"
+    handoff = cfg.handoff if cfg else True
+    handoff_inbox = (
+        cfg.handoff_inbox
+        if cfg and cfg.handoff_inbox is not None
+        else effective_target / ".claude" / "memory-handoffs"
+    )
+    inspect = cfg.inspect if cfg else True
+    native = cfg.native_read_only_sandbox if cfg else False
+    timeout = cfg.timeout_seconds if cfg else DEFAULT_TIMEOUT_SECONDS
+
+    codex_path = shutil.which("codex")
+    brigade_path = shutil.which("brigade")
+    blockers: list[str] = []
+    warnings: list[str] = []
+    if cfg is None:
+        warnings.append(f"config missing: run `brigade dogfood init --target {target}`")
+    if not effective_target.is_dir():
+        blockers.append(f"configured target is not a directory: {effective_target}")
+    if codex_path is None:
+        blockers.append("codex CLI not found on PATH")
+    if brigade_path is None:
+        warnings.append("brigade CLI not found on PATH; use the venv command or install the package")
+
+    ready = not blockers
+    print(f"dogfood: {'ready' if ready else 'not ready'}")
+    _setting_line("config", path if path.exists() else f"{path} (missing)")
+    _setting_line("target", effective_target)
+    _setting_line("artifacts_dir", artifacts_dir)
+    _setting_line("handoff", "enabled" if handoff else "disabled")
+    if handoff:
+        _setting_line("handoff_inbox", handoff_inbox)
+    _setting_line("inspect", "enabled" if inspect else "disabled")
+    _setting_line(
+        "sandbox",
+        "native read-only" if native else "prompt read-only + trusted-workspace execution",
+    )
+    _setting_line("timeout_seconds", f"{timeout:g}")
+    _setting_line("codex", codex_path or "missing")
+    _setting_line("brigade", brigade_path or "missing")
+    _setting_line("config_ignored", _check_git_ignored(effective_target, path))
+    _setting_line("artifacts_ignored", _check_git_ignored(effective_target, artifacts_dir))
+    latest = _latest_run(artifacts_dir)
+    if latest is not None:
+        latest_path, latest_meta = latest
+        task = " ".join(str(latest_meta.get("task") or "").split())
+        if len(task) > 80:
+            task = task[:77].rstrip() + "..."
+        _setting_line(
+            "latest_run",
+            f"{latest_meta.get('started_at', latest_path.name)} [{latest_meta.get('status', 'unknown')}] {latest_path}",
+        )
+        if task:
+            _setting_line("latest_task", task)
+    else:
+        _setting_line("latest_run", "none")
+
+    for warning in warnings:
+        print(f"warning: {warning}", file=sys.stderr)
+    for blocker in blockers:
+        print(f"error: {blocker}", file=sys.stderr)
+    return 0 if ready else 1
 
 
 def init(

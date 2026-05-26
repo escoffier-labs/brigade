@@ -334,6 +334,11 @@ def main(argv=None) -> int:
                 native_read_only_sandbox=args.native_read_only_sandbox,
                 timeout_seconds=args.timeout_seconds,
             )
+        if dogfood_args and dogfood_args[0] == "status":
+            if len(dogfood_args) > 1:
+                print("error: dogfood status does not accept a task argument", file=sys.stderr)
+                return 2
+            return dogfood_cmd.status(target=args.target)
         task = " ".join(dogfood_args) if dogfood_args else None
         return dogfood_cmd.run(
             task,
