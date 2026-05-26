@@ -126,6 +126,26 @@ def _build_parser() -> argparse.ArgumentParser:
     p_work_recap.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
     p_work_recap.add_argument("--limit", type=int, default=5, help="Maximum sessions to include.")
     p_work_recap.add_argument("--since", default=None, help="Only include sessions since YYYY-MM-DD.")
+    p_work_run = work_sub.add_parser("run", help="Start a work session, run dogfood, end it, and recap.")
+    p_work_run.add_argument("task", nargs="*", help="Dogfood task. Defaults to the standard next-slice review.")
+    p_work_run.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace for the session.")
+    p_work_run.add_argument("--title", default=None, help="Work session title. Defaults to the task text.")
+    p_work_run.add_argument("--output-dir", type=Path, default=None, help="Directory for dogfood run artifacts.")
+    p_work_run.add_argument("--handoff-inbox", type=Path, default=None, help="Memory Handoff inbox.")
+    p_work_run.add_argument("--no-handoff", action="store_true", help="Do not write a work-session Memory Handoff.")
+    p_work_run.add_argument(
+        "--dogfood-handoff",
+        action="store_true",
+        help="Also let the underlying dogfood run write its own Memory Handoff.",
+    )
+    p_work_run.add_argument("--no-inspect", action="store_true", help="Do not print the dogfood artifact summary.")
+    p_work_run.add_argument(
+        "--native-read-only-sandbox",
+        action="store_true",
+        help="Use Codex's native read-only sandbox for the underlying dogfood run.",
+    )
+    p_work_run.add_argument("--timeout-seconds", type=float, default=DEFAULT_TIMEOUT_SECONDS, help="Per-agent timeout.")
+    p_work_run.add_argument("--recap-limit", type=int, default=1, help="Maximum sessions to include in the final recap.")
     p_work_start = work_sub.add_parser("start", help="Start a local Brigade work session.")
     p_work_start.add_argument("title", nargs="*", help="Optional session title.")
     p_work_start.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace for the session.")
@@ -420,6 +440,21 @@ def main(argv=None) -> int:
             return work_cmd.show(target=args.target, session=args.session)
         if args.work_command == "recap":
             return work_cmd.recap(target=args.target, limit=args.limit, since=args.since)
+        if args.work_command == "run":
+            task = " ".join(args.task) if args.task else None
+            return work_cmd.run(
+                task,
+                target=args.target,
+                title=args.title,
+                output_dir=args.output_dir,
+                handoff=not args.no_handoff,
+                handoff_inbox=args.handoff_inbox,
+                dogfood_handoff=args.dogfood_handoff,
+                inspect=not args.no_inspect,
+                native_read_only_sandbox=args.native_read_only_sandbox,
+                timeout_seconds=args.timeout_seconds,
+                recap_limit=args.recap_limit,
+            )
         if args.work_command == "start":
             title = " ".join(args.title) if args.title else None
             return work_cmd.start(target=args.target, title=title, force=args.force)

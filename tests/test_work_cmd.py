@@ -268,6 +268,92 @@ def test_work_recap_rejects_bad_since(tmp_path, capsys):
     assert "--since must use YYYY-MM-DD" in capsys.readouterr().err
 
 
+def test_work_run_wraps_dogfood_session(tmp_path, monkeypatch, capsys):
+    _init_git_repo(tmp_path)
+    artifacts_dir = tmp_path / ".brigade" / "runs"
+    dogfood_cmd.init(target=tmp_path, artifacts_dir=artifacts_dir)
+    times = iter(
+        [
+            datetime(2026, 5, 26, 12, 0, 0, tzinfo=timezone.utc),
+            datetime(2026, 5, 26, 13, 0, 0, tzinfo=timezone.utc),
+        ]
+    )
+    monkeypatch.setattr(work_cmd, "_now", lambda: next(times))
+    seen = {}
+
+    def fake_dogfood_run(task, **kwargs):
+        seen["task"] = task
+        seen.update(kwargs)
+        run_dir = kwargs["output_dir"]
+        run_dir.mkdir(parents=True)
+        _write_json(
+            run_dir / "run.json",
+            {"started_at": "2026-05-26T12:10:00Z", "status": "ok", "task": task},
+        )
+        (run_dir / "final.txt").write_text("Done.\n\nNext step: Build work run.\n")
+        return 0
+
+    monkeypatch.setattr(dogfood_cmd, "run", fake_dogfood_run)
+    run_dir = artifacts_dir / "work-run"
+
+    assert (
+        work_cmd.run(
+            "review the repo",
+            target=tmp_path,
+            title="Daily Review",
+            output_dir=run_dir,
+            handoff_inbox=tmp_path / "handoffs",
+        )
+        == 0
+    )
+    assert seen["task"] == "review the repo"
+    assert seen["target"] == tmp_path.resolve()
+    assert seen["output_dir"] == run_dir
+    assert seen["handoff"] is False
+    assert seen["handoff_inbox"] is None
+    assert seen["inspect"] is True
+    assert not (tmp_path / ".brigade" / "work" / "current").exists()
+    session_dir = tmp_path / ".brigade" / "work" / "20260526-120000-daily-review"
+    payload = json.loads((session_dir / "session.json").read_text())
+    assert payload["status"] == "ended"
+    assert payload["note"] == "brigade work run completed with dogfood exit code 0"
+    assert payload["end"]["dogfood"]["latest_run"]["path"] == str(run_dir)
+    assert payload["end"]["dogfood"]["next"] == "Build work run."
+    assert "handoff" in payload
+    out = capsys.readouterr().out
+    assert "work recap:" in out
+    assert "Daily Review" in out
+    assert "next: Build work run." in out
+
+
+def test_work_run_closes_session_when_dogfood_fails(tmp_path, monkeypatch):
+    _init_git_repo(tmp_path)
+    dogfood_cmd.init(target=tmp_path)
+    times = iter(
+        [
+            datetime(2026, 5, 26, 12, 0, 0, tzinfo=timezone.utc),
+            datetime(2026, 5, 26, 13, 0, 0, tzinfo=timezone.utc),
+        ]
+    )
+    monkeypatch.setattr(work_cmd, "_now", lambda: next(times))
+    monkeypatch.setattr(dogfood_cmd, "run", lambda task, **kwargs: 7)
+
+    assert work_cmd.run("review the repo", target=tmp_path, handoff=False) == 7
+    assert not (tmp_path / ".brigade" / "work" / "current").exists()
+    session_dir = tmp_path / ".brigade" / "work" / "20260526-120000-review-the-repo"
+    payload = json.loads((session_dir / "session.json").read_text())
+    assert payload["status"] == "ended"
+    assert payload["note"] == "brigade work run completed with dogfood exit code 7"
+    assert "handoff" not in payload
+
+
+def test_work_run_rejects_bad_recap_limit(tmp_path, capsys):
+    _init_git_repo(tmp_path)
+
+    assert work_cmd.run(None, target=tmp_path, recap_limit=0) == 2
+    assert "--recap-limit must be a positive integer" in capsys.readouterr().err
+
+
 def test_work_status_cli(tmp_path, monkeypatch):
     seen = {}
 
@@ -324,6 +410,58 @@ def test_work_start_and_end_cli(tmp_path, monkeypatch):
             },
         ),
     ]
+
+
+def test_work_run_cli(tmp_path, monkeypatch):
+    seen = {}
+
+    def fake_run(task, **kwargs):
+        seen["task"] = task
+        seen.update(kwargs)
+        return 0
+
+    monkeypatch.setattr(work_cmd, "run", fake_run)
+
+    assert (
+        cli.main(
+            [
+                "work",
+                "run",
+                "review",
+                "repo",
+                "--target",
+                str(tmp_path),
+                "--title",
+                "Daily",
+                "--output-dir",
+                str(tmp_path / "run"),
+                "--handoff-inbox",
+                str(tmp_path / "handoffs"),
+                "--no-handoff",
+                "--dogfood-handoff",
+                "--no-inspect",
+                "--native-read-only-sandbox",
+                "--timeout-seconds",
+                "12",
+                "--recap-limit",
+                "2",
+            ]
+        )
+        == 0
+    )
+    assert seen == {
+        "task": "review repo",
+        "target": tmp_path,
+        "title": "Daily",
+        "output_dir": tmp_path / "run",
+        "handoff": False,
+        "handoff_inbox": tmp_path / "handoffs",
+        "dogfood_handoff": True,
+        "inspect": False,
+        "native_read_only_sandbox": True,
+        "timeout_seconds": 12.0,
+        "recap_limit": 2,
+    }
 
 
 def test_work_inspection_cli(tmp_path, monkeypatch):

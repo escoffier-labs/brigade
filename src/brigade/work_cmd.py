@@ -576,6 +576,57 @@ def recap(*, target: Path, limit: int = 5, since: str | None = None) -> int:
     return 0
 
 
+def run(
+    task: str | None,
+    *,
+    target: Path,
+    title: str | None = None,
+    output_dir: Path | None = None,
+    handoff: bool = True,
+    handoff_inbox: Path | None = None,
+    dogfood_handoff: bool = False,
+    inspect: bool = True,
+    native_read_only_sandbox: bool = False,
+    timeout_seconds: float = dogfood_cmd.DEFAULT_TIMEOUT_SECONDS,
+    recap_limit: int = 1,
+) -> int:
+    if recap_limit < 1:
+        print("error: --recap-limit must be a positive integer", file=sys.stderr)
+        return 2
+
+    target = target.expanduser().resolve()
+    if not target.is_dir():
+        print(f"error: --target is not a directory: {target}", file=sys.stderr)
+        return 2
+
+    task_text = task or dogfood_cmd.DEFAULT_TASK
+    session_title = title or task_text
+    start_rc = start(target=target, title=session_title)
+    if start_rc != 0:
+        return start_rc
+
+    dogfood_rc = 1
+    try:
+        dogfood_rc = dogfood_cmd.run(
+            task_text,
+            target=target,
+            output_dir=output_dir,
+            handoff=dogfood_handoff,
+            handoff_inbox=handoff_inbox if dogfood_handoff else None,
+            inspect=inspect,
+            native_read_only_sandbox=native_read_only_sandbox,
+            timeout_seconds=timeout_seconds,
+        )
+    finally:
+        note = f"brigade work run completed with dogfood exit code {dogfood_rc}"
+        end_rc = end(target=target, note=note, handoff=handoff, handoff_inbox=handoff_inbox)
+
+    if end_rc != 0:
+        return end_rc if dogfood_rc == 0 else dogfood_rc
+    recap(target=target, limit=recap_limit)
+    return dogfood_rc
+
+
 def status(*, target: Path, limit: int = 12) -> int:
     if limit < 1:
         print("error: --limit must be a positive integer", file=sys.stderr)
