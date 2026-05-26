@@ -149,6 +149,7 @@ Use `--output-dir <path>` to pick the artifact directory, or `--no-artifacts` fo
 Inspect a completed run without opening each JSON file:
 
 ```bash
+brigade runs list --cwd /path/to/repo
 brigade runs show .brigade/runs/<run-id>
 ```
 

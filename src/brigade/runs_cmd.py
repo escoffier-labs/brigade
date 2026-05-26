@@ -105,6 +105,68 @@ def _print_final(final_text: str | None) -> None:
         print(f"  {line}")
 
 
+def _short(text: object, limit: int = 72) -> str:
+    rendered = " ".join(str(text or "").split())
+    if len(rendered) <= limit:
+        return rendered
+    return rendered[: limit - 3].rstrip() + "..."
+
+
+def _run_sort_key(item: tuple[Path, dict[str, Any]]) -> str:
+    path, meta = item
+    value = meta.get("started_at")
+    return str(value) if value else path.name
+
+
+def list_runs(*, cwd: Path, runs_dir: Path | None = None, limit: int = 10) -> int:
+    if limit < 1:
+        print("error: --limit must be a positive integer", file=sys.stderr)
+        return 2
+
+    cwd = cwd.expanduser().resolve()
+    if not cwd.is_dir():
+        print(f"error: --cwd is not a directory: {cwd}", file=sys.stderr)
+        return 2
+    root = runs_dir.expanduser() if runs_dir is not None else cwd / ".brigade" / "runs"
+    if not root.is_dir():
+        print(f"error: runs directory not found: {root}", file=sys.stderr)
+        return 2
+
+    runs: list[tuple[Path, dict[str, Any]]] = []
+    skipped = 0
+    for child in root.iterdir():
+        if not child.is_dir():
+            continue
+        try:
+            meta = _read_json(child / "run.json")
+        except ValueError:
+            skipped += 1
+            continue
+        if meta is None:
+            skipped += 1
+            continue
+        runs.append((child, meta))
+
+    runs.sort(key=_run_sort_key, reverse=True)
+    for path, meta in runs[:limit]:
+        status = meta.get("status", "unknown")
+        started = meta.get("started_at", path.name)
+        duration = meta.get("duration_seconds")
+        duration_text = f" {duration:g}s" if isinstance(duration, (int, float)) else ""
+        mode = " read-only" if meta.get("read_only") else ""
+        if meta.get("dry_run"):
+            mode += " dry-run"
+        print(f"{started} [{status}]{duration_text}{mode} {path}")
+        task = _short(meta.get("task"))
+        if task:
+            print(f"  {task}")
+    if not runs:
+        print(f"no runs found in {root}")
+    if skipped:
+        print(f"skipped {skipped} invalid run director{'y' if skipped == 1 else 'ies'}", file=sys.stderr)
+    return 0
+
+
 def show(run_dir: Path) -> int:
     run_dir = run_dir.expanduser()
     if not run_dir.is_dir():

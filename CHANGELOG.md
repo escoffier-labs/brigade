@@ -19,6 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `synthesis.json` run artifacts that capture orchestrator synthesis status, detail, and raw text for non-dry runs.
 - Successful `--handoff` runs now record the written handoff path in `run.json`.
 - `brigade run --handoff` to write a Memory Handoff for successful runs, with `--handoff-inbox` override.
+- `brigade runs list` to print recent run artifact directories from `.brigade/runs`.
 - `brigade runs show <run-dir>` to print a readable summary of one run artifact directory.
 - Roster-level and per-agent `timeout_seconds` controls for bounded CLI calls.
 - `brigade run --read-only` prompt policy for planning and review runs that should inspect and recommend only, with native `codex exec --sandbox read-only` enforcement for Codex agents.
