@@ -132,6 +132,10 @@ def _build_parser() -> argparse.ArgumentParser:
     p_work_bootstrap.add_argument("--no-gitignore", action="store_true", help="Do not update the target .gitignore.")
     p_work_resume = work_sub.add_parser("resume", help="Show the current work handoff point and next command.")
     p_work_resume.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_work_brief = work_sub.add_parser("brief", help="Show the daily work brief and suggested next command.")
+    p_work_brief.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_work_brief.add_argument("--limit", type=int, default=3, help="Maximum recent sessions to include.")
+    p_work_brief.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_work_next = work_sub.add_parser("next", help="Show the next daily work task and suggested command.")
     p_work_next.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
     p_work_next.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
@@ -472,6 +476,8 @@ def main(argv=None) -> int:
             )
         if args.work_command == "resume":
             return work_cmd.resume(target=args.target)
+        if args.work_command == "brief":
+            return work_cmd.brief(target=args.target, limit=args.limit, json_output=args.json)
         if args.work_command == "next":
             return work_cmd.next(target=args.target, json_output=args.json)
         if args.work_command == "list":

@@ -102,13 +102,15 @@ def _dogfood_snapshot(target: Path) -> dict[str, Any]:
         snapshot["next"] = None
         return snapshot
     latest_path, latest_meta = latest
+    next_step, next_source = dogfood_cmd.extract_next_step_from_run(latest_path)
     snapshot["latest_run"] = {
         "path": str(latest_path),
         "started_at": latest_meta.get("started_at"),
         "status": latest_meta.get("status"),
         "task": latest_meta.get("task"),
     }
-    snapshot["next"] = dogfood_cmd.extract_next_step(dogfood_cmd._read_final(latest_path))
+    snapshot["next"] = next_step
+    snapshot["next_source"] = next_source
     return snapshot
 
 
@@ -211,6 +213,30 @@ def _next_step(snapshot: dict[str, Any]) -> str | None:
     if isinstance(dogfood, dict) and isinstance(dogfood.get("next"), str):
         return dogfood["next"]
     return None
+
+
+def _session_info(path: Path, payload: dict[str, Any]) -> dict[str, Any]:
+    snapshot = _snapshot(payload)
+    notes = payload.get("notes")
+    latest_note = None
+    if isinstance(notes, list) and notes:
+        latest = notes[-1]
+        if isinstance(latest, dict) and latest.get("text"):
+            latest_note = latest["text"]
+    return {
+        "path": str(path),
+        "id": payload.get("id", path.name),
+        "status": payload.get("status", "unknown"),
+        "title": payload.get("title"),
+        "started_at": payload.get("started_at"),
+        "ended_at": payload.get("ended_at"),
+        "note": payload.get("note"),
+        "latest_note": latest_note,
+        "handoff": payload.get("handoff"),
+        "branch": _branch(snapshot),
+        "dirty_files": _dirty_count(snapshot),
+        "next": _next_step(snapshot),
+    }
 
 
 def _resolve_next_task(target: Path) -> dict[str, Any]:
@@ -449,6 +475,37 @@ def _next_payload(target: Path) -> dict[str, Any]:
         "target": str(target),
         "active_session": active,
         "dogfood": dogfood,
+        "next_source": resolved["source"],
+        "next": str(resolved["task"]),
+        "suggested_command": suggested,
+    }
+
+
+def _suggested_command(active: dict[str, Any] | None, next_text: object, source: object) -> str:
+    if active is not None:
+        return 'brigade work end --note "..." --handoff'
+    if isinstance(next_text, str) and next_text.strip() and source != "default_review":
+        return f"brigade work run {shlex.quote(next_text.strip())}"
+    return "brigade work run"
+
+
+def _brief_payload(target: Path, *, limit: int = 3) -> dict[str, Any]:
+    target = target.expanduser().resolve()
+    active = _active_session_info(target)
+    sessions, skipped = _collect_sessions(_work_root(target))
+    latest_session = _session_info(sessions[0][0], sessions[0][1]) if sessions else None
+    recent_sessions = [_session_info(path, payload) for path, payload in sessions[:limit]]
+    resolved = _resolve_next_task(target)
+    git = _git_snapshot(target)
+    suggested = _suggested_command(active, resolved["task"], resolved["source"])
+    return {
+        "target": str(target),
+        "git": git,
+        "active_session": active,
+        "latest_session": latest_session,
+        "recent_sessions": recent_sessions,
+        "skipped_sessions": skipped,
+        "dogfood": resolved["dogfood"],
         "next_source": resolved["source"],
         "next": str(resolved["task"]),
         "suggested_command": suggested,
@@ -804,6 +861,90 @@ def resume(*, target: Path) -> int:
         print(f"suggested_command: brigade work run {shlex.quote(next_step)}")
     else:
         print("suggested_command: brigade work run")
+    return 0
+
+
+def brief(*, target: Path, limit: int = 3, json_output: bool = False) -> int:
+    if limit < 1:
+        print("error: --limit must be a positive integer", file=sys.stderr)
+        return 2
+
+    target = target.expanduser().resolve()
+    if not target.is_dir():
+        print(f"error: --target is not a directory: {target}", file=sys.stderr)
+        return 2
+
+    payload = _brief_payload(target, limit=limit)
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+
+    print(f"work brief: {target}")
+    git = payload["git"]
+    if isinstance(git, dict) and git.get("available"):
+        print(f"branch: {git.get('branch')}")
+        dirty = git.get("dirty_files") if isinstance(git.get("dirty_files"), list) else []
+        print(f"dirty_files: {len(dirty)}")
+        for item in dirty[:8]:
+            print(f"  {item}")
+        if len(dirty) > 8:
+            print(f"  ... {len(dirty) - 8} more")
+    else:
+        print("git: unavailable")
+
+    active = payload["active_session"]
+    if isinstance(active, dict):
+        if active.get("valid"):
+            print(f"active_session: {active.get('path')}")
+            if active.get("title"):
+                print(f"active_session_title: {_short(str(active['title']))}")
+        else:
+            print(f"active_session: invalid ({active.get('path')})")
+    else:
+        print("active_session: none")
+
+    latest_session = payload["latest_session"]
+    if isinstance(latest_session, dict):
+        print(f"latest_session: {latest_session.get('path')}")
+        if latest_session.get("title"):
+            print(f"latest_session_title: {_short(str(latest_session['title']))}")
+        if latest_session.get("note"):
+            print(f"latest_session_note: {_short(str(latest_session['note']))}")
+        if latest_session.get("handoff"):
+            print(f"latest_session_handoff: {latest_session['handoff']}")
+    else:
+        print(f"latest_session: none ({_work_root(target)})")
+
+    dogfood = payload["dogfood"]
+    print(f"dogfood_ready: {dogfood.get('ready')}")
+    if dogfood.get("error"):
+        print(f"dogfood_error: {dogfood['error']}")
+    latest_run = dogfood.get("latest_run")
+    if isinstance(latest_run, dict):
+        print(
+            "latest_run: "
+            f"{latest_run.get('started_at', '')} "
+            f"[{latest_run.get('status', 'unknown')}] {latest_run.get('path')}"
+        )
+        if latest_run.get("task"):
+            print(f"latest_task: {_short(str(latest_run['task']))}")
+    else:
+        print("latest_run: none")
+
+    print(f"next_source: {payload['next_source']}")
+    print(f"next: {_short(str(payload['next']))}")
+    print(f"suggested_command: {payload['suggested_command']}")
+
+    recent = payload["recent_sessions"]
+    if isinstance(recent, list) and recent:
+        print("recent_sessions:")
+        for item in recent:
+            if not isinstance(item, dict):
+                continue
+            title = item.get("title") or item.get("id")
+            print(f"  - {item.get('started_at')} [{item.get('status')}] {_short(str(title))}")
+    if payload.get("skipped_sessions"):
+        print(f"skipped_sessions: {payload['skipped_sessions']}", file=sys.stderr)
     return 0
 
 

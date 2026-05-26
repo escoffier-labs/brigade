@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import ast
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -224,29 +225,65 @@ def _read_final(run_dir: Path) -> str:
         return ""
 
 
+def _read_summary(run_dir: Path) -> str:
+    try:
+        return (run_dir / "summary.md").read_text().strip()
+    except OSError:
+        return ""
+
+
+def _clean_next_candidate(line: str) -> str:
+    cleaned = line.strip()
+    cleaned = re.sub(r"^\s{0,3}#{1,6}\s+", "", cleaned)
+    cleaned = re.sub(r"^\s{0,3}[-*+]\s+", "", cleaned)
+    cleaned = cleaned.strip().strip("*").strip()
+    return cleaned
+
+
+def _collect_next_block(lines: list[str], start: int) -> str | None:
+    collected: list[str] = []
+    for follow in lines[start:]:
+        follow_stripped = follow.strip()
+        if not follow_stripped:
+            if collected:
+                break
+            continue
+        if collected and re.match(r"^\s{0,3}#{1,6}\s+", follow_stripped):
+            break
+        if collected and follow_stripped.endswith(":") and not follow_stripped.startswith(("-", "*", "+")):
+            break
+        collected.append(follow_stripped)
+    rendered = "\n".join(item for item in collected if item).strip()
+    if _clean_next_candidate(rendered).lower() in {"(none extracted)", "none", "n/a"}:
+        return None
+    return rendered or None
+
+
 def extract_next_step(final_text: str) -> str | None:
     lines = final_text.splitlines()
     for index, line in enumerate(lines):
-        stripped = line.strip().strip("*")
+        stripped = _clean_next_candidate(line)
         lowered = stripped.lower()
+        if lowered == "next":
+            return _collect_next_block(lines, index + 1)
         for label in NEXT_LABELS:
             if not lowered.startswith(label):
                 continue
             _, _, after = stripped.partition(":")
             if after.strip():
                 return after.strip()
-            collected: list[str] = []
-            for follow in lines[index + 1 :]:
-                follow_stripped = follow.strip()
-                if not follow_stripped:
-                    if collected:
-                        break
-                    continue
-                if collected and follow_stripped.endswith(":") and not follow_stripped.startswith(("-", "*")):
-                    break
-                collected.append(follow_stripped)
-            return "\n".join(collected).strip() or None
+            return _collect_next_block(lines, index + 1)
     return None
+
+
+def extract_next_step_from_run(run_dir: Path) -> tuple[str | None, str | None]:
+    final_next = extract_next_step(_read_final(run_dir))
+    if final_next:
+        return final_next, "final"
+    summary_next = extract_next_step(_read_summary(run_dir))
+    if summary_next:
+        return summary_next, "summary"
+    return None, None
 
 
 def _write_summary(run_dir: Path) -> None:
@@ -290,8 +327,7 @@ def next_step(*, target: Path) -> int:
         print(f"error: no runs found in {artifacts_dir}", file=sys.stderr)
         return 1
     run_dir, _ = latest_run
-    final_text = _read_final(run_dir)
-    extracted = extract_next_step(final_text)
+    extracted, _ = extract_next_step_from_run(run_dir)
     if not extracted:
         print(f"error: no next step found in {run_dir / 'final.txt'}", file=sys.stderr)
         return 1
@@ -368,7 +404,7 @@ def status(*, target: Path) -> int:
         )
         if task:
             _setting_line("latest_task", task)
-        next_step_text = extract_next_step(_read_final(latest_path))
+        next_step_text, _ = extract_next_step_from_run(latest_path)
         if next_step_text:
             _setting_line("latest_next", " ".join(next_step_text.split()))
     else:
