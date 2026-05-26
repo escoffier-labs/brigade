@@ -1,6 +1,7 @@
 """Tests for brigade doctor."""
 from __future__ import annotations
 
+from datetime import date
 from pathlib import Path
 import json
 
@@ -92,7 +93,8 @@ def test_doctor_hermes_flags_experimental(tmp_target: Path, capsys):
     assert rc == 0
 
 
-def test_doctor_reports_memory_care_files(tmp_target: Path, capsys):
+def test_doctor_reports_memory_care_files(tmp_target: Path, monkeypatch, capsys):
+    monkeypatch.setattr(doctor_mod, "_memory_care_today", lambda: date(2026, 5, 14))
     install_selection(
         tmp_target,
         Selection(depth="workspace", harnesses=["claude"], owner="claude", includes=[]),
@@ -109,8 +111,50 @@ def test_doctor_reports_memory_care_files(tmp_target: Path, capsys):
     assert rc == 0
     assert "memory-care: scan-latest" in out
     assert "stale=2" in out
+    assert "memory-care: scan freshness" in out
+    assert "last scan 1 days ago" in out
     assert "memory-care: refresh-queue" in out
     assert "1 queued" in out
+
+
+def test_doctor_warns_when_memory_care_scan_is_stale(tmp_target: Path, monkeypatch, capsys):
+    monkeypatch.setattr(doctor_mod, "_memory_care_today", lambda: date(2026, 5, 26))
+    install_selection(
+        tmp_target,
+        Selection(depth="workspace", harnesses=["claude"], owner="claude", includes=[]),
+    )
+    decay = tmp_target / "memory" / "cards" / "decay"
+    decay.mkdir(exist_ok=True)
+    (decay / "scan-latest.json").write_text(
+        json.dumps({"scan_date": "2026-05-01", "counts": {"stale": 4}})
+    )
+    (decay / "refresh-queue.json").write_text(json.dumps({"cards": []}))
+
+    rc = doctor_mod.run(target=tmp_target, harness="generic")
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "memory-care: scan freshness" in out
+    assert "last scan 25 days ago" in out
+    assert "run memory-care scanner" in out
+
+
+def test_doctor_fails_when_memory_care_state_is_invalid(tmp_target: Path, capsys):
+    install_selection(
+        tmp_target,
+        Selection(depth="workspace", harnesses=["claude"], owner="claude", includes=[]),
+    )
+    decay = tmp_target / "memory" / "cards" / "decay"
+    decay.mkdir(exist_ok=True)
+    (decay / "scan-latest.json").write_text("{not-json")
+    (decay / "refresh-queue.json").write_text(json.dumps({"cards": "not-a-list"}))
+
+    rc = doctor_mod.run(target=tmp_target, harness="generic")
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "memory-care: scan-latest" in out
+    assert "invalid JSON" in out
+    assert "memory-care: refresh-queue" in out
+    assert "`cards` must be a list" in out
 
 
 def test_doctor_verifies_memory_index_card_links(tmp_target: Path, capsys):

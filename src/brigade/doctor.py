@@ -7,6 +7,7 @@ import re
 import shutil
 import subprocess
 import sys
+from datetime import date, datetime
 from pathlib import Path
 from typing import Callable, List, Tuple
 
@@ -29,6 +30,7 @@ BOOTSTRAP_BUDGETS = {
     "HEARTBEAT.md": 5_000,
 }
 MEMORY_CARD_BUDGET_BYTES = 8_000
+MEMORY_CARE_SCAN_STALE_DAYS = 7
 
 from .station import DoctorContext
 
@@ -331,15 +333,19 @@ def _check_memory_care(target: Path) -> List[CheckResult]:
         detail = str(scan)
         try:
             data = json.loads(scan.read_text())
-            scan_date = data.get("scan_date")
-            counts = data.get("counts", {})
-            if scan_date:
-                detail = f"{scan} (scan_date={scan_date}, stale={counts.get('stale', 'unknown')})"
+            if not isinstance(data, dict):
+                results.append((FAIL, "memory-care: scan-latest", f"expected JSON object: {scan}"))
+            else:
+                scan_date = data.get("scan_date")
+                counts = data.get("counts", {})
+                if not isinstance(counts, dict):
+                    counts = {}
+                if scan_date:
+                    detail = f"{scan} (scan_date={scan_date}, stale={counts.get('stale', 'unknown')})"
+                results.append((OK, "memory-care: scan-latest", detail))
+                results.append(_check_memory_care_scan_freshness(scan, scan_date))
         except json.JSONDecodeError:
-            detail = f"invalid JSON: {scan}"
-            results.append((WARN, "memory-care: scan-latest", detail))
-        else:
-            results.append((OK, "memory-care: scan-latest", detail))
+            results.append((FAIL, "memory-care: scan-latest", f"invalid JSON: {scan}"))
     else:
         results.append((WARN, "memory-care: scan-latest", f"missing at {scan}"))
 
@@ -347,18 +353,59 @@ def _check_memory_care(target: Path) -> List[CheckResult]:
         detail = str(queue)
         try:
             data = json.loads(queue.read_text())
-            cards = data.get("cards", [])
-            if isinstance(cards, list):
-                detail = f"{queue} ({len(cards)} queued)"
+            if not isinstance(data, dict):
+                results.append((FAIL, "memory-care: refresh-queue", f"expected JSON object: {queue}"))
+            else:
+                cards = data.get("cards", [])
+                if not isinstance(cards, list):
+                    results.append((FAIL, "memory-care: refresh-queue", f"`cards` must be a list: {queue}"))
+                else:
+                    detail = f"{queue} ({len(cards)} queued)"
+                    results.append((OK, "memory-care: refresh-queue", detail))
         except json.JSONDecodeError:
-            detail = f"invalid JSON: {queue}"
-            results.append((WARN, "memory-care: refresh-queue", detail))
-        else:
-            results.append((OK, "memory-care: refresh-queue", detail))
+            results.append((FAIL, "memory-care: refresh-queue", f"invalid JSON: {queue}"))
     else:
         results.append((WARN, "memory-care: refresh-queue", f"missing at {queue}"))
 
     return results
+
+
+def _check_memory_care_scan_freshness(scan: Path, scan_date: object) -> CheckResult:
+    if not scan_date:
+        return (WARN, "memory-care: scan freshness", f"scan_date missing in {scan}")
+    parsed = _parse_memory_care_scan_date(scan_date)
+    if parsed is None:
+        return (WARN, "memory-care: scan freshness", f"unparseable scan_date={scan_date!r} in {scan}")
+    age_days = (_memory_care_today() - parsed).days
+    if age_days < 0:
+        return (WARN, "memory-care: scan freshness", f"scan_date is in the future: {scan_date}")
+    if age_days > MEMORY_CARE_SCAN_STALE_DAYS:
+        return (
+            WARN,
+            "memory-care: scan freshness",
+            f"last scan {age_days} days ago; run memory-care scanner",
+        )
+    return (OK, "memory-care: scan freshness", f"last scan {age_days} days ago")
+
+
+def _parse_memory_care_scan_date(value: object) -> date | None:
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if not text:
+        return None
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00")).date()
+    except ValueError:
+        pass
+    try:
+        return date.fromisoformat(text[:10])
+    except ValueError:
+        return None
+
+
+def _memory_care_today() -> date:
+    return date.today()
 
 
 def _check_publish_gate(target: Path) -> List[CheckResult]:
