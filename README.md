@@ -151,6 +151,7 @@ Live smoke test, using a temporary Codex-only roster:
 
 ```bash
 tmpdir=$(mktemp -d)
+smoke_cwd=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
 mkdir -p "$tmpdir/.brigade"
 cat > "$tmpdir/.brigade/roster.toml" <<'EOF'
 orchestrator = "chef"
@@ -169,10 +170,10 @@ allow_models = ["codex"]
 EOF
 
 brigade roster doctor --target "$tmpdir"
-timeout 360 brigade run "Integration test: assign the coder worker to return its required success sentence, then synthesize one sentence saying the full Brigade dispatch path succeeded." --cwd "$tmpdir" --show-plan --handoff
+timeout 360 brigade run "Integration test: assign the coder worker to return its required success sentence, then synthesize one sentence saying the full Brigade dispatch path succeeded." --roster "$tmpdir/.brigade/roster.toml" --cwd "$smoke_cwd" --output-dir "$tmpdir/run" --handoff --handoff-inbox "$tmpdir/handoffs" --show-plan --read-only
 ```
 
-Live runs invoke authenticated model CLIs and may consume whatever quota or subscription those CLIs use. `--dry-run` still invokes the orchestrator, but it does not dispatch workers or synthesize.
+Codex may require `--cwd` to be a trusted git repo, so the smoke keeps the roster, artifacts, and handoff inbox in the temp directory while running the agent CLIs from `smoke_cwd`. Live runs invoke authenticated model CLIs and may consume whatever quota or subscription those CLIs use. `--dry-run` still invokes the orchestrator, but it does not dispatch workers or synthesize.
 
 ## Two axes: depth + harnesses
 
