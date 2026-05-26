@@ -190,3 +190,39 @@ def test_runs_list_cli_with_explicit_runs_dir(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "cli task" in out
     assert "dry-run" in out
+
+
+def test_runs_latest_shows_newest_run(tmp_path, capsys):
+    runs_root = tmp_path / ".brigade" / "runs"
+    _write_minimal_run(
+        runs_root / "older",
+        task="older task",
+        status="failed",
+        started_at="2026-05-26T13:00:00Z",
+    )
+    newest = runs_root / "newer"
+    _write_run_artifacts(newest)
+
+    assert runs_cmd.show_latest(cwd=tmp_path) == 0
+    out = capsys.readouterr().out
+    assert f"run: {newest}" in out
+    assert "task: build feature" in out
+    assert "final:" in out
+
+
+def test_runs_latest_reports_no_runs(tmp_path, capsys):
+    runs_root = tmp_path / ".brigade" / "runs"
+    runs_root.mkdir(parents=True)
+
+    assert runs_cmd.show_latest(cwd=tmp_path) == 1
+    assert "no runs found" in capsys.readouterr().err
+
+
+def test_runs_latest_cli_with_explicit_runs_dir(tmp_path, capsys):
+    runs_root = tmp_path / "runs"
+    runs_root.mkdir()
+    run_dir = runs_root / "one"
+    _write_run_artifacts(run_dir)
+
+    assert cli.main(["runs", "latest", "--cwd", str(tmp_path), "--runs-dir", str(runs_root)]) == 0
+    assert f"run: {run_dir}" in capsys.readouterr().out

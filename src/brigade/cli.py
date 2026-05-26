@@ -194,6 +194,19 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Explicit runs directory. Defaults to .brigade/runs under --cwd.",
     )
     p_runs_list.add_argument("--limit", type=int, default=10, help="Maximum number of runs to show.")
+    p_runs_latest = runs_sub.add_parser("latest", help="Show the most recent Brigade run.")
+    p_runs_latest.add_argument(
+        "--cwd",
+        type=Path,
+        default=Path("."),
+        help="Workspace whose default .brigade/runs directory should be inspected.",
+    )
+    p_runs_latest.add_argument(
+        "--runs-dir",
+        type=Path,
+        default=None,
+        help="Explicit runs directory. Defaults to .brigade/runs under --cwd.",
+    )
     p_runs_show = runs_sub.add_parser("show", help="Show a readable summary of one run directory.")
     p_runs_show.add_argument("run_dir", type=Path, help="Path to a Brigade run artifact directory.")
 
@@ -419,6 +432,8 @@ def main(argv=None) -> int:
 
         if args.runs_command == "list":
             return runs_cmd.list_runs(cwd=args.cwd, runs_dir=args.runs_dir, limit=args.limit)
+        if args.runs_command == "latest":
+            return runs_cmd.show_latest(cwd=args.cwd, runs_dir=args.runs_dir)
         if args.runs_command == "show":
             return runs_cmd.show(args.run_dir)
         parser.error(f"unknown runs command: {args.runs_command}")

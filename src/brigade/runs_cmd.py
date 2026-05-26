@@ -118,20 +118,7 @@ def _run_sort_key(item: tuple[Path, dict[str, Any]]) -> str:
     return str(value) if value else path.name
 
 
-def list_runs(*, cwd: Path, runs_dir: Path | None = None, limit: int = 10) -> int:
-    if limit < 1:
-        print("error: --limit must be a positive integer", file=sys.stderr)
-        return 2
-
-    cwd = cwd.expanduser().resolve()
-    if not cwd.is_dir():
-        print(f"error: --cwd is not a directory: {cwd}", file=sys.stderr)
-        return 2
-    root = runs_dir.expanduser() if runs_dir is not None else cwd / ".brigade" / "runs"
-    if not root.is_dir():
-        print(f"error: runs directory not found: {root}", file=sys.stderr)
-        return 2
-
+def _collect_runs(root: Path) -> tuple[list[tuple[Path, dict[str, Any]]], int]:
     runs: list[tuple[Path, dict[str, Any]]] = []
     skipped = 0
     for child in root.iterdir():
@@ -146,8 +133,25 @@ def list_runs(*, cwd: Path, runs_dir: Path | None = None, limit: int = 10) -> in
             skipped += 1
             continue
         runs.append((child, meta))
-
     runs.sort(key=_run_sort_key, reverse=True)
+    return runs, skipped
+
+
+def list_runs(*, cwd: Path, runs_dir: Path | None = None, limit: int = 10) -> int:
+    if limit < 1:
+        print("error: --limit must be a positive integer", file=sys.stderr)
+        return 2
+
+    cwd = cwd.expanduser().resolve()
+    if not cwd.is_dir():
+        print(f"error: --cwd is not a directory: {cwd}", file=sys.stderr)
+        return 2
+    root = runs_dir.expanduser() if runs_dir is not None else cwd / ".brigade" / "runs"
+    if not root.is_dir():
+        print(f"error: runs directory not found: {root}", file=sys.stderr)
+        return 2
+
+    runs, skipped = _collect_runs(root)
     for path, meta in runs[:limit]:
         status = meta.get("status", "unknown")
         started = meta.get("started_at", path.name)
@@ -165,6 +169,25 @@ def list_runs(*, cwd: Path, runs_dir: Path | None = None, limit: int = 10) -> in
     if skipped:
         print(f"skipped {skipped} invalid run director{'y' if skipped == 1 else 'ies'}", file=sys.stderr)
     return 0
+
+
+def show_latest(*, cwd: Path, runs_dir: Path | None = None) -> int:
+    cwd = cwd.expanduser().resolve()
+    if not cwd.is_dir():
+        print(f"error: --cwd is not a directory: {cwd}", file=sys.stderr)
+        return 2
+    root = runs_dir.expanduser() if runs_dir is not None else cwd / ".brigade" / "runs"
+    if not root.is_dir():
+        print(f"error: runs directory not found: {root}", file=sys.stderr)
+        return 2
+
+    runs, skipped = _collect_runs(root)
+    if skipped:
+        print(f"skipped {skipped} invalid run director{'y' if skipped == 1 else 'ies'}", file=sys.stderr)
+    if not runs:
+        print(f"error: no runs found in {root}", file=sys.stderr)
+        return 1
+    return show(runs[0][0])
 
 
 def show(run_dir: Path) -> int:
