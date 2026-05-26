@@ -83,6 +83,112 @@ brigade init --target ./repo --harnesses none           # generic install
 
 Once installed, `brigade doctor` verifies the wiring and `brigade status` reports over the station registry.
 
+## Run a brigade
+
+`brigade run "<task>"` is the aboyeur path: one orchestrator plans the work, Brigade dispatches the assigned workers through their own CLIs, then the orchestrator synthesizes the final answer. It is intentionally bounded: two orchestrator calls plus the worker calls in the plan.
+
+Start with a roster:
+
+```bash
+brigade roster init
+brigade roster doctor
+```
+
+That writes `.brigade/roster.toml` with a Codex orchestrator, a Codex coder, and an optional Ollama local researcher:
+
+```toml
+orchestrator = "chef"
+
+[agents.chef]
+cli = "codex"
+role = "Plan the work, choose useful workers, and synthesize the final answer."
+
+[agents.local_researcher]
+cli = "ollama:llama3.3"
+role = "Research locally and summarize useful findings."
+timeout_seconds = 300
+
+[agents.coder]
+cli = "codex"
+role = "Make precise code changes and report what changed."
+
+[limits]
+max_workers = 4
+timeout_seconds = 600
+allow_models = ["codex", "ollama:*"]
+```
+
+Edit the roles, CLI refs, and timeouts to match the tools on your machine. `limits.timeout_seconds` is the default per-agent timeout; `agents.<name>.timeout_seconds` overrides it for one agent. Then run:
+
+```bash
+brigade run "review this repo and suggest the next implementation step"
+brigade run "plan the migration" --dry-run
+brigade run "review this repo" --show-plan
+brigade run "review this repo" --verbose
+brigade run "review this repo" --cwd /path/to/repo
+brigade run "review this repo" --handoff
+brigade run "review this repo" --read-only
+brigade run "review this repo" --read-only --inspect
+brigade dogfood init --target /path/to/repo
+brigade dogfood
+brigade dogfood --target /path/to/repo
+```
+
+`--dry-run` prints the planned assignments as JSON and stops before worker dispatch. `--show-plan` prints assignments before a normal run. `--verbose` prints the plan, worker statuses, and synthesis status. `--cwd` sets the working directory for the agent CLI calls and defaults to the current directory. `--handoff` writes a Memory Handoff for a successful non-dry run. `--inspect` prints the same readable artifact summary as `brigade runs show` after the run completes. `--read-only` tells the orchestrator and workers to inspect and recommend only, without modifying files or external state. For `codex` agents, Brigade also passes `codex exec --sandbox read-only`; other adapters receive the prompt policy only. The `cli` values are adapters for installed command-line tools: `codex`, `claude`, and `ollama:<model>`. Pick the ones you already use. Brigade shells out to those tools and keeps no provider keys. `brigade roster doctor` validates the roster syntax and reports which CLIs are present on `PATH`.
+
+`brigade dogfood` is the shortcut for using Brigade on itself or another trusted repo. It uses a built-in Codex-only roster, runs with prompt-level read-only instructions, shows the plan, writes normal run artifacts, writes a Memory Handoff by default, and prints the artifact summary afterward. Run `brigade dogfood init --target /path/to/repo` once to write local defaults to `.brigade/dogfood.toml`; that file is gitignored because it captures machine-local paths and preferences. After that, `brigade dogfood` from the repo is the one-command daily path, and `brigade dogfood "review today's changes"` overrides only the task. Dogfood defaults to a 600 second per-agent timeout because full repo review can exceed short smoke-test limits. By default it passes Codex's `danger-full-access` sandbox setting for trusted-workspace use so repo inspection works on hosts where native read-only sandboxing blocks shell inspection. Use `--no-handoff` or `--no-inspect` to turn off those last two steps. Use `--native-read-only-sandbox` when the host supports Codex's native read-only sandbox and you want that additional enforcement.
+
+CLI runs write artifacts by default under `.brigade/runs/<id>` below `--cwd`; dogfood runs use `.brigade/runs/<id>` below the configured target:
+
+| File | Contents |
+|---|---|
+| `run.json` | task, cwd, orchestrator, mode flags, status, artifact path, handoff path, timestamps, and duration |
+| `roster.json` | effective orchestrator, agents, limits, allow-list, and timeouts |
+| `plan-attempts.json` | raw planner outputs, parse status, and parse errors from initial/correction attempts |
+| `plan.json` | parsed worker assignments |
+| `worker-results.json` | worker status, details, and text output for non-dry runs |
+| `synthesis.json` | orchestrator synthesis status, detail, and raw text for non-dry runs |
+| `final.txt` | final synthesized answer for non-dry runs |
+
+Use `--output-dir <path>` to pick the artifact directory, or `--no-artifacts` for a throwaway run.
+
+Inspect a completed run without opening each JSON file:
+
+```bash
+brigade runs list --cwd /path/to/repo
+brigade runs show .brigade/runs/<run-id>
+```
+
+Use `--handoff` to bridge a completed run back into the memory system. By default it writes a reviewable handoff to `.claude/memory-handoffs/` under `--cwd`; override with `--handoff-inbox <path>`. The handoff targets `.learnings/LEARNINGS.md` as a `no-card` document update, so the normal `brigade ingest` route can review or ingest it. If handoff writing fails after synthesis, Brigade still prints the final answer and keeps the final artifacts, but exits nonzero and marks `run.json` as `handoff-failed`. `--handoff` is not allowed with `--dry-run` because dry runs have no final answer.
+
+Live smoke test, using a temporary Codex-only roster:
+
+```bash
+tmpdir=$(mktemp -d)
+smoke_cwd=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
+mkdir -p "$tmpdir/.brigade"
+cat > "$tmpdir/.brigade/roster.toml" <<'EOF'
+orchestrator = "chef"
+
+[agents.chef]
+cli = "codex"
+role = "Plan one small read-only task and synthesize a one-sentence final answer."
+
+[agents.coder]
+cli = "codex"
+role = "Return exactly this sentence, with no shell commands and no extra prose: Brigade full dispatch integration worker succeeded."
+
+[limits]
+max_workers = 1
+allow_models = ["codex"]
+EOF
+
+brigade roster doctor --target "$tmpdir"
+timeout 360 brigade run "Integration test: assign the coder worker to return its required success sentence, then synthesize one sentence saying the full Brigade dispatch path succeeded." --roster "$tmpdir/.brigade/roster.toml" --cwd "$smoke_cwd" --output-dir "$tmpdir/run" --handoff --handoff-inbox "$tmpdir/handoffs" --show-plan --read-only
+```
+
+Codex may require `--cwd` to be a trusted git repo, so the smoke keeps the roster, artifacts, and handoff inbox in the temp directory while running the agent CLIs from `smoke_cwd`. Live runs invoke authenticated model CLIs and may consume whatever quota or subscription those CLIs use. `--dry-run` still invokes the orchestrator, but it does not dispatch workers or synthesize.
+
 ## Two axes: depth + harnesses
 
 brigade installs material on two independent axes:

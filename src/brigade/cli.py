@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 
 from . import __version__
+from .dogfood_cmd import DEFAULT_TIMEOUT_SECONDS
 from .prompt import prompt_for_selection  # imported here so tests can monkeypatch cli.prompt_for_selection
 
 
@@ -80,6 +81,121 @@ def _build_parser() -> argparse.ArgumentParser:
     p_add = sub.add_parser("add", help="Install and wire a station's managed tools.")
     p_add.add_argument("station", help="Station to add tools for (e.g. memory, guard, tokens).")
     p_add.add_argument("--target", "-t", type=Path, default=Path("."))
+
+    # dogfood
+    p_dogfood = sub.add_parser("dogfood", help="Run a safe Codex-only Brigade dogfood review.")
+    p_dogfood.add_argument(
+        "dogfood_args",
+        nargs="*",
+        help="Dogfood task, or `init` to write local dogfood defaults.",
+    )
+    p_dogfood.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_dogfood.add_argument("--output-dir", type=Path, default=None, help="Directory for run artifacts.")
+    p_dogfood.add_argument(
+        "--handoff-inbox",
+        type=Path,
+        default=None,
+        help="Memory Handoff inbox. Defaults to .claude/memory-handoffs under --target.",
+    )
+    p_dogfood.add_argument("--force", action="store_true", help="Overwrite an existing dogfood config during init.")
+    p_dogfood.add_argument("--no-handoff", action="store_true", help="Do not write a Memory Handoff.")
+    p_dogfood.add_argument("--no-inspect", action="store_true", help="Do not print the artifact summary afterward.")
+    p_dogfood.add_argument(
+        "--native-read-only-sandbox",
+        action="store_true",
+        help="Use Codex's native read-only sandbox instead of dogfood's default trusted-workspace danger-full-access setting.",
+    )
+    p_dogfood.add_argument("--timeout-seconds", type=float, default=DEFAULT_TIMEOUT_SECONDS, help="Per-agent timeout.")
+
+    # run
+    p_run = sub.add_parser("run", help="Run a bounded cross-model orchestration task.")
+    p_run.add_argument("task", help="Task for the aboyeur to plan, dispatch, and synthesize.")
+    p_run.add_argument(
+        "--roster",
+        type=Path,
+        default=None,
+        help="Path to roster.toml. Defaults to .brigade/roster.toml under the current directory.",
+    )
+    p_run.add_argument("--dry-run", action="store_true", help="Print the plan without dispatching workers.")
+    p_run.add_argument("--show-plan", action="store_true", help="Print parsed assignments before dispatch.")
+    p_run.add_argument("--verbose", action="store_true", help="Print plan, worker status, and synthesis status.")
+    p_run.add_argument(
+        "--read-only",
+        action="store_true",
+        help="Tell agents to inspect and recommend only, without modifying files or external state.",
+    )
+    p_run.add_argument(
+        "--inspect",
+        action="store_true",
+        help="Print a readable artifact summary after the run completes.",
+    )
+    p_run.add_argument(
+        "--cwd",
+        type=Path,
+        default=Path("."),
+        help="Working directory for agent CLI calls and default run artifacts.",
+    )
+    p_run.add_argument(
+        "--output-dir",
+        type=Path,
+        default=None,
+        help="Directory for run artifacts. Defaults to .brigade/runs/<id> under --cwd.",
+    )
+    p_run.add_argument("--no-artifacts", action="store_true", help="Do not write run artifacts.")
+    p_run.add_argument(
+        "--handoff",
+        action="store_true",
+        help="Write a Memory Handoff for a successful non-dry run.",
+    )
+    p_run.add_argument(
+        "--handoff-inbox",
+        type=Path,
+        default=None,
+        help="Memory Handoff inbox. Defaults to .claude/memory-handoffs under --cwd.",
+    )
+
+    # roster
+    p_roster = sub.add_parser("roster", help="Create and check aboyeur rosters.")
+    roster_sub = p_roster.add_subparsers(dest="roster_command", metavar="<roster-command>")
+    roster_sub.required = True
+    p_roster_init = roster_sub.add_parser("init", help="Write a starter .brigade/roster.toml.")
+    p_roster_init.add_argument("--target", "-t", type=Path, default=Path("."))
+    p_roster_init.add_argument("--force", action="store_true", help="Overwrite an existing roster.")
+    p_roster_init.add_argument(
+        "--ollama-model",
+        default="llama3.3",
+        help="Default local researcher model for the starter roster.",
+    )
+    p_roster_init.add_argument("--max-workers", type=int, default=4)
+    p_roster_doctor = roster_sub.add_parser("doctor", help="Validate roster syntax and installed CLIs.")
+    p_roster_doctor.add_argument("--target", "-t", type=Path, default=Path("."))
+    p_roster_doctor.add_argument(
+        "--roster",
+        type=Path,
+        default=None,
+        help="Path to roster.toml. Defaults to .brigade/roster.toml under --target.",
+    )
+
+    # runs
+    p_runs = sub.add_parser("runs", help="Inspect Brigade run artifacts.")
+    runs_sub = p_runs.add_subparsers(dest="runs_command", metavar="<runs-command>")
+    runs_sub.required = True
+    p_runs_list = runs_sub.add_parser("list", help="List recent Brigade run directories.")
+    p_runs_list.add_argument(
+        "--cwd",
+        type=Path,
+        default=Path("."),
+        help="Workspace whose default .brigade/runs directory should be listed.",
+    )
+    p_runs_list.add_argument(
+        "--runs-dir",
+        type=Path,
+        default=None,
+        help="Explicit runs directory. Defaults to .brigade/runs under --cwd.",
+    )
+    p_runs_list.add_argument("--limit", type=int, default=10, help="Maximum number of runs to show.")
+    p_runs_show = runs_sub.add_parser("show", help="Show a readable summary of one run directory.")
+    p_runs_show.add_argument("run_dir", type=Path, help="Path to a Brigade run artifact directory.")
 
     # scrub
     p_scrub = sub.add_parser("scrub", help="Run content-guard against a target.")
@@ -200,6 +316,108 @@ def main(argv=None) -> int:
         from . import add as add_mod
 
         return add_mod.run(target=args.target, station=args.station)
+    if cmd == "dogfood":
+        from . import dogfood_cmd
+
+        dogfood_args = list(args.dogfood_args)
+        if dogfood_args and dogfood_args[0] == "init":
+            if len(dogfood_args) > 1:
+                print("error: dogfood init does not accept a task argument", file=sys.stderr)
+                return 2
+            return dogfood_cmd.init(
+                target=args.target,
+                artifacts_dir=args.output_dir,
+                handoff_inbox=args.handoff_inbox,
+                force=args.force,
+                handoff=not args.no_handoff,
+                inspect=not args.no_inspect,
+                native_read_only_sandbox=args.native_read_only_sandbox,
+                timeout_seconds=args.timeout_seconds,
+            )
+        task = " ".join(dogfood_args) if dogfood_args else None
+        return dogfood_cmd.run(
+            task,
+            target=args.target,
+            output_dir=args.output_dir,
+            handoff=not args.no_handoff,
+            handoff_inbox=args.handoff_inbox,
+            inspect=not args.no_inspect,
+            native_read_only_sandbox=args.native_read_only_sandbox,
+            timeout_seconds=args.timeout_seconds,
+        )
+    if cmd == "run":
+        from . import aboyeur as aboyeur_mod
+        from . import roster as roster_mod
+
+        run_cwd = args.cwd.expanduser().resolve()
+        if not run_cwd.is_dir():
+            print(f"error: --cwd is not a directory: {run_cwd}", file=sys.stderr)
+            return 2
+        if args.handoff and args.dry_run:
+            print("error: --handoff cannot be used with --dry-run", file=sys.stderr)
+            return 2
+        if args.inspect and args.no_artifacts:
+            print("error: --inspect cannot be used with --no-artifacts", file=sys.stderr)
+            return 2
+        roster_path = args.roster or (run_cwd / ".brigade" / "roster.toml")
+        try:
+            loaded_roster = roster_mod.load_roster(roster_path)
+        except FileNotFoundError:
+            print(
+                f"error: roster not found: {roster_path}. Create .brigade/roster.toml or pass --roster.",
+                file=sys.stderr,
+            )
+            return 2
+        except ValueError as exc:
+            print(f"error: invalid roster: {exc}", file=sys.stderr)
+            return 2
+        output_dir = None
+        if not args.no_artifacts:
+            output_dir = args.output_dir or aboyeur_mod.make_run_dir(run_cwd / ".brigade" / "runs")
+        handoff_inbox = None
+        if args.handoff:
+            handoff_inbox = args.handoff_inbox or (run_cwd / ".claude" / "memory-handoffs")
+        rc = aboyeur_mod.run(
+            args.task,
+            loaded_roster,
+            dry_run=args.dry_run,
+            show_plan=args.show_plan,
+            verbose=args.verbose,
+            cwd=run_cwd,
+            output_dir=output_dir,
+            handoff_inbox=handoff_inbox,
+            read_only=args.read_only,
+        )
+        if output_dir is not None:
+            print(f"artifacts: {output_dir}", file=sys.stderr)
+            if args.inspect:
+                from . import runs_cmd
+
+                runs_cmd.show(output_dir)
+        return rc
+    if cmd == "roster":
+        from . import roster_cmd
+
+        if args.roster_command == "init":
+            return roster_cmd.init(
+                target=args.target,
+                force=args.force,
+                ollama_model=args.ollama_model,
+                max_workers=args.max_workers,
+            )
+        if args.roster_command == "doctor":
+            return roster_cmd.doctor(target=args.target, roster_path=args.roster)
+        parser.error(f"unknown roster command: {args.roster_command}")
+        return 2
+    if cmd == "runs":
+        from . import runs_cmd
+
+        if args.runs_command == "list":
+            return runs_cmd.list_runs(cwd=args.cwd, runs_dir=args.runs_dir, limit=args.limit)
+        if args.runs_command == "show":
+            return runs_cmd.show(args.run_dir)
+        parser.error(f"unknown runs command: {args.runs_command}")
+        return 2
     if cmd == "scrub":
         from . import scrub as scrub_mod
 

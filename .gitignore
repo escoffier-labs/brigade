@@ -41,9 +41,9 @@ Thumbs.db
 *.bak
 *.tmp
 
-# >>> solo-mise gitignore block >>>
-# Managed by `solo-mise init`. Edit between the markers to customize.
-# Re-running `solo-mise init` replaces only the content between markers.
+# >>> brigade gitignore block >>>
+# Managed by `brigade init`. Edit between the markers to customize.
+# Re-running `brigade init` replaces only the content between markers.
 
 # Memory handoffs are session-local and may contain private context
 # (commands run, file paths, error strings). The TEMPLATE.md is the
@@ -59,7 +59,11 @@ memory/20[0-9][0-9]-[0-1][0-9]-[0-3][0-9].md
 # Review inbox: ambiguous handoffs awaiting human triage. Private.
 memory/handoff-inbox/
 
-# solo-mise local state (logs, scrub cache).
+# brigade local state (logs, scrub cache, dogfood runs).
+.brigade/dogfood.toml
+.brigade/logs/
+.brigade/runs/
+.brigade/scrub-cache/
 .solo-mise/logs/
 .solo-mise/scrub-cache/
-# <<< solo-mise gitignore block <<<
+# <<< brigade gitignore block <<<

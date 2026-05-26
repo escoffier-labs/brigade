@@ -25,6 +25,8 @@ def test_init_creates_gitignore_when_missing(tmp_target: Path):
     assert ".claude/memory-handoffs/*" in gi
     assert "!.claude/memory-handoffs/TEMPLATE.md" in gi
     assert "memory/handoff-inbox/" in gi
+    assert ".brigade/dogfood.toml" in gi
+    assert ".brigade/runs/" in gi
 
 
 def test_init_appends_block_to_existing_gitignore(tmp_target: Path):
@@ -102,6 +104,8 @@ def test_gitignore_block_includes_claude_section_when_selected():
     block = build_gitignore_block(sel)
     assert ".claude/memory-handoffs/*" in block
     assert "!.claude/memory-handoffs/TEMPLATE.md" in block
+    assert ".brigade/dogfood.toml" in block
+    assert ".brigade/runs/" in block
     assert ".codex/memory-handoffs" not in block
 
 
@@ -129,3 +133,5 @@ def test_install_writes_gitignore_block(tmp_path):
     assert "# >>> brigade gitignore block >>>" in gi
     assert ".claude/memory-handoffs/*" in gi
     assert ".codex/memory-handoffs/*" in gi
+    assert ".brigade/dogfood.toml" in gi
+    assert ".brigade/runs/" in gi

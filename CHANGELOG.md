@@ -5,6 +5,35 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- `brigade run "<task>"`, a bounded aboyeur flow that asks one rostered orchestrator to plan assignments, dispatches worker CLIs in parallel, then asks the orchestrator to synthesize the final answer.
+- `.brigade/roster.toml` loading for cross-model agent rosters using the user's installed CLIs (`codex`, `claude`, or `ollama:<model>`). Claude is optional, not required.
+- `brigade roster init` and `brigade roster doctor` to scaffold a Codex/Ollama starter roster and validate roster syntax plus installed CLI availability.
+- `brigade dogfood` for a built-in Codex-only, prompt-level read-only, inspected run with artifacts and optional handoff.
+- `brigade dogfood init` to persist machine-local dogfood defaults in gitignored `.brigade/dogfood.toml`, enabling a one-command daily `brigade dogfood` path.
+- `brigade run --show-plan` and `--verbose` visibility modes, plus defensive runtime enforcement of roster `allow_models`.
+- `brigade run --inspect` to print a readable artifact summary immediately after a run completes.
+- `brigade run --cwd`, `--output-dir`, and default `.brigade/runs/<id>` artifacts for dogfooding auditable runs.
+- Start, finish, and duration metadata in `run.json` artifacts.
+- `roster.json` run artifacts that capture the effective orchestrator, agents, limits, allow-list, and timeouts for later review.
+- `plan-attempts.json` run artifacts that capture raw planner outputs and parse errors for debugging failed planning runs.
+- `synthesis.json` run artifacts that capture orchestrator synthesis status, detail, and raw text for non-dry runs.
+- Successful `--handoff` runs now record the written handoff path in `run.json`.
+- `brigade run --handoff` to write a Memory Handoff for successful runs, with `--handoff-inbox` override.
+- `brigade runs list` to print recent run artifact directories from `.brigade/runs`.
+- `brigade runs show <run-dir>` to print a readable summary of one run artifact directory.
+- Roster-level and per-agent `timeout_seconds` controls for bounded CLI calls.
+- `brigade run --read-only` prompt policy for planning and review runs that should inspect and recommend only, with native `codex exec --sandbox read-only` enforcement for Codex agents.
+
+### Changed
+- Dogfood runs now default to a 600 second per-agent timeout for practical daily repo reviews.
+- The managed gitignore block now treats `.brigade/dogfood.toml` and `.brigade/runs/` as local state.
+- Live smoke docs now keep Codex agent execution in a trusted repo cwd while writing temporary roster, artifacts, and handoff output under `/tmp`.
+- Handoff write failures now preserve final run artifacts, print the final answer, return nonzero, and mark `run.json` as `handoff-failed`.
+- Dogfood runs default to prompt-level read-only plus Codex's `danger-full-access` sandbox setting for trusted-workspace use so repo inspection works on hosts where native read-only sandboxing blocks shell inspection; `--native-read-only-sandbox` opts into stricter native enforcement.
+
 ## [0.6.0] - 2026-05-24
 
 ### Added
