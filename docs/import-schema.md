@@ -11,11 +11,14 @@ brigade work import validate imports.jsonl
 brigade work import ingest imports.jsonl
 brigade work import memory-care
 brigade work import chat-sweep
+brigade work inbox
 brigade work import triage
+brigade work import plan <import-id>
+brigade work import promote --run <import-id>
 brigade work import promote --all --source memory-care --kind task
 ```
 
-`validate` checks a JSONL file without writing. `ingest` appends valid records into `.brigade/work/imports/inbox.jsonl`, skipping duplicate pending records with the same source, kind, and normalized text. `memory-care` reads `memory/cards/decay/refresh-queue.json` and converts queued cards into task imports. `chat-sweep` reads `.brigade/chat-memory-sweeps/latest.json` and converts sweep `issues` into incident-oriented imports.
+`validate` checks a JSONL file without writing. `ingest` appends valid records into `.brigade/work/imports/inbox.jsonl`, skipping duplicate pending records with the same source, kind, and normalized text. `inbox` groups pending imports for daily review. `plan` previews the task a reviewed import would create. `promote --run` promotes one task import and immediately runs it through the normal work-session loop. `memory-care` reads `memory/cards/decay/refresh-queue.json` and converts queued cards into task imports. `chat-sweep` reads `.brigade/chat-memory-sweeps/latest.json` and converts sweep `issues` into incident-oriented imports.
 
 ## Record Shape
 

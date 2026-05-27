@@ -169,6 +169,10 @@ def _build_parser() -> argparse.ArgumentParser:
     p_work_brief.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
     p_work_brief.add_argument("--limit", type=int, default=3, help="Maximum recent sessions to include.")
     p_work_brief.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_work_inbox = work_sub.add_parser("inbox", help="Review scanner-ready work imports.")
+    p_work_inbox.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_work_inbox.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_work_inbox.add_argument("--limit", type=int, default=20, help="Maximum imports to show.")
     p_work_next = work_sub.add_parser("next", help="Show the next daily work task and suggested command.")
     p_work_next.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
     p_work_next.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
@@ -248,6 +252,10 @@ def _build_parser() -> argparse.ArgumentParser:
     p_work_import_ingest.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
     p_work_import_ingest.add_argument("--dry-run", action="store_true", help="Validate and report without writing imports.")
     p_work_import_ingest.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_work_import_plan = import_sub.add_parser("plan", help="Preview the task or action a work import would create.")
+    p_work_import_plan.add_argument("import_id", help="Import id or unique prefix.")
+    p_work_import_plan.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_work_import_plan.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_work_import_memory_care = import_sub.add_parser("memory-care", help="Import memory-care refresh queue entries.")
     p_work_import_memory_care.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
     p_work_import_memory_care.add_argument(
@@ -296,6 +304,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p_work_import_promote.add_argument("--source", default=None, help="Limit --all promotion to one source.")
     p_work_import_promote.add_argument("--metadata", action="append", default=[], help="Limit --all promotion by metadata key=value. May be repeated.")
+    p_work_import_promote.add_argument("--run", action="store_true", help="Promote one task import and immediately run it.")
     p_work_import_dismiss = import_sub.add_parser("dismiss", help="Dismiss one pending work import.")
     p_work_import_dismiss.add_argument("import_id", nargs="?", help="Import id or unique prefix.")
     p_work_import_dismiss.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
@@ -761,6 +770,8 @@ def main(argv=None) -> int:
             return work_cmd.resume(target=args.target)
         if args.work_command == "brief":
             return work_cmd.brief(target=args.target, limit=args.limit, json_output=args.json)
+        if args.work_command == "inbox":
+            return work_cmd.inbox(target=args.target, json_output=args.json, limit=args.limit)
         if args.work_command == "next":
             return work_cmd.next(target=args.target, json_output=args.json)
         if args.work_command == "tasks":
@@ -814,6 +825,8 @@ def main(argv=None) -> int:
                     dry_run=args.dry_run,
                     json_output=args.json,
                 )
+            if args.import_command == "plan":
+                return work_cmd.import_plan(target=args.target, import_id=args.import_id, json_output=args.json)
             if args.import_command == "memory-care":
                 return work_cmd.import_memory_care(
                     target=args.target,
@@ -847,6 +860,7 @@ def main(argv=None) -> int:
                     kind=args.kind,
                     source=args.source,
                     metadata=args.metadata,
+                    run_after=args.run,
                 )
             if args.import_command == "dismiss":
                 return work_cmd.import_dismiss(

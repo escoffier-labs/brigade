@@ -85,6 +85,9 @@ TASK_TEMPLATES: dict[str, dict[str, tuple[str, ...]]] = {
     },
 }
 ACTIVE_SESSION_STALE_HOURS = 24
+IMPORT_STALE_HOURS = 72
+DISMISSED_SOURCE_WARN_THRESHOLD = 5
+PRIORITY_RANK = {"urgent": 0, "high": 1, "normal": 2, "low": 3}
 ISSUE_ACCEPTANCE_HEADINGS = {
     "acceptance",
     "acceptance criteria",
@@ -334,6 +337,95 @@ def _task_summary(task: dict[str, Any]) -> dict[str, Any]:
     if issue:
         summary["issue"] = issue
     return summary
+
+
+def _import_task_acceptance(item: dict[str, Any]) -> list[str]:
+    template = item.get("template") if isinstance(item.get("template"), str) else None
+    acceptance = item.get("acceptance") if isinstance(item.get("acceptance"), list) else []
+    return _combined_acceptance(template if template in TASK_TEMPLATES else None, acceptance)
+
+
+def _import_task_type(item: dict[str, Any]) -> str:
+    return _normalize_task_type(item.get("type"))
+
+
+def _import_task_priority(item: dict[str, Any]) -> str:
+    return _normalize_task_priority(item.get("priority"))
+
+
+def _import_task_template(item: dict[str, Any]) -> str | None:
+    template = item.get("template")
+    return template if isinstance(template, str) and template in TASK_TEMPLATES else None
+
+
+def _import_summary(item: dict[str, Any], *, now: datetime | None = None) -> dict[str, Any]:
+    created_at = item.get("created_at")
+    created_dt = _parse_iso_datetime(created_at)
+    age_hours = None
+    if created_dt is not None:
+        age_hours = ((now or _now()) - created_dt).total_seconds() / 3600
+    summary: dict[str, Any] = {
+        "id": item.get("id"),
+        "text": str(item.get("text") or ""),
+        "kind": item.get("kind", "task"),
+        "source": item.get("source", "manual"),
+        "status": item.get("status", "pending"),
+        "created_at": created_at,
+        "updated_at": item.get("updated_at"),
+        "age_hours": round(age_hours, 2) if age_hours is not None else None,
+        "metadata": item.get("metadata") if isinstance(item.get("metadata"), dict) else {},
+    }
+    if item.get("kind") == "task":
+        acceptance = _import_task_acceptance(item)
+        summary.update(
+            {
+                "type": _import_task_type(item),
+                "priority": _import_task_priority(item),
+                "template": _import_task_template(item),
+                "acceptance": acceptance,
+                "acceptance_count": len(acceptance),
+                "acceptance_missing": len(acceptance) == 0,
+            }
+        )
+    return summary
+
+
+def _task_preview_from_import(item: dict[str, Any]) -> dict[str, Any]:
+    metadata: dict[str, Any] = {
+        "import_id": item.get("id"),
+        "import_kind": item.get("kind"),
+        "import_source": item.get("source"),
+    }
+    item_metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+    metadata.update(item_metadata)
+    template = _import_task_template(item)
+    return {
+        "text": str(item.get("text") or "").strip(),
+        "source": f"import:{item.get('source') or 'manual'}",
+        "type": _import_task_type(item),
+        "priority": _import_task_priority(item),
+        "template": template,
+        "acceptance": _import_task_acceptance(item),
+        "metadata": metadata,
+    }
+
+
+def _scanner_candidate(imports: list[dict[str, Any]]) -> dict[str, Any] | None:
+    candidates = [
+        item
+        for item in imports
+        if item.get("kind") == "task" and isinstance(item.get("text"), str) and item["text"].strip()
+    ]
+    if not candidates:
+        return None
+    candidates.sort(
+        key=lambda item: (
+            0 if _import_task_acceptance(item) else 1,
+            PRIORITY_RANK.get(_import_task_priority(item), 2),
+            str(item.get("created_at") or item.get("id") or ""),
+        )
+    )
+    return candidates[0]
 
 
 def _task_snapshot(task: dict[str, Any]) -> dict[str, Any]:
@@ -1466,6 +1558,7 @@ def _brief_payload(target: Path, *, limit: int = 3) -> dict[str, Any]:
     pending = _pending_tasks(target)
     pending_imports = _pending_imports(target)
     pending_import_counts = _import_counts(pending_imports)
+    scanner_candidate = _scanner_candidate(pending_imports)
     handoff_issues = handoff_cmd.collect_issues(target)
     known_handoff_issue_ids = handoff_cmd._known_local_issue_ids(target)
     new_handoff_issues = [issue for issue in handoff_issues if issue.id not in known_handoff_issue_ids]
@@ -1481,6 +1574,7 @@ def _brief_payload(target: Path, *, limit: int = 3) -> dict[str, Any]:
         "imports_path": str(_imports_path(target)),
         "pending_imports": pending_imports,
         "pending_import_counts": pending_import_counts,
+        "scanner_candidate": _import_summary(scanner_candidate) if scanner_candidate else None,
         "handoff_issues": {
             "count": len(new_handoff_issues),
             "known_count": len(handoff_issues) - len(new_handoff_issues),
@@ -1991,6 +2085,19 @@ def brief(*, target: Path, limit: int = 3, json_output: bool = False) -> int:
             print(f"  - {item.get('id')} [{kind}] {source}: {_short(str(item.get('text', '')))}")
         if len(pending_imports) > 5:
             print(f"  ... {len(pending_imports) - 5} more")
+    scanner_candidate = payload.get("scanner_candidate")
+    if isinstance(scanner_candidate, dict):
+        print(f"scanner_next_import: {scanner_candidate.get('id')}")
+        print(f"scanner_next_source: {scanner_candidate.get('source')}")
+        print(f"scanner_next_kind: {scanner_candidate.get('kind')}")
+        if scanner_candidate.get("kind") == "task":
+            print(
+                "scanner_next_task: "
+                f"[{scanner_candidate.get('type')} {scanner_candidate.get('priority')} "
+                f"acceptance={scanner_candidate.get('acceptance_count')}] "
+                f"{_short(str(scanner_candidate.get('text', '')))}"
+            )
+            print(f"scanner_next_command: brigade work import plan {scanner_candidate.get('id')}")
 
     handoff_issues = payload.get("handoff_issues")
     if isinstance(handoff_issues, dict) and handoff_issues.get("count"):
@@ -2686,6 +2793,106 @@ def import_triage(
     return 0
 
 
+def _inbox_payload(target: Path) -> dict[str, Any]:
+    target = target.expanduser().resolve()
+    pending = _pending_imports(target)
+    now = _now()
+    summaries = [_import_summary(item, now=now) for item in pending]
+    by_source: dict[str, int] = {}
+    by_kind: dict[str, int] = {}
+    by_priority: dict[str, int] = {}
+    acceptance = {"ready": 0, "missing": 0}
+    stale: list[dict[str, Any]] = []
+    for summary in summaries:
+        source = str(summary.get("source") or "manual")
+        kind = str(summary.get("kind") or "task")
+        by_source[source] = by_source.get(source, 0) + 1
+        by_kind[kind] = by_kind.get(kind, 0) + 1
+        if kind == "task":
+            priority = str(summary.get("priority") or "normal")
+            by_priority[priority] = by_priority.get(priority, 0) + 1
+            if summary.get("acceptance_missing"):
+                acceptance["missing"] += 1
+            else:
+                acceptance["ready"] += 1
+        age_hours = summary.get("age_hours")
+        if isinstance(age_hours, (int, float)) and age_hours > IMPORT_STALE_HOURS:
+            stale.append(summary)
+    candidate = _scanner_candidate(pending)
+    return {
+        "target": str(target),
+        "imports_path": str(_imports_path(target)),
+        "counts": {
+            "total": len(summaries),
+            "by_source": dict(sorted(by_source.items())),
+            "by_kind": dict(sorted(by_kind.items())),
+            "by_priority": dict(sorted(by_priority.items())),
+            "acceptance": acceptance,
+            "stale": len(stale),
+        },
+        "candidate": _import_summary(candidate, now=now) if candidate else None,
+        "imports": summaries,
+    }
+
+
+def inbox(*, target: Path, json_output: bool = False, limit: int = 20) -> int:
+    if limit < 1:
+        print("error: --limit must be a positive integer", file=sys.stderr)
+        return 2
+    target = target.expanduser().resolve()
+    if not target.is_dir():
+        print(f"error: --target is not a directory: {target}", file=sys.stderr)
+        return 2
+    payload = _inbox_payload(target)
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+    counts = payload["counts"]
+    print(f"work inbox: {target}")
+    print(f"imports_path: {payload['imports_path']}")
+    print(f"pending_imports: {counts['total']}")
+    if counts["by_source"]:
+        print("by_source:")
+        for source, count in counts["by_source"].items():
+            print(f"  {source}: {count}")
+    if counts["by_kind"]:
+        print("by_kind:")
+        for kind, count in counts["by_kind"].items():
+            print(f"  {kind}: {count}")
+    if counts["by_priority"]:
+        print("task_priorities:")
+        for priority, count in counts["by_priority"].items():
+            print(f"  {priority}: {count}")
+    acceptance = counts["acceptance"]
+    print(f"task_acceptance_ready: {acceptance['ready']}")
+    print(f"task_acceptance_missing: {acceptance['missing']}")
+    candidate = payload.get("candidate")
+    if isinstance(candidate, dict):
+        print("next:")
+        print(f"  import: {candidate.get('id')}")
+        print(f"  source: {candidate.get('source')}")
+        print(f"  kind: {candidate.get('kind')}")
+        if candidate.get("kind") == "task":
+            print(f"  priority: {candidate.get('priority')}")
+            print(f"  acceptance: {candidate.get('acceptance_count')}")
+        print(f"  text: {_short(str(candidate.get('text', '')))}")
+        print(f"  plan: brigade work import plan {candidate.get('id')}")
+        print(f"  promote: brigade work import promote {candidate.get('id')}")
+        if candidate.get("kind") == "task":
+            print(f"  run: brigade work import promote --run {candidate.get('id')}")
+    imports = payload.get("imports") if isinstance(payload.get("imports"), list) else []
+    if imports:
+        print("items:")
+        for item in imports[:limit]:
+            detail = f"[{item.get('kind')}] {item.get('source')}"
+            if item.get("kind") == "task":
+                detail += f" {item.get('priority')} acceptance={item.get('acceptance_count')}"
+            print(f"- {item.get('id')} {detail}: {_short(str(item.get('text', '')))}")
+        if len(imports) > limit:
+            print(f"... {len(imports) - limit} more")
+    return 0
+
+
 def import_show(*, target: Path, import_id: str) -> int:
     target = target.expanduser().resolve()
     if not target.is_dir():
@@ -2714,6 +2921,73 @@ def import_show(*, target: Path, import_id: str) -> int:
     return 0
 
 
+def _import_plan_payload(target: Path, import_id: str) -> tuple[dict[str, Any] | None, int]:
+    target = target.expanduser().resolve()
+    if not target.is_dir():
+        print(f"error: --target is not a directory: {target}", file=sys.stderr)
+        return None, 2
+    item, _ = _find_import(target, import_id)
+    if item is None:
+        print(f"error: import not found: {import_id}", file=sys.stderr)
+        return None, 1
+    summary = _import_summary(item)
+    payload: dict[str, Any] = {
+        "target": str(target),
+        "imports_path": str(_imports_path(target)),
+        "import": summary,
+        "suggested_promote_command": f"brigade work import promote {item.get('id')}",
+        "suggested_dismiss_command": f'brigade work import dismiss {item.get("id")} --reason "..."',
+    }
+    if item.get("kind") == "task":
+        task = _task_preview_from_import(item)
+        template = task.get("template") if isinstance(task.get("template"), str) else None
+        payload["task"] = task
+        if template:
+            payload["guidance"] = list(TASK_TEMPLATES.get(template, {}).get("guidance", ()))
+        payload["suggested_run_command"] = f"brigade work import promote --run {item.get('id')}"
+    return payload, 0
+
+
+def import_plan(*, target: Path, import_id: str, json_output: bool = False) -> int:
+    payload, rc = _import_plan_payload(target, import_id)
+    if payload is None:
+        return rc
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+    item = payload["import"]
+    print(f"import: {item.get('id')}")
+    print(f"status: {item.get('status')}")
+    print(f"kind: {item.get('kind')}")
+    print(f"source: {item.get('source')}")
+    print(f"text: {item.get('text')}")
+    metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+    if metadata:
+        print("metadata:")
+        for key in sorted(metadata):
+            print(f"  {key}: {metadata[key]}")
+    task = payload.get("task")
+    if isinstance(task, dict):
+        print("task:")
+        print(f"  type: {task.get('type')}")
+        print(f"  priority: {task.get('priority')}")
+        if task.get("template"):
+            print(f"  template: {task['template']}")
+        acceptance = task.get("acceptance") if isinstance(task.get("acceptance"), list) else []
+        print(f"  acceptance: {len(acceptance)}")
+        for criterion in acceptance:
+            print(f"    - {criterion}")
+    if payload.get("guidance"):
+        print("guidance:")
+        for item in payload["guidance"]:
+            print(f"  - {item}")
+    print(f"promote: {payload['suggested_promote_command']}")
+    if payload.get("suggested_run_command"):
+        print(f"run: {payload['suggested_run_command']}")
+    print(f"dismiss: {payload['suggested_dismiss_command']}")
+    return 0
+
+
 def import_promote(
     *,
     target: Path,
@@ -2722,6 +2996,7 @@ def import_promote(
     kind: str | None = None,
     source: str | None = None,
     metadata: list[str] | None = None,
+    run_after: bool = False,
 ) -> int:
     target = target.expanduser().resolve()
     if not target.is_dir():
@@ -2735,6 +3010,9 @@ def import_promote(
         return rc
     if all_matching and import_id:
         print("error: pass an import id or --all, not both", file=sys.stderr)
+        return 2
+    if run_after and all_matching:
+        print("error: --run can only be used with one import id", file=sys.stderr)
         return 2
     if all_matching:
         imports = _read_imports(target)
@@ -2778,6 +3056,9 @@ def import_promote(
     if item.get("status", "pending") != "pending":
         print(f"error: import is not pending: {item.get('id')} ({item.get('status')})", file=sys.stderr)
         return 2
+    if run_after and item.get("kind") != "task":
+        print(f"error: --run requires a task import: {item.get('id')}", file=sys.stderr)
+        return 2
     text = str(item.get("text") or "").strip()
     if not text:
         print(f"error: import has no text: {import_id}", file=sys.stderr)
@@ -2790,6 +3071,9 @@ def import_promote(
     print(f"created: {created}")
     print(f"acceptance: {len(_task_acceptance(task))}")
     print(f"text: {task['text']}")
+    if run_after:
+        print("run: starting")
+        return run(None, target=target, task_id=str(task["id"]))
     return 0
 
 
@@ -3042,6 +3326,7 @@ def run(
     task: str | None,
     *,
     target: Path,
+    task_id: str | None = None,
     title: str | None = None,
     output_dir: Path | None = None,
     handoff: bool = True,
@@ -3063,6 +3348,21 @@ def run(
         return 2
 
     resolved = _resolve_next_task(target)
+    if task_id is not None:
+        if task:
+            print("error: pass a task or task_id, not both", file=sys.stderr)
+            return 2
+        selected_task, _ = _find_task(target, task_id)
+        if selected_task is None or selected_task.get("status", "pending") != "pending":
+            print(f"error: pending task not found: {task_id}", file=sys.stderr)
+            return 1
+        resolved = {
+            "task": str(selected_task.get("text", "")).strip(),
+            "source": "task_ledger",
+            "task_id": selected_task.get("id"),
+            "ledger_task": selected_task,
+            "dogfood": _dogfood_snapshot(target),
+        }
     task_text = task or str(resolved["task"])
     consumed_task_id = resolved.get("task_id") if task is None and resolved.get("source") == "task_ledger" else None
     ledger_task = resolved.get("ledger_task") if consumed_task_id and isinstance(resolved.get("ledger_task"), dict) else None
@@ -3346,6 +3646,46 @@ def doctor(*, target: Path) -> int:
                 _doctor_line(OK, "github_issues", f"{len(issue_tasks)} issue-backed task(s) checked")
     else:
         _doctor_line(OK, "github_issues", "none")
+
+    pending_imports = _pending_imports(effective_target)
+    now = _now()
+    stale_imports = [
+        item
+        for item in pending_imports
+        if (created := _parse_iso_datetime(item.get("created_at"))) is not None
+        and (now - created).total_seconds() / 3600 > IMPORT_STALE_HOURS
+    ]
+    if stale_imports:
+        sample = ", ".join(str(item.get("id")) for item in stale_imports[:5])
+        _doctor_line(WARN, "scanner_imports_stale", f"{len(stale_imports)} pending import(s) older than {IMPORT_STALE_HOURS}h: {sample}")
+    else:
+        _doctor_line(OK, "scanner_imports_stale", "none")
+    task_imports_missing_acceptance = [
+        item
+        for item in pending_imports
+        if item.get("kind") == "task" and not _import_task_acceptance(item)
+    ]
+    if task_imports_missing_acceptance:
+        sample = ", ".join(str(item.get("id")) for item in task_imports_missing_acceptance[:5])
+        _doctor_line(WARN, "scanner_import_acceptance", f"{len(task_imports_missing_acceptance)} pending task import(s) missing acceptance criteria: {sample}")
+    else:
+        _doctor_line(OK, "scanner_import_acceptance", "pending task imports have acceptance criteria or no task imports are pending")
+    dismissed_by_source: dict[str, int] = {}
+    for item in _read_imports(effective_target):
+        if not isinstance(item, dict) or item.get("status") != "dismissed":
+            continue
+        source = str(item.get("source") or "manual")
+        dismissed_by_source[source] = dismissed_by_source.get(source, 0) + 1
+    noisy_sources = {
+        source: count
+        for source, count in dismissed_by_source.items()
+        if count >= DISMISSED_SOURCE_WARN_THRESHOLD
+    }
+    if noisy_sources:
+        detail = ", ".join(f"{source}={count}" for source, count in sorted(noisy_sources.items()))
+        _doctor_line(WARN, "scanner_import_noise", f"dismissed import threshold {DISMISSED_SOURCE_WARN_THRESHOLD}: {detail}")
+    else:
+        _doctor_line(OK, "scanner_import_noise", "none")
 
     handoff_inbox = (
         cfg.handoff_inbox

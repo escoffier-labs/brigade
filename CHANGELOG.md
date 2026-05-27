@@ -51,8 +51,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `brigade work run` now records consumed task snapshots in work-session artifacts and stores completed session, dogfood run, and acceptance metadata on completed ledger tasks.
 - `brigade work run --queue-next` to queue the successful run's extracted next step, with duplicate pending task protection.
 - `brigade work import add/list/show/promote` to manage a gitignored local import inbox for scanner-discovered candidate work.
+- `brigade work inbox` to group pending scanner imports by source, kind, priority, age, and acceptance coverage with suggested next commands.
 - `brigade work import validate` and `brigade work import ingest` for scanner-authored JSONL import files.
 - Scanner-authored task imports can now carry `type`, `priority`, `template`, and `acceptance`, and promotion preserves those fields on local ledger tasks.
+- `brigade work import plan <import-id>` to preview the exact task a reviewed import would create.
+- `brigade work import promote --run <import-id>` to promote one task import and immediately run it through the work-session loop.
 - `brigade work import memory-care` to convert `memory/cards/decay/refresh-queue.json` into local work imports.
 - `brigade work import chat-sweep` to convert `.brigade/chat-memory-sweeps/latest.json` issues into local work imports.
 - `brigade work import triage` to group pending imports by source and kind.
@@ -102,6 +105,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `brigade work brief` now includes pending local work imports and import counts in both text and JSON output.
 - `brigade work brief` now surfaces issue-backed next-task context.
 - `brigade work doctor` now warns on pending tasks without acceptance criteria, unchecked or closed issue-backed tasks, and active work sessions left open too long.
+- `brigade work doctor` now warns on stale scanner imports, task imports missing acceptance criteria, and noisy scanner sources with many dismissed imports.
 - `brigade work brief` now surfaces pending handoff ingest issue counts when the local handoff source config has an ingestor latest-run log.
 - The managed gitignore block now treats `.brigade/dogfood.toml`, `.brigade/security.toml`, `.brigade/runs/`, and `.brigade/security/` as local state.
 - The managed gitignore block now treats `.brigade/handoff-sources.json` as host-local state.

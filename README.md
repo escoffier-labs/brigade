@@ -166,6 +166,8 @@ brigade work doctor
 brigade work resume
 brigade work brief
 brigade work brief --json
+brigade work inbox
+brigade work inbox --json
 brigade work next
 brigade work next --json
 brigade work tasks
@@ -180,7 +182,9 @@ brigade work import validate imports.jsonl
 brigade work import ingest imports.jsonl
 brigade work import memory-care
 brigade work import triage
+brigade work import plan <import-id>
 brigade work import promote <import-id>
+brigade work import promote --run <import-id>
 brigade work import promote --all --source memory-care --kind task
 brigade work import promote --all --source handoff-ingest --metadata handoff_issue_category=route-skip
 brigade work import dismiss <import-id> --reason "not actionable"
@@ -272,6 +276,7 @@ Start-of-day commands:
 - `brigade work status` is the quick dashboard for branch state, dogfood readiness, paths, latest run, and extracted next step.
 - `brigade work doctor` checks dogfood config, security config, evidence bundles, Codex CLI, artifact paths, handoff inbox, task acceptance, issue-backed tasks, stale active sessions, ignore coverage, and latest run context.
 - `brigade work resume` shows the active or latest session, latest dogfood run, extracted next step, and suggested command.
+- `brigade work inbox` groups pending scanner imports by source, kind, priority, age, and acceptance coverage, then suggests plan, promote, dismiss, or run commands.
 - `brigade work next` prints only the next task. Add `--json` for wrappers.
 
 Task ledger commands:
@@ -298,12 +303,15 @@ Import inbox commands:
 - `brigade work import chat-sweep` converts `.brigade/chat-memory-sweeps/latest.json` issues into imports.
 - `brigade work import triage` groups pending imports by source and kind; use `--source`, `--kind`, and repeatable `--metadata key=value` to narrow noisy queues.
 - `brigade work import show <import-id>` inspects one import.
+- `brigade work import plan <import-id>` previews the exact task promotion would create, including acceptance criteria and template guidance.
 - `brigade work import dismiss <import-id>` removes one noisy item, while `dismiss --all` closes filtered batches.
 - `brigade work import promote <import-id>` promotes one reviewed import into the task ledger.
+- `brigade work import promote --run <import-id>` promotes exactly one task import, then immediately runs that task through the normal work-session loop.
 - `brigade work import promote --all --source memory-care --kind task` batch-promotes filtered imports; metadata filters also work for scanner-specific fields such as `handoff_issue_category=route-skip`.
 
 Imports are stored under `.brigade/work/imports/inbox.jsonl`, stay gitignored, and do not write memory directly.
 Scanner-authored task imports may include `type`, `priority`, `template`, and `acceptance`; promotion preserves those fields so imported tasks can enter the normal TDD work loop.
+`brigade work doctor` warns when scanner queues go stale, task imports lack acceptance criteria, or a source produces many dismissed imports.
 For handoff-ingest issues, prefer `brigade handoff sync-issues` over repeated raw imports. It imports only issue ids that have not already been seen locally and marks stale handoff-ingest imports/tasks resolved when the latest log no longer contains them.
 
 Run the daily loop with `brigade work run`.
