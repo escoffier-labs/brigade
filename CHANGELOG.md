@@ -54,6 +54,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `docs/import-schema.md` documenting the local import JSONL contract for scanners and wrappers.
 - Cybersecurity plugin roadmap covering broad agent-workspace security checks plus Brigade-specific scanner, doctor, import, and multi-harness security checks.
 - Built-in `security` station and `brigade security scan` for read-only agent workspace security checks.
+- Deeper MCP security checks for unpinned `npx`, shell metacharacters, secret-looking env values, sensitive or broad file args, high-risk local commands, large server sets, and missing timeouts.
 - `brigade security scan --import-findings` to route security findings into the local work import inbox for review.
 - `brigade security init` to write gitignored local defaults to `.brigade/security.toml`.
 - `brigade security fix` to create the local security artifact directory and refresh the managed `.gitignore` block.

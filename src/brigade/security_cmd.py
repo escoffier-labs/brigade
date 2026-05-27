@@ -90,6 +90,15 @@ PROMPT_INJECTION_RE = re.compile(
     r"(?i)(ignore (all )?(previous|prior) instructions|do not (tell|reveal)|hidden instruction|"
     r"send (all )?(secrets|tokens)|exfiltrat|disable safety|bypass safety)"
 )
+MCP_SENSITIVE_ARG_RE = re.compile(
+    r"(^|/)(\.env|id_rsa|id_ed25519|credentials|known_hosts|passwd|shadow)$|"
+    r"(\.ssh/|\.aws/|\.config/gh/|\.docker/|/etc/passwd|/etc/shadow)",
+    re.IGNORECASE,
+)
+MCP_BROAD_PATHS = {"~", "$HOME", "/", "/home", "/Users"}
+MCP_HIGH_RISK_COMMANDS = {"bash", "sh", "zsh", "fish", "powershell", "pwsh", "docker", "podman", "ssh", "scp", "rsync"}
+MCP_SERVER_COUNT_WARN = 8
+MCP_SHELL_META_RE = re.compile(r"[;&|`<>]|\$\(")
 
 
 @dataclass(frozen=True)
@@ -349,6 +358,187 @@ def _redact_secret_evidence(line: str) -> str:
     return ENV_ASSIGNMENT_RE.sub(redact_env, redacted)
 
 
+def _line_number_for(text: str, needle: str) -> int:
+    if not needle:
+        return 1
+    for line_number, line in enumerate(text.splitlines(), start=1):
+        if needle in line:
+            return line_number
+    return 1
+
+
+def _is_mcp_document(path: Path, text: str) -> bool:
+    return "mcp" in path.name.lower() or '"mcpServers"' in text
+
+
+def _server_timeout(server: dict[str, Any]) -> object:
+    for key in ("timeout", "timeout_seconds", "timeoutSeconds", "startupTimeout", "startupTimeoutMs"):
+        if key in server:
+            return server[key]
+    return None
+
+
+def _scan_mcp_document(findings: list[dict[str, Any]], *, target: Path, path: Path, text: str) -> None:
+    if not _is_mcp_document(path, text):
+        return
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        return
+    if not isinstance(data, dict):
+        return
+    servers = data.get("mcpServers")
+    if not isinstance(servers, dict):
+        return
+    if len(servers) > MCP_SERVER_COUNT_WARN:
+        _finding(
+            findings,
+            target=target,
+            path=path,
+            line=_line_number_for(text, "mcpServers"),
+            severity="low",
+            category="mcp",
+            title="Large MCP server set",
+            evidence=f"mcpServers: {len(servers)} configured",
+            suggestion="Review whether every MCP server is still needed and disable stale or duplicate servers.",
+        )
+    for server_name, raw_server in servers.items():
+        if not isinstance(server_name, str) or not isinstance(raw_server, dict):
+            continue
+        server = raw_server
+        line_number = _line_number_for(text, server_name)
+        command = server.get("command")
+        args = server.get("args", [])
+        command_name = Path(command).name if isinstance(command, str) else None
+        if command_name in MCP_HIGH_RISK_COMMANDS:
+            _finding(
+                findings,
+                target=target,
+                path=path,
+                line=line_number,
+                severity="medium",
+                category="mcp",
+                title="MCP high-risk local command",
+                evidence=f"{server_name}: command={command}",
+                suggestion="Prefer purpose-built MCP binaries with narrow capabilities over direct shell, container, or remote-copy commands.",
+            )
+        if isinstance(command, str) and command == "npx" and isinstance(args, list):
+            package = _first_npx_package(args)
+            if package and "@" not in package:
+                _finding(
+                    findings,
+                    target=target,
+                    path=path,
+                    line=line_number,
+                    severity="medium",
+                    category="mcp",
+                    title="MCP unpinned npx package",
+                    evidence=f"{server_name}: npx {package}",
+                    suggestion="Pin MCP package versions or install through a reviewed lockfile.",
+                )
+        if isinstance(args, list):
+            for arg in args:
+                if not isinstance(arg, str):
+                    continue
+                if MCP_SHELL_META_RE.search(arg):
+                    _finding(
+                        findings,
+                        target=target,
+                        path=path,
+                        line=line_number,
+                        severity="high",
+                        category="mcp",
+                        title="MCP shell metacharacter in argument",
+                        evidence=f"{server_name}: arg={arg}",
+                        suggestion="Remove shell metacharacters from MCP args and pass structured arguments directly.",
+                    )
+                if arg in MCP_BROAD_PATHS:
+                    _finding(
+                        findings,
+                        target=target,
+                        path=path,
+                        line=line_number,
+                        severity="medium",
+                        category="mcp",
+                        title="MCP broad filesystem argument",
+                        evidence=f"{server_name}: arg={arg}",
+                        suggestion="Scope MCP filesystem access to explicit project directories instead of home or filesystem roots.",
+                    )
+                if MCP_SENSITIVE_ARG_RE.search(arg):
+                    _finding(
+                        findings,
+                        target=target,
+                        path=path,
+                        line=line_number,
+                        severity="medium",
+                        category="mcp",
+                        title="MCP sensitive file argument",
+                        evidence=f"{server_name}: arg={arg}",
+                        suggestion="Avoid passing broad sensitive file paths to MCP servers; scope access to explicit project files.",
+                    )
+        env = server.get("env")
+        if isinstance(env, dict):
+            for key, value in env.items():
+                if not isinstance(key, str) or not isinstance(value, str):
+                    continue
+                if re.search(r"(?i)(TOKEN|SECRET|PASSWORD|API_KEY)", key) and not _is_placeholder(value):
+                    _finding(
+                        findings,
+                        target=target,
+                        path=path,
+                        line=line_number,
+                        severity="high",
+                        category="mcp",
+                        title="MCP hardcoded environment secret",
+                        evidence=_redact_secret_evidence(f"{server_name}.env.{key}={value}"),
+                        suggestion="Load MCP secrets from local environment or secret storage instead of checked-in config.",
+                    )
+        url = server.get("url")
+        if isinstance(url, str) and url.startswith(("http://", "https://")):
+            _finding(
+                findings,
+                target=target,
+                path=path,
+                line=line_number,
+                severity="medium",
+                category="mcp",
+                title="Remote MCP transport",
+                evidence=f"{server_name}: url={url}",
+                suggestion="Prefer local MCP servers, pin remote hosts, and document authentication boundaries.",
+            )
+        if _server_timeout(server) is None:
+            _finding(
+                findings,
+                target=target,
+                path=path,
+                line=line_number,
+                severity="low",
+                category="mcp",
+                title="MCP server missing timeout",
+                evidence=f"{server_name}: timeout unset",
+                suggestion="Set an explicit MCP startup or request timeout so hung servers fail predictably.",
+            )
+
+
+def _first_npx_package(args: list[object]) -> str | None:
+    skip_next = False
+    for arg in args:
+        if not isinstance(arg, str):
+            continue
+        if skip_next:
+            skip_next = False
+            continue
+        if arg in {"-y", "--yes", "--quiet"}:
+            continue
+        if arg in {"--package", "-p"}:
+            skip_next = True
+            continue
+        if arg.startswith("-"):
+            continue
+        return arg
+    return None
+
+
 def _iter_scan_files(target: Path) -> list[Path]:
     paths: list[Path] = []
     for path in target.rglob("*"):
@@ -566,6 +756,7 @@ def scan_target(target: Path, *, include_templates: bool = False, suppressions: 
         scanned_files.append(str(path.relative_to(target)))
         for line_number, line in enumerate(text.splitlines(), start=1):
             _scan_line(findings, target=target, path=path, line_number=line_number, line=line)
+        _scan_mcp_document(findings, target=target, path=path, text=text)
     suppressed = [finding for finding in findings if finding.get("fingerprint") in suppressions]
     findings = [finding for finding in findings if finding.get("fingerprint") not in suppressions]
     counts: dict[str, int] = {}
