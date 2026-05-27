@@ -394,6 +394,17 @@ def _build_parser() -> argparse.ArgumentParser:
     p_security_fix = security_sub.add_parser("fix", help="Apply safe local security hygiene fixes.")
     p_security_fix.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
     p_security_fix.add_argument("--dry-run", action="store_true", help="Show changes without writing files.")
+    p_security_review = security_sub.add_parser("review", help="Review the latest local security evidence bundle.")
+    p_security_review.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to review.")
+    p_security_review.add_argument("--output-dir", type=Path, default=None, help="Security evidence bundle directory.")
+    p_security_review.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_security_suppress = security_sub.add_parser("suppress", help="Suppress a reviewed security finding fingerprint.")
+    p_security_suppress.add_argument("fingerprint", help="Finding fingerprint to suppress.")
+    p_security_suppress.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
+    p_security_suppress.add_argument("--reason", required=True, help="Required suppression reason.")
+    p_security_unsuppress = security_sub.add_parser("unsuppress", help="Remove a security finding suppression.")
+    p_security_unsuppress.add_argument("fingerprint", help="Finding fingerprint to unsuppress.")
+    p_security_unsuppress.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
     p_security_scan = security_sub.add_parser("scan", help="Run a read-only agent workspace security scan.")
     p_security_scan.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to scan.")
     p_security_scan.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
@@ -796,6 +807,12 @@ def main(argv=None) -> int:
             return security_cmd.init(target=args.target, force=args.force)
         if args.security_command == "fix":
             return security_cmd.fix(target=args.target, dry_run=args.dry_run)
+        if args.security_command == "review":
+            return security_cmd.review(target=args.target, output_dir=args.output_dir, json_output=args.json)
+        if args.security_command == "suppress":
+            return security_cmd.suppress(target=args.target, fingerprint=args.fingerprint, reason=args.reason)
+        if args.security_command == "unsuppress":
+            return security_cmd.unsuppress(target=args.target, fingerprint=args.fingerprint)
         if args.security_command == "scan":
             return security_cmd.scan(
                 target=args.target,

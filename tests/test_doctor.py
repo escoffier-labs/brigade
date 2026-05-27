@@ -78,6 +78,36 @@ def test_doctor_fails_invalid_security_config(tmp_target: Path, capsys):
     assert "invalid" in out
 
 
+def test_doctor_warns_on_stale_security_suppressions(tmp_target: Path, capsys):
+    install_selection(
+        tmp_target,
+        Selection(depth="workspace", harnesses=["claude"], owner="claude", includes=[]),
+    )
+    security_config = tmp_target / ".brigade" / "security.toml"
+    security_config.parent.mkdir(exist_ok=True)
+    security_config.write_text(
+        "\n".join(
+            [
+                'policy = "personal"',
+                'fail_on = "critical"',
+                "include_templates = false",
+                "",
+                "[suppressions]",
+                'fingerprints = ["0123456789abcdef"]',
+                "",
+                "[suppression_reasons]",
+                "",
+            ]
+        )
+    )
+
+    rc = doctor_mod.run(target=tmp_target, harness="generic")
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "security: stale suppressions" in out
+    assert "security: suppression reasons" in out
+
+
 def test_doctor_fails_when_bootstrap_file_exceeds_budget(tmp_target: Path, capsys):
     install_selection(
         tmp_target,

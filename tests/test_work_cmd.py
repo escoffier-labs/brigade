@@ -116,6 +116,34 @@ def test_work_doctor_fails_invalid_security_config(tmp_path, monkeypatch, capsys
     assert "[fail] ready: 1 blocker" in out
 
 
+def test_work_doctor_warns_on_stale_security_suppressions(tmp_path, monkeypatch, capsys):
+    _init_git_repo(tmp_path)
+    dogfood_cmd.init(target=tmp_path)
+    security_config = tmp_path / ".brigade" / "security.toml"
+    security_config.write_text(
+        "\n".join(
+            [
+                'policy = "personal"',
+                'fail_on = "critical"',
+                "include_templates = false",
+                "",
+                "[suppressions]",
+                'fingerprints = ["0123456789abcdef"]',
+                "",
+                "[suppression_reasons]",
+                "",
+            ]
+        )
+    )
+    monkeypatch.setattr(work_cmd.shutil, "which", lambda name: f"/usr/bin/{name}" if name == "codex" else None)
+    monkeypatch.setattr(dogfood_cmd, "_check_git_ignored", lambda repo, path: "yes")
+
+    assert work_cmd.doctor(target=tmp_path) == 0
+    out = capsys.readouterr().out
+    assert "[warn] security_stale_suppressions:" in out
+    assert "[warn] security_suppression_reasons:" in out
+
+
 def test_work_doctor_reports_blockers(tmp_path, monkeypatch, capsys):
     _init_git_repo(tmp_path)
     monkeypatch.setattr(work_cmd.shutil, "which", lambda name: None)

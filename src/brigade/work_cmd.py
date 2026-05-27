@@ -2263,10 +2263,12 @@ def doctor(*, target: Path) -> int:
         _doctor_line(OK, "dogfood_artifacts", artifacts_dir)
 
     security_config = security_cmd.config_path(effective_target)
+    security_config_valid = True
     if security_config.is_file():
         try:
             loaded_security = security_cmd.load_config(effective_target)
         except ValueError as exc:
+            security_config_valid = False
             failures += 1
             _doctor_line(FAIL, "security_config", f"invalid {security_config}: {exc}")
         else:
@@ -2274,6 +2276,22 @@ def doctor(*, target: Path) -> int:
             _doctor_line(OK, "security_config", f"{security_config} (policy={policy})")
     else:
         _doctor_line(WARN, "security_config", f"missing, run `brigade security init --target {effective_target}`")
+
+    if security_config_valid:
+        try:
+            suppression_health = security_cmd.suppression_health(effective_target)
+        except ValueError as exc:
+            failures += 1
+            _doctor_line(FAIL, "security_suppressions", f"invalid: {exc}")
+        else:
+            stale = suppression_health["stale"]
+            missing_reasons = suppression_health["missing_reasons"]
+            if stale:
+                _doctor_line(WARN, "security_stale_suppressions", f"{len(stale)} no longer match current findings: {', '.join(stale[:5])}")
+            if missing_reasons:
+                _doctor_line(WARN, "security_suppression_reasons", f"{len(missing_reasons)} missing reason: {', '.join(missing_reasons[:5])}")
+            if not stale and not missing_reasons:
+                _doctor_line(OK, "security_suppressions", f"{suppression_health['suppression_count']} configured")
 
     security_artifacts = security_cmd.default_artifacts_dir(effective_target)
     security_bundle = security_cmd.inspect_evidence_bundle(security_artifacts)

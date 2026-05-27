@@ -135,6 +135,72 @@ def test_security_config_and_suppressions(tmp_path, capsys):
     assert payload["suppressed_findings"][0]["fingerprint"] == fingerprint
 
 
+def test_security_review_suppress_and_unsuppress(tmp_path, capsys):
+    (tmp_path / ".env").write_text("SERVICE_TOKEN=abcd1234abcd1234abcd1234\n")
+    output_dir = tmp_path / ".brigade" / "security" / "latest"
+    assert security_cmd.scan(target=tmp_path, fail_on="none", output_dir=output_dir) == 0
+    capsys.readouterr()
+    report = json.loads((output_dir / "security-report.json").read_text())
+    fingerprint = report["findings"][0]["fingerprint"]
+
+    assert security_cmd.review(target=tmp_path, json_output=True) == 0
+    review_payload = json.loads(capsys.readouterr().out)
+    assert review_payload["open_count"] == 1
+    assert review_payload["findings"][0]["status"] == "open"
+
+    assert security_cmd.suppress(target=tmp_path, fingerprint=fingerprint, reason="reviewed local fake token") == 0
+    out = capsys.readouterr().out
+    assert f"suppressed: {fingerprint}" in out
+    loaded = security_cmd.load_config(tmp_path)
+    assert loaded is not None
+    assert fingerprint in loaded.suppressions
+    assert loaded.suppression_reasons[fingerprint] == "reviewed local fake token"
+
+    assert security_cmd.review(target=tmp_path, json_output=True) == 0
+    review_payload = json.loads(capsys.readouterr().out)
+    assert review_payload["suppressed_count"] == 1
+    assert review_payload["findings"][0]["status"] == "suppressed"
+    assert review_payload["findings"][0]["reason"] == "reviewed local fake token"
+
+    assert security_cmd.scan(target=tmp_path, fail_on="none", json_output=True) == 0
+    scan_payload = json.loads(capsys.readouterr().out)
+    assert scan_payload["finding_count"] == 0
+    assert scan_payload["suppressed_count"] == 1
+
+    assert security_cmd.unsuppress(target=tmp_path, fingerprint=fingerprint) == 0
+    out = capsys.readouterr().out
+    assert f"unsuppressed: {fingerprint}" in out
+    loaded = security_cmd.load_config(tmp_path)
+    assert loaded is not None
+    assert fingerprint not in loaded.suppressions
+    assert fingerprint not in loaded.suppression_reasons
+
+
+def test_security_suppression_health_reports_stale_and_missing_reasons(tmp_path):
+    config = tmp_path / ".brigade" / "security.toml"
+    config.parent.mkdir(parents=True)
+    config.write_text(
+        "\n".join(
+            [
+                'policy = "personal"',
+                'fail_on = "critical"',
+                "include_templates = false",
+                "",
+                "[suppressions]",
+                'fingerprints = ["0123456789abcdef"]',
+                "",
+                "[suppression_reasons]",
+                "",
+            ]
+        )
+    )
+
+    health = security_cmd.suppression_health(tmp_path)
+    assert health["suppression_count"] == 1
+    assert health["stale"] == ["0123456789abcdef"]
+    assert health["missing_reasons"] == ["0123456789abcdef"]
+
+
 def test_security_init_writes_gitignored_local_config(tmp_path, capsys):
     tmp_path.mkdir(exist_ok=True)
 
@@ -256,6 +322,42 @@ def test_security_scan_cli(tmp_path, monkeypatch):
         "import_findings": True,
         "output_dir": tmp_path / "security-report",
     }
+
+
+def test_security_review_cli(tmp_path, monkeypatch):
+    seen = {}
+
+    def fake_review(**kwargs):
+        seen.update(kwargs)
+        return 0
+
+    monkeypatch.setattr(security_cmd, "review", fake_review)
+    assert cli.main(["security", "review", "--target", str(tmp_path), "--output-dir", str(tmp_path / "out"), "--json"]) == 0
+    assert seen == {"target": tmp_path, "output_dir": tmp_path / "out", "json_output": True}
+
+
+def test_security_suppress_cli(tmp_path, monkeypatch):
+    seen = {}
+
+    def fake_suppress(**kwargs):
+        seen.update(kwargs)
+        return 0
+
+    monkeypatch.setattr(security_cmd, "suppress", fake_suppress)
+    assert cli.main(["security", "suppress", "0123456789abcdef", "--target", str(tmp_path), "--reason", "reviewed"]) == 0
+    assert seen == {"target": tmp_path, "fingerprint": "0123456789abcdef", "reason": "reviewed"}
+
+
+def test_security_unsuppress_cli(tmp_path, monkeypatch):
+    seen = {}
+
+    def fake_unsuppress(**kwargs):
+        seen.update(kwargs)
+        return 0
+
+    monkeypatch.setattr(security_cmd, "unsuppress", fake_unsuppress)
+    assert cli.main(["security", "unsuppress", "0123456789abcdef", "--target", str(tmp_path)]) == 0
+    assert seen == {"target": tmp_path, "fingerprint": "0123456789abcdef"}
 
 
 def test_security_fix_cli(tmp_path, monkeypatch):

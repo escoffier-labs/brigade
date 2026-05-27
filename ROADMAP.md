@@ -65,7 +65,16 @@ Brigade-specific additions:
 - Produce Memory Handoffs for durable security findings while keeping raw secret evidence redacted.
 - Add policy packs for personal dogfooding, public-repo release checks, CI gates, and strict enterprise workspaces. Status: started with `personal`, `public-repo`, and `strict`.
 - Include dependency and package-manager hardening checks for agent plugin ecosystems, MCP packages, skills, and local tool wrappers.
-- Track false-positive taxonomy, runtime-confidence rules, suppressions, and regression fixtures as first-class project artifacts.
+- Track false-positive taxonomy, runtime-confidence rules, suppressions, and regression fixtures as first-class project artifacts. Status: started with `brigade security review`, reasoned suppressions, unsuppress, and stale-suppression doctor warnings.
+
+## Later Phase: Issue And TDD Work Loop
+
+Goal: make Brigade support a narrow issue lifecycle for daily work: pick one task, define acceptance, test first when practical, implement, review, refactor, and close.
+
+- Add task templates for vertical-slice work, bugfix work, and RED/GREEN/REFACTOR loops.
+- Let `brigade work run` consume structured acceptance criteria from the local task ledger or a GitHub issue mirror.
+- Keep repo-shareable workflow rules separate from gitignored personal/global preferences.
+- Add doctor checks for missing acceptance criteria or stale active issue context.
 
 First build slice:
 

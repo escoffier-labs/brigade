@@ -7,7 +7,7 @@ import json
 import re
 import sys
 from datetime import datetime, timezone
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -99,6 +99,7 @@ MCP_BROAD_PATHS = {"~", "$HOME", "/", "/home", "/Users"}
 MCP_HIGH_RISK_COMMANDS = {"bash", "sh", "zsh", "fish", "powershell", "pwsh", "docker", "podman", "ssh", "scp", "rsync"}
 MCP_SERVER_COUNT_WARN = 8
 MCP_SHELL_META_RE = re.compile(r"[;&|`<>]|\$\(")
+FINGERPRINT_RE = re.compile(r"^[a-f0-9]{16}$")
 
 
 @dataclass(frozen=True)
@@ -107,6 +108,7 @@ class SecurityConfig:
     fail_on: str | None = None
     include_templates: bool | None = None
     suppressions: tuple[str, ...] = ()
+    suppression_reasons: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -172,11 +174,11 @@ def _read_toml_object(path: Path) -> dict[str, object]:
             continue
         if line.startswith("[") and line.endswith("]"):
             table = line[1:-1].strip()
-            if table != "suppressions":
+            if table not in {"suppressions", "suppression_reasons"}:
                 raise ValueError(f"invalid security config line {line_number}: unsupported table [{table}]")
-            current = data.setdefault("suppressions", {})
+            current = data.setdefault(table, {})
             if not isinstance(current, dict):
-                raise ValueError(f"invalid security config line {line_number}: suppressions must be a table")
+                raise ValueError(f"invalid security config line {line_number}: {table} must be a table")
             continue
         if "=" not in line:
             raise ValueError(f"invalid security config line {line_number}: expected key = value")
@@ -211,11 +213,22 @@ def load_config(target: Path) -> SecurityConfig | None:
         if not isinstance(fingerprints, list) or not all(isinstance(item, str) for item in fingerprints):
             raise ValueError("suppressions.fingerprints must be a list of strings")
         suppressions = tuple(item.strip() for item in fingerprints if item.strip())
+    suppression_reasons: dict[str, str] = {}
+    raw_reasons = data.get("suppression_reasons", {})
+    if raw_reasons:
+        if not isinstance(raw_reasons, dict):
+            raise ValueError("suppression_reasons must be a table")
+        for fingerprint, reason in raw_reasons.items():
+            if not isinstance(fingerprint, str) or not isinstance(reason, str):
+                raise ValueError("suppression_reasons entries must be string = string")
+            if fingerprint.strip() and reason.strip():
+                suppression_reasons[fingerprint.strip()] = reason.strip()
     return SecurityConfig(
         policy=policy,
         fail_on=fail_on,
         include_templates=include_templates,
         suppressions=suppressions,
+        suppression_reasons=suppression_reasons,
     )
 
 
@@ -265,10 +278,51 @@ def write_default_config(target: Path, *, force: bool = False) -> Path:
                 "[suppressions]",
                 "fingerprints = []",
                 "",
+                "[suppression_reasons]",
+                "",
             ]
         )
     )
     return path
+
+
+def _toml_string(value: str) -> str:
+    return json.dumps(value)
+
+
+def write_config(target: Path, config: SecurityConfig) -> Path:
+    path = config_path(target.expanduser().resolve())
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fingerprints = ", ".join(_toml_string(item) for item in config.suppressions)
+    lines = [
+        f"policy = {_toml_string(config.policy)}",
+        f"fail_on = {_toml_string(config.fail_on or POLICIES[config.policy]['fail_on'])}",
+        f"include_templates = {str(config.include_templates if config.include_templates is not None else POLICIES[config.policy]['include_templates']).lower()}",
+        "",
+        "[suppressions]",
+        f"fingerprints = [{fingerprints}]",
+        "",
+        "[suppression_reasons]",
+    ]
+    reasons = config.suppression_reasons
+    for fingerprint in config.suppressions:
+        reason = reasons.get(fingerprint)
+        if reason:
+            lines.append(f"{fingerprint} = {_toml_string(reason)}")
+    lines.append("")
+    path.write_text("\n".join(lines))
+    return path
+
+
+def _load_config_or_default(target: Path) -> SecurityConfig:
+    loaded = load_config(target)
+    if loaded is not None:
+        return loaded
+    return SecurityConfig()
+
+
+def _clean_reason(reason: str) -> str:
+    return " ".join(reason.replace("#", " ").split()).strip()
 
 
 def _gitignore_selection(target: Path):
@@ -312,6 +366,194 @@ def fix(*, target: Path, dry_run: bool = False) -> int:
     print(f"security_config_ignored: {config_ignored}")
     print(f"security_artifacts_ignored: {artifacts_ignored}")
     return 0
+
+
+def _load_report(output_dir: Path) -> dict[str, Any]:
+    path = output_dir.expanduser().resolve() / "security-report.json"
+    if not path.is_file():
+        raise FileNotFoundError(path)
+    data = json.loads(path.read_text())
+    if not isinstance(data, dict):
+        raise ValueError(f"security report must be a JSON object: {path}")
+    return data
+
+
+def _report_findings_for_review(target: Path, report: dict[str, Any]) -> list[dict[str, Any]]:
+    config = load_config(target) or SecurityConfig()
+    suppressed = set(config.suppressions)
+    reasons = config.suppression_reasons
+    records: list[dict[str, Any]] = []
+    for finding in report.get("findings", []):
+        if not isinstance(finding, dict):
+            continue
+        fingerprint = str(finding.get("fingerprint") or "")
+        record = dict(finding)
+        record["status"] = "suppressed" if fingerprint in suppressed else "open"
+        if fingerprint in reasons:
+            record["reason"] = reasons[fingerprint]
+        records.append(record)
+    for finding in report.get("suppressed_findings", []):
+        if not isinstance(finding, dict):
+            continue
+        fingerprint = str(finding.get("fingerprint") or "")
+        record = dict(finding)
+        record["status"] = "suppressed"
+        if fingerprint in reasons:
+            record["reason"] = reasons[fingerprint]
+        records.append(record)
+    records.sort(
+        key=lambda item: (
+            -SEVERITY_ORDER.get(str(item.get("severity")), 0),
+            str(item.get("category") or ""),
+            str(item.get("path") or ""),
+            int(item.get("line") or 0),
+        )
+    )
+    return records
+
+
+def review(*, target: Path, output_dir: Path | None = None, json_output: bool = False) -> int:
+    target = target.expanduser().resolve()
+    if not target.is_dir():
+        print(f"error: --target is not a directory: {target}", file=sys.stderr)
+        return 2
+    artifacts_dir = output_dir.expanduser().resolve() if output_dir is not None else default_artifacts_dir(target)
+    try:
+        report = _load_report(artifacts_dir)
+        records = _report_findings_for_review(target, report)
+    except FileNotFoundError as exc:
+        print(f"error: security report not found: {exc}", file=sys.stderr)
+        return 2
+    except (ValueError, json.JSONDecodeError) as exc:
+        print(f"error: invalid security report: {exc}", file=sys.stderr)
+        return 2
+
+    payload = {
+        "artifacts": str(artifacts_dir),
+        "generated_at": report.get("generated_at"),
+        "policy": report.get("policy"),
+        "findings": records,
+        "finding_count": len(records),
+        "open_count": len([item for item in records if item.get("status") != "suppressed"]),
+        "suppressed_count": len([item for item in records if item.get("status") == "suppressed"]),
+    }
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+
+    print(f"security review: {artifacts_dir}")
+    print(f"generated_at: {payload['generated_at']}")
+    print(f"policy: {payload['policy']}")
+    print(f"findings: {payload['finding_count']}")
+    print(f"open: {payload['open_count']}")
+    print(f"suppressed: {payload['suppressed_count']}")
+    current_group: tuple[str, str] | None = None
+    for finding in records:
+        group = (str(finding.get("severity") or "unknown"), str(finding.get("category") or "unknown"))
+        if group != current_group:
+            current_group = group
+            print(f"{group[0]} / {group[1]}:")
+        print(
+            f"- {finding.get('fingerprint')} [{finding.get('status')}] "
+            f"{finding.get('path')}:{finding.get('line')} {finding.get('title')}"
+        )
+        if finding.get("reason"):
+            print(f"  reason: {finding['reason']}")
+        print(f"  suggestion: {finding.get('suggestion')}")
+    return 0
+
+
+def suppress(*, target: Path, fingerprint: str, reason: str) -> int:
+    target = target.expanduser().resolve()
+    if not target.is_dir():
+        print(f"error: --target is not a directory: {target}", file=sys.stderr)
+        return 2
+    fingerprint = fingerprint.strip()
+    cleaned_reason = _clean_reason(reason)
+    if not FINGERPRINT_RE.match(fingerprint):
+        print("error: fingerprint must be a 16-character lowercase hex value", file=sys.stderr)
+        return 2
+    if not cleaned_reason:
+        print("error: --reason is required", file=sys.stderr)
+        return 2
+    try:
+        config = _load_config_or_default(target)
+    except ValueError as exc:
+        print(f"error: invalid security config: {exc}", file=sys.stderr)
+        return 2
+    suppressions = list(config.suppressions)
+    if fingerprint not in suppressions:
+        suppressions.append(fingerprint)
+    reasons = dict(config.suppression_reasons)
+    reasons[fingerprint] = cleaned_reason
+    path = write_config(
+        target,
+        SecurityConfig(
+            policy=config.policy,
+            fail_on=config.fail_on,
+            include_templates=config.include_templates,
+            suppressions=tuple(suppressions),
+            suppression_reasons=reasons,
+        ),
+    )
+    print(f"security_config: {path}")
+    print(f"suppressed: {fingerprint}")
+    print(f"reason: {cleaned_reason}")
+    return 0
+
+
+def unsuppress(*, target: Path, fingerprint: str) -> int:
+    target = target.expanduser().resolve()
+    if not target.is_dir():
+        print(f"error: --target is not a directory: {target}", file=sys.stderr)
+        return 2
+    fingerprint = fingerprint.strip()
+    if not FINGERPRINT_RE.match(fingerprint):
+        print("error: fingerprint must be a 16-character lowercase hex value", file=sys.stderr)
+        return 2
+    try:
+        config = _load_config_or_default(target)
+    except ValueError as exc:
+        print(f"error: invalid security config: {exc}", file=sys.stderr)
+        return 2
+    if fingerprint not in config.suppressions and fingerprint not in config.suppression_reasons:
+        print(f"error: suppression not found: {fingerprint}", file=sys.stderr)
+        return 1
+    suppressions = tuple(item for item in config.suppressions if item != fingerprint)
+    reasons = dict(config.suppression_reasons)
+    reasons.pop(fingerprint, None)
+    path = write_config(
+        target,
+        SecurityConfig(
+            policy=config.policy,
+            fail_on=config.fail_on,
+            include_templates=config.include_templates,
+            suppressions=suppressions,
+            suppression_reasons=reasons,
+        ),
+    )
+    print(f"security_config: {path}")
+    print(f"unsuppressed: {fingerprint}")
+    return 0
+
+
+def suppression_health(target: Path) -> dict[str, Any]:
+    target = target.expanduser().resolve()
+    config = load_config(target)
+    if config is None:
+        return {"suppression_count": 0, "missing_reasons": [], "stale": []}
+    if not config.suppressions:
+        return {"suppression_count": 0, "missing_reasons": [], "stale": []}
+    effective = _effective_policy(target, policy=None, fail_on=None, include_templates=None)
+    report = scan_target(target, include_templates=effective.include_templates, suppressions=())
+    active = {str(item.get("fingerprint")) for item in report["findings"] if item.get("fingerprint")}
+    stale = [fingerprint for fingerprint in config.suppressions if fingerprint not in active]
+    missing_reasons = [fingerprint for fingerprint in config.suppressions if not config.suppression_reasons.get(fingerprint)]
+    return {
+        "suppression_count": len(config.suppressions),
+        "missing_reasons": missing_reasons,
+        "stale": stale,
+    }
 
 
 def _short(text: str, limit: int = 160) -> str:

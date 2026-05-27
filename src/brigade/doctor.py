@@ -87,15 +87,35 @@ def security_station_checks(ctx: DoctorContext) -> List[CheckResult]:
 
     results: List[CheckResult] = [(OK, "security: built-in scanner", "available")]
     config = security_cmd.config_path(ctx.target)
+    config_valid = True
     if config.is_file():
         try:
             loaded = security_cmd.load_config(ctx.target)
         except ValueError as exc:
+            config_valid = False
             results.append((FAIL, "security: config", f"invalid {config}: {exc}"))
         else:
             results.append((OK, "security: config", f"{config} (policy={loaded.policy if loaded else 'personal'})"))
     else:
         results.append((WARN, "security: config", f"missing at {config}; run `brigade security init --target .`"))
+
+    if config_valid:
+        try:
+            suppression_health = security_cmd.suppression_health(ctx.target)
+        except ValueError as exc:
+            results.append((FAIL, "security: suppressions", f"invalid: {exc}"))
+        else:
+            suppression_count = suppression_health["suppression_count"]
+            stale = suppression_health["stale"]
+            missing_reasons = suppression_health["missing_reasons"]
+            if stale:
+                preview = ", ".join(stale[:5])
+                results.append((WARN, "security: stale suppressions", f"{len(stale)} no longer match current findings: {preview}"))
+            if missing_reasons:
+                preview = ", ".join(missing_reasons[:5])
+                results.append((WARN, "security: suppression reasons", f"{len(missing_reasons)} missing reason: {preview}"))
+            if not stale and not missing_reasons:
+                results.append((OK, "security: suppressions", f"{suppression_count} configured"))
 
     artifacts_dir = security_cmd.default_artifacts_dir(ctx.target)
     bundle = security_cmd.inspect_evidence_bundle(artifacts_dir)
