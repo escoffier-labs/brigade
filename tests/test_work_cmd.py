@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from brigade import cli
 from brigade import dogfood_cmd
 from brigade import security_cmd
+from brigade import tools_cmd
 from brigade import work_cmd
 
 
@@ -1388,7 +1389,7 @@ def test_work_scanners_init_list_show_plan_and_json(tmp_path, monkeypatch, capsy
     out = capsys.readouterr().out
     config = tmp_path / ".brigade" / "scanners.toml"
     assert f"scanner_config: {config}" in out
-    assert "scanners: 5" in out
+    assert "scanners: 6" in out
     assert ".brigade/scanners.toml" in (tmp_path / ".gitignore").read_text()
 
     assert work_cmd.scanners_list(target=tmp_path) == 0
@@ -1419,6 +1420,276 @@ def test_work_scanners_init_list_show_plan_and_json(tmp_path, monkeypatch, capsy
     assert payload["valid"] is True
     assert payload["planned"][0]["id"] == "handoff-ingest"
     assert payload["suggestions"]
+
+
+def test_tools_init_list_show_search_doctor_and_json(tmp_path, monkeypatch, capsys):
+    _init_git_repo(tmp_path)
+    monkeypatch.setattr(dogfood_cmd, "_check_git_ignored", lambda repo, path: "yes")
+
+    assert tools_cmd.init(target=tmp_path) == 0
+    out = capsys.readouterr().out
+    config = tmp_path / ".brigade" / "tools.toml"
+    assert f"tools_config: {config}" in out
+    assert "tools: 2" in out
+    assert ".brigade/tools.toml" in (tmp_path / ".gitignore").read_text()
+
+    (tmp_path / "tools").mkdir()
+    (tmp_path / "tools" / "simplify.md").write_text("Simplify command\n")
+    (tmp_path / "tools" / "superpowers.md").write_text("Superpowers\n")
+    (tmp_path / ".claude" / "commands").mkdir(parents=True)
+    (tmp_path / ".claude" / "commands" / "simplify.md").write_text("Simplify command\n")
+    (tmp_path / ".claude" / "commands" / "superpowers.md").write_text("Superpowers\n")
+    (tmp_path / ".codex" / "skills" / "simplify").mkdir(parents=True)
+    (tmp_path / ".codex" / "skills" / "simplify" / "SKILL.md").write_text("Simplify skill\n")
+    (tmp_path / ".codex" / "skills" / "superpowers").mkdir(parents=True)
+    (tmp_path / ".codex" / "skills" / "superpowers" / "SKILL.md").write_text("Superpowers skill\n")
+    (tmp_path / ".opencode" / "superpowers").mkdir(parents=True)
+    (tmp_path / ".opencode" / "superpowers" / "superpowers.md").write_text("Superpowers projection\n")
+
+    assert tools_cmd.list_tools(target=tmp_path) == 0
+    out = capsys.readouterr().out
+    assert "tools:" in out
+    assert "- simplify [slash-command]" in out
+
+    assert tools_cmd.list_tools(target=tmp_path, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["valid"] is True
+    assert payload["tool_count"] == 2
+
+    assert tools_cmd.show(target=tmp_path, tool_id="simplify") == 0
+    out = capsys.readouterr().out
+    assert "tool: simplify" in out
+    assert "claude: present" in out
+    assert "codex: present" in out
+
+    assert tools_cmd.search(target=tmp_path, query="superpower", json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["match_count"] == 1
+    assert payload["matches"][0]["id"] == "superpowers"
+
+    assert tools_cmd.doctor(target=tmp_path) == 0
+    out = capsys.readouterr().out
+    assert "[ok] tool_config:" in out
+    assert "[ok] tool_catalog: no issues" in out
+
+
+def test_tools_catalog_covers_portable_families_and_mcp_discovery(tmp_path, capsys):
+    _init_git_repo(tmp_path)
+    (tmp_path / ".brigade").mkdir()
+    (tmp_path / "tools").mkdir()
+    (tmp_path / "tools" / "skill.md").write_text("Skill source\n")
+    (tmp_path / "tools" / "command.md").write_text("Slash command\n")
+    (tmp_path / "tools" / "super.md").write_text("Superpower\n")
+    (tmp_path / "tools" / "script.sh").write_text("#!/bin/sh\n")
+    (tmp_path / "tools" / "mcp.json").write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "good": {"command": "brigade", "timeout": 10},
+                    "bad": {},
+                    "risky": {"command": "bash -c echo hi"},
+                }
+            }
+        )
+    )
+    config = tmp_path / ".brigade" / "tools.toml"
+    config.write_text(
+        """
+[[tool]]
+id = "memory-skill"
+name = "Memory Skill"
+family = "skill"
+enabled = true
+description = "Portable memory skill."
+source_path = "tools/skill.md"
+supported_harnesses = []
+
+[[tool]]
+id = "simplify"
+name = "Simplify"
+family = "slash-command"
+enabled = true
+description = "Portable simplify command."
+source_path = "tools/command.md"
+supported_harnesses = []
+
+[[tool]]
+id = "superpowers"
+name = "Superpowers"
+family = "superpower"
+enabled = true
+description = "Portable superpower."
+source_path = "tools/super.md"
+supported_harnesses = []
+
+[[tool]]
+id = "script-tool"
+name = "Script Tool"
+family = "script"
+enabled = true
+description = "Portable script."
+source_path = "tools/script.sh"
+command = "brigade status"
+supported_harnesses = []
+
+[[tool]]
+id = "mcp-local"
+name = "MCP Local"
+family = "mcp"
+enabled = true
+description = "Local MCP config."
+manifest_path = "tools/mcp.json"
+supported_harnesses = []
+"""
+    )
+
+    assert tools_cmd.list_tools(target=tmp_path, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert {tool["family"] for tool in payload["tools"]} == {
+        "skill",
+        "slash-command",
+        "superpower",
+        "script",
+        "mcp",
+    }
+
+    assert tools_cmd.show(target=tmp_path, tool_id="mcp-local", json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["tool"]["mcp"]["server_count"] == 3
+    assert payload["tool"]["mcp"]["server_ids"] == ["bad", "good", "risky"]
+
+    assert tools_cmd.doctor(target=tmp_path) == 0
+    out = capsys.readouterr().out
+    assert "[warn] tool_missing_command: MCP server bad is missing command" in out
+    assert "[warn] tool_missing_timeout: MCP server bad is missing timeout metadata" in out
+    assert "[warn] tool_high_risk_command: MCP server risky command shape is high risk" in out
+
+
+def test_tools_doctor_reports_parity_stale_schema_command_health_and_unsafe_fields(tmp_path, capsys):
+    _init_git_repo(tmp_path)
+    (tmp_path / ".brigade").mkdir()
+    (tmp_path / "tools").mkdir()
+    (tmp_path / "tools" / "source.md").write_text("Tool source\n")
+    projection = tmp_path / ".claude" / "commands" / "tool.md"
+    projection.parent.mkdir(parents=True)
+    projection.write_text("projected\n")
+    schema = tmp_path / "tools" / "schema.json"
+    schema.write_text("{not json")
+    health = tmp_path / "tools" / "health.json"
+    health.write_text("{}\n")
+    old = datetime(2026, 5, 25, 12, 0, 0, tzinfo=timezone.utc).timestamp()
+    os.utime(health, (old, old))
+    config = tmp_path / ".brigade" / "tools.toml"
+    config.write_text(
+        """
+[[tool]]
+id = "portable"
+name = "Portable Tool"
+family = "script"
+enabled = true
+description = "Portable script with several repairable issues."
+source_path = "tools/source.md"
+schema_path = "tools/schema.json"
+health_path = "tools/health.json"
+command = "missing-command --flag"
+auth_label = "local"
+password = "do-not-print"
+supported_harnesses = ["claude", "codex"]
+projections = { claude = ".claude/commands/tool.md" }
+projection_fingerprints = { claude = "deadbeef" }
+"""
+    )
+
+    assert tools_cmd.doctor(target=tmp_path) == 0
+    out = capsys.readouterr().out
+    assert "[warn] tool_unsafe_auth_fields: unsafe field names: password" in out
+    assert "do-not-print" not in out
+    assert "[warn] tool_invalid_schema:" in out
+    assert "[warn] tool_stale_health:" in out
+    assert "[warn] tool_missing_command: command is not resolvable: missing-command --flag" in out
+    assert "[warn] tool_stale_projection:" in out
+    assert "[warn] tool_parity_gap: missing projection for codex" in out
+
+    assert tools_cmd.doctor(target=tmp_path, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    issue_types = {issue["issue_type"] for issue in payload["issues"]}
+    assert {"unsafe_auth_fields", "invalid_schema", "stale_health", "missing_command", "stale_projection", "parity_gap"} <= issue_types
+    rendered = json.dumps(payload, sort_keys=True)
+    assert "do-not-print" not in rendered
+
+
+def test_tools_import_issues_dedupes_and_respects_dismissed_until_change(tmp_path, capsys):
+    _init_git_repo(tmp_path)
+    config = tmp_path / ".brigade" / "tools.toml"
+    config.parent.mkdir()
+    config.write_text(
+        """
+[[tool]]
+id = "portable"
+name = "Portable Tool"
+family = "skill"
+enabled = true
+description = "Portable missing source."
+source_path = "tools/missing.md"
+supported_harnesses = []
+"""
+    )
+
+    assert tools_cmd.import_issues(target=tmp_path, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["created"] == 1
+    item = payload["imports"][0]
+    assert item["source"] == "tool-catalog"
+    assert item["metadata"]["tool_id"] == "portable"
+    assert item["metadata"]["tool_issue_type"] == "missing_source"
+
+    assert tools_cmd.import_issues(target=tmp_path, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["created"] == 0
+    assert payload["skipped"] == 1
+
+    assert work_cmd.import_dismiss(target=tmp_path, import_id=item["id"], reason="ack") == 0
+    capsys.readouterr()
+    assert tools_cmd.import_issues(target=tmp_path, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["created"] == 0
+    assert payload["dismissed"] == 1
+
+    config.write_text(config.read_text().replace("tools/missing.md", "tools/changed.md"))
+    assert tools_cmd.import_issues(target=tmp_path, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["created"] == 1
+
+
+def test_work_brief_and_doctor_include_tool_catalog_health(tmp_path, monkeypatch, capsys):
+    _init_git_repo(tmp_path)
+    dogfood_cmd.init(target=tmp_path)
+    monkeypatch.setattr(work_cmd.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(dogfood_cmd, "_check_git_ignored", lambda repo, path: "yes")
+    config = tmp_path / ".brigade" / "tools.toml"
+    config.write_text(
+        """
+[[tool]]
+id = "portable"
+name = "Portable Tool"
+family = "skill"
+enabled = true
+description = "Portable missing source."
+source_path = "tools/missing.md"
+supported_harnesses = []
+"""
+    )
+
+    assert work_cmd.brief(target=tmp_path) == 0
+    out = capsys.readouterr().out
+    assert "tool_config:" in out
+    assert "tool_catalog:" in out
+    assert "tool_top_issue: portable/missing_source" in out
+
+    assert work_cmd.doctor(target=tmp_path) == 0
+    out = capsys.readouterr().out
+    assert "[warn] tool_missing_source:" in out
+    assert "[ok] tools_config_ignored: yes" in out
 
 
 def test_work_backup_init_status_doctor_and_json(tmp_path, monkeypatch, capsys):
@@ -3441,6 +3712,56 @@ def test_work_backup_cli(tmp_path, monkeypatch):
     assert seen == [
         ("init", {"target": tmp_path, "force": True, "update_gitignore": False}),
         ("status", {"target": tmp_path, "json_output": True}),
+        ("doctor", {"target": tmp_path, "json_output": True}),
+        ("import-issues", {"target": tmp_path, "json_output": True}),
+    ]
+
+
+def test_tools_cli(tmp_path, monkeypatch):
+    seen = []
+
+    def fake_init(**kwargs):
+        seen.append(("init", kwargs))
+        return 0
+
+    def fake_list(**kwargs):
+        seen.append(("list", kwargs))
+        return 0
+
+    def fake_show(**kwargs):
+        seen.append(("show", kwargs))
+        return 0
+
+    def fake_search(**kwargs):
+        seen.append(("search", kwargs))
+        return 0
+
+    def fake_doctor(**kwargs):
+        seen.append(("doctor", kwargs))
+        return 0
+
+    def fake_import_issues(**kwargs):
+        seen.append(("import-issues", kwargs))
+        return 0
+
+    monkeypatch.setattr(tools_cmd, "init", fake_init)
+    monkeypatch.setattr(tools_cmd, "list_tools", fake_list)
+    monkeypatch.setattr(tools_cmd, "show", fake_show)
+    monkeypatch.setattr(tools_cmd, "search", fake_search)
+    monkeypatch.setattr(tools_cmd, "doctor", fake_doctor)
+    monkeypatch.setattr(tools_cmd, "import_issues", fake_import_issues)
+
+    assert cli.main(["tools", "init", "--target", str(tmp_path), "--force", "--no-gitignore"]) == 0
+    assert cli.main(["tools", "list", "--target", str(tmp_path), "--json"]) == 0
+    assert cli.main(["tools", "show", "simplify", "--target", str(tmp_path), "--json"]) == 0
+    assert cli.main(["tools", "search", "simple", "--target", str(tmp_path), "--json"]) == 0
+    assert cli.main(["tools", "doctor", "--target", str(tmp_path), "--json"]) == 0
+    assert cli.main(["tools", "import-issues", "--target", str(tmp_path), "--json"]) == 0
+    assert seen == [
+        ("init", {"target": tmp_path, "force": True, "update_gitignore": False}),
+        ("list", {"target": tmp_path, "json_output": True}),
+        ("show", {"target": tmp_path, "tool_id": "simplify", "json_output": True}),
+        ("search", {"target": tmp_path, "query": "simple", "json_output": True}),
         ("doctor", {"target": tmp_path, "json_output": True}),
         ("import-issues", {"target": tmp_path, "json_output": True}),
     ]

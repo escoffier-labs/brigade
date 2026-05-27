@@ -177,6 +177,12 @@ brigade work scanners list
 brigade work scanners show chat-memory-sweep
 brigade work scanners plan
 brigade work scanners doctor
+brigade tools init
+brigade tools list
+brigade tools show simplify
+brigade tools search simplify
+brigade tools doctor
+brigade tools import-issues
 brigade work next
 brigade work next --json
 brigade work tasks
@@ -289,6 +295,7 @@ Start-of-day commands:
 - `brigade work inbox` groups pending scanner imports by source, kind, priority, age, and acceptance coverage, then suggests plan, promote, dismiss, or run commands.
 - `brigade work backup status` reads local backup health summaries and reports snapshot, check, prune, and restore rehearsal risk without running backup commands.
 - `brigade work scanners plan` inspects the local scanner registry and suggests staggered run windows without executing scanners.
+- `brigade tools doctor` inspects the local portable tool catalog and reports source, projection, schema, MCP, auth-field, and command-shape issues without invoking tools.
 - `brigade work next` prints only the next task. Add `--json` for wrappers.
 
 Task ledger commands:
@@ -330,12 +337,21 @@ For handoff-ingest issues, prefer `brigade handoff sync-issues` over repeated ra
 
 Scanner registry commands:
 
-- `brigade work scanners init` writes gitignored `.brigade/scanners.toml` with local producer entries for chat sweep, memory refresh, handoff ingest sync, and security findings.
+- `brigade work scanners init` writes gitignored `.brigade/scanners.toml` with local producer entries for chat sweep, memory refresh, handoff ingest sync, security findings, backup health, and tool catalog health.
 - `brigade work scanners list` and `show <scanner-id>` inspect configured scanner commands, sources, cadence, timeout, output paths, and conflict windows.
 - `brigade work scanners plan` calculates intended run windows, reports overlaps or clustered jobs, and prints a suggested staggered schedule.
 - `brigade work scanners doctor --import-issues` reports missing config, disabled required producers, bad commands, missing or stale output paths, and schedule conflicts, then can import those health issues as local task imports.
 
 The scanner registry is a planner and health surface only. Brigade does not install cron jobs, start a daemon, run scanners automatically, or promote scanner output automatically.
+
+Portable tool catalog commands:
+
+- `brigade tools init` writes gitignored `.brigade/tools.toml` with local examples for portable slash commands and superpowers.
+- `brigade tools list`, `show <tool-id>`, and `search <query>` inspect logical tool entries across source families such as `skill`, `slash-command`, `superpower`, `mcp`, `openapi`, `graphql`, `script`, and `custom`.
+- `brigade tools doctor` reports missing sources, manifests, schemas, projections, stale projection fingerprints, MCP config issues, stale health files, unsafe auth field names, and high-risk command shapes.
+- `brigade tools import-issues` turns catalog health issues into local `tool-catalog` work imports with stable fingerprints and dismiss-until-changed behavior.
+
+The tool catalog is read-only. Brigade does not invoke tools, start MCP servers, write Claude Code or Codex projections, fetch OpenAPI or GraphQL schemas, store auth, or sync harness configs. Keep tokens, secrets, private URLs, and host-private paths out of public catalog templates.
 
 Backup health commands:
 

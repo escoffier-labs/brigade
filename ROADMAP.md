@@ -61,13 +61,13 @@ Goal: make backup health part of the same daily operator loop as chat, memory, a
 
 Goal: make Brigade able to reason about callable tools across agent harnesses without making each harness own separate tool config.
 
-- Build a local tool catalog abstraction with source records, tool counts, search, describe, and call surfaces.
-- Support source families such as MCP, OpenAPI, GraphQL, local scripts, and custom adapters through a registry contract.
+- Build a local tool catalog abstraction with source records, tool counts, search, describe, and call surfaces. Status: started with gitignored `.brigade/tools.toml` and read-only `brigade tools` discovery commands.
+- Support source families such as MCP, OpenAPI, GraphQL, local scripts, and custom adapters through a registry contract. Status: started for `skill`, `slash-command`, `superpower`, `mcp`, `openapi`, `graphql`, `script`, and `custom` catalog entries.
 - Prefer schema-first tool descriptions so agents can discover by intent, inspect arguments, and produce typed calls.
 - Add a local daemon option with status, stop, restart, port tracking, and safe local auto-start for commands that need a runtime.
 - Track resumable executions for tools that pause for auth, approval, or human confirmation.
 - Keep shared auth, secrets, and policy decisions host-local and gitignored, while publishing only safe example configs.
-- Expose catalog health through `brigade doctor` and route broken source/auth/policy states into `brigade work import`.
+- Expose catalog health through `brigade doctor` and route broken source/auth/policy states into `brigade work import`. Status: started through `brigade work brief`, `brigade work doctor`, and `tool-catalog` imports.
 
 ## Later Phase: Cybersecurity Plugin
 

@@ -65,6 +65,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `brigade work scanners doctor --import-issues` to route scanner registry health warnings into the existing local work inbox.
 - `brigade work backup init/status/doctor/import-issues` for read-only local backup health summaries and `backup-health` inbox imports.
 - Backup health checks for stale snapshots, failed or stale checks, failed or stale prunes, missing summaries, overdue restore rehearsals, and unsafe private summary fields.
+- `brigade tools init/list/show/search/doctor/import-issues` for read-only portable tool, slash command, skill, superpower, script, and MCP catalog discovery.
+- Tool catalog health checks for missing sources, missing manifests or schemas, invalid schema JSON, parity gaps, stale projections, MCP config issues, stale health files, unsafe auth fields, and high-risk command shapes.
+- `tool-catalog` inbox imports with stable source fingerprints and dismissed-import protection until a catalog issue materially changes.
 - `brigade work import triage` to group pending imports by source and kind.
 - `brigade work import dismiss` to close noisy imports without promoting them.
 - `brigade work import promote --all` with optional `--source` and `--kind` filters for batch promotion.

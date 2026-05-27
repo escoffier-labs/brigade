@@ -193,6 +193,16 @@ SCANNER_DEFAULTS = (
         "output_path": ".brigade/security/latest/security-report.json",
         "conflict_window": "03:20-03:50",
     },
+    {
+        "id": "tool-catalog",
+        "source": "tool-catalog",
+        "command": "brigade tools import-issues --json",
+        "cadence": "daily@04:30",
+        "enabled": False,
+        "timeout": 180,
+        "output_path": ".brigade/tools.toml",
+        "conflict_window": "04:20-04:40",
+    },
 )
 CONFIDENCE_RANK = {"high": 0, "medium": 1, "normal": 1, "low": 2}
 RAW_CHAT_FIELDS = {
@@ -2376,7 +2386,7 @@ def _suggested_command(active: dict[str, Any] | None, next_text: object, source:
 
 
 def _brief_payload(target: Path, *, limit: int = 3) -> dict[str, Any]:
-    from . import handoff_cmd
+    from . import handoff_cmd, tools_cmd
 
     target = target.expanduser().resolve()
     active = _active_session_info(target)
@@ -2393,6 +2403,7 @@ def _brief_payload(target: Path, *, limit: int = 3) -> dict[str, Any]:
     scanner_candidate = _scanner_candidate(pending_imports)
     scanner_health = _scanner_health(target)
     backup_health = _backup_health(target)
+    tool_health = tools_cmd.health(target)
     handoff_issues = handoff_cmd.collect_issues(target)
     known_handoff_issue_ids = handoff_cmd._known_local_issue_ids(target)
     new_handoff_issues = [issue for issue in handoff_issues if issue.id not in known_handoff_issue_ids]
@@ -2419,6 +2430,13 @@ def _brief_payload(target: Path, *, limit: int = 3) -> dict[str, Any]:
             "issue_count": backup_health["issue_count"],
             "top_issue": backup_health["top_issue"],
             "valid": backup_health["valid"],
+        },
+        "tool_catalog": {
+            "config_path": tool_health["config_path"],
+            "valid": tool_health["valid"],
+            "tool_count": tool_health["tool_count"],
+            "issue_count": tool_health["issue_count"],
+            "top_issue": tool_health["top_issue"],
         },
         "handoff_issues": {
             "count": len(new_handoff_issues),
@@ -2967,6 +2985,18 @@ def brief(*, target: Path, limit: int = 3, json_output: bool = False) -> int:
                 "backup_top_issue: "
                 f"{top_backup.get('destination')}/{top_backup.get('issue_type')} "
                 f"{_short(str(top_backup.get('detail', '')))}"
+            )
+
+    tool_catalog = payload.get("tool_catalog") if isinstance(payload.get("tool_catalog"), dict) else {}
+    if tool_catalog:
+        print(f"tool_config: {tool_catalog.get('config_path')}")
+        print(f"tool_catalog: {'ok' if tool_catalog.get('issue_count') == 0 else f'{tool_catalog.get('issue_count')} issue(s)'}")
+        top_tool = tool_catalog.get("top_issue") if isinstance(tool_catalog.get("top_issue"), dict) else None
+        if top_tool:
+            print(
+                "tool_top_issue: "
+                f"{top_tool.get('tool_id') or 'catalog'}/{top_tool.get('issue_type')} "
+                f"{_short(str(top_tool.get('detail', '')))}"
             )
 
     handoff_issues = payload.get("handoff_issues")
@@ -4874,7 +4904,7 @@ def status(*, target: Path, limit: int = 12) -> int:
 
 
 def doctor(*, target: Path) -> int:
-    from . import handoff_cmd, security_cmd
+    from . import handoff_cmd, security_cmd, tools_cmd
 
     target = target.expanduser().resolve()
     failures = 0
@@ -5083,6 +5113,15 @@ def doctor(*, target: Path) -> int:
             failures += 1
         _doctor_line(str(check.get("status")), str(check.get("name")), check.get("detail"))
 
+    tool_health = tools_cmd.health(effective_target)
+    if tool_health["issues"]:
+        for issue in tool_health["issues"]:
+            if issue.get("status") == FAIL:
+                failures += 1
+            _doctor_line(str(issue.get("status")), str(issue.get("name")), issue.get("detail"))
+    else:
+        _doctor_line(OK, "tool_catalog", f"{tool_health['tool_count']} configured")
+
     handoff_inbox = (
         cfg.handoff_inbox
         if cfg and cfg.handoff_inbox is not None
@@ -5100,6 +5139,8 @@ def doctor(*, target: Path) -> int:
     _doctor_line(_doctor_ignore_level(backup_config_ignored), "backup_config_ignored", backup_config_ignored)
     scanner_config_ignored = dogfood_cmd._check_git_ignored(effective_target, _scanner_config_path(effective_target))
     _doctor_line(_doctor_ignore_level(scanner_config_ignored), "scanner_config_ignored", scanner_config_ignored)
+    tools_config_ignored = dogfood_cmd._check_git_ignored(effective_target, tools_cmd.config_path(effective_target))
+    _doctor_line(_doctor_ignore_level(tools_config_ignored), "tools_config_ignored", tools_config_ignored)
     work_ignored = dogfood_cmd._check_git_ignored(effective_target, work_root)
     _doctor_line(_doctor_ignore_level(work_ignored), "work_ignored", work_ignored)
     handoff_ignored = dogfood_cmd._check_git_ignored(effective_target, handoff_inbox)

@@ -607,6 +607,32 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Append findings to the local Brigade work import inbox.",
     )
 
+    # tools
+    p_tools = sub.add_parser("tools", help="Inspect local portable tool and skill catalog.")
+    tools_sub = p_tools.add_subparsers(dest="tools_command", metavar="<tools-command>")
+    tools_sub.required = True
+    p_tools_init = tools_sub.add_parser("init", help="Write local tool catalog defaults.")
+    p_tools_init.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
+    p_tools_init.add_argument("--force", action="store_true", help="Overwrite an existing tools config.")
+    p_tools_init.add_argument("--no-gitignore", action="store_true", help="Do not update the target .gitignore.")
+    p_tools_list = tools_sub.add_parser("list", help="List portable tool catalog entries.")
+    p_tools_list.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_tools_list.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_tools_show = tools_sub.add_parser("show", help="Show one portable tool catalog entry.")
+    p_tools_show.add_argument("tool_id", help="Logical tool id.")
+    p_tools_show.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_tools_show.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_tools_search = tools_sub.add_parser("search", help="Search portable tool catalog entries.")
+    p_tools_search.add_argument("query", help="Search query.")
+    p_tools_search.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_tools_search.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_tools_doctor = tools_sub.add_parser("doctor", help="Check portable tool catalog health.")
+    p_tools_doctor.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_tools_doctor.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_tools_import = tools_sub.add_parser("import-issues", help="Import tool catalog issues into the work inbox.")
+    p_tools_import.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
+    p_tools_import.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+
     # handoff-template
     p_ht = sub.add_parser("handoff-template", help="Print the handoff TEMPLATE.md.")
     p_ht.add_argument(
@@ -1113,6 +1139,27 @@ def main(argv=None) -> int:
                 output_dir=args.output_dir,
             )
         parser.error(f"unknown security command: {args.security_command}")
+        return 2
+    if cmd == "tools":
+        from . import tools_cmd
+
+        if args.tools_command == "init":
+            return tools_cmd.init(
+                target=args.target,
+                force=args.force,
+                update_gitignore=not args.no_gitignore,
+            )
+        if args.tools_command == "list":
+            return tools_cmd.list_tools(target=args.target, json_output=args.json)
+        if args.tools_command == "show":
+            return tools_cmd.show(target=args.target, tool_id=args.tool_id, json_output=args.json)
+        if args.tools_command == "search":
+            return tools_cmd.search(target=args.target, query=args.query, json_output=args.json)
+        if args.tools_command == "doctor":
+            return tools_cmd.doctor(target=args.target, json_output=args.json)
+        if args.tools_command == "import-issues":
+            return tools_cmd.import_issues(target=args.target, json_output=args.json)
+        parser.error(f"unknown tools command: {args.tools_command}")
         return 2
     if cmd == "handoff-template":
         from . import handoff as handoff_mod

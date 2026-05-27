@@ -55,4 +55,4 @@ Fields:
 - `output_path`: local output or state file used for freshness checks.
 - `conflict_window`: `HH:MM-HH:MM` window that should not overlap related jobs.
 
-Default local producers cover chat sweep imports, memory refresh imports, handoff ingest sync, security findings, and an optional disabled backup-health entry. Product-specific chat adapters remain outside this registry phase.
+Default local producers cover chat sweep imports, memory refresh imports, handoff ingest sync, security findings, and optional disabled backup-health and tool-catalog entries. Product-specific chat adapters and tool projection writers remain outside this registry phase.
