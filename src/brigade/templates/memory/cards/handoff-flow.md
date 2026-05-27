@@ -31,11 +31,13 @@ Only three handoff shapes can silently mutate canonical memory. Everything else 
 - `Recommended memory action` is `create-card` or `update-card`.
 - `Target card` matches `^[A-Za-z0-9._-]+\.md$` (no path traversal).
 - `Suggested card content` starts with YAML frontmatter.
+- `Target document` and `Suggested document content` sections are omitted entirely.
 
 **Document routing:**
 - `Recommended memory action` is `no-card`.
 - `Target document` is one of: `TOOLS.md`, `USER.md`, `rules/*.md`, `.learnings/*.md`.
 - `Suggested document content` has no `##` headings (would parse as new sections).
+- `Target card` and `Suggested card content` sections are omitted entirely.
 
 ## Closeout instruction
 
@@ -56,6 +58,9 @@ find . -path "*/.claude/memory-handoffs/*.md" -not -path "*/processed/*" -mtime 
 # Ingest run
 brigade ingest --target . --dry-run
 
+# Pre-ingest lint
+brigade handoff lint --target .
+
 # Cards landed via promotion
 find memory/cards -mtime -7 -name "*.md"
 
@@ -66,5 +71,6 @@ ls memory/handoff-inbox/ 2>/dev/null | wc -l
 ## Gotchas
 
 - `##` inside `Suggested document content` parses as a new handoff section. Use `###` or deeper.
+- Mixed card and document sections can trigger route skips. Run `brigade handoff lint` and delete the unused branch before ingest.
 - Auto-promotion writes to the filesystem immediately. Ingest during quiet hours if you care about cache continuity.
 - The ingester is intentionally conservative. If your inbox grows, refine your handoff quality; do not loosen the rules.
