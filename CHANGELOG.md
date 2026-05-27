@@ -46,6 +46,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `brigade work tasks` plus `brigade work task add/show/done` to manage a gitignored local task ledger under `.brigade/work/tasks.json`.
 - `brigade work run --queue-next` to queue the successful run's extracted next step, with duplicate pending task protection.
 - `brigade work import add/list/show/promote` to manage a gitignored local import inbox for scanner-discovered candidate work.
+- `brigade work import triage` to group pending imports by source and kind.
+- `brigade work import dismiss` to close noisy imports without promoting them.
+- `brigade work import promote --all` with optional `--source` and `--kind` filters for batch promotion.
 - `ROADMAP.md` covering the daily-driver path, scanner-ready inbox, chat-surface scanners, memory-card decay refresh, and portable operator setup.
 - `brigade work note` to append timestamped checkpoints to the active work session without ending it.
 - `brigade work doctor` to check dogfood config, Codex availability, local artifact paths, handoff inbox, ignore coverage, and latest run context for the daily work loop.
@@ -61,7 +64,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Dogfood next-step extraction now handles markdown `## Next` sections and can fall back to `summary.md` when `final.txt` does not contain a next-step label.
 - `brigade work run` now consumes the oldest pending ledger task before falling back to the latest extracted dogfood next step, and marks consumed tasks done after successful runs.
 - `brigade work task add --from-next` now reuses an equivalent pending task instead of adding duplicates.
-- `brigade work brief` now includes pending local work imports in both text and JSON output.
+- `brigade work brief` now includes pending local work imports and import counts in both text and JSON output.
 - The managed gitignore block now treats `.brigade/dogfood.toml` and `.brigade/runs/` as local state.
 - Live smoke docs now keep Codex agent execution in a trusted repo cwd while writing temporary roster, artifacts, and handoff output under `/tmp`.
 - Handoff write failures now preserve final run artifacts, print the final answer, return nonzero, and mark `run.json` as `handoff-failed`.

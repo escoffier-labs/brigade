@@ -649,6 +649,92 @@ def test_work_import_promote_reuses_existing_pending_task(tmp_path, monkeypatch,
     assert len(ledger["tasks"]) == 1
 
 
+def test_work_import_triage_groups_pending_imports(tmp_path, monkeypatch, capsys):
+    _init_git_repo(tmp_path)
+    monkeypatch.setattr(
+        work_cmd,
+        "_now",
+        lambda: datetime(2026, 5, 26, 12, 0, 0, tzinfo=timezone.utc),
+    )
+    assert work_cmd.import_add(target=tmp_path, text="Refresh card", kind="task", source="memory-care") == 0
+    assert work_cmd.import_add(target=tmp_path, text="Check chat decision", kind="decision", source="slack") == 0
+    assert work_cmd.import_add(target=tmp_path, text="Review chat task", kind="task", source="slack") == 0
+    capsys.readouterr()
+
+    assert work_cmd.import_triage(target=tmp_path) == 0
+    out = capsys.readouterr().out
+    assert "work import triage:" in out
+    assert "pending_imports: 3" in out
+    assert "- memory-care: 1" in out
+    assert "  task: 1" in out
+    assert "- slack: 2" in out
+    assert "  decision: 1" in out
+    assert "Review chat task" in out
+
+    assert work_cmd.import_triage(target=tmp_path, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["counts"]["total"] == 3
+    assert payload["counts"]["by_source"] == {"memory-care": 1, "slack": 2}
+    assert payload["counts"]["by_kind"] == {"decision": 1, "task": 2}
+    assert payload["groups"]["slack"]["decision"][0]["text"] == "Check chat decision"
+
+
+def test_work_import_promote_all_filters_by_source_and_kind(tmp_path, monkeypatch, capsys):
+    _init_git_repo(tmp_path)
+    monkeypatch.setattr(
+        work_cmd,
+        "_now",
+        lambda: datetime(2026, 5, 26, 12, 0, 0, tzinfo=timezone.utc),
+    )
+    assert work_cmd.import_add(target=tmp_path, text="Refresh card one", kind="task", source="memory-care") == 0
+    assert work_cmd.import_add(target=tmp_path, text="Refresh card two", kind="task", source="memory-care") == 0
+    assert work_cmd.import_add(target=tmp_path, text="Review chat note", kind="task", source="slack") == 0
+    assert work_cmd.import_add(target=tmp_path, text="Record decision", kind="decision", source="memory-care") == 0
+    capsys.readouterr()
+
+    assert (
+        work_cmd.import_promote(
+            target=tmp_path,
+            all_matching=True,
+            kind="task",
+            source="memory-care",
+        )
+        == 0
+    )
+    out = capsys.readouterr().out
+    assert "promoted: 2" in out
+    assert "created: 2" in out
+    assert "existing: 0" in out
+    ledger = json.loads((tmp_path / ".brigade" / "work" / "tasks.json").read_text())
+    assert [task["text"] for task in ledger["tasks"]] == ["Refresh card one", "Refresh card two"]
+
+    assert work_cmd.import_list(target=tmp_path, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert [item["text"] for item in payload["imports"]] == ["Review chat note", "Record decision"]
+
+
+def test_work_import_dismiss_marks_import_not_pending(tmp_path, monkeypatch, capsys):
+    _init_git_repo(tmp_path)
+    monkeypatch.setattr(
+        work_cmd,
+        "_now",
+        lambda: datetime(2026, 5, 26, 12, 0, 0, tzinfo=timezone.utc),
+    )
+    assert work_cmd.import_add(target=tmp_path, text="Ignore noisy scanner item", source="discord") == 0
+    import_id = capsys.readouterr().out.split("import: ", 1)[1].splitlines()[0]
+
+    assert work_cmd.import_dismiss(target=tmp_path, import_id=import_id[:12], reason="not actionable") == 0
+    out = capsys.readouterr().out
+    assert "status: dismissed" in out
+    assert "reason: not actionable" in out
+    assert work_cmd.import_list(target=tmp_path) == 0
+    assert "imports: none" in capsys.readouterr().out
+    assert work_cmd.import_list(target=tmp_path, all_imports=True, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["imports"][0]["status"] == "dismissed"
+    assert payload["imports"][0]["dismiss_reason"] == "not actionable"
+
+
 def test_work_brief_includes_pending_imports(tmp_path, monkeypatch, capsys):
     _init_git_repo(tmp_path)
     monkeypatch.setattr(
@@ -673,6 +759,17 @@ def test_work_brief_includes_pending_imports(tmp_path, monkeypatch, capsys):
     assert payload["pending_imports"][0]["text"] == "Review expired decision card"
     assert payload["pending_imports"][0]["kind"] == "finding"
     assert payload["pending_imports"][0]["source"] == "memory-care"
+    assert payload["pending_import_counts"]["total"] == 1
+    assert payload["pending_import_counts"]["by_source"] == {"memory-care": 1}
+    assert payload["pending_import_counts"]["by_kind"] == {"finding": 1}
+
+    assert work_cmd.brief(target=tmp_path) == 0
+    out = capsys.readouterr().out
+    assert "pending_import_count: 1" in out
+    assert "pending_imports_by_source:" in out
+    assert "  memory-care: 1" in out
+    assert "pending_imports_by_kind:" in out
+    assert "  finding: 1" in out
 
 
 def test_work_next_reports_latest_next_as_default_task(tmp_path, monkeypatch, capsys):
@@ -1157,6 +1254,10 @@ def test_work_import_cli(tmp_path, monkeypatch):
         seen.append(("list", kwargs))
         return 0
 
+    def fake_import_triage(**kwargs):
+        seen.append(("triage", kwargs))
+        return 0
+
     def fake_import_show(**kwargs):
         seen.append(("show", kwargs))
         return 0
@@ -1165,10 +1266,16 @@ def test_work_import_cli(tmp_path, monkeypatch):
         seen.append(("promote", kwargs))
         return 0
 
+    def fake_import_dismiss(**kwargs):
+        seen.append(("dismiss", kwargs))
+        return 0
+
     monkeypatch.setattr(work_cmd, "import_add", fake_import_add)
     monkeypatch.setattr(work_cmd, "import_list", fake_import_list)
+    monkeypatch.setattr(work_cmd, "import_triage", fake_import_triage)
     monkeypatch.setattr(work_cmd, "import_show", fake_import_show)
     monkeypatch.setattr(work_cmd, "import_promote", fake_import_promote)
+    monkeypatch.setattr(work_cmd, "import_dismiss", fake_import_dismiss)
 
     assert (
         cli.main(
@@ -1191,8 +1298,26 @@ def test_work_import_cli(tmp_path, monkeypatch):
         == 0
     )
     assert cli.main(["work", "import", "list", "--target", str(tmp_path), "--all", "--json", "--limit", "3"]) == 0
+    assert cli.main(["work", "import", "triage", "--target", str(tmp_path), "--json", "--limit", "4"]) == 0
     assert cli.main(["work", "import", "show", "imp123", "--target", str(tmp_path)]) == 0
-    assert cli.main(["work", "import", "promote", "imp123", "--target", str(tmp_path)]) == 0
+    assert (
+        cli.main(
+            [
+                "work",
+                "import",
+                "promote",
+                "--target",
+                str(tmp_path),
+                "--all",
+                "--kind",
+                "task",
+                "--source",
+                "memory-care",
+            ]
+        )
+        == 0
+    )
+    assert cli.main(["work", "import", "dismiss", "imp123", "--target", str(tmp_path), "--reason", "noise"]) == 0
     assert seen == [
         (
             "add",
@@ -1205,8 +1330,19 @@ def test_work_import_cli(tmp_path, monkeypatch):
             },
         ),
         ("list", {"target": tmp_path, "all_imports": True, "json_output": True, "limit": 3}),
+        ("triage", {"target": tmp_path, "json_output": True, "limit": 4}),
         ("show", {"target": tmp_path, "import_id": "imp123"}),
-        ("promote", {"target": tmp_path, "import_id": "imp123"}),
+        (
+            "promote",
+            {
+                "target": tmp_path,
+                "import_id": None,
+                "all_matching": True,
+                "kind": "task",
+                "source": "memory-care",
+            },
+        ),
+        ("dismiss", {"target": tmp_path, "import_id": "imp123", "reason": "noise"}),
     ]
 
 

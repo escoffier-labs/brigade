@@ -226,6 +226,35 @@ def _pending_imports(target: Path) -> list[dict[str, Any]]:
     return imports
 
 
+def _import_counts(imports: list[dict[str, Any]]) -> dict[str, Any]:
+    by_source: dict[str, int] = {}
+    by_kind: dict[str, int] = {}
+    for item in imports:
+        source = str(item.get("source") or "manual")
+        kind = str(item.get("kind") or "task")
+        by_source[source] = by_source.get(source, 0) + 1
+        by_kind[kind] = by_kind.get(kind, 0) + 1
+    return {
+        "total": len(imports),
+        "by_source": dict(sorted(by_source.items())),
+        "by_kind": dict(sorted(by_kind.items())),
+    }
+
+
+def _matching_pending_imports(
+    target: Path,
+    *,
+    kind: str | None = None,
+    source: str | None = None,
+) -> list[dict[str, Any]]:
+    imports = _pending_imports(target)
+    if kind:
+        imports = [item for item in imports if item.get("kind") == kind]
+    if source:
+        imports = [item for item in imports if item.get("source") == source]
+    return imports
+
+
 def _find_pending_task_by_text(target: Path, text: str) -> dict[str, Any] | None:
     wanted = _task_text_key(text)
     if not wanted:
@@ -249,6 +278,29 @@ def _find_import(target: Path, import_id: str) -> tuple[dict[str, Any] | None, l
     if len(matches) == 1:
         return matches[0], imports
     return None, imports
+
+
+def _mark_import_promoted(target: Path, item: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+    text = str(item.get("text") or "").strip()
+    metadata: dict[str, Any] = {
+        "import_id": item.get("id"),
+        "import_kind": item.get("kind"),
+        "import_source": item.get("source"),
+    }
+    item_metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+    metadata.update(item_metadata)
+    task, created = _add_task(
+        target,
+        text,
+        source=f"import:{item.get('source') or 'manual'}",
+        metadata=metadata,
+    )
+    now = _now().isoformat()
+    item["status"] = "promoted"
+    item["updated_at"] = now
+    item["promoted_at"] = now
+    item["task_id"] = task["id"]
+    return task, created
 
 
 def _find_task(target: Path, task_id: str) -> tuple[dict[str, Any] | None, dict[str, Any]]:
@@ -776,6 +828,7 @@ def _brief_payload(target: Path, *, limit: int = 3) -> dict[str, Any]:
     suggested = _suggested_command(active, resolved["task"], resolved["source"])
     pending = _pending_tasks(target)
     pending_imports = _pending_imports(target)
+    pending_import_counts = _import_counts(pending_imports)
     return {
         "target": str(target),
         "git": git,
@@ -787,6 +840,7 @@ def _brief_payload(target: Path, *, limit: int = 3) -> dict[str, Any]:
         "pending_tasks": pending,
         "imports_path": str(_imports_path(target)),
         "pending_imports": pending_imports,
+        "pending_import_counts": pending_import_counts,
         "dogfood": resolved["dogfood"],
         "next_source": resolved["source"],
         "task_id": resolved.get("task_id"),
@@ -1232,6 +1286,19 @@ def brief(*, target: Path, limit: int = 3, json_output: bool = False) -> int:
 
     pending_imports = payload["pending_imports"]
     if isinstance(pending_imports, list) and pending_imports:
+        counts = payload.get("pending_import_counts")
+        if isinstance(counts, dict):
+            print(f"pending_import_count: {counts.get('total', len(pending_imports))}")
+            by_source = counts.get("by_source") if isinstance(counts.get("by_source"), dict) else {}
+            if by_source:
+                print("pending_imports_by_source:")
+                for source, count in by_source.items():
+                    print(f"  {source}: {count}")
+            by_kind = counts.get("by_kind") if isinstance(counts.get("by_kind"), dict) else {}
+            if by_kind:
+                print("pending_imports_by_kind:")
+                for kind, count in by_kind.items():
+                    print(f"  {kind}: {count}")
         print("pending_imports:")
         for item in pending_imports[:5]:
             if not isinstance(item, dict):
@@ -1439,6 +1506,54 @@ def import_list(*, target: Path, all_imports: bool = False, json_output: bool = 
     return 0
 
 
+def import_triage(*, target: Path, json_output: bool = False, limit: int = 50) -> int:
+    if limit < 1:
+        print("error: --limit must be a positive integer", file=sys.stderr)
+        return 2
+    target = target.expanduser().resolve()
+    if not target.is_dir():
+        print(f"error: --target is not a directory: {target}", file=sys.stderr)
+        return 2
+    pending = _pending_imports(target)
+    counts = _import_counts(pending)
+    groups: dict[str, dict[str, list[dict[str, Any]]]] = {}
+    for item in pending:
+        source = str(item.get("source") or "manual")
+        kind = str(item.get("kind") or "task")
+        groups.setdefault(source, {}).setdefault(kind, []).append(item)
+
+    if json_output:
+        print(
+            json.dumps(
+                {
+                    "imports_path": str(_imports_path(target)),
+                    "counts": counts,
+                    "groups": groups,
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return 0
+
+    print(f"work import triage: {target}")
+    print(f"imports_path: {_imports_path(target)}")
+    print(f"pending_imports: {counts['total']}")
+    if not pending:
+        return 0
+    print("sources:")
+    for source, by_kind in sorted(groups.items()):
+        source_count = sum(len(items) for items in by_kind.values())
+        print(f"- {source}: {source_count}")
+        for kind, items in sorted(by_kind.items()):
+            print(f"  {kind}: {len(items)}")
+            for item in items[:limit]:
+                print(f"    - {item.get('id')} {_short(str(item.get('text', '')))}")
+            if len(items) > limit:
+                print(f"    ... {len(items) - limit} more")
+    return 0
+
+
 def import_show(*, target: Path, import_id: str) -> int:
     target = target.expanduser().resolve()
     if not target.is_dir():
@@ -1467,10 +1582,47 @@ def import_show(*, target: Path, import_id: str) -> int:
     return 0
 
 
-def import_promote(*, target: Path, import_id: str) -> int:
+def import_promote(
+    *,
+    target: Path,
+    import_id: str | None = None,
+    all_matching: bool = False,
+    kind: str | None = None,
+    source: str | None = None,
+) -> int:
     target = target.expanduser().resolve()
     if not target.is_dir():
         print(f"error: --target is not a directory: {target}", file=sys.stderr)
+        return 2
+    if kind is not None and kind not in IMPORT_KINDS:
+        print(f"error: --kind must be one of: {', '.join(IMPORT_KINDS)}", file=sys.stderr)
+        return 2
+    if all_matching and import_id:
+        print("error: pass an import id or --all, not both", file=sys.stderr)
+        return 2
+    if all_matching:
+        imports = _read_imports(target)
+        wanted_ids = {item.get("id") for item in _matching_pending_imports(target, kind=kind, source=source)}
+        promoted: list[tuple[dict[str, Any], dict[str, Any], bool]] = []
+        for item in imports:
+            if item.get("id") not in wanted_ids:
+                continue
+            text = str(item.get("text") or "").strip()
+            if not text:
+                continue
+            task, created = _mark_import_promoted(target, item)
+            promoted.append((item, task, created))
+        _write_imports(target, imports)
+        created_count = len([item for item in promoted if item[2]])
+        print(f"promoted: {len(promoted)}")
+        print(f"created: {created_count}")
+        print(f"existing: {len(promoted) - created_count}")
+        for item, task, created in promoted:
+            status = "created" if created else "existing"
+            print(f"- {item.get('id')} -> {task['id']} [{status}] {_short(str(task.get('text', '')))}")
+        return 0
+    if not import_id:
+        print("error: import id is required unless --all is passed", file=sys.stderr)
         return 2
     item, imports = _find_import(target, import_id)
     if item is None:
@@ -1480,30 +1632,36 @@ def import_promote(*, target: Path, import_id: str) -> int:
     if not text:
         print(f"error: import has no text: {import_id}", file=sys.stderr)
         return 2
-    metadata: dict[str, Any] = {
-        "import_id": item.get("id"),
-        "import_kind": item.get("kind"),
-        "import_source": item.get("source"),
-    }
-    item_metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
-    metadata.update(item_metadata)
-    task, created = _add_task(
-        target,
-        text,
-        source=f"import:{item.get('source') or 'manual'}",
-        metadata=metadata,
-    )
-    now = _now().isoformat()
-    item["status"] = "promoted"
-    item["updated_at"] = now
-    item["promoted_at"] = now
-    item["task_id"] = task["id"]
+    task, created = _mark_import_promoted(target, item)
     _write_imports(target, imports)
     print(f"import: {item.get('id')}")
     print(f"status: {item.get('status')}")
     print(f"task: {task['id']}")
     print(f"created: {created}")
     print(f"text: {task['text']}")
+    return 0
+
+
+def import_dismiss(*, target: Path, import_id: str, reason: str | None = None) -> int:
+    target = target.expanduser().resolve()
+    if not target.is_dir():
+        print(f"error: --target is not a directory: {target}", file=sys.stderr)
+        return 2
+    item, imports = _find_import(target, import_id)
+    if item is None:
+        print(f"error: import not found: {import_id}", file=sys.stderr)
+        return 1
+    now = _now().isoformat()
+    item["status"] = "dismissed"
+    item["updated_at"] = now
+    item["dismissed_at"] = now
+    if reason and reason.strip():
+        item["dismiss_reason"] = reason.strip()
+    _write_imports(target, imports)
+    print(f"import: {item.get('id')}")
+    print("status: dismissed")
+    if item.get("dismiss_reason"):
+        print(f"reason: {item['dismiss_reason']}")
     return 0
 
 

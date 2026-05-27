@@ -16,13 +16,17 @@ Status: in progress.
 
 ## Next Phase: Scanner-Ready Inbox
 
+Status: in progress.
+
 Goal: make Brigade a safe target for local automations that discover useful work.
 
 - Keep raw scanner output private and gitignored under `.brigade/work/imports/`.
 - Normalize imports into small records with `kind`, `source`, text, timestamps, and metadata.
 - Let wrappers import candidate tasks, findings, decisions, preferences, incidents, links, and commands without knowing Brigade internals.
 - Promote selected imports into the work task ledger, with source metadata preserved.
-- Surface pending imports in `brigade work brief` so discovered work appears in the daily flow.
+- Dismiss noisy imports so scanners can be useful without leaving permanent queue clutter.
+- Batch-promote reviewed imports by source and kind.
+- Surface pending imports and grouped counts in `brigade work brief` so discovered work appears in the daily flow.
 
 ## Later Phase: Chat Surface Scanners
 
