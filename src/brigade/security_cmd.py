@@ -84,6 +84,10 @@ ENV_ASSIGNMENT_RE = re.compile(r"(?i)\b[A-Z0-9_]*(TOKEN|SECRET|PASSWORD|API_KEY)
 REMOTE_SHELL_RE = re.compile(r"\b(curl|wget)\b[^\n|;]*(\||;)\s*(sh|bash)\b")
 DESTRUCTIVE_RE = re.compile(r"\b(rm\s+-rf|git\s+reset\s+--hard|git\s+clean\s+-fdx|chmod\s+777)\b")
 UNPINNED_NPX_RE = re.compile(r"\bnpx\s+(?:-y\s+)?([a-zA-Z0-9_.-]+)(?:\s|$)")
+ENV_DUMP_RE = re.compile(r"\b(env|printenv|set)\b.*(>\s*\S+|\|\s*(curl|nc|netcat|tee))")
+UNPINNED_ACTION_RE = re.compile(r"uses:\s*['\"]?([^@\s'\":]+/[^@\s'\"]+|docker://[^@\s'\"]+)['\"]?\s*$")
+PINNED_ACTION_RE = re.compile(r"uses:\s*['\"]?([^@\s'\"]+)@([^@\s'\"]+)")
+PYTHON_URL_DEP_RE = re.compile(r"(?i)(https?://|git\+https?://|git\+ssh://)")
 HTTP_MCP_RE = re.compile(r'"url"\s*:\s*"https?://')
 AUTO_APPROVE_RE = re.compile(r"(?i)(auto[_-]?approve|always[_-]?allow|allow[_-]?all)")
 PROMPT_INJECTION_RE = re.compile(
@@ -100,6 +104,7 @@ MCP_HIGH_RISK_COMMANDS = {"bash", "sh", "zsh", "fish", "powershell", "pwsh", "do
 MCP_SERVER_COUNT_WARN = 8
 MCP_SHELL_META_RE = re.compile(r"[;&|`<>]|\$\(")
 FINGERPRINT_RE = re.compile(r"^[a-f0-9]{16}$")
+GITHUB_ACTION_FLOATING_REFS = {"main", "master", "latest", "dev", "develop", "trunk", "head"}
 
 
 @dataclass(frozen=True)
@@ -781,6 +786,167 @@ def _first_npx_package(args: list[object]) -> str | None:
     return None
 
 
+def _scan_package_json(findings: list[dict[str, Any]], *, target: Path, path: Path, text: str) -> None:
+    if path.name != "package.json":
+        return
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        return
+    if not isinstance(data, dict):
+        return
+    scripts = data.get("scripts", {})
+    if not isinstance(scripts, dict):
+        return
+    for name, command in scripts.items():
+        if not isinstance(name, str) or not isinstance(command, str):
+            continue
+        line_number = _line_number_for(text, f'"{name}"')
+        evidence = f"scripts.{name}: {command}"
+        if REMOTE_SHELL_RE.search(command):
+            _finding(
+                findings,
+                target=target,
+                path=path,
+                line=line_number,
+                severity="high",
+                category="supply-chain",
+                title="Package script pipes remote content into shell",
+                evidence=evidence,
+                suggestion="Replace curl-to-shell package scripts with checked-in, pinned, and reviewed installer steps.",
+            )
+        if DESTRUCTIVE_RE.search(command):
+            _finding(
+                findings,
+                target=target,
+                path=path,
+                line=line_number,
+                severity="medium",
+                category="supply-chain",
+                title="Package script contains destructive command",
+                evidence=evidence,
+                suggestion="Gate destructive package scripts behind explicit operator approval and document recovery steps.",
+            )
+        npx_match = UNPINNED_NPX_RE.search(command)
+        if npx_match and "@" not in npx_match.group(1):
+            _finding(
+                findings,
+                target=target,
+                path=path,
+                line=line_number,
+                severity="medium",
+                category="supply-chain",
+                title="Package script uses unpinned npx",
+                evidence=evidence,
+                suggestion="Pin npx package versions or move execution behind a reviewed lockfile.",
+            )
+        if ENV_DUMP_RE.search(command):
+            _finding(
+                findings,
+                target=target,
+                path=path,
+                line=line_number,
+                severity="high",
+                category="supply-chain",
+                title="Package script may leak environment",
+                evidence=evidence,
+                suggestion="Avoid dumping environment variables in package scripts, especially near network or file redirection.",
+            )
+
+
+def _scan_github_actions(findings: list[dict[str, Any]], *, target: Path, path: Path, text: str) -> None:
+    rel = path.relative_to(target)
+    if len(rel.parts) < 3 or rel.parts[0] != ".github" or rel.parts[1] != "workflows":
+        return
+    for line_number, line in enumerate(text.splitlines(), start=1):
+        stripped = line.strip()
+        if stripped.startswith("pull_request_target:") or stripped == "- pull_request_target":
+            _finding(
+                findings,
+                target=target,
+                path=path,
+                line=line_number,
+                severity="high",
+                category="supply-chain",
+                title="GitHub Actions uses pull_request_target",
+                evidence=stripped,
+                suggestion="Avoid pull_request_target for untrusted code paths or isolate it from checkout and secret access.",
+            )
+        if stripped.startswith("permissions: write-all"):
+            _finding(
+                findings,
+                target=target,
+                path=path,
+                line=line_number,
+                severity="high",
+                category="supply-chain",
+                title="GitHub Actions grants write-all permissions",
+                evidence=stripped,
+                suggestion="Use least-privilege workflow permissions instead of write-all.",
+            )
+        action_match = UNPINNED_ACTION_RE.search(stripped)
+        if action_match:
+            _finding(
+                findings,
+                target=target,
+                path=path,
+                line=line_number,
+                severity="medium",
+                category="supply-chain",
+                title="GitHub Action missing pinned ref",
+                evidence=stripped,
+                suggestion="Pin actions to an immutable commit SHA or a reviewed release ref.",
+            )
+        pinned_match = PINNED_ACTION_RE.search(stripped)
+        if pinned_match:
+            ref = pinned_match.group(2)
+            if ref.lower() in GITHUB_ACTION_FLOATING_REFS or (not ref.startswith("v") and not re.fullmatch(r"[a-fA-F0-9]{40}", ref)):
+                _finding(
+                    findings,
+                    target=target,
+                    path=path,
+                    line=line_number,
+                    severity="medium",
+                    category="supply-chain",
+                    title="GitHub Action uses floating ref",
+                    evidence=stripped,
+                    suggestion="Pin GitHub Actions to immutable commit SHAs for release-sensitive workflows.",
+                )
+
+
+def _scan_python_project(findings: list[dict[str, Any]], *, target: Path, path: Path, text: str) -> None:
+    if path.name not in {"pyproject.toml", "setup.cfg", "requirements.txt"}:
+        return
+    for line_number, line in enumerate(text.splitlines(), start=1):
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if PYTHON_URL_DEP_RE.search(stripped):
+            _finding(
+                findings,
+                target=target,
+                path=path,
+                line=line_number,
+                severity="medium",
+                category="supply-chain",
+                title="Python dependency uses URL source",
+                evidence=stripped,
+                suggestion="Prefer pinned package versions or reviewed immutable commit URLs for Python dependencies.",
+            )
+        if "setup_requires" in stripped or "dependency_links" in stripped:
+            _finding(
+                findings,
+                target=target,
+                path=path,
+                line=line_number,
+                severity="medium",
+                category="supply-chain",
+                title="Python project uses legacy install hook",
+                evidence=stripped,
+                suggestion="Avoid legacy install-time dependency hooks and move dependencies into static project metadata.",
+            )
+
+
 def _iter_scan_files(target: Path) -> list[Path]:
     paths: list[Path] = []
     for path in target.rglob("*"):
@@ -999,6 +1165,9 @@ def scan_target(target: Path, *, include_templates: bool = False, suppressions: 
         for line_number, line in enumerate(text.splitlines(), start=1):
             _scan_line(findings, target=target, path=path, line_number=line_number, line=line)
         _scan_mcp_document(findings, target=target, path=path, text=text)
+        _scan_package_json(findings, target=target, path=path, text=text)
+        _scan_github_actions(findings, target=target, path=path, text=text)
+        _scan_python_project(findings, target=target, path=path, text=text)
     suppressed = [finding for finding in findings if finding.get("fingerprint") in suppressions]
     findings = [finding for finding in findings if finding.get("fingerprint") not in suppressions]
     counts: dict[str, int] = {}

