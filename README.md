@@ -170,7 +170,9 @@ brigade work next
 brigade work next --json
 brigade work tasks
 brigade work task add "build the next slice"
+brigade work task add "build the next slice" --type feature --priority high --acceptance "focused tests pass"
 brigade work task add --from-next
+brigade work task plan <task-id>
 brigade work task done <task-id>
 brigade work import add --kind task --source slack "refresh the stale memory card"
 brigade work import list
@@ -276,7 +278,9 @@ Task ledger commands:
 
 - `brigade work tasks` lists `.brigade/work/tasks.json`.
 - `brigade work task add "..."` queues a task manually.
+- `brigade work task add "..." --type feature --priority high --acceptance "..."` queues typed work with repeatable acceptance criteria.
 - `brigade work task add --from-next` promotes the latest extracted dogfood next step.
+- `brigade work task plan <task-id>` shows the task metadata, acceptance checklist, and suggested run command.
 - `brigade work task done <task-id>` closes queued work.
 
 Import inbox commands:
@@ -297,6 +301,7 @@ For handoff-ingest issues, prefer `brigade handoff sync-issues` over repeated ra
 
 Run the daily loop with `brigade work run`.
 It opens a work session, resolves the next task, runs `brigade dogfood`, and closes completed ledger tasks after successful runs.
+When the resolved ledger task has acceptance criteria, `work run` includes them in the task prompt as the definition of done.
 Then it ends the session, writes a work-session Memory Handoff by default, and prints a recap.
 
 Useful `work run` switches:

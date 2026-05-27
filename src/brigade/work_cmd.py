@@ -20,6 +20,8 @@ OK = "ok"
 WARN = "warn"
 FAIL = "fail"
 IMPORT_KINDS = ("task", "finding", "decision", "preference", "incident", "link", "command")
+TASK_TYPES = ("task", "feature", "bug", "docs", "security", "workflow", "research", "chore")
+TASK_PRIORITIES = ("low", "normal", "high", "urgent")
 
 
 def _git(target: Path, *args: str) -> subprocess.CompletedProcess[str]:
@@ -197,6 +199,59 @@ def _import_sort_key(item: dict[str, Any]) -> str:
 
 def _task_text_key(text: str) -> str:
     return " ".join(text.casefold().split())
+
+
+def _normalize_task_type(value: object) -> str:
+    if isinstance(value, str) and value.strip() in TASK_TYPES:
+        return value.strip()
+    return "task"
+
+
+def _normalize_task_priority(value: object) -> str:
+    if isinstance(value, str) and value.strip() in TASK_PRIORITIES:
+        return value.strip()
+    return "normal"
+
+
+def _normalize_acceptance(values: object) -> list[str]:
+    if values is None:
+        return []
+    raw_values = values if isinstance(values, list) else [values]
+    accepted: list[str] = []
+    seen: set[str] = set()
+    for value in raw_values:
+        text = str(value).strip()
+        if not text:
+            continue
+        key = _task_text_key(text)
+        if key in seen:
+            continue
+        accepted.append(text)
+        seen.add(key)
+    return accepted
+
+
+def _task_acceptance(task: dict[str, Any]) -> list[str]:
+    values = task.get("acceptance")
+    if values is None:
+        metadata = task.get("metadata") if isinstance(task.get("metadata"), dict) else {}
+        values = metadata.get("acceptance")
+    return _normalize_acceptance(values)
+
+
+def _task_summary(task: dict[str, Any]) -> dict[str, Any]:
+    acceptance = _task_acceptance(task)
+    return {
+        "id": task.get("id"),
+        "text": str(task.get("text") or ""),
+        "status": task.get("status", "pending"),
+        "source": task.get("source", "manual"),
+        "type": _normalize_task_type(task.get("type")),
+        "priority": _normalize_task_priority(task.get("priority")),
+        "acceptance": acceptance,
+        "acceptance_count": len(acceptance),
+        "acceptance_missing": len(acceptance) == 0,
+    }
 
 
 def _import_record_key(item: dict[str, Any]) -> tuple[str, str, str]:
@@ -448,7 +503,15 @@ def _find_task(target: Path, task_id: str) -> tuple[dict[str, Any] | None, dict[
     return None, ledger
 
 
-def _make_task(text: str, *, source: str = "manual", metadata: dict[str, Any] | None = None) -> dict[str, Any]:
+def _make_task(
+    text: str,
+    *,
+    source: str = "manual",
+    metadata: dict[str, Any] | None = None,
+    task_type: str = "task",
+    priority: str = "normal",
+    acceptance: list[str] | None = None,
+) -> dict[str, Any]:
     now = _now()
     created = now.isoformat()
     task = {
@@ -456,6 +519,9 @@ def _make_task(text: str, *, source: str = "manual", metadata: dict[str, Any] | 
         "text": text,
         "status": "pending",
         "source": source,
+        "type": _normalize_task_type(task_type),
+        "priority": _normalize_task_priority(priority),
+        "acceptance": _normalize_acceptance(acceptance),
         "created_at": created,
         "updated_at": created,
     }
@@ -506,12 +572,22 @@ def _add_task(
     *,
     source: str = "manual",
     metadata: dict[str, Any] | None = None,
+    task_type: str = "task",
+    priority: str = "normal",
+    acceptance: list[str] | None = None,
 ) -> tuple[dict[str, Any], bool]:
     ledger = _read_task_ledger(target)
     existing = _find_pending_task_by_text(target, text)
     if existing is not None:
         return existing, False
-    task = _make_task(text, source=source, metadata=metadata)
+    task = _make_task(
+        text,
+        source=source,
+        metadata=metadata,
+        task_type=task_type,
+        priority=priority,
+        acceptance=acceptance,
+    )
     ledger["tasks"].append(task)
     _write_task_ledger(target, ledger)
     return task, True
@@ -698,6 +774,43 @@ def _resolve_next_task(target: Path) -> dict[str, Any]:
         "task_id": None,
         "dogfood": dogfood,
     }
+
+
+def _render_task_run_prompt(task: dict[str, Any]) -> str:
+    text = str(task.get("text") or "").strip()
+    lines = [text]
+    acceptance = _task_acceptance(task)
+    if acceptance:
+        lines.extend(["", "Acceptance criteria:"])
+        lines.extend(f"- {item}" for item in acceptance)
+    lines.extend(
+        [
+            "",
+            "Task metadata:",
+            f"- type: {_normalize_task_type(task.get('type'))}",
+            f"- priority: {_normalize_task_priority(task.get('priority'))}",
+            "",
+            "Definition of done:",
+            "- Treat the acceptance criteria above as the completion checklist.",
+            "- Report the verification command you ran, or explain the blocker.",
+        ]
+    )
+    return "\n".join(lines).strip()
+
+
+def _task_plan_payload(target: Path, task_id: str) -> tuple[dict[str, Any] | None, int]:
+    target = target.expanduser().resolve()
+    if not target.is_dir():
+        print(f"error: --target is not a directory: {target}", file=sys.stderr)
+        return None, 2
+    task, _ = _find_task(target, task_id)
+    if task is None:
+        print(f"error: task not found: {task_id}", file=sys.stderr)
+        return None, 1
+    summary = _task_summary(task)
+    summary["suggested_command"] = "brigade work run"
+    summary["tasks_path"] = str(_tasks_path(target))
+    return summary, 0
 
 
 def _display_session(path: Path, payload: dict[str, Any]) -> None:
@@ -925,6 +1038,7 @@ def _next_payload(target: Path) -> dict[str, Any]:
     active = _active_session_info(target)
     resolved = _resolve_next_task(target)
     dogfood = resolved["dogfood"]
+    ledger_task = resolved.get("ledger_task") if isinstance(resolved.get("ledger_task"), dict) else None
     suggested = 'brigade work end --note "..." --handoff' if active is not None else "brigade work run"
     return {
         "target": str(target),
@@ -932,6 +1046,7 @@ def _next_payload(target: Path) -> dict[str, Any]:
         "dogfood": dogfood,
         "next_source": resolved["source"],
         "task_id": resolved.get("task_id"),
+        "next_task": _task_summary(ledger_task) if ledger_task else None,
         "next": str(resolved["task"]),
         "suggested_command": suggested,
     }
@@ -956,6 +1071,7 @@ def _brief_payload(target: Path, *, limit: int = 3) -> dict[str, Any]:
     latest_session = _session_info(sessions[0][0], sessions[0][1]) if sessions else None
     recent_sessions = [_session_info(path, payload) for path, payload in sessions[:limit]]
     resolved = _resolve_next_task(target)
+    ledger_task = resolved.get("ledger_task") if isinstance(resolved.get("ledger_task"), dict) else None
     git = _git_snapshot(target)
     suggested = _suggested_command(active, resolved["task"], resolved["source"])
     pending = _pending_tasks(target)
@@ -988,6 +1104,7 @@ def _brief_payload(target: Path, *, limit: int = 3) -> dict[str, Any]:
         "dogfood": resolved["dogfood"],
         "next_source": resolved["source"],
         "task_id": resolved.get("task_id"),
+        "next_task": _task_summary(ledger_task) if ledger_task else None,
         "next": str(resolved["task"]),
         "suggested_command": suggested,
     }
@@ -1415,6 +1532,14 @@ def brief(*, target: Path, limit: int = 3, json_output: bool = False) -> int:
     print(f"next_source: {payload['next_source']}")
     if payload.get("task_id"):
         print(f"task_id: {payload['task_id']}")
+    next_task = payload.get("next_task") if isinstance(payload.get("next_task"), dict) else None
+    if next_task:
+        print(f"next_type: {next_task.get('type')}")
+        print(f"next_priority: {next_task.get('priority')}")
+        if next_task.get("acceptance_missing"):
+            print("next_acceptance: missing")
+        else:
+            print(f"next_acceptance: {next_task.get('acceptance_count')}")
     print(f"next: {_short(str(payload['next']))}")
     print(f"suggested_command: {payload['suggested_command']}")
 
@@ -1424,7 +1549,13 @@ def brief(*, target: Path, limit: int = 3, json_output: bool = False) -> int:
         for task in pending[:5]:
             if not isinstance(task, dict):
                 continue
-            print(f"  - {task.get('id')} {_short(str(task.get('text', '')))}")
+            summary = _task_summary(task)
+            print(
+                "  - "
+                f"{task.get('id')} "
+                f"[{summary['type']} {summary['priority']} acceptance={summary['acceptance_count']}] "
+                f"{_short(str(task.get('text', '')))}"
+            )
         if len(pending) > 5:
             print(f"  ... {len(pending) - 5} more")
 
@@ -1499,7 +1630,12 @@ def tasks(*, target: Path, all_tasks: bool = False, json_output: bool = False) -
         return 0
     for task in task_items:
         status_text = task.get("status", "pending")
-        print(f"- {task.get('id')} [{status_text}] {_short(str(task.get('text', '')))}")
+        summary = _task_summary(task)
+        print(
+            f"- {task.get('id')} [{status_text}] "
+            f"[{summary['type']} {summary['priority']} acceptance={summary['acceptance_count']}] "
+            f"{_short(str(task.get('text', '')))}"
+        )
         if task.get("source"):
             print(f"  source: {task['source']}")
         metadata = task.get("metadata") if isinstance(task.get("metadata"), dict) else {}
@@ -1512,13 +1648,27 @@ def tasks(*, target: Path, all_tasks: bool = False, json_output: bool = False) -
     return 0
 
 
-def task_add(*, target: Path, text: str | None = None, from_next: bool = False) -> int:
+def task_add(
+    *,
+    target: Path,
+    text: str | None = None,
+    from_next: bool = False,
+    task_type: str = "task",
+    priority: str = "normal",
+    acceptance: list[str] | None = None,
+) -> int:
     target = target.expanduser().resolve()
     if not target.is_dir():
         print(f"error: --target is not a directory: {target}", file=sys.stderr)
         return 2
     if from_next and text:
         print("error: pass task text or --from-next, not both", file=sys.stderr)
+        return 2
+    if task_type not in TASK_TYPES:
+        print(f"error: --type must be one of: {', '.join(TASK_TYPES)}", file=sys.stderr)
+        return 2
+    if priority not in TASK_PRIORITIES:
+        print(f"error: --priority must be one of: {', '.join(TASK_PRIORITIES)}", file=sys.stderr)
         return 2
     task_text = (text or "").strip()
     source = "manual"
@@ -1534,10 +1684,22 @@ def task_add(*, target: Path, text: str | None = None, from_next: bool = False) 
     if not task_text:
         print("error: task text is required", file=sys.stderr)
         return 2
-    task, created = _add_task(target, task_text, source=source, metadata=metadata)
+    task, created = _add_task(
+        target,
+        task_text,
+        source=source,
+        metadata=metadata,
+        task_type=task_type,
+        priority=priority,
+        acceptance=_normalize_acceptance(acceptance),
+    )
     print(f"task: {task['id']}")
     print(f"status: {task['status']}")
     print(f"created: {created}")
+    print(f"type: {_normalize_task_type(task.get('type'))}")
+    print(f"priority: {_normalize_task_priority(task.get('priority'))}")
+    criteria = _task_acceptance(task)
+    print(f"acceptance: {len(criteria)}")
     print(f"text: {task['text']}")
     return 0
 
@@ -1554,8 +1716,14 @@ def task_show(*, target: Path, task_id: str) -> int:
     print(f"task: {task.get('id')}")
     print(f"status: {task.get('status', 'pending')}")
     print(f"source: {task.get('source', '')}")
+    print(f"type: {_normalize_task_type(task.get('type'))}")
+    print(f"priority: {_normalize_task_priority(task.get('priority'))}")
     print(f"created_at: {task.get('created_at', '')}")
     print(f"updated_at: {task.get('updated_at', '')}")
+    criteria = _task_acceptance(task)
+    print(f"acceptance: {len(criteria)}")
+    for item in criteria:
+        print(f"  - {item}")
     metadata = task.get("metadata") if isinstance(task.get("metadata"), dict) else {}
     if metadata:
         print("metadata:")
@@ -1564,6 +1732,29 @@ def task_show(*, target: Path, task_id: str) -> int:
     if task.get("completed_at"):
         print(f"completed_at: {task['completed_at']}")
     print(f"text: {task.get('text', '')}")
+    return 0
+
+
+def task_plan(*, target: Path, task_id: str, json_output: bool = False) -> int:
+    payload, rc = _task_plan_payload(target, task_id)
+    if payload is None:
+        return rc
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+    print(f"task: {payload['id']}")
+    print(f"type: {payload['type']}")
+    print(f"priority: {payload['priority']}")
+    print(f"status: {payload['status']}")
+    print(f"source: {payload['source']}")
+    print(f"text: {payload['text']}")
+    print("acceptance:")
+    if payload["acceptance"]:
+        for item in payload["acceptance"]:
+            print(f"  - {item}")
+    else:
+        print("  missing")
+    print(f"suggested_command: {payload['suggested_command']}")
     return 0
 
 
@@ -2390,6 +2581,12 @@ def run(
     resolved = _resolve_next_task(target)
     task_text = task or str(resolved["task"])
     consumed_task_id = resolved.get("task_id") if task is None and resolved.get("source") == "task_ledger" else None
+    ledger_task = resolved.get("ledger_task") if consumed_task_id and isinstance(resolved.get("ledger_task"), dict) else None
+    run_task_text = (
+        _render_task_run_prompt(ledger_task)
+        if ledger_task is not None and _task_acceptance(ledger_task)
+        else task_text
+    )
     session_title = title or task_text
     start_rc = start(target=target, title=session_title)
     if start_rc != 0:
@@ -2399,7 +2596,7 @@ def run(
     dogfood_rc = 1
     try:
         dogfood_rc = dogfood_cmd.run(
-            task_text,
+            run_task_text,
             target=target,
             output_dir=output_dir,
             handoff=dogfood_handoff,

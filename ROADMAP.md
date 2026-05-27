@@ -99,7 +99,7 @@ Brigade-specific additions:
 Goal: make Brigade support a narrow issue lifecycle for daily work: pick one task, define acceptance, test first when practical, implement, review, refactor, and close.
 
 - Add task templates for vertical-slice work, bugfix work, and RED/GREEN/REFACTOR loops.
-- Let `brigade work run` consume structured acceptance criteria from the local task ledger or a GitHub issue mirror.
+- Let `brigade work run` consume structured acceptance criteria from the local task ledger or a GitHub issue mirror. Status: started for local ledger tasks with typed priority, repeatable acceptance criteria, `work task plan`, brief coverage, and criteria injection into ledger-driven runs.
 - Keep repo-shareable workflow rules separate from gitignored personal/global preferences.
 - Add doctor checks for missing acceptance criteria or stale active issue context.
 

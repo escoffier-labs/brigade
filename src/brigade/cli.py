@@ -7,6 +7,7 @@ from pathlib import Path
 
 from . import __version__
 from .dogfood_cmd import DEFAULT_TIMEOUT_SECONDS
+from .work_cmd import TASK_PRIORITIES, TASK_TYPES
 from .prompt import prompt_for_selection  # imported here so tests can monkeypatch cli.prompt_for_selection
 
 
@@ -182,9 +183,21 @@ def _build_parser() -> argparse.ArgumentParser:
     p_work_task_add.add_argument("text", nargs="*", help="Task text.")
     p_work_task_add.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
     p_work_task_add.add_argument("--from-next", action="store_true", help="Add the latest extracted dogfood next step.")
+    p_work_task_add.add_argument("--type", choices=TASK_TYPES, default="task", help="Task type.")
+    p_work_task_add.add_argument("--priority", choices=TASK_PRIORITIES, default="normal", help="Task priority.")
+    p_work_task_add.add_argument(
+        "--acceptance",
+        action="append",
+        default=[],
+        help="Acceptance criterion. Repeat for multiple criteria.",
+    )
     p_work_task_show = task_sub.add_parser("show", help="Show one work task.")
     p_work_task_show.add_argument("task_id", help="Task id or unique prefix.")
     p_work_task_show.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_work_task_plan = task_sub.add_parser("plan", help="Show task acceptance criteria and run plan.")
+    p_work_task_plan.add_argument("task_id", help="Task id or unique prefix.")
+    p_work_task_plan.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_work_task_plan.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_work_task_done = task_sub.add_parser("done", help="Mark one work task done.")
     p_work_task_done.add_argument("task_id", help="Task id or unique prefix.")
     p_work_task_done.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
@@ -748,9 +761,18 @@ def main(argv=None) -> int:
         if args.work_command == "task":
             if args.task_command == "add":
                 text = " ".join(args.text) if args.text else None
-                return work_cmd.task_add(target=args.target, text=text, from_next=args.from_next)
+                return work_cmd.task_add(
+                    target=args.target,
+                    text=text,
+                    from_next=args.from_next,
+                    task_type=args.type,
+                    priority=args.priority,
+                    acceptance=args.acceptance,
+                )
             if args.task_command == "show":
                 return work_cmd.task_show(target=args.target, task_id=args.task_id)
+            if args.task_command == "plan":
+                return work_cmd.task_plan(target=args.target, task_id=args.task_id, json_output=args.json)
             if args.task_command == "done":
                 return work_cmd.task_done(target=args.target, task_id=args.task_id)
             parser.error(f"unknown task command: {args.task_command}")
