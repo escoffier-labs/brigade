@@ -56,6 +56,56 @@ def test_security_policy_presets_and_template_inclusion(tmp_path, capsys):
     assert payload["findings"][0]["confidence"] == "template"
 
 
+def test_security_scan_deep_mcp_config_checks(tmp_path, capsys):
+    mcp_dir = tmp_path / ".codex"
+    mcp_dir.mkdir()
+    (mcp_dir / "mcp.json").write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "browser": {
+                        "command": "npx",
+                        "args": ["-y", "playwright-mcp", "--profile", "~/.ssh/id_rsa", "foo;bar"],
+                        "env": {"BROWSER_API_KEY": "abcd1234abcd1234abcd1234"},
+                    },
+                    "remote": {
+                        "url": "https://example.invalid/mcp",
+                        "timeoutSeconds": 30,
+                    },
+                    "shell": {
+                        "command": "bash",
+                        "args": ["~"],
+                    },
+                    "one": {"command": "node"},
+                    "two": {"command": "node"},
+                    "three": {"command": "node"},
+                    "four": {"command": "node"},
+                    "five": {"command": "node"},
+                    "six": {"command": "node"},
+                }
+            },
+            indent=2,
+        )
+    )
+
+    assert security_cmd.scan(target=tmp_path, fail_on="none", json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    titles = {finding["title"] for finding in payload["findings"]}
+    assert "MCP unpinned npx package" in titles
+    assert "MCP shell metacharacter in argument" in titles
+    assert "MCP sensitive file argument" in titles
+    assert "MCP hardcoded environment secret" in titles
+    assert "MCP server missing timeout" in titles
+    assert "Remote MCP transport" in titles
+    assert "MCP high-risk local command" in titles
+    assert "MCP broad filesystem argument" in titles
+    assert "Large MCP server set" in titles
+    secret_findings = [finding for finding in payload["findings"] if finding["title"] == "MCP hardcoded environment secret"]
+    assert secret_findings
+    assert "[REDACTED]" in secret_findings[0]["evidence"]
+    assert "abcd1234" not in secret_findings[0]["evidence"]
+
+
 def test_security_config_and_suppressions(tmp_path, capsys):
     (tmp_path / ".env").write_text("SERVICE_TOKEN=abcd1234abcd1234abcd1234\n")
     report = security_cmd.scan_target(tmp_path)
