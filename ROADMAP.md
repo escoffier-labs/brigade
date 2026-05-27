@@ -25,12 +25,13 @@ Goal: make Brigade a safe target for local automations that discover useful work
 - Document the scanner JSONL contract so external producers can target Brigade without importing Brigade internals.
 - Validate and ingest scanner-authored JSONL files.
 - Let wrappers import candidate tasks, findings, decisions, preferences, incidents, links, and commands without knowing Brigade internals.
-- Convert memory-care refresh queues into local task imports.
+- Convert memory-care refresh queues into local task imports. Status: implemented, including `memory-refresh` candidates with task metadata and acceptance.
 - Promote selected imports into the work task ledger, with source metadata preserved. Status: implemented with task `type`, `priority`, `template`, and `acceptance` preservation plus reviewed promote-and-run.
 - Dismiss noisy imports so scanners can be useful without leaving permanent queue clutter. Status: started with single-item dismissal and filtered `dismiss --all`.
 - Batch-promote reviewed imports by source and kind. Status: started with source, kind, and metadata filters across list, triage, promote, and dismiss.
 - Surface pending imports and grouped counts in `brigade work brief` so discovered work appears in the daily flow. Status: implemented with scanner candidate surfacing and `brigade work inbox`.
 - Warn on stale, noisy, or incomplete scanner queues. Status: started in `brigade work doctor`.
+- Keep scanner producer ingestion idempotent so repeated chat and memory sweeps skip equivalent pending or promoted imports, and dismissed items stay dismissed until source fingerprints change. Status: implemented for chat-sweep and memory-refresh producers.
 
 ## Later Phase: Chat Surface Scanners
 
@@ -42,7 +43,7 @@ Goal: support the common places agent work happens without making any one chat p
 - Use promotion gates so only reviewed, durable, or actionable items become tasks or memory handoffs.
 - Keep source metadata such as workspace, channel, thread, message range, and confidence local unless explicitly exported.
 - Maintain a local provider registry for OpenClaw, Peter S, Vincent, and other chat plugins instead of hardcoding one product list. Seeded channel families include Discord, Slack, ClickClack, Telegram, WhatsApp, Signal, iMessage, BlueBubbles, Google Chat, Microsoft Teams, Matrix, Mattermost, Nextcloud Talk, Feishu, Line, QQ bot, Zalo, Nostr, IRC, Twitch, Tlon, Google Meet, voice-call transcripts, webhooks, and QA channels.
-- Import nightly memory sweep `issues` into Brigade with `brigade work import chat-sweep`. Status: started with `.brigade/chat-memory-sweep.example.json`, OpenClaw cron fragment, and a command that converts sweep issues into local work imports.
+- Import nightly memory sweep `issues` into Brigade with `brigade work import chat-sweep`. Status: implemented for the local producer contract, including actionable task imports, wrapper JSON counts, source metadata, idempotency, and raw-chat privacy filtering.
 - Add scheduler rules that spread memory ingest, crawler repair, chat sweeps, and OpenClaw updater jobs around update windows so upgrades do not race plugin or extension loads.
 
 ## Later Phase: Backup And Recovery Visibility

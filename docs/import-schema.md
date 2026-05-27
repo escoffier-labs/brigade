@@ -10,6 +10,7 @@ Imports are local review items. They do not write canonical memory directly.
 brigade work import validate imports.jsonl
 brigade work import ingest imports.jsonl
 brigade work import memory-care
+brigade work import memory-refresh
 brigade work import chat-sweep
 brigade work inbox
 brigade work import triage
@@ -18,7 +19,7 @@ brigade work import promote --run <import-id>
 brigade work import promote --all --source memory-care --kind task
 ```
 
-`validate` checks a JSONL file without writing. `ingest` appends valid records into `.brigade/work/imports/inbox.jsonl`, skipping duplicate pending records with the same source, kind, and normalized text. `inbox` groups pending imports for daily review. `plan` previews the task a reviewed import would create. `promote --run` promotes one task import and immediately runs it through the normal work-session loop. `memory-care` reads `memory/cards/decay/refresh-queue.json` and converts queued cards into task imports. `chat-sweep` reads `.brigade/chat-memory-sweeps/latest.json` and converts sweep `issues` into incident-oriented imports.
+`validate` checks a JSONL file without writing. `ingest` appends valid records into `.brigade/work/imports/inbox.jsonl`, skipping duplicate pending records with the same source, kind, and normalized text. Scanner producers can also provide stable source item keys and fingerprints so repeated ingestion skips equivalent pending or promoted imports, while dismissed imports stay dismissed unless the source item changes materially. `inbox` groups pending imports for daily review. `plan` previews the task a reviewed import would create. `promote --run` promotes one task import and immediately runs it through the normal work-session loop. `memory-care` reads `memory/cards/decay/refresh-queue.json` and converts queued cards into task imports. `memory-refresh` accepts the same queue plus `candidates` or `refresh_candidates` and writes TDD-ready refresh task imports. `chat-sweep` reads `.brigade/chat-memory-sweeps/latest.json` and converts sweep `issues`; actionable issues become task imports.
 
 ## Record Shape
 
@@ -50,15 +51,24 @@ Task fields are valid only when `kind` is `task`. When a task import is promoted
 Recommended metadata keys:
 
 - `card_file`: memory card path for memory-care records.
+- `card_id`: stable memory card identity.
 - `reason`: short reason the item was produced.
+- `refresh_reason`: reason a memory card needs review.
+- `source_item_key`: stable producer item key used for idempotency.
+- `source_fingerprint`: producer item fingerprint used to detect material changes.
 - `sweep_path`: local chat memory sweep JSON path.
+- `sweep_id`: stable chat sweep id.
+- `sweep_issue_id`: stable issue id inside a chat sweep.
 - `issue_title`: title from a chat memory sweep issue.
 - `issue_source`: original issue source such as cron, delivery, crawler, or bridge.
+- `provider`: scanner provider or memory owner that produced the item.
 - `workspace`: chat workspace or source workspace.
 - `channel`: chat channel or surface name.
 - `thread`: thread id, message range, or export locator.
+- `message_range`: local message range or export range.
 - `confidence`: producer confidence such as `low`, `medium`, or `high`.
-- `evidence`: local evidence path or compact summary, not raw private chat text.
+- `evidence_summary`: compact evidence summary, not raw private chat text.
+- `evidence`: local evidence path, not raw private chat text.
 
 ## Privacy Rules
 
@@ -66,9 +76,9 @@ Recommended metadata keys:
 - Store source locators and summaries in metadata instead of raw message quotes.
 - Route durable memory changes through reviewed Memory Handoffs. Do not let scanners edit memory cards directly by default.
 
-## Memory-Care Producer
+## Memory-Care And Memory-Refresh Producers
 
-The memory-care producer reads this refresh queue by default:
+The memory-care and memory-refresh producers read this refresh queue by default:
 
 ```text
 memory/cards/decay/refresh-queue.json
@@ -91,10 +101,13 @@ Run:
 
 ```bash
 brigade work import memory-care
+brigade work import memory-refresh
 brigade work import triage
 ```
 
-The producer writes `task` imports with source `memory-care`, preserving `card_file`, `reason`, and `queue_path` metadata.
+`memory-care` keeps the legacy source name `memory-care`. `memory-refresh` uses source `memory-refresh` and also accepts `candidates` or `refresh_candidates`.
+
+Memory-refresh candidates can include `id` or `card_id`, `file`, `refresh_reason`, `confidence`, `evidence_summary`, `priority`, `template`, and `acceptance`. The producer writes `task` imports preserving card identity, refresh reason, queue path, evidence summary, source item key, and source fingerprint metadata.
 
 ## Chat Memory Sweep Producer
 
@@ -116,6 +129,7 @@ Minimal sweep shape:
   },
   "issues": [
     {
+      "id": "sweep-issue-1",
       "title": "Cron delivery failure",
       "summary": "Recent message delivery failed.",
       "kind": "incident",
@@ -137,4 +151,6 @@ brigade work import chat-sweep
 brigade work import triage
 ```
 
-The producer writes imports with source `chat-memory-sweep`, preserving local locators and summary metadata. It does not import raw transcripts, persisted memory entries, or skipped buckets.
+The producer writes imports with source `chat-memory-sweep`, preserving local locators and summary metadata. If an issue has `actionable: true`, `task: true`, or `kind: "task"`, Brigade writes a `task` import with task metadata and acceptance criteria. The JSON output reports `created`, `skipped`, `dismissed`, and `invalid` counts for wrappers.
+
+The producer omits raw private fields such as `raw_text`, `raw_messages`, `messages`, `message_text`, `quotes`, and `transcript`. Use `summary`, `evidence_summary`, and local evidence locators instead of copying private chat bodies into the inbox.

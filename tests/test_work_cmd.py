@@ -1581,6 +1581,240 @@ def test_work_import_chat_sweep_reads_issues(tmp_path, monkeypatch, capsys):
     assert item["metadata"]["sweep_path"] == str(sweep)
 
 
+def test_work_import_chat_sweep_actionable_task_privacy_and_idempotency(tmp_path, monkeypatch, capsys):
+    _init_git_repo(tmp_path)
+    times = iter(
+        [
+            datetime(2026, 5, 26, 12, 0, 0, tzinfo=timezone.utc),
+            datetime(2026, 5, 26, 12, 1, 0, tzinfo=timezone.utc),
+            datetime(2026, 5, 26, 12, 2, 0, tzinfo=timezone.utc),
+            datetime(2026, 5, 26, 12, 3, 0, tzinfo=timezone.utc),
+        ]
+    )
+    monkeypatch.setattr(work_cmd, "_now", lambda: next(times))
+    sweep = tmp_path / ".brigade" / "chat-memory-sweeps" / "latest.json"
+    sweep.parent.mkdir(parents=True)
+    _write_json(
+        sweep,
+        {
+            "sweep_id": "nightly-2026-05-26",
+            "provider": "openclaw",
+            "generated_at": "2026-05-26T22:09:00-04:00",
+            "issues": [
+                {
+                    "id": "issue-1",
+                    "title": "Memory ingest warning",
+                    "summary": "Ingest skipped one handoff.",
+                    "actionable": True,
+                    "priority": "high",
+                    "confidence": "high",
+                    "evidence_summary": "NO_REPLY warning in local sweep artifact.",
+                    "raw_text": "PRIVATE CHAT TRANSCRIPT",
+                    "metadata": {
+                        "workspace": "ops",
+                        "channel": "memory",
+                        "thread": "abc123",
+                        "message_range": "42-44",
+                        "raw_messages": ["PRIVATE CHAT MESSAGE"],
+                    },
+                    "acceptance": ["Repair or document the ingest warning."],
+                }
+            ],
+        },
+    )
+
+    assert work_cmd.import_chat_sweep(target=tmp_path, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["created"] == 1
+    assert payload["skipped"] == 0
+    assert payload["dismissed"] == 0
+    assert payload["invalid"] == 0
+    item = payload["imports"][0]
+    rendered = json.dumps(item, sort_keys=True)
+    assert item["kind"] == "task"
+    assert item["priority"] == "high"
+    assert item["template"] == "vertical-slice"
+    assert item["acceptance"] == ["Repair or document the ingest warning."]
+    assert item["metadata"]["provider"] == "openclaw"
+    assert item["metadata"]["workspace"] == "ops"
+    assert item["metadata"]["channel"] == "memory"
+    assert item["metadata"]["thread"] == "abc123"
+    assert item["metadata"]["message_range"] == "42-44"
+    assert item["metadata"]["confidence"] == "high"
+    assert item["metadata"]["evidence_summary"] == "NO_REPLY warning in local sweep artifact."
+    assert "PRIVATE CHAT" not in rendered
+    assert item["metadata"]["private_fields_omitted"] == ["raw_messages", "raw_text"]
+
+    assert work_cmd.import_chat_sweep(target=tmp_path, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["created"] == 0
+    assert payload["skipped"] == 1
+
+    import_id = item["id"]
+    assert work_cmd.import_dismiss(target=tmp_path, import_id=import_id, reason="not now") == 0
+    capsys.readouterr()
+    assert work_cmd.import_chat_sweep(target=tmp_path, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["created"] == 0
+    assert payload["dismissed"] == 1
+
+    data = json.loads(sweep.read_text())
+    data["issues"][0]["summary"] = "Ingest skipped two handoffs."
+    _write_json(sweep, data)
+    assert work_cmd.import_chat_sweep(target=tmp_path, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["created"] == 1
+
+
+def test_work_import_chat_sweep_reports_precise_errors(tmp_path, capsys):
+    _init_git_repo(tmp_path)
+    sweep = tmp_path / "bad-sweep.json"
+    _write_json(
+        sweep,
+        {
+            "issues": [
+                {"summary": "missing title"},
+                {"title": "Bad kind", "kind": "bad"},
+                {"title": "Bad metadata", "metadata": []},
+                "not-object",
+            ]
+        },
+    )
+
+    assert work_cmd.import_chat_sweep(target=tmp_path, input_path=sweep) == 2
+    err = capsys.readouterr().err
+    assert "chat memory sweep issue 1 requires title" in err
+    assert "chat memory sweep issue 2 kind must be one of:" in err
+    assert "chat memory sweep issue 3 metadata must be an object" in err
+    assert "chat memory sweep issue 4 must be an object" in err
+
+    assert work_cmd.import_chat_sweep(target=tmp_path, input_path=sweep, json_output=True) == 2
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["valid"] is False
+    assert payload["created"] == 0
+    assert payload["invalid"] == 4
+    assert len(payload["errors"]) == 4
+
+
+def test_work_import_memory_refresh_reads_candidates(tmp_path, monkeypatch, capsys):
+    _init_git_repo(tmp_path)
+    monkeypatch.setattr(
+        work_cmd,
+        "_now",
+        lambda: datetime(2026, 5, 26, 12, 0, 0, tzinfo=timezone.utc),
+    )
+    queue = tmp_path / "memory-refresh.json"
+    _write_json(
+        queue,
+        {
+            "refresh_candidates": [
+                {
+                    "id": "tools-card",
+                    "file": "memory/cards/tools.md",
+                    "refresh_reason": "contradictory tool notes",
+                    "confidence": "high",
+                    "evidence_summary": "Two recent handoffs disagree.",
+                    "priority": "high",
+                }
+            ]
+        },
+    )
+
+    assert work_cmd.import_memory_refresh(target=tmp_path, queue=queue, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["created"] == 1
+    item = payload["imports"][0]
+    assert item["source"] == "memory-refresh"
+    assert item["kind"] == "task"
+    assert item["type"] == "docs"
+    assert item["priority"] == "high"
+    assert item["template"] == "docs"
+    assert item["metadata"]["card_id"] == "tools-card"
+    assert item["metadata"]["card_file"] == "memory/cards/tools.md"
+    assert item["metadata"]["refresh_reason"] == "contradictory tool notes"
+    assert item["metadata"]["confidence"] == "high"
+    assert item["metadata"]["evidence_summary"] == "Two recent handoffs disagree."
+    assert item["acceptance"] == [
+        "Review memory/cards/tools.md against current source evidence.",
+        "Update the memory card or document why no change is needed.",
+    ]
+
+
+def test_work_chat_sweep_flows_through_inbox_plan_promote_run_completion(tmp_path, monkeypatch, capsys):
+    _init_git_repo(tmp_path)
+    artifacts_dir = tmp_path / ".brigade" / "runs"
+    dogfood_cmd.init(target=tmp_path, artifacts_dir=artifacts_dir)
+    times = iter(
+        [
+            datetime(2026, 5, 26, 12, 0, 0, tzinfo=timezone.utc),
+            datetime(2026, 5, 26, 12, 1, 0, tzinfo=timezone.utc),
+            datetime(2026, 5, 26, 12, 2, 0, tzinfo=timezone.utc),
+            datetime(2026, 5, 26, 12, 3, 0, tzinfo=timezone.utc),
+            datetime(2026, 5, 26, 12, 4, 0, tzinfo=timezone.utc),
+            datetime(2026, 5, 26, 12, 5, 0, tzinfo=timezone.utc),
+            datetime(2026, 5, 26, 12, 6, 0, tzinfo=timezone.utc),
+            datetime(2026, 5, 26, 12, 7, 0, tzinfo=timezone.utc),
+        ]
+    )
+    monkeypatch.setattr(work_cmd, "_now", lambda: next(times))
+    sweep = tmp_path / ".brigade" / "chat-memory-sweeps" / "latest.json"
+    sweep.parent.mkdir(parents=True)
+    _write_json(
+        sweep,
+        {
+            "sweep_id": "nightly-2026-05-26",
+            "issues": [
+                {
+                    "id": "action-1",
+                    "title": "Repair memory sweep ingestion",
+                    "summary": "One local warning needs review.",
+                    "actionable": True,
+                    "confidence": "high",
+                    "priority": "urgent",
+                    "acceptance": ["The warning is resolved or documented."],
+                }
+            ],
+        },
+    )
+
+    assert work_cmd.import_chat_sweep(target=tmp_path) == 0
+    item = json.loads((tmp_path / ".brigade" / "work" / "imports" / "inbox.jsonl").read_text().splitlines()[0])
+    capsys.readouterr()
+    assert work_cmd.inbox(target=tmp_path) == 0
+    out = capsys.readouterr().out
+    assert f"import: {item['id']}" in out
+    assert "confidence=high" in out
+
+    assert work_cmd.import_plan(target=tmp_path, import_id=item["id"]) == 0
+    out = capsys.readouterr().out
+    assert "The warning is resolved or documented." in out
+    assert "sweep_issue_id: action-1" in out
+
+    def fake_dogfood_run(task, **kwargs):
+        assert "Repair memory sweep ingestion" in task
+        assert "The warning is resolved or documented." in task
+        run_dir = kwargs["output_dir"] or artifacts_dir / "chat-sweep-run"
+        run_dir.mkdir(parents=True)
+        _write_json(run_dir / "run.json", {"started_at": "2026-05-26T12:03:00Z", "status": "ok", "task": task})
+        (run_dir / "final.txt").write_text("Done.\n")
+        return 0
+
+    monkeypatch.setattr(dogfood_cmd, "run", fake_dogfood_run)
+
+    assert work_cmd.import_promote(target=tmp_path, import_id=item["id"], run_after=True) == 0
+    ledger = json.loads((tmp_path / ".brigade" / "work" / "tasks.json").read_text())
+    task = ledger["tasks"][0]
+    assert task["status"] == "done"
+    assert task["source"] == "import:chat-memory-sweep"
+    assert task["metadata"]["sweep_issue_id"] == "action-1"
+    assert task["completed_acceptance"] == [
+        "One user-visible path is implemented end to end.",
+        "Focused tests cover the new path.",
+        "Documentation or help text is updated when user behavior changes.",
+        "The warning is resolved or documented.",
+    ]
+
+
 def test_work_import_triage_groups_pending_imports(tmp_path, monkeypatch, capsys):
     _init_git_repo(tmp_path)
     monkeypatch.setattr(
@@ -2892,6 +3126,10 @@ def test_work_import_cli(tmp_path, monkeypatch):
         seen.append(("memory-care", kwargs))
         return 0
 
+    def fake_import_memory_refresh(**kwargs):
+        seen.append(("memory-refresh", kwargs))
+        return 0
+
     def fake_import_chat_sweep(**kwargs):
         seen.append(("chat-sweep", kwargs))
         return 0
@@ -2921,6 +3159,7 @@ def test_work_import_cli(tmp_path, monkeypatch):
     monkeypatch.setattr(work_cmd, "import_validate", fake_import_validate)
     monkeypatch.setattr(work_cmd, "import_ingest", fake_import_ingest)
     monkeypatch.setattr(work_cmd, "import_memory_care", fake_import_memory_care)
+    monkeypatch.setattr(work_cmd, "import_memory_refresh", fake_import_memory_refresh)
     monkeypatch.setattr(work_cmd, "import_chat_sweep", fake_import_chat_sweep)
     monkeypatch.setattr(work_cmd, "import_triage", fake_import_triage)
     monkeypatch.setattr(work_cmd, "import_show", fake_import_show)
@@ -2980,6 +3219,22 @@ def test_work_import_cli(tmp_path, monkeypatch):
                 str(tmp_path / "imports.jsonl"),
                 "--target",
                 str(tmp_path),
+                "--dry-run",
+                "--json",
+            ]
+        )
+        == 0
+    )
+    assert (
+        cli.main(
+            [
+                "work",
+                "import",
+                "memory-refresh",
+                "--target",
+                str(tmp_path),
+                "--queue",
+                str(tmp_path / "memory-refresh.json"),
                 "--dry-run",
                 "--json",
             ]
@@ -3103,6 +3358,15 @@ def test_work_import_cli(tmp_path, monkeypatch):
             {
                 "target": tmp_path,
                 "input_path": tmp_path / "imports.jsonl",
+                "dry_run": True,
+                "json_output": True,
+            },
+        ),
+        (
+            "memory-refresh",
+            {
+                "target": tmp_path,
+                "queue": tmp_path / "memory-refresh.json",
                 "dry_run": True,
                 "json_output": True,
             },

@@ -527,7 +527,7 @@ def import_issues(
     records = [issue.as_import_record() for issue in found]
     from . import work_cmd
 
-    imported, skipped = work_cmd._append_import_records(target, records, dry_run=dry_run)
+    imported, skipped, skipped_dismissed = work_cmd._append_import_records(target, records, dry_run=dry_run)
     payload = {
         "target": str(target),
         "imports_path": str(work_cmd._imports_path(target)),
@@ -535,6 +535,7 @@ def import_issues(
         "issues": len(found),
         "imported": len(imported),
         "skipped_duplicates": len(skipped),
+        "skipped_dismissed": len(skipped_dismissed),
         "by_category": _issue_counts(found),
         "imports": imported,
     }
@@ -577,7 +578,7 @@ def sync_issues(
     records = [issue.as_import_record() for issue in new_issues]
     from . import work_cmd
 
-    imported, skipped = work_cmd._append_import_records(target, records, dry_run=dry_run)
+    imported, skipped, skipped_dismissed = work_cmd._append_import_records(target, records, dry_run=dry_run)
     stale = (
         _close_stale_local_issue_work(
             target,
@@ -600,6 +601,7 @@ def sync_issues(
         "new_issues": len(new_issues),
         "imported": len(imported),
         "skipped_duplicates": len(skipped),
+        "skipped_dismissed": len(skipped_dismissed),
         "stale_imports_closed": len(stale["imports"]),
         "stale_tasks_closed": len(stale["tasks"]),
         "by_category": _issue_counts(found),

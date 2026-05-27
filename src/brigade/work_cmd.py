@@ -1,6 +1,7 @@
 """Daily work session helpers."""
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import shlex
@@ -88,6 +89,26 @@ ACTIVE_SESSION_STALE_HOURS = 24
 IMPORT_STALE_HOURS = 72
 DISMISSED_SOURCE_WARN_THRESHOLD = 5
 PRIORITY_RANK = {"urgent": 0, "high": 1, "normal": 2, "low": 3}
+CONFIDENCE_RANK = {"high": 0, "medium": 1, "normal": 1, "low": 2}
+RAW_CHAT_FIELDS = {
+    "body",
+    "bodies",
+    "message",
+    "message_body",
+    "message_bodies",
+    "message_text",
+    "messages",
+    "private_text",
+    "quote",
+    "quotes",
+    "raw",
+    "raw_message",
+    "raw_messages",
+    "raw_text",
+    "text",
+    "transcript",
+    "transcripts",
+}
 ISSUE_ACCEPTANCE_HEADINGS = {
     "acceptance",
     "acceptance criteria",
@@ -280,6 +301,22 @@ def _task_text_key(text: str) -> str:
     return " ".join(text.casefold().split())
 
 
+def _stable_hash(value: object) -> str:
+    rendered = json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(rendered.encode("utf-8")).hexdigest()[:16]
+
+
+def _string_field(value: object) -> str | None:
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return None
+
+
+def _confidence_rank(value: object) -> int:
+    text = value.strip().casefold() if isinstance(value, str) else ""
+    return CONFIDENCE_RANK.get(text, 1)
+
+
 def _normalize_task_type(value: object) -> str:
     if isinstance(value, str) and value.strip() in TASK_TYPES:
         return value.strip()
@@ -358,6 +395,25 @@ def _import_task_template(item: dict[str, Any]) -> str | None:
     return template if isinstance(template, str) and template in TASK_TEMPLATES else None
 
 
+def _import_context(item: dict[str, Any]) -> dict[str, Any]:
+    metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+    keys = (
+        "provider",
+        "surface",
+        "workspace",
+        "channel",
+        "thread",
+        "message_range",
+        "confidence",
+        "evidence_summary",
+        "card_file",
+        "card_id",
+        "refresh_reason",
+        "reason",
+    )
+    return {key: metadata[key] for key in keys if metadata.get(key) not in (None, "")}
+
+
 def _import_summary(item: dict[str, Any], *, now: datetime | None = None) -> dict[str, Any]:
     created_at = item.get("created_at")
     created_dt = _parse_iso_datetime(created_at)
@@ -374,6 +430,7 @@ def _import_summary(item: dict[str, Any], *, now: datetime | None = None) -> dic
         "updated_at": item.get("updated_at"),
         "age_hours": round(age_hours, 2) if age_hours is not None else None,
         "metadata": item.get("metadata") if isinstance(item.get("metadata"), dict) else {},
+        "context": _import_context(item),
     }
     if item.get("kind") == "task":
         acceptance = _import_task_acceptance(item)
@@ -421,6 +478,10 @@ def _scanner_candidate(imports: list[dict[str, Any]]) -> dict[str, Any] | None:
     candidates.sort(
         key=lambda item: (
             0 if _import_task_acceptance(item) else 1,
+            _confidence_rank(
+                (item.get("metadata") if isinstance(item.get("metadata"), dict) else {}).get("confidence")
+            ),
+            0 if item.get("source") in {"chat-memory-sweep", "memory-refresh", "memory-care"} else 1,
             PRIORITY_RANK.get(_import_task_priority(item), 2),
             str(item.get("created_at") or item.get("id") or ""),
         )
@@ -608,6 +669,61 @@ def _import_record_key(item: dict[str, Any]) -> tuple[str, str, str]:
     )
 
 
+def _import_source_key(item: dict[str, Any]) -> str | None:
+    metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+    for key in (
+        "source_item_key",
+        "source_item_id",
+        "scanner_item_id",
+        "sweep_issue_id",
+        "issue_id",
+        "card_id",
+        "card_file",
+    ):
+        value = metadata.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+        if isinstance(value, (int, float)):
+            return str(value)
+    return None
+
+
+def _import_fingerprint(item: dict[str, Any]) -> str | None:
+    metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+    value = metadata.get("source_fingerprint")
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    source_key = _import_source_key(item)
+    if not source_key:
+        return None
+    return _stable_hash(
+        {
+            "text": item.get("text"),
+            "kind": item.get("kind"),
+            "type": item.get("type"),
+            "priority": item.get("priority"),
+            "template": item.get("template"),
+            "acceptance": item.get("acceptance"),
+            "metadata": {
+                key: value
+                for key, value in metadata.items()
+                if key not in {"source_fingerprint", "sweep_path", "queue_path"}
+            },
+        }
+    )
+
+
+def _import_source_identity(item: dict[str, Any]) -> tuple[str, str, str] | None:
+    source_key = _import_source_key(item)
+    if not source_key:
+        return None
+    return (
+        str(item.get("source") or "manual"),
+        str(item.get("kind") or "task"),
+        source_key,
+    )
+
+
 def _validate_import_record(value: object, *, label: str) -> tuple[dict[str, Any] | None, list[str]]:
     errors: list[str] = []
     if not isinstance(value, dict):
@@ -713,18 +829,36 @@ def _append_import_records(
     records: list[dict[str, Any]],
     *,
     dry_run: bool = False,
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
     imports = _read_imports(target)
     existing = {
         _import_record_key(item)
         for item in imports
-        if isinstance(item, dict) and item.get("status", "pending") == "pending"
+        if isinstance(item, dict) and item.get("status", "pending") in {"pending", "promoted"}
     }
+    existing_by_source: dict[tuple[str, str, str], dict[str, Any]] = {}
+    for item in imports:
+        if not isinstance(item, dict):
+            continue
+        identity = _import_source_identity(item)
+        if identity is not None:
+            existing_by_source[identity] = item
     imported: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
+    skipped_dismissed: list[dict[str, Any]] = []
     for record in records:
         key = _import_record_key(record)
-        if key[2] and key in existing:
+        identity = _import_source_identity(record)
+        if identity is not None and identity in existing_by_source:
+            existing_item = existing_by_source[identity]
+            if existing_item.get("status") == "dismissed":
+                if _import_fingerprint(existing_item) == _import_fingerprint(record):
+                    skipped_dismissed.append(record)
+                    continue
+            elif _import_fingerprint(existing_item) == _import_fingerprint(record):
+                skipped.append(record)
+                continue
+        elif key[2] and key in existing:
             skipped.append(record)
             continue
         item = _make_import(
@@ -739,10 +873,12 @@ def _append_import_records(
         )
         imported.append(item)
         existing.add(key)
+        if identity is not None:
+            existing_by_source[identity] = item
     if imported and not dry_run:
         imports.extend(imported)
         _write_imports(target, imports)
-    return imported, skipped
+    return imported, skipped, skipped_dismissed
 
 
 def _pending_tasks(target: Path) -> list[dict[str, Any]]:
@@ -2511,6 +2647,10 @@ def import_ingest(
                         "imports_path": str(_imports_path(target)),
                         "valid": False,
                         "errors": errors,
+                        "created": 0,
+                        "skipped": 0,
+                        "dismissed": 0,
+                        "invalid": len(errors),
                     },
                     indent=2,
                     sort_keys=True,
@@ -2522,13 +2662,18 @@ def import_ingest(
                 print(f"- {error}", file=sys.stderr)
         return 2
 
-    imported, skipped = _append_import_records(target, records, dry_run=dry_run)
+    imported, skipped, skipped_dismissed = _append_import_records(target, records, dry_run=dry_run)
     payload = {
         "path": str(path),
         "imports_path": str(_imports_path(target)),
         "dry_run": dry_run,
+        "created": len(imported),
         "imported": len(imported),
+        "skipped": len(skipped),
         "skipped_duplicates": len(skipped),
+        "dismissed": len(skipped_dismissed),
+        "skipped_dismissed": len(skipped_dismissed),
+        "invalid": 0,
         "imports": imported,
     }
     if json_output:
@@ -2539,6 +2684,8 @@ def import_ingest(
     print(f"dry_run: {dry_run}")
     print(f"imported: {len(imported)}")
     print(f"skipped_duplicates: {len(skipped)}")
+    if skipped_dismissed:
+        print(f"skipped_dismissed: {len(skipped_dismissed)}")
     for item in imported:
         print(f"- {item.get('id')} [{item.get('kind')}] {item.get('source')}: {_short(str(item.get('text', '')))}")
     return 0
@@ -2550,6 +2697,112 @@ def import_memory_care(
     queue: Path | None = None,
     dry_run: bool = False,
     json_output: bool = False,
+) -> int:
+    return _import_memory_refresh_queue(
+        target=target,
+        queue=queue,
+        dry_run=dry_run,
+        json_output=json_output,
+        source="memory-care",
+        command_name="memory-care",
+    )
+
+
+def import_memory_refresh(
+    *,
+    target: Path,
+    queue: Path | None = None,
+    dry_run: bool = False,
+    json_output: bool = False,
+) -> int:
+    return _import_memory_refresh_queue(
+        target=target,
+        queue=queue,
+        dry_run=dry_run,
+        json_output=json_output,
+        source="memory-refresh",
+        command_name="memory-refresh",
+    )
+
+
+def _memory_refresh_cards(payload: dict[str, Any], *, queue_path: Path) -> tuple[list[dict[str, Any]], list[str]]:
+    cards = payload.get("cards")
+    if cards is None:
+        cards = payload.get("candidates")
+    if cards is None:
+        cards = payload.get("refresh_candidates", [])
+    if not isinstance(cards, list):
+        return [], [f"memory-refresh queue `cards` must be a list: {queue_path}"]
+
+    records: list[dict[str, Any]] = []
+    errors: list[str] = []
+    for index, card in enumerate(cards, start=1):
+        label = f"memory-refresh card entry {index}"
+        if not isinstance(card, dict):
+            errors.append(f"{label} must be an object")
+            continue
+        card_file = _string_field(card.get("file")) or _string_field(card.get("path")) or _string_field(card.get("card_file"))
+        card_id = _string_field(card.get("id")) or _string_field(card.get("card_id")) or card_file
+        if not card_file:
+            errors.append(f"{label} requires file")
+            continue
+        reason = (
+            _string_field(card.get("refresh_reason"))
+            or _string_field(card.get("reason"))
+            or _string_field(card.get("category"))
+            or "stale memory card"
+        )
+        acceptance = _normalize_acceptance(card.get("acceptance"))
+        if not acceptance:
+            acceptance = [
+                f"Review {card_file} against current source evidence.",
+                "Update the memory card or document why no change is needed.",
+            ]
+        metadata: dict[str, Any] = {
+            "card_file": card_file,
+            "card_id": card_id,
+            "refresh_reason": reason,
+            "reason": reason,
+            "queue_path": str(queue_path),
+        }
+        for key in ("confidence", "evidence_summary", "review_after", "last_reviewed_at", "freshness", "source"):
+            value = card.get(key)
+            if value not in (None, ""):
+                metadata[key] = value
+        source_item_key = f"memory-refresh:{card_id}"
+        record = {
+            "text": f"Refresh memory card {card_file}: {reason}",
+            "kind": "task",
+            "source": "memory-refresh",
+            "type": card.get("type") if isinstance(card.get("type"), str) else "docs",
+            "priority": card.get("priority") if isinstance(card.get("priority"), str) else "normal",
+            "template": card.get("template") if isinstance(card.get("template"), str) else "docs",
+            "acceptance": acceptance,
+            "metadata": metadata,
+        }
+        fingerprint = _stable_hash(
+            {
+                "card_id": card_id,
+                "card_file": card_file,
+                "reason": reason,
+                "acceptance": acceptance,
+                "evidence_summary": metadata.get("evidence_summary"),
+            }
+        )
+        metadata["source_item_key"] = source_item_key
+        metadata["source_fingerprint"] = fingerprint
+        records.append(record)
+    return records, errors
+
+
+def _import_memory_refresh_queue(
+    *,
+    target: Path,
+    queue: Path | None,
+    dry_run: bool,
+    json_output: bool,
+    source: str,
+    command_name: str,
 ) -> int:
     target = target.expanduser().resolve()
     if not target.is_dir():
@@ -2567,56 +2820,204 @@ def import_memory_care(
     if not isinstance(payload, dict):
         print(f"error: memory-care refresh queue must be an object: {queue_path}", file=sys.stderr)
         return 2
-    cards = payload.get("cards", [])
-    if not isinstance(cards, list):
-        print(f"error: memory-care refresh queue `cards` must be a list: {queue_path}", file=sys.stderr)
+    records, errors = _memory_refresh_cards(payload, queue_path=queue_path)
+    if source != "memory-refresh":
+        for record in records:
+            record["source"] = source
+            metadata = record.get("metadata") if isinstance(record.get("metadata"), dict) else {}
+            if isinstance(metadata.get("source_item_key"), str):
+                metadata["source_item_key"] = metadata["source_item_key"].replace("memory-refresh:", f"{source}:", 1)
+    if errors:
+        if json_output:
+            print(
+                json.dumps(
+                    {
+                        "queue": str(queue_path),
+                        "imports_path": str(_imports_path(target)),
+                        "valid": False,
+                        "errors": errors,
+                        "created": 0,
+                        "skipped": 0,
+                        "dismissed": 0,
+                        "invalid": len(errors),
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+            )
+        else:
+            for error in errors:
+                print(f"error: {error}", file=sys.stderr)
         return 2
-
-    records: list[dict[str, Any]] = []
-    for index, card in enumerate(cards, start=1):
-        if not isinstance(card, dict):
-            print(f"error: memory-care card entry {index} must be an object", file=sys.stderr)
-            return 2
-        card_file = card.get("file")
-        if not isinstance(card_file, str) or not card_file.strip():
-            print(f"error: memory-care card entry {index} requires file", file=sys.stderr)
-            return 2
-        reason = card.get("reason")
-        reason_text = reason.strip() if isinstance(reason, str) and reason.strip() else "stale memory card"
-        records.append(
-            {
-                "text": f"Refresh memory card {card_file.strip()}: {reason_text}",
-                "kind": "task",
-                "source": "memory-care",
-                "metadata": {
-                    "card_file": card_file.strip(),
-                    "reason": reason_text,
-                    "queue_path": str(queue_path),
-                },
-            }
-        )
-    imported, skipped = _append_import_records(target, records, dry_run=dry_run)
+    imported, skipped, skipped_dismissed = _append_import_records(target, records, dry_run=dry_run)
     output = {
         "queue": str(queue_path),
         "imports_path": str(_imports_path(target)),
         "dry_run": dry_run,
-        "queued_cards": len(cards),
+        "valid": True,
+        "queued_cards": len(records),
+        "created": len(imported),
         "imported": len(imported),
+        "skipped": len(skipped),
         "skipped_duplicates": len(skipped),
+        "dismissed": len(skipped_dismissed),
+        "skipped_dismissed": len(skipped_dismissed),
+        "invalid": 0,
         "imports": imported,
     }
     if json_output:
         print(json.dumps(output, indent=2, sort_keys=True))
         return 0
-    print(f"memory-care queue: {queue_path}")
+    print(f"{command_name} queue: {queue_path}")
     print(f"imports_path: {_imports_path(target)}")
     print(f"dry_run: {dry_run}")
-    print(f"queued_cards: {len(cards)}")
+    print(f"queued_cards: {len(records)}")
     print(f"imported: {len(imported)}")
     print(f"skipped_duplicates: {len(skipped)}")
+    if skipped_dismissed:
+        print(f"skipped_dismissed: {len(skipped_dismissed)}")
     for item in imported:
         print(f"- {item.get('id')} {_short(str(item.get('text', '')))}")
     return 0
+
+
+def _safe_chat_metadata(issue: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
+    metadata = issue.get("metadata", {})
+    if metadata is None:
+        metadata = {}
+    safe: dict[str, Any] = {}
+    omitted: list[str] = []
+    if isinstance(metadata, dict):
+        for key, value in metadata.items():
+            normalized = str(key).strip().casefold()
+            if normalized in RAW_CHAT_FIELDS or normalized.startswith("raw_"):
+                omitted.append(str(key))
+                continue
+            safe[str(key)] = value
+    for source_key, dest_key in (
+        ("provider", "provider"),
+        ("surface", "surface"),
+        ("workspace", "workspace"),
+        ("channel", "channel"),
+        ("thread", "thread"),
+        ("message_range", "message_range"),
+        ("confidence", "confidence"),
+        ("evidence_summary", "evidence_summary"),
+        ("local_locator", "local_locator"),
+    ):
+        value = issue.get(source_key)
+        if value not in (None, ""):
+            safe[dest_key] = value
+    for key in RAW_CHAT_FIELDS:
+        if key in issue:
+            omitted.append(key)
+    return safe, sorted(set(omitted))
+
+
+def _chat_sweep_records(payload: dict[str, Any], *, sweep_path: Path) -> tuple[list[dict[str, Any]], list[str], int]:
+    issues = payload.get("issues", [])
+    if not isinstance(issues, list):
+        return [], [f"chat memory sweep `issues` must be a list: {sweep_path}"], 0
+
+    generated_at = payload.get("generated_at")
+    sweep_id = _string_field(payload.get("sweep_id")) or _string_field(payload.get("id")) or _stable_hash(
+        {"path": str(sweep_path), "generated_at": generated_at}
+    )
+    provider = _string_field(payload.get("provider"))
+    records: list[dict[str, Any]] = []
+    errors: list[str] = []
+    for index, issue in enumerate(issues, start=1):
+        label = f"chat memory sweep issue {index}"
+        if not isinstance(issue, dict):
+            errors.append(f"{label} must be an object")
+            continue
+        title = _string_field(issue.get("title"))
+        if not title:
+            errors.append(f"{label} requires title")
+            continue
+        issue_id = _string_field(issue.get("id")) or _string_field(issue.get("issue_id")) or _stable_hash(
+            {"sweep_id": sweep_id, "title": title, "index": index}
+        )
+        actionable = bool(issue.get("actionable")) or bool(issue.get("task")) or issue.get("kind") == "task"
+        kind = "task" if actionable else issue.get("kind", "incident")
+        if not isinstance(kind, str) or kind not in IMPORT_KINDS:
+            errors.append(f"{label} kind must be one of: {', '.join(IMPORT_KINDS)}")
+            continue
+        metadata = issue.get("metadata", {})
+        if metadata is not None and not isinstance(metadata, dict):
+            errors.append(f"{label} metadata must be an object")
+            continue
+
+        safe_metadata, omitted_fields = _safe_chat_metadata(issue)
+        if provider and "provider" not in safe_metadata:
+            safe_metadata["provider"] = provider
+        summary = _string_field(issue.get("summary"))
+        evidence_summary = _string_field(issue.get("evidence_summary"))
+        severity = _string_field(issue.get("severity"))
+        issue_source = _string_field(issue.get("source"))
+        rendered_title = title
+        severity_prefix = f" [{severity}]" if severity else ""
+        if actionable:
+            text = f"Review chat memory sweep task{severity_prefix} {rendered_title}"
+        else:
+            text = f"Review memory sweep issue{severity_prefix} {rendered_title}"
+        if summary:
+            text = f"{text}: {summary}"
+
+        record_metadata = dict(safe_metadata)
+        record_metadata.update(
+            {
+                "sweep_id": sweep_id,
+                "sweep_issue_id": issue_id,
+                "source_item_key": f"chat-memory-sweep:{sweep_id}:{issue_id}",
+                "sweep_path": str(sweep_path),
+                "issue_title": rendered_title,
+            }
+        )
+        if issue_source:
+            record_metadata["issue_source"] = issue_source
+        if severity:
+            record_metadata["severity"] = severity
+        if evidence_summary:
+            record_metadata["evidence_summary"] = evidence_summary
+        if isinstance(generated_at, str) and generated_at.strip():
+            record_metadata["generated_at"] = generated_at.strip()
+        if omitted_fields:
+            record_metadata["private_fields_omitted"] = omitted_fields
+        acceptance = _normalize_acceptance(issue.get("acceptance"))
+        if actionable and not acceptance:
+            acceptance = [
+                "Review the sweep summary and local evidence locator.",
+                "Promote only public-safe conclusions or create a memory handoff.",
+            ]
+        fingerprint_payload = {
+            "title": title,
+            "summary": summary,
+            "kind": kind,
+            "severity": severity,
+            "source": issue_source,
+            "acceptance": acceptance,
+            "evidence_summary": evidence_summary,
+            "metadata": {
+                key: value
+                for key, value in record_metadata.items()
+                if key not in {"sweep_path", "source_fingerprint", "private_fields_omitted"}
+            },
+        }
+        record_metadata["source_fingerprint"] = _stable_hash(fingerprint_payload)
+        record: dict[str, Any] = {
+            "text": text,
+            "kind": kind,
+            "source": "chat-memory-sweep",
+            "metadata": record_metadata,
+        }
+        if kind == "task":
+            record["type"] = issue.get("type") if isinstance(issue.get("type"), str) else "workflow"
+            record["priority"] = issue.get("priority") if isinstance(issue.get("priority"), str) else "normal"
+            record["template"] = issue.get("template") if isinstance(issue.get("template"), str) else "vertical-slice"
+            record["acceptance"] = acceptance
+        records.append(record)
+    return records, errors, len(issues)
 
 
 def import_chat_sweep(
@@ -2646,75 +3047,39 @@ def import_chat_sweep(
     if not isinstance(payload, dict):
         print(f"error: chat memory sweep must be an object: {sweep_path}", file=sys.stderr)
         return 2
-    issues = payload.get("issues", [])
-    if not isinstance(issues, list):
-        print(f"error: chat memory sweep `issues` must be a list: {sweep_path}", file=sys.stderr)
+    records, errors, issue_count = _chat_sweep_records(payload, sweep_path=sweep_path)
+    if errors:
+        output = {
+            "input": str(sweep_path),
+            "imports_path": str(_imports_path(target)),
+            "valid": False,
+            "errors": errors,
+            "created": 0,
+            "skipped": 0,
+            "dismissed": 0,
+            "invalid": len(errors),
+        }
+        if json_output:
+            print(json.dumps(output, indent=2, sort_keys=True))
+        else:
+            for error in errors:
+                print(f"error: {error}", file=sys.stderr)
         return 2
 
-    records: list[dict[str, Any]] = []
-    generated_at = payload.get("generated_at")
-    for index, issue in enumerate(issues, start=1):
-        if not isinstance(issue, dict):
-            print(f"error: chat memory sweep issue {index} must be an object", file=sys.stderr)
-            return 2
-        title = issue.get("title")
-        if not isinstance(title, str) or not title.strip():
-            print(f"error: chat memory sweep issue {index} requires title", file=sys.stderr)
-            return 2
-        kind = issue.get("kind", "incident")
-        if not isinstance(kind, str) or kind not in IMPORT_KINDS:
-            print(f"error: chat memory sweep issue {index} kind must be one of: {', '.join(IMPORT_KINDS)}", file=sys.stderr)
-            return 2
-        metadata = issue.get("metadata", {})
-        if metadata is None:
-            metadata = {}
-        if not isinstance(metadata, dict):
-            print(f"error: chat memory sweep issue {index} metadata must be an object", file=sys.stderr)
-            return 2
-
-        summary = issue.get("summary")
-        summary_text = summary.strip() if isinstance(summary, str) and summary.strip() else ""
-        severity = issue.get("severity")
-        severity_text = severity.strip() if isinstance(severity, str) and severity.strip() else ""
-        issue_source = issue.get("source")
-        issue_source_text = issue_source.strip() if isinstance(issue_source, str) and issue_source.strip() else ""
-        rendered_title = title.strip()
-        severity_prefix = f" [{severity_text}]" if severity_text else ""
-        text = f"Review memory sweep issue{severity_prefix} {rendered_title}"
-        if summary_text:
-            text = f"{text}: {summary_text}"
-
-        record_metadata = dict(metadata)
-        record_metadata.update(
-            {
-                "sweep_path": str(sweep_path),
-                "issue_title": rendered_title,
-            }
-        )
-        if issue_source_text:
-            record_metadata["issue_source"] = issue_source_text
-        if severity_text:
-            record_metadata["severity"] = severity_text
-        if isinstance(generated_at, str) and generated_at.strip():
-            record_metadata["generated_at"] = generated_at.strip()
-
-        records.append(
-            {
-                "text": text,
-                "kind": kind,
-                "source": "chat-memory-sweep",
-                "metadata": record_metadata,
-            }
-        )
-
-    imported, skipped = _append_import_records(target, records, dry_run=dry_run)
+    imported, skipped, skipped_dismissed = _append_import_records(target, records, dry_run=dry_run)
     output = {
         "input": str(sweep_path),
         "imports_path": str(_imports_path(target)),
         "dry_run": dry_run,
-        "issues": len(issues),
+        "valid": True,
+        "issues": issue_count,
+        "created": len(imported),
         "imported": len(imported),
+        "skipped": len(skipped),
         "skipped_duplicates": len(skipped),
+        "dismissed": len(skipped_dismissed),
+        "skipped_dismissed": len(skipped_dismissed),
+        "invalid": 0,
         "imports": imported,
     }
     if json_output:
@@ -2723,9 +3088,11 @@ def import_chat_sweep(
     print(f"chat memory sweep: {sweep_path}")
     print(f"imports_path: {_imports_path(target)}")
     print(f"dry_run: {dry_run}")
-    print(f"issues: {len(issues)}")
+    print(f"issues: {issue_count}")
     print(f"imported: {len(imported)}")
     print(f"skipped_duplicates: {len(skipped)}")
+    if skipped_dismissed:
+        print(f"skipped_dismissed: {len(skipped_dismissed)}")
     for item in imported:
         print(f"- {item.get('id')} [{item.get('kind')}] {_short(str(item.get('text', '')))}")
     return 0
@@ -2876,6 +3243,10 @@ def inbox(*, target: Path, json_output: bool = False, limit: int = 20) -> int:
             print(f"  priority: {candidate.get('priority')}")
             print(f"  acceptance: {candidate.get('acceptance_count')}")
         print(f"  text: {_short(str(candidate.get('text', '')))}")
+        context = candidate.get("context") if isinstance(candidate.get("context"), dict) else {}
+        if context:
+            rendered = ", ".join(f"{key}={context[key]}" for key in sorted(context))
+            print(f"  context: {rendered}")
         print(f"  plan: brigade work import plan {candidate.get('id')}")
         print(f"  promote: brigade work import promote {candidate.get('id')}")
         if candidate.get("kind") == "task":
@@ -2888,6 +3259,10 @@ def inbox(*, target: Path, json_output: bool = False, limit: int = 20) -> int:
             if item.get("kind") == "task":
                 detail += f" {item.get('priority')} acceptance={item.get('acceptance_count')}"
             print(f"- {item.get('id')} {detail}: {_short(str(item.get('text', '')))}")
+            context = item.get("context") if isinstance(item.get("context"), dict) else {}
+            if context:
+                rendered = ", ".join(f"{key}={context[key]}" for key in sorted(context))
+                print(f"  context: {rendered}")
         if len(imports) > limit:
             print(f"... {len(imports) - limit} more")
     return 0

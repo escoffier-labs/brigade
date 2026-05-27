@@ -1714,8 +1714,9 @@ def _import_findings(target: Path, findings: list[dict[str, Any]]) -> tuple[list
         )
         if fingerprint:
             existing_fingerprints.add(fingerprint)
-    imported, duplicate_records = work_cmd._append_import_records(target, records)
+    imported, duplicate_records, dismissed_records = work_cmd._append_import_records(target, records)
     skipped.extend(duplicate_records)
+    skipped.extend(dismissed_records)
     return imported, skipped
 
 

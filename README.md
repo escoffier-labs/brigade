@@ -181,6 +181,7 @@ brigade work import list
 brigade work import validate imports.jsonl
 brigade work import ingest imports.jsonl
 brigade work import memory-care
+brigade work import memory-refresh
 brigade work import triage
 brigade work import plan <import-id>
 brigade work import promote <import-id>
@@ -300,7 +301,8 @@ Import inbox commands:
 - `brigade work import validate imports.jsonl` checks scanner output against [`docs/import-schema.md`](docs/import-schema.md).
 - `brigade work import ingest imports.jsonl` ingests scanner output.
 - `brigade work import memory-care` converts `memory/cards/decay/refresh-queue.json` into imports.
-- `brigade work import chat-sweep` converts `.brigade/chat-memory-sweeps/latest.json` issues into imports.
+- `brigade work import memory-refresh` converts memory-refresh candidates into task imports with card identity, reason, evidence summary, and acceptance criteria.
+- `brigade work import chat-sweep` converts `.brigade/chat-memory-sweeps/latest.json` issues into imports. Actionable sweep issues become task imports with acceptance criteria, while raw private chat text is omitted.
 - `brigade work import triage` groups pending imports by source and kind; use `--source`, `--kind`, and repeatable `--metadata key=value` to narrow noisy queues.
 - `brigade work import show <import-id>` inspects one import.
 - `brigade work import plan <import-id>` previews the exact task promotion would create, including acceptance criteria and template guidance.
@@ -311,6 +313,7 @@ Import inbox commands:
 
 Imports are stored under `.brigade/work/imports/inbox.jsonl`, stay gitignored, and do not write memory directly.
 Scanner-authored task imports may include `type`, `priority`, `template`, and `acceptance`; promotion preserves those fields so imported tasks can enter the normal TDD work loop.
+Scanner producer imports use source item keys and fingerprints when available. Repeated ingestion skips equivalent pending or promoted imports, and dismissed imports stay dismissed unless the source item changes materially.
 `brigade work doctor` warns when scanner queues go stale, task imports lack acceptance criteria, or a source produces many dismissed imports.
 For handoff-ingest issues, prefer `brigade handoff sync-issues` over repeated raw imports. It imports only issue ids that have not already been seen locally and marks stale handoff-ingest imports/tasks resolved when the latest log no longer contains them.
 
