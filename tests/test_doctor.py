@@ -108,6 +108,36 @@ def test_doctor_warns_on_stale_security_suppressions(tmp_target: Path, capsys):
     assert "security: suppression reasons" in out
 
 
+def test_doctor_warns_on_misconfigured_security_enrichment(tmp_target: Path, capsys):
+    install_selection(
+        tmp_target,
+        Selection(depth="workspace", harnesses=["claude"], owner="claude", includes=[]),
+    )
+    security_config = tmp_target / ".brigade" / "security.toml"
+    security_config.parent.mkdir(exist_ok=True)
+    security_config.write_text(
+        "\n".join(
+            [
+                'policy = "personal"',
+                'fail_on = "critical"',
+                "include_templates = false",
+                "",
+                "[enrichment]",
+                'provider = "misp"',
+                'misp_url = ""',
+                'misp_api_key_env = "BRIGADE_TEST_MISP_KEY"',
+                "",
+            ]
+        )
+    )
+
+    rc = doctor_mod.run(target=tmp_target, harness="generic")
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "security: enrichment" in out
+    assert "missing misp_url" in out
+
+
 def test_doctor_fails_when_bootstrap_file_exceeds_budget(tmp_target: Path, capsys):
     install_selection(
         tmp_target,

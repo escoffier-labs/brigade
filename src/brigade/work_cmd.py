@@ -2274,6 +2274,12 @@ def doctor(*, target: Path) -> int:
         else:
             policy = loaded_security.policy if loaded_security is not None else "personal"
             _doctor_line(OK, "security_config", f"{security_config} (policy={policy})")
+            enrichment = security_cmd.enrichment_health(effective_target)
+            _doctor_line(
+                OK if enrichment.get("configured") else WARN,
+                "security_enrichment",
+                f"{enrichment.get('provider') or 'none'} ({enrichment.get('status')})",
+            )
     else:
         _doctor_line(WARN, "security_config", f"missing, run `brigade security init --target {effective_target}`")
 
