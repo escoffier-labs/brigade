@@ -54,6 +54,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `brigade work import promote --all` with optional `--source` and `--kind` filters for batch promotion.
 - `brigade handoff doctor` to compare pending `.claude` and `.codex` memory handoffs against gitignored local source config.
 - Repo installs now include `.brigade/handoff-sources.example.json` as the local handoff ingestor source-list contract.
+- `brigade handoff doctor` ingestor-log checks for stale latest-run logs, skipped malformed handoffs, warning summaries, and no-reply/no-update masking signals.
 - `docs/import-schema.md` documenting the local import JSONL contract for scanners and wrappers.
 - Cybersecurity plugin roadmap covering broad agent-workspace security checks plus Brigade-specific scanner, doctor, import, and multi-harness security checks.
 - Built-in `security` station and `brigade security scan` for read-only agent workspace security checks.

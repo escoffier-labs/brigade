@@ -1,6 +1,20 @@
 {
   "_description": "Copy to .brigade/handoff-sources.json and edit for this machine. Relative roots resolve from the repo or workspace target.",
   "canonical_owner": "openclaw",
+  "ingestor": {
+    "last_run_log": ".brigade/handoff-ingest/latest.log",
+    "stale_after_minutes": 90,
+    "warning_patterns": [
+      "Warnings:",
+      "SKIP ",
+      "PROMOTE-SKIP",
+      "ROUTE-SKIP",
+      "NO_REPLY",
+      "NO_UPDATES",
+      "unreachable",
+      "timeout"
+    ]
+  },
   "sources": [
     {
       "root": ".",
