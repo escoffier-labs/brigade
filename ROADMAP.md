@@ -61,7 +61,7 @@ Brigade-specific additions:
 - Understand Brigade installs: `.brigade/`, `.codex/`, `.claude/`, memory handoff inboxes, roster files, dogfood configs, run artifacts, work imports, memory-care decay files, and public template folders.
 - Treat public-template findings differently from active runtime findings so docs and starter templates do not score like live credentials or enabled tools.
 - Integrate with `brigade doctor` as a security station and with `brigade work import` so findings can become reviewable local tasks instead of only console output. Status: started with doctor checks, work doctor checks, and `--import-findings`.
-- Provide safe auto-fix only for narrow cases such as replacing obvious hardcoded sample secrets, tightening generated allow-list examples, or adding missing ignore rules.
+- Provide safe auto-fix only for narrow cases such as replacing obvious hardcoded sample secrets, tightening generated allow-list examples, or adding missing ignore rules. Status: started with `brigade security fix` for local artifact directory and managed `.gitignore` hygiene.
 - Produce Memory Handoffs for durable security findings while keeping raw secret evidence redacted.
 - Add policy packs for personal dogfooding, public-repo release checks, CI gates, and strict enterprise workspaces. Status: started with `personal`, `public-repo`, and `strict`.
 - Include dependency and package-manager hardening checks for agent plugin ecosystems, MCP packages, skills, and local tool wrappers.

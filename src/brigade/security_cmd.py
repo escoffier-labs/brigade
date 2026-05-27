@@ -262,6 +262,49 @@ def write_default_config(target: Path, *, force: bool = False) -> Path:
     return path
 
 
+def _gitignore_selection(target: Path):
+    from .config import load_config
+    from .selection import Selection
+
+    loaded = load_config(target)
+    if loaded is not None:
+        return loaded.selection
+    return Selection(depth="repo", harnesses=[], owner="this-repo", includes=[])
+
+
+def fix(*, target: Path, dry_run: bool = False) -> int:
+    from . import dogfood_cmd
+    from .install import apply_gitignore
+
+    target = target.expanduser().resolve()
+    if not target.is_dir():
+        print(f"error: --target is not a directory: {target}", file=sys.stderr)
+        return 2
+    try:
+        selection = _gitignore_selection(target)
+    except (ValueError, json.JSONDecodeError) as exc:
+        print(f"error: invalid Brigade config: {exc}", file=sys.stderr)
+        return 2
+
+    artifacts_root = default_artifacts_dir(target).parent
+    print(f"security fix: {target}")
+    if dry_run:
+        print("dry_run: True")
+        print(f"would_create: {artifacts_root}")
+        print("would_update: .gitignore")
+        return 0
+
+    artifacts_root.mkdir(parents=True, exist_ok=True)
+    result = apply_gitignore(target, selection)
+    config_ignored = dogfood_cmd._check_git_ignored(target, config_path(target))
+    artifacts_ignored = dogfood_cmd._check_git_ignored(target, artifacts_root)
+    print(f"security_artifacts_dir: {artifacts_root}")
+    print(f"gitignore: {result}")
+    print(f"security_config_ignored: {config_ignored}")
+    print(f"security_artifacts_ignored: {artifacts_ignored}")
+    return 0
+
+
 def _short(text: str, limit: int = 160) -> str:
     rendered = " ".join(text.split())
     if len(rendered) <= limit:

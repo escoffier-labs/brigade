@@ -203,6 +203,7 @@ brigade runs list --cwd /path/to/repo
 brigade runs latest --cwd /path/to/repo
 brigade runs show .brigade/runs/<run-id>
 brigade security init
+brigade security fix
 brigade security scan --target .
 brigade security scan --target . --policy public-repo
 brigade security scan --target . --output-dir .brigade/security/latest
@@ -290,7 +291,7 @@ brigade add guard    # content-guard
 brigade add tokens   # tokenjuice
 ```
 
-`security` is a built-in station with no external managed tool yet. Run `brigade security scan --target .` for a read-only agent workspace security report, add `--output-dir .brigade/security/latest` to write redacted `security-report.json` and `security-report.md` artifacts, or add `--import-findings` to turn findings into local `brigade work import` review items. `brigade doctor` and `brigade work doctor` report security config health, latest evidence bundle status, and whether local security artifacts are ignored. Secret evidence is redacted before reports, artifacts, or imports are written. Use `brigade security init` to write gitignored local defaults to `.brigade/security.toml`; it supports policy presets (`personal`, `public-repo`, `strict`), `fail_on`, template scanning, and fingerprint suppressions for reviewed findings.
+`security` is a built-in station with no external managed tool yet. Run `brigade security scan --target .` for a read-only agent workspace security report, add `--output-dir .brigade/security/latest` to write redacted `security-report.json` and `security-report.md` artifacts, or add `--import-findings` to turn findings into local `brigade work import` review items. `brigade doctor` and `brigade work doctor` report security config health, latest evidence bundle status, and whether local security artifacts are ignored. `brigade security fix` applies the narrow safe hygiene fix for that local state: it creates `.brigade/security/` and refreshes the managed `.gitignore` block. Secret evidence is redacted before reports, artifacts, or imports are written. Use `brigade security init` to write gitignored local defaults to `.brigade/security.toml`; it supports policy presets (`personal`, `public-repo`, `strict`), `fail_on`, template scanning, and fingerprint suppressions for reviewed findings.
 
 The current managed tools:
 

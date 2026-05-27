@@ -100,6 +100,30 @@ def test_security_init_writes_gitignored_local_config(tmp_path, capsys):
     assert security_cmd.init(target=tmp_path, force=True) == 0
 
 
+def test_security_fix_prepares_local_ignored_security_paths(tmp_path, capsys):
+    tmp_path.mkdir(exist_ok=True)
+
+    assert security_cmd.fix(target=tmp_path) == 0
+    out = capsys.readouterr().out
+    assert "security fix:" in out
+    assert "gitignore:" in out
+    assert (tmp_path / ".brigade" / "security").is_dir()
+    gitignore = (tmp_path / ".gitignore").read_text()
+    assert ".brigade/security.toml" in gitignore
+    assert ".brigade/security/" in gitignore
+
+
+def test_security_fix_dry_run_does_not_write(tmp_path, capsys):
+    tmp_path.mkdir(exist_ok=True)
+
+    assert security_cmd.fix(target=tmp_path, dry_run=True) == 0
+    out = capsys.readouterr().out
+    assert "dry_run: True" in out
+    assert "would_update: .gitignore" in out
+    assert not (tmp_path / ".gitignore").exists()
+    assert not (tmp_path / ".brigade").exists()
+
+
 def test_security_scan_can_import_findings(tmp_path, capsys):
     (tmp_path / ".env").write_text("SERVICE_TOKEN=abcd1234abcd1234abcd1234\n")
 
@@ -182,6 +206,18 @@ def test_security_scan_cli(tmp_path, monkeypatch):
         "import_findings": True,
         "output_dir": tmp_path / "security-report",
     }
+
+
+def test_security_fix_cli(tmp_path, monkeypatch):
+    seen = {}
+
+    def fake_fix(**kwargs):
+        seen.update(kwargs)
+        return 0
+
+    monkeypatch.setattr(security_cmd, "fix", fake_fix)
+    assert cli.main(["security", "fix", "--target", str(tmp_path), "--dry-run"]) == 0
+    assert seen == {"target": tmp_path, "dry_run": True}
 
 
 def test_security_init_cli(tmp_path, monkeypatch):

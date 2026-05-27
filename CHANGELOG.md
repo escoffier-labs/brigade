@@ -56,6 +56,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Built-in `security` station and `brigade security scan` for read-only agent workspace security checks.
 - `brigade security scan --import-findings` to route security findings into the local work import inbox for review.
 - `brigade security init` to write gitignored local defaults to `.brigade/security.toml`.
+- `brigade security fix` to create the local security artifact directory and refresh the managed `.gitignore` block.
 - Security policy presets (`personal`, `public-repo`, `strict`), template scanning controls, stable finding fingerprints, and fingerprint suppressions.
 - `brigade security scan --output-dir <dir>` to write redacted `security-report.json` and `security-report.md` evidence bundles.
 - `brigade doctor` and `brigade work doctor` now report security config health, latest security evidence bundle status, and local security artifact ignore coverage.
