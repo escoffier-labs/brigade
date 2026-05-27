@@ -55,6 +55,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Cybersecurity plugin roadmap covering broad agent-workspace security checks plus Brigade-specific scanner, doctor, import, and multi-harness security checks.
 - Built-in `security` station and `brigade security scan` for read-only agent workspace security checks.
 - `brigade security scan --import-findings` to route security findings into the local work import inbox for review.
+- `brigade security init` to write gitignored local defaults to `.brigade/security.toml`.
+- Security policy presets (`personal`, `public-repo`, `strict`), template scanning controls, stable finding fingerprints, and fingerprint suppressions.
+- Security scan secret evidence is redacted before reports or work imports are written.
 - `ROADMAP.md` covering the daily-driver path, scanner-ready inbox, chat-surface scanners, memory-card decay refresh, and portable operator setup.
 - `brigade work note` to append timestamped checkpoints to the active work session without ending it.
 - `brigade work doctor` to check dogfood config, Codex availability, local artifact paths, handoff inbox, ignore coverage, and latest run context for the daily work loop.
@@ -71,7 +74,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `brigade work run` now consumes the oldest pending ledger task before falling back to the latest extracted dogfood next step, and marks consumed tasks done after successful runs.
 - `brigade work task add --from-next` now reuses an equivalent pending task instead of adding duplicates.
 - `brigade work brief` now includes pending local work imports and import counts in both text and JSON output.
-- The managed gitignore block now treats `.brigade/dogfood.toml` and `.brigade/runs/` as local state.
+- The managed gitignore block now treats `.brigade/dogfood.toml`, `.brigade/security.toml`, and `.brigade/runs/` as local state.
 - Live smoke docs now keep Codex agent execution in a trusted repo cwd while writing temporary roster, artifacts, and handoff output under `/tmp`.
 - Handoff write failures now preserve final run artifacts, print the final answer, return nonzero, and mark `run.json` as `handoff-failed`.
 - Dogfood runs default to prompt-level read-only plus Codex's `danger-full-access` sandbox setting for trusted-workspace use so repo inspection works on hosts where native read-only sandboxing blocks shell inspection; `--native-read-only-sandbox` opts into stricter native enforcement.

@@ -63,17 +63,18 @@ Brigade-specific additions:
 - Integrate with `brigade doctor` as a security station and with `brigade work import` so findings can become reviewable local tasks instead of only console output.
 - Provide safe auto-fix only for narrow cases such as replacing obvious hardcoded sample secrets, tightening generated allow-list examples, or adding missing ignore rules.
 - Produce Memory Handoffs for durable security findings while keeping raw secret evidence redacted.
-- Add policy packs for personal dogfooding, public-repo release checks, CI gates, and strict enterprise workspaces.
+- Add policy packs for personal dogfooding, public-repo release checks, CI gates, and strict enterprise workspaces. Status: started with `personal`, `public-repo`, and `strict`.
 - Include dependency and package-manager hardening checks for agent plugin ecosystems, MCP packages, skills, and local tool wrappers.
 - Track false-positive taxonomy, runtime-confidence rules, suppressions, and regression fixtures as first-class project artifacts.
 
 First build slice:
 
-- Create a plugin scaffold and security scan contract. Status: started with built-in `security` station and `brigade security scan`.
+- Create a plugin scaffold and security scan contract. Status: started with built-in `security` station, `brigade security init`, and `brigade security scan`.
 - Start with config discovery and read-only reporting for Brigade, Claude Code, Codex, and MCP config files. Status: started.
 - Add core rule categories for secrets, permissions, hooks, MCP servers, supply-chain patterns, and agent instructions. Status: started.
 - Output JSON plus readable text, then route selected findings into `brigade work import`. Status: started with `--import-findings`.
 - Keep all raw findings local and gitignored unless the operator explicitly exports an evidence pack. Status: current default.
+- Add local policy defaults, stable finding fingerprints, and suppressions. Status: started with `.brigade/security.toml`.
 
 ## Later Phase: Memory Card Decay And Refresh
 

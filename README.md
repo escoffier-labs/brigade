@@ -202,7 +202,9 @@ Inspect a completed run without opening each JSON file:
 brigade runs list --cwd /path/to/repo
 brigade runs latest --cwd /path/to/repo
 brigade runs show .brigade/runs/<run-id>
+brigade security init
 brigade security scan --target .
+brigade security scan --target . --policy public-repo
 brigade security scan --target . --import-findings
 ```
 
@@ -287,7 +289,7 @@ brigade add guard    # content-guard
 brigade add tokens   # tokenjuice
 ```
 
-`security` is a built-in station with no external managed tool yet. Run `brigade security scan --target .` for a read-only agent workspace security report, or add `--import-findings` to turn findings into local `brigade work import` review items.
+`security` is a built-in station with no external managed tool yet. Run `brigade security scan --target .` for a read-only agent workspace security report, or add `--import-findings` to turn findings into local `brigade work import` review items. Secret evidence is redacted before reports or imports are written. Use `brigade security init` to write gitignored local defaults to `.brigade/security.toml`; it supports policy presets (`personal`, `public-repo`, `strict`), `fail_on`, template scanning, and fingerprint suppressions for reviewed findings.
 
 The current managed tools:
 

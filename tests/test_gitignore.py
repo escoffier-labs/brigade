@@ -26,6 +26,7 @@ def test_init_creates_gitignore_when_missing(tmp_target: Path):
     assert "!.claude/memory-handoffs/TEMPLATE.md" in gi
     assert "memory/handoff-inbox/" in gi
     assert ".brigade/dogfood.toml" in gi
+    assert ".brigade/security.toml" in gi
     assert ".brigade/runs/" in gi
     assert ".brigade/work/" in gi
 

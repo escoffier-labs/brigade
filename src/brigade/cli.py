@@ -388,14 +388,36 @@ def _build_parser() -> argparse.ArgumentParser:
     p_security = sub.add_parser("security", help="Scan agent workspace security posture.")
     security_sub = p_security.add_subparsers(dest="security_command", metavar="<security-command>")
     security_sub.required = True
+    p_security_init = security_sub.add_parser("init", help="Write local security scan defaults.")
+    p_security_init.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to configure.")
+    p_security_init.add_argument("--force", action="store_true", help="Overwrite an existing security config.")
     p_security_scan = security_sub.add_parser("scan", help="Run a read-only agent workspace security scan.")
     p_security_scan.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to scan.")
     p_security_scan.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_security_scan.add_argument(
+        "--policy",
+        choices=["personal", "public-repo", "strict"],
+        default=None,
+        help="Policy preset. Defaults to .brigade/security.toml or personal.",
+    )
+    p_security_scan.add_argument(
         "--fail-on",
         choices=["none", "low", "medium", "high", "critical"],
-        default="critical",
+        default=None,
         help="Return nonzero when a finding at or above this severity exists.",
+    )
+    p_security_scan.add_argument(
+        "--include-templates",
+        dest="include_templates",
+        action="store_true",
+        default=None,
+        help="Include public template files in scanner findings.",
+    )
+    p_security_scan.add_argument(
+        "--no-include-templates",
+        dest="include_templates",
+        action="store_false",
+        help="Exclude public template files from scanner findings.",
     )
     p_security_scan.add_argument(
         "--import-findings",
@@ -761,11 +783,15 @@ def main(argv=None) -> int:
     if cmd == "security":
         from . import security_cmd
 
+        if args.security_command == "init":
+            return security_cmd.init(target=args.target, force=args.force)
         if args.security_command == "scan":
             return security_cmd.scan(
                 target=args.target,
                 json_output=args.json,
+                policy=args.policy,
                 fail_on=args.fail_on,
+                include_templates=args.include_templates,
                 import_findings=args.import_findings,
             )
         parser.error(f"unknown security command: {args.security_command}")
