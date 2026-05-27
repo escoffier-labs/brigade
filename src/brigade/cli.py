@@ -395,6 +395,12 @@ def _build_parser() -> argparse.ArgumentParser:
     p_security_scan.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to scan.")
     p_security_scan.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_security_scan.add_argument(
+        "--output-dir",
+        type=Path,
+        default=None,
+        help="Write redacted security report artifacts to this directory.",
+    )
+    p_security_scan.add_argument(
         "--policy",
         choices=["personal", "public-repo", "strict"],
         default=None,
@@ -793,6 +799,7 @@ def main(argv=None) -> int:
                 fail_on=args.fail_on,
                 include_templates=args.include_templates,
                 import_findings=args.import_findings,
+                output_dir=args.output_dir,
             )
         parser.error(f"unknown security command: {args.security_command}")
         return 2

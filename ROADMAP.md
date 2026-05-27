@@ -52,7 +52,7 @@ Baseline coverage targets:
 - Analyze hooks and startup automation for command injection, remote execution, data exfiltration, silent failures, package installs, container escape, reverse shells, clipboard access, log tampering, and persistence behaviors.
 - Audit MCP server configs for high-risk server types, remote transports, shell metacharacters, unpinned `npx` usage, hardcoded env secrets, sensitive file args, excessive server counts, missing timeouts, and auto-approve behavior.
 - Review agent prompts, skills, subagents, slash commands, and workspace instructions for prompt-injection patterns, hidden instructions, URL execution, data harvesting, output suppression, time bombs, and unsafe auto-run language.
-- Emit graded reports with severity, category scores, evidence snippets, suggested fixes, JSON output, markdown output, HTML or bundle output, and CI-friendly exit codes.
+- Emit graded reports with severity, category scores, evidence snippets, suggested fixes, JSON output, markdown output, HTML or bundle output, and CI-friendly exit codes. Status: started with redacted JSON and Markdown evidence bundles.
 - Support CLI use, GitHub Action use, and local evidence packs.
 
 Brigade-specific additions:
@@ -72,7 +72,7 @@ First build slice:
 - Create a plugin scaffold and security scan contract. Status: started with built-in `security` station, `brigade security init`, and `brigade security scan`.
 - Start with config discovery and read-only reporting for Brigade, Claude Code, Codex, and MCP config files. Status: started.
 - Add core rule categories for secrets, permissions, hooks, MCP servers, supply-chain patterns, and agent instructions. Status: started.
-- Output JSON plus readable text, then route selected findings into `brigade work import`. Status: started with `--import-findings`.
+- Output JSON plus readable text, redacted evidence bundles, then route selected findings into `brigade work import`. Status: started with `--output-dir` and `--import-findings`.
 - Keep all raw findings local and gitignored unless the operator explicitly exports an evidence pack. Status: current default.
 - Add local policy defaults, stable finding fingerprints, and suppressions. Status: started with `.brigade/security.toml`.
 

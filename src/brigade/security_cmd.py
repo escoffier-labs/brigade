@@ -6,6 +6,7 @@ import hashlib
 import json
 import re
 import sys
+from datetime import datetime, timezone
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -49,6 +50,7 @@ SKIP_DIRS = {
 
 SKIP_PREFIXES = (
     (".brigade", "runs"),
+    (".brigade", "security"),
     (".brigade", "work"),
     (".claude", "memory-handoffs"),
     (".codex", "memory-handoffs"),
@@ -563,6 +565,63 @@ def _import_findings(target: Path, findings: list[dict[str, Any]]) -> tuple[list
     return imported, skipped
 
 
+def _utc_iso() -> str:
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _render_markdown_report(report: dict[str, Any]) -> str:
+    lines = [
+        "# Brigade Security Report",
+        "",
+        f"- target: `{report['target']}`",
+        f"- generated_at: `{report['generated_at']}`",
+        f"- policy: `{report['policy']}`",
+        f"- fail_on: `{report['fail_on']}`",
+        f"- include_templates: `{report['include_templates']}`",
+        f"- scanned_files: `{report['scanned_file_count']}`",
+        f"- findings: `{report['finding_count']}`",
+        f"- suppressed: `{report['suppressed_count']}`",
+        "",
+        "## Severity Counts",
+        "",
+    ]
+    if report["severity_counts"]:
+        for severity, count in report["severity_counts"].items():
+            lines.append(f"- {severity}: {count}")
+    else:
+        lines.append("- none: 0")
+    lines.extend(["", "## Findings", ""])
+    if not report["findings"]:
+        lines.append("No unsuppressed findings.")
+    for finding in report["findings"]:
+        lines.extend(
+            [
+                f"### {finding['id']} - {finding['title']}",
+                "",
+                f"- fingerprint: `{finding['fingerprint']}`",
+                f"- severity: `{finding['severity']}`",
+                f"- category: `{finding['category']}`",
+                f"- path: `{finding['path']}:{finding['line']}`",
+                f"- surface: `{finding['surface']}`",
+                f"- confidence: `{finding['confidence']}`",
+                f"- evidence: `{finding['evidence']}`",
+                f"- suggestion: {finding['suggestion']}",
+                "",
+            ]
+        )
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def write_evidence_bundle(report: dict[str, Any], output_dir: Path) -> Path:
+    output_dir = output_dir.expanduser().resolve()
+    output_dir.mkdir(parents=True, exist_ok=True)
+    report = dict(report)
+    report["artifacts"] = str(output_dir)
+    (output_dir / "security-report.json").write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
+    (output_dir / "security-report.md").write_text(_render_markdown_report(report))
+    return output_dir
+
+
 def scan(
     *,
     target: Path,
@@ -571,6 +630,7 @@ def scan(
     fail_on: str | None = None,
     include_templates: bool | None = None,
     import_findings: bool = False,
+    output_dir: Path | None = None,
 ) -> int:
     target = target.expanduser().resolve()
     if not target.is_dir():
@@ -597,12 +657,16 @@ def scan(
     report["include_templates"] = effective.include_templates
     report["config"] = str(effective.config_path)
     report["config_loaded"] = effective.config_loaded
+    report["generated_at"] = _utc_iso()
     imported: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
     if import_findings and report["findings"]:
         imported, skipped = _import_findings(target, report["findings"])
         report["imported_findings"] = len(imported)
         report["skipped_duplicate_imports"] = len(skipped)
+    if output_dir is not None:
+        artifacts_dir = write_evidence_bundle(report, output_dir)
+        report["artifacts"] = str(artifacts_dir)
 
     if json_output:
         print(json.dumps(report, indent=2, sort_keys=True))
@@ -619,6 +683,8 @@ def scan(
         if import_findings:
             print(f"imported_findings: {len(imported)}")
             print(f"skipped_duplicate_imports: {len(skipped)}")
+        if output_dir is not None:
+            print(f"artifacts: {report['artifacts']}")
         for finding in report["findings"]:
             print(
                 f"- [{finding['severity']}] {finding['category']} "

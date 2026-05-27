@@ -66,6 +66,7 @@ def build_gitignore_block(selection: Selection) -> str:
         ".brigade/logs/",
         ".brigade/runs/",
         ".brigade/scrub-cache/",
+        ".brigade/security/",
         ".brigade/work/",
         GITIGNORE_END,
         "",

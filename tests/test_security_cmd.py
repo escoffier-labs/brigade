@@ -119,6 +119,32 @@ def test_security_scan_can_import_findings(tmp_path, capsys):
     assert "skipped_duplicate_imports: 1" in out
 
 
+def test_security_scan_writes_redacted_evidence_bundle(tmp_path, capsys):
+    (tmp_path / ".env").write_text("SERVICE_TOKEN=abcd1234abcd1234abcd1234\n")
+    output_dir = tmp_path / ".brigade" / "security" / "latest"
+
+    assert security_cmd.scan(target=tmp_path, fail_on="none", output_dir=output_dir) == 0
+    out = capsys.readouterr().out
+    assert f"artifacts: {output_dir.resolve()}" in out
+
+    json_path = output_dir / "security-report.json"
+    markdown_path = output_dir / "security-report.md"
+    assert json_path.is_file()
+    assert markdown_path.is_file()
+
+    payload = json.loads(json_path.read_text())
+    assert payload["artifacts"] == str(output_dir.resolve())
+    assert payload["generated_at"]
+    assert payload["finding_count"] == 1
+    assert "[REDACTED]" in json_path.read_text()
+    assert "abcd1234" not in json_path.read_text()
+    markdown = markdown_path.read_text()
+    assert "# Brigade Security Report" in markdown
+    assert "Possible sensitive secret material" in markdown
+    assert "[REDACTED]" in markdown
+    assert "abcd1234" not in markdown
+
+
 def test_security_scan_cli(tmp_path, monkeypatch):
     seen = {}
 
@@ -141,6 +167,8 @@ def test_security_scan_cli(tmp_path, monkeypatch):
                 "medium",
                 "--include-templates",
                 "--import-findings",
+                "--output-dir",
+                str(tmp_path / "security-report"),
             ]
         )
         == 0
@@ -152,6 +180,7 @@ def test_security_scan_cli(tmp_path, monkeypatch):
         "fail_on": "medium",
         "include_templates": True,
         "import_findings": True,
+        "output_dir": tmp_path / "security-report",
     }
 
 
