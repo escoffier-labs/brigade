@@ -622,10 +622,26 @@ def _build_parser() -> argparse.ArgumentParser:
     p_tools_show.add_argument("tool_id", help="Logical tool id.")
     p_tools_show.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
     p_tools_show.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_tools_describe = tools_sub.add_parser("describe", help="Describe one portable tool contract.")
+    p_tools_describe.add_argument("tool_id", help="Logical tool id.")
+    p_tools_describe.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_tools_describe.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_tools_contracts = tools_sub.add_parser("contracts", help="List portable tool contracts.")
+    p_tools_contracts.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_tools_contracts.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_tools_search = tools_sub.add_parser("search", help="Search portable tool catalog entries.")
     p_tools_search.add_argument("query", help="Search query.")
     p_tools_search.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
     p_tools_search.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_tools_call = tools_sub.add_parser("call", help="Plan portable tool calls without executing them.")
+    tools_call_sub = p_tools_call.add_subparsers(dest="tools_call_command", metavar="<tools-call-command>")
+    tools_call_sub.required = True
+    p_tools_call_plan = tools_call_sub.add_parser("plan", help="Plan one portable tool call without executing it.")
+    p_tools_call_plan.add_argument("tool_id", help="Logical tool id.")
+    p_tools_call_plan.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_tools_call_plan.add_argument("--args", dest="args", default=None, help="Inline JSON object arguments.")
+    p_tools_call_plan.add_argument("--args-json", type=Path, default=None, help="Path to a JSON object argument file.")
+    p_tools_call_plan.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_tools_plan = tools_sub.add_parser("plan", help="Plan portable tool projection writes.")
     p_tools_plan.add_argument("tool_id", nargs="?", help="Optional logical tool id.")
     p_tools_plan.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
@@ -1164,8 +1180,23 @@ def main(argv=None) -> int:
             return tools_cmd.list_tools(target=args.target, json_output=args.json)
         if args.tools_command == "show":
             return tools_cmd.show(target=args.target, tool_id=args.tool_id, json_output=args.json)
+        if args.tools_command == "describe":
+            return tools_cmd.describe(target=args.target, tool_id=args.tool_id, json_output=args.json)
+        if args.tools_command == "contracts":
+            return tools_cmd.contracts(target=args.target, json_output=args.json)
         if args.tools_command == "search":
             return tools_cmd.search(target=args.target, query=args.query, json_output=args.json)
+        if args.tools_command == "call":
+            if args.tools_call_command == "plan":
+                return tools_cmd.call_plan(
+                    target=args.target,
+                    tool_id=args.tool_id,
+                    args=args.args,
+                    args_json=args.args_json,
+                    json_output=args.json,
+                )
+            parser.error(f"unknown tools call command: {args.tools_call_command}")
+            return 2
         if args.tools_command == "plan":
             return tools_cmd.plan(target=args.target, tool_id=args.tool_id, json_output=args.json)
         if args.tools_command == "apply":

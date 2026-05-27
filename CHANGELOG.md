@@ -65,8 +65,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `brigade work scanners doctor --import-issues` to route scanner registry health warnings into the existing local work inbox.
 - `brigade work backup init/status/doctor/import-issues` for read-only local backup health summaries and `backup-health` inbox imports.
 - Backup health checks for stale snapshots, failed or stale checks, failed or stale prunes, missing summaries, overdue restore rehearsals, and unsafe private summary fields.
-- `brigade tools init/list/show/search/plan/apply/doctor/import-issues` for portable tool, slash command, skill, superpower, script, and MCP catalog discovery plus explicit projection writes.
-- Tool catalog health checks for missing sources, missing manifests or schemas, invalid schema JSON, parity gaps, missing projections, unmanaged projections, locally edited managed projections, stale projections, MCP config issues, stale health files, unsafe auth fields, and high-risk command shapes.
+- `brigade tools init/list/show/search/describe/contracts/call plan/plan/apply/doctor/import-issues` for portable tool, slash command, skill, superpower, script, and MCP catalog discovery plus explicit projection writes and read-only call planning.
+- Tool catalog health checks for missing sources, missing manifests or schemas, invalid schema JSON, invalid contract schemas, missing examples, bad argument templates, missing contracts, parity gaps, missing projections, unmanaged projections, locally edited managed projections, stale projections, MCP config issues, stale health files, unsafe auth/env fields, and high-risk command shapes.
+- Schema-backed call plans validate local JSON args against a dependency-free JSON Schema subset, render configured argument templates, report blockers, and redact secret-looking fields without invoking tools.
 - Managed tool projections record source and projection fingerprints so `brigade tools plan`, `apply`, and `doctor` can distinguish missing, current, stale, unmanaged, and conflicted projection states.
 - `tool-catalog` inbox imports with stable source fingerprints and dismissed-import protection until a catalog issue materially changes.
 - `brigade work import triage` to group pending imports by source and kind.

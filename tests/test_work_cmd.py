@@ -1922,6 +1922,252 @@ projections = { claude = ".claude/commands/simplify.md", codex = ".codex/skills/
     assert {"unmanaged_projection", "missing_projection"} <= issue_types
 
 
+def test_tools_describe_and_contracts_report_schema_contracts(tmp_path, capsys):
+    _init_git_repo(tmp_path)
+    tools_dir = tmp_path / "tools"
+    tools_dir.mkdir()
+    (tools_dir / "input.schema.json").write_text(
+        json.dumps(
+            {
+                "type": "object",
+                "required": ["path"],
+                "properties": {
+                    "path": {"type": "string"},
+                    "mode": {"type": "string", "enum": ["fast", "safe"]},
+                },
+                "additionalProperties": False,
+            }
+        )
+    )
+    (tools_dir / "output.schema.json").write_text(
+        json.dumps({"type": "object", "properties": {"ok": {"type": "boolean"}}})
+    )
+    (tools_dir / "examples.json").write_text("{}\n")
+    config = tmp_path / ".brigade" / "tools.toml"
+    config.parent.mkdir()
+    config.write_text(
+        """
+[[tool]]
+id = "script-tool"
+name = "Script Tool"
+family = "script"
+enabled = true
+description = "Contracted script."
+command = "brigade status"
+input_schema_path = "tools/input.schema.json"
+output_schema_path = "tools/output.schema.json"
+examples_path = "tools/examples.json"
+permissions = ["read-files"]
+effects = ["local-read"]
+approval_mode = "on-request"
+cwd = "."
+env_labels = ["SAFE_ENV"]
+argument_template = { path = "{path}", mode = "--mode={mode}" }
+supported_harnesses = []
+"""
+    )
+
+    assert tools_cmd.describe(target=tmp_path, tool_id="script-tool") == 0
+    out = capsys.readouterr().out
+    assert "tool: script-tool" in out
+    assert "command: brigade status" in out
+    assert "approval_mode: on-request" in out
+    assert "permissions: read-files" in out
+
+    assert tools_cmd.describe(target=tmp_path, tool_id="script-tool", json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["tool"]["contract"]["has_contract"] is True
+    assert payload["tool"]["contract"]["permissions"] == ["read-files"]
+    assert payload["issue_count"] == 0
+
+    assert tools_cmd.contracts(target=tmp_path) == 0
+    out = capsys.readouterr().out
+    assert "tools contracts:" in out
+    assert "- script-tool [script] ready issues=0" in out
+
+    assert tools_cmd.contracts(target=tmp_path, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["contract_count"] == 1
+    assert payload["issue_count"] == 0
+
+
+def test_tools_contracts_report_malformed_and_unsupported_schemas(tmp_path, capsys):
+    _init_git_repo(tmp_path)
+    tools_dir = tmp_path / "tools"
+    tools_dir.mkdir()
+    (tools_dir / "bad.schema.json").write_text("{not json")
+    (tools_dir / "unsupported.schema.json").write_text(json.dumps({"type": "string"}))
+    config = tmp_path / ".brigade" / "tools.toml"
+    config.parent.mkdir()
+    config.write_text(
+        """
+[[tool]]
+id = "bad-contract"
+name = "Bad Contract"
+family = "script"
+enabled = true
+description = "Bad schema."
+command = "brigade status"
+input_schema_path = "tools/bad.schema.json"
+output_schema_path = "tools/unsupported.schema.json"
+examples_path = "tools/missing-examples.json"
+argument_template = { "bad-key!" = "{path" }
+supported_harnesses = []
+"""
+    )
+
+    assert tools_cmd.doctor(target=tmp_path) == 0
+    out = capsys.readouterr().out
+    assert "[warn] tool_invalid_input_schema:" in out
+    assert "[warn] tool_unsupported_output_schema:" in out
+    assert "[warn] tool_missing_examples:" in out
+    assert "[warn] tool_bad_argument_template:" in out
+
+    assert tools_cmd.contracts(target=tmp_path, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    issue_types = {issue["issue_type"] for issue in payload["issues"]}
+    assert {"invalid_input_schema", "unsupported_output_schema", "missing_examples", "bad_argument_template"} <= issue_types
+
+
+def test_tools_call_plan_validates_args_and_renders_template(tmp_path, capsys):
+    _init_git_repo(tmp_path)
+    tools_dir = tmp_path / "tools"
+    tools_dir.mkdir()
+    (tools_dir / "input.schema.json").write_text(
+        json.dumps(
+            {
+                "type": "object",
+                "required": ["path", "count", "tags", "mode"],
+                "properties": {
+                    "path": {"type": "string"},
+                    "count": {"type": "integer"},
+                    "tags": {"type": "array", "items": {"type": "string"}},
+                    "mode": {"type": "string", "enum": ["fast", "safe"]},
+                },
+                "additionalProperties": False,
+            }
+        )
+    )
+    config = tmp_path / ".brigade" / "tools.toml"
+    config.parent.mkdir()
+    config.write_text(
+        """
+[[tool]]
+id = "runner"
+name = "Runner"
+family = "script"
+enabled = true
+description = "Call planner."
+command = "brigade status"
+input_schema_path = "tools/input.schema.json"
+permissions = ["read-files"]
+effects = ["local-read"]
+approval_mode = "never"
+auth_label = "local-safe"
+env_labels = ["SAFE_ENV"]
+argument_template = { target = "{path}", count = "--count={count}", mode = "--mode={mode}", tags = "{tags}" }
+supported_harnesses = []
+"""
+    )
+    args_path = tmp_path / "args.json"
+    args_path.write_text(json.dumps({"path": "README.md", "count": 2, "tags": ["a", "b"], "mode": "safe"}))
+
+    assert tools_cmd.call_plan(target=tmp_path, tool_id="runner", args_json=args_path, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["valid"] is True
+    assert payload["plan"]["command"] == "brigade status"
+    assert payload["plan"]["arguments"]["target"] == "README.md"
+    assert payload["plan"]["arguments"]["count"] == "--count=2"
+    assert payload["plan"]["arguments"]["mode"] == "--mode=safe"
+    assert payload["plan"]["approval_required"] is False
+
+    assert tools_cmd.call_plan(
+        target=tmp_path,
+        tool_id="runner",
+        args='{"path":"README.md","count":"two","tags":["a", 1],"mode":"slow","extra":true}',
+        json_output=True,
+    ) == 1
+    payload = json.loads(capsys.readouterr().out)
+    blockers = "\n".join(payload["blockers"])
+    assert "$.count: expected integer" in blockers
+    assert "$.tags[1]: expected string" in blockers
+    assert "$.mode: expected one of 'fast', 'safe'" in blockers
+    assert "$.extra: additional property not allowed" in blockers
+
+
+def test_tools_call_plan_redacts_and_reports_blockers(tmp_path, capsys):
+    _init_git_repo(tmp_path)
+    tools_dir = tmp_path / "tools"
+    tools_dir.mkdir()
+    (tools_dir / "blocked.md").write_text("Blocked source.\n")
+    (tools_dir / "input.schema.json").write_text(json.dumps({"type": "object", "properties": {"token": {"type": "string"}}}))
+    projection = tmp_path / ".claude" / "commands" / "blocked.md"
+    projection.parent.mkdir(parents=True)
+    projection.write_text("unmanaged\n")
+    config = tmp_path / ".brigade" / "tools.toml"
+    config.parent.mkdir()
+    config.write_text(
+        """
+[[tool]]
+id = "blocked"
+name = "Blocked"
+family = "script"
+enabled = true
+description = "Blocked plan."
+source_path = "tools/blocked.md"
+input_schema_path = "tools/input.schema.json"
+auth_label = "api_token"
+env_labels = ["SECRET_TOKEN"]
+argument_template = { token = "{token}" }
+supported_harnesses = ["claude"]
+projections = { claude = ".claude/commands/blocked.md" }
+"""
+    )
+
+    assert tools_cmd.call_plan(target=tmp_path, tool_id="blocked", args='{"token":"abc123"}', json_output=True) == 1
+    payload = json.loads(capsys.readouterr().out)
+    blockers = "\n".join(payload["blockers"])
+    assert "command is required for call planning" in blockers
+    assert "auth_label appears unsafe" in blockers
+    assert "env label appears unsafe: SECRET_TOKEN" in blockers
+    assert "one or more projections are conflicted or unmanaged" in blockers
+    assert payload["plan"]["auth_label"] == "[redacted]"
+    assert payload["plan"]["env_labels"] == ["[redacted]"]
+    assert payload["plan"]["args"]["token"] == "[redacted]"
+    rendered = json.dumps(payload, sort_keys=True)
+    assert "abc123" not in rendered
+
+
+def test_tools_import_issues_and_work_brief_surface_contract_health(tmp_path, monkeypatch, capsys):
+    _init_git_repo(tmp_path)
+    dogfood_cmd.init(target=tmp_path)
+    capsys.readouterr()
+    monkeypatch.setattr(work_cmd.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(dogfood_cmd, "_check_git_ignored", lambda repo, path: "yes")
+    config = tmp_path / ".brigade" / "tools.toml"
+    config.write_text(
+        """
+[[tool]]
+id = "contractless"
+name = "Contractless"
+family = "script"
+enabled = true
+description = "Missing contract."
+command = "brigade status"
+supported_harnesses = []
+"""
+    )
+
+    assert tools_cmd.import_issues(target=tmp_path, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["created"] == 1
+    assert payload["imports"][0]["metadata"]["tool_issue_type"] == "missing_contract"
+
+    assert work_cmd.brief(target=tmp_path) == 0
+    out = capsys.readouterr().out
+    assert "tool_top_issue: contractless/missing_contract" in out
+
+
 def test_work_backup_init_status_doctor_and_json(tmp_path, monkeypatch, capsys):
     _init_git_repo(tmp_path)
     monkeypatch.setattr(dogfood_cmd, "_check_git_ignored", lambda repo, path: "yes")
@@ -3966,6 +4212,18 @@ def test_tools_cli(tmp_path, monkeypatch):
         seen.append(("search", kwargs))
         return 0
 
+    def fake_describe(**kwargs):
+        seen.append(("describe", kwargs))
+        return 0
+
+    def fake_contracts(**kwargs):
+        seen.append(("contracts", kwargs))
+        return 0
+
+    def fake_call_plan(**kwargs):
+        seen.append(("call-plan", kwargs))
+        return 0
+
     def fake_plan(**kwargs):
         seen.append(("plan", kwargs))
         return 0
@@ -3986,6 +4244,9 @@ def test_tools_cli(tmp_path, monkeypatch):
     monkeypatch.setattr(tools_cmd, "list_tools", fake_list)
     monkeypatch.setattr(tools_cmd, "show", fake_show)
     monkeypatch.setattr(tools_cmd, "search", fake_search)
+    monkeypatch.setattr(tools_cmd, "describe", fake_describe)
+    monkeypatch.setattr(tools_cmd, "contracts", fake_contracts)
+    monkeypatch.setattr(tools_cmd, "call_plan", fake_call_plan)
     monkeypatch.setattr(tools_cmd, "plan", fake_plan)
     monkeypatch.setattr(tools_cmd, "apply", fake_apply)
     monkeypatch.setattr(tools_cmd, "doctor", fake_doctor)
@@ -3994,7 +4255,10 @@ def test_tools_cli(tmp_path, monkeypatch):
     assert cli.main(["tools", "init", "--target", str(tmp_path), "--force", "--no-gitignore"]) == 0
     assert cli.main(["tools", "list", "--target", str(tmp_path), "--json"]) == 0
     assert cli.main(["tools", "show", "simplify", "--target", str(tmp_path), "--json"]) == 0
+    assert cli.main(["tools", "describe", "simplify", "--target", str(tmp_path), "--json"]) == 0
+    assert cli.main(["tools", "contracts", "--target", str(tmp_path), "--json"]) == 0
     assert cli.main(["tools", "search", "simple", "--target", str(tmp_path), "--json"]) == 0
+    assert cli.main(["tools", "call", "plan", "simplify", "--target", str(tmp_path), "--args", '{"x":1}', "--json"]) == 0
     assert cli.main(["tools", "plan", "simplify", "--target", str(tmp_path), "--json"]) == 0
     assert cli.main(["tools", "apply", "simplify", "--target", str(tmp_path), "--dry-run", "--force", "--json"]) == 0
     assert cli.main(["tools", "apply", "--all", "--target", str(tmp_path), "--json"]) == 0
@@ -4004,7 +4268,19 @@ def test_tools_cli(tmp_path, monkeypatch):
         ("init", {"target": tmp_path, "force": True, "update_gitignore": False}),
         ("list", {"target": tmp_path, "json_output": True}),
         ("show", {"target": tmp_path, "tool_id": "simplify", "json_output": True}),
+        ("describe", {"target": tmp_path, "tool_id": "simplify", "json_output": True}),
+        ("contracts", {"target": tmp_path, "json_output": True}),
         ("search", {"target": tmp_path, "query": "simple", "json_output": True}),
+        (
+            "call-plan",
+            {
+                "target": tmp_path,
+                "tool_id": "simplify",
+                "args": '{"x":1}',
+                "args_json": None,
+                "json_output": True,
+            },
+        ),
         ("plan", {"target": tmp_path, "tool_id": "simplify", "json_output": True}),
         (
             "apply",

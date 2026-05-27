@@ -181,6 +181,9 @@ brigade tools init
 brigade tools list
 brigade tools show simplify
 brigade tools search simplify
+brigade tools describe simplify
+brigade tools contracts
+brigade tools call plan simplify --args '{"path":"README.md"}'
 brigade tools plan
 brigade tools plan simplify
 brigade tools apply simplify --dry-run
@@ -353,12 +356,14 @@ Portable tool catalog commands:
 
 - `brigade tools init` writes gitignored `.brigade/tools.toml` with local examples for portable slash commands and superpowers.
 - `brigade tools list`, `show <tool-id>`, and `search <query>` inspect logical tool entries across source families such as `skill`, `slash-command`, `superpower`, `mcp`, `openapi`, `graphql`, `script`, and `custom`.
+- `brigade tools describe <tool-id>` and `brigade tools contracts` inspect schema-backed call contracts, permissions, effects, approval mode, env labels, and argument templates.
+- `brigade tools call plan <tool-id> --args ...` validates local JSON args against the configured input schema and returns a redacted wrapper-friendly call plan without executing the tool.
 - `brigade tools plan` previews exact projection creates, updates, skips, unmanaged conflicts, and local-edit conflicts for all configured harness targets.
 - `brigade tools apply <tool-id>` and `brigade tools apply --all` explicitly write managed harness projections. Use `--dry-run` to preview writes and `--force` only to overwrite unmanaged or locally edited projection files.
-- `brigade tools doctor` reports missing sources, manifests, schemas, projections, unmanaged projections, locally edited managed projections, stale projection fingerprints, MCP config issues, stale health files, unsafe auth field names, and high-risk command shapes.
+- `brigade tools doctor` reports missing sources, manifests, schemas, invalid contracts, missing examples, bad argument templates, projections, unmanaged projections, locally edited managed projections, stale projection fingerprints, MCP config issues, stale health files, unsafe auth/env field names, and high-risk command shapes.
 - `brigade tools import-issues` turns catalog health issues into local `tool-catalog` work imports with stable fingerprints and dismiss-until-changed behavior.
 
-Tool catalog inspection is read-only, and projection writes are always explicit through `brigade tools apply`. Brigade does not invoke tools, start MCP servers, fetch OpenAPI or GraphQL schemas, store auth, run a daemon, or auto-sync harness configs from `doctor`, `brief`, or `work run`. Keep tokens, secrets, private URLs, and host-private paths out of public catalog templates.
+Tool catalog inspection and call planning are read-only, and projection writes are always explicit through `brigade tools apply`. Brigade does not invoke tools, start MCP servers, fetch OpenAPI or GraphQL schemas, store auth, run a daemon, or auto-sync harness configs from `doctor`, `brief`, or `work run`. Keep tokens, secrets, private URLs, and host-private paths out of public catalog templates.
 
 Backup health commands:
 
