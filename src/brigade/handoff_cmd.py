@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import sys
 import time
 from dataclasses import dataclass
@@ -28,6 +29,7 @@ DEFAULT_WARNING_PATTERNS = (
     "timed out",
     "no route",
 )
+ISSUE_SOURCE = "handoff-ingest"
 
 
 @dataclass(frozen=True)
@@ -88,6 +90,45 @@ class IngestorHealth:
             "stale_after_seconds": self.stale_after_seconds,
             "stale": self.stale,
             "warnings": list(self.warnings),
+        }
+
+
+@dataclass(frozen=True)
+class HandoffIssue:
+    id: str
+    category: str
+    kind: str
+    text: str
+    repair: str
+    evidence: str
+    metadata: dict[str, Any]
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "category": self.category,
+            "kind": self.kind,
+            "text": self.text,
+            "repair": self.repair,
+            "evidence": self.evidence,
+            "metadata": self.metadata,
+        }
+
+    def as_import_record(self) -> dict[str, Any]:
+        metadata = dict(self.metadata)
+        metadata.update(
+            {
+                "handoff_issue_id": self.id,
+                "handoff_issue_category": self.category,
+                "repair": self.repair,
+                "evidence": self.evidence,
+            }
+        )
+        return {
+            "text": self.text,
+            "kind": self.kind,
+            "source": ISSUE_SOURCE,
+            "metadata": metadata,
         }
 
 
@@ -219,6 +260,145 @@ def doctor_checks(target: Path, sources: Path | None = None) -> list[tuple[str, 
     return checks
 
 
+def collect_issues(target: Path, sources: Path | None = None) -> list[HandoffIssue]:
+    health = inspect(target, sources=sources)
+    issues: list[HandoffIssue] = []
+    for inbox in health.inboxes:
+        if inbox.pending and not inbox.watched:
+            issues.append(
+                _make_issue(
+                    category="untracked-inbox",
+                    kind="task",
+                    text=(
+                        f"Add {inbox.inbox} to handoff source config or move "
+                        f"{inbox.pending} pending handoff"
+                        f"{'s' if inbox.pending != 1 else ''}"
+                    ),
+                    repair=(
+                        "Add the repo root and inbox path to .brigade/handoff-sources.json, "
+                        "or move the pending files into an inbox the canonical ingestor scans."
+                    ),
+                    evidence=str(inbox.path),
+                    metadata={
+                        "inbox": inbox.inbox,
+                        "path": str(inbox.path),
+                        "pending": inbox.pending,
+                    },
+                )
+            )
+
+    ingestor = health.ingestor
+    if ingestor.configured:
+        if not ingestor.exists:
+            issues.append(
+                _make_issue(
+                    category="missing-log",
+                    kind="incident",
+                    text=f"Restore handoff ingestor latest-run log at {ingestor.log_path}",
+                    repair=(
+                        "Update ingestor.last_run_log to the actual latest-run log path, "
+                        "or adjust the ingestor wrapper to write that log after each run."
+                    ),
+                    evidence=str(ingestor.log_path),
+                    metadata={"log_path": str(ingestor.log_path)},
+                )
+            )
+        elif ingestor.stale:
+            issues.append(
+                _make_issue(
+                    category="stale-log",
+                    kind="incident",
+                    text=f"Investigate stale handoff ingestor run log at {ingestor.log_path}",
+                    repair="Run the handoff ingestor, then fix the scheduler or wrapper if the log does not refresh.",
+                    evidence=f"age={_format_seconds(ingestor.age_seconds)}, stale_after={_format_seconds(ingestor.stale_after_seconds)}",
+                    metadata={
+                        "log_path": str(ingestor.log_path),
+                        "age_seconds": ingestor.age_seconds,
+                        "stale_after_seconds": ingestor.stale_after_seconds,
+                    },
+                )
+            )
+        if ingestor.exists and ingestor.log_path is not None:
+            issues.extend(_parse_ingestor_log_issues(ingestor.log_path))
+    return _dedupe_issues(issues)
+
+
+def issues(
+    *,
+    target: Path,
+    sources: Path | None = None,
+    json_output: bool = False,
+    limit: int = 20,
+) -> int:
+    if limit < 1:
+        print("error: --limit must be a positive integer", file=sys.stderr)
+        return 2
+    target = target.expanduser().resolve()
+    if not target.is_dir():
+        print(f"error: --target is not a directory: {target}", file=sys.stderr)
+        return 2
+    found = collect_issues(target, sources=sources)
+    payload = _issues_payload(target, found)
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+    print(f"handoff issues: {target}")
+    print(f"issues: {payload['count']}")
+    if not found:
+        return 0
+    print("groups:")
+    for category, count in payload["by_category"].items():
+        print(f"- {category}: {count}")
+    print("items:")
+    for issue in found[:limit]:
+        print(f"- {issue.id} [{issue.category}] {issue.kind}: {_short(issue.text)}")
+        print(f"  repair: {_short(issue.repair, 140)}")
+        print(f"  evidence: {_short(issue.evidence, 160)}")
+    if len(found) > limit:
+        print(f"... {len(found) - limit} more")
+    return 0
+
+
+def import_issues(
+    *,
+    target: Path,
+    sources: Path | None = None,
+    dry_run: bool = False,
+    json_output: bool = False,
+) -> int:
+    target = target.expanduser().resolve()
+    if not target.is_dir():
+        print(f"error: --target is not a directory: {target}", file=sys.stderr)
+        return 2
+    found = collect_issues(target, sources=sources)
+    records = [issue.as_import_record() for issue in found]
+    from . import work_cmd
+
+    imported, skipped = work_cmd._append_import_records(target, records, dry_run=dry_run)
+    payload = {
+        "target": str(target),
+        "imports_path": str(work_cmd._imports_path(target)),
+        "dry_run": dry_run,
+        "issues": len(found),
+        "imported": len(imported),
+        "skipped_duplicates": len(skipped),
+        "by_category": _issue_counts(found),
+        "imports": imported,
+    }
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+    print(f"handoff issue imports: {target}")
+    print(f"imports_path: {payload['imports_path']}")
+    print(f"dry_run: {dry_run}")
+    print(f"issues: {len(found)}")
+    print(f"imported: {len(imported)}")
+    print(f"skipped_duplicates: {len(skipped)}")
+    for item in imported:
+        print(f"- {item.get('id')} [{item.get('kind')}] {_short(str(item.get('text', '')))}")
+    return 0
+
+
 def doctor(*, target: Path, sources: Path | None = None, json_output: bool = False) -> int:
     if not target.expanduser().exists():
         print(f"error: target does not exist: {target}", file=sys.stderr)
@@ -232,6 +412,166 @@ def doctor(*, target: Path, sources: Path | None = None, json_output: bool = Fal
         for status, name, detail in doctor_checks(health.target, sources=health.sources_path):
             print(f"[{status}] {name}: {detail}")
     return 1 if health.failures else 0
+
+
+def _issues_payload(target: Path, found: list[HandoffIssue]) -> dict[str, Any]:
+    return {
+        "target": str(target),
+        "count": len(found),
+        "by_category": _issue_counts(found),
+        "issues": [issue.as_dict() for issue in found],
+    }
+
+
+def _issue_counts(found: list[HandoffIssue]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for issue in found:
+        counts[issue.category] = counts.get(issue.category, 0) + 1
+    return dict(sorted(counts.items()))
+
+
+def _dedupe_issues(issues: list[HandoffIssue]) -> list[HandoffIssue]:
+    seen: set[str] = set()
+    deduped: list[HandoffIssue] = []
+    for issue in issues:
+        if issue.id in seen:
+            continue
+        seen.add(issue.id)
+        deduped.append(issue)
+    return deduped
+
+
+def _make_issue(
+    *,
+    category: str,
+    kind: str,
+    text: str,
+    repair: str,
+    evidence: str,
+    metadata: dict[str, Any] | None = None,
+) -> HandoffIssue:
+    raw_id = f"{category}|{text}|{evidence}"
+    digest = hashlib.sha1(raw_id.encode("utf-8")).hexdigest()[:10]
+    return HandoffIssue(
+        id=f"handoff-{category}-{digest}",
+        category=category,
+        kind=kind,
+        text=text,
+        repair=repair,
+        evidence=evidence,
+        metadata=metadata or {},
+    )
+
+
+def _parse_ingestor_log_issues(log_path: Path) -> list[HandoffIssue]:
+    try:
+        lines = log_path.read_text(errors="replace").splitlines()
+    except OSError as exc:
+        return [
+            _make_issue(
+                category="missing-log",
+                kind="incident",
+                text=f"Read handoff ingestor log at {log_path}",
+                repair="Fix file permissions or update ingestor.last_run_log to a readable latest-run log.",
+                evidence=str(exc),
+                metadata={"log_path": str(log_path)},
+            )
+        ]
+    issues: list[HandoffIssue] = []
+    has_warning_summary = False
+    has_no_reply_or_update = False
+    for line_number, line in enumerate(lines, start=1):
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if stripped.startswith("SKIP "):
+            issues.append(_issue_from_log_line("skip", "task", stripped, line_number, log_path))
+        elif stripped.startswith("PROMOTE-SKIP "):
+            issues.append(_issue_from_log_line("promote-skip", "task", stripped, line_number, log_path))
+        elif stripped.startswith("ROUTE-SKIP "):
+            issues.append(_issue_from_log_line("route-skip", "task", stripped, line_number, log_path))
+        elif stripped.startswith("Warnings:"):
+            has_warning_summary = True
+            issues.append(_issue_from_log_line("warning-summary", "incident", stripped, line_number, log_path))
+        if "NO_REPLY" in stripped or "NO_UPDATES" in stripped:
+            has_no_reply_or_update = True
+        if _looks_unreachable(stripped):
+            issues.append(_issue_from_log_line("source-unreachable", "incident", stripped, line_number, log_path))
+    if has_warning_summary and has_no_reply_or_update:
+        issues.append(
+            _make_issue(
+                category="hidden-warning",
+                kind="incident",
+                text="Fix handoff ingestor no-reply output that can hide warnings",
+                repair="Adjust the scheduler or wrapper so warning output is delivered even when the run also emits NO_REPLY or NO_UPDATES.",
+                evidence=str(log_path),
+                metadata={"log_path": str(log_path)},
+            )
+        )
+    return issues
+
+
+def _issue_from_log_line(category: str, kind: str, line: str, line_number: int, log_path: Path) -> HandoffIssue:
+    subject, detail = _split_issue_line(line)
+    repair = _repair_for_issue(category, line)
+    text = _text_for_issue(category, subject, detail)
+    return _make_issue(
+        category=category,
+        kind=kind,
+        text=text,
+        repair=repair,
+        evidence=line,
+        metadata={
+            "log_path": str(log_path),
+            "line_number": line_number,
+            "subject": subject,
+        },
+    )
+
+
+def _split_issue_line(line: str) -> tuple[str, str]:
+    if ": " not in line:
+        return line, ""
+    subject, detail = line.split(": ", 1)
+    return subject, detail
+
+
+def _text_for_issue(category: str, subject: str, detail: str) -> str:
+    item = Path(subject.split()[-1]).name if subject else "handoff ingest issue"
+    if category == "skip":
+        return f"Repair malformed handoff {item}: {detail or 'not parsed'}"
+    if category == "promote-skip":
+        return f"Fix handoff promotion target for {item}: {detail or 'promotion skipped'}"
+    if category == "route-skip":
+        return f"Fix handoff routing fields for {item}: {detail or 'route skipped'}"
+    if category == "warning-summary":
+        return f"Review handoff ingestor warning summary: {subject}"
+    if category == "source-unreachable":
+        return f"Investigate unreachable handoff source: {subject}"
+    return f"Review handoff ingest issue: {subject}"
+
+
+def _repair_for_issue(category: str, line: str) -> str:
+    if category == "skip":
+        return "Rewrite the handoff with the standard markdown sections, especially Type, Title, Summary, Recommended memory action, and the matching target section."
+    if category == "promote-skip" and "target card does not exist" in line:
+        return "Either create the target memory card first, change Recommended memory action to create-card, or correct Target card to an existing card."
+    if category == "promote-skip":
+        return "Align Recommended memory action, Target card, and Suggested card content so card promotion can succeed."
+    if category == "route-skip" and "action is not no-card" in line:
+        return "Use Recommended memory action no-card when routing to Target document, or remove Target document and provide a valid card target."
+    if category == "route-skip":
+        return "Align Recommended memory action, Target document, and Suggested document content so document routing can succeed."
+    if category == "warning-summary":
+        return "Inspect the latest ingestor log and clear the concrete warning lines before treating the run as clean."
+    if category == "source-unreachable":
+        return "Check network, SSH, mount, or source-path availability, then rerun the handoff ingestor."
+    return "Review the latest handoff ingestor log and fix the underlying source or scheduler issue."
+
+
+def _looks_unreachable(line: str) -> bool:
+    lowered = line.casefold()
+    return any(token in lowered for token in ("unreachable", "timed out", "timeout", "no route"))
 
 
 def _load_sources(target: Path, sources_path: Path) -> SourceConfig:
@@ -383,6 +723,13 @@ def _normalize_inbox(value: str) -> str:
     if normalized.startswith("./"):
         normalized = normalized[2:]
     return normalized
+
+
+def _short(text: str, limit: int = 96) -> str:
+    rendered = " ".join(text.split())
+    if len(rendered) <= limit:
+        return rendered
+    return rendered[: limit - 3].rstrip() + "..."
 
 
 def _inspect_inbox(target: Path, rel: str, watched: tuple[WatchedInbox, ...]) -> InboxHealth:

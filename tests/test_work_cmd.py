@@ -1019,6 +1019,34 @@ def test_work_brief_includes_pending_imports(tmp_path, monkeypatch, capsys):
     assert "  finding: 1" in out
 
 
+def test_work_brief_includes_handoff_ingest_issues(tmp_path, monkeypatch, capsys):
+    _init_git_repo(tmp_path)
+    monkeypatch.setattr(work_cmd.shutil, "which", lambda name: f"/usr/bin/{name}")
+    log = tmp_path / ".brigade" / "handoff-ingest" / "latest.log"
+    log.parent.mkdir(parents=True)
+    log.write_text("SKIP bad.md: no recognizable markdown sections found\n")
+    config = tmp_path / ".brigade" / "handoff-sources.json"
+    config.write_text(
+        json.dumps(
+            {
+                "sources": [{"root": ".", "inboxes": [".claude/memory-handoffs"]}],
+                "ingestor": {"last_run_log": ".brigade/handoff-ingest/latest.log"},
+            }
+        )
+    )
+
+    assert work_cmd.brief(target=tmp_path, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["handoff_issues"]["count"] == 1
+    assert payload["handoff_issues"]["by_category"] == {"skip": 1}
+
+    assert work_cmd.brief(target=tmp_path) == 0
+    out = capsys.readouterr().out
+    assert "handoff_ingest_issues_pending: 1" in out
+    assert "handoff_ingest_issues_by_category:" in out
+    assert "  skip: 1" in out
+
+
 def test_work_next_reports_latest_next_as_default_task(tmp_path, monkeypatch, capsys):
     _init_git_repo(tmp_path)
     dogfood_cmd.init(target=tmp_path)

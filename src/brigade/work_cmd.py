@@ -912,6 +912,8 @@ def _suggested_command(active: dict[str, Any] | None, next_text: object, source:
 
 
 def _brief_payload(target: Path, *, limit: int = 3) -> dict[str, Any]:
+    from . import handoff_cmd
+
     target = target.expanduser().resolve()
     active = _active_session_info(target)
     sessions, skipped = _collect_sessions(_work_root(target))
@@ -923,6 +925,7 @@ def _brief_payload(target: Path, *, limit: int = 3) -> dict[str, Any]:
     pending = _pending_tasks(target)
     pending_imports = _pending_imports(target)
     pending_import_counts = _import_counts(pending_imports)
+    handoff_issues = handoff_cmd.collect_issues(target)
     return {
         "target": str(target),
         "git": git,
@@ -935,6 +938,10 @@ def _brief_payload(target: Path, *, limit: int = 3) -> dict[str, Any]:
         "imports_path": str(_imports_path(target)),
         "pending_imports": pending_imports,
         "pending_import_counts": pending_import_counts,
+        "handoff_issues": {
+            "count": len(handoff_issues),
+            "by_category": handoff_cmd._issue_counts(handoff_issues),
+        },
         "dogfood": resolved["dogfood"],
         "next_source": resolved["source"],
         "task_id": resolved.get("task_id"),
@@ -1402,6 +1409,15 @@ def brief(*, target: Path, limit: int = 3, json_output: bool = False) -> int:
             print(f"  - {item.get('id')} [{kind}] {source}: {_short(str(item.get('text', '')))}")
         if len(pending_imports) > 5:
             print(f"  ... {len(pending_imports) - 5} more")
+
+    handoff_issues = payload.get("handoff_issues")
+    if isinstance(handoff_issues, dict) and handoff_issues.get("count"):
+        print(f"handoff_ingest_issues_pending: {handoff_issues.get('count')}")
+        by_category = handoff_issues.get("by_category")
+        if isinstance(by_category, dict) and by_category:
+            print("handoff_ingest_issues_by_category:")
+            for category, count in by_category.items():
+                print(f"  {category}: {count}")
 
     recent = payload["recent_sessions"]
     if isinstance(recent, list) and recent:

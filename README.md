@@ -96,6 +96,7 @@ Once installed, `brigade doctor` verifies the wiring and `brigade status` report
 For machines that ingest handoffs from multiple repos, copy `.brigade/handoff-sources.example.json` to `.brigade/handoff-sources.json` and list the repo roots and writer inboxes the canonical ingestor scans.
 `brigade handoff doctor` reports pending `.claude/memory-handoffs/` and `.codex/memory-handoffs/` files that are not covered by that local source list.
 If your ingestor writes a latest-run log, set `ingestor.last_run_log` in that local config so the doctor can warn on stale runs, skipped malformed handoffs, and warning summaries hidden behind no-reply cron output.
+Use `brigade handoff issues` to group those warnings with repair guidance, then `brigade handoff import-issues` to route them into the normal local work import inbox.
 
 ## Run a brigade
 
@@ -154,6 +155,8 @@ brigade dogfood
 brigade dogfood next
 brigade dogfood --target /path/to/repo
 brigade handoff doctor
+brigade handoff issues
+brigade handoff import-issues
 brigade work bootstrap
 brigade work status
 brigade work doctor

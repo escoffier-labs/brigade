@@ -54,6 +54,18 @@ Goal: make backup health part of the same daily operator loop as chat, memory, a
 - Route stale snapshot, failed check, failed prune, missing mount, and restore-rehearsal overdue signals into `brigade work import` as incidents.
 - Keep real hostnames, remote names, mount paths, webhook URLs, channel ids, and backup passwords out of public templates.
 
+## Later Phase: Shared Tool Catalog And Runtime
+
+Goal: make Brigade able to reason about callable tools across agent harnesses without making each harness own separate tool config.
+
+- Build a local tool catalog abstraction with source records, tool counts, search, describe, and call surfaces.
+- Support source families such as MCP, OpenAPI, GraphQL, local scripts, and custom adapters through a registry contract.
+- Prefer schema-first tool descriptions so agents can discover by intent, inspect arguments, and produce typed calls.
+- Add a local daemon option with status, stop, restart, port tracking, and safe local auto-start for commands that need a runtime.
+- Track resumable executions for tools that pause for auth, approval, or human confirmation.
+- Keep shared auth, secrets, and policy decisions host-local and gitignored, while publishing only safe example configs.
+- Expose catalog health through `brigade doctor` and route broken source/auth/policy states into `brigade work import`.
+
 ## Later Phase: Cybersecurity Plugin
 
 Goal: ship a Brigade cybersecurity plugin with broad coverage for agent workspaces, then go deeper on Brigade's multi-harness, memory, scanner, and dogfood workflows.
@@ -112,6 +124,7 @@ Goal: prevent durable memory from silently rotting.
 - Treat bootstrap truncation as a hard failure. Bootstrap files stay slim, cards hold durable detail, and doctor checks enforce the boundary.
 - Add a handoff doctor that compares repo-local writer inboxes such as `.claude/memory-handoffs/` and `.codex/memory-handoffs/` against the canonical ingestor source list, warning when handoffs exist in directories the owner is not scanning. Status: started with `brigade handoff doctor`, `.brigade/handoff-sources.example.json`, and `brigade doctor` / `brigade work doctor` integration.
 - Add handoff-ingest observability checks for hidden warning states, including unreachable remote sources, malformed handoffs that are skipped, and runs that emit `NO_REPLY` despite warnings. Status: started with optional `ingestor.last_run_log` checks in `brigade handoff doctor`.
+- Turn handoff-ingest warnings into repairable local work. Status: started with `brigade handoff issues`, `brigade handoff import-issues`, repair guidance, and `brigade work brief` issue counts.
 
 ## Later Phase: Portable Operator Setup
 

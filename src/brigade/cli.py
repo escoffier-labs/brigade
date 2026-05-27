@@ -115,6 +115,16 @@ def _build_parser() -> argparse.ArgumentParser:
     p_handoff_doctor.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
     p_handoff_doctor.add_argument("--sources", type=Path, default=None, help="Override .brigade/handoff-sources.json.")
     p_handoff_doctor.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_handoff_issues = handoff_sub.add_parser("issues", help="Group actionable handoff ingest issues.")
+    p_handoff_issues.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_handoff_issues.add_argument("--sources", type=Path, default=None, help="Override .brigade/handoff-sources.json.")
+    p_handoff_issues.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_handoff_issues.add_argument("--limit", type=int, default=20, help="Maximum issue rows to print.")
+    p_handoff_import_issues = handoff_sub.add_parser("import-issues", help="Import handoff ingest issues into the work inbox.")
+    p_handoff_import_issues.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
+    p_handoff_import_issues.add_argument("--sources", type=Path, default=None, help="Override .brigade/handoff-sources.json.")
+    p_handoff_import_issues.add_argument("--dry-run", action="store_true", help="Report without writing imports.")
+    p_handoff_import_issues.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
 
     # work
     p_work = sub.add_parser("work", help="Inspect and manage a daily Brigade work session.")
@@ -640,6 +650,10 @@ def main(argv=None) -> int:
 
         if args.handoff_command == "doctor":
             return handoff_cmd.doctor(target=args.target, sources=args.sources, json_output=args.json)
+        if args.handoff_command == "issues":
+            return handoff_cmd.issues(target=args.target, sources=args.sources, json_output=args.json, limit=args.limit)
+        if args.handoff_command == "import-issues":
+            return handoff_cmd.import_issues(target=args.target, sources=args.sources, dry_run=args.dry_run, json_output=args.json)
         parser.error(f"unknown handoff command: {args.handoff_command}")
         return 2
     if cmd == "work":
