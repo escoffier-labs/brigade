@@ -26,7 +26,7 @@ Goal: make Brigade a safe target for local automations that discover useful work
 - Validate and ingest scanner-authored JSONL files.
 - Let wrappers import candidate tasks, findings, decisions, preferences, incidents, links, and commands without knowing Brigade internals.
 - Convert memory-care refresh queues into local task imports.
-- Promote selected imports into the work task ledger, with source metadata preserved.
+- Promote selected imports into the work task ledger, with source metadata preserved. Status: started with task `type`, `priority`, `template`, and `acceptance` preservation.
 - Dismiss noisy imports so scanners can be useful without leaving permanent queue clutter. Status: started with single-item dismissal and filtered `dismiss --all`.
 - Batch-promote reviewed imports by source and kind. Status: started with source, kind, and metadata filters across list, triage, promote, and dismiss.
 - Surface pending imports and grouped counts in `brigade work brief` so discovered work appears in the daily flow.
@@ -99,8 +99,9 @@ Brigade-specific additions:
 Goal: make Brigade support a narrow issue lifecycle for daily work: pick one task, define acceptance, test first when practical, implement, review, refactor, and close.
 
 - Add task templates for vertical-slice work, bugfix work, RED/GREEN/REFACTOR loops, docs work, and security follow-ups. Status: implemented in the local task ledger.
-- Import GitHub issues into the local task ledger without building a sync engine. Status: implemented through the existing `gh` CLI.
-- Let `brigade work run` consume structured acceptance criteria from the local task ledger or a GitHub issue mirror. Status: started with local ledger acceptance criteria and issue metadata.
+- Import GitHub issues into the local task ledger without building a sync engine. Status: implemented through the existing `gh` CLI, including issue-body acceptance extraction.
+- Let `brigade work run` consume structured acceptance criteria from the local task ledger or a GitHub issue mirror. Status: started with local ledger acceptance criteria and issue-body criteria imported into the ledger.
+- Record completed task evidence locally. Status: started with consumed task snapshots in work-session artifacts and completion metadata for session path, dogfood run path, and acceptance criteria.
 - Keep repo-shareable workflow rules separate from gitignored personal/global preferences.
 - Add doctor checks for missing acceptance criteria or stale active issue context. Status: started with missing acceptance, closed remote issues, unchecked issue-backed tasks, and stale active sessions.
 

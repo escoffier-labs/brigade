@@ -47,9 +47,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Typed task metadata and repeatable acceptance criteria for `brigade work task add`, plus `brigade work task plan` for the completion checklist.
 - `brigade work task add --template` for `vertical-slice`, `bugfix`, `red-green-refactor`, `docs`, and `security-follow-up` defaults.
 - `brigade work task add --from-issue <issue-url-or-number>` to import GitHub issue title and metadata through the existing `gh` CLI when available.
+- `brigade work task add --from-issue` now imports acceptance criteria from GitHub issue-body checkboxes and acceptance/test sections into the local task acceptance field without storing the raw body.
+- `brigade work run` now records consumed task snapshots in work-session artifacts and stores completed session, dogfood run, and acceptance metadata on completed ledger tasks.
 - `brigade work run --queue-next` to queue the successful run's extracted next step, with duplicate pending task protection.
 - `brigade work import add/list/show/promote` to manage a gitignored local import inbox for scanner-discovered candidate work.
 - `brigade work import validate` and `brigade work import ingest` for scanner-authored JSONL import files.
+- Scanner-authored task imports can now carry `type`, `priority`, `template`, and `acceptance`, and promotion preserves those fields on local ledger tasks.
 - `brigade work import memory-care` to convert `memory/cards/decay/refresh-queue.json` into local work imports.
 - `brigade work import chat-sweep` to convert `.brigade/chat-memory-sweeps/latest.json` issues into local work imports.
 - `brigade work import triage` to group pending imports by source and kind.

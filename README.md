@@ -280,13 +280,14 @@ Task ledger commands:
 - `brigade work task add "..."` queues a task manually.
 - `brigade work task add "..." --type feature --priority high --acceptance "..."` queues typed work with repeatable acceptance criteria.
 - `brigade work task add "..." --template bugfix --acceptance "Regression test passes"` adds template acceptance criteria while preserving explicit acceptance criteria.
-- `brigade work task add --from-issue 42` imports a GitHub issue with `gh issue view` when `gh` is available.
+- `brigade work task add --from-issue 42` imports a GitHub issue with `gh issue view` when `gh` is available, including acceptance criteria parsed from issue-body checkboxes or acceptance/test sections.
 - `brigade work task add --from-next` promotes the latest extracted dogfood next step.
 - `brigade work task plan <task-id>` shows the task metadata, acceptance checklist, template guidance, and suggested run command.
 - `brigade work task done <task-id>` closes queued work.
 
 Available task templates are `vertical-slice`, `bugfix`, `red-green-refactor`, `docs`, and `security-follow-up`.
 Issue-backed tasks keep issue URL, number, title, labels, state, and source metadata in the local gitignored ledger.
+Issue body text is not stored, and Brigade does not poll, sync, mutate, or refresh GitHub issues in the background.
 
 Import inbox commands:
 
@@ -302,11 +303,14 @@ Import inbox commands:
 - `brigade work import promote --all --source memory-care --kind task` batch-promotes filtered imports; metadata filters also work for scanner-specific fields such as `handoff_issue_category=route-skip`.
 
 Imports are stored under `.brigade/work/imports/inbox.jsonl`, stay gitignored, and do not write memory directly.
+Scanner-authored task imports may include `type`, `priority`, `template`, and `acceptance`; promotion preserves those fields so imported tasks can enter the normal TDD work loop.
 For handoff-ingest issues, prefer `brigade handoff sync-issues` over repeated raw imports. It imports only issue ids that have not already been seen locally and marks stale handoff-ingest imports/tasks resolved when the latest log no longer contains them.
 
 Run the daily loop with `brigade work run`.
 It opens a work session, resolves the next task, runs `brigade dogfood`, and closes completed ledger tasks after successful runs.
 When the resolved ledger task has acceptance criteria, `work run` includes them in the task prompt as the definition of done.
+When `work run` consumes a queued task, the session artifacts record the task snapshot, issue metadata, and acceptance checklist in `session.json`, `start.md`, and `end.md`.
+Successful runs also store the completed session path, dogfood run path, and completion-time acceptance criteria on the task.
 Then it ends the session, writes a work-session Memory Handoff by default, and prints a recap.
 
 Useful `work run` switches:

@@ -35,6 +35,15 @@ Optional fields:
 - `source`: non-empty string identifying the producer, such as `memory-care`, `slack`, `discord`, `telegram`, or `repo-scan`. Defaults to `manual`.
 - `metadata`: JSON object with producer-specific context.
 
+Task-only optional fields:
+
+- `type`: one of `task`, `feature`, `bug`, `docs`, `security`, `workflow`, `research`, or `chore`.
+- `priority`: one of `low`, `normal`, `high`, or `urgent`.
+- `template`: one of `vertical-slice`, `bugfix`, `red-green-refactor`, `docs`, or `security-follow-up`.
+- `acceptance`: list of non-empty strings. These become local task acceptance criteria when the import is promoted.
+
+Task fields are valid only when `kind` is `task`. When a task import is promoted, Brigade preserves these fields on the local task ledger item and keeps source-specific details in `metadata`.
+
 Recommended metadata keys:
 
 - `card_file`: memory card path for memory-care records.

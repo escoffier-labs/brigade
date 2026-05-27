@@ -794,6 +794,36 @@ def test_work_task_add_template_preserves_explicit_acceptance_and_plan(tmp_path,
     assert "The login redirect works in the browser smoke test." in out
 
 
+def test_extract_issue_acceptance_from_sections_and_checkboxes():
+    body = """
+## Context
+- This is background, not acceptance.
+
+## Acceptance Criteria
+- CLI imports the first criterion.
+1. Numbered criteria are supported.
+
+## Notes
+- This should not be imported.
+- [ ] Checkboxes are imported wherever they appear.
+
+Testing:
+* Focused tests pass.
+"""
+
+    assert work_cmd._extract_issue_acceptance(body) == [
+        "CLI imports the first criterion.",
+        "Numbered criteria are supported.",
+        "Checkboxes are imported wherever they appear.",
+        "Focused tests pass.",
+    ]
+
+
+def test_extract_issue_acceptance_returns_empty_for_missing_body():
+    assert work_cmd._extract_issue_acceptance(None) == []
+    assert work_cmd._extract_issue_acceptance("") == []
+
+
 def test_work_task_add_from_issue_preserves_github_metadata(tmp_path, monkeypatch, capsys):
     _init_git_repo(tmp_path)
     monkeypatch.setattr(
@@ -840,12 +870,128 @@ def test_work_task_add_from_issue_preserves_github_metadata(tmp_path, monkeypatc
     }
 
 
+def test_work_task_add_from_issue_imports_body_acceptance(tmp_path, monkeypatch, capsys):
+    _init_git_repo(tmp_path)
+    monkeypatch.setattr(
+        work_cmd,
+        "_now",
+        lambda: datetime(2026, 5, 26, 12, 0, 0, tzinfo=timezone.utc),
+    )
+    monkeypatch.setattr(work_cmd.shutil, "which", lambda name: "/usr/bin/gh" if name == "gh" else None)
+
+    def fake_run(args, **kwargs):
+        assert args[:3] == ["gh", "issue", "view"]
+        assert args[-1] == "url,number,title,labels,state,body"
+        return subprocess.CompletedProcess(
+            args,
+            0,
+            stdout=json.dumps(
+                {
+                    "url": "https://github.com/acme/widgets/issues/43",
+                    "number": 43,
+                    "title": "Extract issue acceptance",
+                    "labels": [],
+                    "state": "OPEN",
+                    "body": """
+## Acceptance Criteria
+- Parse acceptance section bullets.
+- Keep the existing ledger acceptance path.
+
+## Notes
+- Ignore unrelated bullets.
+""",
+                }
+            ),
+            stderr="",
+        )
+
+    monkeypatch.setattr(work_cmd.subprocess, "run", fake_run)
+
+    assert work_cmd.task_add(target=tmp_path, from_issue="43", acceptance=["Manual criterion"]) == 0
+    out = capsys.readouterr().out
+    assert "acceptance: 3" in out
+    ledger = json.loads((tmp_path / ".brigade" / "work" / "tasks.json").read_text())
+    task = ledger["tasks"][0]
+    assert task["acceptance"] == [
+        "Parse acceptance section bullets.",
+        "Keep the existing ledger acceptance path.",
+        "Manual criterion",
+    ]
+    assert "body" not in task["metadata"]["github_issue"]
+    assert "acceptance" not in task["metadata"]["github_issue"]
+
+
+def test_work_run_uses_issue_imported_acceptance(tmp_path, monkeypatch):
+    _init_git_repo(tmp_path)
+    artifacts_dir = tmp_path / ".brigade" / "runs"
+    dogfood_cmd.init(target=tmp_path, artifacts_dir=artifacts_dir)
+    times = iter(
+        [
+            datetime(2026, 5, 26, 11, 30, 0, tzinfo=timezone.utc),
+            datetime(2026, 5, 26, 12, 0, 0, tzinfo=timezone.utc),
+            datetime(2026, 5, 26, 13, 0, 0, tzinfo=timezone.utc),
+            datetime(2026, 5, 26, 13, 0, 1, tzinfo=timezone.utc),
+        ]
+    )
+    monkeypatch.setattr(work_cmd, "_now", lambda: next(times))
+    monkeypatch.setattr(work_cmd.shutil, "which", lambda name: "/usr/bin/gh" if name == "gh" else None)
+
+    def fake_gh_run(args, **kwargs):
+        return subprocess.CompletedProcess(
+            args,
+            0,
+            stdout=json.dumps(
+                {
+                    "url": "https://github.com/acme/widgets/issues/44",
+                    "number": 44,
+                    "title": "Run issue accepted task",
+                    "labels": [],
+                    "state": "OPEN",
+                    "body": "Acceptance Criteria:\n- Imported issue criterion reaches dogfood.",
+                }
+            ),
+            stderr="",
+        )
+
+    monkeypatch.setattr(work_cmd.subprocess, "run", fake_gh_run)
+    assert work_cmd.task_add(target=tmp_path, from_issue="44") == 0
+    seen = {}
+
+    def fake_dogfood_run(task, **kwargs):
+        seen["task"] = task
+        run_dir = kwargs["output_dir"]
+        run_dir.mkdir(parents=True)
+        _write_json(run_dir / "run.json", {"started_at": "2026-05-26T12:10:00Z", "status": "ok", "task": task})
+        (run_dir / "final.txt").write_text("Done.\n\nNext step: Build follow-up.\n")
+        return 0
+
+    monkeypatch.setattr(dogfood_cmd, "run", fake_dogfood_run)
+
+    assert work_cmd.run(None, target=tmp_path, output_dir=artifacts_dir / "new", handoff=False) == 0
+    assert seen["task"].startswith("Run issue accepted task")
+    assert "- Imported issue criterion reaches dogfood." in seen["task"]
+
+
 def test_work_task_add_from_issue_fails_without_partial_task(tmp_path, monkeypatch, capsys):
     _init_git_repo(tmp_path)
     monkeypatch.setattr(work_cmd.shutil, "which", lambda name: None)
 
     assert work_cmd.task_add(target=tmp_path, from_issue="42") == 1
     assert "gh CLI is not available" in capsys.readouterr().err
+    assert not (tmp_path / ".brigade" / "work" / "tasks.json").exists()
+
+
+def test_work_task_add_from_issue_rejects_malformed_gh_output_without_partial_task(tmp_path, monkeypatch, capsys):
+    _init_git_repo(tmp_path)
+    monkeypatch.setattr(work_cmd.shutil, "which", lambda name: "/usr/bin/gh" if name == "gh" else None)
+
+    def fake_run(args, **kwargs):
+        return subprocess.CompletedProcess(args, 0, stdout="{bad json", stderr="")
+
+    monkeypatch.setattr(work_cmd.subprocess, "run", fake_run)
+
+    assert work_cmd.task_add(target=tmp_path, from_issue="42") == 1
+    assert "returned invalid JSON" in capsys.readouterr().err
     assert not (tmp_path / ".brigade" / "work" / "tasks.json").exists()
 
 
@@ -1067,6 +1213,65 @@ def test_work_import_validate_and_ingest_jsonl(tmp_path, monkeypatch, capsys):
     assert payload["imports"][0]["metadata"]["thread"] == "abc123"
 
 
+def test_work_import_validate_ingest_and_promote_task_metadata(tmp_path, monkeypatch, capsys):
+    _init_git_repo(tmp_path)
+    times = iter(
+        [
+            datetime(2026, 5, 26, 12, 0, 0, tzinfo=timezone.utc),
+            datetime(2026, 5, 26, 12, 1, 0, tzinfo=timezone.utc),
+            datetime(2026, 5, 26, 12, 1, 1, tzinfo=timezone.utc),
+        ]
+    )
+    monkeypatch.setattr(work_cmd, "_now", lambda: next(times))
+    import_file = tmp_path / "task-imports.jsonl"
+    import_file.write_text(
+        json.dumps(
+            {
+                "text": "Build scanner task",
+                "kind": "task",
+                "source": "repo-scan",
+                "type": "feature",
+                "priority": "high",
+                "template": "vertical-slice",
+                "acceptance": ["Scanner acceptance passes."],
+                "metadata": {"scanner": "daily"},
+            }
+        )
+        + "\n"
+    )
+
+    assert work_cmd.import_validate(input_path=import_file) == 0
+    assert "status: valid" in capsys.readouterr().out
+    assert work_cmd.import_ingest(target=tmp_path, input_path=import_file) == 0
+    assert "imported: 1" in capsys.readouterr().out
+    assert work_cmd.import_list(target=tmp_path, json_output=True) == 0
+    imports = json.loads(capsys.readouterr().out)["imports"]
+    item = imports[0]
+    assert item["type"] == "feature"
+    assert item["priority"] == "high"
+    assert item["template"] == "vertical-slice"
+    assert item["acceptance"] == ["Scanner acceptance passes."]
+
+    assert work_cmd.import_promote(target=tmp_path, import_id=item["id"]) == 0
+    out = capsys.readouterr().out
+    assert "acceptance: 4" in out
+    task_id = out.split("task: ", 1)[1].splitlines()[0]
+    ledger = json.loads((tmp_path / ".brigade" / "work" / "tasks.json").read_text())
+    task = ledger["tasks"][0]
+    assert task["id"] == task_id
+    assert task["type"] == "feature"
+    assert task["priority"] == "high"
+    assert task["template"] == "vertical-slice"
+    assert task["acceptance"] == [
+        "One user-visible path is implemented end to end.",
+        "Focused tests cover the new path.",
+        "Documentation or help text is updated when user behavior changes.",
+        "Scanner acceptance passes.",
+    ]
+    assert task["metadata"]["import_source"] == "repo-scan"
+    assert task["metadata"]["scanner"] == "daily"
+
+
 def test_work_import_validate_reports_schema_errors(tmp_path, capsys):
     import_file = tmp_path / "bad-imports.jsonl"
     import_file.write_text('{"kind":"nope","metadata":[]}\nnot-json\n')
@@ -1082,6 +1287,51 @@ def test_work_import_validate_reports_schema_errors(tmp_path, capsys):
     payload = json.loads(capsys.readouterr().out)
     assert payload["valid"] is False
     assert len(payload["errors"]) == 4
+
+
+def test_work_import_validate_rejects_bad_task_fields(tmp_path, capsys):
+    import_file = tmp_path / "bad-task-imports.jsonl"
+    import_file.write_text(
+        json.dumps(
+            {
+                "text": "Bad task import",
+                "kind": "task",
+                "source": "scanner",
+                "type": "invalid",
+                "priority": "now",
+                "template": "unknown",
+                "acceptance": "not-a-list",
+            }
+        )
+        + "\n"
+        + json.dumps(
+            {
+                "text": "Wrong kind",
+                "kind": "finding",
+                "source": "scanner",
+                "acceptance": ["Only tasks may carry acceptance."],
+            }
+        )
+        + "\n"
+        + json.dumps(
+            {
+                "text": "Empty acceptance",
+                "kind": "task",
+                "source": "scanner",
+                "acceptance": [""],
+            }
+        )
+        + "\n"
+    )
+
+    assert work_cmd.import_validate(input_path=import_file) == 1
+    out = capsys.readouterr().out
+    assert "line 1: type must be one of:" in out
+    assert "line 1: priority must be one of:" in out
+    assert "line 1: template must be one of:" in out
+    assert "line 1: acceptance must be a list of non-empty strings" in out
+    assert "line 2: task fields are only valid when kind is task" in out
+    assert "line 3: acceptance item 1 must be a non-empty string" in out
 
 
 def test_work_import_memory_care_reads_refresh_queue(tmp_path, monkeypatch, capsys):
@@ -1296,6 +1546,100 @@ def test_work_import_promote_all_filters_by_source_and_kind(tmp_path, monkeypatc
     assert work_cmd.import_list(target=tmp_path, json_output=True) == 0
     payload = json.loads(capsys.readouterr().out)
     assert [item["text"] for item in payload["imports"]] == ["Review chat note", "Record decision"]
+
+
+def test_work_import_promote_all_preserves_task_metadata(tmp_path, monkeypatch, capsys):
+    _init_git_repo(tmp_path)
+    times = iter(
+        [
+            datetime(2026, 5, 26, 12, 0, 0, tzinfo=timezone.utc),
+            datetime(2026, 5, 26, 12, 1, 0, tzinfo=timezone.utc),
+            datetime(2026, 5, 26, 12, 1, 1, tzinfo=timezone.utc),
+            datetime(2026, 5, 26, 12, 1, 2, tzinfo=timezone.utc),
+            datetime(2026, 5, 26, 12, 1, 3, tzinfo=timezone.utc),
+            datetime(2026, 5, 26, 12, 1, 4, tzinfo=timezone.utc),
+        ]
+    )
+    monkeypatch.setattr(work_cmd, "_now", lambda: next(times))
+    import_file = tmp_path / "task-imports.jsonl"
+    records = [
+        {
+            "text": "Build scanner task one",
+            "kind": "task",
+            "source": "repo-scan",
+            "type": "bug",
+            "priority": "high",
+            "acceptance": ["Bug fix acceptance."],
+        },
+        {
+            "text": "Build scanner task two",
+            "kind": "task",
+            "source": "repo-scan",
+            "type": "docs",
+            "priority": "low",
+            "acceptance": ["Docs acceptance."],
+        },
+    ]
+    import_file.write_text("".join(json.dumps(record) + "\n" for record in records))
+    assert work_cmd.import_ingest(target=tmp_path, input_path=import_file) == 0
+    capsys.readouterr()
+
+    assert work_cmd.import_promote(target=tmp_path, all_matching=True, source="repo-scan", kind="task") == 0
+    out = capsys.readouterr().out
+    assert "promoted: 2" in out
+    assert "acceptance=1" in out
+    ledger = json.loads((tmp_path / ".brigade" / "work" / "tasks.json").read_text())
+    assert [(task["type"], task["priority"], task["acceptance"]) for task in ledger["tasks"]] == [
+        ("bug", "high", ["Bug fix acceptance."]),
+        ("docs", "low", ["Docs acceptance."]),
+    ]
+
+
+def test_work_run_uses_promoted_import_acceptance(tmp_path, monkeypatch, capsys):
+    _init_git_repo(tmp_path)
+    artifacts_dir = tmp_path / ".brigade" / "runs"
+    dogfood_cmd.init(target=tmp_path, artifacts_dir=artifacts_dir)
+    times = iter(
+        [
+            datetime(2026, 5, 26, 12, 0, 0, tzinfo=timezone.utc),
+            datetime(2026, 5, 26, 12, 1, 0, tzinfo=timezone.utc),
+            datetime(2026, 5, 26, 12, 1, 1, tzinfo=timezone.utc),
+            datetime(2026, 5, 26, 13, 0, 0, tzinfo=timezone.utc),
+            datetime(2026, 5, 26, 13, 0, 1, tzinfo=timezone.utc),
+            datetime(2026, 5, 26, 13, 0, 2, tzinfo=timezone.utc),
+        ]
+    )
+    monkeypatch.setattr(work_cmd, "_now", lambda: next(times))
+    import_file = tmp_path / "task-imports.jsonl"
+    import_file.write_text(
+        json.dumps(
+            {
+                "text": "Run promoted scanner task",
+                "kind": "task",
+                "source": "repo-scan",
+                "acceptance": ["Promoted scanner acceptance reaches dogfood."],
+            }
+        )
+        + "\n"
+    )
+    assert work_cmd.import_ingest(target=tmp_path, input_path=import_file) == 0
+    assert work_cmd.import_promote(target=tmp_path, all_matching=True, source="repo-scan", kind="task") == 0
+    capsys.readouterr()
+    seen = {}
+
+    def fake_dogfood_run(task, **kwargs):
+        seen["task"] = task
+        run_dir = kwargs["output_dir"]
+        run_dir.mkdir(parents=True)
+        _write_json(run_dir / "run.json", {"started_at": "2026-05-26T12:10:00Z", "status": "ok", "task": task})
+        (run_dir / "final.txt").write_text("Done.\n\nNext step: Build follow-up.\n")
+        return 0
+
+    monkeypatch.setattr(dogfood_cmd, "run", fake_dogfood_run)
+
+    assert work_cmd.run(None, target=tmp_path, output_dir=artifacts_dir / "new", handoff=False) == 0
+    assert seen["task"].startswith("Run promoted scanner task")
+    assert "- Promoted scanner acceptance reaches dogfood." in seen["task"]
 
 
 def test_work_import_promote_all_filters_by_metadata(tmp_path, monkeypatch, capsys):
@@ -1833,6 +2177,112 @@ def test_work_run_consumes_pending_task_before_latest_next(tmp_path, monkeypatch
     assert ledger["tasks"][0]["completed_session_title"] == "Build queued task"
 
 
+def test_work_run_records_task_snapshot_and_completion_metadata(tmp_path, monkeypatch, capsys):
+    _init_git_repo(tmp_path)
+    artifacts_dir = tmp_path / ".brigade" / "runs"
+    dogfood_cmd.init(target=tmp_path, artifacts_dir=artifacts_dir)
+    times = iter(
+        [
+            datetime(2026, 5, 26, 12, 0, 0, tzinfo=timezone.utc),
+            datetime(2026, 5, 26, 13, 0, 0, tzinfo=timezone.utc),
+            datetime(2026, 5, 26, 13, 0, 1, tzinfo=timezone.utc),
+        ]
+    )
+    monkeypatch.setattr(work_cmd, "_now", lambda: next(times))
+    work_cmd._write_task_ledger(
+        tmp_path,
+        {
+            "version": 1,
+            "tasks": [
+                {
+                    "id": "issue-task",
+                    "text": "Build acceptance evidence",
+                    "status": "pending",
+                    "source": "github_issue",
+                    "type": "feature",
+                    "priority": "high",
+                    "template": "vertical-slice",
+                    "acceptance": ["Session records the acceptance checklist."],
+                    "created_at": "2026-05-26T11:30:00+00:00",
+                    "updated_at": "2026-05-26T11:30:00+00:00",
+                    "metadata": {
+                        "github_issue": {
+                            "url": "https://github.com/acme/widgets/issues/45",
+                            "number": 45,
+                            "title": "Build acceptance evidence",
+                            "labels": ["tdd"],
+                            "state": "OPEN",
+                            "source": "gh",
+                            "ref": "45",
+                        }
+                    },
+                }
+            ],
+        },
+    )
+
+    def fake_dogfood_run(task, **kwargs):
+        run_dir = kwargs["output_dir"]
+        run_dir.mkdir(parents=True)
+        _write_json(run_dir / "run.json", {"started_at": "2026-05-26T12:10:00Z", "status": "ok", "task": task})
+        (run_dir / "final.txt").write_text("Done.\n\nNext step: Build follow-up.\n")
+        return 0
+
+    monkeypatch.setattr(dogfood_cmd, "run", fake_dogfood_run)
+    run_dir = artifacts_dir / "new"
+
+    assert work_cmd.run(None, target=tmp_path, output_dir=run_dir, handoff=False) == 0
+    capsys.readouterr()
+
+    session_dir = tmp_path / ".brigade" / "work" / "20260526-120000-build-acceptance-evidence"
+    payload = json.loads((session_dir / "session.json").read_text())
+    assert payload["task"] == {
+        "id": "issue-task",
+        "text": "Build acceptance evidence",
+        "source": "github_issue",
+        "type": "feature",
+        "priority": "high",
+        "acceptance": ["Session records the acceptance checklist."],
+        "acceptance_count": 1,
+        "template": "vertical-slice",
+        "issue": {
+            "url": "https://github.com/acme/widgets/issues/45",
+            "number": 45,
+            "title": "Build acceptance evidence",
+            "labels": ["tdd"],
+            "state": "OPEN",
+            "source": "gh",
+            "ref": "45",
+        },
+    }
+    start_md = (session_dir / "start.md").read_text()
+    end_md = (session_dir / "end.md").read_text()
+    for rendered in (start_md, end_md):
+        assert "## Task" in rendered
+        assert "- Task: `issue-task`" in rendered
+        assert "- Source: github_issue" in rendered
+        assert "- Type: feature" in rendered
+        assert "- Priority: high" in rendered
+        assert "- Template: vertical-slice" in rendered
+        assert "- Issue: https://github.com/acme/widgets/issues/45" in rendered
+        assert "### Acceptance Criteria" in rendered
+        assert "- Session records the acceptance checklist." in rendered
+
+    ledger = json.loads((tmp_path / ".brigade" / "work" / "tasks.json").read_text())
+    task = ledger["tasks"][0]
+    assert task["status"] == "done"
+    assert task["completed_session_path"] == str(session_dir)
+    assert task["completed_run_path"] == str(run_dir)
+    assert task["completed_acceptance"] == ["Session records the acceptance checklist."]
+
+    assert work_cmd.task_show(target=tmp_path, task_id="issue-task") == 0
+    out = capsys.readouterr().out
+    assert f"completed_session_path: {session_dir}" in out
+    assert f"completed_run_path: {run_dir}" in out
+    assert "completed_acceptance: 1" in out
+    assert "Session records the acceptance checklist." in out
+
+
 def test_work_run_passes_acceptance_criteria_for_pending_task(tmp_path, monkeypatch):
     _init_git_repo(tmp_path)
     artifacts_dir = tmp_path / ".brigade" / "runs"
@@ -1990,6 +2440,31 @@ def test_work_run_closes_session_when_dogfood_fails(tmp_path, monkeypatch):
     assert payload["status"] == "ended"
     assert payload["note"] == "brigade work run completed with dogfood exit code 7"
     assert "handoff" not in payload
+
+
+def test_work_run_leaves_consumed_task_pending_when_dogfood_fails(tmp_path, monkeypatch):
+    _init_git_repo(tmp_path)
+    dogfood_cmd.init(target=tmp_path)
+    times = iter(
+        [
+            datetime(2026, 5, 26, 12, 0, 0, tzinfo=timezone.utc),
+            datetime(2026, 5, 26, 13, 0, 0, tzinfo=timezone.utc),
+            datetime(2026, 5, 26, 13, 0, 1, tzinfo=timezone.utc),
+        ]
+    )
+    monkeypatch.setattr(work_cmd, "_now", lambda: next(times))
+    assert work_cmd.task_add(target=tmp_path, text="Build pending failure", acceptance=["Do not complete on failure"]) == 0
+    monkeypatch.setattr(dogfood_cmd, "run", lambda task, **kwargs: 7)
+
+    assert work_cmd.run(None, target=tmp_path, handoff=False) == 7
+    ledger = json.loads((tmp_path / ".brigade" / "work" / "tasks.json").read_text())
+    task = ledger["tasks"][0]
+    assert task["status"] == "pending"
+    assert "completed_at" not in task
+    assert "completed_session_path" not in task
+    session_dir = tmp_path / ".brigade" / "work" / "20260526-130000-build-pending-failure"
+    payload = json.loads((session_dir / "session.json").read_text())
+    assert payload["task"]["id"] == task["id"]
 
 
 def test_work_run_rejects_bad_recap_limit(tmp_path, capsys):

@@ -85,6 +85,19 @@ TASK_TEMPLATES: dict[str, dict[str, tuple[str, ...]]] = {
     },
 }
 ACTIVE_SESSION_STALE_HOURS = 24
+ISSUE_ACCEPTANCE_HEADINGS = {
+    "acceptance",
+    "acceptance criteria",
+    "definition of done",
+    "done when",
+}
+ISSUE_TEST_HEADINGS = {
+    "test",
+    "tests",
+    "testing",
+    "test plan",
+    "verification",
+}
 
 
 def _git(target: Path, *args: str) -> subprocess.CompletedProcess[str]:
@@ -323,6 +336,24 @@ def _task_summary(task: dict[str, Any]) -> dict[str, Any]:
     return summary
 
 
+def _task_snapshot(task: dict[str, Any]) -> dict[str, Any]:
+    summary = _task_summary(task)
+    snapshot: dict[str, Any] = {
+        "id": summary.get("id"),
+        "text": summary.get("text"),
+        "source": summary.get("source"),
+        "type": summary.get("type"),
+        "priority": summary.get("priority"),
+        "acceptance": summary.get("acceptance", []),
+        "acceptance_count": summary.get("acceptance_count", 0),
+    }
+    if summary.get("template"):
+        snapshot["template"] = summary["template"]
+    if summary.get("issue"):
+        snapshot["issue"] = summary["issue"]
+    return snapshot
+
+
 def _template_acceptance(template: str | None) -> list[str]:
     if not template:
         return []
@@ -334,6 +365,60 @@ def _template_acceptance(template: str | None) -> list[str]:
 
 def _combined_acceptance(template: str | None, explicit: list[str] | None) -> list[str]:
     return _normalize_acceptance([*_template_acceptance(template), *(explicit or [])])
+
+
+def _normalize_issue_heading(text: str) -> str:
+    value = text.strip().strip("#").strip().rstrip(":").casefold()
+    value = re.sub(r"[*_`]+", "", value)
+    return " ".join(value.split())
+
+
+def _is_issue_acceptance_heading(text: str) -> bool:
+    value = _normalize_issue_heading(text)
+    if value in ISSUE_ACCEPTANCE_HEADINGS or value in ISSUE_TEST_HEADINGS:
+        return True
+    return "acceptance" in value or value.startswith("test ")
+
+
+def _issue_heading(line: str) -> str | None:
+    stripped = line.strip()
+    if not stripped:
+        return None
+    markdown = re.fullmatch(r"#{1,6}\s+(.+?)\s*#*", stripped)
+    if markdown:
+        return markdown.group(1)
+    plain = re.fullmatch(r"([A-Za-z][A-Za-z0-9 _/-]{1,80}):", stripped)
+    if plain:
+        return plain.group(1)
+    return None
+
+
+def _issue_list_item(line: str) -> str | None:
+    checkbox = re.fullmatch(r"\s*[-*+]\s+\[[ xX]\]\s+(.+?)\s*", line)
+    if checkbox:
+        return checkbox.group(1).strip()
+    bullet = re.fullmatch(r"\s*(?:[-*+]|\d+[.)])\s+(.+?)\s*", line)
+    if bullet:
+        return bullet.group(1).strip()
+    return None
+
+
+def _extract_issue_acceptance(body: object) -> list[str]:
+    if not isinstance(body, str) or not body.strip():
+        return []
+    extracted: list[str] = []
+    in_relevant_section = False
+    for line in body.splitlines():
+        heading = _issue_heading(line)
+        if heading is not None:
+            in_relevant_section = _is_issue_acceptance_heading(heading)
+            continue
+        item = _issue_list_item(line)
+        if item is None:
+            continue
+        if re.fullmatch(r"\s*[-*+]\s+\[[ xX]\]\s+.+?\s*", line) or in_relevant_section:
+            extracted.append(item)
+    return _normalize_acceptance(extracted)
 
 
 def _task_issue_metadata(task: dict[str, Any]) -> dict[str, Any] | None:
@@ -370,9 +455,9 @@ def _github_issue_ref(issue: dict[str, Any]) -> str | None:
     return None
 
 
-def _read_github_issue(target: Path, issue_ref: str) -> tuple[dict[str, Any] | None, str | None]:
+def _read_github_issue(target: Path, issue_ref: str) -> tuple[dict[str, Any] | None, list[str], str | None]:
     if shutil.which("gh") is None:
-        return None, "gh CLI is not available on PATH"
+        return None, [], "gh CLI is not available on PATH"
     result = subprocess.run(
         [
             "gh",
@@ -380,7 +465,7 @@ def _read_github_issue(target: Path, issue_ref: str) -> tuple[dict[str, Any] | N
             "view",
             issue_ref,
             "--json",
-            "url,number,title,labels,state",
+            "url,number,title,labels,state,body",
         ],
         cwd=target,
         check=False,
@@ -390,16 +475,16 @@ def _read_github_issue(target: Path, issue_ref: str) -> tuple[dict[str, Any] | N
     )
     if result.returncode != 0:
         detail = result.stderr.strip() or result.stdout.strip() or f"gh issue view exited {result.returncode}"
-        return None, detail
+        return None, [], detail
     try:
         payload = json.loads(result.stdout)
     except json.JSONDecodeError as exc:
-        return None, f"gh issue view returned invalid JSON: {exc.msg}"
+        return None, [], f"gh issue view returned invalid JSON: {exc.msg}"
     if not isinstance(payload, dict):
-        return None, "gh issue view returned invalid JSON object"
+        return None, [], "gh issue view returned invalid JSON object"
     title = payload.get("title")
     if not isinstance(title, str) or not title.strip():
-        return None, "gh issue view did not return an issue title"
+        return None, [], "gh issue view did not return an issue title"
     labels = payload.get("labels")
     label_names: list[str] = []
     if isinstance(labels, list):
@@ -408,15 +493,19 @@ def _read_github_issue(target: Path, issue_ref: str) -> tuple[dict[str, Any] | N
                 label_names.append(label["name"])
             elif isinstance(label, str):
                 label_names.append(label)
-    return {
-        "url": payload.get("url"),
-        "number": payload.get("number"),
-        "title": title.strip(),
-        "labels": label_names,
-        "state": payload.get("state"),
-        "source": "gh",
-        "ref": issue_ref,
-    }, None
+    return (
+        {
+            "url": payload.get("url"),
+            "number": payload.get("number"),
+            "title": title.strip(),
+            "labels": label_names,
+            "state": payload.get("state"),
+            "source": "gh",
+            "ref": issue_ref,
+        },
+        _extract_issue_acceptance(payload.get("body")),
+        None,
+    )
 
 
 def _import_record_key(item: dict[str, Any]) -> tuple[str, str, str]:
@@ -446,15 +535,62 @@ def _validate_import_record(value: object, *, label: str) -> tuple[dict[str, Any
         metadata = {}
     if not isinstance(metadata, dict):
         errors.append(f"{label}: metadata must be an object when present")
+    task_type = value.get("type")
+    if task_type is not None and (not isinstance(task_type, str) or task_type.strip() not in TASK_TYPES):
+        errors.append(f"{label}: type must be one of: {', '.join(TASK_TYPES)}")
+    priority = value.get("priority")
+    if priority is not None and (not isinstance(priority, str) or priority.strip() not in TASK_PRIORITIES):
+        errors.append(f"{label}: priority must be one of: {', '.join(TASK_PRIORITIES)}")
+    template = value.get("template")
+    if template is not None and (not isinstance(template, str) or template.strip() not in TASK_TEMPLATES):
+        errors.append(f"{label}: template must be one of: {', '.join(TASK_TEMPLATES)}")
+    acceptance = value.get("acceptance")
+    normalized_acceptance: list[str] = []
+    if acceptance is not None:
+        if not isinstance(acceptance, list):
+            errors.append(f"{label}: acceptance must be a list of non-empty strings")
+        else:
+            seen_acceptance: set[str] = set()
+            for index, item in enumerate(acceptance, start=1):
+                if not isinstance(item, str) or not item.strip():
+                    errors.append(f"{label}: acceptance item {index} must be a non-empty string")
+                    continue
+                rendered = item.strip()
+                key = _task_text_key(rendered)
+                if key in seen_acceptance:
+                    continue
+                normalized_acceptance.append(rendered)
+                seen_acceptance.add(key)
+    task_fields = {
+        name
+        for name, present in {
+            "type": task_type is not None,
+            "priority": priority is not None,
+            "template": template is not None,
+            "acceptance": acceptance is not None,
+        }.items()
+        if present
+    }
+    if task_fields and kind != "task":
+        errors.append(f"{label}: task fields are only valid when kind is task")
 
     if errors:
         return None, errors
-    return {
+    record: dict[str, Any] = {
         "text": text.strip(),
         "kind": kind,
         "source": source.strip(),
         "metadata": metadata,
-    }, []
+    }
+    if isinstance(task_type, str) and task_type.strip():
+        record["type"] = task_type.strip()
+    if isinstance(priority, str) and priority.strip():
+        record["priority"] = priority.strip()
+    if isinstance(template, str) and template.strip():
+        record["template"] = template.strip()
+    if acceptance is not None:
+        record["acceptance"] = normalized_acceptance
+    return record, []
 
 
 def _load_import_jsonl(path: Path) -> tuple[list[dict[str, Any]], list[str]]:
@@ -504,6 +640,10 @@ def _append_import_records(
             kind=str(record["kind"]),
             source=str(record["source"]),
             metadata=record.get("metadata") if isinstance(record.get("metadata"), dict) else None,
+            task_type=record.get("type") if isinstance(record.get("type"), str) else None,
+            priority=record.get("priority") if isinstance(record.get("priority"), str) else None,
+            acceptance=record.get("acceptance") if isinstance(record.get("acceptance"), list) else None,
+            template=record.get("template") if isinstance(record.get("template"), str) else None,
         )
         imported.append(item)
         existing.add(key)
@@ -639,11 +779,17 @@ def _mark_import_promoted(target: Path, item: dict[str, Any]) -> tuple[dict[str,
     }
     item_metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
     metadata.update(item_metadata)
+    template = item.get("template") if isinstance(item.get("template"), str) and item.get("template") in TASK_TEMPLATES else None
+    acceptance = item.get("acceptance") if isinstance(item.get("acceptance"), list) else None
     task, created = _add_task(
         target,
         text,
         source=f"import:{item.get('source') or 'manual'}",
         metadata=metadata,
+        task_type=str(item.get("type") or "task"),
+        priority=str(item.get("priority") or "normal"),
+        acceptance=_combined_acceptance(template, acceptance),
+        template=template,
     )
     now = _now().isoformat()
     item["status"] = "promoted"
@@ -717,6 +863,10 @@ def _make_import(
     kind: str,
     source: str,
     metadata: dict[str, Any] | None = None,
+    task_type: str | None = None,
+    priority: str | None = None,
+    acceptance: list[str] | None = None,
+    template: str | None = None,
 ) -> dict[str, Any]:
     now = _now()
     created = now.isoformat()
@@ -729,6 +879,15 @@ def _make_import(
         "created_at": created,
         "updated_at": created,
     }
+    if kind == "task":
+        if task_type:
+            item["type"] = _normalize_task_type(task_type)
+        if priority:
+            item["priority"] = _normalize_task_priority(priority)
+        if template:
+            item["template"] = template
+        if acceptance is not None:
+            item["acceptance"] = _normalize_acceptance(acceptance)
     if metadata:
         item["metadata"] = metadata
     return item
@@ -804,6 +963,17 @@ def _queue_latest_next(
         metadata=metadata,
     )
     return task, created, None
+
+
+def _latest_completed_run_path(target: Path, output_dir: Path | None) -> str | None:
+    if output_dir is not None:
+        candidate = output_dir.expanduser()
+        if (candidate / "run.json").is_file():
+            return str(candidate)
+    dogfood = _dogfood_snapshot(target)
+    latest = dogfood.get("latest_run") if isinstance(dogfood.get("latest_run"), dict) else None
+    path = latest.get("path") if isinstance(latest, dict) else None
+    return path if isinstance(path, str) and path else None
 
 
 def _read_session(path: Path) -> dict[str, Any] | None:
@@ -1007,6 +1177,20 @@ def _display_session(path: Path, payload: dict[str, Any]) -> None:
             print(f"latest_note: {_short(str(notes[-1]['text']))}")
     if payload.get("handoff"):
         print(f"handoff: {payload['handoff']}")
+    task = payload.get("task")
+    if isinstance(task, dict):
+        print("task:")
+        print(f"  id: {task.get('id', '')}")
+        print(f"  source: {task.get('source', '')}")
+        print(f"  type: {task.get('type', '')}")
+        print(f"  priority: {task.get('priority', '')}")
+        if task.get("template"):
+            print(f"  template: {task['template']}")
+        acceptance = task.get("acceptance") if isinstance(task.get("acceptance"), list) else []
+        print(f"  acceptance: {len(acceptance)}")
+        issue = task.get("issue") if isinstance(task.get("issue"), dict) else None
+        if issue:
+            print(f"  issue: {issue.get('url') or issue.get('number')}")
 
     start_snapshot = payload.get("start") if isinstance(payload.get("start"), dict) else {}
     end_snapshot = payload.get("end") if isinstance(payload.get("end"), dict) else {}
@@ -1032,6 +1216,34 @@ def _display_session(path: Path, payload: dict[str, Any]) -> None:
             print(f"  next: {_short(str(dogfood['next']))}")
 
 
+def _session_task_markdown(task: object) -> list[str]:
+    if not isinstance(task, dict):
+        return []
+    lines = ["", "## Task", ""]
+    lines.append(f"- Task: `{task.get('id', '')}`")
+    if task.get("text"):
+        lines.append(f"- Text: {task['text']}")
+    lines.append(f"- Source: {task.get('source', '')}")
+    lines.append(f"- Type: {task.get('type', '')}")
+    lines.append(f"- Priority: {task.get('priority', '')}")
+    if task.get("template"):
+        lines.append(f"- Template: {task['template']}")
+    issue = task.get("issue") if isinstance(task.get("issue"), dict) else None
+    if issue:
+        lines.append(f"- Issue: {issue.get('url') or issue.get('number')}")
+        if issue.get("title"):
+            lines.append(f"- Issue title: {issue['title']}")
+        if issue.get("state"):
+            lines.append(f"- Issue state: {issue['state']}")
+    acceptance = task.get("acceptance") if isinstance(task.get("acceptance"), list) else []
+    lines.extend(["", "### Acceptance Criteria", ""])
+    if acceptance:
+        lines.extend(f"- {item}" for item in acceptance)
+    else:
+        lines.append("- none")
+    return lines
+
+
 def _write_session_markdown(path: Path, *, title: str, payload: dict[str, Any], key: str) -> None:
     snapshot = payload[key]
     git = snapshot.get("git", {})
@@ -1049,6 +1261,7 @@ def _write_session_markdown(path: Path, *, title: str, payload: dict[str, Any], 
         lines.append(f"- Title: {payload['title']}")
     if payload.get("note"):
         lines.append(f"- Note: {payload['note']}")
+    lines.extend(_session_task_markdown(payload.get("task")))
     lines.extend(["", "## Git", ""])
     if git.get("available"):
         lines.append(f"- Branch: {git.get('branch')}")
@@ -1308,7 +1521,13 @@ def _work_selection(target: Path, handoff_inbox: Path | None) -> Selection:
     return Selection(depth="repo", harnesses=harnesses, owner=owner, includes=[])
 
 
-def start(*, target: Path, title: str | None = None, force: bool = False) -> int:
+def start(
+    *,
+    target: Path,
+    title: str | None = None,
+    force: bool = False,
+    task_snapshot: dict[str, Any] | None = None,
+) -> int:
     target = target.expanduser().resolve()
     if not target.is_dir():
         print(f"error: --target is not a directory: {target}", file=sys.stderr)
@@ -1332,6 +1551,8 @@ def start(*, target: Path, title: str | None = None, force: bool = False) -> int
         "started_at": started.isoformat(),
         "start": _session_snapshot(target),
     }
+    if task_snapshot is not None:
+        payload["task"] = task_snapshot
     _write_json(session_dir / "session.json", payload)
     _write_session_markdown(session_dir / "start.md", title="Brigade Work Session Start", payload=payload, key="start")
     current.write_text(session_id + "\n")
@@ -1883,13 +2104,14 @@ def task_add(
         if not issue_ref:
             print("error: --from-issue requires an issue URL or number", file=sys.stderr)
             return 2
-        issue, error = _read_github_issue(target, issue_ref)
+        issue, issue_acceptance, error = _read_github_issue(target, issue_ref)
         if issue is None:
             print(f"error: could not read GitHub issue {issue_ref}: {error}", file=sys.stderr)
             return 1
         task_text = str(issue["title"]).strip()
         source = "github_issue"
         metadata = {"github_issue": issue}
+        acceptance = [*issue_acceptance, *(acceptance or [])]
         dedupe = False
     else:
         metadata = None
@@ -1962,6 +2184,17 @@ def task_show(*, target: Path, task_id: str) -> int:
             print(f"  {key}: {metadata[key]}")
     if task.get("completed_at"):
         print(f"completed_at: {task['completed_at']}")
+    if task.get("completed_session_title"):
+        print(f"completed_session_title: {task['completed_session_title']}")
+    if task.get("completed_session_path"):
+        print(f"completed_session_path: {task['completed_session_path']}")
+    if task.get("completed_run_path"):
+        print(f"completed_run_path: {task['completed_run_path']}")
+    completed_acceptance = task.get("completed_acceptance")
+    if isinstance(completed_acceptance, list):
+        print(f"completed_acceptance: {len(completed_acceptance)}")
+        for item in completed_acceptance:
+            print(f"  - {item}")
     print(f"text: {task.get('text', '')}")
     return 0
 
@@ -2530,7 +2763,10 @@ def import_promote(
         print(f"existing: {len(promoted) - created_count}")
         for item, task, created in promoted:
             status = "created" if created else "existing"
-            print(f"- {item.get('id')} -> {task['id']} [{status}] {_short(str(task.get('text', '')))}")
+            print(
+                f"- {item.get('id')} -> {task['id']} [{status} acceptance={len(_task_acceptance(task))}] "
+                f"{_short(str(task.get('text', '')))}"
+            )
         return 0
     if not import_id:
         print("error: import id is required unless --all is passed", file=sys.stderr)
@@ -2552,6 +2788,7 @@ def import_promote(
     print(f"status: {item.get('status')}")
     print(f"task: {task['id']}")
     print(f"created: {created}")
+    print(f"acceptance: {len(_task_acceptance(task))}")
     print(f"text: {task['text']}")
     return 0
 
@@ -2834,8 +3071,9 @@ def run(
         if ledger_task is not None and _task_acceptance(ledger_task)
         else task_text
     )
+    task_snapshot = _task_snapshot(ledger_task) if ledger_task is not None else None
     session_title = title or task_text
-    start_rc = start(target=target, title=session_title)
+    start_rc = start(target=target, title=session_title, task_snapshot=task_snapshot)
     if start_rc != 0:
         return start_rc
     session_dir = _active_session_dir(target)
@@ -2866,6 +3104,12 @@ def run(
             task["updated_at"] = now
             task["completed_at"] = now
             task["completed_session_title"] = session_title
+            if session_dir is not None:
+                task["completed_session_path"] = str(session_dir)
+            completed_run_path = _latest_completed_run_path(target, output_dir)
+            if completed_run_path is not None:
+                task["completed_run_path"] = completed_run_path
+            task["completed_acceptance"] = _task_acceptance(task)
             _write_task_ledger(target, ledger)
     if dogfood_rc == 0 and queue_next:
         queued_task, created, reason = _queue_latest_next(
@@ -3087,7 +3331,7 @@ def doctor(*, target: Path) -> int:
                 if issue_ref is None:
                     unchecked.append(str(task.get("id")))
                     continue
-                remote_issue, error = _read_github_issue(effective_target, issue_ref)
+                remote_issue, _, error = _read_github_issue(effective_target, issue_ref)
                 if remote_issue is None:
                     unchecked.append(f"{task.get('id')} ({error})")
                     continue
