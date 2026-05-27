@@ -181,6 +181,11 @@ brigade tools init
 brigade tools list
 brigade tools show simplify
 brigade tools search simplify
+brigade tools plan
+brigade tools plan simplify
+brigade tools apply simplify --dry-run
+brigade tools apply simplify
+brigade tools apply --all
 brigade tools doctor
 brigade tools import-issues
 brigade work next
@@ -348,10 +353,12 @@ Portable tool catalog commands:
 
 - `brigade tools init` writes gitignored `.brigade/tools.toml` with local examples for portable slash commands and superpowers.
 - `brigade tools list`, `show <tool-id>`, and `search <query>` inspect logical tool entries across source families such as `skill`, `slash-command`, `superpower`, `mcp`, `openapi`, `graphql`, `script`, and `custom`.
-- `brigade tools doctor` reports missing sources, manifests, schemas, projections, stale projection fingerprints, MCP config issues, stale health files, unsafe auth field names, and high-risk command shapes.
+- `brigade tools plan` previews exact projection creates, updates, skips, unmanaged conflicts, and local-edit conflicts for all configured harness targets.
+- `brigade tools apply <tool-id>` and `brigade tools apply --all` explicitly write managed harness projections. Use `--dry-run` to preview writes and `--force` only to overwrite unmanaged or locally edited projection files.
+- `brigade tools doctor` reports missing sources, manifests, schemas, projections, unmanaged projections, locally edited managed projections, stale projection fingerprints, MCP config issues, stale health files, unsafe auth field names, and high-risk command shapes.
 - `brigade tools import-issues` turns catalog health issues into local `tool-catalog` work imports with stable fingerprints and dismiss-until-changed behavior.
 
-The tool catalog is read-only. Brigade does not invoke tools, start MCP servers, write Claude Code or Codex projections, fetch OpenAPI or GraphQL schemas, store auth, or sync harness configs. Keep tokens, secrets, private URLs, and host-private paths out of public catalog templates.
+Tool catalog inspection is read-only, and projection writes are always explicit through `brigade tools apply`. Brigade does not invoke tools, start MCP servers, fetch OpenAPI or GraphQL schemas, store auth, run a daemon, or auto-sync harness configs from `doctor`, `brief`, or `work run`. Keep tokens, secrets, private URLs, and host-private paths out of public catalog templates.
 
 Backup health commands:
 

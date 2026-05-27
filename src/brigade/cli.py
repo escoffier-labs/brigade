@@ -626,6 +626,17 @@ def _build_parser() -> argparse.ArgumentParser:
     p_tools_search.add_argument("query", help="Search query.")
     p_tools_search.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
     p_tools_search.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_tools_plan = tools_sub.add_parser("plan", help="Plan portable tool projection writes.")
+    p_tools_plan.add_argument("tool_id", nargs="?", help="Optional logical tool id.")
+    p_tools_plan.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_tools_plan.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_tools_apply = tools_sub.add_parser("apply", help="Explicitly write portable tool projections.")
+    p_tools_apply.add_argument("tool_id", nargs="?", help="Logical tool id.")
+    p_tools_apply.add_argument("--all", action="store_true", help="Apply all configured tool projections.")
+    p_tools_apply.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
+    p_tools_apply.add_argument("--dry-run", action="store_true", help="Plan writes without changing files.")
+    p_tools_apply.add_argument("--force", action="store_true", help="Overwrite unmanaged or locally edited projection files.")
+    p_tools_apply.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_tools_doctor = tools_sub.add_parser("doctor", help="Check portable tool catalog health.")
     p_tools_doctor.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
     p_tools_doctor.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
@@ -1155,6 +1166,17 @@ def main(argv=None) -> int:
             return tools_cmd.show(target=args.target, tool_id=args.tool_id, json_output=args.json)
         if args.tools_command == "search":
             return tools_cmd.search(target=args.target, query=args.query, json_output=args.json)
+        if args.tools_command == "plan":
+            return tools_cmd.plan(target=args.target, tool_id=args.tool_id, json_output=args.json)
+        if args.tools_command == "apply":
+            return tools_cmd.apply(
+                target=args.target,
+                tool_id=args.tool_id,
+                all_tools=args.all,
+                dry_run=args.dry_run,
+                force=args.force,
+                json_output=args.json,
+            )
         if args.tools_command == "doctor":
             return tools_cmd.doctor(target=args.target, json_output=args.json)
         if args.tools_command == "import-issues":

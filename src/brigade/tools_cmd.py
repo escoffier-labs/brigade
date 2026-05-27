@@ -25,6 +25,7 @@ WARN = "warn"
 FAIL = "fail"
 CONFIG_REL_PATH = ".brigade/tools.toml"
 HEALTH_STALE_HOURS = 48
+PROJECTION_MARKER = "brigade-tool-projection:"
 FAMILIES = ("skill", "slash-command", "superpower", "mcp", "openapi", "graphql", "script", "custom")
 KNOWN_HARNESSES = ("claude", "codex", "opencode", "hermes", "openclaw", "mcp", "scripts")
 UNSAFE_FIELD_PATTERN = re.compile(r"(password|secret|token|credential|api[_-]?key)", re.IGNORECASE)
@@ -80,6 +81,10 @@ def _file_hash(path: Path) -> str | None:
     except OSError:
         return None
     return hashlib.sha256(data).hexdigest()[:16]
+
+
+def _text_hash(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()[:16]
 
 
 def _short(text: str, limit: int = 96) -> str:
@@ -247,6 +252,235 @@ def _read_json(path: Path) -> tuple[object | None, str | None]:
     return payload, None
 
 
+def _managed_header(metadata: dict[str, Any]) -> str:
+    rendered = json.dumps(metadata, sort_keys=True, separators=(",", ":"))
+    return f"<!-- {PROJECTION_MARKER} {rendered} -->"
+
+
+def _read_projection(path: Path) -> tuple[dict[str, Any] | None, str | None]:
+    try:
+        text = path.read_text()
+    except OSError:
+        return None, None
+    lines = text.splitlines(keepends=True)
+    if not lines:
+        return None, text
+    first = lines[0].strip()
+    prefix = f"<!-- {PROJECTION_MARKER} "
+    if not first.startswith(prefix) or not first.endswith(" -->"):
+        return None, text
+    raw = first[len(prefix) : -len(" -->")]
+    try:
+        metadata = json.loads(raw)
+    except json.JSONDecodeError:
+        return None, text
+    if not isinstance(metadata, dict):
+        return None, text
+    return metadata, "".join(lines[1:])
+
+
+def _relative_path(target: Path, path: Path | None) -> str:
+    if path is None:
+        return ""
+    try:
+        return str(path.relative_to(target))
+    except ValueError:
+        return str(path)
+
+
+def _render_projection_body(tool: dict[str, Any], harness: str, source_text: str, source_ref: str) -> str:
+    family = str(tool.get("family") or "")
+    tool_id = str(tool.get("id") or "")
+    name = str(tool.get("name") or tool_id)
+    description = str(tool.get("description") or "")
+    if family in {"slash-command", "skill", "superpower"}:
+        return source_text if source_text.endswith("\n") else source_text + "\n"
+    if family == "script":
+        lines = [
+            f"# {name}",
+            "",
+            "Managed Brigade script projection.",
+            "",
+            f"- tool_id: `{tool_id}`",
+            f"- harness: `{harness}`",
+            f"- source: `{source_ref}`",
+            f"- command: `{tool.get('command') or ''}`",
+        ]
+        if description:
+            lines.extend(["", description])
+        lines.extend(["", "## Source", "", "```text", source_text.rstrip(), "```", ""])
+        return "\n".join(lines)
+    if family == "mcp":
+        lines = [
+            f"# {name}",
+            "",
+            "Managed Brigade MCP projection stub.",
+            "",
+            f"- tool_id: `{tool_id}`",
+            f"- harness: `{harness}`",
+            f"- source: `{source_ref}`",
+            "",
+            "This projection documents the local MCP catalog entry. Brigade does not start MCP servers or write runtime MCP configs from this file.",
+        ]
+        if description:
+            lines.extend(["", description])
+        return "\n".join(lines) + "\n"
+    lines = [
+        f"# {name}",
+        "",
+        "Managed Brigade tool projection.",
+        "",
+        f"- tool_id: `{tool_id}`",
+        f"- family: `{family}`",
+        f"- harness: `{harness}`",
+        f"- source: `{source_ref}`",
+    ]
+    if description:
+        lines.extend(["", description])
+    if source_text.strip():
+        lines.extend(["", "## Source", "", "```text", source_text.rstrip(), "```"])
+    return "\n".join(lines) + "\n"
+
+
+def _projection_item(
+    target: Path,
+    tool: dict[str, Any],
+    harness: str,
+    *,
+    generated_at: datetime | None = None,
+    force: bool = False,
+) -> dict[str, Any]:
+    generated_at = generated_at or datetime.now(timezone.utc)
+    projections = tool.get("projections") if isinstance(tool.get("projections"), dict) else {}
+    projection_value = projections.get(harness)
+    source_path = _as_path(target, tool.get("source_path"))
+    projection_path = _as_path(target, projection_value)
+    item: dict[str, Any] = {
+        "tool_id": tool.get("id"),
+        "name": tool.get("name"),
+        "family": tool.get("family"),
+        "harness": harness,
+        "source_path": str(source_path) if source_path is not None else None,
+        "projection_path": str(projection_path) if projection_path is not None else None,
+        "managed": False,
+        "metadata": None,
+    }
+    if projection_path is None:
+        item.update({"status": "missing", "action": "skip", "detail": f"missing projection target for {harness}"})
+        return item
+    if source_path is None or not source_path.is_file():
+        item.update({"status": "missing_source", "action": "skip", "detail": f"missing source: {source_path}"})
+        return item
+    try:
+        source_text = source_path.read_text()
+    except OSError as exc:
+        item.update({"status": "missing_source", "action": "skip", "detail": f"cannot read source: {exc}"})
+        return item
+    source_fingerprint = _text_hash(source_text)
+    body = _render_projection_body(tool, harness, source_text, _relative_path(target, source_path))
+    projection_fingerprint = _text_hash(body)
+    item.update(
+        {
+            "source_fingerprint": source_fingerprint,
+            "expected_fingerprint": projection_fingerprint,
+            "expected_projection_fingerprint": projection_fingerprint,
+        }
+    )
+    metadata = {
+        "tool_id": tool.get("id"),
+        "family": tool.get("family"),
+        "harness": harness,
+        "source_fingerprint": source_fingerprint,
+        "projection_fingerprint": projection_fingerprint,
+        "generated_at": generated_at.isoformat(),
+    }
+    rendered = _managed_header(metadata) + "\n" + body
+    item["rendered"] = rendered
+    if not projection_path.exists():
+        item.update({"status": "missing", "action": "create", "detail": "projection will be created"})
+        return item
+    existing_metadata, existing_body = _read_projection(projection_path)
+    if existing_metadata is None:
+        item.update(
+            {
+                "status": "unmanaged",
+                "action": "update" if force else "conflict",
+                "detail": "existing projection is not managed by Brigade",
+            }
+        )
+        return item
+    item["managed"] = True
+    item["metadata"] = existing_metadata
+    existing_projection_fingerprint = str(existing_metadata.get("projection_fingerprint") or "")
+    actual_projection_fingerprint = _text_hash(existing_body or "")
+    item["actual_projection_fingerprint"] = actual_projection_fingerprint
+    if existing_projection_fingerprint != actual_projection_fingerprint:
+        item.update(
+            {
+                "status": "conflicted",
+                "action": "update" if force else "conflict",
+                "detail": "managed projection has local edits",
+            }
+        )
+        return item
+    if (
+        existing_metadata.get("source_fingerprint") == source_fingerprint
+        and existing_projection_fingerprint == projection_fingerprint
+    ):
+        item.update({"status": "current", "action": "skip", "detail": "projection is current"})
+        return item
+    item.update({"status": "stale", "action": "update", "detail": "projection will be updated"})
+    return item
+
+
+def _projection_plan_payload(target: Path, tool_id: str | None = None, *, force: bool = False) -> dict[str, Any]:
+    target = target.expanduser().resolve()
+    tools, errors = _load_config(target)
+    selected: list[dict[str, Any]] = []
+    for tool in tools:
+        if not tool.get("enabled", True):
+            continue
+        if tool_id is None or tool.get("id") == tool_id:
+            selected.append(tool)
+    if tool_id is not None and not selected and not errors:
+        errors.append(f"tool not found: {tool_id}")
+    generated_at = datetime.now(timezone.utc)
+    projections: list[dict[str, Any]] = []
+    for tool in selected:
+        for harness in tool.get("supported_harnesses", []):
+            projections.append(_projection_item(target, tool, harness, generated_at=generated_at, force=force))
+    counts: dict[str, int] = {}
+    for item in projections:
+        status = str(item.get("status") or "unknown")
+        counts[status] = counts.get(status, 0) + 1
+    return {
+        "target": str(target),
+        "config_path": str(config_path(target)),
+        "valid": not errors,
+        "errors": errors,
+        "tool_id": tool_id,
+        "tools": [tool.get("id") for tool in selected],
+        "projections": [
+            {key: value for key, value in item.items() if key != "rendered"}
+            for item in projections
+        ],
+        "counts": counts,
+    }
+
+
+def _projection_issue(tool: dict[str, Any], item: dict[str, Any]) -> dict[str, Any]:
+    status = str(item.get("status") or "projection")
+    harness = str(item.get("harness") or "")
+    detail = str(item.get("detail") or "")
+    return _tool_issue(
+        tool,
+        f"{status}_projection" if status not in {"missing"} else "missing_projection",
+        f"{harness}: {detail}",
+        harness=harness,
+        target=str(item.get("projection_path") or ""),
+    )
+
+
 def _tool_issue(tool: dict[str, Any], issue_type: str, detail: str, *, harness: str | None = None, target: str | None = None) -> dict[str, Any]:
     return {
         "status": WARN,
@@ -347,27 +581,20 @@ def _inspect_tool(target: Path, tool: dict[str, Any], now: datetime | None = Non
             issues.append(_tool_issue(tool, "missing_command", f"command is not resolvable: {_short(str(command))}"))
         if _high_risk_command(command):
             issues.append(_tool_issue(tool, "high_risk_command", "command shape is high risk"))
-    projections = tool.get("projections") if isinstance(tool.get("projections"), dict) else {}
-    projection_fingerprints = (
-        tool.get("projection_fingerprints") if isinstance(tool.get("projection_fingerprints"), dict) else {}
-    )
     for harness in tool.get("supported_harnesses", []):
-        projection = projections.get(harness)
-        if not projection:
-            summary["projection_coverage"][harness] = "missing"
+        projection_item = _projection_item(target, tool, harness)
+        status = str(projection_item.get("status") or "missing")
+        summary["projection_coverage"][harness] = status
+        if projection_item.get("projection_path"):
+            summary.setdefault("projection_paths", {})[harness] = projection_item["projection_path"]
+        if status == "missing" and projection_item.get("action") == "skip":
             issues.append(_tool_issue(tool, "parity_gap", f"missing projection for {harness}", harness=harness))
             continue
-        projection_path = _as_path(target, projection)
-        assert projection_path is not None
-        summary["projection_coverage"][harness] = "present" if projection_path.is_file() else "missing"
-        if not projection_path.is_file():
-            issues.append(_tool_issue(tool, "missing_projection", f"missing projection for {harness}: {projection_path}", harness=harness, target=str(projection_path)))
+        if status == "missing_source":
             continue
-        expected = projection_fingerprints.get(harness)
-        actual = _file_hash(projection_path)
-        if expected and actual and expected != actual:
-            summary["projection_coverage"][harness] = "stale"
-            issues.append(_tool_issue(tool, "stale_projection", f"stale projection for {harness}: {projection_path}", harness=harness, target=str(projection_path)))
+        if status in {"missing", "stale", "conflicted", "unmanaged"}:
+            issues.append(_projection_issue(tool, projection_item))
+            continue
     if tool.get("family") == "mcp":
         mcp_path = manifest_path or schema_path or source_path
         if mcp_path is not None and mcp_path.is_file():
@@ -565,6 +792,127 @@ def search(*, target: Path, query: str, json_output: bool = False) -> int:
     for tool in matches:
         print(f"- {tool.get('id')} [{tool.get('family')}] {_short(str(tool.get('description', '')))}")
     return 0
+
+
+def plan(*, target: Path, tool_id: str | None = None, json_output: bool = False) -> int:
+    target = target.expanduser().resolve()
+    if not target.is_dir():
+        print(f"error: --target is not a directory: {target}", file=sys.stderr)
+        return 2
+    payload = _projection_plan_payload(target, tool_id=tool_id)
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0 if payload["valid"] else 1
+    print(f"tools projection plan: {target}")
+    print(f"config_path: {payload['config_path']}")
+    if tool_id is not None:
+        print(f"tool_id: {tool_id}")
+    if payload["errors"]:
+        for error in payload["errors"]:
+            print(f"error: {error}")
+        return 1
+    projections = payload["projections"]
+    print(f"projections: {len(projections)}")
+    if payload["counts"]:
+        print("counts:")
+        for status, count in sorted(payload["counts"].items()):
+            print(f"  {status}: {count}")
+    for item in projections:
+        print(
+            "- "
+            f"{item.get('tool_id')} {item.get('harness')} "
+            f"{item.get('status')} action={item.get('action')}"
+        )
+        print(f"  source: {item.get('source_path')}")
+        print(f"  target: {item.get('projection_path')}")
+        if item.get("expected_fingerprint"):
+            print(f"  expected_fingerprint: {item.get('expected_fingerprint')}")
+        print(f"  detail: {item.get('detail')}")
+    return 0
+
+
+def apply(
+    *,
+    target: Path,
+    tool_id: str | None = None,
+    all_tools: bool = False,
+    dry_run: bool = False,
+    force: bool = False,
+    json_output: bool = False,
+) -> int:
+    target = target.expanduser().resolve()
+    if not target.is_dir():
+        print(f"error: --target is not a directory: {target}", file=sys.stderr)
+        return 2
+    if bool(tool_id) == bool(all_tools):
+        print("error: pass exactly one of <tool-id> or --all", file=sys.stderr)
+        return 2
+    tools, errors = _load_config(target)
+    selected = [
+        tool
+        for tool in tools
+        if tool.get("enabled", True) and (all_tools or tool.get("id") == tool_id)
+    ]
+    if tool_id is not None and not selected and not errors:
+        errors.append(f"tool not found: {tool_id}")
+    generated_at = datetime.now(timezone.utc)
+    applied: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
+    conflicts: list[dict[str, Any]] = []
+    for tool in selected:
+        for harness in tool.get("supported_harnesses", []):
+            item = _projection_item(target, tool, harness, generated_at=generated_at, force=force)
+            public_item = {key: value for key, value in item.items() if key != "rendered"}
+            action = item.get("action")
+            if action == "conflict":
+                conflicts.append(public_item)
+                continue
+            if action not in {"create", "update"}:
+                skipped.append(public_item)
+                continue
+            if dry_run:
+                applied.append({**public_item, "dry_run": True})
+                continue
+            projection_path = Path(str(item["projection_path"]))
+            projection_path.parent.mkdir(parents=True, exist_ok=True)
+            projection_path.write_text(str(item["rendered"]))
+            applied.append(public_item)
+    payload = {
+        "target": str(target),
+        "config_path": str(config_path(target)),
+        "valid": not errors,
+        "errors": errors,
+        "tool_id": tool_id,
+        "all": all_tools,
+        "dry_run": dry_run,
+        "force": force,
+        "applied": applied,
+        "skipped": skipped,
+        "conflicts": conflicts,
+        "applied_count": len(applied),
+        "skipped_count": len(skipped),
+        "conflict_count": len(conflicts),
+    }
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0 if not errors and not conflicts else 1
+    print(f"tools projection apply: {target}")
+    print(f"config_path: {config_path(target)}")
+    if errors:
+        for error in errors:
+            print(f"error: {error}")
+        return 1
+    print(f"dry_run: {dry_run}")
+    print(f"force: {force}")
+    print(f"applied: {len(applied)}")
+    print(f"skipped: {len(skipped)}")
+    print(f"conflicts: {len(conflicts)}")
+    for item in applied:
+        verb = "would_write" if dry_run else "wrote"
+        print(f"- {verb}: {item.get('tool_id')} {item.get('harness')} {item.get('projection_path')}")
+    for item in conflicts:
+        print(f"- conflict: {item.get('tool_id')} {item.get('harness')} {item.get('detail')}")
+    return 0 if not conflicts else 1
 
 
 def doctor(*, target: Path, json_output: bool = False) -> int:

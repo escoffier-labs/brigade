@@ -1445,6 +1445,7 @@ def test_tools_init_list_show_search_doctor_and_json(tmp_path, monkeypatch, caps
     (tmp_path / ".codex" / "skills" / "superpowers" / "SKILL.md").write_text("Superpowers skill\n")
     (tmp_path / ".opencode" / "superpowers").mkdir(parents=True)
     (tmp_path / ".opencode" / "superpowers" / "superpowers.md").write_text("Superpowers projection\n")
+    assert tools_cmd.apply(target=tmp_path, all_tools=True, force=True) == 0
 
     assert tools_cmd.list_tools(target=tmp_path) == 0
     out = capsys.readouterr().out
@@ -1459,8 +1460,8 @@ def test_tools_init_list_show_search_doctor_and_json(tmp_path, monkeypatch, caps
     assert tools_cmd.show(target=tmp_path, tool_id="simplify") == 0
     out = capsys.readouterr().out
     assert "tool: simplify" in out
-    assert "claude: present" in out
-    assert "codex: present" in out
+    assert "claude: current" in out
+    assert "codex: current" in out
 
     assert tools_cmd.search(target=tmp_path, query="superpower", json_output=True) == 0
     payload = json.loads(capsys.readouterr().out)
@@ -1596,9 +1597,11 @@ auth_label = "local"
 password = "do-not-print"
 supported_harnesses = ["claude", "codex"]
 projections = { claude = ".claude/commands/tool.md" }
-projection_fingerprints = { claude = "deadbeef" }
 """
     )
+    assert tools_cmd.apply(target=tmp_path, tool_id="portable", force=True) == 0
+    (tmp_path / "tools" / "source.md").write_text("Tool source changed\n")
+    capsys.readouterr()
 
     assert tools_cmd.doctor(target=tmp_path) == 0
     out = capsys.readouterr().out
@@ -1666,6 +1669,9 @@ def test_work_brief_and_doctor_include_tool_catalog_health(tmp_path, monkeypatch
     dogfood_cmd.init(target=tmp_path)
     monkeypatch.setattr(work_cmd.shutil, "which", lambda name: f"/usr/bin/{name}")
     monkeypatch.setattr(dogfood_cmd, "_check_git_ignored", lambda repo, path: "yes")
+    source = tmp_path / "tools" / "portable.md"
+    source.parent.mkdir()
+    source.write_text("Portable source.\n")
     config = tmp_path / ".brigade" / "tools.toml"
     config.write_text(
         """
@@ -1675,8 +1681,9 @@ name = "Portable Tool"
 family = "skill"
 enabled = true
 description = "Portable missing source."
-source_path = "tools/missing.md"
-supported_harnesses = []
+source_path = "tools/portable.md"
+supported_harnesses = ["codex"]
+projections = { codex = ".codex/skills/portable/SKILL.md" }
 """
     )
 
@@ -1684,12 +1691,235 @@ supported_harnesses = []
     out = capsys.readouterr().out
     assert "tool_config:" in out
     assert "tool_catalog:" in out
-    assert "tool_top_issue: portable/missing_source" in out
+    assert "tool_top_issue: portable/missing_projection" in out
 
     assert work_cmd.doctor(target=tmp_path) == 0
     out = capsys.readouterr().out
-    assert "[warn] tool_missing_source:" in out
+    assert "[warn] tool_missing_projection:" in out
     assert "[ok] tools_config_ignored: yes" in out
+
+
+def test_tools_plan_and_apply_projection_lifecycle(tmp_path, capsys):
+    _init_git_repo(tmp_path)
+    source = tmp_path / "tools" / "simplify.md"
+    source.parent.mkdir()
+    source.write_text("Simplify the current task.\n")
+    config = tmp_path / ".brigade" / "tools.toml"
+    config.parent.mkdir()
+    config.write_text(
+        """
+[[tool]]
+id = "simplify"
+name = "Simplify"
+family = "slash-command"
+enabled = true
+description = "Portable simplify command."
+source_path = "tools/simplify.md"
+supported_harnesses = ["claude", "codex"]
+projections = { claude = ".claude/commands/simplify.md", codex = ".codex/skills/simplify/SKILL.md" }
+"""
+    )
+
+    assert tools_cmd.plan(target=tmp_path) == 0
+    out = capsys.readouterr().out
+    assert "tools projection plan:" in out
+    assert "simplify claude missing action=create" in out
+
+    assert tools_cmd.plan(target=tmp_path, tool_id="simplify", json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["counts"]["missing"] == 2
+    assert payload["projections"][0]["expected_fingerprint"]
+
+    assert tools_cmd.apply(target=tmp_path, tool_id="simplify", dry_run=True, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["applied_count"] == 2
+    assert not (tmp_path / ".claude" / "commands" / "simplify.md").exists()
+
+    assert tools_cmd.apply(target=tmp_path, tool_id="simplify", json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["applied_count"] == 2
+    projection = tmp_path / ".claude" / "commands" / "simplify.md"
+    text = projection.read_text()
+    assert "brigade-tool-projection:" in text
+    assert "Simplify the current task." in text
+    metadata, body = tools_cmd._read_projection(projection)
+    assert metadata["tool_id"] == "simplify"
+    assert metadata["family"] == "slash-command"
+    assert metadata["harness"] == "claude"
+    assert metadata["source_fingerprint"]
+    assert metadata["projection_fingerprint"] == tools_cmd._text_hash(body)
+
+    assert tools_cmd.plan(target=tmp_path, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["counts"]["current"] == 2
+
+    assert tools_cmd.apply(target=tmp_path, tool_id="simplify", json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["applied_count"] == 0
+    assert payload["skipped_count"] == 2
+
+    source.write_text("Simplify the current task and remove duplication.\n")
+    assert tools_cmd.plan(target=tmp_path, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["counts"]["stale"] == 2
+
+    assert tools_cmd.apply(target=tmp_path, tool_id="simplify", json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["applied_count"] == 2
+    assert "remove duplication" in projection.read_text()
+
+    projection.write_text(projection.read_text() + "\nlocal edit\n")
+    assert tools_cmd.plan(target=tmp_path, tool_id="simplify", json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["counts"]["conflicted"] == 1
+
+    assert tools_cmd.apply(target=tmp_path, tool_id="simplify", json_output=True) == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["conflict_count"] == 1
+    assert "local edit" in projection.read_text()
+
+    assert tools_cmd.apply(target=tmp_path, tool_id="simplify", force=True, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["applied_count"] == 1
+    assert "local edit" not in projection.read_text()
+
+
+def test_tools_apply_creates_harness_script_and_mcp_projections(tmp_path, capsys):
+    _init_git_repo(tmp_path)
+    tools_dir = tmp_path / "tools"
+    tools_dir.mkdir()
+    (tools_dir / "super.md").write_text("Use shared superpowers.\n")
+    (tools_dir / "script.sh").write_text("#!/bin/sh\necho ok\n")
+    (tools_dir / "mcp.json").write_text('{"mcpServers":{"local":{"command":"brigade","timeout":10}}}\n')
+    config = tmp_path / ".brigade" / "tools.toml"
+    config.parent.mkdir()
+    config.write_text(
+        """
+[[tool]]
+id = "superpowers"
+name = "Superpowers"
+family = "superpower"
+enabled = true
+description = "Shared superpowers."
+source_path = "tools/super.md"
+supported_harnesses = ["claude", "codex", "opencode", "hermes", "openclaw", "mcp", "scripts"]
+projections = { claude = ".claude/commands/superpowers.md", codex = ".codex/skills/superpowers/SKILL.md", opencode = ".opencode/superpowers/superpowers.md", hermes = ".hermes/superpowers/superpowers.md", openclaw = ".openclaw/superpowers/superpowers.md", mcp = ".mcp/superpowers.md", scripts = "scripts/superpowers.md" }
+
+[[tool]]
+id = "script-tool"
+name = "Script Tool"
+family = "script"
+enabled = true
+description = "Script projection."
+source_path = "tools/script.sh"
+command = "brigade status"
+supported_harnesses = ["scripts"]
+projections = { scripts = "scripts/script-tool.md" }
+
+[[tool]]
+id = "mcp-local"
+name = "MCP Local"
+family = "mcp"
+enabled = true
+description = "MCP projection."
+source_path = "tools/mcp.json"
+supported_harnesses = ["mcp"]
+projections = { mcp = ".mcp/mcp-local.md" }
+"""
+    )
+
+    assert tools_cmd.apply(target=tmp_path, all_tools=True, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["applied_count"] == 9
+    for rel_path in (
+        ".claude/commands/superpowers.md",
+        ".codex/skills/superpowers/SKILL.md",
+        ".opencode/superpowers/superpowers.md",
+        ".hermes/superpowers/superpowers.md",
+        ".openclaw/superpowers/superpowers.md",
+        ".mcp/superpowers.md",
+        "scripts/superpowers.md",
+    ):
+        assert (tmp_path / rel_path).is_file()
+        assert "brigade-tool-projection:" in (tmp_path / rel_path).read_text()
+    script_projection = (tmp_path / "scripts" / "script-tool.md").read_text()
+    assert "Managed Brigade script projection." in script_projection
+    assert "command: `brigade status`" in script_projection
+    mcp_projection = (tmp_path / ".mcp" / "mcp-local.md").read_text()
+    assert "Managed Brigade MCP projection stub." in mcp_projection
+    assert "does not start MCP servers" in mcp_projection
+
+
+def test_tools_apply_refuses_unmanaged_projection_unless_forced(tmp_path, capsys):
+    _init_git_repo(tmp_path)
+    source = tmp_path / "tools" / "simplify.md"
+    source.parent.mkdir()
+    source.write_text("Simplify source.\n")
+    projection = tmp_path / ".claude" / "commands" / "simplify.md"
+    projection.parent.mkdir(parents=True)
+    projection.write_text("user managed projection\n")
+    config = tmp_path / ".brigade" / "tools.toml"
+    config.parent.mkdir()
+    config.write_text(
+        """
+[[tool]]
+id = "simplify"
+name = "Simplify"
+family = "slash-command"
+enabled = true
+description = "Portable simplify command."
+source_path = "tools/simplify.md"
+supported_harnesses = ["claude"]
+projections = { claude = ".claude/commands/simplify.md" }
+"""
+    )
+
+    assert tools_cmd.apply(target=tmp_path, tool_id="simplify", json_output=True) == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["conflict_count"] == 1
+    assert payload["conflicts"][0]["status"] == "unmanaged"
+    assert projection.read_text() == "user managed projection\n"
+
+    assert tools_cmd.apply(target=tmp_path, tool_id="simplify", force=True, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["applied_count"] == 1
+    assert "brigade-tool-projection:" in projection.read_text()
+    assert "Simplify source." in projection.read_text()
+
+
+def test_tools_doctor_and_import_issues_use_projection_states(tmp_path, capsys):
+    _init_git_repo(tmp_path)
+    source = tmp_path / "tools" / "simplify.md"
+    source.parent.mkdir()
+    source.write_text("Simplify source.\n")
+    unmanaged = tmp_path / ".claude" / "commands" / "simplify.md"
+    unmanaged.parent.mkdir(parents=True)
+    unmanaged.write_text("unmanaged projection\n")
+    config = tmp_path / ".brigade" / "tools.toml"
+    config.parent.mkdir()
+    config.write_text(
+        """
+[[tool]]
+id = "simplify"
+name = "Simplify"
+family = "slash-command"
+enabled = true
+description = "Portable simplify command."
+source_path = "tools/simplify.md"
+supported_harnesses = ["claude", "codex"]
+projections = { claude = ".claude/commands/simplify.md", codex = ".codex/skills/simplify/SKILL.md" }
+"""
+    )
+
+    assert tools_cmd.doctor(target=tmp_path) == 0
+    out = capsys.readouterr().out
+    assert "[warn] tool_unmanaged_projection: claude: existing projection is not managed by Brigade" in out
+    assert "[warn] tool_missing_projection: codex: projection will be created" in out
+
+    assert tools_cmd.import_issues(target=tmp_path, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    issue_types = {item["metadata"]["tool_issue_type"] for item in payload["imports"]}
+    assert {"unmanaged_projection", "missing_projection"} <= issue_types
 
 
 def test_work_backup_init_status_doctor_and_json(tmp_path, monkeypatch, capsys):
@@ -3736,6 +3966,14 @@ def test_tools_cli(tmp_path, monkeypatch):
         seen.append(("search", kwargs))
         return 0
 
+    def fake_plan(**kwargs):
+        seen.append(("plan", kwargs))
+        return 0
+
+    def fake_apply(**kwargs):
+        seen.append(("apply", kwargs))
+        return 0
+
     def fake_doctor(**kwargs):
         seen.append(("doctor", kwargs))
         return 0
@@ -3748,6 +3986,8 @@ def test_tools_cli(tmp_path, monkeypatch):
     monkeypatch.setattr(tools_cmd, "list_tools", fake_list)
     monkeypatch.setattr(tools_cmd, "show", fake_show)
     monkeypatch.setattr(tools_cmd, "search", fake_search)
+    monkeypatch.setattr(tools_cmd, "plan", fake_plan)
+    monkeypatch.setattr(tools_cmd, "apply", fake_apply)
     monkeypatch.setattr(tools_cmd, "doctor", fake_doctor)
     monkeypatch.setattr(tools_cmd, "import_issues", fake_import_issues)
 
@@ -3755,6 +3995,9 @@ def test_tools_cli(tmp_path, monkeypatch):
     assert cli.main(["tools", "list", "--target", str(tmp_path), "--json"]) == 0
     assert cli.main(["tools", "show", "simplify", "--target", str(tmp_path), "--json"]) == 0
     assert cli.main(["tools", "search", "simple", "--target", str(tmp_path), "--json"]) == 0
+    assert cli.main(["tools", "plan", "simplify", "--target", str(tmp_path), "--json"]) == 0
+    assert cli.main(["tools", "apply", "simplify", "--target", str(tmp_path), "--dry-run", "--force", "--json"]) == 0
+    assert cli.main(["tools", "apply", "--all", "--target", str(tmp_path), "--json"]) == 0
     assert cli.main(["tools", "doctor", "--target", str(tmp_path), "--json"]) == 0
     assert cli.main(["tools", "import-issues", "--target", str(tmp_path), "--json"]) == 0
     assert seen == [
@@ -3762,6 +4005,29 @@ def test_tools_cli(tmp_path, monkeypatch):
         ("list", {"target": tmp_path, "json_output": True}),
         ("show", {"target": tmp_path, "tool_id": "simplify", "json_output": True}),
         ("search", {"target": tmp_path, "query": "simple", "json_output": True}),
+        ("plan", {"target": tmp_path, "tool_id": "simplify", "json_output": True}),
+        (
+            "apply",
+            {
+                "target": tmp_path,
+                "tool_id": "simplify",
+                "all_tools": False,
+                "dry_run": True,
+                "force": True,
+                "json_output": True,
+            },
+        ),
+        (
+            "apply",
+            {
+                "target": tmp_path,
+                "tool_id": None,
+                "all_tools": True,
+                "dry_run": False,
+                "force": False,
+                "json_output": True,
+            },
+        ),
         ("doctor", {"target": tmp_path, "json_output": True}),
         ("import-issues", {"target": tmp_path, "json_output": True}),
     ]
