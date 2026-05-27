@@ -199,6 +199,100 @@ def _task_text_key(text: str) -> str:
     return " ".join(text.casefold().split())
 
 
+def _import_record_key(item: dict[str, Any]) -> tuple[str, str, str]:
+    return (
+        str(item.get("source") or "manual"),
+        str(item.get("kind") or "task"),
+        _task_text_key(str(item.get("text") or "")),
+    )
+
+
+def _validate_import_record(value: object, *, label: str) -> tuple[dict[str, Any] | None, list[str]]:
+    errors: list[str] = []
+    if not isinstance(value, dict):
+        return None, [f"{label}: expected JSON object"]
+
+    text = value.get("text")
+    if not isinstance(text, str) or not text.strip():
+        errors.append(f"{label}: text must be a non-empty string")
+    kind = value.get("kind", "task")
+    if not isinstance(kind, str) or kind not in IMPORT_KINDS:
+        errors.append(f"{label}: kind must be one of: {', '.join(IMPORT_KINDS)}")
+    source = value.get("source", "manual")
+    if not isinstance(source, str) or not source.strip():
+        errors.append(f"{label}: source must be a non-empty string")
+    metadata = value.get("metadata", {})
+    if metadata is None:
+        metadata = {}
+    if not isinstance(metadata, dict):
+        errors.append(f"{label}: metadata must be an object when present")
+
+    if errors:
+        return None, errors
+    return {
+        "text": text.strip(),
+        "kind": kind,
+        "source": source.strip(),
+        "metadata": metadata,
+    }, []
+
+
+def _load_import_jsonl(path: Path) -> tuple[list[dict[str, Any]], list[str]]:
+    records: list[dict[str, Any]] = []
+    errors: list[str] = []
+    try:
+        lines = path.read_text().splitlines()
+    except OSError as exc:
+        return records, [f"{path}: {exc}"]
+    for line_number, line in enumerate(lines, start=1):
+        if not line.strip():
+            continue
+        label = f"line {line_number}"
+        try:
+            value = json.loads(line)
+        except json.JSONDecodeError as exc:
+            errors.append(f"{label}: invalid JSON: {exc.msg}")
+            continue
+        record, record_errors = _validate_import_record(value, label=label)
+        errors.extend(record_errors)
+        if record is not None:
+            records.append(record)
+    return records, errors
+
+
+def _append_import_records(
+    target: Path,
+    records: list[dict[str, Any]],
+    *,
+    dry_run: bool = False,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    imports = _read_imports(target)
+    existing = {
+        _import_record_key(item)
+        for item in imports
+        if isinstance(item, dict) and item.get("status", "pending") == "pending"
+    }
+    imported: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
+    for record in records:
+        key = _import_record_key(record)
+        if key[2] and key in existing:
+            skipped.append(record)
+            continue
+        item = _make_import(
+            str(record["text"]),
+            kind=str(record["kind"]),
+            source=str(record["source"]),
+            metadata=record.get("metadata") if isinstance(record.get("metadata"), dict) else None,
+        )
+        imported.append(item)
+        existing.add(key)
+    if imported and not dry_run:
+        imports.extend(imported)
+        _write_imports(target, imports)
+    return imported, skipped
+
+
 def _pending_tasks(target: Path) -> list[dict[str, Any]]:
     ledger = _read_task_ledger(target)
     tasks = [
@@ -352,7 +446,7 @@ def _make_import(
     *,
     kind: str,
     source: str,
-    metadata: dict[str, str] | None = None,
+    metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     now = _now()
     created = now.isoformat()
@@ -1503,6 +1597,165 @@ def import_list(*, target: Path, all_imports: bool = False, json_output: bool = 
             print(f"  metadata: {rendered}")
         if item.get("task_id"):
             print(f"  task: {item['task_id']}")
+    return 0
+
+
+def import_validate(*, input_path: Path, json_output: bool = False) -> int:
+    path = input_path.expanduser().resolve()
+    if not path.is_file():
+        print(f"error: import file not found: {path}", file=sys.stderr)
+        return 2
+    records, errors = _load_import_jsonl(path)
+    payload = {
+        "path": str(path),
+        "valid": not errors,
+        "records": len(records),
+        "errors": errors,
+    }
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0 if not errors else 1
+    print(f"import file: {path}")
+    print(f"records: {len(records)}")
+    if errors:
+        print(f"errors: {len(errors)}")
+        for error in errors:
+            print(f"- {error}")
+        return 1
+    print("status: valid")
+    return 0
+
+
+def import_ingest(
+    *,
+    target: Path,
+    input_path: Path,
+    dry_run: bool = False,
+    json_output: bool = False,
+) -> int:
+    target = target.expanduser().resolve()
+    if not target.is_dir():
+        print(f"error: --target is not a directory: {target}", file=sys.stderr)
+        return 2
+    path = input_path.expanduser().resolve()
+    if not path.is_file():
+        print(f"error: import file not found: {path}", file=sys.stderr)
+        return 2
+    records, errors = _load_import_jsonl(path)
+    if errors:
+        if json_output:
+            print(
+                json.dumps(
+                    {
+                        "path": str(path),
+                        "imports_path": str(_imports_path(target)),
+                        "valid": False,
+                        "errors": errors,
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+            )
+        else:
+            print(f"error: import file is invalid: {path}", file=sys.stderr)
+            for error in errors:
+                print(f"- {error}", file=sys.stderr)
+        return 2
+
+    imported, skipped = _append_import_records(target, records, dry_run=dry_run)
+    payload = {
+        "path": str(path),
+        "imports_path": str(_imports_path(target)),
+        "dry_run": dry_run,
+        "imported": len(imported),
+        "skipped_duplicates": len(skipped),
+        "imports": imported,
+    }
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+    print(f"import file: {path}")
+    print(f"imports_path: {_imports_path(target)}")
+    print(f"dry_run: {dry_run}")
+    print(f"imported: {len(imported)}")
+    print(f"skipped_duplicates: {len(skipped)}")
+    for item in imported:
+        print(f"- {item.get('id')} [{item.get('kind')}] {item.get('source')}: {_short(str(item.get('text', '')))}")
+    return 0
+
+
+def import_memory_care(
+    *,
+    target: Path,
+    queue: Path | None = None,
+    dry_run: bool = False,
+    json_output: bool = False,
+) -> int:
+    target = target.expanduser().resolve()
+    if not target.is_dir():
+        print(f"error: --target is not a directory: {target}", file=sys.stderr)
+        return 2
+    queue_path = queue.expanduser().resolve() if queue is not None else target / "memory" / "cards" / "decay" / "refresh-queue.json"
+    if not queue_path.is_file():
+        print(f"error: memory-care refresh queue not found: {queue_path}", file=sys.stderr)
+        return 2
+    try:
+        payload = json.loads(queue_path.read_text())
+    except json.JSONDecodeError as exc:
+        print(f"error: invalid memory-care refresh queue JSON: {exc}", file=sys.stderr)
+        return 2
+    if not isinstance(payload, dict):
+        print(f"error: memory-care refresh queue must be an object: {queue_path}", file=sys.stderr)
+        return 2
+    cards = payload.get("cards", [])
+    if not isinstance(cards, list):
+        print(f"error: memory-care refresh queue `cards` must be a list: {queue_path}", file=sys.stderr)
+        return 2
+
+    records: list[dict[str, Any]] = []
+    for index, card in enumerate(cards, start=1):
+        if not isinstance(card, dict):
+            print(f"error: memory-care card entry {index} must be an object", file=sys.stderr)
+            return 2
+        card_file = card.get("file")
+        if not isinstance(card_file, str) or not card_file.strip():
+            print(f"error: memory-care card entry {index} requires file", file=sys.stderr)
+            return 2
+        reason = card.get("reason")
+        reason_text = reason.strip() if isinstance(reason, str) and reason.strip() else "stale memory card"
+        records.append(
+            {
+                "text": f"Refresh memory card {card_file.strip()}: {reason_text}",
+                "kind": "task",
+                "source": "memory-care",
+                "metadata": {
+                    "card_file": card_file.strip(),
+                    "reason": reason_text,
+                    "queue_path": str(queue_path),
+                },
+            }
+        )
+    imported, skipped = _append_import_records(target, records, dry_run=dry_run)
+    output = {
+        "queue": str(queue_path),
+        "imports_path": str(_imports_path(target)),
+        "dry_run": dry_run,
+        "queued_cards": len(cards),
+        "imported": len(imported),
+        "skipped_duplicates": len(skipped),
+        "imports": imported,
+    }
+    if json_output:
+        print(json.dumps(output, indent=2, sort_keys=True))
+        return 0
+    print(f"memory-care queue: {queue_path}")
+    print(f"imports_path: {_imports_path(target)}")
+    print(f"dry_run: {dry_run}")
+    print(f"queued_cards: {len(cards)}")
+    print(f"imported: {len(imported)}")
+    print(f"skipped_duplicates: {len(skipped)}")
+    for item in imported:
+        print(f"- {item.get('id')} {_short(str(item.get('text', '')))}")
     return 0
 
 

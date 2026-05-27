@@ -180,6 +180,24 @@ def _build_parser() -> argparse.ArgumentParser:
     p_work_import_list.add_argument("--all", action="store_true", help="Include promoted imports.")
     p_work_import_list.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_work_import_list.add_argument("--limit", type=int, default=20, help="Maximum imports to show.")
+    p_work_import_validate = import_sub.add_parser("validate", help="Validate a work import JSONL file.")
+    p_work_import_validate.add_argument("input_path", type=Path, help="JSONL file to validate.")
+    p_work_import_validate.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_work_import_ingest = import_sub.add_parser("ingest", help="Validate and append a work import JSONL file.")
+    p_work_import_ingest.add_argument("input_path", type=Path, help="JSONL file to ingest.")
+    p_work_import_ingest.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
+    p_work_import_ingest.add_argument("--dry-run", action="store_true", help="Validate and report without writing imports.")
+    p_work_import_ingest.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_work_import_memory_care = import_sub.add_parser("memory-care", help="Import memory-care refresh queue entries.")
+    p_work_import_memory_care.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
+    p_work_import_memory_care.add_argument(
+        "--queue",
+        type=Path,
+        default=None,
+        help="Refresh queue JSON. Defaults to memory/cards/decay/refresh-queue.json under target.",
+    )
+    p_work_import_memory_care.add_argument("--dry-run", action="store_true", help="Report without writing imports.")
+    p_work_import_memory_care.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_work_import_triage = import_sub.add_parser("triage", help="Group pending imports by source and kind.")
     p_work_import_triage.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
     p_work_import_triage.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
@@ -571,6 +589,22 @@ def main(argv=None) -> int:
                     all_imports=args.all,
                     json_output=args.json,
                     limit=args.limit,
+                )
+            if args.import_command == "validate":
+                return work_cmd.import_validate(input_path=args.input_path, json_output=args.json)
+            if args.import_command == "ingest":
+                return work_cmd.import_ingest(
+                    target=args.target,
+                    input_path=args.input_path,
+                    dry_run=args.dry_run,
+                    json_output=args.json,
+                )
+            if args.import_command == "memory-care":
+                return work_cmd.import_memory_care(
+                    target=args.target,
+                    queue=args.queue,
+                    dry_run=args.dry_run,
+                    json_output=args.json,
                 )
             if args.import_command == "triage":
                 return work_cmd.import_triage(target=args.target, json_output=args.json, limit=args.limit)

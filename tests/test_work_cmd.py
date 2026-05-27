@@ -649,6 +649,107 @@ def test_work_import_promote_reuses_existing_pending_task(tmp_path, monkeypatch,
     assert len(ledger["tasks"]) == 1
 
 
+def test_work_import_validate_and_ingest_jsonl(tmp_path, monkeypatch, capsys):
+    _init_git_repo(tmp_path)
+    monkeypatch.setattr(
+        work_cmd,
+        "_now",
+        lambda: datetime(2026, 5, 26, 12, 0, 0, tzinfo=timezone.utc),
+    )
+    import_file = tmp_path / "imports.jsonl"
+    import_file.write_text(
+        json.dumps(
+            {
+                "text": "Review imported scanner item",
+                "kind": "finding",
+                "source": "scanner",
+                "metadata": {"thread": "abc123"},
+            }
+        )
+        + "\n"
+    )
+
+    assert work_cmd.import_validate(input_path=import_file) == 0
+    out = capsys.readouterr().out
+    assert "status: valid" in out
+    assert "records: 1" in out
+
+    assert work_cmd.import_ingest(target=tmp_path, input_path=import_file) == 0
+    out = capsys.readouterr().out
+    assert "imported: 1" in out
+    assert "skipped_duplicates: 0" in out
+    assert work_cmd.import_ingest(target=tmp_path, input_path=import_file) == 0
+    out = capsys.readouterr().out
+    assert "imported: 0" in out
+    assert "skipped_duplicates: 1" in out
+
+    assert work_cmd.import_list(target=tmp_path, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert len(payload["imports"]) == 1
+    assert payload["imports"][0]["kind"] == "finding"
+    assert payload["imports"][0]["source"] == "scanner"
+    assert payload["imports"][0]["metadata"]["thread"] == "abc123"
+
+
+def test_work_import_validate_reports_schema_errors(tmp_path, capsys):
+    import_file = tmp_path / "bad-imports.jsonl"
+    import_file.write_text('{"kind":"nope","metadata":[]}\nnot-json\n')
+
+    assert work_cmd.import_validate(input_path=import_file) == 1
+    out = capsys.readouterr().out
+    assert "errors: 4" in out
+    assert "line 1: text must be a non-empty string" in out
+    assert "line 1: kind must be one of:" in out
+    assert "line 1: metadata must be an object when present" in out
+
+    assert work_cmd.import_validate(input_path=import_file, json_output=True) == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["valid"] is False
+    assert len(payload["errors"]) == 4
+
+
+def test_work_import_memory_care_reads_refresh_queue(tmp_path, monkeypatch, capsys):
+    _init_git_repo(tmp_path)
+    monkeypatch.setattr(
+        work_cmd,
+        "_now",
+        lambda: datetime(2026, 5, 26, 12, 0, 0, tzinfo=timezone.utc),
+    )
+    queue = tmp_path / "memory" / "cards" / "decay" / "refresh-queue.json"
+    queue.parent.mkdir(parents=True)
+    queue.write_text(
+        json.dumps(
+            {
+                "cards": [
+                    {
+                        "file": "memory/cards/tools.md",
+                        "reason": "source-of-truth changed",
+                    }
+                ]
+            }
+        )
+    )
+
+    assert work_cmd.import_memory_care(target=tmp_path) == 0
+    out = capsys.readouterr().out
+    assert f"memory-care queue: {queue}" in out
+    assert "queued_cards: 1" in out
+    assert "imported: 1" in out
+    assert work_cmd.import_memory_care(target=tmp_path) == 0
+    out = capsys.readouterr().out
+    assert "imported: 0" in out
+    assert "skipped_duplicates: 1" in out
+
+    assert work_cmd.import_list(target=tmp_path, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    item = payload["imports"][0]
+    assert item["kind"] == "task"
+    assert item["source"] == "memory-care"
+    assert item["text"] == "Refresh memory card memory/cards/tools.md: source-of-truth changed"
+    assert item["metadata"]["card_file"] == "memory/cards/tools.md"
+    assert item["metadata"]["reason"] == "source-of-truth changed"
+
+
 def test_work_import_triage_groups_pending_imports(tmp_path, monkeypatch, capsys):
     _init_git_repo(tmp_path)
     monkeypatch.setattr(
@@ -1254,6 +1355,18 @@ def test_work_import_cli(tmp_path, monkeypatch):
         seen.append(("list", kwargs))
         return 0
 
+    def fake_import_validate(**kwargs):
+        seen.append(("validate", kwargs))
+        return 0
+
+    def fake_import_ingest(**kwargs):
+        seen.append(("ingest", kwargs))
+        return 0
+
+    def fake_import_memory_care(**kwargs):
+        seen.append(("memory-care", kwargs))
+        return 0
+
     def fake_import_triage(**kwargs):
         seen.append(("triage", kwargs))
         return 0
@@ -1272,6 +1385,9 @@ def test_work_import_cli(tmp_path, monkeypatch):
 
     monkeypatch.setattr(work_cmd, "import_add", fake_import_add)
     monkeypatch.setattr(work_cmd, "import_list", fake_import_list)
+    monkeypatch.setattr(work_cmd, "import_validate", fake_import_validate)
+    monkeypatch.setattr(work_cmd, "import_ingest", fake_import_ingest)
+    monkeypatch.setattr(work_cmd, "import_memory_care", fake_import_memory_care)
     monkeypatch.setattr(work_cmd, "import_triage", fake_import_triage)
     monkeypatch.setattr(work_cmd, "import_show", fake_import_show)
     monkeypatch.setattr(work_cmd, "import_promote", fake_import_promote)
@@ -1298,6 +1414,38 @@ def test_work_import_cli(tmp_path, monkeypatch):
         == 0
     )
     assert cli.main(["work", "import", "list", "--target", str(tmp_path), "--all", "--json", "--limit", "3"]) == 0
+    assert cli.main(["work", "import", "validate", str(tmp_path / "imports.jsonl"), "--json"]) == 0
+    assert (
+        cli.main(
+            [
+                "work",
+                "import",
+                "ingest",
+                str(tmp_path / "imports.jsonl"),
+                "--target",
+                str(tmp_path),
+                "--dry-run",
+                "--json",
+            ]
+        )
+        == 0
+    )
+    assert (
+        cli.main(
+            [
+                "work",
+                "import",
+                "memory-care",
+                "--target",
+                str(tmp_path),
+                "--queue",
+                str(tmp_path / "refresh-queue.json"),
+                "--dry-run",
+                "--json",
+            ]
+        )
+        == 0
+    )
     assert cli.main(["work", "import", "triage", "--target", str(tmp_path), "--json", "--limit", "4"]) == 0
     assert cli.main(["work", "import", "show", "imp123", "--target", str(tmp_path)]) == 0
     assert (
@@ -1330,6 +1478,25 @@ def test_work_import_cli(tmp_path, monkeypatch):
             },
         ),
         ("list", {"target": tmp_path, "all_imports": True, "json_output": True, "limit": 3}),
+        ("validate", {"input_path": tmp_path / "imports.jsonl", "json_output": True}),
+        (
+            "ingest",
+            {
+                "target": tmp_path,
+                "input_path": tmp_path / "imports.jsonl",
+                "dry_run": True,
+                "json_output": True,
+            },
+        ),
+        (
+            "memory-care",
+            {
+                "target": tmp_path,
+                "queue": tmp_path / "refresh-queue.json",
+                "dry_run": True,
+                "json_output": True,
+            },
+        ),
         ("triage", {"target": tmp_path, "json_output": True, "limit": 4}),
         ("show", {"target": tmp_path, "import_id": "imp123"}),
         (

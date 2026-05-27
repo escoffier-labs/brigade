@@ -16,13 +16,16 @@ Status: in progress.
 
 ## Next Phase: Scanner-Ready Inbox
 
-Status: in progress.
+Status: active.
 
 Goal: make Brigade a safe target for local automations that discover useful work.
 
 - Keep raw scanner output private and gitignored under `.brigade/work/imports/`.
 - Normalize imports into small records with `kind`, `source`, text, timestamps, and metadata.
+- Document the scanner JSONL contract so external producers can target Brigade without importing Brigade internals.
+- Validate and ingest scanner-authored JSONL files.
 - Let wrappers import candidate tasks, findings, decisions, preferences, incidents, links, and commands without knowing Brigade internals.
+- Convert memory-care refresh queues into local task imports.
 - Promote selected imports into the work task ledger, with source metadata preserved.
 - Dismiss noisy imports so scanners can be useful without leaving permanent queue clutter.
 - Batch-promote reviewed imports by source and kind.
