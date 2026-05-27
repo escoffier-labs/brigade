@@ -96,6 +96,11 @@ def security_station_checks(ctx: DoctorContext) -> List[CheckResult]:
             results.append((FAIL, "security: config", f"invalid {config}: {exc}"))
         else:
             results.append((OK, "security: config", f"{config} (policy={loaded.policy if loaded else 'personal'})"))
+            enrichment = security_cmd.enrichment_health(ctx.target)
+            if enrichment.get("configured"):
+                results.append((OK, "security: enrichment", f"{enrichment.get('provider')} ({enrichment.get('status')})"))
+            else:
+                results.append((WARN, "security: enrichment", str(enrichment.get("status"))))
     else:
         results.append((WARN, "security: config", f"missing at {config}; run `brigade security init --target .`"))
 

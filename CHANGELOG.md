@@ -56,6 +56,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Built-in `security` station and `brigade security scan` for read-only agent workspace security checks.
 - Deeper MCP security checks for unpinned `npx`, shell metacharacters, secret-looking env values, sensitive or broad file args, high-risk local commands, large server sets, and missing timeouts.
 - Supply-chain security checks for package scripts, GitHub Actions permissions and action refs, Python URL dependencies, and legacy install hooks.
+- `brigade security enrich` for explicit post-scan enrichment artifacts, with an offline local provider and opt-in MISP provider config.
 - `brigade security scan --import-findings` to route security findings into the local work import inbox for review.
 - `brigade security init` to write gitignored local defaults to `.brigade/security.toml`.
 - `brigade security fix` to create the local security artifact directory and refresh the managed `.gitignore` block.
