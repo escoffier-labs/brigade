@@ -177,7 +177,9 @@ brigade work import memory-care
 brigade work import triage
 brigade work import promote <import-id>
 brigade work import promote --all --source memory-care --kind task
+brigade work import promote --all --source handoff-ingest --metadata handoff_issue_category=route-skip
 brigade work import dismiss <import-id> --reason "not actionable"
+brigade work import dismiss --all --source handoff-ingest --metadata handoff_issue_category=skip --reason "historical noise"
 brigade work run
 brigade work run --queue-next
 brigade work run "review today's changes"
@@ -281,11 +283,11 @@ Import inbox commands:
 - `brigade work import ingest imports.jsonl` ingests scanner output.
 - `brigade work import memory-care` converts `memory/cards/decay/refresh-queue.json` into imports.
 - `brigade work import chat-sweep` converts `.brigade/chat-memory-sweeps/latest.json` issues into imports.
-- `brigade work import triage` groups pending imports by source and kind.
+- `brigade work import triage` groups pending imports by source and kind; use `--source`, `--kind`, and repeatable `--metadata key=value` to narrow noisy queues.
 - `brigade work import show <import-id>` inspects one import.
-- `brigade work import dismiss <import-id>` removes noise.
+- `brigade work import dismiss <import-id>` removes one noisy item, while `dismiss --all` closes filtered batches.
 - `brigade work import promote <import-id>` promotes one reviewed import into the task ledger.
-- `brigade work import promote --all --source memory-care --kind task` batch-promotes filtered imports.
+- `brigade work import promote --all --source memory-care --kind task` batch-promotes filtered imports; metadata filters also work for scanner-specific fields such as `handoff_issue_category=route-skip`.
 
 Imports are stored under `.brigade/work/imports/inbox.jsonl`, stay gitignored, and do not write memory directly.
 

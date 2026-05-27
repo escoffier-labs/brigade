@@ -340,13 +340,49 @@ def _matching_pending_imports(
     *,
     kind: str | None = None,
     source: str | None = None,
+    metadata_filters: dict[str, str] | None = None,
 ) -> list[dict[str, Any]]:
     imports = _pending_imports(target)
     if kind:
         imports = [item for item in imports if item.get("kind") == kind]
     if source:
         imports = [item for item in imports if item.get("source") == source]
+    if metadata_filters:
+        imports = [item for item in imports if _import_metadata_matches(item, metadata_filters)]
     return imports
+
+
+def _import_metadata_matches(item: dict[str, Any], filters: dict[str, str]) -> bool:
+    metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+    for key, expected in filters.items():
+        if str(metadata.get(key, "")) != expected:
+            return False
+    return True
+
+
+def _parse_metadata_filters(values: list[str] | None) -> tuple[dict[str, str], list[str]]:
+    filters: dict[str, str] = {}
+    errors: list[str] = []
+    for raw in values or []:
+        if "=" not in raw:
+            errors.append(f"--metadata filter must be key=value: {raw}")
+            continue
+        key, value = raw.split("=", 1)
+        key = key.strip()
+        if not key:
+            errors.append(f"--metadata filter key cannot be empty: {raw}")
+            continue
+        filters[key] = value.strip()
+    return filters, errors
+
+
+def _parse_or_report_metadata_filters(values: list[str] | None) -> tuple[dict[str, str] | None, int]:
+    filters, errors = _parse_metadata_filters(values)
+    if errors:
+        for error in errors:
+            print(f"error: {error}", file=sys.stderr)
+        return None, 2
+    return filters, 0
 
 
 def _find_pending_task_by_text(target: Path, text: str) -> dict[str, Any] | None:
@@ -1579,10 +1615,25 @@ def import_add(
     return 0
 
 
-def import_list(*, target: Path, all_imports: bool = False, json_output: bool = False, limit: int = 20) -> int:
+def import_list(
+    *,
+    target: Path,
+    all_imports: bool = False,
+    json_output: bool = False,
+    limit: int = 20,
+    source: str | None = None,
+    kind: str | None = None,
+    metadata: list[str] | None = None,
+) -> int:
     if limit < 1:
         print("error: --limit must be a positive integer", file=sys.stderr)
         return 2
+    if kind is not None and kind not in IMPORT_KINDS:
+        print(f"error: --kind must be one of: {', '.join(IMPORT_KINDS)}", file=sys.stderr)
+        return 2
+    metadata_filters, rc = _parse_or_report_metadata_filters(metadata)
+    if rc:
+        return rc
     target = target.expanduser().resolve()
     if not target.is_dir():
         print(f"error: --target is not a directory: {target}", file=sys.stderr)
@@ -1591,6 +1642,12 @@ def import_list(*, target: Path, all_imports: bool = False, json_output: bool = 
     imports.sort(key=_import_sort_key)
     if not all_imports:
         imports = [item for item in imports if item.get("status", "pending") == "pending"]
+    if source:
+        imports = [item for item in imports if item.get("source") == source]
+    if kind:
+        imports = [item for item in imports if item.get("kind") == kind]
+    if metadata_filters:
+        imports = [item for item in imports if _import_metadata_matches(item, metadata_filters)]
     imports = imports[:limit]
 
     if json_output:
@@ -1887,15 +1944,29 @@ def import_chat_sweep(
     return 0
 
 
-def import_triage(*, target: Path, json_output: bool = False, limit: int = 50) -> int:
+def import_triage(
+    *,
+    target: Path,
+    json_output: bool = False,
+    limit: int = 50,
+    source: str | None = None,
+    kind: str | None = None,
+    metadata: list[str] | None = None,
+) -> int:
     if limit < 1:
         print("error: --limit must be a positive integer", file=sys.stderr)
         return 2
+    if kind is not None and kind not in IMPORT_KINDS:
+        print(f"error: --kind must be one of: {', '.join(IMPORT_KINDS)}", file=sys.stderr)
+        return 2
+    metadata_filters, rc = _parse_or_report_metadata_filters(metadata)
+    if rc:
+        return rc
     target = target.expanduser().resolve()
     if not target.is_dir():
         print(f"error: --target is not a directory: {target}", file=sys.stderr)
         return 2
-    pending = _pending_imports(target)
+    pending = _matching_pending_imports(target, kind=kind, source=source, metadata_filters=metadata_filters)
     counts = _import_counts(pending)
     groups: dict[str, dict[str, list[dict[str, Any]]]] = {}
     for item in pending:
@@ -1970,6 +2041,7 @@ def import_promote(
     all_matching: bool = False,
     kind: str | None = None,
     source: str | None = None,
+    metadata: list[str] | None = None,
 ) -> int:
     target = target.expanduser().resolve()
     if not target.is_dir():
@@ -1978,12 +2050,23 @@ def import_promote(
     if kind is not None and kind not in IMPORT_KINDS:
         print(f"error: --kind must be one of: {', '.join(IMPORT_KINDS)}", file=sys.stderr)
         return 2
+    metadata_filters, rc = _parse_or_report_metadata_filters(metadata)
+    if rc:
+        return rc
     if all_matching and import_id:
         print("error: pass an import id or --all, not both", file=sys.stderr)
         return 2
     if all_matching:
         imports = _read_imports(target)
-        wanted_ids = {item.get("id") for item in _matching_pending_imports(target, kind=kind, source=source)}
+        wanted_ids = {
+            item.get("id")
+            for item in _matching_pending_imports(
+                target,
+                kind=kind,
+                source=source,
+                metadata_filters=metadata_filters,
+            )
+        }
         promoted: list[tuple[dict[str, Any], dict[str, Any], bool]] = []
         for item in imports:
             if item.get("id") not in wanted_ids:
@@ -2026,10 +2109,60 @@ def import_promote(
     return 0
 
 
-def import_dismiss(*, target: Path, import_id: str, reason: str | None = None) -> int:
+def import_dismiss(
+    *,
+    target: Path,
+    import_id: str | None = None,
+    reason: str | None = None,
+    all_matching: bool = False,
+    kind: str | None = None,
+    source: str | None = None,
+    metadata: list[str] | None = None,
+) -> int:
     target = target.expanduser().resolve()
     if not target.is_dir():
         print(f"error: --target is not a directory: {target}", file=sys.stderr)
+        return 2
+    if kind is not None and kind not in IMPORT_KINDS:
+        print(f"error: --kind must be one of: {', '.join(IMPORT_KINDS)}", file=sys.stderr)
+        return 2
+    metadata_filters, rc = _parse_or_report_metadata_filters(metadata)
+    if rc:
+        return rc
+    if all_matching and import_id:
+        print("error: pass an import id or --all, not both", file=sys.stderr)
+        return 2
+    if all_matching:
+        imports = _read_imports(target)
+        wanted_ids = {
+            item.get("id")
+            for item in _matching_pending_imports(
+                target,
+                kind=kind,
+                source=source,
+                metadata_filters=metadata_filters,
+            )
+        }
+        now = _now().isoformat()
+        dismissed: list[dict[str, Any]] = []
+        for item in imports:
+            if item.get("id") not in wanted_ids:
+                continue
+            item["status"] = "dismissed"
+            item["updated_at"] = now
+            item["dismissed_at"] = now
+            if reason and reason.strip():
+                item["dismiss_reason"] = reason.strip()
+            dismissed.append(item)
+        _write_imports(target, imports)
+        print(f"dismissed: {len(dismissed)}")
+        if reason and reason.strip():
+            print(f"reason: {reason.strip()}")
+        for item in dismissed:
+            print(f"- {item.get('id')} {_short(str(item.get('text', '')))}")
+        return 0
+    if not import_id:
+        print("error: import id is required unless --all is passed", file=sys.stderr)
         return 2
     item, imports = _find_import(target, import_id)
     if item is None:

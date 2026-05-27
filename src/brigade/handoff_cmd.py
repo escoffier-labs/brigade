@@ -260,7 +260,11 @@ def doctor_checks(target: Path, sources: Path | None = None) -> list[tuple[str, 
     return checks
 
 
-def collect_issues(target: Path, sources: Path | None = None) -> list[HandoffIssue]:
+def collect_issues(
+    target: Path,
+    sources: Path | None = None,
+    categories: list[str] | None = None,
+) -> list[HandoffIssue]:
     health = inspect(target, sources=sources)
     issues: list[HandoffIssue] = []
     for inbox in health.inboxes:
@@ -320,7 +324,7 @@ def collect_issues(target: Path, sources: Path | None = None) -> list[HandoffIss
             )
         if ingestor.exists and ingestor.log_path is not None:
             issues.extend(_parse_ingestor_log_issues(ingestor.log_path))
-    return _dedupe_issues(issues)
+    return _filter_issues_by_category(_dedupe_issues(issues), categories)
 
 
 def issues(
@@ -329,6 +333,7 @@ def issues(
     sources: Path | None = None,
     json_output: bool = False,
     limit: int = 20,
+    categories: list[str] | None = None,
 ) -> int:
     if limit < 1:
         print("error: --limit must be a positive integer", file=sys.stderr)
@@ -337,7 +342,7 @@ def issues(
     if not target.is_dir():
         print(f"error: --target is not a directory: {target}", file=sys.stderr)
         return 2
-    found = collect_issues(target, sources=sources)
+    found = collect_issues(target, sources=sources, categories=categories)
     payload = _issues_payload(target, found)
     if json_output:
         print(json.dumps(payload, indent=2, sort_keys=True))
@@ -365,12 +370,13 @@ def import_issues(
     sources: Path | None = None,
     dry_run: bool = False,
     json_output: bool = False,
+    categories: list[str] | None = None,
 ) -> int:
     target = target.expanduser().resolve()
     if not target.is_dir():
         print(f"error: --target is not a directory: {target}", file=sys.stderr)
         return 2
-    found = collect_issues(target, sources=sources)
+    found = collect_issues(target, sources=sources, categories=categories)
     records = [issue.as_import_record() for issue in found]
     from . import work_cmd
 
@@ -439,6 +445,16 @@ def _dedupe_issues(issues: list[HandoffIssue]) -> list[HandoffIssue]:
         seen.add(issue.id)
         deduped.append(issue)
     return deduped
+
+
+def _filter_issues_by_category(
+    issues: list[HandoffIssue],
+    categories: list[str] | None,
+) -> list[HandoffIssue]:
+    wanted = {category for category in categories or [] if category}
+    if not wanted:
+        return issues
+    return [issue for issue in issues if issue.category in wanted]
 
 
 def _make_issue(
