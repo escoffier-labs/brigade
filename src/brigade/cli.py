@@ -115,6 +115,10 @@ def _build_parser() -> argparse.ArgumentParser:
     p_handoff_doctor.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
     p_handoff_doctor.add_argument("--sources", type=Path, default=None, help="Override .brigade/handoff-sources.json.")
     p_handoff_doctor.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_handoff_lint = handoff_sub.add_parser("lint", help="Validate pending or explicit memory handoff files.")
+    p_handoff_lint.add_argument("paths", nargs="*", type=Path, help="Handoff files to validate. Defaults to pending inbox files.")
+    p_handoff_lint.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_handoff_lint.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_handoff_issues = handoff_sub.add_parser("issues", help="Group actionable handoff ingest issues.")
     p_handoff_issues.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
     p_handoff_issues.add_argument("--sources", type=Path, default=None, help="Override .brigade/handoff-sources.json.")
@@ -678,6 +682,8 @@ def main(argv=None) -> int:
 
         if args.handoff_command == "doctor":
             return handoff_cmd.doctor(target=args.target, sources=args.sources, json_output=args.json)
+        if args.handoff_command == "lint":
+            return handoff_cmd.lint(target=args.target, paths=args.paths, json_output=args.json)
         if args.handoff_command == "issues":
             return handoff_cmd.issues(
                 target=args.target,

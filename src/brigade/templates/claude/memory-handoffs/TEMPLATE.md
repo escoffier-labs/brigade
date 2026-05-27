@@ -28,6 +28,11 @@ Short, specific title. No private identifiers.
 
 create-card | update-card | no-card
 
+Choose exactly one branch below, then delete the other branch before saving.
+Card actions must omit document sections entirely. `no-card` actions must omit card sections entirely.
+
+<!-- CARD ACTION BRANCH: keep only for create-card or update-card. -->
+
 ## Target card
 
 card-name-if-known.md
@@ -47,6 +52,8 @@ tags: [list]
 
 Card body. Use ### or deeper for subsections; ## headings parse as new handoff sections.
 ```
+
+<!-- NO-CARD ACTION BRANCH: keep only for no-card. -->
 
 ## Target document
 

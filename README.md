@@ -95,6 +95,7 @@ brigade init --target ./repo --harnesses none           # generic install
 Once installed, `brigade doctor` verifies the wiring and `brigade status` reports over the station registry.
 For machines that ingest handoffs from multiple repos, copy `.brigade/handoff-sources.example.json` to `.brigade/handoff-sources.json` and list the repo roots and writer inboxes the canonical ingestor scans.
 `brigade handoff doctor` reports pending `.claude/memory-handoffs/` and `.codex/memory-handoffs/` files that are not covered by that local source list.
+Run `brigade handoff lint` before ingesting pending handoffs when you want to catch action/target mismatches early.
 If your ingestor writes a latest-run log, set `ingestor.last_run_log` in that local config so the doctor can warn on stale runs, skipped malformed handoffs, and warning summaries hidden behind no-reply cron output.
 Use `brigade handoff issues` to group those warnings with repair guidance, then `brigade handoff import-issues` to route them into the normal local work import inbox.
 
@@ -155,6 +156,7 @@ brigade dogfood
 brigade dogfood next
 brigade dogfood --target /path/to/repo
 brigade handoff doctor
+brigade handoff lint
 brigade handoff issues
 brigade handoff import-issues
 brigade work bootstrap
@@ -360,6 +362,7 @@ Handoff behavior:
 - By default it writes a reviewable handoff to `.claude/memory-handoffs/` under `--cwd`.
 - Use `--handoff-inbox <path>` for Codex, OpenCode, GPT, Hermes, OpenClaw, or another writer inbox.
 - The handoff targets `.learnings/LEARNINGS.md` as a `no-card` document update.
+- `brigade handoff lint` validates pending handoffs before ingest. Card actions require `Target card` plus `Suggested card content` and must omit document sections; `no-card` actions require document sections and must omit card sections.
 - The normal `brigade ingest` route can review or ingest that handoff.
 - If handoff writing fails after synthesis, Brigade still prints the final answer and keeps the final artifacts.
 - Failed handoff writes exit nonzero and mark `run.json` as `handoff-failed`.

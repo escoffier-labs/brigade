@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import re
 import sys
 import time
 from dataclasses import dataclass
@@ -17,6 +18,12 @@ WRITER_INBOXES = (".claude/memory-handoffs", ".codex/memory-handoffs")
 IGNORED_HANDOFF_NAMES = {"TEMPLATE.md"}
 DEFAULT_STALE_AFTER_MINUTES = 90
 MAX_INGESTOR_WARNING_SIGNALS = 5
+CARD_ACTIONS = ("create-card", "update-card")
+NO_CARD_ACTION = "no-card"
+HANDOFF_ACTIONS = (*CARD_ACTIONS, NO_CARD_ACTION)
+CARD_TARGET_PATTERN = re.compile(r"^[A-Za-z0-9._-]+\.md$")
+DOCUMENT_TARGETS = ("TOOLS.md", "USER.md")
+DOCUMENT_TARGET_PREFIXES = ("rules/", ".learnings/")
 DEFAULT_WARNING_PATTERNS = (
     "Warnings:",
     "SKIP ",
@@ -133,12 +140,31 @@ class HandoffIssue:
 
 
 @dataclass(frozen=True)
+class HandoffLintResult:
+    path: Path
+    action: str | None
+    valid: bool
+    errors: tuple[str, ...]
+    warnings: tuple[str, ...]
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "path": str(self.path),
+            "action": self.action,
+            "valid": self.valid,
+            "errors": list(self.errors),
+            "warnings": list(self.warnings),
+        }
+
+
+@dataclass(frozen=True)
 class HandoffHealth:
     target: Path
     sources_path: Path | None
     sources_loaded: bool
     inboxes: tuple[InboxHealth, ...]
     ingestor: IngestorHealth
+    lint: tuple[HandoffLintResult, ...]
     warnings: tuple[str, ...]
     failures: tuple[str, ...]
 
@@ -149,6 +175,7 @@ class HandoffHealth:
             "sources_loaded": self.sources_loaded,
             "inboxes": [inbox.as_dict() for inbox in self.inboxes],
             "ingestor": self.ingestor.as_dict(),
+            "lint": [result.as_dict() for result in self.lint],
             "warnings": list(self.warnings),
             "failures": list(self.failures),
         }
@@ -181,6 +208,7 @@ def inspect(target: Path, sources: Path | None = None) -> HandoffHealth:
     watched = source_config.watched
     inboxes = tuple(_inspect_inbox(target, rel, watched) for rel in WRITER_INBOXES)
     ingestor = _inspect_ingestor(source_config.ingestor)
+    lint_results = lint_targets(target)
     warnings: list[str] = []
     pending_total = sum(inbox.pending for inbox in inboxes)
     if pending_total and not sources_loaded and not failures:
@@ -193,6 +221,11 @@ def inspect(target: Path, sources: Path | None = None) -> HandoffHealth:
                 f"{inbox.inbox} has {inbox.pending} pending handoff"
                 f"{'s' if inbox.pending != 1 else ''} but is not watched by the source config"
             )
+    for result in lint_results:
+        if not result.valid:
+            warnings.append(
+                f"handoff lint failed for {result.path}: {result.errors[0] if result.errors else 'invalid handoff'}"
+            )
     warnings.extend(ingestor.warnings)
 
     return HandoffHealth(
@@ -201,6 +234,7 @@ def inspect(target: Path, sources: Path | None = None) -> HandoffHealth:
         sources_loaded=sources_loaded,
         inboxes=inboxes,
         ingestor=ingestor,
+        lint=lint_results,
         warnings=tuple(warnings),
         failures=tuple(failures),
     )
@@ -255,6 +289,17 @@ def doctor_checks(target: Path, sources: Path | None = None) -> list[tuple[str, 
     else:
         checks.append((OK, "handoff_ingestor", "log not configured"))
 
+    invalid_lint = [result for result in health.lint if not result.valid]
+    if not health.lint:
+        checks.append((OK, "handoff_lint", "no pending handoffs"))
+    elif invalid_lint:
+        checks.append((WARN, "handoff_lint", f"{len(invalid_lint)} invalid of {len(health.lint)} pending handoff files"))
+        for result in invalid_lint:
+            first_error = result.errors[0] if result.errors else "invalid handoff"
+            checks.append((WARN, "handoff_lint", f"{result.path}: {first_error}"))
+    else:
+        checks.append((OK, "handoff_lint", f"{len(health.lint)} pending handoff file{'s' if len(health.lint) != 1 else ''} valid"))
+
     for warning in health.warnings:
         checks.append((WARN, "handoff_warning", warning))
     return checks
@@ -291,6 +336,25 @@ def collect_issues(
                 )
             )
 
+    for result in health.lint:
+        if result.valid:
+            continue
+        first_error = result.errors[0] if result.errors else "invalid handoff"
+        issues.append(
+            _make_issue(
+                category="lint",
+                kind="task",
+                text=f"Fix pending handoff lint error in {result.path.name}: {first_error}",
+                repair=_lint_repair_for_result(result),
+                evidence=str(result.path),
+                metadata={
+                    "path": str(result.path),
+                    "action": result.action,
+                    "errors": list(result.errors),
+                },
+            )
+        )
+
     ingestor = health.ingestor
     if ingestor.configured:
         if not ingestor.exists:
@@ -325,6 +389,89 @@ def collect_issues(
         if ingestor.exists and ingestor.log_path is not None:
             issues.extend(_parse_ingestor_log_issues(ingestor.log_path))
     return _filter_issues_by_category(_dedupe_issues(issues), categories)
+
+
+def lint(
+    *,
+    target: Path,
+    paths: list[Path] | None = None,
+    json_output: bool = False,
+) -> int:
+    target = target.expanduser().resolve()
+    if not target.is_dir():
+        print(f"error: --target is not a directory: {target}", file=sys.stderr)
+        return 2
+    results = lint_targets(target, paths=paths)
+    payload = {
+        "target": str(target),
+        "count": len(results),
+        "valid": all(result.valid for result in results),
+        "results": [result.as_dict() for result in results],
+    }
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0 if payload["valid"] else 1
+    print(f"handoff lint: {target}")
+    print(f"files: {len(results)}")
+    for result in results:
+        status = OK if result.valid else FAIL
+        action = f" ({result.action})" if result.action else ""
+        print(f"[{status}] {result.path}{action}")
+        for error in result.errors:
+            print(f"  - {error}")
+        for warning in result.warnings:
+            print(f"  warning: {warning}")
+    return 0 if payload["valid"] else 1
+
+
+def lint_targets(target: Path, paths: list[Path] | None = None) -> tuple[HandoffLintResult, ...]:
+    target = target.expanduser().resolve()
+    candidates = tuple(_resolve_lint_path(target, path) for path in paths) if paths else _pending_handoff_paths(target)
+    return tuple(lint_file(path) for path in candidates)
+
+
+def lint_file(path: Path) -> HandoffLintResult:
+    path = path.expanduser().resolve()
+    errors: list[str] = []
+    warnings: list[str] = []
+    action: str | None = None
+    try:
+        text = path.read_text(errors="replace")
+    except OSError as exc:
+        return HandoffLintResult(
+            path=path,
+            action=None,
+            valid=False,
+            errors=(f"cannot read handoff file: {exc}",),
+            warnings=(),
+        )
+
+    sections = _parse_markdown_sections(text)
+    for required in ("Type", "Title", "Summary", "Recommended memory action"):
+        if required not in sections or not _section_value(sections, required):
+            errors.append(f"missing required section: {required}")
+
+    action_value = _section_value(sections, "Recommended memory action")
+    if action_value:
+        action = action_value.splitlines()[0].strip().casefold()
+        if action not in HANDOFF_ACTIONS:
+            errors.append(
+                "Recommended memory action must be one of: "
+                + ", ".join(HANDOFF_ACTIONS)
+            )
+
+    if action in CARD_ACTIONS:
+        _lint_card_action(sections, errors, warnings)
+    elif action == NO_CARD_ACTION:
+        _lint_no_card_action(sections, errors)
+
+    return HandoffLintResult(
+        path=path,
+        action=action,
+        valid=not errors,
+        errors=tuple(errors),
+        warnings=tuple(warnings),
+    )
 
 
 def issues(
@@ -418,6 +565,127 @@ def doctor(*, target: Path, sources: Path | None = None, json_output: bool = Fal
         for status, name, detail in doctor_checks(health.target, sources=health.sources_path):
             print(f"[{status}] {name}: {detail}")
     return 1 if health.failures else 0
+
+
+def _resolve_lint_path(target: Path, path: Path) -> Path:
+    path = path.expanduser()
+    if not path.is_absolute():
+        path = target / path
+    return path.resolve()
+
+
+def _pending_handoff_paths(target: Path) -> tuple[Path, ...]:
+    paths: list[Path] = []
+    for rel in WRITER_INBOXES:
+        inbox = target / rel
+        if not inbox.is_dir():
+            continue
+        for candidate in inbox.glob("*.md"):
+            if not candidate.is_file():
+                continue
+            if candidate.name.startswith(".") or candidate.name in IGNORED_HANDOFF_NAMES:
+                continue
+            paths.append(candidate.resolve())
+    return tuple(sorted(paths))
+
+
+def _parse_markdown_sections(text: str) -> dict[str, str]:
+    sections: dict[str, list[str]] = {}
+    current: str | None = None
+    for line in text.splitlines():
+        if line.startswith("## "):
+            current = line[3:].strip()
+            sections.setdefault(current, [])
+            continue
+        if current is not None:
+            sections[current].append(line)
+    return {name: "\n".join(lines).strip() for name, lines in sections.items()}
+
+
+def _section_value(sections: dict[str, str], name: str) -> str:
+    raw = sections.get(name, "")
+    lines: list[str] = []
+    in_comment = False
+    for line in raw.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if stripped.startswith("<!--"):
+            in_comment = not stripped.endswith("-->")
+            continue
+        if in_comment:
+            if stripped.endswith("-->"):
+                in_comment = False
+            continue
+        lines.append(line.rstrip())
+    return "\n".join(lines).strip()
+
+
+def _lint_card_action(
+    sections: dict[str, str],
+    errors: list[str],
+    warnings: list[str],
+) -> None:
+    target_card = _section_value(sections, "Target card")
+    if not target_card:
+        errors.append("card handoffs require Target card")
+    elif not CARD_TARGET_PATTERN.fullmatch(target_card.splitlines()[0].strip()):
+        errors.append("Target card must be a filename like project-context.md with no path separators")
+
+    suggested_card = _section_value(sections, "Suggested card content")
+    if not suggested_card:
+        errors.append("card handoffs require Suggested card content")
+    elif not suggested_card.startswith("---"):
+        errors.append("Suggested card content must start with YAML frontmatter")
+
+    for prohibited in ("Target document", "Suggested document content"):
+        if prohibited in sections:
+            errors.append(f"card handoffs must omit the {prohibited} section entirely")
+
+    if "## " in suggested_card:
+        warnings.append("Suggested card content contains level-2 markdown headings, which may be parsed as handoff sections")
+
+
+def _lint_no_card_action(sections: dict[str, str], errors: list[str]) -> None:
+    target_document = _section_value(sections, "Target document")
+    if not target_document:
+        errors.append("no-card handoffs require Target document")
+    elif not _valid_document_target(target_document.splitlines()[0].strip()):
+        errors.append("Target document must be TOOLS.md, USER.md, rules/*.md, or .learnings/*.md")
+
+    suggested_document = _section_value(sections, "Suggested document content")
+    if not suggested_document:
+        errors.append("no-card handoffs require Suggested document content")
+    elif any(line.startswith("## ") for line in suggested_document.splitlines()):
+        errors.append("Suggested document content must not contain level-2 markdown headings")
+
+    for prohibited in ("Target card", "Suggested card content"):
+        if prohibited in sections:
+            errors.append(f"no-card handoffs must omit the {prohibited} section entirely")
+
+
+def _valid_document_target(value: str) -> bool:
+    if value.startswith("/") or ".." in Path(value).parts:
+        return False
+    if value in DOCUMENT_TARGETS:
+        return True
+    return any(value.startswith(prefix) and value.endswith(".md") for prefix in DOCUMENT_TARGET_PREFIXES)
+
+
+def _lint_repair_for_result(result: HandoffLintResult) -> str:
+    if result.action in CARD_ACTIONS:
+        return (
+            "Keep only the card branch in the handoff: Recommended memory action "
+            f"{result.action}, Target card, and Suggested card content. "
+            "Delete Target document and Suggested document content sections entirely."
+        )
+    if result.action == NO_CARD_ACTION:
+        return (
+            "Keep only the document branch in the handoff: Recommended memory action no-card, "
+            "Target document, and Suggested document content. Delete Target card and "
+            "Suggested card content sections entirely."
+        )
+    return "Rewrite the handoff with exactly one valid action branch before rerunning the ingestor."
 
 
 def _issues_payload(target: Path, found: list[HandoffIssue]) -> dict[str, Any]:

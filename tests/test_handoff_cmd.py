@@ -7,6 +7,120 @@ from brigade import cli
 from brigade import handoff_cmd
 
 
+CARD_HANDOFF = """# Memory Handoff
+
+## Type
+learning
+
+## Title
+Handoff lint cards
+
+## Summary
+Card handoffs should be promotable.
+
+## Recommended memory action
+create-card
+
+## Target card
+handoff-lint-cards.md
+
+## Suggested card content
+---
+topic: handoff-lint-cards
+category: foundation
+tags: [memory, handoff]
+---
+
+# Handoff lint cards
+
+Card handoffs only include card fields.
+"""
+
+
+NO_CARD_HANDOFF = """# Memory Handoff
+
+## Type
+learning
+
+## Title
+Handoff lint documents
+
+## Summary
+Document handoffs should be routable.
+
+## Recommended memory action
+no-card
+
+## Target document
+.learnings/LEARNINGS.md
+
+## Suggested document content
+### Handoff lint documents
+
+Document handoffs only include document fields.
+"""
+
+
+def test_handoff_lint_accepts_card_handoff_without_document_sections(tmp_path, capsys):
+    path = tmp_path / "note.md"
+    path.write_text(CARD_HANDOFF)
+
+    assert handoff_cmd.lint(target=tmp_path, paths=[path]) == 0
+
+    out = capsys.readouterr().out
+    assert "[ok]" in out
+    assert "(create-card)" in out
+
+
+def test_handoff_lint_rejects_card_handoff_with_empty_document_sections(tmp_path, capsys):
+    path = tmp_path / "note.md"
+    path.write_text(CARD_HANDOFF + "\n## Target document\n\n## Suggested document content\n")
+
+    assert handoff_cmd.lint(target=tmp_path, paths=[path]) == 1
+
+    out = capsys.readouterr().out
+    assert "[fail]" in out
+    assert "card handoffs must omit the Target document section entirely" in out
+    assert "card handoffs must omit the Suggested document content section entirely" in out
+
+
+def test_handoff_lint_accepts_no_card_handoff_without_card_sections(tmp_path, capsys):
+    path = tmp_path / "note.md"
+    path.write_text(NO_CARD_HANDOFF)
+
+    assert handoff_cmd.lint(target=tmp_path, paths=[path]) == 0
+
+    out = capsys.readouterr().out
+    assert "[ok]" in out
+    assert "(no-card)" in out
+
+
+def test_handoff_lint_rejects_no_card_handoff_with_card_sections(tmp_path, capsys):
+    path = tmp_path / "note.md"
+    path.write_text(NO_CARD_HANDOFF + "\n## Target card\nextra.md\n\n## Suggested card content\n---\n")
+
+    assert handoff_cmd.lint(target=tmp_path, paths=[path]) == 1
+
+    out = capsys.readouterr().out
+    assert "[fail]" in out
+    assert "no-card handoffs must omit the Target card section entirely" in out
+    assert "no-card handoffs must omit the Suggested card content section entirely" in out
+
+
+def test_handoff_lint_defaults_to_pending_inboxes(tmp_path, capsys):
+    inbox = tmp_path / ".codex" / "memory-handoffs"
+    inbox.mkdir(parents=True)
+    (inbox / "TEMPLATE.md").write_text("# template\n")
+    (inbox / "2026-05-27-note.md").write_text(CARD_HANDOFF)
+
+    assert handoff_cmd.lint(target=tmp_path) == 0
+
+    out = capsys.readouterr().out
+    assert "files: 1" in out
+    assert "2026-05-27-note.md" in out
+    assert "TEMPLATE.md" not in out
+
+
 def test_handoff_doctor_warns_for_pending_handoff_without_source_config(tmp_path, capsys):
     inbox = tmp_path / ".claude" / "memory-handoffs"
     inbox.mkdir(parents=True)
@@ -27,7 +141,7 @@ def test_handoff_doctor_accepts_configured_claude_and_codex_inboxes(tmp_path, ca
     for rel in (".claude/memory-handoffs", ".codex/memory-handoffs"):
         inbox = tmp_path / rel
         inbox.mkdir(parents=True)
-        (inbox / "2026-05-27-note.md").write_text("# Memory Handoff\n")
+        (inbox / "2026-05-27-note.md").write_text(CARD_HANDOFF)
     config = tmp_path / ".brigade" / "handoff-sources.json"
     config.parent.mkdir()
     config.write_text(
@@ -54,6 +168,32 @@ def test_handoff_doctor_accepts_configured_claude_and_codex_inboxes(tmp_path, ca
     assert "pending=1" in out
     assert "watched=yes" in out
     assert "handoff_warning" not in out
+
+
+def test_handoff_doctor_warns_for_pending_lint_error(tmp_path, capsys):
+    inbox = tmp_path / ".claude" / "memory-handoffs"
+    inbox.mkdir(parents=True)
+    (inbox / "bad.md").write_text(CARD_HANDOFF + "\n## Target document\n\n## Suggested document content\n")
+
+    assert handoff_cmd.doctor(target=tmp_path) == 0
+
+    out = capsys.readouterr().out
+    assert "[warn] handoff_lint:" in out
+    assert "card handoffs must omit the Target document section entirely" in out
+
+
+def test_handoff_issues_include_pending_lint_errors(tmp_path, capsys):
+    inbox = tmp_path / ".claude" / "memory-handoffs"
+    inbox.mkdir(parents=True)
+    (inbox / "bad.md").write_text(CARD_HANDOFF + "\n## Target document\n\n## Suggested document content\n")
+
+    assert handoff_cmd.issues(target=tmp_path, categories=["lint"], json_output=True) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["by_category"] == {"lint": 1}
+    issue = payload["issues"][0]
+    assert "Fix pending handoff lint error in bad.md" in issue["text"]
+    assert "Delete Target document and Suggested document content sections entirely" in issue["repair"]
 
 
 def test_handoff_doctor_fails_invalid_source_config(tmp_path, capsys):
@@ -288,6 +428,20 @@ def test_handoff_doctor_cli(tmp_path, monkeypatch):
 
     assert cli.main(["handoff", "doctor", "--target", str(tmp_path), "--json"]) == 0
     assert seen == {"target": tmp_path, "sources": None, "json_output": True}
+
+
+def test_handoff_lint_cli(tmp_path, monkeypatch):
+    seen = {}
+
+    def fake_lint(**kwargs):
+        seen.update(kwargs)
+        return 0
+
+    monkeypatch.setattr(handoff_cmd, "lint", fake_lint)
+
+    path = tmp_path / "note.md"
+    assert cli.main(["handoff", "lint", "--target", str(tmp_path), "--json", str(path)]) == 0
+    assert seen == {"target": tmp_path, "paths": [path], "json_output": True}
 
 
 def test_handoff_issues_cli(tmp_path, monkeypatch):
