@@ -886,6 +886,62 @@ def test_work_import_triage_groups_pending_imports(tmp_path, monkeypatch, capsys
     assert payload["groups"]["slack"]["decision"][0]["text"] == "Check chat decision"
 
 
+def test_work_import_list_and_triage_filter_by_metadata(tmp_path, monkeypatch, capsys):
+    _init_git_repo(tmp_path)
+    monkeypatch.setattr(
+        work_cmd,
+        "_now",
+        lambda: datetime(2026, 5, 26, 12, 0, 0, tzinfo=timezone.utc),
+    )
+    assert (
+        work_cmd.import_add(
+            target=tmp_path,
+            text="Repair skipped handoff",
+            kind="task",
+            source="handoff-ingest",
+            metadata=["handoff_issue_category=skip"],
+        )
+        == 0
+    )
+    assert (
+        work_cmd.import_add(
+            target=tmp_path,
+            text="Repair route skip",
+            kind="task",
+            source="handoff-ingest",
+            metadata=["handoff_issue_category=route-skip"],
+        )
+        == 0
+    )
+    capsys.readouterr()
+
+    assert (
+        work_cmd.import_list(
+            target=tmp_path,
+            json_output=True,
+            source="handoff-ingest",
+            kind="task",
+            metadata=["handoff_issue_category=skip"],
+        )
+        == 0
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert [item["text"] for item in payload["imports"]] == ["Repair skipped handoff"]
+
+    assert (
+        work_cmd.import_triage(
+            target=tmp_path,
+            json_output=True,
+            source="handoff-ingest",
+            metadata=["handoff_issue_category=route-skip"],
+        )
+        == 0
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["counts"]["total"] == 1
+    assert payload["groups"]["handoff-ingest"]["task"][0]["text"] == "Repair route skip"
+
+
 def test_work_import_promote_all_filters_by_source_and_kind(tmp_path, monkeypatch, capsys):
     _init_git_repo(tmp_path)
     monkeypatch.setattr(
@@ -920,6 +976,53 @@ def test_work_import_promote_all_filters_by_source_and_kind(tmp_path, monkeypatc
     assert [item["text"] for item in payload["imports"]] == ["Review chat note", "Record decision"]
 
 
+def test_work_import_promote_all_filters_by_metadata(tmp_path, monkeypatch, capsys):
+    _init_git_repo(tmp_path)
+    monkeypatch.setattr(
+        work_cmd,
+        "_now",
+        lambda: datetime(2026, 5, 26, 12, 0, 0, tzinfo=timezone.utc),
+    )
+    assert (
+        work_cmd.import_add(
+            target=tmp_path,
+            text="Fix route skip",
+            kind="task",
+            source="handoff-ingest",
+            metadata=["handoff_issue_category=route-skip"],
+        )
+        == 0
+    )
+    assert (
+        work_cmd.import_add(
+            target=tmp_path,
+            text="Fix malformed handoff",
+            kind="task",
+            source="handoff-ingest",
+            metadata=["handoff_issue_category=skip"],
+        )
+        == 0
+    )
+    capsys.readouterr()
+
+    assert (
+        work_cmd.import_promote(
+            target=tmp_path,
+            all_matching=True,
+            source="handoff-ingest",
+            metadata=["handoff_issue_category=route-skip"],
+        )
+        == 0
+    )
+    out = capsys.readouterr().out
+    assert "promoted: 1" in out
+    ledger = json.loads((tmp_path / ".brigade" / "work" / "tasks.json").read_text())
+    assert [task["text"] for task in ledger["tasks"]] == ["Fix route skip"]
+    assert work_cmd.import_list(target=tmp_path, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert [item["text"] for item in payload["imports"]] == ["Fix malformed handoff"]
+
+
 def test_work_import_dismiss_marks_import_not_pending(tmp_path, monkeypatch, capsys):
     _init_git_repo(tmp_path)
     monkeypatch.setattr(
@@ -940,6 +1043,68 @@ def test_work_import_dismiss_marks_import_not_pending(tmp_path, monkeypatch, cap
     payload = json.loads(capsys.readouterr().out)
     assert payload["imports"][0]["status"] == "dismissed"
     assert payload["imports"][0]["dismiss_reason"] == "not actionable"
+
+
+def test_work_import_dismiss_all_filters_by_source_kind_and_metadata(tmp_path, monkeypatch, capsys):
+    _init_git_repo(tmp_path)
+    monkeypatch.setattr(
+        work_cmd,
+        "_now",
+        lambda: datetime(2026, 5, 26, 12, 0, 0, tzinfo=timezone.utc),
+    )
+    assert (
+        work_cmd.import_add(
+            target=tmp_path,
+            text="Dismiss skipped historical handoff",
+            kind="task",
+            source="handoff-ingest",
+            metadata=["handoff_issue_category=skip"],
+        )
+        == 0
+    )
+    assert (
+        work_cmd.import_add(
+            target=tmp_path,
+            text="Keep route skip",
+            kind="task",
+            source="handoff-ingest",
+            metadata=["handoff_issue_category=route-skip"],
+        )
+        == 0
+    )
+    assert work_cmd.import_add(target=tmp_path, text="Keep incident", kind="incident", source="handoff-ingest") == 0
+    capsys.readouterr()
+
+    assert (
+        work_cmd.import_dismiss(
+            target=tmp_path,
+            all_matching=True,
+            kind="task",
+            source="handoff-ingest",
+            metadata=["handoff_issue_category=skip"],
+            reason="historical noise",
+        )
+        == 0
+    )
+    out = capsys.readouterr().out
+    assert "dismissed: 1" in out
+    assert "reason: historical noise" in out
+
+    assert work_cmd.import_list(target=tmp_path, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert [item["text"] for item in payload["imports"]] == ["Keep route skip", "Keep incident"]
+    assert work_cmd.import_list(target=tmp_path, all_imports=True, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    dismissed = [item for item in payload["imports"] if item["text"] == "Dismiss skipped historical handoff"][0]
+    assert dismissed["status"] == "dismissed"
+    assert dismissed["dismiss_reason"] == "historical noise"
+
+
+def test_work_import_dismiss_all_requires_id_or_all(tmp_path, capsys):
+    _init_git_repo(tmp_path)
+
+    assert work_cmd.import_dismiss(target=tmp_path) == 2
+    assert "import id is required unless --all is passed" in capsys.readouterr().err
 
 
 def test_work_import_promote_rejects_non_pending_import(tmp_path, monkeypatch, capsys):
@@ -1592,7 +1757,28 @@ def test_work_import_cli(tmp_path, monkeypatch):
         )
         == 0
     )
-    assert cli.main(["work", "import", "list", "--target", str(tmp_path), "--all", "--json", "--limit", "3"]) == 0
+    assert (
+        cli.main(
+            [
+                "work",
+                "import",
+                "list",
+                "--target",
+                str(tmp_path),
+                "--all",
+                "--json",
+                "--limit",
+                "3",
+                "--source",
+                "handoff-ingest",
+                "--kind",
+                "task",
+                "--metadata",
+                "handoff_issue_category=skip",
+            ]
+        )
+        == 0
+    )
     assert cli.main(["work", "import", "validate", str(tmp_path / "imports.jsonl"), "--json"]) == 0
     assert (
         cli.main(
@@ -1641,7 +1827,25 @@ def test_work_import_cli(tmp_path, monkeypatch):
         )
         == 0
     )
-    assert cli.main(["work", "import", "triage", "--target", str(tmp_path), "--json", "--limit", "4"]) == 0
+    assert (
+        cli.main(
+            [
+                "work",
+                "import",
+                "triage",
+                "--target",
+                str(tmp_path),
+                "--json",
+                "--limit",
+                "4",
+                "--source",
+                "handoff-ingest",
+                "--metadata",
+                "handoff_issue_category=route-skip",
+            ]
+        )
+        == 0
+    )
     assert cli.main(["work", "import", "show", "imp123", "--target", str(tmp_path)]) == 0
     assert (
         cli.main(
@@ -1656,11 +1860,33 @@ def test_work_import_cli(tmp_path, monkeypatch):
                 "task",
                 "--source",
                 "memory-care",
+                "--metadata",
+                "handoff_issue_category=skip",
             ]
         )
         == 0
     )
-    assert cli.main(["work", "import", "dismiss", "imp123", "--target", str(tmp_path), "--reason", "noise"]) == 0
+    assert (
+        cli.main(
+            [
+                "work",
+                "import",
+                "dismiss",
+                "--target",
+                str(tmp_path),
+                "--all",
+                "--kind",
+                "task",
+                "--source",
+                "handoff-ingest",
+                "--metadata",
+                "handoff_issue_category=skip",
+                "--reason",
+                "noise",
+            ]
+        )
+        == 0
+    )
     assert seen == [
         (
             "add",
@@ -1672,7 +1898,18 @@ def test_work_import_cli(tmp_path, monkeypatch):
                 "metadata": ["channel=dev"],
             },
         ),
-        ("list", {"target": tmp_path, "all_imports": True, "json_output": True, "limit": 3}),
+        (
+            "list",
+            {
+                "target": tmp_path,
+                "all_imports": True,
+                "json_output": True,
+                "limit": 3,
+                "source": "handoff-ingest",
+                "kind": "task",
+                "metadata": ["handoff_issue_category=skip"],
+            },
+        ),
         ("validate", {"input_path": tmp_path / "imports.jsonl", "json_output": True}),
         (
             "ingest",
@@ -1701,7 +1938,17 @@ def test_work_import_cli(tmp_path, monkeypatch):
                 "json_output": True,
             },
         ),
-        ("triage", {"target": tmp_path, "json_output": True, "limit": 4}),
+        (
+            "triage",
+            {
+                "target": tmp_path,
+                "json_output": True,
+                "limit": 4,
+                "source": "handoff-ingest",
+                "kind": None,
+                "metadata": ["handoff_issue_category=route-skip"],
+            },
+        ),
         ("show", {"target": tmp_path, "import_id": "imp123"}),
         (
             "promote",
@@ -1711,9 +1958,21 @@ def test_work_import_cli(tmp_path, monkeypatch):
                 "all_matching": True,
                 "kind": "task",
                 "source": "memory-care",
+                "metadata": ["handoff_issue_category=skip"],
             },
         ),
-        ("dismiss", {"target": tmp_path, "import_id": "imp123", "reason": "noise"}),
+        (
+            "dismiss",
+            {
+                "target": tmp_path,
+                "import_id": None,
+                "reason": "noise",
+                "all_matching": True,
+                "kind": "task",
+                "source": "handoff-ingest",
+                "metadata": ["handoff_issue_category=skip"],
+            },
+        ),
     ]
 
 

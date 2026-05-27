@@ -246,6 +246,37 @@ def test_handoff_import_issues_dedupes_existing_pending_imports(tmp_path, capsys
     assert "skipped_duplicates: 1" in out
 
 
+def test_handoff_import_issues_filters_by_category(tmp_path, capsys):
+    log = tmp_path / "latest.log"
+    log.write_text(
+        "\n".join(
+            [
+                "SKIP bad.md: no recognizable markdown sections found",
+                "ROUTE-SKIP note.md: action is not no-card",
+                "",
+            ]
+        )
+    )
+    config = tmp_path / ".brigade" / "handoff-sources.json"
+    config.parent.mkdir()
+    config.write_text(
+        json.dumps(
+            {
+                "sources": [{"root": ".", "inboxes": [".claude/memory-handoffs"]}],
+                "ingestor": {"last_run_log": "latest.log"},
+            }
+        )
+    )
+
+    assert handoff_cmd.import_issues(target=tmp_path, categories=["route-skip"]) == 0
+
+    out = capsys.readouterr().out
+    assert "issues: 1" in out
+    assert "imported: 1" in out
+    item = json.loads((tmp_path / ".brigade" / "work" / "imports" / "inbox.jsonl").read_text().splitlines()[0])
+    assert item["metadata"]["handoff_issue_category"] == "route-skip"
+
+
 def test_handoff_doctor_cli(tmp_path, monkeypatch):
     seen = {}
 
@@ -268,8 +299,23 @@ def test_handoff_issues_cli(tmp_path, monkeypatch):
 
     monkeypatch.setattr(handoff_cmd, "issues", fake_issues)
 
-    assert cli.main(["handoff", "issues", "--target", str(tmp_path), "--json", "--limit", "7"]) == 0
-    assert seen == {"target": tmp_path, "sources": None, "json_output": True, "limit": 7}
+    assert (
+        cli.main(
+            [
+                "handoff",
+                "issues",
+                "--target",
+                str(tmp_path),
+                "--json",
+                "--limit",
+                "7",
+                "--category",
+                "skip",
+            ]
+        )
+        == 0
+    )
+    assert seen == {"target": tmp_path, "sources": None, "json_output": True, "limit": 7, "categories": ["skip"]}
 
 
 def test_handoff_import_issues_cli(tmp_path, monkeypatch):
@@ -281,5 +327,19 @@ def test_handoff_import_issues_cli(tmp_path, monkeypatch):
 
     monkeypatch.setattr(handoff_cmd, "import_issues", fake_import_issues)
 
-    assert cli.main(["handoff", "import-issues", "--target", str(tmp_path), "--dry-run", "--json"]) == 0
-    assert seen == {"target": tmp_path, "sources": None, "dry_run": True, "json_output": True}
+    assert (
+        cli.main(
+            [
+                "handoff",
+                "import-issues",
+                "--target",
+                str(tmp_path),
+                "--dry-run",
+                "--json",
+                "--category",
+                "route-skip",
+            ]
+        )
+        == 0
+    )
+    assert seen == {"target": tmp_path, "sources": None, "dry_run": True, "json_output": True, "categories": ["route-skip"]}

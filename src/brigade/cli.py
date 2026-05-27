@@ -120,11 +120,13 @@ def _build_parser() -> argparse.ArgumentParser:
     p_handoff_issues.add_argument("--sources", type=Path, default=None, help="Override .brigade/handoff-sources.json.")
     p_handoff_issues.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_handoff_issues.add_argument("--limit", type=int, default=20, help="Maximum issue rows to print.")
+    p_handoff_issues.add_argument("--category", action="append", default=[], help="Limit to one issue category. May be repeated.")
     p_handoff_import_issues = handoff_sub.add_parser("import-issues", help="Import handoff ingest issues into the work inbox.")
     p_handoff_import_issues.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
     p_handoff_import_issues.add_argument("--sources", type=Path, default=None, help="Override .brigade/handoff-sources.json.")
     p_handoff_import_issues.add_argument("--dry-run", action="store_true", help="Report without writing imports.")
     p_handoff_import_issues.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_handoff_import_issues.add_argument("--category", action="append", default=[], help="Import only one issue category. May be repeated.")
 
     # work
     p_work = sub.add_parser("work", help="Inspect and manage a daily Brigade work session.")
@@ -199,6 +201,14 @@ def _build_parser() -> argparse.ArgumentParser:
     p_work_import_list.add_argument("--all", action="store_true", help="Include promoted imports.")
     p_work_import_list.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_work_import_list.add_argument("--limit", type=int, default=20, help="Maximum imports to show.")
+    p_work_import_list.add_argument("--source", default=None, help="Filter by import source.")
+    p_work_import_list.add_argument(
+        "--kind",
+        choices=["task", "finding", "decision", "preference", "incident", "link", "command"],
+        default=None,
+        help="Filter by import kind.",
+    )
+    p_work_import_list.add_argument("--metadata", action="append", default=[], help="Filter by metadata key=value. May be repeated.")
     p_work_import_validate = import_sub.add_parser("validate", help="Validate a work import JSONL file.")
     p_work_import_validate.add_argument("input_path", type=Path, help="JSONL file to validate.")
     p_work_import_validate.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
@@ -232,6 +242,14 @@ def _build_parser() -> argparse.ArgumentParser:
     p_work_import_triage.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
     p_work_import_triage.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_work_import_triage.add_argument("--limit", type=int, default=50, help="Maximum imports per group to show.")
+    p_work_import_triage.add_argument("--source", default=None, help="Filter by import source.")
+    p_work_import_triage.add_argument(
+        "--kind",
+        choices=["task", "finding", "decision", "preference", "incident", "link", "command"],
+        default=None,
+        help="Filter by import kind.",
+    )
+    p_work_import_triage.add_argument("--metadata", action="append", default=[], help="Filter by metadata key=value. May be repeated.")
     p_work_import_show = import_sub.add_parser("show", help="Show one work import.")
     p_work_import_show.add_argument("import_id", help="Import id or unique prefix.")
     p_work_import_show.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
@@ -246,9 +264,19 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Limit --all promotion to one kind.",
     )
     p_work_import_promote.add_argument("--source", default=None, help="Limit --all promotion to one source.")
+    p_work_import_promote.add_argument("--metadata", action="append", default=[], help="Limit --all promotion by metadata key=value. May be repeated.")
     p_work_import_dismiss = import_sub.add_parser("dismiss", help="Dismiss one pending work import.")
-    p_work_import_dismiss.add_argument("import_id", help="Import id or unique prefix.")
+    p_work_import_dismiss.add_argument("import_id", nargs="?", help="Import id or unique prefix.")
     p_work_import_dismiss.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
+    p_work_import_dismiss.add_argument("--all", action="store_true", help="Dismiss all pending imports matching filters.")
+    p_work_import_dismiss.add_argument(
+        "--kind",
+        choices=["task", "finding", "decision", "preference", "incident", "link", "command"],
+        default=None,
+        help="Limit --all dismissal to one kind.",
+    )
+    p_work_import_dismiss.add_argument("--source", default=None, help="Limit --all dismissal to one source.")
+    p_work_import_dismiss.add_argument("--metadata", action="append", default=[], help="Limit --all dismissal by metadata key=value. May be repeated.")
     p_work_import_dismiss.add_argument("--reason", default=None, help="Optional dismiss reason.")
     p_work_list = work_sub.add_parser("list", help="List recent Brigade work sessions.")
     p_work_list.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
@@ -651,9 +679,21 @@ def main(argv=None) -> int:
         if args.handoff_command == "doctor":
             return handoff_cmd.doctor(target=args.target, sources=args.sources, json_output=args.json)
         if args.handoff_command == "issues":
-            return handoff_cmd.issues(target=args.target, sources=args.sources, json_output=args.json, limit=args.limit)
+            return handoff_cmd.issues(
+                target=args.target,
+                sources=args.sources,
+                json_output=args.json,
+                limit=args.limit,
+                categories=args.category,
+            )
         if args.handoff_command == "import-issues":
-            return handoff_cmd.import_issues(target=args.target, sources=args.sources, dry_run=args.dry_run, json_output=args.json)
+            return handoff_cmd.import_issues(
+                target=args.target,
+                sources=args.sources,
+                dry_run=args.dry_run,
+                json_output=args.json,
+                categories=args.category,
+            )
         parser.error(f"unknown handoff command: {args.handoff_command}")
         return 2
     if cmd == "work":
@@ -708,6 +748,9 @@ def main(argv=None) -> int:
                     all_imports=args.all,
                     json_output=args.json,
                     limit=args.limit,
+                    source=args.source,
+                    kind=args.kind,
+                    metadata=args.metadata,
                 )
             if args.import_command == "validate":
                 return work_cmd.import_validate(input_path=args.input_path, json_output=args.json)
@@ -733,7 +776,14 @@ def main(argv=None) -> int:
                     json_output=args.json,
                 )
             if args.import_command == "triage":
-                return work_cmd.import_triage(target=args.target, json_output=args.json, limit=args.limit)
+                return work_cmd.import_triage(
+                    target=args.target,
+                    json_output=args.json,
+                    limit=args.limit,
+                    source=args.source,
+                    kind=args.kind,
+                    metadata=args.metadata,
+                )
             if args.import_command == "show":
                 return work_cmd.import_show(target=args.target, import_id=args.import_id)
             if args.import_command == "promote":
@@ -743,9 +793,18 @@ def main(argv=None) -> int:
                     all_matching=args.all,
                     kind=args.kind,
                     source=args.source,
+                    metadata=args.metadata,
                 )
             if args.import_command == "dismiss":
-                return work_cmd.import_dismiss(target=args.target, import_id=args.import_id, reason=args.reason)
+                return work_cmd.import_dismiss(
+                    target=args.target,
+                    import_id=args.import_id,
+                    reason=args.reason,
+                    all_matching=args.all,
+                    kind=args.kind,
+                    source=args.source,
+                    metadata=args.metadata,
+                )
             parser.error(f"unknown import command: {args.import_command}")
             return 2
         if args.work_command == "list":

@@ -27,8 +27,8 @@ Goal: make Brigade a safe target for local automations that discover useful work
 - Let wrappers import candidate tasks, findings, decisions, preferences, incidents, links, and commands without knowing Brigade internals.
 - Convert memory-care refresh queues into local task imports.
 - Promote selected imports into the work task ledger, with source metadata preserved.
-- Dismiss noisy imports so scanners can be useful without leaving permanent queue clutter.
-- Batch-promote reviewed imports by source and kind.
+- Dismiss noisy imports so scanners can be useful without leaving permanent queue clutter. Status: started with single-item dismissal and filtered `dismiss --all`.
+- Batch-promote reviewed imports by source and kind. Status: started with source, kind, and metadata filters across list, triage, promote, and dismiss.
 - Surface pending imports and grouped counts in `brigade work brief` so discovered work appears in the daily flow.
 
 ## Later Phase: Chat Surface Scanners
