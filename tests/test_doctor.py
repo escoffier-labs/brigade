@@ -32,6 +32,52 @@ def test_doctor_reports_failures_on_empty_dir(tmp_target: Path, capsys):
     assert "[fail]" in out
 
 
+def test_doctor_reports_security_config_and_evidence_bundle(tmp_target: Path, capsys):
+    install_selection(
+        tmp_target,
+        Selection(depth="workspace", harnesses=["claude"], owner="claude", includes=[]),
+    )
+    from brigade import security_cmd
+
+    security_cmd.init(target=tmp_target)
+    security_dir = tmp_target / ".brigade" / "security" / "latest"
+    security_dir.mkdir(parents=True)
+    (security_dir / "security-report.json").write_text(
+        json.dumps(
+            {
+                "generated_at": "2026-05-26T12:00:00Z",
+                "finding_count": 0,
+                "policy": "personal",
+            }
+        )
+    )
+    (security_dir / "security-report.md").write_text("# Brigade Security Report\n")
+
+    rc = doctor_mod.run(target=tmp_target, harness="generic")
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "security: config" in out
+    assert "policy=personal" in out
+    assert "security: evidence bundle" in out
+    assert "findings=0" in out
+
+
+def test_doctor_fails_invalid_security_config(tmp_target: Path, capsys):
+    install_selection(
+        tmp_target,
+        Selection(depth="workspace", harnesses=["claude"], owner="claude", includes=[]),
+    )
+    security_config = tmp_target / ".brigade" / "security.toml"
+    security_config.parent.mkdir(exist_ok=True)
+    security_config.write_text('policy = "not-real"\n')
+
+    rc = doctor_mod.run(target=tmp_target, harness="generic")
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "security: config" in out
+    assert "invalid" in out
+
+
 def test_doctor_fails_when_bootstrap_file_exceeds_budget(tmp_target: Path, capsys):
     install_selection(
         tmp_target,

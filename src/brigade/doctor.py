@@ -83,7 +83,41 @@ def tokens_station_checks(ctx: DoctorContext) -> List[CheckResult]:
 
 
 def security_station_checks(ctx: DoctorContext) -> List[CheckResult]:
-    return [(OK, "security: built-in scanner", "run `brigade security scan --target .`")]
+    from . import dogfood_cmd, security_cmd
+
+    results: List[CheckResult] = [(OK, "security: built-in scanner", "available")]
+    config = security_cmd.config_path(ctx.target)
+    if config.is_file():
+        try:
+            loaded = security_cmd.load_config(ctx.target)
+        except ValueError as exc:
+            results.append((FAIL, "security: config", f"invalid {config}: {exc}"))
+        else:
+            results.append((OK, "security: config", f"{config} (policy={loaded.policy if loaded else 'personal'})"))
+    else:
+        results.append((WARN, "security: config", f"missing at {config}; run `brigade security init --target .`"))
+
+    artifacts_dir = security_cmd.default_artifacts_dir(ctx.target)
+    bundle = security_cmd.inspect_evidence_bundle(artifacts_dir)
+    if bundle.get("ready"):
+        detail = (
+            f"{artifacts_dir} "
+            f"(generated_at={bundle.get('generated_at')}, findings={bundle.get('finding_count')})"
+        )
+        results.append((OK, "security: evidence bundle", detail))
+    else:
+        results.append(
+            (
+                WARN,
+                "security: evidence bundle",
+                f"{bundle.get('reason')} at {artifacts_dir}; run `brigade security scan --output-dir {artifacts_dir}`",
+            )
+        )
+
+    ignored = dogfood_cmd._check_git_ignored(ctx.target, artifacts_dir)
+    level = OK if ignored in {"yes", "outside-target"} else WARN
+    results.append((level, "security: evidence ignored", ignored))
+    return results
 
 
 def run(target: Path, harness: str = "generic") -> int:

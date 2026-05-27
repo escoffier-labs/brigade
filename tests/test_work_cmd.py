@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 
 from brigade import cli
 from brigade import dogfood_cmd
+from brigade import security_cmd
 from brigade import work_cmd
 
 
@@ -72,6 +73,14 @@ def test_work_status_rejects_bad_limit(tmp_path, capsys):
 def test_work_doctor_reports_ready_repo(tmp_path, monkeypatch, capsys):
     _init_git_repo(tmp_path)
     dogfood_cmd.init(target=tmp_path)
+    security_cmd.init(target=tmp_path)
+    security_dir = tmp_path / ".brigade" / "security" / "latest"
+    security_dir.mkdir(parents=True)
+    _write_json(
+        security_dir / "security-report.json",
+        {"generated_at": "2026-05-26T12:00:00Z", "finding_count": 0, "policy": "personal"},
+    )
+    (security_dir / "security-report.md").write_text("# Brigade Security Report\n")
     run_dir = tmp_path / ".brigade" / "runs" / "latest"
     run_dir.mkdir(parents=True)
     _write_json(run_dir / "run.json", {"started_at": "2026-05-26T12:00:00Z", "status": "ok", "task": "review"})
@@ -85,9 +94,26 @@ def test_work_doctor_reports_ready_repo(tmp_path, monkeypatch, capsys):
     assert "[ok] target:" in out
     assert "[ok] git:" in out
     assert "[ok] dogfood_config:" in out
+    assert "[ok] security_config:" in out
+    assert "[ok] security_evidence:" in out
     assert "[ok] codex: /usr/bin/codex" in out
     assert "[ok] latest_next: Build doctor." in out
     assert "[ok] ready: daily work loop is usable" in out
+
+
+def test_work_doctor_fails_invalid_security_config(tmp_path, monkeypatch, capsys):
+    _init_git_repo(tmp_path)
+    dogfood_cmd.init(target=tmp_path)
+    security_config = tmp_path / ".brigade" / "security.toml"
+    security_config.write_text('policy = "not-real"\n')
+    monkeypatch.setattr(work_cmd.shutil, "which", lambda name: f"/usr/bin/{name}" if name == "codex" else None)
+    monkeypatch.setattr(dogfood_cmd, "_check_git_ignored", lambda repo, path: "yes")
+
+    assert work_cmd.doctor(target=tmp_path) == 1
+    out = capsys.readouterr().out
+    assert "[fail] security_config:" in out
+    assert "invalid" in out
+    assert "[fail] ready: 1 blocker" in out
 
 
 def test_work_doctor_reports_blockers(tmp_path, monkeypatch, capsys):

@@ -21,6 +21,7 @@ SEVERITY_ORDER = {
     "critical": 4,
 }
 CONFIG_REL_PATH = ".brigade/security.toml"
+ARTIFACTS_REL_PATH = ".brigade/security/latest"
 POLICIES = {
     "personal": {
         "fail_on": "critical",
@@ -111,6 +112,34 @@ class EffectivePolicy:
 
 def config_path(target: Path) -> Path:
     return target / CONFIG_REL_PATH
+
+
+def default_artifacts_dir(target: Path) -> Path:
+    return target / ARTIFACTS_REL_PATH
+
+
+def inspect_evidence_bundle(path: Path) -> dict[str, Any]:
+    path = path.expanduser().resolve()
+    json_path = path / "security-report.json"
+    markdown_path = path / "security-report.md"
+    if not path.is_dir():
+        return {"ready": False, "path": str(path), "reason": "missing"}
+    missing = [item.name for item in (json_path, markdown_path) if not item.is_file()]
+    if missing:
+        return {"ready": False, "path": str(path), "reason": f"missing {', '.join(missing)}"}
+    try:
+        payload = json.loads(json_path.read_text())
+    except json.JSONDecodeError as exc:
+        return {"ready": False, "path": str(path), "reason": f"invalid JSON: {exc}"}
+    if not isinstance(payload, dict):
+        return {"ready": False, "path": str(path), "reason": "security-report.json must contain an object"}
+    return {
+        "ready": True,
+        "path": str(path),
+        "generated_at": payload.get("generated_at"),
+        "finding_count": payload.get("finding_count"),
+        "policy": payload.get("policy"),
+    }
 
 
 def _parse_toml_value(raw: str) -> object:

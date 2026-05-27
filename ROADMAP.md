@@ -60,7 +60,7 @@ Brigade-specific additions:
 - Scan Claude Code, Codex, OpenCode, Gemini, Hermes, OpenClaw, VS Code, Zed, dmux, and generic repo-local agent harness surfaces with explicit runtime-confidence labels.
 - Understand Brigade installs: `.brigade/`, `.codex/`, `.claude/`, memory handoff inboxes, roster files, dogfood configs, run artifacts, work imports, memory-care decay files, and public template folders.
 - Treat public-template findings differently from active runtime findings so docs and starter templates do not score like live credentials or enabled tools.
-- Integrate with `brigade doctor` as a security station and with `brigade work import` so findings can become reviewable local tasks instead of only console output.
+- Integrate with `brigade doctor` as a security station and with `brigade work import` so findings can become reviewable local tasks instead of only console output. Status: started with doctor checks, work doctor checks, and `--import-findings`.
 - Provide safe auto-fix only for narrow cases such as replacing obvious hardcoded sample secrets, tightening generated allow-list examples, or adding missing ignore rules.
 - Produce Memory Handoffs for durable security findings while keeping raw secret evidence redacted.
 - Add policy packs for personal dogfooding, public-repo release checks, CI gates, and strict enterprise workspaces. Status: started with `personal`, `public-repo`, and `strict`.
@@ -72,7 +72,7 @@ First build slice:
 - Create a plugin scaffold and security scan contract. Status: started with built-in `security` station, `brigade security init`, and `brigade security scan`.
 - Start with config discovery and read-only reporting for Brigade, Claude Code, Codex, and MCP config files. Status: started.
 - Add core rule categories for secrets, permissions, hooks, MCP servers, supply-chain patterns, and agent instructions. Status: started.
-- Output JSON plus readable text, redacted evidence bundles, then route selected findings into `brigade work import`. Status: started with `--output-dir` and `--import-findings`.
+- Output JSON plus readable text, redacted evidence bundles, then route selected findings into `brigade work import`. Status: started with `--output-dir`, doctor evidence status, and `--import-findings`.
 - Keep all raw findings local and gitignored unless the operator explicitly exports an evidence pack. Status: current default.
 - Add local policy defaults, stable finding fingerprints, and suppressions. Status: started with `.brigade/security.toml`.
 

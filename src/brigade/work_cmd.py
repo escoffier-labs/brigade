@@ -2226,6 +2226,8 @@ def status(*, target: Path, limit: int = 12) -> int:
 
 
 def doctor(*, target: Path) -> int:
+    from . import security_cmd
+
     target = target.expanduser().resolve()
     failures = 0
 
@@ -2260,6 +2262,35 @@ def doctor(*, target: Path) -> int:
         _doctor_line(OK, "dogfood_target", effective_target)
         _doctor_line(OK, "dogfood_artifacts", artifacts_dir)
 
+    security_config = security_cmd.config_path(effective_target)
+    if security_config.is_file():
+        try:
+            loaded_security = security_cmd.load_config(effective_target)
+        except ValueError as exc:
+            failures += 1
+            _doctor_line(FAIL, "security_config", f"invalid {security_config}: {exc}")
+        else:
+            policy = loaded_security.policy if loaded_security is not None else "personal"
+            _doctor_line(OK, "security_config", f"{security_config} (policy={policy})")
+    else:
+        _doctor_line(WARN, "security_config", f"missing, run `brigade security init --target {effective_target}`")
+
+    security_artifacts = security_cmd.default_artifacts_dir(effective_target)
+    security_bundle = security_cmd.inspect_evidence_bundle(security_artifacts)
+    if security_bundle.get("ready"):
+        _doctor_line(
+            OK,
+            "security_evidence",
+            f"{security_artifacts} "
+            f"(generated_at={security_bundle.get('generated_at')}, findings={security_bundle.get('finding_count')})",
+        )
+    else:
+        _doctor_line(
+            WARN,
+            "security_evidence",
+            f"{security_bundle.get('reason')}; run `brigade security scan --target {effective_target} --output-dir {security_artifacts}`",
+        )
+
     codex_path = shutil.which("codex")
     if codex_path is None:
         failures += 1
@@ -2291,6 +2322,8 @@ def doctor(*, target: Path) -> int:
     _doctor_line(_doctor_ignore_level(config_ignored), "config_ignored", config_ignored)
     artifacts_ignored = dogfood_cmd._check_git_ignored(effective_target, artifacts_dir)
     _doctor_line(_doctor_ignore_level(artifacts_ignored), "artifacts_ignored", artifacts_ignored)
+    security_ignored = dogfood_cmd._check_git_ignored(effective_target, security_artifacts)
+    _doctor_line(_doctor_ignore_level(security_ignored), "security_ignored", security_ignored)
     work_ignored = dogfood_cmd._check_git_ignored(effective_target, work_root)
     _doctor_line(_doctor_ignore_level(work_ignored), "work_ignored", work_ignored)
     handoff_ignored = dogfood_cmd._check_git_ignored(effective_target, handoff_inbox)
