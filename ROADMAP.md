@@ -110,6 +110,8 @@ Goal: prevent durable memory from silently rotting.
 - Promote refresh candidates into tasks or memory handoffs after review.
 - Auto-fix only within safe gates where source evidence is current, low-risk, and locally reviewable.
 - Treat bootstrap truncation as a hard failure. Bootstrap files stay slim, cards hold durable detail, and doctor checks enforce the boundary.
+- Add a handoff doctor that compares repo-local writer inboxes such as `.claude/memory-handoffs/` and `.codex/memory-handoffs/` against the canonical ingestor source list, warning when handoffs exist in directories the owner is not scanning.
+- Add handoff-ingest observability checks for hidden warning states, including unreachable remote sources, malformed handoffs that are skipped, and runs that emit `NO_REPLY` despite warnings.
 
 ## Later Phase: Portable Operator Setup
 
