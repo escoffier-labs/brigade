@@ -60,6 +60,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `brigade handoff issues` and `brigade handoff import-issues` to turn handoff ingest warnings into grouped repair guidance and local work imports.
 - `brigade handoff issues --category` and `brigade handoff import-issues --category` for category-limited handoff issue review/import.
 - `brigade handoff lint` to validate pending or explicit handoff files before ingest and catch card/document action mismatches that would be skipped later.
+- `brigade handoff sync-issues` to import new handoff-ingest issues without resurrecting dismissed ones and close stale local handoff tasks/imports.
 - `docs/import-schema.md` documenting the local import JSONL contract for scanners and wrappers.
 - Cybersecurity plugin roadmap covering broad agent-workspace security checks plus Brigade-specific scanner, doctor, import, and multi-harness security checks.
 - Built-in `security` station and `brigade security scan` for read-only agent workspace security checks.

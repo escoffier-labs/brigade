@@ -131,6 +131,13 @@ def _build_parser() -> argparse.ArgumentParser:
     p_handoff_import_issues.add_argument("--dry-run", action="store_true", help="Report without writing imports.")
     p_handoff_import_issues.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_handoff_import_issues.add_argument("--category", action="append", default=[], help="Import only one issue category. May be repeated.")
+    p_handoff_sync_issues = handoff_sub.add_parser("sync-issues", help="Import current handoff issues and close stale local handoff work.")
+    p_handoff_sync_issues.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
+    p_handoff_sync_issues.add_argument("--sources", type=Path, default=None, help="Override .brigade/handoff-sources.json.")
+    p_handoff_sync_issues.add_argument("--dry-run", action="store_true", help="Report without writing imports or closing stale items.")
+    p_handoff_sync_issues.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_handoff_sync_issues.add_argument("--category", action="append", default=[], help="Sync only one issue category. May be repeated.")
+    p_handoff_sync_issues.add_argument("--no-close-stale", action="store_true", help="Do not dismiss stale imports or close stale tasks.")
 
     # work
     p_work = sub.add_parser("work", help="Inspect and manage a daily Brigade work session.")
@@ -699,6 +706,15 @@ def main(argv=None) -> int:
                 dry_run=args.dry_run,
                 json_output=args.json,
                 categories=args.category,
+            )
+        if args.handoff_command == "sync-issues":
+            return handoff_cmd.sync_issues(
+                target=args.target,
+                sources=args.sources,
+                dry_run=args.dry_run,
+                json_output=args.json,
+                categories=args.category,
+                close_stale=not args.no_close_stale,
             )
         parser.error(f"unknown handoff command: {args.handoff_command}")
         return 2

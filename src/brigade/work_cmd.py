@@ -962,6 +962,8 @@ def _brief_payload(target: Path, *, limit: int = 3) -> dict[str, Any]:
     pending_imports = _pending_imports(target)
     pending_import_counts = _import_counts(pending_imports)
     handoff_issues = handoff_cmd.collect_issues(target)
+    known_handoff_issue_ids = handoff_cmd._known_local_issue_ids(target)
+    new_handoff_issues = [issue for issue in handoff_issues if issue.id not in known_handoff_issue_ids]
     return {
         "target": str(target),
         "git": git,
@@ -975,8 +977,13 @@ def _brief_payload(target: Path, *, limit: int = 3) -> dict[str, Any]:
         "pending_imports": pending_imports,
         "pending_import_counts": pending_import_counts,
         "handoff_issues": {
-            "count": len(handoff_issues),
-            "by_category": handoff_cmd._issue_counts(handoff_issues),
+            "count": len(new_handoff_issues),
+            "known_count": len(handoff_issues) - len(new_handoff_issues),
+            "total_count": len(handoff_issues),
+            "by_category": handoff_cmd._issue_counts(new_handoff_issues),
+            "known_by_category": handoff_cmd._issue_counts(
+                [issue for issue in handoff_issues if issue.id in known_handoff_issue_ids]
+            ),
         },
         "dogfood": resolved["dogfood"],
         "next_source": resolved["source"],
@@ -1448,12 +1455,14 @@ def brief(*, target: Path, limit: int = 3, json_output: bool = False) -> int:
 
     handoff_issues = payload.get("handoff_issues")
     if isinstance(handoff_issues, dict) and handoff_issues.get("count"):
-        print(f"handoff_ingest_issues_pending: {handoff_issues.get('count')}")
+        print(f"handoff_ingest_issues_new: {handoff_issues.get('count')}")
         by_category = handoff_issues.get("by_category")
         if isinstance(by_category, dict) and by_category:
             print("handoff_ingest_issues_by_category:")
             for category, count in by_category.items():
                 print(f"  {category}: {count}")
+    if isinstance(handoff_issues, dict) and handoff_issues.get("known_count"):
+        print(f"handoff_ingest_issues_known: {handoff_issues.get('known_count')}")
 
     recent = payload["recent_sessions"]
     if isinstance(recent, list) and recent:

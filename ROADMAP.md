@@ -126,6 +126,7 @@ Goal: prevent durable memory from silently rotting.
 - Add handoff-ingest observability checks for hidden warning states, including unreachable remote sources, malformed handoffs that are skipped, and runs that emit `NO_REPLY` despite warnings. Status: started with optional `ingestor.last_run_log` checks in `brigade handoff doctor`.
 - Turn handoff-ingest warnings into repairable local work. Status: started with `brigade handoff issues`, `brigade handoff import-issues`, repair guidance, and `brigade work brief` issue counts.
 - Catch handoff action/target mismatches before ingest. Status: started with `brigade handoff lint`, doctor warnings, issue imports, and template guidance that forces card and document handoffs into mutually exclusive branches.
+- Keep the daily brief quiet after fixes land. Status: started with `brigade handoff sync-issues`, known issue suppression in `work brief`, and stale handoff-ingest task/import cleanup.
 
 ## Later Phase: Portable Operator Setup
 

@@ -5,6 +5,7 @@ import os
 
 from brigade import cli
 from brigade import handoff_cmd
+from brigade import work_cmd
 
 
 CARD_HANDOFF = """# Memory Handoff
@@ -427,6 +428,177 @@ def test_handoff_import_issues_filters_by_category(tmp_path, capsys):
     assert item["metadata"]["handoff_issue_category"] == "route-skip"
 
 
+def test_handoff_sync_issues_imports_new_and_closes_stale_local_work(tmp_path, capsys):
+    log = tmp_path / "latest.log"
+    log.write_text("SKIP current.md: no recognizable markdown sections found\n")
+    config = tmp_path / ".brigade" / "handoff-sources.json"
+    config.parent.mkdir()
+    config.write_text(
+        json.dumps(
+            {
+                "sources": [{"root": ".", "inboxes": [".claude/memory-handoffs"]}],
+                "ingestor": {"last_run_log": "latest.log"},
+            }
+        )
+    )
+    stale_metadata = {
+        "handoff_issue_id": "handoff-route-skip-old",
+        "handoff_issue_category": "route-skip",
+    }
+    stale_import = work_cmd._make_import(
+        "Fix old route skip",
+        kind="task",
+        source="handoff-ingest",
+        metadata=stale_metadata,
+    )
+    work_cmd._write_imports(tmp_path, [stale_import])
+    stale_task, _ = work_cmd._add_task(
+        tmp_path,
+        "Fix old route skip",
+        source="import:handoff-ingest",
+        metadata=stale_metadata,
+    )
+
+    assert handoff_cmd.sync_issues(target=tmp_path, json_output=True) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["issues"] == 1
+    assert payload["imported"] == 1
+    assert payload["stale_imports_closed"] == 1
+    assert payload["stale_tasks_closed"] == 1
+    imports = work_cmd._read_imports(tmp_path)
+    assert imports[0]["status"] == "dismissed"
+    assert imports[0]["dismiss_reason"] == "resolved or absent from latest handoff issue scan"
+    assert imports[1]["status"] == "pending"
+    assert imports[1]["metadata"]["handoff_issue_category"] == "skip"
+    task, _ = work_cmd._find_task(tmp_path, stale_task["id"])
+    assert task is not None
+    assert task["status"] == "done"
+    assert task["completion_reason"] == "resolved or absent from latest handoff issue scan"
+
+
+def test_handoff_sync_issues_does_not_reimport_dismissed_known_issue(tmp_path, capsys):
+    log = tmp_path / "latest.log"
+    log.write_text("SKIP current.md: no recognizable markdown sections found\n")
+    config = tmp_path / ".brigade" / "handoff-sources.json"
+    config.parent.mkdir()
+    config.write_text(
+        json.dumps(
+            {
+                "sources": [{"root": ".", "inboxes": [".claude/memory-handoffs"]}],
+                "ingestor": {"last_run_log": "latest.log"},
+            }
+        )
+    )
+    issue = handoff_cmd.collect_issues(tmp_path)[0]
+    dismissed = work_cmd._make_import(
+        issue.text,
+        kind=issue.kind,
+        source="handoff-ingest",
+        metadata=issue.as_import_record()["metadata"],
+    )
+    dismissed["status"] = "dismissed"
+    work_cmd._write_imports(tmp_path, [dismissed])
+
+    assert handoff_cmd.sync_issues(target=tmp_path, json_output=True) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["issues"] == 1
+    assert payload["known_issues"] == 1
+    assert payload["new_issues"] == 0
+    assert payload["imported"] == 0
+    assert len(work_cmd._read_imports(tmp_path)) == 1
+
+
+def test_handoff_sync_issues_closes_covered_warning_summary(tmp_path, capsys):
+    log = tmp_path / "latest.log"
+    log.write_text(
+        "\n".join(
+            [
+                "SKIP current.md: no recognizable markdown sections found",
+                "Warnings: 1",
+                "",
+            ]
+        )
+    )
+    config = tmp_path / ".brigade" / "handoff-sources.json"
+    config.parent.mkdir()
+    config.write_text(
+        json.dumps(
+            {
+                "sources": [{"root": ".", "inboxes": [".claude/memory-handoffs"]}],
+                "ingestor": {"last_run_log": "latest.log"},
+            }
+        )
+    )
+    issues = handoff_cmd.collect_issues(tmp_path)
+    skip_issue = [issue for issue in issues if issue.category == "skip"][0]
+    summary_issue = [issue for issue in issues if issue.category == "warning-summary"][0]
+    dismissed_skip = work_cmd._make_import(
+        skip_issue.text,
+        kind=skip_issue.kind,
+        source="handoff-ingest",
+        metadata=skip_issue.as_import_record()["metadata"],
+    )
+    dismissed_skip["status"] = "dismissed"
+    pending_summary = work_cmd._make_import(
+        summary_issue.text,
+        kind=summary_issue.kind,
+        source="handoff-ingest",
+        metadata=summary_issue.as_import_record()["metadata"],
+    )
+    work_cmd._write_imports(tmp_path, [dismissed_skip, pending_summary])
+
+    assert handoff_cmd.sync_issues(target=tmp_path, json_output=True) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["covered_summary_issues"] == 1
+    assert payload["imported"] == 0
+    assert payload["stale_imports_closed"] == 1
+    imports = work_cmd._read_imports(tmp_path)
+    assert imports[1]["status"] == "dismissed"
+    assert imports[1]["dismiss_reason"] == "covered by known concrete handoff issue lines"
+
+
+def test_handoff_sync_issues_dry_run_does_not_write(tmp_path, capsys):
+    log = tmp_path / "latest.log"
+    log.write_text("SKIP current.md: no recognizable markdown sections found\n")
+    config = tmp_path / ".brigade" / "handoff-sources.json"
+    config.parent.mkdir()
+    config.write_text(
+        json.dumps(
+            {
+                "sources": [{"root": ".", "inboxes": [".claude/memory-handoffs"]}],
+                "ingestor": {"last_run_log": "latest.log"},
+            }
+        )
+    )
+    stale_metadata = {
+        "handoff_issue_id": "handoff-route-skip-old",
+        "handoff_issue_category": "route-skip",
+    }
+    work_cmd._write_imports(
+        tmp_path,
+        [
+            work_cmd._make_import(
+                "Fix old route skip",
+                kind="task",
+                source="handoff-ingest",
+                metadata=stale_metadata,
+            )
+        ],
+    )
+
+    assert handoff_cmd.sync_issues(target=tmp_path, dry_run=True, json_output=True) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["imported"] == 1
+    assert payload["stale_imports_closed"] == 1
+    imports = work_cmd._read_imports(tmp_path)
+    assert len(imports) == 1
+    assert imports[0]["status"] == "pending"
+
+
 def test_handoff_doctor_cli(tmp_path, monkeypatch):
     seen = {}
 
@@ -507,3 +679,38 @@ def test_handoff_import_issues_cli(tmp_path, monkeypatch):
         == 0
     )
     assert seen == {"target": tmp_path, "sources": None, "dry_run": True, "json_output": True, "categories": ["route-skip"]}
+
+
+def test_handoff_sync_issues_cli(tmp_path, monkeypatch):
+    seen = {}
+
+    def fake_sync_issues(**kwargs):
+        seen.update(kwargs)
+        return 0
+
+    monkeypatch.setattr(handoff_cmd, "sync_issues", fake_sync_issues)
+
+    assert (
+        cli.main(
+            [
+                "handoff",
+                "sync-issues",
+                "--target",
+                str(tmp_path),
+                "--dry-run",
+                "--json",
+                "--category",
+                "route-skip",
+                "--no-close-stale",
+            ]
+        )
+        == 0
+    )
+    assert seen == {
+        "target": tmp_path,
+        "sources": None,
+        "dry_run": True,
+        "json_output": True,
+        "categories": ["route-skip"],
+        "close_stale": False,
+    }

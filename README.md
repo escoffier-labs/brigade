@@ -97,7 +97,7 @@ For machines that ingest handoffs from multiple repos, copy `.brigade/handoff-so
 `brigade handoff doctor` reports pending `.claude/memory-handoffs/` and `.codex/memory-handoffs/` files that are not covered by that local source list.
 Run `brigade handoff lint` before ingesting pending handoffs when you want to catch action/target mismatches early.
 If your ingestor writes a latest-run log, set `ingestor.last_run_log` in that local config so the doctor can warn on stale runs, skipped malformed handoffs, and warning summaries hidden behind no-reply cron output.
-Use `brigade handoff issues` to group those warnings with repair guidance, then `brigade handoff import-issues` to route them into the normal local work import inbox.
+Use `brigade handoff issues` to group those warnings with repair guidance, then `brigade handoff sync-issues` to import new issues and close stale local handoff tasks/imports once the latest scan no longer reports them.
 
 ## Run a brigade
 
@@ -159,6 +159,7 @@ brigade handoff doctor
 brigade handoff lint
 brigade handoff issues
 brigade handoff import-issues
+brigade handoff sync-issues
 brigade work bootstrap
 brigade work status
 brigade work doctor
@@ -292,6 +293,7 @@ Import inbox commands:
 - `brigade work import promote --all --source memory-care --kind task` batch-promotes filtered imports; metadata filters also work for scanner-specific fields such as `handoff_issue_category=route-skip`.
 
 Imports are stored under `.brigade/work/imports/inbox.jsonl`, stay gitignored, and do not write memory directly.
+For handoff-ingest issues, prefer `brigade handoff sync-issues` over repeated raw imports. It imports only issue ids that have not already been seen locally and marks stale handoff-ingest imports/tasks resolved when the latest log no longer contains them.
 
 Run the daily loop with `brigade work run`.
 It opens a work session, resolves the next task, runs `brigade dogfood`, and closes completed ledger tasks after successful runs.

@@ -552,6 +552,85 @@ def import_issues(
     return 0
 
 
+def sync_issues(
+    *,
+    target: Path,
+    sources: Path | None = None,
+    dry_run: bool = False,
+    json_output: bool = False,
+    categories: list[str] | None = None,
+    close_stale: bool = True,
+) -> int:
+    target = target.expanduser().resolve()
+    if not target.is_dir():
+        print(f"error: --target is not a directory: {target}", file=sys.stderr)
+        return 2
+    found = collect_issues(target, sources=sources, categories=categories)
+    current_ids = {issue.id for issue in found}
+    known_ids = _known_local_issue_ids(target)
+    covered_summary_ids = _covered_warning_summary_ids(found, known_ids)
+    new_issues = [
+        issue
+        for issue in found
+        if issue.id not in known_ids and issue.id not in covered_summary_ids
+    ]
+    records = [issue.as_import_record() for issue in new_issues]
+    from . import work_cmd
+
+    imported, skipped = work_cmd._append_import_records(target, records, dry_run=dry_run)
+    stale = (
+        _close_stale_local_issue_work(
+            target,
+            current_ids=current_ids,
+            close_current_ids=covered_summary_ids,
+            categories=categories,
+            dry_run=dry_run,
+        )
+        if close_stale
+        else {"imports": [], "tasks": []}
+    )
+    payload = {
+        "target": str(target),
+        "imports_path": str(work_cmd._imports_path(target)),
+        "dry_run": dry_run,
+        "close_stale": close_stale,
+        "issues": len(found),
+        "known_issues": len(known_ids.intersection(current_ids)),
+        "covered_summary_issues": len(covered_summary_ids),
+        "new_issues": len(new_issues),
+        "imported": len(imported),
+        "skipped_duplicates": len(skipped),
+        "stale_imports_closed": len(stale["imports"]),
+        "stale_tasks_closed": len(stale["tasks"]),
+        "by_category": _issue_counts(found),
+        "imports": imported,
+        "stale_imports": stale["imports"],
+        "stale_tasks": stale["tasks"],
+    }
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+    print(f"handoff issue sync: {target}")
+    print(f"imports_path: {payload['imports_path']}")
+    print(f"dry_run: {dry_run}")
+    print(f"close_stale: {close_stale}")
+    print(f"issues: {len(found)}")
+    print(f"known: {payload['known_issues']}")
+    print(f"covered_summary: {payload['covered_summary_issues']}")
+    print(f"new: {len(new_issues)}")
+    print(f"imported: {len(imported)}")
+    print(f"skipped_duplicates: {len(skipped)}")
+    print(f"stale_imports_closed: {len(stale['imports'])}")
+    print(f"stale_tasks_closed: {len(stale['tasks'])}")
+    for item in imported:
+        print(f"- imported {item.get('id')} [{item.get('kind')}] {_short(str(item.get('text', '')))}")
+    for item in stale["imports"]:
+        print(f"- closed import {item.get('id')} {_short(str(item.get('text', '')))}")
+    for task in stale["tasks"]:
+        print(f"- closed task {task.get('id')} {_short(str(task.get('text', '')))}")
+    return 0
+
+
 def doctor(*, target: Path, sources: Path | None = None, json_output: bool = False) -> int:
     if not target.expanduser().exists():
         print(f"error: target does not exist: {target}", file=sys.stderr)
@@ -686,6 +765,115 @@ def _lint_repair_for_result(result: HandoffLintResult) -> str:
             "Suggested card content sections entirely."
         )
     return "Rewrite the handoff with exactly one valid action branch before rerunning the ingestor."
+
+
+def _known_local_issue_ids(target: Path) -> set[str]:
+    from . import work_cmd
+
+    known: set[str] = set()
+    for item in work_cmd._read_imports(target):
+        issue_id = _handoff_issue_id(item)
+        if issue_id:
+            known.add(issue_id)
+    ledger = work_cmd._read_task_ledger(target)
+    for task in ledger.get("tasks", []):
+        issue_id = _handoff_issue_id(task) if isinstance(task, dict) else None
+        if issue_id:
+            known.add(issue_id)
+    return known
+
+
+def _close_stale_local_issue_work(
+    target: Path,
+    *,
+    current_ids: set[str],
+    close_current_ids: set[str],
+    categories: list[str] | None,
+    dry_run: bool,
+) -> dict[str, list[dict[str, Any]]]:
+    from . import work_cmd
+
+    wanted_categories = {category for category in categories or [] if category}
+    now = time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime())
+    closed_imports: list[dict[str, Any]] = []
+    imports = work_cmd._read_imports(target)
+    for item in imports:
+        if not isinstance(item, dict) or item.get("status", "pending") != "pending":
+            continue
+        if item.get("source") != ISSUE_SOURCE:
+            continue
+        issue_id = _handoff_issue_id(item)
+        if not issue_id:
+            continue
+        if issue_id in current_ids and issue_id not in close_current_ids:
+            continue
+        if wanted_categories and _handoff_issue_category(item) not in wanted_categories:
+            continue
+        updated = dict(item)
+        updated["status"] = "dismissed"
+        updated["updated_at"] = now
+        updated["dismissed_at"] = now
+        updated["dismiss_reason"] = _stale_close_reason(issue_id, close_current_ids)
+        item.update(updated)
+        closed_imports.append(updated)
+    if closed_imports and not dry_run:
+        work_cmd._write_imports(target, imports)
+
+    closed_tasks: list[dict[str, Any]] = []
+    ledger = work_cmd._read_task_ledger(target)
+    for task in ledger.get("tasks", []):
+        if not isinstance(task, dict) or task.get("status", "pending") != "pending":
+            continue
+        if task.get("source") != f"import:{ISSUE_SOURCE}":
+            continue
+        issue_id = _handoff_issue_id(task)
+        if not issue_id:
+            continue
+        if issue_id in current_ids and issue_id not in close_current_ids:
+            continue
+        if wanted_categories and _handoff_issue_category(task) not in wanted_categories:
+            continue
+        updated = dict(task)
+        updated["status"] = "done"
+        updated["updated_at"] = now
+        updated["completed_at"] = now
+        updated["completion_reason"] = _stale_close_reason(issue_id, close_current_ids)
+        task.update(updated)
+        closed_tasks.append(updated)
+    if closed_tasks and not dry_run:
+        work_cmd._write_task_ledger(target, ledger)
+
+    return {
+        "imports": closed_imports,
+        "tasks": closed_tasks,
+    }
+
+
+def _handoff_issue_id(item: dict[str, Any]) -> str | None:
+    metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+    issue_id = metadata.get("handoff_issue_id")
+    return issue_id if isinstance(issue_id, str) and issue_id else None
+
+
+def _handoff_issue_category(item: dict[str, Any]) -> str | None:
+    metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+    category = metadata.get("handoff_issue_category")
+    return category if isinstance(category, str) and category else None
+
+
+def _covered_warning_summary_ids(found: list[HandoffIssue], known_ids: set[str]) -> set[str]:
+    concrete = [issue for issue in found if issue.category not in {"warning-summary", "hidden-warning"}]
+    if not concrete:
+        return set()
+    if any(issue.id not in known_ids for issue in concrete):
+        return set()
+    return {issue.id for issue in found if issue.category == "warning-summary"}
+
+
+def _stale_close_reason(issue_id: str, close_current_ids: set[str]) -> str:
+    if issue_id in close_current_ids:
+        return "covered by known concrete handoff issue lines"
+    return "resolved or absent from latest handoff issue scan"
 
 
 def _issues_payload(target: Path, found: list[HandoffIssue]) -> dict[str, Any]:
