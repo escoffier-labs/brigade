@@ -123,6 +123,8 @@ A typical day has two short cross-harness summaries plus a session-review pass a
 
 Standups summarize state already in memory. The memory scanner promotes durable findings *into* memory from the day's sessions. Memory care checks existing cards for stale facts. Run order: standup -> scanner -> overnight ingester sweeps -> memory-care scan -> morning report next day.
 
+Stagger frequent ingest jobs around updater windows. Avoid putting memory ingest, chat sweeps, crawler repair, and OpenClaw updates on the same minute.
+
 ## Multi-Agent Workflow
 
 Configure your agent roster in the table below. The default shape:

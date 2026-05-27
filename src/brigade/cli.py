@@ -198,6 +198,17 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p_work_import_memory_care.add_argument("--dry-run", action="store_true", help="Report without writing imports.")
     p_work_import_memory_care.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_work_import_chat_sweep = import_sub.add_parser("chat-sweep", help="Import chat memory sweep issues.")
+    p_work_import_chat_sweep.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
+    p_work_import_chat_sweep.add_argument(
+        "--input",
+        dest="input_path",
+        type=Path,
+        default=None,
+        help="Chat memory sweep JSON. Defaults to .brigade/chat-memory-sweeps/latest.json under target.",
+    )
+    p_work_import_chat_sweep.add_argument("--dry-run", action="store_true", help="Report without writing imports.")
+    p_work_import_chat_sweep.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_work_import_triage = import_sub.add_parser("triage", help="Group pending imports by source and kind.")
     p_work_import_triage.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
     p_work_import_triage.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
@@ -681,6 +692,13 @@ def main(argv=None) -> int:
                 return work_cmd.import_memory_care(
                     target=args.target,
                     queue=args.queue,
+                    dry_run=args.dry_run,
+                    json_output=args.json,
+                )
+            if args.import_command == "chat-sweep":
+                return work_cmd.import_chat_sweep(
+                    target=args.target,
+                    input_path=args.input_path,
                     dry_run=args.dry_run,
                     json_output=args.json,
                 )

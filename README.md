@@ -273,6 +273,7 @@ Import inbox commands:
 - `brigade work import validate imports.jsonl` checks scanner output against [`docs/import-schema.md`](docs/import-schema.md).
 - `brigade work import ingest imports.jsonl` ingests scanner output.
 - `brigade work import memory-care` converts `memory/cards/decay/refresh-queue.json` into imports.
+- `brigade work import chat-sweep` converts `.brigade/chat-memory-sweeps/latest.json` issues into imports.
 - `brigade work import triage` groups pending imports by source and kind.
 - `brigade work import show <import-id>` inspects one import.
 - `brigade work import dismiss <import-id>` removes noise.
@@ -313,6 +314,7 @@ It also checks:
 - corrupt scan or refresh-queue JSON once the loop is wired
 
 Workspace installs include `.brigade/memory-care.example.json` as a scanner wiring contract for whatever scheduler or memory owner produces the decay files.
+They also include `.brigade/chat-memory-sweep.example.json` for nightly chat/session sweep summaries.
 Missing memory-care state is advisory for fresh installs.
 Bootstrap truncation is a hard failure to prevent, not a cosmetic warning.
 

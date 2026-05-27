@@ -48,6 +48,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `brigade work import add/list/show/promote` to manage a gitignored local import inbox for scanner-discovered candidate work.
 - `brigade work import validate` and `brigade work import ingest` for scanner-authored JSONL import files.
 - `brigade work import memory-care` to convert `memory/cards/decay/refresh-queue.json` into local work imports.
+- `brigade work import chat-sweep` to convert `.brigade/chat-memory-sweeps/latest.json` issues into local work imports.
 - `brigade work import triage` to group pending imports by source and kind.
 - `brigade work import dismiss` to close noisy imports without promoting them.
 - `brigade work import promote --all` with optional `--source` and `--kind` filters for batch promotion.
@@ -70,6 +71,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `brigade work note` to append timestamped checkpoints to the active work session without ending it.
 - `brigade work doctor` to check dogfood config, Codex availability, local artifact paths, handoff inbox, ignore coverage, and latest run context for the daily work loop.
 - Workspace installs now include `.brigade/memory-care.example.json` as a scanner wiring contract for memory-care decay output.
+- Workspace installs now include `.brigade/chat-memory-sweep.example.json` plus an OpenClaw memory-sweep cron fragment for nightly chat/session sweep wiring.
 - Roster-level and per-agent `timeout_seconds` controls for bounded CLI calls.
 - `brigade run --read-only` prompt policy for planning and review runs that should inspect and recommend only, with native `codex exec --sandbox read-only` enforcement for Codex agents.
 

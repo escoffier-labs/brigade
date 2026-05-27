@@ -41,14 +41,22 @@ Each crawler is platform-specific (auth differs, intents differ, rate limits dif
 | Platform | Crawler (suggested name) | Status |
 |----------|--------------------------|--------|
 | Discord | [`discrawl`](https://github.com/solomonneas/discrawl) | Available. Bot-token, SQLite + FTS5, git-snapshot read mode. |
+| ClickClack | `clickclack` | Planned adapter. Use its agent-friendly CLI, export command, realtime event API, incoming webhook, and slash command surfaces. |
 | Slack | `slackcrawl` | Pattern-name. Bot-token + RTM events; same SQLite shape. |
 | WhatsApp | `whatsappcrawl` | Pattern-name. Likely via WhatsApp Business API or Multi-Device session bridge. |
 | Telegram | `tgcrawl` | Pattern-name. Bot API + MTProto for history backfill. |
 | iMessage | `imescrawl` | Pattern-name. macOS-only; reads from local `chat.db`. |
 | Signal | `signalcrawl` | Pattern-name. Signal-cli session export. |
+| Matrix | `matrixcrawl` | Pattern-name. Room archive plus event sync. |
+| Mattermost | `mattermostcrawl` | Pattern-name. Channel and thread export shape close to Slack. |
+| Google Chat / Teams / Feishu | product-specific crawlers | Pattern-name. Enterprise chat adapters should preserve workspace, channel, thread, and user locators. |
 | Email (Gmail/IMAP) | `mailcrawl` | Pattern-name. IMAP IDLE for tail, full-folder sync for repair. |
 
 The names above follow the `<platform>crawl` convention used by `discrawl`. Swap them for whatever tool you actually use - the contract matters, not the binary name.
+
+Known channel families worth scanning when present: Discord, Slack, ClickClack, Telegram, WhatsApp, Signal, iMessage, BlueBubbles, Google Chat, Microsoft Teams, Matrix, Mattermost, Nextcloud Talk, Feishu, Line, QQ bot, Zalo, Nostr, IRC, Twitch, Tlon, Google Meet, voice-call transcripts, incoming webhooks, and QA channels.
+
+Do not hardcode this list into business logic. Treat it as a registry that local installs can extend as new OpenClaw, Peter S, Vincent, or other chat plugins appear.
 
 ## Discrawl reference (the tested one)
 
@@ -82,6 +90,15 @@ discrawl query --since "$since" --channel "#decisions" --format json |
 ```
 
 The scanner writes one Memory Handoff per durable finding. The conservative ingester routes those handoffs into cards / runbooks / learnings the same way it routes anything else.
+
+For operational failures found during the same pass, write a compact sweep file and import the issues into the daily inbox:
+
+```bash
+brigade work import chat-sweep --input .brigade/chat-memory-sweeps/latest.json
+brigade work import triage
+```
+
+This makes delivery failures, stale bridge jobs, and crawler gaps visible without promoting raw chat content.
 
 ## Privacy boundary
 

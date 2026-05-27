@@ -1,0 +1,131 @@
+{
+  "_brigade_version": "0.1.0",
+  "_description": "Example output contract for a nightly chat/session memory sweep. Keep raw chat transcripts in crawler archives; this file contains summaries and local source locators only.",
+  "generated_at": "2026-05-26T22:09:00-04:00",
+  "window": {
+    "since": "2026-05-25T22:00:00-04:00",
+    "until": "2026-05-26T22:00:00-04:00"
+  },
+  "sessions": {
+    "listed": 24,
+    "reviewed": 10,
+    "durable": 1
+  },
+  "surfaces": [
+    {
+      "id": "discord",
+      "crawler": "discrawl",
+      "status": "enabled",
+      "query": "discrawl query --since <since> --format json"
+    },
+    {
+      "id": "slack",
+      "crawler": "slackcrawl",
+      "status": "planned",
+      "query": "slackcrawl query --since <since> --format json"
+    },
+    {
+      "id": "clickclack",
+      "crawler": "clickclack",
+      "status": "planned",
+      "query": "clickclack export --out .brigade/chat-memory-sweeps/clickclack-export.json"
+    },
+    {
+      "id": "telegram",
+      "crawler": "tgcrawl",
+      "status": "planned",
+      "query": "tgcrawl query --since <since> --format json"
+    },
+    {
+      "id": "matrix",
+      "crawler": "matrixcrawl",
+      "status": "planned",
+      "query": "matrixcrawl query --since <since> --format json"
+    },
+    {
+      "id": "mattermost",
+      "crawler": "mattermostcrawl",
+      "status": "planned",
+      "query": "mattermostcrawl query --since <since> --format json"
+    },
+    {
+      "id": "signal",
+      "crawler": "signalcrawl",
+      "status": "planned",
+      "query": "signalcrawl query --since <since> --format json"
+    },
+    {
+      "id": "imessage",
+      "crawler": "imescrawl",
+      "status": "planned",
+      "query": "imescrawl query --since <since> --format json"
+    },
+    {
+      "id": "webhooks",
+      "crawler": "webhook-archive",
+      "status": "planned",
+      "query": "webhook-archive query --since <since> --format json"
+    }
+  ],
+  "known_channel_families": [
+    "discord",
+    "slack",
+    "clickclack",
+    "telegram",
+    "whatsapp",
+    "signal",
+    "imessage",
+    "bluebubbles",
+    "googlechat",
+    "msteams",
+    "matrix",
+    "mattermost",
+    "nextcloud-talk",
+    "feishu",
+    "line",
+    "qqbot",
+    "zalo",
+    "nostr",
+    "irc",
+    "twitch",
+    "tlon",
+    "google-meet",
+    "voice-call",
+    "webhooks",
+    "qa-channel"
+  ],
+  "persisted": [
+    {
+      "target": "memory/cards/example-project-state.md",
+      "action": "updated",
+      "summary": "Updated durable project state from reviewed chat and agent sessions."
+    }
+  ],
+  "issues": [
+    {
+      "title": "Example cron delivery failure",
+      "summary": "Recent delivery failure surfaced during the nightly sweep.",
+      "kind": "incident",
+      "source": "cron",
+      "severity": "warning",
+      "metadata": {
+        "local_locator": "crawler://example/session-or-thread-id",
+        "surface": "discord",
+        "raw_transcript": "not included"
+      }
+    }
+  ],
+  "skipped": [
+    {
+      "count": 14,
+      "label": "cron/agent sessions",
+      "reason": "routine, heartbeat-only, no-reply, or operational noise after signal pass"
+    },
+    {
+      "count": 8,
+      "label": "chat/manual sessions",
+      "reason": "delivery-only, output artifacts, or no durable preference/tooling/project change"
+    }
+  ],
+  "net_result": "Captured one durable update and surfaced one operational issue for review."
+}

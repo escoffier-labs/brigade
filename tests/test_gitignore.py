@@ -29,6 +29,7 @@ def test_init_creates_gitignore_when_missing(tmp_target: Path):
     assert ".brigade/security.toml" in gi
     assert ".brigade/runs/" in gi
     assert ".brigade/security/" in gi
+    assert ".brigade/chat-memory-sweeps/" in gi
     assert ".brigade/work/" in gi
 
 

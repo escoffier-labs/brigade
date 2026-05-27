@@ -6,6 +6,7 @@
     {"src": "openclaw/model-aliases.openclaw.json", "dst": ".brigade/openclaw/model-aliases.openclaw.json"},
     {"src": "openclaw/ollama-memory-search.openclaw.json", "dst": ".brigade/openclaw/ollama-memory-search.openclaw.json"},
     {"src": "openclaw/acp-escalation.openclaw.json", "dst": ".brigade/openclaw/acp-escalation.openclaw.json"},
+    {"src": "openclaw/memory-sweep-cron.openclaw.json", "dst": ".brigade/openclaw/memory-sweep-cron.openclaw.json"},
     {"src": "openclaw/README.md", "dst": ".brigade/openclaw/README.md"}
   ],
   "dirs": [],

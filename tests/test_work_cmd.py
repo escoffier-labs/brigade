@@ -804,6 +804,58 @@ def test_work_import_memory_care_reads_refresh_queue(tmp_path, monkeypatch, caps
     assert item["metadata"]["reason"] == "source-of-truth changed"
 
 
+def test_work_import_chat_sweep_reads_issues(tmp_path, monkeypatch, capsys):
+    _init_git_repo(tmp_path)
+    monkeypatch.setattr(
+        work_cmd,
+        "_now",
+        lambda: datetime(2026, 5, 26, 12, 0, 0, tzinfo=timezone.utc),
+    )
+    sweep = tmp_path / ".brigade" / "chat-memory-sweeps" / "latest.json"
+    sweep.parent.mkdir(parents=True)
+    _write_json(
+        sweep,
+        {
+            "generated_at": "2026-05-26T22:09:00-04:00",
+            "sessions": {"listed": 24, "reviewed": 10, "durable": 1},
+            "issues": [
+                {
+                    "title": "Cron delivery failure",
+                    "summary": "Recent message delivery failed.",
+                    "kind": "incident",
+                    "source": "cron",
+                    "severity": "warning",
+                    "metadata": {
+                        "surface": "discord",
+                        "local_locator": "crawler://discord/example",
+                    },
+                }
+            ],
+        },
+    )
+
+    assert work_cmd.import_chat_sweep(target=tmp_path) == 0
+    out = capsys.readouterr().out
+    assert f"chat memory sweep: {sweep}" in out
+    assert "issues: 1" in out
+    assert "imported: 1" in out
+    assert work_cmd.import_chat_sweep(target=tmp_path) == 0
+    out = capsys.readouterr().out
+    assert "imported: 0" in out
+    assert "skipped_duplicates: 1" in out
+
+    assert work_cmd.import_list(target=tmp_path, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    item = payload["imports"][0]
+    assert item["kind"] == "incident"
+    assert item["source"] == "chat-memory-sweep"
+    assert item["text"] == "Review memory sweep issue [warning] Cron delivery failure: Recent message delivery failed."
+    assert item["metadata"]["surface"] == "discord"
+    assert item["metadata"]["issue_source"] == "cron"
+    assert item["metadata"]["severity"] == "warning"
+    assert item["metadata"]["sweep_path"] == str(sweep)
+
+
 def test_work_import_triage_groups_pending_imports(tmp_path, monkeypatch, capsys):
     _init_git_repo(tmp_path)
     monkeypatch.setattr(
@@ -1421,6 +1473,10 @@ def test_work_import_cli(tmp_path, monkeypatch):
         seen.append(("memory-care", kwargs))
         return 0
 
+    def fake_import_chat_sweep(**kwargs):
+        seen.append(("chat-sweep", kwargs))
+        return 0
+
     def fake_import_triage(**kwargs):
         seen.append(("triage", kwargs))
         return 0
@@ -1442,6 +1498,7 @@ def test_work_import_cli(tmp_path, monkeypatch):
     monkeypatch.setattr(work_cmd, "import_validate", fake_import_validate)
     monkeypatch.setattr(work_cmd, "import_ingest", fake_import_ingest)
     monkeypatch.setattr(work_cmd, "import_memory_care", fake_import_memory_care)
+    monkeypatch.setattr(work_cmd, "import_chat_sweep", fake_import_chat_sweep)
     monkeypatch.setattr(work_cmd, "import_triage", fake_import_triage)
     monkeypatch.setattr(work_cmd, "import_show", fake_import_show)
     monkeypatch.setattr(work_cmd, "import_promote", fake_import_promote)
@@ -1500,6 +1557,22 @@ def test_work_import_cli(tmp_path, monkeypatch):
         )
         == 0
     )
+    assert (
+        cli.main(
+            [
+                "work",
+                "import",
+                "chat-sweep",
+                "--target",
+                str(tmp_path),
+                "--input",
+                str(tmp_path / "latest-sweep.json"),
+                "--dry-run",
+                "--json",
+            ]
+        )
+        == 0
+    )
     assert cli.main(["work", "import", "triage", "--target", str(tmp_path), "--json", "--limit", "4"]) == 0
     assert cli.main(["work", "import", "show", "imp123", "--target", str(tmp_path)]) == 0
     assert (
@@ -1547,6 +1620,15 @@ def test_work_import_cli(tmp_path, monkeypatch):
             {
                 "target": tmp_path,
                 "queue": tmp_path / "refresh-queue.json",
+                "dry_run": True,
+                "json_output": True,
+            },
+        ),
+        (
+            "chat-sweep",
+            {
+                "target": tmp_path,
+                "input_path": tmp_path / "latest-sweep.json",
                 "dry_run": True,
                 "json_output": True,
             },

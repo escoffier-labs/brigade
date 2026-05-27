@@ -117,6 +117,16 @@ Log file path:
 
 Worth wiring into the morning report (`memory/cards/pipeline-standups.md`): grep recent logs for `ERROR` and surface in the briefing. A silent backup that has been failing for three weeks is the second-worst kind of bug.
 
+If chat is part of your operations loop, send backup summaries to the same private status surface you already use for agent reports. Keep the status compact:
+
+- latest NAS snapshot age
+- latest cloud snapshot age
+- most recent `restic check` result
+- prune result
+- restore rehearsal date
+
+Route stale or failed backup checks into the Brigade work inbox as incidents. Do not publish real repo names, hostnames, webhook URLs, cloud remote names, or channel ids in public docs.
+
 ## Anti-patterns
 
 - **One destination only.** Single point of failure.

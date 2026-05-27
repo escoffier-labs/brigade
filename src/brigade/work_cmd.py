@@ -1759,6 +1759,118 @@ def import_memory_care(
     return 0
 
 
+def import_chat_sweep(
+    *,
+    target: Path,
+    input_path: Path | None = None,
+    dry_run: bool = False,
+    json_output: bool = False,
+) -> int:
+    target = target.expanduser().resolve()
+    if not target.is_dir():
+        print(f"error: --target is not a directory: {target}", file=sys.stderr)
+        return 2
+    sweep_path = (
+        input_path.expanduser().resolve()
+        if input_path is not None
+        else target / ".brigade" / "chat-memory-sweeps" / "latest.json"
+    )
+    if not sweep_path.is_file():
+        print(f"error: chat memory sweep not found: {sweep_path}", file=sys.stderr)
+        return 2
+    try:
+        payload = json.loads(sweep_path.read_text())
+    except json.JSONDecodeError as exc:
+        print(f"error: invalid chat memory sweep JSON: {exc}", file=sys.stderr)
+        return 2
+    if not isinstance(payload, dict):
+        print(f"error: chat memory sweep must be an object: {sweep_path}", file=sys.stderr)
+        return 2
+    issues = payload.get("issues", [])
+    if not isinstance(issues, list):
+        print(f"error: chat memory sweep `issues` must be a list: {sweep_path}", file=sys.stderr)
+        return 2
+
+    records: list[dict[str, Any]] = []
+    generated_at = payload.get("generated_at")
+    for index, issue in enumerate(issues, start=1):
+        if not isinstance(issue, dict):
+            print(f"error: chat memory sweep issue {index} must be an object", file=sys.stderr)
+            return 2
+        title = issue.get("title")
+        if not isinstance(title, str) or not title.strip():
+            print(f"error: chat memory sweep issue {index} requires title", file=sys.stderr)
+            return 2
+        kind = issue.get("kind", "incident")
+        if not isinstance(kind, str) or kind not in IMPORT_KINDS:
+            print(f"error: chat memory sweep issue {index} kind must be one of: {', '.join(IMPORT_KINDS)}", file=sys.stderr)
+            return 2
+        metadata = issue.get("metadata", {})
+        if metadata is None:
+            metadata = {}
+        if not isinstance(metadata, dict):
+            print(f"error: chat memory sweep issue {index} metadata must be an object", file=sys.stderr)
+            return 2
+
+        summary = issue.get("summary")
+        summary_text = summary.strip() if isinstance(summary, str) and summary.strip() else ""
+        severity = issue.get("severity")
+        severity_text = severity.strip() if isinstance(severity, str) and severity.strip() else ""
+        issue_source = issue.get("source")
+        issue_source_text = issue_source.strip() if isinstance(issue_source, str) and issue_source.strip() else ""
+        rendered_title = title.strip()
+        severity_prefix = f" [{severity_text}]" if severity_text else ""
+        text = f"Review memory sweep issue{severity_prefix} {rendered_title}"
+        if summary_text:
+            text = f"{text}: {summary_text}"
+
+        record_metadata = dict(metadata)
+        record_metadata.update(
+            {
+                "sweep_path": str(sweep_path),
+                "issue_title": rendered_title,
+            }
+        )
+        if issue_source_text:
+            record_metadata["issue_source"] = issue_source_text
+        if severity_text:
+            record_metadata["severity"] = severity_text
+        if isinstance(generated_at, str) and generated_at.strip():
+            record_metadata["generated_at"] = generated_at.strip()
+
+        records.append(
+            {
+                "text": text,
+                "kind": kind,
+                "source": "chat-memory-sweep",
+                "metadata": record_metadata,
+            }
+        )
+
+    imported, skipped = _append_import_records(target, records, dry_run=dry_run)
+    output = {
+        "input": str(sweep_path),
+        "imports_path": str(_imports_path(target)),
+        "dry_run": dry_run,
+        "issues": len(issues),
+        "imported": len(imported),
+        "skipped_duplicates": len(skipped),
+        "imports": imported,
+    }
+    if json_output:
+        print(json.dumps(output, indent=2, sort_keys=True))
+        return 0
+    print(f"chat memory sweep: {sweep_path}")
+    print(f"imports_path: {_imports_path(target)}")
+    print(f"dry_run: {dry_run}")
+    print(f"issues: {len(issues)}")
+    print(f"imported: {len(imported)}")
+    print(f"skipped_duplicates: {len(skipped)}")
+    for item in imported:
+        print(f"- {item.get('id')} [{item.get('kind')}] {_short(str(item.get('text', '')))}")
+    return 0
+
+
 def import_triage(*, target: Path, json_output: bool = False, limit: int = 50) -> int:
     if limit < 1:
         print("error: --limit must be a positive integer", file=sys.stderr)

@@ -63,9 +63,22 @@ discrawl tail           # live event stream
 discrawl search '<q>'   # local FTS
 
 # Other surfaces follow the same shape (slackcrawl, tgcrawl, whatsappcrawl, mailcrawl)
+
+# ClickClack
+clickclack send --channel general "status"
+clickclack messages list --channel general
+clickclack export --out .brigade/chat-memory-sweeps/clickclack-export.json
+
+# Sweep output
+test -f .brigade/chat-memory-sweeps/latest.json
+jq '.sessions, .issues' .brigade/chat-memory-sweeps/latest.json
+brigade work import chat-sweep --input .brigade/chat-memory-sweeps/latest.json
+brigade work import triage
 ```
 
 See `memory/cards/chat-surface-crawlers.md` for the full pattern.
+
+Stagger crawler repair, memory ingest, and updater cron jobs. Avoid placing memory ingest jobs inside known OpenClaw update windows.
 
 ## Publish Guard
 

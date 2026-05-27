@@ -38,7 +38,7 @@ A real implementation (typical nightly cadence):
 
 1. **List recent sessions.** Last 12-24 hours, across all harnesses connected to canonical memory.
 2. **Skip noise.** Cron-spawned sessions, heartbeat/reminder-only sessions, empty subagent shells, pure delivery mirror / announce-only sessions.
-3. **Prioritize real human-facing sessions first.** Discord, WhatsApp, Telegram, Slack, manual ACP threads. These are where decisions, corrections, and preferences actually land.
+3. **Prioritize real human-facing sessions first.** Discord, ClickClack, WhatsApp, Telegram, Slack, manual ACP threads. These are where decisions, corrections, and preferences actually land.
 4. **Start with summaries.** Only fetch deeper history for sessions that clearly contain durable decisions, corrections, preferences, project changes, new tooling facts, or new published outputs.
 5. **Cap deep review** to the top N most promising sessions (typical: 8) unless there is an obvious reason to exceed it.
 6. **Avoid duplication.** Do not re-promote facts that already exist as cards or in daily-log entries.
@@ -62,21 +62,40 @@ A real implementation (typical nightly cadence):
 The scanner reports back on what it did:
 
 ```text
-Sessions listed: N
-Sessions deeply reviewed: N
-Sessions with meaningful content: N
-Persisted: [bullets]
-Skipped: [short bullets]
-Net result: [1-3 bullets]
+Memory Sweep - YYYY-MM-DD
+
+Sessions: N listed | N reviewed | N with durable content
+
+Persisted:
+- card-or-file.md - updated with concise durable change.
+
+Issues:
+- Short operational failure or delivery problem that needs review.
+
+Skipped:
+- N cron/agent sessions - routine, heartbeat-only, no-reply, or operational noise after signal pass.
+- N chat/manual sessions - delivery-only, output artifacts, or no durable preference/tooling/project change.
+
+Net result: Captured durable context and surfaced issues that should not be treated as noise.
 ```
 
 This gives you an audit trail and a heartbeat for the scanner itself. If "persisted" is empty for a week, either nothing durable happened or the scanner stopped firing.
+
+The scanner should also write a local machine-readable summary at:
+
+```text
+.brigade/chat-memory-sweeps/latest.json
+```
+
+Use `.brigade/chat-memory-sweep.example.json` as the contract. `brigade work import chat-sweep` imports only the `issues` array into the local work inbox. Raw transcripts, private message bodies, and channel exports stay in crawler archives.
 
 ## Scheduling
 
 Common cadence (matches reference cookbook): nightly at quiet hours, after [pipeline-standups](pipeline-standups.md) have run and the day's activity has settled.
 
 Avoid promoting during active sessions because card writes invalidate prefix caches.
+
+Spread recurring jobs around update windows. Do not anchor memory ingest, chat sweep, crawler repair, and updater jobs on the same minute or the same five-minute window. Prefer staggered minute offsets such as `:15` and `:45` for frequent ingest jobs when an updater runs near the top of the hour.
 
 ## Implementation surface
 
@@ -85,6 +104,7 @@ Avoid promoting during active sessions because card writes invalidate prefix cac
 - a cron job that spawns an isolated agent session with a "review last 12h and persist durable facts" prompt
 - the prompt should embed the skip-rules and cost controls above
 - output goes either directly to `memory/cards/*.md` (if your harness can write there) or through `.claude/memory-handoffs/` for the conservative ingester to route
+- issue summaries also go to `.brigade/chat-memory-sweeps/latest.json` so the daily work loop can review operational failures
 
 ## Relationship to Memory Care
 

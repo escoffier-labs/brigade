@@ -35,11 +35,24 @@ Goal: make Brigade a safe target for local automations that discover useful work
 
 Goal: support the common places agent work happens without making any one chat product mandatory.
 
-- Build adapters for Discord, Slack, Telegram, and export-based chat archives as separate scanner layers.
+- Build adapters for Discord, Slack, ClickClack, Telegram, and export-based chat archives as separate scanner layers.
 - Convert surface-specific events into the local import inbox instead of writing memory directly.
 - Summarize private chat evidence, do not quote raw third-party messages into public docs or handoffs.
 - Use promotion gates so only reviewed, durable, or actionable items become tasks or memory handoffs.
 - Keep source metadata such as workspace, channel, thread, message range, and confidence local unless explicitly exported.
+- Maintain a local provider registry for OpenClaw, Peter S, Vincent, and other chat plugins instead of hardcoding one product list. Seeded channel families include Discord, Slack, ClickClack, Telegram, WhatsApp, Signal, iMessage, BlueBubbles, Google Chat, Microsoft Teams, Matrix, Mattermost, Nextcloud Talk, Feishu, Line, QQ bot, Zalo, Nostr, IRC, Twitch, Tlon, Google Meet, voice-call transcripts, webhooks, and QA channels.
+- Import nightly memory sweep `issues` into Brigade with `brigade work import chat-sweep`. Status: started with `.brigade/chat-memory-sweep.example.json`, OpenClaw cron fragment, and a command that converts sweep issues into local work imports.
+- Add scheduler rules that spread memory ingest, crawler repair, chat sweeps, and OpenClaw updater jobs around update windows so upgrades do not race plugin or extension loads.
+
+## Later Phase: Backup And Recovery Visibility
+
+Goal: make backup health part of the same daily operator loop as chat, memory, and work imports.
+
+- Track restic backups to both NAS and cloud destinations.
+- Surface latest NAS snapshot age, latest cloud snapshot age, prune result, `restic check` result, and restore rehearsal date.
+- Send compact private backup summaries to the operator chat/status surface, including Discord or ClickClack when configured.
+- Route stale snapshot, failed check, failed prune, missing mount, and restore-rehearsal overdue signals into `brigade work import` as incidents.
+- Keep real hostnames, remote names, mount paths, webhook URLs, channel ids, and backup passwords out of public templates.
 
 ## Later Phase: Cybersecurity Plugin
 
