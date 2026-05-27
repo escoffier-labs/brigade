@@ -550,12 +550,15 @@ def test_work_task_ledger_add_list_show_and_done(tmp_path, monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "work tasks:" in out
     assert task_id in out
-    assert "[pending] Build task ledger" in out
+    assert "[pending] [task normal acceptance=0] Build task ledger" in out
 
     assert work_cmd.task_show(target=tmp_path, task_id=task_id[:12]) == 0
     out = capsys.readouterr().out
     assert f"task: {task_id}" in out
     assert "status: pending" in out
+    assert "type: task" in out
+    assert "priority: normal" in out
+    assert "acceptance: 0" in out
     assert "text: Build task ledger" in out
 
     assert work_cmd.task_done(target=tmp_path, task_id=task_id[:12]) == 0
@@ -597,6 +600,47 @@ def test_work_task_add_from_next_deduplicates_pending_task(tmp_path, monkeypatch
     assert payload["task_id"]
 
 
+def test_work_task_add_stores_metadata_acceptance_and_plan(tmp_path, monkeypatch, capsys):
+    _init_git_repo(tmp_path)
+    monkeypatch.setattr(
+        work_cmd,
+        "_now",
+        lambda: datetime(2026, 5, 26, 12, 0, 0, tzinfo=timezone.utc),
+    )
+
+    assert (
+        work_cmd.task_add(
+            target=tmp_path,
+            text="Build issue loop",
+            task_type="feature",
+            priority="high",
+            acceptance=["Adds metadata", "Shows criteria in the plan"],
+        )
+        == 0
+    )
+    out = capsys.readouterr().out
+    task_id = out.split("task: ", 1)[1].splitlines()[0]
+    assert "type: feature" in out
+    assert "priority: high" in out
+    assert "acceptance: 2" in out
+
+    assert work_cmd.task_plan(target=tmp_path, task_id=task_id[:12]) == 0
+    out = capsys.readouterr().out
+    assert "task: " in out
+    assert "type: feature" in out
+    assert "priority: high" in out
+    assert "  - Adds metadata" in out
+    assert "  - Shows criteria in the plan" in out
+    assert "suggested_command: brigade work run" in out
+
+    assert work_cmd.task_plan(target=tmp_path, task_id=task_id[:12], json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["type"] == "feature"
+    assert payload["priority"] == "high"
+    assert payload["acceptance_count"] == 2
+    assert payload["acceptance_missing"] is False
+
+
 def test_work_brief_includes_pending_tasks(tmp_path, monkeypatch, capsys):
     _init_git_repo(tmp_path)
     monkeypatch.setattr(
@@ -613,6 +657,35 @@ def test_work_brief_includes_pending_tasks(tmp_path, monkeypatch, capsys):
     assert payload["next"] == "Build queued task"
     assert payload["pending_tasks"][0]["text"] == "Build queued task"
     assert payload["suggested_command"] == "brigade work run"
+    assert payload["next_task"]["acceptance_missing"] is True
+    assert payload["next_task"]["acceptance_count"] == 0
+
+
+def test_work_brief_reports_next_task_acceptance(tmp_path, monkeypatch, capsys):
+    _init_git_repo(tmp_path)
+    monkeypatch.setattr(
+        work_cmd,
+        "_now",
+        lambda: datetime(2026, 5, 26, 12, 0, 0, tzinfo=timezone.utc),
+    )
+    assert (
+        work_cmd.task_add(
+            target=tmp_path,
+            text="Build accepted task",
+            task_type="workflow",
+            priority="urgent",
+            acceptance=["Brief reports acceptance"],
+        )
+        == 0
+    )
+    capsys.readouterr()
+
+    assert work_cmd.brief(target=tmp_path) == 0
+    out = capsys.readouterr().out
+    assert "next_type: workflow" in out
+    assert "next_priority: urgent" in out
+    assert "next_acceptance: 1" in out
+    assert "[workflow urgent acceptance=1] Build accepted task" in out
 
 
 def test_work_import_add_list_show_and_promote(tmp_path, monkeypatch, capsys):
@@ -1511,6 +1584,55 @@ def test_work_run_consumes_pending_task_before_latest_next(tmp_path, monkeypatch
     assert ledger["tasks"][0]["completed_session_title"] == "Build queued task"
 
 
+def test_work_run_passes_acceptance_criteria_for_pending_task(tmp_path, monkeypatch):
+    _init_git_repo(tmp_path)
+    artifacts_dir = tmp_path / ".brigade" / "runs"
+    dogfood_cmd.init(target=tmp_path, artifacts_dir=artifacts_dir)
+    times = iter(
+        [
+            datetime(2026, 5, 26, 11, 30, 0, tzinfo=timezone.utc),
+            datetime(2026, 5, 26, 12, 0, 0, tzinfo=timezone.utc),
+            datetime(2026, 5, 26, 13, 0, 0, tzinfo=timezone.utc),
+            datetime(2026, 5, 26, 13, 0, 1, tzinfo=timezone.utc),
+        ]
+    )
+    monkeypatch.setattr(work_cmd, "_now", lambda: next(times))
+    assert (
+        work_cmd.task_add(
+            target=tmp_path,
+            text="Build accepted queue",
+            task_type="feature",
+            priority="high",
+            acceptance=["Dogfood prompt includes this criterion"],
+        )
+        == 0
+    )
+    seen = {}
+
+    def fake_dogfood_run(task, **kwargs):
+        seen["task"] = task
+        run_dir = kwargs["output_dir"]
+        run_dir.mkdir(parents=True)
+        _write_json(
+            run_dir / "run.json",
+            {"started_at": "2026-05-26T12:10:00Z", "status": "ok", "task": task},
+        )
+        (run_dir / "final.txt").write_text("Done.\n\nNext step: Build follow-up.\n")
+        return 0
+
+    monkeypatch.setattr(dogfood_cmd, "run", fake_dogfood_run)
+
+    assert work_cmd.run(None, target=tmp_path, output_dir=artifacts_dir / "new", handoff=False) == 0
+    assert seen["task"].startswith("Build accepted queue")
+    assert "Acceptance criteria:" in seen["task"]
+    assert "- Dogfood prompt includes this criterion" in seen["task"]
+    assert "- type: feature" in seen["task"]
+    assert "- priority: high" in seen["task"]
+    ledger = json.loads((tmp_path / ".brigade" / "work" / "tasks.json").read_text())
+    assert ledger["tasks"][0]["status"] == "done"
+    assert ledger["tasks"][0]["completed_session_title"] == "Build accepted queue"
+
+
 def test_work_run_queue_next_adds_extracted_followup(tmp_path, monkeypatch, capsys):
     _init_git_repo(tmp_path)
     artifacts_dir = tmp_path / ".brigade" / "runs"
@@ -1701,6 +1823,10 @@ def test_work_tasks_cli(tmp_path, monkeypatch):
         seen.append(("show", kwargs))
         return 0
 
+    def fake_task_plan(**kwargs):
+        seen.append(("plan", kwargs))
+        return 0
+
     def fake_task_done(**kwargs):
         seen.append(("done", kwargs))
         return 0
@@ -1708,18 +1834,60 @@ def test_work_tasks_cli(tmp_path, monkeypatch):
     monkeypatch.setattr(work_cmd, "tasks", fake_tasks)
     monkeypatch.setattr(work_cmd, "task_add", fake_task_add)
     monkeypatch.setattr(work_cmd, "task_show", fake_task_show)
+    monkeypatch.setattr(work_cmd, "task_plan", fake_task_plan)
     monkeypatch.setattr(work_cmd, "task_done", fake_task_done)
 
     assert cli.main(["work", "tasks", "--target", str(tmp_path), "--all", "--json"]) == 0
-    assert cli.main(["work", "task", "add", "build", "queue", "--target", str(tmp_path)]) == 0
+    assert (
+        cli.main(
+            [
+                "work",
+                "task",
+                "add",
+                "build",
+                "queue",
+                "--target",
+                str(tmp_path),
+                "--type",
+                "feature",
+                "--priority",
+                "high",
+                "--acceptance",
+                "passes",
+            ]
+        )
+        == 0
+    )
     assert cli.main(["work", "task", "add", "--target", str(tmp_path), "--from-next"]) == 0
     assert cli.main(["work", "task", "show", "abc123", "--target", str(tmp_path)]) == 0
+    assert cli.main(["work", "task", "plan", "abc123", "--target", str(tmp_path), "--json"]) == 0
     assert cli.main(["work", "task", "done", "abc123", "--target", str(tmp_path)]) == 0
     assert seen == [
         ("tasks", {"target": tmp_path, "all_tasks": True, "json_output": True}),
-        ("add", {"target": tmp_path, "text": "build queue", "from_next": False}),
-        ("add", {"target": tmp_path, "text": None, "from_next": True}),
+        (
+            "add",
+            {
+                "target": tmp_path,
+                "text": "build queue",
+                "from_next": False,
+                "task_type": "feature",
+                "priority": "high",
+                "acceptance": ["passes"],
+            },
+        ),
+        (
+            "add",
+            {
+                "target": tmp_path,
+                "text": None,
+                "from_next": True,
+                "task_type": "task",
+                "priority": "normal",
+                "acceptance": [],
+            },
+        ),
         ("show", {"target": tmp_path, "task_id": "abc123"}),
+        ("plan", {"target": tmp_path, "task_id": "abc123", "json_output": True}),
         ("done", {"target": tmp_path, "task_id": "abc123"}),
     ]
 
