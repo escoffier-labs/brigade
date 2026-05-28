@@ -3622,7 +3622,7 @@ def test_work_backup_doctor_warns_for_backup_health_issues(tmp_path, monkeypatch
         lambda: datetime(2026, 5, 30, 12, 0, 0, tzinfo=timezone.utc),
     )
     config = tmp_path / ".brigade" / "backups.toml"
-    config.parent.mkdir(parents=True)
+    config.parent.mkdir(parents=True, exist_ok=True)
     config.write_text(
         """
 [[destination]]
@@ -3855,7 +3855,7 @@ print("scanner complete")
 """
     )
     config = tmp_path / ".brigade" / "scanners.toml"
-    config.parent.mkdir(parents=True)
+    config.parent.mkdir(parents=True, exist_ok=True)
     config.write_text(
         f"""
 [[scanner]]
@@ -3889,11 +3889,121 @@ conflict_window = "02:00-02:10"
     assert Path(receipt["stderr_path"]).is_file()
     assert receipt["output_before"] == {"path": str(tmp_path / ".brigade" / "scanner-output.json"), "exists": False}
     assert receipt["output_after"]["exists"] is True
+    assert receipt["provenance_imports_stamped"] == 1
+    imports = json.loads((tmp_path / ".brigade" / "work" / "imports" / "inbox.jsonl").read_text().splitlines()[0])
+    assert imports["metadata"]["scanner_run_id"] == receipt["run_id"]
+    assert imports["metadata"]["scanner_id"] == "repo-scan"
+    assert imports["metadata"]["source_fingerprint"]
 
     assert work_cmd.scanners_run(target=tmp_path, scanner_id="repo-scan", json_output=True) == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["completed"] == 1
     assert payload["imports_after"]["by_source"] == {"repo-scan": 1}
+    assert payload["runs"][0]["provenance_imports_stamped"] == 0
+
+
+def test_work_scanners_run_ingest_output_adds_provenance_only_with_flag(tmp_path, capsys):
+    _init_git_repo(tmp_path)
+    script = tmp_path / "scanner.py"
+    script.write_text(
+        """
+import json
+from pathlib import Path
+
+root = Path.cwd()
+path = root / ".brigade" / "scanner-imports.jsonl"
+path.parent.mkdir(parents=True, exist_ok=True)
+record = {
+    "kind": "task",
+    "source": "repo-scan",
+    "text": "Review generated finding",
+    "metadata": {"source_item_key": "finding-1"},
+    "acceptance": ["Finding is reviewed."],
+}
+path.write_text(json.dumps(record) + "\\n")
+print("wrote imports")
+"""
+    )
+    config = tmp_path / ".brigade" / "scanners.toml"
+    config.parent.mkdir(parents=True, exist_ok=True)
+    config.write_text(
+        f"""
+[[scanner]]
+id = "repo-scan"
+source = "repo-scan"
+command = "{sys.executable} {script}"
+cadence = "daily@02:00"
+enabled = true
+timeout = 30
+output_path = ".brigade/scanner-imports.jsonl"
+import_path = ".brigade/scanner-imports.jsonl"
+import_format = "jsonl"
+conflict_window = "02:00-02:10"
+"""
+    )
+
+    assert work_cmd.scanners_run(target=tmp_path, scanner_id="repo-scan") == 0
+    out = capsys.readouterr().out
+    assert "pending_imports_after: 0" in out
+    assert work_cmd.import_list(target=tmp_path, json_output=True) == 0
+    assert json.loads(capsys.readouterr().out)["imports"] == []
+
+    assert work_cmd.scanners_run(target=tmp_path, scanner_id="repo-scan", ingest_output=True, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ingest_output"] is True
+    assert payload["runs"][0]["ingest_output"]["created"] == 1
+    assert payload["imports_after"]["by_source"] == {"repo-scan": 1}
+
+    item = payload["runs"][0]
+    assert work_cmd.import_list(target=tmp_path, json_output=True) == 0
+    imports = json.loads(capsys.readouterr().out)["imports"]
+    assert len(imports) == 1
+    metadata = imports[0]["metadata"]
+    assert metadata["scanner_id"] == "repo-scan"
+    assert metadata["scanner_source"] == "repo-scan"
+    assert metadata["scanner_run_id"] == item["run_id"]
+    assert metadata["scanner_receipt_path"].endswith("/receipt.json")
+    assert metadata["scanner_import_path"].endswith(".brigade/scanner-imports.jsonl")
+    assert metadata["source_fingerprint"]
+    assert metadata["scanner_output_path_snapshot"]["exists"] is True
+
+
+def test_work_scanners_run_ingest_output_rejects_malformed_without_partial_write(tmp_path, capsys):
+    _init_git_repo(tmp_path)
+    script = tmp_path / "scanner.py"
+    script.write_text(
+        """
+from pathlib import Path
+
+path = Path.cwd() / ".brigade" / "bad-imports.jsonl"
+path.parent.mkdir(parents=True, exist_ok=True)
+path.write_text("{not json\\n")
+print("wrote bad imports")
+"""
+    )
+    config = tmp_path / ".brigade" / "scanners.toml"
+    config.parent.mkdir(parents=True)
+    config.write_text(
+        f"""
+[[scanner]]
+id = "repo-scan"
+source = "repo-scan"
+command = "{sys.executable} {script}"
+cadence = "daily@02:00"
+enabled = true
+timeout = 30
+output_path = ".brigade/bad-imports.jsonl"
+import_path = ".brigade/bad-imports.jsonl"
+import_format = "jsonl"
+conflict_window = "02:00-02:10"
+"""
+    )
+
+    assert work_cmd.scanners_run(target=tmp_path, scanner_id="repo-scan", ingest_output=True, json_output=True) == 2
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ingest_errors"]
+    assert payload["imports_after"]["total"] == 0
+    assert not (tmp_path / ".brigade" / "work" / "imports" / "inbox.jsonl").exists()
 
 
 def test_work_scanners_due_all_disabled_and_receipt_review(tmp_path, capsys):
@@ -4121,6 +4231,138 @@ conflict_window = "02:00-02:10"
     assert work_cmd.doctor(target=tmp_path) == 1
     out = capsys.readouterr().out
     assert "[warn] scanner_runs_failed:" in out
+
+
+def test_work_inbox_doctor_reports_hygiene_issues_and_daily_loop(tmp_path, monkeypatch, capsys):
+    _init_git_repo(tmp_path)
+    dogfood_cmd.init(target=tmp_path)
+    monkeypatch.setattr(work_cmd.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(
+        work_cmd,
+        "_now",
+        lambda: datetime(2026, 5, 30, 12, 0, 0, tzinfo=timezone.utc),
+    )
+    config = tmp_path / ".brigade" / "scanners.toml"
+    config.parent.mkdir(parents=True, exist_ok=True)
+    config.write_text(
+        """
+[[scanner]]
+id = "repo-scan"
+source = "repo-scan"
+command = "python3 scanner.py"
+cadence = "daily@02:00"
+enabled = true
+timeout = 30
+output_path = ".brigade/repo-scan.jsonl"
+import_path = ".brigade/repo-scan.jsonl"
+import_format = "jsonl"
+conflict_window = "02:00-02:10"
+"""
+    )
+    missing = work_cmd._make_import("Missing provenance", kind="task", source="repo-scan")
+    missing["created_at"] = "2026-05-30T11:00:00+00:00"
+    stale = work_cmd._make_import("Stale pending", kind="task", source="manual")
+    stale["created_at"] = "2026-05-20T12:00:00+00:00"
+    promoted = work_cmd._make_import("Broken promoted", kind="task", source="repo-scan")
+    promoted.update({"status": "promoted", "task_id": "missing-task", "updated_at": "2026-05-29T12:00:00+00:00"})
+    dismissed_changed = work_cmd._make_import(
+        "Dismissed old",
+        kind="task",
+        source="repo-scan",
+        metadata={"source_item_key": "same-item", "source_fingerprint": "old"},
+    )
+    dismissed_changed.update({"status": "dismissed", "dismissed_at": "2026-05-29T12:00:00+00:00"})
+    changed_pending = work_cmd._make_import(
+        "Dismissed new",
+        kind="task",
+        source="repo-scan",
+        metadata={
+            "source_item_key": "same-item",
+            "source_fingerprint": "new",
+            "scanner_id": "repo-scan",
+            "scanner_source": "repo-scan",
+        },
+    )
+    noisy = []
+    for index in range(work_cmd.DISMISSED_SOURCE_WARN_THRESHOLD):
+        item = work_cmd._make_import(f"Noisy {index}", kind="task", source="noisy-source")
+        item.update({"status": "dismissed", "dismissed_at": "2026-05-29T12:00:00+00:00"})
+        noisy.append(item)
+    work_cmd._write_imports(tmp_path, [missing, stale, promoted, dismissed_changed, changed_pending, *noisy])
+    run_dir = tmp_path / ".brigade" / "scanners" / "runs" / "no-import-run"
+    run_dir.mkdir(parents=True)
+    _write_json(
+        run_dir / "receipt.json",
+        {
+            "run_id": "no-import-run",
+            "scanner_id": "repo-scan",
+            "source": "repo-scan",
+            "status": "completed",
+            "started_at": "2026-05-30T10:00:00+00:00",
+            "completed_at": "2026-05-30T10:00:01+00:00",
+            "exit_code": 0,
+            "timed_out": False,
+            "import_path": str(tmp_path / ".brigade" / "repo-scan.jsonl"),
+        },
+    )
+
+    assert work_cmd.inbox_doctor(target=tmp_path) == 0
+    out = capsys.readouterr().out
+    assert "[warn] inbox_missing_provenance:" in out
+    assert "[warn] inbox_stale_pending:" in out
+    assert "[warn] inbox_promoted_task_missing:" in out
+    assert "[warn] inbox_dismissed_changed:" in out
+    assert "[warn] inbox_noisy_sources:" in out
+    assert "[warn] inbox_scanner_run_no_imports:" in out
+
+    assert work_cmd.inbox_doctor(target=tmp_path, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["issue_count"] == 6
+    assert payload["top_issue"]["name"] == "inbox_missing_provenance"
+
+    assert work_cmd.brief(target=tmp_path) == 0
+    out = capsys.readouterr().out
+    assert "inbox_hygiene: 6 issue(s)" in out
+    assert "inbox_top_issue: inbox_missing_provenance" in out
+
+    assert work_cmd.doctor(target=tmp_path) == 0
+    out = capsys.readouterr().out
+    assert "[warn] inbox_missing_provenance:" in out
+    assert "[warn] inbox_scanner_run_no_imports:" in out
+
+
+def test_work_inbox_archive_preserves_pending_and_archives_closed(tmp_path, monkeypatch, capsys):
+    _init_git_repo(tmp_path)
+    monkeypatch.setattr(
+        work_cmd,
+        "_now",
+        lambda: datetime(2026, 5, 30, 12, 0, 0, tzinfo=timezone.utc),
+    )
+    pending = work_cmd._make_import("Keep pending", kind="task", source="repo-scan")
+    pending.update({"status": "pending", "updated_at": "2026-05-20T12:00:00+00:00"})
+    promoted = work_cmd._make_import("Archive promoted", kind="task", source="repo-scan")
+    promoted.update({"status": "promoted", "updated_at": "2026-05-20T12:00:00+00:00"})
+    dismissed = work_cmd._make_import("Archive dismissed", kind="task", source="repo-scan")
+    dismissed.update({"status": "dismissed", "updated_at": "2026-05-20T12:00:00+00:00"})
+    superseded = work_cmd._make_import("Archive superseded", kind="task", source="repo-scan")
+    superseded.update({"status": "superseded", "updated_at": "2026-05-20T12:00:00+00:00"})
+    fresh = work_cmd._make_import("Keep fresh dismissed", kind="task", source="repo-scan")
+    fresh.update({"status": "dismissed", "updated_at": "2026-05-30T11:00:00+00:00"})
+    work_cmd._write_imports(tmp_path, [pending, promoted, dismissed, superseded, fresh])
+
+    assert work_cmd.inbox_archive(target=tmp_path, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["archived"] == 3
+    assert payload["kept"] == 2
+
+    remaining = [item["text"] for item in work_cmd._read_imports(tmp_path)]
+    assert remaining == ["Keep pending", "Keep fresh dismissed"]
+    archived = [
+        json.loads(line)
+        for line in (tmp_path / ".brigade" / "work" / "imports" / "archive.jsonl").read_text().splitlines()
+    ]
+    assert [item["text"] for item in archived] == ["Archive promoted", "Archive dismissed", "Archive superseded"]
+    assert all(item["archived_at"] == "2026-05-30T12:00:00+00:00" for item in archived)
 
 
 def test_work_scanners_doctor_warns_for_missing_stale_bad_and_imports_issues(tmp_path, monkeypatch, capsys):
@@ -5851,19 +6093,34 @@ def test_work_brief_cli(tmp_path, monkeypatch):
 
 
 def test_work_inbox_cli(tmp_path, monkeypatch):
-    seen = {}
+    seen = []
 
     def fake_inbox(**kwargs):
-        seen.update(kwargs)
+        seen.append(("inbox", kwargs))
+        return 0
+
+    def fake_inbox_doctor(**kwargs):
+        seen.append(("doctor", kwargs))
+        return 0
+
+    def fake_inbox_archive(**kwargs):
+        seen.append(("archive", kwargs))
         return 0
 
     monkeypatch.setattr(work_cmd, "inbox", fake_inbox)
+    monkeypatch.setattr(work_cmd, "inbox_doctor", fake_inbox_doctor)
+    monkeypatch.setattr(work_cmd, "inbox_archive", fake_inbox_archive)
 
     assert cli.main(["work", "inbox", "--target", str(tmp_path), "--limit", "7"]) == 0
-    assert seen == {"target": tmp_path, "json_output": False, "limit": 7}
-    seen.clear()
     assert cli.main(["work", "inbox", "--target", str(tmp_path), "--json"]) == 0
-    assert seen == {"target": tmp_path, "json_output": True, "limit": 20}
+    assert cli.main(["work", "inbox", "doctor", "--target", str(tmp_path), "--json"]) == 0
+    assert cli.main(["work", "inbox", "archive", "--target", str(tmp_path), "--json"]) == 0
+    assert seen == [
+        ("inbox", {"target": tmp_path, "json_output": False, "limit": 7}),
+        ("inbox", {"target": tmp_path, "json_output": True, "limit": 20}),
+        ("doctor", {"target": tmp_path, "json_output": True}),
+        ("archive", {"target": tmp_path, "json_output": True}),
+    ]
 
 
 def test_work_scanners_cli(tmp_path, monkeypatch):
@@ -5926,6 +6183,7 @@ def test_work_scanners_cli(tmp_path, monkeypatch):
                 str(tmp_path),
                 "--include-disabled",
                 "--force",
+                "--ingest-output",
                 "--json",
             ]
         )
@@ -5949,6 +6207,7 @@ def test_work_scanners_cli(tmp_path, monkeypatch):
                 "due": False,
                 "include_disabled": True,
                 "force": True,
+                "ingest_output": True,
                 "json_output": True,
             },
         ),
@@ -5961,6 +6220,7 @@ def test_work_scanners_cli(tmp_path, monkeypatch):
                 "due": True,
                 "include_disabled": False,
                 "force": False,
+                "ingest_output": False,
                 "json_output": False,
             },
         ),

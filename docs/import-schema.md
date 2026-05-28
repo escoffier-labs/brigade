@@ -13,13 +13,15 @@ brigade work import memory-care
 brigade work import memory-refresh
 brigade work import chat-sweep
 brigade work inbox
+brigade work inbox doctor
+brigade work inbox archive
 brigade work import triage
 brigade work import plan <import-id>
 brigade work import promote --run <import-id>
 brigade work import promote --all --source memory-care --kind task
 ```
 
-`validate` checks a JSONL file without writing. `ingest` appends valid records into `.brigade/work/imports/inbox.jsonl`, skipping duplicate pending records with the same source, kind, and normalized text. Scanner producers can also provide stable source item keys and fingerprints so repeated ingestion skips equivalent pending or promoted imports, while dismissed imports stay dismissed unless the source item changes materially. `inbox` groups pending imports for daily review. `plan` previews the task a reviewed import would create. `promote --run` promotes one task import and immediately runs it through the normal work-session loop. `memory-care` reads `memory/cards/decay/refresh-queue.json` and converts queued cards into task imports. `memory-refresh` accepts the same queue plus `candidates` or `refresh_candidates` and writes TDD-ready refresh task imports. `chat-sweep` reads `.brigade/chat-memory-sweeps/latest.json` and converts sweep `issues`; actionable issues become task imports.
+`validate` checks a JSONL file without writing. `ingest` appends valid records into `.brigade/work/imports/inbox.jsonl`, skipping duplicate pending records with the same source, kind, and normalized text. Scanner producers can also provide stable source item keys and fingerprints so repeated ingestion skips equivalent pending or promoted imports, while dismissed imports stay dismissed unless the source item changes materially. `inbox` groups pending imports for daily review. `inbox doctor` reports queue hygiene issues, and `inbox archive` moves old closed imports to `.brigade/work/imports/archive.jsonl` without touching pending imports. `plan` previews the task a reviewed import would create. `promote --run` promotes one task import and immediately runs it through the normal work-session loop. `memory-care` reads `memory/cards/decay/refresh-queue.json` and converts queued cards into task imports. `memory-refresh` accepts the same queue plus `candidates` or `refresh_candidates` and writes TDD-ready refresh task imports. `chat-sweep` reads `.brigade/chat-memory-sweeps/latest.json` and converts sweep `issues`; actionable issues become task imports.
 
 ## Record Shape
 
@@ -69,6 +71,16 @@ Recommended metadata keys:
 - `confidence`: producer confidence such as `low`, `medium`, or `high`.
 - `evidence_summary`: compact evidence summary, not raw private chat text.
 - `evidence`: local evidence path, not raw private chat text.
+
+Scanner run provenance metadata is added by `brigade work scanners run --ingest-output`, and also attached to new inbox records that a scanner command writes directly during a run when Brigade can match the source:
+
+- `scanner_id`: configured scanner id.
+- `scanner_source`: configured scanner source.
+- `scanner_run_id`: local scanner run receipt id.
+- `scanner_receipt_path`: local receipt path under `.brigade/scanners/runs/`.
+- `scanner_output_path_snapshot`: safe snapshot of configured output path after the run.
+- `scanner_import_path`: configured JSONL import output path when present.
+- `source_fingerprint`: producer fingerprint or Brigade-computed fingerprint for dedupe and dismissed-change checks.
 
 ## Privacy Rules
 

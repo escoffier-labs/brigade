@@ -198,6 +198,13 @@ def _build_parser() -> argparse.ArgumentParser:
     p_work_inbox.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
     p_work_inbox.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_work_inbox.add_argument("--limit", type=int, default=20, help="Maximum imports to show.")
+    inbox_sub = p_work_inbox.add_subparsers(dest="inbox_command", metavar="<inbox-command>")
+    p_work_inbox_doctor = inbox_sub.add_parser("doctor", help="Check scanner inbox hygiene.")
+    p_work_inbox_doctor.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_work_inbox_doctor.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_work_inbox_archive = inbox_sub.add_parser("archive", help="Archive old closed scanner inbox imports.")
+    p_work_inbox_archive.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
+    p_work_inbox_archive.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_work_backup = work_sub.add_parser("backup", help="Inspect local backup health summaries.")
     backup_sub = p_work_backup.add_subparsers(dest="backup_command", metavar="<backup-command>")
     backup_sub.required = True
@@ -238,6 +245,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p_work_scanners_run.add_argument("--due", action="store_true", help="Run due scanners only.")
     p_work_scanners_run.add_argument("--include-disabled", action="store_true", help="Allow disabled scanners to run.")
     p_work_scanners_run.add_argument("--force", action="store_true", help="Run even when another scanner receipt is marked running.")
+    p_work_scanners_run.add_argument("--ingest-output", action="store_true", help="Validate and ingest configured JSONL output after successful runs.")
     p_work_scanners_run.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_work_scanners_runs = scanners_sub.add_parser("runs", help="List local scanner run receipts.")
     p_work_scanners_runs.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
@@ -1062,6 +1070,13 @@ def main(argv=None) -> int:
             return work_cmd.resume(target=args.target)
         if args.work_command == "brief":
             return work_cmd.brief(target=args.target, limit=args.limit, json_output=args.json)
+        if args.work_command == "inbox" and getattr(args, "inbox_command", None):
+            if args.inbox_command == "doctor":
+                return work_cmd.inbox_doctor(target=args.target, json_output=args.json)
+            if args.inbox_command == "archive":
+                return work_cmd.inbox_archive(target=args.target, json_output=args.json)
+            parser.error(f"unknown inbox command: {args.inbox_command}")
+            return 2
         if args.work_command == "inbox":
             return work_cmd.inbox(target=args.target, json_output=args.json, limit=args.limit)
         if args.work_command == "backup":
@@ -1100,6 +1115,7 @@ def main(argv=None) -> int:
                     due=args.due,
                     include_disabled=args.include_disabled,
                     force=args.force,
+                    ingest_output=args.ingest_output,
                     json_output=args.json,
                 )
             if args.scanners_command == "runs":

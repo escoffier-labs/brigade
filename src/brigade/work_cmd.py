@@ -142,6 +142,7 @@ BACKUP_DEFAULTS = (
 SCANNER_CONFIG_REL_PATH = ".brigade/scanners.toml"
 SCANNER_OUTPUT_STALE_HOURS = 48
 SCANNER_RUN_STALE_HOURS = 48
+IMPORT_ARCHIVE_STALE_HOURS = 168
 SCANNER_REQUIRED_IDS = ("chat-memory-sweep", "memory-refresh", "handoff-ingest")
 SCANNER_HIGH_RISK_COMMANDS = {"bash", "sh", "zsh", "fish", "powershell", "pwsh", "ssh", "scp", "rsync"}
 SCANNER_SHELL_META_RE = re.compile(r"[;&|`<>]|\$\(")
@@ -302,6 +303,10 @@ def _imports_path(target: Path) -> Path:
     return _work_root(target) / "imports" / "inbox.jsonl"
 
 
+def _imports_archive_path(target: Path) -> Path:
+    return _work_root(target) / "imports" / "archive.jsonl"
+
+
 def _backup_config_path(target: Path) -> Path:
     return target / BACKUP_CONFIG_REL_PATH
 
@@ -427,6 +432,16 @@ def _write_imports(target: Path, imports: list[dict[str, Any]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     rendered = "".join(json.dumps(item, sort_keys=True) + "\n" for item in imports)
     path.write_text(rendered)
+
+
+def _append_archived_imports(target: Path, imports: list[dict[str, Any]]) -> None:
+    if not imports:
+        return
+    path = _imports_archive_path(target)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a") as handle:
+        for item in imports:
+            handle.write(json.dumps(item, sort_keys=True) + "\n")
 
 
 def _task_sort_key(task: dict[str, Any]) -> str:
@@ -1687,6 +1702,20 @@ def _load_scanner_config(target: Path) -> tuple[list[dict[str, Any]], list[str]]
                 errors.append(f"{label}: {field} must be a non-empty string")
             else:
                 scanner[field] = value.strip()
+        import_path = item.get("import_path")
+        if import_path is not None:
+            if not isinstance(import_path, str) or not import_path.strip():
+                errors.append(f"{label}: import_path must be a non-empty string when present")
+            elif Path(import_path).is_absolute() or ".." in Path(import_path).parts:
+                errors.append(f"{label}: import_path must be relative and must not contain '..'")
+            else:
+                scanner["import_path"] = import_path.strip()
+        import_format = item.get("import_format")
+        if import_format is not None:
+            if not isinstance(import_format, str) or import_format.strip() != "jsonl":
+                errors.append(f"{label}: import_format must be jsonl")
+            else:
+                scanner["import_format"] = "jsonl"
         cwd = item.get("cwd", item.get("target"))
         if cwd is not None:
             field = "cwd" if "cwd" in item else "target"
@@ -1805,6 +1834,14 @@ def _scanner_output_path(target: Path, scanner: dict[str, Any]) -> Path | None:
     return path if path.is_absolute() else target / path
 
 
+def _scanner_import_path(target: Path, scanner: dict[str, Any]) -> Path | None:
+    value = scanner.get("import_path")
+    if not isinstance(value, str) or not value.strip():
+        return None
+    path = Path(value).expanduser()
+    return path if path.is_absolute() else target / path
+
+
 def _scanner_cwd(target: Path, scanner: dict[str, Any]) -> Path:
     raw = scanner.get("cwd")
     if isinstance(raw, str) and raw.strip():
@@ -1890,6 +1927,112 @@ def _scanner_run_summary(text: str, limit: int = 1200) -> str:
     return rendered[: limit - 3].rstrip() + "..."
 
 
+def _scanner_run_receipt_path(run: dict[str, Any]) -> str | None:
+    path = run.get("path")
+    if isinstance(path, str) and path.strip():
+        return str(Path(path) / "receipt.json")
+    return None
+
+
+def _scanner_import_fingerprint(record: dict[str, Any], *, scanner: dict[str, Any]) -> str:
+    metadata = record.get("metadata") if isinstance(record.get("metadata"), dict) else {}
+    existing = metadata.get("source_fingerprint")
+    if isinstance(existing, str) and existing.strip():
+        return existing.strip()
+    return _stable_hash(
+        {
+            "scanner_id": scanner.get("id"),
+            "scanner_source": scanner.get("source"),
+            "source_item_key": _import_source_key(record),
+            "text": record.get("text"),
+            "kind": record.get("kind"),
+            "type": record.get("type"),
+            "priority": record.get("priority"),
+            "template": record.get("template"),
+            "acceptance": record.get("acceptance"),
+        }
+    )
+
+
+def _scanner_import_provenance(
+    *,
+    target: Path,
+    scanner: dict[str, Any],
+    run: dict[str, Any],
+    record: dict[str, Any],
+) -> dict[str, Any]:
+    metadata = record.get("metadata") if isinstance(record.get("metadata"), dict) else {}
+    output_after = run.get("output_after") if isinstance(run.get("output_after"), dict) else None
+    provenance = {
+        "scanner_id": scanner.get("id"),
+        "scanner_source": scanner.get("source"),
+        "scanner_run_id": run.get("run_id"),
+        "scanner_receipt_path": _scanner_run_receipt_path(run),
+        "scanner_output_path_snapshot": output_after,
+        "source_fingerprint": _scanner_import_fingerprint(record, scanner=scanner),
+    }
+    import_path = _scanner_import_path(target, scanner)
+    if import_path is not None:
+        provenance["scanner_import_path"] = str(import_path)
+    return {key: value for key, value in {**metadata, **provenance}.items() if value is not None}
+
+
+def _scanner_enrich_import_records(
+    *,
+    target: Path,
+    scanner: dict[str, Any],
+    run: dict[str, Any],
+    records: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    enriched: list[dict[str, Any]] = []
+    for record in records:
+        item = dict(record)
+        item["metadata"] = _scanner_import_provenance(target=target, scanner=scanner, run=run, record=record)
+        enriched.append(item)
+    return enriched
+
+
+def _scanner_stamp_new_imports(
+    *,
+    target: Path,
+    scanner: dict[str, Any],
+    run: dict[str, Any],
+    before_ids: set[str],
+) -> int:
+    imports = _read_imports(target)
+    changed = 0
+    for item in imports:
+        import_id = item.get("id")
+        if not isinstance(import_id, str) or import_id in before_ids:
+            continue
+        if item.get("source") != scanner.get("source"):
+            continue
+        metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+        if metadata.get("scanner_run_id"):
+            continue
+        item["metadata"] = _scanner_import_provenance(target=target, scanner=scanner, run=run, record=item)
+        item["updated_at"] = _now().isoformat()
+        changed += 1
+    if changed:
+        _write_imports(target, imports)
+    return changed
+
+
+def _scanner_validate_import_output(
+    target: Path,
+    scanner: dict[str, Any],
+) -> tuple[Path | None, list[dict[str, Any]], list[str]]:
+    import_path = _scanner_import_path(target, scanner)
+    if import_path is None:
+        return None, [], [f"{scanner.get('id')}: import_path is not configured"]
+    if scanner.get("import_format", "jsonl") != "jsonl":
+        return import_path, [], [f"{scanner.get('id')}: import_format must be jsonl"]
+    if not import_path.is_file():
+        return import_path, [], [f"{scanner.get('id')}: import file not found: {import_path}"]
+    records, errors = _load_import_jsonl(import_path)
+    return import_path, records, [f"{scanner.get('id')}: {error}" for error in errors]
+
+
 def _scanner_run_one(
     target: Path,
     scanner: dict[str, Any],
@@ -1900,6 +2043,7 @@ def _scanner_run_one(
     command = str(scanner.get("command") or "")
     argv, blocker = _scanner_argv(command)
     output_path = _scanner_output_path(target, scanner)
+    import_path = _scanner_import_path(target, scanner)
     cwd = _scanner_cwd(target, scanner)
     started = _now()
     run_id = f"{started.strftime('%Y%m%d-%H%M%S')}-{_slug(scanner_id)}-{uuid4().hex[:6]}"
@@ -1913,6 +2057,7 @@ def _scanner_run_one(
         "scanner_id": scanner_id,
         "source": scanner.get("source"),
         "status": "running",
+        "path": str(run_dir),
         "target": str(target),
         "cwd": str(cwd),
         "command": command,
@@ -1923,6 +2068,8 @@ def _scanner_run_one(
         "stderr_path": str(stderr_path),
         "output_path": str(output_path) if output_path is not None else None,
         "output_before": _scanner_output_snapshot(output_path),
+        "import_path": str(import_path) if import_path is not None else None,
+        "import_format": scanner.get("import_format", "jsonl") if import_path is not None else None,
         "forced": force,
     }
     _write_json(receipt_path, receipt)
@@ -2036,6 +2183,8 @@ def _scanner_plan_payload(target: Path) -> dict[str, Any]:
                 "end": _format_clock_minutes(start + duration),
                 "conflict_window": scanner.get("conflict_window"),
                 "output_path": scanner.get("output_path"),
+                "import_path": scanner.get("import_path"),
+                "import_format": scanner.get("import_format", "jsonl") if scanner.get("import_path") else None,
             }
         )
     planned.sort(key=lambda item: int(item.get("start_minute", 0)))
@@ -2728,6 +2877,7 @@ def _brief_payload(target: Path, *, limit: int = 3) -> dict[str, Any]:
     pending_imports = _pending_imports(target)
     pending_import_counts = _import_counts(pending_imports)
     scanner_candidate = _scanner_candidate(pending_imports)
+    inbox_hygiene = _inbox_hygiene_payload(target)
     scanner_health = _scanner_health(target)
     memory_health = memory_cmd.health(target)
     security_health = security_cmd.health(target)
@@ -2749,6 +2899,10 @@ def _brief_payload(target: Path, *, limit: int = 3) -> dict[str, Any]:
         "pending_imports": pending_imports,
         "pending_import_counts": pending_import_counts,
         "scanner_candidate": _import_summary(scanner_candidate) if scanner_candidate else None,
+        "inbox_hygiene": {
+            "issue_count": inbox_hygiene["issue_count"],
+            "top_issue": inbox_hygiene["top_issue"],
+        },
         "scanner_health": {
             "config_path": scanner_health["config_path"],
             "checks": scanner_health["checks"],
@@ -3310,6 +3464,17 @@ def brief(*, target: Path, limit: int = 3, json_output: bool = False) -> int:
                 f"{_short(str(scanner_candidate.get('text', '')))}"
             )
             print(f"scanner_next_command: brigade work import plan {scanner_candidate.get('id')}")
+
+    inbox_hygiene = payload.get("inbox_hygiene") if isinstance(payload.get("inbox_hygiene"), dict) else {}
+    if inbox_hygiene:
+        print(f"inbox_hygiene: {'ok' if inbox_hygiene.get('issue_count') == 0 else f'{inbox_hygiene.get('issue_count')} issue(s)'}")
+        top_inbox = inbox_hygiene.get("top_issue") if isinstance(inbox_hygiene.get("top_issue"), dict) else None
+        if top_inbox:
+            print(
+                "inbox_top_issue: "
+                f"{top_inbox.get('name')} "
+                f"{_short(str(top_inbox.get('detail', '')))}"
+            )
 
     scanner_health = payload.get("scanner_health") if isinstance(payload.get("scanner_health"), dict) else {}
     scanner_checks = scanner_health.get("checks") if isinstance(scanner_health.get("checks"), list) else []
@@ -4392,6 +4557,184 @@ def _inbox_payload(target: Path) -> dict[str, Any]:
     }
 
 
+def _scanner_source_map(target: Path) -> dict[str, dict[str, Any]]:
+    scanners, errors = _load_scanner_config(target)
+    if errors:
+        return {}
+    by_source: dict[str, dict[str, Any]] = {}
+    for scanner in scanners:
+        for key in ("source", "id"):
+            value = scanner.get(key)
+            if isinstance(value, str) and value.strip():
+                by_source[value.strip()] = scanner
+    return by_source
+
+
+def _import_hygiene_issue(status: str, name: str, detail: str, items: list[str] | None = None) -> dict[str, Any]:
+    issue: dict[str, Any] = {"status": status, "name": name, "detail": detail}
+    if items is not None:
+        issue["items"] = items
+    return issue
+
+
+def _inbox_hygiene_payload(target: Path) -> dict[str, Any]:
+    target = target.expanduser().resolve()
+    imports = [item for item in _read_imports(target) if isinstance(item, dict)]
+    scanner_sources = _scanner_source_map(target)
+    checks: list[dict[str, Any]] = []
+    now: datetime | None = None
+
+    def current_now() -> datetime:
+        nonlocal now
+        if now is None:
+            now = _now()
+        return now
+
+    missing_provenance: list[str] = []
+    for item in imports:
+        if item.get("status", "pending") != "pending":
+            continue
+        source = str(item.get("source") or "")
+        if source not in scanner_sources:
+            continue
+        metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+        required = ("scanner_id", "scanner_source", "source_fingerprint")
+        if any(not metadata.get(key) for key in required):
+            missing_provenance.append(str(item.get("id")))
+    checks.append(
+        _import_hygiene_issue(
+            WARN if missing_provenance else OK,
+            "inbox_missing_provenance",
+            f"{len(missing_provenance)} pending scanner import(s) missing provenance"
+            if missing_provenance
+            else "pending scanner imports have provenance",
+            missing_provenance[:10],
+        )
+    )
+
+    stale_pending = [
+        str(item.get("id"))
+        for item in imports
+        if item.get("status", "pending") == "pending"
+        and (created := _parse_iso_datetime(item.get("created_at"))) is not None
+        and (current_now() - created).total_seconds() / 3600 > IMPORT_STALE_HOURS
+    ]
+    checks.append(
+        _import_hygiene_issue(
+            WARN if stale_pending else OK,
+            "inbox_stale_pending",
+            f"{len(stale_pending)} pending import(s) older than {IMPORT_STALE_HOURS}h" if stale_pending else "none",
+            stale_pending[:10],
+        )
+    )
+
+    task_ids = {
+        str(task.get("id"))
+        for task in _read_task_ledger(target).get("tasks", [])
+        if isinstance(task, dict) and isinstance(task.get("id"), str)
+    }
+    broken_promoted = [
+        str(item.get("id"))
+        for item in imports
+        if item.get("status") == "promoted"
+        and isinstance(item.get("task_id"), str)
+        and item.get("task_id") not in task_ids
+    ]
+    checks.append(
+        _import_hygiene_issue(
+            WARN if broken_promoted else OK,
+            "inbox_promoted_task_missing",
+            f"{len(broken_promoted)} promoted import(s) point at missing ledger tasks" if broken_promoted else "none",
+            broken_promoted[:10],
+        )
+    )
+
+    by_identity: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
+    for item in imports:
+        identity = _import_source_identity(item)
+        if identity is not None:
+            by_identity.setdefault(identity, []).append(item)
+    changed_dismissed: list[str] = []
+    for items in by_identity.values():
+        dismissed = [item for item in items if item.get("status") == "dismissed"]
+        active = [item for item in items if item.get("status", "pending") in {"pending", "promoted"}]
+        active_fingerprints = {_import_fingerprint(item) for item in active if _import_fingerprint(item)}
+        for item in dismissed:
+            fingerprint = _import_fingerprint(item)
+            if fingerprint and active_fingerprints and fingerprint not in active_fingerprints:
+                changed_dismissed.append(str(item.get("id")))
+    checks.append(
+        _import_hygiene_issue(
+            WARN if changed_dismissed else OK,
+            "inbox_dismissed_changed",
+            f"{len(changed_dismissed)} dismissed import(s) have changed source fingerprints" if changed_dismissed else "none",
+            changed_dismissed[:10],
+        )
+    )
+
+    by_source: dict[str, dict[str, int]] = {}
+    for item in imports:
+        source = str(item.get("source") or "manual")
+        status = str(item.get("status") or "pending")
+        by_source.setdefault(source, {"dismissed": 0, "promoted": 0})
+        if status in by_source[source]:
+            by_source[source][status] += 1
+    noisy_sources = [
+        f"{source}=dismissed:{counts['dismissed']},promoted:{counts['promoted']}"
+        for source, counts in sorted(by_source.items())
+        if counts["dismissed"] >= DISMISSED_SOURCE_WARN_THRESHOLD and counts["dismissed"] > max(1, counts["promoted"]) * 2
+    ]
+    checks.append(
+        _import_hygiene_issue(
+            WARN if noisy_sources else OK,
+            "inbox_noisy_sources",
+            ", ".join(noisy_sources) if noisy_sources else "none",
+            noisy_sources[:10],
+        )
+    )
+
+    no_import_runs: list[str] = []
+    scanners, errors = _load_scanner_config(target)
+    scanner_by_id = {str(scanner.get("id")): scanner for scanner in scanners if isinstance(scanner.get("id"), str)}
+    if not errors:
+        imports_by_run = {
+            str(metadata.get("scanner_run_id"))
+            for item in imports
+            if isinstance((metadata := item.get("metadata")), dict) and metadata.get("scanner_run_id")
+        }
+        for receipt in _scanner_receipts(target):
+            run_id = str(receipt.get("run_id") or "")
+            scanner = scanner_by_id.get(str(receipt.get("scanner_id") or ""))
+            if not run_id or scanner is None or not scanner.get("import_path"):
+                continue
+            if receipt.get("status") != "completed":
+                continue
+            ingest = receipt.get("ingest_output") if isinstance(receipt.get("ingest_output"), dict) else {}
+            created = int(ingest.get("created", 0) or 0) if ingest else 0
+            stamped = int(receipt.get("provenance_imports_stamped", 0) or 0)
+            if run_id not in imports_by_run and created == 0 and stamped == 0:
+                no_import_runs.append(run_id)
+    checks.append(
+        _import_hygiene_issue(
+            WARN if no_import_runs else OK,
+            "inbox_scanner_run_no_imports",
+            f"{len(no_import_runs)} scanner run(s) produced no imports despite configured import_path" if no_import_runs else "none",
+            no_import_runs[:10],
+        )
+    )
+
+    issues = [check for check in checks if check.get("status") != OK]
+    return {
+        "target": str(target),
+        "imports_path": str(_imports_path(target)),
+        "archive_path": str(_imports_archive_path(target)),
+        "checks": checks,
+        "issues": issues,
+        "issue_count": len(issues),
+        "top_issue": issues[0] if issues else None,
+    }
+
+
 def inbox(*, target: Path, json_output: bool = False, limit: int = 20) -> int:
     if limit < 1:
         print("error: --limit must be a positive integer", file=sys.stderr)
@@ -4455,6 +4798,75 @@ def inbox(*, target: Path, json_output: bool = False, limit: int = 20) -> int:
                 print(f"  context: {rendered}")
         if len(imports) > limit:
             print(f"... {len(imports) - limit} more")
+    return 0
+
+
+def inbox_doctor(*, target: Path, json_output: bool = False) -> int:
+    target = target.expanduser().resolve()
+    if not target.is_dir():
+        print(f"error: --target is not a directory: {target}", file=sys.stderr)
+        return 2
+    payload = _inbox_hygiene_payload(target)
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+    print(f"work inbox doctor: {target}")
+    print(f"imports_path: {payload['imports_path']}")
+    print(f"archive_path: {payload['archive_path']}")
+    for check in payload["checks"]:
+        _doctor_line(str(check.get("status")), str(check.get("name")), check.get("detail"))
+    return 0
+
+
+def _archive_import_cutoff(item: dict[str, Any]) -> datetime | None:
+    for key in ("updated_at", "dismissed_at", "promoted_at", "created_at"):
+        parsed = _parse_iso_datetime(item.get(key))
+        if parsed is not None:
+            return parsed
+    return None
+
+
+def inbox_archive(*, target: Path, json_output: bool = False) -> int:
+    target = target.expanduser().resolve()
+    if not target.is_dir():
+        print(f"error: --target is not a directory: {target}", file=sys.stderr)
+        return 2
+    now = _now()
+    imports = [item for item in _read_imports(target) if isinstance(item, dict)]
+    archived: list[dict[str, Any]] = []
+    kept: list[dict[str, Any]] = []
+    for item in imports:
+        status = str(item.get("status", "pending"))
+        timestamp = _archive_import_cutoff(item)
+        age_hours = (now - timestamp).total_seconds() / 3600 if timestamp is not None else 0
+        if status in {"promoted", "dismissed", "superseded"} and age_hours >= IMPORT_ARCHIVE_STALE_HOURS:
+            archived_item = dict(item)
+            archived_item["archived_at"] = now.isoformat()
+            archived_item["archive_reason"] = f"{status}_older_than_{IMPORT_ARCHIVE_STALE_HOURS}h"
+            archived.append(archived_item)
+        else:
+            kept.append(item)
+    if archived:
+        _append_archived_imports(target, archived)
+        _write_imports(target, kept)
+    payload = {
+        "target": str(target),
+        "imports_path": str(_imports_path(target)),
+        "archive_path": str(_imports_archive_path(target)),
+        "archived": len(archived),
+        "kept": len(kept),
+        "archived_imports": archived,
+    }
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+    print(f"work inbox archive: {target}")
+    print(f"imports_path: {payload['imports_path']}")
+    print(f"archive_path: {payload['archive_path']}")
+    print(f"archived: {payload['archived']}")
+    print(f"kept: {payload['kept']}")
+    for item in archived[:20]:
+        print(f"- {item.get('id')} [{item.get('status')}] {_short(str(item.get('text', '')))}")
     return 0
 
 
@@ -4875,6 +5287,8 @@ def scanners_list(*, target: Path, json_output: bool = False) -> int:
         print(f"- {scanner.get('id')} [{status}] {scanner.get('cadence')} source={scanner.get('source')}")
         print(f"  command: {scanner.get('command')}")
         print(f"  output: {scanner.get('output_path')}")
+        if scanner.get("import_path"):
+            print(f"  import: {scanner.get('import_path')} ({scanner.get('import_format', 'jsonl')})")
     return 0
 
 
@@ -4912,6 +5326,9 @@ def scanners_show(*, target: Path, scanner_id: str, json_output: bool = False) -
     print(f"cadence: {scanner.get('cadence')}")
     print(f"timeout: {scanner.get('timeout')}")
     print(f"output_path: {scanner.get('output_path')}")
+    if scanner.get("import_path"):
+        print(f"import_path: {scanner.get('import_path')}")
+        print(f"import_format: {scanner.get('import_format', 'jsonl')}")
     print(f"conflict_window: {scanner.get('conflict_window')}")
     print(f"command: {scanner.get('command')}")
     return 0
@@ -5035,6 +5452,7 @@ def scanners_run(
     due: bool = False,
     include_disabled: bool = False,
     force: bool = False,
+    ingest_output: bool = False,
     json_output: bool = False,
 ) -> int:
     target = target.expanduser().resolve()
@@ -5078,7 +5496,77 @@ def scanners_run(
                 print(f"error: {error}", file=sys.stderr)
         return 2
     before_counts = _import_counts(_pending_imports(target))
-    runs = [_scanner_run_one(target, scanner, force=force) for scanner in selected]
+    runs: list[dict[str, Any]] = []
+    contexts: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    for scanner in selected:
+        before_ids = {
+            str(item.get("id"))
+            for item in _read_imports(target)
+            if isinstance(item, dict) and isinstance(item.get("id"), str)
+        }
+        run = _scanner_run_one(target, scanner, force=force)
+        stamped = _scanner_stamp_new_imports(target=target, scanner=scanner, run=run, before_ids=before_ids)
+        run["provenance_imports_stamped"] = stamped
+        if run.get("path"):
+            _write_json(Path(str(run["path"])) / "receipt.json", run)
+        runs.append(run)
+        contexts.append((scanner, run))
+    ingest_errors: list[str] = []
+    ingest_payloads: list[tuple[dict[str, Any], dict[str, Any], Path, list[dict[str, Any]]]] = []
+    if ingest_output:
+        for scanner, run in contexts:
+            if run.get("status") != "completed":
+                continue
+            path, records, errors = _scanner_validate_import_output(target, scanner)
+            if errors:
+                ingest_errors.extend(errors)
+                continue
+            if path is not None:
+                ingest_payloads.append(
+                    (
+                        scanner,
+                        run,
+                        path,
+                        _scanner_enrich_import_records(target=target, scanner=scanner, run=run, records=records),
+                    )
+                )
+        if ingest_errors:
+            after_counts = _import_counts(_pending_imports(target))
+            payload = {
+                "target": str(target),
+                "runs_root": str(_scanner_runs_root(target)),
+                "selected": len(selected),
+                "completed": len([run for run in runs if run.get("status") == "completed"]),
+                "failed": len([run for run in runs if run.get("status") != "completed"]),
+                "skipped": [
+                    {"scanner_id": item["scanner"].get("id"), "reason": item["reason"]}
+                    for item in skipped
+                    if isinstance(item.get("scanner"), dict)
+                ],
+                "imports_before": before_counts,
+                "imports_after": after_counts,
+                "ingest_output": True,
+                "ingest_errors": ingest_errors,
+                "runs": runs,
+            }
+            if json_output:
+                print(json.dumps(payload, indent=2, sort_keys=True))
+            else:
+                print(f"work scanners run: {target}")
+                for error in ingest_errors:
+                    print(f"error: {error}", file=sys.stderr)
+            return 2
+        for scanner, run, path, records in ingest_payloads:
+            imported, skipped_records, skipped_dismissed = _append_import_records(target, records)
+            run["ingest_output"] = {
+                "path": str(path),
+                "created": len(imported),
+                "skipped": len(skipped_records),
+                "dismissed": len(skipped_dismissed),
+                "records": len(records),
+            }
+            if run.get("path"):
+                _write_json(Path(str(run["path"])) / "receipt.json", run)
     after_counts = _import_counts(_pending_imports(target))
     payload = {
         "target": str(target),
@@ -5093,6 +5581,8 @@ def scanners_run(
         ],
         "imports_before": before_counts,
         "imports_after": after_counts,
+        "ingest_output": ingest_output,
+        "ingest_errors": ingest_errors,
         "runs": runs,
     }
     if json_output:
@@ -5112,6 +5602,14 @@ def scanners_run(
         )
         if run.get("error"):
             print(f"  error: {run.get('error')}")
+        if run.get("ingest_output"):
+            ingest = run["ingest_output"]
+            print(
+                "  ingest_output: "
+                f"created={ingest.get('created')} skipped={ingest.get('skipped')} dismissed={ingest.get('dismissed')}"
+            )
+        if run.get("provenance_imports_stamped"):
+            print(f"  provenance_imports_stamped: {run.get('provenance_imports_stamped')}")
         print(f"  logs: {run.get('stdout_path')} {run.get('stderr_path')}")
     print(f"pending_imports_before: {before_counts.get('total', 0)}")
     print(f"pending_imports_after: {after_counts.get('total', 0)}")
@@ -5721,6 +6219,11 @@ def doctor(*, target: Path) -> int:
         _doctor_line(WARN, "scanner_import_noise", f"dismissed import threshold {DISMISSED_SOURCE_WARN_THRESHOLD}: {detail}")
     else:
         _doctor_line(OK, "scanner_import_noise", "none")
+
+    inbox_hygiene = _inbox_hygiene_payload(effective_target)
+    for check in inbox_hygiene["checks"]:
+        if check.get("status") != OK:
+            _doctor_line(str(check.get("status")), str(check.get("name")), check.get("detail"))
 
     scanner_health = _scanner_health(effective_target)
     for check in scanner_health["checks"]:
