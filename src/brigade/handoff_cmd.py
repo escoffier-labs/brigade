@@ -201,6 +201,9 @@ class HandoffDraft:
     scanner_provenance: dict[str, Any]
     status: str
     watched: bool
+    ingestion_status: str | None
+    ingest_run_id: str | None
+    ingest_log_path: str | None
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -220,6 +223,9 @@ class HandoffDraft:
             "scanner_provenance": self.scanner_provenance,
             "status": self.status,
             "watched": self.watched,
+            "ingestion_status": self.ingestion_status,
+            "ingest_run_id": self.ingest_run_id,
+            "ingest_log_path": self.ingest_log_path,
         }
 
 
@@ -531,6 +537,10 @@ def _handoff_archive_records_path(target: Path) -> Path:
     return _handoff_state_root(target) / "archive.jsonl"
 
 
+def _handoff_ingest_runs_root(target: Path) -> Path:
+    return _handoff_state_root(target) / "ingest-runs"
+
+
 def _load_source_config_for_drafts(target: Path, sources: Path | None = None) -> tuple[SourceConfig, Path | None, list[str], bool]:
     target = target.expanduser().resolve()
     sources_path = sources.expanduser().resolve() if sources is not None else default_sources_path(target)
@@ -582,6 +592,214 @@ def _path_timestamp(path: Path, attr: str) -> tuple[str | None, float | None]:
     return time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime(value)), value
 
 
+def _iso_from_timestamp(value: float | None = None) -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime(time.time() if value is None else value))
+
+
+def _normalize_receipt_list(value: object) -> list[object]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return value
+    return [value]
+
+
+def _receipt_path_value(item: object) -> str | None:
+    if isinstance(item, str) and item.strip():
+        return item.strip()
+    if isinstance(item, dict):
+        for key in ("handoff_path", "path", "draft_path"):
+            value = item.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    return None
+
+
+def _receipt_target_value(item: object) -> str | None:
+    if isinstance(item, dict):
+        for key in ("target", "target_card", "target_document", "card", "document"):
+            value = item.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    return None
+
+
+def _path_match_keys(target: Path, value: str | Path) -> set[str]:
+    text = str(value)
+    raw = Path(text).expanduser()
+    resolved = raw if raw.is_absolute() else target / raw
+    keys = {text, raw.name}
+    try:
+        keys.add(str(resolved.resolve()))
+    except OSError:
+        keys.add(str(resolved))
+    return {key for key in keys if key}
+
+
+def _ingest_receipt_path(target: Path, run_id: str) -> Path:
+    return _handoff_ingest_runs_root(target) / f"{run_id}.json"
+
+
+def _normalize_ingest_receipt(target: Path, payload: dict[str, Any], *, source_path: Path | None = None) -> dict[str, Any]:
+    run_id = str(payload.get("run_id") or (source_path.stem if source_path is not None else "")).strip()
+    if not run_id:
+        raise ValueError("receipt missing run_id")
+    normalized = {
+        "run_id": run_id,
+        "started_at": payload.get("started_at") if isinstance(payload.get("started_at"), str) else None,
+        "completed_at": payload.get("completed_at") if isinstance(payload.get("completed_at"), str) else None,
+        "source_root": str(payload.get("source_root") or target),
+        "inbox_paths": [str(item) for item in _normalize_receipt_list(payload.get("inbox_paths")) if str(item)],
+        "processed_handoff_paths": [
+            str(path)
+            for item in _normalize_receipt_list(payload.get("processed_handoff_paths"))
+            if (path := _receipt_path_value(item))
+        ],
+        "promoted_card_targets": [
+            {
+                "handoff_path": path,
+                "target": _receipt_target_value(item),
+            }
+            for item in _normalize_receipt_list(payload.get("promoted_card_targets"))
+            if (path := _receipt_path_value(item))
+        ],
+        "routed_document_targets": [
+            {
+                "handoff_path": path,
+                "target": _receipt_target_value(item),
+            }
+            for item in _normalize_receipt_list(payload.get("routed_document_targets"))
+            if (path := _receipt_path_value(item))
+        ],
+        "skipped_handoff_paths": [
+            str(path)
+            for item in _normalize_receipt_list(payload.get("skipped_handoff_paths"))
+            if (path := _receipt_path_value(item))
+        ],
+        "failed_handoff_paths": [
+            str(path)
+            for item in _normalize_receipt_list(payload.get("failed_handoff_paths"))
+            if (path := _receipt_path_value(item))
+        ],
+        "warning_count": int(payload.get("warning_count") or 0),
+        "safe_summary": str(payload.get("safe_summary") or ""),
+        "log_path": str(payload.get("log_path") or ""),
+    }
+    normalized["outcomes"] = _ingest_receipt_outcomes(target, normalized)
+    return normalized
+
+
+def _load_ingest_receipt(target: Path, path: Path) -> dict[str, Any] | None:
+    try:
+        raw = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError, TypeError, ValueError):
+        return None
+    if not isinstance(raw, dict):
+        return None
+    try:
+        return _normalize_ingest_receipt(target, raw, source_path=path)
+    except ValueError:
+        return None
+
+
+def _ingest_receipts(target: Path) -> list[dict[str, Any]]:
+    root = _handoff_ingest_runs_root(target)
+    if not root.is_dir():
+        return []
+    receipts = [
+        receipt
+        for path in sorted(root.glob("*.json"))
+        if (receipt := _load_ingest_receipt(target, path)) is not None
+    ]
+    receipts.sort(key=lambda item: str(item.get("completed_at") or item.get("started_at") or item.get("run_id")), reverse=True)
+    return receipts
+
+
+def _ingest_receipt_outcomes(target: Path, receipt: dict[str, Any]) -> list[dict[str, Any]]:
+    outcomes: dict[str, dict[str, Any]] = {}
+
+    def add(path_value: str, status: str, *, target_card: str | None = None, target_document: str | None = None) -> None:
+        entry = {
+            "path": path_value,
+            "status": status,
+            "run_id": receipt.get("run_id"),
+            "completed_at": receipt.get("completed_at"),
+            "log_path": receipt.get("log_path"),
+            "target_card": target_card,
+            "target_document": target_document,
+        }
+        for key in _path_match_keys(target, path_value):
+            existing = outcomes.get(key, {})
+            merged = {**existing, **{k: v for k, v in entry.items() if v is not None}}
+            outcomes[key] = merged
+
+    for path_value in receipt.get("processed_handoff_paths") or []:
+        if isinstance(path_value, str):
+            add(path_value, "ingested")
+    for item in receipt.get("promoted_card_targets") or []:
+        if isinstance(item, dict) and isinstance(item.get("handoff_path"), str):
+            add(item["handoff_path"], "ingested", target_card=_receipt_target_value(item))
+    for item in receipt.get("routed_document_targets") or []:
+        if isinstance(item, dict) and isinstance(item.get("handoff_path"), str):
+            add(item["handoff_path"], "ingested", target_document=_receipt_target_value(item))
+    for path_value in receipt.get("skipped_handoff_paths") or []:
+        if isinstance(path_value, str):
+            add(path_value, "skipped")
+    for path_value in receipt.get("failed_handoff_paths") or []:
+        if isinstance(path_value, str):
+            add(path_value, "failed")
+
+    unique: dict[tuple[str | None, str | None], dict[str, Any]] = {}
+    for outcome in outcomes.values():
+        unique[(outcome.get("path"), outcome.get("status"))] = outcome
+    return list(unique.values())
+
+
+def _ingest_outcomes_by_path(target: Path) -> dict[str, dict[str, Any]]:
+    mapped: dict[str, dict[str, Any]] = {}
+    for receipt in _ingest_receipts(target):
+        for outcome in receipt.get("outcomes") or []:
+            path_value = outcome.get("path")
+            if not isinstance(path_value, str):
+                continue
+            for key in _path_match_keys(target, path_value):
+                mapped.setdefault(key, outcome)
+    return mapped
+
+
+def _latest_ingest_outcome_for_path(target: Path, path: Path, outcomes: dict[str, dict[str, Any]] | None = None) -> dict[str, Any] | None:
+    outcomes = outcomes if outcomes is not None else _ingest_outcomes_by_path(target)
+    for key in _path_match_keys(target, path):
+        outcome = outcomes.get(key)
+        if outcome is not None:
+            return outcome
+    return None
+
+
+def _receipt_summary(receipt: dict[str, Any]) -> dict[str, Any]:
+    outcomes = receipt.get("outcomes") if isinstance(receipt.get("outcomes"), list) else []
+    counts: dict[str, int] = {}
+    for outcome in outcomes:
+        if not isinstance(outcome, dict):
+            continue
+        status = str(outcome.get("status") or "unknown")
+        counts[status] = counts.get(status, 0) + 1
+    return {
+        "run_id": receipt.get("run_id"),
+        "started_at": receipt.get("started_at"),
+        "completed_at": receipt.get("completed_at"),
+        "source_root": receipt.get("source_root"),
+        "inbox_paths": receipt.get("inbox_paths") or [],
+        "warning_count": receipt.get("warning_count") or 0,
+        "safe_summary": receipt.get("safe_summary") or "",
+        "log_path": receipt.get("log_path") or "",
+        "outcome_counts": counts,
+        "processed": len(receipt.get("processed_handoff_paths") or []),
+        "skipped": len(receipt.get("skipped_handoff_paths") or []),
+        "failed": len(receipt.get("failed_handoff_paths") or []),
+    }
+
+
 def _extract_handoff_key_values(text: str) -> dict[str, str]:
     values: dict[str, str] = {}
     for line in text.splitlines():
@@ -598,7 +816,14 @@ def _extract_handoff_key_values(text: str) -> dict[str, str]:
     return values
 
 
-def _draft_summary(path: Path, *, target: Path, inbox: str, watched: bool) -> HandoffDraft:
+def _draft_summary(
+    path: Path,
+    *,
+    target: Path,
+    inbox: str,
+    watched: bool,
+    ingest_outcomes: dict[str, dict[str, Any]] | None = None,
+) -> HandoffDraft:
     path = path.expanduser().resolve()
     try:
         text = path.read_text(errors="replace")
@@ -630,6 +855,7 @@ def _draft_summary(path: Path, *, target: Path, inbox: str, watched: bool) -> Ha
         age_hours = round((time.time() - modified_seconds) / 3600, 2)
     stale = bool(age_hours is not None and age_hours > HANDOFF_DRAFT_STALE_HOURS)
     status = "reviewed" if lint_result.valid else "pending"
+    ingest_outcome = _latest_ingest_outcome_for_path(target, path, ingest_outcomes)
     return HandoffDraft(
         id=path.stem,
         path=path,
@@ -647,13 +873,20 @@ def _draft_summary(path: Path, *, target: Path, inbox: str, watched: bool) -> Ha
         scanner_provenance=scanner_provenance,
         status=status,
         watched=watched,
+        ingestion_status=str(ingest_outcome.get("status")) if ingest_outcome and ingest_outcome.get("status") else None,
+        ingest_run_id=str(ingest_outcome.get("run_id")) if ingest_outcome and ingest_outcome.get("run_id") else None,
+        ingest_log_path=str(ingest_outcome.get("log_path")) if ingest_outcome and ingest_outcome.get("log_path") else None,
     )
 
 
 def _drafts(target: Path, sources: Path | None = None) -> tuple[list[HandoffDraft], list[str], bool]:
     target = target.expanduser().resolve()
     paths, errors, loaded = _draft_paths(target, sources=sources)
-    drafts = [_draft_summary(path, target=target, inbox=inbox, watched=watched) for path, inbox, watched in paths]
+    ingest_outcomes = _ingest_outcomes_by_path(target)
+    drafts = [
+        _draft_summary(path, target=target, inbox=inbox, watched=watched, ingest_outcomes=ingest_outcomes)
+        for path, inbox, watched in paths
+    ]
     drafts.sort(key=lambda item: str(item.modified_at or item.id), reverse=True)
     return drafts, errors, loaded
 
@@ -679,11 +912,52 @@ def _archive_records(target: Path) -> list[dict[str, Any]]:
     return records
 
 
+def _write_archive_records(target: Path, records: list[dict[str, Any]]) -> None:
+    path = _handoff_archive_records_path(target)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w") as handle:
+        for record in records:
+            handle.write(json.dumps(record, sort_keys=True) + "\n")
+
+
 def _append_archive_record(target: Path, record: dict[str, Any]) -> None:
     path = _handoff_archive_records_path(target)
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a") as handle:
         handle.write(json.dumps(record, sort_keys=True) + "\n")
+
+
+def _archive_record_with_ingest_outcome(target: Path, record: dict[str, Any], outcomes: dict[str, dict[str, Any]] | None = None) -> dict[str, Any]:
+    outcomes = outcomes if outcomes is not None else _ingest_outcomes_by_path(target)
+    outcome = None
+    for key in ("archive_path", "path"):
+        value = record.get(key)
+        if isinstance(value, str) and value:
+            outcome = _latest_ingest_outcome_for_path(target, Path(value), outcomes)
+            if outcome is not None:
+                break
+    if outcome is None:
+        return record
+    updated = dict(record)
+    updated["ingestion_status"] = outcome.get("status")
+    updated["ingest_run_id"] = outcome.get("run_id")
+    updated["ingest_log_path"] = outcome.get("log_path")
+    if outcome.get("target_card") and not updated.get("target_card"):
+        updated["target_card"] = outcome.get("target_card")
+    if outcome.get("target_document") and not updated.get("target_document"):
+        updated["target_document"] = outcome.get("target_document")
+    return updated
+
+
+def _refresh_archive_ingest_outcomes(target: Path) -> list[dict[str, Any]]:
+    records = _archive_records(target)
+    if not records:
+        return []
+    outcomes = _ingest_outcomes_by_path(target)
+    refreshed = [_archive_record_with_ingest_outcome(target, record, outcomes) for record in records]
+    if refreshed != records:
+        _write_archive_records(target, refreshed)
+    return refreshed
 
 
 def _draft_source_import_issues(target: Path, drafts: list[HandoffDraft]) -> tuple[list[str], list[str]]:
@@ -713,8 +987,14 @@ def _draft_source_import_issues(target: Path, drafts: list[HandoffDraft]) -> tup
 def draft_queue_payload(target: Path, sources: Path | None = None) -> dict[str, Any]:
     target = target.expanduser().resolve()
     drafts, errors, sources_loaded = _drafts(target, sources=sources)
-    archives = _archive_records(target)
+    archives = _refresh_archive_ingest_outcomes(target)
+    receipts = _ingest_receipts(target)
     stale = [draft.id for draft in drafts if draft.stale and draft.status != "archived"]
+    unreconciled = [
+        draft.id
+        for draft in drafts
+        if draft.stale and draft.ingestion_status is None and draft.status != "archived"
+    ]
     invalid = [draft.id for draft in drafts if not draft.lint.valid]
     uncovered = [draft.id for draft in drafts if not draft.watched]
     missing_imports, changed_fingerprints = _draft_source_import_issues(target, drafts)
@@ -730,6 +1010,12 @@ def draft_queue_payload(target: Path, sources: Path | None = None) -> dict[str, 
             "name": "handoff_draft_stale",
             "detail": f"{len(stale)} stale pending handoff draft(s)" if stale else "none",
             "items": stale[:10],
+        },
+        {
+            "status": WARN if unreconciled else OK,
+            "name": "handoff_draft_unreconciled",
+            "detail": f"{len(unreconciled)} stale handoff draft(s) not represented in recent ingest receipts" if unreconciled else "none",
+            "items": unreconciled[:10],
         },
         {
             "status": WARN if invalid else OK,
@@ -762,10 +1048,15 @@ def draft_queue_payload(target: Path, sources: Path | None = None) -> dict[str, 
         "handoff_root": str(_handoff_state_root(target)),
         "drafts": [draft.as_dict() for draft in drafts],
         "archives": archives,
+        "ingest_runs_root": str(_handoff_ingest_runs_root(target)),
+        "latest_ingest_run": _receipt_summary(receipts[0]) if receipts else None,
         "counts": {
             "pending": len([draft for draft in drafts if draft.status == "pending"]),
             "reviewed": len([draft for draft in drafts if draft.status == "reviewed"]),
             "archived": len(archives),
+            "ingested": len([draft for draft in drafts if draft.ingestion_status == "ingested"]),
+            "skipped": len([draft for draft in drafts if draft.ingestion_status == "skipped"]),
+            "failed": len([draft for draft in drafts if draft.ingestion_status == "failed"]),
             "total": len(drafts),
         },
         "checks": checks,
@@ -821,12 +1112,16 @@ def list_drafts(*, target: Path, sources: Path | None = None, json_output: bool 
     print(f"pending: {counts['pending']}")
     print(f"reviewed: {counts['reviewed']}")
     print(f"archived: {counts['archived']}")
+    if payload.get("latest_ingest_run"):
+        latest = payload["latest_ingest_run"]
+        print(f"latest_ingest_run: {latest.get('run_id')} completed={latest.get('completed_at')}")
     for draft in payload["drafts"]:
         target_value = draft.get("target_document") or draft.get("target_card") or ""
+        ingest = draft.get("ingestion_status") or "unreconciled"
         print(
             f"- {draft.get('id')} [{draft.get('status')}] "
             f"lint={'ok' if draft.get('lint', {}).get('valid') else 'fail'} "
-            f"target={target_value}: {draft.get('path')}"
+            f"ingest={ingest} target={target_value}: {draft.get('path')}"
         )
     return 0
 
@@ -852,6 +1147,11 @@ def show_draft(*, target: Path, draft_id: str, sources: Path | None = None, json
     print(f"age_hours: {draft.age_hours}")
     print(f"stale: {draft.stale}")
     print(f"lint: {'ok' if draft.lint.valid else 'fail'}")
+    print(f"ingestion_status: {draft.ingestion_status or 'unreconciled'}")
+    if draft.ingest_run_id:
+        print(f"ingest_run_id: {draft.ingest_run_id}")
+    if draft.ingest_log_path:
+        print(f"ingest_log_path: {draft.ingest_log_path}")
     print(f"action: {draft.action}")
     if draft.target_card:
         print(f"target_card: {draft.target_card}")
@@ -891,6 +1191,9 @@ def _archive_one(target: Path, draft: HandoffDraft, *, reason: str | None = None
         "source_fingerprint": draft.source_fingerprint,
         "target_card": draft.target_card,
         "target_document": draft.target_document,
+        "ingestion_status": draft.ingestion_status,
+        "ingest_run_id": draft.ingest_run_id,
+        "ingest_log_path": draft.ingest_log_path,
     }
     _append_archive_record(target, record)
     return record
@@ -943,6 +1246,117 @@ def archive_draft(
     print(f"archived: {len(archived)}")
     for record in archived:
         print(f"- {record['id']} -> {record['archive_path']}")
+    return 0
+
+
+def runs(*, target: Path, json_output: bool = False, limit: int = 20) -> int:
+    if limit < 1:
+        print("error: --limit must be a positive integer", file=sys.stderr)
+        return 2
+    target = target.expanduser().resolve()
+    if not target.is_dir():
+        print(f"error: --target is not a directory: {target}", file=sys.stderr)
+        return 2
+    receipts = _ingest_receipts(target)
+    payload = {
+        "target": str(target),
+        "runs_root": str(_handoff_ingest_runs_root(target)),
+        "count": len(receipts),
+        "runs": [_receipt_summary(receipt) for receipt in receipts[:limit]],
+    }
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+    print(f"handoff ingest runs: {target}")
+    print(f"runs_root: {payload['runs_root']}")
+    print(f"runs: {payload['count']}")
+    for item in payload["runs"]:
+        print(
+            f"- {item.get('run_id')} completed={item.get('completed_at')} "
+            f"processed={item.get('processed')} skipped={item.get('skipped')} "
+            f"failed={item.get('failed')} warnings={item.get('warning_count')}"
+        )
+    return 0
+
+
+def run_show(*, target: Path, run_id: str, json_output: bool = False) -> int:
+    target = target.expanduser().resolve()
+    if not target.is_dir():
+        print(f"error: --target is not a directory: {target}", file=sys.stderr)
+        return 2
+    matches = [receipt for receipt in _ingest_receipts(target) if str(receipt.get("run_id")) == run_id or str(receipt.get("run_id", "")).startswith(run_id)]
+    if not matches:
+        print(f"error: handoff ingest run not found: {run_id}", file=sys.stderr)
+        return 1
+    if len(matches) > 1:
+        print(f"error: handoff ingest run id is ambiguous: {run_id}", file=sys.stderr)
+        return 2
+    receipt = matches[0]
+    payload = {"target": str(target), "run": receipt}
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+    print(f"handoff ingest run: {receipt.get('run_id')}")
+    print(f"started_at: {receipt.get('started_at')}")
+    print(f"completed_at: {receipt.get('completed_at')}")
+    print(f"source_root: {receipt.get('source_root')}")
+    print(f"warning_count: {receipt.get('warning_count')}")
+    if receipt.get("safe_summary"):
+        print(f"safe_summary: {receipt.get('safe_summary')}")
+    if receipt.get("log_path"):
+        print(f"log_path: {receipt.get('log_path')}")
+    print(f"processed: {len(receipt.get('processed_handoff_paths') or [])}")
+    print(f"skipped: {len(receipt.get('skipped_handoff_paths') or [])}")
+    print(f"failed: {len(receipt.get('failed_handoff_paths') or [])}")
+    for outcome in receipt.get("outcomes") or []:
+        if isinstance(outcome, dict):
+            print(f"- {outcome.get('status')} {outcome.get('path')}")
+    return 0
+
+
+def reconcile(*, target: Path, sources: Path | None = None, json_output: bool = False) -> int:
+    target = target.expanduser().resolve()
+    if not target.is_dir():
+        print(f"error: --target is not a directory: {target}", file=sys.stderr)
+        return 2
+    config, sources_path, errors, _ = _load_source_config_for_drafts(target, sources=sources)
+    if errors:
+        print(f"error: {'; '.join(errors)}", file=sys.stderr)
+        return 2
+    if config.ingestor is None:
+        print("error: ingestor.last_run_log is not configured", file=sys.stderr)
+        return 2
+    log_path = config.ingestor.log_path
+    if not log_path.is_file():
+        print(f"error: ingestor last_run_log not found: {log_path}", file=sys.stderr)
+        return 1
+    try:
+        text = log_path.read_text(errors="replace")
+    except OSError as exc:
+        print(f"error: cannot read ingestor log: {exc}", file=sys.stderr)
+        return 1
+    receipt = _parse_ingestor_log_receipt(target, config, log_path, text)
+    path = _ingest_receipt_path(target, str(receipt["run_id"]))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n")
+    archives = _refresh_archive_ingest_outcomes(target)
+    payload = {
+        "target": str(target),
+        "sources_path": str(sources_path) if sources_path else None,
+        "receipt_path": str(path),
+        "run": receipt,
+        "archive_records_refreshed": len(archives),
+    }
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+    print(f"handoff reconcile: {target}")
+    print(f"receipt: {path}")
+    print(f"run_id: {receipt['run_id']}")
+    print(f"processed: {len(receipt['processed_handoff_paths'])}")
+    print(f"skipped: {len(receipt['skipped_handoff_paths'])}")
+    print(f"failed: {len(receipt['failed_handoff_paths'])}")
+    print(f"warnings: {receipt['warning_count']}")
     return 0
 
 
@@ -1455,6 +1869,102 @@ def _parse_ingestor_log_issues(log_path: Path) -> list[HandoffIssue]:
             )
         )
     return issues
+
+
+def _parse_ingestor_log_receipt(target: Path, config: SourceConfig, log_path: Path, text: str) -> dict[str, Any]:
+    try:
+        stat = log_path.stat()
+        timestamp = stat.st_mtime
+    except OSError:
+        timestamp = time.time()
+    digest = hashlib.sha1(text.encode("utf-8", errors="replace")).hexdigest()[:10]
+    run_id = f"handoff-ingest-{time.strftime('%Y%m%d%H%M%S', time.gmtime(timestamp))}-{digest}"
+    processed: list[str] = []
+    promoted: list[dict[str, str | None]] = []
+    routed: list[dict[str, str | None]] = []
+    skipped: list[str] = []
+    failed: list[str] = []
+    warning_count = 0
+    no_reply = False
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        lower = stripped.casefold()
+        if stripped.startswith("Warnings:"):
+            match = re.search(r"Warnings:\s*(\d+)", stripped)
+            warning_count += int(match.group(1)) if match else 1
+            continue
+        if "NO_REPLY" in stripped or "NO_UPDATES" in stripped:
+            no_reply = True
+        if lower.startswith(("promoted ", "promote ")):
+            path_value, target_value = _split_outcome_line(stripped.split(" ", 1)[1])
+            if path_value:
+                promoted.append({"handoff_path": path_value, "target": target_value})
+                if path_value not in processed:
+                    processed.append(path_value)
+            continue
+        if lower.startswith(("routed ", "route ")):
+            path_value, target_value = _split_outcome_line(stripped.split(" ", 1)[1])
+            if path_value:
+                routed.append({"handoff_path": path_value, "target": target_value})
+                if path_value not in processed:
+                    processed.append(path_value)
+            continue
+        if lower.startswith(("processed ", "ingested ")):
+            remainder = stripped.split(" ", 1)[1]
+            path_value, _ = _split_outcome_line(remainder)
+            if path_value and path_value.endswith(".md") and path_value not in processed:
+                processed.append(path_value)
+            continue
+        if lower.startswith(("skip ", "skipped ", "promote-skip ", "route-skip ")):
+            path_value, _ = _split_outcome_line(stripped.split(" ", 1)[1])
+            if path_value:
+                skipped.append(path_value)
+            continue
+        if lower.startswith(("fail ", "failed ", "error ")):
+            path_value, _ = _split_outcome_line(stripped.split(" ", 1)[1])
+            if path_value:
+                failed.append(path_value)
+            continue
+    if no_reply and warning_count == 0:
+        warning_count = 1
+    inbox_paths = [str(watched.root / watched.inbox) for watched in config.watched]
+    safe_summary = (
+        f"processed={len(processed)}, skipped={len(skipped)}, "
+        f"failed={len(failed)}, warnings={warning_count}"
+    )
+    receipt = {
+        "run_id": run_id,
+        "started_at": _iso_from_timestamp(timestamp),
+        "completed_at": _iso_from_timestamp(timestamp),
+        "source_root": str(target),
+        "inbox_paths": inbox_paths,
+        "processed_handoff_paths": processed,
+        "promoted_card_targets": promoted,
+        "routed_document_targets": routed,
+        "skipped_handoff_paths": skipped,
+        "failed_handoff_paths": failed,
+        "warning_count": warning_count,
+        "safe_summary": safe_summary,
+        "log_path": str(log_path),
+    }
+    return _normalize_ingest_receipt(target, receipt)
+
+
+def _split_outcome_line(value: str) -> tuple[str | None, str | None]:
+    value = value.strip()
+    if not value:
+        return None, None
+    target_value = None
+    if " -> " in value:
+        value, target_value = value.split(" -> ", 1)
+    if ":" in value:
+        value = value.split(":", 1)[0]
+    value = value.strip().strip("`")
+    if value.startswith("[") and "]" in value:
+        value = value.split("]", 1)[1].strip()
+    return (value or None, target_value.strip() if isinstance(target_value, str) and target_value.strip() else None)
 
 
 def _issue_from_log_line(category: str, kind: str, line: str, line_number: int, log_path: Path) -> HandoffIssue:

@@ -6407,17 +6407,40 @@ no-card
 """
     )
     (inbox / "invalid.md").write_text("# Memory Handoff\n")
+    runs_root = tmp_path / ".brigade" / "handoffs" / "ingest-runs"
+    runs_root.mkdir(parents=True)
+    (runs_root / "run-brief.json").write_text(
+        json.dumps(
+            {
+                "run_id": "run-brief",
+                "started_at": "2026-05-28T10:00:00+00:00",
+                "completed_at": "2026-05-28T10:01:00+00:00",
+                "source_root": str(tmp_path),
+                "inbox_paths": [str(inbox)],
+                "processed_handoff_paths": [str(inbox / "reviewed.md")],
+                "promoted_card_targets": [],
+                "routed_document_targets": [],
+                "skipped_handoff_paths": [],
+                "failed_handoff_paths": [],
+                "warning_count": 0,
+                "safe_summary": "processed=1",
+                "log_path": "latest.log",
+            }
+        )
+    )
 
     assert work_cmd.brief(target=tmp_path, json_output=True) == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["handoff_drafts"]["counts"]["total"] == 2
     assert payload["handoff_drafts"]["counts"]["reviewed"] == 1
+    assert payload["handoff_drafts"]["latest_ingest_run"]["run_id"] == "run-brief"
     assert payload["handoff_drafts"]["issue_count"] >= 1
 
     assert work_cmd.brief(target=tmp_path) == 0
     out = capsys.readouterr().out
     assert "handoff_drafts_pending: 1" in out
     assert "handoff_drafts_reviewed: 1" in out
+    assert "handoff_ingest_latest: run-brief completed=2026-05-28T10:01:00+00:00" in out
     assert "handoff_draft_next_command: brigade handoff show" in out
 
     assert work_cmd.doctor(target=tmp_path) == 1

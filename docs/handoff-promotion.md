@@ -13,6 +13,9 @@ brigade handoff list
 brigade handoff show <handoff-id-or-path>
 brigade handoff archive <handoff-id-or-path>
 brigade handoff archive --all-reviewed
+brigade handoff runs
+brigade handoff run-show <run-id>
+brigade handoff reconcile
 ```
 
 `plan-handoff` previews the handoff target, type, local inbox, provenance, and blockers. `promote-handoff` writes the draft, runs handoff lint, and only then marks the import promoted.
@@ -66,3 +69,13 @@ Promoted imports preserve the local handoff path, target document, promotion tim
 `brigade handoff show <handoff-id-or-path>` prints the same detail for one draft. `brigade handoff archive <handoff-id-or-path>` moves one draft into `.brigade/handoffs/archive/` and appends a closeout record under `.brigade/handoffs/archive.jsonl`. `brigade handoff archive --all-reviewed` archives lint-valid drafts only, leaving invalid drafts in place for repair.
 
 The draft queue is review visibility only. Brigade does not run the canonical ingestor, route the draft into canonical memory, edit `MEMORY.md`, or mutate memory cards.
+
+## Ingestion Receipt Visibility
+
+Canonical memory ingestion stays outside Brigade, but Brigade can read local receipt summaries that the ingestor or wrapper leaves behind under `.brigade/handoffs/ingest-runs/`. A receipt records the run id, timestamps, source root, inbox paths, processed handoff paths, promoted card targets, routed document targets, skipped paths, failed paths, warning count, safe summary, and local log path.
+
+`brigade handoff runs` lists those receipts. `brigade handoff run-show <run-id>` shows the full normalized receipt and outcome summary. `brigade handoff list` and `brigade handoff show` include the latest known ingestion status for each draft when a receipt references it.
+
+`brigade handoff reconcile` reads the configured `ingestor.last_run_log`, parses recognizable processed, promoted, routed, skipped, failed, warning, and no-reply lines, then writes a normalized receipt locally. Reconcile may update `.brigade/handoffs/archive.jsonl` with known ingestion outcome fields while preserving manual archive reasons.
+
+This is observability only. Brigade does not run the ingestor, edit canonical memory, promote cards, route documents, or summarize draft content.

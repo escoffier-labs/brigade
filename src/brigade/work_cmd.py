@@ -3378,6 +3378,7 @@ def _brief_payload(target: Path, *, limit: int = 3) -> dict[str, Any]:
             "counts": handoff_drafts["counts"],
             "issue_count": handoff_drafts["issue_count"],
             "top_issue": handoff_drafts["top_issue"],
+            "latest_ingest_run": handoff_drafts.get("latest_ingest_run"),
             "drafts": handoff_drafts["drafts"][:limit],
         },
         "dogfood": resolved["dogfood"],
@@ -4056,6 +4057,12 @@ def brief(*, target: Path, limit: int = 3, json_output: bool = False) -> int:
         if total:
             print(f"handoff_drafts_pending: {counts.get('pending', 0)}")
             print(f"handoff_drafts_reviewed: {counts.get('reviewed', 0)}")
+            latest_ingest = handoff_drafts.get("latest_ingest_run") if isinstance(handoff_drafts.get("latest_ingest_run"), dict) else None
+            if latest_ingest:
+                print(
+                    f"handoff_ingest_latest: {latest_ingest.get('run_id')} "
+                    f"completed={latest_ingest.get('completed_at')}"
+                )
             top_issue = handoff_drafts.get("top_issue") if isinstance(handoff_drafts.get("top_issue"), dict) else None
             if top_issue:
                 print(f"handoff_draft_top_issue: {top_issue.get('name')} {_short(str(top_issue.get('detail', '')))}")

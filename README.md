@@ -161,6 +161,9 @@ brigade handoff list
 brigade handoff show <handoff-id-or-path>
 brigade handoff archive <handoff-id-or-path>
 brigade handoff archive --all-reviewed
+brigade handoff runs
+brigade handoff run-show <run-id>
+brigade handoff reconcile
 brigade handoff issues
 brigade handoff import-issues
 brigade handoff sync-issues
@@ -414,6 +417,8 @@ Handoff draft queue commands:
 - `brigade handoff show <handoff-id-or-path>` shows lint status, target card or document, source import id, source fingerprint, scanner provenance, and stale age.
 - `brigade handoff archive <handoff-id-or-path>` moves one reviewed draft into `.brigade/handoffs/archive/` and records closeout metadata in `.brigade/handoffs/archive.jsonl`.
 - `brigade handoff archive --all-reviewed` archives lint-valid drafts only. It does not run the canonical ingestor or edit memory.
+- `brigade handoff runs` and `brigade handoff run-show <run-id>` read normalized local ingestion receipts from `.brigade/handoffs/ingest-runs/`.
+- `brigade handoff reconcile` parses the configured `ingestor.last_run_log`, writes a normalized local receipt, and connects ingested, skipped, or failed outcomes back to draft and archive metadata. It does not run the ingestor or edit canonical memory.
 
 Scanner registry commands:
 

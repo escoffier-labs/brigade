@@ -137,6 +137,18 @@ def _build_parser() -> argparse.ArgumentParser:
     p_handoff_archive.add_argument("--sources", type=Path, default=None, help="Override .brigade/handoff-sources.json.")
     p_handoff_archive.add_argument("--reason", default=None, help="Review reason to store in archive metadata.")
     p_handoff_archive.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_handoff_runs = handoff_sub.add_parser("runs", help="List local handoff ingestion receipts.")
+    p_handoff_runs.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_handoff_runs.add_argument("--limit", type=int, default=20, help="Maximum runs to show.")
+    p_handoff_runs.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_handoff_run_show = handoff_sub.add_parser("run-show", help="Show one local handoff ingestion receipt.")
+    p_handoff_run_show.add_argument("run_id", help="Run id or unique prefix.")
+    p_handoff_run_show.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_handoff_run_show.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_handoff_reconcile = handoff_sub.add_parser("reconcile", help="Normalize the configured handoff ingestor latest-run log.")
+    p_handoff_reconcile.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
+    p_handoff_reconcile.add_argument("--sources", type=Path, default=None, help="Override .brigade/handoff-sources.json.")
+    p_handoff_reconcile.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_handoff_issues = handoff_sub.add_parser("issues", help="Group actionable handoff ingest issues.")
     p_handoff_issues.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
     p_handoff_issues.add_argument("--sources", type=Path, default=None, help="Override .brigade/handoff-sources.json.")
@@ -1100,6 +1112,12 @@ def main(argv=None) -> int:
                 sources=args.sources,
                 json_output=args.json,
             )
+        if args.handoff_command == "runs":
+            return handoff_cmd.runs(target=args.target, json_output=args.json, limit=args.limit)
+        if args.handoff_command == "run-show":
+            return handoff_cmd.run_show(target=args.target, run_id=args.run_id, json_output=args.json)
+        if args.handoff_command == "reconcile":
+            return handoff_cmd.reconcile(target=args.target, sources=args.sources, json_output=args.json)
         if args.handoff_command == "issues":
             return handoff_cmd.issues(
                 target=args.target,
