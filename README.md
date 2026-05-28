@@ -198,6 +198,9 @@ brigade tools runtime status
 brigade tools runtime start <runtime-id>
 brigade tools runtime stop <runtime-id>
 brigade tools runtime doctor
+brigade tools policy init
+brigade tools policy show
+brigade tools policy doctor
 brigade tools plan
 brigade tools plan simplify
 brigade tools apply simplify --dry-run
@@ -375,12 +378,13 @@ Portable tool catalog commands:
 - `brigade tools call queue/list/show/approve/reject/hold` stores planned calls in `.brigade/tools/calls.jsonl` for local review. Approval changes status only and never executes a tool.
 - `brigade tools call run <call-id>` and `brigade tools call run --next` execute approved, unblocked `script` calls only, then write local receipts and stdout/stderr logs under `.brigade/tools/runs/`.
 - `brigade tools runtime init/list/show/status/start/stop/restart/doctor` manages explicit local runtimes used by portable tool calls, writing PID files and logs under `.brigade/tools/runtime/`.
+- `brigade tools policy init/show/doctor` manages host-local execution policy, including allowed effects, timeout caps, runtime allow-lists, approval modes, and environment label bindings.
 - `brigade tools plan` previews exact projection creates, updates, skips, unmanaged conflicts, and local-edit conflicts for all configured harness targets.
 - `brigade tools apply <tool-id>` and `brigade tools apply --all` explicitly write managed harness projections. Use `--dry-run` to preview writes and `--force` only to overwrite unmanaged or locally edited projection files.
 - `brigade tools doctor` reports missing sources, manifests, schemas, invalid contracts, missing examples, bad argument templates, projections, unmanaged projections, locally edited managed projections, stale projection fingerprints, MCP config issues, stale health files, unsafe auth/env field names, and high-risk command shapes.
 - `brigade tools import-issues` turns catalog health issues into local `tool-catalog` work imports with stable fingerprints and dismiss-until-changed behavior.
 
-Tool catalog inspection, call planning, and call approval review are non-executing, and projection writes are always explicit through `brigade tools apply`. Tool call execution is explicit through `brigade tools call run`, limited initially to approved local `script` entries, and writes local receipts instead of mutating approvals automatically. Runtime start and stop are explicit through `brigade tools runtime`; `doctor`, `brief`, and `work run` never auto-start runtimes. Brigade does not start MCP servers, fetch OpenAPI or GraphQL schemas, store auth, install schedulers, send approval notifications, or auto-sync harness configs from `doctor`, `brief`, or `work run`. Keep tokens, secrets, private URLs, and host-private paths out of public catalog templates.
+Tool catalog inspection, call planning, and call approval review are non-executing, and projection writes are always explicit through `brigade tools apply`. Tool call execution is explicit through `brigade tools call run`, limited initially to approved local `script` entries, and writes local receipts instead of mutating approvals automatically. Runtime start and stop are explicit through `brigade tools runtime`; `doctor`, `brief`, and `work run` never auto-start runtimes. Execution policy is host-local and gitignored; environment values come only from the current process and are not stored in calls, receipts, logs, imports, or docs. Brigade does not start MCP servers, fetch OpenAPI or GraphQL schemas, store auth, install schedulers, send approval notifications, or auto-sync harness configs from `doctor`, `brief`, or `work run`. Keep tokens, secrets, private URLs, and host-private paths out of public catalog templates.
 
 Backup health commands:
 

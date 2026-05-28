@@ -42,6 +42,9 @@ brigade tools runtime start <runtime-id>
 brigade tools runtime stop <runtime-id>
 brigade tools runtime restart <runtime-id>
 brigade tools runtime doctor
+brigade tools policy init
+brigade tools policy show
+brigade tools policy doctor
 brigade tools plan
 brigade tools plan simplify
 brigade tools apply simplify --dry-run
@@ -52,7 +55,7 @@ brigade tools doctor --json
 brigade tools import-issues
 ```
 
-`list`, `show`, and `search` inspect configured entries. `describe` and `contracts` inspect schema-backed call contracts. `call plan` validates arguments and returns a safe call plan without executing anything. `call queue` stores a plan for local review, and `call approve`, `reject`, and `hold` update review status only. `call run` explicitly executes approved script calls and writes local receipts. `runtime` commands explicitly manage local runtimes. `plan` previews projection writes without touching files. `apply` is the only command that writes projections, and it requires either one tool id or `--all`. `doctor` reports catalog health issues. `import-issues` writes those issues into the normal work import inbox as `tool-catalog` task imports with stable source fingerprints.
+`list`, `show`, and `search` inspect configured entries. `describe` and `contracts` inspect schema-backed call contracts. `call plan` validates arguments and returns a safe call plan without executing anything. `call queue` stores a plan for local review, and `call approve`, `reject`, and `hold` update review status only. `call run` explicitly executes approved script calls and writes local receipts. `runtime` commands explicitly manage local runtimes. `policy` commands inspect host-local execution gates and env label bindings. `plan` previews projection writes without touching files. `apply` is the only command that writes projections, and it requires either one tool id or `--all`. `doctor` reports catalog health issues. `import-issues` writes those issues into the normal work import inbox as `tool-catalog` task imports with stable source fingerprints.
 
 ## Config Shape
 
@@ -164,6 +167,48 @@ Runtime commands are local and explicit:
 Brigade refuses high-risk runtime command shapes, detects already-running runtimes, detects stale PID files, and warns when configured ports are already in use. `doctor`, `brief`, and `work run` never start runtimes automatically.
 
 When a tool has `requires_runtime = true`, `brigade tools call run` refuses execution unless the configured runtime exists, is running, is managed by Brigade metadata, and passes health checks. Receipts include the runtime id and runtime snapshot used for the run.
+
+## Execution Policy
+
+Execution policy is host-local and gitignored:
+
+```text
+.brigade/tools/policy.toml
+```
+
+Create a starter policy with:
+
+```bash
+brigade tools policy init
+```
+
+The policy shape is:
+
+```toml
+allowed_families = ["script"]
+allowed_effects = ["local-read", "local-write"]
+denied_effects = ["remote-mutation", "secret-read"]
+required_approval_modes = ["on-request", "always"]
+max_timeout = 60
+allowed_runtimes = ["local-helper"]
+env_bindings = { SAFE_ENV = "SAFE_ENV" }
+```
+
+Policy fields:
+
+- `allowed_families`: optional allow-list for tool families that can run.
+- `allowed_effects`: optional allow-list for effect labels.
+- `denied_effects`: effect labels that always block planning and execution.
+- `required_approval_modes`: allowed approval modes for executable calls.
+- `max_timeout`: maximum allowed call timeout in seconds.
+- `allowed_runtimes`: optional allow-list for runtime ids.
+- `env_bindings`: maps safe env labels from tool config to process environment variable names.
+
+When a policy file exists, `brigade tools call plan` and `brigade tools call run` report policy blockers for denied effects, effects outside the allow-list, disallowed families, missing env bindings, missing process env values, timeout caps, disallowed runtimes, and approval-mode mismatches. A missing policy is a health issue for executable contract-backed tools, but it does not break older read-only catalog workflows.
+
+For env bindings, Brigade reads the current process environment at execution time and passes values to the script under the configured label name. It never stores env values in `.brigade/tools/calls.jsonl`, receipts, logs, docs, or work imports. Receipts include the policy decision and env labels used, with values redacted.
+
+`brigade tools policy doctor` checks the policy file directly. `brigade tools doctor`, `brigade work brief`, and `brigade tools import-issues` also surface missing policy, missing env labels, denied effects, timeout caps, approval-mode blockers, and runtime/policy mismatches.
 
 ## Projection Planning And Apply
 
@@ -291,6 +336,8 @@ Receipts include call id, tool id, status, timestamps, duration, exit code, time
 - tool call executions left running too long
 - missing, stopped, stale, unhealthy, or unmanaged required runtimes
 - runtime config, cwd, command, PID, port, and health-check issues
+- missing execution policy for executable contract-backed tools
+- policy blockers for effects, timeouts, approval modes, runtimes, families, and env labels
 - MCP config issues in local JSON files with `mcpServers`
 
 MCP discovery is structural only. Brigade summarizes server count and server ids, checks for missing commands and timeout metadata, and flags broad shell-like command shapes. It never starts an MCP server.
@@ -313,4 +360,4 @@ Repeated imports dedupe equivalent pending or promoted issues. Dismissed tool-ca
 
 Keep all catalog state local and gitignored. Do not put tokens, passwords, raw credentials, URLs with embedded secrets, private hostnames, or host-private paths in public templates. Brigade reports unsafe field names without copying their values into command output, work imports, session artifacts, docs, or handoffs.
 
-Projection apply is local and explicit. Call planning and call approval review are local and non-executing. Tool execution is explicit through `brigade tools call run`, limited initially to approved local `script` entries, and recorded with local receipts. Runtime lifecycle is explicit through `brigade tools runtime`; no command auto-starts runtimes as a side effect. Brigade does not start MCP servers, run OpenAPI or GraphQL calls, install schedulers, fetch remote schemas, store auth, send notifications, or mutate remote services.
+Projection apply is local and explicit. Call planning and call approval review are local and non-executing. Tool execution is explicit through `brigade tools call run`, limited initially to approved local `script` entries, and recorded with local receipts. Runtime lifecycle is explicit through `brigade tools runtime`; no command auto-starts runtimes as a side effect. Execution policy is host-local and gitignored. Brigade does not store secrets, start MCP servers, run OpenAPI or GraphQL calls, install schedulers, fetch remote schemas, store auth, send notifications, or mutate remote services.

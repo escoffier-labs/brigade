@@ -4,6 +4,7 @@ import socket
 import subprocess
 import sys
 from datetime import datetime, timezone
+from pathlib import Path
 
 from brigade import cli
 from brigade import dogfood_cmd
@@ -2439,6 +2440,43 @@ def _write_runtime_config(
     config.write_text("\n".join(lines) + "\n")
 
 
+def _write_policy_config(
+    tmp_path,
+    *,
+    allowed_families=None,
+    allowed_effects=None,
+    denied_effects=None,
+    required_approval_modes=None,
+    max_timeout=10,
+    allowed_runtimes=None,
+    env_bindings=None,
+):
+    allowed_families = ["script"] if allowed_families is None else allowed_families
+    allowed_effects = ["local-read"] if allowed_effects is None else allowed_effects
+    denied_effects = [] if denied_effects is None else denied_effects
+    required_approval_modes = ["on-request", "always"] if required_approval_modes is None else required_approval_modes
+    allowed_runtimes = [] if allowed_runtimes is None else allowed_runtimes
+    env_bindings = {} if env_bindings is None else env_bindings
+    config = tmp_path / ".brigade" / "tools" / "policy.toml"
+    config.parent.mkdir(parents=True, exist_ok=True)
+    config.write_text(
+        "\n".join(
+            [
+                "allowed_families = " + json.dumps(allowed_families),
+                "allowed_effects = " + json.dumps(allowed_effects),
+                "denied_effects = " + json.dumps(denied_effects),
+                "required_approval_modes = " + json.dumps(required_approval_modes),
+                f"max_timeout = {max_timeout}",
+                "allowed_runtimes = " + json.dumps(allowed_runtimes),
+                "env_bindings = { "
+                + ", ".join(f"{key} = {json.dumps(value)}" for key, value in env_bindings.items())
+                + " }",
+                "",
+            ]
+        )
+    )
+
+
 def _queue_and_approve_runner(tmp_path, capsys, args='{"path":"README.md"}'):
     assert tools_cmd.call_queue(target=tmp_path, tool_id="runner", args=args, json_output=True) == 0
     call = json.loads(capsys.readouterr().out)["call"]
@@ -2767,6 +2805,145 @@ requires_runtime = true
     payload = json.loads(capsys.readouterr().out)
     issue_types = {item["metadata"]["tool_issue_type"] for item in payload["imports"]}
     assert "runtime_missing" in issue_types
+
+
+def test_tools_policy_init_show_doctor_and_json(tmp_path, capsys):
+    _init_git_repo(tmp_path)
+    assert tools_cmd.policy_init(target=tmp_path) == 0
+    out = capsys.readouterr().out
+    assert "policy_config:" in out
+    assert (tmp_path / ".brigade" / "tools" / "policy.toml").is_file()
+
+    assert tools_cmd.policy_show(target=tmp_path) == 0
+    out = capsys.readouterr().out
+    assert "tools policy:" in out
+    assert "allowed_families: script" in out
+
+    assert tools_cmd.policy_show(target=tmp_path, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["policy"]["allowed_families"] == ["script"]
+    assert "SAFE_ENV" in payload["policy"]["env_bindings"]
+
+    assert tools_cmd.policy_doctor(target=tmp_path, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["enabled"] is True
+    assert payload["issue_count"] == 0
+
+
+def test_tools_policy_blocks_plan_and_run_for_effect_timeout_runtime_approval_and_env(tmp_path, capsys):
+    _init_git_repo(tmp_path)
+    _write_script_tool_config(tmp_path, script='print("ok")\n', timeout=30)
+    config = tmp_path / ".brigade" / "tools.toml"
+    config.write_text(
+        f"""
+[[tool]]
+id = "runner"
+name = "Runner"
+family = "script"
+enabled = true
+description = "Run local script."
+command = "{sys.executable} tools/runner.py"
+input_schema_path = "tools/input.schema.json"
+timeout = 30
+permissions = ["read-files"]
+effects = ["remote-mutation"]
+approval_mode = "never"
+argument_template = {{ path = "{{path}}" }}
+supported_harnesses = []
+runtime_id = "helper"
+requires_runtime = false
+env_labels = ["SAFE_LABEL"]
+"""
+    )
+    _write_policy_config(
+        tmp_path,
+        allowed_effects=["local-read"],
+        denied_effects=["remote-mutation"],
+        required_approval_modes=["on-request"],
+        max_timeout=5,
+        allowed_runtimes=["other"],
+        env_bindings={},
+    )
+
+    assert tools_cmd.call_plan(target=tmp_path, tool_id="runner", args='{"path":"README.md"}', json_output=True) == 1
+    payload = json.loads(capsys.readouterr().out)
+    blockers = "\n".join(payload["blockers"])
+    assert "effect is denied by policy: remote-mutation" in blockers
+    assert "effect is not allowed by policy: remote-mutation" in blockers
+    assert "approval mode is not allowed by policy: never" in blockers
+    assert "timeout exceeds policy max: 30.0 > 5.0" in blockers
+    assert "runtime is not allowed by policy: helper" in blockers
+    assert "missing env binding for label: SAFE_LABEL" in blockers
+
+    assert tools_cmd.call_queue(target=tmp_path, tool_id="runner", args='{"path":"README.md"}', include_blocked=True, json_output=True) == 0
+    call = json.loads(capsys.readouterr().out)["call"]
+    calls = tools_cmd._read_calls(tmp_path)
+    calls[0]["status"] = "approved"
+    calls[0]["reviewed_at"] = "2026-05-27T12:00:00+00:00"
+    calls[0]["approval_fingerprint"] = tools_cmd._approval_fingerprint(calls[0])
+    tools_cmd._write_calls(tmp_path, calls)
+    assert tools_cmd.call_run(target=tmp_path, call_id=call["id"], json_output=True) == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert "effect is denied by policy: remote-mutation" in "\n".join(payload["blockers"])
+
+
+def test_tools_policy_env_binding_passes_values_without_storing_them(tmp_path, monkeypatch, capsys):
+    _init_git_repo(tmp_path)
+    secret_value = "super-secret-value"
+    monkeypatch.setenv("BRIGADE_TEST_SECRET", secret_value)
+    _write_script_tool_config(
+        tmp_path,
+        script='import os\nprint("label=" + os.environ.get("SAFE_LABEL", ""))\n',
+    )
+    config = tmp_path / ".brigade" / "tools.toml"
+    config.write_text(
+        config.read_text()
+        + """
+env_labels = ["SAFE_TOKEN"]
+"""
+    )
+    config.write_text(config.read_text().replace('env_labels = ["SAFE_TOKEN"]', 'env_labels = ["SAFE_LABEL"]'))
+    _write_policy_config(tmp_path, env_bindings={"SAFE_LABEL": "BRIGADE_TEST_SECRET"})
+
+    assert tools_cmd.call_plan(target=tmp_path, tool_id="runner", args='{"path":"README.md"}', json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["policy"]["env_labels_used"] == ["SAFE_LABEL"]
+    assert secret_value not in json.dumps(payload)
+
+    call = _queue_and_approve_runner(tmp_path, capsys)
+    assert secret_value not in (tmp_path / ".brigade" / "tools" / "calls.jsonl").read_text()
+
+    assert tools_cmd.call_run(target=tmp_path, call_id=call["id"], json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["receipt"]["env_labels_used"] == ["SAFE_LABEL"]
+    assert payload["receipt"]["policy"]["env_labels_used"] == ["SAFE_LABEL"]
+    assert secret_value not in json.dumps(payload)
+    assert secret_value not in (tmp_path / ".brigade" / "tools" / "runs" / f"{payload['receipt']['id']}.stdout.log").read_text()
+    assert "[redacted]" in (tmp_path / ".brigade" / "tools" / "runs" / f"{payload['receipt']['id']}.stdout.log").read_text()
+    assert secret_value not in Path(payload["receipt"]["receipt_path"]).read_text()
+
+
+def test_tools_policy_health_integrates_with_doctor_brief_and_imports(tmp_path, monkeypatch, capsys):
+    _init_git_repo(tmp_path)
+    dogfood_cmd.init(target=tmp_path)
+    capsys.readouterr()
+    monkeypatch.setattr(work_cmd.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(dogfood_cmd, "_check_git_ignored", lambda repo, path: "yes")
+    _write_script_tool_config(tmp_path, script='print("ok")\n')
+    _write_policy_config(tmp_path, denied_effects=["local-read"])
+
+    assert tools_cmd.doctor(target=tmp_path) == 0
+    out = capsys.readouterr().out
+    assert "[warn] tool_policy_denied_effect:" in out
+
+    assert work_cmd.brief(target=tmp_path) == 0
+    out = capsys.readouterr().out
+    assert "tool_top_issue: runner/policy_denied_effect" in out
+
+    assert tools_cmd.import_issues(target=tmp_path, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    issue_types = {item["metadata"]["tool_issue_type"] for item in payload["imports"]}
+    assert "policy_denied_effect" in issue_types
 
 
 def test_work_backup_init_status_doctor_and_json(tmp_path, monkeypatch, capsys):
@@ -4885,6 +5062,18 @@ def test_tools_cli(tmp_path, monkeypatch):
         seen.append(("runtime-doctor", kwargs))
         return 0
 
+    def fake_policy_init(**kwargs):
+        seen.append(("policy-init", kwargs))
+        return 0
+
+    def fake_policy_show(**kwargs):
+        seen.append(("policy-show", kwargs))
+        return 0
+
+    def fake_policy_doctor(**kwargs):
+        seen.append(("policy-doctor", kwargs))
+        return 0
+
     def fake_plan(**kwargs):
         seen.append(("plan", kwargs))
         return 0
@@ -4923,6 +5112,9 @@ def test_tools_cli(tmp_path, monkeypatch):
     monkeypatch.setattr(tools_cmd, "runtime_stop", fake_runtime_stop)
     monkeypatch.setattr(tools_cmd, "runtime_restart", fake_runtime_restart)
     monkeypatch.setattr(tools_cmd, "runtime_doctor", fake_runtime_doctor)
+    monkeypatch.setattr(tools_cmd, "policy_init", fake_policy_init)
+    monkeypatch.setattr(tools_cmd, "policy_show", fake_policy_show)
+    monkeypatch.setattr(tools_cmd, "policy_doctor", fake_policy_doctor)
     monkeypatch.setattr(tools_cmd, "plan", fake_plan)
     monkeypatch.setattr(tools_cmd, "apply", fake_apply)
     monkeypatch.setattr(tools_cmd, "doctor", fake_doctor)
@@ -4951,6 +5143,9 @@ def test_tools_cli(tmp_path, monkeypatch):
     assert cli.main(["tools", "runtime", "stop", "helper", "--target", str(tmp_path), "--json"]) == 0
     assert cli.main(["tools", "runtime", "restart", "helper", "--target", str(tmp_path), "--json"]) == 0
     assert cli.main(["tools", "runtime", "doctor", "--target", str(tmp_path), "--json"]) == 0
+    assert cli.main(["tools", "policy", "init", "--target", str(tmp_path), "--force"]) == 0
+    assert cli.main(["tools", "policy", "show", "--target", str(tmp_path), "--json"]) == 0
+    assert cli.main(["tools", "policy", "doctor", "--target", str(tmp_path), "--json"]) == 0
     assert cli.main(["tools", "plan", "simplify", "--target", str(tmp_path), "--json"]) == 0
     assert cli.main(["tools", "apply", "simplify", "--target", str(tmp_path), "--dry-run", "--force", "--json"]) == 0
     assert cli.main(["tools", "apply", "--all", "--target", str(tmp_path), "--json"]) == 0
@@ -4999,6 +5194,9 @@ def test_tools_cli(tmp_path, monkeypatch):
         ("runtime-stop", {"target": tmp_path, "runtime_id": "helper", "json_output": True}),
         ("runtime-restart", {"target": tmp_path, "runtime_id": "helper", "json_output": True}),
         ("runtime-doctor", {"target": tmp_path, "json_output": True}),
+        ("policy-init", {"target": tmp_path, "force": True}),
+        ("policy-show", {"target": tmp_path, "json_output": True}),
+        ("policy-doctor", {"target": tmp_path, "json_output": True}),
         ("plan", {"target": tmp_path, "tool_id": "simplify", "json_output": True}),
         (
             "apply",

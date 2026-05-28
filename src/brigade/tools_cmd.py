@@ -33,6 +33,7 @@ CALLS_REL_PATH = ".brigade/tools/calls.jsonl"
 RUNS_REL_PATH = ".brigade/tools/runs"
 RUNTIMES_REL_PATH = ".brigade/tools/runtimes.toml"
 RUNTIME_STATE_REL_PATH = ".brigade/tools/runtime"
+POLICY_REL_PATH = ".brigade/tools/policy.toml"
 HEALTH_STALE_HOURS = 48
 CALL_STALE_HOURS = 72
 CALL_RUNNING_STALE_HOURS = 2
@@ -92,6 +93,15 @@ DEFAULT_RUNTIMES = (
         "timeout": 10,
     },
 )
+DEFAULT_POLICY = {
+    "allowed_families": ["script"],
+    "allowed_effects": ["local-read", "local-write"],
+    "denied_effects": ["remote-mutation", "secret-read"],
+    "required_approval_modes": ["on-request", "always"],
+    "max_timeout": 60,
+    "allowed_runtimes": ["local-helper"],
+    "env_bindings": {"SAFE_ENV": "SAFE_ENV"},
+}
 
 
 def config_path(target: Path) -> Path:
@@ -112,6 +122,10 @@ def runtimes_config_path(target: Path) -> Path:
 
 def runtime_state_path(target: Path) -> Path:
     return target / RUNTIME_STATE_REL_PATH
+
+
+def policy_path(target: Path) -> Path:
+    return target / POLICY_REL_PATH
 
 
 def _now() -> datetime:
@@ -198,6 +212,21 @@ def _format_runtimes_toml(runtimes: tuple[dict[str, Any], ...] = DEFAULT_RUNTIME
         for key in ("id", "name", "enabled", "command", "cwd", "port", "health_command", "health_path", "pid_path", "log_path", "timeout"):
             lines.append(f"{key} = {dogfood_cmd._format_toml_value(runtime[key])}")
         lines.append("")
+    return "\n".join(lines)
+
+
+def _format_policy_toml(policy: dict[str, Any] = DEFAULT_POLICY) -> str:
+    lines = [
+        "# Host-local portable tool execution policy. Keep secrets in the process environment, not here.",
+        f"allowed_families = {_format_inline_list(list(policy['allowed_families']))}",
+        f"allowed_effects = {_format_inline_list(list(policy['allowed_effects']))}",
+        f"denied_effects = {_format_inline_list(list(policy['denied_effects']))}",
+        f"required_approval_modes = {_format_inline_list(list(policy['required_approval_modes']))}",
+        f"max_timeout = {dogfood_cmd._format_toml_value(policy['max_timeout'])}",
+        f"allowed_runtimes = {_format_inline_list(list(policy['allowed_runtimes']))}",
+        f"env_bindings = {_format_inline_table(dict(policy['env_bindings']))}",
+        "",
+    ]
     return "\n".join(lines)
 
 
@@ -370,6 +399,67 @@ def _load_runtime_config(target: Path) -> tuple[list[dict[str, Any]], list[str]]
                 runtime["timeout"] = float(timeout)
         runtimes.append(runtime)
     return runtimes, errors
+
+
+def _load_policy_config(target: Path) -> tuple[dict[str, Any] | None, list[str]]:
+    path = policy_path(target)
+    if not path.is_file():
+        return None, [f"tool execution policy missing: {path}"]
+    if tomllib is None:
+        return None, ["tool execution policy requires Python tomllib support"]
+    try:
+        raw_policy = tomllib.loads(path.read_text())
+    except (OSError, tomllib.TOMLDecodeError) as exc:  # type: ignore[union-attr]
+        return None, [f"invalid tool execution policy: {exc}"]
+    errors: list[str] = []
+    policy: dict[str, Any] = {"raw": raw_policy}
+    for field in ("allowed_families", "allowed_effects", "denied_effects", "required_approval_modes", "allowed_runtimes"):
+        values = raw_policy.get(field, [])
+        if values is None:
+            values = []
+        if not isinstance(values, list) or any(not isinstance(item, str) or not item.strip() for item in values):
+            errors.append(f"{field} must be a list of strings")
+            values = []
+        policy[field] = [item.strip() for item in values if isinstance(item, str) and item.strip()]
+    invalid_families = [family for family in policy["allowed_families"] if family not in FAMILIES]
+    if invalid_families:
+        errors.append(f"allowed_families has unknown values: {', '.join(invalid_families)}")
+    invalid_modes = [mode for mode in policy["required_approval_modes"] if mode not in APPROVAL_MODES]
+    if invalid_modes:
+        errors.append(f"required_approval_modes has unknown values: {', '.join(invalid_modes)}")
+    max_timeout = raw_policy.get("max_timeout")
+    if max_timeout is not None:
+        if not isinstance(max_timeout, (int, float)) or isinstance(max_timeout, bool) or max_timeout <= 0:
+            errors.append("max_timeout must be a positive number")
+            max_timeout = None
+        else:
+            max_timeout = float(max_timeout)
+    policy["max_timeout"] = max_timeout
+    env_bindings = raw_policy.get("env_bindings", {})
+    if env_bindings is None:
+        env_bindings = {}
+    if not isinstance(env_bindings, dict) or any(
+        not isinstance(key, str)
+        or not key.strip()
+        or not isinstance(value, str)
+        or not value.strip()
+        for key, value in env_bindings.items()
+    ):
+        errors.append("env_bindings must be a table of label = environment variable")
+        env_bindings = {}
+    cleaned_bindings: dict[str, str] = {}
+    for key, value in env_bindings.items():
+        label = str(key).strip()
+        env_name = str(value).strip()
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", label):
+            errors.append(f"env binding label is invalid: {label}")
+            continue
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", env_name):
+            errors.append(f"env binding target is invalid for label: {label}")
+            continue
+        cleaned_bindings[label] = env_name
+    policy["env_bindings"] = cleaned_bindings
+    return policy, errors
 
 
 def _find_runtime(target: Path, runtime_id: str) -> tuple[dict[str, Any] | None, list[str]]:
@@ -610,6 +700,151 @@ def _tool_runtime_issues(target: Path, tools: list[dict[str, Any]], runtime_payl
     return issues
 
 
+def _policy_decision(
+    target: Path,
+    plan: dict[str, Any],
+    *,
+    include_env_values: bool = False,
+) -> dict[str, Any]:
+    policy, errors = _load_policy_config(target)
+    if policy is None:
+        return {
+            "enabled": False,
+            "policy_path": str(policy_path(target)),
+            "allowed": True,
+            "blockers": [],
+            "errors": errors,
+            "env_labels_used": [],
+            "env": {},
+        }
+    blockers: list[str] = list(errors)
+    family = str(plan.get("family") or "")
+    if policy["allowed_families"] and family not in policy["allowed_families"]:
+        blockers.append(f"family is not allowed by policy: {family}")
+    effects = [str(effect) for effect in (plan.get("effects") if isinstance(plan.get("effects"), list) else [])]
+    for effect in effects:
+        if effect in policy["denied_effects"]:
+            blockers.append(f"effect is denied by policy: {effect}")
+        if policy["allowed_effects"] and effect not in policy["allowed_effects"]:
+            blockers.append(f"effect is not allowed by policy: {effect}")
+    approval_mode = str(plan.get("approval_mode") or "never")
+    if policy["required_approval_modes"] and approval_mode not in policy["required_approval_modes"]:
+        blockers.append(f"approval mode is not allowed by policy: {approval_mode}")
+    timeout = plan.get("timeout")
+    if policy.get("max_timeout") is not None and isinstance(timeout, (int, float)) and not isinstance(timeout, bool):
+        if float(timeout) > float(policy["max_timeout"]):
+            blockers.append(f"timeout exceeds policy max: {timeout} > {policy['max_timeout']}")
+    runtime_id = plan.get("runtime_id")
+    if isinstance(runtime_id, str) and runtime_id.strip() and policy["allowed_runtimes"] and runtime_id not in policy["allowed_runtimes"]:
+        blockers.append(f"runtime is not allowed by policy: {runtime_id}")
+    env_bindings = policy.get("env_bindings", {}) if isinstance(policy.get("env_bindings"), dict) else {}
+    env_labels = [str(label) for label in (plan.get("env_labels") if isinstance(plan.get("env_labels"), list) else [])]
+    env: dict[str, str] = {}
+    env_labels_used: list[str] = []
+    for label in env_labels:
+        env_name = env_bindings.get(label)
+        if not env_name:
+            blockers.append(f"missing env binding for label: {label}")
+            continue
+        if env_name not in os.environ:
+            blockers.append(f"missing process env for label: {label}")
+            continue
+        env_labels_used.append(label)
+        if include_env_values:
+            env[label] = os.environ[env_name]
+    return {
+        "enabled": True,
+        "policy_path": str(policy_path(target)),
+        "allowed": not blockers,
+        "blockers": blockers,
+        "errors": errors,
+        "allowed_families": policy["allowed_families"],
+        "allowed_effects": policy["allowed_effects"],
+        "denied_effects": policy["denied_effects"],
+        "required_approval_modes": policy["required_approval_modes"],
+        "max_timeout": policy.get("max_timeout"),
+        "allowed_runtimes": policy["allowed_runtimes"],
+        "env_labels_required": env_labels,
+        "env_labels_used": env_labels_used,
+        "env": env,
+    }
+
+
+def _policy_health(target: Path, tools: list[dict[str, Any]]) -> dict[str, Any]:
+    policy, errors = _load_policy_config(target)
+    issues: list[dict[str, Any]] = []
+    if policy is None:
+        policy_relevant = [
+            tool for tool in tools if tool.get("enabled", True) and tool.get("command") and _contract_defined(tool)
+        ]
+        if policy_relevant:
+            issues.append(
+                {
+                    "status": WARN,
+                    "name": "tool_policy_missing",
+                    "tool_id": "policy",
+                    "family": "policy",
+                    "issue_type": "policy_missing",
+                    "detail": errors[0] if errors else f"tool execution policy missing: {policy_path(target)}",
+                }
+            )
+        return {
+            "policy_path": str(policy_path(target)),
+            "enabled": False,
+            "valid": False,
+            "errors": errors,
+            "issues": issues,
+            "issue_count": len(issues),
+            "top_issue": issues[0] if issues else None,
+        }
+    if errors:
+        issues.append(
+            {
+                "status": WARN,
+                "name": "tool_policy_config",
+                "tool_id": "policy",
+                "family": "policy",
+                "issue_type": "policy_config",
+                "detail": "; ".join(errors),
+            }
+        )
+    for tool in tools:
+        if not tool.get("enabled", True):
+            continue
+        plan = {
+            "family": tool.get("family"),
+            "effects": tool.get("effects", []),
+            "approval_mode": tool.get("approval_mode", "never"),
+            "timeout": tool.get("timeout"),
+            "runtime_id": tool.get("runtime_id"),
+            "env_labels": tool.get("env_labels", []),
+        }
+        decision = _policy_decision(target, plan)
+        for blocker in decision["blockers"]:
+            issue_type = "policy_blocker"
+            if "missing env binding" in blocker or "missing process env" in blocker:
+                issue_type = "policy_missing_env"
+            elif "effect is denied" in blocker:
+                issue_type = "policy_denied_effect"
+            elif "timeout exceeds" in blocker:
+                issue_type = "policy_timeout"
+            elif "runtime is not allowed" in blocker:
+                issue_type = "policy_runtime"
+            elif "approval mode" in blocker:
+                issue_type = "policy_approval"
+            issues.append(_tool_issue(tool, issue_type, blocker))
+    return {
+        "policy_path": str(policy_path(target)),
+        "enabled": True,
+        "valid": not errors,
+        "errors": errors,
+        "policy": {key: value for key, value in policy.items() if key != "raw"},
+        "issues": issues,
+        "issue_count": len(issues),
+        "top_issue": issues[0] if issues else None,
+    }
+
+
 def _start_runtime_payload(target: Path, runtime_id: str) -> tuple[dict[str, Any], int]:
     target = target.expanduser().resolve()
     runtime, errors = _find_runtime(target, runtime_id)
@@ -810,7 +1045,7 @@ def _redact_payload(value: object) -> object:
     return value
 
 
-def _redact_text(value: object, limit: int = 500) -> str:
+def _redact_text(value: object, limit: int | None = 500) -> str:
     text = "" if value is None else str(value)
     text = re.sub(
         r"(?i)\b([A-Za-z0-9_-]*(?:password|secret|token|credential|api[_-]?key)[A-Za-z0-9_-]*)\b\s*[:=]\s*[^\s\"']+",
@@ -822,6 +1057,8 @@ def _redact_text(value: object, limit: int = 500) -> str:
         r"\1[redacted]\2",
         text,
     )
+    if limit is None:
+        return text
     return _short(text, limit)
 
 
@@ -1590,6 +1827,8 @@ def _call_plan_payload(
         }
         contract_fingerprint = _contract_fingerprint(target, tool)
         source_fingerprint = _source_fingerprint(target, tool)
+    policy_decision = _policy_decision(target, plan_payload)
+    blockers.extend(policy_decision["blockers"])
     return {
         "target": str(target),
         "config_path": str(config_path(target)),
@@ -1597,6 +1836,7 @@ def _call_plan_payload(
         "tool_id": tool_id,
         "plan": plan_payload,
         "blockers": blockers,
+        "policy": {key: value for key, value in policy_decision.items() if key != "env"},
         "validation_errors": validation_errors,
         "projection_blockers": projection_blockers,
         "projection_summary": projection_summary,
@@ -1717,6 +1957,7 @@ def _make_call_record(plan_payload: dict[str, Any]) -> dict[str, Any]:
             "runtime_health_path": plan.get("runtime_health_path"),
         },
         "blockers": plan_payload.get("blockers", []),
+        "policy": plan_payload.get("policy", {}),
         "projection_summary": plan_payload.get("projection_summary", {}),
         "contract_fingerprint": plan_payload.get("contract_fingerprint"),
         "source_fingerprint": plan_payload.get("source_fingerprint"),
@@ -1909,6 +2150,8 @@ def _call_run_blockers(target: Path, call: dict[str, Any]) -> list[str]:
             blockers.append(f"required runtime is not managed by Brigade: {runtime_snapshot.get('id')}")
         elif runtime_snapshot.get("health_ok") is False:
             blockers.append(f"required runtime is unhealthy: {runtime_snapshot.get('id')}")
+    policy_decision = _policy_decision(target, _call_plan_from_record(call))
+    blockers.extend(policy_decision["blockers"])
     return blockers
 
 
@@ -1927,18 +2170,27 @@ def _write_run_receipt(
     stderr: object,
     argv: list[str],
     cwd: Path,
+    policy_decision: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     run_dir = runs_path(target)
     run_dir.mkdir(parents=True, exist_ok=True)
     stdout_text = "" if stdout is None else str(stdout)
     stderr_text = "" if stderr is None else str(stderr)
+    contract = call.get("contract") if isinstance(call.get("contract"), dict) else {}
+    runtime_snapshot = _runtime_snapshot_for_call(target, call, run_health=False)
+    if policy_decision is None:
+        policy_decision = _policy_decision(target, _call_plan_from_record(call))
+    safe_policy = {key: value for key, value in policy_decision.items() if key != "env"}
+    env_values = policy_decision.get("env") if isinstance(policy_decision.get("env"), dict) else {}
+    for value in env_values.values():
+        if value:
+            stdout_text = stdout_text.replace(str(value), "[redacted]")
+            stderr_text = stderr_text.replace(str(value), "[redacted]")
     stdout_path = run_dir / f"{run_id}.stdout.log"
     stderr_path = run_dir / f"{run_id}.stderr.log"
     receipt_path = run_dir / f"{run_id}.json"
     stdout_path.write_text(stdout_text)
     stderr_path.write_text(stderr_text)
-    contract = call.get("contract") if isinstance(call.get("contract"), dict) else {}
-    runtime_snapshot = _runtime_snapshot_for_call(target, call, run_health=False)
     receipt = {
         "id": run_id,
         "call_id": call.get("id"),
@@ -1969,6 +2221,8 @@ def _write_run_receipt(
         "effects": contract.get("effects", []),
         "runtime_id": contract.get("runtime_id"),
         "runtime": runtime_snapshot,
+        "policy": safe_policy,
+        "env_labels_used": policy_decision.get("env_labels_used", []),
         "projection_summary": call.get("projection_summary", {}),
     }
     receipt_path.write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n")
@@ -2029,6 +2283,11 @@ def _run_call_payload(target: Path, *, call_id: str | None = None, next_call: bo
 
     timeout = contract.get("timeout")
     timeout_value = float(timeout) if isinstance(timeout, (int, float)) and not isinstance(timeout, bool) else None
+    policy_decision = _policy_decision(target, _call_plan_from_record(call), include_env_values=True)
+    run_env = os.environ.copy()
+    env_values = policy_decision.get("env") if isinstance(policy_decision.get("env"), dict) else {}
+    for label, value in env_values.items():
+        run_env[str(label)] = str(value)
     start_monotonic = time.monotonic()
     stdout: object = ""
     stderr: object = ""
@@ -2039,7 +2298,7 @@ def _run_call_payload(target: Path, *, call_id: str | None = None, next_call: bo
         completed = subprocess.run(
             argv,
             cwd=cwd,
-            env=os.environ.copy(),
+            env=run_env,
             text=True,
             capture_output=True,
             timeout=timeout_value,
@@ -2074,6 +2333,7 @@ def _run_call_payload(target: Path, *, call_id: str | None = None, next_call: bo
         stderr=stderr,
         argv=argv,
         cwd=cwd,
+        policy_decision=policy_decision,
     )
     call["status"] = status
     call["completed_at"] = completed_at
@@ -2211,6 +2471,8 @@ def _catalog_payload(target: Path) -> dict[str, Any]:
     }
     issues.extend(runtime_health["issues"])
     issues.extend(_tool_runtime_issues(target, tools, runtime_health))
+    policy_health = _policy_health(target, tools)
+    issues.extend(policy_health["issues"])
     call_health = _call_health(target)
     issues.extend(call_health["issues"])
     if errors:
@@ -2240,6 +2502,13 @@ def _catalog_payload(target: Path) -> dict[str, Any]:
             "issue_count": runtime_health["issue_count"],
             "top_issue": runtime_health["top_issue"],
         },
+        "policy": {
+            "policy_path": policy_health["policy_path"],
+            "enabled": policy_health["enabled"],
+            "valid": policy_health["valid"],
+            "issue_count": policy_health["issue_count"],
+            "top_issue": policy_health["top_issue"],
+        },
     }
 
 
@@ -2254,6 +2523,7 @@ def health(target: Path) -> dict[str, Any]:
         "issues": payload["issues"],
         "call_queue": payload["call_queue"],
         "runtimes": payload["runtimes"],
+        "policy": payload["policy"],
     }
 
 
@@ -2485,6 +2755,80 @@ def runtime_doctor(*, target: Path, json_output: bool = False) -> int:
         print("[ok] tool_runtimes: no issues")
     print(f"runtime_issues: {payload['issue_count']}")
     return 0 if payload["valid"] else 1
+
+
+def policy_init(*, target: Path, force: bool = False) -> int:
+    target = target.expanduser().resolve()
+    if not target.is_dir():
+        print(f"error: --target is not a directory: {target}", file=sys.stderr)
+        return 2
+    path = policy_path(target)
+    if path.exists() and not force:
+        print(f"error: tool execution policy already exists: {path}", file=sys.stderr)
+        return 2
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(_format_policy_toml())
+    print(f"policy_config: {path}")
+    print("next_command: brigade tools policy show")
+    return 0
+
+
+def policy_show(*, target: Path, json_output: bool = False) -> int:
+    target = target.expanduser().resolve()
+    if not target.is_dir():
+        print(f"error: --target is not a directory: {target}", file=sys.stderr)
+        return 2
+    policy, errors = _load_policy_config(target)
+    payload = {
+        "target": str(target),
+        "policy_path": str(policy_path(target)),
+        "valid": policy is not None and not errors,
+        "errors": errors,
+        "policy": {key: value for key, value in (policy or {}).items() if key != "raw"} if policy else None,
+    }
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0 if payload["valid"] else 1
+    print(f"tools policy: {target}")
+    print(f"policy_path: {payload['policy_path']}")
+    if errors:
+        for error in errors:
+            print(f"error: {error}")
+        return 1
+    assert policy is not None
+    print(f"allowed_families: {', '.join(policy['allowed_families'])}")
+    print(f"allowed_effects: {', '.join(policy['allowed_effects'])}")
+    print(f"denied_effects: {', '.join(policy['denied_effects'])}")
+    print(f"required_approval_modes: {', '.join(policy['required_approval_modes'])}")
+    print(f"max_timeout: {policy.get('max_timeout') or ''}")
+    print(f"allowed_runtimes: {', '.join(policy['allowed_runtimes'])}")
+    print(f"env_bindings: {len(policy['env_bindings'])}")
+    return 0
+
+
+def policy_doctor(*, target: Path, json_output: bool = False) -> int:
+    target = target.expanduser().resolve()
+    if not target.is_dir():
+        print(f"error: --target is not a directory: {target}", file=sys.stderr)
+        return 2
+    tools, tool_errors = _load_config(target)
+    payload = _policy_health(target, tools)
+    payload["target"] = str(target)
+    payload["tool_errors"] = tool_errors
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0 if payload["enabled"] and payload["valid"] else 1
+    print(f"tools policy doctor: {target}")
+    print(f"policy_path: {payload['policy_path']}")
+    for error in payload.get("errors", []):
+        print(f"[warn] tool_policy: {error}")
+    if payload["issues"]:
+        for issue in payload["issues"]:
+            print(f"[{issue.get('status', WARN)}] {issue.get('name')}: {issue.get('detail')}")
+    else:
+        print("[ok] tool_policy: no issues")
+    print(f"policy_issues: {payload['issue_count']}")
+    return 0 if payload["enabled"] and payload["valid"] else 1
 
 
 def list_tools(*, target: Path, json_output: bool = False) -> int:

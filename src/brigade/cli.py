@@ -699,6 +699,18 @@ def _build_parser() -> argparse.ArgumentParser:
     p_tools_runtime_doctor = tools_runtime_sub.add_parser("doctor", help="Check portable tool runtime health.")
     p_tools_runtime_doctor.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
     p_tools_runtime_doctor.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_tools_policy = tools_sub.add_parser("policy", help="Inspect host-local portable tool execution policy.")
+    tools_policy_sub = p_tools_policy.add_subparsers(dest="tools_policy_command", metavar="<tools-policy-command>")
+    tools_policy_sub.required = True
+    p_tools_policy_init = tools_policy_sub.add_parser("init", help="Write a local portable tool execution policy.")
+    p_tools_policy_init.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
+    p_tools_policy_init.add_argument("--force", action="store_true", help="Overwrite existing policy config.")
+    p_tools_policy_show = tools_policy_sub.add_parser("show", help="Show local portable tool execution policy.")
+    p_tools_policy_show.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_tools_policy_show.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_tools_policy_doctor = tools_policy_sub.add_parser("doctor", help="Check portable tool execution policy health.")
+    p_tools_policy_doctor.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_tools_policy_doctor.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_tools_plan = tools_sub.add_parser("plan", help="Plan portable tool projection writes.")
     p_tools_plan.add_argument("tool_id", nargs="?", help="Optional logical tool id.")
     p_tools_plan.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
@@ -1298,6 +1310,15 @@ def main(argv=None) -> int:
             if args.tools_runtime_command == "doctor":
                 return tools_cmd.runtime_doctor(target=args.target, json_output=args.json)
             parser.error(f"unknown tools runtime command: {args.tools_runtime_command}")
+            return 2
+        if args.tools_command == "policy":
+            if args.tools_policy_command == "init":
+                return tools_cmd.policy_init(target=args.target, force=args.force)
+            if args.tools_policy_command == "show":
+                return tools_cmd.policy_show(target=args.target, json_output=args.json)
+            if args.tools_policy_command == "doctor":
+                return tools_cmd.policy_doctor(target=args.target, json_output=args.json)
+            parser.error(f"unknown tools policy command: {args.tools_policy_command}")
             return 2
         if args.tools_command == "plan":
             return tools_cmd.plan(target=args.target, tool_id=args.tool_id, json_output=args.json)
