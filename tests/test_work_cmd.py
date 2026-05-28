@@ -7,6 +7,7 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 
 from brigade import cli
+from brigade import chat_cmd
 from brigade import dogfood_cmd
 from brigade import security_cmd
 from brigade import tools_cmd
@@ -1392,7 +1393,7 @@ def test_work_scanners_init_list_show_plan_and_json(tmp_path, monkeypatch, capsy
     out = capsys.readouterr().out
     config = tmp_path / ".brigade" / "scanners.toml"
     assert f"scanner_config: {config}" in out
-    assert "scanners: 7" in out
+    assert "scanners: 8" in out
     assert ".brigade/scanners.toml" in (tmp_path / ".gitignore").read_text()
 
     assert work_cmd.scanners_list(target=tmp_path) == 0
@@ -5203,6 +5204,250 @@ def test_work_import_chat_sweep_reports_precise_errors(tmp_path, capsys):
     assert len(payload["errors"]) == 4
 
 
+def _write_chat_surfaces_config(tmp_path, surfaces):
+    lines = []
+    for surface in surfaces:
+        lines.append("[[surface]]")
+        for key, value in surface.items():
+            if isinstance(value, bool):
+                rendered = "true" if value else "false"
+            elif isinstance(value, (int, float)):
+                rendered = str(value)
+            else:
+                rendered = json.dumps(value)
+            lines.append(f"{key} = {rendered}")
+        lines.append("")
+    path = tmp_path / ".brigade" / "chat-surfaces.toml"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(lines))
+    return path
+
+
+def _chat_finding(provider, surface_id, issue_id="issue-1", **extra):
+    item = {
+        "sweep_id": "nightly-chat",
+        "provider": provider,
+        "surface_id": surface_id,
+        "issue_id": issue_id,
+        "issue_type": "task",
+        "priority": "high",
+        "confidence": "high",
+        "safe_summary": "Actionable local chat export finding.",
+        "evidence_summary": "Several local export messages refer to the same follow-up.",
+        "suggested_task_text": "Review chat export follow-up",
+        "acceptance_criteria": ["The follow-up is reviewed without copying raw chat text."],
+        "source_fingerprint": f"fp-{surface_id}-{issue_id}",
+        "channel_label": "triage",
+        "message_range_label": "messages 10-12",
+    }
+    item.update(extra)
+    return item
+
+
+def test_chat_surfaces_config_commands_text_and_json(tmp_path, capsys):
+    _init_git_repo(tmp_path)
+
+    assert chat_cmd.surfaces_init(target=tmp_path, update_gitignore=False) == 0
+    out = capsys.readouterr().out
+    assert "chat_surfaces_config:" in out
+    assert "gitignore: skipped" in out
+
+    assert chat_cmd.surfaces_list(target=tmp_path, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["surfaces"][0]["provider"] == "discord-export"
+
+    surface_id = payload["surfaces"][0]["id"]
+    assert chat_cmd.surfaces_show(target=tmp_path, surface_id=surface_id) == 0
+    out = capsys.readouterr().out
+    assert f"surface: {surface_id}" in out
+    assert "privacy_mode: summary-only" in out
+
+    assert chat_cmd.surfaces_doctor(target=tmp_path, json_output=True) == 0
+    doctor = json.loads(capsys.readouterr().out)
+    assert doctor["config_path"].endswith(".brigade/chat-surfaces.toml")
+
+
+def test_chat_sweep_validate_accepts_provider_fixtures_and_reports_errors(tmp_path, capsys):
+    providers = ["discord-export", "slack-export", "telegram-export", "clickclack-export", "generic-jsonl"]
+    for provider in providers:
+        fixture = tmp_path / f"{provider}.json"
+        _write_json(fixture, {"findings": [_chat_finding(provider, provider)]})
+        assert chat_cmd.sweep_validate(target=tmp_path, input_path=fixture, json_output=True) == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["valid"] is True
+        assert payload["findings"] == 1
+
+    bad = tmp_path / "bad-chat.json"
+    _write_json(
+        bad,
+        {
+            "findings": [
+                {
+                    "provider": "discord-export",
+                    "surface_id": "discord-export",
+                    "issue_type": "not-real",
+                    "safe_summary": "Missing fields.",
+                }
+            ]
+        },
+    )
+    assert chat_cmd.sweep_validate(target=tmp_path, input_path=bad, json_output=True) == 2
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["valid"] is False
+    assert any("finding 1 requires issue_id" in error for error in payload["errors"])
+    assert any("finding 1 issue_type must be one of:" in error for error in payload["errors"])
+    assert any("finding 1 requires evidence_summary" in error for error in payload["errors"])
+
+
+def test_chat_sweep_ingest_import_privacy_idempotency_and_dismissed_change(tmp_path, capsys):
+    _init_git_repo(tmp_path)
+    export = tmp_path / ".brigade" / "chat-surfaces" / "discord.json"
+    export.parent.mkdir(parents=True)
+    _write_json(export, {"findings": [_chat_finding("discord-export", "discord-export")]})
+    _write_chat_surfaces_config(
+        tmp_path,
+        [
+            {
+                "id": "discord-export",
+                "provider": "discord-export",
+                "workspace_label": "local-discord",
+                "channel_label": "triage",
+                "export_path": ".brigade/chat-surfaces/discord.json",
+                "sweep_output_path": ".brigade/chat-memory-sweeps/discord-export-latest.json",
+                "enabled": True,
+                "privacy_mode": "summary-only",
+                "evidence_policy": "local-path",
+                "confidence_threshold": "medium",
+            }
+        ],
+    )
+
+    assert chat_cmd.sweep_ingest(target=tmp_path, surface_id="discord-export", json_output=True) == 0
+    ingest = json.loads(capsys.readouterr().out)
+    assert ingest["valid"] is True
+    assert Path(ingest["output"]).is_file()
+
+    assert chat_cmd.sweep_import_issues(target=tmp_path, surface_id="discord-export", json_output=True) == 0
+    first = json.loads(capsys.readouterr().out)
+    assert first["created"] == 1
+    assert first["skipped"] == 0
+    rendered = json.dumps(work_cmd._read_imports(tmp_path))
+    assert "PRIVATE CHAT" not in rendered
+    assert "Actionable local chat export finding" in rendered
+
+    assert chat_cmd.sweep_import_issues(target=tmp_path, surface_id="discord-export", json_output=True) == 0
+    second = json.loads(capsys.readouterr().out)
+    assert second["created"] == 0
+    assert second["skipped"] == 1
+
+    imports = work_cmd._read_imports(tmp_path)
+    imports[0]["status"] = "dismissed"
+    work_cmd._write_imports(tmp_path, imports)
+    assert chat_cmd.sweep_import_issues(target=tmp_path, surface_id="discord-export", json_output=True) == 0
+    dismissed = json.loads(capsys.readouterr().out)
+    assert dismissed["created"] == 0
+    assert dismissed["dismissed"] == 1
+
+    data = json.loads(export.read_text())
+    data["findings"][0]["source_fingerprint"] = "fp-discord-export-issue-1-changed"
+    _write_json(export, data)
+    assert chat_cmd.sweep_ingest(target=tmp_path, surface_id="discord-export", json_output=True) == 0
+    capsys.readouterr()
+    assert chat_cmd.sweep_import_issues(target=tmp_path, surface_id="discord-export", json_output=True) == 0
+    changed = json.loads(capsys.readouterr().out)
+    assert changed["created"] == 1
+
+    raw_export = tmp_path / ".brigade" / "chat-surfaces" / "raw.json"
+    _write_json(
+        raw_export,
+        {
+            "findings": [
+                _chat_finding(
+                    "discord-export",
+                    "discord-export",
+                    issue_id="raw-1",
+                    raw_text="PRIVATE CHAT TRANSCRIPT",
+                )
+            ]
+        },
+    )
+    config = (tmp_path / ".brigade" / "chat-surfaces.toml").read_text()
+    config = config.replace(".brigade/chat-surfaces/discord.json", ".brigade/chat-surfaces/raw.json")
+    (tmp_path / ".brigade" / "chat-surfaces.toml").write_text(config)
+    assert chat_cmd.sweep_ingest(target=tmp_path, surface_id="discord-export", json_output=True) == 2
+    raw_result = json.loads(capsys.readouterr().out)
+    assert any("raw private chat fields" in error for error in raw_result["errors"])
+
+
+def test_chat_surfaces_integrate_with_work_brief_doctor_and_scanner_sweep(tmp_path, monkeypatch, capsys):
+    _init_git_repo(tmp_path)
+    dogfood_cmd.init(target=tmp_path)
+    capsys.readouterr()
+    monkeypatch.setattr(work_cmd.shutil, "which", lambda name: f"/usr/bin/{name}")
+    export = tmp_path / ".brigade" / "chat-surfaces" / "discord.json"
+    export.parent.mkdir(parents=True)
+    _write_json(export, {"findings": [_chat_finding("discord-export", "discord-export")]})
+    _write_chat_surfaces_config(
+        tmp_path,
+        [
+            {
+                "id": "discord-export",
+                "provider": "discord-export",
+                "workspace_label": "local-discord",
+                "channel_label": "triage",
+                "export_path": ".brigade/chat-surfaces/discord.json",
+                "sweep_output_path": ".brigade/chat-memory-sweeps/discord-export-latest.json",
+                "enabled": True,
+                "privacy_mode": "summary-only",
+                "evidence_policy": "local-path",
+                "confidence_threshold": "medium",
+            }
+        ],
+    )
+    scanner = tmp_path / ".brigade" / "scanners.toml"
+    runner = tmp_path / "chat_surface_runner.py"
+    runner.write_text(
+        f"""
+import sys
+from pathlib import Path
+sys.path.insert(0, {str(Path(__file__).parents[1] / "src")!r})
+from brigade import chat_cmd
+
+raise SystemExit(chat_cmd.sweep_import_issues(target=Path("."), surface_id="discord-export", json_output=True))
+"""
+    )
+    scanner.write_text(
+        f"""
+[[scanner]]
+id = "chat-surfaces"
+source = "chat-memory-sweep"
+command = "{sys.executable} {runner}"
+cadence = "daily@02:00"
+enabled = true
+timeout = 30
+output_path = ".brigade/chat-memory-sweeps/discord-export-latest.json"
+conflict_window = "02:00-02:10"
+"""
+    )
+
+    assert work_cmd.sweep(target=tmp_path, ingest=False, json_output=True) == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["status"] == "completed"
+    imports = work_cmd._read_imports(tmp_path)
+    assert len(imports) == 1
+    assert imports[0]["source"] == "chat-memory-sweep"
+    assert imports[0]["metadata"]["scanner_id"] == "chat-surfaces"
+
+    assert work_cmd.brief(target=tmp_path) == 0
+    out = capsys.readouterr().out
+    assert "chat_surfaces_health: ok" in out
+    assert "scanner_next_source: chat-memory-sweep" in out
+
+    assert work_cmd.doctor(target=tmp_path) == 0
+    out = capsys.readouterr().out
+    assert "[ok] chat_surfaces_config: 1 surface(s)" in out
+
+
 def test_work_import_memory_refresh_reads_candidates(tmp_path, monkeypatch, capsys):
     _init_git_repo(tmp_path)
     monkeypatch.setattr(
@@ -7483,6 +7728,63 @@ def test_work_import_cli(tmp_path, monkeypatch):
                 "metadata": ["handoff_issue_category=skip"],
             },
         ),
+    ]
+
+
+def test_chat_cli(tmp_path, monkeypatch):
+    seen = []
+
+    def fake_surfaces_init(**kwargs):
+        seen.append(("surfaces-init", kwargs))
+        return 0
+
+    def fake_surfaces_list(**kwargs):
+        seen.append(("surfaces-list", kwargs))
+        return 0
+
+    def fake_surfaces_show(**kwargs):
+        seen.append(("surfaces-show", kwargs))
+        return 0
+
+    def fake_surfaces_doctor(**kwargs):
+        seen.append(("surfaces-doctor", kwargs))
+        return 0
+
+    def fake_sweep_validate(**kwargs):
+        seen.append(("sweep-validate", kwargs))
+        return 0
+
+    def fake_sweep_ingest(**kwargs):
+        seen.append(("sweep-ingest", kwargs))
+        return 0
+
+    def fake_sweep_import_issues(**kwargs):
+        seen.append(("sweep-import-issues", kwargs))
+        return 0
+
+    monkeypatch.setattr(chat_cmd, "surfaces_init", fake_surfaces_init)
+    monkeypatch.setattr(chat_cmd, "surfaces_list", fake_surfaces_list)
+    monkeypatch.setattr(chat_cmd, "surfaces_show", fake_surfaces_show)
+    monkeypatch.setattr(chat_cmd, "surfaces_doctor", fake_surfaces_doctor)
+    monkeypatch.setattr(chat_cmd, "sweep_validate", fake_sweep_validate)
+    monkeypatch.setattr(chat_cmd, "sweep_ingest", fake_sweep_ingest)
+    monkeypatch.setattr(chat_cmd, "sweep_import_issues", fake_sweep_import_issues)
+
+    assert cli.main(["chat", "surfaces", "init", "--target", str(tmp_path), "--force", "--no-gitignore"]) == 0
+    assert cli.main(["chat", "surfaces", "list", "--target", str(tmp_path), "--json"]) == 0
+    assert cli.main(["chat", "surfaces", "show", "discord-export", "--target", str(tmp_path), "--json"]) == 0
+    assert cli.main(["chat", "surfaces", "doctor", "--target", str(tmp_path), "--json"]) == 0
+    assert cli.main(["chat", "sweep", "validate", str(tmp_path / "export.json"), "--target", str(tmp_path), "--json"]) == 0
+    assert cli.main(["chat", "sweep", "ingest", "discord-export", "--target", str(tmp_path), "--json"]) == 0
+    assert cli.main(["chat", "sweep", "import-issues", "discord-export", "--target", str(tmp_path), "--json"]) == 0
+    assert seen == [
+        ("surfaces-init", {"target": tmp_path, "force": True, "update_gitignore": False}),
+        ("surfaces-list", {"target": tmp_path, "json_output": True}),
+        ("surfaces-show", {"target": tmp_path, "surface_id": "discord-export", "json_output": True}),
+        ("surfaces-doctor", {"target": tmp_path, "json_output": True}),
+        ("sweep-validate", {"target": tmp_path, "input_path": tmp_path / "export.json", "json_output": True}),
+        ("sweep-ingest", {"target": tmp_path, "surface_id": "discord-export", "json_output": True}),
+        ("sweep-import-issues", {"target": tmp_path, "surface_id": "discord-export", "json_output": True}),
     ]
 
 

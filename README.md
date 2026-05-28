@@ -188,6 +188,12 @@ brigade work sweep --all
 brigade work sweeps
 brigade work sweep-show <sweep-id>
 brigade work sweep-review latest
+brigade chat surfaces init
+brigade chat surfaces list
+brigade chat surfaces doctor
+brigade chat sweep validate .brigade/chat-surfaces/discord-export.json
+brigade chat sweep ingest discord-export
+brigade chat sweep import-issues discord-export
 brigade tools init
 brigade tools list
 brigade tools show simplify
@@ -348,6 +354,7 @@ Start-of-day commands:
 - `brigade work scanners run --due` explicitly runs due enabled scanner producers, writes local receipts, and leaves promotion to the operator.
 - `brigade work sweep` explicitly runs due scanner producers, ingests configured JSONL outputs by default, and writes one local sweep report for review.
 - `brigade work sweep-review latest` shows created imports, skipped or dismissed fingerprints, grouping, and next commands for the latest sweep.
+- `brigade chat sweep import-issues <surface-id>` converts a local chat export sweep into public-safe scanner inbox imports.
 - `brigade tools doctor` inspects the local portable tool catalog and reports source, projection, schema, MCP, auth-field, and command-shape issues without invoking tools.
 - `brigade work next` prints only the next task. Add `--json` for wrappers.
 
@@ -406,6 +413,16 @@ Scanner registry commands:
 - `brigade work scanners doctor --import-issues` reports missing config, disabled required producers, bad commands, missing or stale output paths, schedule conflicts, failed or timed-out runs, malformed receipts, missing logs, and due scanners, then can import those health issues as local task imports.
 
 The scanner registry is explicit and local. Brigade does not install cron jobs, start a daemon, run scanners from `brief` or `doctor`, promote scanner output automatically, or mutate scanner output beyond the configured command's own behavior. `brigade work sweep` is still explicit foreground execution, not a scheduler, and `sweep-review` is read-only.
+
+Chat surface export commands:
+
+- `brigade chat surfaces init` writes gitignored `.brigade/chat-surfaces.toml` with local export surface examples.
+- `brigade chat surfaces list`, `show <surface-id>`, and `doctor` inspect local export paths, providers, privacy mode, evidence policy, confidence thresholds, and stale sweep output health.
+- `brigade chat sweep validate <path>` checks a local export finding file without writing.
+- `brigade chat sweep ingest <surface-id>` normalizes a configured export into `.brigade/chat-memory-sweeps/<surface-id>-latest.json`.
+- `brigade chat sweep import-issues <surface-id>` imports normalized actionable findings into the existing work inbox with source `chat-memory-sweep`.
+
+Chat surface exports are local and explicit. Brigade supports `discord-export`, `slack-export`, `telegram-export`, `clickclack-export`, and `generic-jsonl` fixtures, but it does not call live chat APIs, perform OAuth, send webhooks, run a daemon, or promote imports automatically. Raw message bodies and transcript fields are rejected by default; imports keep safe summaries, labels, message ranges, local evidence paths, confidence, and fingerprints.
 
 Portable tool catalog commands:
 

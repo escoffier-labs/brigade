@@ -160,6 +160,16 @@ SCANNER_DEFAULTS = (
         "conflict_window": "02:00-02:30",
     },
     {
+        "id": "chat-surfaces",
+        "source": "chat-memory-sweep",
+        "command": "brigade chat sweep import-issues discord-export --json",
+        "cadence": "daily@02:20",
+        "enabled": False,
+        "timeout": 300,
+        "output_path": ".brigade/chat-memory-sweeps/discord-export-latest.json",
+        "conflict_window": "02:15-02:35",
+    },
+    {
         "id": "memory-refresh",
         "source": "memory-refresh",
         "command": "brigade work import memory-refresh --json",
@@ -2937,7 +2947,7 @@ def _suggested_command(active: dict[str, Any] | None, next_text: object, source:
 
 
 def _brief_payload(target: Path, *, limit: int = 3) -> dict[str, Any]:
-    from . import handoff_cmd, memory_cmd, security_cmd, tools_cmd
+    from . import chat_cmd, handoff_cmd, memory_cmd, security_cmd, tools_cmd
 
     target = target.expanduser().resolve()
     active = _active_session_info(target)
@@ -2955,6 +2965,7 @@ def _brief_payload(target: Path, *, limit: int = 3) -> dict[str, Any]:
     inbox_hygiene = _inbox_hygiene_payload(target)
     scanner_health = _scanner_health(target)
     sweep_health = _scanner_sweep_health(target)
+    chat_health = chat_cmd.health(target)
     memory_health = memory_cmd.health(target)
     security_health = security_cmd.health(target)
     backup_health = _backup_health(target)
@@ -2993,6 +3004,12 @@ def _brief_payload(target: Path, *, limit: int = 3) -> dict[str, Any]:
             "due_count": sweep_health["due_count"],
             "suggested_command": sweep_health["suggested_command"],
             "review": sweep_health["review"],
+        },
+        "chat_surfaces": {
+            "config_path": chat_health["config_path"],
+            "checks": chat_health["checks"],
+            "issue_count": chat_health["issue_count"],
+            "top_issue": chat_health["top_issue"],
         },
         "memory_care": {
             "config_path": memory_health["config_path"],
@@ -3596,6 +3613,15 @@ def brief(*, target: Path, limit: int = 3, json_output: bool = False) -> int:
             print(f"scanner_unreviewed_sweep: {latest_sweep.get('sweep_id')}")
             print(f"scanner_sweep_import: {top_pending.get('id')} {top_pending.get('source')} {_short(str(top_pending.get('text', '')))}")
             print(f"scanner_sweep_review: brigade work sweep-review {latest_sweep.get('sweep_id')}")
+
+    chat_surfaces = payload.get("chat_surfaces") if isinstance(payload.get("chat_surfaces"), dict) else {}
+    if chat_surfaces:
+        print(f"chat_surfaces_config: {chat_surfaces.get('config_path')}")
+        chat_issue_count = int(chat_surfaces.get("issue_count", 0) or 0)
+        print(f"chat_surfaces_health: {'ok' if chat_issue_count == 0 else f'{chat_issue_count} issue(s)'}")
+        top_chat = chat_surfaces.get("top_issue") if isinstance(chat_surfaces.get("top_issue"), dict) else None
+        if top_chat:
+            print(f"chat_surfaces_top_issue: {top_chat.get('name')} {_short(str(top_chat.get('detail', '')))}")
 
     memory_care = payload.get("memory_care") if isinstance(payload.get("memory_care"), dict) else {}
     if memory_care:
@@ -6665,7 +6691,7 @@ def status(*, target: Path, limit: int = 12) -> int:
 
 
 def doctor(*, target: Path) -> int:
-    from . import handoff_cmd, memory_cmd, security_cmd, tools_cmd
+    from . import chat_cmd, handoff_cmd, memory_cmd, security_cmd, tools_cmd
 
     target = target.expanduser().resolve()
     failures = 0
@@ -6883,6 +6909,10 @@ def doctor(*, target: Path) -> int:
 
     sweep_health = _scanner_sweep_health(effective_target)
     for check in sweep_health["checks"]:
+        _doctor_line(str(check.get("status")), str(check.get("name")), check.get("detail"))
+
+    chat_health = chat_cmd.health(effective_target)
+    for check in chat_health["checks"]:
         _doctor_line(str(check.get("status")), str(check.get("name")), check.get("detail"))
 
     memory_health = memory_cmd.health(effective_target)

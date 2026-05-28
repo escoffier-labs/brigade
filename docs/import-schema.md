@@ -12,6 +12,7 @@ brigade work import ingest imports.jsonl
 brigade work import memory-care
 brigade work import memory-refresh
 brigade work import chat-sweep
+brigade chat sweep import-issues discord-export
 brigade work inbox
 brigade work inbox doctor
 brigade work inbox archive
@@ -21,7 +22,7 @@ brigade work import promote --run <import-id>
 brigade work import promote --all --source memory-care --kind task
 ```
 
-`validate` checks a JSONL file without writing. `ingest` appends valid records into `.brigade/work/imports/inbox.jsonl`, skipping duplicate pending records with the same source, kind, and normalized text. Scanner producers can also provide stable source item keys and fingerprints so repeated ingestion skips equivalent pending or promoted imports, while dismissed imports stay dismissed unless the source item changes materially. `inbox` groups pending imports for daily review. `inbox doctor` reports queue hygiene issues, and `inbox archive` moves old closed imports to `.brigade/work/imports/archive.jsonl` without touching pending imports. `plan` previews the task a reviewed import would create. `promote --run` promotes one task import and immediately runs it through the normal work-session loop. `memory-care` reads `memory/cards/decay/refresh-queue.json` and converts queued cards into task imports. `memory-refresh` accepts the same queue plus `candidates` or `refresh_candidates` and writes TDD-ready refresh task imports. `chat-sweep` reads `.brigade/chat-memory-sweeps/latest.json` and converts sweep `issues`; actionable issues become task imports.
+`validate` checks a JSONL file without writing. `ingest` appends valid records into `.brigade/work/imports/inbox.jsonl`, skipping duplicate pending records with the same source, kind, and normalized text. Scanner producers can also provide stable source item keys and fingerprints so repeated ingestion skips equivalent pending or promoted imports, while dismissed imports stay dismissed unless the source item changes materially. `inbox` groups pending imports for daily review. `inbox doctor` reports queue hygiene issues, and `inbox archive` moves old closed imports to `.brigade/work/imports/archive.jsonl` without touching pending imports. `plan` previews the task a reviewed import would create. `promote --run` promotes one task import and immediately runs it through the normal work-session loop. `memory-care` reads `memory/cards/decay/refresh-queue.json` and converts queued cards into task imports. `memory-refresh` accepts the same queue plus `candidates` or `refresh_candidates` and writes TDD-ready refresh task imports. `chat-sweep` reads `.brigade/chat-memory-sweeps/latest.json` and converts sweep `issues`; actionable issues become task imports. `brigade chat sweep import-issues <surface-id>` produces that same chat-sweep import shape from configured local chat export fixtures.
 
 ## Record Shape
 
@@ -168,3 +169,24 @@ brigade work import triage
 The producer writes imports with source `chat-memory-sweep`, preserving local locators and summary metadata. If an issue has `actionable: true`, `task: true`, or `kind: "task"`, Brigade writes a `task` import with task metadata and acceptance criteria. The JSON output reports `created`, `skipped`, `dismissed`, and `invalid` counts for wrappers.
 
 The producer omits raw private fields such as `raw_text`, `raw_messages`, `messages`, `message_text`, `quotes`, and `transcript`. Use `summary`, `evidence_summary`, and local evidence locators instead of copying private chat bodies into the inbox.
+
+## Chat Surface Export Producer
+
+Local chat surface exports are configured in:
+
+```text
+.brigade/chat-surfaces.toml
+```
+
+Run:
+
+```bash
+brigade chat surfaces init
+brigade chat sweep validate .brigade/chat-surfaces/discord-export.json
+brigade chat sweep ingest discord-export
+brigade chat sweep import-issues discord-export
+```
+
+Each export finding must provide `provider`, `surface_id`, `issue_id`, `issue_type`, `priority`, `confidence`, `safe_summary`, `evidence_summary`, `suggested_task_text`, and `acceptance_criteria`. Supported provider families are `discord-export`, `slack-export`, `telegram-export`, `clickclack-export`, and `generic-jsonl`.
+
+`ingest` writes normalized sweep JSON under `.brigade/chat-memory-sweeps/`, and `import-issues` routes actionable items through the existing source `chat-memory-sweep` import path. Raw private chat fields such as `raw_text`, `raw_messages`, `message_text`, `messages`, and `transcript` are rejected by default. Use safe summaries, channel labels, message ranges, confidence, and local evidence paths instead.
