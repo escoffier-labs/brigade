@@ -143,6 +143,7 @@ SCANNER_CONFIG_REL_PATH = ".brigade/scanners.toml"
 SCANNER_OUTPUT_STALE_HOURS = 48
 SCANNER_RUN_STALE_HOURS = 48
 SCANNER_SWEEP_STALE_HOURS = 36
+SCANNER_SWEEP_REVIEW_STALE_HOURS = 24
 IMPORT_ARCHIVE_STALE_HOURS = 168
 SCANNER_REQUIRED_IDS = ("chat-memory-sweep", "memory-refresh", "handoff-ingest")
 SCANNER_HIGH_RISK_COMMANDS = {"bash", "sh", "zsh", "fish", "powershell", "pwsh", "ssh", "scp", "rsync"}
@@ -2032,9 +2033,10 @@ def _scanner_stamp_new_imports(
     scanner: dict[str, Any],
     run: dict[str, Any],
     before_ids: set[str],
-) -> int:
+) -> list[str]:
     imports = _read_imports(target)
     changed = 0
+    stamped_ids: list[str] = []
     for item in imports:
         import_id = item.get("id")
         if not isinstance(import_id, str) or import_id in before_ids:
@@ -2047,9 +2049,10 @@ def _scanner_stamp_new_imports(
         item["metadata"] = _scanner_import_provenance(target=target, scanner=scanner, run=run, record=item)
         item["updated_at"] = _now().isoformat()
         changed += 1
+        stamped_ids.append(import_id)
     if changed:
         _write_imports(target, imports)
-    return changed
+    return stamped_ids
 
 
 def _scanner_validate_import_output(
@@ -2433,6 +2436,7 @@ def _scanner_sweep_health(target: Path) -> dict[str, Any]:
     latest = _scanner_latest_sweep(target)
     due = _scanner_health(target).get("due")
     due_count = len(due) if isinstance(due, list) else 0
+    review: dict[str, Any] | None = None
     if latest is None:
         checks.append({"status": WARN, "name": "scanner_sweeps", "detail": "none, run `brigade work sweep`"})
     else:
@@ -2446,6 +2450,9 @@ def _scanner_sweep_health(target: Path) -> dict[str, Any]:
             age_hours = (_now() - completed).total_seconds() / 3600
             if age_hours > SCANNER_SWEEP_STALE_HOURS:
                 checks.append({"status": WARN, "name": "scanner_sweep_stale", "detail": f"{latest.get('sweep_id')}={age_hours:.1f}h"})
+        review, _ = _sweep_review_payload(target, str(latest.get("sweep_id") or "latest"))
+        if isinstance(review, dict):
+            checks.extend(review["issues"])
     return {
         "target": str(target),
         "sweeps_root": str(_scanner_sweeps_root(target)),
@@ -2453,6 +2460,11 @@ def _scanner_sweep_health(target: Path) -> dict[str, Any]:
         "checks": checks,
         "due_count": due_count,
         "suggested_command": "brigade work sweep" if due_count else None,
+        "review": {
+            "top_pending_import": review.get("top_pending_import") if isinstance(review, dict) else None,
+            "issue_count": len(review.get("issues", [])) if isinstance(review, dict) else 0,
+            "issues": review.get("issues", []) if isinstance(review, dict) else [],
+        },
     }
 
 
@@ -2980,6 +2992,7 @@ def _brief_payload(target: Path, *, limit: int = 3) -> dict[str, Any]:
             "checks": sweep_health["checks"],
             "due_count": sweep_health["due_count"],
             "suggested_command": sweep_health["suggested_command"],
+            "review": sweep_health["review"],
         },
         "memory_care": {
             "config_path": memory_health["config_path"],
@@ -3577,6 +3590,12 @@ def brief(*, target: Path, limit: int = 3, json_output: bool = False) -> int:
             print(f"scanner_latest_sweep: {latest_sweep.get('sweep_id')} [{latest_sweep.get('status')}]")
         if scanner_sweeps.get("suggested_command"):
             print(f"scanner_sweep_command: {scanner_sweeps.get('suggested_command')}")
+        review = scanner_sweeps.get("review") if isinstance(scanner_sweeps.get("review"), dict) else {}
+        top_pending = review.get("top_pending_import") if isinstance(review.get("top_pending_import"), dict) else None
+        if top_pending and latest_sweep:
+            print(f"scanner_unreviewed_sweep: {latest_sweep.get('sweep_id')}")
+            print(f"scanner_sweep_import: {top_pending.get('id')} {top_pending.get('source')} {_short(str(top_pending.get('text', '')))}")
+            print(f"scanner_sweep_review: brigade work sweep-review {latest_sweep.get('sweep_id')}")
 
     memory_care = payload.get("memory_care") if isinstance(payload.get("memory_care"), dict) else {}
     if memory_care:
@@ -4802,6 +4821,48 @@ def _inbox_hygiene_payload(target: Path) -> dict[str, Any]:
         )
     )
 
+    imports_by_id = {
+        str(item.get("id")): item
+        for item in imports
+        if isinstance(item.get("id"), str)
+    }
+    sweep_missing_refs: list[str] = []
+    sweep_lost_provenance: list[str] = []
+    for sweep_report in _scanner_sweeps(target):
+        sweep_id = str(sweep_report.get("sweep_id") or "unknown")
+        references = _sweep_import_references(sweep_report)
+        for import_id in references.get("created_import_ids", []):
+            if not isinstance(import_id, str) or not import_id.strip():
+                continue
+            item = imports_by_id.get(import_id)
+            if item is None:
+                sweep_missing_refs.append(f"{sweep_id}:{import_id}")
+                continue
+            metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+            required = ("scanner_id", "scanner_source", "scanner_run_id", "source_fingerprint")
+            if any(not metadata.get(key) for key in required):
+                sweep_lost_provenance.append(f"{sweep_id}:{import_id}")
+    checks.append(
+        _import_hygiene_issue(
+            WARN if sweep_missing_refs else OK,
+            "inbox_sweep_import_missing",
+            f"{len(sweep_missing_refs)} sweep import reference(s) missing from inbox"
+            if sweep_missing_refs
+            else "none",
+            sweep_missing_refs[:10],
+        )
+    )
+    checks.append(
+        _import_hygiene_issue(
+            WARN if sweep_lost_provenance else OK,
+            "inbox_sweep_import_provenance",
+            f"{len(sweep_lost_provenance)} sweep import reference(s) lost provenance"
+            if sweep_lost_provenance
+            else "none",
+            sweep_lost_provenance[:10],
+        )
+    )
+
     issues = [check for check in checks if check.get("status") != OK]
     return {
         "target": str(target),
@@ -5570,8 +5631,10 @@ def _scanners_run_payload(
             if isinstance(item, dict) and isinstance(item.get("id"), str)
         }
         run = _scanner_run_one(target, scanner, force=force)
-        stamped = _scanner_stamp_new_imports(target=target, scanner=scanner, run=run, before_ids=before_ids)
-        run["provenance_imports_stamped"] = stamped
+        stamped_ids = _scanner_stamp_new_imports(target=target, scanner=scanner, run=run, before_ids=before_ids)
+        run["provenance_imports_stamped"] = len(stamped_ids)
+        if stamped_ids:
+            run["stamped_import_ids"] = stamped_ids
         if run.get("path"):
             _write_json(Path(str(run["path"])) / "receipt.json", run)
         runs.append(run)
@@ -5623,6 +5686,21 @@ def _scanners_run_payload(
                 "skipped": len(skipped_records),
                 "dismissed": len(skipped_dismissed),
                 "records": len(records),
+                "created_import_ids": [
+                    str(item.get("id"))
+                    for item in imported
+                    if isinstance(item.get("id"), str)
+                ],
+                "skipped_source_fingerprints": [
+                    fingerprint
+                    for record in skipped_records
+                    if (fingerprint := _import_fingerprint(record))
+                ],
+                "dismissed_source_fingerprints": [
+                    fingerprint
+                    for record in skipped_dismissed
+                    if (fingerprint := _import_fingerprint(record))
+                ],
             }
             if run.get("path"):
                 _write_json(Path(str(run["path"])) / "receipt.json", run)
@@ -5768,6 +5846,78 @@ def scanners_run_show(*, target: Path, run_id: str, json_output: bool = False) -
     return 0
 
 
+def _sweep_run_references(run: dict[str, Any]) -> dict[str, Any]:
+    ingest = run.get("ingest_output") if isinstance(run.get("ingest_output"), dict) else {}
+    created_import_ids = [
+        str(item)
+        for item in ingest.get("created_import_ids", [])
+        if isinstance(item, str) and item.strip()
+    ]
+    for item in run.get("stamped_import_ids", []):
+        if isinstance(item, str) and item.strip() and item not in created_import_ids:
+            created_import_ids.append(item)
+    skipped_source_fingerprints = [
+        str(item)
+        for item in ingest.get("skipped_source_fingerprints", [])
+        if isinstance(item, str) and item.strip()
+    ]
+    dismissed_source_fingerprints = [
+        str(item)
+        for item in ingest.get("dismissed_source_fingerprints", [])
+        if isinstance(item, str) and item.strip()
+    ]
+    return {
+        "scanner_id": run.get("scanner_id"),
+        "scanner_source": run.get("source"),
+        "scanner_run_id": run.get("run_id"),
+        "receipt_path": _scanner_run_receipt_path(run),
+        "import_path": ingest.get("path"),
+        "created_import_ids": created_import_ids,
+        "skipped_source_fingerprints": skipped_source_fingerprints,
+        "dismissed_source_fingerprints": dismissed_source_fingerprints,
+    }
+
+
+def _sweep_import_references(report: dict[str, Any]) -> dict[str, Any]:
+    existing = report.get("import_references")
+    if isinstance(existing, dict):
+        return existing
+    runs = []
+    run_result = report.get("run_result") if isinstance(report.get("run_result"), dict) else {}
+    for run in run_result.get("runs", []):
+        if isinstance(run, dict):
+            runs.append(_sweep_run_references(run))
+    return _sweep_references_from_runs(runs)
+
+
+def _sweep_references_from_runs(runs: list[dict[str, Any]]) -> dict[str, Any]:
+    created_import_ids: list[str] = []
+    skipped_source_fingerprints: list[str] = []
+    dismissed_source_fingerprints: list[str] = []
+    for run in runs:
+        created_import_ids.extend(
+            str(item)
+            for item in run.get("created_import_ids", [])
+            if isinstance(item, str) and item.strip()
+        )
+        skipped_source_fingerprints.extend(
+            str(item)
+            for item in run.get("skipped_source_fingerprints", [])
+            if isinstance(item, str) and item.strip()
+        )
+        dismissed_source_fingerprints.extend(
+            str(item)
+            for item in run.get("dismissed_source_fingerprints", [])
+            if isinstance(item, str) and item.strip()
+        )
+    return {
+        "created_import_ids": sorted(set(created_import_ids)),
+        "skipped_source_fingerprints": sorted(set(skipped_source_fingerprints)),
+        "dismissed_source_fingerprints": sorted(set(dismissed_source_fingerprints)),
+        "runs": runs,
+    }
+
+
 def _sweep_import_counts(run_payload: dict[str, Any]) -> dict[str, int]:
     runs = run_payload.get("runs") if isinstance(run_payload.get("runs"), list) else []
     created = 0
@@ -5826,6 +5976,7 @@ def sweep(
     errors = run_payload.get("errors") if isinstance(run_payload.get("errors"), list) else []
     status_text = "failed" if run_rc != 0 else "completed"
     inbox_hygiene = _inbox_hygiene_payload(target)
+    run_references = [_sweep_run_references(run) for run in runs if isinstance(run, dict)]
     report = {
         "sweep_id": sweep_id,
         "status": status_text,
@@ -5844,6 +5995,7 @@ def sweep(
         "scanner_run_ids": [run.get("run_id") for run in runs if isinstance(run, dict)],
         "receipt_paths": [_scanner_run_receipt_path(run) for run in runs if isinstance(run, dict)],
         "import_counts": _sweep_import_counts(run_payload),
+        "import_references": _sweep_references_from_runs(run_references),
         "inbox_hygiene": {
             "issue_count": inbox_hygiene["issue_count"],
             "top_issue": inbox_hygiene["top_issue"],
@@ -5923,6 +6075,256 @@ def sweep_show(*, target: Path, sweep_id: str, json_output: bool = False) -> int
     print(f"dismissed: {counts.get('dismissed', 0)}")
     hygiene = report.get("inbox_hygiene") if isinstance(report.get("inbox_hygiene"), dict) else {}
     print(f"inbox_hygiene: {hygiene.get('issue_count', 0)} issue(s)")
+    return 0
+
+
+def _find_sweep_report(target: Path, sweep_id: str) -> tuple[dict[str, Any] | None, str | None]:
+    if sweep_id == "latest":
+        latest = _scanner_latest_sweep(target)
+        if latest is None:
+            return None, "sweep not found: latest"
+        return latest, None
+    matches = [
+        report
+        for report in _scanner_sweeps(target)
+        if str(report.get("sweep_id") or "").startswith(sweep_id)
+    ]
+    if not matches:
+        return None, f"sweep not found: {sweep_id}"
+    if len(matches) > 1:
+        return None, f"sweep id is ambiguous: {sweep_id}"
+    return matches[0], None
+
+
+def _sweep_import_suggested_commands(import_id: str, kind: str) -> list[str]:
+    commands = [
+        f"brigade work import plan {import_id}",
+        f"brigade work import promote {import_id}",
+        f"brigade work import dismiss {import_id} --reason \"...\"",
+    ]
+    if kind == "task":
+        commands.append(f"brigade work import promote --run {import_id}")
+    return commands
+
+
+def _sweep_import_review_summary(item: dict[str, Any], *, now: datetime | None = None) -> dict[str, Any]:
+    summary = _import_summary(item, now=now)
+    metadata = summary.get("metadata") if isinstance(summary.get("metadata"), dict) else {}
+    required = ("scanner_id", "scanner_source", "scanner_run_id", "source_fingerprint")
+    provenance_complete = all(metadata.get(key) for key in required)
+    acceptance_count = int(summary.get("acceptance_count", 0) or 0)
+    if summary.get("kind") == "task":
+        acceptance_coverage = "ready" if acceptance_count else "missing"
+        priority = str(summary.get("priority") or "normal")
+    else:
+        acceptance_coverage = "n/a"
+        priority = "n/a"
+    import_id = str(summary.get("id") or "")
+    summary.update(
+        {
+            "priority": priority,
+            "acceptance_coverage": acceptance_coverage,
+            "provenance_complete": provenance_complete,
+            "provenance_status": "complete" if provenance_complete else "missing",
+            "suggested_commands": _sweep_import_suggested_commands(import_id, str(summary.get("kind") or "task"))
+            if summary.get("status") == "pending" and import_id
+            else [],
+        }
+    )
+    return summary
+
+
+def _sweep_group_key(item: dict[str, Any]) -> tuple[str, str, str, str, str, str]:
+    return (
+        str(item.get("source") or "manual"),
+        str(item.get("kind") or "task"),
+        str(item.get("priority") or "n/a"),
+        str(item.get("acceptance_coverage") or "n/a"),
+        str(item.get("provenance_status") or "missing"),
+        str(item.get("status") or "pending"),
+    )
+
+
+def _sweep_review_groups(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    grouped: dict[tuple[str, str, str, str, str, str], list[str]] = {}
+    for item in items:
+        import_id = item.get("id")
+        if isinstance(import_id, str):
+            grouped.setdefault(_sweep_group_key(item), []).append(import_id)
+    result: list[dict[str, Any]] = []
+    for key, import_ids in sorted(grouped.items()):
+        source, kind, priority, acceptance_coverage, provenance_status, status = key
+        result.append(
+            {
+                "source": source,
+                "kind": kind,
+                "priority": priority,
+                "acceptance_coverage": acceptance_coverage,
+                "provenance_status": provenance_status,
+                "status": status,
+                "count": len(import_ids),
+                "import_ids": sorted(import_ids),
+            }
+        )
+    return result
+
+
+def _sweep_review_checks(
+    *,
+    report: dict[str, Any],
+    references: dict[str, Any],
+    items: list[dict[str, Any]],
+    missing_import_ids: list[str],
+) -> list[dict[str, Any]]:
+    checks: list[dict[str, Any]] = []
+    pending_ids = [
+        str(item.get("id"))
+        for item in items
+        if item.get("status") == "pending" and isinstance(item.get("id"), str)
+    ]
+    completed = _parse_iso_datetime(report.get("completed_at") or report.get("started_at"))
+    stale_pending: list[str] = []
+    if pending_ids and completed is not None:
+        age_hours = (_now() - completed).total_seconds() / 3600
+        if age_hours > SCANNER_SWEEP_REVIEW_STALE_HOURS:
+            stale_pending = pending_ids
+    checks.append(
+        _import_hygiene_issue(
+            WARN if stale_pending else OK,
+            "scanner_sweep_unreviewed",
+            f"{len(stale_pending)} pending sweep import(s) older than {SCANNER_SWEEP_REVIEW_STALE_HOURS}h"
+            if stale_pending
+            else "none",
+            stale_pending[:10],
+        )
+    )
+    checks.append(
+        _import_hygiene_issue(
+            WARN if missing_import_ids else OK,
+            "scanner_sweep_missing_imports",
+            f"{len(missing_import_ids)} sweep import reference(s) missing from inbox"
+            if missing_import_ids
+            else "none",
+            missing_import_ids[:10],
+        )
+    )
+    missing_provenance = [
+        str(item.get("id"))
+        for item in items
+        if not item.get("provenance_complete") and isinstance(item.get("id"), str)
+    ]
+    checks.append(
+        _import_hygiene_issue(
+            WARN if missing_provenance else OK,
+            "scanner_sweep_missing_provenance",
+            f"{len(missing_provenance)} sweep import(s) missing scanner provenance"
+            if missing_provenance
+            else "none",
+            missing_provenance[:10],
+        )
+    )
+    created = len(references.get("created_import_ids", []) if isinstance(references.get("created_import_ids"), list) else [])
+    skipped = len(
+        references.get("skipped_source_fingerprints", [])
+        if isinstance(references.get("skipped_source_fingerprints"), list)
+        else []
+    )
+    dismissed = len(
+        references.get("dismissed_source_fingerprints", [])
+        if isinstance(references.get("dismissed_source_fingerprints"), list)
+        else []
+    )
+    noisy = created == 0 and (skipped + dismissed) > 0
+    checks.append(
+        _import_hygiene_issue(
+            WARN if noisy else OK,
+            "scanner_sweep_noisy_noop",
+            f"created=0 skipped={skipped} dismissed={dismissed}" if noisy else "none",
+        )
+    )
+    return checks
+
+
+def _sweep_review_payload(target: Path, sweep_id: str) -> tuple[dict[str, Any] | None, str | None]:
+    report, error = _find_sweep_report(target, sweep_id)
+    if report is None:
+        return None, error
+    references = _sweep_import_references(report)
+    imports_by_id = {
+        str(item.get("id")): item
+        for item in _read_imports(target)
+        if isinstance(item, dict) and isinstance(item.get("id"), str)
+    }
+    now = _now()
+    import_ids = [
+        str(item)
+        for item in references.get("created_import_ids", [])
+        if isinstance(item, str) and item.strip()
+    ]
+    missing_import_ids = sorted(import_id for import_id in import_ids if import_id not in imports_by_id)
+    items = [
+        _sweep_import_review_summary(imports_by_id[import_id], now=now)
+        for import_id in import_ids
+        if import_id in imports_by_id
+    ]
+    actionable = [item for item in items if item.get("status") == "pending"]
+    checks = _sweep_review_checks(
+        report=report,
+        references=references,
+        items=items,
+        missing_import_ids=missing_import_ids,
+    )
+    return (
+        {
+            "target": str(target),
+            "sweep": report,
+            "references": references,
+            "imports": items,
+            "groups": _sweep_review_groups(items),
+            "actionable_imports": actionable,
+            "top_pending_import": actionable[0] if actionable else None,
+            "missing_import_ids": missing_import_ids,
+            "checks": checks,
+            "issues": [check for check in checks if check.get("status") != OK],
+        },
+        None,
+    )
+
+
+def sweep_review(*, target: Path, sweep_id: str, json_output: bool = False) -> int:
+    target = target.expanduser().resolve()
+    if not target.is_dir():
+        print(f"error: --target is not a directory: {target}", file=sys.stderr)
+        return 2
+    payload, error = _sweep_review_payload(target, sweep_id)
+    if payload is None:
+        print(f"error: {error}", file=sys.stderr)
+        return 1 if error and "not found" in error else 2
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+    sweep_data = payload["sweep"]
+    print(f"sweep_review: {sweep_data.get('sweep_id')}")
+    print(f"status: {sweep_data.get('status')}")
+    print(f"created_imports: {len(payload['references'].get('created_import_ids') or [])}")
+    print(f"missing_imports: {len(payload['missing_import_ids'])}")
+    if payload["groups"]:
+        print("groups:")
+        for group in payload["groups"]:
+            print(
+                f"- {group['source']} {group['kind']} priority={group['priority']} "
+                f"acceptance={group['acceptance_coverage']} provenance={group['provenance_status']} "
+                f"status={group['status']} count={group['count']}"
+            )
+    if payload["actionable_imports"]:
+        print("actionable:")
+        for item in payload["actionable_imports"]:
+            print(f"- {item.get('id')} [{item.get('kind')}] {item.get('source')}: {_short(str(item.get('text', '')))}")
+            for command in item.get("suggested_commands", []):
+                print(f"  next: {command}")
+    for check in payload["checks"]:
+        if check.get("status") != OK:
+            _doctor_line(str(check.get("status")), str(check.get("name")), check.get("detail"))
     return 0
 
 

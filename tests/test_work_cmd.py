@@ -4418,8 +4418,40 @@ conflict_window = "02:00-02:10"
     assert work_cmd.import_list(target=tmp_path, json_output=True) == 0
     imports = json.loads(capsys.readouterr().out)["imports"]
     assert len(imports) == 1
+    assert report["import_references"]["created_import_ids"] == [imports[0]["id"]]
+    assert report["import_references"]["runs"][0]["scanner_id"] == "repo-scan"
+    assert report["import_references"]["runs"][0]["scanner_run_id"] == report["scanner_run_ids"][0]
     assert imports[0]["metadata"]["scanner_run_id"] == report["scanner_run_ids"][0]
     assert imports[0]["metadata"]["scanner_receipt_path"] == report["receipt_paths"][0]
+
+    assert work_cmd.sweep_review(target=tmp_path, sweep_id="latest", json_output=True) == 0
+    review = json.loads(capsys.readouterr().out)
+    assert review["sweep"]["sweep_id"] == report["sweep_id"]
+    assert review["references"]["created_import_ids"] == [imports[0]["id"]]
+    assert review["groups"] == [
+        {
+            "source": "repo-scan",
+            "kind": "task",
+            "priority": "normal",
+            "acceptance_coverage": "ready",
+            "provenance_status": "complete",
+            "status": "pending",
+            "count": 1,
+            "import_ids": [imports[0]["id"]],
+        }
+    ]
+    assert review["actionable_imports"][0]["suggested_commands"] == [
+        f"brigade work import plan {imports[0]['id']}",
+        f"brigade work import promote {imports[0]['id']}",
+        f"brigade work import dismiss {imports[0]['id']} --reason \"...\"",
+        f"brigade work import promote --run {imports[0]['id']}",
+    ]
+
+    assert work_cmd.sweep_review(target=tmp_path, sweep_id=report["sweep_id"]) == 0
+    out = capsys.readouterr().out
+    assert f"sweep_review: {report['sweep_id']}" in out
+    assert "repo-scan task priority=normal acceptance=ready provenance=complete status=pending count=1" in out
+    assert f"next: brigade work import plan {imports[0]['id']}" in out
 
     assert work_cmd.sweeps(target=tmp_path, json_output=True) == 0
     sweeps_payload = json.loads(capsys.readouterr().out)
@@ -4515,6 +4547,79 @@ conflict_window = "04:00-04:10"
     assert any(run["scanner_id"] == "fail-scan" and run["status"] == "failed" for run in all_report["run_result"]["runs"])
 
 
+def test_work_sweep_records_skipped_and_dismissed_fingerprints(tmp_path, capsys):
+    _init_git_repo(tmp_path)
+    pending = work_cmd._make_import(
+        "Existing pending",
+        kind="task",
+        source="repo-scan",
+        metadata={"source_item_key": "same-pending", "source_fingerprint": "fp-pending"},
+    )
+    dismissed = work_cmd._make_import(
+        "Existing dismissed",
+        kind="task",
+        source="repo-scan",
+        metadata={"source_item_key": "same-dismissed", "source_fingerprint": "fp-dismissed"},
+    )
+    dismissed["status"] = "dismissed"
+    work_cmd._write_imports(tmp_path, [pending, dismissed])
+    script = tmp_path / "scanner.py"
+    script.write_text(
+        """
+import json
+from pathlib import Path
+
+records = [
+    {
+        "kind": "task",
+        "source": "repo-scan",
+        "text": "Existing pending",
+        "metadata": {"source_item_key": "same-pending", "source_fingerprint": "fp-pending"},
+    },
+    {
+        "kind": "task",
+        "source": "repo-scan",
+        "text": "Existing dismissed",
+        "metadata": {"source_item_key": "same-dismissed", "source_fingerprint": "fp-dismissed"},
+    },
+]
+path = Path.cwd() / ".brigade" / "scanner-imports.jsonl"
+path.parent.mkdir(parents=True, exist_ok=True)
+path.write_text("\\n".join(json.dumps(record) for record in records) + "\\n")
+"""
+    )
+    config = tmp_path / ".brigade" / "scanners.toml"
+    config.parent.mkdir(parents=True, exist_ok=True)
+    config.write_text(
+        f"""
+[[scanner]]
+id = "repo-scan"
+source = "repo-scan"
+command = "{sys.executable} {script}"
+cadence = "daily@02:00"
+enabled = true
+timeout = 30
+output_path = ".brigade/scanner-imports.jsonl"
+import_path = ".brigade/scanner-imports.jsonl"
+import_format = "jsonl"
+conflict_window = "02:00-02:10"
+"""
+    )
+
+    assert work_cmd.sweep(target=tmp_path, scanner_id="repo-scan", json_output=True) == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["import_counts"] == {"created": 0, "dismissed": 1, "skipped": 1}
+    assert report["import_references"]["created_import_ids"] == []
+    assert report["import_references"]["skipped_source_fingerprints"] == ["fp-pending"]
+    assert report["import_references"]["dismissed_source_fingerprints"] == ["fp-dismissed"]
+
+    assert work_cmd.sweep_review(target=tmp_path, sweep_id=report["sweep_id"], json_output=True) == 0
+    review = json.loads(capsys.readouterr().out)
+    assert review["references"]["skipped_source_fingerprints"] == ["fp-pending"]
+    assert review["references"]["dismissed_source_fingerprints"] == ["fp-dismissed"]
+    assert any(check["name"] == "scanner_sweep_noisy_noop" and check["status"] == "warn" for check in review["checks"])
+
+
 def test_work_brief_and_doctor_include_scanner_sweep_health(tmp_path, monkeypatch, capsys):
     _init_git_repo(tmp_path)
     dogfood_cmd.init(target=tmp_path)
@@ -4564,6 +4669,96 @@ conflict_window = "02:00-02:10"
     out = capsys.readouterr().out
     assert "[warn] scanner_sweep_failed: old-failed" in out
     assert "[warn] scanner_sweep_stale: old-failed=120.0h" in out
+
+
+def test_work_sweep_review_health_reports_missing_provenance_and_stale_review(tmp_path, monkeypatch, capsys):
+    _init_git_repo(tmp_path)
+    dogfood_cmd.init(target=tmp_path)
+    capsys.readouterr()
+    monkeypatch.setattr(work_cmd.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(
+        work_cmd,
+        "_now",
+        lambda: datetime(2026, 5, 30, 12, 0, 0, tzinfo=timezone.utc),
+    )
+    config = tmp_path / ".brigade" / "scanners.toml"
+    config.parent.mkdir(parents=True, exist_ok=True)
+    config.write_text(
+        """
+[[scanner]]
+id = "repo-scan"
+source = "repo-scan"
+command = "python3 scanner.py"
+cadence = "daily@02:00"
+enabled = true
+timeout = 30
+output_path = ".brigade/due.jsonl"
+import_path = ".brigade/due.jsonl"
+import_format = "jsonl"
+conflict_window = "02:00-02:10"
+"""
+    )
+    item = work_cmd._make_import(
+        "Review stale sweep import",
+        kind="task",
+        source="repo-scan",
+        metadata={"scanner_id": "repo-scan"},
+    )
+    work_cmd._write_imports(tmp_path, [item])
+    sweep_dir = tmp_path / ".brigade" / "scanners" / "sweeps" / "stale-review"
+    sweep_dir.mkdir(parents=True)
+    _write_json(
+        sweep_dir / "sweep.json",
+        {
+            "sweep_id": "stale-review",
+            "status": "completed",
+            "started_at": "2026-05-28T10:00:00+00:00",
+            "completed_at": "2026-05-28T10:00:00+00:00",
+            "scanner_run_ids": ["run-1"],
+            "import_counts": {"created": 2, "skipped": 0, "dismissed": 0},
+            "import_references": {
+                "created_import_ids": [item["id"], "missing-import"],
+                "skipped_source_fingerprints": [],
+                "dismissed_source_fingerprints": [],
+                "runs": [
+                    {
+                        "scanner_id": "repo-scan",
+                        "scanner_source": "repo-scan",
+                        "scanner_run_id": "run-1",
+                        "receipt_path": str(tmp_path / ".brigade" / "scanners" / "runs" / "run-1" / "receipt.json"),
+                        "import_path": str(tmp_path / ".brigade" / "due.jsonl"),
+                        "created_import_ids": [item["id"], "missing-import"],
+                        "skipped_source_fingerprints": [],
+                        "dismissed_source_fingerprints": [],
+                    }
+                ],
+            },
+        },
+    )
+
+    assert work_cmd.sweep_review(target=tmp_path, sweep_id="stale-review", json_output=True) == 0
+    review = json.loads(capsys.readouterr().out)
+    issue_names = {check["name"] for check in review["issues"]}
+    assert "scanner_sweep_unreviewed" in issue_names
+    assert "scanner_sweep_missing_imports" in issue_names
+    assert "scanner_sweep_missing_provenance" in issue_names
+    assert review["missing_import_ids"] == ["missing-import"]
+
+    assert work_cmd.brief(target=tmp_path) == 0
+    out = capsys.readouterr().out
+    assert "scanner_unreviewed_sweep: stale-review" in out
+    assert f"scanner_sweep_import: {item['id']} repo-scan Review stale sweep import" in out
+
+    assert work_cmd.doctor(target=tmp_path) == 0
+    out = capsys.readouterr().out
+    assert "[warn] scanner_sweep_unreviewed: 1 pending sweep import(s) older than 24h" in out
+    assert "[warn] scanner_sweep_missing_imports: 1 sweep import reference(s) missing from inbox" in out
+    assert "[warn] scanner_sweep_missing_provenance: 1 sweep import(s) missing scanner provenance" in out
+
+    assert work_cmd.inbox_doctor(target=tmp_path) == 0
+    out = capsys.readouterr().out
+    assert "[warn] inbox_sweep_import_missing: 1 sweep import reference(s) missing from inbox" in out
+    assert "[warn] inbox_sweep_import_provenance: 1 sweep import reference(s) lost provenance" in out
 
 
 def test_work_scanners_doctor_warns_for_missing_stale_bad_and_imports_issues(tmp_path, monkeypatch, capsys):
@@ -6445,9 +6640,14 @@ def test_work_sweep_cli(tmp_path, monkeypatch):
         seen.append(("sweep-show", kwargs))
         return 0
 
+    def fake_sweep_review(**kwargs):
+        seen.append(("sweep-review", kwargs))
+        return 0
+
     monkeypatch.setattr(work_cmd, "sweep", fake_sweep)
     monkeypatch.setattr(work_cmd, "sweeps", fake_sweeps)
     monkeypatch.setattr(work_cmd, "sweep_show", fake_sweep_show)
+    monkeypatch.setattr(work_cmd, "sweep_review", fake_sweep_review)
 
     assert (
         cli.main(
@@ -6469,6 +6669,7 @@ def test_work_sweep_cli(tmp_path, monkeypatch):
     assert cli.main(["work", "sweep", "--target", str(tmp_path), "--all"]) == 0
     assert cli.main(["work", "sweeps", "--target", str(tmp_path), "--limit", "5", "--json"]) == 0
     assert cli.main(["work", "sweep-show", "sweep-1", "--target", str(tmp_path), "--json"]) == 0
+    assert cli.main(["work", "sweep-review", "latest", "--target", str(tmp_path), "--json"]) == 0
     assert seen == [
         (
             "sweep",
@@ -6496,6 +6697,7 @@ def test_work_sweep_cli(tmp_path, monkeypatch):
         ),
         ("sweeps", {"target": tmp_path, "limit": 5, "json_output": True}),
         ("sweep-show", {"target": tmp_path, "sweep_id": "sweep-1", "json_output": True}),
+        ("sweep-review", {"target": tmp_path, "sweep_id": "latest", "json_output": True}),
     ]
 
 

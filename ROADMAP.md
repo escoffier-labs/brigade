@@ -36,6 +36,7 @@ Goal: make Brigade a safe target for local automations that discover useful work
 - Explicitly execute configured local scanner producers with foreground receipts, due-run selection, output snapshots, and pending import count reporting. Status: implemented with `brigade work scanners run`, `run --all`, `run --due`, `runs`, `run-show`, and scanner execution health imports, without a daemon or automatic promotion.
 - Preserve scanner run provenance through the import inbox and keep the queue tidy. Status: implemented with scanner provenance metadata, explicit `--ingest-output` JSONL ingestion, `brigade work inbox doctor`, and `brigade work inbox archive`.
 - Run a reviewed daily scanner sweep as one explicit operator action. Status: implemented with `brigade work sweep`, `brigade work sweeps`, `brigade work sweep-show`, default configured JSONL output ingestion, local sweep reports, brief visibility, and doctor warnings, without a daemon or automatic promotion.
+- Review scanner sweep results without digging through raw receipts. Status: implemented with `brigade work sweep-review`, created import references, skipped and dismissed fingerprints, grouped triage, suggested next commands, closeout health, and broken-reference inbox doctor checks.
 
 ## Later Phase: Chat Surface Scanners
 

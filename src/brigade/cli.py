@@ -210,6 +210,10 @@ def _build_parser() -> argparse.ArgumentParser:
     p_work_sweep_show.add_argument("sweep_id", help="Sweep id or unique prefix.")
     p_work_sweep_show.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
     p_work_sweep_show.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_work_sweep_review = work_sub.add_parser("sweep-review", help="Review imports created by one scanner sweep.")
+    p_work_sweep_review.add_argument("sweep_id", help="Sweep id, unique prefix, or latest.")
+    p_work_sweep_review.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_work_sweep_review.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_work_inbox = work_sub.add_parser("inbox", help="Review scanner-ready work imports.")
     p_work_inbox.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
     p_work_inbox.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
@@ -1100,6 +1104,8 @@ def main(argv=None) -> int:
             return work_cmd.sweeps(target=args.target, limit=args.limit, json_output=args.json)
         if args.work_command == "sweep-show":
             return work_cmd.sweep_show(target=args.target, sweep_id=args.sweep_id, json_output=args.json)
+        if args.work_command == "sweep-review":
+            return work_cmd.sweep_review(target=args.target, sweep_id=args.sweep_id, json_output=args.json)
         if args.work_command == "inbox" and getattr(args, "inbox_command", None):
             if args.inbox_command == "doctor":
                 return work_cmd.inbox_doctor(target=args.target, json_output=args.json)
