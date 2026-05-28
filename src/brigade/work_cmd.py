@@ -250,6 +250,33 @@ RAW_CHAT_FIELDS = {
     "transcript",
     "transcripts",
 }
+HANDOFF_READY_KINDS = ("finding", "decision", "preference", "incident", "link", "command")
+HANDOFF_UNSAFE_FIELD_NAMES = {
+    "channel_id",
+    "dm_id",
+    "host",
+    "hostname",
+    "message_id",
+    "password",
+    "private_url",
+    "remote",
+    "secret",
+    "token",
+    "url",
+    "user_id",
+    "webhook",
+    "webhook_url",
+}
+HANDOFF_UNSAFE_VALUE_RE = re.compile(
+    r"(?:https?://[^\s]+|/home/[^\s]+|/Users/[^\s]+|[A-Za-z]:\\[^\s]+|xox[baprs]-[A-Za-z0-9-]+|[A-Za-z0-9_]*(?:token|secret|password|api_key)[A-Za-z0-9_]*\s*[:=]\s*[A-Za-z0-9_./+=:-]{8,})",
+    re.IGNORECASE,
+)
+HANDOFF_TARGETS = {
+    "preference": "USER.md",
+    "command": "TOOLS.md",
+    "incident": ".learnings/ERRORS.md",
+    "link": ".learnings/LEARNINGS.md",
+}
 ISSUE_ACCEPTANCE_HEADINGS = {
     "acceptance",
     "acceptance criteria",
@@ -615,6 +642,17 @@ def _import_summary(item: dict[str, Any], *, now: datetime | None = None) -> dic
                 "acceptance_missing": len(acceptance) == 0,
             }
         )
+    elif item.get("kind") in HANDOFF_READY_KINDS:
+        summary.update(
+            {
+                "handoff_ready": True,
+                "target_document": _handoff_target_document(item),
+            }
+        )
+    if item.get("handoff_path"):
+        summary["handoff_path"] = item.get("handoff_path")
+    if item.get("handoff_target_document"):
+        summary["handoff_target_document"] = item.get("handoff_target_document")
     return summary
 
 
@@ -658,6 +696,32 @@ def _scanner_candidate(imports: list[dict[str, Any]]) -> dict[str, Any] | None:
         )
     )
     return candidates[0]
+
+
+def _handoff_ready_imports(imports: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    candidates = [
+        item
+        for item in imports
+        if item.get("kind") in HANDOFF_READY_KINDS
+        and item.get("status", "pending") == "pending"
+        and isinstance(item.get("text"), str)
+        and item["text"].strip()
+    ]
+    candidates.sort(
+        key=lambda item: (
+            0 if item.get("source") in {"chat-memory-sweep", "memory-refresh", "memory-care"} else 1,
+            _confidence_rank(
+                (item.get("metadata") if isinstance(item.get("metadata"), dict) else {}).get("confidence")
+            ),
+            str(item.get("created_at") or item.get("id") or ""),
+        )
+    )
+    return candidates
+
+
+def _handoff_candidate(imports: list[dict[str, Any]]) -> dict[str, Any] | None:
+    candidates = _handoff_ready_imports(imports)
+    return candidates[0] if candidates else None
 
 
 def _task_snapshot(task: dict[str, Any]) -> dict[str, Any]:
@@ -1196,6 +1260,262 @@ def _mark_import_promoted(target: Path, item: dict[str, Any]) -> tuple[dict[str,
     item["promoted_at"] = now
     item["task_id"] = task["id"]
     return task, created
+
+
+def _handoff_is_document_target(value: str) -> bool:
+    if value.startswith("/") or ".." in Path(value).parts:
+        return False
+    if value in {"TOOLS.md", "USER.md"}:
+        return True
+    return (
+        value.startswith("rules/")
+        or value.startswith(".learnings/")
+    ) and value.endswith(".md")
+
+
+def _handoff_target_document(item: dict[str, Any]) -> str:
+    metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+    override = metadata.get("handoff_target_document") or metadata.get("target_document")
+    if isinstance(override, str) and _handoff_is_document_target(override.strip()):
+        return override.strip()
+    kind = str(item.get("kind") or "finding")
+    category = " ".join(
+        str(metadata.get(key) or "")
+        for key in ("category", "issue_type", "handoff_category", "memory_target", "reason")
+    ).casefold()
+    if "feature" in category or "request" in category:
+        return ".learnings/FEATURE_REQUESTS.md"
+    if "workflow" in category or "rule" in category or "policy" in category:
+        return "rules/scanner-imports.md"
+    if "failure" in category or "error" in category or "bug" in category:
+        return ".learnings/ERRORS.md"
+    if kind == "finding" and str(item.get("source") or "") == "security-scan":
+        return ".learnings/ERRORS.md"
+    return HANDOFF_TARGETS.get(kind, ".learnings/LEARNINGS.md")
+
+
+def _handoff_type(item: dict[str, Any], target_document: str) -> str:
+    kind = str(item.get("kind") or "finding")
+    source = str(item.get("source") or "")
+    if kind == "preference":
+        return "preference"
+    if kind == "incident" or target_document.endswith("ERRORS.md"):
+        return "bugfix"
+    if source == "security-scan":
+        return "security"
+    if target_document.startswith("rules/"):
+        return "workflow"
+    if kind == "decision":
+        return "decision"
+    return "project-context"
+
+
+def _handoff_private_fields(value: object, *, path: tuple[str, ...] = ()) -> list[str]:
+    found: list[str] = []
+    if isinstance(value, dict):
+        for key, item in value.items():
+            key_text = str(key)
+            normalized = key_text.strip().casefold()
+            is_top_text = not path and normalized == "text"
+            if not is_top_text and (normalized in RAW_CHAT_FIELDS or normalized.startswith("raw_")):
+                found.append(".".join((*path, key_text)))
+                continue
+            found.extend(_handoff_private_fields(item, path=(*path, key_text)))
+    elif isinstance(value, list):
+        for index, item in enumerate(value):
+            found.extend(_handoff_private_fields(item, path=(*path, str(index))))
+    return sorted(set(found))
+
+
+def _handoff_redact_value(value: object, *, key: str | None = None) -> object:
+    normalized = (key or "").strip().casefold()
+    if normalized in HANDOFF_UNSAFE_FIELD_NAMES or any(token in normalized for token in ("password", "secret", "token", "webhook")):
+        return "[redacted]"
+    if isinstance(value, str):
+        return HANDOFF_UNSAFE_VALUE_RE.sub("[redacted]", value)
+    if isinstance(value, list):
+        return [_handoff_redact_value(item) for item in value]
+    if isinstance(value, dict):
+        return {str(item_key): _handoff_redact_value(item_value, key=str(item_key)) for item_key, item_value in value.items()}
+    return value
+
+
+def _handoff_render_value(value: object) -> str:
+    redacted = _handoff_redact_value(value)
+    if isinstance(redacted, str):
+        return redacted.replace("\n", " ").strip()
+    return json.dumps(redacted, sort_keys=True, default=str)
+
+
+def _handoff_provenance(item: dict[str, Any]) -> dict[str, Any]:
+    metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+    keys = (
+        "source_fingerprint",
+        "scanner_id",
+        "scanner_source",
+        "scanner_run_id",
+        "scanner_receipt_path",
+        "scanner_output_path_snapshot",
+        "scanner_import_path",
+        "sweep_id",
+        "sweep_issue_id",
+        "sweep_path",
+        "evidence_summary",
+        "evidence",
+        "local_evidence_path",
+        "provider",
+        "workspace",
+        "channel",
+        "thread",
+        "message_range",
+        "confidence",
+    )
+    provenance: dict[str, Any] = {
+        "import_id": item.get("id"),
+        "source": item.get("source"),
+        "kind": item.get("kind"),
+    }
+    for key in keys:
+        value = metadata.get(key)
+        if value not in (None, ""):
+            provenance[key] = _handoff_redact_value(value, key=key)
+    fingerprint = _import_fingerprint(item)
+    if fingerprint and "source_fingerprint" not in provenance:
+        provenance["source_fingerprint"] = fingerprint
+    return provenance
+
+
+def _handoff_safe_text(value: object) -> str:
+    return _handoff_render_value(value)[:500]
+
+
+def _handoff_title(item: dict[str, Any]) -> str:
+    text = _handoff_safe_text(item.get("text") or "scanner import")
+    return _short(text, 80) or "Reviewed scanner import"
+
+
+def _handoff_suggested_document_content(item: dict[str, Any], target_document: str) -> str:
+    metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+    provenance = _handoff_provenance(item)
+    title = _handoff_title(item)
+    lines = [
+        f"### Reviewed scanner import: {title}",
+        "",
+        f"- source: {_handoff_safe_text(item.get('source') or 'manual')}",
+        f"- kind: {_handoff_safe_text(item.get('kind') or 'finding')}",
+        f"- import: {_handoff_safe_text(item.get('id') or '')}",
+        f"- summary: {_handoff_safe_text(item.get('text') or '')}",
+    ]
+    for key in ("evidence_summary", "safe_summary", "reason", "issue_type", "category"):
+        if metadata.get(key) not in (None, ""):
+            lines.append(f"- {key}: {_handoff_safe_text(metadata[key])}")
+    if target_document.startswith("rules/"):
+        lines.append("- rule: Review this scanner import and convert the durable workflow correction into a concise rule.")
+    elif target_document == "TOOLS.md":
+        lines.append("- operational note: Review this command or tool detail before adding it to durable tool notes.")
+    elif target_document == "USER.md":
+        lines.append("- preference note: Review this preference before adding it to durable user context.")
+    else:
+        lines.append("- memory note: Review this item before adding it to durable memory.")
+    if provenance:
+        lines.append("- provenance:")
+        for key in sorted(provenance):
+            lines.append(f"  - {key}: {_handoff_safe_text(provenance[key])}")
+    return "\n".join(lines)
+
+
+def _render_import_handoff(target: Path, item: dict[str, Any], target_document: str) -> str:
+    title = _handoff_title(item)
+    provenance = _handoff_provenance(item)
+    evidence_lines = [
+        f"- import: {item.get('id')}",
+        f"- source: {_handoff_safe_text(item.get('source') or 'manual')}",
+        f"- kind: {_handoff_safe_text(item.get('kind') or 'finding')}",
+    ]
+    for key in sorted(provenance):
+        if key in {"import_id", "source", "kind"}:
+            continue
+        evidence_lines.append(f"- {key}: {_handoff_safe_text(provenance[key])}")
+    content = _handoff_suggested_document_content(item, target_document)
+    return f"""# Memory Handoff
+
+## Type
+{_handoff_type(item, target_document)}
+
+## Title
+{title}
+
+## Summary
+Reviewed scanner import `{item.get('id')}` from `{_handoff_safe_text(item.get('source') or 'manual')}`. This handoff preserves the safe conclusion and local provenance without editing canonical memory directly.
+
+## Durable facts
+- Source import kind: {_handoff_safe_text(item.get('kind') or 'finding')}
+- Source import status at promotion: {_handoff_safe_text(item.get('status') or 'pending')}
+- Target document: {target_document}
+
+## Evidence
+{chr(10).join(evidence_lines)}
+
+## Recommended memory action
+no-card
+
+## Target document
+{target_document}
+
+## Suggested document content
+{content}
+"""
+
+
+def _import_handoff_plan_payload(target: Path, item: dict[str, Any]) -> dict[str, Any]:
+    target = target.expanduser().resolve()
+    target_document = _handoff_target_document(item)
+    inbox = _handoff_inbox(target, {}, None)
+    private_fields = _handoff_private_fields(item)
+    blockers: list[str] = []
+    if item.get("status", "pending") != "pending":
+        blockers.append(f"import is not pending: {item.get('status')}")
+    if item.get("kind") not in HANDOFF_READY_KINDS:
+        blockers.append(f"import kind is not handoff-ready: {item.get('kind')}")
+    if not str(item.get("text") or "").strip():
+        blockers.append("import text is required")
+    if private_fields:
+        blockers.append("raw private chat fields are not allowed: " + ", ".join(private_fields))
+    if not _handoff_is_document_target(target_document):
+        blockers.append(f"handoff target document is invalid: {target_document}")
+    return {
+        "target": str(target),
+        "imports_path": str(_imports_path(target)),
+        "handoff_inbox": str(inbox),
+        "import": _import_summary(item),
+        "handoff_ready": not blockers,
+        "target_document": target_document,
+        "handoff_type": _handoff_type(item, target_document),
+        "provenance": _handoff_provenance(item),
+        "private_fields": private_fields,
+        "blockers": blockers,
+        "suggested_promote_handoff_command": f"brigade work import promote-handoff {item.get('id')}",
+        "suggested_dismiss_command": f'brigade work import dismiss {item.get("id")} --reason "..."',
+    }
+
+
+def _write_import_handoff(target: Path, item: dict[str, Any], target_document: str) -> Path:
+    now = _now()
+    inbox = _handoff_inbox(target, {}, None)
+    inbox.mkdir(parents=True, exist_ok=True)
+    path = inbox / f"{now.strftime('%Y-%m-%d-%H%M')}-scanner-import-{_slug(str(item.get('kind') or 'finding'))}-{_slug(str(item.get('id') or 'import'))}-{uuid4().hex[:6]}.md"
+    path.write_text(_render_import_handoff(target, item, target_document))
+    return path
+
+
+def _mark_import_handoff_promoted(target: Path, item: dict[str, Any], *, handoff_path: Path, target_document: str) -> None:
+    now = _now().isoformat()
+    item["status"] = "promoted"
+    item["updated_at"] = now
+    item["promoted_at"] = now
+    item["handoff_path"] = str(handoff_path)
+    item["handoff_target_document"] = target_document
+    item["handoff_source_fingerprint"] = _import_fingerprint(item)
 
 
 def _find_task(target: Path, task_id: str) -> tuple[dict[str, Any] | None, dict[str, Any]]:
@@ -2962,6 +3282,7 @@ def _brief_payload(target: Path, *, limit: int = 3) -> dict[str, Any]:
     pending_imports = _pending_imports(target)
     pending_import_counts = _import_counts(pending_imports)
     scanner_candidate = _scanner_candidate(pending_imports)
+    handoff_candidate = _handoff_candidate(pending_imports)
     inbox_hygiene = _inbox_hygiene_payload(target)
     scanner_health = _scanner_health(target)
     sweep_health = _scanner_sweep_health(target)
@@ -2986,6 +3307,7 @@ def _brief_payload(target: Path, *, limit: int = 3) -> dict[str, Any]:
         "pending_imports": pending_imports,
         "pending_import_counts": pending_import_counts,
         "scanner_candidate": _import_summary(scanner_candidate) if scanner_candidate else None,
+        "handoff_candidate": _import_summary(handoff_candidate) if handoff_candidate else None,
         "inbox_hygiene": {
             "issue_count": inbox_hygiene["issue_count"],
             "top_issue": inbox_hygiene["top_issue"],
@@ -3565,6 +3887,14 @@ def brief(*, target: Path, limit: int = 3, json_output: bool = False) -> int:
                 f"{_short(str(scanner_candidate.get('text', '')))}"
             )
             print(f"scanner_next_command: brigade work import plan {scanner_candidate.get('id')}")
+    handoff_candidate = payload.get("handoff_candidate")
+    pending_tasks = payload.get("pending_tasks") if isinstance(payload.get("pending_tasks"), list) else []
+    if isinstance(handoff_candidate, dict) and not pending_tasks:
+        print(f"handoff_next_import: {handoff_candidate.get('id')}")
+        print(f"handoff_next_source: {handoff_candidate.get('source')}")
+        print(f"handoff_next_kind: {handoff_candidate.get('kind')}")
+        print(f"handoff_next_target: {handoff_candidate.get('target_document')}")
+        print(f"handoff_next_command: brigade work import plan-handoff {handoff_candidate.get('id')}")
 
     inbox_hygiene = payload.get("inbox_hygiene") if isinstance(payload.get("inbox_hygiene"), dict) else {}
     if inbox_hygiene:
@@ -4648,6 +4978,7 @@ def _inbox_payload(target: Path) -> dict[str, Any]:
     by_kind: dict[str, int] = {}
     by_priority: dict[str, int] = {}
     acceptance = {"ready": 0, "missing": 0}
+    handoff_ready = 0
     stale: list[dict[str, Any]] = []
     for summary in summaries:
         source = str(summary.get("source") or "manual")
@@ -4661,10 +4992,13 @@ def _inbox_payload(target: Path) -> dict[str, Any]:
                 acceptance["missing"] += 1
             else:
                 acceptance["ready"] += 1
+        elif kind in HANDOFF_READY_KINDS:
+            handoff_ready += 1
         age_hours = summary.get("age_hours")
         if isinstance(age_hours, (int, float)) and age_hours > IMPORT_STALE_HOURS:
             stale.append(summary)
     candidate = _scanner_candidate(pending)
+    handoff_candidate = _handoff_candidate(pending)
     return {
         "target": str(target),
         "imports_path": str(_imports_path(target)),
@@ -4674,9 +5008,11 @@ def _inbox_payload(target: Path) -> dict[str, Any]:
             "by_kind": dict(sorted(by_kind.items())),
             "by_priority": dict(sorted(by_priority.items())),
             "acceptance": acceptance,
+            "handoff_ready": handoff_ready,
             "stale": len(stale),
         },
         "candidate": _import_summary(candidate, now=now) if candidate else None,
+        "handoff_candidate": _import_summary(handoff_candidate, now=now) if handoff_candidate else None,
         "imports": summaries,
     }
 
@@ -4749,6 +5085,24 @@ def _inbox_hygiene_payload(target: Path) -> dict[str, Any]:
             "inbox_stale_pending",
             f"{len(stale_pending)} pending import(s) older than {IMPORT_STALE_HOURS}h" if stale_pending else "none",
             stale_pending[:10],
+        )
+    )
+    stale_handoff_ready = [
+        str(item.get("id"))
+        for item in imports
+        if item.get("status", "pending") == "pending"
+        and item.get("kind") in HANDOFF_READY_KINDS
+        and (created := _parse_iso_datetime(item.get("created_at"))) is not None
+        and (current_now() - created).total_seconds() / 3600 > IMPORT_STALE_HOURS
+    ]
+    checks.append(
+        _import_hygiene_issue(
+            WARN if stale_handoff_ready else OK,
+            "inbox_stale_handoff_ready",
+            f"{len(stale_handoff_ready)} handoff-ready import(s) older than {IMPORT_STALE_HOURS}h"
+            if stale_handoff_ready
+            else "none",
+            stale_handoff_ready[:10],
         )
     )
 
@@ -4932,7 +5286,8 @@ def inbox(*, target: Path, json_output: bool = False, limit: int = 20) -> int:
     acceptance = counts["acceptance"]
     print(f"task_acceptance_ready: {acceptance['ready']}")
     print(f"task_acceptance_missing: {acceptance['missing']}")
-    candidate = payload.get("candidate")
+    print(f"handoff_ready: {counts.get('handoff_ready', 0)}")
+    candidate = payload.get("candidate") or payload.get("handoff_candidate")
     if isinstance(candidate, dict):
         print("next:")
         print(f"  import: {candidate.get('id')}")
@@ -4947,9 +5302,13 @@ def inbox(*, target: Path, json_output: bool = False, limit: int = 20) -> int:
             rendered = ", ".join(f"{key}={context[key]}" for key in sorted(context))
             print(f"  context: {rendered}")
         print(f"  plan: brigade work import plan {candidate.get('id')}")
-        print(f"  promote: brigade work import promote {candidate.get('id')}")
         if candidate.get("kind") == "task":
+            print(f"  promote: brigade work import promote {candidate.get('id')}")
             print(f"  run: brigade work import promote --run {candidate.get('id')}")
+        elif candidate.get("kind") in HANDOFF_READY_KINDS:
+            print(f"  plan_handoff: brigade work import plan-handoff {candidate.get('id')}")
+            print(f"  promote_handoff: brigade work import promote-handoff {candidate.get('id')}")
+        print(f"  dismiss: brigade work import dismiss {candidate.get('id')} --reason \"...\"")
     imports = payload.get("imports") if isinstance(payload.get("imports"), list) else []
     if imports:
         print("items:")
@@ -5060,6 +5419,10 @@ def import_show(*, target: Path, import_id: str) -> int:
         print(f"promoted_at: {item['promoted_at']}")
     if item.get("task_id"):
         print(f"task: {item['task_id']}")
+    if item.get("handoff_path"):
+        print(f"handoff: {item['handoff_path']}")
+    if item.get("handoff_target_document"):
+        print(f"handoff_target_document: {item['handoff_target_document']}")
     print(f"text: {item.get('text', '')}")
     return 0
 
@@ -5088,6 +5451,21 @@ def _import_plan_payload(target: Path, import_id: str) -> tuple[dict[str, Any] |
         if template:
             payload["guidance"] = list(TASK_TEMPLATES.get(template, {}).get("guidance", ()))
         payload["suggested_run_command"] = f"brigade work import promote --run {item.get('id')}"
+        payload["recommended_action"] = "promote-task"
+    elif item.get("kind") in HANDOFF_READY_KINDS:
+        handoff = _import_handoff_plan_payload(target, item)
+        payload["handoff"] = {
+            "ready": handoff["handoff_ready"],
+            "target_document": handoff["target_document"],
+            "handoff_type": handoff["handoff_type"],
+            "handoff_inbox": handoff["handoff_inbox"],
+            "blockers": handoff["blockers"],
+            "provenance": handoff["provenance"],
+        }
+        payload["recommended_action"] = "promote-handoff" if handoff["handoff_ready"] else "dismiss-or-fix"
+        payload["suggested_promote_handoff_command"] = handoff["suggested_promote_handoff_command"]
+    else:
+        payload["recommended_action"] = "dismiss-or-fix"
     return payload, 0
 
 
@@ -5124,10 +5502,133 @@ def import_plan(*, target: Path, import_id: str, json_output: bool = False) -> i
         print("guidance:")
         for item in payload["guidance"]:
             print(f"  - {item}")
+    handoff = payload.get("handoff")
+    if isinstance(handoff, dict):
+        print("handoff:")
+        print(f"  ready: {handoff.get('ready')}")
+        print(f"  target_document: {handoff.get('target_document')}")
+        print(f"  type: {handoff.get('handoff_type')}")
+        blockers = handoff.get("blockers") if isinstance(handoff.get("blockers"), list) else []
+        if blockers:
+            print("  blockers:")
+            for blocker in blockers:
+                print(f"    - {blocker}")
+    if payload.get("recommended_action"):
+        print(f"recommended: {payload['recommended_action']}")
     print(f"promote: {payload['suggested_promote_command']}")
+    if payload.get("suggested_promote_handoff_command"):
+        print(f"handoff: {payload['suggested_promote_handoff_command']}")
     if payload.get("suggested_run_command"):
         print(f"run: {payload['suggested_run_command']}")
     print(f"dismiss: {payload['suggested_dismiss_command']}")
+    return 0
+
+
+def import_plan_handoff(*, target: Path, import_id: str, json_output: bool = False) -> int:
+    target = target.expanduser().resolve()
+    if not target.is_dir():
+        print(f"error: --target is not a directory: {target}", file=sys.stderr)
+        return 2
+    item, _ = _find_import(target, import_id)
+    if item is None:
+        print(f"error: import not found: {import_id}", file=sys.stderr)
+        return 1
+    payload = _import_handoff_plan_payload(target, item)
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0 if payload["handoff_ready"] else 2
+    source = payload["import"].get("source") if isinstance(payload.get("import"), dict) else item.get("source")
+    kind = payload["import"].get("kind") if isinstance(payload.get("import"), dict) else item.get("kind")
+    print(f"import: {item.get('id')}")
+    print(f"status: {item.get('status', 'pending')}")
+    print(f"kind: {kind}")
+    print(f"source: {source}")
+    print(f"text: {_handoff_safe_text(item.get('text') or '')}")
+    print(f"handoff_ready: {payload['handoff_ready']}")
+    print(f"handoff_inbox: {payload['handoff_inbox']}")
+    print(f"target_document: {payload['target_document']}")
+    print(f"type: {payload['handoff_type']}")
+    if payload["blockers"]:
+        print("blockers:")
+        for blocker in payload["blockers"]:
+            print(f"  - {blocker}")
+    print(f"promote_handoff: {payload['suggested_promote_handoff_command']}")
+    print(f"dismiss: {payload['suggested_dismiss_command']}")
+    return 0 if payload["handoff_ready"] else 2
+
+
+def import_promote_handoff(
+    *,
+    target: Path,
+    import_id: str,
+    run_after: bool = False,
+    json_output: bool = False,
+) -> int:
+    target = target.expanduser().resolve()
+    if not target.is_dir():
+        print(f"error: --target is not a directory: {target}", file=sys.stderr)
+        return 2
+    item, imports = _find_import(target, import_id)
+    if item is None:
+        print(f"error: import not found: {import_id}", file=sys.stderr)
+        return 1
+    if run_after:
+        if item.get("kind") != "task":
+            print(f"error: --run requires a task import: {item.get('id')}", file=sys.stderr)
+            return 2
+        return import_promote(target=target, import_id=str(item.get("id")), run_after=True)
+    payload = _import_handoff_plan_payload(target, item)
+    if payload["blockers"]:
+        if json_output:
+            print(json.dumps(payload, indent=2, sort_keys=True))
+        else:
+            for blocker in payload["blockers"]:
+                print(f"error: {blocker}", file=sys.stderr)
+        return 2
+    target_document = str(payload["target_document"])
+    handoff_path = _write_import_handoff(target, item, target_document)
+    from . import handoff_cmd
+
+    lint_result = handoff_cmd.lint_file(handoff_path)
+    if not lint_result.valid:
+        try:
+            handoff_path.unlink()
+        except OSError:
+            pass
+        failure_payload = dict(payload)
+        failure_payload.update(
+            {
+                "handoff_path": str(handoff_path),
+                "lint": lint_result.as_dict(),
+                "handoff_ready": False,
+                "blockers": [*payload["blockers"], *lint_result.errors],
+            }
+        )
+        if json_output:
+            print(json.dumps(failure_payload, indent=2, sort_keys=True))
+        else:
+            for error in lint_result.errors:
+                print(f"error: handoff lint failed: {error}", file=sys.stderr)
+        return 2
+    _mark_import_handoff_promoted(target, item, handoff_path=handoff_path, target_document=target_document)
+    _write_imports(target, imports)
+    output = dict(payload)
+    output.update(
+        {
+            "handoff_ready": True,
+            "handoff_path": str(handoff_path),
+            "lint": lint_result.as_dict(),
+            "import": _import_summary(item),
+        }
+    )
+    if json_output:
+        print(json.dumps(output, indent=2, sort_keys=True))
+        return 0
+    print(f"import: {item.get('id')}")
+    print(f"status: {item.get('status')}")
+    print(f"handoff: {handoff_path}")
+    print(f"target_document: {target_document}")
+    print("lint: ok")
     return 0
 
 
@@ -6125,11 +6626,14 @@ def _find_sweep_report(target: Path, sweep_id: str) -> tuple[dict[str, Any] | No
 def _sweep_import_suggested_commands(import_id: str, kind: str) -> list[str]:
     commands = [
         f"brigade work import plan {import_id}",
-        f"brigade work import promote {import_id}",
         f"brigade work import dismiss {import_id} --reason \"...\"",
     ]
     if kind == "task":
+        commands.insert(1, f"brigade work import promote {import_id}")
         commands.append(f"brigade work import promote --run {import_id}")
+    elif kind in HANDOFF_READY_KINDS:
+        commands.insert(1, f"brigade work import plan-handoff {import_id}")
+        commands.insert(2, f"brigade work import promote-handoff {import_id}")
     return commands
 
 
@@ -6157,6 +6661,9 @@ def _sweep_import_review_summary(item: dict[str, Any], *, now: datetime | None =
             else [],
         }
     )
+    if summary.get("kind") in HANDOFF_READY_KINDS:
+        summary["handoff_ready"] = True
+        summary["target_document"] = _handoff_target_document(item)
     return summary
 
 

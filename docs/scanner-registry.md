@@ -68,7 +68,7 @@ Sweep reports are gitignored under:
 
 Each report includes the sweep id, started and completed timestamps, scanner run ids, scanner receipt paths, created import ids, skipped source fingerprints, dismissed source fingerprints, import counts, an inbox hygiene summary, and suggested next commands. Use `brigade work sweeps` and `brigade work sweep-show <sweep-id>` to inspect reports.
 
-Use `brigade work sweep-review <sweep-id>` or `brigade work sweep-review latest` to triage what a sweep produced. Review output groups created imports by source, kind, priority, acceptance coverage, provenance completeness, and pending/promoted/dismissed state. Pending imports include exact next commands for `import plan`, `import promote`, `import dismiss`, and `import promote --run`.
+Use `brigade work sweep-review <sweep-id>` or `brigade work sweep-review latest` to triage what a sweep produced. Review output groups created imports by source, kind, priority, acceptance coverage, provenance completeness, and pending/promoted/dismissed state. Pending imports include exact next commands for `import plan`, `import promote`, `import dismiss`, `import promote --run`, `import plan-handoff`, and `import promote-handoff` as appropriate.
 
 `brigade work brief` shows the latest sweep, suggests `brigade work sweep` when scanner runs are due, and surfaces the top pending import from the latest unreviewed sweep. `brigade work doctor` warns on missing, stale, failed, or unreviewed sweep reports, missing import references, lost provenance, and noisy no-op sweeps. `brigade work inbox doctor` also reports broken sweep import references.
 

@@ -18,11 +18,13 @@ brigade work inbox doctor
 brigade work inbox archive
 brigade work import triage
 brigade work import plan <import-id>
+brigade work import plan-handoff <import-id>
+brigade work import promote-handoff <import-id>
 brigade work import promote --run <import-id>
 brigade work import promote --all --source memory-care --kind task
 ```
 
-`validate` checks a JSONL file without writing. `ingest` appends valid records into `.brigade/work/imports/inbox.jsonl`, skipping duplicate pending records with the same source, kind, and normalized text. Scanner producers can also provide stable source item keys and fingerprints so repeated ingestion skips equivalent pending or promoted imports, while dismissed imports stay dismissed unless the source item changes materially. `inbox` groups pending imports for daily review. `inbox doctor` reports queue hygiene issues, and `inbox archive` moves old closed imports to `.brigade/work/imports/archive.jsonl` without touching pending imports. `plan` previews the task a reviewed import would create. `promote --run` promotes one task import and immediately runs it through the normal work-session loop. `memory-care` reads `memory/cards/decay/refresh-queue.json` and converts queued cards into task imports. `memory-refresh` accepts the same queue plus `candidates` or `refresh_candidates` and writes TDD-ready refresh task imports. `chat-sweep` reads `.brigade/chat-memory-sweeps/latest.json` and converts sweep `issues`; actionable issues become task imports. `brigade chat sweep import-issues <surface-id>` produces that same chat-sweep import shape from configured local chat export fixtures.
+`validate` checks a JSONL file without writing. `ingest` appends valid records into `.brigade/work/imports/inbox.jsonl`, skipping duplicate pending records with the same source, kind, and normalized text. Scanner producers can also provide stable source item keys and fingerprints so repeated ingestion skips equivalent pending or promoted imports, while dismissed imports stay dismissed unless the source item changes materially. `inbox` groups pending imports for daily review. `inbox doctor` reports queue hygiene issues, and `inbox archive` moves old closed imports to `.brigade/work/imports/archive.jsonl` without touching pending imports. `plan` previews the task or handoff a reviewed import would create. `promote --run` promotes one task import and immediately runs it through the normal work-session loop. `plan-handoff` and `promote-handoff` preview and write reviewed Memory Handoff drafts for durable non-task imports. `memory-care` reads `memory/cards/decay/refresh-queue.json` and converts queued cards into task imports. `memory-refresh` accepts the same queue plus `candidates` or `refresh_candidates` and writes TDD-ready refresh task imports. `chat-sweep` reads `.brigade/chat-memory-sweeps/latest.json` and converts sweep `issues`; actionable issues become task imports. `brigade chat sweep import-issues <surface-id>` produces that same chat-sweep import shape from configured local chat export fixtures.
 
 ## Record Shape
 
@@ -51,6 +53,8 @@ Task-only optional fields:
 
 Task fields are valid only when `kind` is `task`. When a task import is promoted, Brigade preserves these fields on the local task ledger item and keeps source-specific details in `metadata`.
 
+Durable non-task imports with kind `decision`, `preference`, `link`, `command`, `finding`, or `incident` can be promoted into a local Memory Handoff draft. Promotion writes to the configured handoff inbox, runs handoff lint, then marks the import `promoted` only after the draft is valid. The promoted import stores `handoff_path`, `handoff_target_document`, `promoted_at`, and `handoff_source_fingerprint`.
+
 Recommended metadata keys:
 
 - `card_file`: memory card path for memory-care records.
@@ -72,6 +76,7 @@ Recommended metadata keys:
 - `confidence`: producer confidence such as `low`, `medium`, or `high`.
 - `evidence_summary`: compact evidence summary, not raw private chat text.
 - `evidence`: local evidence path, not raw private chat text.
+- `handoff_target_document`: optional explicit target document for `promote-handoff`, such as `TOOLS.md`, `USER.md`, `rules/scanner-imports.md`, or `.learnings/LEARNINGS.md`.
 
 Scanner run provenance metadata is added by `brigade work scanners run --ingest-output`, and also attached to new inbox records that a scanner command writes directly during a run when Brigade can match the source:
 
@@ -88,6 +93,8 @@ Scanner run provenance metadata is added by `brigade work scanners run --ingest-
 - Keep raw chat exports, message bodies, and third-party personal details out of public docs and public repos.
 - Store source locators and summaries in metadata instead of raw message quotes.
 - Route durable memory changes through reviewed Memory Handoffs. Do not let scanners edit memory cards directly by default.
+- `promote-handoff` rejects raw private chat fields such as `raw_text`, `raw_messages`, `messages`, `message_text`, `quotes`, and `transcript`.
+- `promote-handoff` redacts unsafe URLs, tokens, host-private paths, user ids, channel ids, hostnames, and secret-looking values before writing handoff drafts.
 
 ## Memory-Care And Memory-Refresh Producers
 

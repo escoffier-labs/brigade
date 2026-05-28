@@ -37,6 +37,7 @@ Goal: make Brigade a safe target for local automations that discover useful work
 - Preserve scanner run provenance through the import inbox and keep the queue tidy. Status: implemented with scanner provenance metadata, explicit `--ingest-output` JSONL ingestion, `brigade work inbox doctor`, and `brigade work inbox archive`.
 - Run a reviewed daily scanner sweep as one explicit operator action. Status: implemented with `brigade work sweep`, `brigade work sweeps`, `brigade work sweep-show`, default configured JSONL output ingestion, local sweep reports, brief visibility, and doctor warnings, without a daemon or automatic promotion.
 - Review scanner sweep results without digging through raw receipts. Status: implemented with `brigade work sweep-review`, created import references, skipped and dismissed fingerprints, grouped triage, suggested next commands, closeout health, and broken-reference inbox doctor checks.
+- Promote durable non-task scanner imports into reviewed Memory Handoff drafts. Status: implemented with `brigade work import plan-handoff`, `promote-handoff`, lint-gated handoff writing, provenance preservation, redaction, daily brief surfacing, and stale handoff-ready inbox warnings, without editing canonical memory.
 
 ## Later Phase: Chat Surface Scanners
 

@@ -5687,6 +5687,286 @@ def test_work_import_promote_all_filters_by_source_and_kind(tmp_path, monkeypatc
     assert [item["text"] for item in payload["imports"]] == ["Review chat note", "Record decision"]
 
 
+def test_work_import_plan_handoff_covers_durable_kinds(tmp_path, monkeypatch, capsys):
+    _init_git_repo(tmp_path)
+    monkeypatch.setattr(
+        work_cmd,
+        "_now",
+        lambda: datetime(2026, 5, 26, 12, 0, 0, tzinfo=timezone.utc),
+    )
+    records = [
+        {
+            "text": f"Durable {kind} from scanner",
+            "kind": kind,
+            "source": "chat-memory-sweep",
+            "metadata": {
+                "source_item_key": f"chat:{kind}",
+                "source_fingerprint": f"fp-{kind}",
+                "evidence_summary": f"Safe evidence for {kind}.",
+            },
+        }
+        for kind in ("decision", "preference", "link", "command", "finding", "incident")
+    ]
+    import_file = tmp_path / "durable-imports.jsonl"
+    import_file.write_text("".join(json.dumps(record) + "\n" for record in records))
+    assert work_cmd.import_ingest(target=tmp_path, input_path=import_file) == 0
+    capsys.readouterr()
+
+    expected_targets = {
+        "decision": ".learnings/LEARNINGS.md",
+        "preference": "USER.md",
+        "link": ".learnings/LEARNINGS.md",
+        "command": "TOOLS.md",
+        "finding": ".learnings/LEARNINGS.md",
+        "incident": ".learnings/ERRORS.md",
+    }
+    imports = [json.loads(line) for line in (tmp_path / ".brigade" / "work" / "imports" / "inbox.jsonl").read_text().splitlines()]
+    for item in imports:
+        assert work_cmd.import_plan_handoff(target=tmp_path, import_id=item["id"], json_output=True) == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["handoff_ready"] is True
+        assert payload["target_document"] == expected_targets[item["kind"]]
+        assert payload["provenance"]["source_fingerprint"] == f"fp-{item['kind']}"
+
+
+def test_work_import_promote_handoff_writes_valid_draft_and_completion_metadata(tmp_path, monkeypatch, capsys):
+    _init_git_repo(tmp_path)
+    from brigade import handoff_cmd
+
+    times = iter(
+        [
+            datetime(2026, 5, 26, 12, 0, 0, tzinfo=timezone.utc),
+            datetime(2026, 5, 26, 12, 1, 0, tzinfo=timezone.utc),
+            datetime(2026, 5, 26, 12, 1, 1, tzinfo=timezone.utc),
+            datetime(2026, 5, 26, 12, 1, 2, tzinfo=timezone.utc),
+            datetime(2026, 5, 26, 12, 1, 3, tzinfo=timezone.utc),
+        ]
+    )
+    monkeypatch.setattr(work_cmd, "_now", lambda: next(times))
+    import_file = tmp_path / "handoff-import.jsonl"
+    import_file.write_text(
+        json.dumps(
+            {
+                "text": "Record durable scanner decision",
+                "kind": "decision",
+                "source": "chat-memory-sweep",
+                "metadata": {
+                    "source_item_key": "chat:decision:one",
+                    "source_fingerprint": "fingerprint-one",
+                    "scanner_id": "chat-surfaces",
+                    "scanner_run_id": "run-1",
+                    "sweep_id": "sweep-1",
+                    "evidence_summary": "Safe evidence at https://private.example/token=SECRET123456.",
+                    "local_evidence_path": ".brigade/evidence/chat-decision.json",
+                },
+            }
+        )
+        + "\n"
+    )
+    assert work_cmd.import_ingest(target=tmp_path, input_path=import_file) == 0
+    capsys.readouterr()
+    item = json.loads((tmp_path / ".brigade" / "work" / "imports" / "inbox.jsonl").read_text())
+
+    assert work_cmd.import_promote_handoff(target=tmp_path, import_id=item["id"], json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    handoff_path = Path(payload["handoff_path"])
+    assert handoff_path.parent == tmp_path / ".codex" / "memory-handoffs"
+    assert handoff_cmd.lint_file(handoff_path).valid is True
+    handoff = handoff_path.read_text()
+    assert "fingerprint-one" in handoff
+    assert "scanner_run_id" in handoff
+    assert "sweep-1" in handoff
+    assert "https://private.example" not in handoff
+    assert "SECRET123456" not in handoff
+
+    promoted = json.loads((tmp_path / ".brigade" / "work" / "imports" / "inbox.jsonl").read_text())
+    assert promoted["status"] == "promoted"
+    assert promoted["handoff_path"] == str(handoff_path)
+    assert promoted["handoff_target_document"] == ".learnings/LEARNINGS.md"
+    assert promoted["handoff_source_fingerprint"] == "fingerprint-one"
+    assert promoted["promoted_at"] == "2026-05-26T12:01:02+00:00"
+
+
+def test_work_import_promote_handoff_lint_failure_does_not_promote(tmp_path, monkeypatch, capsys):
+    _init_git_repo(tmp_path)
+    from brigade import handoff_cmd
+
+    monkeypatch.setattr(
+        work_cmd,
+        "_now",
+        lambda: datetime(2026, 5, 26, 12, 0, 0, tzinfo=timezone.utc),
+    )
+    assert work_cmd.import_add(target=tmp_path, text="Record durable finding", kind="finding", source="repo-scan") == 0
+    import_id = capsys.readouterr().out.split("import: ", 1)[1].splitlines()[0]
+
+    def fake_lint_file(path):
+        return handoff_cmd.HandoffLintResult(
+            path=path,
+            action="no-card",
+            valid=False,
+            errors=("forced lint failure",),
+            warnings=(),
+        )
+
+    monkeypatch.setattr(handoff_cmd, "lint_file", fake_lint_file)
+
+    assert work_cmd.import_promote_handoff(target=tmp_path, import_id=import_id, json_output=True) == 2
+    payload = json.loads(capsys.readouterr().out)
+    assert "forced lint failure" in payload["blockers"]
+    item = json.loads((tmp_path / ".brigade" / "work" / "imports" / "inbox.jsonl").read_text())
+    assert item["status"] == "pending"
+    assert "handoff_path" not in item
+    assert not list((tmp_path / ".codex" / "memory-handoffs").glob("*.md"))
+
+
+def test_work_import_promote_handoff_rejects_raw_private_chat_fields(tmp_path, monkeypatch, capsys):
+    _init_git_repo(tmp_path)
+    monkeypatch.setattr(
+        work_cmd,
+        "_now",
+        lambda: datetime(2026, 5, 26, 12, 0, 0, tzinfo=timezone.utc),
+    )
+    import_file = tmp_path / "raw-chat-import.jsonl"
+    import_file.write_text(
+        json.dumps(
+            {
+                "text": "Record durable chat finding",
+                "kind": "finding",
+                "source": "chat-memory-sweep",
+                "metadata": {
+                    "source_item_key": "chat:finding:raw",
+                    "source_fingerprint": "raw-fingerprint",
+                    "raw_text": "do not copy this private transcript",
+                },
+            }
+        )
+        + "\n"
+    )
+    assert work_cmd.import_ingest(target=tmp_path, input_path=import_file) == 0
+    capsys.readouterr()
+    item = json.loads((tmp_path / ".brigade" / "work" / "imports" / "inbox.jsonl").read_text())
+
+    assert work_cmd.import_plan_handoff(target=tmp_path, import_id=item["id"], json_output=True) == 2
+    plan = json.loads(capsys.readouterr().out)
+    assert plan["handoff_ready"] is False
+    assert "metadata.raw_text" in plan["private_fields"]
+
+    assert work_cmd.import_promote_handoff(target=tmp_path, import_id=item["id"]) == 2
+    assert "raw private chat fields are not allowed" in capsys.readouterr().err
+    item = json.loads((tmp_path / ".brigade" / "work" / "imports" / "inbox.jsonl").read_text())
+    assert item["status"] == "pending"
+
+
+def test_work_handoff_ready_imports_surface_in_inbox_sweep_brief_and_doctor(tmp_path, monkeypatch, capsys):
+    _init_git_repo(tmp_path)
+    monkeypatch.setattr(
+        work_cmd,
+        "_now",
+        lambda: datetime(2026, 5, 28, 12, 0, 0, tzinfo=timezone.utc),
+    )
+    import_file = tmp_path / "sweep-import.jsonl"
+    import_file.write_text(
+        json.dumps(
+            {
+                "text": "Remember scanner decision from sweep",
+                "kind": "decision",
+                "source": "chat-memory-sweep",
+                "metadata": {
+                    "source_item_key": "sweep:decision:one",
+                    "source_fingerprint": "sweep-fp-one",
+                    "scanner_id": "chat-surfaces",
+                    "scanner_source": "chat-memory-sweep",
+                    "scanner_run_id": "run-one",
+                },
+            }
+        )
+        + "\n"
+    )
+    assert work_cmd.import_ingest(target=tmp_path, input_path=import_file) == 0
+    imports_path = tmp_path / ".brigade" / "work" / "imports" / "inbox.jsonl"
+    item = json.loads(imports_path.read_text())
+    item["created_at"] = "2026-05-24T08:00:00+00:00"
+    item["updated_at"] = "2026-05-24T08:00:00+00:00"
+    imports_path.write_text(json.dumps(item, sort_keys=True) + "\n")
+    import_id = item["id"]
+    sweep_dir = tmp_path / ".brigade" / "scanners" / "sweeps" / "sweep-one"
+    sweep_dir.mkdir(parents=True)
+    _write_json(
+        sweep_dir / "sweep.json",
+        {
+            "sweep_id": "sweep-one",
+            "status": "completed",
+            "completed_at": "2026-05-24T08:30:00+00:00",
+            "import_references": {"created_import_ids": [import_id], "skipped_source_fingerprints": [], "dismissed_source_fingerprints": []},
+        },
+    )
+
+    assert work_cmd.inbox(target=tmp_path) == 0
+    inbox_out = capsys.readouterr().out
+    assert "handoff_ready: 1" in inbox_out
+    assert f"plan_handoff: brigade work import plan-handoff {import_id}" in inbox_out
+
+    assert work_cmd.sweep_review(target=tmp_path, sweep_id="latest") == 0
+    sweep_out = capsys.readouterr().out
+    assert f"next: brigade work import plan-handoff {import_id}" in sweep_out
+    assert f"next: brigade work import promote-handoff {import_id}" in sweep_out
+
+    assert work_cmd.brief(target=tmp_path) == 0
+    brief_out = capsys.readouterr().out
+    assert f"handoff_next_import: {import_id}" in brief_out
+    assert f"handoff_next_command: brigade work import plan-handoff {import_id}" in brief_out
+
+    assert work_cmd.inbox_doctor(target=tmp_path) == 0
+    doctor_out = capsys.readouterr().out
+    assert "[warn] inbox_stale_handoff_ready:" in doctor_out
+
+
+def test_work_import_handoff_dedupe_respects_promoted_and_changed_fingerprints(tmp_path, monkeypatch, capsys):
+    _init_git_repo(tmp_path)
+    times = iter(
+        [
+            datetime(2026, 5, 26, 12, 0, 0, tzinfo=timezone.utc),
+            datetime(2026, 5, 26, 12, 1, 0, tzinfo=timezone.utc),
+            datetime(2026, 5, 26, 12, 1, 1, tzinfo=timezone.utc),
+            datetime(2026, 5, 26, 12, 2, 0, tzinfo=timezone.utc),
+            datetime(2026, 5, 26, 12, 3, 0, tzinfo=timezone.utc),
+            datetime(2026, 5, 26, 12, 4, 0, tzinfo=timezone.utc),
+            datetime(2026, 5, 26, 12, 5, 0, tzinfo=timezone.utc),
+        ]
+    )
+    monkeypatch.setattr(work_cmd, "_now", lambda: next(times))
+    base = {
+        "text": "Remember durable scanner preference",
+        "kind": "preference",
+        "source": "chat-memory-sweep",
+        "metadata": {
+            "source_item_key": "chat:preference:one",
+            "source_fingerprint": "fp-one",
+        },
+    }
+    import_file = tmp_path / "preference.jsonl"
+    import_file.write_text(json.dumps(base) + "\n")
+    assert work_cmd.import_ingest(target=tmp_path, input_path=import_file, json_output=True) == 0
+    item = json.loads(capsys.readouterr().out)["imports"][0]
+    assert work_cmd.import_promote_handoff(target=tmp_path, import_id=item["id"]) == 0
+    capsys.readouterr()
+
+    assert work_cmd.import_ingest(target=tmp_path, input_path=import_file, json_output=True) == 0
+    same_payload = json.loads(capsys.readouterr().out)
+    assert same_payload["created"] == 0
+    assert same_payload["skipped"] == 1
+
+    changed = dict(base)
+    changed["metadata"] = dict(base["metadata"])
+    changed["metadata"]["source_fingerprint"] = "fp-two"
+    import_file.write_text(json.dumps(changed) + "\n")
+    assert work_cmd.import_ingest(target=tmp_path, input_path=import_file, json_output=True) == 0
+    changed_payload = json.loads(capsys.readouterr().out)
+    assert changed_payload["created"] == 1
+    imports = [json.loads(line) for line in (tmp_path / ".brigade" / "work" / "imports" / "inbox.jsonl").read_text().splitlines()]
+    assert [item["status"] for item in imports] == ["promoted", "pending"]
+
+
 def test_work_import_promote_all_preserves_task_metadata(tmp_path, monkeypatch, capsys):
     _init_git_repo(tmp_path)
     times = iter(
@@ -7448,8 +7728,16 @@ def test_work_import_cli(tmp_path, monkeypatch):
         seen.append(("plan", kwargs))
         return 0
 
+    def fake_import_plan_handoff(**kwargs):
+        seen.append(("plan-handoff", kwargs))
+        return 0
+
     def fake_import_promote(**kwargs):
         seen.append(("promote", kwargs))
+        return 0
+
+    def fake_import_promote_handoff(**kwargs):
+        seen.append(("promote-handoff", kwargs))
         return 0
 
     def fake_import_dismiss(**kwargs):
@@ -7466,7 +7754,9 @@ def test_work_import_cli(tmp_path, monkeypatch):
     monkeypatch.setattr(work_cmd, "import_triage", fake_import_triage)
     monkeypatch.setattr(work_cmd, "import_show", fake_import_show)
     monkeypatch.setattr(work_cmd, "import_plan", fake_import_plan)
+    monkeypatch.setattr(work_cmd, "import_plan_handoff", fake_import_plan_handoff)
     monkeypatch.setattr(work_cmd, "import_promote", fake_import_promote)
+    monkeypatch.setattr(work_cmd, "import_promote_handoff", fake_import_promote_handoff)
     monkeypatch.setattr(work_cmd, "import_dismiss", fake_import_dismiss)
 
     assert (
@@ -7596,6 +7886,7 @@ def test_work_import_cli(tmp_path, monkeypatch):
     )
     assert cli.main(["work", "import", "show", "imp123", "--target", str(tmp_path)]) == 0
     assert cli.main(["work", "import", "plan", "imp123", "--target", str(tmp_path), "--json"]) == 0
+    assert cli.main(["work", "import", "plan-handoff", "imp123", "--target", str(tmp_path), "--json"]) == 0
     assert (
         cli.main(
             [
@@ -7606,6 +7897,20 @@ def test_work_import_cli(tmp_path, monkeypatch):
                 "--target",
                 str(tmp_path),
                 "--run",
+            ]
+        )
+        == 0
+    )
+    assert (
+        cli.main(
+            [
+                "work",
+                "import",
+                "promote-handoff",
+                "imp123",
+                "--target",
+                str(tmp_path),
+                "--json",
             ]
         )
         == 0
@@ -7704,6 +8009,7 @@ def test_work_import_cli(tmp_path, monkeypatch):
         ),
         ("show", {"target": tmp_path, "import_id": "imp123"}),
         ("plan", {"target": tmp_path, "import_id": "imp123", "json_output": True}),
+        ("plan-handoff", {"target": tmp_path, "import_id": "imp123", "json_output": True}),
         (
             "promote",
             {
@@ -7714,6 +8020,15 @@ def test_work_import_cli(tmp_path, monkeypatch):
                 "source": None,
                 "metadata": [],
                 "run_after": True,
+            },
+        ),
+        (
+            "promote-handoff",
+            {
+                "target": tmp_path,
+                "import_id": "imp123",
+                "run_after": False,
+                "json_output": True,
             },
         ),
         (
