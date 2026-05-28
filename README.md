@@ -157,6 +157,10 @@ brigade dogfood next
 brigade dogfood --target /path/to/repo
 brigade handoff doctor
 brigade handoff lint
+brigade handoff list
+brigade handoff show <handoff-id-or-path>
+brigade handoff archive <handoff-id-or-path>
+brigade handoff archive --all-reviewed
 brigade handoff issues
 brigade handoff import-issues
 brigade handoff sync-issues
@@ -403,6 +407,13 @@ Durable non-task imports such as decisions, preferences, links, commands, findin
 Scanner producer imports use source item keys and fingerprints when available. Repeated ingestion skips equivalent pending or promoted imports, and dismissed imports stay dismissed unless the source item changes materially. Imports created during scanner runs carry provenance metadata when Brigade can attach it, including scanner id, source, run id, receipt path, output snapshot, import path, and source fingerprint.
 `brigade work doctor` warns when scanner queues go stale, task imports lack acceptance criteria, or a source produces many dismissed imports.
 For handoff-ingest issues, prefer `brigade handoff sync-issues` over repeated raw imports. It imports only issue ids that have not already been seen locally and marks stale handoff-ingest imports/tasks resolved when the latest log no longer contains them.
+
+Handoff draft queue commands:
+
+- `brigade handoff list` lists local Memory Handoff drafts from `.claude/memory-handoffs/`, `.codex/memory-handoffs/`, and configured source inboxes.
+- `brigade handoff show <handoff-id-or-path>` shows lint status, target card or document, source import id, source fingerprint, scanner provenance, and stale age.
+- `brigade handoff archive <handoff-id-or-path>` moves one reviewed draft into `.brigade/handoffs/archive/` and records closeout metadata in `.brigade/handoffs/archive.jsonl`.
+- `brigade handoff archive --all-reviewed` archives lint-valid drafts only. It does not run the canonical ingestor or edit memory.
 
 Scanner registry commands:
 

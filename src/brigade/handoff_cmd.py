@@ -6,6 +6,7 @@ import hashlib
 import re
 import sys
 import time
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -17,6 +18,7 @@ FAIL = "fail"
 WRITER_INBOXES = (".claude/memory-handoffs", ".codex/memory-handoffs")
 IGNORED_HANDOFF_NAMES = {"TEMPLATE.md"}
 DEFAULT_STALE_AFTER_MINUTES = 90
+HANDOFF_DRAFT_STALE_HOURS = 72
 MAX_INGESTOR_WARNING_SIGNALS = 5
 CARD_ACTIONS = ("create-card", "update-card")
 NO_CARD_ACTION = "no-card"
@@ -181,6 +183,46 @@ class HandoffHealth:
         }
 
 
+@dataclass(frozen=True)
+class HandoffDraft:
+    id: str
+    path: Path
+    inbox: str
+    created_at: str | None
+    modified_at: str | None
+    age_hours: float | None
+    stale: bool
+    lint: HandoffLintResult
+    action: str | None
+    target_card: str | None
+    target_document: str | None
+    source_import_id: str | None
+    source_fingerprint: str | None
+    scanner_provenance: dict[str, Any]
+    status: str
+    watched: bool
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "path": str(self.path),
+            "inbox": self.inbox,
+            "created_at": self.created_at,
+            "modified_at": self.modified_at,
+            "age_hours": self.age_hours,
+            "stale": self.stale,
+            "lint": self.lint.as_dict(),
+            "action": self.action,
+            "target_card": self.target_card,
+            "target_document": self.target_document,
+            "source_import_id": self.source_import_id,
+            "source_fingerprint": self.source_fingerprint,
+            "scanner_provenance": self.scanner_provenance,
+            "status": self.status,
+            "watched": self.watched,
+        }
+
+
 def default_sources_path(target: Path) -> Path:
     return target / ".brigade" / "handoff-sources.json"
 
@@ -302,6 +344,9 @@ def doctor_checks(target: Path, sources: Path | None = None) -> list[tuple[str, 
 
     for warning in health.warnings:
         checks.append((WARN, "handoff_warning", warning))
+    draft_payload = draft_queue_payload(target, sources=sources)
+    for check in draft_payload["checks"]:
+        checks.append((str(check.get("status")), str(check.get("name")), str(check.get("detail"))))
     return checks
 
 
@@ -472,6 +517,433 @@ def lint_file(path: Path) -> HandoffLintResult:
         errors=tuple(errors),
         warnings=tuple(warnings),
     )
+
+
+def _handoff_state_root(target: Path) -> Path:
+    return target / ".brigade" / "handoffs"
+
+
+def _handoff_archive_root(target: Path) -> Path:
+    return _handoff_state_root(target) / "archive"
+
+
+def _handoff_archive_records_path(target: Path) -> Path:
+    return _handoff_state_root(target) / "archive.jsonl"
+
+
+def _load_source_config_for_drafts(target: Path, sources: Path | None = None) -> tuple[SourceConfig, Path | None, list[str], bool]:
+    target = target.expanduser().resolve()
+    sources_path = sources.expanduser().resolve() if sources is not None else default_sources_path(target)
+    if sources_path.is_file():
+        try:
+            return _load_sources(target, sources_path), sources_path, [], True
+        except ValueError as exc:
+            return SourceConfig(watched=(), ingestor=None), sources_path, [f"invalid handoff source config {sources_path}: {exc}"], False
+    if sources is not None:
+        return SourceConfig(watched=(), ingestor=None), sources_path, [f"handoff source config not found: {sources_path}"], False
+    return SourceConfig(watched=(), ingestor=None), None, [], False
+
+
+def _draft_inbox_specs(target: Path, sources: Path | None = None) -> tuple[list[tuple[Path, str, bool]], list[str], bool]:
+    target = target.expanduser().resolve()
+    config, _, errors, loaded = _load_source_config_for_drafts(target, sources=sources)
+    specs: dict[tuple[str, str], tuple[Path, str, bool]] = {}
+    for rel in WRITER_INBOXES:
+        path = (target / rel).resolve()
+        specs[(str(path), rel)] = (path, rel, _is_watched(target, rel, config.watched))
+    for watched in config.watched:
+        path = (watched.root / watched.inbox).resolve()
+        label = watched.inbox if watched.root == target.resolve() else str(path)
+        specs[(str(path), label)] = (path, label, True)
+    return list(specs.values()), errors, loaded
+
+
+def _draft_paths(target: Path, sources: Path | None = None) -> tuple[list[tuple[Path, str, bool]], list[str], bool]:
+    paths: list[tuple[Path, str, bool]] = []
+    specs, errors, loaded = _draft_inbox_specs(target, sources=sources)
+    for inbox_path, inbox, watched in specs:
+        if not inbox_path.is_dir():
+            continue
+        for candidate in sorted(inbox_path.glob("*.md")):
+            if not candidate.is_file():
+                continue
+            if candidate.name.startswith(".") or candidate.name in IGNORED_HANDOFF_NAMES:
+                continue
+            paths.append((candidate.resolve(), inbox, watched))
+    return paths, errors, loaded
+
+
+def _path_timestamp(path: Path, attr: str) -> tuple[str | None, float | None]:
+    try:
+        stat = path.stat()
+    except OSError:
+        return None, None
+    value = stat.st_ctime if attr == "created" else stat.st_mtime
+    return time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime(value)), value
+
+
+def _extract_handoff_key_values(text: str) -> dict[str, str]:
+    values: dict[str, str] = {}
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("- "):
+            stripped = stripped[2:].strip()
+        if not stripped or ":" not in stripped:
+            continue
+        key, value = stripped.split(":", 1)
+        key = key.strip().strip("`").casefold().replace(" ", "_")
+        value = value.strip().strip("`")
+        if key and value and key not in values:
+            values[key] = value
+    return values
+
+
+def _draft_summary(path: Path, *, target: Path, inbox: str, watched: bool) -> HandoffDraft:
+    path = path.expanduser().resolve()
+    try:
+        text = path.read_text(errors="replace")
+    except OSError:
+        text = ""
+    sections = _parse_markdown_sections(text)
+    lint_result = lint_file(path)
+    action = lint_result.action
+    target_card = _section_value(sections, "Target card").splitlines()[0].strip() if _section_value(sections, "Target card") else None
+    target_document = _section_value(sections, "Target document").splitlines()[0].strip() if _section_value(sections, "Target document") else None
+    key_values = _extract_handoff_key_values(text)
+    source_import_id = key_values.get("import") or key_values.get("import_id") or key_values.get("source_import_id")
+    source_fingerprint = key_values.get("source_fingerprint") or key_values.get("handoff_source_fingerprint")
+    scanner_keys = (
+        "scanner_id",
+        "scanner_source",
+        "scanner_run_id",
+        "scanner_receipt_path",
+        "scanner_output_path_snapshot",
+        "scanner_import_path",
+        "sweep_id",
+        "sweep_issue_id",
+    )
+    scanner_provenance = {key: key_values[key] for key in scanner_keys if key_values.get(key)}
+    created_at, _ = _path_timestamp(path, "created")
+    modified_at, modified_seconds = _path_timestamp(path, "modified")
+    age_hours = None
+    if modified_seconds is not None:
+        age_hours = round((time.time() - modified_seconds) / 3600, 2)
+    stale = bool(age_hours is not None and age_hours > HANDOFF_DRAFT_STALE_HOURS)
+    status = "reviewed" if lint_result.valid else "pending"
+    return HandoffDraft(
+        id=path.stem,
+        path=path,
+        inbox=inbox,
+        created_at=created_at,
+        modified_at=modified_at,
+        age_hours=age_hours,
+        stale=stale,
+        lint=lint_result,
+        action=action,
+        target_card=target_card,
+        target_document=target_document,
+        source_import_id=source_import_id,
+        source_fingerprint=source_fingerprint,
+        scanner_provenance=scanner_provenance,
+        status=status,
+        watched=watched,
+    )
+
+
+def _drafts(target: Path, sources: Path | None = None) -> tuple[list[HandoffDraft], list[str], bool]:
+    target = target.expanduser().resolve()
+    paths, errors, loaded = _draft_paths(target, sources=sources)
+    drafts = [_draft_summary(path, target=target, inbox=inbox, watched=watched) for path, inbox, watched in paths]
+    drafts.sort(key=lambda item: str(item.modified_at or item.id), reverse=True)
+    return drafts, errors, loaded
+
+
+def _archive_records(target: Path) -> list[dict[str, Any]]:
+    path = _handoff_archive_records_path(target)
+    if not path.exists():
+        return []
+    records: list[dict[str, Any]] = []
+    try:
+        lines = path.read_text().splitlines()
+    except OSError:
+        return []
+    for line in lines:
+        if not line.strip():
+            continue
+        try:
+            value = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(value, dict):
+            records.append(value)
+    return records
+
+
+def _append_archive_record(target: Path, record: dict[str, Any]) -> None:
+    path = _handoff_archive_records_path(target)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a") as handle:
+        handle.write(json.dumps(record, sort_keys=True) + "\n")
+
+
+def _draft_source_import_issues(target: Path, drafts: list[HandoffDraft]) -> tuple[list[str], list[str]]:
+    from . import work_cmd
+
+    imports_by_id = {
+        str(item.get("id")): item
+        for item in work_cmd._read_imports(target)
+        if isinstance(item, dict) and isinstance(item.get("id"), str)
+    }
+    missing: list[str] = []
+    changed: list[str] = []
+    for draft in drafts:
+        if not draft.source_import_id:
+            continue
+        item = imports_by_id.get(draft.source_import_id)
+        if item is None:
+            missing.append(draft.id)
+            continue
+        if draft.source_fingerprint:
+            current = work_cmd._import_fingerprint(item)
+            if current and current != draft.source_fingerprint:
+                changed.append(draft.id)
+    return missing, changed
+
+
+def draft_queue_payload(target: Path, sources: Path | None = None) -> dict[str, Any]:
+    target = target.expanduser().resolve()
+    drafts, errors, sources_loaded = _drafts(target, sources=sources)
+    archives = _archive_records(target)
+    stale = [draft.id for draft in drafts if draft.stale and draft.status != "archived"]
+    invalid = [draft.id for draft in drafts if not draft.lint.valid]
+    uncovered = [draft.id for draft in drafts if not draft.watched]
+    missing_imports, changed_fingerprints = _draft_source_import_issues(target, drafts)
+    checks = [
+        {
+            "status": WARN if errors else OK,
+            "name": "handoff_draft_sources",
+            "detail": "; ".join(errors) if errors else ("configured" if sources_loaded else "default writer inboxes"),
+            "items": errors,
+        },
+        {
+            "status": WARN if stale else OK,
+            "name": "handoff_draft_stale",
+            "detail": f"{len(stale)} stale pending handoff draft(s)" if stale else "none",
+            "items": stale[:10],
+        },
+        {
+            "status": WARN if invalid else OK,
+            "name": "handoff_draft_invalid",
+            "detail": f"{len(invalid)} invalid handoff draft(s)" if invalid else "none",
+            "items": invalid[:10],
+        },
+        {
+            "status": WARN if missing_imports else OK,
+            "name": "handoff_draft_missing_source_import",
+            "detail": f"{len(missing_imports)} handoff draft(s) reference missing source imports" if missing_imports else "none",
+            "items": missing_imports[:10],
+        },
+        {
+            "status": WARN if changed_fingerprints else OK,
+            "name": "handoff_draft_changed_source_fingerprint",
+            "detail": f"{len(changed_fingerprints)} handoff draft(s) have changed source fingerprints" if changed_fingerprints else "none",
+            "items": changed_fingerprints[:10],
+        },
+        {
+            "status": WARN if uncovered else OK,
+            "name": "handoff_draft_uncovered_inbox",
+            "detail": f"{len(uncovered)} handoff draft(s) are in inboxes not covered by source config" if uncovered else "none",
+            "items": uncovered[:10],
+        },
+    ]
+    issues = [check for check in checks if check["status"] != OK]
+    return {
+        "target": str(target),
+        "handoff_root": str(_handoff_state_root(target)),
+        "drafts": [draft.as_dict() for draft in drafts],
+        "archives": archives,
+        "counts": {
+            "pending": len([draft for draft in drafts if draft.status == "pending"]),
+            "reviewed": len([draft for draft in drafts if draft.status == "reviewed"]),
+            "archived": len(archives),
+            "total": len(drafts),
+        },
+        "checks": checks,
+        "issues": issues,
+        "issue_count": len(issues),
+        "top_issue": issues[0] if issues else None,
+    }
+
+
+def _find_draft(target: Path, draft_id_or_path: str, sources: Path | None = None) -> tuple[HandoffDraft | None, str | None]:
+    target = target.expanduser().resolve()
+    raw_path = Path(draft_id_or_path).expanduser()
+    candidates: list[HandoffDraft] = []
+    drafts, errors, _ = _drafts(target, sources=sources)
+    if errors:
+        return None, "; ".join(errors)
+    if raw_path.is_absolute() or len(raw_path.parts) > 1:
+        path = raw_path if raw_path.is_absolute() else target / raw_path
+        resolved = path.resolve()
+        candidates = [draft for draft in drafts if draft.path == resolved]
+    else:
+        candidates = [
+            draft
+            for draft in drafts
+            if draft.id == draft_id_or_path
+            or draft.path.name == draft_id_or_path
+            or draft.id.startswith(draft_id_or_path)
+        ]
+    if not candidates:
+        return None, f"handoff draft not found: {draft_id_or_path}"
+    if len(candidates) > 1:
+        return None, f"handoff draft id is ambiguous: {draft_id_or_path}"
+    return candidates[0], None
+
+
+def list_drafts(*, target: Path, sources: Path | None = None, json_output: bool = False, limit: int = 20) -> int:
+    if limit < 1:
+        print("error: --limit must be a positive integer", file=sys.stderr)
+        return 2
+    target = target.expanduser().resolve()
+    if not target.is_dir():
+        print(f"error: --target is not a directory: {target}", file=sys.stderr)
+        return 2
+    payload = draft_queue_payload(target, sources=sources)
+    payload["drafts"] = payload["drafts"][:limit]
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+    print(f"handoff drafts: {target}")
+    print(f"handoff_root: {payload['handoff_root']}")
+    counts = payload["counts"]
+    print(f"drafts: {counts['total']}")
+    print(f"pending: {counts['pending']}")
+    print(f"reviewed: {counts['reviewed']}")
+    print(f"archived: {counts['archived']}")
+    for draft in payload["drafts"]:
+        target_value = draft.get("target_document") or draft.get("target_card") or ""
+        print(
+            f"- {draft.get('id')} [{draft.get('status')}] "
+            f"lint={'ok' if draft.get('lint', {}).get('valid') else 'fail'} "
+            f"target={target_value}: {draft.get('path')}"
+        )
+    return 0
+
+
+def show_draft(*, target: Path, draft_id: str, sources: Path | None = None, json_output: bool = False) -> int:
+    target = target.expanduser().resolve()
+    if not target.is_dir():
+        print(f"error: --target is not a directory: {target}", file=sys.stderr)
+        return 2
+    draft, error = _find_draft(target, draft_id, sources=sources)
+    if draft is None:
+        print(f"error: {error}", file=sys.stderr)
+        return 1 if error and "not found" in error else 2
+    payload = {"target": str(target), "draft": draft.as_dict()}
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+    print(f"handoff: {draft.id}")
+    print(f"status: {draft.status}")
+    print(f"path: {draft.path}")
+    print(f"inbox: {draft.inbox}")
+    print(f"modified_at: {draft.modified_at}")
+    print(f"age_hours: {draft.age_hours}")
+    print(f"stale: {draft.stale}")
+    print(f"lint: {'ok' if draft.lint.valid else 'fail'}")
+    print(f"action: {draft.action}")
+    if draft.target_card:
+        print(f"target_card: {draft.target_card}")
+    if draft.target_document:
+        print(f"target_document: {draft.target_document}")
+    if draft.source_import_id:
+        print(f"source_import_id: {draft.source_import_id}")
+    if draft.source_fingerprint:
+        print(f"source_fingerprint: {draft.source_fingerprint}")
+    if draft.scanner_provenance:
+        print("scanner_provenance:")
+        for key in sorted(draft.scanner_provenance):
+            print(f"  {key}: {draft.scanner_provenance[key]}")
+    for error in draft.lint.errors:
+        print(f"error: {error}")
+    return 0
+
+
+def _archive_one(target: Path, draft: HandoffDraft, *, reason: str | None = None) -> dict[str, Any]:
+    archived_at = time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime())
+    archive_dir = _handoff_archive_root(target) / archived_at[:10]
+    archive_dir.mkdir(parents=True, exist_ok=True)
+    destination = archive_dir / draft.path.name
+    if destination.exists():
+        destination = archive_dir / f"{draft.path.stem}-{hashlib.sha1(str(draft.path).encode()).hexdigest()[:8]}{draft.path.suffix}"
+    shutil.move(str(draft.path), str(destination))
+    record = {
+        "id": draft.id,
+        "status": "archived",
+        "previous_status": draft.status,
+        "path": str(draft.path),
+        "archive_path": str(destination),
+        "archived_at": archived_at,
+        "review_reason": reason or "reviewed handoff draft archived",
+        "reviewed_at": archived_at,
+        "source_import_id": draft.source_import_id,
+        "source_fingerprint": draft.source_fingerprint,
+        "target_card": draft.target_card,
+        "target_document": draft.target_document,
+    }
+    _append_archive_record(target, record)
+    return record
+
+
+def archive_draft(
+    *,
+    target: Path,
+    draft_id: str | None = None,
+    all_reviewed: bool = False,
+    reason: str | None = None,
+    sources: Path | None = None,
+    json_output: bool = False,
+) -> int:
+    target = target.expanduser().resolve()
+    if not target.is_dir():
+        print(f"error: --target is not a directory: {target}", file=sys.stderr)
+        return 2
+    if all_reviewed and draft_id:
+        print("error: pass a handoff id/path or --all-reviewed, not both", file=sys.stderr)
+        return 2
+    archived: list[dict[str, Any]] = []
+    if all_reviewed:
+        drafts, errors, _ = _drafts(target, sources=sources)
+        if errors:
+            print(f"error: {'; '.join(errors)}", file=sys.stderr)
+            return 2
+        for draft in drafts:
+            if draft.lint.valid:
+                archived.append(_archive_one(target, draft, reason=reason))
+    else:
+        if not draft_id:
+            print("error: handoff id/path is required unless --all-reviewed is passed", file=sys.stderr)
+            return 2
+        draft, error = _find_draft(target, draft_id, sources=sources)
+        if draft is None:
+            print(f"error: {error}", file=sys.stderr)
+            return 1 if error and "not found" in error else 2
+        archived.append(_archive_one(target, draft, reason=reason))
+    payload = {
+        "target": str(target),
+        "archive_path": str(_handoff_archive_records_path(target)),
+        "archived": len(archived),
+        "records": archived,
+    }
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+    print(f"handoff archive: {target}")
+    print(f"archived: {len(archived)}")
+    for record in archived:
+        print(f"- {record['id']} -> {record['archive_path']}")
+    return 0
 
 
 def issues(

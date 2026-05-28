@@ -3294,6 +3294,7 @@ def _brief_payload(target: Path, *, limit: int = 3) -> dict[str, Any]:
     handoff_issues = handoff_cmd.collect_issues(target)
     known_handoff_issue_ids = handoff_cmd._known_local_issue_ids(target)
     new_handoff_issues = [issue for issue in handoff_issues if issue.id not in known_handoff_issue_ids]
+    handoff_drafts = handoff_cmd.draft_queue_payload(target)
     return {
         "target": str(target),
         "git": git,
@@ -3372,6 +3373,12 @@ def _brief_payload(target: Path, *, limit: int = 3) -> dict[str, Any]:
             "known_by_category": handoff_cmd._issue_counts(
                 [issue for issue in handoff_issues if issue.id in known_handoff_issue_ids]
             ),
+        },
+        "handoff_drafts": {
+            "counts": handoff_drafts["counts"],
+            "issue_count": handoff_drafts["issue_count"],
+            "top_issue": handoff_drafts["top_issue"],
+            "drafts": handoff_drafts["drafts"][:limit],
         },
         "dogfood": resolved["dogfood"],
         "next_source": resolved["source"],
@@ -4042,6 +4049,21 @@ def brief(*, target: Path, limit: int = 3, json_output: bool = False) -> int:
                 print(f"  {category}: {count}")
     if isinstance(handoff_issues, dict) and handoff_issues.get("known_count"):
         print(f"handoff_ingest_issues_known: {handoff_issues.get('known_count')}")
+    handoff_drafts = payload.get("handoff_drafts")
+    if isinstance(handoff_drafts, dict):
+        counts = handoff_drafts.get("counts") if isinstance(handoff_drafts.get("counts"), dict) else {}
+        total = int(counts.get("total", 0) or 0)
+        if total:
+            print(f"handoff_drafts_pending: {counts.get('pending', 0)}")
+            print(f"handoff_drafts_reviewed: {counts.get('reviewed', 0)}")
+            top_issue = handoff_drafts.get("top_issue") if isinstance(handoff_drafts.get("top_issue"), dict) else None
+            if top_issue:
+                print(f"handoff_draft_top_issue: {top_issue.get('name')} {_short(str(top_issue.get('detail', '')))}")
+            drafts = handoff_drafts.get("drafts") if isinstance(handoff_drafts.get("drafts"), list) else []
+            if drafts:
+                first = drafts[0]
+                print(f"handoff_draft_next: {first.get('id')} {first.get('status')} {first.get('path')}")
+                print(f"handoff_draft_next_command: brigade handoff show {first.get('id')}")
 
     recent = payload["recent_sessions"]
     if isinstance(recent, list) and recent:
@@ -5124,6 +5146,23 @@ def _inbox_hygiene_payload(target: Path) -> dict[str, Any]:
             "inbox_promoted_task_missing",
             f"{len(broken_promoted)} promoted import(s) point at missing ledger tasks" if broken_promoted else "none",
             broken_promoted[:10],
+        )
+    )
+    missing_handoff_drafts = [
+        str(item.get("id"))
+        for item in imports
+        if item.get("status") == "promoted"
+        and isinstance(item.get("handoff_path"), str)
+        and not Path(item["handoff_path"]).expanduser().exists()
+    ]
+    checks.append(
+        _import_hygiene_issue(
+            WARN if missing_handoff_drafts else OK,
+            "inbox_promoted_handoff_missing",
+            f"{len(missing_handoff_drafts)} promoted import(s) point at missing handoff drafts"
+            if missing_handoff_drafts
+            else "none",
+            missing_handoff_drafts[:10],
         )
     )
 

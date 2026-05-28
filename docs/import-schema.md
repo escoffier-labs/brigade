@@ -53,7 +53,7 @@ Task-only optional fields:
 
 Task fields are valid only when `kind` is `task`. When a task import is promoted, Brigade preserves these fields on the local task ledger item and keeps source-specific details in `metadata`.
 
-Durable non-task imports with kind `decision`, `preference`, `link`, `command`, `finding`, or `incident` can be promoted into a local Memory Handoff draft. Promotion writes to the configured handoff inbox, runs handoff lint, then marks the import `promoted` only after the draft is valid. The promoted import stores `handoff_path`, `handoff_target_document`, `promoted_at`, and `handoff_source_fingerprint`.
+Durable non-task imports with kind `decision`, `preference`, `link`, `command`, `finding`, or `incident` can be promoted into a local Memory Handoff draft. Promotion writes to the configured handoff inbox, runs handoff lint, then marks the import `promoted` only after the draft is valid. The promoted import stores `handoff_path`, `handoff_target_document`, `promoted_at`, and `handoff_source_fingerprint`. Review those drafts with `brigade handoff list`, `brigade handoff show`, and `brigade handoff archive`; those commands do not run the canonical ingestor or edit memory.
 
 Recommended metadata keys:
 

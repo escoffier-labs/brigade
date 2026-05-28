@@ -9,6 +9,10 @@ brigade work import plan-handoff <import-id>
 brigade work import plan-handoff <import-id> --json
 brigade work import promote-handoff <import-id>
 brigade work import promote-handoff <import-id> --json
+brigade handoff list
+brigade handoff show <handoff-id-or-path>
+brigade handoff archive <handoff-id-or-path>
+brigade handoff archive --all-reviewed
 ```
 
 `plan-handoff` previews the handoff target, type, local inbox, provenance, and blockers. `promote-handoff` writes the draft, runs handoff lint, and only then marks the import promoted.
@@ -46,3 +50,19 @@ Handoff promotion writes only a local draft under the configured handoff inbox, 
 Raw private chat fields are rejected by default, including `raw_text`, `raw_messages`, `messages`, `message_text`, `quotes`, and `transcript`. Unsafe URLs, tokens, host-private paths, user ids, channel ids, hostnames, and secret-looking values are redacted before the draft is written.
 
 Promoted imports preserve the local handoff path, target document, promotion timestamp, and source fingerprint for review.
+
+## Draft Queue Review
+
+`brigade handoff list` discovers pending drafts from `.claude/memory-handoffs/`, `.codex/memory-handoffs/`, and inboxes declared in `.brigade/handoff-sources.json`. Each draft summary includes:
+
+- filename id and path
+- created and modified timestamps
+- lint status and recommended memory action
+- target card or target document
+- source import id and source fingerprint when present
+- scanner provenance such as scanner id, run id, and sweep id
+- stale age and source coverage status
+
+`brigade handoff show <handoff-id-or-path>` prints the same detail for one draft. `brigade handoff archive <handoff-id-or-path>` moves one draft into `.brigade/handoffs/archive/` and appends a closeout record under `.brigade/handoffs/archive.jsonl`. `brigade handoff archive --all-reviewed` archives lint-valid drafts only, leaving invalid drafts in place for repair.
+
+The draft queue is review visibility only. Brigade does not run the canonical ingestor, route the draft into canonical memory, edit `MEMORY.md`, or mutate memory cards.

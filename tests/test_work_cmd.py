@@ -6377,6 +6377,76 @@ def test_work_brief_includes_handoff_ingest_issues(tmp_path, monkeypatch, capsys
     assert "  skip: 1" in out
 
 
+def test_work_brief_and_doctor_include_handoff_draft_queue(tmp_path, monkeypatch, capsys):
+    _init_git_repo(tmp_path)
+    monkeypatch.setattr(work_cmd.shutil, "which", lambda name: f"/usr/bin/{name}")
+    inbox = tmp_path / ".codex" / "memory-handoffs"
+    inbox.mkdir(parents=True)
+    (inbox / "reviewed.md").write_text(
+        """# Memory Handoff
+
+## Type
+decision
+
+## Title
+Reviewed draft
+
+## Summary
+Reviewed draft.
+
+## Recommended memory action
+no-card
+
+## Target document
+.learnings/LEARNINGS.md
+
+## Suggested document content
+### Reviewed draft
+
+- source: test
+"""
+    )
+    (inbox / "invalid.md").write_text("# Memory Handoff\n")
+
+    assert work_cmd.brief(target=tmp_path, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["handoff_drafts"]["counts"]["total"] == 2
+    assert payload["handoff_drafts"]["counts"]["reviewed"] == 1
+    assert payload["handoff_drafts"]["issue_count"] >= 1
+
+    assert work_cmd.brief(target=tmp_path) == 0
+    out = capsys.readouterr().out
+    assert "handoff_drafts_pending: 1" in out
+    assert "handoff_drafts_reviewed: 1" in out
+    assert "handoff_draft_next_command: brigade handoff show" in out
+
+    assert work_cmd.doctor(target=tmp_path) == 1
+    out = capsys.readouterr().out
+    assert "handoff_draft_invalid" in out
+
+
+def test_work_inbox_doctor_reports_promoted_import_missing_handoff_draft(tmp_path, capsys):
+    _init_git_repo(tmp_path)
+    work_cmd._write_imports(
+        tmp_path,
+        [
+            {
+                "id": "import-one",
+                "kind": "decision",
+                "source": "chat-memory-sweep",
+                "text": "Durable decision.",
+                "status": "promoted",
+                "handoff_path": str(tmp_path / ".codex" / "memory-handoffs" / "missing.md"),
+                "metadata": {"source_item_key": "chat:one", "source_fingerprint": "fp-one"},
+            }
+        ],
+    )
+
+    assert work_cmd.inbox_doctor(target=tmp_path) == 0
+    out = capsys.readouterr().out
+    assert "[warn] inbox_promoted_handoff_missing:" in out
+
+
 def test_work_brief_suppresses_known_handoff_ingest_issues(tmp_path, monkeypatch, capsys):
     _init_git_repo(tmp_path)
     monkeypatch.setattr(work_cmd.shutil, "which", lambda name: f"/usr/bin/{name}")
