@@ -43,6 +43,7 @@ Goal: make Brigade a safe target for local automations that discover useful work
 - Run explicit multi-harness code review producers and route findings through the scanner inbox. Status: implemented with gitignored `.brigade/reviews.toml`, `brigade work review`, local receipts under `.brigade/reviews/runs/`, normalized `code-review` findings, daily brief surfacing, and work doctor checks, without automatic fixes or remote mutation.
 - Close out imported review findings against downstream work. Status: implemented with `brigade work review findings`, `finding-show`, `closeout`, source-fingerprint re-review detection, task review evidence, and daily-loop warnings for unclosed review runs.
 - Close out completed work against local verification evidence. Status: implemented with `brigade work verify plan/run/runs/show` and `brigade work closeout`, collecting task acceptance, test command receipts, scanner sweep state, code review closeout state, handoff draft status, and session evidence without CI or remote mutation.
+- Check local release readiness before publish operations. Status: implemented with `brigade release plan`, `doctor`, `run`, `runs`, and `show`, collecting work closeout, verification, review, scanner, security, handoff, content-guard, docs, changelog, roadmap, and git-state evidence without pushing, tagging, or mutating remotes.
 
 ## Later Phase: Chat Surface Scanners
 

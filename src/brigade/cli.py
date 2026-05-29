@@ -108,6 +108,31 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p_dogfood.add_argument("--timeout-seconds", type=float, default=DEFAULT_TIMEOUT_SECONDS, help="Per-agent timeout.")
 
+    # release
+    p_release = sub.add_parser("release", help="Inspect local release readiness.")
+    release_sub = p_release.add_subparsers(dest="release_command", metavar="<release-command>")
+    release_sub.required = True
+    p_release_plan = release_sub.add_parser("plan", help="Plan release readiness without writing a receipt.")
+    p_release_plan.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_release_plan.add_argument("--base-ref", default="origin/main", help="Base ref for introduced-content and docs checks.")
+    p_release_plan.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_release_doctor = release_sub.add_parser("doctor", help="Run local release readiness checks without writing a receipt.")
+    p_release_doctor.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_release_doctor.add_argument("--base-ref", default="origin/main", help="Base ref for introduced-content and docs checks.")
+    p_release_doctor.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_release_run = release_sub.add_parser("run", help="Run local release readiness checks and write a receipt.")
+    p_release_run.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
+    p_release_run.add_argument("--base-ref", default="origin/main", help="Base ref for introduced-content and docs checks.")
+    p_release_run.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_release_runs = release_sub.add_parser("runs", help="List local release readiness receipts.")
+    p_release_runs.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_release_runs.add_argument("--limit", type=int, default=20, help="Maximum runs to list.")
+    p_release_runs.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_release_show = release_sub.add_parser("show", help="Show one local release readiness receipt.")
+    p_release_show.add_argument("run_id", help="Run id, unique prefix, or latest.")
+    p_release_show.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_release_show.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+
     # handoff
     p_handoff = sub.add_parser("handoff", help="Inspect memory handoff inbox health.")
     handoff_sub = p_handoff.add_subparsers(dest="handoff_command", metavar="<handoff-command>")
@@ -1147,6 +1172,21 @@ def main(argv=None) -> int:
             native_read_only_sandbox=args.native_read_only_sandbox,
             timeout_seconds=args.timeout_seconds,
         )
+    if cmd == "release":
+        from . import release_cmd
+
+        if args.release_command == "plan":
+            return release_cmd.plan(target=args.target, base_ref=args.base_ref, json_output=args.json)
+        if args.release_command == "doctor":
+            return release_cmd.doctor(target=args.target, base_ref=args.base_ref, json_output=args.json)
+        if args.release_command == "run":
+            return release_cmd.run(target=args.target, base_ref=args.base_ref, json_output=args.json)
+        if args.release_command == "runs":
+            return release_cmd.runs(target=args.target, limit=args.limit, json_output=args.json)
+        if args.release_command == "show":
+            return release_cmd.show(target=args.target, run_id=args.run_id, json_output=args.json)
+        parser.error(f"unknown release command: {args.release_command}")
+        return 2
     if cmd == "handoff":
         from . import handoff_cmd
 

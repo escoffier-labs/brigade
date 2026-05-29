@@ -155,6 +155,11 @@ brigade dogfood status
 brigade dogfood
 brigade dogfood next
 brigade dogfood --target /path/to/repo
+brigade release plan
+brigade release doctor
+brigade release run
+brigade release runs
+brigade release show <run-id>
 brigade handoff doctor
 brigade handoff lint
 brigade handoff list
@@ -530,6 +535,17 @@ Work verification and closeout commands:
 Verification and closeout are local gates. Brigade does not mutate CI, GitHub, reviewers, scanner promotions, handoff ingestion, daemons, or schedulers. Verification commands run only when explicitly requested.
 
 See [`docs/work-closeout.md`](docs/work-closeout.md) for the verification command rules, closeout record contents, and ready-state checklist.
+
+Release readiness commands:
+
+- `brigade release plan` collects local publish-readiness evidence without writing a receipt.
+- `brigade release doctor` runs local publish checks such as content-guard when available and reports blockers.
+- `brigade release run` writes a release-readiness receipt under `.brigade/release/runs/`.
+- `brigade release runs` and `brigade release show <run-id>` inspect local release receipts.
+
+Release readiness is a local publish gate. It reviews latest work closeout, verification, code review closeout, scanner sweep state, security health, handoff draft health, content-guard results, git state, and docs/changelog/roadmap touch warnings. It never pushes, tags, creates releases, comments remotely, or mutates remotes.
+
+See [`docs/release-readiness.md`](docs/release-readiness.md) for the receipt contract and local-only boundary.
 
 ### Memory And Bootstrap Health
 
