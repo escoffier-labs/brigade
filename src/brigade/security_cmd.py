@@ -40,6 +40,19 @@ POLICIES = {
         "include_templates": True,
     },
 }
+SCAN_PROFILES = {
+    "public-repo": "public-repo",
+    "internal-workspace": "personal",
+    "local-only-audit": "strict",
+}
+SECURITY_CHECKS = (
+    "automation",
+    "mcp",
+    "permissions",
+    "prompt-injection",
+    "secrets",
+    "supply-chain",
+)
 
 SKIP_DIRS = {
     ".git",
@@ -129,8 +142,14 @@ class SecurityEnrichmentConfig:
 @dataclass(frozen=True)
 class SecurityConfig:
     policy: str = "personal"
+    scan_profile: str = "local-only-audit"
     fail_on: str | None = None
     include_templates: bool | None = None
+    enabled_checks: tuple[str, ...] = SECURITY_CHECKS
+    include_paths: tuple[str, ...] = ()
+    exclude_paths: tuple[str, ...] = ()
+    severity_threshold: str = "low"
+    output_path: str = ARTIFACTS_REL_PATH
     suppressions: tuple[str, ...] = ()
     suppression_reasons: dict[str, str] = field(default_factory=dict)
     enrichment: SecurityEnrichmentConfig = field(default_factory=SecurityEnrichmentConfig)
@@ -139,8 +158,14 @@ class SecurityConfig:
 @dataclass(frozen=True)
 class EffectivePolicy:
     policy: str
+    scan_profile: str
     fail_on: str
     include_templates: bool
+    enabled_checks: tuple[str, ...]
+    include_paths: tuple[str, ...]
+    exclude_paths: tuple[str, ...]
+    severity_threshold: str
+    output_path: str
     suppressions: tuple[str, ...]
     config_path: Path
     config_loaded: bool
@@ -225,12 +250,31 @@ def load_config(target: Path) -> SecurityConfig | None:
     policy = data.get("policy", "personal")
     if not isinstance(policy, str) or policy not in POLICIES:
         raise ValueError("policy must be one of: personal, public-repo, strict")
+    scan_profile = data.get("scan_profile", "local-only-audit")
+    if not isinstance(scan_profile, str) or scan_profile not in SCAN_PROFILES:
+        raise ValueError("scan_profile must be one of: public-repo, internal-workspace, local-only-audit")
     fail_on = data.get("fail_on")
     if fail_on is not None and (not isinstance(fail_on, str) or fail_on not in SEVERITY_ORDER and fail_on != "none"):
         raise ValueError("fail_on must be one of: none, low, medium, high, critical")
     include_templates = data.get("include_templates")
     if include_templates is not None and not isinstance(include_templates, bool):
         raise ValueError("include_templates must be true or false")
+    enabled_checks = _parse_string_list(
+        data.get("enabled_checks", list(SECURITY_CHECKS)),
+        field_name="enabled_checks",
+        allowed=SECURITY_CHECKS,
+    )
+    include_paths = _parse_string_list(data.get("include_paths", []), field_name="include_paths")
+    exclude_paths = _parse_string_list(data.get("exclude_paths", []), field_name="exclude_paths")
+    severity_threshold = data.get("severity_threshold", "low")
+    if not isinstance(severity_threshold, str) or severity_threshold not in SEVERITY_ORDER:
+        raise ValueError("severity_threshold must be one of: info, low, medium, high, critical")
+    output_path = data.get("output_path", ARTIFACTS_REL_PATH)
+    if not isinstance(output_path, str) or not output_path.strip():
+        raise ValueError("output_path must be a non-empty relative path")
+    output = Path(output_path)
+    if output.is_absolute() or ".." in output.parts:
+        raise ValueError("output_path must be relative and must not contain '..'")
     suppressions: tuple[str, ...] = ()
     raw_suppressions = data.get("suppressions", {})
     if raw_suppressions:
@@ -253,12 +297,31 @@ def load_config(target: Path) -> SecurityConfig | None:
     enrichment = _parse_enrichment_config(data.get("enrichment", {}))
     return SecurityConfig(
         policy=policy,
+        scan_profile=scan_profile,
         fail_on=fail_on,
         include_templates=include_templates,
+        enabled_checks=enabled_checks,
+        include_paths=include_paths,
+        exclude_paths=exclude_paths,
+        severity_threshold=severity_threshold,
+        output_path=output_path.strip(),
         suppressions=suppressions,
         suppression_reasons=suppression_reasons,
         enrichment=enrichment,
     )
+
+
+def _parse_string_list(raw: object, *, field_name: str, allowed: tuple[str, ...] | None = None) -> tuple[str, ...]:
+    if raw is None:
+        return ()
+    if not isinstance(raw, list) or not all(isinstance(item, str) for item in raw):
+        raise ValueError(f"{field_name} must be a list of strings")
+    values = tuple(item.strip() for item in raw if item.strip())
+    if allowed is not None:
+        bad = [item for item in values if item not in allowed]
+        if bad:
+            raise ValueError(f"{field_name} entries must be one of: {', '.join(allowed)}")
+    return values
 
 
 def _parse_enrichment_config(raw: object) -> SecurityEnrichmentConfig:
@@ -317,8 +380,14 @@ def _effective_policy(
         raise ValueError("fail_on must be one of: none, low, medium, high, critical")
     return EffectivePolicy(
         policy=policy_name,
+        scan_profile=loaded.scan_profile if loaded is not None else "local-only-audit",
         fail_on=effective_fail_on,
         include_templates=effective_include_templates,
+        enabled_checks=loaded.enabled_checks if loaded is not None else SECURITY_CHECKS,
+        include_paths=loaded.include_paths if loaded is not None else (),
+        exclude_paths=loaded.exclude_paths if loaded is not None else (),
+        severity_threshold=loaded.severity_threshold if loaded is not None else "low",
+        output_path=loaded.output_path if loaded is not None else ARTIFACTS_REL_PATH,
         suppressions=loaded.suppressions if loaded is not None else (),
         config_path=config_path(target),
         config_loaded=loaded is not None,
@@ -333,9 +402,17 @@ def write_default_config(target: Path, *, force: bool = False) -> Path:
     path.write_text(
         "\n".join(
             [
+                "# Local security scanner config. Keep secrets and host-private paths out of this file.",
+                "# scan_profile options: public-repo, internal-workspace, local-only-audit",
                 'policy = "personal"',
+                'scan_profile = "local-only-audit"',
                 'fail_on = "critical"',
                 "include_templates = false",
+                'enabled_checks = ["automation", "mcp", "permissions", "prompt-injection", "secrets", "supply-chain"]',
+                "include_paths = []",
+                "exclude_paths = []",
+                'severity_threshold = "low"',
+                'output_path = ".brigade/security/latest"',
                 "",
                 "[suppressions]",
                 "fingerprints = []",
@@ -366,8 +443,14 @@ def write_config(target: Path, config: SecurityConfig) -> Path:
     enrichment = config.enrichment
     lines = [
         f"policy = {_toml_string(config.policy)}",
+        f"scan_profile = {_toml_string(config.scan_profile)}",
         f"fail_on = {_toml_string(config.fail_on or POLICIES[config.policy]['fail_on'])}",
         f"include_templates = {str(config.include_templates if config.include_templates is not None else POLICIES[config.policy]['include_templates']).lower()}",
+        f"enabled_checks = [{', '.join(_toml_string(item) for item in config.enabled_checks)}]",
+        f"include_paths = [{', '.join(_toml_string(item) for item in config.include_paths)}]",
+        f"exclude_paths = [{', '.join(_toml_string(item) for item in config.exclude_paths)}]",
+        f"severity_threshold = {_toml_string(config.severity_threshold)}",
+        f"output_path = {_toml_string(config.output_path)}",
         "",
         "[suppressions]",
         f"fingerprints = [{fingerprints}]",
@@ -554,6 +637,65 @@ def review(*, target: Path, output_dir: Path | None = None, json_output: bool = 
         print(f"- provider: {enrichment.get('provider')}")
         print(f"- indicators: {enrichment.get('indicator_count')}")
         print(f"- hits: {enrichment.get('hit_count')}")
+    return 0
+
+
+def findings(*, target: Path, output_dir: Path | None = None, json_output: bool = False) -> int:
+    return review(target=target, output_dir=output_dir, json_output=json_output)
+
+
+def _resolve_finding_record(target: Path, identifier: str, output_dir: Path | None = None) -> tuple[dict[str, Any] | None, str | None]:
+    artifacts_dir = output_dir.expanduser().resolve() if output_dir is not None else default_artifacts_dir(target)
+    try:
+        report = _load_report(artifacts_dir)
+        records = _report_findings_for_review(target, report)
+    except FileNotFoundError as exc:
+        return None, f"security report not found: {exc}"
+    except (ValueError, json.JSONDecodeError) as exc:
+        return None, f"invalid security report: {exc}"
+    needle = identifier.strip()
+    matches = [
+        item
+        for item in records
+        if needle
+        and (
+            str(item.get("id") or "") == needle
+            or str(item.get("fingerprint") or "") == needle
+            or str(item.get("id") or "").startswith(needle)
+            or str(item.get("fingerprint") or "").startswith(needle)
+        )
+    ]
+    if not matches:
+        return None, f"finding not found: {identifier}"
+    if len(matches) > 1:
+        return None, f"finding id is ambiguous: {identifier}"
+    return matches[0], None
+
+
+def show(*, target: Path, finding_id: str, output_dir: Path | None = None, json_output: bool = False) -> int:
+    target = target.expanduser().resolve()
+    if not target.is_dir():
+        print(f"error: --target is not a directory: {target}", file=sys.stderr)
+        return 2
+    finding, message = _resolve_finding_record(target, finding_id, output_dir=output_dir)
+    if finding is None:
+        print(f"error: {message}", file=sys.stderr)
+        return 1 if message and "not found" in message else 2
+    if json_output:
+        print(json.dumps({"finding": finding}, indent=2, sort_keys=True))
+        return 0
+    print(f"security finding: {finding.get('id')}")
+    print(f"status: {finding.get('status', 'open')}")
+    print(f"fingerprint: {finding.get('fingerprint')}")
+    print(f"rule_id: {finding.get('rule_id')}")
+    print(f"severity: {finding.get('severity')}")
+    print(f"category: {finding.get('category')}")
+    print(f"path: {finding.get('path')}:{finding.get('line')}")
+    print(f"title: {finding.get('title')}")
+    print(f"safe_excerpt: {finding.get('safe_excerpt') or finding.get('evidence')}")
+    print(f"remediation: {finding.get('remediation_hint') or finding.get('suggestion')}")
+    if finding.get("reason"):
+        print(f"reason: {finding['reason']}")
     return 0
 
 
@@ -954,8 +1096,11 @@ def suppress(*, target: Path, fingerprint: str, reason: str) -> int:
     fingerprint = fingerprint.strip()
     cleaned_reason = _clean_reason(reason)
     if not FINGERPRINT_RE.match(fingerprint):
-        print("error: fingerprint must be a 16-character lowercase hex value", file=sys.stderr)
-        return 2
+        finding, message = _resolve_finding_record(target, fingerprint)
+        if finding is None or not FINGERPRINT_RE.match(str(finding.get("fingerprint") or "")):
+            print(f"error: {message or 'finding id or fingerprint is invalid'}", file=sys.stderr)
+            return 2
+        fingerprint = str(finding["fingerprint"])
     if not cleaned_reason:
         print("error: --reason is required", file=sys.stderr)
         return 2
@@ -973,8 +1118,14 @@ def suppress(*, target: Path, fingerprint: str, reason: str) -> int:
         target,
         SecurityConfig(
             policy=config.policy,
+            scan_profile=config.scan_profile,
             fail_on=config.fail_on,
             include_templates=config.include_templates,
+            enabled_checks=config.enabled_checks,
+            include_paths=config.include_paths,
+            exclude_paths=config.exclude_paths,
+            severity_threshold=config.severity_threshold,
+            output_path=config.output_path,
             suppressions=tuple(suppressions),
             suppression_reasons=reasons,
             enrichment=config.enrichment,
@@ -993,8 +1144,11 @@ def unsuppress(*, target: Path, fingerprint: str) -> int:
         return 2
     fingerprint = fingerprint.strip()
     if not FINGERPRINT_RE.match(fingerprint):
-        print("error: fingerprint must be a 16-character lowercase hex value", file=sys.stderr)
-        return 2
+        finding, message = _resolve_finding_record(target, fingerprint)
+        if finding is None or not FINGERPRINT_RE.match(str(finding.get("fingerprint") or "")):
+            print(f"error: {message or 'finding id or fingerprint is invalid'}", file=sys.stderr)
+            return 2
+        fingerprint = str(finding["fingerprint"])
     try:
         config = _load_config_or_default(target)
     except ValueError as exc:
@@ -1010,8 +1164,14 @@ def unsuppress(*, target: Path, fingerprint: str) -> int:
         target,
         SecurityConfig(
             policy=config.policy,
+            scan_profile=config.scan_profile,
             fail_on=config.fail_on,
             include_templates=config.include_templates,
+            enabled_checks=config.enabled_checks,
+            include_paths=config.include_paths,
+            exclude_paths=config.exclude_paths,
+            severity_threshold=config.severity_threshold,
+            output_path=config.output_path,
             suppressions=suppressions,
             suppression_reasons=reasons,
             enrichment=config.enrichment,
@@ -1030,7 +1190,15 @@ def suppression_health(target: Path) -> dict[str, Any]:
     if not config.suppressions:
         return {"suppression_count": 0, "missing_reasons": [], "stale": []}
     effective = _effective_policy(target, policy=None, fail_on=None, include_templates=None)
-    report = scan_target(target, include_templates=effective.include_templates, suppressions=())
+    report = scan_target(
+        target,
+        include_templates=effective.include_templates,
+        suppressions=(),
+        enabled_checks=effective.enabled_checks,
+        include_paths=effective.include_paths,
+        exclude_paths=effective.exclude_paths,
+        severity_threshold=effective.severity_threshold,
+    )
     active = {str(item.get("fingerprint")) for item in report["findings"] if item.get("fingerprint")}
     stale = [fingerprint for fingerprint in config.suppressions if fingerprint not in active]
     missing_reasons = [fingerprint for fingerprint in config.suppressions if not config.suppression_reasons.get(fingerprint)]
@@ -1083,6 +1251,11 @@ def _redact_secret_evidence(line: str) -> str:
         return f"{key}=[REDACTED]"
 
     return ENV_ASSIGNMENT_RE.sub(redact_env, redacted)
+
+
+def _rule_id(category: str, title: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")
+    return f"{category}.{slug or 'finding'}"
 
 
 def _line_number_for(text: str, needle: str) -> int:
@@ -1479,8 +1652,8 @@ def _confidence_for(path: Path, target: Path) -> str:
     return "repo"
 
 
-def _fingerprint(*, category: str, title: str, rel_path: Path, evidence: str) -> str:
-    stable = "\n".join([category, title, str(rel_path), _short(evidence, limit=96)])
+def _fingerprint(*, category: str, title: str, rel_path: Path, line: int, evidence: str) -> str:
+    stable = "\n".join([category, title, str(rel_path), str(line), _short(evidence, limit=96)])
     return hashlib.sha256(stable.encode()).hexdigest()[:16]
 
 
@@ -1497,12 +1670,14 @@ def _finding(
     suggestion: str,
 ) -> None:
     rel = path.relative_to(target)
-    finding_id = f"security-{len(findings) + 1:04d}"
-    fingerprint = _fingerprint(category=category, title=title, rel_path=rel, evidence=evidence)
+    safe_excerpt = _short(evidence)
+    fingerprint = _fingerprint(category=category, title=title, rel_path=rel, line=line, evidence=safe_excerpt)
+    finding_id = f"security-{fingerprint}"
     findings.append(
         {
             "id": finding_id,
             "fingerprint": fingerprint,
+            "rule_id": _rule_id(category, title),
             "severity": severity,
             "category": category,
             "title": title,
@@ -1510,8 +1685,10 @@ def _finding(
             "line": line,
             "surface": _surface_for(path, target),
             "confidence": _confidence_for(path, target),
-            "evidence": _short(evidence),
+            "evidence": safe_excerpt,
+            "safe_excerpt": safe_excerpt,
             "suggestion": suggestion,
+            "remediation_hint": suggestion,
         }
     )
 
@@ -1630,7 +1807,55 @@ def _scan_line(findings: list[dict[str, Any]], *, target: Path, path: Path, line
         )
 
 
-def scan_target(target: Path, *, include_templates: bool = False, suppressions: tuple[str, ...] = ()) -> dict[str, Any]:
+def _path_matches_any(rel_path: str, patterns: tuple[str, ...]) -> bool:
+    normalized = rel_path.replace("\\", "/")
+    for pattern in patterns:
+        clean = pattern.strip().replace("\\", "/").strip("/")
+        if not clean:
+            continue
+        if normalized == clean or normalized.startswith(clean.rstrip("/") + "/"):
+            return True
+    return False
+
+
+def _severity_selected(finding: dict[str, Any], threshold: str) -> bool:
+    return SEVERITY_ORDER.get(str(finding.get("severity")), 0) >= SEVERITY_ORDER.get(threshold, 0)
+
+
+def _filter_findings(
+    findings: list[dict[str, Any]],
+    *,
+    enabled_checks: tuple[str, ...],
+    include_paths: tuple[str, ...],
+    exclude_paths: tuple[str, ...],
+    severity_threshold: str,
+) -> list[dict[str, Any]]:
+    selected: list[dict[str, Any]] = []
+    enabled = set(enabled_checks)
+    for finding in findings:
+        path = str(finding.get("path") or "")
+        if enabled and finding.get("category") not in enabled:
+            continue
+        if include_paths and not _path_matches_any(path, include_paths):
+            continue
+        if exclude_paths and _path_matches_any(path, exclude_paths):
+            continue
+        if not _severity_selected(finding, severity_threshold):
+            continue
+        selected.append(finding)
+    return selected
+
+
+def scan_target(
+    target: Path,
+    *,
+    include_templates: bool = False,
+    suppressions: tuple[str, ...] = (),
+    enabled_checks: tuple[str, ...] = SECURITY_CHECKS,
+    include_paths: tuple[str, ...] = (),
+    exclude_paths: tuple[str, ...] = (),
+    severity_threshold: str = "low",
+) -> dict[str, Any]:
     target = target.expanduser().resolve()
     findings: list[dict[str, Any]] = []
     scanned_files: list[str] = []
@@ -1648,6 +1873,13 @@ def scan_target(target: Path, *, include_templates: bool = False, suppressions: 
         _scan_package_json(findings, target=target, path=path, text=text)
         _scan_github_actions(findings, target=target, path=path, text=text)
         _scan_python_project(findings, target=target, path=path, text=text)
+    findings = _filter_findings(
+        findings,
+        enabled_checks=enabled_checks,
+        include_paths=include_paths,
+        exclude_paths=exclude_paths,
+        severity_threshold=severity_threshold,
+    )
     suppressed = [finding for finding in findings if finding.get("fingerprint") in suppressions]
     findings = [finding for finding in findings if finding.get("fingerprint") not in suppressions]
     counts: dict[str, int] = {}
@@ -1673,7 +1905,12 @@ def _should_fail(findings: list[dict[str, Any]], fail_on: str) -> bool:
     return any(SEVERITY_ORDER.get(str(item.get("severity")), 0) >= threshold for item in findings)
 
 
-def _import_findings(target: Path, findings: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+def _import_findings(
+    target: Path,
+    findings: list[dict[str, Any]],
+    *,
+    evidence_path: Path | None = None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     existing_fingerprints = {
         str(item.get("metadata", {}).get("fingerprint"))
         for item in work_cmd._pending_imports(target)
@@ -1694,28 +1931,52 @@ def _import_findings(target: Path, findings: list[dict[str, Any]]) -> tuple[list
         title = finding.get("title")
         severity = finding.get("severity")
         category = finding.get("category")
+        kind = "incident" if SEVERITY_ORDER.get(str(severity), 0) >= SEVERITY_ORDER["high"] else "finding"
+        acceptance = [
+            f"`brigade security findings` no longer reports {finding.get('id')}.",
+            "The mitigation or suppression reason is documented without exposing secret values.",
+        ]
         records.append(
             {
                 "text": f"Review security finding [{severity}] {category} in {path}:{line}: {title}",
-                "kind": "incident",
+                "kind": kind,
                 "source": "security-scan",
+                "type": "security",
+                "priority": "high" if kind == "incident" else "normal",
+                "template": "security-follow-up",
+                "acceptance": acceptance,
                 "metadata": {
                     "finding_id": finding.get("id"),
+                    "rule_id": finding.get("rule_id"),
                     "fingerprint": finding.get("fingerprint"),
+                    "source_item_key": f"security-scan:{finding.get('fingerprint')}",
+                    "source_fingerprint": work_cmd._stable_hash(
+                        {
+                            "rule_id": finding.get("rule_id"),
+                            "fingerprint": finding.get("fingerprint"),
+                            "severity": severity,
+                            "path": path,
+                            "line": line,
+                            "safe_excerpt": finding.get("safe_excerpt") or finding.get("evidence"),
+                        }
+                    ),
                     "severity": severity,
                     "category": category,
                     "path": path,
                     "line": line,
                     "surface": finding.get("surface"),
                     "confidence": finding.get("confidence"),
-                    "suggestion": finding.get("suggestion"),
+                    "safe_detail": finding.get("safe_excerpt") or finding.get("evidence"),
+                    "remediation_hint": finding.get("remediation_hint") or finding.get("suggestion"),
+                    "local_evidence_path": str(evidence_path) if evidence_path is not None else None,
                 },
             }
         )
         if fingerprint:
             existing_fingerprints.add(fingerprint)
-    imported, duplicate_records = work_cmd._append_import_records(target, records)
+    imported, duplicate_records, dismissed_records = work_cmd._append_import_records(target, records)
     skipped.extend(duplicate_records)
+    skipped.extend(dismissed_records)
     return imported, skipped
 
 
@@ -1776,6 +2037,157 @@ def write_evidence_bundle(report: dict[str, Any], output_dir: Path) -> Path:
     return output_dir
 
 
+def _config_payload(target: Path) -> dict[str, Any]:
+    config = load_config(target)
+    path = config_path(target)
+    if config is None:
+        return {"config_path": str(path), "configured": False, "config": None}
+    return {
+        "config_path": str(path),
+        "configured": True,
+        "config": {
+            "policy": config.policy,
+            "scan_profile": config.scan_profile,
+            "fail_on": config.fail_on or POLICIES[config.policy]["fail_on"],
+            "include_templates": config.include_templates
+            if config.include_templates is not None
+            else POLICIES[config.policy]["include_templates"],
+            "enabled_checks": list(config.enabled_checks),
+            "include_paths": list(config.include_paths),
+            "exclude_paths": list(config.exclude_paths),
+            "severity_threshold": config.severity_threshold,
+            "output_path": config.output_path,
+            "suppressions": list(config.suppressions),
+            "suppression_reasons": config.suppression_reasons,
+            "enrichment": {
+                "provider": config.enrichment.provider,
+                "misp_url_configured": bool(config.enrichment.misp_url),
+                "misp_api_key_env": config.enrichment.misp_api_key_env,
+                "timeout_seconds": config.enrichment.timeout_seconds,
+                "cache_path": config.enrichment.cache_path,
+            },
+        },
+    }
+
+
+def show_config(*, target: Path, json_output: bool = False) -> int:
+    target = target.expanduser().resolve()
+    if not target.is_dir():
+        print(f"error: --target is not a directory: {target}", file=sys.stderr)
+        return 2
+    try:
+        payload = _config_payload(target)
+    except ValueError as exc:
+        print(f"error: invalid security config: {exc}", file=sys.stderr)
+        return 2
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0 if payload["configured"] else 1
+    print(f"security config: {payload['config_path']}")
+    if not payload["configured"]:
+        print("status: missing")
+        print(f"next_command: brigade security init --target {target}")
+        return 1
+    config = payload["config"] or {}
+    print("status: configured")
+    print(f"policy: {config.get('policy')}")
+    print(f"scan_profile: {config.get('scan_profile')}")
+    print(f"fail_on: {config.get('fail_on')}")
+    print(f"include_templates: {config.get('include_templates')}")
+    print(f"enabled_checks: {', '.join(config.get('enabled_checks', []))}")
+    print(f"severity_threshold: {config.get('severity_threshold')}")
+    print(f"output_path: {config.get('output_path')}")
+    print(f"suppressions: {len(config.get('suppressions', []))}")
+    return 0
+
+
+def health(target: Path) -> dict[str, Any]:
+    target = target.expanduser().resolve()
+    checks: list[dict[str, Any]] = []
+    config_ok = True
+    try:
+        loaded = load_config(target)
+    except ValueError as exc:
+        config_ok = False
+        loaded = None
+        checks.append({"status": "fail", "name": "security_config", "detail": str(exc)})
+    if config_ok:
+        if loaded is None:
+            checks.append({"status": "warn", "name": "security_config", "detail": f"missing, run `brigade security init --target {target}`"})
+        else:
+            checks.append({"status": "ok", "name": "security_config", "detail": f"{config_path(target)} (profile={loaded.scan_profile})"})
+    bundle = inspect_evidence_bundle(default_artifacts_dir(target))
+    if bundle.get("ready"):
+        checks.append(
+            {
+                "status": "ok",
+                "name": "security_evidence",
+                "detail": f"{bundle.get('path')} findings={bundle.get('finding_count')}",
+            }
+        )
+    else:
+        checks.append({"status": "warn", "name": "security_evidence", "detail": str(bundle.get("reason"))})
+    try:
+        suppression = suppression_health(target)
+    except ValueError as exc:
+        checks.append({"status": "fail", "name": "security_suppressions", "detail": str(exc)})
+    else:
+        if suppression["stale"]:
+            checks.append({"status": "warn", "name": "security_stale_suppressions", "detail": ", ".join(suppression["stale"][:5])})
+        if suppression["missing_reasons"]:
+            checks.append({"status": "warn", "name": "security_suppression_reasons", "detail": ", ".join(suppression["missing_reasons"][:5])})
+        if not suppression["stale"] and not suppression["missing_reasons"]:
+            checks.append({"status": "ok", "name": "security_suppressions", "detail": f"{suppression['suppression_count']} configured"})
+    top_finding: dict[str, Any] | None = None
+    if bundle.get("ready"):
+        try:
+            report = _load_report(default_artifacts_dir(target))
+            records = [item for item in _report_findings_for_review(target, report) if item.get("status") != "suppressed"]
+        except (OSError, ValueError, json.JSONDecodeError):
+            records = []
+        if records:
+            top_finding = records[0]
+            checks.append(
+                {
+                    "status": "warn",
+                    "name": "security_open_findings",
+                    "detail": f"{len(records)} open finding(s), top={top_finding.get('id')}",
+                }
+            )
+        else:
+            checks.append({"status": "ok", "name": "security_open_findings", "detail": "none"})
+    issues = [item for item in checks if item["status"] != "ok"]
+    return {
+        "target": str(target),
+        "config_path": str(config_path(target)),
+        "valid": not any(item["status"] == "fail" for item in checks),
+        "issue_count": len(issues),
+        "top_issue": issues[0] if issues else None,
+        "top_finding": top_finding,
+        "checks": checks,
+        "evidence": bundle,
+    }
+
+
+def doctor(*, target: Path, json_output: bool = False) -> int:
+    target = target.expanduser().resolve()
+    if not target.is_dir():
+        print(f"error: --target is not a directory: {target}", file=sys.stderr)
+        return 2
+    payload = health(target)
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0 if payload["valid"] else 1
+    print(f"security doctor: {target}")
+    for check in payload["checks"]:
+        print(f"[{check['status']}] {check['name']}: {check['detail']}")
+    top = payload.get("top_finding") if isinstance(payload.get("top_finding"), dict) else None
+    if top:
+        print(f"top_finding: {top.get('id')} [{top.get('severity')}] {top.get('path')}:{top.get('line')} {top.get('title')}")
+        print(f"show_command: brigade security show {top.get('id')}")
+    return 0 if payload["valid"] else 1
+
+
 def scan(
     *,
     target: Path,
@@ -1805,30 +2217,50 @@ def scan(
         target,
         include_templates=effective.include_templates,
         suppressions=effective.suppressions,
+        enabled_checks=effective.enabled_checks,
+        include_paths=effective.include_paths,
+        exclude_paths=effective.exclude_paths,
+        severity_threshold=effective.severity_threshold,
     )
     report["policy"] = effective.policy
+    report["scan_profile"] = effective.scan_profile
     report["fail_on"] = effective.fail_on
     report["include_templates"] = effective.include_templates
+    report["enabled_checks"] = list(effective.enabled_checks)
+    report["include_paths"] = list(effective.include_paths)
+    report["exclude_paths"] = list(effective.exclude_paths)
+    report["severity_threshold"] = effective.severity_threshold
     report["config"] = str(effective.config_path)
     report["config_loaded"] = effective.config_loaded
     report["generated_at"] = _utc_iso()
+    configured_output_dir = target / effective.output_path
+    requested_output_dir = output_dir
+    if requested_output_dir is None and (import_findings or effective.config_loaded):
+        requested_output_dir = configured_output_dir
+    if requested_output_dir is not None:
+        artifacts_dir = write_evidence_bundle(report, requested_output_dir)
+        report["artifacts"] = str(artifacts_dir)
     imported: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
     if import_findings and report["findings"]:
-        imported, skipped = _import_findings(target, report["findings"])
+        evidence_path = Path(report["artifacts"]) / "security-report.json" if report.get("artifacts") else None
+        imported, skipped = _import_findings(target, report["findings"], evidence_path=evidence_path)
         report["imported_findings"] = len(imported)
         report["skipped_duplicate_imports"] = len(skipped)
-    if output_dir is not None:
-        artifacts_dir = write_evidence_bundle(report, output_dir)
-        report["artifacts"] = str(artifacts_dir)
+        if requested_output_dir is not None:
+            artifacts_dir = write_evidence_bundle(report, requested_output_dir)
+            report["artifacts"] = str(artifacts_dir)
 
     if json_output:
         print(json.dumps(report, indent=2, sort_keys=True))
     else:
         print(f"security scan: {target}")
         print(f"policy: {effective.policy}")
+        print(f"scan_profile: {effective.scan_profile}")
         print(f"fail_on: {effective.fail_on}")
         print(f"include_templates: {effective.include_templates}")
+        print(f"enabled_checks: {', '.join(effective.enabled_checks)}")
+        print(f"severity_threshold: {effective.severity_threshold}")
         print(f"scanned_files: {report['scanned_file_count']}")
         print(f"findings: {report['finding_count']}")
         print(f"suppressed: {report['suppressed_count']}")
@@ -1837,7 +2269,7 @@ def scan(
         if import_findings:
             print(f"imported_findings: {len(imported)}")
             print(f"skipped_duplicate_imports: {len(skipped)}")
-        if output_dir is not None:
+        if requested_output_dir is not None:
             print(f"artifacts: {report['artifacts']}")
         for finding in report["findings"]:
             print(

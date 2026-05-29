@@ -157,6 +157,13 @@ brigade dogfood next
 brigade dogfood --target /path/to/repo
 brigade handoff doctor
 brigade handoff lint
+brigade handoff list
+brigade handoff show <handoff-id-or-path>
+brigade handoff archive <handoff-id-or-path>
+brigade handoff archive --all-reviewed
+brigade handoff runs
+brigade handoff run-show <run-id>
+brigade handoff reconcile
 brigade handoff issues
 brigade handoff import-issues
 brigade handoff sync-issues
@@ -166,6 +173,83 @@ brigade work doctor
 brigade work resume
 brigade work brief
 brigade work brief --json
+brigade work inbox
+brigade work inbox --json
+brigade work inbox doctor
+brigade work inbox archive
+brigade work backup init
+brigade work backup status
+brigade work backup doctor
+brigade work backup import-issues
+brigade work scanners init
+brigade work scanners list
+brigade work scanners show chat-memory-sweep
+brigade work scanners plan
+brigade work scanners doctor
+brigade work scanners run chat-memory-sweep
+brigade work scanners run --due
+brigade work scanners runs
+brigade work scanners run-show <run-id>
+brigade work review init
+brigade work review plan
+brigade work review run <reviewer-id>
+brigade work review runs
+brigade work review show <run-id>
+brigade work review import-findings <run-id>
+brigade work review findings
+brigade work review finding-show <finding-id-or-import-id>
+brigade work review closeout latest
+brigade work sweep
+brigade work sweep --all
+brigade work sweeps
+brigade work sweep-show <sweep-id>
+brigade work sweep-review latest
+brigade chat surfaces init
+brigade chat surfaces list
+brigade chat surfaces doctor
+brigade chat sweep validate .brigade/chat-surfaces/discord-export.json
+brigade chat sweep ingest discord-export
+brigade chat sweep import-issues discord-export
+brigade tools init
+brigade tools list
+brigade tools show simplify
+brigade tools search simplify
+brigade tools describe simplify
+brigade tools contracts
+brigade tools call plan simplify --args '{"path":"README.md"}'
+brigade tools call queue simplify --args '{"path":"README.md"}'
+brigade tools call list
+brigade tools call show <call-id>
+brigade tools call approve <call-id>
+brigade tools call reject <call-id> --reason "not needed"
+brigade tools call hold <call-id> --reason "needs review"
+brigade tools call run <call-id>
+brigade tools call run --next
+brigade tools run list
+brigade tools run show <run-id>
+brigade tools run latest
+brigade tools run replay <run-id>
+brigade tools checkpoint list
+brigade tools checkpoint show <checkpoint-id>
+brigade tools checkpoint approve <checkpoint-id> --choice continue
+brigade tools checkpoint reject <checkpoint-id> --reason "not safe"
+brigade tools checkpoint resume <checkpoint-id>
+brigade tools runtime init
+brigade tools runtime list
+brigade tools runtime status
+brigade tools runtime start <runtime-id>
+brigade tools runtime stop <runtime-id>
+brigade tools runtime doctor
+brigade tools policy init
+brigade tools policy show
+brigade tools policy doctor
+brigade tools plan
+brigade tools plan simplify
+brigade tools apply simplify --dry-run
+brigade tools apply simplify
+brigade tools apply --all
+brigade tools doctor
+brigade tools import-issues
 brigade work next
 brigade work next --json
 brigade work tasks
@@ -179,12 +263,22 @@ brigade work import list
 brigade work import validate imports.jsonl
 brigade work import ingest imports.jsonl
 brigade work import memory-care
+brigade work import memory-refresh
 brigade work import triage
+brigade work import plan <import-id>
+brigade work import plan-handoff <import-id>
 brigade work import promote <import-id>
+brigade work import promote-handoff <import-id>
+brigade work import promote --run <import-id>
 brigade work import promote --all --source memory-care --kind task
 brigade work import promote --all --source handoff-ingest --metadata handoff_issue_category=route-skip
 brigade work import dismiss <import-id> --reason "not actionable"
 brigade work import dismiss --all --source handoff-ingest --metadata handoff_issue_category=skip --reason "historical noise"
+brigade memory care init
+brigade memory care scan
+brigade memory care status
+brigade memory care doctor
+brigade memory care import-issues
 brigade work run
 brigade work run --queue-next
 brigade work run "review today's changes"
@@ -272,6 +366,14 @@ Start-of-day commands:
 - `brigade work status` is the quick dashboard for branch state, dogfood readiness, paths, latest run, and extracted next step.
 - `brigade work doctor` checks dogfood config, security config, evidence bundles, Codex CLI, artifact paths, handoff inbox, task acceptance, issue-backed tasks, stale active sessions, ignore coverage, and latest run context.
 - `brigade work resume` shows the active or latest session, latest dogfood run, extracted next step, and suggested command.
+- `brigade work inbox` groups pending scanner imports by source, kind, priority, age, and acceptance coverage, then suggests plan, promote, dismiss, or run commands.
+- `brigade work backup status` reads local backup health summaries and reports snapshot, check, prune, and restore rehearsal risk without running backup commands.
+- `brigade work scanners plan` inspects the local scanner registry and suggests staggered run windows.
+- `brigade work scanners run --due` explicitly runs due enabled scanner producers, writes local receipts, and leaves promotion to the operator.
+- `brigade work sweep` explicitly runs due scanner producers, ingests configured JSONL outputs by default, and writes one local sweep report for review.
+- `brigade work sweep-review latest` shows created imports, skipped or dismissed fingerprints, grouping, and next commands for the latest sweep.
+- `brigade chat sweep import-issues <surface-id>` converts a local chat export sweep into public-safe scanner inbox imports.
+- `brigade tools doctor` inspects the local portable tool catalog and reports source, projection, schema, MCP, auth-field, and command-shape issues without invoking tools.
 - `brigade work next` prints only the next task. Add `--json` for wrappers.
 
 Task ledger commands:
@@ -280,33 +382,122 @@ Task ledger commands:
 - `brigade work task add "..."` queues a task manually.
 - `brigade work task add "..." --type feature --priority high --acceptance "..."` queues typed work with repeatable acceptance criteria.
 - `brigade work task add "..." --template bugfix --acceptance "Regression test passes"` adds template acceptance criteria while preserving explicit acceptance criteria.
-- `brigade work task add --from-issue 42` imports a GitHub issue with `gh issue view` when `gh` is available.
+- `brigade work task add --from-issue 42` imports a GitHub issue with `gh issue view` when `gh` is available, including acceptance criteria parsed from issue-body checkboxes or acceptance/test sections.
 - `brigade work task add --from-next` promotes the latest extracted dogfood next step.
 - `brigade work task plan <task-id>` shows the task metadata, acceptance checklist, template guidance, and suggested run command.
 - `brigade work task done <task-id>` closes queued work.
 
 Available task templates are `vertical-slice`, `bugfix`, `red-green-refactor`, `docs`, and `security-follow-up`.
 Issue-backed tasks keep issue URL, number, title, labels, state, and source metadata in the local gitignored ledger.
+Issue body text is not stored, and Brigade does not poll, sync, mutate, or refresh GitHub issues in the background.
 
 Import inbox commands:
 
 - `brigade work import add "..."` creates a scanner-ready local import.
 - `brigade work import validate imports.jsonl` checks scanner output against [`docs/import-schema.md`](docs/import-schema.md).
 - `brigade work import ingest imports.jsonl` ingests scanner output.
+- `brigade memory care scan` scans local memory cards for stale, expired, undersourced, contradictory, missing-index-link, orphaned, oversized, and missing-frontmatter issues without editing memory.
+- `brigade memory care import-issues` routes the latest memory-care refresh queue into the work inbox.
 - `brigade work import memory-care` converts `memory/cards/decay/refresh-queue.json` into imports.
-- `brigade work import chat-sweep` converts `.brigade/chat-memory-sweeps/latest.json` issues into imports.
+- `brigade work import memory-refresh` converts memory-refresh candidates into task imports with card identity, reason, evidence summary, and acceptance criteria.
+- `brigade work import chat-sweep` converts `.brigade/chat-memory-sweeps/latest.json` issues into imports. Actionable sweep issues become task imports with acceptance criteria, while raw private chat text is omitted.
 - `brigade work import triage` groups pending imports by source and kind; use `--source`, `--kind`, and repeatable `--metadata key=value` to narrow noisy queues.
 - `brigade work import show <import-id>` inspects one import.
+- `brigade work import plan <import-id>` previews the exact task or handoff promotion would create, including acceptance criteria, template guidance, or handoff target.
+- `brigade work import plan-handoff <import-id>` previews the Memory Handoff draft target for durable non-task imports.
 - `brigade work import dismiss <import-id>` removes one noisy item, while `dismiss --all` closes filtered batches.
 - `brigade work import promote <import-id>` promotes one reviewed import into the task ledger.
+- `brigade work import promote-handoff <import-id>` promotes one reviewed durable import into a linted Memory Handoff draft.
+- `brigade work import promote --run <import-id>` promotes exactly one task import, then immediately runs that task through the normal work-session loop.
 - `brigade work import promote --all --source memory-care --kind task` batch-promotes filtered imports; metadata filters also work for scanner-specific fields such as `handoff_issue_category=route-skip`.
+- `brigade work inbox doctor` reports missing scanner provenance, stale pending imports, broken promoted task links, changed dismissed fingerprints, noisy sources, and scanner runs that produced no imports.
+- `brigade work inbox archive` moves old promoted, dismissed, and superseded imports into `.brigade/work/imports/archive.jsonl` while preserving pending imports.
 
 Imports are stored under `.brigade/work/imports/inbox.jsonl`, stay gitignored, and do not write memory directly.
+Scanner-authored task imports may include `type`, `priority`, `template`, and `acceptance`; promotion preserves those fields so imported tasks can enter the normal TDD work loop.
+Durable non-task imports such as decisions, preferences, links, commands, findings, and incidents can be promoted only into reviewed Memory Handoff drafts. Brigade writes the draft to the configured local handoff inbox, lints it, stores the handoff path and target document on the promoted import, and does not edit `MEMORY.md`, memory cards, or canonical memory.
+Scanner producer imports use source item keys and fingerprints when available. Repeated ingestion skips equivalent pending or promoted imports, and dismissed imports stay dismissed unless the source item changes materially. Imports created during scanner runs carry provenance metadata when Brigade can attach it, including scanner id, source, run id, receipt path, output snapshot, import path, and source fingerprint.
+`brigade work doctor` warns when scanner queues go stale, task imports lack acceptance criteria, or a source produces many dismissed imports.
 For handoff-ingest issues, prefer `brigade handoff sync-issues` over repeated raw imports. It imports only issue ids that have not already been seen locally and marks stale handoff-ingest imports/tasks resolved when the latest log no longer contains them.
+
+Handoff draft queue commands:
+
+- `brigade handoff list` lists local Memory Handoff drafts from `.claude/memory-handoffs/`, `.codex/memory-handoffs/`, and configured source inboxes.
+- `brigade handoff show <handoff-id-or-path>` shows lint status, target card or document, source import id, source fingerprint, scanner provenance, and stale age.
+- `brigade handoff archive <handoff-id-or-path>` moves one reviewed draft into `.brigade/handoffs/archive/` and records closeout metadata in `.brigade/handoffs/archive.jsonl`.
+- `brigade handoff archive --all-reviewed` archives lint-valid drafts only. It does not run the canonical ingestor or edit memory.
+- `brigade handoff runs` and `brigade handoff run-show <run-id>` read normalized local ingestion receipts from `.brigade/handoffs/ingest-runs/`.
+- `brigade handoff reconcile` parses the configured `ingestor.last_run_log`, writes a normalized local receipt, and connects ingested, skipped, or failed outcomes back to draft and archive metadata. It does not run the ingestor or edit canonical memory.
+
+Scanner registry commands:
+
+- `brigade work scanners init` writes gitignored `.brigade/scanners.toml` with local producer entries for chat sweep, memory refresh, handoff ingest sync, security findings, backup health, and tool catalog health.
+- `brigade work scanners list` and `show <scanner-id>` inspect configured scanner commands, sources, cadence, timeout, output paths, and conflict windows.
+- `brigade work scanners plan` calculates intended run windows, reports overlaps or clustered jobs, and prints a suggested staggered schedule.
+- `brigade work scanners run <scanner-id>`, `run --all`, and `run --due` execute configured enabled scanner entries explicitly, never through a shell, and refuse disabled, risky, or overlapping runs unless the matching review flag is present.
+- `brigade work scanners run <scanner-id> --ingest-output` validates and ingests the scanner's configured JSONL `import_path` after a successful run. Without the flag, Brigade records the receipt and leaves output ingestion explicit.
+- `brigade work scanners runs` and `run-show <run-id>` inspect receipts under `.brigade/scanners/runs/`, including exit code, timeout state, stdout/stderr summaries, log paths, output snapshots, and pending import counts after the run.
+- `brigade work sweep` is the daily operator action for scanner review. It runs due scanners by default, or `--all` / `--scanner <id>` when selected, ingests configured JSONL outputs unless `--no-ingest` is present, and writes one report under `.brigade/scanners/sweeps/`.
+- `brigade work sweeps` and `brigade work sweep-show <sweep-id>` review sweep reports, including scanner run receipt paths, import counts, inbox hygiene, and suggested next commands.
+- `brigade work sweep-review <sweep-id>` and `sweep-review latest` triage one sweep by grouping created imports by source, kind, priority, acceptance coverage, provenance completeness, and status. Pending imports show exact plan, promote, dismiss, promote-run, plan-handoff, or promote-handoff commands as appropriate.
+- `brigade work scanners doctor --import-issues` reports missing config, disabled required producers, bad commands, missing or stale output paths, schedule conflicts, failed or timed-out runs, malformed receipts, missing logs, and due scanners, then can import those health issues as local task imports.
+
+The scanner registry is explicit and local. Brigade does not install cron jobs, start a daemon, run scanners from `brief` or `doctor`, promote scanner output automatically, or mutate scanner output beyond the configured command's own behavior. `brigade work sweep` is still explicit foreground execution, not a scheduler, and `sweep-review` is read-only.
+
+Code review producer commands:
+
+- `brigade work review init` writes gitignored `.brigade/reviews.toml` with disabled starter entries for Codex review, Claude Opus review, and custom local reviewers.
+- `brigade work review plan` shows configured reviewer commands, cwd, timeout, target paths, base ref, output path, findings path, and command blockers without executing anything.
+- `brigade work review run <reviewer-id>` and `run --all` execute configured reviewers explicitly, never through a shell, and write receipts under `.brigade/reviews/runs/`.
+- `brigade work review runs` and `brigade work review show <run-id>` inspect review receipts, including exit code, timeout state, stdout/stderr summaries, log paths, findings path, and reviewed completed task ids when available.
+- `brigade work review import-findings <run-id>` reads the run's normalized findings JSON, redacts unsafe values, and routes findings into the existing work inbox with source `code-review`.
+- `brigade work review findings` and `finding-show <finding-id-or-import-id>` inspect imported review findings by reviewer, run, severity, category, path, inbox status, and resolution state.
+- `brigade work review closeout <run-id>` or `closeout latest` writes a local closeout record that connects review findings to pending imports, dismissals, promoted tasks, completed tasks, and source-fingerprint changes requiring re-review.
+
+Code review is explicit and local. Brigade does not auto-run reviewers from `work run`, apply fixes, post review comments, mutate GitHub, store auth, or promote findings automatically.
+
+Chat surface export commands:
+
+- `brigade chat surfaces init` writes gitignored `.brigade/chat-surfaces.toml` with local export surface examples.
+- `brigade chat surfaces list`, `show <surface-id>`, and `doctor` inspect local export paths, providers, privacy mode, evidence policy, confidence thresholds, and stale sweep output health.
+- `brigade chat sweep validate <path>` checks a local export finding file without writing.
+- `brigade chat sweep ingest <surface-id>` normalizes a configured export into `.brigade/chat-memory-sweeps/<surface-id>-latest.json`.
+- `brigade chat sweep import-issues <surface-id>` imports normalized actionable findings into the existing work inbox with source `chat-memory-sweep`.
+
+Chat surface exports are local and explicit. Brigade supports `discord-export`, `slack-export`, `telegram-export`, `clickclack-export`, and `generic-jsonl` fixtures, but it does not call live chat APIs, perform OAuth, send webhooks, run a daemon, or promote imports automatically. Raw message bodies and transcript fields are rejected by default; imports keep safe summaries, labels, message ranges, local evidence paths, confidence, and fingerprints.
+
+Portable tool catalog commands:
+
+- `brigade tools init` writes gitignored `.brigade/tools.toml` with local examples for portable slash commands and superpowers.
+- `brigade tools list`, `show <tool-id>`, and `search <query>` inspect logical tool entries across source families such as `skill`, `slash-command`, `superpower`, `mcp`, `openapi`, `graphql`, `script`, and `custom`.
+- `brigade tools describe <tool-id>` and `brigade tools contracts` inspect schema-backed call contracts, permissions, effects, approval mode, env labels, and argument templates.
+- `brigade tools call plan <tool-id> --args ...` validates local JSON args against the configured input schema and returns a redacted wrapper-friendly call plan without executing the tool.
+- `brigade tools call queue/list/show/approve/reject/hold` stores planned calls in `.brigade/tools/calls.jsonl` for local review. Approval changes status only and never executes a tool.
+- `brigade tools call run <call-id>` and `brigade tools call run --next` execute approved, unblocked local `script` calls and approved local `mcp` calls, then write local receipts and stdout/stderr logs under `.brigade/tools/runs/`.
+- `brigade tools run list/show/latest` inspects local execution receipts, and `brigade tools run replay <run-id>` creates a new pending reviewed replay candidate after revalidating current contract, source, runtime, and policy state. Replay never reruns directly.
+- `brigade tools checkpoint list/show/approve/reject/resume` reviews script-requested local checkpoints under `.brigade/tools/checkpoints/`; resume requires explicit checkpoint approval and revalidates runtime and policy gates.
+- `brigade tools runtime init/list/show/status/start/stop/restart/doctor` manages explicit local runtimes used by portable tool calls, writing PID files and logs under `.brigade/tools/runtime/`.
+- `brigade tools policy init/show/doctor` manages host-local execution policy, including allowed effects, timeout caps, runtime allow-lists, approval modes, and environment label bindings.
+- `brigade tools plan` previews exact projection creates, updates, skips, unmanaged conflicts, and local-edit conflicts for all configured harness targets.
+- `brigade tools apply <tool-id>` and `brigade tools apply --all` explicitly write managed harness projections. Use `--dry-run` to preview writes and `--force` only to overwrite unmanaged or locally edited projection files.
+- `brigade tools doctor` reports missing sources, manifests, schemas, invalid contracts, missing examples, bad argument templates, projections, unmanaged projections, locally edited managed projections, stale projection fingerprints, MCP config issues, stale health files, unsafe auth/env field names, and high-risk command shapes.
+- `brigade tools import-issues` turns catalog health issues into local `tool-catalog` work imports with stable fingerprints and dismiss-until-changed behavior.
+
+Tool catalog inspection, call planning, call approval review, run history inspection, and checkpoint review are non-executing, and projection writes are always explicit through `brigade tools apply`. Tool call execution is explicit through `brigade tools call run`, limited to approved local `script` entries and approved local `mcp` entries with already-running managed runtimes, and writes local receipts instead of mutating approvals automatically. MCP execution uses a configured local stdio command, sends `initialize`, `tools/list`, and `tools/call`, and never starts a runtime automatically. Replay creates a pending call from redacted receipt arguments and never recovers secret values or bypasses approval, runtime, or policy gates. Checkpoint resume is explicit through `brigade tools checkpoint resume` and never runs automatically after approval. Runtime start and stop are explicit through `brigade tools runtime`; `doctor`, `brief`, and `work run` never auto-start runtimes. Execution policy is host-local and gitignored; environment values come only from the current process and are not stored in calls, checkpoints, receipts, logs, imports, or docs. Brigade does not connect to remote MCP servers, fetch OpenAPI or GraphQL schemas, store auth, install schedulers, send approval notifications, or auto-sync harness configs from `doctor`, `brief`, or `work run`. Keep tokens, secrets, private URLs, and host-private paths out of public catalog templates.
+
+Backup health commands:
+
+- `brigade work backup init` writes gitignored `.brigade/backups.toml` with local NAS and cloud destination examples.
+- `brigade work backup status` and `doctor` read local JSON summaries for latest snapshot, check, prune, and restore rehearsal status.
+- `brigade work backup import-issues` turns stale snapshots, failed checks, stale prunes, missing summaries, overdue restore rehearsals, and unsafe summary fields into local `backup-health` work imports.
+
+Backup health summaries are local and read-only. Brigade does not run `restic`, mount storage, prune, restore, send webhooks, or mutate remote backup state. Keep real hostnames, remotes, mount paths, repo paths, webhook URLs, channel ids, and backup passwords out of public templates and summary records.
 
 Run the daily loop with `brigade work run`.
 It opens a work session, resolves the next task, runs `brigade dogfood`, and closes completed ledger tasks after successful runs.
 When the resolved ledger task has acceptance criteria, `work run` includes them in the task prompt as the definition of done.
+When `work run` consumes a queued task, the session artifacts record the task snapshot, issue metadata, and acceptance checklist in `session.json`, `start.md`, and `end.md`.
+Successful runs also store the completed session path, dogfood run path, and completion-time acceptance criteria on the task.
 Then it ends the session, writes a work-session Memory Handoff by default, and prints a recap.
 
 Useful `work run` switches:
@@ -333,13 +524,15 @@ It also checks:
 
 - `memory/cards/*.md` budgets
 - `MEMORY.md` card links under `memory/cards/`
-- memory-care freshness from `memory/cards/decay/scan-latest.json`
+- memory-care config, scan freshness, open refresh candidates, and queue validity
 - corrupt scan or refresh-queue JSON once the loop is wired
 
-Workspace installs include `.brigade/memory-care.example.json` as a scanner wiring contract for whatever scheduler or memory owner produces the decay files.
+Workspace installs include `.brigade/memory-care.example.json` as a legacy scanner wiring contract, and `brigade memory care init` writes the active gitignored `.brigade/memory-care.toml` scanner config.
 They also include `.brigade/chat-memory-sweep.example.json` for nightly chat/session sweep summaries.
 Missing memory-care state is advisory for fresh installs.
 Bootstrap truncation is a hard failure to prevent, not a cosmetic warning.
+
+Memory care is local and explicit. Brigade writes scan reports and work imports, but it does not edit memory cards, run a scheduler, mutate canonical memory, or use LLM inference for contradictions.
 
 Inspect local work sessions with:
 
@@ -360,10 +553,13 @@ brigade security fix
 brigade security scan --target .
 brigade security scan --target . --policy public-repo
 brigade security scan --target . --output-dir .brigade/security/latest
+brigade security config
+brigade security doctor
+brigade security findings
+brigade security show <finding-id>
 brigade security enrich --target .
-brigade security review
-brigade security suppress <fingerprint> --reason "reviewed false positive"
-brigade security unsuppress <fingerprint>
+brigade security suppress <finding-id-or-fingerprint> --reason "reviewed false positive"
+brigade security unsuppress <finding-id-or-fingerprint>
 brigade security scan --target . --import-findings
 ```
 
@@ -479,14 +675,19 @@ brigade add tokens   # tokenjuice
 Security commands:
 
 - `brigade security init` writes gitignored local defaults to `.brigade/security.toml`.
+- `brigade security config` shows the local profile, enabled checks, include/exclude paths, severity threshold, output path, suppressions, and enrichment settings.
 - `brigade security fix` creates `.brigade/security/` and refreshes the managed `.gitignore` block.
 - `brigade security scan --target .` runs a read-only agent workspace security scan.
-- `brigade security scan --output-dir .brigade/security/latest` writes redacted report artifacts.
-- `brigade security scan --import-findings` turns findings into local `brigade work import` review items.
+- `brigade security scan --output-dir .brigade/security/latest` writes redacted report artifacts with stable finding ids, fingerprints, rule ids, severity, category, path, line, safe excerpt, and remediation hint.
+- `brigade security scan --import-findings` writes the local evidence bundle and turns unsuppressed findings into deduped `security-scan` work imports with safe metadata.
+- `brigade security findings` lists the latest reviewable findings, and `brigade security show <finding-id>` inspects one finding.
+- `brigade security doctor` reports config, evidence, suppression, and open-finding health in text or JSON.
 - `brigade security enrich --target .` enriches an existing report and writes enrichment artifacts.
 - `brigade security review` inspects the latest evidence bundle, including enrichment when present.
-- `brigade security suppress <fingerprint> --reason "..."` suppresses reviewed noise.
-- `brigade security unsuppress <fingerprint>` removes stale suppressions.
+- `brigade security suppress <finding-id-or-fingerprint> --reason "..."` suppresses reviewed noise.
+- `brigade security unsuppress <finding-id-or-fingerprint>` removes stale suppressions.
+
+The local `.brigade/security.toml` contract supports `scan_profile` values `public-repo`, `internal-workspace`, and `local-only-audit`, plus `enabled_checks`, `include_paths`, `exclude_paths`, `severity_threshold`, suppressions, and `output_path`. Scan state and raw evidence stay under `.brigade/security/` and should remain gitignored. Public reports and work imports use redacted excerpts and safe detail fields, not raw secrets or private infrastructure values. The scanner never calls external SaaS scanners, runs network scans, stores secrets, starts a daemon, or remediates automatically.
 
 The scanner covers:
 

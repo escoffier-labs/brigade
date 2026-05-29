@@ -27,8 +27,10 @@ def test_init_creates_gitignore_when_missing(tmp_target: Path):
     assert "memory/handoff-inbox/" in gi
     assert ".brigade/dogfood.toml" in gi
     assert ".brigade/handoff-sources.json" in gi
+    assert ".brigade/memory-care.toml" in gi
     assert ".brigade/security.toml" in gi
     assert ".brigade/runs/" in gi
+    assert ".brigade/scanners/" in gi
     assert ".brigade/security/" in gi
     assert ".brigade/chat-memory-sweeps/" in gi
     assert ".brigade/work/" in gi
@@ -186,7 +188,9 @@ def test_gitignore_block_includes_claude_section_when_selected():
     assert "!.claude/memory-handoffs/TEMPLATE.md" in block
     assert ".brigade/dogfood.toml" in block
     assert ".brigade/handoff-sources.json" in block
+    assert ".brigade/memory-care.toml" in block
     assert ".brigade/runs/" in block
+    assert ".brigade/scanners/" in block
     assert ".brigade/security/" in block
     assert ".brigade/work/" in block
     assert ".codex/memory-handoffs" not in block

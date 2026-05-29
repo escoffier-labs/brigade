@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 
 from brigade import cli
 from brigade import handoff_cmd
@@ -59,6 +60,40 @@ no-card
 ### Handoff lint documents
 
 Document handoffs only include document fields.
+"""
+
+
+PROMOTED_IMPORT_HANDOFF = """# Memory Handoff
+
+## Type
+decision
+
+## Title
+Reviewed scanner import
+
+## Summary
+Reviewed scanner import `import-one`.
+
+## Evidence
+- import: import-one
+- source_fingerprint: fp-one
+- scanner_id: chat-surfaces
+- scanner_run_id: run-one
+- sweep_id: sweep-one
+
+## Recommended memory action
+no-card
+
+## Target document
+.learnings/LEARNINGS.md
+
+## Suggested document content
+### Reviewed scanner import
+
+- source: chat-memory-sweep
+- kind: decision
+- import: import-one
+- summary: Durable scanner decision.
 """
 
 
@@ -130,6 +165,271 @@ def test_handoff_lint_defaults_to_pending_inboxes(tmp_path, capsys):
     assert "files: 1" in out
     assert "2026-05-27-note.md" in out
     assert "TEMPLATE.md" not in out
+
+
+def test_handoff_list_and_show_report_draft_metadata(tmp_path, capsys):
+    codex_inbox = tmp_path / ".codex" / "memory-handoffs"
+    codex_inbox.mkdir(parents=True)
+    path = codex_inbox / "2026-05-28-reviewed.md"
+    path.write_text(PROMOTED_IMPORT_HANDOFF)
+
+    assert handoff_cmd.list_drafts(target=tmp_path, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["counts"]["reviewed"] == 1
+    draft = payload["drafts"][0]
+    assert draft["id"] == "2026-05-28-reviewed"
+    assert draft["lint"]["valid"] is True
+    assert draft["action"] == "no-card"
+    assert draft["target_document"] == ".learnings/LEARNINGS.md"
+    assert draft["source_import_id"] == "import-one"
+    assert draft["source_fingerprint"] == "fp-one"
+    assert draft["scanner_provenance"]["scanner_id"] == "chat-surfaces"
+
+    assert handoff_cmd.show_draft(target=tmp_path, draft_id="2026-05-28-reviewed") == 0
+    out = capsys.readouterr().out
+    assert "handoff: 2026-05-28-reviewed" in out
+    assert "target_document: .learnings/LEARNINGS.md" in out
+    assert "source_import_id: import-one" in out
+
+
+def test_handoff_runs_list_show_and_draft_ingestion_status(tmp_path, capsys):
+    codex_inbox = tmp_path / ".codex" / "memory-handoffs"
+    codex_inbox.mkdir(parents=True)
+    draft_path = codex_inbox / "2026-05-28-reviewed.md"
+    draft_path.write_text(PROMOTED_IMPORT_HANDOFF)
+    runs_root = tmp_path / ".brigade" / "handoffs" / "ingest-runs"
+    runs_root.mkdir(parents=True)
+    receipt = {
+        "run_id": "run-one",
+        "started_at": "2026-05-28T10:00:00+00:00",
+        "completed_at": "2026-05-28T10:01:00+00:00",
+        "source_root": str(tmp_path),
+        "inbox_paths": [str(codex_inbox)],
+        "processed_handoff_paths": [str(draft_path)],
+        "promoted_card_targets": [],
+        "routed_document_targets": [
+            {"handoff_path": str(draft_path), "target": ".learnings/LEARNINGS.md"}
+        ],
+        "skipped_handoff_paths": [],
+        "failed_handoff_paths": [],
+        "warning_count": 0,
+        "safe_summary": "processed=1",
+        "log_path": str(tmp_path / ".brigade" / "handoff-ingest" / "latest.log"),
+    }
+    (runs_root / "run-one.json").write_text(json.dumps(receipt))
+
+    assert handoff_cmd.runs(target=tmp_path, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["count"] == 1
+    assert payload["runs"][0]["run_id"] == "run-one"
+    assert payload["runs"][0]["outcome_counts"] == {"ingested": 1}
+
+    assert handoff_cmd.run_show(target=tmp_path, run_id="run-one", json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["run"]["routed_document_targets"][0]["target"] == ".learnings/LEARNINGS.md"
+
+    assert handoff_cmd.list_drafts(target=tmp_path, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["latest_ingest_run"]["run_id"] == "run-one"
+    assert payload["drafts"][0]["ingestion_status"] == "ingested"
+    assert payload["drafts"][0]["ingest_run_id"] == "run-one"
+
+    assert handoff_cmd.show_draft(target=tmp_path, draft_id="2026-05-28-reviewed") == 0
+    out = capsys.readouterr().out
+    assert "ingestion_status: ingested" in out
+    assert "ingest_run_id: run-one" in out
+
+
+def test_handoff_reconcile_parses_ingestor_log_into_receipt(tmp_path, capsys):
+    inbox = tmp_path / ".codex" / "memory-handoffs"
+    inbox.mkdir(parents=True)
+    draft_path = inbox / "reviewed.md"
+    draft_path.write_text(NO_CARD_HANDOFF)
+    skipped_path = inbox / "skipped.md"
+    skipped_path.write_text("# Memory Handoff\n")
+    log = tmp_path / ".brigade" / "handoff-ingest" / "latest.log"
+    log.parent.mkdir(parents=True)
+    log.write_text(
+        "\n".join(
+            [
+                f"ROUTED {draft_path} -> .learnings/LEARNINGS.md",
+                f"SKIP {skipped_path}: no recognizable markdown sections found",
+                "Warnings: 1",
+                "",
+            ]
+        )
+    )
+    config = tmp_path / ".brigade" / "handoff-sources.json"
+    config.write_text(
+        json.dumps(
+            {
+                "sources": [{"root": ".", "inboxes": [".codex/memory-handoffs"]}],
+                "ingestor": {"last_run_log": ".brigade/handoff-ingest/latest.log"},
+            }
+        )
+    )
+
+    assert handoff_cmd.reconcile(target=tmp_path, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    receipt_path = tmp_path / payload["receipt_path"]
+    assert receipt_path.exists()
+    assert payload["run"]["processed_handoff_paths"] == [str(draft_path)]
+    assert payload["run"]["skipped_handoff_paths"] == [str(skipped_path)]
+    assert payload["run"]["warning_count"] == 1
+
+    assert handoff_cmd.show_draft(target=tmp_path, draft_id="reviewed", json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["draft"]["ingestion_status"] == "ingested"
+
+
+def test_handoff_archive_preserves_reason_and_adds_ingest_outcome(tmp_path, capsys):
+    inbox = tmp_path / ".codex" / "memory-handoffs"
+    inbox.mkdir(parents=True)
+    draft_path = inbox / "valid-one.md"
+    draft_path.write_text(NO_CARD_HANDOFF)
+    runs_root = tmp_path / ".brigade" / "handoffs" / "ingest-runs"
+    runs_root.mkdir(parents=True)
+    (runs_root / "run-archive.json").write_text(
+        json.dumps(
+            {
+                "run_id": "run-archive",
+                "started_at": "2026-05-28T10:00:00+00:00",
+                "completed_at": "2026-05-28T10:01:00+00:00",
+                "source_root": str(tmp_path),
+                "inbox_paths": [str(inbox)],
+                "processed_handoff_paths": [str(draft_path)],
+                "promoted_card_targets": [],
+                "routed_document_targets": [],
+                "skipped_handoff_paths": [],
+                "failed_handoff_paths": [],
+                "warning_count": 0,
+                "safe_summary": "processed=1",
+                "log_path": "latest.log",
+            }
+        )
+    )
+
+    assert handoff_cmd.archive_draft(target=tmp_path, draft_id="valid-one", reason="manual review", json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    record = payload["records"][0]
+    assert record["review_reason"] == "manual review"
+    assert record["ingestion_status"] == "ingested"
+    assert record["ingest_run_id"] == "run-archive"
+
+
+def test_handoff_doctor_warns_for_stale_unreconciled_draft(tmp_path, capsys):
+    inbox = tmp_path / ".codex" / "memory-handoffs"
+    inbox.mkdir(parents=True)
+    stale = inbox / "stale.md"
+    stale.write_text(NO_CARD_HANDOFF)
+    old = time.time() - (handoff_cmd.HANDOFF_DRAFT_STALE_HOURS + 2) * 3600
+    os.utime(stale, (old, old))
+
+    assert handoff_cmd.doctor(target=tmp_path) == 0
+    out = capsys.readouterr().out
+    assert "[warn] handoff_draft_unreconciled:" in out
+
+
+def test_handoff_list_discovers_claude_codex_and_configured_inboxes(tmp_path, capsys):
+    for rel, name in (
+        (".claude/memory-handoffs", "claude.md"),
+        (".codex/memory-handoffs", "codex.md"),
+        ("custom/handoffs", "custom.md"),
+    ):
+        inbox = tmp_path / rel
+        inbox.mkdir(parents=True)
+        (inbox / name).write_text(NO_CARD_HANDOFF)
+    sources = tmp_path / ".brigade" / "handoff-sources.json"
+    sources.parent.mkdir(parents=True)
+    sources.write_text(
+        json.dumps(
+            {
+                "sources": [
+                    {
+                        "root": ".",
+                        "inboxes": [
+                            ".claude/memory-handoffs",
+                            ".codex/memory-handoffs",
+                            "custom/handoffs",
+                        ],
+                    }
+                ]
+            }
+        )
+        + "\n"
+    )
+
+    assert handoff_cmd.list_drafts(target=tmp_path, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert {draft["path"].rsplit("/", 1)[-1] for draft in payload["drafts"]} == {"claude.md", "codex.md", "custom.md"}
+    assert all(draft["watched"] is True for draft in payload["drafts"])
+
+
+def test_handoff_archive_single_and_all_reviewed_write_records(tmp_path, capsys):
+    inbox = tmp_path / ".codex" / "memory-handoffs"
+    inbox.mkdir(parents=True)
+    (inbox / "valid-one.md").write_text(NO_CARD_HANDOFF)
+    (inbox / "valid-two.md").write_text(PROMOTED_IMPORT_HANDOFF)
+    (inbox / "invalid.md").write_text("# Memory Handoff\n")
+
+    assert handoff_cmd.archive_draft(target=tmp_path, draft_id="valid-one", reason="reviewed", json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["archived"] == 1
+    assert not (inbox / "valid-one.md").exists()
+    assert payload["records"][0]["status"] == "archived"
+    assert payload["records"][0]["review_reason"] == "reviewed"
+
+    assert handoff_cmd.archive_draft(target=tmp_path, all_reviewed=True, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["archived"] == 1
+    assert not (inbox / "valid-two.md").exists()
+    assert (inbox / "invalid.md").exists()
+    records = [
+        json.loads(line)
+        for line in (tmp_path / ".brigade" / "handoffs" / "archive.jsonl").read_text().splitlines()
+    ]
+    assert [record["id"] for record in records] == ["valid-one", "valid-two"]
+
+
+def test_handoff_doctor_reports_draft_queue_warnings(tmp_path, capsys):
+    inbox = tmp_path / ".codex" / "memory-handoffs"
+    inbox.mkdir(parents=True)
+    stale = inbox / "stale.md"
+    stale.write_text(PROMOTED_IMPORT_HANDOFF)
+    invalid = inbox / "invalid.md"
+    invalid.write_text("# Memory Handoff\n")
+    old = time.time() - (handoff_cmd.HANDOFF_DRAFT_STALE_HOURS + 2) * 3600
+    os.utime(stale, (old, old))
+
+    assert handoff_cmd.doctor(target=tmp_path) == 0
+    out = capsys.readouterr().out
+    assert "[warn] handoff_draft_stale:" in out
+    assert "[warn] handoff_draft_invalid:" in out
+    assert "[warn] handoff_draft_missing_source_import:" in out
+    assert "[warn] handoff_draft_uncovered_inbox:" in out
+
+
+def test_handoff_doctor_reports_changed_source_fingerprint(tmp_path, capsys):
+    inbox = tmp_path / ".codex" / "memory-handoffs"
+    inbox.mkdir(parents=True)
+    (inbox / "promoted.md").write_text(PROMOTED_IMPORT_HANDOFF)
+    work_cmd._write_imports(
+        tmp_path,
+        [
+            {
+                "id": "import-one",
+                "kind": "decision",
+                "source": "chat-memory-sweep",
+                "text": "Durable scanner decision.",
+                "status": "promoted",
+                "metadata": {"source_item_key": "chat:one", "source_fingerprint": "fp-two"},
+            }
+        ],
+    )
+
+    assert handoff_cmd.doctor(target=tmp_path) == 0
+    out = capsys.readouterr().out
+    assert "[warn] handoff_draft_changed_source_fingerprint:" in out
 
 
 def test_handoff_doctor_warns_for_pending_handoff_without_source_config(tmp_path, capsys):
@@ -624,6 +924,80 @@ def test_handoff_lint_cli(tmp_path, monkeypatch):
     path = tmp_path / "note.md"
     assert cli.main(["handoff", "lint", "--target", str(tmp_path), "--json", str(path)]) == 0
     assert seen == {"target": tmp_path, "paths": [path], "json_output": True}
+
+
+def test_handoff_draft_review_cli(tmp_path, monkeypatch):
+    seen = []
+
+    def fake_list_drafts(**kwargs):
+        seen.append(("list", kwargs))
+        return 0
+
+    def fake_show_draft(**kwargs):
+        seen.append(("show", kwargs))
+        return 0
+
+    def fake_archive_draft(**kwargs):
+        seen.append(("archive", kwargs))
+        return 0
+
+    def fake_runs(**kwargs):
+        seen.append(("runs", kwargs))
+        return 0
+
+    def fake_run_show(**kwargs):
+        seen.append(("run-show", kwargs))
+        return 0
+
+    def fake_reconcile(**kwargs):
+        seen.append(("reconcile", kwargs))
+        return 0
+
+    monkeypatch.setattr(handoff_cmd, "list_drafts", fake_list_drafts)
+    monkeypatch.setattr(handoff_cmd, "show_draft", fake_show_draft)
+    monkeypatch.setattr(handoff_cmd, "archive_draft", fake_archive_draft)
+    monkeypatch.setattr(handoff_cmd, "runs", fake_runs)
+    monkeypatch.setattr(handoff_cmd, "run_show", fake_run_show)
+    monkeypatch.setattr(handoff_cmd, "reconcile", fake_reconcile)
+
+    assert cli.main(["handoff", "list", "--target", str(tmp_path), "--json", "--limit", "3"]) == 0
+    assert cli.main(["handoff", "show", "draft-one", "--target", str(tmp_path), "--json"]) == 0
+    assert (
+        cli.main(
+            [
+                "handoff",
+                "archive",
+                "--target",
+                str(tmp_path),
+                "--all-reviewed",
+                "--reason",
+                "done",
+                "--json",
+            ]
+        )
+        == 0
+    )
+    assert cli.main(["handoff", "runs", "--target", str(tmp_path), "--json", "--limit", "2"]) == 0
+    assert cli.main(["handoff", "run-show", "run-one", "--target", str(tmp_path), "--json"]) == 0
+    assert cli.main(["handoff", "reconcile", "--target", str(tmp_path), "--json"]) == 0
+    assert seen == [
+        ("list", {"target": tmp_path, "sources": None, "json_output": True, "limit": 3}),
+        ("show", {"target": tmp_path, "draft_id": "draft-one", "sources": None, "json_output": True}),
+        (
+            "archive",
+            {
+                "target": tmp_path,
+                "draft_id": None,
+                "all_reviewed": True,
+                "reason": "done",
+                "sources": None,
+                "json_output": True,
+            },
+        ),
+        ("runs", {"target": tmp_path, "json_output": True, "limit": 2}),
+        ("run-show", {"target": tmp_path, "run_id": "run-one", "json_output": True}),
+        ("reconcile", {"target": tmp_path, "sources": None, "json_output": True}),
+    ]
 
 
 def test_handoff_issues_cli(tmp_path, monkeypatch):

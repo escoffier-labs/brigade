@@ -120,6 +120,35 @@ def _build_parser() -> argparse.ArgumentParser:
     p_handoff_lint.add_argument("paths", nargs="*", type=Path, help="Handoff files to validate. Defaults to pending inbox files.")
     p_handoff_lint.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
     p_handoff_lint.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_handoff_list = handoff_sub.add_parser("list", help="List local Memory Handoff drafts.")
+    p_handoff_list.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_handoff_list.add_argument("--sources", type=Path, default=None, help="Override .brigade/handoff-sources.json.")
+    p_handoff_list.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_handoff_list.add_argument("--limit", type=int, default=20, help="Maximum drafts to show.")
+    p_handoff_show = handoff_sub.add_parser("show", help="Show one local Memory Handoff draft.")
+    p_handoff_show.add_argument("draft_id", help="Draft id, filename, path, or unique prefix.")
+    p_handoff_show.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_handoff_show.add_argument("--sources", type=Path, default=None, help="Override .brigade/handoff-sources.json.")
+    p_handoff_show.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_handoff_archive = handoff_sub.add_parser("archive", help="Archive reviewed local Memory Handoff drafts.")
+    p_handoff_archive.add_argument("draft_id", nargs="?", help="Draft id, filename, path, or unique prefix.")
+    p_handoff_archive.add_argument("--all-reviewed", action="store_true", help="Archive all lint-valid drafts.")
+    p_handoff_archive.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
+    p_handoff_archive.add_argument("--sources", type=Path, default=None, help="Override .brigade/handoff-sources.json.")
+    p_handoff_archive.add_argument("--reason", default=None, help="Review reason to store in archive metadata.")
+    p_handoff_archive.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_handoff_runs = handoff_sub.add_parser("runs", help="List local handoff ingestion receipts.")
+    p_handoff_runs.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_handoff_runs.add_argument("--limit", type=int, default=20, help="Maximum runs to show.")
+    p_handoff_runs.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_handoff_run_show = handoff_sub.add_parser("run-show", help="Show one local handoff ingestion receipt.")
+    p_handoff_run_show.add_argument("run_id", help="Run id or unique prefix.")
+    p_handoff_run_show.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_handoff_run_show.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_handoff_reconcile = handoff_sub.add_parser("reconcile", help="Normalize the configured handoff ingestor latest-run log.")
+    p_handoff_reconcile.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
+    p_handoff_reconcile.add_argument("--sources", type=Path, default=None, help="Override .brigade/handoff-sources.json.")
+    p_handoff_reconcile.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_handoff_issues = handoff_sub.add_parser("issues", help="Group actionable handoff ingest issues.")
     p_handoff_issues.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
     p_handoff_issues.add_argument("--sources", type=Path, default=None, help="Override .brigade/handoff-sources.json.")
@@ -139,6 +168,31 @@ def _build_parser() -> argparse.ArgumentParser:
     p_handoff_sync_issues.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_handoff_sync_issues.add_argument("--category", action="append", default=[], help="Sync only one issue category. May be repeated.")
     p_handoff_sync_issues.add_argument("--no-close-stale", action="store_true", help="Do not dismiss stale imports or close stale tasks.")
+
+    # memory
+    p_memory = sub.add_parser("memory", help="Inspect local memory maintenance workflows.")
+    memory_sub = p_memory.add_subparsers(dest="memory_command", metavar="<memory-command>")
+    memory_sub.required = True
+    p_memory_care = memory_sub.add_parser("care", help="Scan local memory cards for refresh risk.")
+    memory_care_sub = p_memory_care.add_subparsers(dest="memory_care_command", metavar="<memory-care-command>")
+    memory_care_sub.required = True
+    p_memory_care_init = memory_care_sub.add_parser("init", help="Write local memory-care config.")
+    p_memory_care_init.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
+    p_memory_care_init.add_argument("--force", action="store_true", help="Overwrite an existing memory-care config.")
+    p_memory_care_init.add_argument("--no-gitignore", action="store_true", help="Do not update the target .gitignore.")
+    p_memory_care_scan = memory_care_sub.add_parser("scan", help="Scan local memory cards without editing them.")
+    p_memory_care_scan.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_memory_care_scan.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_memory_care_status = memory_care_sub.add_parser("status", help="Show local memory-care status.")
+    p_memory_care_status.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_memory_care_status.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_memory_care_doctor = memory_care_sub.add_parser("doctor", help="Check local memory-care health.")
+    p_memory_care_doctor.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_memory_care_doctor.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_memory_care_import = memory_care_sub.add_parser("import-issues", help="Import memory-care issues into the work inbox.")
+    p_memory_care_import.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
+    p_memory_care_import.add_argument("--dry-run", action="store_true", help="Report without writing imports.")
+    p_memory_care_import.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
 
     # work
     p_work = sub.add_parser("work", help="Inspect and manage a daily Brigade work session.")
@@ -169,6 +223,132 @@ def _build_parser() -> argparse.ArgumentParser:
     p_work_brief.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
     p_work_brief.add_argument("--limit", type=int, default=3, help="Maximum recent sessions to include.")
     p_work_brief.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_work_sweep = work_sub.add_parser("sweep", help="Run an explicit daily scanner sweep.")
+    p_work_sweep.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
+    p_work_sweep.add_argument("--scanner", default=None, help="Run one scanner id instead of due scanners.")
+    p_work_sweep.add_argument("--all", action="store_true", help="Run all configured scanners.")
+    p_work_sweep.add_argument("--include-disabled", action="store_true", help="Allow disabled scanners to run.")
+    p_work_sweep.add_argument("--force", action="store_true", help="Run even when another scanner receipt is marked running.")
+    p_work_sweep.add_argument("--no-ingest", action="store_true", help="Do not ingest configured scanner import output.")
+    p_work_sweep.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_work_sweeps = work_sub.add_parser("sweeps", help="List scanner sweep reports.")
+    p_work_sweeps.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_work_sweeps.add_argument("--limit", type=int, default=20, help="Maximum sweeps to list.")
+    p_work_sweeps.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_work_sweep_show = work_sub.add_parser("sweep-show", help="Show one scanner sweep report.")
+    p_work_sweep_show.add_argument("sweep_id", help="Sweep id or unique prefix.")
+    p_work_sweep_show.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_work_sweep_show.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_work_sweep_review = work_sub.add_parser("sweep-review", help="Review imports created by one scanner sweep.")
+    p_work_sweep_review.add_argument("sweep_id", help="Sweep id, unique prefix, or latest.")
+    p_work_sweep_review.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_work_sweep_review.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_work_inbox = work_sub.add_parser("inbox", help="Review scanner-ready work imports.")
+    p_work_inbox.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_work_inbox.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_work_inbox.add_argument("--limit", type=int, default=20, help="Maximum imports to show.")
+    inbox_sub = p_work_inbox.add_subparsers(dest="inbox_command", metavar="<inbox-command>")
+    p_work_inbox_doctor = inbox_sub.add_parser("doctor", help="Check scanner inbox hygiene.")
+    p_work_inbox_doctor.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_work_inbox_doctor.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_work_inbox_archive = inbox_sub.add_parser("archive", help="Archive old closed scanner inbox imports.")
+    p_work_inbox_archive.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
+    p_work_inbox_archive.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_work_backup = work_sub.add_parser("backup", help="Inspect local backup health summaries.")
+    backup_sub = p_work_backup.add_subparsers(dest="backup_command", metavar="<backup-command>")
+    backup_sub.required = True
+    p_work_backup_init = backup_sub.add_parser("init", help="Write a local backup health config.")
+    p_work_backup_init.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
+    p_work_backup_init.add_argument("--force", action="store_true", help="Overwrite an existing backup config.")
+    p_work_backup_init.add_argument("--no-gitignore", action="store_true", help="Do not update the target .gitignore.")
+    p_work_backup_status = backup_sub.add_parser("status", help="Show local backup health status.")
+    p_work_backup_status.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_work_backup_status.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_work_backup_doctor = backup_sub.add_parser("doctor", help="Check local backup health summaries.")
+    p_work_backup_doctor.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_work_backup_doctor.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_work_backup_import = backup_sub.add_parser("import-issues", help="Import backup health issues into the work inbox.")
+    p_work_backup_import.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
+    p_work_backup_import.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_work_scanners = work_sub.add_parser("scanners", help="Inspect local scanner registry and schedule plans.")
+    scanners_sub = p_work_scanners.add_subparsers(dest="scanners_command", metavar="<scanners-command>")
+    scanners_sub.required = True
+    p_work_scanners_init = scanners_sub.add_parser("init", help="Write a local scanner registry config.")
+    p_work_scanners_init.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
+    p_work_scanners_init.add_argument("--force", action="store_true", help="Overwrite an existing scanner config.")
+    p_work_scanners_init.add_argument("--no-gitignore", action="store_true", help="Do not update the target .gitignore.")
+    p_work_scanners_list = scanners_sub.add_parser("list", help="List configured local scanners.")
+    p_work_scanners_list.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_work_scanners_list.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_work_scanners_show = scanners_sub.add_parser("show", help="Show one configured scanner.")
+    p_work_scanners_show.add_argument("scanner_id", help="Scanner id.")
+    p_work_scanners_show.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_work_scanners_show.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_work_scanners_plan = scanners_sub.add_parser("plan", help="Plan scanner run windows without executing scanners.")
+    p_work_scanners_plan.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_work_scanners_plan.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_work_scanners_run = scanners_sub.add_parser("run", help="Run configured local scanners explicitly.")
+    p_work_scanners_run.add_argument("scanner_id", nargs="?", default=None, help="Scanner id to run.")
+    p_work_scanners_run.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
+    p_work_scanners_run.add_argument("--all", action="store_true", help="Run all configured scanners.")
+    p_work_scanners_run.add_argument("--due", action="store_true", help="Run due scanners only.")
+    p_work_scanners_run.add_argument("--include-disabled", action="store_true", help="Allow disabled scanners to run.")
+    p_work_scanners_run.add_argument("--force", action="store_true", help="Run even when another scanner receipt is marked running.")
+    p_work_scanners_run.add_argument("--ingest-output", action="store_true", help="Validate and ingest configured JSONL output after successful runs.")
+    p_work_scanners_run.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_work_scanners_runs = scanners_sub.add_parser("runs", help="List local scanner run receipts.")
+    p_work_scanners_runs.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_work_scanners_runs.add_argument("--limit", type=int, default=20, help="Maximum runs to list.")
+    p_work_scanners_runs.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_work_scanners_run_show = scanners_sub.add_parser("run-show", help="Show one scanner run receipt.")
+    p_work_scanners_run_show.add_argument("run_id", help="Run id or unique prefix.")
+    p_work_scanners_run_show.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_work_scanners_run_show.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_work_scanners_doctor = scanners_sub.add_parser("doctor", help="Check scanner registry health.")
+    p_work_scanners_doctor.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_work_scanners_doctor.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_work_scanners_doctor.add_argument("--import-issues", action="store_true", help="Import scanner health issues into the work inbox.")
+    p_work_review = work_sub.add_parser("review", help="Run explicit local code review producers.")
+    review_sub = p_work_review.add_subparsers(dest="review_command", metavar="<review-command>")
+    review_sub.required = True
+    p_work_review_init = review_sub.add_parser("init", help="Write local code review producer config.")
+    p_work_review_init.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
+    p_work_review_init.add_argument("--force", action="store_true", help="Overwrite an existing review config.")
+    p_work_review_init.add_argument("--no-gitignore", action="store_true", help="Do not update the target .gitignore.")
+    p_work_review_plan = review_sub.add_parser("plan", help="Plan configured code review producers without running them.")
+    p_work_review_plan.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_work_review_plan.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_work_review_run = review_sub.add_parser("run", help="Run configured local code review producers explicitly.")
+    p_work_review_run.add_argument("reviewer_id", nargs="?", default=None, help="Reviewer id to run.")
+    p_work_review_run.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
+    p_work_review_run.add_argument("--all", action="store_true", help="Run all configured reviewers.")
+    p_work_review_run.add_argument("--include-disabled", action="store_true", help="Allow disabled reviewers to run.")
+    p_work_review_run.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_work_review_runs = review_sub.add_parser("runs", help="List local code review run receipts.")
+    p_work_review_runs.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_work_review_runs.add_argument("--limit", type=int, default=20, help="Maximum runs to list.")
+    p_work_review_runs.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_work_review_show = review_sub.add_parser("show", help="Show one code review run receipt.")
+    p_work_review_show.add_argument("run_id", help="Run id or unique prefix.")
+    p_work_review_show.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_work_review_show.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_work_review_import = review_sub.add_parser("import-findings", help="Import normalized review findings into the work inbox.")
+    p_work_review_import.add_argument("run_id", help="Run id or unique prefix.")
+    p_work_review_import.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
+    p_work_review_import.add_argument("--dry-run", action="store_true", help="Report without writing imports.")
+    p_work_review_import.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_work_review_findings = review_sub.add_parser("findings", help="List imported code review findings.")
+    p_work_review_findings.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_work_review_findings.add_argument("--run-id", default=None, help="Limit findings to one review run id.")
+    p_work_review_findings.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_work_review_finding_show = review_sub.add_parser("finding-show", help="Show one imported code review finding.")
+    p_work_review_finding_show.add_argument("finding_id", help="Finding id, import id, or unique prefix.")
+    p_work_review_finding_show.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_work_review_finding_show.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_work_review_closeout = review_sub.add_parser("closeout", help="Summarize one code review run's resolution state.")
+    p_work_review_closeout.add_argument("run_id", help="Run id, unique prefix, or latest.")
+    p_work_review_closeout.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
+    p_work_review_closeout.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_work_next = work_sub.add_parser("next", help="Show the next daily work task and suggested command.")
     p_work_next.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
     p_work_next.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
@@ -248,6 +428,14 @@ def _build_parser() -> argparse.ArgumentParser:
     p_work_import_ingest.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
     p_work_import_ingest.add_argument("--dry-run", action="store_true", help="Validate and report without writing imports.")
     p_work_import_ingest.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_work_import_plan = import_sub.add_parser("plan", help="Preview the task or action a work import would create.")
+    p_work_import_plan.add_argument("import_id", help="Import id or unique prefix.")
+    p_work_import_plan.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_work_import_plan.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_work_import_plan_handoff = import_sub.add_parser("plan-handoff", help="Preview the Memory Handoff a work import would create.")
+    p_work_import_plan_handoff.add_argument("import_id", help="Import id or unique prefix.")
+    p_work_import_plan_handoff.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_work_import_plan_handoff.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_work_import_memory_care = import_sub.add_parser("memory-care", help="Import memory-care refresh queue entries.")
     p_work_import_memory_care.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
     p_work_import_memory_care.add_argument(
@@ -258,6 +446,16 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p_work_import_memory_care.add_argument("--dry-run", action="store_true", help="Report without writing imports.")
     p_work_import_memory_care.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_work_import_memory_refresh = import_sub.add_parser("memory-refresh", help="Import memory refresh candidates.")
+    p_work_import_memory_refresh.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
+    p_work_import_memory_refresh.add_argument(
+        "--queue",
+        type=Path,
+        default=None,
+        help="Refresh queue JSON. Defaults to memory/cards/decay/refresh-queue.json under target.",
+    )
+    p_work_import_memory_refresh.add_argument("--dry-run", action="store_true", help="Report without writing imports.")
+    p_work_import_memory_refresh.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_work_import_chat_sweep = import_sub.add_parser("chat-sweep", help="Import chat memory sweep issues.")
     p_work_import_chat_sweep.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
     p_work_import_chat_sweep.add_argument(
@@ -296,6 +494,12 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p_work_import_promote.add_argument("--source", default=None, help="Limit --all promotion to one source.")
     p_work_import_promote.add_argument("--metadata", action="append", default=[], help="Limit --all promotion by metadata key=value. May be repeated.")
+    p_work_import_promote.add_argument("--run", action="store_true", help="Promote one task import and immediately run it.")
+    p_work_import_promote_handoff = import_sub.add_parser("promote-handoff", help="Promote one reviewed work import into a Memory Handoff draft.")
+    p_work_import_promote_handoff.add_argument("import_id", help="Import id or unique prefix.")
+    p_work_import_promote_handoff.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
+    p_work_import_promote_handoff.add_argument("--run", action="store_true", help="For task imports, use the existing promote-and-run path.")
+    p_work_import_promote_handoff.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_work_import_dismiss = import_sub.add_parser("dismiss", help="Dismiss one pending work import.")
     p_work_import_dismiss.add_argument("import_id", nargs="?", help="Import id or unique prefix.")
     p_work_import_dismiss.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
@@ -359,6 +563,43 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Memory Handoff inbox. Defaults to configured dogfood inbox or .codex/memory-handoffs.",
     )
+
+    # chat
+    p_chat = sub.add_parser("chat", help="Inspect and import local chat surface exports.")
+    chat_sub = p_chat.add_subparsers(dest="chat_command", metavar="<chat-command>")
+    chat_sub.required = True
+    p_chat_surfaces = chat_sub.add_parser("surfaces", help="Manage local chat surface export config.")
+    surfaces_sub = p_chat_surfaces.add_subparsers(dest="surfaces_command", metavar="<surfaces-command>")
+    surfaces_sub.required = True
+    p_chat_surfaces_init = surfaces_sub.add_parser("init", help="Write a starter .brigade/chat-surfaces.toml.")
+    p_chat_surfaces_init.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
+    p_chat_surfaces_init.add_argument("--force", action="store_true", help="Overwrite an existing config.")
+    p_chat_surfaces_init.add_argument("--no-gitignore", action="store_true", help="Do not update managed .gitignore.")
+    p_chat_surfaces_list = surfaces_sub.add_parser("list", help="List configured chat surfaces.")
+    p_chat_surfaces_list.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_chat_surfaces_list.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_chat_surfaces_show = surfaces_sub.add_parser("show", help="Show one chat surface.")
+    p_chat_surfaces_show.add_argument("surface_id", help="Surface id.")
+    p_chat_surfaces_show.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_chat_surfaces_show.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_chat_surfaces_doctor = surfaces_sub.add_parser("doctor", help="Check chat surface config health.")
+    p_chat_surfaces_doctor.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_chat_surfaces_doctor.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_chat_sweep = chat_sub.add_parser("sweep", help="Validate, ingest, or import local chat sweep exports.")
+    sweep_sub = p_chat_sweep.add_subparsers(dest="sweep_command", metavar="<sweep-command>")
+    sweep_sub.required = True
+    p_chat_sweep_validate = sweep_sub.add_parser("validate", help="Validate a chat export finding file.")
+    p_chat_sweep_validate.add_argument("input_path", type=Path, help="Chat export JSON or JSONL file.")
+    p_chat_sweep_validate.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace context.")
+    p_chat_sweep_validate.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_chat_sweep_ingest = sweep_sub.add_parser("ingest", help="Normalize one configured chat surface export.")
+    p_chat_sweep_ingest.add_argument("surface_id", help="Surface id.")
+    p_chat_sweep_ingest.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
+    p_chat_sweep_ingest.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_chat_sweep_import = sweep_sub.add_parser("import-issues", help="Import normalized chat sweep issues.")
+    p_chat_sweep_import.add_argument("surface_id", help="Surface id.")
+    p_chat_sweep_import.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
+    p_chat_sweep_import.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
 
     # run
     p_run = sub.add_parser("run", help="Run a bounded cross-model orchestration task.")
@@ -480,6 +721,12 @@ def _build_parser() -> argparse.ArgumentParser:
     p_security_init = security_sub.add_parser("init", help="Write local security scan defaults.")
     p_security_init.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to configure.")
     p_security_init.add_argument("--force", action="store_true", help="Overwrite an existing security config.")
+    p_security_config = security_sub.add_parser("config", help="Show local security scan config.")
+    p_security_config.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_security_config.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_security_doctor = security_sub.add_parser("doctor", help="Check local security scanner health.")
+    p_security_doctor.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_security_doctor.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_security_fix = security_sub.add_parser("fix", help="Apply safe local security hygiene fixes.")
     p_security_fix.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
     p_security_fix.add_argument("--dry-run", action="store_true", help="Show changes without writing files.")
@@ -487,6 +734,15 @@ def _build_parser() -> argparse.ArgumentParser:
     p_security_review.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to review.")
     p_security_review.add_argument("--output-dir", type=Path, default=None, help="Security evidence bundle directory.")
     p_security_review.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_security_findings = security_sub.add_parser("findings", help="List local security findings.")
+    p_security_findings.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to review.")
+    p_security_findings.add_argument("--output-dir", type=Path, default=None, help="Security evidence bundle directory.")
+    p_security_findings.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_security_show = security_sub.add_parser("show", help="Show one local security finding.")
+    p_security_show.add_argument("finding_id", help="Finding id, id prefix, or fingerprint.")
+    p_security_show.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to review.")
+    p_security_show.add_argument("--output-dir", type=Path, default=None, help="Security evidence bundle directory.")
+    p_security_show.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_security_enrich = security_sub.add_parser("enrich", help="Enrich an existing security report.")
     p_security_enrich.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to enrich.")
     p_security_enrich.add_argument(
@@ -504,12 +760,12 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p_security_enrich.add_argument("--provider", choices=["local", "misp"], default=None, help="Override configured provider.")
     p_security_enrich.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
-    p_security_suppress = security_sub.add_parser("suppress", help="Suppress a reviewed security finding fingerprint.")
-    p_security_suppress.add_argument("fingerprint", help="Finding fingerprint to suppress.")
+    p_security_suppress = security_sub.add_parser("suppress", help="Suppress a reviewed security finding.")
+    p_security_suppress.add_argument("fingerprint", help="Finding id, id prefix, or fingerprint to suppress.")
     p_security_suppress.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
     p_security_suppress.add_argument("--reason", required=True, help="Required suppression reason.")
     p_security_unsuppress = security_sub.add_parser("unsuppress", help="Remove a security finding suppression.")
-    p_security_unsuppress.add_argument("fingerprint", help="Finding fingerprint to unsuppress.")
+    p_security_unsuppress.add_argument("fingerprint", help="Finding id, id prefix, or fingerprint to unsuppress.")
     p_security_unsuppress.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
     p_security_scan = security_sub.add_parser("scan", help="Run a read-only agent workspace security scan.")
     p_security_scan.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to scan.")
@@ -550,6 +806,169 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Append findings to the local Brigade work import inbox.",
     )
+
+    # tools
+    p_tools = sub.add_parser("tools", help="Inspect local portable tool and skill catalog.")
+    tools_sub = p_tools.add_subparsers(dest="tools_command", metavar="<tools-command>")
+    tools_sub.required = True
+    p_tools_init = tools_sub.add_parser("init", help="Write local tool catalog defaults.")
+    p_tools_init.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
+    p_tools_init.add_argument("--force", action="store_true", help="Overwrite an existing tools config.")
+    p_tools_init.add_argument("--no-gitignore", action="store_true", help="Do not update the target .gitignore.")
+    p_tools_list = tools_sub.add_parser("list", help="List portable tool catalog entries.")
+    p_tools_list.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_tools_list.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_tools_show = tools_sub.add_parser("show", help="Show one portable tool catalog entry.")
+    p_tools_show.add_argument("tool_id", help="Logical tool id.")
+    p_tools_show.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_tools_show.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_tools_describe = tools_sub.add_parser("describe", help="Describe one portable tool contract.")
+    p_tools_describe.add_argument("tool_id", help="Logical tool id.")
+    p_tools_describe.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_tools_describe.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_tools_contracts = tools_sub.add_parser("contracts", help="List portable tool contracts.")
+    p_tools_contracts.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_tools_contracts.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_tools_search = tools_sub.add_parser("search", help="Search portable tool catalog entries.")
+    p_tools_search.add_argument("query", help="Search query.")
+    p_tools_search.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_tools_search.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_tools_call = tools_sub.add_parser("call", help="Plan portable tool calls without executing them.")
+    tools_call_sub = p_tools_call.add_subparsers(dest="tools_call_command", metavar="<tools-call-command>")
+    tools_call_sub.required = True
+    p_tools_call_plan = tools_call_sub.add_parser("plan", help="Plan one portable tool call without executing it.")
+    p_tools_call_plan.add_argument("tool_id", help="Logical tool id.")
+    p_tools_call_plan.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_tools_call_plan.add_argument("--args", dest="args", default=None, help="Inline JSON object arguments.")
+    p_tools_call_plan.add_argument("--args-json", type=Path, default=None, help="Path to a JSON object argument file.")
+    p_tools_call_plan.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_tools_call_queue = tools_call_sub.add_parser("queue", help="Queue one planned portable tool call for review.")
+    p_tools_call_queue.add_argument("tool_id", help="Logical tool id.")
+    p_tools_call_queue.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
+    p_tools_call_queue.add_argument("--args", dest="args", default=None, help="Inline JSON object arguments.")
+    p_tools_call_queue.add_argument("--args-json", type=Path, default=None, help="Path to a JSON object argument file.")
+    p_tools_call_queue.add_argument("--include-blocked", action="store_true", help="Queue plans that have blockers.")
+    p_tools_call_queue.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_tools_call_list = tools_call_sub.add_parser("list", help="List queued portable tool calls.")
+    p_tools_call_list.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_tools_call_list.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_tools_call_show = tools_call_sub.add_parser("show", help="Show one queued portable tool call.")
+    p_tools_call_show.add_argument("call_id", help="Call id or unique prefix.")
+    p_tools_call_show.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_tools_call_show.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_tools_call_approve = tools_call_sub.add_parser("approve", help="Approve one queued portable tool call without executing it.")
+    p_tools_call_approve.add_argument("call_id", help="Call id or unique prefix.")
+    p_tools_call_approve.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
+    p_tools_call_approve.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_tools_call_reject = tools_call_sub.add_parser("reject", help="Reject one queued portable tool call.")
+    p_tools_call_reject.add_argument("call_id", help="Call id or unique prefix.")
+    p_tools_call_reject.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
+    p_tools_call_reject.add_argument("--reason", required=True, help="Review reason.")
+    p_tools_call_reject.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_tools_call_hold = tools_call_sub.add_parser("hold", help="Hold one queued portable tool call.")
+    p_tools_call_hold.add_argument("call_id", help="Call id or unique prefix.")
+    p_tools_call_hold.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
+    p_tools_call_hold.add_argument("--reason", required=True, help="Review reason.")
+    p_tools_call_hold.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_tools_call_run = tools_call_sub.add_parser("run", help="Run one approved portable tool call and write a local receipt.")
+    p_tools_call_run.add_argument("call_id", nargs="?", help="Call id or unique prefix.")
+    p_tools_call_run.add_argument("--next", action="store_true", help="Run the oldest approved portable tool call.")
+    p_tools_call_run.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
+    p_tools_call_run.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_tools_run = tools_sub.add_parser("run", help="Inspect portable tool execution history and replay plans.")
+    tools_run_sub = p_tools_run.add_subparsers(dest="tools_run_command", metavar="<tools-run-command>")
+    tools_run_sub.required = True
+    p_tools_run_list = tools_run_sub.add_parser("list", help="List local portable tool execution receipts.")
+    p_tools_run_list.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_tools_run_list.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_tools_run_show = tools_run_sub.add_parser("show", help="Show one local portable tool execution receipt.")
+    p_tools_run_show.add_argument("run_id", help="Run id or unique prefix.")
+    p_tools_run_show.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_tools_run_show.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_tools_run_latest = tools_run_sub.add_parser("latest", help="Show the latest local portable tool execution receipt.")
+    p_tools_run_latest.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_tools_run_latest.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_tools_run_replay = tools_run_sub.add_parser("replay", help="Queue a reviewed replay candidate from one run receipt.")
+    p_tools_run_replay.add_argument("run_id", help="Run id or unique prefix.")
+    p_tools_run_replay.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
+    p_tools_run_replay.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_tools_checkpoint = tools_sub.add_parser("checkpoint", help="Review and resume portable tool execution checkpoints.")
+    tools_checkpoint_sub = p_tools_checkpoint.add_subparsers(dest="tools_checkpoint_command", metavar="<tools-checkpoint-command>")
+    tools_checkpoint_sub.required = True
+    p_tools_checkpoint_list = tools_checkpoint_sub.add_parser("list", help="List local portable tool checkpoints.")
+    p_tools_checkpoint_list.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_tools_checkpoint_list.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_tools_checkpoint_show = tools_checkpoint_sub.add_parser("show", help="Show one local portable tool checkpoint.")
+    p_tools_checkpoint_show.add_argument("checkpoint_id", help="Checkpoint id or unique prefix.")
+    p_tools_checkpoint_show.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_tools_checkpoint_show.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_tools_checkpoint_approve = tools_checkpoint_sub.add_parser("approve", help="Approve one checkpoint for explicit resume.")
+    p_tools_checkpoint_approve.add_argument("checkpoint_id", help="Checkpoint id or unique prefix.")
+    p_tools_checkpoint_approve.add_argument("--choice", required=True, help="Allowed resume choice.")
+    p_tools_checkpoint_approve.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
+    p_tools_checkpoint_approve.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_tools_checkpoint_reject = tools_checkpoint_sub.add_parser("reject", help="Reject one checkpoint.")
+    p_tools_checkpoint_reject.add_argument("checkpoint_id", help="Checkpoint id or unique prefix.")
+    p_tools_checkpoint_reject.add_argument("--reason", required=True, help="Review reason.")
+    p_tools_checkpoint_reject.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
+    p_tools_checkpoint_reject.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_tools_checkpoint_resume = tools_checkpoint_sub.add_parser("resume", help="Resume one approved checkpoint.")
+    p_tools_checkpoint_resume.add_argument("checkpoint_id", help="Checkpoint id or unique prefix.")
+    p_tools_checkpoint_resume.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
+    p_tools_checkpoint_resume.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_tools_runtime = tools_sub.add_parser("runtime", help="Manage explicit local portable tool runtimes.")
+    tools_runtime_sub = p_tools_runtime.add_subparsers(dest="tools_runtime_command", metavar="<tools-runtime-command>")
+    tools_runtime_sub.required = True
+    p_tools_runtime_init = tools_runtime_sub.add_parser("init", help="Write a local portable tool runtime config.")
+    p_tools_runtime_init.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
+    p_tools_runtime_init.add_argument("--force", action="store_true", help="Overwrite existing runtime config.")
+    p_tools_runtime_list = tools_runtime_sub.add_parser("list", help="List configured portable tool runtimes.")
+    p_tools_runtime_list.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_tools_runtime_list.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_tools_runtime_show = tools_runtime_sub.add_parser("show", help="Show one portable tool runtime.")
+    p_tools_runtime_show.add_argument("runtime_id", help="Runtime id.")
+    p_tools_runtime_show.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_tools_runtime_show.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_tools_runtime_status = tools_runtime_sub.add_parser("status", help="Show portable tool runtime process status.")
+    p_tools_runtime_status.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_tools_runtime_status.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    for runtime_command in ("start", "stop", "restart"):
+        p_runtime_action = tools_runtime_sub.add_parser(runtime_command, help=f"{runtime_command.title()} one portable tool runtime.")
+        p_runtime_action.add_argument("runtime_id", help="Runtime id.")
+        p_runtime_action.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
+        p_runtime_action.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_tools_runtime_doctor = tools_runtime_sub.add_parser("doctor", help="Check portable tool runtime health.")
+    p_tools_runtime_doctor.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_tools_runtime_doctor.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_tools_policy = tools_sub.add_parser("policy", help="Inspect host-local portable tool execution policy.")
+    tools_policy_sub = p_tools_policy.add_subparsers(dest="tools_policy_command", metavar="<tools-policy-command>")
+    tools_policy_sub.required = True
+    p_tools_policy_init = tools_policy_sub.add_parser("init", help="Write a local portable tool execution policy.")
+    p_tools_policy_init.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
+    p_tools_policy_init.add_argument("--force", action="store_true", help="Overwrite existing policy config.")
+    p_tools_policy_show = tools_policy_sub.add_parser("show", help="Show local portable tool execution policy.")
+    p_tools_policy_show.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_tools_policy_show.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_tools_policy_doctor = tools_policy_sub.add_parser("doctor", help="Check portable tool execution policy health.")
+    p_tools_policy_doctor.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_tools_policy_doctor.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_tools_plan = tools_sub.add_parser("plan", help="Plan portable tool projection writes.")
+    p_tools_plan.add_argument("tool_id", nargs="?", help="Optional logical tool id.")
+    p_tools_plan.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_tools_plan.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_tools_apply = tools_sub.add_parser("apply", help="Explicitly write portable tool projections.")
+    p_tools_apply.add_argument("tool_id", nargs="?", help="Logical tool id.")
+    p_tools_apply.add_argument("--all", action="store_true", help="Apply all configured tool projections.")
+    p_tools_apply.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
+    p_tools_apply.add_argument("--dry-run", action="store_true", help="Plan writes without changing files.")
+    p_tools_apply.add_argument("--force", action="store_true", help="Overwrite unmanaged or locally edited projection files.")
+    p_tools_apply.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_tools_doctor = tools_sub.add_parser("doctor", help="Check portable tool catalog health.")
+    p_tools_doctor.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_tools_doctor.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_tools_import = tools_sub.add_parser("import-issues", help="Import tool catalog issues into the work inbox.")
+    p_tools_import.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
+    p_tools_import.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
 
     # handoff-template
     p_ht = sub.add_parser("handoff-template", help="Print the handoff TEMPLATE.md.")
@@ -711,6 +1130,35 @@ def main(argv=None) -> int:
             return handoff_cmd.doctor(target=args.target, sources=args.sources, json_output=args.json)
         if args.handoff_command == "lint":
             return handoff_cmd.lint(target=args.target, paths=args.paths, json_output=args.json)
+        if args.handoff_command == "list":
+            return handoff_cmd.list_drafts(
+                target=args.target,
+                sources=args.sources,
+                json_output=args.json,
+                limit=args.limit,
+            )
+        if args.handoff_command == "show":
+            return handoff_cmd.show_draft(
+                target=args.target,
+                draft_id=args.draft_id,
+                sources=args.sources,
+                json_output=args.json,
+            )
+        if args.handoff_command == "archive":
+            return handoff_cmd.archive_draft(
+                target=args.target,
+                draft_id=args.draft_id,
+                all_reviewed=args.all_reviewed,
+                reason=args.reason,
+                sources=args.sources,
+                json_output=args.json,
+            )
+        if args.handoff_command == "runs":
+            return handoff_cmd.runs(target=args.target, json_output=args.json, limit=args.limit)
+        if args.handoff_command == "run-show":
+            return handoff_cmd.run_show(target=args.target, run_id=args.run_id, json_output=args.json)
+        if args.handoff_command == "reconcile":
+            return handoff_cmd.reconcile(target=args.target, sources=args.sources, json_output=args.json)
         if args.handoff_command == "issues":
             return handoff_cmd.issues(
                 target=args.target,
@@ -738,6 +1186,61 @@ def main(argv=None) -> int:
             )
         parser.error(f"unknown handoff command: {args.handoff_command}")
         return 2
+    if cmd == "chat":
+        from . import chat_cmd
+
+        if args.chat_command == "surfaces":
+            if args.surfaces_command == "init":
+                return chat_cmd.surfaces_init(
+                    target=args.target,
+                    force=args.force,
+                    update_gitignore=not args.no_gitignore,
+                )
+            if args.surfaces_command == "list":
+                return chat_cmd.surfaces_list(target=args.target, json_output=args.json)
+            if args.surfaces_command == "show":
+                return chat_cmd.surfaces_show(target=args.target, surface_id=args.surface_id, json_output=args.json)
+            if args.surfaces_command == "doctor":
+                return chat_cmd.surfaces_doctor(target=args.target, json_output=args.json)
+            parser.error(f"unknown chat surfaces command: {args.surfaces_command}")
+            return 2
+        if args.chat_command == "sweep":
+            if args.sweep_command == "validate":
+                return chat_cmd.sweep_validate(target=args.target, input_path=args.input_path, json_output=args.json)
+            if args.sweep_command == "ingest":
+                return chat_cmd.sweep_ingest(target=args.target, surface_id=args.surface_id, json_output=args.json)
+            if args.sweep_command == "import-issues":
+                return chat_cmd.sweep_import_issues(target=args.target, surface_id=args.surface_id, json_output=args.json)
+            parser.error(f"unknown chat sweep command: {args.sweep_command}")
+            return 2
+        parser.error(f"unknown chat command: {args.chat_command}")
+        return 2
+    if cmd == "memory":
+        from . import memory_cmd
+
+        if args.memory_command == "care":
+            if args.memory_care_command == "init":
+                return memory_cmd.init(
+                    target=args.target,
+                    force=args.force,
+                    update_gitignore=not args.no_gitignore,
+                )
+            if args.memory_care_command == "scan":
+                return memory_cmd.scan(target=args.target, json_output=args.json)
+            if args.memory_care_command == "status":
+                return memory_cmd.status(target=args.target, json_output=args.json)
+            if args.memory_care_command == "doctor":
+                return memory_cmd.doctor(target=args.target, json_output=args.json)
+            if args.memory_care_command == "import-issues":
+                return memory_cmd.import_issues(
+                    target=args.target,
+                    dry_run=args.dry_run,
+                    json_output=args.json,
+                )
+            parser.error(f"unknown memory care command: {args.memory_care_command}")
+            return 2
+        parser.error(f"unknown memory command: {args.memory_command}")
+        return 2
     if cmd == "work":
         from . import work_cmd
 
@@ -761,6 +1264,118 @@ def main(argv=None) -> int:
             return work_cmd.resume(target=args.target)
         if args.work_command == "brief":
             return work_cmd.brief(target=args.target, limit=args.limit, json_output=args.json)
+        if args.work_command == "sweep":
+            return work_cmd.sweep(
+                target=args.target,
+                scanner_id=args.scanner,
+                all_matching=args.all,
+                include_disabled=args.include_disabled,
+                force=args.force,
+                ingest=not args.no_ingest,
+                json_output=args.json,
+            )
+        if args.work_command == "sweeps":
+            return work_cmd.sweeps(target=args.target, limit=args.limit, json_output=args.json)
+        if args.work_command == "sweep-show":
+            return work_cmd.sweep_show(target=args.target, sweep_id=args.sweep_id, json_output=args.json)
+        if args.work_command == "sweep-review":
+            return work_cmd.sweep_review(target=args.target, sweep_id=args.sweep_id, json_output=args.json)
+        if args.work_command == "inbox" and getattr(args, "inbox_command", None):
+            if args.inbox_command == "doctor":
+                return work_cmd.inbox_doctor(target=args.target, json_output=args.json)
+            if args.inbox_command == "archive":
+                return work_cmd.inbox_archive(target=args.target, json_output=args.json)
+            parser.error(f"unknown inbox command: {args.inbox_command}")
+            return 2
+        if args.work_command == "inbox":
+            return work_cmd.inbox(target=args.target, json_output=args.json, limit=args.limit)
+        if args.work_command == "backup":
+            if args.backup_command == "init":
+                return work_cmd.backup_init(
+                    target=args.target,
+                    force=args.force,
+                    update_gitignore=not args.no_gitignore,
+                )
+            if args.backup_command == "status":
+                return work_cmd.backup_status(target=args.target, json_output=args.json)
+            if args.backup_command == "doctor":
+                return work_cmd.backup_doctor(target=args.target, json_output=args.json)
+            if args.backup_command == "import-issues":
+                return work_cmd.backup_import_issues(target=args.target, json_output=args.json)
+            parser.error(f"unknown backup command: {args.backup_command}")
+            return 2
+        if args.work_command == "scanners":
+            if args.scanners_command == "init":
+                return work_cmd.scanners_init(
+                    target=args.target,
+                    force=args.force,
+                    update_gitignore=not args.no_gitignore,
+                )
+            if args.scanners_command == "list":
+                return work_cmd.scanners_list(target=args.target, json_output=args.json)
+            if args.scanners_command == "show":
+                return work_cmd.scanners_show(target=args.target, scanner_id=args.scanner_id, json_output=args.json)
+            if args.scanners_command == "plan":
+                return work_cmd.scanners_plan(target=args.target, json_output=args.json)
+            if args.scanners_command == "run":
+                return work_cmd.scanners_run(
+                    target=args.target,
+                    scanner_id=args.scanner_id,
+                    all_matching=args.all,
+                    due=args.due,
+                    include_disabled=args.include_disabled,
+                    force=args.force,
+                    ingest_output=args.ingest_output,
+                    json_output=args.json,
+                )
+            if args.scanners_command == "runs":
+                return work_cmd.scanners_runs(target=args.target, limit=args.limit, json_output=args.json)
+            if args.scanners_command == "run-show":
+                return work_cmd.scanners_run_show(target=args.target, run_id=args.run_id, json_output=args.json)
+            if args.scanners_command == "doctor":
+                return work_cmd.scanners_doctor(
+                    target=args.target,
+                    json_output=args.json,
+                    import_issues=args.import_issues,
+                )
+            parser.error(f"unknown scanners command: {args.scanners_command}")
+            return 2
+        if args.work_command == "review":
+            if args.review_command == "init":
+                return work_cmd.review_init(
+                    target=args.target,
+                    force=args.force,
+                    update_gitignore=not args.no_gitignore,
+                )
+            if args.review_command == "plan":
+                return work_cmd.review_plan(target=args.target, json_output=args.json)
+            if args.review_command == "run":
+                return work_cmd.review_run(
+                    target=args.target,
+                    reviewer_id=args.reviewer_id,
+                    all_matching=args.all,
+                    include_disabled=args.include_disabled,
+                    json_output=args.json,
+                )
+            if args.review_command == "runs":
+                return work_cmd.review_runs(target=args.target, limit=args.limit, json_output=args.json)
+            if args.review_command == "show":
+                return work_cmd.review_show(target=args.target, run_id=args.run_id, json_output=args.json)
+            if args.review_command == "import-findings":
+                return work_cmd.review_import_findings(
+                    target=args.target,
+                    run_id=args.run_id,
+                    dry_run=args.dry_run,
+                    json_output=args.json,
+                )
+            if args.review_command == "findings":
+                return work_cmd.review_findings(target=args.target, run_id=args.run_id, json_output=args.json)
+            if args.review_command == "finding-show":
+                return work_cmd.review_finding_show(target=args.target, finding_id=args.finding_id, json_output=args.json)
+            if args.review_command == "closeout":
+                return work_cmd.review_closeout(target=args.target, run_id=args.run_id, json_output=args.json)
+            parser.error(f"unknown review command: {args.review_command}")
+            return 2
         if args.work_command == "next":
             return work_cmd.next(target=args.target, json_output=args.json)
         if args.work_command == "tasks":
@@ -814,8 +1429,19 @@ def main(argv=None) -> int:
                     dry_run=args.dry_run,
                     json_output=args.json,
                 )
+            if args.import_command == "plan":
+                return work_cmd.import_plan(target=args.target, import_id=args.import_id, json_output=args.json)
+            if args.import_command == "plan-handoff":
+                return work_cmd.import_plan_handoff(target=args.target, import_id=args.import_id, json_output=args.json)
             if args.import_command == "memory-care":
                 return work_cmd.import_memory_care(
+                    target=args.target,
+                    queue=args.queue,
+                    dry_run=args.dry_run,
+                    json_output=args.json,
+                )
+            if args.import_command == "memory-refresh":
+                return work_cmd.import_memory_refresh(
                     target=args.target,
                     queue=args.queue,
                     dry_run=args.dry_run,
@@ -847,6 +1473,14 @@ def main(argv=None) -> int:
                     kind=args.kind,
                     source=args.source,
                     metadata=args.metadata,
+                    run_after=args.run,
+                )
+            if args.import_command == "promote-handoff":
+                return work_cmd.import_promote_handoff(
+                    target=args.target,
+                    import_id=args.import_id,
+                    run_after=args.run,
+                    json_output=args.json,
                 )
             if args.import_command == "dismiss":
                 return work_cmd.import_dismiss(
@@ -982,10 +1616,23 @@ def main(argv=None) -> int:
 
         if args.security_command == "init":
             return security_cmd.init(target=args.target, force=args.force)
+        if args.security_command == "config":
+            return security_cmd.show_config(target=args.target, json_output=args.json)
+        if args.security_command == "doctor":
+            return security_cmd.doctor(target=args.target, json_output=args.json)
         if args.security_command == "fix":
             return security_cmd.fix(target=args.target, dry_run=args.dry_run)
         if args.security_command == "review":
             return security_cmd.review(target=args.target, output_dir=args.output_dir, json_output=args.json)
+        if args.security_command == "findings":
+            return security_cmd.findings(target=args.target, output_dir=args.output_dir, json_output=args.json)
+        if args.security_command == "show":
+            return security_cmd.show(
+                target=args.target,
+                finding_id=args.finding_id,
+                output_dir=args.output_dir,
+                json_output=args.json,
+            )
         if args.security_command == "enrich":
             return security_cmd.enrich(
                 target=args.target,
@@ -1009,6 +1656,141 @@ def main(argv=None) -> int:
                 output_dir=args.output_dir,
             )
         parser.error(f"unknown security command: {args.security_command}")
+        return 2
+    if cmd == "tools":
+        from . import tools_cmd
+
+        if args.tools_command == "init":
+            return tools_cmd.init(
+                target=args.target,
+                force=args.force,
+                update_gitignore=not args.no_gitignore,
+            )
+        if args.tools_command == "list":
+            return tools_cmd.list_tools(target=args.target, json_output=args.json)
+        if args.tools_command == "show":
+            return tools_cmd.show(target=args.target, tool_id=args.tool_id, json_output=args.json)
+        if args.tools_command == "describe":
+            return tools_cmd.describe(target=args.target, tool_id=args.tool_id, json_output=args.json)
+        if args.tools_command == "contracts":
+            return tools_cmd.contracts(target=args.target, json_output=args.json)
+        if args.tools_command == "search":
+            return tools_cmd.search(target=args.target, query=args.query, json_output=args.json)
+        if args.tools_command == "call":
+            if args.tools_call_command == "plan":
+                return tools_cmd.call_plan(
+                    target=args.target,
+                    tool_id=args.tool_id,
+                    args=args.args,
+                    args_json=args.args_json,
+                    json_output=args.json,
+                )
+            if args.tools_call_command == "queue":
+                return tools_cmd.call_queue(
+                    target=args.target,
+                    tool_id=args.tool_id,
+                    args=args.args,
+                    args_json=args.args_json,
+                    include_blocked=args.include_blocked,
+                    json_output=args.json,
+                )
+            if args.tools_call_command == "list":
+                return tools_cmd.call_list(target=args.target, json_output=args.json)
+            if args.tools_call_command == "show":
+                return tools_cmd.call_show(target=args.target, call_id=args.call_id, json_output=args.json)
+            if args.tools_call_command == "approve":
+                return tools_cmd.call_approve(target=args.target, call_id=args.call_id, json_output=args.json)
+            if args.tools_call_command == "reject":
+                return tools_cmd.call_reject(target=args.target, call_id=args.call_id, reason=args.reason, json_output=args.json)
+            if args.tools_call_command == "hold":
+                return tools_cmd.call_hold(target=args.target, call_id=args.call_id, reason=args.reason, json_output=args.json)
+            if args.tools_call_command == "run":
+                return tools_cmd.call_run(
+                    target=args.target,
+                    call_id=args.call_id,
+                    next_call=args.next,
+                    json_output=args.json,
+                )
+            parser.error(f"unknown tools call command: {args.tools_call_command}")
+            return 2
+        if args.tools_command == "run":
+            if args.tools_run_command == "list":
+                return tools_cmd.run_list(target=args.target, json_output=args.json)
+            if args.tools_run_command == "show":
+                return tools_cmd.run_show(target=args.target, run_id=args.run_id, json_output=args.json)
+            if args.tools_run_command == "latest":
+                return tools_cmd.run_latest(target=args.target, json_output=args.json)
+            if args.tools_run_command == "replay":
+                return tools_cmd.run_replay(target=args.target, run_id=args.run_id, json_output=args.json)
+            parser.error(f"unknown tools run command: {args.tools_run_command}")
+            return 2
+        if args.tools_command == "checkpoint":
+            if args.tools_checkpoint_command == "list":
+                return tools_cmd.checkpoint_list(target=args.target, json_output=args.json)
+            if args.tools_checkpoint_command == "show":
+                return tools_cmd.checkpoint_show(target=args.target, checkpoint_id=args.checkpoint_id, json_output=args.json)
+            if args.tools_checkpoint_command == "approve":
+                return tools_cmd.checkpoint_approve(
+                    target=args.target,
+                    checkpoint_id=args.checkpoint_id,
+                    choice=args.choice,
+                    json_output=args.json,
+                )
+            if args.tools_checkpoint_command == "reject":
+                return tools_cmd.checkpoint_reject(
+                    target=args.target,
+                    checkpoint_id=args.checkpoint_id,
+                    reason=args.reason,
+                    json_output=args.json,
+                )
+            if args.tools_checkpoint_command == "resume":
+                return tools_cmd.checkpoint_resume(target=args.target, checkpoint_id=args.checkpoint_id, json_output=args.json)
+            parser.error(f"unknown tools checkpoint command: {args.tools_checkpoint_command}")
+            return 2
+        if args.tools_command == "runtime":
+            if args.tools_runtime_command == "init":
+                return tools_cmd.runtime_init(target=args.target, force=args.force)
+            if args.tools_runtime_command == "list":
+                return tools_cmd.runtime_list(target=args.target, json_output=args.json)
+            if args.tools_runtime_command == "show":
+                return tools_cmd.runtime_show(target=args.target, runtime_id=args.runtime_id, json_output=args.json)
+            if args.tools_runtime_command == "status":
+                return tools_cmd.runtime_status(target=args.target, json_output=args.json)
+            if args.tools_runtime_command == "start":
+                return tools_cmd.runtime_start(target=args.target, runtime_id=args.runtime_id, json_output=args.json)
+            if args.tools_runtime_command == "stop":
+                return tools_cmd.runtime_stop(target=args.target, runtime_id=args.runtime_id, json_output=args.json)
+            if args.tools_runtime_command == "restart":
+                return tools_cmd.runtime_restart(target=args.target, runtime_id=args.runtime_id, json_output=args.json)
+            if args.tools_runtime_command == "doctor":
+                return tools_cmd.runtime_doctor(target=args.target, json_output=args.json)
+            parser.error(f"unknown tools runtime command: {args.tools_runtime_command}")
+            return 2
+        if args.tools_command == "policy":
+            if args.tools_policy_command == "init":
+                return tools_cmd.policy_init(target=args.target, force=args.force)
+            if args.tools_policy_command == "show":
+                return tools_cmd.policy_show(target=args.target, json_output=args.json)
+            if args.tools_policy_command == "doctor":
+                return tools_cmd.policy_doctor(target=args.target, json_output=args.json)
+            parser.error(f"unknown tools policy command: {args.tools_policy_command}")
+            return 2
+        if args.tools_command == "plan":
+            return tools_cmd.plan(target=args.target, tool_id=args.tool_id, json_output=args.json)
+        if args.tools_command == "apply":
+            return tools_cmd.apply(
+                target=args.target,
+                tool_id=args.tool_id,
+                all_tools=args.all,
+                dry_run=args.dry_run,
+                force=args.force,
+                json_output=args.json,
+            )
+        if args.tools_command == "doctor":
+            return tools_cmd.doctor(target=args.target, json_output=args.json)
+        if args.tools_command == "import-issues":
+            return tools_cmd.import_issues(target=args.target, json_output=args.json)
+        parser.error(f"unknown tools command: {args.tools_command}")
         return 2
     if cmd == "handoff-template":
         from . import handoff as handoff_mod
