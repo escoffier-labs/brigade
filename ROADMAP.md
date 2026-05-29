@@ -41,6 +41,7 @@ Goal: make Brigade a safe target for local automations that discover useful work
 - Keep reviewed Memory Handoff drafts visible until the operator closes them out. Status: implemented with `brigade handoff list`, `show`, and `archive`, draft queue health in `work brief` and `work doctor`, and promoted-import handoff reference checks in `work inbox doctor`, without running the canonical ingestor.
 - Connect local handoff ingestor outcomes back to draft review state. Status: implemented with normalized receipts under `.brigade/handoffs/ingest-runs/`, `brigade handoff runs`, `run-show`, `reconcile`, ingestion status in draft list/show, archive outcome metadata, and daily-loop warnings for stale unreconciled drafts, without running the ingestor.
 - Run explicit multi-harness code review producers and route findings through the scanner inbox. Status: implemented with gitignored `.brigade/reviews.toml`, `brigade work review`, local receipts under `.brigade/reviews/runs/`, normalized `code-review` findings, daily brief surfacing, and work doctor checks, without automatic fixes or remote mutation.
+- Close out imported review findings against downstream work. Status: implemented with `brigade work review findings`, `finding-show`, `closeout`, source-fingerprint re-review detection, task review evidence, and daily-loop warnings for unclosed review runs.
 
 ## Later Phase: Chat Surface Scanners
 

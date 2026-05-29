@@ -649,6 +649,17 @@ def _task_summary(task: dict[str, Any]) -> dict[str, Any]:
     }
     if isinstance(task.get("template"), str):
         summary["template"] = task["template"]
+    metadata = task.get("metadata") if isinstance(task.get("metadata"), dict) else {}
+    closeouts = metadata.get("review_closeouts")
+    if isinstance(closeouts, list):
+        review_count = len([item for item in closeouts if isinstance(item, dict)])
+        unresolved = sum(
+            int(item.get("unresolved_count") or 0)
+            for item in closeouts
+            if isinstance(item, dict)
+        )
+        summary["review_closeout_count"] = review_count
+        summary["review_unresolved_count"] = unresolved
     issue = _task_issue_metadata(task)
     if issue:
         summary["issue"] = issue
@@ -2763,7 +2774,11 @@ def _normalize_review_finding(value: object, *, reviewer_id: str, run_id: str, r
         normalized["finding_id"] = finding_id.strip()
     else:
         normalized["finding_id"] = _stable_hash(normalized)[:12]
-    normalized["source_fingerprint"] = _review_finding_fingerprint(normalized, reviewer_id=reviewer_id)
+    source_fingerprint = value.get("source_fingerprint")
+    if isinstance(source_fingerprint, str) and source_fingerprint.strip():
+        normalized["source_fingerprint"] = source_fingerprint.strip()
+    else:
+        normalized["source_fingerprint"] = _review_finding_fingerprint(normalized, reviewer_id=reviewer_id)
     normalized["receipt_path"] = _review_receipt_path(run)
     if run.get("findings_path"):
         normalized["findings_path"] = run.get("findings_path")
@@ -3170,6 +3185,203 @@ def _review_pending_finding(target: Path) -> dict[str, Any] | None:
     return _import_summary(candidates[0])
 
 
+def _review_imports(target: Path, *, run_id: str | None = None) -> list[dict[str, Any]]:
+    items = [
+        item
+        for item in _read_imports(target)
+        if isinstance(item, dict) and item.get("source") == "code-review"
+    ]
+    if run_id is None:
+        return items
+    filtered: list[dict[str, Any]] = []
+    for item in items:
+        metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+        if metadata.get("review_run_id") == run_id:
+            filtered.append(item)
+    return filtered
+
+
+def _review_tasks_by_id(target: Path) -> dict[str, dict[str, Any]]:
+    return {
+        str(task.get("id")): task
+        for task in _read_task_ledger(target).get("tasks", [])
+        if isinstance(task, dict) and isinstance(task.get("id"), str)
+    }
+
+
+def _review_current_fingerprints(findings: list[dict[str, Any]]) -> dict[str, str]:
+    values: dict[str, str] = {}
+    for finding in findings:
+        finding_id = finding.get("finding_id")
+        fingerprint = finding.get("source_fingerprint")
+        if isinstance(finding_id, str) and isinstance(fingerprint, str):
+            values[finding_id] = fingerprint
+    return values
+
+
+def _review_finding_resolution(
+    item: dict[str, Any],
+    *,
+    tasks_by_id: dict[str, dict[str, Any]],
+    current_fingerprints: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+    finding_id = str(metadata.get("review_finding_id") or "")
+    source_fingerprint = metadata.get("source_fingerprint")
+    current_fingerprint = current_fingerprints.get(finding_id) if current_fingerprints else None
+    source_changed = bool(
+        isinstance(current_fingerprint, str)
+        and isinstance(source_fingerprint, str)
+        and current_fingerprint
+        and source_fingerprint
+        and current_fingerprint != source_fingerprint
+    )
+    task_id = item.get("task_id")
+    task = tasks_by_id.get(str(task_id)) if isinstance(task_id, str) else None
+    status = str(item.get("status", "pending"))
+    dismiss_reason = item.get("dismiss_reason")
+    task_done = bool(task and task.get("status") == "done")
+    if source_changed:
+        state = "re_review"
+        resolved = False
+    elif status == "dismissed" and isinstance(dismiss_reason, str) and dismiss_reason.strip():
+        state = "dismissed"
+        resolved = True
+    elif status == "promoted" and task_done:
+        state = "completed"
+        resolved = True
+    elif status == "promoted":
+        state = "promoted"
+        resolved = False
+    elif status == "dismissed":
+        state = "dismissed_without_reason"
+        resolved = False
+    else:
+        state = "pending"
+        resolved = False
+    return {
+        "resolved": resolved,
+        "resolution_state": state,
+        "source_changed": source_changed,
+        "current_source_fingerprint": current_fingerprint,
+        "task": task,
+    }
+
+
+def _review_finding_summary(
+    item: dict[str, Any],
+    *,
+    tasks_by_id: dict[str, dict[str, Any]],
+    current_fingerprints: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+    resolution = _review_finding_resolution(item, tasks_by_id=tasks_by_id, current_fingerprints=current_fingerprints)
+    task = resolution.get("task") if isinstance(resolution.get("task"), dict) else None
+    return {
+        "import_id": item.get("id"),
+        "finding_id": metadata.get("review_finding_id"),
+        "reviewer_id": metadata.get("reviewer_id"),
+        "review_run_id": metadata.get("review_run_id"),
+        "severity": metadata.get("severity"),
+        "category": metadata.get("category"),
+        "path": metadata.get("path"),
+        "line": metadata.get("line"),
+        "status": item.get("status", "pending"),
+        "resolution_state": resolution["resolution_state"],
+        "resolved": resolution["resolved"],
+        "source_changed": resolution["source_changed"],
+        "source_fingerprint": metadata.get("source_fingerprint"),
+        "current_source_fingerprint": resolution.get("current_source_fingerprint"),
+        "task_id": item.get("task_id"),
+        "task_status": task.get("status") if task else None,
+        "dismiss_reason": item.get("dismiss_reason"),
+        "completed_at": task.get("completed_at") if task else None,
+        "text": item.get("text"),
+        "metadata": metadata,
+    }
+
+
+def _review_findings_payload(target: Path, *, run_id: str | None = None) -> dict[str, Any]:
+    target = target.expanduser().resolve()
+    tasks_by_id = _review_tasks_by_id(target)
+    imports = _review_imports(target, run_id=run_id)
+    current_fingerprints_by_run: dict[str, dict[str, str]] = {}
+    wanted_run_ids = {
+        str(metadata.get("review_run_id"))
+        for item in imports
+        if isinstance((metadata := item.get("metadata")), dict) and isinstance(metadata.get("review_run_id"), str)
+    }
+    for run in _review_receipts(target):
+        review_run_id = run.get("run_id")
+        findings_path = run.get("findings_path")
+        if not isinstance(review_run_id, str) or review_run_id not in wanted_run_ids:
+            continue
+        if not isinstance(findings_path, str) or not Path(findings_path).is_file():
+            continue
+        findings, _ = _load_review_findings(
+            Path(findings_path),
+            reviewer_id=str(run.get("reviewer_id") or ""),
+            run_id=review_run_id,
+            run=run,
+        )
+        current_fingerprints_by_run[review_run_id] = _review_current_fingerprints(findings)
+    summaries = []
+    for item in imports:
+        metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+        item_run_id = metadata.get("review_run_id")
+        current_fingerprints = current_fingerprints_by_run.get(str(item_run_id)) if isinstance(item_run_id, str) else None
+        summaries.append(
+            _review_finding_summary(item, tasks_by_id=tasks_by_id, current_fingerprints=current_fingerprints)
+        )
+    groups: dict[str, dict[str, int]] = {
+        "by_reviewer": {},
+        "by_run": {},
+        "by_severity": {},
+        "by_category": {},
+        "by_path": {},
+        "by_status": {},
+        "by_resolution": {},
+    }
+    for item in summaries:
+        for group_name, key_name in (
+            ("by_reviewer", "reviewer_id"),
+            ("by_run", "review_run_id"),
+            ("by_severity", "severity"),
+            ("by_category", "category"),
+            ("by_path", "path"),
+            ("by_status", "status"),
+            ("by_resolution", "resolution_state"),
+        ):
+            value = str(item.get(key_name) or "unknown")
+            groups[group_name][value] = groups[group_name].get(value, 0) + 1
+    unresolved = [item for item in summaries if not item["resolved"]]
+    return {
+        "target": str(target),
+        "count": len(summaries),
+        "unresolved_count": len(unresolved),
+        "findings": summaries,
+        "groups": groups,
+        "top_unresolved": unresolved[0] if unresolved else None,
+    }
+
+
+def _find_review_finding(target: Path, finding_id_or_import_id: str) -> tuple[dict[str, Any] | None, str | None]:
+    payload = _review_findings_payload(target)
+    matches = [
+        item
+        for item in payload["findings"]
+        if item.get("import_id") == finding_id_or_import_id
+        or item.get("finding_id") == finding_id_or_import_id
+        or (isinstance(item.get("import_id"), str) and item["import_id"].startswith(finding_id_or_import_id))
+        or (isinstance(item.get("finding_id"), str) and item["finding_id"].startswith(finding_id_or_import_id))
+    ]
+    if not matches:
+        return None, f"review finding not found: {finding_id_or_import_id}"
+    if len(matches) > 1:
+        return None, f"review finding id is ambiguous: {finding_id_or_import_id}"
+    return matches[0], None
+
+
 def _review_malformed_findings(target: Path, runs: list[dict[str, Any]], reviewers: list[dict[str, Any]]) -> list[str]:
     items: list[tuple[str, Path, dict[str, Any]]] = []
     for run in runs[:20]:
@@ -3252,6 +3464,10 @@ def _review_health(target: Path) -> dict[str, Any]:
     done_tasks = [task for task in ledger.get("tasks", []) if isinstance(task, dict) and task.get("status") == "done"]
     if enabled and done_tasks and latest_success is None:
         checks.append({"status": WARN, "name": "review_completed_tasks", "detail": f"{len(done_tasks)} completed task(s) have no successful review receipt"})
+    unclosed = [run for run in receipts if run.get("status") == "completed" and not isinstance(run.get("closeout"), dict)]
+    if unclosed:
+        checks.append({"status": WARN, "name": "review_runs_unclosed", "detail": ", ".join(str(run.get("run_id")) for run in unclosed[:5])})
+    findings_payload = _review_findings_payload(target)
     top_pending = _review_pending_finding(target)
     return {
         "target": str(target),
@@ -3260,9 +3476,206 @@ def _review_health(target: Path) -> dict[str, Any]:
         "plan": plan,
         "latest_run": receipts[0] if receipts else None,
         "latest_success": latest_success,
+        "latest_unclosed_run": unclosed[0] if unclosed else None,
         "top_pending_finding": top_pending,
+        "top_unresolved_finding": findings_payload["top_unresolved"],
         "pending_finding_count": len([item for item in _pending_imports(target) if item.get("source") == "code-review"]),
+        "unresolved_finding_count": findings_payload["unresolved_count"],
     }
+
+
+def _review_closeout_path(run: dict[str, Any]) -> Path | None:
+    value = run.get("path")
+    if isinstance(value, str) and value:
+        return Path(value) / "closeout.json"
+    return None
+
+
+def _resolve_review_run(target: Path, run_id: str) -> tuple[dict[str, Any] | None, str | None]:
+    receipts = _review_receipts(target)
+    if run_id == "latest":
+        return (receipts[0], None) if receipts else (None, "review run not found: latest")
+    matches = [run for run in receipts if str(run.get("run_id") or "").startswith(run_id)]
+    if not matches:
+        return None, f"review run not found: {run_id}"
+    if len(matches) > 1:
+        return None, f"review run id is ambiguous: {run_id}"
+    return matches[0], None
+
+
+def _review_stamp_task_closeouts(target: Path, closeout: dict[str, Any]) -> list[str]:
+    ledger = _read_task_ledger(target)
+    wanted_task_ids = {
+        str(item.get("task_id"))
+        for item in closeout.get("findings", [])
+        if isinstance(item, dict) and isinstance(item.get("task_id"), str)
+    }
+    wanted_task_ids.update(
+        str(item)
+        for item in closeout.get("completed_task_ids_reviewed", [])
+        if isinstance(item, str)
+    )
+    stamped: list[str] = []
+    changed = False
+    for task in ledger.get("tasks", []):
+        if not isinstance(task, dict) or task.get("status") != "done" or task.get("id") not in wanted_task_ids:
+            continue
+        metadata = task.setdefault("metadata", {})
+        if not isinstance(metadata, dict):
+            metadata = {}
+            task["metadata"] = metadata
+        closeouts = metadata.get("review_closeouts")
+        if not isinstance(closeouts, list):
+            closeouts = []
+            metadata["review_closeouts"] = closeouts
+        if any(isinstance(item, dict) and item.get("review_run_id") == closeout.get("run_id") for item in closeouts):
+            continue
+        closeouts.append(
+            {
+                "review_run_id": closeout.get("run_id"),
+                "closed_at": closeout.get("closed_at"),
+                "finding_count": closeout.get("finding_count"),
+                "unresolved_count": closeout.get("unresolved_count"),
+                "resolved": closeout.get("resolved"),
+            }
+        )
+        stamped.append(str(task.get("id")))
+        changed = True
+    if changed:
+        _write_task_ledger(target, ledger)
+    return stamped
+
+
+def _review_stamp_latest_session(target: Path, closeout: dict[str, Any]) -> str | None:
+    sessions, _ = _collect_sessions(_work_root(target))
+    if not sessions:
+        return None
+    session_dir, payload = sessions[0]
+    closeouts = payload.get("review_closeouts")
+    if not isinstance(closeouts, list):
+        closeouts = []
+        payload["review_closeouts"] = closeouts
+    if not any(isinstance(item, dict) and item.get("review_run_id") == closeout.get("run_id") for item in closeouts):
+        closeouts.append(
+            {
+                "review_run_id": closeout.get("run_id"),
+                "closed_at": closeout.get("closed_at"),
+                "finding_count": closeout.get("finding_count"),
+                "unresolved_count": closeout.get("unresolved_count"),
+                "resolved": closeout.get("resolved"),
+            }
+        )
+        _write_json(session_dir / "session.json", payload)
+    return str(session_dir)
+
+
+def _review_closeout_payload(target: Path, run_id: str, *, write: bool = False) -> tuple[dict[str, Any] | None, int]:
+    target = target.expanduser().resolve()
+    run, error = _resolve_review_run(target, run_id)
+    if run is None:
+        print(f"error: {error}", file=sys.stderr)
+        return None, 1 if error and "not found" in error else 2
+    findings: list[dict[str, Any]] = []
+    current_errors: list[str] = []
+    findings_path = run.get("findings_path")
+    if isinstance(findings_path, str) and findings_path and Path(findings_path).is_file():
+        findings, current_errors = _load_review_findings(
+            Path(findings_path),
+            reviewer_id=str(run.get("reviewer_id") or ""),
+            run_id=str(run.get("run_id") or ""),
+            run=run,
+        )
+    tasks_by_id = _review_tasks_by_id(target)
+    current_fingerprints = _review_current_fingerprints(findings)
+    imported = _review_imports(target, run_id=str(run.get("run_id") or ""))
+    summaries = [
+        _review_finding_summary(item, tasks_by_id=tasks_by_id, current_fingerprints=current_fingerprints)
+        for item in imported
+    ]
+    imported_finding_ids = {
+        str(item.get("finding_id"))
+        for item in summaries
+        if item.get("finding_id")
+    }
+    for finding in findings:
+        finding_id = str(finding.get("finding_id") or "")
+        if finding_id and finding_id in imported_finding_ids:
+            continue
+        summaries.append(
+            {
+                "import_id": None,
+                "finding_id": finding.get("finding_id"),
+                "reviewer_id": finding.get("reviewer_id"),
+                "review_run_id": finding.get("run_id"),
+                "severity": finding.get("severity"),
+                "category": finding.get("category"),
+                "path": finding.get("path"),
+                "line": finding.get("line"),
+                "status": "not_imported",
+                "resolution_state": "not_imported",
+                "resolved": False,
+                "source_changed": False,
+                "source_fingerprint": finding.get("source_fingerprint"),
+                "current_source_fingerprint": finding.get("source_fingerprint"),
+                "task_id": None,
+                "task_status": None,
+                "dismiss_reason": None,
+                "completed_at": None,
+                "text": finding.get("rationale"),
+                "metadata": finding,
+            }
+        )
+    pending = [item for item in summaries if item["status"] == "pending"]
+    dismissed = [item for item in summaries if item["status"] == "dismissed"]
+    promoted = [item for item in summaries if item["status"] == "promoted"]
+    completed = [item for item in summaries if item["resolution_state"] == "completed"]
+    unresolved = [item for item in summaries if not item["resolved"]]
+    now = _now().isoformat()
+    closeout = {
+        "run_id": run.get("run_id"),
+        "reviewer_id": run.get("reviewer_id"),
+        "closed_at": now,
+        "status": "unresolved" if unresolved or current_errors else "resolved",
+        "resolved": not unresolved and not current_errors,
+        "finding_count": len(findings),
+        "imported_finding_count": len(summaries),
+        "pending_imports": len(pending),
+        "dismissed_findings": len(dismissed),
+        "promoted_tasks": len(promoted),
+        "completed_tasks": len(completed),
+        "unresolved_count": len(unresolved),
+        "changed_source_count": len([item for item in summaries if item.get("source_changed")]),
+        "current_findings_errors": current_errors,
+        "findings": summaries,
+        "unresolved_findings": unresolved,
+        "completed_task_ids_reviewed": run.get("completed_task_ids_reviewed") if isinstance(run.get("completed_task_ids_reviewed"), list) else [],
+    }
+    if write:
+        stamped_tasks = _review_stamp_task_closeouts(target, closeout)
+        stamped_session = _review_stamp_latest_session(target, closeout)
+        closeout["stamped_task_ids"] = stamped_tasks
+        closeout["stamped_session_path"] = stamped_session
+        run["closeout"] = {
+            key: closeout[key]
+            for key in (
+                "closed_at",
+                "status",
+                "resolved",
+                "finding_count",
+                "imported_finding_count",
+                "unresolved_count",
+                "changed_source_count",
+            )
+        }
+        if _review_closeout_path(run) is not None:
+            _write_json(_review_closeout_path(run), closeout)
+        if run.get("path"):
+            _write_json(Path(str(run["path"])) / "receipt.json", run)
+    return {
+        "target": str(target),
+        "run": run,
+        "closeout": closeout,
+    }, 0 if closeout["resolved"] else 1
 
 
 def _scanner_plan_payload(target: Path) -> dict[str, Any]:
@@ -4071,8 +4484,11 @@ def _brief_payload(target: Path, *, limit: int = 3) -> dict[str, Any]:
             "checks": review_health["checks"],
             "latest_run": review_health["latest_run"],
             "latest_success": review_health["latest_success"],
+            "latest_unclosed_run": review_health["latest_unclosed_run"],
             "pending_finding_count": review_health["pending_finding_count"],
+            "unresolved_finding_count": review_health["unresolved_finding_count"],
             "top_pending_finding": review_health["top_pending_finding"],
+            "top_unresolved_finding": review_health["top_unresolved_finding"],
         },
         "chat_surfaces": {
             "config_path": chat_health["config_path"],
@@ -4794,12 +5210,20 @@ def brief(*, target: Path, limit: int = 3, json_output: bool = False) -> int:
                 f"review_latest: {latest_review.get('run_id')} "
                 f"{latest_review.get('reviewer_id')} [{latest_review.get('status')}]"
             )
+        unclosed_review = code_review.get("latest_unclosed_run") if isinstance(code_review.get("latest_unclosed_run"), dict) else None
+        if unclosed_review:
+            print(f"review_unclosed: {unclosed_review.get('run_id')} {unclosed_review.get('reviewer_id')}")
         if code_review.get("pending_finding_count"):
             print(f"review_pending_findings: {code_review.get('pending_finding_count')}")
+        if code_review.get("unresolved_finding_count"):
+            print(f"review_unresolved_findings: {code_review.get('unresolved_finding_count')}")
         top_review = code_review.get("top_pending_finding") if isinstance(code_review.get("top_pending_finding"), dict) else None
+        if not top_review:
+            top_review = code_review.get("top_unresolved_finding") if isinstance(code_review.get("top_unresolved_finding"), dict) else None
         if top_review:
-            print(f"review_top_finding: {top_review.get('id')} {_short(str(top_review.get('text', '')))}")
-            print(f"review_top_command: brigade work import plan {top_review.get('id')}")
+            finding_id = top_review.get("id") or top_review.get("import_id")
+            print(f"review_top_finding: {finding_id} {_short(str(top_review.get('text', '')))}")
+            print(f"review_top_command: brigade work review finding-show {finding_id}")
 
     handoff_issues = payload.get("handoff_issues")
     if isinstance(handoff_issues, dict) and handoff_issues.get("count"):
@@ -5012,6 +5436,19 @@ def task_show(*, target: Path, task_id: str) -> int:
         print("metadata:")
         for key in sorted(metadata):
             print(f"  {key}: {metadata[key]}")
+    closeouts = metadata.get("review_closeouts")
+    if isinstance(closeouts, list) and closeouts:
+        print(f"review_closeouts: {len(closeouts)}")
+        for item in closeouts:
+            if not isinstance(item, dict):
+                continue
+            print(
+                "  - "
+                f"{item.get('review_run_id')} "
+                f"resolved={item.get('resolved')} "
+                f"findings={item.get('finding_count')} "
+                f"unresolved={item.get('unresolved_count')}"
+            )
     if task.get("completed_at"):
         print(f"completed_at: {task['completed_at']}")
     if task.get("completed_session_title"):
@@ -6995,6 +7432,101 @@ def review_import_findings(*, target: Path, run_id: str, json_output: bool = Fal
     for item in imported:
         print(f"- {item.get('id')} [{item.get('kind')}] {_short(str(item.get('text', '')))}")
     return 0
+
+
+def review_findings(*, target: Path, json_output: bool = False, run_id: str | None = None) -> int:
+    target = target.expanduser().resolve()
+    if not target.is_dir():
+        print(f"error: --target is not a directory: {target}", file=sys.stderr)
+        return 2
+    payload = _review_findings_payload(target, run_id=run_id)
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+    print(f"review findings: {target}")
+    print(f"findings: {payload['count']}")
+    print(f"unresolved: {payload['unresolved_count']}")
+    groups = payload["groups"]
+    for group_name in ("by_reviewer", "by_run", "by_severity", "by_category", "by_status", "by_resolution"):
+        values = groups.get(group_name) if isinstance(groups.get(group_name), dict) else {}
+        if not values:
+            continue
+        print(f"{group_name}:")
+        for key, count in values.items():
+            print(f"  {key}: {count}")
+    for item in payload["findings"][:20]:
+        print(
+            f"- {item.get('finding_id')} import={item.get('import_id')} "
+            f"[{item.get('severity')} {item.get('category')}] "
+            f"{item.get('resolution_state')} {item.get('path')}"
+        )
+    return 0
+
+
+def review_finding_show(*, target: Path, finding_id: str, json_output: bool = False) -> int:
+    target = target.expanduser().resolve()
+    if not target.is_dir():
+        print(f"error: --target is not a directory: {target}", file=sys.stderr)
+        return 2
+    finding, error = _find_review_finding(target, finding_id)
+    if finding is None:
+        print(f"error: {error}", file=sys.stderr)
+        return 1 if error and "not found" in error else 2
+    payload = {"target": str(target), "finding": finding}
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+    print(f"review_finding: {finding.get('finding_id')}")
+    print(f"import: {finding.get('import_id')}")
+    print(f"reviewer: {finding.get('reviewer_id')}")
+    print(f"run: {finding.get('review_run_id')}")
+    print(f"severity: {finding.get('severity')}")
+    print(f"category: {finding.get('category')}")
+    print(f"path: {finding.get('path')}")
+    if finding.get("line"):
+        print(f"line: {finding.get('line')}")
+    print(f"status: {finding.get('status')}")
+    print(f"resolution_state: {finding.get('resolution_state')}")
+    print(f"resolved: {finding.get('resolved')}")
+    print(f"source_changed: {finding.get('source_changed')}")
+    if finding.get("task_id"):
+        print(f"task: {finding.get('task_id')}")
+        print(f"task_status: {finding.get('task_status')}")
+    if finding.get("dismiss_reason"):
+        print(f"dismiss_reason: {finding.get('dismiss_reason')}")
+    print(f"text: {finding.get('text')}")
+    return 0
+
+
+def review_closeout(*, target: Path, run_id: str, json_output: bool = False) -> int:
+    target = target.expanduser().resolve()
+    if not target.is_dir():
+        print(f"error: --target is not a directory: {target}", file=sys.stderr)
+        return 2
+    payload, rc = _review_closeout_payload(target, run_id, write=True)
+    if payload is None:
+        return rc
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return rc
+    closeout = payload["closeout"]
+    print(f"review closeout: {closeout.get('run_id')}")
+    print(f"reviewer: {closeout.get('reviewer_id')}")
+    print(f"status: {closeout.get('status')}")
+    print(f"resolved: {closeout.get('resolved')}")
+    print(f"findings: {closeout.get('finding_count')}")
+    print(f"imported_findings: {closeout.get('imported_finding_count')}")
+    print(f"pending_imports: {closeout.get('pending_imports')}")
+    print(f"dismissed_findings: {closeout.get('dismissed_findings')}")
+    print(f"promoted_tasks: {closeout.get('promoted_tasks')}")
+    print(f"completed_tasks: {closeout.get('completed_tasks')}")
+    print(f"unresolved: {closeout.get('unresolved_count')}")
+    if closeout.get("changed_source_count"):
+        print(f"changed_sources: {closeout.get('changed_source_count')}")
+    for item in closeout.get("unresolved_findings", [])[:10]:
+        if isinstance(item, dict):
+            print(f"- unresolved {item.get('finding_id')} {item.get('resolution_state')} {item.get('path')}")
+    return rc
 
 
 def scanners_list(*, target: Path, json_output: bool = False) -> int:

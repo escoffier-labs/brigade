@@ -337,6 +337,18 @@ def _build_parser() -> argparse.ArgumentParser:
     p_work_review_import.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
     p_work_review_import.add_argument("--dry-run", action="store_true", help="Report without writing imports.")
     p_work_review_import.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_work_review_findings = review_sub.add_parser("findings", help="List imported code review findings.")
+    p_work_review_findings.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_work_review_findings.add_argument("--run-id", default=None, help="Limit findings to one review run id.")
+    p_work_review_findings.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_work_review_finding_show = review_sub.add_parser("finding-show", help="Show one imported code review finding.")
+    p_work_review_finding_show.add_argument("finding_id", help="Finding id, import id, or unique prefix.")
+    p_work_review_finding_show.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_work_review_finding_show.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_work_review_closeout = review_sub.add_parser("closeout", help="Summarize one code review run's resolution state.")
+    p_work_review_closeout.add_argument("run_id", help="Run id, unique prefix, or latest.")
+    p_work_review_closeout.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
+    p_work_review_closeout.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_work_next = work_sub.add_parser("next", help="Show the next daily work task and suggested command.")
     p_work_next.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
     p_work_next.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
@@ -1356,6 +1368,12 @@ def main(argv=None) -> int:
                     dry_run=args.dry_run,
                     json_output=args.json,
                 )
+            if args.review_command == "findings":
+                return work_cmd.review_findings(target=args.target, run_id=args.run_id, json_output=args.json)
+            if args.review_command == "finding-show":
+                return work_cmd.review_finding_show(target=args.target, finding_id=args.finding_id, json_output=args.json)
+            if args.review_command == "closeout":
+                return work_cmd.review_closeout(target=args.target, run_id=args.run_id, json_output=args.json)
             parser.error(f"unknown review command: {args.review_command}")
             return 2
         if args.work_command == "next":

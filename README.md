@@ -196,6 +196,9 @@ brigade work review run <reviewer-id>
 brigade work review runs
 brigade work review show <run-id>
 brigade work review import-findings <run-id>
+brigade work review findings
+brigade work review finding-show <finding-id-or-import-id>
+brigade work review closeout latest
 brigade work sweep
 brigade work sweep --all
 brigade work sweeps
@@ -448,6 +451,8 @@ Code review producer commands:
 - `brigade work review run <reviewer-id>` and `run --all` execute configured reviewers explicitly, never through a shell, and write receipts under `.brigade/reviews/runs/`.
 - `brigade work review runs` and `brigade work review show <run-id>` inspect review receipts, including exit code, timeout state, stdout/stderr summaries, log paths, findings path, and reviewed completed task ids when available.
 - `brigade work review import-findings <run-id>` reads the run's normalized findings JSON, redacts unsafe values, and routes findings into the existing work inbox with source `code-review`.
+- `brigade work review findings` and `finding-show <finding-id-or-import-id>` inspect imported review findings by reviewer, run, severity, category, path, inbox status, and resolution state.
+- `brigade work review closeout <run-id>` or `closeout latest` writes a local closeout record that connects review findings to pending imports, dismissals, promoted tasks, completed tasks, and source-fingerprint changes requiring re-review.
 
 Code review is explicit and local. Brigade does not auto-run reviewers from `work run`, apply fixes, post review comments, mutate GitHub, store auth, or promote findings automatically.
 
