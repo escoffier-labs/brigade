@@ -42,6 +42,7 @@ DOC_COMMAND_TOP_LEVELS = {
     "tools",
     "work",
 }
+COMMAND_INVENTORY_RELATIVE_PATH = Path("docs") / "command-inventory.md"
 
 PATTERN_FAMILIES: tuple[dict[str, Any], ...] = (
     {
@@ -316,6 +317,10 @@ def _public_doc_paths(target: Path) -> list[Path]:
     return [path for path in paths if path.is_file()]
 
 
+def _command_inventory_path(target: Path) -> Path:
+    return target / COMMAND_INVENTORY_RELATIVE_PATH
+
+
 def _read_text(path: Path) -> str:
     try:
         return path.read_text()
@@ -556,6 +561,13 @@ def audit_payload(target: Path) -> dict[str, Any]:
             "commands": missing_docs[:20],
         }
     )
+    command_contract = command_contract_payload(target)
+    inventory_check = next(
+        (check for check in command_contract["checks"] if check.get("name") == "roadmap_command_inventory_current"),
+        None,
+    )
+    if inventory_check:
+        checks.append(dict(inventory_check))
     deferred_items = _deferred_items()
     checks.extend(_deferred_item_checks(deferred_items))
     issues = [check for check in checks if check.get("status") != OK]
@@ -723,12 +735,25 @@ def command_contract_payload(target: Path) -> dict[str, Any]:
                 "cli_path_count": sum(1 for item in cli_commands if item == command or item.startswith(f"{command} ")),
             }
         )
+    expected_inventory = _command_inventory_markdown(
+        groups=groups,
+        cli_commands=cli_commands,
+    )
+    inventory_path = _command_inventory_path(target)
+    existing_inventory = _read_text(inventory_path) if inventory_path.is_file() else ""
+    inventory_current = existing_inventory == expected_inventory
     checks = [
         {
             "status": WARN if missing_groups else OK,
             "name": "roadmap_command_group_missing_docs",
             "detail": f"{len(missing_groups)} top-level command group(s) missing public docs" if missing_groups else "none",
             "commands": missing_groups,
+        },
+        {
+            "status": OK if inventory_current else WARN,
+            "name": "roadmap_command_inventory_current",
+            "detail": f"{COMMAND_INVENTORY_RELATIVE_PATH.as_posix()} is current" if inventory_current else f"{COMMAND_INVENTORY_RELATIVE_PATH.as_posix()} missing or stale",
+            "path": COMMAND_INVENTORY_RELATIVE_PATH.as_posix(),
         }
     ]
     issues = [check for check in checks if check["status"] != OK]
@@ -739,6 +764,11 @@ def command_contract_payload(target: Path) -> dict[str, Any]:
         "cli_commands": cli_commands,
         "groups": groups,
         "group_count": len(groups),
+        "inventory_path": str(inventory_path),
+        "inventory_relative_path": COMMAND_INVENTORY_RELATIVE_PATH.as_posix(),
+        "inventory_exists": inventory_path.is_file(),
+        "inventory_current": inventory_current,
+        "expected_inventory": expected_inventory,
         "checks": checks,
         "issues": issues,
         "issue_count": len(issues),
@@ -746,20 +776,52 @@ def command_contract_payload(target: Path) -> dict[str, Any]:
     }
 
 
-def commands(*, target: Path, json_output: bool = False) -> int:
+def _command_inventory_markdown(*, groups: list[dict[str, Any]], cli_commands: list[str]) -> str:
+    lines = [
+        "# Brigade Command Inventory",
+        "",
+        "This file is generated from the Brigade CLI parser.",
+        "",
+        "Regenerate with:",
+        "",
+        "```bash",
+        "brigade roadmap commands --write",
+        "```",
+        "",
+        "## Command Groups",
+        "",
+    ]
+    for group in groups:
+        lines.append(f"- `{group['command']}`: {group['cli_path_count']} command path(s)")
+    lines.extend(["", "## Commands", ""])
+    for command in cli_commands:
+        lines.append(f"- `{command}`")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def commands(*, target: Path, json_output: bool = False, write_inventory: bool = False, check_inventory: bool = False) -> int:
     payload = command_contract_payload(target)
+    if write_inventory:
+        inventory_path = Path(payload["inventory_path"])
+        inventory_path.parent.mkdir(parents=True, exist_ok=True)
+        inventory_path.write_text(payload["expected_inventory"])
+        payload = command_contract_payload(target)
     if json_output:
-        print(json.dumps(payload, indent=2, sort_keys=True))
-        return 0
+        output_payload = dict(payload)
+        output_payload.pop("expected_inventory", None)
+        print(json.dumps(output_payload, indent=2, sort_keys=True))
+        return 1 if check_inventory and not payload["inventory_current"] else 0
     print(f"roadmap commands: {payload['target']}")
     print(f"groups: {payload['group_count']}")
+    print(f"inventory: {payload['inventory_relative_path']} ({'current' if payload['inventory_current'] else 'stale'})")
     for group in payload["groups"]:
         status = OK if group["documented"] else WARN
         print(f"[{status}] {group['command']}: {group['cli_path_count']} CLI path(s)")
     for check in payload["checks"]:
         if check["status"] != OK:
             print(f"[{check['status']}] {check['name']}: {check['detail']}")
-    return 0
+    return 1 if check_inventory and not payload["inventory_current"] else 0
 
 
 def health(target: Path) -> dict[str, Any]:

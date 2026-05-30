@@ -270,6 +270,12 @@ Phase 63 status:
 - Added text and JSON output for parser-derived command groups, normalized documented command snippets, documentation coverage, and missing top-level public docs.
 - README documents the roadmap command contract surface.
 
+Phase 99 status:
+
+- Added `brigade roadmap commands --write` to generate `docs/command-inventory.md` from the CLI parser.
+- Added `brigade roadmap commands --check` and roadmap audit integration for stale or missing command inventory warnings.
+- The generated inventory contains public command paths only, not local paths, private repo names, or source evidence.
+
 ### 3. Inspiration Pattern Registry
 
 Deliverable: a bounded local record of external workflow patterns Brigade intends to support.

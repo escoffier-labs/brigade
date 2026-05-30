@@ -1,0 +1,358 @@
+# Brigade Command Inventory
+
+This file is generated from the Brigade CLI parser.
+
+Regenerate with:
+
+```bash
+brigade roadmap commands --write
+```
+
+## Command Groups
+
+- `brigade add`: 1 command path(s)
+- `brigade center`: 24 command path(s)
+- `brigade chat`: 7 command path(s)
+- `brigade context`: 8 command path(s)
+- `brigade doctor`: 1 command path(s)
+- `brigade dogfood`: 1 command path(s)
+- `brigade handoff`: 12 command path(s)
+- `brigade handoff-template`: 1 command path(s)
+- `brigade hermes-fragments`: 1 command path(s)
+- `brigade ingest`: 1 command path(s)
+- `brigade init`: 1 command path(s)
+- `brigade learn`: 10 command path(s)
+- `brigade memory`: 7 command path(s)
+- `brigade openclaw-fragments`: 1 command path(s)
+- `brigade projects`: 9 command path(s)
+- `brigade reconfigure`: 1 command path(s)
+- `brigade release`: 22 command path(s)
+- `brigade repos`: 68 command path(s)
+- `brigade roadmap`: 3 command path(s)
+- `brigade roster`: 2 command path(s)
+- `brigade run`: 1 command path(s)
+- `brigade runs`: 3 command path(s)
+- `brigade scrub`: 1 command path(s)
+- `brigade security`: 14 command path(s)
+- `brigade status`: 1 command path(s)
+- `brigade tools`: 46 command path(s)
+- `brigade work`: 69 command path(s)
+
+## Commands
+
+- `brigade add`
+- `brigade center actions archive`
+- `brigade center actions build`
+- `brigade center actions defer`
+- `brigade center actions doctor`
+- `brigade center actions done`
+- `brigade center actions import-issues`
+- `brigade center actions list`
+- `brigade center actions plan`
+- `brigade center actions show`
+- `brigade center actions start`
+- `brigade center activity`
+- `brigade center report archive`
+- `brigade center report build`
+- `brigade center report closeout`
+- `brigade center report compare`
+- `brigade center report diff`
+- `brigade center report list`
+- `brigade center report plan`
+- `brigade center report review`
+- `brigade center report show`
+- `brigade center reviews`
+- `brigade center schema`
+- `brigade center status`
+- `brigade center templates`
+- `brigade chat surfaces doctor`
+- `brigade chat surfaces init`
+- `brigade chat surfaces list`
+- `brigade chat surfaces show`
+- `brigade chat sweep import-issues`
+- `brigade chat sweep ingest`
+- `brigade chat sweep validate`
+- `brigade context archive`
+- `brigade context build`
+- `brigade context doctor`
+- `brigade context import-issues`
+- `brigade context list`
+- `brigade context plan`
+- `brigade context show`
+- `brigade context sync`
+- `brigade doctor`
+- `brigade dogfood`
+- `brigade handoff archive`
+- `brigade handoff closeout`
+- `brigade handoff doctor`
+- `brigade handoff import-issues`
+- `brigade handoff issues`
+- `brigade handoff lint`
+- `brigade handoff list`
+- `brigade handoff reconcile`
+- `brigade handoff run-show`
+- `brigade handoff runs`
+- `brigade handoff show`
+- `brigade handoff sync-issues`
+- `brigade handoff-template`
+- `brigade hermes-fragments`
+- `brigade ingest`
+- `brigade init`
+- `brigade learn closeout`
+- `brigade learn closeout-show`
+- `brigade learn closeouts`
+- `brigade learn doctor`
+- `brigade learn import-issues`
+- `brigade learn plan`
+- `brigade learn replay compare`
+- `brigade learn replay export`
+- `brigade learn replay list`
+- `brigade learn replay show`
+- `brigade memory care closeout`
+- `brigade memory care doctor`
+- `brigade memory care import-issues`
+- `brigade memory care init`
+- `brigade memory care plan-fixes`
+- `brigade memory care scan`
+- `brigade memory care status`
+- `brigade openclaw-fragments`
+- `brigade projects audit`
+- `brigade projects closeout`
+- `brigade projects closeout-show`
+- `brigade projects closeouts`
+- `brigade projects import-issues`
+- `brigade projects readiness list`
+- `brigade projects readiness plan`
+- `brigade projects readiness record`
+- `brigade projects readiness show`
+- `brigade reconfigure`
+- `brigade release candidate archive`
+- `brigade release candidate audit`
+- `brigade release candidate build`
+- `brigade release candidate closeout`
+- `brigade release candidate compare`
+- `brigade release candidate import-issues`
+- `brigade release candidate list`
+- `brigade release candidate plan`
+- `brigade release candidate show`
+- `brigade release ci doctor`
+- `brigade release ci import-issues`
+- `brigade release doctor`
+- `brigade release plan`
+- `brigade release run`
+- `brigade release runs`
+- `brigade release schema`
+- `brigade release show`
+- `brigade release smoke doctor`
+- `brigade release smoke list`
+- `brigade release smoke plan`
+- `brigade release smoke record`
+- `brigade release smoke show`
+- `brigade repos actions archive`
+- `brigade repos actions build`
+- `brigade repos actions context`
+- `brigade repos actions defer`
+- `brigade repos actions dispatch`
+- `brigade repos actions done`
+- `brigade repos actions list`
+- `brigade repos actions plan`
+- `brigade repos actions reconcile`
+- `brigade repos actions show`
+- `brigade repos actions start`
+- `brigade repos discover plan`
+- `brigade repos doctor`
+- `brigade repos health-commands`
+- `brigade repos import-issues`
+- `brigade repos init`
+- `brigade repos list`
+- `brigade repos release actions archive`
+- `brigade repos release actions build`
+- `brigade repos release actions defer`
+- `brigade repos release actions done`
+- `brigade repos release actions list`
+- `brigade repos release actions plan`
+- `brigade repos release actions show`
+- `brigade repos release actions start`
+- `brigade repos release activity`
+- `brigade repos release archive`
+- `brigade repos release audit`
+- `brigade repos release build`
+- `brigade repos release checklist`
+- `brigade repos release closeout`
+- `brigade repos release compare`
+- `brigade repos release evidence list`
+- `brigade repos release evidence plan`
+- `brigade repos release evidence record`
+- `brigade repos release evidence show`
+- `brigade repos release hygiene`
+- `brigade repos release import-issues`
+- `brigade repos release list`
+- `brigade repos release manifest`
+- `brigade repos release matrix`
+- `brigade repos release plan`
+- `brigade repos release ready`
+- `brigade repos release reconcile`
+- `brigade repos release report`
+- `brigade repos release show`
+- `brigade repos release summary`
+- `brigade repos release waivers doctor`
+- `brigade repos release waivers import-issues`
+- `brigade repos release waivers list`
+- `brigade repos release waivers record`
+- `brigade repos release waivers renew`
+- `brigade repos release waivers revoke`
+- `brigade repos release waivers show`
+- `brigade repos release waivers templates`
+- `brigade repos report archive`
+- `brigade repos report build`
+- `brigade repos report closeout`
+- `brigade repos report list`
+- `brigade repos report plan`
+- `brigade repos report show`
+- `brigade repos scan`
+- `brigade repos show`
+- `brigade repos sweep closeout`
+- `brigade repos sweep plan`
+- `brigade repos sweep run`
+- `brigade repos sweep runs`
+- `brigade repos sweep show`
+- `brigade roadmap audit`
+- `brigade roadmap commands`
+- `brigade roadmap patterns`
+- `brigade roster doctor`
+- `brigade roster init`
+- `brigade run`
+- `brigade runs latest`
+- `brigade runs list`
+- `brigade runs show`
+- `brigade scrub`
+- `brigade security closeout`
+- `brigade security config`
+- `brigade security doctor`
+- `brigade security enrich`
+- `brigade security findings`
+- `brigade security fix`
+- `brigade security init`
+- `brigade security review`
+- `brigade security sarif`
+- `brigade security scan`
+- `brigade security show`
+- `brigade security suppress`
+- `brigade security template-audit`
+- `brigade security unsuppress`
+- `brigade status`
+- `brigade tools apply`
+- `brigade tools call approve`
+- `brigade tools call hold`
+- `brigade tools call list`
+- `brigade tools call plan`
+- `brigade tools call queue`
+- `brigade tools call reject`
+- `brigade tools call run`
+- `brigade tools call show`
+- `brigade tools checkpoint approve`
+- `brigade tools checkpoint list`
+- `brigade tools checkpoint reject`
+- `brigade tools checkpoint resume`
+- `brigade tools checkpoint show`
+- `brigade tools contracts`
+- `brigade tools describe`
+- `brigade tools doctor`
+- `brigade tools import-issues`
+- `brigade tools init`
+- `brigade tools list`
+- `brigade tools pack archive`
+- `brigade tools pack build`
+- `brigade tools pack list`
+- `brigade tools pack show`
+- `brigade tools parity closeout`
+- `brigade tools parity status`
+- `brigade tools plan`
+- `brigade tools policy doctor`
+- `brigade tools policy init`
+- `brigade tools policy show`
+- `brigade tools run latest`
+- `brigade tools run list`
+- `brigade tools run replay`
+- `brigade tools run show`
+- `brigade tools runtime doctor`
+- `brigade tools runtime init`
+- `brigade tools runtime list`
+- `brigade tools runtime restart`
+- `brigade tools runtime show`
+- `brigade tools runtime start`
+- `brigade tools runtime status`
+- `brigade tools runtime stop`
+- `brigade tools search`
+- `brigade tools show`
+- `brigade tools sync apply`
+- `brigade tools sync plan`
+- `brigade work acceptance`
+- `brigade work backup closeout`
+- `brigade work backup doctor`
+- `brigade work backup import-issues`
+- `brigade work backup init`
+- `brigade work backup status`
+- `brigade work bootstrap`
+- `brigade work brief`
+- `brigade work closeout`
+- `brigade work doctor`
+- `brigade work end`
+- `brigade work import add`
+- `brigade work import chat-sweep`
+- `brigade work import dismiss`
+- `brigade work import ingest`
+- `brigade work import issue-repairs`
+- `brigade work import list`
+- `brigade work import memory-care`
+- `brigade work import memory-refresh`
+- `brigade work import plan`
+- `brigade work import plan-handoff`
+- `brigade work import promote`
+- `brigade work import promote-handoff`
+- `brigade work import provenance`
+- `brigade work import show`
+- `brigade work import triage`
+- `brigade work import validate`
+- `brigade work inbox archive`
+- `brigade work inbox doctor`
+- `brigade work latest`
+- `brigade work list`
+- `brigade work next`
+- `brigade work note`
+- `brigade work recap`
+- `brigade work resume`
+- `brigade work review closeout`
+- `brigade work review finding-show`
+- `brigade work review findings`
+- `brigade work review import-findings`
+- `brigade work review init`
+- `brigade work review plan`
+- `brigade work review run`
+- `brigade work review runs`
+- `brigade work review show`
+- `brigade work run`
+- `brigade work scanners doctor`
+- `brigade work scanners init`
+- `brigade work scanners list`
+- `brigade work scanners plan`
+- `brigade work scanners run`
+- `brigade work scanners run-show`
+- `brigade work scanners runs`
+- `brigade work scanners show`
+- `brigade work show`
+- `brigade work start`
+- `brigade work status`
+- `brigade work sweep`
+- `brigade work sweep-review`
+- `brigade work sweep-show`
+- `brigade work sweeps`
+- `brigade work task add`
+- `brigade work task done`
+- `brigade work task plan`
+- `brigade work task show`
+- `brigade work tasks`
+- `brigade work verify plan`
+- `brigade work verify run`
+- `brigade work verify runs`
+- `brigade work verify show`

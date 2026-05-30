@@ -282,6 +282,8 @@ Goal: generate or verify a docs command inventory from the CLI parser so public 
 
 Acceptance: tests cover generated inventory, drift warnings, roadmap audit integration, and no private content.
 
+Status: implemented with `brigade roadmap commands --write`, `--check`, generated `docs/command-inventory.md`, stale-inventory audit warnings, docs, and focused tests.
+
 ### Phase 100: Local Operator Readiness Closeout
 Goal: build one final local readiness closeout over roadmap audit, center state, release evidence, repo fleet, security, memory, tools, context, learning, and docs command contracts.
 

@@ -146,7 +146,7 @@ def test_roadmap_cli_dispatch(tmp_path, monkeypatch):
     assert seen == [
         ("audit", {"target": tmp_path, "json_output": True, "import_issues": True}),
         ("patterns", {"target": tmp_path, "json_output": True}),
-        ("commands", {"target": tmp_path, "json_output": True}),
+        ("commands", {"target": tmp_path, "json_output": True, "write_inventory": False, "check_inventory": False}),
     ]
 
 
