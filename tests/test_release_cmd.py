@@ -7,6 +7,7 @@ from brigade import cli
 from brigade import handoff_cmd
 from brigade import release_cmd
 from brigade import security_cmd
+from brigade import tools_cmd
 from brigade import work_cmd
 
 
@@ -136,6 +137,60 @@ def test_release_plan_run_runs_show_clean_ready(tmp_path, monkeypatch, capsys):
     assert release_cmd.show(target=tmp_path, run_id="latest") == 0
     out = capsys.readouterr().out
     assert f"release run: {receipt['run_id']}" in out
+
+
+def test_release_evidence_includes_tool_pack_parity_and_sync_state(tmp_path, monkeypatch, capsys):
+    _init_repo(tmp_path)
+    _seed_ready_evidence(tmp_path)
+    _patch_clean_health(monkeypatch)
+    _patch_content_guard(monkeypatch)
+    source = tmp_path / "tools" / "portable.md"
+    source.parent.mkdir()
+    source.write_text("portable source\n")
+    unmanaged = tmp_path / ".claude" / "commands" / "portable.md"
+    unmanaged.parent.mkdir(parents=True)
+    unmanaged.write_text("user projection\n")
+    config = tmp_path / ".brigade" / "tools.toml"
+    config.parent.mkdir(parents=True, exist_ok=True)
+    config.write_text(
+        """
+[[tool]]
+id = "portable"
+name = "Portable"
+family = "slash-command"
+enabled = true
+description = "Portable projection."
+source_path = "tools/portable.md"
+supported_harnesses = ["claude", "codex"]
+projections = { claude = ".claude/commands/portable.md", codex = ".codex/skills/portable/SKILL.md" }
+"""
+    )
+
+    assert tools_cmd.parity_closeout(target=tmp_path, reason="reviewed", json_output=True) == 0
+    capsys.readouterr()
+    assert tools_cmd.pack_build(target=tmp_path, json_output=True) == 0
+    pack = json.loads(capsys.readouterr().out)
+    source.write_text("portable source changed\n")
+
+    assert release_cmd.plan(target=tmp_path, base_ref=None, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    tool_catalog = payload["evidence"]["tool_catalog"]
+    assert tool_catalog["packs"]["latest"]["pack_id"] == pack["pack_id"]
+    assert tool_catalog["packs"]["issue_count"] == 1
+    assert tool_catalog["packs"]["top_issue"]["issue_type"] == "pack_stale"
+    assert tool_catalog["parity"]["latest_closeout"]["status"] == "reviewed"
+    assert tool_catalog["parity"]["changed_issue_count"] >= 1
+    assert tool_catalog["sync_plan"]["blocker_count"] >= 1
+    assert tool_catalog["sync_plan"]["dry_run_default"] is True
+    assert tool_catalog["sync_plan"]["delete_supported"] is False
+
+    assert release_cmd.run(target=tmp_path, base_ref=None, json_output=True) == 0
+    capsys.readouterr()
+    assert release_cmd.candidate_build(target=tmp_path, base_ref=None, json_output=True) == 0
+    candidate = json.loads(capsys.readouterr().out)
+    evidence = json.loads(Path(candidate["path"], "EVIDENCE.json").read_text())
+    assert evidence["tool_catalog"]["packs"]["latest"]["pack_id"] == pack["pack_id"]
+    assert evidence["tool_catalog"]["sync_plan"]["blocker_count"] >= 1
 
 
 def test_release_blocks_missing_closeout_failed_verification_unclosed_review_dirty_handoff_and_content_guard(tmp_path, monkeypatch, capsys):

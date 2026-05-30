@@ -395,7 +395,11 @@ def _evidence(target: Path, *, base_ref: str | None) -> dict[str, Any]:
         "tool_catalog": {
             "valid": tool_health.get("valid"),
             "issue_count": tool_health.get("issue_count"),
+            "raw_issue_count": tool_health.get("raw_issue_count"),
             "top_issue": tool_health.get("top_issue"),
+            "packs": tool_health.get("packs"),
+            "parity": tool_health.get("parity"),
+            "sync_plan": tool_health.get("sync_plan"),
             "call_queue": tool_health.get("call_queue"),
             "run_history": tool_health.get("run_history"),
             "checkpoints": tool_health.get("checkpoints"),

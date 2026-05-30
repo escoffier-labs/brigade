@@ -440,6 +440,7 @@ Phase 36 status:
 - Implemented command surface: `brigade tools parity status/closeout`.
 - Tool packs summarize catalog entries, projections, policy, runtimes, call approvals, run history, checkpoints, and catalog issues.
 - Tool parity closeouts write local receipts under `.brigade/tools/parity-closeouts/`, quiet unchanged reviewed or deferred missing, stale, unmanaged, conflicted, and parity-gap projection issues, and resurface changed projection fingerprints through doctor, brief, and import routing.
+- Release readiness and release candidate evidence include latest tool pack health, stale pack warnings, parity closeout state, sync-plan blockers, approval counts, run history counts, and checkpoint state without applying projections or running tools.
 
 ### 8. Context Engineering Packs
 

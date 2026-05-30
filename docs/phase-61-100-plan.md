@@ -72,6 +72,8 @@ Goal: make tool packs and sync plans first-class release evidence without applyi
 
 Acceptance: release readiness and candidate tests include tool pack freshness, parity closeout state, approvals, run history, and sync blockers.
 
+Status: implemented with tool pack health, stale pack detection, sync-plan blocker summaries, parity closeout evidence, approval queue counts, run history, and checkpoint state in release readiness and release candidate evidence.
+
 ### Phase 70: Context Sync Planning Receipts
 Goal: add reviewable context sync plans and receipts for configured harness destinations without writing context files by default.
 

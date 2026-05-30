@@ -3567,6 +3567,8 @@ def _catalog_payload(target: Path) -> dict[str, Any]:
 
 def health(target: Path) -> dict[str, Any]:
     payload = _catalog_payload(target)
+    packs = _tool_pack_health(target)
+    sync_plan = _sync_plan_summary(target)
     return {
         "config_path": payload["config_path"],
         "valid": payload["valid"],
@@ -3576,6 +3578,8 @@ def health(target: Path) -> dict[str, Any]:
         "top_issue": payload["top_issue"],
         "issues": payload["issues"],
         "parity": payload["parity"],
+        "packs": packs,
+        "sync_plan": sync_plan,
         "call_queue": payload["call_queue"],
         "run_history": payload["run_history"],
         "checkpoints": payload["checkpoints"],
@@ -4645,13 +4649,14 @@ def _packs_archive_root(target: Path) -> Path:
 def _tool_pack_payload(target: Path) -> dict[str, Any]:
     catalog = _catalog_payload(target)
     projection = _projection_plan_payload(target)
-    return {
+    payload = {
         "target": catalog["target"],
         "created_at": datetime.now(timezone.utc).isoformat(),
         "tool_count": catalog["tool_count"],
         "tools": catalog["tools"],
         "projection_counts": projection["counts"],
         "projections": projection["projections"],
+        "parity": catalog["parity"],
         "policy": catalog["policy"],
         "runtimes": catalog["runtimes"],
         "call_queue": catalog["call_queue"],
@@ -4660,6 +4665,38 @@ def _tool_pack_payload(target: Path) -> dict[str, Any]:
         "issues": catalog["issues"],
         "issue_count": catalog["issue_count"],
     }
+    payload["evidence_fingerprint"] = _tool_pack_evidence_fingerprint(payload)
+    return payload
+
+
+def _tool_pack_evidence_fingerprint(payload: dict[str, Any]) -> str:
+    tools = payload.get("tools") if isinstance(payload.get("tools"), list) else []
+    issues = payload.get("issues") if isinstance(payload.get("issues"), list) else []
+    parity = payload.get("parity") if isinstance(payload.get("parity"), dict) else {}
+    latest_closeout = parity.get("latest_closeout") if isinstance(parity.get("latest_closeout"), dict) else {}
+    return _stable_hash(
+        {
+            "tool_ids": [tool.get("id") for tool in tools if isinstance(tool, dict)],
+            "tool_source_fingerprints": [tool.get("source_fingerprint") for tool in tools if isinstance(tool, dict)],
+            "tool_count": payload.get("tool_count"),
+            "projection_counts": payload.get("projection_counts"),
+            "issue_count": payload.get("issue_count"),
+            "issue_fingerprints": [
+                issue.get("parity_fingerprint") or _stable_hash(issue)
+                for issue in issues
+                if isinstance(issue, dict)
+            ],
+            "call_queue_counts": (payload.get("call_queue") or {}).get("counts") if isinstance(payload.get("call_queue"), dict) else {},
+            "run_history_counts": (payload.get("run_history") or {}).get("counts") if isinstance(payload.get("run_history"), dict) else {},
+            "checkpoint_counts": (payload.get("checkpoints") or {}).get("counts") if isinstance(payload.get("checkpoints"), dict) else {},
+            "parity_closeout_id": latest_closeout.get("closeout_id"),
+            "parity_closeout_status": latest_closeout.get("status"),
+            "parity_quieted_count": parity.get("quieted_issue_count"),
+            "parity_changed_count": parity.get("changed_issue_count"),
+            "policy_issue_count": (payload.get("policy") or {}).get("issue_count") if isinstance(payload.get("policy"), dict) else None,
+            "runtime_issue_count": (payload.get("runtimes") or {}).get("issue_count") if isinstance(payload.get("runtimes"), dict) else None,
+        }
+    )
 
 
 def pack_build(*, target: Path, json_output: bool = False) -> int:
@@ -4700,6 +4737,55 @@ def _tool_packs(target: Path) -> list[dict[str, Any]]:
                 packs.append(payload)
     packs.sort(key=lambda item: str(item.get("created_at") or item.get("pack_id") or ""), reverse=True)
     return packs
+
+
+def _sync_plan_summary(target: Path) -> dict[str, Any]:
+    plan = _projection_plan_payload(target)
+    blockers = [
+        item
+        for item in plan.get("projections", [])
+        if isinstance(item, dict) and item.get("status") in {"conflicted", "unmanaged", "missing_source"}
+    ]
+    actions = [
+        item
+        for item in plan.get("projections", [])
+        if isinstance(item, dict) and item.get("action") in {"create", "update", "conflict"}
+    ]
+    return {
+        "valid": plan.get("valid"),
+        "counts": plan.get("counts", {}),
+        "projection_count": len(plan.get("projections", [])),
+        "action_count": len(actions),
+        "blocker_count": len(blockers),
+        "blockers": blockers,
+        "dry_run_default": True,
+        "add_only": True,
+        "delete_supported": False,
+    }
+
+
+def _tool_pack_health(target: Path) -> dict[str, Any]:
+    packs = _tool_packs(target)
+    latest = packs[0] if packs else None
+    current = _tool_pack_payload(target)
+    checks: list[dict[str, Any]] = []
+    if latest is None:
+        checks.append({"status": WARN, "name": "tool_pack_missing", "issue_type": "pack_missing", "detail": "no tool pack has been built"})
+    else:
+        if latest.get("evidence_fingerprint") != current.get("evidence_fingerprint"):
+            checks.append({"status": WARN, "name": "tool_pack_stale", "issue_type": "pack_stale", "detail": f"{latest.get('pack_id')} no longer matches current catalog evidence"})
+        path = latest.get("path")
+        if path and not Path(str(path)).exists():
+            checks.append({"status": WARN, "name": "tool_pack_missing_path", "issue_type": "pack_missing_path", "detail": str(path)})
+    return {
+        "packs_path": str(_packs_root(target)),
+        "pack_count": len(packs),
+        "latest": latest,
+        "current_fingerprint": current.get("evidence_fingerprint"),
+        "issue_count": len(checks),
+        "issues": checks,
+        "top_issue": checks[0] if checks else None,
+    }
 
 
 def pack_list(*, target: Path, json_output: bool = False, limit: int = 20) -> int:
