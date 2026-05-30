@@ -277,9 +277,9 @@ DEFERRED_ROADMAP_ITEMS: tuple[dict[str, Any], ...] = (
         "subsystem": "install",
         "owner": "templates",
         "source_section": "Issue And TDD Loop Closure",
-        "deferred_reason": "The first acceptance phase avoided mixing public workflow rules with personal preferences.",
+        "deferred_reason": "Closed in phase 79 with public-safe repo templates and work doctor visibility.",
         "suggested_phase": 79,
-        "status": "planned",
+        "status": "implemented",
     },
     {
         "id": "safe-memory-autofix-planning",

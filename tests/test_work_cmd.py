@@ -15,6 +15,8 @@ from brigade import roadmap_cmd
 from brigade import security_cmd
 from brigade import tools_cmd
 from brigade import work_cmd
+from brigade.install import install_selection
+from brigade.selection import Selection
 
 
 def _write_json(path, payload):
@@ -160,6 +162,28 @@ def test_work_doctor_warns_for_task_acceptance_gh_and_stale_session(tmp_path, mo
     assert "[warn] active_session_age:" in out
     assert "[warn] task_acceptance: 1 pending task(s) missing acceptance criteria" in out
     assert "[warn] github_issues: 1 issue-backed task(s) cannot be checked because gh is missing: issue-task" in out
+
+
+def test_work_doctor_reports_workflow_rule_template_visibility(tmp_path, monkeypatch, capsys):
+    _init_git_repo(tmp_path)
+    dogfood_cmd.init(target=tmp_path)
+    monkeypatch.setattr(work_cmd.shutil, "which", lambda name: "/usr/bin/codex" if name == "codex" else None)
+    monkeypatch.setattr(dogfood_cmd, "_check_git_ignored", lambda repo, path: "yes")
+
+    assert work_cmd.doctor(target=tmp_path) == 0
+    out = capsys.readouterr().out
+    assert "[warn] workflow_rules: missing rules/issue-tdd-loop.md, rules/acceptance-driven-work.md;" in out
+
+    rc = install_selection(
+        tmp_path,
+        Selection(depth="repo", harnesses=[], owner="this-repo", includes=[]),
+        force=True,
+    )
+    assert rc == 0
+    capsys.readouterr()
+    assert work_cmd.doctor(target=tmp_path) == 0
+    out = capsys.readouterr().out
+    assert "[ok] workflow_rules: repo-shareable workflow rules installed" in out
 
 
 def test_work_doctor_warns_when_issue_backed_task_is_closed(tmp_path, monkeypatch, capsys):

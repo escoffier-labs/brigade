@@ -55,6 +55,11 @@ def test_repo_install_lays_down_expected_files(tmp_target: Path):
     assert (tmp_target / "CLAUDE.md").is_file()
     assert (tmp_target / ".claude" / "memory-handoffs" / "TEMPLATE.md").is_file()
     assert (tmp_target / ".brigade" / "handoff-sources.example.json").is_file()
+    assert (tmp_target / "rules" / "issue-tdd-loop.md").is_file()
+    assert (tmp_target / "rules" / "acceptance-driven-work.md").is_file()
+    rules = (tmp_target / "rules" / "issue-tdd-loop.md").read_text()
+    assert "personal preference" in rules
+    assert "remote issues" in rules
     assert (tmp_target / "hooks" / "pre-push").is_file()
     # pre-push must be executable
     mode = (tmp_target / "hooks" / "pre-push").stat().st_mode & 0o777
@@ -96,6 +101,8 @@ def test_workspace_install_includes_memory_cards(tmp_target: Path):
     assert (tmp_target / ".brigade" / "memory-care.example.json").is_file()
     assert (tmp_target / ".brigade" / "chat-memory-sweep.example.json").is_file()
     assert (tmp_target / ".brigade" / "handoff-sources.example.json").is_file()
+    assert (tmp_target / "rules" / "issue-tdd-loop.md").is_file()
+    assert (tmp_target / "rules" / "acceptance-driven-work.md").is_file()
     # skill + script land at the right paths, executable bit on the script
     assert (tmp_target / "skills" / "note" / "SKILL.md").is_file()
     backup = tmp_target / "scripts" / "backup-restic.sh"

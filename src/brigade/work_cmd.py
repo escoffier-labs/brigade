@@ -87,6 +87,10 @@ TASK_TEMPLATES: dict[str, dict[str, tuple[str, ...]]] = {
         ),
     },
 }
+WORKFLOW_RULE_TEMPLATES = (
+    "rules/issue-tdd-loop.md",
+    "rules/acceptance-driven-work.md",
+)
 ACTIVE_SESSION_STALE_HOURS = 24
 IMPORT_STALE_HOURS = 72
 DISMISSED_SOURCE_WARN_THRESHOLD = 5
@@ -4862,6 +4866,20 @@ def _doctor_ignore_level(value: str) -> str:
     if value == "no":
         return WARN
     return WARN
+
+
+def _workflow_rule_health(target: Path) -> dict[str, Any]:
+    missing = [rel for rel in WORKFLOW_RULE_TEMPLATES if not (target / rel).is_file()]
+    return {
+        "status": OK if not missing else WARN,
+        "name": "workflow_rules",
+        "detail": (
+            "repo-shareable workflow rules installed"
+            if not missing
+            else f"missing {', '.join(missing)}; run `brigade init --target {target} --depth repo --force` to refresh templates"
+        ),
+        "missing": missing,
+    }
 
 
 def _active_session_info(target: Path) -> dict[str, Any] | None:
@@ -10062,6 +10080,9 @@ def doctor(*, target: Path) -> int:
         _doctor_line(WARN, "task_acceptance", f"{len(missing_acceptance)} pending task(s) missing acceptance criteria: {sample}")
     else:
         _doctor_line(OK, "task_acceptance", "pending tasks have acceptance criteria or no tasks are pending")
+
+    workflow_rules = _workflow_rule_health(effective_target)
+    _doctor_line(str(workflow_rules["status"]), str(workflow_rules["name"]), workflow_rules["detail"])
 
     issue_tasks = [(task, issue) for task in pending_tasks if (issue := _task_issue_metadata(task))]
     if issue_tasks:

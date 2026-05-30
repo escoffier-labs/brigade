@@ -42,6 +42,7 @@ The cookbook explains the why. This package gives you the kitchen.
 - a canonical memory layout where one configured owner holds durable knowledge
 - writer-specific Memory Handoff inboxes, such as `.claude/memory-handoffs/` for Claude Code and `.codex/memory-handoffs/` for Codex
 - starter memory cards and routing rules
+- repo-shareable workflow rules for issue-backed and acceptance-driven work loops
 - multi-workspace handoff patterns for people administering more than one agent setup
 - memory-care staleness checks so durable cards do not quietly rot
 - TokenJuice output-compaction guidance for Claude Code and Codex, including wrapper notes and savings expectations
@@ -54,6 +55,7 @@ Browse the public template index in [`templates/`](templates/).
 The installable source files live under `src/brigade/templates/`; root workspace files are local dogfood state and stay ignored.
 
 See [`ROADMAP.md`](ROADMAP.md) for the daily-driver, scanner inbox, chat-surface scanner, and memory-card decay roadmap. The active phase queue for roadmap completion hardening is tracked in [`docs/phase-61-100-plan.md`](docs/phase-61-100-plan.md).
+See [`docs/workflow-rules.md`](docs/workflow-rules.md) for the public-safe repo workflow rule templates installed under `rules/`.
 
 ## What you do not get
 

@@ -142,6 +142,8 @@ Goal: add public-safe workflow rule templates for issue/TDD loops without embedd
 
 Acceptance: tests cover install output, docs, privacy scan, and work doctor visibility.
 
+Status: implemented with repo install templates under `rules/`, `brigade work doctor` visibility, docs, and focused install/doctor tests.
+
 ### Phase 80: Stale Active Issue Repair Imports
 Goal: route stale active issue context and closed remote issue mismatches into repairable local imports.
 

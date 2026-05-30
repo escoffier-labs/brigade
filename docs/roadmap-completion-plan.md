@@ -631,7 +631,7 @@ Deliverable: close the daily task lifecycle from issue or scanner import to revi
 
 Implementation scope:
 
-- Add repo-shareable workflow rule templates without embedding personal preferences.
+- Add repo-shareable workflow rule templates without embedding personal preferences. Status: implemented with public-safe install templates under `rules/` and work doctor visibility.
 - Add stale active issue context checks and repair imports.
 - Add acceptance coverage summaries across pending tasks, completed tasks, review findings, and release closeout.
 - Add task outcome rollups in release candidate evidence.
@@ -646,7 +646,7 @@ Phase 36 status:
 
 - Implemented command surface: `brigade work acceptance`.
 - Acceptance summaries report pending tasks with acceptance, pending tasks missing acceptance, completed tasks with completion metadata, completed tasks missing completion metadata, and pending review-finding counts.
-- Deferred: stale active issue repair imports and shareable workflow rule templates. Reason: this phase completed the local acceptance rollup first.
+- Deferred: stale active issue repair imports. Reason: the local acceptance rollup and shareable workflow rule templates are complete; stale issue repair imports remain for a focused follow-up.
 
 ### 13. Memory And Handoff Closure
 
