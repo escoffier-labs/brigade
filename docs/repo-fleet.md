@@ -43,6 +43,11 @@ brigade repos release show <train-id>
 brigade repos release compare <train-id|latest>
 brigade repos release reconcile <train-id|latest>
 brigade repos release summary <train-id|latest>
+brigade repos release report <train-id|latest>
+brigade repos release checklist <train-id|latest>
+brigade repos release hygiene
+brigade repos release import-issues <train-id|latest>
+brigade repos release ready <train-id|latest>
 brigade repos release closeout <train-id|latest>
 brigade repos release archive <train-id>
 brigade repos release actions plan <train-id|latest>
@@ -121,6 +126,8 @@ Each repo is classified as `ready`, `blocked`, `needs-review`, `needs-dispatch`,
 `brigade repos release evidence plan/record/list/show` records manual publish evidence under `.brigade/repos/releases/evidence.jsonl`. Evidence steps are `verification`, `release-doctor`, `candidate-compare`, `tag`, `push`, `release`, and `other`. Statuses are `completed`, `skipped`, `blocked`, and `deferred`. These records describe what the operator did manually; Brigade does not run verification, tag, push, or release commands.
 
 `brigade repos release reconcile <train-id|latest>` compares release-train actions with manual evidence records. An action is marked done only when the repo has required evidence for verification, release doctor, candidate compare, tag, push, and release, and none of those records are blocked. Completed, skipped, and deferred evidence all count as reviewed operator outcomes. Missing or blocked evidence keeps the action open. `brigade repos release summary <train-id|latest>` reports per-repo evidence status, unresolved action counts, and suggested next commands. Release train closeout includes summary counts when available.
+
+`brigade repos release report <train-id|latest>` writes `RELEASE_TRAIN_REPORT.md` and `RELEASE_TRAIN_REPORT.json` into the train bundle. `checklist` prints the required evidence rows for each repo. `hygiene` reports unclosed, stale, or missing-report trains. `import-issues` routes missing or blocked release evidence into the local work inbox as `source: repo-fleet-release`. `ready` is a local manual-publish gate that fails when the train has blocked repos, unresolved train actions, missing evidence, or blocked evidence.
 
 Privacy boundaries:
 

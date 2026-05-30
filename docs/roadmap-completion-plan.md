@@ -155,6 +155,7 @@ Implementation scope:
 - Coordinate local fleet release trains from safe per-repo release readiness, candidate, verification, review, security, operator, and fleet action evidence without pushing, tagging, publishing, or mutating remotes.
 - Turn reviewed fleet release trains into local release action queues and record manual publish evidence without executing verification, tag, push, release, or remote-mutating commands.
 - Reconcile fleet release train actions against manual evidence records and include summary counts in train closeout.
+- Add fleet release train report bundles, manual evidence checklists, hygiene checks, unresolved-evidence work imports, and a local manual-publish ready gate.
 
 Acceptance:
 
@@ -168,6 +169,7 @@ Acceptance:
 - Tests cover fleet release train plan/build/list/show/compare/closeout/archive text and JSON, per-repo classifications, bundle evidence, manual-only publish plans, compare warnings, closeout states, daily-loop integration, and release-doctor integration.
 - Tests cover fleet release train action plan/build/list/show/start/done/defer/archive and manual release evidence plan/record/list/show, including health integration and no command execution.
 - Tests cover release train reconcile and summary for complete, skipped, deferred, blocked, and missing evidence states.
+- Tests cover release train report, checklist, hygiene, import-issues, and ready gate behavior without remote mutation.
 - Tests prove private repo names, owner names, org names, local paths, and raw evidence are not copied into public docs, fixtures, imports, handoffs, release evidence, or committed diffs.
 
 Phase 35 status:
@@ -220,6 +222,15 @@ Phase 45 status:
 - Reconciliation marks release-train actions done when required manual evidence is completed, skipped, or deferred, and keeps actions open when evidence is missing or blocked.
 - Release summaries report per-repo evidence status, missing evidence, blocked evidence, unresolved action counts, and suggested next commands.
 - Release train closeout now includes reconciliation summary counts when available.
+
+Phase 46-50 status:
+
+- Implemented command surface: `brigade repos release report <train-id|latest>`.
+- Implemented command surface: `brigade repos release import-issues <train-id|latest>`.
+- Implemented command surface: `brigade repos release checklist <train-id|latest>`.
+- Implemented command surface: `brigade repos release hygiene`.
+- Implemented command surface: `brigade repos release ready <train-id|latest>`.
+- Release reports write `RELEASE_TRAIN_REPORT.md` and `RELEASE_TRAIN_REPORT.json` into the local train bundle. Import routing uses `source: repo-fleet-release` and preserves source fingerprints. The ready gate remains local and fails on blocked repos, unresolved actions, missing evidence, or blocked evidence.
 
 ### 3. Inspiration Pattern Registry
 

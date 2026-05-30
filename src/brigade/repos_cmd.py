@@ -2944,6 +2944,225 @@ def release_summary(*, target: Path, train_id: str = "latest", json_output: bool
     return 0
 
 
+def _release_report_markdown(summary: dict[str, Any]) -> str:
+    lines = [
+        "# Fleet Release Train Review Report",
+        "",
+        f"- Train: `{summary.get('train_id')}`",
+        f"- Generated: {summary.get('generated_at')}",
+        f"- Repos: {summary.get('repo_count')}",
+        f"- Unresolved actions: {summary.get('unresolved_action_count')}",
+        f"- Missing evidence: {summary.get('missing_evidence_count')}",
+        f"- Blocked evidence: {summary.get('blocked_count')}",
+        "",
+        "## Repo Evidence",
+        "",
+    ]
+    repos = summary.get("repos") if isinstance(summary.get("repos"), list) else []
+    for repo in repos:
+        lines.append(f"- `{repo.get('repo_id')}` {repo.get('repo_label')} - {repo.get('evidence_status')}")
+        missing = repo.get("missing_evidence_steps") if isinstance(repo.get("missing_evidence_steps"), list) else []
+        blocked = repo.get("blocked_evidence_steps") if isinstance(repo.get("blocked_evidence_steps"), list) else []
+        if missing:
+            lines.append(f"  - missing: {', '.join(str(step) for step in missing)}")
+        if blocked:
+            lines.append(f"  - blocked: {', '.join(str(step) for step in blocked)}")
+    if not repos:
+        lines.append("- none")
+    lines.extend(["", "## Boundaries", "", "- local report only", "- no verification, tag, push, release, upload, or remote mutation"])
+    return "\n".join(lines) + "\n"
+
+
+def release_report(*, target: Path, train_id: str = "latest", json_output: bool = False) -> int:
+    target = target.expanduser().resolve()
+    train, error = _resolve_release_train(target, train_id)
+    if train is None:
+        print(f"error: {error}", file=sys.stderr)
+        return 1 if error and "not found" in error else 2
+    train_dir = _release_trains_root(target) / str(train.get("train_id") or "")
+    if not train_dir.is_dir():
+        print(f"error: fleet release train path is missing: {train.get('path_label') or train.get('train_id')}", file=sys.stderr)
+        return 2
+    summary = _release_summary_payload(target, train)
+    report = {
+        "target_label": "repo-fleet",
+        "train_id": train.get("train_id"),
+        "generated_at": summary.get("generated_at"),
+        "summary": summary,
+        "report_fingerprint": _fingerprint_payload(summary),
+        "bundle_files": ["RELEASE_TRAIN_REPORT.md", "RELEASE_TRAIN_REPORT.json"],
+    }
+    _write_json(train_dir / "RELEASE_TRAIN_REPORT.json", report)
+    (train_dir / "RELEASE_TRAIN_REPORT.md").write_text(_release_report_markdown(summary))
+    payload = {"target_label": "repo-fleet", "train_id": train.get("train_id"), "path_label": str(train.get("train_id") or ""), "report": report}
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+    print(f"repo fleet release report: {train.get('train_id')}")
+    print("path_label: RELEASE_TRAIN_REPORT.md")
+    return 0
+
+
+def _release_import_records(summary: dict[str, Any]) -> list[dict[str, Any]]:
+    train_id = str(summary.get("train_id") or "latest")
+    records: list[dict[str, Any]] = []
+    for repo in summary.get("repos") if isinstance(summary.get("repos"), list) else []:
+        if not isinstance(repo, dict):
+            continue
+        repo_id = str(repo.get("repo_id") or "unknown")
+        status = str(repo.get("evidence_status") or "")
+        if status not in {"missing-evidence", "blocked-evidence"}:
+            continue
+        fingerprint = _fingerprint_payload(
+            {
+                "train_id": train_id,
+                "repo_id": repo_id,
+                "status": status,
+                "missing": repo.get("missing_evidence_steps"),
+                "blocked": repo.get("blocked_evidence_steps"),
+            }
+        )
+        records.append(
+            {
+                "text": f"Resolve fleet release train evidence for {repo_id}: {status}",
+                "kind": "task",
+                "source": "repo-fleet-release",
+                "type": "docs",
+                "priority": "high" if status == "blocked-evidence" else "normal",
+                "template": "docs",
+                "acceptance": [
+                    "Required manual release evidence is recorded or explicitly deferred.",
+                    "No remote publish, tag, push, or release action is performed by Brigade.",
+                    "Fleet release train summary no longer reports the same unresolved evidence.",
+                ],
+                "metadata": {
+                    "train_id": train_id,
+                    "repo_id": repo_id,
+                    "issue_type": status,
+                    "safe_summary": f"{repo_id} release train evidence is {status}",
+                    "missing_evidence_steps": repo.get("missing_evidence_steps"),
+                    "blocked_evidence_steps": repo.get("blocked_evidence_steps"),
+                    "source_item_key": f"{train_id}:{repo_id}:{status}",
+                    "source_fingerprint": fingerprint,
+                },
+            }
+        )
+    return records
+
+
+def release_import_issues(*, target: Path, train_id: str = "latest", dry_run: bool = False, json_output: bool = False) -> int:
+    target = target.expanduser().resolve()
+    train, error = _resolve_release_train(target, train_id)
+    if train is None:
+        print(f"error: {error}", file=sys.stderr)
+        return 1 if error and "not found" in error else 2
+    summary = _release_summary_payload(target, train)
+    records = _release_import_records(summary)
+    imported, skipped, dismissed = work_cmd._append_import_records(target, records, dry_run=dry_run)
+    payload = {
+        "target_label": "repo-fleet",
+        "train_id": train.get("train_id"),
+        "dry_run": dry_run,
+        "issue_count": len(records),
+        "created": len(imported),
+        "skipped": len(skipped),
+        "dismissed": len(dismissed),
+    }
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+    print(f"repo fleet release imports: {train.get('train_id')}")
+    print(f"created: {len(imported)}")
+    print(f"skipped: {len(skipped)}")
+    print(f"dismissed: {len(dismissed)}")
+    return 0
+
+
+def release_checklist(*, target: Path, train_id: str = "latest", json_output: bool = False) -> int:
+    target = target.expanduser().resolve()
+    train, error = _resolve_release_train(target, train_id)
+    if train is None:
+        print(f"error: {error}", file=sys.stderr)
+        return 1 if error and "not found" in error else 2
+    summary = _release_summary_payload(target, train)
+    items = [
+        {
+            "repo_id": repo.get("repo_id"),
+            "repo_label": repo.get("repo_label"),
+            "step": step.get("step"),
+            "status": step.get("status"),
+            "evidence_id": step.get("evidence_id"),
+            "suggested_next_command": f"brigade repos release evidence record {train.get('train_id')} --repo {repo.get('repo_id')} --step {step.get('step')} --status completed",
+        }
+        for repo in summary.get("repos", [])
+        if isinstance(repo, dict)
+        for step in repo.get("steps", [])
+        if isinstance(step, dict)
+    ]
+    payload = {"target_label": "repo-fleet", "train_id": train.get("train_id"), "items": items, "item_count": len(items)}
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+    print(f"repo fleet release checklist: {train.get('train_id')}")
+    for item in items:
+        print(f"- {item.get('repo_id')} {item.get('step')} [{item.get('status')}]")
+    return 0
+
+
+def release_hygiene(*, target: Path, json_output: bool = False) -> int:
+    target = target.expanduser().resolve()
+    trains = _release_trains(target)
+    issues: list[dict[str, Any]] = []
+    for train in trains:
+        train_id = str(train.get("train_id") or "")
+        closeout = train.get("closeout") if isinstance(train.get("closeout"), dict) else None
+        if not closeout:
+            issues.append({"status": WARN, "name": "fleet_release_train_unclosed", "train_id": train_id, "detail": f"{train_id} has no closeout", "suggested_next_command": f"brigade repos release closeout {train_id}"})
+        report_path = _release_trains_root(target) / train_id / "RELEASE_TRAIN_REPORT.json"
+        if not report_path.is_file():
+            issues.append({"status": WARN, "name": "fleet_release_report_missing", "train_id": train_id, "detail": f"{train_id} has no review report", "suggested_next_command": f"brigade repos release report {train_id}"})
+        created = _parse_time(train.get("created_at") or train.get("generated_at"))
+        if created and (_now() - created).total_seconds() / 3600 > RELEASE_TRAIN_STALE_HOURS:
+            issues.append({"status": WARN, "name": "fleet_release_train_stale", "train_id": train_id, "detail": f"{train_id} is stale", "suggested_next_command": "brigade repos release build"})
+    payload = {"target_label": "repo-fleet", "train_count": len(trains), "issues": issues, "issue_count": len(issues), "top_issue": issues[0] if issues else None}
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+    print("repo fleet release hygiene")
+    print(f"issues: {len(issues)}")
+    for issue in issues[:20]:
+        print(f"[{issue.get('status')}] {issue.get('name')}: {issue.get('detail')}")
+    return 0
+
+
+def release_ready(*, target: Path, train_id: str = "latest", json_output: bool = False) -> int:
+    target = target.expanduser().resolve()
+    train, error = _resolve_release_train(target, train_id)
+    if train is None:
+        print(f"error: {error}", file=sys.stderr)
+        return 1 if error and "not found" in error else 2
+    summary = _release_summary_payload(target, train)
+    blockers: list[str] = []
+    if int(train.get("blocker_count") or 0) > 0:
+        blockers.append("train has blocked repos")
+    if int(summary.get("unresolved_action_count") or 0) > 0:
+        blockers.append("train has unresolved actions")
+    if int(summary.get("missing_evidence_count") or 0) > 0:
+        blockers.append("train has missing manual evidence")
+    if int(summary.get("blocked_count") or 0) > 0:
+        blockers.append("train has blocked manual evidence")
+    ready = not blockers
+    payload = {"target_label": "repo-fleet", "train_id": train.get("train_id"), "ready": ready, "blockers": blockers, "summary": {key: summary.get(key) for key in ("repo_count", "counts", "unresolved_action_count", "missing_evidence_count", "blocked_count")}}
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0 if ready else 1
+    print(f"repo fleet release ready: {train.get('train_id')}")
+    print(f"ready: {str(ready).lower()}")
+    for blocker in blockers:
+        print(f"- {blocker}")
+    return 0 if ready else 1
+
+
 def release_train_actions_health(target: Path) -> dict[str, Any]:
     target = target.expanduser().resolve()
     actions = _read_release_actions(target)

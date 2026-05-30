@@ -323,11 +323,19 @@ def _build_parser() -> argparse.ArgumentParser:
         p_repos_release_item.add_argument("train_id", help="Train id, unique prefix, or latest.")
         p_repos_release_item.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
         p_repos_release_item.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
-    for name in ("reconcile", "summary"):
+    for name in ("reconcile", "summary", "report", "checklist", "ready"):
         p_repos_release_review = repos_release_sub.add_parser(name, help=f"{name.title()} one repo fleet release train.")
         p_repos_release_review.add_argument("train_id", nargs="?", default="latest", help="Train id, unique prefix, or latest.")
         p_repos_release_review.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
         p_repos_release_review.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_repos_release_hygiene = repos_release_sub.add_parser("hygiene", help="Check fleet release train hygiene.")
+    p_repos_release_hygiene.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_repos_release_hygiene.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_repos_release_import = repos_release_sub.add_parser("import-issues", help="Import fleet release train issues into the local work inbox.")
+    p_repos_release_import.add_argument("train_id", nargs="?", default="latest", help="Train id, unique prefix, or latest.")
+    p_repos_release_import.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
+    p_repos_release_import.add_argument("--dry-run", action="store_true", help="Validate without writing imports.")
+    p_repos_release_import.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_repos_release_closeout = repos_release_sub.add_parser("closeout", help="Close out one repo fleet release train.")
     p_repos_release_closeout.add_argument("train_id", nargs="?", default="latest", help="Train id, unique prefix, or latest.")
     p_repos_release_closeout.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
@@ -1810,6 +1818,16 @@ def main(argv=None) -> int:
                 return repos_cmd.release_reconcile(target=args.target, train_id=args.train_id, json_output=args.json)
             if args.repos_release_command == "summary":
                 return repos_cmd.release_summary(target=args.target, train_id=args.train_id, json_output=args.json)
+            if args.repos_release_command == "report":
+                return repos_cmd.release_report(target=args.target, train_id=args.train_id, json_output=args.json)
+            if args.repos_release_command == "checklist":
+                return repos_cmd.release_checklist(target=args.target, train_id=args.train_id, json_output=args.json)
+            if args.repos_release_command == "ready":
+                return repos_cmd.release_ready(target=args.target, train_id=args.train_id, json_output=args.json)
+            if args.repos_release_command == "hygiene":
+                return repos_cmd.release_hygiene(target=args.target, json_output=args.json)
+            if args.repos_release_command == "import-issues":
+                return repos_cmd.release_import_issues(target=args.target, train_id=args.train_id, dry_run=args.dry_run, json_output=args.json)
             if args.repos_release_command == "actions":
                 if args.repos_release_actions_command == "plan":
                     return repos_cmd.release_actions_plan(target=args.target, train_id=args.train_id, json_output=args.json)
