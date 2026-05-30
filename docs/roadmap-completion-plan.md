@@ -264,6 +264,12 @@ Phase 62 status:
 - Each known deferred item now has an id, title, subsystem, owner, source section, deferred reason, status, and suggested phase when the item remains in scope.
 - Text audit output includes the deferred item count, while unresolved ownership or missing phase metadata would become roadmap audit warnings.
 
+Phase 63 status:
+
+- Implemented command surface: `brigade roadmap commands`.
+- Added text and JSON output for parser-derived command groups, normalized documented command snippets, documentation coverage, and missing top-level public docs.
+- README documents the roadmap command contract surface.
+
 ### 3. Inspiration Pattern Registry
 
 Deliverable: a bounded local record of external workflow patterns Brigade intends to support.

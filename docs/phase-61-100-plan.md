@@ -30,6 +30,8 @@ Goal: make public docs and CLI command discovery agree through a stable command 
 
 Acceptance: tests compare documented command snippets to parser command paths and public docs list every supported top-level command group.
 
+Status: implemented with `brigade roadmap commands`.
+
 ### Phase 64: Cross-Producer Provenance Compatibility Audit
 Goal: audit scanner, backup, memory-care, security, review, tool-catalog, repo-fleet, and learning imports for a common provenance and fingerprint contract.
 

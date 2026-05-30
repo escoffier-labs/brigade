@@ -94,6 +94,23 @@ def test_roadmap_patterns_cover_neutral_families_and_decisions(capsys, tmp_path)
     assert all(check["status"] == "ok" for check in payload["checks"])
 
 
+def test_roadmap_commands_reports_top_level_documentation(capsys, tmp_path):
+    (tmp_path / "ROADMAP.md").write_text("# Roadmap\n")
+    (tmp_path / "README.md").write_text(
+        "Use `brigade roadmap audit`, `brigade roadmap commands`, `brigade tools show simplify`, and `brigade work brief`.\n"
+    )
+
+    assert roadmap_cmd.commands(target=tmp_path, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+
+    groups = {item["command"]: item for item in payload["groups"]}
+    assert groups["brigade roadmap"]["documented"] is True
+    assert groups["brigade tools"]["documented"] is True
+    assert groups["brigade work"]["documented"] is True
+    assert groups["brigade release"]["documented"] is False
+    assert "brigade release" in payload["checks"][0]["commands"]
+
+
 def test_phase_61_100_plan_lists_forty_public_safe_phases():
     plan = (Path(__file__).parents[1] / "docs" / "phase-61-100-plan.md").read_text()
 
@@ -114,15 +131,22 @@ def test_roadmap_cli_dispatch(tmp_path, monkeypatch):
         seen.append(("patterns", kwargs))
         return 0
 
+    def fake_commands(**kwargs):
+        seen.append(("commands", kwargs))
+        return 0
+
     monkeypatch.setattr(roadmap_cmd, "audit", fake_audit)
     monkeypatch.setattr(roadmap_cmd, "patterns", fake_patterns)
+    monkeypatch.setattr(roadmap_cmd, "commands", fake_commands)
 
     assert cli.main(["roadmap", "audit", "--target", str(tmp_path), "--json", "--import-issues"]) == 0
     assert cli.main(["roadmap", "patterns", "--target", str(tmp_path), "--json"]) == 0
+    assert cli.main(["roadmap", "commands", "--target", str(tmp_path), "--json"]) == 0
 
     assert seen == [
         ("audit", {"target": tmp_path, "json_output": True, "import_issues": True}),
         ("patterns", {"target": tmp_path, "json_output": True}),
+        ("commands", {"target": tmp_path, "json_output": True}),
     ]
 
 

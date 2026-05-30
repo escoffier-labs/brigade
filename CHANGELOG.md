@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `brigade roadmap commands` for a parser-derived public command documentation contract with text and JSON output.
 - `docs/phase-61-100-plan.md` as the public, testable phase queue for roadmap completion hardening.
 - Public `templates/` index that points fresh-start users at the packaged starter templates without exposing local dogfood workspace files.
 - Built-in `brigade doctor` bootstrap budget checks that fail hard when installed bootstrap files exceed conservative byte limits.

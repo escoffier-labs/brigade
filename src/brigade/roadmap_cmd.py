@@ -694,12 +694,82 @@ def patterns(*, target: Path, json_output: bool = False) -> int:
     return 0
 
 
+def command_contract_payload(target: Path) -> dict[str, Any]:
+    target = target.expanduser().resolve()
+    documented = _documented_brigade_commands(target)
+    cli_commands = _cli_command_paths()
+    cli_prefixes = _cli_command_prefixes(cli_commands)
+    normalized_documented = sorted(
+        {_normalize_documented_command(command, cli_prefixes) for command in documented}
+    )
+    top_level_names = sorted({command.split()[1] for command in cli_commands if len(command.split()) > 1})
+    groups: list[dict[str, Any]] = []
+    missing_groups: list[str] = []
+    for name in top_level_names:
+        command = f"brigade {name}"
+        documented_paths = [
+            item
+            for item in normalized_documented
+            if item == command or item.startswith(f"{command} ")
+        ]
+        documented_group = command in normalized_documented or bool(documented_paths)
+        if not documented_group:
+            missing_groups.append(command)
+        groups.append(
+            {
+                "command": command,
+                "documented": documented_group,
+                "documented_paths": documented_paths,
+                "cli_path_count": sum(1 for item in cli_commands if item == command or item.startswith(f"{command} ")),
+            }
+        )
+    checks = [
+        {
+            "status": WARN if missing_groups else OK,
+            "name": "roadmap_command_group_missing_docs",
+            "detail": f"{len(missing_groups)} top-level command group(s) missing public docs" if missing_groups else "none",
+            "commands": missing_groups,
+        }
+    ]
+    issues = [check for check in checks if check["status"] != OK]
+    return {
+        "target": str(target),
+        "documented_commands": documented,
+        "normalized_documented_commands": normalized_documented,
+        "cli_commands": cli_commands,
+        "groups": groups,
+        "group_count": len(groups),
+        "checks": checks,
+        "issues": issues,
+        "issue_count": len(issues),
+        "top_issue": issues[0] if issues else None,
+    }
+
+
+def commands(*, target: Path, json_output: bool = False) -> int:
+    payload = command_contract_payload(target)
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+    print(f"roadmap commands: {payload['target']}")
+    print(f"groups: {payload['group_count']}")
+    for group in payload["groups"]:
+        status = OK if group["documented"] else WARN
+        print(f"[{status}] {group['command']}: {group['cli_path_count']} CLI path(s)")
+    for check in payload["checks"]:
+        if check["status"] != OK:
+            print(f"[{check['status']}] {check['name']}: {check['detail']}")
+    return 0
+
+
 def health(target: Path) -> dict[str, Any]:
     audit_data = audit_payload(target)
     pattern_data = patterns_payload(target)
+    command_data = command_contract_payload(target)
     checks = [
         *audit_data.get("issues", []),
         *pattern_data.get("issues", []),
+        *command_data.get("issues", []),
     ]
     return {
         "target": str(target.expanduser().resolve()),
@@ -710,6 +780,10 @@ def health(target: Path) -> dict[str, Any]:
         "patterns": {
             "issue_count": pattern_data["issue_count"],
             "top_issue": pattern_data["top_issue"],
+        },
+        "commands": {
+            "issue_count": command_data["issue_count"],
+            "top_issue": command_data["top_issue"],
         },
         "checks": checks,
         "issue_count": len(checks),
