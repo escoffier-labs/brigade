@@ -82,6 +82,7 @@ memory/20[0-9][0-9]-[0-1][0-9]-[0-3][0-9].md
 memory/handoff-inbox/
 
 # brigade local state (logs, scrub cache, dogfood runs, work sessions).
+.brigade/center/
 .brigade/dogfood.toml
 .brigade/logs/
 .brigade/runs/

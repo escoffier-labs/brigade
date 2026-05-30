@@ -46,7 +46,7 @@ Release readiness includes:
 - latest security health and evidence state
 - handoff draft and ingest health
 - local closeout state for backup, handoff, memory-care, security, and release candidates when available
-- context pack freshness, project consolidation state, learning candidates, and operator-center pending review summaries where configured
+- context pack freshness, project consolidation state, learning candidates, operator-center pending review summaries, and operator report freshness where configured
 - git branch, dirty tracked files, upstream, ahead count, and behind count
 - README, CHANGELOG, and ROADMAP touch warnings when user-facing code changed
 - content-guard tip scan when available

@@ -34,12 +34,15 @@ Each candidate contains:
 - `RELEASE_NOTES_DRAFT.md`, an editable draft inferred from `CHANGELOG.md`, commit subjects since the base ref, and touched docs. Uncertain sections are marked `review-needed`.
 - `PUBLISH_PLAN.md`, a manual checklist for verification, closeout, release doctor, content guard, tag, push, and release creation. Remote-mutating commands are marked manual-only and are not run.
 - `EVIDENCE.json`, stable wrapper-friendly evidence for the release readiness receipt, work closeout, verification receipt, code review closeout, scanner sweep state, security state, handoff state, git state, changed files, docs touch status, content-guard summaries, blockers, warnings, and suggested next commands.
+- latest operator report health, including stale reports, missing receipt references, changed HEAD, and newer center activity warnings.
 
 ## Candidate Health
 
 `brigade release doctor` warns when the latest candidate is stale, references missing receipts, was built from blocked readiness, or no longer matches the current git HEAD.
 
 These are warnings because candidate bundles are review artifacts. They do not replace release readiness checks, verification, code review closeout, or content guard.
+
+Release readiness and candidate bundles include operator report health so an operator can tell whether the local daily review packet is fresh before publishing manually.
 
 ## Boundary
 

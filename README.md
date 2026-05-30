@@ -322,6 +322,11 @@ brigade center status
 brigade center activity
 brigade center reviews
 brigade center templates
+brigade center report plan
+brigade center report build
+brigade center report list
+brigade center report show <report-id>
+brigade center report archive <report-id>
 brigade work run
 brigade work run --queue-next
 brigade work run "review today's changes"

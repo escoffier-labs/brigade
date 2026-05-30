@@ -4859,7 +4859,7 @@ def _suggested_command(active: dict[str, Any] | None, next_text: object, source:
 
 
 def _brief_payload(target: Path, *, limit: int = 3) -> dict[str, Any]:
-    from . import chat_cmd, context_cmd, handoff_cmd, learn_cmd, memory_cmd, projects_cmd, repos_cmd, roadmap_cmd, security_cmd, tools_cmd
+    from . import center_cmd, chat_cmd, context_cmd, handoff_cmd, learn_cmd, memory_cmd, projects_cmd, repos_cmd, roadmap_cmd, security_cmd, tools_cmd
 
     target = target.expanduser().resolve()
     active = _active_session_info(target)
@@ -4889,6 +4889,7 @@ def _brief_payload(target: Path, *, limit: int = 3) -> dict[str, Any]:
     context_health = context_cmd.health(target)
     projects_health = projects_cmd.health(target)
     learning_health = learn_cmd.health(target)
+    center_report_health = center_cmd.report_health(target)
     handoff_issues = handoff_cmd.collect_issues(target)
     known_handoff_issue_ids = handoff_cmd._known_local_issue_ids(target)
     new_handoff_issues = [issue for issue in handoff_issues if issue.id not in known_handoff_issue_ids]
@@ -5001,6 +5002,11 @@ def _brief_payload(target: Path, *, limit: int = 3) -> dict[str, Any]:
             "candidate_count": learning_health["candidate_count"],
             "issue_count": learning_health["issue_count"],
             "top_issue": learning_health["top_issue"],
+        },
+        "operator_report": {
+            "issue_count": center_report_health["issue_count"],
+            "top_issue": center_report_health["top_issue"],
+            "latest": center_report_health["latest"],
         },
         "handoff_issues": {
             "count": len(new_handoff_issues),
@@ -5716,6 +5722,18 @@ def brief(*, target: Path, limit: int = 3, json_output: bool = False) -> int:
         top_learning = learning.get("top_issue") if isinstance(learning.get("top_issue"), dict) else None
         if top_learning:
             print(f"learning_top_issue: {top_learning.get('name')} {_short(str(top_learning.get('detail', '')))}")
+
+    operator_report = payload.get("operator_report") if isinstance(payload.get("operator_report"), dict) else {}
+    if operator_report:
+        latest_report = operator_report.get("latest") if isinstance(operator_report.get("latest"), dict) else None
+        if latest_report:
+            print(f"operator_report_latest: {latest_report.get('report_id')} {latest_report.get('created_at')}")
+        print(f"operator_report: {'ok' if operator_report.get('issue_count') == 0 else f'{operator_report.get('issue_count')} issue(s)'}")
+        top_report = operator_report.get("top_issue") if isinstance(operator_report.get("top_issue"), dict) else None
+        if top_report:
+            print(f"operator_report_top_issue: {top_report.get('name')} {_short(str(top_report.get('detail', '')))}")
+            if top_report.get("suggested_next_command"):
+                print(f"operator_report_command: {top_report.get('suggested_next_command')}")
 
     code_review = payload.get("code_review")
     if isinstance(code_review, dict):
@@ -9649,7 +9667,7 @@ def status(*, target: Path, limit: int = 12) -> int:
 
 
 def doctor(*, target: Path) -> int:
-    from . import chat_cmd, context_cmd, handoff_cmd, learn_cmd, memory_cmd, projects_cmd, repos_cmd, roadmap_cmd, security_cmd, tools_cmd
+    from . import center_cmd, chat_cmd, context_cmd, handoff_cmd, learn_cmd, memory_cmd, projects_cmd, repos_cmd, roadmap_cmd, security_cmd, tools_cmd
 
     target = target.expanduser().resolve()
     failures = 0
@@ -9924,6 +9942,13 @@ def doctor(*, target: Path) -> int:
         _doctor_line(WARN, "learning_candidates", top_learning.get("detail") or f"{learning_health.get('candidate_count', 0)} candidate(s)")
     else:
         _doctor_line(OK, "learning_candidates", "none")
+
+    center_report_health = center_cmd.report_health(effective_target)
+    for check in center_report_health.get("checks", []):
+        _doctor_line(str(check.get("status")), str(check.get("name")), check.get("detail"))
+    if not center_report_health.get("checks"):
+        latest_report = center_report_health.get("latest") if isinstance(center_report_health.get("latest"), dict) else {}
+        _doctor_line(OK, "operator_report", latest_report.get("report_id") or "none")
 
     handoff_inbox = (
         cfg.handoff_inbox

@@ -335,6 +335,8 @@ def _resolve_candidate(target: Path, candidate_id: str) -> tuple[dict[str, Any] 
 
 
 def _evidence(target: Path, *, base_ref: str | None) -> dict[str, Any]:
+    from . import center_cmd
+
     sweep = work_cmd._scanner_sweep_health(target)
     review = work_cmd._review_health(target)
     handoffs = handoff_cmd.draft_queue_payload(target)
@@ -347,6 +349,7 @@ def _evidence(target: Path, *, base_ref: str | None) -> dict[str, Any]:
     memory_health = memory_cmd.health(target)
     backup_health = work_cmd._backup_health(target)
     acceptance = work_cmd._acceptance_payload(target)
+    operator_report_health = center_cmd.report_health(target)
     return {
         "git": _git_state(target),
         "latest_work_closeout": _latest_work_closeout(target),
@@ -420,6 +423,11 @@ def _evidence(target: Path, *, base_ref: str | None) -> dict[str, Any]:
             "issue_count": roadmap_health.get("issue_count"),
             "top_issue": roadmap_health.get("top_issue"),
         },
+        "operator_report": {
+            "issue_count": operator_report_health.get("issue_count"),
+            "top_issue": operator_report_health.get("top_issue"),
+            "latest": operator_report_health.get("latest"),
+        },
         "security_closeout": _latest_closeout_json(target / ".brigade" / "security" / "closeouts"),
         "docs": {
             "base_ref": base_ref,
@@ -460,6 +468,10 @@ def _assess(evidence: dict[str, Any], checks: list[dict[str, Any]], docs_warning
     handoffs = evidence.get("handoff_drafts") if isinstance(evidence.get("handoff_drafts"), dict) else {}
     if int(handoffs.get("issue_count") or 0) > 0:
         blockers.append(f"handoff draft queue has issue(s): {handoffs.get('issue_count')}")
+    operator_report = evidence.get("operator_report") if isinstance(evidence.get("operator_report"), dict) else {}
+    if int(operator_report.get("issue_count") or 0) > 0:
+        top_report = operator_report.get("top_issue") if isinstance(operator_report.get("top_issue"), dict) else {}
+        warnings.append(f"operator report has issue(s): {top_report.get('detail') or operator_report.get('issue_count')}")
     for check in checks:
         if check.get("status") == FAIL:
             blockers.append(f"{check.get('name')}: {check.get('detail')}")
@@ -620,6 +632,7 @@ def _candidate_payload(target: Path, *, base_ref: str | None) -> dict[str, Any]:
         "context": evidence.get("context"),
         "projects": evidence.get("projects"),
         "learning": evidence.get("learning"),
+        "operator_report": evidence.get("operator_report"),
         "repo_fleet": evidence.get("repo_fleet"),
         "roadmap": evidence.get("roadmap"),
         "git": git,

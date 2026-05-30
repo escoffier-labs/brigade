@@ -84,7 +84,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `brigade learn plan/doctor/import-issues` for bounded local learning candidates that become reviewed tasks, handoffs, suppressions, accepted risk, archive, or dismissal.
 - `brigade tools pack build/list/show/archive` and `brigade tools sync plan/apply` for portable tool evidence bundles and reviewed projection sync over the existing managed projection path.
 - `brigade work backup closeout`, `brigade security closeout`, `brigade handoff closeout`, `brigade memory care closeout`, and `brigade work acceptance` for reviewable local closeout and acceptance rollup receipts.
-- `brigade center status/activity/reviews/templates` for read-only local operator-center summaries over work, scanner, review, handoff, tool, learning, context, project, security, and release state.
+- `brigade center status/activity/reviews/templates` and `brigade center report plan/build/list/show/archive` for read-only local operator-center summaries and local report bundles over work, scanner, review, handoff, tool, learning, context, project, security, and release state.
 - `brigade roadmap audit` and `brigade roadmap patterns` for roadmap closure checks, stale phase warnings, documented command drift, neutral pattern-family coverage, and source-pattern decisions.
 - `brigade repos init/list/show/scan/doctor/import-issues` for gitignored local repo-fleet readiness checks, safe setup metadata, fallback guidance detection, and `repo-fleet` work inbox imports.
 - `brigade work sweep closeout <sweep-id|latest>` for reviewable sweep closeout records that block unresolved pending imports, support explicit deferrals, and surface unclosed sweeps through inbox hygiene.

@@ -809,6 +809,27 @@ def _build_parser() -> argparse.ArgumentParser:
         p_center_action.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
         if name in {"activity", "reviews"}:
             p_center_action.add_argument("--limit", type=int, default=50, help="Maximum rows to show.")
+    p_center_report = center_sub.add_parser("report", help="Plan, build, and inspect local operator report bundles.")
+    center_report_sub = p_center_report.add_subparsers(dest="center_report_command", metavar="<center-report-command>")
+    center_report_sub.required = True
+    p_center_report_plan = center_report_sub.add_parser("plan", help="Plan a local operator report without writing it.")
+    p_center_report_plan.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_center_report_plan.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_center_report_build = center_report_sub.add_parser("build", help="Build a local operator report bundle.")
+    p_center_report_build.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
+    p_center_report_build.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_center_report_list = center_report_sub.add_parser("list", help="List local operator report bundles.")
+    p_center_report_list.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_center_report_list.add_argument("--limit", type=int, default=20, help="Maximum reports to list.")
+    p_center_report_list.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_center_report_show = center_report_sub.add_parser("show", help="Show one local operator report bundle.")
+    p_center_report_show.add_argument("report_id", help="Report id, unique prefix, or latest.")
+    p_center_report_show.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_center_report_show.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_center_report_archive = center_report_sub.add_parser("archive", help="Archive one local operator report bundle.")
+    p_center_report_archive.add_argument("report_id", help="Report id, unique prefix, or latest.")
+    p_center_report_archive.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
+    p_center_report_archive.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
 
     # run
     p_run = sub.add_parser("run", help="Run a bounded cross-model orchestration task.")
@@ -1602,6 +1623,19 @@ def main(argv=None) -> int:
             return center_cmd.reviews(target=args.target, limit=args.limit, json_output=args.json)
         if args.center_command == "templates":
             return center_cmd.templates(target=args.target, json_output=args.json)
+        if args.center_command == "report":
+            if args.center_report_command == "plan":
+                return center_cmd.report_plan(target=args.target, json_output=args.json)
+            if args.center_report_command == "build":
+                return center_cmd.report_build(target=args.target, json_output=args.json)
+            if args.center_report_command == "list":
+                return center_cmd.report_list(target=args.target, limit=args.limit, json_output=args.json)
+            if args.center_report_command == "show":
+                return center_cmd.report_show(target=args.target, report_id=args.report_id, json_output=args.json)
+            if args.center_report_command == "archive":
+                return center_cmd.report_archive(target=args.target, report_id=args.report_id, json_output=args.json)
+            parser.error(f"unknown center report command: {args.center_report_command}")
+            return 2
         parser.error(f"unknown center command: {args.center_command}")
         return 2
     if cmd == "memory":
