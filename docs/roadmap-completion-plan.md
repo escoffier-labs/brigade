@@ -768,6 +768,16 @@ Phase 101 status:
 - `daily closeout` marks the latest run reviewed, deferred, blocked, or archived and can write a linted Memory Handoff draft without editing canonical memory.
 - The daily driver is the agent-facing entrypoint over the operator system. It does not run arbitrary commands, start scanners or reviewers, run tools, run fleet sweeps, mutate remotes, push, tag, publish, or edit canonical memory.
 
+Phase 102 status:
+
+- Hardened the existing daily driver without adding a new subsystem.
+- Added command surface: `brigade daily init/schema/history/show/doctor`.
+- Added gitignored `.brigade/daily.toml` defaults for preferred mode, risk policy, context pack building, operator report building, readiness imports, import promotion, work runs, and stale receipt thresholds.
+- Daily planning now respects task-first, inbox-first, and readiness-first modes without bypassing approval or remote-mutation guards.
+- Daily review now shows the selected adapter, config blockers, evidence blockers, acceptance, risk, approval boundary, and context pack intent.
+- Daily run now refuses disabled adapters, stale recorded plans, approval-required actions without `--approved`, and missing source evidence, while preserving clean JSON output from wrapped commands.
+- Daily health now surfaces lightly in work brief, work doctor, center status, and center reviews.
+
 ## Suggested Execution Order
 
 1. Roadmap audit, inspiration pattern registry, and repo-fleet readiness.

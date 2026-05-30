@@ -84,10 +84,14 @@ def _build_parser() -> argparse.ArgumentParser:
     p_daily = sub.add_parser("daily", help="Run the personal daily operator loop.")
     daily_sub = p_daily.add_subparsers(dest="daily_command", metavar="<daily-command>")
     daily_sub.required = True
-    for name in ("status", "review"):
+    for name in ("status", "review", "schema", "doctor"):
         p_daily_action = daily_sub.add_parser(name, help=f"Show daily {name}.")
         p_daily_action.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
         p_daily_action.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_daily_init = daily_sub.add_parser("init", help="Write local daily driver defaults.")
+    p_daily_init.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
+    p_daily_init.add_argument("--force", action="store_true", help="Overwrite an existing daily config.")
+    p_daily_init.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_daily_plan = daily_sub.add_parser("plan", help="Create the ranked daily plan.")
     p_daily_plan.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
     p_daily_plan.add_argument("--record", action="store_true", help="Write a local daily plan receipt.")
@@ -95,7 +99,17 @@ def _build_parser() -> argparse.ArgumentParser:
     p_daily_run = daily_sub.add_parser("run", help="Run one bounded safe daily action.")
     p_daily_run.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
     p_daily_run.add_argument("--approved", action="store_true", help="Allow the selected action when it requires explicit approval.")
+    p_daily_run.add_argument("--plan-id", default=None, help="Run from a recorded daily plan id or latest.")
+    p_daily_run.add_argument("--replan", action="store_true", help="Ignore a stale or supplied plan and choose a fresh action.")
     p_daily_run.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_daily_history = daily_sub.add_parser("history", help="List local daily receipts.")
+    p_daily_history.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_daily_history.add_argument("--limit", type=int, default=20, help="Maximum receipts to show.")
+    p_daily_history.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_daily_show = daily_sub.add_parser("show", help="Show a daily run receipt.")
+    p_daily_show.add_argument("run_id", nargs="?", default="latest", help="Run id or latest.")
+    p_daily_show.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_daily_show.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_daily_closeout = daily_sub.add_parser("closeout", help="Close out the latest daily run.")
     p_daily_closeout.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
     p_daily_closeout.add_argument("--status", choices=["reviewed", "deferred", "blocked", "archived"], default="reviewed")
@@ -1870,14 +1884,24 @@ def main(argv=None) -> int:
     if cmd == "daily":
         from . import daily_cmd
 
+        if args.daily_command == "init":
+            return daily_cmd.init(target=args.target, force=args.force, json_output=args.json)
         if args.daily_command == "status":
             return daily_cmd.status(target=args.target, json_output=args.json)
         if args.daily_command == "plan":
             return daily_cmd.plan(target=args.target, record=args.record, json_output=args.json)
         if args.daily_command == "review":
             return daily_cmd.review(target=args.target, json_output=args.json)
+        if args.daily_command == "schema":
+            return daily_cmd.schema(target=args.target, json_output=args.json)
+        if args.daily_command == "history":
+            return daily_cmd.history(target=args.target, limit=args.limit, json_output=args.json)
+        if args.daily_command == "show":
+            return daily_cmd.show(target=args.target, run_id=args.run_id, json_output=args.json)
+        if args.daily_command == "doctor":
+            return daily_cmd.doctor(target=args.target, json_output=args.json)
         if args.daily_command == "run":
-            return daily_cmd.run(target=args.target, approved=args.approved, json_output=args.json)
+            return daily_cmd.run(target=args.target, approved=args.approved, plan_id=args.plan_id, replan=args.replan, json_output=args.json)
         if args.daily_command == "closeout":
             return daily_cmd.closeout(target=args.target, status=args.status, reason=args.reason, handoff=args.handoff, json_output=args.json)
         parser.error(f"unknown daily command: {args.daily_command}")

@@ -597,6 +597,8 @@ def _activity(target: Path) -> list[dict[str, Any]]:
 
 
 def _reviews(target: Path) -> list[dict[str, Any]]:
+    from . import daily_cmd
+
     items: list[dict[str, Any]] = []
     for item in work_cmd._pending_imports(target):
         import_id = str(item.get("id") or "")
@@ -699,10 +701,16 @@ def _reviews(target: Path) -> list[dict[str, Any]]:
     top_readiness = readiness.get("top_issue") if isinstance(readiness.get("top_issue"), dict) else None
     if top_readiness:
         items.append(_item("center-readiness", str(top_readiness.get("name") or "readiness"), str(top_readiness.get("status") or "warn"), str(top_readiness.get("detail") or "operator readiness needs review"), "brigade center readiness plan"))
+    daily_health = daily_cmd.health(target)
+    top_daily = daily_health.get("top_issue") if isinstance(daily_health.get("top_issue"), dict) else None
+    if top_daily:
+        items.append(_item("daily-driver", str(top_daily.get("name") or "daily"), str(top_daily.get("status") or "warn"), str(top_daily.get("detail") or "daily driver needs review"), "brigade daily doctor"))
     return items
 
 
 def status_payload(target: Path) -> dict[str, Any]:
+    from . import daily_cmd
+
     target = target.expanduser().resolve()
     active = work_cmd._active_session_info(target)
     pending_tasks = work_cmd._pending_tasks(target)
@@ -733,6 +741,7 @@ def status_payload(target: Path) -> dict[str, Any]:
         "operator_readiness": readiness_health(target),
         "operator_report": report_health(target),
         "action_queue": actions_health(target),
+        "daily_driver": daily_cmd.health(target),
         "review_queue_count": len(_reviews(target)),
     }
 

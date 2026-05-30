@@ -42,11 +42,16 @@ brigade center readiness closeout
 brigade center readiness list
 brigade center readiness show <readiness-id>
 brigade center readiness import-issues
+brigade daily init
 brigade daily status
 brigade daily plan
 brigade daily review
 brigade daily run
 brigade daily closeout
+brigade daily history
+brigade daily show <run-id>
+brigade daily doctor
+brigade daily schema
 ```
 
 `status` summarizes active work, pending tasks, pending imports, scanner sweep health, review health, handoff drafts, tool catalog health, learning candidates, context packs, release readiness, release candidates, repo fleet, roadmap health, project consolidation, and security health.
@@ -72,13 +77,17 @@ Every center row uses the same wrapper-facing fields: `subsystem`, `local_id`, `
 
 `brigade daily status` summarizes the current local operating state from work, imports, center reviews, action queues, readiness, handoffs, memory-care, security, tools, release receipts, and operator reports. It also returns the next recommended command.
 
-`brigade daily plan` ranks local candidate actions by urgency, safety, acceptance coverage, provenance, and expected usefulness. It prefers pending accepted tasks, then reviewed imports with acceptance criteria, reviewed center actions, readiness blockers that can become imports, and stale handoff, memory, or security issues. It chooses one recommended action and writes no state unless `--record` is passed.
+`brigade daily init` writes conservative local defaults to `.brigade/daily.toml`. The config can prefer task, inbox, or readiness modes and can disable context pack builds, operator report builds, readiness imports, import promotion, or work runs.
 
-`brigade daily review` previews the selected action with safe evidence references, acceptance criteria when available, risk, approval boundary, likely next command, and context pack planning.
+`brigade daily plan` ranks local candidate actions by urgency, safety, acceptance coverage, provenance, and expected usefulness. It prefers pending accepted tasks, then reviewed imports with acceptance criteria, reviewed center actions, readiness blockers that can become imports, and stale handoff, memory, or security issues. It chooses one recommended action and writes no state unless `--record` is passed. The local preferred mode can move inbox or readiness items upward without bypassing risk, approval, or remote-mutation guards.
 
-`brigade daily run` executes exactly one bounded local step. It can run a pending task, promote an approved import, start a reviewed center action, build an operator report, build a safe context pack, or import readiness issues. It refuses approval-required actions unless `--approved` is passed and records receipts under `.brigade/daily/runs/`.
+`brigade daily review` previews the selected action with selected adapter, safe evidence references, acceptance criteria when available, risk, config blockers, approval boundary, likely next command, and context pack planning.
+
+`brigade daily run` executes exactly one bounded local step. It can run a pending task, promote an approved import, start a reviewed center action, build an operator report, build a safe context pack, or import readiness issues. It refuses approval-required actions unless `--approved` is passed, refuses disabled adapters, and records receipts under `.brigade/daily/runs/`.
 
 `brigade daily closeout` updates the latest daily receipt as reviewed, deferred, blocked, or archived. It can also write a Memory Handoff draft for durable knowledge, but it never edits canonical memory.
+
+`brigade daily history` and `brigade daily show <run-id|latest>` inspect local plan and run receipts. `brigade daily doctor` reports missing or invalid config, stale plans, stale unclosed or blocked runs, parse errors, missing source evidence, and unsafe config. `brigade daily schema` prints wrapper-facing JSON contracts.
 
 Daily commands are the intended wrapper path for an agent:
 

@@ -36,6 +36,23 @@ def _seed_ready_repo(path, capsys=None):
     _write_release_receipt(path)
 
 
+def _daily_action(action_type, *, source_subsystem="test", source_local_id="item", metadata=None, approval_required=False, risk_level="low"):
+    return daily_cmd._candidate(
+        target=Path("."),
+        action_type=action_type,
+        source_subsystem=source_subsystem,
+        source_local_id=source_local_id,
+        safe_summary=f"{action_type} action",
+        suggested_next_command=f"brigade {action_type}",
+        score=500,
+        ranking_reasons=["test"],
+        approval_required=approval_required,
+        approval_reason="approval required" if approval_required else None,
+        risk_level=risk_level,
+        metadata=metadata or {},
+    )
+
+
 def test_daily_status_text_and_json(tmp_path, capsys):
     _seed_ready_repo(tmp_path, capsys)
     work_cmd._add_task(
@@ -53,6 +70,86 @@ def test_daily_status_text_and_json(tmp_path, capsys):
 
     assert cli.main(["daily", "status", "--target", str(tmp_path)]) == 0
     assert "daily status:" in capsys.readouterr().out
+
+
+def test_daily_init_schema_history_show_and_doctor(tmp_path, monkeypatch, capsys):
+    _seed_ready_repo(tmp_path, capsys)
+
+    assert cli.main(["daily", "init", "--target", str(tmp_path), "--json"]) == 0
+    init_payload = json.loads(capsys.readouterr().out)
+    assert init_payload["written"] is True
+    assert (tmp_path / ".brigade" / "daily.toml").is_file()
+
+    assert cli.main(["daily", "schema", "--target", str(tmp_path), "--json"]) == 0
+    schema_payload = json.loads(capsys.readouterr().out)
+    names = {item["name"] for item in schema_payload["schemas"]}
+    assert {"daily-status", "daily-plan", "daily-review", "daily-run", "daily-doctor"} <= names
+
+    work_cmd._add_task(tmp_path, "History task", acceptance=["History records exist."])
+    monkeypatch.setattr(work_cmd, "run", lambda *args, **kwargs: 0)
+    assert daily_cmd.run(target=tmp_path, json_output=True) == 0
+    run_receipt = json.loads(capsys.readouterr().out)
+
+    assert cli.main(["daily", "history", "--target", str(tmp_path), "--json"]) == 0
+    history_payload = json.loads(capsys.readouterr().out)
+    assert history_payload["run_count"] == 1
+    assert history_payload["plan_count"] == 1
+
+    assert cli.main(["daily", "show", "latest", "--target", str(tmp_path), "--json"]) == 0
+    show_payload = json.loads(capsys.readouterr().out)
+    assert show_payload["run_id"] == run_receipt["run_id"]
+
+    assert cli.main(["daily", "doctor", "--target", str(tmp_path), "--json"]) == 0
+    doctor_payload = json.loads(capsys.readouterr().out)
+    assert doctor_payload["health"]["run_count"] == 1
+
+
+def test_daily_config_validation_preferred_mode_and_unsafe_warning(tmp_path, capsys):
+    _seed_ready_repo(tmp_path, capsys)
+    (tmp_path / ".brigade").mkdir(exist_ok=True)
+    (tmp_path / ".brigade" / "daily.toml").write_text(
+        "\n".join(
+            [
+                'preferred_mode = "inbox-first"',
+                'max_risk_without_approval = "high"',
+                "allow_context_pack_build = true",
+                "allow_operator_report_build = true",
+                "allow_readiness_imports = true",
+                "allow_import_promotion_with_approval = true",
+                "allow_work_run = true",
+                "stale_plan_threshold_hours = 12",
+                "stale_run_threshold_hours = 12",
+            ]
+        )
+        + "\n"
+    )
+    work_cmd._add_task(tmp_path, "Lower task", acceptance=["Task acceptance exists."])
+    work_cmd._append_import_records(
+        tmp_path,
+        [
+            {
+                "text": "Preferred import",
+                "kind": "task",
+                "source": "scanner",
+                "priority": "high",
+                "acceptance": ["Import acceptance exists."],
+                "metadata": {"source_fingerprint": "preferred-import"},
+            }
+        ],
+    )
+
+    assert daily_cmd.plan(target=tmp_path, json_output=True) == 0
+    plan_payload = json.loads(capsys.readouterr().out)
+    assert plan_payload["selected_action"]["source_subsystem"] == "work-import"
+
+    assert daily_cmd.doctor(target=tmp_path, json_output=True) == 0
+    doctor_payload = json.loads(capsys.readouterr().out)
+    assert any(check["name"] == "daily_risk_policy" for check in doctor_payload["checks"])
+
+    (tmp_path / ".brigade" / "daily.toml").write_text('preferred_mode = "sideways"\n')
+    assert daily_cmd.doctor(target=tmp_path, json_output=True) == 1
+    invalid_payload = json.loads(capsys.readouterr().out)
+    assert any(check["name"] == "daily_preferred_mode" for check in invalid_payload["checks"])
 
 
 def test_daily_plan_ranks_tasks_imports_center_actions_and_readiness(tmp_path, capsys):
@@ -123,6 +220,9 @@ def test_daily_plan_records_and_review_previews_action(tmp_path, capsys):
     assert review["acceptance"] == ["Context exists."]
     assert review["context_pack_plan"]["task"]["id"] == task["id"]
     assert review["approval_boundary"] == "no explicit approval required"
+    assert review["selected_adapter"] == "brigade work run"
+    assert review["context_pack_would_build"] is True
+    assert review["config_blockers"] == []
 
 
 def test_daily_plan_includes_handoff_memory_and_security_issues(tmp_path, capsys):
@@ -167,6 +267,110 @@ def test_daily_run_refuses_approval_required_import_and_promotes_when_approved(t
     assert work_cmd._pending_tasks(tmp_path)
 
 
+def test_daily_run_disabled_adapters_and_stale_recorded_plan(tmp_path, capsys):
+    _seed_ready_repo(tmp_path, capsys)
+    (tmp_path / ".brigade").mkdir(exist_ok=True)
+    (tmp_path / ".brigade" / "daily.toml").write_text(
+        "\n".join(
+            [
+                'preferred_mode = "task-first"',
+                'max_risk_without_approval = "medium"',
+                "allow_context_pack_build = true",
+                "allow_operator_report_build = true",
+                "allow_readiness_imports = true",
+                "allow_import_promotion_with_approval = true",
+                "allow_work_run = false",
+                "stale_plan_threshold_hours = 1",
+                "stale_run_threshold_hours = 1",
+            ]
+        )
+        + "\n"
+    )
+    work_cmd._add_task(tmp_path, "Disabled task", acceptance=["Should not run."])
+    assert daily_cmd.run(target=tmp_path, json_output=True) == 1
+    blocked = json.loads(capsys.readouterr().out)
+    assert "work run adapter disabled" in blocked["blockers"][0]
+
+    stale_plan_dir = tmp_path / ".brigade" / "daily" / "plans" / "stale-plan"
+    stale_plan_dir.mkdir(parents=True)
+    stale_plan = daily_cmd.plan_payload(tmp_path)
+    stale_plan["plan_id"] = "stale-plan"
+    stale_plan["created_at"] = "2026-05-29T00:00:00+00:00"
+    (stale_plan_dir / "plan.json").write_text(json.dumps(stale_plan))
+    assert daily_cmd.run(target=tmp_path, plan_id="stale-plan", json_output=True) == 1
+    stale = json.loads(capsys.readouterr().out)
+    assert any("stale" in blocker for blocker in stale["blockers"])
+
+
+def test_daily_doctor_stale_blocked_missing_evidence_and_parse_errors(tmp_path, capsys):
+    _seed_ready_repo(tmp_path, capsys)
+    assert daily_cmd.init(target=tmp_path) == 0
+    capsys.readouterr()
+    plan_dir = tmp_path / ".brigade" / "daily" / "plans" / "old-plan"
+    plan_dir.mkdir(parents=True)
+    (plan_dir / "plan.json").write_text(json.dumps({"plan_id": "old-plan", "created_at": "2026-05-29T00:00:00+00:00"}))
+    run_dir = tmp_path / ".brigade" / "daily" / "runs" / "blocked-run"
+    run_dir.mkdir(parents=True)
+    (run_dir / "run.json").write_text(
+        json.dumps(
+            {
+                "run_id": "blocked-run",
+                "status": "blocked",
+                "started_at": "2026-05-29T00:00:00+00:00",
+                "completed_at": "2026-05-29T00:01:00+00:00",
+                "selected_action": _daily_action("run-task", source_subsystem="work-task", source_local_id="missing", metadata={"task_id": "missing"}),
+            }
+        )
+    )
+    bad_dir = tmp_path / ".brigade" / "daily" / "runs" / "bad-run"
+    bad_dir.mkdir(parents=True)
+    (bad_dir / "run.json").write_text("{not json")
+
+    assert daily_cmd.doctor(target=tmp_path, json_output=True) == 1
+    payload = json.loads(capsys.readouterr().out)
+    names = {check["name"] for check in payload["checks"]}
+    assert {"daily_stale_plan", "daily_blocked_run", "daily_unclosed_run", "daily_missing_evidence", "daily_receipt_parse"} <= names
+
+
+def test_daily_run_safe_adapters_and_json_cleanliness(tmp_path, monkeypatch, capsys):
+    _seed_ready_repo(tmp_path, capsys)
+    center_cmd._write_actions(
+        tmp_path,
+        [
+            {
+                "action_id": "action-safe",
+                "status": "pending",
+                "safe_summary": "Start this action",
+                "source_fingerprint": "action-safe-fp",
+                "created_at": "2026-05-30T00:00:00+00:00",
+                "updated_at": "2026-05-30T00:00:00+00:00",
+            }
+        ],
+    )
+    calls = []
+
+    def run_one(action):
+        monkeypatch.setattr(daily_cmd, "_all_candidates", lambda target: [action])
+        assert daily_cmd.run(target=tmp_path, approved=True, json_output=True) == 0
+        payload = json.loads(capsys.readouterr().out)
+        calls.append(payload["commands_invoked"][-1]["command"])
+        return payload
+
+    run_one(_daily_action("start-center-action", source_subsystem="center-action", source_local_id="action-safe", metadata={"action_id": "action-safe"}))
+
+    monkeypatch.setattr(center_cmd, "readiness_import_issues", lambda **kwargs: print("noisy readiness") or 0)
+    run_one(_daily_action("import-readiness-issues", source_subsystem="center-readiness", source_local_id="ready"))
+
+    monkeypatch.setattr(center_cmd, "report_build", lambda **kwargs: print("noisy report") or 0)
+    run_one(_daily_action("build-operator-report", source_subsystem="center-report", source_local_id="report"))
+
+    assert calls == [
+        "brigade center actions start action-safe",
+        "brigade center readiness import-issues",
+        "brigade center report build",
+    ]
+
+
 def test_daily_selection_skips_remote_mutation_commands():
     selected = daily_cmd._selected(
         [
@@ -207,6 +411,30 @@ def test_daily_run_handles_one_task_and_builds_context(tmp_path, monkeypatch, ca
     assert receipt["context_pack_id"]
     assert receipt["task_id"] == task["id"]
     assert any(command["command"] == "brigade context build" for command in receipt["commands_invoked"])
+    assert len([command for command in receipt["commands_invoked"] if command["command"] != "brigade context build"]) == 1
+
+
+def test_daily_health_integration_with_work_and_center(tmp_path, capsys):
+    _seed_ready_repo(tmp_path, capsys)
+    assert daily_cmd.init(target=tmp_path) == 0
+    capsys.readouterr()
+    assert cli.main(["work", "brief", "--target", str(tmp_path), "--json"]) == 0
+    brief = json.loads(capsys.readouterr().out)
+    assert "daily_driver" in brief
+
+    assert cli.main(["center", "status", "--target", str(tmp_path), "--json"]) == 0
+    center_status = json.loads(capsys.readouterr().out)
+    assert "daily_driver" in center_status
+
+    run_dir = tmp_path / ".brigade" / "daily" / "runs" / "blocked-run"
+    run_dir.mkdir(parents=True)
+    (run_dir / "run.json").write_text(json.dumps({"run_id": "blocked-run", "status": "blocked", "started_at": "2026-05-30T00:00:00+00:00"}))
+    assert cli.main(["center", "reviews", "--target", str(tmp_path), "--json"]) == 0
+    reviews = json.loads(capsys.readouterr().out)
+    assert any(item["subsystem"] == "daily-driver" for item in reviews["reviews"])
+
+    assert cli.main(["work", "doctor", "--target", str(tmp_path)]) in {0, 1}
+    assert "daily_blocked_run" in capsys.readouterr().out
 
 
 def test_daily_closeout_states_and_handoff(tmp_path, monkeypatch, capsys):

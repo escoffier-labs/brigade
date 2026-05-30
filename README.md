@@ -382,11 +382,16 @@ brigade center readiness closeout
 brigade center readiness list
 brigade center readiness show <readiness-id>
 brigade center readiness import-issues
+brigade daily init
 brigade daily status
 brigade daily plan
 brigade daily review
 brigade daily run
 brigade daily closeout
+brigade daily history
+brigade daily show latest
+brigade daily doctor
+brigade daily schema
 brigade work run
 brigade work run --queue-next
 brigade work run "review today's changes"
@@ -652,9 +657,10 @@ brigade daily closeout --json
 
 `brigade daily status` summarizes the current operating state and prints the next recommended command.
 `brigade daily plan` ranks local candidate actions by urgency, safety, acceptance coverage, provenance, and usefulness, then chooses exactly one recommended action. It writes no state unless `--record` is passed.
-`brigade daily review` previews the selected action, risk, evidence references, acceptance criteria, approval boundary, and likely next command.
-`brigade daily run` executes at most one safe local step, such as running a pending accepted task, promoting an approved import, building a context pack, building an operator report, or importing readiness issues. It refuses approval-required actions unless `--approved` is passed and writes a local receipt under `.brigade/daily/runs/`.
+`brigade daily review` previews the selected action, selected adapter, risk, evidence references, acceptance criteria, config blockers, approval boundary, and likely next command.
+`brigade daily run` executes at most one safe local step, such as running a pending accepted task, promoting an approved import, building a context pack, building an operator report, or importing readiness issues. It refuses approval-required actions unless `--approved` is passed, respects local `.brigade/daily.toml` adapter settings, and writes a local receipt under `.brigade/daily/runs/`.
 `brigade daily closeout` marks the latest daily run reviewed, deferred, blocked, or archived and can write a Memory Handoff draft without editing canonical memory.
+`brigade daily init` writes conservative local defaults to `.brigade/daily.toml`. `brigade daily history`, `show`, `doctor`, and `schema` inspect local daily receipts, health, and wrapper-facing JSON contracts.
 
 The daily driver is local and explicit. It does not start daemons, run arbitrary commands, execute scanners, reviewers, tools, or fleet sweeps, mutate remotes, push, tag, publish, or edit canonical memory.
 

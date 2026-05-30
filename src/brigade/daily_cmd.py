@@ -4,8 +4,9 @@ from __future__ import annotations
 import json
 import re
 import sys
+import tomllib
 from contextlib import redirect_stdout
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from io import StringIO
 from pathlib import Path
 from typing import Any
@@ -15,6 +16,20 @@ from . import center_cmd, context_cmd, handoff_cmd, memory_cmd, security_cmd, to
 
 SCHEMA_VERSION = 1
 RUN_STATUSES = {"reviewed", "deferred", "blocked", "archived"}
+PREFERRED_MODES = {"task-first", "inbox-first", "readiness-first"}
+RISK_LEVELS = {"low": 1, "medium": 2, "high": 3}
+DEFAULT_CONFIG: dict[str, Any] = {
+    "enabled": True,
+    "preferred_mode": "task-first",
+    "max_risk_without_approval": "medium",
+    "allow_context_pack_build": True,
+    "allow_operator_report_build": True,
+    "allow_readiness_imports": True,
+    "allow_import_promotion_with_approval": True,
+    "allow_work_run": True,
+    "stale_plan_threshold_hours": 12,
+    "stale_run_threshold_hours": 12,
+}
 
 
 def _now() -> datetime:
@@ -23,6 +38,10 @@ def _now() -> datetime:
 
 def _daily_root(target: Path) -> Path:
     return target / ".brigade" / "daily"
+
+
+def _config_path(target: Path) -> Path:
+    return target / ".brigade" / "daily.toml"
 
 
 def _plans_root(target: Path) -> Path:
@@ -61,6 +80,85 @@ def _schema(name: str) -> dict[str, Any]:
             "suggested_next_command",
         ],
     }
+
+
+def _schemas() -> dict[str, Any]:
+    base_fields = _schema("daily-item")["item_fields"]
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "schemas": [
+            {"name": "daily-status", "top_level_fields": ["target", "selected_action", "next_recommended_command", "daily_health"], "item_fields": base_fields},
+            {"name": "daily-plan", "top_level_fields": ["plan_id", "candidate_actions", "selected_action", "approval_required", "recorded"], "item_fields": base_fields},
+            {"name": "daily-review", "top_level_fields": ["selected_action", "selected_adapter", "source_evidence_refs", "acceptance", "config_blockers", "context_pack_would_build"], "item_fields": base_fields},
+            {"name": "daily-run", "top_level_fields": ["run_id", "plan_id", "selected_action", "status", "commands_invoked", "receipts_created", "blockers"], "item_fields": base_fields},
+            {"name": "daily-closeout", "top_level_fields": ["run_id", "closeout_status", "reviewed_at", "handoff_path"], "item_fields": []},
+            {"name": "daily-history", "top_level_fields": ["runs", "plans", "run_count", "plan_count"], "item_fields": ["id", "status", "created_at", "path"]},
+            {"name": "daily-doctor", "top_level_fields": ["checks", "issue_count", "top_issue", "health"], "item_fields": ["status", "name", "detail"]},
+        ],
+    }
+
+
+def _write_config(path: Path, config: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lines = ["# Local Brigade daily driver settings.", ""]
+    for key, value in config.items():
+        if isinstance(value, bool):
+            rendered = "true" if value else "false"
+        elif isinstance(value, int):
+            rendered = str(value)
+        else:
+            rendered = json.dumps(str(value))
+        lines.append(f"{key} = {rendered}")
+    path.write_text("\n".join(lines) + "\n")
+
+
+def _load_config(target: Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    path = _config_path(target)
+    checks: list[dict[str, Any]] = []
+    config = dict(DEFAULT_CONFIG)
+    if not path.exists():
+        checks.append({"status": "warn", "name": "daily_config_missing", "detail": f"missing {path}; run `brigade daily init`"})
+        return config, checks
+    try:
+        loaded = tomllib.loads(path.read_text())
+    except (OSError, tomllib.TOMLDecodeError) as exc:
+        checks.append({"status": "fail", "name": "daily_config_invalid", "detail": str(exc)})
+        return config, checks
+    if not isinstance(loaded, dict):
+        checks.append({"status": "fail", "name": "daily_config_invalid", "detail": "config must be a TOML table"})
+        return config, checks
+    config.update(loaded)
+    checks.extend(_validate_config(config))
+    if not checks:
+        checks.append({"status": "ok", "name": "daily_config", "detail": str(path)})
+    return config, checks
+
+
+def _validate_config(config: dict[str, Any]) -> list[dict[str, Any]]:
+    checks: list[dict[str, Any]] = []
+    if config.get("preferred_mode") not in PREFERRED_MODES:
+        checks.append({"status": "fail", "name": "daily_preferred_mode", "detail": "expected task-first, inbox-first, or readiness-first"})
+    if config.get("max_risk_without_approval") not in RISK_LEVELS:
+        checks.append({"status": "fail", "name": "daily_max_risk", "detail": "expected low, medium, or high"})
+    for key in (
+        "enabled",
+        "allow_context_pack_build",
+        "allow_operator_report_build",
+        "allow_readiness_imports",
+        "allow_import_promotion_with_approval",
+        "allow_work_run",
+    ):
+        if not isinstance(config.get(key), bool):
+            checks.append({"status": "fail", "name": key, "detail": "expected boolean"})
+    for key in ("stale_plan_threshold_hours", "stale_run_threshold_hours"):
+        value = config.get(key)
+        if not isinstance(value, int) or value < 1:
+            checks.append({"status": "fail", "name": key, "detail": "expected positive integer hours"})
+    if config.get("enabled") is False:
+        checks.append({"status": "warn", "name": "daily_disabled", "detail": "daily driver is disabled in local config"})
+    if config.get("max_risk_without_approval") == "high":
+        checks.append({"status": "warn", "name": "daily_risk_policy", "detail": "high risk actions are allowed without approval"})
+    return checks
 
 
 def _safe_text(target: Path, value: object) -> str:
@@ -309,6 +407,7 @@ def _report_candidate(target: Path) -> list[dict[str, Any]]:
 
 
 def _all_candidates(target: Path) -> list[dict[str, Any]]:
+    config, _ = _load_config(target)
     candidates = [
         *_pending_task_candidates(target),
         *_pending_import_candidates(target),
@@ -317,8 +416,26 @@ def _all_candidates(target: Path) -> list[dict[str, Any]]:
         *_health_issue_candidates(target),
         *_report_candidate(target),
     ]
+    _apply_preferred_mode(candidates, str(config.get("preferred_mode") or "task-first"))
     candidates.sort(key=lambda item: (int(item.get("score") or 0), str(item.get("action_id") or "")), reverse=True)
     return candidates
+
+
+def _apply_preferred_mode(candidates: list[dict[str, Any]], mode: str) -> None:
+    for item in candidates:
+        subsystem = item.get("source_subsystem")
+        if mode == "inbox-first":
+            if subsystem == "work-import":
+                item["score"] = int(item.get("score") or 0) + 160
+                item.setdefault("ranking_reasons", []).append("preferred_mode=inbox-first")
+            elif subsystem == "work-task":
+                item["score"] = int(item.get("score") or 0) - 80
+        elif mode == "readiness-first":
+            if subsystem == "center-readiness":
+                item["score"] = int(item.get("score") or 0) + 220
+                item.setdefault("ranking_reasons", []).append("preferred_mode=readiness-first")
+            elif subsystem in {"work-task", "work-import"}:
+                item["score"] = int(item.get("score") or 0) - 80
 
 
 def _selected(candidates: list[dict[str, Any]]) -> dict[str, Any] | None:
@@ -330,10 +447,87 @@ def _selected(candidates: list[dict[str, Any]]) -> dict[str, Any] | None:
     return None
 
 
+def _adapter_for(action: dict[str, Any] | None) -> str | None:
+    if not action:
+        return None
+    return {
+        "run-task": "brigade work run",
+        "promote-import": "brigade work import promote",
+        "start-center-action": "brigade center actions start",
+        "import-readiness-issues": "brigade center readiness import-issues",
+        "build-operator-report": "brigade center report build",
+        "review-center-action": "review-only",
+        "review-health-issue": "review-only",
+    }.get(str(action.get("action_type")), "unsupported")
+
+
+def _config_blockers(config: dict[str, Any], action: dict[str, Any] | None, *, approved: bool = False) -> list[str]:
+    blockers: list[str] = []
+    if not config.get("enabled", True):
+        blockers.append("daily driver is disabled")
+    if action is None:
+        return blockers
+    risk = str(action.get("risk_level") or "low")
+    max_risk = str(config.get("max_risk_without_approval") or "medium")
+    if RISK_LEVELS.get(risk, 99) > RISK_LEVELS.get(max_risk, 2) and not approved:
+        blockers.append(f"risk level {risk} exceeds max_risk_without_approval={max_risk}")
+    action_type = str(action.get("action_type"))
+    if action_type == "run-task" and not config.get("allow_work_run", True):
+        blockers.append("work run adapter disabled by daily config")
+    if action_type == "promote-import" and not config.get("allow_import_promotion_with_approval", True):
+        blockers.append("import promotion adapter disabled by daily config")
+    if action_type == "import-readiness-issues" and not config.get("allow_readiness_imports", True):
+        blockers.append("readiness import adapter disabled by daily config")
+    if action_type == "build-operator-report" and not config.get("allow_operator_report_build", True):
+        blockers.append("operator report adapter disabled by daily config")
+    return blockers
+
+
+def _evidence_blockers(target: Path, action: dict[str, Any] | None) -> list[str]:
+    if action is None:
+        return ["no selected action"]
+    action_type = str(action.get("action_type"))
+    source_id = str(action.get("source_local_id") or "")
+    metadata = action.get("metadata") if isinstance(action.get("metadata"), dict) else {}
+    if action_type == "run-task":
+        task_id = str(metadata.get("task_id") or source_id)
+        if not any(str(task.get("id")) == task_id for task in work_cmd._pending_tasks(target)):
+            return [f"pending task not found: {task_id}"]
+    if action_type == "promote-import":
+        import_id = str(metadata.get("import_id") or source_id)
+        if not any(str(item.get("id")) == import_id for item in work_cmd._pending_imports(target)):
+            return [f"pending import not found: {import_id}"]
+    if action_type == "start-center-action":
+        action_id = str(metadata.get("action_id") or source_id)
+        if not any(str(item.get("action_id")) == action_id and item.get("status") in {"pending", "active"} for item in center_cmd._read_actions(target)):
+            return [f"center action not found: {action_id}"]
+    return []
+
+
+def _parse_time(value: object) -> datetime | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _is_stale(value: object, hours: int) -> bool:
+    parsed = _parse_time(value)
+    if parsed is None:
+        return False
+    return _now() - parsed > timedelta(hours=hours)
+
+
 def status_payload(target: Path) -> dict[str, Any]:
     target = target.expanduser().resolve()
     center = center_cmd.status_payload(target)
     readiness = center_cmd._readiness_payload(target)
+    config, config_checks = _load_config(target)
     candidates = _all_candidates(target)
     selected = _selected(candidates)
     handoffs = center.get("handoff_drafts") if isinstance(center.get("handoff_drafts"), dict) else {}
@@ -345,6 +539,9 @@ def status_payload(target: Path) -> dict[str, Any]:
         "schema_version": SCHEMA_VERSION,
         "schema": _schema("daily-status"),
         "target": str(target),
+        "config": config,
+        "config_checks": config_checks,
+        "daily_health": health(target),
         "active_session": center.get("active_session"),
         "pending_task_count": center.get("pending_task_count", 0),
         "pending_import_count": center.get("pending_import_count", 0),
@@ -385,6 +582,7 @@ def status(*, target: Path, json_output: bool = False) -> int:
 
 def plan_payload(target: Path, *, record: bool = False) -> dict[str, Any]:
     target = target.expanduser().resolve()
+    config, config_checks = _load_config(target)
     candidates = _all_candidates(target)
     selected = _selected(candidates)
     created = _now().isoformat()
@@ -393,6 +591,8 @@ def plan_payload(target: Path, *, record: bool = False) -> dict[str, Any]:
         "schema_version": SCHEMA_VERSION,
         "schema": _schema("daily-plan"),
         "target": str(target),
+        "config": config,
+        "config_checks": config_checks,
         "plan_id": plan_id,
         "created_at": created,
         "candidate_actions": candidates,
@@ -408,6 +608,8 @@ def plan_payload(target: Path, *, record: bool = False) -> dict[str, Any]:
         "suggested_next_command": selected.get("suggested_next_command") if selected else "brigade daily status",
         "can_run_without_approval": bool(selected and not selected.get("approval_required")),
         "requires_explicit_approval": bool(selected and selected.get("approval_required")),
+        "config_blockers": _config_blockers(config, selected),
+        "evidence_blockers": _evidence_blockers(target, selected),
         "recorded": False,
     }
     if record:
@@ -440,9 +642,11 @@ def plan(*, target: Path, record: bool = False, json_output: bool = False) -> in
 
 def _review_payload(target: Path, selected: dict[str, Any] | None = None) -> dict[str, Any]:
     target = target.expanduser().resolve()
+    config, config_checks = _load_config(target)
     action = selected or _selected(_all_candidates(target))
     context_plan = None
-    if action and action.get("context_kind"):
+    context_would_build = bool(action and action.get("context_kind") and config.get("allow_context_pack_build", True))
+    if action and action.get("context_kind") and config.get("allow_context_pack_build", True):
         context_plan = context_cmd._context_payload(
             target,
             kind=str(action.get("context_kind")),
@@ -452,7 +656,10 @@ def _review_payload(target: Path, selected: dict[str, Any] | None = None) -> dic
         "schema_version": SCHEMA_VERSION,
         "schema": _schema("daily-review"),
         "target": str(target),
+        "config": config,
+        "config_checks": config_checks,
         "selected_action": action,
+        "selected_adapter": _adapter_for(action),
         "source_subsystem": action.get("source_subsystem") if action else None,
         "source_local_id": action.get("source_local_id") if action else None,
         "safe_summary": action.get("safe_summary") if action else None,
@@ -463,6 +670,9 @@ def _review_payload(target: Path, selected: dict[str, Any] | None = None) -> dic
         "approval_boundary": action.get("approval_reason") if action and action.get("approval_required") else "no explicit approval required",
         "likely_next_command": action.get("suggested_next_command") if action else None,
         "context_pack_plan": context_plan,
+        "context_pack_would_build": context_would_build,
+        "config_blockers": _config_blockers(config, action),
+        "evidence_blockers": _evidence_blockers(target, action),
         "writes": [],
     }
 
@@ -477,7 +687,12 @@ def review(*, target: Path, json_output: bool = False) -> int:
         print(f"selected: {payload['selected_action']['action_id']}")
         print(f"summary: {payload['safe_summary']}")
         print(f"risk: {payload['risk_level']}")
+        print(f"adapter: {payload['selected_adapter']}")
         print(f"approval: {payload['approval_boundary']}")
+        if payload.get("config_blockers"):
+            print(f"config_blockers: {len(payload['config_blockers'])}")
+        if payload.get("evidence_blockers"):
+            print(f"evidence_blockers: {len(payload['evidence_blockers'])}")
         print(f"next: {payload['likely_next_command']}")
     else:
         print("selected: none")
@@ -496,6 +711,36 @@ def _latest_run(target: Path) -> dict[str, Any] | None:
                 runs.append(payload)
     runs.sort(key=lambda item: str(item.get("started_at") or item.get("run_id") or ""), reverse=True)
     return runs[0] if runs else None
+
+
+def _iter_receipts(root: Path, filename: str) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
+    receipts: list[dict[str, Any]] = []
+    errors: list[dict[str, str]] = []
+    if not root.is_dir():
+        return receipts, errors
+    for child in root.iterdir():
+        if not child.is_dir():
+            continue
+        path = child / filename
+        payload = _read_json(path)
+        if payload is None:
+            errors.append({"path": str(path), "error": "missing or invalid JSON"})
+            continue
+        receipts.append(payload)
+    receipts.sort(key=lambda item: str(item.get("started_at") or item.get("created_at") or item.get("run_id") or item.get("plan_id") or ""), reverse=True)
+    return receipts, errors
+
+
+def _latest_plan(target: Path) -> dict[str, Any] | None:
+    plans, _ = _iter_receipts(_plans_root(target), "plan.json")
+    return plans[0] if plans else None
+
+
+def _resolve_plan(target: Path, plan_id: str | None) -> dict[str, Any] | None:
+    if plan_id in (None, "", "latest"):
+        return _latest_plan(target)
+    path = _plans_root(target) / str(plan_id) / "plan.json"
+    return _read_json(path)
 
 
 def _record_run(target: Path, receipt: dict[str, Any]) -> dict[str, Any]:
@@ -518,9 +763,39 @@ def _invoke_context_build(target: Path, action: dict[str, Any]) -> tuple[str | N
     return (str(created.get("pack_id")) if isinstance(created, dict) else None), [{"command": "brigade context build", "exit_code": rc}]
 
 
-def run(*, target: Path, approved: bool = False, json_output: bool = False) -> int:
+def _blocked_run(
+    *,
+    target: Path,
+    receipt: dict[str, Any],
+    blockers: list[str],
+    json_output: bool,
+    next_command: str = "brigade daily review",
+) -> int:
+    receipt["status"] = "blocked"
+    receipt["completed_at"] = _now().isoformat()
+    receipt["next_recommended_command"] = next_command
+    receipt["blockers"].extend(blockers)
+    _record_run(target, receipt)
+    if json_output:
+        print(json.dumps(receipt, indent=2, sort_keys=True))
+    else:
+        print(f"daily run: {receipt['run_id']}")
+        print("status: blocked")
+        for blocker in blockers:
+            print(f"blocker: {blocker}")
+    return 1
+
+
+def run(*, target: Path, approved: bool = False, plan_id: str | None = None, replan: bool = False, json_output: bool = False) -> int:
     target = target.expanduser().resolve()
-    plan_data = plan_payload(target, record=True)
+    config, _ = _load_config(target)
+    if plan_id and not replan:
+        plan_data = _resolve_plan(target, plan_id)
+        if plan_data is None:
+            plan_data = plan_payload(target, record=True)
+            plan_data["plan_load_error"] = f"plan not found: {plan_id}"
+    else:
+        plan_data = plan_payload(target, record=True)
     action = plan_data.get("selected_action") if isinstance(plan_data.get("selected_action"), dict) else None
     run_id = f"{_now().strftime('%Y%m%d-%H%M%S')}-daily-run-{uuid4().hex[:6]}"
     started = _now().isoformat()
@@ -544,29 +819,24 @@ def run(*, target: Path, approved: bool = False, json_output: bool = False) -> i
         "handoff_path": None,
         "blockers": [],
         "next_recommended_command": "brigade daily status",
+        "config": config,
     }
+    if plan_data.get("plan_load_error"):
+        return _blocked_run(target=target, receipt=receipt, blockers=[str(plan_data["plan_load_error"])], json_output=json_output)
+    if plan_id and not replan and _is_stale(plan_data.get("created_at"), int(config.get("stale_plan_threshold_hours") or 12)):
+        return _blocked_run(target=target, receipt=receipt, blockers=[f"recorded plan is stale: {plan_data.get('plan_id')}"], json_output=json_output, next_command="brigade daily plan --record")
     if action is None:
-        receipt["blockers"].append("no daily action selected")
-        receipt["completed_at"] = _now().isoformat()
-        _record_run(target, receipt)
-        if json_output:
-            print(json.dumps(receipt, indent=2, sort_keys=True))
-        else:
-            print(f"daily run: {run_id}")
-            print("status: blocked")
-        return 1
+        return _blocked_run(target=target, receipt=receipt, blockers=["no daily action selected"], json_output=json_output, next_command="brigade daily plan")
+    config_blockers = _config_blockers(config, action, approved=approved)
+    evidence_blockers = _evidence_blockers(target, action)
+    if config_blockers or evidence_blockers:
+        return _blocked_run(target=target, receipt=receipt, blockers=[*config_blockers, *evidence_blockers], json_output=json_output)
     if action.get("approval_required") and not approved:
-        receipt.update({"status": "blocked", "completed_at": _now().isoformat(), "next_recommended_command": "brigade daily review"})
-        receipt["blockers"].append(str(action.get("approval_reason") or "explicit approval required"))
-        _record_run(target, receipt)
-        if json_output:
-            print(json.dumps(receipt, indent=2, sort_keys=True))
-        else:
-            print(f"daily run: {run_id}")
-            print("status: blocked")
-            print("approval_required: true")
-        return 1
-    context_pack_id, context_commands = _invoke_context_build(target, action)
+        return _blocked_run(target=target, receipt=receipt, blockers=[str(action.get("approval_reason") or "explicit approval required")], json_output=json_output)
+    if action.get("context_kind") and config.get("allow_context_pack_build", True):
+        context_pack_id, context_commands = _invoke_context_build(target, action)
+    else:
+        context_pack_id, context_commands = None, []
     receipt["context_pack_id"] = context_pack_id
     receipt["commands_invoked"].extend(context_commands)
     if context_pack_id:
@@ -614,6 +884,142 @@ def run(*, target: Path, approved: bool = False, json_output: bool = False) -> i
         print(f"selected: {receipt['selected_action_id']}")
         print(f"next: {receipt['next_recommended_command']}")
     return rc
+
+
+def init(*, target: Path, force: bool = False, json_output: bool = False) -> int:
+    target = target.expanduser().resolve()
+    path = _config_path(target)
+    if path.exists() and not force:
+        payload = {"schema_version": SCHEMA_VERSION, "target": str(target), "path": str(path), "written": False, "reason": "already exists"}
+    else:
+        _write_config(path, DEFAULT_CONFIG)
+        payload = {"schema_version": SCHEMA_VERSION, "target": str(target), "path": str(path), "written": True, "config": DEFAULT_CONFIG}
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        print(f"daily config: {path}")
+        print(f"written: {payload['written']}")
+    return 0
+
+
+def schema(*, target: Path, json_output: bool = False) -> int:
+    payload = {"schema_version": SCHEMA_VERSION, "target": str(target.expanduser().resolve()), **_schemas()}
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        print(f"daily schema: {payload['target']}")
+        for item in payload["schemas"]:
+            print(f"- {item['name']}")
+    return 0
+
+
+def history_payload(target: Path, *, limit: int = 20) -> dict[str, Any]:
+    target = target.expanduser().resolve()
+    runs, run_errors = _iter_receipts(_runs_root(target), "run.json")
+    plans, plan_errors = _iter_receipts(_plans_root(target), "plan.json")
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "schema": {"name": "daily-history", "version": SCHEMA_VERSION},
+        "target": str(target),
+        "runs": runs[:limit],
+        "plans": plans[:limit],
+        "run_count": len(runs),
+        "plan_count": len(plans),
+        "parse_errors": [*run_errors, *plan_errors],
+    }
+
+
+def history(*, target: Path, limit: int = 20, json_output: bool = False) -> int:
+    payload = history_payload(target, limit=limit)
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        print(f"daily history: {payload['target']}")
+        print(f"runs: {payload['run_count']}")
+        for item in payload["runs"]:
+            print(f"- {item.get('run_id')} [{item.get('status')}] {item.get('started_at')}")
+        print(f"plans: {payload['plan_count']}")
+    return 0
+
+
+def show(*, target: Path, run_id: str = "latest", json_output: bool = False) -> int:
+    target = target.expanduser().resolve()
+    if run_id == "latest":
+        payload = _latest_run(target)
+    else:
+        payload = _read_json(_runs_root(target) / run_id / "run.json")
+    if payload is None:
+        print(f"error: daily run not found: {run_id}", file=sys.stderr)
+        return 1
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        print(f"daily run: {payload.get('run_id')}")
+        print(f"status: {payload.get('status')}")
+        print(f"selected: {payload.get('selected_action_id')}")
+        print(f"next: {payload.get('next_recommended_command')}")
+    return 0
+
+
+def health(target: Path) -> dict[str, Any]:
+    target = target.expanduser().resolve()
+    config, config_checks = _load_config(target)
+    checks = list(config_checks)
+    runs, run_errors = _iter_receipts(_runs_root(target), "run.json")
+    plans, plan_errors = _iter_receipts(_plans_root(target), "plan.json")
+    for error in [*run_errors, *plan_errors]:
+        checks.append({"status": "fail", "name": "daily_receipt_parse", "detail": f"{error['path']}: {error['error']}"})
+    plan_hours = int(config.get("stale_plan_threshold_hours") or 12)
+    run_hours = int(config.get("stale_run_threshold_hours") or 12)
+    latest_plan = plans[0] if plans else None
+    latest_run = runs[0] if runs else None
+    if latest_plan and _is_stale(latest_plan.get("created_at"), plan_hours):
+        checks.append({"status": "warn", "name": "daily_stale_plan", "detail": str(latest_plan.get("plan_id"))})
+    if latest_run:
+        if latest_run.get("status") in {"running", "planned"} and _is_stale(latest_run.get("started_at"), run_hours):
+            checks.append({"status": "warn", "name": "daily_stale_run", "detail": str(latest_run.get("run_id"))})
+        if latest_run.get("status") == "blocked":
+            checks.append({"status": "warn", "name": "daily_blocked_run", "detail": str(latest_run.get("run_id"))})
+        if latest_run.get("status") in {"completed", "failed", "blocked"} and not latest_run.get("closeout_status") and _is_stale(latest_run.get("completed_at") or latest_run.get("started_at"), run_hours):
+            checks.append({"status": "warn", "name": "daily_unclosed_run", "detail": str(latest_run.get("run_id"))})
+    for run_receipt in runs[:10]:
+        action = run_receipt.get("selected_action") if isinstance(run_receipt.get("selected_action"), dict) else None
+        for blocker in _evidence_blockers(target, action):
+            checks.append({"status": "warn", "name": "daily_missing_evidence", "detail": blocker})
+            break
+    active_checks = [check for check in checks if check.get("status") != "ok"]
+    top_issue = active_checks[0] if active_checks else None
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "config_path": str(_config_path(target)),
+        "run_count": len(runs),
+        "plan_count": len(plans),
+        "latest_run": latest_run,
+        "latest_plan": latest_plan,
+        "checks": checks,
+        "issue_count": len(active_checks),
+        "top_issue": top_issue,
+    }
+
+
+def doctor(*, target: Path, json_output: bool = False) -> int:
+    target = target.expanduser().resolve()
+    payload = {
+        "schema_version": SCHEMA_VERSION,
+        "schema": {"name": "daily-doctor", "version": SCHEMA_VERSION},
+        "target": str(target),
+        "health": health(target),
+    }
+    payload["checks"] = payload["health"]["checks"]
+    payload["issue_count"] = payload["health"]["issue_count"]
+    payload["top_issue"] = payload["health"]["top_issue"]
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        print(f"daily doctor: {target}")
+        for check in payload["checks"]:
+            print(f"[{check.get('status')}] {check.get('name')}: {check.get('detail')}")
+    return 1 if any(check.get("status") == "fail" for check in payload["checks"]) else 0
 
 
 def _write_handoff(target: Path, run_receipt: dict[str, Any], status: str, reason: str | None) -> Path:

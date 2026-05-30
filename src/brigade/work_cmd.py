@@ -5122,7 +5122,7 @@ def _suggested_command(active: dict[str, Any] | None, next_text: object, source:
 
 
 def _brief_payload(target: Path, *, limit: int = 3) -> dict[str, Any]:
-    from . import center_cmd, chat_cmd, context_cmd, handoff_cmd, learn_cmd, memory_cmd, projects_cmd, repos_cmd, roadmap_cmd, security_cmd, tools_cmd
+    from . import center_cmd, chat_cmd, context_cmd, daily_cmd, handoff_cmd, learn_cmd, memory_cmd, projects_cmd, repos_cmd, roadmap_cmd, security_cmd, tools_cmd
 
     target = target.expanduser().resolve()
     active = _active_session_info(target)
@@ -5154,6 +5154,7 @@ def _brief_payload(target: Path, *, limit: int = 3) -> dict[str, Any]:
     learning_health = learn_cmd.health(target)
     center_report_health = center_cmd.report_health(target)
     center_actions_health = center_cmd.actions_health(target)
+    daily_health = daily_cmd.health(target)
     handoff_issues = handoff_cmd.collect_issues(target)
     known_handoff_issue_ids = handoff_cmd._known_local_issue_ids(target)
     new_handoff_issues = [issue for issue in handoff_issues if issue.id not in known_handoff_issue_ids]
@@ -5291,6 +5292,15 @@ def _brief_payload(target: Path, *, limit: int = 3) -> dict[str, Any]:
             "top_action": center_actions_health["top_action"],
             "issue_count": center_actions_health["issue_count"],
             "top_issue": center_actions_health["top_issue"],
+        },
+        "daily_driver": {
+            "config_path": daily_health["config_path"],
+            "run_count": daily_health["run_count"],
+            "plan_count": daily_health["plan_count"],
+            "issue_count": daily_health["issue_count"],
+            "top_issue": daily_health["top_issue"],
+            "latest_run": daily_health["latest_run"],
+            "latest_plan": daily_health["latest_plan"],
         },
         "handoff_issues": {
             "count": len(new_handoff_issues),
@@ -5938,6 +5948,17 @@ def brief(*, target: Path, limit: int = 3, json_output: bool = False) -> int:
                 f"{top_backup.get('destination')}/{top_backup.get('issue_type')} "
                 f"{_short(str(top_backup.get('detail', '')))}"
             )
+
+    daily_driver = payload.get("daily_driver") if isinstance(payload.get("daily_driver"), dict) else {}
+    if daily_driver:
+        print(f"daily_config: {daily_driver.get('config_path')}")
+        print(f"daily_driver: {_count_status(daily_driver.get('issue_count'))}")
+        latest_daily = daily_driver.get("latest_run") if isinstance(daily_driver.get("latest_run"), dict) else None
+        if latest_daily:
+            print(f"daily_latest_run: {latest_daily.get('run_id')} [{latest_daily.get('status')}]")
+        top_daily = daily_driver.get("top_issue") if isinstance(daily_driver.get("top_issue"), dict) else None
+        if top_daily:
+            print(f"daily_top_issue: {top_daily.get('name')} {_short(str(top_daily.get('detail', '')))}")
 
     tool_catalog = payload.get("tool_catalog") if isinstance(payload.get("tool_catalog"), dict) else {}
     if tool_catalog:
@@ -10224,7 +10245,7 @@ def status(*, target: Path, limit: int = 12) -> int:
 
 
 def doctor(*, target: Path) -> int:
-    from . import center_cmd, chat_cmd, context_cmd, handoff_cmd, learn_cmd, memory_cmd, projects_cmd, repos_cmd, roadmap_cmd, security_cmd, tools_cmd
+    from . import center_cmd, chat_cmd, context_cmd, daily_cmd, handoff_cmd, learn_cmd, memory_cmd, projects_cmd, repos_cmd, roadmap_cmd, security_cmd, tools_cmd
 
     target = target.expanduser().resolve()
     failures = 0
@@ -10527,6 +10548,14 @@ def doctor(*, target: Path) -> int:
         _doctor_line(str(check.get("status")), str(check.get("name")), check.get("detail"))
     if not center_actions_health.get("checks"):
         _doctor_line(OK, "operator_actions", f"{center_actions_health.get('action_count', 0)} action(s)")
+
+    daily_health = daily_cmd.health(effective_target)
+    for check in daily_health.get("checks", []):
+        if check.get("status") == FAIL:
+            failures += 1
+        _doctor_line(str(check.get("status")), str(check.get("name")), check.get("detail"))
+    if not daily_health.get("issue_count"):
+        _doctor_line(OK, "daily_driver", f"{daily_health.get('run_count', 0)} run(s)")
 
     handoff_inbox = (
         cfg.handoff_inbox
