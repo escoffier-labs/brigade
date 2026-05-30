@@ -162,6 +162,9 @@ def test_tool_pack_and_sync_plan(tmp_path, capsys):
     assert tools_cmd.sync_plan(target=tmp_path, json_output=True) in {0, 1}
     sync = json.loads(capsys.readouterr().out)
     assert sync["delete_supported"] is False
+    assert tools_cmd.sync_apply(target=tmp_path, json_output=True) == 0
+    apply_payload = json.loads(capsys.readouterr().out)
+    assert apply_payload["dry_run"] is True
     assert tools_cmd.pack_archive(target=tmp_path, pack_id=pack["pack_id"], json_output=True) == 0
     assert json.loads(capsys.readouterr().out)["status"] == "archived"
 

@@ -4688,6 +4688,11 @@ def sync_plan(*, target: Path, tool_id: str | None = None, json_output: bool = F
 
 
 def sync_apply(*, target: Path, tool_id: str | None = None, all_tools: bool = False, dry_run: bool = True, force: bool = False, json_output: bool = False) -> int:
+    if tool_id is None and not all_tools:
+        if not dry_run and force:
+            print("error: pass <tool-id> or --all for write sync apply", file=sys.stderr)
+            return 2
+        all_tools = True
     if not dry_run and not force:
         # Sync apply is intentionally conservative: explicit non-dry-run writes require --force.
         dry_run = True

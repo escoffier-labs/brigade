@@ -268,6 +268,7 @@ brigade tools pack list
 brigade tools pack show <pack-id>
 brigade tools pack archive <pack-id>
 brigade tools sync plan
+brigade tools sync apply
 brigade tools sync apply --write --all
 brigade tools plan
 brigade tools plan simplify
