@@ -57,6 +57,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Handoff ingestor log parsing now recognizes skipped, failed, malformed, unreachable-source, and no-reply warning states in issues and normalized reconcile receipts.
 - Handoff source coverage issues now carry source keys and fingerprints, so uncovered writer inbox repairs dedupe and dismissed items stay quiet until coverage changes.
 - `brigade release schema` for a wrapper-friendly local manifest of release readiness, candidate, fleet train, waiver, and manual evidence JSON record contracts.
+- `brigade release candidate audit` and `import-issues` for local release candidate provenance checks and work-inbox routing without publishing or remote mutation.
 - `brigade work run` now records consumed task snapshots in work-session artifacts and stores completed session, dogfood run, and acceptance metadata on completed ledger tasks.
 - `brigade work run --queue-next` to queue the successful run's extracted next step, with duplicate pending task protection.
 - `brigade work import add/list/show/promote` to manage a gitignored local import inbox for scanner-discovered candidate work.

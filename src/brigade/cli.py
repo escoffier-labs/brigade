@@ -160,6 +160,15 @@ def _build_parser() -> argparse.ArgumentParser:
     p_release_candidate_archive.add_argument("candidate_id", help="Candidate id, unique prefix, or latest.")
     p_release_candidate_archive.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
     p_release_candidate_archive.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_release_candidate_audit = release_candidate_sub.add_parser("audit", help="Audit one local release candidate bundle.")
+    p_release_candidate_audit.add_argument("candidate_id", nargs="?", default="latest", help="Candidate id, unique prefix, or latest.")
+    p_release_candidate_audit.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_release_candidate_audit.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_release_candidate_import = release_candidate_sub.add_parser("import-issues", help="Import release candidate audit issues.")
+    p_release_candidate_import.add_argument("candidate_id", nargs="?", default="latest", help="Candidate id, unique prefix, or latest.")
+    p_release_candidate_import.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
+    p_release_candidate_import.add_argument("--dry-run", action="store_true", help="Report without writing imports.")
+    p_release_candidate_import.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_release_candidate_compare = release_candidate_sub.add_parser("compare", help="Compare a candidate against current local state.")
     p_release_candidate_compare.add_argument("candidate_id", nargs="?", default="latest", help="Candidate id, unique prefix, or latest.")
     p_release_candidate_compare.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
@@ -1811,6 +1820,15 @@ def main(argv=None) -> int:
                 return release_cmd.candidate_show(target=args.target, candidate_id=args.candidate_id, json_output=args.json)
             if args.release_candidate_command == "archive":
                 return release_cmd.candidate_archive(target=args.target, candidate_id=args.candidate_id, json_output=args.json)
+            if args.release_candidate_command == "audit":
+                return release_cmd.candidate_audit(target=args.target, candidate_id=args.candidate_id, json_output=args.json)
+            if args.release_candidate_command == "import-issues":
+                return release_cmd.candidate_import_issues(
+                    target=args.target,
+                    candidate_id=args.candidate_id,
+                    dry_run=args.dry_run,
+                    json_output=args.json,
+                )
             if args.release_candidate_command == "compare":
                 return release_cmd.candidate_compare(target=args.target, candidate_id=args.candidate_id, json_output=args.json)
             if args.release_candidate_command == "closeout":

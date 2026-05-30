@@ -579,6 +579,17 @@ def _payload_with_candidate_health(payload: dict[str, Any], target: Path) -> dic
     candidate_health = _candidate_health(target)
     checks = list(payload.get("checks") if isinstance(payload.get("checks"), list) else [])
     checks.extend(candidate_health.get("checks") if isinstance(candidate_health.get("checks"), list) else [])
+    latest_candidate = candidate_health.get("latest") if isinstance(candidate_health.get("latest"), dict) else None
+    if latest_candidate is not None:
+        audit = _candidate_audit_payload(target, latest_candidate)
+        checks.extend(
+            {
+                "status": issue.get("status", WARN),
+                "name": f"release_candidate_audit_{issue.get('name')}",
+                "detail": issue.get("detail"),
+            }
+            for issue in audit.get("issues", [])
+        )
     blockers, warnings = _assess(
         payload.get("evidence") if isinstance(payload.get("evidence"), dict) else {},
         checks,
@@ -724,6 +735,7 @@ def _candidate_payload(target: Path, *, base_ref: str | None) -> dict[str, Any]:
             "commit_subjects": _commit_subjects(target, base_ref),
             "touched_docs": [path for path in changed_files if str(path).startswith("docs/")],
         },
+        "command_contract": _command_contract_snapshot(target),
         "blockers": readiness.get("blockers") if isinstance(readiness.get("blockers"), list) else [],
         "warnings": readiness.get("warnings") if isinstance(readiness.get("warnings"), list) else [],
         "suggested_next_commands": [
@@ -733,6 +745,18 @@ def _candidate_payload(target: Path, *, base_ref: str | None) -> dict[str, Any]:
             "brigade release candidate build",
         ],
     }
+
+
+def _command_contract_snapshot(target: Path) -> dict[str, Any]:
+    payload = roadmap_cmd.command_contract_payload(target)
+    snapshot = {
+        "cli_command_count": len(payload.get("cli_commands") if isinstance(payload.get("cli_commands"), list) else []),
+        "documented_command_count": len(payload.get("normalized_documented_commands") if isinstance(payload.get("normalized_documented_commands"), list) else []),
+        "issue_count": payload.get("issue_count"),
+        "top_issue": payload.get("top_issue"),
+    }
+    snapshot["fingerprint"] = work_cmd._stable_hash(snapshot)
+    return snapshot
 
 
 def _candidate_health(target: Path) -> dict[str, Any]:
@@ -1203,6 +1227,175 @@ def candidate_archive(*, target: Path, candidate_id: str, json_output: bool = Fa
         return 0
     print(f"archived release candidate: {payload['candidate_id']}")
     print(f"archive_path: {payload['archive_path']}")
+    return 0
+
+
+def _candidate_bundle_files(candidate: dict[str, Any]) -> list[Path]:
+    path = candidate.get("path")
+    if not isinstance(path, str) or not path:
+        return []
+    root = Path(path)
+    names = candidate.get("bundle_files") if isinstance(candidate.get("bundle_files"), list) else []
+    return [root / str(name) for name in names if str(name)]
+
+
+def _candidate_privacy_issues(candidate: dict[str, Any]) -> list[dict[str, Any]]:
+    issues: list[dict[str, Any]] = []
+    for path in _candidate_bundle_files(candidate):
+        try:
+            text = path.read_text(errors="replace")
+        except OSError:
+            continue
+        if RELEASE_PRIVATE_VALUE_RE.search(text):
+            issues.append({"status": WARN, "name": "candidate_privacy_secret_like_value", "detail": path.name})
+        if RELEASE_PRIVATE_PATH_RE.search(text):
+            issues.append({"status": WARN, "name": "candidate_privacy_private_path", "detail": path.name})
+    return issues
+
+
+def _candidate_reference_issues(candidate: dict[str, Any]) -> list[dict[str, Any]]:
+    issues: list[dict[str, Any]] = []
+    for key, value in (
+        ("release_readiness", (candidate.get("release_readiness") or {}).get("path") if isinstance(candidate.get("release_readiness"), dict) else None),
+        ("work_closeout", (candidate.get("work_closeout") or {}).get("path") if isinstance(candidate.get("work_closeout"), dict) else None),
+        ("verification", (candidate.get("verification") or {}).get("path") if isinstance(candidate.get("verification"), dict) else None),
+    ):
+        if not value:
+            issues.append({"status": WARN, "name": f"missing_{key}_evidence", "detail": "not captured in candidate"})
+        elif not Path(str(value)).exists():
+            issues.append({"status": WARN, "name": f"missing_{key}_receipt", "detail": str(value)})
+    return issues
+
+
+def _candidate_docs_changed_after_build(candidate: dict[str, Any]) -> list[str]:
+    path = candidate.get("path")
+    if not isinstance(path, str) or not path:
+        return []
+    evidence_path = Path(path) / "EVIDENCE.json"
+    try:
+        evidence_mtime = evidence_path.stat().st_mtime
+    except OSError:
+        return []
+    target = Path(str(candidate.get("target") or "."))
+    changed: list[str] = []
+    for item in ("README.md", "CHANGELOG.md", "ROADMAP.md"):
+        repo_file = target / item
+        if repo_file.exists() and repo_file.stat().st_mtime > evidence_mtime:
+            changed.append(item)
+    return changed
+
+
+def _candidate_audit_payload(target: Path, candidate: dict[str, Any]) -> dict[str, Any]:
+    issues: list[dict[str, Any]] = []
+    created = work_cmd._parse_iso_datetime(candidate.get("created_at"))
+    if created is not None:
+        age_hours = (_now() - created).total_seconds() / 3600
+        if age_hours > RELEASE_CANDIDATE_STALE_HOURS:
+            issues.append({"status": WARN, "name": "candidate_stale", "detail": f"{age_hours:.1f}h"})
+    git = candidate.get("git") if isinstance(candidate.get("git"), dict) else {}
+    current_head = _git_value(target, "rev-parse", "HEAD")
+    if git.get("head") and current_head and git.get("head") != current_head:
+        issues.append({"status": WARN, "name": "candidate_head_changed", "detail": "current HEAD differs from candidate HEAD"})
+    issues.extend(_candidate_reference_issues(candidate))
+    docs_changed = _candidate_docs_changed_after_build(candidate)
+    if docs_changed:
+        issues.append({"status": WARN, "name": "candidate_docs_changed", "detail": ", ".join(docs_changed)})
+    current_contract = _command_contract_snapshot(target)
+    candidate_contract = candidate.get("command_contract") if isinstance(candidate.get("command_contract"), dict) else {}
+    if not candidate_contract.get("fingerprint"):
+        issues.append({"status": WARN, "name": "candidate_missing_command_contract", "detail": "candidate has no command contract fingerprint"})
+    elif candidate_contract.get("fingerprint") != current_contract.get("fingerprint"):
+        issues.append({"status": WARN, "name": "candidate_command_contract_changed", "detail": "current CLI/docs command contract differs from candidate"})
+    issues.extend(_candidate_privacy_issues(candidate))
+    return {
+        "target": str(target),
+        "candidate_id": candidate.get("candidate_id"),
+        "candidate_path": candidate.get("path"),
+        "status": "current" if not issues else "needs-review",
+        "issue_count": len(issues),
+        "issues": issues,
+        "command_contract": {
+            "candidate": candidate_contract or None,
+            "current": current_contract,
+        },
+        "suggested_next_commands": [
+            f"brigade release candidate compare {candidate.get('candidate_id')}",
+            f"brigade release candidate closeout {candidate.get('candidate_id')} --status reviewed",
+            f"brigade release candidate import-issues {candidate.get('candidate_id')}",
+        ],
+    }
+
+
+def candidate_audit(*, target: Path, candidate_id: str = "latest", json_output: bool = False) -> int:
+    target = target.expanduser().resolve()
+    if not target.is_dir():
+        print(f"error: --target is not a directory: {target}", file=sys.stderr)
+        return 2
+    candidate, error = _resolve_candidate(target, candidate_id)
+    if candidate is None:
+        print(f"error: {error}", file=sys.stderr)
+        return 1 if error and "not found" in error else 2
+    payload = _candidate_audit_payload(target, candidate)
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0 if payload["issue_count"] == 0 else 1
+    print(f"release candidate audit: {candidate.get('candidate_id')}")
+    print(f"status: {payload['status']}")
+    print(f"issues: {payload['issue_count']}")
+    for issue in payload["issues"]:
+        print(f"[{issue['status']}] {issue['name']}: {issue['detail']}")
+    return 0 if payload["issue_count"] == 0 else 1
+
+
+def candidate_import_issues(*, target: Path, candidate_id: str = "latest", dry_run: bool = False, json_output: bool = False) -> int:
+    target = target.expanduser().resolve()
+    if not target.is_dir():
+        print(f"error: --target is not a directory: {target}", file=sys.stderr)
+        return 2
+    candidate, error = _resolve_candidate(target, candidate_id)
+    if candidate is None:
+        print(f"error: {error}", file=sys.stderr)
+        return 1 if error and "not found" in error else 2
+    audit = _candidate_audit_payload(target, candidate)
+    records = []
+    for issue in audit["issues"]:
+        name = str(issue.get("name") or "candidate_issue")
+        records.append(
+            {
+                "text": f"Review release candidate {candidate.get('candidate_id')}: {name}",
+                "kind": "task",
+                "source": "release-candidate",
+                "priority": "high" if "privacy" in name or "missing" in name else "normal",
+                "metadata": {
+                    "candidate_id": candidate.get("candidate_id"),
+                    "candidate_path": candidate.get("path"),
+                    "issue_name": name,
+                    "detail": issue.get("detail"),
+                    "source_item_key": f"release-candidate:{candidate.get('candidate_id')}:{name}",
+                    "source_fingerprint": work_cmd._stable_hash({"candidate": candidate.get("candidate_id"), "issue": issue}),
+                },
+            }
+        )
+    imported, skipped, skipped_dismissed = work_cmd._append_import_records(target, records, dry_run=dry_run)
+    payload = {
+        "target": str(target),
+        "candidate_id": candidate.get("candidate_id"),
+        "dry_run": dry_run,
+        "issues": len(records),
+        "imported": len(imported),
+        "skipped_duplicates": len(skipped),
+        "skipped_dismissed": len(skipped_dismissed),
+        "imports": imported,
+    }
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+    print(f"release candidate issue imports: {candidate.get('candidate_id')}")
+    print(f"dry_run: {dry_run}")
+    print(f"issues: {payload['issues']}")
+    print(f"imported: {payload['imported']}")
+    print(f"skipped_duplicates: {payload['skipped_duplicates']}")
+    print(f"skipped_dismissed: {payload['skipped_dismissed']}")
     return 0
 
 

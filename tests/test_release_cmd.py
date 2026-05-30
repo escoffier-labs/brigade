@@ -1,6 +1,8 @@
 import json
+import os
 import shutil
 import subprocess
+import time
 from pathlib import Path
 
 from brigade import cli
@@ -363,6 +365,14 @@ def test_release_cli(tmp_path, monkeypatch):
         seen.append(("candidate_archive", kwargs))
         return 0
 
+    def fake_candidate_audit(**kwargs):
+        seen.append(("candidate_audit", kwargs))
+        return 0
+
+    def fake_candidate_import_issues(**kwargs):
+        seen.append(("candidate_import_issues", kwargs))
+        return 0
+
     monkeypatch.setattr(release_cmd, "plan", fake_plan)
     monkeypatch.setattr(release_cmd, "doctor", fake_doctor)
     monkeypatch.setattr(release_cmd, "run", fake_run)
@@ -374,6 +384,8 @@ def test_release_cli(tmp_path, monkeypatch):
     monkeypatch.setattr(release_cmd, "candidate_list", fake_candidate_list)
     monkeypatch.setattr(release_cmd, "candidate_show", fake_candidate_show)
     monkeypatch.setattr(release_cmd, "candidate_archive", fake_candidate_archive)
+    monkeypatch.setattr(release_cmd, "candidate_audit", fake_candidate_audit)
+    monkeypatch.setattr(release_cmd, "candidate_import_issues", fake_candidate_import_issues)
 
     assert cli.main(["release", "plan", "--target", str(tmp_path), "--base-ref", "main", "--json"]) == 0
     assert cli.main(["release", "doctor", "--target", str(tmp_path), "--base-ref", "main", "--json"]) == 0
@@ -386,6 +398,8 @@ def test_release_cli(tmp_path, monkeypatch):
     assert cli.main(["release", "candidate", "list", "--target", str(tmp_path), "--limit", "4", "--json"]) == 0
     assert cli.main(["release", "candidate", "show", "latest", "--target", str(tmp_path), "--json"]) == 0
     assert cli.main(["release", "candidate", "archive", "latest", "--target", str(tmp_path), "--json"]) == 0
+    assert cli.main(["release", "candidate", "audit", "latest", "--target", str(tmp_path), "--json"]) == 0
+    assert cli.main(["release", "candidate", "import-issues", "latest", "--target", str(tmp_path), "--dry-run", "--json"]) == 0
     assert seen == [
         ("plan", {"target": tmp_path, "base_ref": "main", "json_output": True}),
         ("doctor", {"target": tmp_path, "base_ref": "main", "json_output": True}),
@@ -398,6 +412,8 @@ def test_release_cli(tmp_path, monkeypatch):
         ("candidate_list", {"target": tmp_path, "limit": 4, "json_output": True}),
         ("candidate_show", {"target": tmp_path, "candidate_id": "latest", "json_output": True}),
         ("candidate_archive", {"target": tmp_path, "candidate_id": "latest", "json_output": True}),
+        ("candidate_audit", {"target": tmp_path, "candidate_id": "latest", "json_output": True}),
+        ("candidate_import_issues", {"target": tmp_path, "candidate_id": "latest", "dry_run": True, "json_output": True}),
     ]
 
 
@@ -491,6 +507,47 @@ def test_release_schema_manifest_detects_missing_receipts(tmp_path, monkeypatch,
     checks = {check["name"]: check for check in payload["checks"]}
     assert checks["release_candidate_missing_verification"]["status"] == "warn"
     assert payload["issue_count"] >= 1
+
+
+def test_release_candidate_audit_and_import_issues(tmp_path, monkeypatch, capsys):
+    _init_repo(tmp_path)
+    _seed_ready_evidence(tmp_path)
+    _patch_clean_health(monkeypatch)
+    _patch_content_guard(monkeypatch)
+    assert release_cmd.run(target=tmp_path, base_ref=None, json_output=True) == 0
+    capsys.readouterr()
+    assert release_cmd.candidate_build(target=tmp_path, base_ref=None, json_output=True) == 0
+    candidate = json.loads(capsys.readouterr().out)
+    candidate_dir = Path(candidate["path"])
+    evidence_path = candidate_dir / "EVIDENCE.json"
+    evidence = json.loads(evidence_path.read_text())
+    evidence["command_contract"]["fingerprint"] = "old-contract"
+    _write_json(evidence_path, evidence)
+    shutil.rmtree(candidate["verification"]["path"])
+    (candidate_dir / "RELEASE_NOTES_DRAFT.md").write_text("api_token=123456789abcdef\n")
+    future = time.time() + 10
+    os.utime(tmp_path / "README.md", (future, future))
+
+    assert release_cmd.candidate_audit(target=tmp_path, candidate_id=candidate["candidate_id"], json_output=True) == 1
+    audit = json.loads(capsys.readouterr().out)
+    issue_names = {issue["name"] for issue in audit["issues"]}
+    assert "missing_verification_receipt" in issue_names
+    assert "candidate_docs_changed" in issue_names
+    assert "candidate_command_contract_changed" in issue_names
+    assert "candidate_privacy_secret_like_value" in issue_names
+
+    assert release_cmd.candidate_import_issues(target=tmp_path, candidate_id=candidate["candidate_id"], dry_run=True, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["issues"] == audit["issue_count"]
+    assert payload["imported"] == audit["issue_count"]
+    first = payload["imports"][0]
+    assert first["source"] == "release-candidate"
+    assert first["metadata"]["source_item_key"].startswith(f"release-candidate:{candidate['candidate_id']}:")
+
+    assert release_cmd.doctor(target=tmp_path, base_ref=None, json_output=True) == 1
+    doctor = json.loads(capsys.readouterr().out)
+    check_names = {check["name"] for check in doctor["checks"]}
+    assert "release_candidate_audit_missing_verification_receipt" in check_names
 
 
 def test_release_candidate_notes_and_publish_plan(tmp_path, monkeypatch, capsys):

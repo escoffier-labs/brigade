@@ -15,7 +15,9 @@ brigade release candidate plan
 brigade release candidate build
 brigade release candidate list
 brigade release candidate show <candidate-id>
+brigade release candidate audit <candidate-id>
 brigade release candidate compare <candidate-id>
+brigade release candidate import-issues <candidate-id>
 brigade release candidate closeout <candidate-id>
 brigade release candidate archive <candidate-id>
 ```
@@ -36,7 +38,7 @@ brigade release candidate archive <candidate-id>
 
 `brigade release schema` is read-only and emits the local release evidence schema manifest for wrappers. It documents the release readiness, candidate, fleet train, waiver, and manual evidence record shapes, then reports missing latest or referenced receipts.
 
-Use `brigade release candidate compare` before publishing from an older candidate. It reports changed HEAD, missing referenced receipts, newer local verification, review, scanner, or security evidence, and docs changed after candidate build. Use `brigade release candidate closeout` to mark a candidate draft, reviewed, superseded, or archived without moving the bundle.
+Use `brigade release candidate audit` and `compare` before publishing from an older candidate. Audit reports stale evidence, missing references, changed HEAD/docs/command contracts, and privacy-boundary issues. Compare reports changed HEAD, missing referenced receipts, newer local verification, review, scanner, or security evidence, and docs changed after candidate build. Use `brigade release candidate import-issues` to route audit findings into local work, and use `brigade release candidate closeout` to mark a candidate draft, reviewed, superseded, or archived without moving the bundle.
 
 ## Evidence
 

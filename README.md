@@ -168,7 +168,9 @@ brigade release candidate plan
 brigade release candidate build
 brigade release candidate list
 brigade release candidate show <candidate-id>
+brigade release candidate audit <candidate-id>
 brigade release candidate compare <candidate-id>
+brigade release candidate import-issues <candidate-id>
 brigade release candidate closeout <candidate-id>
 brigade release candidate archive <candidate-id>
 brigade handoff doctor
@@ -657,6 +659,8 @@ Release readiness commands:
 - `brigade release candidate build` writes a local bundle under `.brigade/release/candidates/`.
 - `brigade release candidate list`, `show`, and `archive` inspect or archive local candidate bundles.
 - `brigade release schema` prints a wrapper-friendly manifest for release readiness receipts, candidate evidence, fleet release trains, waivers, and manual release evidence records, plus checks for missing latest or referenced receipts.
+- `brigade release candidate audit` checks a candidate for stale evidence, missing references, changed HEAD/docs/command contracts, and privacy-boundary issues.
+- `brigade release candidate import-issues` routes candidate audit findings into the local work inbox as source `release-candidate` without promoting or fixing anything.
 
 Release readiness is a local publish gate. It reviews latest work closeout, verification, code review closeout, scanner sweep state, security health, handoff draft health, content-guard results, git state, and docs/changelog/roadmap touch warnings. It never pushes, tags, creates releases, comments remotely, or mutates remotes.
 

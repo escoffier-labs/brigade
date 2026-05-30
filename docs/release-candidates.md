@@ -9,7 +9,9 @@ brigade release candidate plan
 brigade release candidate build
 brigade release candidate list
 brigade release candidate show <candidate-id>
+brigade release candidate audit <candidate-id>
 brigade release candidate compare <candidate-id>
+brigade release candidate import-issues <candidate-id>
 brigade release candidate closeout <candidate-id>
 brigade release candidate archive <candidate-id>
 ```
@@ -22,7 +24,9 @@ brigade release candidate archive <candidate-id>
 .brigade/release/candidates/
 ```
 
-`list` and `show` inspect bundles. `compare` checks the candidate against current local state, including changed HEAD, missing referenced receipts, newer verification or review evidence, newer scanner, security, or operator report evidence, and docs changed after the bundle was built.
+`list` and `show` inspect bundles. `audit` checks a candidate for stale evidence, missing references, changed HEAD, changed docs, changed command-contract fingerprints, and privacy-boundary issues. `compare` checks the candidate against current local state, including changed HEAD, missing referenced receipts, newer verification or review evidence, newer scanner, security, or operator report evidence, and docs changed after the bundle was built.
+
+`brigade release candidate import-issues` turns audit findings into local work imports with source `release-candidate`, stable source item keys, and source fingerprints. It never promotes imports, fixes candidate files, publishes, tags, or mutates remotes.
 
 `closeout` writes a local `CLOSEOUT.json` into the candidate bundle with `draft`, `reviewed`, `superseded`, or `archived` state. `archive` moves a reviewed candidate into the local archive so it no longer appears as the latest candidate.
 

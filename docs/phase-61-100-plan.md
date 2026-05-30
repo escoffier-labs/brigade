@@ -198,6 +198,8 @@ Goal: audit release candidate bundles for stale receipts, missing evidence, chan
 
 Acceptance: tests cover audit text and JSON, release doctor integration, and import routing.
 
+Status: implemented with `brigade release candidate audit`, `brigade release candidate import-issues`, candidate command-contract fingerprints, provenance/privacy checks, release doctor integration, docs, and focused tests.
+
 ### Phase 88: Operator Center JSON Schema Export
 Goal: export stable local JSON schemas for center status, activity, reviews, templates, reports, and action queues.
 
