@@ -156,6 +156,45 @@ def _build_parser() -> argparse.ArgumentParser:
     p_release_candidate_archive.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
     p_release_candidate_archive.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
 
+    # roadmap
+    p_roadmap = sub.add_parser("roadmap", help="Inspect roadmap completion state.")
+    roadmap_sub = p_roadmap.add_subparsers(dest="roadmap_command", metavar="<roadmap-command>")
+    roadmap_sub.required = True
+    p_roadmap_audit = roadmap_sub.add_parser("audit", help="Audit ROADMAP.md and documented command coverage.")
+    p_roadmap_audit.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_roadmap_audit.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_roadmap_audit.add_argument("--import-issues", action="store_true", help="Import roadmap audit issues into the work inbox.")
+    p_roadmap_patterns = roadmap_sub.add_parser("patterns", help="Show neutral inspiration pattern coverage.")
+    p_roadmap_patterns.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_roadmap_patterns.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+
+    # repos
+    p_repos = sub.add_parser("repos", help="Inspect local repository fleet readiness.")
+    repos_sub = p_repos.add_subparsers(dest="repos_command", metavar="<repos-command>")
+    repos_sub.required = True
+    p_repos_init = repos_sub.add_parser("init", help="Write local repo fleet config.")
+    p_repos_init.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
+    p_repos_init.add_argument("--force", action="store_true", help="Overwrite existing config.")
+    p_repos_init.add_argument("--no-gitignore", action="store_true", help="Do not update .gitignore.")
+    p_repos_init.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_repos_list = repos_sub.add_parser("list", help="List configured fleet repos.")
+    p_repos_list.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_repos_list.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_repos_show = repos_sub.add_parser("show", help="Show one configured fleet repo.")
+    p_repos_show.add_argument("repo_id", help="Repo id.")
+    p_repos_show.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_repos_show.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_repos_scan = repos_sub.add_parser("scan", help="Scan local repo fleet readiness.")
+    p_repos_scan.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_repos_scan.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_repos_doctor = repos_sub.add_parser("doctor", help="Report repo fleet health.")
+    p_repos_doctor.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_repos_doctor.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_repos_import = repos_sub.add_parser("import-issues", help="Import repo fleet health issues into the work inbox.")
+    p_repos_import.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_repos_import.add_argument("--dry-run", action="store_true", help="Show counts without writing imports.")
+    p_repos_import.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+
     # handoff
     p_handoff = sub.add_parser("handoff", help="Inspect memory handoff inbox health.")
     handoff_sub = p_handoff.add_subparsers(dest="handoff_command", metavar="<handoff-command>")
@@ -278,7 +317,11 @@ def _build_parser() -> argparse.ArgumentParser:
     p_work_sweep.add_argument("--include-disabled", action="store_true", help="Allow disabled scanners to run.")
     p_work_sweep.add_argument("--force", action="store_true", help="Run even when another scanner receipt is marked running.")
     p_work_sweep.add_argument("--no-ingest", action="store_true", help="Do not ingest configured scanner import output.")
+    p_work_sweep.add_argument("--reason", default=None, help="Review closeout reason when using `closeout`.")
+    p_work_sweep.add_argument("--defer", action="append", default=[], help="Defer one pending import during sweep closeout. May be repeated.")
+    p_work_sweep.add_argument("--defer-all", action="store_true", help="Defer every pending import during sweep closeout.")
     p_work_sweep.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_work_sweep.add_argument("sweep_args", nargs="*", help="Use `closeout <sweep-id|latest>` to mark a sweep reviewed.")
     p_work_sweeps = work_sub.add_parser("sweeps", help="List scanner sweep reports.")
     p_work_sweeps.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
     p_work_sweeps.add_argument("--limit", type=int, default=20, help="Maximum sweeps to list.")
@@ -1223,6 +1266,37 @@ def main(argv=None) -> int:
             return 2
         parser.error(f"unknown release command: {args.release_command}")
         return 2
+    if cmd == "roadmap":
+        from . import roadmap_cmd
+
+        if args.roadmap_command == "audit":
+            return roadmap_cmd.audit(target=args.target, json_output=args.json, import_issues=args.import_issues)
+        if args.roadmap_command == "patterns":
+            return roadmap_cmd.patterns(target=args.target, json_output=args.json)
+        parser.error(f"unknown roadmap command: {args.roadmap_command}")
+        return 2
+    if cmd == "repos":
+        from . import repos_cmd
+
+        if args.repos_command == "init":
+            return repos_cmd.init(
+                target=args.target,
+                force=args.force,
+                update_gitignore=not args.no_gitignore,
+                json_output=args.json,
+            )
+        if args.repos_command == "list":
+            return repos_cmd.list_repos(target=args.target, json_output=args.json)
+        if args.repos_command == "show":
+            return repos_cmd.show(target=args.target, repo_id=args.repo_id, json_output=args.json)
+        if args.repos_command == "scan":
+            return repos_cmd.scan(target=args.target, json_output=args.json)
+        if args.repos_command == "doctor":
+            return repos_cmd.doctor(target=args.target, json_output=args.json)
+        if args.repos_command == "import-issues":
+            return repos_cmd.import_issues(target=args.target, dry_run=args.dry_run, json_output=args.json)
+        parser.error(f"unknown repos command: {args.repos_command}")
+        return 2
     if cmd == "handoff":
         from . import handoff_cmd
 
@@ -1365,6 +1439,21 @@ def main(argv=None) -> int:
         if args.work_command == "brief":
             return work_cmd.brief(target=args.target, limit=args.limit, json_output=args.json)
         if args.work_command == "sweep":
+            if args.sweep_args:
+                if args.sweep_args[0] != "closeout":
+                    parser.error("work sweep accepts only `closeout <sweep-id|latest>` as positional arguments")
+                    return 2
+                if len(args.sweep_args) > 2:
+                    parser.error("work sweep closeout accepts at most one sweep id")
+                    return 2
+                return work_cmd.sweep_closeout(
+                    target=args.target,
+                    sweep_id=args.sweep_args[1] if len(args.sweep_args) == 2 else "latest",
+                    reason=args.reason,
+                    deferred_imports=args.defer,
+                    defer_all=args.defer_all,
+                    json_output=args.json,
+                )
             return work_cmd.sweep(
                 target=args.target,
                 scanner_id=args.scanner,

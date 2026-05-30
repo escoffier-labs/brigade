@@ -1,0 +1,594 @@
+# Roadmap Completion Plan
+
+This document is the source of truth for the next large Brigade implementation goal. It closes the remaining roadmap gaps without turning Brigade into a daemon, remote sync engine, or product-specific chat adapter.
+
+## Objective
+
+Finish Brigade as a local operator system for agent work:
+
+- discover useful work from local scanners and repo health checks
+- review and promote that work through tasks or Memory Handoffs
+- execute approved local tools with receipts
+- verify, review, close out, and package releases locally
+- inspect a workspace full of repos without taking over those repos
+- preserve the best patterns from command, skill, subagent, MCP, self-learning memory, context engineering, local security gate, and multi-harness review systems
+
+## Non-Goals
+
+- No remote mutation by default.
+- No daemon, scheduler install, cron mutation, systemd mutation, or background worker.
+- No product-specific live chat APIs.
+- No automatic promotion, automatic memory mutation, automatic fixes, automatic releases, or automatic approvals.
+- No secret storage.
+- No new dependencies unless explicitly approved.
+- No attempt to implement the product roadmap of every repo under `~/repos`.
+- No repository transfer, archival, or ownership change without explicit approval.
+
+## Inspiration And Fleet Boundary
+
+Brigade should do two different things with external repos and reference projects:
+
+1. Keep fleet management for the operator's local repos.
+2. Harvest durable workflow patterns from the agent/tooling projects we selected for inspiration.
+
+Those are related, but not the same.
+
+### Fleet Management
+
+Covered:
+
+- Read repo-local `AGENTS.md`, root `~/AGENTS.md`, `~/repos/AGENTS.md`, and fallback `CLAUDE.md` guidance as inspectable repo metadata.
+- Detect repos with stale or missing local workflow setup, missing handoff inbox coverage, missing release readiness, missing publish-guard integration, dirty state, stale roadmap items, or absent test command hints.
+- Import repo health findings into Brigade's scanner inbox as reviewed local work.
+- Support release, review, scanner, handoff, and publish-guard evidence for repos that opt in.
+- Preserve publish-guard tip and introduced-content summaries in Brigade release evidence.
+
+Not covered:
+
+- Brigade will not implement unrelated product-analysis features, publish-guard policy model phases, app-specific product features, or repo-specific business logic.
+- Brigade will not edit other repos automatically.
+- Brigade will not copy private repo guidance or raw local evidence into public Brigade docs.
+
+### Feature Inspiration Coverage
+
+The larger Brigade roadmap should intentionally absorb the useful patterns we selected from external command, memory, skill, security, context-engineering, and cross-harness sync projects, while implementing them in Brigade's local, receipt-backed style.
+
+Reference set:
+
+- Command-harness best-practice material for commands, skills, subagents, project settings, MCP, memory, and permission boundaries.
+- Ordered delivery-loop projects for think, plan, multi-role review, QA, release, and learn patterns.
+- Durable memory projects for markdown-backed memory, retrieval and graph discipline, skillpacks, job receipts, eval replay, and bounded overnight learning loops.
+- Portable skill libraries for `SKILL.md` packaging, focused engineering workflows, planning, TDD, architecture review, and git safety.
+- Agent guardrail projects for workspace security posture, policy checks, prompt-injection risk, tool permissions, secrets, and reportable findings.
+- Context-engineering projects for staged context packs, command/checklist driven context preparation, and explicit sync into harness-specific contexts.
+- Skill/plugin sync tools for cross-harness portability patterns: dry-run planning, add-only sync, managed headers or sidecars, no silent deletes, and explicit conflict handling.
+- Related local side projects for consolidation decisions, named only in private or gitignored local config.
+
+Covered inspiration:
+
+- Command-harness slash commands, skills, subagents, memory handoffs, MCP config discovery, project settings, and permission boundaries.
+- MCP runner patterns from MCP-focused tooling: config import, stdio and HTTP server metadata, tool listing, call planning, daemon or runtime supervision, timeout handling, and generated wrappers.
+- Multi-harness patterns: portable command projection, harness-specific files, parity checks, and local extension or plugin surfaces.
+- Agent protocol and orchestration patterns: explicit session ids, run receipts, reviewer producers, subagent outputs, structured findings, and closeout records.
+- Delivery-loop patterns: role-based plan review, design review, engineering review, QA review, release manager review, and sprint learning.
+- Durable-memory patterns: markdown as source of truth, hybrid retrieval as an implementation detail, memory repair jobs, citation repair, eval export/replay, and learning cycles that produce reviewable receipts.
+- Portable-skill patterns: small composable skills, `SKILL.md` as the portable unit, TDD and planning skills, architecture grilling, issue generation, and git guardrails.
+- Agent-security patterns: local-only scans, risky tool permission findings, prompt-injection checks, policy reports, and actionable remediation without automatic mutation.
+- Context-engineering patterns: explicit context pack planning, scoped context export, stale context warnings, and harness-specific sync receipts.
+- Cross-harness sync patterns: one portable source of truth for skills/plugins/commands, exact projection plans, dry-run/apply split, managed metadata, and conflict-safe updates.
+- Side-project consolidation patterns:
+  - bake tiny, stable workflow primitives into Brigade when Brigade is the natural control plane
+  - integrate larger tools by receipts and scanner imports when they have their own product surface
+  - keep domain-specific MCP servers as separate repos but make Brigade able to catalog, test, run, and release them
+  - consider moving public reusable side repos to an organization when they are no longer personal experiments and need org-owned issue, release, security, and documentation workflows
+- Self-learning patterns: durable findings become reviewed Memory Handoffs, memory-care refresh candidates, accepted-risk records, or scanner inbox tasks, never automatic canonical memory edits.
+- Security patterns: prompt and instruction scanning, MCP config auditing, permission and hook checks, local evidence bundles, suppressions, accepted risk, and policy-backed release gates.
+- Publishing patterns: content guard scans, introduced-content scans, release readiness receipts, release candidate bundles, and manual-only remote publish plans.
+
+Not covered:
+
+- Brigade does not need to be source-compatible with those projects.
+- Brigade does not need to use their implementation languages or runtime stacks.
+- Brigade does not start live adapters or mutate external tool configs unless an explicit local apply command already exists.
+- Brigade does not silently sync skills, plugins, or context files across harnesses. Projection and sync remain explicit local commands.
+- Brigade does not turn self-learning into unbounded self-modification. Every learning loop must end as a reviewed task, reviewed handoff, accepted suppression, or local receipt.
+- Brigade does not clone, vendor, or name exact reference repositories in public docs by default.
+- Brigade does not automatically move repos between GitHub owners. It can produce local migration plans only.
+
+## Completion Themes
+
+### 1. Roadmap State Audit And Closure Map
+
+Deliverable: a machine-readable and human-readable roadmap health view.
+
+Implementation scope:
+
+- Add `brigade roadmap audit`.
+- Parse `ROADMAP.md` headings and bullets.
+- Classify bullets as `implemented`, `started`, `current`, `planned`, or `unclear`.
+- Emit text and stable JSON.
+- Warn on stale "Current Phase" or "Next Phase" sections that are already mostly implemented.
+- Warn on roadmap items that name commands not present in the CLI.
+- Warn on commands present in docs but missing from roadmap.
+- Route roadmap hygiene issues into the existing work inbox as `source: roadmap-audit`.
+
+Acceptance:
+
+- Tests cover status classification from roadmap fixtures.
+- Tests cover command mismatch detection.
+- Tests cover JSON output stability.
+- Tests cover inbox imports with stable fingerprints and dismissed-until-changed behavior.
+
+Phase 35 status:
+
+- Implemented command surface: `brigade roadmap audit` with text output, JSON output, stale phase checks, command drift checks, and `--import-issues`.
+- Deferred: deeper roadmap ownership modeling. Reason: sections 1 through 4 prioritize the data model, JSON output, tests, and daily-loop health before richer roadmap workflow state.
+
+### 2. Repository Fleet Readiness
+
+Deliverable: inspect local repos as a fleet and turn setup gaps into reviewable work.
+
+Implementation scope:
+
+- Add gitignored `.brigade/repos.toml`.
+- Add `brigade repos init/list/show/scan/doctor/import-issues`.
+- Discover repos under configured roots such as `~/repos`.
+- Record safe repo metadata only: repo path label, branch, dirty counts, presence of `AGENTS.md`, `CLAUDE.md`, `ROADMAP.md`, README, CHANGELOG, test hints, handoff inboxes, publish-guard hooks, Brigade config, latest release readiness receipt, latest release candidate, and latest work closeout.
+- Detect missing or stale operator setup:
+  - missing repo-local guidance
+  - fallback `CLAUDE.md` present without equivalent `AGENTS.md`
+  - missing handoff inbox
+  - handoff inbox not covered by configured source list
+  - missing publish-guard hook where public release checks are expected
+  - stale roadmap with no status markers
+  - dirty tracked files older than threshold
+  - missing test command hint
+  - missing Brigade bootstrap where opted in
+- Import issues into the scanner inbox as `source: repo-fleet`.
+
+Acceptance:
+
+- Tests cover config init/list/show/scan/doctor text and JSON.
+- Tests cover repo fixtures with AGENTS, CLAUDE fallback, roadmap, publish-guard, handoff inboxes, and dirty state.
+- Tests prove private file contents are not copied into imports or docs.
+- Tests cover repo-fleet imports, dedupe, and dismissed-until-changed behavior.
+
+Phase 35 status:
+
+- Implemented command surface: `brigade repos init/list/show/scan/doctor/import-issues`.
+- Implemented safe metadata only: repo id, label, path label, branch, dirty counts, guidance-file presence, docs presence, test hints, handoff inbox presence, publish-guard hook presence, Brigade config presence, and local receipt references.
+- Deferred: recursive root discovery beyond configured entries. Reason: explicit config avoids accidentally exposing private repo names or paths in this phase.
+
+### 3. Inspiration Pattern Registry
+
+Deliverable: a bounded local record of external workflow patterns Brigade intends to support.
+
+Implementation scope:
+
+- Add `docs/inspiration-patterns.md`.
+- Add optional local fixtures for pattern families without copying private project contents.
+- Define pattern families:
+  - slash command
+  - skill
+  - subagent
+  - MCP server
+  - portable tool projection
+  - runtime supervisor
+  - approval queue
+  - checkpoint and resume
+  - code review producer
+  - content guard gate
+  - memory handoff
+  - self-learning scanner
+  - role-based delivery review
+  - skillpack
+  - memory eval replay
+  - release learning closeout
+  - context pack
+  - context sync receipt
+  - skill/plugin sync
+  - agent security guardrail
+- Map each pattern family to an existing or planned Brigade subsystem.
+- Add `brigade roadmap patterns` or include pattern coverage in `brigade roadmap audit`.
+- Emit text and stable JSON coverage:
+  - pattern id
+  - source family: command harness, delivery loop, durable memory, portable skill, agent security, context engineering, sync tool, Brigade-native, or other
+  - Brigade subsystem
+  - status: implemented, started, planned, deferred
+  - acceptance owner doc
+- Warn when a pattern family has no Brigade owner or no tests.
+- Include a source-pattern coverage table for external inspirations and local side tools:
+  - source alias or pattern family
+  - pattern extracted
+  - Brigade subsystem owner
+  - decision: bake-in, integrate, catalog-only, move-candidate, or leave-alone
+  - reason
+  - public/private evidence boundary
+
+Acceptance:
+
+- Tests cover pattern registry parsing and JSON output.
+- Tests cover missing-owner and missing-test warnings.
+- Tests prove no raw private reference content is copied into public fixtures.
+- Tests cover pattern coverage for command harness, delivery-loop, durable-memory, portable-skill, agent-security, context-engineering, and cross-harness sync families without public reference repo names.
+- Tests cover source-project decision records for bake-in, integrate, catalog-only, move-candidate, and leave-alone.
+- README, ROADMAP, and this plan document explain the pattern coverage boundary.
+
+Phase 35 status:
+
+- Implemented command surface: `brigade roadmap patterns`.
+- Implemented public docs: `docs/inspiration-patterns.md` documents neutral pattern families, decision types, and the public/private evidence boundary.
+- Deferred: loading private pattern source aliases from local config. Reason: exact reference names belong only in gitignored host-local config, and sections 1 through 4 require public-safe registry output first.
+
+### 4. Scanner And Inbox Closure
+
+Deliverable: finish the scanner-ready inbox as a complete reviewed daily loop.
+
+Implementation scope:
+
+- Tighten `work inbox doctor` coverage for stale, noisy, missing-provenance, broken-promoted, changed-dismissed, and no-import scanner runs.
+- Add explicit review state to sweep reviews: pending, reviewed, archived.
+- Add `brigade work sweep closeout <sweep-id|latest>` to record that the operator reviewed, dismissed, promoted, or intentionally deferred all actionable imports from a sweep.
+- Make `work brief` prefer unclosed sweep reviews before suggesting new sweeps.
+- Ensure scanner-health, backup-health, memory-care, security-scan, code-review, tool-catalog, and repo-fleet imports all use the same provenance and fingerprint path.
+
+Acceptance:
+
+- Tests cover sweep closeout clean and blocked cases.
+- Tests cover work brief ordering: manual queued task, unclosed sweep, top scanner import, due scanner.
+- Tests cover scanner import provenance across all local producer sources.
+
+Phase 35 status:
+
+- Implemented command surface: `brigade work sweep closeout <sweep-id|latest>`.
+- Implemented closeout states for reviewed sweeps, deferred pending imports, blocked unresolved pending imports, and missing import references.
+- Implemented inbox hygiene for unclosed sweep reports in addition to existing missing provenance, broken references, stale pending imports, changed dismissed fingerprints, and noisy source checks.
+- Deferred: cross-producer provenance audits across every historical source. Reason: this phase tightens the common path and leaves historical backfill for a later compatibility cleanup.
+
+### 5. Chat Surface Export Completion
+
+Deliverable: finish export-based chat sweep ingestion without live product APIs.
+
+Implementation scope:
+
+- Complete provider registry docs and fixtures for common chat export families and generic JSONL.
+- Add optional provider-family aliases for the longer surface list from the roadmap without implementing live adapters.
+- Improve privacy checks for raw transcript fields, user ids, channel ids, private URLs, hostnames, tokens, and unbounded excerpts.
+- Ensure chat-surface producer output works through scanner sweep, sweep review, task promotion, handoff promotion, and release closeout evidence.
+
+Acceptance:
+
+- Tests cover each provider fixture through validate, ingest, import, inbox, sweep review, and handoff or task promotion.
+- Tests prove raw private chat text is rejected or redacted from imports, session artifacts, handoffs, docs, and release evidence.
+
+### 6. Backup And Recovery Closure
+
+Deliverable: make backup health fully reviewable in daily operations.
+
+Implementation scope:
+
+- Add backup health closeout or review status so repeated known issues do not keep the daily brief noisy.
+- Add restore rehearsal evidence summaries and stale rehearsal warnings to release readiness.
+- Add optional safe operator status summary output for backup health without sending messages.
+- Keep all destinations labeled and private.
+
+Acceptance:
+
+- Tests cover backup review closeout and daily brief quieting.
+- Tests cover release readiness including backup risk as warning or blocker by policy.
+- Tests prove hostnames, remotes, mount paths, webhook URLs, and passwords are not copied.
+
+### 7. Shared Tool Catalog Completion
+
+Deliverable: make portable tools useful across harnesses while keeping execution explicit.
+
+Implementation scope:
+
+- Add catalog export bundles for reviewed tools:
+  - portable source summary
+  - projection status by harness
+  - contract schemas
+  - policy requirements
+  - runtime requirements
+  - approval and run history
+- Add parity report closeout for tool projections across configured harness targets and scripts.
+- Add `brigade tools pack build/show/list/archive` for local portable tool packs.
+- Add `brigade tools sync plan` and `brigade tools sync apply` as a thin reviewed layer over existing projections:
+  - dry-run by default
+  - add-only unless `--force` is passed
+  - no delete unless a future explicit command is added
+  - managed metadata required before updates
+  - preserve local harness edits as conflicts
+- Keep pack output local unless explicitly copied by the operator.
+
+Acceptance:
+
+- Tests cover pack build/show/list/archive text and JSON.
+- Tests cover sync plan/apply dry-run, add-only behavior, managed metadata, and conflict refusal.
+- Tests cover projections, contracts, policy, runtime, approvals, run history, and checkpoints represented in pack evidence.
+- Tests cover parity closeout and work brief quieting.
+
+### 8. Context Engineering Packs
+
+Deliverable: make repo and task context explicit, reviewable, and portable across harnesses.
+
+Implementation scope:
+
+- Add `brigade context plan`.
+- Add `brigade context build`.
+- Add `brigade context list/show/archive`.
+- Build local context packs under `.brigade/context/packs/`.
+- Context pack contents:
+  - task or release target
+  - relevant docs
+  - AGENTS and CLAUDE guidance summary
+  - active task acceptance criteria
+  - recent work closeout
+  - recent review and security findings
+  - selected tool catalog entries
+  - excluded private/raw evidence summary
+- Add context sync planning to configured harness destinations without writing by default.
+- Keep raw private chat, secrets, private infrastructure values, and full local logs out of context packs unless explicitly allowed by local policy.
+
+Acceptance:
+
+- Tests cover context plan/build/list/show/archive text and JSON.
+- Tests cover context packs for task, repo, release, and tool-use scenarios.
+- Tests cover stale context warnings and missing source references.
+- Tests prove raw private evidence is excluded by default.
+
+### 9. Side Project Consolidation And Org-Move Planning
+
+Deliverable: decide which related projects become Brigade features, Brigade integrations, catalog-only tools, or organization move candidates.
+
+Implementation scope:
+
+- Add `brigade projects audit`.
+- Add optional gitignored `.brigade/projects.toml`.
+- Inspect configured local or public project records without cloning by default.
+- For each project, classify:
+  - `bake-in`: small workflow primitive belongs directly in Brigade
+  - `integrate`: external tool keeps its repo but Brigade reads receipts or imports findings
+  - `catalog-only`: tool belongs in the portable tool catalog or MCP catalog
+  - `move-candidate`: side repo may belong under an organization
+  - `leave-alone`: unrelated or product-owned
+- Initial classification guidance:
+  - publish guards: integrate as publish gates and release evidence, do not bake in scanner engines
+  - memory maintenance tools: bake in compatible handoff/memory-care checks where small, integrate larger repair reports
+  - bootstrap maintenance tools: bake in bootstrap budget and oversized-prefix checks
+  - output compaction tools: integrate as optional output compaction and run-history scanner, catalog executable
+  - MCP runner tools: integrate as MCP/tool execution inspiration and catalog bridge, do not replace them
+  - MCP server family: catalog-only plus release/readiness templates, potential organization move candidates when public and reusable
+  - prompt library tools: integrate as prompt/skill source catalog and scanner producer
+  - code search tools: integrate as optional local scanner and context pack source
+  - usage tracking tools: integrate as token budget and run-cost scanner producer
+  - notification tools: catalog-only until notifications become explicit
+  - domain-specific ops and security products: leave as product repos unless Brigade needs their health receipts
+- Produce a local migration plan:
+  - source owner
+  - recommended owner
+  - reason
+  - required docs/license/security/release readiness before move
+  - manual commands only, not executed
+- Route stale or missing project-readiness work into the scanner inbox as `source: project-consolidation`.
+
+Acceptance:
+
+- Tests cover project audit text and JSON.
+- Tests cover classification rules for bake-in, integrate, catalog-only, move-candidate, and leave-alone.
+- Tests cover migration plan generation with manual-only commands.
+- Tests prove no GitHub transfer, archive, visibility, or remote mutation occurs.
+- Tests cover project-consolidation imports with dedupe and dismissed-until-changed behavior.
+
+### 10. Self-Learning Loop Closure
+
+Deliverable: make self-learning explicit, bounded, and reviewable.
+
+Implementation scope:
+
+- Add a local learning inbox view over durable findings from:
+  - scanner imports
+  - code review findings
+  - security findings
+  - failed tool runs
+  - checkpoint rejections
+  - handoff ingest failures
+  - memory-care refresh candidates
+- Add `brigade learn plan` and `brigade learn doctor` as read-only summary commands.
+- Add `brigade learn import-issues` to route stale or blocked learning candidates into the scanner inbox.
+- Add durable-memory inspired eval replay receipts for learning changes:
+  - export a safe local learning scenario
+  - replay after code or rule changes
+  - record before/after outcome summaries
+  - do not upload or publish private examples
+- Make every learning candidate choose one review path:
+  - task
+  - Memory Handoff draft
+  - suppression or accepted risk
+  - archive or dismissal
+- Add release evidence summaries for unresolved learning candidates.
+- Do not edit canonical memory, source files, tool configs, or policies automatically.
+
+Acceptance:
+
+- Tests cover learning candidate aggregation from fixtures across scanners, review, security, tools, handoffs, and memory-care.
+- Tests cover safe eval replay receipts without private raw evidence.
+- Tests cover JSON output and inbox imports.
+- Tests cover dismissal and accepted-risk quieting.
+- Tests prove no automatic memory edits or source edits happen.
+
+### 11. Security Plugin Closure
+
+Deliverable: complete security evidence packs and policy-driven local gates.
+
+Implementation scope:
+
+- Add security report bundles that include JSON, Markdown, and optional HTML-safe index without new dependencies.
+- Add SARIF output if it can be implemented dependency-free.
+- Add prompt and instruction rule fixtures for repo AGENTS, CLAUDE, skills, slash commands, subagents, and tool wrappers.
+- Add security review closeout so suppressions, accepted risk, and completed follow-up tasks are visible in release readiness.
+- Tighten runtime-confidence handling for public templates versus active configs.
+- Add agent-security inspired guardrail reporting:
+  - tool permission risk
+  - prompt injection risk
+  - secret and private endpoint risk
+  - unsafe hook or auto-run risk
+  - harness config risk
+  - remediation task routing
+
+Acceptance:
+
+- Tests cover prompt-injection style instruction findings.
+- Tests cover agent-security guardrail categories.
+- Tests cover SARIF or explicitly document why SARIF is deferred.
+- Tests cover security closeout evidence in release readiness and release candidates.
+- Existing publish-guard integration still passes.
+
+### 12. Issue And TDD Loop Closure
+
+Deliverable: close the daily task lifecycle from issue or scanner import to review and release evidence.
+
+Implementation scope:
+
+- Add repo-shareable workflow rule templates without embedding personal preferences.
+- Add stale active issue context checks and repair imports.
+- Add acceptance coverage summaries across pending tasks, completed tasks, review findings, and release closeout.
+- Add task outcome rollups in release candidate evidence.
+
+Acceptance:
+
+- Tests cover stale issue context and repair imports.
+- Tests cover shareable workflow rule templates.
+- Tests cover acceptance coverage rollups in release evidence.
+
+### 13. Memory And Handoff Closure
+
+Deliverable: make memory handoff and memory-care review quiet, explicit, and auditable.
+
+Implementation scope:
+
+- Add handoff closeout views that explain why a draft is still pending, ingested, skipped, failed, reviewed, or archived.
+- Add memory-care closeout for refresh candidates that are task-promoted, handoff-promoted, dismissed, or intentionally deferred.
+- Add optional safe auto-fix planning only, no memory mutation, for low-risk metadata repair.
+
+Acceptance:
+
+- Tests cover handoff and memory-care closeout states.
+- Tests cover no direct `MEMORY.md` or memory card edits.
+- Tests cover daily brief quieting after closeout.
+
+### 14. Release And Publish Gate Completion
+
+Deliverable: turn all local evidence into a complete publish review packet, still without remote mutation.
+
+Implementation scope:
+
+- Extend release readiness and candidates to include roadmap audit, repo-fleet, project-consolidation state, context pack freshness, backup review, tool parity, security closeout, task acceptance rollup, and memory-care closeout.
+- Add release candidate compare between latest candidate and current HEAD.
+- Add publish checklist templates for tag, push, GitHub release, package publish, and docs publish as manual-only steps.
+- Add release candidate closeout status: draft, reviewed, superseded, archived.
+
+Acceptance:
+
+- Tests cover release readiness and candidate evidence for every completed local subsystem, including context packs.
+- Tests cover candidate compare and closeout state.
+- Tests prove no push, tag, release creation, upload, or PR mutation occurs.
+
+## Suggested Execution Order
+
+1. Roadmap audit, inspiration pattern registry, and repo-fleet readiness.
+2. Scanner inbox and sweep closeout.
+3. Chat surface export completion.
+4. Backup review closeout.
+5. Tool catalog packs, skill/plugin sync, and parity closeout.
+6. Context engineering packs.
+7. Side project consolidation and org-move planning.
+8. Self-learning loop closure.
+9. Security report bundles and closeout.
+10. Issue/TDD and acceptance rollups.
+11. Memory/handoff closeout.
+12. Release candidate final integration.
+
+This order starts by making the remaining work visible, then closes noisy daily-loop surfaces, then adds final release integration.
+
+## Stop Conditions
+
+The implementation goal should stop when all of the following are true:
+
+- Every command named in the selected sections exists or is explicitly documented as deferred.
+- Every selected section has focused tests.
+- README, CHANGELOG, ROADMAP, and relevant docs are updated.
+- The selected verification commands pass.
+- A Memory Handoff is written and linted for durable workflow changes.
+- The work is committed and pushed if the active goal includes commit and push.
+
+The goal should not continue by inventing new features after those conditions are met.
+
+## Verification Baseline
+
+Run at minimum:
+
+```bash
+PYTHONPATH=src python3 -m pytest tests/test_release_cmd.py tests/test_work_cmd.py tests/test_handoff_cmd.py -q
+PYTHONPATH=src python3 -m pytest -q
+git diff --check
+```
+
+Add narrower tests for each subsystem touched, for example:
+
+```bash
+PYTHONPATH=src python3 -m pytest tests/test_security_cmd.py -q
+PYTHONPATH=src python3 -m pytest tests/test_tools_cmd.py -q
+```
+
+## Recommended Next Goal Prompt
+
+```text
+/goal Brigade phase 35: roadmap completion tranche one
+
+Use docs/roadmap-completion-plan.md as the source of truth.
+
+Implement sections 1 through 4 only:
+- Roadmap State Audit And Closure Map
+- Repository Fleet Readiness
+- Inspiration Pattern Registry
+- Scanner And Inbox Closure
+
+Keep the boundaries and stop conditions from docs/roadmap-completion-plan.md.
+
+Scope:
+- Add roadmap audit commands and JSON output.
+- Add repo fleet config, scan, doctor, and inbox imports.
+- Add an inspiration pattern registry and coverage audit for command-harness patterns, delivery loops, durable memory/eval loops, portable skills, agent-security guardrails, context packs, cross-harness sync tools, relevant local side-project categories, MCP tooling, portable tools, security gates, self-learning, and release gates.
+- Add scanner sweep closeout and tighter inbox hygiene integration.
+- Update work brief and work doctor only as needed to surface the highest-priority unresolved roadmap, pattern coverage, repo-fleet, or sweep closeout issue.
+- Preserve all existing scanner, release, handoff, review, security, backup, tool, and work-task behavior.
+
+Out of scope:
+- No live chat adapters.
+- No daemon or scheduler mutation.
+- No remote mutation.
+- No automatic promotion.
+- No automatic memory edits.
+- No security SARIF, context pack, tool pack, or sync apply work yet.
+- No implementation of other repos' product roadmaps.
+- No copying raw private reference repo contents into Brigade docs or fixtures.
+- No GitHub repo transfer, archive, visibility, or owner mutation.
+- No new dependencies.
+
+Acceptance:
+- Tests cover roadmap audit parsing, command mismatch detection, JSON output, and roadmap-audit imports.
+- Tests cover repo fleet init/list/show/scan/doctor/import-issues text and JSON.
+- Tests cover AGENTS and CLAUDE fallback detection without copying private contents.
+- Tests cover repo-fleet imports with stable fingerprints, dedupe, and dismissed-until-changed behavior.
+- Tests cover inspiration pattern registry text and JSON, named source coverage, missing-owner warnings, and missing-test warnings.
+- Tests cover sweep closeout clean, blocked, stale, and missing-reference states.
+- Tests cover work brief, work doctor, and work inbox doctor integration.
+- Existing release readiness and release candidate workflows still pass.
+- Existing scanner, handoff, review, security, backup, tool, and work-task workflows still pass.
+- README, CHANGELOG, ROADMAP, docs/import-schema.md, docs/scanner-registry.md, and this plan document are updated.
+- A Memory Handoff is written and linted.
+- PYTHONPATH=src python3 -m pytest tests/test_release_cmd.py tests/test_work_cmd.py tests/test_handoff_cmd.py -q passes.
+- PYTHONPATH=src python3 -m pytest -q passes.
+- Commit and push the phase when complete.
+```

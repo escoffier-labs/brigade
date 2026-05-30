@@ -9,6 +9,8 @@ from pathlib import Path
 from brigade import cli
 from brigade import chat_cmd
 from brigade import dogfood_cmd
+from brigade import repos_cmd
+from brigade import roadmap_cmd
 from brigade import security_cmd
 from brigade import tools_cmd
 from brigade import work_cmd
@@ -1701,6 +1703,47 @@ projections = { codex = ".codex/skills/portable/SKILL.md" }
     out = capsys.readouterr().out
     assert "[warn] tool_missing_projection:" in out
     assert "[ok] tools_config_ignored: yes" in out
+
+
+def test_work_brief_and_doctor_include_roadmap_and_repo_fleet_health(tmp_path, monkeypatch, capsys):
+    _init_git_repo(tmp_path)
+    dogfood_cmd.init(target=tmp_path)
+    monkeypatch.setattr(work_cmd.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(dogfood_cmd, "_check_git_ignored", lambda repo, path: "yes")
+    monkeypatch.setattr(
+        roadmap_cmd,
+        "health",
+        lambda target: {
+            "issue_count": 1,
+            "top_issue": {"status": "warn", "name": "roadmap_example", "detail": "needs review"},
+            "audit": {"issue_count": 1, "top_issue": {"status": "warn", "name": "roadmap_example", "detail": "needs review"}},
+            "patterns": {"issue_count": 0, "top_issue": None},
+            "checks": [{"status": "warn", "name": "roadmap_example", "detail": "needs review"}],
+        },
+    )
+    monkeypatch.setattr(
+        repos_cmd,
+        "health",
+        lambda target: {
+            "config_path": str(tmp_path / ".brigade" / "repos.toml"),
+            "repo_count": 1,
+            "issue_count": 1,
+            "top_issue": {"status": "warn", "name": "repo_example", "detail": "missing setup"},
+            "checks": [{"status": "warn", "name": "repo_example", "detail": "missing setup"}],
+        },
+    )
+
+    assert work_cmd.brief(target=tmp_path) == 0
+    out = capsys.readouterr().out
+    assert "roadmap_completion: 1 issue(s)" in out
+    assert "roadmap_top_issue: roadmap_example needs review" in out
+    assert "repo_fleet: 1 issue(s)" in out
+    assert "repo_fleet_top_issue: repo_example missing setup" in out
+
+    assert work_cmd.doctor(target=tmp_path) == 0
+    out = capsys.readouterr().out
+    assert "[warn] roadmap_example: needs review" in out
+    assert "[warn] repo_example: missing setup" in out
 
 
 def test_tools_plan_and_apply_projection_lifecycle(tmp_path, capsys):
@@ -8021,10 +8064,15 @@ def test_work_sweep_cli(tmp_path, monkeypatch):
         seen.append(("sweep-review", kwargs))
         return 0
 
+    def fake_sweep_closeout(**kwargs):
+        seen.append(("sweep-closeout", kwargs))
+        return 0
+
     monkeypatch.setattr(work_cmd, "sweep", fake_sweep)
     monkeypatch.setattr(work_cmd, "sweeps", fake_sweeps)
     monkeypatch.setattr(work_cmd, "sweep_show", fake_sweep_show)
     monkeypatch.setattr(work_cmd, "sweep_review", fake_sweep_review)
+    monkeypatch.setattr(work_cmd, "sweep_closeout", fake_sweep_closeout)
 
     assert (
         cli.main(
@@ -8047,6 +8095,24 @@ def test_work_sweep_cli(tmp_path, monkeypatch):
     assert cli.main(["work", "sweeps", "--target", str(tmp_path), "--limit", "5", "--json"]) == 0
     assert cli.main(["work", "sweep-show", "sweep-1", "--target", str(tmp_path), "--json"]) == 0
     assert cli.main(["work", "sweep-review", "latest", "--target", str(tmp_path), "--json"]) == 0
+    assert (
+        cli.main(
+            [
+                "work",
+                "sweep",
+                "closeout",
+                "latest",
+                "--target",
+                str(tmp_path),
+                "--defer",
+                "import-one",
+                "--reason",
+                "reviewed",
+                "--json",
+            ]
+        )
+        == 0
+    )
     assert seen == [
         (
             "sweep",
@@ -8075,7 +8141,120 @@ def test_work_sweep_cli(tmp_path, monkeypatch):
         ("sweeps", {"target": tmp_path, "limit": 5, "json_output": True}),
         ("sweep-show", {"target": tmp_path, "sweep_id": "sweep-1", "json_output": True}),
         ("sweep-review", {"target": tmp_path, "sweep_id": "latest", "json_output": True}),
+        (
+            "sweep-closeout",
+            {
+                "target": tmp_path,
+                "sweep_id": "latest",
+                "reason": "reviewed",
+                "deferred_imports": ["import-one"],
+                "defer_all": False,
+                "json_output": True,
+            },
+        ),
     ]
+
+
+def test_sweep_closeout_blocks_pending_imports(tmp_path, capsys):
+    tmp_path.mkdir(exist_ok=True)
+    item = work_cmd._make_import(
+        "Review scanner finding",
+        kind="task",
+        source="scanner-health",
+        metadata={"scanner_id": "scanner-one", "scanner_source": "scanner-health", "scanner_run_id": "run-one", "source_fingerprint": "abc"},
+    )
+    work_cmd._write_imports(tmp_path, [item])
+    work_cmd._write_sweep_report(
+        tmp_path,
+        {
+            "sweep_id": "sweep-one",
+            "status": "completed",
+            "started_at": "2026-05-29T12:00:00+00:00",
+            "completed_at": "2026-05-29T12:01:00+00:00",
+            "import_references": {"created_import_ids": [item["id"]]},
+        },
+    )
+
+    assert work_cmd.sweep_closeout(target=tmp_path, sweep_id="sweep-one", json_output=True) == 2
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["closeout"]["status"] == "blocked"
+    assert "pending imports remain unreviewed" in payload["closeout"]["blocked_reasons"]
+
+
+def test_sweep_closeout_can_defer_pending_imports(tmp_path, capsys):
+    tmp_path.mkdir(exist_ok=True)
+    item = work_cmd._make_import(
+        "Review scanner task",
+        kind="task",
+        source="scanner-health",
+        metadata={
+            "scanner_id": "scanner-one",
+            "scanner_source": "scanner-health",
+            "scanner_run_id": "run-two",
+            "source_fingerprint": "def",
+        },
+    )
+    work_cmd._write_imports(tmp_path, [item])
+    work_cmd._write_sweep_report(
+        tmp_path,
+        {
+            "sweep_id": "sweep-two",
+            "status": "completed",
+            "started_at": "2026-05-29T12:00:00+00:00",
+            "completed_at": "2026-05-29T12:01:00+00:00",
+            "import_references": {"created_import_ids": [item["id"]]},
+        },
+    )
+
+    assert work_cmd.sweep_closeout(target=tmp_path, sweep_id="latest", defer_all=True, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["closeout"]["status"] == "reviewed_with_deferrals"
+
+    report, error = work_cmd._find_sweep_report(tmp_path, "sweep-two")
+    assert error is None
+    assert report["review_closeout"]["deferred_import_ids"] == [item["id"]]
+    review, error = work_cmd._sweep_review_payload(tmp_path, "sweep-two")
+    assert error is None
+    assert not review["issues"]
+
+
+def test_sweep_closeout_missing_reference_is_blocked(tmp_path, capsys):
+    tmp_path.mkdir(exist_ok=True)
+    work_cmd._write_sweep_report(
+        tmp_path,
+        {
+            "sweep_id": "sweep-missing",
+            "status": "completed",
+            "started_at": "2026-05-29T12:00:00+00:00",
+            "completed_at": "2026-05-29T12:01:00+00:00",
+            "import_references": {"created_import_ids": ["missing-import"]},
+        },
+    )
+
+    assert work_cmd.sweep_closeout(target=tmp_path, sweep_id="sweep-missing", defer_all=True, json_output=True) == 2
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["closeout"]["status"] == "blocked"
+    assert payload["closeout"]["missing_import_ids"] == ["missing-import"]
+
+
+def test_inbox_hygiene_reports_unclosed_sweeps(tmp_path):
+    tmp_path.mkdir(exist_ok=True)
+    item = work_cmd._make_import("Review scanner task", kind="task", source="scanner-health")
+    work_cmd._write_imports(tmp_path, [item])
+    work_cmd._write_sweep_report(
+        tmp_path,
+        {
+            "sweep_id": "sweep-open",
+            "status": "completed",
+            "started_at": "2026-05-29T12:00:00+00:00",
+            "completed_at": "2026-05-29T12:01:00+00:00",
+            "import_references": {"created_import_ids": [item["id"]]},
+        },
+    )
+
+    payload = work_cmd._inbox_hygiene_payload(tmp_path)
+    issue_names = {issue["name"] for issue in payload["issues"]}
+    assert "inbox_sweep_unclosed" in issue_names
 
 
 def test_work_verify_and_closeout_cli(tmp_path, monkeypatch):

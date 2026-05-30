@@ -88,6 +88,13 @@ Scanner run provenance metadata is added by `brigade work scanners run --ingest-
 - `scanner_import_path`: configured JSONL import output path when present.
 - `source_fingerprint`: producer fingerprint or Brigade-computed fingerprint for dedupe and dismissed-change checks.
 
+Roadmap and repo-fleet producers use the same import contract:
+
+- `source: roadmap-audit` records roadmap hygiene issues such as stale phase sections or documented command drift. Metadata includes `issue_type`, `safe_summary`, `source_item_key`, and `source_fingerprint`.
+- `source: repo-fleet` records local repository readiness gaps from `brigade repos import-issues`. Metadata includes `repo_id`, `issue_type`, `safe_summary`, `source_item_key`, and `source_fingerprint`.
+
+Repo-fleet imports must use safe labels only. Do not copy full local paths, guidance file contents, private config values, raw logs, scanner output, owner names, exact private repo names, or raw evidence into import text or metadata.
+
 ## Privacy Rules
 
 - Keep raw chat exports, message bodies, and third-party personal details out of public docs and public repos.

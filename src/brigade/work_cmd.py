@@ -4827,7 +4827,7 @@ def _suggested_command(active: dict[str, Any] | None, next_text: object, source:
 
 
 def _brief_payload(target: Path, *, limit: int = 3) -> dict[str, Any]:
-    from . import chat_cmd, handoff_cmd, memory_cmd, security_cmd, tools_cmd
+    from . import chat_cmd, handoff_cmd, memory_cmd, repos_cmd, roadmap_cmd, security_cmd, tools_cmd
 
     target = target.expanduser().resolve()
     active = _active_session_info(target)
@@ -4852,6 +4852,8 @@ def _brief_payload(target: Path, *, limit: int = 3) -> dict[str, Any]:
     security_health = security_cmd.health(target)
     backup_health = _backup_health(target)
     tool_health = tools_cmd.health(target)
+    roadmap_health = roadmap_cmd.health(target)
+    repo_health = repos_cmd.health(target)
     handoff_issues = handoff_cmd.collect_issues(target)
     known_handoff_issue_ids = handoff_cmd._known_local_issue_ids(target)
     new_handoff_issues = [issue for issue in handoff_issues if issue.id not in known_handoff_issue_ids]
@@ -4936,6 +4938,18 @@ def _brief_payload(target: Path, *, limit: int = 3) -> dict[str, Any]:
             "call_queue": tool_health.get("call_queue"),
             "run_history": tool_health.get("run_history"),
             "checkpoints": tool_health.get("checkpoints"),
+        },
+        "roadmap_completion": {
+            "issue_count": roadmap_health["issue_count"],
+            "top_issue": roadmap_health["top_issue"],
+            "audit": roadmap_health["audit"],
+            "patterns": roadmap_health["patterns"],
+        },
+        "repo_fleet": {
+            "config_path": repo_health["config_path"],
+            "repo_count": repo_health["repo_count"],
+            "issue_count": repo_health["issue_count"],
+            "top_issue": repo_health["top_issue"],
         },
         "handoff_issues": {
             "count": len(new_handoff_issues),
@@ -5611,6 +5625,24 @@ def brief(*, target: Path, limit: int = 3, json_output: bool = False) -> int:
                     f"{checkpoint_top.get('checkpoint_id')} {checkpoint_top.get('issue_type')} "
                     f"{_short(str(checkpoint_top.get('detail', '')))}"
                 )
+
+    roadmap_completion = payload.get("roadmap_completion") if isinstance(payload.get("roadmap_completion"), dict) else {}
+    if roadmap_completion:
+        print(
+            "roadmap_completion: "
+            f"{'ok' if roadmap_completion.get('issue_count') == 0 else f'{roadmap_completion.get('issue_count')} issue(s)'}"
+        )
+        top_roadmap = roadmap_completion.get("top_issue") if isinstance(roadmap_completion.get("top_issue"), dict) else None
+        if top_roadmap:
+            print(f"roadmap_top_issue: {top_roadmap.get('name')} {_short(str(top_roadmap.get('detail', '')))}")
+
+    repo_fleet = payload.get("repo_fleet") if isinstance(payload.get("repo_fleet"), dict) else {}
+    if repo_fleet:
+        print(f"repo_fleet_config: {repo_fleet.get('config_path')}")
+        print(f"repo_fleet: {'ok' if repo_fleet.get('issue_count') == 0 else f'{repo_fleet.get('issue_count')} issue(s)'}")
+        top_repo = repo_fleet.get("top_issue") if isinstance(repo_fleet.get("top_issue"), dict) else None
+        if top_repo:
+            print(f"repo_fleet_top_issue: {top_repo.get('name')} {_short(str(top_repo.get('detail', '')))}")
 
     code_review = payload.get("code_review")
     if isinstance(code_review, dict):
@@ -6862,9 +6894,11 @@ def _inbox_hygiene_payload(target: Path) -> dict[str, Any]:
     }
     sweep_missing_refs: list[str] = []
     sweep_lost_provenance: list[str] = []
+    sweep_unclosed: list[str] = []
     for sweep_report in _scanner_sweeps(target):
         sweep_id = str(sweep_report.get("sweep_id") or "unknown")
         references = _sweep_import_references(sweep_report)
+        referenced_pending = False
         for import_id in references.get("created_import_ids", []):
             if not isinstance(import_id, str) or not import_id.strip():
                 continue
@@ -6872,10 +6906,14 @@ def _inbox_hygiene_payload(target: Path) -> dict[str, Any]:
             if item is None:
                 sweep_missing_refs.append(f"{sweep_id}:{import_id}")
                 continue
+            if item.get("status", "pending") == "pending":
+                referenced_pending = True
             metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
             required = ("scanner_id", "scanner_source", "scanner_run_id", "source_fingerprint")
             if any(not metadata.get(key) for key in required):
                 sweep_lost_provenance.append(f"{sweep_id}:{import_id}")
+        if referenced_pending and not _sweep_is_closed(sweep_report):
+            sweep_unclosed.append(sweep_id)
     checks.append(
         _import_hygiene_issue(
             WARN if sweep_missing_refs else OK,
@@ -6894,6 +6932,16 @@ def _inbox_hygiene_payload(target: Path) -> dict[str, Any]:
             if sweep_lost_provenance
             else "none",
             sweep_lost_provenance[:10],
+        )
+    )
+    checks.append(
+        _import_hygiene_issue(
+            WARN if sweep_unclosed else OK,
+            "inbox_sweep_unclosed",
+            f"{len(sweep_unclosed)} sweep(s) have pending imports without review closeout"
+            if sweep_unclosed
+            else "none",
+            sweep_unclosed[:10],
         )
     )
 
@@ -8627,6 +8675,18 @@ def _write_sweep_report(target: Path, report: dict[str, Any]) -> None:
     _write_json(_scanner_sweeps_root(target) / sweep_id / "sweep.json", report)
 
 
+def _sweep_closeout_status(report: dict[str, Any]) -> str | None:
+    closeout = report.get("review_closeout")
+    if not isinstance(closeout, dict):
+        return None
+    status = closeout.get("status")
+    return str(status) if isinstance(status, str) else None
+
+
+def _sweep_is_closed(report: dict[str, Any]) -> bool:
+    return _sweep_closeout_status(report) in {"reviewed", "reviewed_with_deferrals"}
+
+
 def sweep(
     *,
     target: Path,
@@ -8964,6 +9024,20 @@ def _sweep_review_payload(target: Path, sweep_id: str) -> tuple[dict[str, Any] |
         items=items,
         missing_import_ids=missing_import_ids,
     )
+    closeout = report.get("review_closeout") if isinstance(report.get("review_closeout"), dict) else None
+    if _sweep_is_closed(report):
+        checks = [
+            check
+            for check in checks
+            if check.get("name") not in {"scanner_sweep_unreviewed", "scanner_sweep_noisy_noop"}
+        ]
+        checks.append(
+            _import_hygiene_issue(
+                OK,
+                "scanner_sweep_closeout",
+                f"{closeout.get('status')} at {closeout.get('closed_at')}" if closeout else "reviewed",
+            )
+        )
     return (
         {
             "target": str(target),
@@ -8974,6 +9048,7 @@ def _sweep_review_payload(target: Path, sweep_id: str) -> tuple[dict[str, Any] |
             "actionable_imports": actionable,
             "top_pending_import": actionable[0] if actionable else None,
             "missing_import_ids": missing_import_ids,
+            "closeout": closeout,
             "checks": checks,
             "issues": [check for check in checks if check.get("status") != OK],
         },
@@ -9015,6 +9090,73 @@ def sweep_review(*, target: Path, sweep_id: str, json_output: bool = False) -> i
     for check in payload["checks"]:
         if check.get("status") != OK:
             _doctor_line(str(check.get("status")), str(check.get("name")), check.get("detail"))
+    return 0
+
+
+def sweep_closeout(
+    *,
+    target: Path,
+    sweep_id: str,
+    reason: str | None = None,
+    deferred_imports: list[str] | None = None,
+    defer_all: bool = False,
+    json_output: bool = False,
+) -> int:
+    target = target.expanduser().resolve()
+    if not target.is_dir():
+        print(f"error: --target is not a directory: {target}", file=sys.stderr)
+        return 2
+    payload, error = _sweep_review_payload(target, sweep_id)
+    if payload is None:
+        print(f"error: {error}", file=sys.stderr)
+        return 1 if error and "not found" in error else 2
+    report = payload["sweep"]
+    pending_ids = sorted(
+        str(item.get("id"))
+        for item in payload.get("actionable_imports", [])
+        if isinstance(item, dict) and isinstance(item.get("id"), str)
+    )
+    missing_import_ids = list(payload.get("missing_import_ids") or [])
+    deferred = sorted(set(deferred_imports or []))
+    unknown_deferred = sorted(import_id for import_id in deferred if import_id not in pending_ids)
+    blocked: list[str] = []
+    if missing_import_ids:
+        blocked.append("missing sweep import references")
+    if unknown_deferred:
+        blocked.append("deferred imports are not pending sweep imports")
+    if pending_ids and not defer_all:
+        unresolved = sorted(import_id for import_id in pending_ids if import_id not in deferred)
+        if unresolved:
+            blocked.append("pending imports remain unreviewed")
+    else:
+        unresolved = []
+    closeout = {
+        "sweep_id": report.get("sweep_id"),
+        "closed_at": _now().isoformat(),
+        "status": "blocked" if blocked else ("reviewed_with_deferrals" if pending_ids else "reviewed"),
+        "pending_import_ids": pending_ids,
+        "deferred_import_ids": pending_ids if defer_all and pending_ids else deferred,
+        "missing_import_ids": missing_import_ids,
+        "unresolved_import_ids": unresolved,
+        "blocked_reasons": blocked,
+        "reason": reason or "",
+    }
+    if not blocked:
+        report["review_closeout"] = closeout
+        _write_sweep_report(target, report)
+    output = {"target": str(target), "sweep_id": report.get("sweep_id"), "closeout": closeout}
+    if json_output:
+        print(json.dumps(output, indent=2, sort_keys=True))
+        return 0 if not blocked else 2
+    print(f"sweep_closeout: {report.get('sweep_id')}")
+    print(f"status: {closeout['status']}")
+    print(f"pending_imports: {len(pending_ids)}")
+    print(f"deferred_imports: {len(closeout['deferred_import_ids'])}")
+    if blocked:
+        for item in blocked:
+            print(f"blocked: {item}", file=sys.stderr)
+        return 2
+    print(f"closed_at: {closeout['closed_at']}")
     return 0
 
 
@@ -9355,7 +9497,7 @@ def status(*, target: Path, limit: int = 12) -> int:
 
 
 def doctor(*, target: Path) -> int:
-    from . import chat_cmd, handoff_cmd, memory_cmd, security_cmd, tools_cmd
+    from . import chat_cmd, handoff_cmd, memory_cmd, repos_cmd, roadmap_cmd, security_cmd, tools_cmd
 
     target = target.expanduser().resolve()
     failures = 0
@@ -9605,6 +9747,14 @@ def doctor(*, target: Path) -> int:
             _doctor_line(str(issue.get("status")), str(issue.get("name")), issue.get("detail"))
     else:
         _doctor_line(OK, "tool_catalog", f"{tool_health['tool_count']} configured")
+
+    roadmap_health = roadmap_cmd.health(effective_target)
+    for issue in roadmap_health["checks"]:
+        _doctor_line(str(issue.get("status")), str(issue.get("name")), issue.get("detail"))
+
+    repo_health = repos_cmd.health(effective_target)
+    for check in repo_health["checks"]:
+        _doctor_line(str(check.get("status")), str(check.get("name")), check.get("detail"))
 
     handoff_inbox = (
         cfg.handoff_inbox

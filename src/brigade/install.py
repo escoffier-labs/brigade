@@ -64,6 +64,7 @@ def build_gitignore_block(selection: Selection) -> str:
         ".brigade/backups.toml",
         ".brigade/dogfood.toml",
         ".brigade/handoff-sources.json",
+        ".brigade/repos.toml",
         ".brigade/chat-surfaces.toml",
         ".brigade/memory-care.toml",
         ".brigade/scanners.toml",

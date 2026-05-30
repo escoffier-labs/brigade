@@ -70,7 +70,9 @@ Each report includes the sweep id, started and completed timestamps, scanner run
 
 Use `brigade work sweep-review <sweep-id>` or `brigade work sweep-review latest` to triage what a sweep produced. Review output groups created imports by source, kind, priority, acceptance coverage, provenance completeness, and pending/promoted/dismissed state. Pending imports include exact next commands for `import plan`, `import promote`, `import dismiss`, `import promote --run`, `import plan-handoff`, and `import promote-handoff` as appropriate.
 
-`brigade work brief` shows the latest sweep, suggests `brigade work sweep` when scanner runs are due, and surfaces the top pending import from the latest unreviewed sweep. `brigade work doctor` warns on missing, stale, failed, or unreviewed sweep reports, missing import references, lost provenance, and noisy no-op sweeps. `brigade work inbox doctor` also reports broken sweep import references.
+Use `brigade work sweep closeout <sweep-id|latest>` after all actionable imports have been promoted, dismissed, archived, or intentionally deferred. Closeout records review state in the sweep report. It blocks when pending imports remain unresolved, when deferred ids are not part of the sweep, or when the sweep references missing import ids. Use `--defer <import-id>` or `--defer-all` to record intentional deferrals.
+
+`brigade work brief` shows the latest sweep, suggests `brigade work sweep` when scanner runs are due, and surfaces the top pending import from the latest unreviewed sweep. `brigade work doctor` warns on missing, stale, failed, or unreviewed sweep reports, missing import references, lost provenance, and noisy no-op sweeps. `brigade work inbox doctor` also reports broken sweep import references and unclosed sweeps.
 
 Sweeps may ingest reviewed JSONL output into the work inbox, but they never promote imports, edit memory, mutate GitHub, or run in the background.
 
@@ -81,7 +83,7 @@ brigade work inbox doctor
 brigade work inbox archive
 ```
 
-`inbox doctor` reports pending scanner imports missing provenance, stale pending imports, promoted imports whose ledger task is missing, dismissed imports whose source fingerprint changed, noisy sources, and scanner runs that produced no imports despite a configured `import_path`. `inbox archive` moves old promoted, dismissed, and superseded imports to `.brigade/work/imports/archive.jsonl` while preserving pending imports.
+`inbox doctor` reports pending scanner imports missing provenance, stale pending imports, promoted imports whose ledger task is missing, dismissed imports whose source fingerprint changed, noisy sources, scanner runs that produced no imports despite a configured `import_path`, missing sweep references, lost sweep provenance, and unclosed sweeps. `inbox archive` moves old promoted, dismissed, and superseded imports to `.brigade/work/imports/archive.jsonl` while preserving pending imports.
 
 ## Config Shape
 
