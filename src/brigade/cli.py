@@ -1479,6 +1479,17 @@ def _build_parser() -> argparse.ArgumentParser:
     p_tools_policy_doctor = tools_policy_sub.add_parser("doctor", help="Check portable tool execution policy health.")
     p_tools_policy_doctor.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
     p_tools_policy_doctor.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_tools_parity = tools_sub.add_parser("parity", help="Inspect and close out portable tool projection parity.")
+    tools_parity_sub = p_tools_parity.add_subparsers(dest="tools_parity_command", metavar="<tools-parity-command>")
+    tools_parity_sub.required = True
+    p_tools_parity_status = tools_parity_sub.add_parser("status", help="Show projection parity closeout state.")
+    p_tools_parity_status.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_tools_parity_status.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_tools_parity_closeout = tools_parity_sub.add_parser("closeout", help="Close out current projection parity issues.")
+    p_tools_parity_closeout.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
+    p_tools_parity_closeout.add_argument("--reason", default="", help="Review or defer reason.")
+    p_tools_parity_closeout.add_argument("--defer", action="store_true", help="Mark parity issues deferred instead of reviewed.")
+    p_tools_parity_closeout.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_tools_pack = tools_sub.add_parser("pack", help="Build and inspect local portable tool packs.")
     tools_pack_sub = p_tools_pack.add_subparsers(dest="tools_pack_command", metavar="<tools-pack-command>")
     tools_pack_sub.required = True
@@ -2765,6 +2776,13 @@ def main(argv=None) -> int:
             if args.tools_policy_command == "doctor":
                 return tools_cmd.policy_doctor(target=args.target, json_output=args.json)
             parser.error(f"unknown tools policy command: {args.tools_policy_command}")
+            return 2
+        if args.tools_command == "parity":
+            if args.tools_parity_command == "status":
+                return tools_cmd.parity_status(target=args.target, json_output=args.json)
+            if args.tools_parity_command == "closeout":
+                return tools_cmd.parity_closeout(target=args.target, reason=args.reason, defer=args.defer, json_output=args.json)
+            parser.error(f"unknown tools parity command: {args.tools_parity_command}")
             return 2
         if args.tools_command == "pack":
             if args.tools_pack_command == "build":

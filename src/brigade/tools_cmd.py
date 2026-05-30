@@ -31,12 +31,14 @@ CHECKPOINTS_REL_PATH = ".brigade/tools/checkpoints"
 RUNTIMES_REL_PATH = ".brigade/tools/runtimes.toml"
 RUNTIME_STATE_REL_PATH = ".brigade/tools/runtime"
 POLICY_REL_PATH = ".brigade/tools/policy.toml"
+PARITY_CLOSEOUTS_REL_PATH = ".brigade/tools/parity-closeouts"
 HEALTH_STALE_HOURS = 48
 CALL_STALE_HOURS = 72
 CALL_RUNNING_STALE_HOURS = 2
 PROJECTION_MARKER = "brigade-tool-projection:"
 FAMILIES = ("skill", "slash-command", "superpower", "mcp", "openapi", "graphql", "script", "custom")
 KNOWN_HARNESSES = ("claude", "codex", "opencode", "hermes", "openclaw", "mcp", "scripts")
+PARITY_ISSUE_TYPES = {"parity_gap", "missing_projection", "stale_projection", "conflicted_projection", "unmanaged_projection"}
 APPROVAL_MODES = ("never", "on-request", "always")
 SCHEMA_TYPES = ("object", "array", "string", "number", "integer", "boolean", "null")
 UNSAFE_FIELD_PATTERN = re.compile(r"(password|secret|token|credential|api[_-]?key)", re.IGNORECASE)
@@ -127,6 +129,10 @@ def runtime_state_path(target: Path) -> Path:
 
 def policy_path(target: Path) -> Path:
     return target / POLICY_REL_PATH
+
+
+def parity_closeouts_path(target: Path) -> Path:
+    return target / PARITY_CLOSEOUTS_REL_PATH
 
 
 def _now() -> datetime:
@@ -1554,13 +1560,22 @@ def _projection_issue(tool: dict[str, Any], item: dict[str, Any]) -> dict[str, A
     status = str(item.get("status") or "projection")
     harness = str(item.get("harness") or "")
     detail = str(item.get("detail") or "")
-    return _tool_issue(
+    issue = _tool_issue(
         tool,
         f"{status}_projection" if status not in {"missing"} else "missing_projection",
         f"{harness}: {detail}",
         harness=harness,
         target=str(item.get("projection_path") or ""),
     )
+    issue.update(
+        {
+            "projection_status": status,
+            "tool_source_fingerprint": item.get("source_fingerprint"),
+            "expected_projection_fingerprint": item.get("expected_projection_fingerprint") or item.get("expected_fingerprint"),
+            "actual_projection_fingerprint": item.get("actual_projection_fingerprint"),
+        }
+    )
+    return issue
 
 
 def _tool_issue(tool: dict[str, Any], issue_type: str, detail: str, *, harness: str | None = None, target: str | None = None) -> dict[str, Any]:
@@ -1574,6 +1589,67 @@ def _tool_issue(tool: dict[str, Any], issue_type: str, detail: str, *, harness: 
         "projection_target": target,
         "description": tool.get("description"),
         "detail": detail,
+    }
+
+
+def _is_parity_issue(issue: dict[str, Any]) -> bool:
+    return str(issue.get("issue_type") or issue.get("name") or "") in PARITY_ISSUE_TYPES
+
+
+def _parity_issue_fingerprint(issue: dict[str, Any]) -> str:
+    return _stable_hash(
+        {
+            "tool_id": issue.get("tool_id"),
+            "family": issue.get("family"),
+            "issue_type": issue.get("issue_type") or issue.get("name"),
+            "harness": issue.get("harness"),
+            "projection_target": issue.get("projection_target"),
+            "projection_status": issue.get("projection_status"),
+            "tool_source_fingerprint": issue.get("tool_source_fingerprint"),
+            "expected_projection_fingerprint": issue.get("expected_projection_fingerprint"),
+            "actual_projection_fingerprint": issue.get("actual_projection_fingerprint"),
+            "detail": issue.get("detail"),
+        }
+    )
+
+
+def _latest_parity_closeout(target: Path) -> dict[str, Any] | None:
+    root = parity_closeouts_path(target)
+    if not root.is_dir():
+        return None
+    closeouts: list[dict[str, Any]] = []
+    for path in root.glob("*/closeout.json"):
+        payload, error = _read_json(path)
+        if error is None and isinstance(payload, dict):
+            payload.setdefault("path", str(path))
+            closeouts.append(payload)
+    closeouts.sort(key=lambda item: str(item.get("created_at") or item.get("closeout_id") or ""), reverse=True)
+    return closeouts[0] if closeouts else None
+
+
+def _apply_parity_closeout(target: Path, issues: list[dict[str, Any]]) -> dict[str, Any]:
+    closeout = _latest_parity_closeout(target)
+    closed = set(closeout.get("source_fingerprints", [])) if isinstance(closeout, dict) else set()
+    active: list[dict[str, Any]] = []
+    quieted: list[dict[str, Any]] = []
+    changed: list[dict[str, Any]] = []
+    for issue in issues:
+        if not _is_parity_issue(issue):
+            active.append(issue)
+            continue
+        fingerprint = _parity_issue_fingerprint(issue)
+        issue["parity_fingerprint"] = fingerprint
+        if fingerprint in closed:
+            quieted.append(issue)
+        else:
+            active.append(issue)
+            if closed:
+                changed.append(issue)
+    return {
+        "issues": active,
+        "quieted_issues": quieted,
+        "changed_issues": changed,
+        "latest_closeout": closeout,
     }
 
 
@@ -3426,6 +3502,9 @@ def _catalog_payload(target: Path) -> dict[str, Any]:
     issues.extend(checkpoint_health["issues"])
     if errors:
         issues.insert(0, {"status": WARN, "name": "tool_config", "issue_type": "config", "detail": "; ".join(errors)})
+    raw_issues = list(issues)
+    parity = _apply_parity_closeout(target, raw_issues)
+    issues = parity["issues"]
     return {
         "target": str(target),
         "config_path": str(config_path(target)),
@@ -3433,9 +3512,18 @@ def _catalog_payload(target: Path) -> dict[str, Any]:
         "errors": errors,
         "tools": summaries,
         "tool_count": len(summaries),
+        "raw_issues": raw_issues,
+        "raw_issue_count": len(raw_issues),
         "issues": issues,
         "issue_count": len(issues),
         "top_issue": issues[0] if issues else None,
+        "parity": {
+            "latest_closeout": parity["latest_closeout"],
+            "quieted_issue_count": len(parity["quieted_issues"]),
+            "quieted_issues": parity["quieted_issues"],
+            "changed_issue_count": len(parity["changed_issues"]),
+            "changed_issues": parity["changed_issues"],
+        },
         "call_queue": {
             "calls_path": call_health["calls_path"],
             "counts": call_health["counts"],
@@ -3483,9 +3571,11 @@ def health(target: Path) -> dict[str, Any]:
         "config_path": payload["config_path"],
         "valid": payload["valid"],
         "tool_count": payload["tool_count"],
+        "raw_issue_count": payload["raw_issue_count"],
         "issue_count": payload["issue_count"],
         "top_issue": payload["top_issue"],
         "issues": payload["issues"],
+        "parity": payload["parity"],
         "call_queue": payload["call_queue"],
         "run_history": payload["run_history"],
         "checkpoints": payload["checkpoints"],
@@ -3501,6 +3591,22 @@ def _issue_records(target: Path) -> list[dict[str, Any]]:
         issue_type = str(issue.get("issue_type") or issue.get("name") or "tool_issue")
         tool_id = str(issue.get("tool_id") or "catalog")
         detail = str(issue.get("detail") or "")
+        source_fingerprint = str(issue.get("parity_fingerprint") or _stable_hash(
+            {
+                "tool_id": tool_id,
+                "issue_type": issue_type,
+                "detail": detail,
+                "harness": issue.get("harness"),
+                "call_id": issue.get("call_id"),
+                "run_id": issue.get("run_id"),
+                "checkpoint_id": issue.get("checkpoint_id"),
+                "projection_target": issue.get("projection_target"),
+                "projection_status": issue.get("projection_status"),
+                "tool_source_fingerprint": issue.get("tool_source_fingerprint"),
+                "expected_projection_fingerprint": issue.get("expected_projection_fingerprint"),
+                "actual_projection_fingerprint": issue.get("actual_projection_fingerprint"),
+            }
+        ))
         metadata = {
             "tool_id": tool_id,
             "tool_family": issue.get("family"),
@@ -3512,18 +3618,7 @@ def _issue_records(target: Path) -> list[dict[str, Any]]:
             "projection_target": issue.get("projection_target"),
             "tool_issue_detail": detail,
             "source_item_key": f"tool-catalog:{tool_id}:{issue_type}:{issue.get('harness') or ''}:{issue.get('call_id') or ''}:{issue.get('run_id') or ''}:{issue.get('checkpoint_id') or ''}",
-            "source_fingerprint": _stable_hash(
-                {
-                    "tool_id": tool_id,
-                    "issue_type": issue_type,
-                    "detail": detail,
-                    "harness": issue.get("harness"),
-                    "call_id": issue.get("call_id"),
-                    "run_id": issue.get("run_id"),
-                    "checkpoint_id": issue.get("checkpoint_id"),
-                    "projection_target": issue.get("projection_target"),
-                }
-            ),
+            "source_fingerprint": source_fingerprint,
         }
         records.append(
             {
@@ -4756,4 +4851,70 @@ def import_issues(*, target: Path, json_output: bool = False) -> int:
     print(f"dismissed: {len(skipped_dismissed)}")
     for item in imported:
         print(f"- {item.get('id')} [{item.get('kind')}] {_short(str(item.get('text', '')))}")
+    return 0
+
+
+def parity_status(*, target: Path, json_output: bool = False) -> int:
+    target = target.expanduser().resolve()
+    if not target.is_dir():
+        print(f"error: --target is not a directory: {target}", file=sys.stderr)
+        return 2
+    payload = _catalog_payload(target)
+    parity = payload.get("parity") if isinstance(payload.get("parity"), dict) else {}
+    projection_issues = [issue for issue in payload["issues"] if _is_parity_issue(issue)]
+    response = {
+        "target": str(target),
+        "closeouts_path": str(parity_closeouts_path(target)),
+        "latest_closeout": parity.get("latest_closeout"),
+        "projection_issue_count": len(projection_issues),
+        "quieted_issue_count": parity.get("quieted_issue_count", 0),
+        "changed_issue_count": parity.get("changed_issue_count", 0),
+        "issues": projection_issues,
+        "quieted_issues": parity.get("quieted_issues", []),
+        "changed_issues": parity.get("changed_issues", []),
+    }
+    if json_output:
+        print(json.dumps(response, indent=2, sort_keys=True))
+        return 0
+    print(f"tools parity: {target}")
+    print(f"projection_issues: {response['projection_issue_count']}")
+    print(f"quieted_issues: {response['quieted_issue_count']}")
+    print(f"changed_issues: {response['changed_issue_count']}")
+    latest = response.get("latest_closeout")
+    if isinstance(latest, dict):
+        print(f"latest_closeout: {latest.get('closeout_id')} [{latest.get('status')}]")
+    else:
+        print("latest_closeout: none")
+    return 0
+
+
+def parity_closeout(*, target: Path, reason: str | None = None, defer: bool = False, json_output: bool = False) -> int:
+    target = target.expanduser().resolve()
+    if not target.is_dir():
+        print(f"error: --target is not a directory: {target}", file=sys.stderr)
+        return 2
+    payload = _catalog_payload(target)
+    source_issues = [
+        issue
+        for issue in payload.get("raw_issues", [])
+        if isinstance(issue, dict) and _is_parity_issue(issue)
+    ]
+    fingerprints = [_parity_issue_fingerprint(issue) for issue in source_issues]
+    closeout_id = f"{_now().strftime('%Y%m%d-%H%M%S')}-tool-parity-closeout"
+    closeout = {
+        "closeout_id": closeout_id,
+        "created_at": _now().isoformat(),
+        "status": "deferred" if defer else "reviewed",
+        "reason": reason or "",
+        "issue_count": len(source_issues),
+        "source_fingerprints": fingerprints,
+        "safe_summary": f"{len(source_issues)} tool projection parity issue(s) {'deferred' if defer else 'reviewed'}",
+    }
+    _write_json(parity_closeouts_path(target) / closeout_id / "closeout.json", closeout)
+    if json_output:
+        print(json.dumps(closeout, indent=2, sort_keys=True))
+        return 0
+    print(f"tool_parity_closeout: {closeout_id}")
+    print(f"status: {closeout['status']}")
+    print(f"issues: {closeout['issue_count']}")
     return 0

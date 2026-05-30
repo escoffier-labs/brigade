@@ -437,8 +437,9 @@ Phase 36 status:
 
 - Implemented command surface: `brigade tools pack build/list/show/archive`.
 - Implemented command surface: `brigade tools sync plan` and `brigade tools sync apply`.
+- Implemented command surface: `brigade tools parity status/closeout`.
 - Tool packs summarize catalog entries, projections, policy, runtimes, call approvals, run history, checkpoints, and catalog issues.
-- Deferred: separate parity closeout receipt. Reason: projection state is represented in packs and sync plans first, with closeout state left for a focused compatibility pass.
+- Tool parity closeouts write local receipts under `.brigade/tools/parity-closeouts/`, quiet unchanged reviewed or deferred missing, stale, unmanaged, conflicted, and parity-gap projection issues, and resurface changed projection fingerprints through doctor, brief, and import routing.
 
 ### 8. Context Engineering Packs
 

@@ -88,7 +88,7 @@ Goal: make Brigade able to reason about callable tools across agent harnesses wi
 - Add a local daemon option with status, stop, restart, port tracking, and safe local auto-start for commands that need a runtime. Status: started with explicit local runtime supervision through `brigade tools runtime`, without auto-start from doctor, brief, or work run.
 - Keep shared auth, secrets, and policy decisions host-local and gitignored, while publishing only safe example configs. Status: started with `.brigade/tools/policy.toml`, policy-gated call planning and execution, and env label bindings from the current process environment.
 - Expose catalog health through `brigade doctor` and route broken source/auth/policy states into `brigade work import`. Status: started through `brigade work brief`, `brigade work doctor`, and `tool-catalog` imports.
-- Build local portable tool evidence bundles and reviewed sync plans. Status: started with `brigade tools pack build/list/show/archive` and `brigade tools sync plan/apply`, dry-run by default with managed projection conflict safety.
+- Build local portable tool evidence bundles and reviewed sync plans. Status: strengthened with `brigade tools pack build/list/show/archive`, `brigade tools sync plan/apply`, and `brigade tools parity status/closeout` for reviewed projection parity receipts, dry-run sync by default, managed projection conflict safety, and changed-fingerprint resurfacing.
 
 ## Later Phase: Context, Projects, And Learning
 

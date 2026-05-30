@@ -65,6 +65,8 @@ Goal: add explicit parity closeout receipts for portable tool projections across
 
 Acceptance: tests cover current, stale, missing, conflicted, unmanaged, deferred, and reviewed parity states in doctor, brief, and import routing.
 
+Status: implemented with `brigade tools parity status/closeout`, local parity closeout receipts, quieting for unchanged reviewed or deferred projection issues, changed-fingerprint resurfacing, doctor and brief integration, and import routing through active parity issues only.
+
 ### Phase 69: Tool Pack Release Evidence Integration
 Goal: make tool packs and sync plans first-class release evidence without applying projections automatically.
 

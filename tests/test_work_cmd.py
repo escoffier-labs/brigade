@@ -2034,6 +2034,128 @@ projections = { claude = ".claude/commands/simplify.md", codex = ".codex/skills/
     assert {"unmanaged_projection", "missing_projection"} <= issue_types
 
 
+def test_tools_parity_closeout_quiets_projection_issues_and_resurfaces_changed_state(tmp_path, capsys):
+    _init_git_repo(tmp_path)
+    tools_dir = tmp_path / "tools"
+    tools_dir.mkdir()
+    for name in ("current", "stale", "missing", "unmanaged", "conflicted", "gap"):
+        (tools_dir / f"{name}.md").write_text(f"{name} source\n")
+    unmanaged = tmp_path / ".claude" / "commands" / "unmanaged.md"
+    unmanaged.parent.mkdir(parents=True)
+    unmanaged.write_text("user projection\n")
+    config = tmp_path / ".brigade" / "tools.toml"
+    config.parent.mkdir(parents=True)
+    config.write_text(
+        """
+[[tool]]
+id = "current"
+name = "Current"
+family = "slash-command"
+enabled = true
+description = "Current projection."
+source_path = "tools/current.md"
+supported_harnesses = ["claude"]
+projections = { claude = ".claude/commands/current.md" }
+
+[[tool]]
+id = "stale"
+name = "Stale"
+family = "slash-command"
+enabled = true
+description = "Stale projection."
+source_path = "tools/stale.md"
+supported_harnesses = ["claude"]
+projections = { claude = ".claude/commands/stale.md" }
+
+[[tool]]
+id = "missing"
+name = "Missing"
+family = "slash-command"
+enabled = true
+description = "Missing projection."
+source_path = "tools/missing.md"
+supported_harnesses = ["claude"]
+projections = { claude = ".claude/commands/missing.md" }
+
+[[tool]]
+id = "unmanaged"
+name = "Unmanaged"
+family = "slash-command"
+enabled = true
+description = "Unmanaged projection."
+source_path = "tools/unmanaged.md"
+supported_harnesses = ["claude"]
+projections = { claude = ".claude/commands/unmanaged.md" }
+
+[[tool]]
+id = "conflicted"
+name = "Conflicted"
+family = "slash-command"
+enabled = true
+description = "Conflicted projection."
+source_path = "tools/conflicted.md"
+supported_harnesses = ["claude"]
+projections = { claude = ".claude/commands/conflicted.md" }
+
+[[tool]]
+id = "gap"
+name = "Gap"
+family = "slash-command"
+enabled = true
+description = "Parity gap."
+source_path = "tools/gap.md"
+supported_harnesses = ["claude", "codex"]
+projections = { claude = ".claude/commands/gap.md" }
+"""
+    )
+    for tool_id in ("current", "stale", "conflicted", "gap"):
+        assert tools_cmd.apply(target=tmp_path, tool_id=tool_id, json_output=True) == 0
+        capsys.readouterr()
+    (tools_dir / "stale.md").write_text("stale source changed\n")
+    conflicted_path = tmp_path / ".claude" / "commands" / "conflicted.md"
+    conflicted_path.write_text(conflicted_path.read_text() + "\nlocal edit\n")
+
+    assert tools_cmd.parity_status(target=tmp_path, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    issue_types = {issue["issue_type"] for issue in payload["issues"]}
+    assert {"stale_projection", "missing_projection", "unmanaged_projection", "conflicted_projection", "parity_gap"} <= issue_types
+    assert payload["quieted_issue_count"] == 0
+
+    assert tools_cmd.parity_closeout(target=tmp_path, reason="reviewed", json_output=True) == 0
+    closeout = json.loads(capsys.readouterr().out)
+    assert closeout["status"] == "reviewed"
+    assert closeout["issue_count"] == 5
+    assert len(closeout["source_fingerprints"]) == 5
+
+    assert tools_cmd.parity_status(target=tmp_path, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["projection_issue_count"] == 0
+    assert payload["quieted_issue_count"] == 5
+    assert payload["changed_issue_count"] == 0
+
+    assert tools_cmd.doctor(target=tmp_path) == 0
+    out = capsys.readouterr().out
+    assert "tool_issues: 0" in out
+    assert "tool_stale_projection" not in out
+
+    (tools_dir / "stale.md").write_text("stale source changed again\n")
+    assert tools_cmd.parity_status(target=tmp_path, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["projection_issue_count"] == 1
+    assert payload["changed_issue_count"] == 1
+    assert payload["issues"][0]["issue_type"] == "stale_projection"
+
+    assert tools_cmd.import_issues(target=tmp_path, json_output=True) == 0
+    imports = json.loads(capsys.readouterr().out)
+    assert imports["created"] == 1
+    assert imports["imports"][0]["metadata"]["tool_issue_type"] == "stale_projection"
+
+    assert tools_cmd.parity_closeout(target=tmp_path, reason="defer", defer=True, json_output=True) == 0
+    deferred = json.loads(capsys.readouterr().out)
+    assert deferred["status"] == "deferred"
+    assert deferred["issue_count"] == 5
+
+
 def test_tools_describe_and_contracts_report_schema_contracts(tmp_path, capsys):
     _init_git_repo(tmp_path)
     tools_dir = tmp_path / "tools"
@@ -8832,6 +8954,14 @@ def test_tools_cli(tmp_path, monkeypatch):
         seen.append(("import-issues", kwargs))
         return 0
 
+    def fake_parity_status(**kwargs):
+        seen.append(("parity-status", kwargs))
+        return 0
+
+    def fake_parity_closeout(**kwargs):
+        seen.append(("parity-closeout", kwargs))
+        return 0
+
     monkeypatch.setattr(tools_cmd, "init", fake_init)
     monkeypatch.setattr(tools_cmd, "list_tools", fake_list)
     monkeypatch.setattr(tools_cmd, "show", fake_show)
@@ -8870,6 +9000,8 @@ def test_tools_cli(tmp_path, monkeypatch):
     monkeypatch.setattr(tools_cmd, "apply", fake_apply)
     monkeypatch.setattr(tools_cmd, "doctor", fake_doctor)
     monkeypatch.setattr(tools_cmd, "import_issues", fake_import_issues)
+    monkeypatch.setattr(tools_cmd, "parity_status", fake_parity_status)
+    monkeypatch.setattr(tools_cmd, "parity_closeout", fake_parity_closeout)
 
     assert cli.main(["tools", "init", "--target", str(tmp_path), "--force", "--no-gitignore"]) == 0
     assert cli.main(["tools", "list", "--target", str(tmp_path), "--json"]) == 0
@@ -8906,6 +9038,8 @@ def test_tools_cli(tmp_path, monkeypatch):
     assert cli.main(["tools", "policy", "init", "--target", str(tmp_path), "--force"]) == 0
     assert cli.main(["tools", "policy", "show", "--target", str(tmp_path), "--json"]) == 0
     assert cli.main(["tools", "policy", "doctor", "--target", str(tmp_path), "--json"]) == 0
+    assert cli.main(["tools", "parity", "status", "--target", str(tmp_path), "--json"]) == 0
+    assert cli.main(["tools", "parity", "closeout", "--target", str(tmp_path), "--reason", "reviewed", "--defer", "--json"]) == 0
     assert cli.main(["tools", "plan", "simplify", "--target", str(tmp_path), "--json"]) == 0
     assert cli.main(["tools", "apply", "simplify", "--target", str(tmp_path), "--dry-run", "--force", "--json"]) == 0
     assert cli.main(["tools", "apply", "--all", "--target", str(tmp_path), "--json"]) == 0
@@ -8966,6 +9100,8 @@ def test_tools_cli(tmp_path, monkeypatch):
         ("policy-init", {"target": tmp_path, "force": True}),
         ("policy-show", {"target": tmp_path, "json_output": True}),
         ("policy-doctor", {"target": tmp_path, "json_output": True}),
+        ("parity-status", {"target": tmp_path, "json_output": True}),
+        ("parity-closeout", {"target": tmp_path, "reason": "reviewed", "defer": True, "json_output": True}),
         ("plan", {"target": tmp_path, "tool_id": "simplify", "json_output": True}),
         (
             "apply",

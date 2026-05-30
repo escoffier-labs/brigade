@@ -54,6 +54,8 @@ brigade tools runtime doctor
 brigade tools policy init
 brigade tools policy show
 brigade tools policy doctor
+brigade tools parity status
+brigade tools parity closeout
 brigade tools plan
 brigade tools plan simplify
 brigade tools apply simplify --dry-run
@@ -64,7 +66,7 @@ brigade tools doctor --json
 brigade tools import-issues
 ```
 
-`list`, `show`, and `search` inspect configured entries. `describe` and `contracts` inspect schema-backed call contracts. `call plan` validates arguments and returns a safe call plan without executing anything. `call queue` stores a plan for local review, and `call approve`, `reject`, and `hold` update review status only. `call run` explicitly executes approved script calls and writes local receipts. `run list`, `show`, and `latest` inspect receipts, and `run replay` queues a pending replay candidate without executing it. `checkpoint` commands review and explicitly resume local pause records. `runtime` commands explicitly manage local runtimes. `policy` commands inspect host-local execution gates and env label bindings. `plan` previews projection writes without touching files. `apply` is the only command that writes projections, and it requires either one tool id or `--all`. `doctor` reports catalog health issues. `import-issues` writes those issues into the normal work import inbox as `tool-catalog` task imports with stable source fingerprints.
+`list`, `show`, and `search` inspect configured entries. `describe` and `contracts` inspect schema-backed call contracts. `call plan` validates arguments and returns a safe call plan without executing anything. `call queue` stores a plan for local review, and `call approve`, `reject`, and `hold` update review status only. `call run` explicitly executes approved script calls and writes local receipts. `run list`, `show`, and `latest` inspect receipts, and `run replay` queues a pending replay candidate without executing it. `checkpoint` commands review and explicitly resume local pause records. `runtime` commands explicitly manage local runtimes. `policy` commands inspect host-local execution gates and env label bindings. `parity status` and `parity closeout` review projection parity without writing projections. `plan` previews projection writes without touching files. `apply` is the only command that writes projections, and it requires either one tool id or `--all`. `doctor` reports catalog health issues. `import-issues` writes those issues into the normal work import inbox as `tool-catalog` task imports with stable source fingerprints.
 
 ## Config Shape
 
@@ -243,6 +245,8 @@ Projection statuses are:
 - `missing_source`: source file cannot be read
 
 `brigade tools apply <tool-id>` and `brigade tools apply --all` write only `create` and `update` actions. `--dry-run` reports writes without touching files. `--force` is required to overwrite unmanaged files or managed projections with local edits. `doctor`, `brief`, `work run`, and `import-issues` never apply projections automatically.
+
+`brigade tools parity status` summarizes active projection parity issues, reviewed or deferred quieted issues, changed issue count, and the latest parity closeout. `brigade tools parity closeout` stores a local receipt under `.brigade/tools/parity-closeouts/` with safe counts, review status, reason, and parity fingerprints. A parity closeout can quiet unchanged missing, stale, unmanaged, conflicted, or parity-gap projection issues in `tools doctor`, `work brief`, and `tools import-issues`, but changed projection fingerprints resurface as active issues.
 
 Managed projection files start with a Brigade metadata header containing:
 
