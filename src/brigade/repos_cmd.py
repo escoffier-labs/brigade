@@ -38,6 +38,8 @@ RELEASE_BUNDLE_FILES = (
     "CLOSEOUT.json",
     "RELEASE_TRAIN_REPORT.json",
     "RELEASE_TRAIN_REPORT.md",
+    "RELEASE_TRAIN_MATRIX.json",
+    "RELEASE_TRAIN_MATRIX.md",
     "RELEASE_TRAIN_MANIFEST.json",
 )
 
@@ -3880,6 +3882,133 @@ def release_report(*, target: Path, train_id: str = "latest", json_output: bool 
     return 0
 
 
+def _waivers_for_repo(waivers: list[dict[str, Any]], repo_id: str) -> list[dict[str, Any]]:
+    return [
+        {
+            "waiver_id": waiver.get("waiver_id"),
+            "scope": waiver.get("scope"),
+            "status": waiver.get("status"),
+            "repo_id": waiver.get("repo_id"),
+            "expires_at": waiver.get("expires_at"),
+            "reason": waiver.get("reason"),
+        }
+        for waiver in waivers
+        if waiver.get("repo_id") in {None, "", repo_id}
+    ]
+
+
+def _release_matrix_payload(target: Path, train: dict[str, Any]) -> dict[str, Any]:
+    train_id = str(train.get("train_id") or "")
+    summary = _release_summary_payload(target, train)
+    actions = [action for action in _read_release_actions(target) if action.get("source_train_id") == train_id]
+    waivers = _active_release_waivers(target, train_id)
+    rows: list[dict[str, Any]] = []
+    summary_by_repo = {repo.get("repo_id"): repo for repo in summary.get("repos") if isinstance(repo, dict)}
+    for repo in train.get("repos") if isinstance(train.get("repos"), list) else []:
+        if not isinstance(repo, dict):
+            continue
+        repo_id = str(repo.get("repo_id") or "")
+        repo_summary = summary_by_repo.get(repo_id, {})
+        repo_actions = [action for action in actions if action.get("repo_id") == repo_id]
+        unresolved_actions = [action for action in repo_actions if action.get("status") in {"pending", "active", "deferred"}]
+        repo_waivers = _waivers_for_repo(waivers, repo_id)
+        waived_scopes = _release_waiver_scope_names(repo_waivers)
+        blockers: list[str] = []
+        if repo.get("classification") == "blocked" and "blocked-repo" not in waived_scopes:
+            blockers.append("blocked-repo")
+        if unresolved_actions and "unresolved-action" not in waived_scopes:
+            blockers.append("unresolved-action")
+        if repo_summary.get("missing_evidence_steps") and "missing-evidence" not in waived_scopes:
+            blockers.append("missing-evidence")
+        if repo_summary.get("blocked_evidence_steps") and "blocked-evidence" not in waived_scopes:
+            blockers.append("blocked-evidence")
+        rows.append(
+            {
+                "repo_id": repo_id,
+                "repo_label": repo.get("repo_label"),
+                "classification": repo.get("classification"),
+                "evidence_status": repo_summary.get("evidence_status"),
+                "evidence_steps": repo_summary.get("steps") if isinstance(repo_summary.get("steps"), list) else [],
+                "unresolved_action_count": len(unresolved_actions),
+                "unresolved_actions": [{"release_action_id": action.get("release_action_id"), "status": action.get("status"), "resolution_status": action.get("resolution_status")} for action in unresolved_actions],
+                "active_waivers": repo_waivers,
+                "waived_scopes": sorted(waived_scopes),
+                "blockers": blockers,
+                "ready": not blockers,
+                "suggested_next_command": repo_summary.get("suggested_next_command") or repo.get("suggested_next_command"),
+            }
+        )
+    blocker_rows = [row for row in rows if row.get("blockers")]
+    payload = {
+        "target_label": "repo-fleet",
+        "train_id": train_id,
+        "generated_at": _now().isoformat(),
+        "repo_count": len(rows),
+        "rows": rows,
+        "ready_count": sum(1 for row in rows if row.get("ready")),
+        "blocked_count": len(blocker_rows),
+        "waiver_count": len(waivers),
+        "evidence_steps": list(REQUIRED_RELEASE_EVIDENCE_STEPS),
+        "summary": {key: summary.get(key) for key in ("counts", "missing_evidence_count", "blocked_count", "unresolved_action_count")},
+        "matrix_fingerprint": _fingerprint_payload({"train_id": train_id, "rows": rows, "waivers": waivers}),
+        "suggested_next_commands": ["brigade repos release ready latest", "brigade repos release checklist latest"],
+    }
+    return payload
+
+
+def _release_matrix_markdown(matrix: dict[str, Any]) -> str:
+    lines = [
+        "# Fleet Release Matrix",
+        "",
+        f"- Train: `{matrix.get('train_id')}`",
+        f"- Generated: {matrix.get('generated_at')}",
+        f"- Repos: {matrix.get('repo_count')}",
+        f"- Ready: {matrix.get('ready_count')}",
+        f"- Blocked: {matrix.get('blocked_count')}",
+        f"- Active waivers: {matrix.get('waiver_count')}",
+        "",
+        "| Repo | Classification | Evidence | Actions | Waivers | Ready |",
+        "| --- | --- | --- | --- | --- | --- |",
+    ]
+    for row in matrix.get("rows") if isinstance(matrix.get("rows"), list) else []:
+        waivers = ", ".join(str(scope) for scope in row.get("waived_scopes") or []) or "none"
+        lines.append(
+            f"| `{row.get('repo_id')}` | {row.get('classification')} | {row.get('evidence_status')} | {row.get('unresolved_action_count')} | {waivers} | {str(bool(row.get('ready'))).lower()} |"
+        )
+    lines.extend(["", "## Boundaries", "", "- local matrix only", "- no verification, tag, push, release, upload, or remote mutation"])
+    return "\n".join(lines) + "\n"
+
+
+def release_matrix(*, target: Path, train_id: str = "latest", json_output: bool = False) -> int:
+    target = target.expanduser().resolve()
+    train, error = _resolve_release_train(target, train_id)
+    if train is None:
+        print(f"error: {error}", file=sys.stderr)
+        return 1 if error and "not found" in error else 2
+    train_dir = _release_trains_root(target) / str(train.get("train_id") or "")
+    if not train_dir.is_dir():
+        print(f"error: fleet release train path is missing: {train.get('path_label') or train.get('train_id')}", file=sys.stderr)
+        return 2
+    matrix = _release_matrix_payload(target, train)
+    report = {
+        "target_label": "repo-fleet",
+        "train_id": train.get("train_id"),
+        "generated_at": matrix.get("generated_at"),
+        "matrix": matrix,
+        "matrix_fingerprint": matrix.get("matrix_fingerprint"),
+        "bundle_files": ["RELEASE_TRAIN_MATRIX.md", "RELEASE_TRAIN_MATRIX.json"],
+    }
+    _write_json(train_dir / "RELEASE_TRAIN_MATRIX.json", report)
+    (train_dir / "RELEASE_TRAIN_MATRIX.md").write_text(_release_matrix_markdown(matrix))
+    payload = {"target_label": "repo-fleet", "train_id": train.get("train_id"), "path_label": "RELEASE_TRAIN_MATRIX.md", "report": report}
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+    print(f"repo fleet release matrix: {train.get('train_id')}")
+    print("path_label: RELEASE_TRAIN_MATRIX.md")
+    return 0
+
+
 def _release_import_records(summary: dict[str, Any]) -> list[dict[str, Any]]:
     train_id = str(summary.get("train_id") or "latest")
     records: list[dict[str, Any]] = []
@@ -4328,6 +4457,9 @@ def release_train_health(target: Path) -> dict[str, Any]:
     closeout = latest.get("closeout") if isinstance(latest.get("closeout"), dict) else None
     if latest.get("status") == "blocked" or int(latest.get("blocker_count") or 0) > 0:
         checks.append({"status": WARN, "name": "repo_fleet_release_train_blocked", "detail": f"{latest.get('train_id')} has blocker(s)", "suggested_next_command": f"brigade repos release show {latest.get('train_id')}"})
+    train_id = str(latest.get("train_id") or "")
+    if train_id and not (_release_trains_root(target) / train_id / "RELEASE_TRAIN_MATRIX.json").is_file():
+        checks.append({"status": WARN, "name": "repo_fleet_release_matrix_missing", "detail": f"{train_id} has no release matrix", "suggested_next_command": f"brigade repos release matrix {train_id}"})
     if not closeout or closeout.get("status") not in {"reviewed", "deferred", "superseded", "archived"}:
         checks.append({"status": WARN, "name": "repo_fleet_release_train_unclosed", "detail": f"{latest.get('train_id')} has not been closed out", "suggested_next_command": f"brigade repos release closeout {latest.get('train_id')}"})
     created = _parse_time(latest.get("created_at") or latest.get("generated_at"))

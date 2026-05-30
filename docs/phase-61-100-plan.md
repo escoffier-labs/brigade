@@ -247,6 +247,8 @@ Goal: generate a release train matrix across repos, evidence steps, waivers, rea
 
 Acceptance: tests cover Markdown and JSON matrix files, no remote mutation, and release doctor integration.
 
+Status: implemented with `brigade repos release matrix`, `RELEASE_TRAIN_MATRIX.json`, `RELEASE_TRAIN_MATRIX.md`, repo readiness rows, evidence step status, active waiver summaries, missing-matrix health checks, docs, and focused tests.
+
 ### Phase 95: Fleet Waiver Policy Templates
 Goal: add local templates and checks for waiver expiry, renewal reason quality, review owner labels, and waiver scope.
 

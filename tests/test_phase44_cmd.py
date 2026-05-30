@@ -202,6 +202,33 @@ def test_release_evidence_plan_record_list_show_and_health(tmp_path, monkeypatch
     assert any(check["name"] == "repo_fleet_release_evidence_blocked" for check in health["checks"])
 
 
+def test_release_matrix_writes_markdown_json_and_surfaces_health(tmp_path, monkeypatch, capsys):
+    train = _build_train(tmp_path, monkeypatch, capsys)
+    health = repos_cmd.release_train_health(tmp_path)
+    assert any(check["name"] == "repo_fleet_release_matrix_missing" for check in health["checks"])
+    assert repos_cmd.release_evidence_record(target=tmp_path, train_id=train["train_id"], repo_id="blocked", step="release-doctor", status="blocked", summary="doctor blocked", json_output=True) == 0
+    capsys.readouterr()
+    assert repos_cmd.release_waiver_record(target=tmp_path, train_id=train["train_id"], scope="blocked-evidence", repo_id="blocked", reason="reviewed blocker", expires_at="2026-06-30T00:00:00+00:00", json_output=True) == 0
+    waiver = json.loads(capsys.readouterr().out)
+    assert waiver["waiver"]["scope"] == "blocked-evidence"
+
+    assert cli.main(["repos", "release", "matrix", train["train_id"], "--target", str(tmp_path), "--json"]) == 0
+    matrix = json.loads(capsys.readouterr().out)
+    report = matrix["report"]
+    rows = {row["repo_id"]: row for row in report["matrix"]["rows"]}
+    assert rows["ready"]["evidence_status"] == "missing-evidence"
+    assert "blocked-evidence" in rows["blocked"]["waived_scopes"]
+    assert rows["blocked"]["evidence_steps"][1]["step"] == "release-doctor"
+    assert rows["blocked"]["evidence_steps"][1]["status"] == "blocked"
+    assert report["matrix"]["waiver_count"] == 1
+    train_path = tmp_path / ".brigade" / "repos" / "releases" / train["train_id"]
+    assert (train_path / "RELEASE_TRAIN_MATRIX.json").is_file()
+    assert (train_path / "RELEASE_TRAIN_MATRIX.md").is_file()
+    assert "actual-repo-name" not in (train_path / "RELEASE_TRAIN_MATRIX.json").read_text()
+    assert "private guidance that must not be copied" not in (train_path / "RELEASE_TRAIN_MATRIX.md").read_text()
+    assert not any(check["name"] == "repo_fleet_release_matrix_missing" for check in repos_cmd.release_train_health(tmp_path)["checks"])
+
+
 def test_release_train_actions_and_evidence_integrate_with_daily_surfaces(tmp_path, monkeypatch, capsys):
     _init_repo(tmp_path)
     _seed_release_ready(tmp_path)

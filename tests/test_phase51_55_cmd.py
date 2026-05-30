@@ -94,6 +94,8 @@ def test_release_audit_reports_missing_bundle_and_evidence_then_improves(tmp_pat
 
     assert repos_cmd.release_report(target=tmp_path, train_id=train["train_id"], json_output=True) == 0
     capsys.readouterr()
+    assert repos_cmd.release_matrix(target=tmp_path, train_id=train["train_id"], json_output=True) == 0
+    capsys.readouterr()
     assert repos_cmd.release_manifest(target=tmp_path, train_id=train["train_id"], json_output=True) == 0
     capsys.readouterr()
     assert repos_cmd.release_audit(target=tmp_path, train_id=train["train_id"], json_output=True) == 0

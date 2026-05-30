@@ -47,6 +47,7 @@ brigade repos release compare <train-id|latest>
 brigade repos release reconcile <train-id|latest>
 brigade repos release summary <train-id|latest>
 brigade repos release report <train-id|latest>
+brigade repos release matrix <train-id|latest>
 brigade repos release checklist <train-id|latest>
 brigade repos release hygiene
 brigade repos release import-issues <train-id|latest>
@@ -146,7 +147,7 @@ Each repo is classified as `ready`, `blocked`, `needs-review`, `needs-dispatch`,
 
 `brigade repos release reconcile <train-id|latest>` compares release-train actions with manual evidence records. An action is marked done only when the repo has required evidence for verification, release doctor, candidate compare, tag, push, and release, and none of those records are blocked. Completed, skipped, and deferred evidence all count as reviewed operator outcomes. Missing or blocked evidence keeps the action open. `brigade repos release summary <train-id|latest>` reports per-repo evidence status, unresolved action counts, and suggested next commands. Release train closeout includes summary counts when available.
 
-`brigade repos release report <train-id|latest>` writes `RELEASE_TRAIN_REPORT.md` and `RELEASE_TRAIN_REPORT.json` into the train bundle. `checklist` prints the required evidence rows for each repo. `hygiene` reports unclosed, stale, or missing-report trains. `import-issues` routes missing or blocked release evidence into the local work inbox as `source: repo-fleet-release`. `activity` shows a chronological local ledger for train creation, closeout, actions, evidence, waivers, reports, and manifests. `manifest` writes `RELEASE_TRAIN_MANIFEST.json` with bundle file labels and fingerprints. `audit` checks for missing bundle files, stale manifests, open actions, and unresolved release evidence.
+`brigade repos release report <train-id|latest>` writes `RELEASE_TRAIN_REPORT.md` and `RELEASE_TRAIN_REPORT.json` into the train bundle. `brigade repos release matrix <train-id|latest>` writes `RELEASE_TRAIN_MATRIX.md` and `RELEASE_TRAIN_MATRIX.json`, showing repo classifications, manual evidence steps, unresolved train actions, active waivers, and ready blockers in one table. `checklist` prints the required evidence rows for each repo. `hygiene` reports unclosed, stale, or missing-report trains. `import-issues` routes missing or blocked release evidence into the local work inbox as `source: repo-fleet-release`. `activity` shows a chronological local ledger for train creation, closeout, actions, evidence, waivers, reports, and manifests. `manifest` writes `RELEASE_TRAIN_MANIFEST.json` with bundle file labels and fingerprints. `audit` checks for missing bundle files, stale manifests, open actions, and unresolved release evidence.
 
 `brigade repos release ready <train-id|latest>` is a local manual-publish gate that fails when the train has blocked repos, unresolved train actions, missing evidence, or blocked evidence. `brigade repos release waivers` can record explicit local waivers for `blocked-repo`, `unresolved-action`, `missing-evidence`, and `blocked-evidence` scopes. Active waivers are included in ready output and can allow the ready gate to pass without hiding the underlying counts. Expired waivers do not satisfy the ready gate.
 

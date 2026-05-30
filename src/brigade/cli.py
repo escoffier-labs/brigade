@@ -349,7 +349,7 @@ def _build_parser() -> argparse.ArgumentParser:
         p_repos_release_item.add_argument("train_id", help="Train id, unique prefix, or latest.")
         p_repos_release_item.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
         p_repos_release_item.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
-    for name in ("reconcile", "summary", "report", "checklist", "ready", "activity", "manifest", "audit"):
+    for name in ("reconcile", "summary", "report", "matrix", "checklist", "ready", "activity", "manifest", "audit"):
         p_repos_release_review = repos_release_sub.add_parser(name, help=f"{name.title()} one repo fleet release train.")
         p_repos_release_review.add_argument("train_id", nargs="?", default="latest", help="Train id, unique prefix, or latest.")
         p_repos_release_review.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
@@ -2032,6 +2032,8 @@ def main(argv=None) -> int:
                 return repos_cmd.release_summary(target=args.target, train_id=args.train_id, json_output=args.json)
             if args.repos_release_command == "report":
                 return repos_cmd.release_report(target=args.target, train_id=args.train_id, json_output=args.json)
+            if args.repos_release_command == "matrix":
+                return repos_cmd.release_matrix(target=args.target, train_id=args.train_id, json_output=args.json)
             if args.repos_release_command == "checklist":
                 return repos_cmd.release_checklist(target=args.target, train_id=args.train_id, json_output=args.json)
             if args.repos_release_command == "ready":
