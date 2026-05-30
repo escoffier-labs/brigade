@@ -26,6 +26,8 @@ CHECKS = (
     "orphaned-card",
     "oversized-card",
     "missing-frontmatter",
+    "missing-reviewed",
+    "missing-freshness",
 )
 CONFIDENCE_RANK = {"unknown": 0, "low": 1, "medium": 2, "high": 3}
 
@@ -313,7 +315,7 @@ def _safe_summary(text: str) -> str:
 def _priority(issue_type: str, severity: str) -> str:
     if severity == "high" or issue_type in {"expired", "missing-index-link"}:
         return "high"
-    if issue_type in {"missing-frontmatter", "oversized-card", "contradictory"}:
+    if issue_type in {"missing-frontmatter", "missing-reviewed", "missing-freshness", "oversized-card", "contradictory"}:
         return "normal"
     return "normal"
 
@@ -354,8 +356,8 @@ def _issue(
         "reason": issue_type,
         "severity": severity,
         "priority": _priority(issue_type, severity),
-        "type": "docs" if issue_type in {"missing-index-link", "orphaned-card", "missing-frontmatter", "oversized-card"} else "research",
-        "template": "docs" if issue_type in {"missing-index-link", "orphaned-card", "missing-frontmatter", "oversized-card"} else "bugfix",
+        "type": "docs" if issue_type in {"missing-index-link", "orphaned-card", "missing-frontmatter", "missing-reviewed", "missing-freshness", "oversized-card"} else "research",
+        "template": "docs" if issue_type in {"missing-index-link", "orphaned-card", "missing-frontmatter", "missing-reviewed", "missing-freshness", "oversized-card"} else "bugfix",
         "safe_summary": _safe_summary(summary),
         "evidence_references": evidence,
         "evidence_summary": "; ".join(evidence) if evidence else summary,
@@ -384,7 +386,6 @@ def _scan_payload(target: Path, config: MemoryCareConfig) -> dict[str, Any]:
         card_id = str(_frontmatter_value(meta, "id", "card_id", "topic") or Path(rel).stem)
         by_id.setdefault(card_id, []).append(rel)
         row = {"file": rel, "card_id": card_id, "has_frontmatter": has_frontmatter, "bytes": path.stat().st_size}
-        card_rows.append(row)
         if "missing-frontmatter" in enabled and not has_frontmatter:
             issues.append(
                 _issue(
@@ -399,6 +400,20 @@ def _scan_payload(target: Path, config: MemoryCareConfig) -> dict[str, Any]:
                 )
             )
         reviewed = _parse_date(_frontmatter_value(meta, "last_reviewed", "last_reviewed_at", "reviewed_at"))
+        row["last_reviewed"] = reviewed.isoformat() if reviewed else None
+        if has_frontmatter and "missing-reviewed" in enabled and reviewed is None:
+            issues.append(
+                _issue(
+                    target=target,
+                    card_path=rel,
+                    card_id=card_id,
+                    issue_type="missing-reviewed",
+                    severity="medium",
+                    summary=f"{rel} has no reviewed date metadata.",
+                    evidence=["last_reviewed missing"],
+                    action="Add a reviewed date after checking the card against current evidence.",
+                )
+            )
         if "stale" in enabled and reviewed is not None and (today - reviewed).days > config.stale_after_days:
             issues.append(
                 _issue(
@@ -413,6 +428,20 @@ def _scan_payload(target: Path, config: MemoryCareConfig) -> dict[str, Any]:
                 )
             )
         expiry = _parse_date(_frontmatter_value(meta, "fresh_until", "expires_at", "expires"))
+        row["fresh_until"] = expiry.isoformat() if expiry else None
+        if has_frontmatter and "missing-freshness" in enabled and expiry is None:
+            issues.append(
+                _issue(
+                    target=target,
+                    card_path=rel,
+                    card_id=card_id,
+                    issue_type="missing-freshness",
+                    severity="medium",
+                    summary=f"{rel} has no freshness date metadata.",
+                    evidence=["fresh_until missing"],
+                    action="Add a freshness date or document why the card should not expire.",
+                )
+            )
         if "expired" in enabled and expiry is not None and (expiry - today).days <= config.expiry_warning_days:
             issues.append(
                 _issue(
@@ -428,7 +457,11 @@ def _scan_payload(target: Path, config: MemoryCareConfig) -> dict[str, Any]:
             )
         confidence = str(_frontmatter_value(meta, "confidence") or "unknown").lower()
         weak_confidence = CONFIDENCE_RANK.get(confidence, 0) < CONFIDENCE_RANK[config.minimum_confidence]
-        missing_evidence = config.require_evidence and not _has_evidence(meta)
+        has_evidence = _has_evidence(meta)
+        missing_evidence = config.require_evidence and not has_evidence
+        row["confidence"] = confidence
+        row["has_evidence"] = has_evidence
+        card_rows.append(row)
         if "undersourced" in enabled and (weak_confidence or missing_evidence):
             evidence = []
             if weak_confidence:
@@ -510,6 +543,27 @@ def _scan_payload(target: Path, config: MemoryCareConfig) -> dict[str, Any]:
     for issue in issues:
         issue_type = str(issue["issue_type"])
         counts[issue_type] = counts.get(issue_type, 0) + 1
+    confidence_counts: dict[str, int] = {}
+    for row in card_rows:
+        confidence = str(row.get("confidence") or "unknown")
+        confidence_counts[confidence] = confidence_counts.get(confidence, 0) + 1
+    metadata_summary = {
+        "reviewed_dates": {
+            "present": len([row for row in card_rows if row.get("last_reviewed")]),
+            "missing": len([row for row in card_rows if row.get("has_frontmatter") and not row.get("last_reviewed")]),
+            "stale": counts.get("stale", 0),
+        },
+        "freshness_dates": {
+            "present": len([row for row in card_rows if row.get("fresh_until")]),
+            "missing": len([row for row in card_rows if row.get("has_frontmatter") and not row.get("fresh_until")]),
+            "expired": counts.get("expired", 0),
+        },
+        "confidence": dict(sorted(confidence_counts.items())),
+        "evidence": {
+            "present": len([row for row in card_rows if row.get("has_evidence")]),
+            "missing": len([row for row in card_rows if row.get("has_frontmatter") and not row.get("has_evidence")]),
+        },
+    }
     return {
         "target": str(target),
         "config_path": str(config_path(target)),
@@ -519,6 +573,7 @@ def _scan_payload(target: Path, config: MemoryCareConfig) -> dict[str, Any]:
         "issue_count": len(issues),
         "refresh_queue_size": len(issues),
         "counts": dict(sorted(counts.items())),
+        "metadata": metadata_summary,
         "cards": card_rows,
         "issues": issues,
     }
@@ -660,6 +715,7 @@ def health(target: Path) -> dict[str, Any]:
     else:
         checks.append({"status": "ok", "name": "memory_care_open_issues", "detail": "none"})
     issues = [check for check in checks if check["status"] != "ok"]
+    metadata = scan_payload.get("metadata") if isinstance(scan_payload, dict) and isinstance(scan_payload.get("metadata"), dict) else {}
     return {
         "target": str(target),
         "config_path": str(config_path(target)),
@@ -669,6 +725,7 @@ def health(target: Path) -> dict[str, Any]:
         "issue_count": len(issues),
         "top_issue": top_issue or (issues[0] if issues else None),
         "checks": checks,
+        "metadata": metadata,
         "latest_closeout": closeout,
     }
 
@@ -688,6 +745,20 @@ def status(*, target: Path, json_output: bool = False) -> int:
     print(f"queue_path: {payload['queue_path']}")
     issue_count = payload["issue_count"]
     print(f"health: {'ok' if issue_count == 0 else str(issue_count) + ' issue(s)'}")
+    metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+    reviewed = metadata.get("reviewed_dates") if isinstance(metadata.get("reviewed_dates"), dict) else None
+    freshness = metadata.get("freshness_dates") if isinstance(metadata.get("freshness_dates"), dict) else None
+    evidence = metadata.get("evidence") if isinstance(metadata.get("evidence"), dict) else None
+    confidence = metadata.get("confidence") if isinstance(metadata.get("confidence"), dict) else None
+    if reviewed:
+        print(f"reviewed_dates: present={reviewed.get('present', 0)} missing={reviewed.get('missing', 0)} stale={reviewed.get('stale', 0)}")
+    if freshness:
+        print(f"freshness_dates: present={freshness.get('present', 0)} missing={freshness.get('missing', 0)} expired={freshness.get('expired', 0)}")
+    if evidence:
+        print(f"evidence_metadata: present={evidence.get('present', 0)} missing={evidence.get('missing', 0)}")
+    if confidence:
+        rendered = ", ".join(f"{key}={confidence[key]}" for key in sorted(confidence))
+        print(f"confidence_metadata: {rendered}")
     top = payload.get("top_issue") if isinstance(payload.get("top_issue"), dict) else None
     if top:
         print(f"top_issue: {top.get('issue_type') or top.get('name')} {top.get('file') or top.get('detail')}")

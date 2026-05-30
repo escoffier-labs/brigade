@@ -115,11 +115,66 @@ def test_memory_care_scan_detects_card_decay_issues(tmp_path, monkeypatch, capsy
     assert first["suggested_refresh_action"]
 
 
+def test_memory_care_status_explains_freshness_metadata(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(memory_cmd, "_today", lambda: date(2026, 5, 28))
+    cards = tmp_path / "memory" / "cards"
+    _write_card(cards / "missing-meta.md", {"topic": "missing-meta", "confidence": "high", "evidence": ["README.md"]})
+    _write_card(
+        cards / "stale.md",
+        {"topic": "stale", "last_reviewed": "2026-01-01", "fresh_until": "2026-12-01", "confidence": "high", "evidence": ["README.md"]},
+    )
+    _write_card(
+        cards / "expired.md",
+        {"topic": "expired", "last_reviewed": "2026-05-01", "fresh_until": "2026-05-01", "confidence": "high", "evidence": ["README.md"]},
+    )
+    _write_card(cards / "undersourced.md", {"topic": "undersourced", "last_reviewed": "2026-05-01", "fresh_until": "2026-12-01", "confidence": "low"})
+    (tmp_path / "MEMORY.md").write_text(
+        "\n".join(
+            [
+                "- [missing-meta](memory/cards/missing-meta.md)",
+                "- [stale](memory/cards/stale.md)",
+                "- [expired](memory/cards/expired.md)",
+                "- [undersourced](memory/cards/undersourced.md)",
+            ]
+        )
+        + "\n"
+    )
+
+    assert memory_cmd.scan(target=tmp_path, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    issue_types = {issue["issue_type"] for issue in payload["issues"]}
+    assert {"missing-reviewed", "missing-freshness", "stale", "expired", "undersourced"} <= issue_types
+    assert payload["metadata"]["reviewed_dates"] == {"present": 3, "missing": 1, "stale": 1}
+    assert payload["metadata"]["freshness_dates"] == {"present": 3, "missing": 1, "expired": 1}
+    assert payload["metadata"]["evidence"] == {"present": 3, "missing": 1}
+    queue = json.loads((tmp_path / "memory" / "cards" / "decay" / "refresh-queue.json").read_text())
+    queued_types = {card["issue_type"] for card in queue["cards"]}
+    assert "missing-reviewed" in queued_types
+    assert "missing-freshness" in queued_types
+
+    assert memory_cmd.status(target=tmp_path) == 0
+    out = capsys.readouterr().out
+    assert "reviewed_dates: present=3 missing=1 stale=1" in out
+    assert "freshness_dates: present=3 missing=1 expired=1" in out
+    assert "evidence_metadata: present=3 missing=1" in out
+    assert "confidence_metadata: high=3, low=1" in out
+
+    assert memory_cmd.status(target=tmp_path, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["metadata"]["freshness_dates"]["missing"] == 1
+
+    assert memory_cmd.import_issues(target=tmp_path, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    imported_types = {item["metadata"]["issue_type"] for item in payload["imports"]}
+    assert "missing-reviewed" in imported_types
+    assert "missing-freshness" in imported_types
+
+
 def test_memory_care_imports_dedupe_and_respect_dismissed(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(memory_cmd, "_today", lambda: date(2026, 5, 28))
     monkeypatch.setattr(work_cmd, "_now", lambda: datetime(2026, 5, 28, 12, 0, tzinfo=timezone.utc))
     cards = tmp_path / "memory" / "cards"
-    _write_card(cards / "stale.md", {"topic": "stale", "last_reviewed": "2026-01-01", "confidence": "high", "evidence": ["README.md"]})
+    _write_card(cards / "stale.md", {"topic": "stale", "last_reviewed": "2026-01-01", "fresh_until": "2026-12-01", "confidence": "high", "evidence": ["README.md"]})
     (tmp_path / "MEMORY.md").write_text("- [stale](memory/cards/stale.md)\n")
     assert memory_cmd.scan(target=tmp_path) == 0
     capsys.readouterr()
@@ -162,7 +217,7 @@ def test_memory_care_promoted_task_reaches_work_run_acceptance(tmp_path, monkeyp
     )
     monkeypatch.setattr(work_cmd, "_now", lambda: next(times))
     cards = tmp_path / "memory" / "cards"
-    _write_card(cards / "stale.md", {"topic": "stale", "last_reviewed": "2026-01-01", "confidence": "high", "evidence": ["README.md"]})
+    _write_card(cards / "stale.md", {"topic": "stale", "last_reviewed": "2026-01-01", "fresh_until": "2026-12-01", "confidence": "high", "evidence": ["README.md"]})
     (tmp_path / "MEMORY.md").write_text("- [stale](memory/cards/stale.md)\n")
     assert memory_cmd.scan(target=tmp_path) == 0
     assert memory_cmd.import_issues(target=tmp_path) == 0

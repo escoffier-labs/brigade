@@ -44,7 +44,7 @@ The cookbook explains the why. This package gives you the kitchen.
 - starter memory cards and routing rules
 - repo-shareable workflow rules for issue-backed and acceptance-driven work loops
 - multi-workspace handoff patterns for people administering more than one agent setup
-- memory-care staleness checks so durable cards do not quietly rot
+- memory-care freshness metadata checks so durable cards do not quietly rot
 - TokenJuice output-compaction guidance for Claude Code and Codex, including wrapper notes and savings expectations
 - content-guard publish gates so private infrastructure does not leak into public docs
 - built-in agent workspace security scan for secrets, permissions, hooks, MCP configs, supply-chain patterns, and instruction risks

@@ -41,8 +41,12 @@ Memory care can emit:
 - `orphaned-card`
 - `oversized-card`
 - `missing-frontmatter`
+- `missing-reviewed`
+- `missing-freshness`
 
 Contradiction detection is deliberately conservative. Brigade only flags explicit duplicate card identities or metadata hints, not LLM-inferred factual conflicts.
+
+`status` and JSON output summarize freshness metadata coverage: reviewed dates present, missing, and stale; freshness dates present, missing, and expired; confidence distribution; and evidence metadata present or missing. These checks only explain review needs. Brigade does not edit memory cards automatically.
 
 ## Refresh Queue
 

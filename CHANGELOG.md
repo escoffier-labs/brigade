@@ -64,6 +64,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `brigade work import promote --run <import-id>` to promote one task import and immediately run it through the work-session loop.
 - `brigade work import memory-care` to convert `memory/cards/decay/refresh-queue.json` into local work imports.
 - `brigade memory care init/scan/status/doctor/import-issues` for read-only local memory card decay scanning, refresh queue production, daily-loop health, and reviewed work inbox routing.
+- Memory-care scans now flag missing reviewed dates and missing freshness dates, and status output summarizes reviewed, freshness, confidence, and evidence metadata coverage without editing cards.
 - `brigade work import chat-sweep` to convert `.brigade/chat-memory-sweeps/latest.json` issues into local work imports.
 - `brigade work import memory-refresh` to convert memory-refresh candidates into TDD-ready scanner task imports with card identity, refresh reason, evidence summary, and acceptance criteria.
 - Chat sweep imports now convert actionable sweep issues into task imports, preserve local provider/channel/thread/confidence metadata, and omit raw private chat fields.

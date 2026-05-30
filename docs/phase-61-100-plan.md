@@ -163,6 +163,8 @@ Goal: make memory-care status explain missing or stale freshness metadata withou
 
 Acceptance: tests cover reviewed dates, freshness dates, confidence, evidence metadata, and memory-care imports.
 
+Status: implemented with `missing-reviewed` and `missing-freshness` memory-care issues, metadata coverage summaries in status and JSON, import routing, docs, and focused tests.
+
 ### Phase 83: Memory-Care Safe Autofix Planning
 Goal: add planning only for low-risk memory metadata repairs, with no automatic memory mutation.
 

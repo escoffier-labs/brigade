@@ -151,7 +151,7 @@ First build slice:
 
 Goal: prevent durable memory from silently rotting.
 
-- Track freshness metadata, confidence, evidence, and review dates for memory cards.
+- Track freshness metadata, confidence, evidence, and review dates for memory cards. Status: started with memory-care metadata coverage summaries, missing reviewed-date issues, missing freshness-date issues, confidence counts, evidence metadata counts, and reviewed imports.
 - Run memory-care scanners that detect expired, stale, contradictory, or undersourced cards. Status: implemented with `brigade memory care scan`, local `.brigade/memory-care.toml`, and stable refresh queue output.
 - Import refresh candidates into Brigade as local work imports. Status: implemented with `brigade memory care import-issues`, source `memory-care`, safe metadata, source fingerprints, and dismissed-import protection.
 - Promote refresh candidates into tasks or memory handoffs after review. Status: implemented through the existing work import promotion and acceptance/evidence loop.
