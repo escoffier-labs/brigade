@@ -156,6 +156,8 @@ Goal: improve acceptance coverage rollups across pending tasks, completed tasks,
 
 Acceptance: tests cover acceptance gaps, completion metadata gaps, review-finding task outcomes, and release evidence.
 
+Status: implemented with hardened `brigade work acceptance` payloads, release readiness blockers, release candidate evidence, and focused work/release tests.
+
 ### Phase 82: Memory Card Freshness Metadata Review
 Goal: make memory-care status explain missing or stale freshness metadata without editing memory cards.
 

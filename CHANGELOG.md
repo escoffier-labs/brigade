@@ -53,6 +53,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `brigade work task add --from-issue` now imports acceptance criteria from GitHub issue-body checkboxes and acceptance/test sections into the local task acceptance field without storing the raw body.
 - Repo installs now include public-safe workflow rule templates under `rules/issue-tdd-loop.md` and `rules/acceptance-driven-work.md`, and `brigade work doctor` reports missing rule templates.
 - `brigade work import issue-repairs` to route incomplete, stale, unchecked, or closed-remote issue-backed local tasks into repairable local imports without GitHub mutation.
+- `brigade work acceptance` now includes completion-time acceptance gaps, code-review finding outcomes, latest work closeout status, and fuller release readiness plus release candidate evidence.
 - `brigade work run` now records consumed task snapshots in work-session artifacts and stores completed session, dogfood run, and acceptance metadata on completed ledger tasks.
 - `brigade work run --queue-next` to queue the successful run's extracted next step, with duplicate pending task protection.
 - `brigade work import add/list/show/promote` to manage a gitignored local import inbox for scanner-discovered candidate work.

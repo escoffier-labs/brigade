@@ -241,6 +241,49 @@ def test_release_blocks_missing_closeout_failed_verification_unclosed_review_dir
     assert "content_guard_tip" in blockers
 
 
+def test_release_evidence_includes_hardened_task_acceptance_rollup(tmp_path, monkeypatch, capsys):
+    _init_repo(tmp_path)
+    _seed_ready_evidence(tmp_path)
+    _patch_clean_health(monkeypatch)
+    _patch_content_guard(monkeypatch)
+    work_cmd._write_task_ledger(
+        tmp_path,
+        {
+            "version": 1,
+            "tasks": [
+                {
+                    "id": "pending-missing",
+                    "text": "Pending missing acceptance",
+                    "status": "pending",
+                },
+                {
+                    "id": "done-missing-completed-acceptance",
+                    "text": "Done missing completed acceptance",
+                    "status": "done",
+                    "acceptance": ["Completion should preserve acceptance."],
+                    "completion": {"session_path": ".brigade/work/session-one"},
+                },
+            ],
+        },
+    )
+
+    assert release_cmd.plan(target=tmp_path, base_ref=None, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ready"] is False
+    assert any("task acceptance has issue(s)" in blocker for blocker in payload["blockers"])
+    acceptance = payload["evidence"]["task_acceptance"]
+    assert acceptance["pending_missing_acceptance"] == ["pending-missing"]
+    assert acceptance["done_missing_completed_acceptance"] == ["done-missing-completed-acceptance"]
+    assert acceptance["coverage"]["review_findings_unresolved"] == 0
+    assert acceptance["latest_work_closeout"]["closeout_id"] == "closeout-one"
+
+    assert release_cmd.candidate_build(target=tmp_path, base_ref=None, json_output=True) == 0
+    candidate = json.loads(capsys.readouterr().out)
+    evidence = json.loads(Path(candidate["path"], "EVIDENCE.json").read_text())
+    assert evidence["task_acceptance"]["pending_missing_acceptance"] == ["pending-missing"]
+    assert evidence["task_acceptance"]["done_missing_completed_acceptance"] == ["done-missing-completed-acceptance"]
+
+
 def test_release_reports_introduced_clean_but_tip_blocked(tmp_path, monkeypatch, capsys):
     _init_repo(tmp_path)
     _seed_ready_evidence(tmp_path)

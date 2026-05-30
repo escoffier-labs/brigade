@@ -633,8 +633,8 @@ Implementation scope:
 
 - Add repo-shareable workflow rule templates without embedding personal preferences. Status: implemented with public-safe install templates under `rules/` and work doctor visibility.
 - Add stale active issue context checks and repair imports. Status: implemented with `brigade work import issue-repairs` for missing context, unavailable `gh`, failed checks, stale context, and closed remote issues.
-- Add acceptance coverage summaries across pending tasks, completed tasks, review findings, and release closeout.
-- Add task outcome rollups in release candidate evidence.
+- Add acceptance coverage summaries across pending tasks, completed tasks, review findings, and release closeout. Status: implemented with hardened `brigade work acceptance` rollups.
+- Add task outcome rollups in release candidate evidence. Status: started with acceptance coverage, completion gaps, review finding outcomes, and work closeout state in release readiness and candidate evidence.
 
 Acceptance:
 
@@ -645,7 +645,7 @@ Acceptance:
 Phase 36 status:
 
 - Implemented command surface: `brigade work acceptance`.
-- Acceptance summaries report pending tasks with acceptance, pending tasks missing acceptance, completed tasks with completion metadata, completed tasks missing completion metadata, and pending review-finding counts.
+- Acceptance summaries report pending tasks with acceptance, pending tasks missing acceptance, completed tasks with completion metadata, completed tasks missing completion metadata, completion-time acceptance gaps, review-finding outcomes, and latest work closeout state.
 - Deferred: none for the initial issue and TDD loop closure. The local acceptance rollup, shareable workflow rule templates, and issue repair imports are complete.
 
 ### 13. Memory And Handoff Closure

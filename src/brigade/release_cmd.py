@@ -409,6 +409,14 @@ def _evidence(target: Path, *, base_ref: str | None) -> dict[str, Any]:
             "coverage": acceptance.get("coverage"),
             "issue_count": acceptance.get("issue_count"),
             "top_issue": acceptance.get("top_issue"),
+            "pending_with_acceptance": acceptance.get("pending_with_acceptance"),
+            "pending_missing_acceptance": acceptance.get("pending_missing_acceptance"),
+            "done_with_completion": acceptance.get("done_with_completion"),
+            "done_missing_completion": acceptance.get("done_missing_completion"),
+            "done_missing_completed_acceptance": acceptance.get("done_missing_completed_acceptance"),
+            "review_findings": acceptance.get("review_findings"),
+            "latest_work_closeout": acceptance.get("latest_work_closeout"),
+            "issues": acceptance.get("issues"),
         },
         "memory_care": {
             "valid": memory_health.get("valid"),
@@ -495,6 +503,10 @@ def _assess(evidence: dict[str, Any], checks: list[dict[str, Any]], docs_warning
         blockers.append(f"review run is not closed out: {run.get('run_id') if isinstance(run, dict) else run}")
     if int(review.get("unresolved_finding_count") or 0) > 0:
         blockers.append(f"code review has unresolved finding(s): {review.get('unresolved_finding_count')}")
+    task_acceptance = evidence.get("task_acceptance") if isinstance(evidence.get("task_acceptance"), dict) else {}
+    if int(task_acceptance.get("issue_count") or 0) > 0:
+        top_acceptance = task_acceptance.get("top_issue") if isinstance(task_acceptance.get("top_issue"), dict) else {}
+        blockers.append(f"task acceptance has issue(s): {top_acceptance.get('detail') or task_acceptance.get('issue_count')}")
     sweep = evidence.get("scanner_sweep") if isinstance(evidence.get("scanner_sweep"), dict) else {}
     sweep_review = sweep.get("review") if isinstance(sweep.get("review"), dict) else {}
     if int(sweep_review.get("issue_count") or 0) > 0:

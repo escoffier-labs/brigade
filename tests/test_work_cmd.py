@@ -384,6 +384,112 @@ def test_work_import_issue_repairs_for_unavailable_gh(tmp_path, monkeypatch, cap
     assert payload["imports"][0]["metadata"]["issue_type"] == "gh_unavailable"
 
 
+def test_work_acceptance_rollup_covers_completion_review_and_closeout(tmp_path, capsys):
+    _init_git_repo(tmp_path)
+    ledger = {
+        "version": 1,
+        "tasks": [
+            {
+                "id": "pending-ready",
+                "text": "Pending with acceptance",
+                "status": "pending",
+                "acceptance": ["Ready acceptance."],
+            },
+            {
+                "id": "pending-missing",
+                "text": "Pending missing acceptance",
+                "status": "pending",
+            },
+            {
+                "id": "done-ready",
+                "text": "Done with completion",
+                "status": "done",
+                "acceptance": ["Done acceptance."],
+                "completed_acceptance": ["Done acceptance."],
+                "completion": {"session_path": ".brigade/work/session-one"},
+            },
+            {
+                "id": "done-missing-completion",
+                "text": "Done missing completion",
+                "status": "done",
+                "acceptance": ["Done acceptance."],
+                "completed_acceptance": ["Done acceptance."],
+            },
+            {
+                "id": "done-missing-completed-acceptance",
+                "text": "Done missing completed acceptance",
+                "status": "done",
+                "acceptance": ["Done acceptance."],
+                "completion": {"session_path": ".brigade/work/session-two"},
+            },
+        ],
+    }
+    work_cmd._write_task_ledger(tmp_path, ledger)
+    imports = []
+    for finding_id, status, task_id, dismiss_reason in (
+        ("pending-finding", "pending", None, None),
+        ("dismissed-finding", "dismissed", None, "not actionable"),
+        ("completed-finding", "promoted", "done-ready", None),
+    ):
+        item = work_cmd._make_import(
+            f"Review finding {finding_id}",
+            kind="task",
+            source="code-review",
+            metadata={
+                "reviewer_id": "codex-review",
+                "review_run_id": "run-one",
+                "review_finding_id": finding_id,
+                "source_item_key": f"code-review:codex-review:{finding_id}",
+                "source_fingerprint": f"fp-{finding_id}",
+            },
+        )
+        item["status"] = status
+        if task_id:
+            item["task_id"] = task_id
+        if dismiss_reason:
+            item["dismiss_reason"] = dismiss_reason
+        imports.append(item)
+    work_cmd._write_imports(tmp_path, imports)
+    (tmp_path / ".brigade" / "work" / "closeouts" / "blocked-closeout").mkdir(parents=True)
+    _write_json(
+        tmp_path / ".brigade" / "work" / "closeouts" / "blocked-closeout" / "closeout.json",
+        {
+            "closeout_id": "blocked-closeout",
+            "ready": False,
+            "status": "blocked",
+            "created_at": "2026-05-29T12:00:00+00:00",
+            "acceptance_criteria": ["Closeout acceptance."],
+            "blockers": ["review run is not closed out"],
+        },
+    )
+
+    assert work_cmd.acceptance(target=tmp_path, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["pending_with_acceptance"] == ["pending-ready"]
+    assert payload["pending_missing_acceptance"] == ["pending-missing"]
+    assert payload["done_with_completion"] == ["done-ready", "done-missing-completed-acceptance"]
+    assert payload["done_missing_completion"] == ["done-missing-completion"]
+    assert payload["done_missing_completed_acceptance"] == ["done-missing-completed-acceptance"]
+    assert payload["review_findings"]["outcomes"] == {
+        "completed": 1,
+        "dismissed": 1,
+        "pending": 1,
+    }
+    assert payload["latest_work_closeout"]["closeout_id"] == "blocked-closeout"
+    issue_names = {issue["name"] for issue in payload["issues"]}
+    assert "acceptance_pending_missing" in issue_names
+    assert "acceptance_done_missing_completion" in issue_names
+    assert "acceptance_done_missing_completed_acceptance" in issue_names
+    assert "acceptance_review_findings_unresolved" in issue_names
+    assert "acceptance_work_closeout_blocked" in issue_names
+
+    assert work_cmd.acceptance(target=tmp_path) == 0
+    out = capsys.readouterr().out
+    assert "done_missing_completed_acceptance: 1" in out
+    assert "review_findings_unresolved: 1" in out
+    assert "work_closeout: blocked-closeout" in out
+
+
 def test_work_doctor_warns_for_scanner_queue_health(tmp_path, monkeypatch, capsys):
     _init_git_repo(tmp_path)
     dogfood_cmd.init(target=tmp_path)

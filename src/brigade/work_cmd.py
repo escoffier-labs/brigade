@@ -558,6 +558,14 @@ def _write_json(path: Path, payload: dict[str, Any]) -> None:
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
 
 
+def _read_json(path: Path) -> dict[str, Any] | None:
+    try:
+        payload = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
 def _read_task_ledger(target: Path) -> dict[str, Any]:
     path = _tasks_path(target)
     if not path.exists():
@@ -4517,6 +4525,20 @@ def _resolve_closeout_session(target: Path, session_id: str) -> tuple[Path | Non
 
 def _work_closeout_path(target: Path, closeout_id: str) -> Path:
     return _work_closeouts_root(target) / closeout_id / "closeout.json"
+
+
+def _latest_work_closeout_payload(target: Path) -> dict[str, Any] | None:
+    root = _work_closeouts_root(target)
+    if not root.is_dir():
+        return None
+    closeouts: list[dict[str, Any]] = []
+    for child in root.iterdir():
+        payload = _read_json(child / "closeout.json") if child.is_dir() else None
+        if isinstance(payload, dict):
+            payload.setdefault("path", str(child / "closeout.json"))
+            closeouts.append(payload)
+    closeouts.sort(key=lambda item: str(item.get("created_at") or item.get("closeout_id") or ""), reverse=True)
+    return closeouts[0] if closeouts else None
 
 
 def _write_work_closeout_markdown(path: Path, closeout: dict[str, Any]) -> None:
@@ -8729,30 +8751,70 @@ def _acceptance_payload(target: Path) -> dict[str, Any]:
     tasks = [task for task in _read_task_ledger(target).get("tasks", []) if isinstance(task, dict)]
     pending = [task for task in tasks if task.get("status", "pending") == "pending"]
     done = [task for task in tasks if task.get("status") == "done"]
+    pending_with_acceptance = [task for task in pending if _task_acceptance(task)]
     pending_missing = [task for task in pending if not _task_acceptance(task)]
+    done_with_completion = [task for task in done if task.get("completion")]
     done_missing_completion = [task for task in done if not task.get("completion")]
-    review_findings = [
-        item for item in _read_imports(target)
-        if item.get("source") == "code-review" and item.get("status", "pending") == "pending"
+    done_missing_completed_acceptance = [
+        task for task in done
+        if _task_acceptance(task) and not _normalize_acceptance(task.get("completed_acceptance"))
     ]
+    review_payload = _review_findings_payload(target)
+    review_groups = review_payload.get("groups") if isinstance(review_payload.get("groups"), dict) else {}
+    review_outcomes = review_groups.get("by_resolution") if isinstance(review_groups.get("by_resolution"), dict) else {}
+    latest_closeout = _latest_work_closeout_payload(target)
+    closeout_summary = None
+    if latest_closeout is not None:
+        closeout_summary = {
+            "closeout_id": latest_closeout.get("closeout_id"),
+            "status": latest_closeout.get("status"),
+            "ready": latest_closeout.get("ready"),
+            "path": latest_closeout.get("path"),
+            "acceptance_count": len(latest_closeout.get("acceptance_criteria") or []),
+            "blocker_count": len(latest_closeout.get("blockers") or []),
+        }
     issues: list[dict[str, Any]] = []
     if pending_missing:
         issues.append({"status": WARN, "name": "acceptance_pending_missing", "detail": f"{len(pending_missing)} pending task(s) missing acceptance"})
     if done_missing_completion:
         issues.append({"status": WARN, "name": "acceptance_done_missing_completion", "detail": f"{len(done_missing_completion)} done task(s) missing completion evidence"})
+    if done_missing_completed_acceptance:
+        issues.append({"status": WARN, "name": "acceptance_done_missing_completed_acceptance", "detail": f"{len(done_missing_completed_acceptance)} done task(s) missing completion-time acceptance evidence"})
+    if int(review_payload.get("unresolved_count") or 0) > 0:
+        issues.append({"status": WARN, "name": "acceptance_review_findings_unresolved", "detail": f"{review_payload.get('unresolved_count')} review finding(s) unresolved"})
+    if done and latest_closeout is None:
+        issues.append({"status": WARN, "name": "acceptance_work_closeout_missing", "detail": "completed tasks exist but no work closeout receipt was found"})
+    elif latest_closeout is not None and not latest_closeout.get("ready"):
+        issues.append({"status": WARN, "name": "acceptance_work_closeout_blocked", "detail": f"latest work closeout is not ready: {latest_closeout.get('closeout_id')}"})
     return {
         "target": str(target),
         "task_count": len(tasks),
         "pending_count": len(pending),
         "done_count": len(done),
+        "pending_with_acceptance": [task.get("id") for task in pending_with_acceptance],
         "pending_missing_acceptance": [task.get("id") for task in pending_missing],
+        "done_with_completion": [task.get("id") for task in done_with_completion],
         "done_missing_completion": [task.get("id") for task in done_missing_completion],
-        "review_finding_pending_count": len(review_findings),
+        "done_missing_completed_acceptance": [task.get("id") for task in done_missing_completed_acceptance],
+        "review_findings": {
+            "count": review_payload.get("count"),
+            "unresolved_count": review_payload.get("unresolved_count"),
+            "outcomes": dict(sorted(review_outcomes.items())),
+            "top_unresolved": review_payload.get("top_unresolved"),
+        },
+        "review_finding_pending_count": int(review_outcomes.get("pending") or 0),
+        "latest_work_closeout": closeout_summary,
         "coverage": {
-            "pending_with_acceptance": len(pending) - len(pending_missing),
+            "pending_with_acceptance": len(pending_with_acceptance),
             "pending_missing_acceptance": len(pending_missing),
-            "done_with_completion": len(done) - len(done_missing_completion),
+            "done_with_completion": len(done_with_completion),
             "done_missing_completion": len(done_missing_completion),
+            "done_with_completed_acceptance": len(done) - len(done_missing_completed_acceptance),
+            "done_missing_completed_acceptance": len(done_missing_completed_acceptance),
+            "review_findings_resolved": int(review_payload.get("count") or 0) - int(review_payload.get("unresolved_count") or 0),
+            "review_findings_unresolved": int(review_payload.get("unresolved_count") or 0),
+            "work_closeout_ready": 1 if latest_closeout is not None and latest_closeout.get("ready") else 0,
+            "work_closeout_missing": 1 if latest_closeout is None else 0,
         },
         "issues": issues,
         "issue_count": len(issues),
@@ -8773,7 +8835,12 @@ def acceptance(*, target: Path, json_output: bool = False) -> int:
     print(f"tasks: {payload['task_count']}")
     print(f"pending_missing_acceptance: {len(payload['pending_missing_acceptance'])}")
     print(f"done_missing_completion: {len(payload['done_missing_completion'])}")
+    print(f"done_missing_completed_acceptance: {len(payload['done_missing_completed_acceptance'])}")
     print(f"review_findings_pending: {payload['review_finding_pending_count']}")
+    review_findings = payload.get("review_findings") if isinstance(payload.get("review_findings"), dict) else {}
+    print(f"review_findings_unresolved: {review_findings.get('unresolved_count', 0)}")
+    closeout = payload.get("latest_work_closeout") if isinstance(payload.get("latest_work_closeout"), dict) else None
+    print(f"work_closeout: {closeout.get('closeout_id') if closeout else 'none'}")
     return 0
 
 
