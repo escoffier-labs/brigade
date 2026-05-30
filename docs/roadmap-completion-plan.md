@@ -610,6 +610,7 @@ Acceptance:
 
 - Tests cover prompt-injection style instruction findings.
 - Tests cover agent-security guardrail categories.
+- Tests cover repo guidance, skill, slash-command, subagent, and tool-wrapper surfaces with template confidence handling.
 - Tests cover SARIF or explicitly document why SARIF is deferred.
 - Tests cover security closeout evidence in release readiness and release candidates.
 - Existing publish-guard integration still passes.
@@ -619,6 +620,7 @@ Phase 36 status:
 - Implemented command surface: `brigade security closeout`.
 - Security closeouts write local receipts under `.brigade/security/closeouts/` with finding ids, fingerprints, status, suppressions, and accepted-risk state.
 - Added dependency-free SARIF 2.1.0 output through `brigade security sarif` and scan bundle generation.
+- Added guardrail fixtures and surface labels for repo guidance, skills, slash commands, subagents, and tool wrappers, including prompt-injection and environment-exfiltration patterns.
 
 ### 12. Issue And TDD Loop Closure
 

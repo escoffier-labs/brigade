@@ -128,6 +128,8 @@ Goal: expand security fixtures for repo guidance, skills, slash commands, subage
 
 Acceptance: tests cover guardrail categories, runtime confidence, public-template treatment, and safe remediation imports.
 
+Status: implemented with guardrail fixtures and surface labels for repo guidance, skills, slash commands, subagents, and tool wrappers, plus prompt-injection and environment-exfiltration findings, runtime versus template confidence tests, and safe remediation import assertions.
+
 ### Phase 78: Security Policy Pack Closeouts
 Goal: make personal, public-repo, CI, and strict security policy packs reviewable with accepted-risk closeouts.
 

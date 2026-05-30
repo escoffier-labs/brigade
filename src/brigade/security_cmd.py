@@ -1660,15 +1660,33 @@ def _iter_scan_files(target: Path) -> list[Path]:
 def _surface_for(path: Path, target: Path) -> str:
     rel = path.relative_to(target)
     parts = rel.parts
+    if "skills" in parts and path.name == "SKILL.md":
+        return "skill"
+    if "commands" in parts and path.suffix.lower() == ".md":
+        return "slash-command"
+    if ("agents" in parts or "subagents" in parts) and path.suffix.lower() == ".md":
+        return "subagent"
+    if any(part in {"wrappers", "tools", "tool-wrappers"} for part in parts) and path.suffix.lower() in {".sh", ".py", ".js", ".ts", ".toml", ".json", ".md"}:
+        return "tool-wrapper"
     if parts and parts[0] == ".brigade":
+        if path.name == "tools.toml" or "tools" in parts:
+            return "tool-wrapper"
         return "brigade"
     if parts and parts[0] == ".codex":
+        if "skills" in parts:
+            return "skill"
         return "codex"
     if parts and parts[0] == ".claude":
+        if "commands" in parts:
+            return "slash-command"
+        if "agents" in parts or "subagents" in parts:
+            return "subagent"
         return "claude"
     if "mcp" in path.name.lower():
         return "mcp"
     if parts and parts[0] in {"hooks", "scripts"}:
+        if any(part in {"wrappers", "tools", "tool-wrappers"} for part in parts):
+            return "tool-wrapper"
         return "automation"
     if path.name in {"AGENTS.md", "CLAUDE.md", "SAFETY_RULES.md", "INSTALL_FOR_AGENTS.md"}:
         return "agent-instructions"
@@ -1790,6 +1808,18 @@ def _scan_line(findings: list[dict[str, Any]], *, target: Path, path: Path, line
             evidence=line,
             suggestion="Gate destructive commands behind explicit operator approval and document recovery steps.",
         )
+    if ENV_DUMP_RE.search(line):
+        _finding(
+            findings,
+            target=target,
+            path=path,
+            line=line_number,
+            severity="high",
+            category="secrets",
+            title="Environment dump or exfiltration pattern",
+            evidence=_redact_secret_evidence(line),
+            suggestion="Avoid dumping environment variables near file redirection or network commands.",
+        )
     npx_match = UNPINNED_NPX_RE.search(line)
     if npx_match and "@" not in npx_match.group(1):
         _finding(
@@ -1828,7 +1858,7 @@ def _scan_line(findings: list[dict[str, Any]], *, target: Path, path: Path, line
                 evidence=line,
                 suggestion="Avoid blanket auto-approval and require review for mutable or networked tools.",
             )
-    if _surface_for(path, target) in {"agent-instructions", "claude", "codex", "repo"} and PROMPT_INJECTION_RE.search(line):
+    if _surface_for(path, target) in {"agent-instructions", "claude", "codex", "repo", "skill", "slash-command", "subagent", "tool-wrapper"} and PROMPT_INJECTION_RE.search(line):
         _finding(
             findings,
             target=target,

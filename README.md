@@ -822,6 +822,7 @@ Security commands:
 - `brigade security sarif` regenerates `security-report.sarif` from an existing local evidence bundle.
 - `brigade security scan --import-findings` writes the local evidence bundle and turns unsuppressed findings into deduped `security-scan` work imports with safe metadata.
 - `brigade security findings` lists the latest reviewable findings, and `brigade security show <finding-id>` inspects one finding.
+- Security guardrails distinguish repo guidance, skills, slash commands, subagents, and tool wrappers, with template confidence for public examples and runtime confidence for active workspace files.
 - `brigade security doctor` reports config, evidence, suppression, and open-finding health in text or JSON.
 - `brigade security enrich --target .` enriches an existing report and writes enrichment artifacts.
 - `brigade security review` inspects the latest evidence bundle, including enrichment when present.
