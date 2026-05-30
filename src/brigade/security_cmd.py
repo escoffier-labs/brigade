@@ -132,6 +132,13 @@ INDICATOR_GITHUB_ACTION_RE = re.compile(r"uses:\s*['\"]?([^@\s'\"]+)(?:@([^@\s'\
 ENRICHMENT_PROVIDERS = {"local", "misp"}
 ENRICHMENT_MARKDOWN_START = "<!-- brigade-security-enrichment:start -->"
 ENRICHMENT_MARKDOWN_END = "<!-- brigade-security-enrichment:end -->"
+TEMPLATE_AUDIT_ROOTS = ("src/brigade/templates", "templates", "docs")
+TEMPLATE_PRIVATE_PATH_RE = re.compile(r"(?<![`$<])/(?:home|Users|private|mnt|Volumes)/[A-Za-z0-9_.@/-]+")
+TEMPLATE_PRIVATE_URL_RE = re.compile(r"https?://(?:[A-Za-z0-9_-]+\.)*(?:lan|local|internal|private)(?:[/:][^\s`\"'<)]*)?", re.IGNORECASE)
+TEMPLATE_ALLOWLIST_RE = re.compile(
+    r"(example[.](com|org|net|invalid)|local" r"host|127[.]0[.]0[.]1|0[.]0[.]0[.]0|<[^>]+>|\{\{[^}]+\}\}|\$\{?[A-Z_][A-Z0-9_]*(?::-[^}]*)?\}?)",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True)
@@ -1316,6 +1323,88 @@ def _redact_secret_evidence(line: str) -> str:
     return ENV_ASSIGNMENT_RE.sub(redact_env, redacted)
 
 
+def _template_relpath(target: Path, path: Path) -> str:
+    try:
+        return str(path.relative_to(target))
+    except ValueError:
+        return path.name
+
+
+def _template_audit_finding(*, target: Path, path: Path, line_number: int, category: str, title: str, line: str) -> dict[str, Any]:
+    rel = _template_relpath(target, path)
+    evidence = _redact_secret_evidence(line.strip())
+    if len(evidence) > 220:
+        evidence = evidence[:217].rstrip() + "..."
+    payload = {
+        "id": f"template-privacy-{hashlib.sha256(f'{rel}:{line_number}:{category}:{evidence}'.encode()).hexdigest()[:12]}",
+        "path": rel,
+        "line": line_number,
+        "category": category,
+        "title": title,
+        "severity": "high" if category == "secret" else "medium",
+        "safe_excerpt": evidence,
+        "surface": _surface_for(path, target),
+        "confidence": "template" if "templates" in path.parts else "docs",
+    }
+    payload["fingerprint"] = hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()[:16]
+    return payload
+
+
+def template_privacy_payload(target: Path) -> dict[str, Any]:
+    target = target.expanduser().resolve()
+    findings: list[dict[str, Any]] = []
+    scanned_files: list[str] = []
+    roots = [target / rel for rel in TEMPLATE_AUDIT_ROOTS]
+    for root in roots:
+        if not root.exists():
+            continue
+        paths = [root] if root.is_file() else sorted(path for path in root.rglob("*") if path.is_file())
+        for path in paths:
+            if path.suffix not in TEXT_SUFFIXES:
+                continue
+            try:
+                text = path.read_text(errors="replace")
+            except OSError:
+                continue
+            rel = _template_relpath(target, path)
+            scanned_files.append(rel)
+            for line_number, line in enumerate(text.splitlines(), start=1):
+                if TEMPLATE_ALLOWLIST_RE.search(line):
+                    continue
+                if SECRET_VALUE_RE.search(line) or ENV_ASSIGNMENT_RE.search(line) or PRIVATE_KEY_RE.search(line):
+                    findings.append(_template_audit_finding(target=target, path=path, line_number=line_number, category="secret", title="Template contains secret-looking value", line=line))
+                elif TEMPLATE_PRIVATE_PATH_RE.search(line):
+                    findings.append(_template_audit_finding(target=target, path=path, line_number=line_number, category="private-path", title="Template contains host-private path", line=line))
+                elif TEMPLATE_PRIVATE_URL_RE.search(line):
+                    findings.append(_template_audit_finding(target=target, path=path, line_number=line_number, category="private-url", title="Template contains private-looking URL", line=line))
+    findings.sort(key=lambda item: (str(item.get("path") or ""), int(item.get("line") or 0), str(item.get("id") or "")))
+    return {
+        "target": str(target),
+        "roots": TEMPLATE_AUDIT_ROOTS,
+        "scanned_files": scanned_files,
+        "scanned_file_count": len(scanned_files),
+        "finding_count": len(findings),
+        "findings": findings,
+        "status": "warn" if findings else "ok",
+        "top_finding": findings[0] if findings else None,
+        "allowlisted_examples": ["example.com", "example.invalid", "loopback-host", "loopback-ipv4", "wildcard-ipv4", "<placeholder>", "{{placeholder}}", "$ENV_LABEL"],
+    }
+
+
+def template_audit(*, target: Path, json_output: bool = False) -> int:
+    target = target.expanduser().resolve()
+    payload = template_privacy_payload(target)
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+    print(f"security template audit: {target}")
+    print(f"scanned_files: {payload['scanned_file_count']}")
+    print(f"findings: {payload['finding_count']}")
+    for finding in payload["findings"]:
+        print(f"- {finding['path']}:{finding['line']} {finding['title']}")
+    return 0
+
+
 def _rule_id(category: str, title: str) -> str:
     slug = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")
     return f"{category}.{slug or 'finding'}"
@@ -2306,6 +2395,12 @@ def health(target: Path) -> dict[str, Any]:
         )
     else:
         checks.append({"status": "warn", "name": "security_evidence", "detail": str(bundle.get("reason"))})
+    template_audit_payload = template_privacy_payload(target)
+    if template_audit_payload["finding_count"]:
+        top_template = template_audit_payload["top_finding"] if isinstance(template_audit_payload.get("top_finding"), dict) else {}
+        checks.append({"status": "warn", "name": "security_template_privacy", "detail": f"{template_audit_payload['finding_count']} public template privacy finding(s), top={top_template.get('path')}:{top_template.get('line')}"})
+    else:
+        checks.append({"status": "ok", "name": "security_template_privacy", "detail": f"{template_audit_payload['scanned_file_count']} public file(s) checked"})
     try:
         suppression = suppression_health(target)
     except ValueError as exc:
@@ -2345,6 +2440,7 @@ def health(target: Path) -> dict[str, Any]:
         "top_finding": top_finding,
         "checks": checks,
         "evidence": bundle,
+        "template_privacy": template_audit_payload,
         "latest_closeout": closeouts[0] if closeouts else None,
     }
 

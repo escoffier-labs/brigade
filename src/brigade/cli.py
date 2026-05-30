@@ -1412,6 +1412,9 @@ def _build_parser() -> argparse.ArgumentParser:
     p_security_doctor = security_sub.add_parser("doctor", help="Check local security scanner health.")
     p_security_doctor.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
     p_security_doctor.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_security_template_audit = security_sub.add_parser("template-audit", help="Audit public templates and docs for private values.")
+    p_security_template_audit.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_security_template_audit.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_security_fix = security_sub.add_parser("fix", help="Apply safe local security hygiene fixes.")
     p_security_fix.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
     p_security_fix.add_argument("--dry-run", action="store_true", help="Show changes without writing files.")
@@ -2898,6 +2901,8 @@ def main(argv=None) -> int:
             return security_cmd.show_config(target=args.target, json_output=args.json)
         if args.security_command == "doctor":
             return security_cmd.doctor(target=args.target, json_output=args.json)
+        if args.security_command == "template-audit":
+            return security_cmd.template_audit(target=args.target, json_output=args.json)
         if args.security_command == "fix":
             return security_cmd.fix(target=args.target, dry_run=args.dry_run)
         if args.security_command == "review":

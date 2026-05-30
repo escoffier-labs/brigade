@@ -722,6 +722,7 @@ brigade security scan --target . --policy public-repo
 brigade security scan --target . --output-dir .brigade/security/latest
 brigade security config
 brigade security doctor
+brigade security template-audit
 brigade security findings
 brigade security sarif
 brigade security show <finding-id>
@@ -846,13 +847,14 @@ Security commands:
 - `brigade security config` shows the local profile, enabled checks, include/exclude paths, severity threshold, output path, suppressions, and enrichment settings.
 - `brigade security fix` creates `.brigade/security/` and refreshes the managed `.gitignore` block.
 - `brigade security scan --target .` runs a read-only agent workspace security scan.
+- `brigade security template-audit` checks public templates and docs for private paths, private URLs, and secret-looking values while allowing placeholders and safe examples.
 - Security policy presets are `personal`, `public-repo`, `ci`, and `strict`.
 - `brigade security scan --output-dir .brigade/security/latest` writes redacted report artifacts with stable finding ids, fingerprints, rule ids, severity, category, path, line, safe excerpt, remediation hint, and dependency-free SARIF.
 - `brigade security sarif` regenerates `security-report.sarif` from an existing local evidence bundle.
 - `brigade security scan --import-findings` writes the local evidence bundle and turns unsuppressed findings into deduped `security-scan` work imports with safe metadata.
 - `brigade security findings` lists the latest reviewable findings, and `brigade security show <finding-id>` inspects one finding.
 - Security guardrails distinguish repo guidance, skills, slash commands, subagents, and tool wrappers, with template confidence for public examples and runtime confidence for active workspace files.
-- `brigade security doctor` reports config, evidence, suppression, and open-finding health in text or JSON.
+- `brigade security doctor` reports config, evidence, public template privacy, suppression, and open-finding health in text or JSON.
 - `brigade security closeout --accept-risk` records reviewed accepted risk with policy-pack blocker and warning counts for release evidence.
 - `brigade security enrich --target .` enriches an existing report and writes enrichment artifacts.
 - `brigade security review` inspects the latest evidence bundle, including enrichment when present.

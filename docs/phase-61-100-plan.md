@@ -275,6 +275,8 @@ Goal: add a focused audit for public templates to prove they contain placeholder
 
 Acceptance: tests cover workspace templates, harness templates, docs references, allowlisted examples, and privacy scan integration.
 
+Status: implemented with `brigade security template-audit`, public template/docs scanning, placeholder allowlists, redacted findings, security doctor and release evidence integration, docs, and focused tests.
+
 ### Phase 99: Docs Command Contract Generator
 Goal: generate or verify a docs command inventory from the CLI parser so public docs stay aligned.
 

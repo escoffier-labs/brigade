@@ -59,7 +59,7 @@ Release readiness includes:
 - latest work verification receipt
 - latest code review closeout
 - latest scanner sweep review state
-- latest security health and evidence state
+- latest security health, public template privacy audit, and evidence state
 - local GitHub Actions platform deprecation warnings when workflow files or saved CI summaries are present
 - local install smoke matrix receipts for supported depth and harness combinations
 - handoff draft and ingest health

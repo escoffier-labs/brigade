@@ -108,6 +108,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `brigade learn plan/doctor/import-issues` plus `brigade learn closeout/closeouts/closeout-show` for bounded local learning candidates that become reviewed tasks, handoffs, suppressions, accepted risk, archive, deferral, or dismissal, with unchanged closeouts quieted and changed fingerprints resurfaced.
 - `brigade learn replay export/list/show/compare` for safe local before/after learning replay receipts, redacted summaries, compare receipts, release evidence, and operator-center review surfacing.
 - `brigade security sarif` and security scan SARIF bundle output for dependency-free SARIF 2.1.0 evidence generated from redacted local findings.
+- `brigade security template-audit` for focused public template and docs privacy checks, with placeholder allowlists, doctor integration, and release-readiness evidence.
 - Security guardrail coverage now labels repo guidance, skills, slash commands, subagents, and tool wrappers separately, including prompt-injection and environment-exfiltration patterns with template confidence handling.
 - Security policy presets now include `ci`, and security closeouts record policy-pack blocker, warning, and accepted-risk evidence for release readiness and candidate packets.
 - `brigade tools pack build/list/show/archive` and `brigade tools sync plan/apply` for portable tool evidence bundles and reviewed projection sync over the existing managed projection path.
