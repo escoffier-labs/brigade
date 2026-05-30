@@ -51,6 +51,8 @@ brigade release candidate archive <candidate-id>
 
 Use `brigade release candidate audit` and `compare` before publishing from an older candidate. Audit reports stale evidence, missing references, changed HEAD/docs/command contracts, and privacy-boundary issues. Compare reports changed HEAD, missing referenced receipts, newer local verification, review, scanner, or security evidence, and docs changed after candidate build. Use `brigade release candidate import-issues` to route audit findings into local work, and use `brigade release candidate closeout` to mark a candidate draft, reviewed, superseded, or archived without moving the bundle.
 
+`brigade center readiness plan` is the higher-level local operator closeout over release readiness. It reuses the latest release readiness receipt plus roadmap audit, docs command inventory, center state, repo fleet, security, memory, tools, context, learning, and waiver state, then writes only local readiness receipts and manual-only checklist files.
+
 ## Evidence
 
 Release readiness includes:

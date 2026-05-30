@@ -1204,6 +1204,30 @@ def _build_parser() -> argparse.ArgumentParser:
     p_center_schema = center_sub.add_parser("schema", help="Show local operator-center JSON schema manifest.")
     p_center_schema.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
     p_center_schema.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_center_readiness = center_sub.add_parser("readiness", help="Plan and close out local operator readiness.")
+    center_readiness_sub = p_center_readiness.add_subparsers(dest="center_readiness_command", metavar="<center-readiness-command>")
+    center_readiness_sub.required = True
+    p_center_readiness_plan = center_readiness_sub.add_parser("plan", help="Plan local operator readiness without writing a receipt.")
+    p_center_readiness_plan.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_center_readiness_plan.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_center_readiness_closeout = center_readiness_sub.add_parser("closeout", help="Write a local operator readiness closeout.")
+    p_center_readiness_closeout.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
+    p_center_readiness_closeout.add_argument("--status", choices=["reviewed", "deferred", "blocked", "archived"], default="reviewed")
+    p_center_readiness_closeout.add_argument("--reason", default=None, help="Review or waiver reason.")
+    p_center_readiness_closeout.add_argument("--waive", action="append", default=[], help="Readiness finding id to waive. May be repeated.")
+    p_center_readiness_closeout.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_center_readiness_list = center_readiness_sub.add_parser("list", help="List local operator readiness closeouts.")
+    p_center_readiness_list.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_center_readiness_list.add_argument("--limit", type=int, default=20, help="Maximum closeouts to list.")
+    p_center_readiness_list.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_center_readiness_show = center_readiness_sub.add_parser("show", help="Show one local operator readiness closeout.")
+    p_center_readiness_show.add_argument("readiness_id", nargs="?", default="latest", help="Readiness id, unique prefix, or latest.")
+    p_center_readiness_show.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_center_readiness_show.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_center_readiness_import = center_readiness_sub.add_parser("import-issues", help="Import unresolved readiness issues into the work inbox.")
+    p_center_readiness_import.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
+    p_center_readiness_import.add_argument("--dry-run", action="store_true", help="Report without writing imports.")
+    p_center_readiness_import.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_center_report = center_sub.add_parser("report", help="Plan, build, and inspect local operator report bundles.")
     center_report_sub = p_center_report.add_subparsers(dest="center_report_command", metavar="<center-report-command>")
     center_report_sub.required = True
@@ -2375,6 +2399,25 @@ def main(argv=None) -> int:
             return center_cmd.templates(target=args.target, json_output=args.json)
         if args.center_command == "schema":
             return center_cmd.schema(target=args.target, json_output=args.json)
+        if args.center_command == "readiness":
+            if args.center_readiness_command == "plan":
+                return center_cmd.readiness_plan(target=args.target, json_output=args.json)
+            if args.center_readiness_command == "closeout":
+                return center_cmd.readiness_closeout(
+                    target=args.target,
+                    status=args.status,
+                    reason=args.reason,
+                    waive_finding_ids=args.waive,
+                    json_output=args.json,
+                )
+            if args.center_readiness_command == "list":
+                return center_cmd.readiness_list(target=args.target, limit=args.limit, json_output=args.json)
+            if args.center_readiness_command == "show":
+                return center_cmd.readiness_show(target=args.target, readiness_id=args.readiness_id, json_output=args.json)
+            if args.center_readiness_command == "import-issues":
+                return center_cmd.readiness_import_issues(target=args.target, dry_run=args.dry_run, json_output=args.json)
+            parser.error(f"unknown center readiness command: {args.center_readiness_command}")
+            return 2
         if args.center_command == "report":
             if args.center_report_command == "plan":
                 return center_cmd.report_plan(target=args.target, json_output=args.json)

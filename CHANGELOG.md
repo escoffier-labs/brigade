@@ -59,6 +59,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `brigade release schema` for a wrapper-friendly local manifest of release readiness, candidate, fleet train, waiver, and manual evidence JSON record contracts.
 - `brigade release candidate audit` and `import-issues` for local release candidate provenance checks and work-inbox routing without publishing or remote mutation.
 - `brigade center schema` for a read-only wrapper-facing manifest of operator center status, activity, reviews, templates, report, report review, and action queue JSON contracts.
+- `brigade center readiness plan/closeout/list/show/import-issues` for final local operator readiness closeouts over roadmap, docs command inventory, center, release, repo fleet, security, memory, tools, context, learning, waivers, and a manual-only publish checklist.
 - `brigade center report diff <base> <compare> --record` for local operator report diff receipts that track new review items, resolved items, new blockers, and stale receipt references.
 - `brigade center actions doctor` and `import-issues` for local operator action aging policy warnings and explicit work-inbox routing.
 - `brigade repos discover plan` for dry-run repository discovery under explicit configured roots with include/exclude rules, safe labels, path redaction, and no cloning.

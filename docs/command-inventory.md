@@ -11,7 +11,7 @@ brigade roadmap commands --write
 ## Command Groups
 
 - `brigade add`: 1 command path(s)
-- `brigade center`: 24 command path(s)
+- `brigade center`: 29 command path(s)
 - `brigade chat`: 7 command path(s)
 - `brigade context`: 8 command path(s)
 - `brigade doctor`: 1 command path(s)
@@ -52,6 +52,11 @@ brigade roadmap commands --write
 - `brigade center actions show`
 - `brigade center actions start`
 - `brigade center activity`
+- `brigade center readiness closeout`
+- `brigade center readiness import-issues`
+- `brigade center readiness list`
+- `brigade center readiness plan`
+- `brigade center readiness show`
 - `brigade center report archive`
 - `brigade center report build`
 - `brigade center report closeout`

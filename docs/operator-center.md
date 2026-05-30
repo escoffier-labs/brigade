@@ -35,6 +35,11 @@ brigade center actions start <action-id>
 brigade center actions done <action-id>
 brigade center actions defer <action-id> --reason "not today"
 brigade center actions archive --completed
+brigade center readiness plan
+brigade center readiness closeout
+brigade center readiness list
+brigade center readiness show <readiness-id>
+brigade center readiness import-issues
 ```
 
 `status` summarizes active work, pending tasks, pending imports, scanner sweep health, review health, handoff drafts, tool catalog health, learning candidates, context packs, release readiness, release candidates, repo fleet, roadmap health, project consolidation, and security health.
@@ -50,7 +55,7 @@ brigade center actions archive --completed
 - safe summary
 - suggested next command
 
-`schema` exports a read-only manifest for wrapper-facing JSON contracts. It covers `status`, `activity`, `reviews`, `templates`, report evidence, report review action plans, and daily action queues. The manifest names stable top-level fields, item fields, action fields, and source commands without reading or writing local receipts.
+`schema` exports a read-only manifest for wrapper-facing JSON contracts. It covers `status`, `activity`, `reviews`, `templates`, report evidence, report review action plans, daily action queues, and operator readiness closeouts. The manifest names stable top-level fields, item fields, action fields, and source commands without reading or writing local receipts.
 
 `templates` lists local workflow templates for context packs, tool packs, project audits, release candidates, and review closeouts.
 
@@ -123,6 +128,8 @@ Each action stores:
 
 `brigade center actions doctor` applies local aging policy to the action queue. Defaults warn on pending actions older than 24 hours, active actions older than 8 hours, deferred actions older than 72 hours, and completed actions older than 24 hours that have not been archived. `brigade center actions import-issues` routes those stale action issues into the work import inbox as `source: center-action-policy` without running suggested commands.
 
+`brigade center readiness plan` is the final local operator readiness view. It aggregates roadmap audit, docs command inventory, center review queue, release readiness, repo fleet, security, memory-care, backup, tool catalog, context, projects, and learning health into blockers, warnings, waivers, and a manual-only publish checklist. `brigade center readiness closeout` writes a local receipt and `MANUAL_PUBLISH_CHECKLIST.md` under `.brigade/center/readiness/`. `--waive <finding-id>` records an explicit local waiver for one finding, and `brigade center readiness import-issues` turns unresolved findings into `source: center-readiness` work imports. Readiness never executes checklist commands.
+
 ## Repo Fleet Rollups
 
 `brigade repos sweep plan/run/runs/show/closeout` explicitly refreshes safe local evidence across configured repos. A sweep runs only configured foreground local read/report commands inside each enabled repo, records per-command status and safe stdout/stderr summaries, stores raw logs only in gitignored local files, and writes one receipt under `.brigade/repos/sweeps/`. Sweep receipts use safe repo ids, labels, command labels, status counts, receipt labels, and local log labels.
@@ -141,4 +148,4 @@ Each action stores:
 
 Center status, center reviews, work brief, work doctor, release doctor, and release evidence include fleet sweep, fleet report, fleet action queue, dispatch, reconciliation, fleet release train action, and manual evidence health.
 
-The operator center never invokes scanners, tools, reviewers, handoff ingestion, release publishing, git commands that mutate state, or remote APIs. Only `center report build`, `center report archive`, `center report diff --record`, `center actions import-issues`, and `center actions build/start/done/defer/archive` write local gitignored center files or work imports.
+The operator center never invokes scanners, tools, reviewers, handoff ingestion, release publishing, git commands that mutate state, or remote APIs. Only `center report build`, `center report archive`, `center report diff --record`, `center actions import-issues`, `center actions build/start/done/defer/archive`, and `center readiness closeout/import-issues` write local gitignored center files or work imports.

@@ -288,3 +288,5 @@ Status: implemented with `brigade roadmap commands --write`, `--check`, generate
 Goal: build one final local readiness closeout over roadmap audit, center state, release evidence, repo fleet, security, memory, tools, context, learning, and docs command contracts.
 
 Acceptance: tests cover clean ready, blocked ready, waiver-aware ready, imports for unresolved readiness issues, and a manual-only publish checklist.
+
+Status: implemented with `brigade center readiness plan/closeout/list/show/import-issues`, local readiness receipts, waiver-aware blockers, work-inbox imports, schema/status/review integration, manual-only publish checklists, docs, and focused tests.

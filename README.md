@@ -377,6 +377,11 @@ brigade center actions start <action-id>
 brigade center actions done <action-id>
 brigade center actions defer <action-id> --reason "not today"
 brigade center actions archive --completed
+brigade center readiness plan
+brigade center readiness closeout
+brigade center readiness list
+brigade center readiness show <readiness-id>
+brigade center readiness import-issues
 brigade work run
 brigade work run --queue-next
 brigade work run "review today's changes"
@@ -661,6 +666,15 @@ Work verification and closeout commands:
 Verification and closeout are local gates. Brigade does not mutate CI, GitHub, reviewers, scanner promotions, handoff ingestion, daemons, or schedulers. Verification commands run only when explicitly requested.
 
 See [`docs/work-closeout.md`](docs/work-closeout.md) for the verification command rules, closeout record contents, and ready-state checklist.
+
+Operator readiness commands:
+
+- `brigade center readiness plan` aggregates roadmap audit, docs command inventory, center reviews, release readiness, repo fleet, security, memory-care, backup, tool catalog, context, projects, and learning health into one local ready or blocked view.
+- `brigade center readiness closeout` writes a local readiness receipt and `MANUAL_PUBLISH_CHECKLIST.md` under `.brigade/center/readiness/`.
+- `brigade center readiness closeout --waive <finding-id> --reason "..."` records a local waiver for an explicit readiness finding.
+- `brigade center readiness import-issues` routes unresolved readiness findings into the work inbox as `source: center-readiness`.
+
+Readiness closeout is local and manual-only. It never runs checklist commands, starts scanners, applies fixes, promotes imports, tags, pushes, creates releases, or mutates remotes.
 
 Release readiness commands:
 
