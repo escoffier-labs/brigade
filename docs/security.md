@@ -8,7 +8,7 @@ Brigade includes a read-only local security scanner for agent workspaces. It is 
 
 Supported fields:
 
-- `policy`: `personal`, `public-repo`, or `strict`.
+- `policy`: `personal`, `public-repo`, `ci`, or `strict`.
 - `scan_profile`: `public-repo`, `internal-workspace`, or `local-only-audit`.
 - `fail_on`: `none`, `low`, `medium`, `high`, or `critical`.
 - `include_templates`: whether public template files are scanned.
@@ -37,6 +37,8 @@ Findings include stable `id`, `fingerprint`, `rule_id`, `severity`, `category`, 
 Security scans write `security-report.sarif` next to the JSON and Markdown reports. `brigade security sarif` can regenerate that SARIF file from an existing local evidence bundle without rescanning.
 
 Guardrail surfaces distinguish repo guidance, Claude command files, Codex skills, subagents, and tool wrappers. Public template findings keep `confidence: template`, while active workspace guidance and wrapper files report runtime confidence.
+
+Security closeouts include policy-pack evidence: policy name, fail threshold, template inclusion, blocker count, warning count, and whether open findings were accepted as local risk. Release readiness and release candidates include the latest closeout.
 
 ## Inbox Flow
 

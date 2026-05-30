@@ -94,6 +94,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `brigade learn replay export/list/show/compare` for safe local before/after learning replay receipts, redacted summaries, compare receipts, release evidence, and operator-center review surfacing.
 - `brigade security sarif` and security scan SARIF bundle output for dependency-free SARIF 2.1.0 evidence generated from redacted local findings.
 - Security guardrail coverage now labels repo guidance, skills, slash commands, subagents, and tool wrappers separately, including prompt-injection and environment-exfiltration patterns with template confidence handling.
+- Security policy presets now include `ci`, and security closeouts record policy-pack blocker, warning, and accepted-risk evidence for release readiness and candidate packets.
 - `brigade tools pack build/list/show/archive` and `brigade tools sync plan/apply` for portable tool evidence bundles and reviewed projection sync over the existing managed projection path.
 - `brigade tools parity status/closeout` for local reviewed projection parity receipts that quiet unchanged missing, stale, unmanaged, conflicted, or parity-gap projection issues while resurfacing changed fingerprints.
 - Release readiness and release candidate evidence now include tool pack freshness, projection parity closeout state, sync-plan blockers, approval queue counts, run history, and checkpoint state without applying projections.

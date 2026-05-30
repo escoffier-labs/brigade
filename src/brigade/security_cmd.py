@@ -35,6 +35,10 @@ POLICIES = {
         "fail_on": "high",
         "include_templates": False,
     },
+    "ci": {
+        "fail_on": "high",
+        "include_templates": True,
+    },
     "strict": {
         "fail_on": "medium",
         "include_templates": True,
@@ -183,6 +187,29 @@ def _closeouts_root(target: Path) -> Path:
     return target / ".brigade" / "security" / "closeouts"
 
 
+def _read_json(path: Path) -> dict[str, Any] | None:
+    try:
+        payload = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _read_closeouts(target: Path) -> list[dict[str, Any]]:
+    root = _closeouts_root(target.expanduser().resolve())
+    receipts: list[dict[str, Any]] = []
+    if not root.is_dir():
+        return receipts
+    for path in sorted(root.glob("*/closeout.json")):
+        payload = _read_json(path)
+        if payload is None:
+            continue
+        payload.setdefault("closeout_id", path.parent.name)
+        payload.setdefault("path", str(path))
+        receipts.append(payload)
+    return sorted(receipts, key=lambda item: str(item.get("created_at") or item.get("closeout_id") or ""), reverse=True)
+
+
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
@@ -261,7 +288,7 @@ def load_config(target: Path) -> SecurityConfig | None:
     data = _read_toml_object(path)
     policy = data.get("policy", "personal")
     if not isinstance(policy, str) or policy not in POLICIES:
-        raise ValueError("policy must be one of: personal, public-repo, strict")
+        raise ValueError("policy must be one of: ci, personal, public-repo, strict")
     scan_profile = data.get("scan_profile", "local-only-audit")
     if not isinstance(scan_profile, str) or scan_profile not in SCAN_PROFILES:
         raise ValueError("scan_profile must be one of: public-repo, internal-workspace, local-only-audit")
@@ -379,7 +406,7 @@ def _effective_policy(
     loaded = load_config(target)
     policy_name = policy or (loaded.policy if loaded is not None else "personal")
     if policy_name not in POLICIES:
-        raise ValueError("policy must be one of: personal, public-repo, strict")
+        raise ValueError("policy must be one of: ci, personal, public-repo, strict")
     preset = POLICIES[policy_name]
     effective_fail_on = fail_on or (loaded.fail_on if loaded and loaded.fail_on is not None else str(preset["fail_on"]))
     if include_templates is not None:
@@ -416,6 +443,7 @@ def write_default_config(target: Path, *, force: bool = False) -> Path:
             [
                 "# Local security scanner config. Keep secrets and host-private paths out of this file.",
                 "# scan_profile options: public-repo, internal-workspace, local-only-audit",
+                "# policy options: personal, public-repo, ci, strict",
                 'policy = "personal"',
                 'scan_profile = "local-only-audit"',
                 'fail_on = "critical"',
@@ -2254,6 +2282,7 @@ def show_config(*, target: Path, json_output: bool = False) -> int:
 def health(target: Path) -> dict[str, Any]:
     target = target.expanduser().resolve()
     checks: list[dict[str, Any]] = []
+    closeouts = _read_closeouts(target)
     config_ok = True
     try:
         loaded = load_config(target)
@@ -2316,6 +2345,7 @@ def health(target: Path) -> dict[str, Any]:
         "top_finding": top_finding,
         "checks": checks,
         "evidence": bundle,
+        "latest_closeout": closeouts[0] if closeouts else None,
     }
 
 
@@ -2365,6 +2395,11 @@ def closeout(
     created_at = _utc_iso()
     closeout_id = f"{created_at.replace(':', '').replace('.', '').replace('Z', '')}-security-closeout"
     status = "accepted-risk" if accept_risk and opened else "reviewed"
+    policy_name = str(report.get("policy") or "personal")
+    policy = POLICIES.get(policy_name, POLICIES["personal"])
+    fail_on = str(report.get("fail_on") or policy["fail_on"])
+    blocker_count = sum(1 for item in opened if SEVERITY_ORDER.get(str(item.get("severity")), 0) >= SEVERITY_ORDER.get(fail_on, SEVERITY_ORDER["critical"]))
+    warning_count = max(0, len(opened) - blocker_count)
     finding_records = [
         {
             "id": item.get("id"),
@@ -2387,6 +2422,14 @@ def closeout(
         "artifacts": str(artifacts_dir),
         "generated_at": report.get("generated_at"),
         "policy": report.get("policy"),
+        "policy_pack": {
+            "name": policy_name,
+            "fail_on": fail_on,
+            "include_templates": report.get("include_templates"),
+            "blocker_count": blocker_count,
+            "warning_count": warning_count,
+            "accepted_risk": bool(accept_risk and opened),
+        },
         "finding_count": len(records),
         "open_count": len(opened),
         "suppressed_count": len(suppressed),

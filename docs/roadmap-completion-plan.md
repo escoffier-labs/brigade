@@ -597,6 +597,7 @@ Implementation scope:
 - Add SARIF output if it can be implemented dependency-free.
 - Add prompt and instruction rule fixtures for repo AGENTS, CLAUDE, skills, slash commands, subagents, and tool wrappers.
 - Add security review closeout so suppressions, accepted risk, and completed follow-up tasks are visible in release readiness.
+- Add policy-pack closeout evidence for personal, public-repo, CI, and strict scan modes.
 - Tighten runtime-confidence handling for public templates versus active configs.
 - Add agent-security inspired guardrail reporting:
   - tool permission risk
@@ -613,6 +614,7 @@ Acceptance:
 - Tests cover repo guidance, skill, slash-command, subagent, and tool-wrapper surfaces with template confidence handling.
 - Tests cover SARIF or explicitly document why SARIF is deferred.
 - Tests cover security closeout evidence in release readiness and release candidates.
+- Tests cover policy-specific blockers, warnings, suppressions, accepted risk, release readiness, and release candidates.
 - Existing publish-guard integration still passes.
 
 Phase 36 status:
@@ -621,6 +623,7 @@ Phase 36 status:
 - Security closeouts write local receipts under `.brigade/security/closeouts/` with finding ids, fingerprints, status, suppressions, and accepted-risk state.
 - Added dependency-free SARIF 2.1.0 output through `brigade security sarif` and scan bundle generation.
 - Added guardrail fixtures and surface labels for repo guidance, skills, slash commands, subagents, and tool wrappers, including prompt-injection and environment-exfiltration patterns.
+- Added `ci` policy preset and policy-pack closeout evidence for blocker counts, warning counts, accepted risk, release readiness, and release candidate packets.
 
 ### 12. Issue And TDD Loop Closure
 

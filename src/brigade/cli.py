@@ -1386,7 +1386,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p_security_scan.add_argument(
         "--policy",
-        choices=["personal", "public-repo", "strict"],
+        choices=["personal", "public-repo", "ci", "strict"],
         default=None,
         help="Policy preset. Defaults to .brigade/security.toml or personal.",
     )

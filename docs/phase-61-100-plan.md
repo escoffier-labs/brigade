@@ -135,6 +135,8 @@ Goal: make personal, public-repo, CI, and strict security policy packs reviewabl
 
 Acceptance: tests cover policy-specific blockers, warnings, suppressions, accepted risk, release readiness, and release candidates.
 
+Status: implemented with a `ci` policy preset, security closeout policy-pack evidence for blocker and warning counts, accepted-risk metadata, and release readiness plus release candidate evidence for latest policy closeouts.
+
 ### Phase 79: Repo-Shareable Workflow Rule Templates
 Goal: add public-safe workflow rule templates for issue/TDD loops without embedding personal preferences.
 

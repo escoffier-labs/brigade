@@ -144,6 +144,7 @@ def _security_summary(target: Path) -> dict[str, Any]:
         "top_issue": health.get("top_issue"),
         "top_finding": health.get("top_finding"),
         "evidence": health.get("evidence"),
+        "latest_closeout": health.get("latest_closeout"),
     }
 
 
