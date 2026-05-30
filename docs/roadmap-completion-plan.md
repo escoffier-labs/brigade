@@ -568,15 +568,18 @@ Implementation scope:
 - Add `brigade center reviews`.
 - Add `brigade center templates`.
 - Add `brigade center report plan/build/list/show/archive/review/compare/closeout`.
+- Add `brigade center actions plan/build/list/show/start/done/defer/archive`.
 - Aggregate existing local state only: work sessions, pending tasks, pending imports, scanner runs and sweeps, review runs, handoff drafts, tool approvals, checkpoints, context packs, learning candidates, repo fleet, project decisions, security health, release readiness, and release candidates.
 - Every center item includes subsystem, local id, status, safe summary, suggested next command, and priority or severity when available.
 - Keep center commands read-only and JSON-first for future wrappers.
 - Build local report bundles only under `.brigade/center/reports/`, with Markdown, dependency-free HTML, and JSON evidence.
+- Build reviewed daily action queues only under `.brigade/center/actions/`, without running suggested commands.
 
 Acceptance:
 
 - Tests cover center status, activity, reviews, and templates in text and JSON.
 - Tests cover center report plan, build, list, show, archive, review, compare, closeout, freshness checks, and release/work integration.
+- Tests cover center action queue plan, build, list, show, start, done, defer, archive, dedupe, reviewed-report gating, and release/work integration.
 - Tests prove center commands are read-only.
 - Public docs describe the operator center as local CLI output, not a hosted dashboard, app server, daemon, or sync engine.
 
@@ -597,6 +600,13 @@ Phase 38 status:
 - Report review groups pending items into an action plan with suggested commands.
 - Report compare checks changed HEAD, missing receipts, newer local activity, newer subsystem receipts, and changed review queues.
 - Report closeout stores reviewed, deferred, superseded, or archived metadata without taking actions on queued items.
+
+Phase 39 status:
+
+- Implemented command surface: `brigade center actions plan/build/list/show/start/done/defer/archive`.
+- Action queues persist reviewed report action items under `.brigade/center/actions/`, dedupe repeated builds by report fingerprint and source item id, and require reviewed or deferred report closeout unless explicitly overridden.
+- Action state changes update local metadata only. They do not promote imports, dismiss findings, execute tools, run scanners, run reviewers, or mutate remotes.
+- Center status, center reviews, work brief, work doctor, and release doctor surface open action queue health.
 
 ## Suggested Execution Order
 

@@ -350,6 +350,7 @@ def _evidence(target: Path, *, base_ref: str | None) -> dict[str, Any]:
     backup_health = work_cmd._backup_health(target)
     acceptance = work_cmd._acceptance_payload(target)
     operator_report_health = center_cmd.report_health(target)
+    operator_actions_health = center_cmd.actions_health(target)
     return {
         "git": _git_state(target),
         "latest_work_closeout": _latest_work_closeout(target),
@@ -428,6 +429,13 @@ def _evidence(target: Path, *, base_ref: str | None) -> dict[str, Any]:
             "top_issue": operator_report_health.get("top_issue"),
             "latest": operator_report_health.get("latest"),
         },
+        "operator_actions": {
+            "action_count": operator_actions_health.get("action_count"),
+            "open_count": operator_actions_health.get("open_count"),
+            "top_action": operator_actions_health.get("top_action"),
+            "issue_count": operator_actions_health.get("issue_count"),
+            "top_issue": operator_actions_health.get("top_issue"),
+        },
         "security_closeout": _latest_closeout_json(target / ".brigade" / "security" / "closeouts"),
         "docs": {
             "base_ref": base_ref,
@@ -472,6 +480,10 @@ def _assess(evidence: dict[str, Any], checks: list[dict[str, Any]], docs_warning
     if int(operator_report.get("issue_count") or 0) > 0:
         top_report = operator_report.get("top_issue") if isinstance(operator_report.get("top_issue"), dict) else {}
         warnings.append(f"operator report has issue(s): {top_report.get('detail') or operator_report.get('issue_count')}")
+    operator_actions = evidence.get("operator_actions") if isinstance(evidence.get("operator_actions"), dict) else {}
+    if int(operator_actions.get("open_count") or 0) > 0:
+        top_action = operator_actions.get("top_action") if isinstance(operator_actions.get("top_action"), dict) else {}
+        warnings.append(f"operator action queue has open action(s): {top_action.get('action_id') or operator_actions.get('open_count')}")
     for check in checks:
         if check.get("status") == FAIL:
             blockers.append(f"{check.get('name')}: {check.get('detail')}")

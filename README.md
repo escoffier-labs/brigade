@@ -330,6 +330,14 @@ brigade center report archive <report-id>
 brigade center report review <report-id>
 brigade center report compare <report-id>
 brigade center report closeout <report-id>
+brigade center actions plan <report-id>
+brigade center actions build <report-id>
+brigade center actions list
+brigade center actions show <action-id>
+brigade center actions start <action-id>
+brigade center actions done <action-id>
+brigade center actions defer <action-id> --reason "not today"
+brigade center actions archive --completed
 brigade work run
 brigade work run --queue-next
 brigade work run "review today's changes"

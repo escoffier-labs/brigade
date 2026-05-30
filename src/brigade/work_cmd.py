@@ -4890,6 +4890,7 @@ def _brief_payload(target: Path, *, limit: int = 3) -> dict[str, Any]:
     projects_health = projects_cmd.health(target)
     learning_health = learn_cmd.health(target)
     center_report_health = center_cmd.report_health(target)
+    center_actions_health = center_cmd.actions_health(target)
     handoff_issues = handoff_cmd.collect_issues(target)
     known_handoff_issue_ids = handoff_cmd._known_local_issue_ids(target)
     new_handoff_issues = [issue for issue in handoff_issues if issue.id not in known_handoff_issue_ids]
@@ -5007,6 +5008,15 @@ def _brief_payload(target: Path, *, limit: int = 3) -> dict[str, Any]:
             "issue_count": center_report_health["issue_count"],
             "top_issue": center_report_health["top_issue"],
             "latest": center_report_health["latest"],
+        },
+        "operator_actions": {
+            "actions_path": center_actions_health["actions_path"],
+            "action_count": center_actions_health["action_count"],
+            "open_count": center_actions_health["open_count"],
+            "counts": center_actions_health["counts"],
+            "top_action": center_actions_health["top_action"],
+            "issue_count": center_actions_health["issue_count"],
+            "top_issue": center_actions_health["top_issue"],
         },
         "handoff_issues": {
             "count": len(new_handoff_issues),
@@ -5734,6 +5744,15 @@ def brief(*, target: Path, limit: int = 3, json_output: bool = False) -> int:
             print(f"operator_report_top_issue: {top_report.get('name')} {_short(str(top_report.get('detail', '')))}")
             if top_report.get("suggested_next_command"):
                 print(f"operator_report_command: {top_report.get('suggested_next_command')}")
+
+    operator_actions = payload.get("operator_actions") if isinstance(payload.get("operator_actions"), dict) else {}
+    if operator_actions:
+        print(f"operator_actions: {operator_actions.get('open_count', 0)} open")
+        top_action = operator_actions.get("top_action") if isinstance(operator_actions.get("top_action"), dict) else None
+        if top_action:
+            print(f"operator_action_top: {top_action.get('action_id')} {top_action.get('source_group')} {_short(str(top_action.get('safe_summary', '')))}")
+            if top_action.get("suggested_command"):
+                print(f"operator_action_command: {top_action.get('suggested_command')}")
 
     code_review = payload.get("code_review")
     if isinstance(code_review, dict):
@@ -9949,6 +9968,12 @@ def doctor(*, target: Path) -> int:
     if not center_report_health.get("checks"):
         latest_report = center_report_health.get("latest") if isinstance(center_report_health.get("latest"), dict) else {}
         _doctor_line(OK, "operator_report", latest_report.get("report_id") or "none")
+
+    center_actions_health = center_cmd.actions_health(effective_target)
+    for check in center_actions_health.get("checks", []):
+        _doctor_line(str(check.get("status")), str(check.get("name")), check.get("detail"))
+    if not center_actions_health.get("checks"):
+        _doctor_line(OK, "operator_actions", f"{center_actions_health.get('action_count', 0)} action(s)")
 
     handoff_inbox = (
         cfg.handoff_inbox

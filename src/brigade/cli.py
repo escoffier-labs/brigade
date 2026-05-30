@@ -845,6 +845,40 @@ def _build_parser() -> argparse.ArgumentParser:
     p_center_report_closeout.add_argument("--reason", default=None, help="Review reason.")
     p_center_report_closeout.add_argument("--defer-item", action="append", default=[], help="Deferred report item id. May be repeated.")
     p_center_report_closeout.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_center_actions = center_sub.add_parser("actions", help="Plan and manage local daily operator actions.")
+    center_actions_sub = p_center_actions.add_subparsers(dest="center_actions_command", metavar="<center-actions-command>")
+    center_actions_sub.required = True
+    p_center_actions_plan = center_actions_sub.add_parser("plan", help="Plan daily actions from an operator report.")
+    p_center_actions_plan.add_argument("report_id", nargs="?", default="latest", help="Report id, unique prefix, or latest.")
+    p_center_actions_plan.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_center_actions_plan.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_center_actions_build = center_actions_sub.add_parser("build", help="Build a daily action queue from an operator report.")
+    p_center_actions_build.add_argument("report_id", nargs="?", default="latest", help="Report id, unique prefix, or latest.")
+    p_center_actions_build.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
+    p_center_actions_build.add_argument("--allow-unreviewed", action="store_true", help="Build from an unclosed report.")
+    p_center_actions_build.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_center_actions_list = center_actions_sub.add_parser("list", help="List local daily operator actions.")
+    p_center_actions_list.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_center_actions_list.add_argument("--limit", type=int, default=50, help="Maximum actions to list.")
+    p_center_actions_list.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_center_actions_show = center_actions_sub.add_parser("show", help="Show one local daily operator action.")
+    p_center_actions_show.add_argument("action_id", help="Action id or unique prefix.")
+    p_center_actions_show.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_center_actions_show.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    for name in ("start", "done"):
+        p_center_actions_state = center_actions_sub.add_parser(name, help=f"Mark one action {name}.")
+        p_center_actions_state.add_argument("action_id", help="Action id or unique prefix.")
+        p_center_actions_state.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
+        p_center_actions_state.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_center_actions_defer = center_actions_sub.add_parser("defer", help="Defer one local daily operator action.")
+    p_center_actions_defer.add_argument("action_id", help="Action id or unique prefix.")
+    p_center_actions_defer.add_argument("--reason", required=True, help="Deferral reason.")
+    p_center_actions_defer.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
+    p_center_actions_defer.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_center_actions_archive = center_actions_sub.add_parser("archive", help="Archive completed local daily operator actions.")
+    p_center_actions_archive.add_argument("--completed", action="store_true", required=True, help="Archive completed actions.")
+    p_center_actions_archive.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
+    p_center_actions_archive.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
 
     # run
     p_run = sub.add_parser("run", help="Run a bounded cross-model orchestration task.")
@@ -1663,6 +1697,30 @@ def main(argv=None) -> int:
                     json_output=args.json,
                 )
             parser.error(f"unknown center report command: {args.center_report_command}")
+            return 2
+        if args.center_command == "actions":
+            if args.center_actions_command == "plan":
+                return center_cmd.actions_plan(target=args.target, report_id=args.report_id, json_output=args.json)
+            if args.center_actions_command == "build":
+                return center_cmd.actions_build(
+                    target=args.target,
+                    report_id=args.report_id,
+                    allow_unreviewed=args.allow_unreviewed,
+                    json_output=args.json,
+                )
+            if args.center_actions_command == "list":
+                return center_cmd.actions_list(target=args.target, limit=args.limit, json_output=args.json)
+            if args.center_actions_command == "show":
+                return center_cmd.actions_show(target=args.target, action_id=args.action_id, json_output=args.json)
+            if args.center_actions_command == "start":
+                return center_cmd.actions_start(target=args.target, action_id=args.action_id, json_output=args.json)
+            if args.center_actions_command == "done":
+                return center_cmd.actions_done(target=args.target, action_id=args.action_id, json_output=args.json)
+            if args.center_actions_command == "defer":
+                return center_cmd.actions_defer(target=args.target, action_id=args.action_id, reason=args.reason, json_output=args.json)
+            if args.center_actions_command == "archive":
+                return center_cmd.actions_archive_completed(target=args.target, json_output=args.json)
+            parser.error(f"unknown center actions command: {args.center_actions_command}")
             return 2
         parser.error(f"unknown center command: {args.center_command}")
         return 2

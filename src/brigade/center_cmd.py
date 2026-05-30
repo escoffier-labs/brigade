@@ -16,6 +16,7 @@ from . import chat_cmd, context_cmd, handoff_cmd, learn_cmd, memory_cmd, project
 
 SCHEMA_VERSION = 1
 REPORT_STALE_HOURS = 24
+ACTION_STATUSES = {"pending", "active", "done", "deferred", "archived"}
 
 
 def _read_json(path: Path) -> dict[str, Any] | None:
@@ -61,6 +62,29 @@ def _schema(name: str) -> dict[str, Any]:
             "receipt_path",
             "path",
             "suggested_next_command",
+        ],
+    }
+
+
+def _action_schema(name: str) -> dict[str, Any]:
+    return {
+        "name": name,
+        "version": SCHEMA_VERSION,
+        "action_fields": [
+            "action_id",
+            "source_report_id",
+            "source_group",
+            "source_subsystem",
+            "source_local_id",
+            "status",
+            "priority",
+            "severity",
+            "safe_summary",
+            "suggested_command",
+            "created_at",
+            "updated_at",
+            "reviewed_at",
+            "source_fingerprint",
         ],
     }
 
@@ -148,6 +172,52 @@ def _read_jsonl(path: Path) -> list[dict[str, Any]]:
         if isinstance(payload, dict):
             records.append(payload)
     return records
+
+
+def _actions_root(target: Path) -> Path:
+    return target / ".brigade" / "center" / "actions"
+
+
+def _actions_path(target: Path) -> Path:
+    return _actions_root(target) / "actions.json"
+
+
+def _actions_archive_path(target: Path) -> Path:
+    return _actions_root(target) / "archive.jsonl"
+
+
+def _read_actions(target: Path) -> list[dict[str, Any]]:
+    payload = _read_json(_actions_path(target))
+    if payload is None:
+        return []
+    actions = payload.get("actions")
+    if not isinstance(actions, list):
+        return []
+    return [item for item in actions if isinstance(item, dict)]
+
+
+def _read_action_archive(target: Path) -> list[dict[str, Any]]:
+    return _read_jsonl(_actions_archive_path(target))
+
+
+def _write_actions(target: Path, actions: list[dict[str, Any]]) -> None:
+    payload = {
+        "schema_version": SCHEMA_VERSION,
+        "schema": _action_schema("center-actions-store"),
+        "updated_at": _now().isoformat(),
+        "actions": actions,
+    }
+    _write_json(_actions_path(target), payload)
+
+
+def _append_action_archive(target: Path, actions: list[dict[str, Any]]) -> None:
+    if not actions:
+        return
+    path = _actions_archive_path(target)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a") as handle:
+        for action in actions:
+            handle.write(json.dumps(action, sort_keys=True) + "\n")
 
 
 def _activity(target: Path) -> list[dict[str, Any]]:
@@ -252,6 +322,22 @@ def _activity(target: Path) -> list[dict[str, Any]]:
     if candidate:
         candidate_id = str(candidate.get("candidate_id") or "latest")
         items.append(_item("release-candidate", candidate_id, str(candidate.get("status") or "draft"), "release candidate", f"brigade release candidate show {candidate_id}", created_at=candidate.get("created_at") if isinstance(candidate.get("created_at"), str) else None, updated_at=candidate.get("created_at") if isinstance(candidate.get("created_at"), str) else None, receipt_path=str(Path(str(candidate.get("path") or "")) / "EVIDENCE.json") if candidate.get("path") else None, path=candidate.get("path") if isinstance(candidate.get("path"), str) else None))
+    for action in _read_actions(target)[:20]:
+        action_id = str(action.get("action_id") or "")
+        items.append(
+            _item(
+                "center-action",
+                action_id,
+                str(action.get("status") or "pending"),
+                str(action.get("safe_summary") or "operator action"),
+                f"brigade center actions show {action_id}",
+                priority=action.get("priority") if isinstance(action.get("priority"), str) else None,
+                severity=action.get("severity") if isinstance(action.get("severity"), str) else None,
+                created_at=action.get("created_at") if isinstance(action.get("created_at"), str) else None,
+                updated_at=action.get("updated_at") if isinstance(action.get("updated_at"), str) else None,
+                receipt_path=str(_actions_path(target)),
+            )
+        )
     items.sort(key=lambda item: str(item.get("updated_at") or ""), reverse=True)
     return items
 
@@ -324,6 +410,23 @@ def _reviews(target: Path) -> list[dict[str, Any]]:
     if isinstance(candidate, dict) and candidate.get("status") in {"draft", "blocked"}:
         candidate_id = str(candidate.get("candidate_id") or "latest")
         items.append(_item("release-candidate", candidate_id, str(candidate.get("status") or "draft"), "release candidate awaits review", f"brigade release candidate compare {candidate_id}", updated_at=candidate.get("created_at") if isinstance(candidate.get("created_at"), str) else None, path=candidate.get("path") if isinstance(candidate.get("path"), str) else None))
+    for action in _read_actions(target):
+        if action.get("status") not in {"pending", "active", "deferred"}:
+            continue
+        action_id = str(action.get("action_id") or "")
+        items.append(
+            _item(
+                "center-action",
+                action_id,
+                str(action.get("status") or "pending"),
+                str(action.get("safe_summary") or "operator action"),
+                f"brigade center actions show {action_id}",
+                priority=action.get("priority") if isinstance(action.get("priority"), str) else None,
+                severity=action.get("severity") if isinstance(action.get("severity"), str) else None,
+                updated_at=action.get("updated_at") if isinstance(action.get("updated_at"), str) else None,
+                receipt_path=str(_actions_path(target)),
+            )
+        )
     return items
 
 
@@ -356,6 +459,7 @@ def status_payload(target: Path) -> dict[str, Any]:
         "projects": projects_cmd.health(target),
         "security": security_cmd.health(target),
         "operator_report": report_health(target),
+        "action_queue": actions_health(target),
         "review_queue_count": len(_reviews(target)),
     }
 
@@ -369,6 +473,7 @@ def status(*, target: Path, json_output: bool = False) -> int:
     print(f"pending_tasks: {payload['pending_task_count']}")
     print(f"pending_imports: {payload['pending_import_count']}")
     print(f"reviews: {payload['review_queue_count']}")
+    print(f"actions: {payload['action_queue']['open_count']}")
     print(f"context_packs: {payload['context']['pack_count']}")
     return 0
 
@@ -1029,4 +1134,347 @@ def report_closeout(
     print(f"status: {status}")
     print(f"unresolved_items: {payload['unresolved_item_count']}")
     print(f"path: {closeout_path}")
+    return 0
+
+
+def _report_review_status(report: dict[str, Any]) -> str | None:
+    closeout = report.get("closeout") if isinstance(report.get("closeout"), dict) else None
+    status = closeout.get("status") if isinstance(closeout, dict) else None
+    return status if isinstance(status, str) else None
+
+
+def _report_reviewed_at(report: dict[str, Any]) -> str | None:
+    closeout = report.get("closeout") if isinstance(report.get("closeout"), dict) else None
+    reviewed_at = closeout.get("reviewed_at") if isinstance(closeout, dict) else None
+    return reviewed_at if isinstance(reviewed_at, str) else None
+
+
+def _action_priority_rank(action: dict[str, Any]) -> tuple[int, int]:
+    severity = str(action.get("severity") or "")
+    priority = str(action.get("priority") or "")
+    status = str(action.get("status") or "")
+    severity_rank = {"critical": 0, "high": 1, "medium": 2, "low": 3}.get(severity, 4)
+    priority_rank = {"urgent": 0, "high": 1, "normal": 2, "low": 3}.get(priority, 4)
+    status_rank = {"active": 0, "pending": 1, "deferred": 2, "done": 3, "archived": 4}.get(status, 5)
+    return (status_rank, min(severity_rank, priority_rank))
+
+
+def _planned_actions(report: dict[str, Any]) -> list[dict[str, Any]]:
+    plan = _action_plan(report)
+    report_id = str(report.get("report_id") or "planned")
+    report_fingerprint = str(report.get("report_fingerprint") or _fingerprint_payload({"reviews": report.get("reviews"), "activity": report.get("activity")}))
+    reviewed_at = _report_reviewed_at(report)
+    created = _now().isoformat()
+    actions: list[dict[str, Any]] = []
+    seen_source_items: set[str] = set()
+    for group, items in plan["groups"].items():
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            source_subsystem = str(item.get("subsystem") or "unknown")
+            source_local_id = str(item.get("local_id") or item.get("id") or "unknown")
+            source_item_id = f"{source_subsystem}:{source_local_id}"
+            if source_item_id in seen_source_items:
+                continue
+            seen_source_items.add(source_item_id)
+            source_fingerprint = _fingerprint_payload(
+                {
+                    "report_fingerprint": report_fingerprint,
+                    "source_item_id": source_item_id,
+                }
+            )
+            action_id = f"act-{source_fingerprint[:16]}"
+            actions.append(
+                {
+                    "schema_version": SCHEMA_VERSION,
+                    "action_id": action_id,
+                    "source_report_id": report_id,
+                    "source_report_path": report.get("path"),
+                    "source_report_fingerprint": report_fingerprint,
+                    "source_group": group,
+                    "source_subsystem": source_subsystem,
+                    "source_local_id": source_local_id,
+                    "status": "pending",
+                    "priority": item.get("priority") if isinstance(item.get("priority"), str) else None,
+                    "severity": item.get("severity") if isinstance(item.get("severity"), str) else None,
+                    "safe_summary": str(item.get("safe_summary") or "operator action"),
+                    "suggested_command": str(item.get("suggested_next_command") or ""),
+                    "created_at": created,
+                    "updated_at": created,
+                    "reviewed_at": reviewed_at,
+                    "source_fingerprint": source_fingerprint,
+                }
+            )
+    actions.sort(key=lambda action: (_action_priority_rank(action), str(action.get("source_group") or ""), str(action.get("source_local_id") or "")))
+    return actions
+
+
+def _find_action(target: Path, action_id: str) -> tuple[list[dict[str, Any]], dict[str, Any] | None, str | None]:
+    actions = _read_actions(target)
+    matches = [item for item in actions if str(item.get("action_id") or "").startswith(action_id)]
+    if not matches:
+        return actions, None, f"action not found: {action_id}"
+    if len(matches) > 1:
+        return actions, None, f"action id is ambiguous: {action_id}"
+    return actions, matches[0], None
+
+
+def _action_counts(actions: list[dict[str, Any]]) -> dict[str, int]:
+    counts = {status: 0 for status in sorted(ACTION_STATUSES)}
+    for action in actions:
+        status = str(action.get("status") or "pending")
+        if status not in counts:
+            counts[status] = 0
+        counts[status] += 1
+    return counts
+
+
+def actions_health(target: Path) -> dict[str, Any]:
+    target = target.expanduser().resolve()
+    actions = _read_actions(target)
+    open_actions = [action for action in actions if action.get("status") in {"pending", "active", "deferred"}]
+    open_actions.sort(key=_action_priority_rank)
+    checks: list[dict[str, Any]] = []
+    if open_actions:
+        top = open_actions[0]
+        checks.append(
+            {
+                "status": "warn",
+                "name": "center_actions_open",
+                "detail": f"{len(open_actions)} open operator action(s)",
+                "suggested_next_command": f"brigade center actions show {top.get('action_id')}",
+            }
+        )
+    return {
+        "actions_path": str(_actions_path(target)),
+        "action_count": len(actions),
+        "open_count": len(open_actions),
+        "counts": _action_counts(actions),
+        "top_action": open_actions[0] if open_actions else None,
+        "checks": checks,
+        "issue_count": len(checks),
+        "top_issue": checks[0] if checks else None,
+    }
+
+
+def actions_plan(*, target: Path, report_id: str = "latest", json_output: bool = False) -> int:
+    target = target.expanduser().resolve()
+    report, error = _resolve_report(target, report_id)
+    if report is None:
+        print(f"error: {error}", file=sys.stderr)
+        return 1 if error and "not found" in error else 2
+    actions = _planned_actions(report)
+    payload = {
+        "schema_version": SCHEMA_VERSION,
+        "schema": _action_schema("center-actions-plan"),
+        "target": str(target),
+        "report_id": report.get("report_id"),
+        "report_path": report.get("path"),
+        "report_review_status": _report_review_status(report),
+        "actions_root": str(_actions_root(target)),
+        "actions": actions,
+        "action_count": len(actions),
+        "write_required": False,
+    }
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+    print(f"center actions plan: {report.get('report_id')}")
+    print(f"actions: {len(actions)}")
+    print(f"report_status: {payload['report_review_status'] or 'unreviewed'}")
+    print("run: brigade center actions build latest")
+    for action in actions[:20]:
+        print(f"- {action['action_id']} {action['source_group']} {action['source_local_id']} [{action['status']}] {action['safe_summary']}")
+        if action.get("suggested_command"):
+            print(f"  next: {action['suggested_command']}")
+    return 0
+
+
+def actions_build(*, target: Path, report_id: str = "latest", allow_unreviewed: bool = False, json_output: bool = False) -> int:
+    target = target.expanduser().resolve()
+    report, error = _resolve_report(target, report_id)
+    if report is None:
+        print(f"error: {error}", file=sys.stderr)
+        return 1 if error and "not found" in error else 2
+    review_status = _report_review_status(report)
+    if review_status not in {"reviewed", "deferred"} and not allow_unreviewed:
+        print("error: source report must be closed out as reviewed or deferred, or pass --allow-unreviewed", file=sys.stderr)
+        return 2
+    planned = _planned_actions(report)
+    existing = _read_actions(target)
+    existing_fingerprints = {str(item.get("source_fingerprint")) for item in existing}
+    existing_fingerprints.update(str(item.get("source_fingerprint")) for item in _read_action_archive(target))
+    created: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
+    for action in planned:
+        if str(action.get("source_fingerprint")) in existing_fingerprints:
+            skipped.append(action)
+            continue
+        created.append(action)
+        existing.append(action)
+        existing_fingerprints.add(str(action.get("source_fingerprint")))
+    _write_actions(target, existing)
+    payload = {
+        "schema_version": SCHEMA_VERSION,
+        "schema": _action_schema("center-actions-build"),
+        "target": str(target),
+        "report_id": report.get("report_id"),
+        "report_path": report.get("path"),
+        "report_review_status": review_status,
+        "actions_path": str(_actions_path(target)),
+        "created_count": len(created),
+        "skipped_count": len(skipped),
+        "created_actions": created,
+        "skipped_actions": skipped,
+    }
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+    print(f"center actions build: {report.get('report_id')}")
+    print(f"created: {len(created)}")
+    print(f"skipped: {len(skipped)}")
+    print(f"path: {_actions_path(target)}")
+    return 0
+
+
+def actions_list(*, target: Path, json_output: bool = False, limit: int = 50) -> int:
+    if limit < 1:
+        print("error: --limit must be a positive integer", file=sys.stderr)
+        return 2
+    target = target.expanduser().resolve()
+    actions = _read_actions(target)
+    actions.sort(key=lambda action: (_action_priority_rank(action), str(action.get("updated_at") or "")))
+    payload = {
+        "schema_version": SCHEMA_VERSION,
+        "schema": _action_schema("center-actions-list"),
+        "target": str(target),
+        "actions_path": str(_actions_path(target)),
+        "actions": actions[:limit],
+        "action_count": len(actions),
+        "counts": _action_counts(actions),
+    }
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+    print(f"center actions: {target}")
+    print(f"actions_path: {_actions_path(target)}")
+    for action in actions[:limit]:
+        print(f"- {action.get('action_id')} [{action.get('status')}] {action.get('source_group')} {action.get('source_local_id')}: {action.get('safe_summary')}")
+        if action.get("suggested_command"):
+            print(f"  next: {action.get('suggested_command')}")
+    return 0
+
+
+def actions_show(*, target: Path, action_id: str, json_output: bool = False) -> int:
+    target = target.expanduser().resolve()
+    _, action, error = _find_action(target, action_id)
+    if action is None:
+        print(f"error: {error}", file=sys.stderr)
+        return 1 if error and "not found" in error else 2
+    payload = {
+        "schema_version": SCHEMA_VERSION,
+        "schema": _action_schema("center-actions-show"),
+        "target": str(target),
+        "action": action,
+    }
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+    print(f"center action: {action.get('action_id')}")
+    print(f"status: {action.get('status')}")
+    print(f"source: {action.get('source_group')} {action.get('source_subsystem')}:{action.get('source_local_id')}")
+    print(f"summary: {action.get('safe_summary')}")
+    if action.get("suggested_command"):
+        print(f"next: {action.get('suggested_command')}")
+    return 0
+
+
+def _set_action_status(
+    *,
+    target: Path,
+    action_id: str,
+    status: str,
+    reason: str | None = None,
+    json_output: bool = False,
+) -> int:
+    target = target.expanduser().resolve()
+    if status not in ACTION_STATUSES:
+        print(f"error: invalid action status: {status}", file=sys.stderr)
+        return 2
+    actions, action, error = _find_action(target, action_id)
+    if action is None:
+        print(f"error: {error}", file=sys.stderr)
+        return 1 if error and "not found" in error else 2
+    now = _now().isoformat()
+    action["status"] = status
+    action["updated_at"] = now
+    if status == "active":
+        action["started_at"] = now
+    elif status == "done":
+        action["completed_at"] = now
+    elif status == "deferred":
+        action["deferred_at"] = now
+        action["defer_reason"] = reason or "deferred"
+    _write_actions(target, actions)
+    payload = {
+        "schema_version": SCHEMA_VERSION,
+        "schema": _action_schema(f"center-actions-{status}"),
+        "target": str(target),
+        "action": action,
+    }
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+    print(f"center action {status}: {action.get('action_id')}")
+    print(f"status: {action.get('status')}")
+    return 0
+
+
+def actions_start(*, target: Path, action_id: str, json_output: bool = False) -> int:
+    return _set_action_status(target=target, action_id=action_id, status="active", json_output=json_output)
+
+
+def actions_done(*, target: Path, action_id: str, json_output: bool = False) -> int:
+    return _set_action_status(target=target, action_id=action_id, status="done", json_output=json_output)
+
+
+def actions_defer(*, target: Path, action_id: str, reason: str, json_output: bool = False) -> int:
+    if not reason:
+        print("error: --reason is required", file=sys.stderr)
+        return 2
+    return _set_action_status(target=target, action_id=action_id, status="deferred", reason=reason, json_output=json_output)
+
+
+def actions_archive_completed(*, target: Path, json_output: bool = False) -> int:
+    target = target.expanduser().resolve()
+    actions = _read_actions(target)
+    now = _now().isoformat()
+    archived: list[dict[str, Any]] = []
+    remaining: list[dict[str, Any]] = []
+    for action in actions:
+        if action.get("status") == "done":
+            archived_action = dict(action)
+            archived_action["status"] = "archived"
+            archived_action["archived_at"] = now
+            archived_action["updated_at"] = now
+            archived.append(archived_action)
+        else:
+            remaining.append(action)
+    _write_actions(target, remaining)
+    _append_action_archive(target, archived)
+    payload = {
+        "schema_version": SCHEMA_VERSION,
+        "schema": _action_schema("center-actions-archive"),
+        "target": str(target),
+        "archived_count": len(archived),
+        "archive_path": str(_actions_archive_path(target)),
+        "actions_path": str(_actions_path(target)),
+        "archived_actions": archived,
+    }
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+    print("center actions archive: completed")
+    print(f"archived: {len(archived)}")
+    print(f"path: {_actions_archive_path(target)}")
     return 0

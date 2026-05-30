@@ -21,6 +21,14 @@ brigade center report archive <report-id>
 brigade center report review <report-id>
 brigade center report compare <report-id>
 brigade center report closeout <report-id>
+brigade center actions plan <report-id>
+brigade center actions build <report-id>
+brigade center actions list
+brigade center actions show <action-id>
+brigade center actions start <action-id>
+brigade center actions done <action-id>
+brigade center actions defer <action-id> --reason "not today"
+brigade center actions archive --completed
 ```
 
 `status` summarizes active work, pending tasks, pending imports, scanner sweep health, review health, handoff drafts, tool catalog health, learning candidates, context packs, release readiness, release candidates, repo fleet, roadmap health, project consolidation, and security health.
@@ -72,4 +80,29 @@ Each bundle contains:
 
 `brigade center report closeout <report-id|latest>` writes `CLOSEOUT.json` in the report bundle. Closeout states are `reviewed`, `deferred`, `superseded`, and `archived`. Closeout stores a reviewed timestamp, reason, unresolved item count, deferred item ids, and report fingerprint.
 
-The operator center never invokes scanners, tools, reviewers, handoff ingestion, release publishing, git commands that mutate state, or remote APIs. Only `center report build` and `center report archive` write local gitignored report bundle files.
+## Daily Action Queue
+
+`brigade center actions plan <report-id|latest>` converts a report review plan into stable action records without writing them. `brigade center actions build <report-id|latest>` writes the queue under:
+
+```text
+.brigade/center/actions/
+```
+
+`build` requires the report to be closed out as `reviewed` or `deferred` unless `--allow-unreviewed` is passed. Repeated builds dedupe by report fingerprint and source item id, including actions already archived from the same report. High-priority items that appear in both urgent and subsystem groups become one action owned by the urgent group.
+
+Each action stores:
+
+- action id
+- source report id
+- source group
+- source subsystem and local id
+- status: `pending`, `active`, `done`, `deferred`, or `archived`
+- priority or severity when known
+- safe summary
+- suggested command
+- created, updated, and reviewed timestamps
+- source fingerprint
+
+`start`, `done`, and `defer` only update local action metadata. `archive --completed` archives completed actions and leaves pending, active, and deferred actions in the queue. Center status, center reviews, work brief, work doctor, and release doctor surface open action queue health.
+
+The operator center never invokes scanners, tools, reviewers, handoff ingestion, release publishing, git commands that mutate state, or remote APIs. Only `center report build`, `center report archive`, and `center actions build/start/done/defer/archive` write local gitignored center files.
