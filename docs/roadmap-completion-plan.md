@@ -132,6 +132,7 @@ Implementation scope:
 
 - Add gitignored `.brigade/repos.toml`.
 - Add `brigade repos init/list/show/scan/doctor/import-issues`.
+- Add `brigade repos sweep plan/run/runs/show/closeout`.
 - Add `brigade repos report plan/build/list/show/archive/closeout`.
 - Add `brigade repos actions plan/build/list/show/start/done/defer/archive`.
 - Discover repos under configured roots such as `~/repos`.
@@ -148,6 +149,7 @@ Implementation scope:
   - missing test command hint
   - missing Brigade bootstrap where opted in
 - Import issues into the scanner inbox as `source: repo-fleet`.
+- Refresh safe local evidence explicitly through fleet sweeps that run configured read/report commands, write local receipts, and feed reports and action queues without cloning, fixing, promoting, or mutating remotes.
 
 Acceptance:
 
@@ -155,6 +157,7 @@ Acceptance:
 - Tests cover repo fixtures with AGENTS, CLAUDE fallback, roadmap, publish-guard, handoff inboxes, and dirty state.
 - Tests prove private file contents are not copied into imports or docs.
 - Tests cover repo-fleet imports, dedupe, and dismissed-until-changed behavior.
+- Tests cover fleet sweep plan/run/runs/show/closeout text and JSON, filtering, stale-only selection, failed-repo isolation, safe log labels, and daily-loop integration.
 - Tests cover fleet report plan/build/list/show/archive and fleet action plan/build/list/show/start/done/defer/archive text and JSON.
 - Tests prove private repo names, owner names, org names, local paths, and raw evidence are not copied into public docs, fixtures, imports, handoffs, release evidence, or committed diffs.
 
@@ -171,6 +174,12 @@ Phase 40 status:
 - Fleet reports write local `FLEET_REPORT.md` and `FLEET_EVIDENCE.json` bundles under `.brigade/repos/reports/` with safe repo ids, labels, counts, statuses, receipt labels, warnings, blockers, and suggested next commands.
 - Fleet actions write local queues under `.brigade/repos/actions/`, require a reviewed or deferred fleet report unless explicitly overridden, dedupe by repo id plus report/source fingerprint, and update action metadata only.
 - Center status, center reviews, work brief, work doctor, and release doctor surface fleet report and fleet action health.
+
+Phase 41 status:
+
+- Implemented command surface: `brigade repos sweep plan/run/runs/show/closeout`.
+- Fleet sweeps run explicit local read/report commands in configured repos, write gitignored receipts under `.brigade/repos/sweeps/`, store raw logs locally, and expose safe repo ids, labels, command labels, status counts, log labels, and receipt labels only.
+- Fleet reports, center status, center reviews, work brief, work doctor, and release doctor surface stale, failed, or unclosed fleet sweep health.
 
 ### 3. Inspiration Pattern Registry
 

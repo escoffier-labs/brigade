@@ -263,6 +263,32 @@ def _build_parser() -> argparse.ArgumentParser:
     p_repos_actions_archive.add_argument("--completed", action="store_true", required=True, help="Archive completed actions.")
     p_repos_actions_archive.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
     p_repos_actions_archive.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_repos_sweep = repos_sub.add_parser("sweep", help="Plan, run, and close out explicit repo fleet evidence sweeps.")
+    repos_sweep_sub = p_repos_sweep.add_subparsers(dest="repos_sweep_command", metavar="<repos-sweep-command>")
+    repos_sweep_sub.required = True
+    for name in ("plan", "run"):
+        p_repos_sweep_cmd = repos_sweep_sub.add_parser(name, help=f"{name.title()} a repo fleet evidence sweep.")
+        p_repos_sweep_cmd.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+        p_repos_sweep_cmd.add_argument("--repo", dest="repo_ids", action="append", default=[], help="Repo id to include. May be repeated.")
+        p_repos_sweep_cmd.add_argument("--all", dest="all_repos", action="store_true", help="Include all enabled repos.")
+        p_repos_sweep_cmd.add_argument("--stale-only", action="store_true", help="Only include repos without a successful sweep.")
+        p_repos_sweep_cmd.add_argument("--include-disabled", action="store_true", help="Allow disabled configured repos.")
+        p_repos_sweep_cmd.add_argument("--force", action="store_true", help="Force a refresh even when evidence is fresh.")
+        p_repos_sweep_cmd.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_repos_sweep_runs = repos_sweep_sub.add_parser("runs", help="List repo fleet sweep receipts.")
+    p_repos_sweep_runs.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_repos_sweep_runs.add_argument("--limit", type=int, default=20, help="Maximum sweeps to list.")
+    p_repos_sweep_runs.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_repos_sweep_show = repos_sweep_sub.add_parser("show", help="Show one repo fleet sweep receipt.")
+    p_repos_sweep_show.add_argument("sweep_id", help="Sweep id, unique prefix, or latest.")
+    p_repos_sweep_show.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_repos_sweep_show.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_repos_sweep_closeout = repos_sweep_sub.add_parser("closeout", help="Close out one repo fleet sweep review.")
+    p_repos_sweep_closeout.add_argument("sweep_id", nargs="?", default="latest", help="Sweep id, unique prefix, or latest.")
+    p_repos_sweep_closeout.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
+    p_repos_sweep_closeout.add_argument("--status", choices=["reviewed", "deferred", "superseded", "archived"], default="reviewed")
+    p_repos_sweep_closeout.add_argument("--reason", default=None, help="Review reason.")
+    p_repos_sweep_closeout.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
 
     # handoff
     p_handoff = sub.add_parser("handoff", help="Inspect memory handoff inbox health.")
@@ -1600,6 +1626,35 @@ def main(argv=None) -> int:
             if args.repos_actions_command == "archive":
                 return repos_cmd.actions_archive_completed(target=args.target, json_output=args.json)
             parser.error(f"unknown repos actions command: {args.repos_actions_command}")
+            return 2
+        if args.repos_command == "sweep":
+            if args.repos_sweep_command == "plan":
+                return repos_cmd.sweep_plan(
+                    target=args.target,
+                    repo_ids=args.repo_ids,
+                    all_repos=args.all_repos,
+                    stale_only=args.stale_only,
+                    include_disabled=args.include_disabled,
+                    force=args.force,
+                    json_output=args.json,
+                )
+            if args.repos_sweep_command == "run":
+                return repos_cmd.sweep_run(
+                    target=args.target,
+                    repo_ids=args.repo_ids,
+                    all_repos=args.all_repos,
+                    stale_only=args.stale_only,
+                    include_disabled=args.include_disabled,
+                    force=args.force,
+                    json_output=args.json,
+                )
+            if args.repos_sweep_command == "runs":
+                return repos_cmd.sweep_runs(target=args.target, limit=args.limit, json_output=args.json)
+            if args.repos_sweep_command == "show":
+                return repos_cmd.sweep_show(target=args.target, sweep_id=args.sweep_id, json_output=args.json)
+            if args.repos_sweep_command == "closeout":
+                return repos_cmd.sweep_closeout(target=args.target, sweep_id=args.sweep_id, status=args.status, reason=args.reason, json_output=args.json)
+            parser.error(f"unknown repos sweep command: {args.repos_sweep_command}")
             return 2
         parser.error(f"unknown repos command: {args.repos_command}")
         return 2

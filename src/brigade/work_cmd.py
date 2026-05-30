@@ -4989,6 +4989,7 @@ def _brief_payload(target: Path, *, limit: int = 3) -> dict[str, Any]:
             "top_issue": repo_health["top_issue"],
             "report": repo_health.get("report"),
             "actions": repo_health.get("actions"),
+            "sweep": repo_health.get("sweep"),
         },
         "context_packs": {
             "pack_count": context_health["pack_count"],
@@ -9950,6 +9951,10 @@ def doctor(*, target: Path) -> int:
         if isinstance(bucket, dict):
             for check in bucket.get("checks", []):
                 _doctor_line(str(check.get("status")), str(check.get("name")), check.get("detail"))
+    sweep_bucket = repo_health.get("sweep")
+    if isinstance(sweep_bucket, dict):
+        for check in sweep_bucket.get("checks", []):
+            _doctor_line(str(check.get("status")), str(check.get("name")), check.get("detail"))
 
     context_health = context_cmd.health(effective_target)
     for issue in context_health.get("issues", []):

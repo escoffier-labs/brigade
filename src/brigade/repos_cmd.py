@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import tomllib
@@ -32,6 +33,14 @@ class RepoEntry:
     enabled: bool = True
     expect_brigade: bool = False
     expect_publish_guard: bool = False
+    health_commands: tuple[SweepCommand, ...] = ()
+
+
+@dataclass(frozen=True)
+class SweepCommand:
+    label: str
+    argv: list[str]
+    timeout: int = 120
 
 
 def config_path(target: Path) -> Path:
@@ -102,6 +111,54 @@ expect_publish_guard = false
 """
 
 
+def _health_command_from_raw(raw: object, repo_id: str, index: int) -> tuple[SweepCommand | None, str | None]:
+    if not isinstance(raw, dict):
+        return None, f"repo {repo_id}: health command {index} must be a table"
+    label = str(raw.get("label") or f"health-{index}").strip()
+    if not label:
+        return None, f"repo {repo_id}: health command {index} label is required"
+    timeout_raw = raw.get("timeout", 120)
+    timeout = int(timeout_raw) if isinstance(timeout_raw, int) and timeout_raw > 0 else 120
+    enabled = bool(raw.get("enabled", True))
+    if not enabled:
+        return None, None
+    argv: list[str] | None = None
+    command = raw.get("command")
+    if isinstance(command, str) and command.strip():
+        argv, error = work_cmd._scanner_argv(command)
+        if error:
+            return None, f"repo {repo_id}: health command {label}: {error}"
+    else:
+        raw_argv = raw.get("argv")
+        if isinstance(raw_argv, list) and all(isinstance(part, str) and part.strip() for part in raw_argv):
+            argv = [str(part) for part in raw_argv]
+            executable = Path(argv[0]).name
+            if executable in work_cmd.SCANNER_HIGH_RISK_COMMANDS:
+                return None, f"repo {repo_id}: health command {label}: high-risk scanner command: {executable}"
+            if any(work_cmd.SCANNER_SHELL_META_RE.search(part) for part in argv):
+                return None, f"repo {repo_id}: health command {label}: high-risk scanner command contains shell metacharacters"
+            if executable != "brigade" and "/" not in argv[0] and shutil.which(argv[0]) is None:
+                return None, f"repo {repo_id}: health command {label}: scanner command is not resolvable: {argv[0]}"
+        else:
+            return None, f"repo {repo_id}: health command {label}: command or argv is required"
+    return SweepCommand(label, argv or [], timeout), None
+
+
+def _health_commands(raw_entry: dict[str, Any], repo_id: str) -> tuple[tuple[SweepCommand, ...], list[str]]:
+    raw_commands = raw_entry.get("health_command") or raw_entry.get("health_commands") or []
+    if not isinstance(raw_commands, list):
+        return (), [f"repo {repo_id}: health_commands must be a list"]
+    commands: list[SweepCommand] = []
+    errors: list[str] = []
+    for index, raw in enumerate(raw_commands, start=1):
+        command, error = _health_command_from_raw(raw, repo_id, index)
+        if error:
+            errors.append(error)
+        if command is not None:
+            commands.append(command)
+    return tuple(commands), errors
+
+
 def _load_config(target: Path) -> tuple[list[RepoEntry], list[str], bool]:
     path = config_path(target)
     if not path.is_file():
@@ -133,6 +190,8 @@ def _load_config(target: Path) -> tuple[list[RepoEntry], list[str], bool]:
         if not path_value:
             errors.append(f"repo {repo_id}: path is required")
             continue
+        health_commands, health_errors = _health_commands(raw, repo_id)
+        errors.extend(health_errors)
         repo_path = (target / path_value).expanduser().resolve()
         entries.append(
             RepoEntry(
@@ -142,6 +201,7 @@ def _load_config(target: Path) -> tuple[list[RepoEntry], list[str], bool]:
                 enabled=bool(raw.get("enabled", True)),
                 expect_brigade=bool(raw.get("expect_brigade", False)),
                 expect_publish_guard=bool(raw.get("expect_publish_guard", False)),
+                health_commands=health_commands,
             )
         )
     return entries, errors, True
@@ -522,14 +582,21 @@ def scan(*, target: Path, json_output: bool = False) -> int:
 
 
 def doctor(*, target: Path, json_output: bool = False) -> int:
-    payload = scan_payload(target)
+    payload = health(target)
+    scan_issue_count = sum(1 for check in payload["checks"] if isinstance(check, dict) and check.get("status") != OK)
+    health_issue_count = int(payload.get("issue_count") or 0)
+    checks = [*payload["checks"]]
+    for bucket_name in ("report", "actions", "sweep"):
+        bucket = payload.get(bucket_name) if isinstance(payload.get(bucket_name), dict) else {}
+        checks.extend(bucket.get("checks") if isinstance(bucket.get("checks"), list) else [])
+    payload = {**payload, "checks": checks, "issue_count": scan_issue_count, "health_issue_count": health_issue_count}
     if json_output:
         print(json.dumps(payload, indent=2, sort_keys=True))
-        return 0 if payload["issue_count"] == 0 else 1
+        return 0 if scan_issue_count == 0 else 1
     print(f"repos doctor: {payload['target']}")
-    for check in payload["checks"]:
+    for check in checks:
         print(f"[{check['status']}] {check['name']}: {check['detail']}")
-    return 0 if payload["issue_count"] == 0 else 1
+    return 0 if scan_issue_count == 0 else 1
 
 
 def _import_records(payload: dict[str, Any]) -> list[dict[str, Any]]:
@@ -587,6 +654,394 @@ def import_issues(*, target: Path, json_output: bool = False, dry_run: bool = Fa
     if dry_run:
         print("dry_run: true")
     return 0
+
+
+def _sweeps_root(target: Path) -> Path:
+    return target / ".brigade" / "repos" / "sweeps"
+
+
+def _sweep_json_path(path: Path) -> Path:
+    return path / "sweep.json" if path.is_dir() else path
+
+
+def _read_sweep(path: Path) -> dict[str, Any] | None:
+    payload = _read_json(_sweep_json_path(path))
+    if payload is not None:
+        payload.pop("path", None)
+        payload.setdefault("path_label", _sweep_json_path(path).parent.name)
+    return payload
+
+
+def _sweeps(target: Path) -> list[dict[str, Any]]:
+    root = _sweeps_root(target)
+    sweeps: list[dict[str, Any]] = []
+    if root.is_dir():
+        for child in root.iterdir():
+            if child.is_dir():
+                payload = _read_sweep(child)
+                if payload is not None:
+                    sweeps.append(payload)
+    sweeps.sort(key=lambda item: str(item.get("started_at") or item.get("sweep_id") or ""), reverse=True)
+    return sweeps
+
+
+def latest_sweep(target: Path) -> dict[str, Any] | None:
+    sweeps = _sweeps(target)
+    return sweeps[0] if sweeps else None
+
+
+def _resolve_sweep(target: Path, sweep_id: str) -> tuple[dict[str, Any] | None, str | None]:
+    if sweep_id == "latest":
+        latest = latest_sweep(target)
+        return (latest, None) if latest else (None, "repo fleet sweep not found: latest")
+    matches = [item for item in _sweeps(target) if str(item.get("sweep_id") or "").startswith(sweep_id)]
+    if not matches:
+        return None, f"repo fleet sweep not found: {sweep_id}"
+    if len(matches) > 1:
+        return None, f"repo fleet sweep id is ambiguous: {sweep_id}"
+    return matches[0], None
+
+
+def _sweep_commands() -> list[SweepCommand]:
+    return [
+        SweepCommand("center-report-build", [sys.executable, "-m", "brigade", "center", "report", "build", "--json"]),
+        SweepCommand("release-plan", [sys.executable, "-m", "brigade", "release", "plan", "--base-ref", "", "--json"]),
+        SweepCommand("work-brief", [sys.executable, "-m", "brigade", "work", "brief", "--json"]),
+    ]
+
+
+def _commands_for_entry(entry: RepoEntry) -> list[SweepCommand]:
+    return [*_sweep_commands(), *entry.health_commands]
+
+
+def _latest_sweep_for_repo(target: Path, repo_id: str) -> dict[str, Any] | None:
+    for sweep in _sweeps(target):
+        for result in sweep.get("repos") if isinstance(sweep.get("repos"), list) else []:
+            if isinstance(result, dict) and result.get("repo_id") == repo_id and result.get("status") == "completed":
+                return sweep
+    return None
+
+
+def _select_sweep_entries(
+    target: Path,
+    *,
+    repo_ids: list[str] | None = None,
+    include_disabled: bool = False,
+    stale_only: bool = False,
+    force: bool = False,
+) -> tuple[list[RepoEntry], list[str], bool]:
+    entries, errors, config_loaded = _load_config(target)
+    wanted = set(repo_ids or [])
+    selected: list[RepoEntry] = []
+    for entry in entries:
+        if wanted and entry.repo_id not in wanted:
+            continue
+        if not entry.enabled and not include_disabled:
+            continue
+        if stale_only and not force and _latest_sweep_for_repo(target, entry.repo_id) is not None:
+            continue
+        selected.append(entry)
+    missing = sorted(wanted - {entry.repo_id for entry in entries})
+    errors.extend(f"repo not found: {repo_id}" for repo_id in missing)
+    return selected, errors, config_loaded
+
+
+def _sweep_plan_payload(
+    target: Path,
+    *,
+    repo_ids: list[str] | None = None,
+    include_disabled: bool = False,
+    stale_only: bool = False,
+    force: bool = False,
+    all_repos: bool = False,
+) -> dict[str, Any]:
+    target = target.expanduser().resolve()
+    selected, errors, config_loaded = _select_sweep_entries(
+        target,
+        repo_ids=repo_ids,
+        include_disabled=include_disabled,
+        stale_only=stale_only,
+        force=force or all_repos,
+    )
+    command_labels = sorted({command.label for entry in selected for command in _commands_for_entry(entry)})
+    safe_errors = [_safe_text(error, target, "repo-fleet", "repo fleet") for error in errors]
+    return {
+        "target_label": "repo-fleet",
+        "config_path_label": CONFIG_REL_PATH,
+        "config_loaded": config_loaded,
+        "errors": safe_errors,
+        "mode": "all" if all_repos else ("stale-only" if stale_only else "selected"),
+        "repos": [
+            {
+                "repo_id": entry.repo_id,
+                "repo_label": entry.label,
+                "enabled": entry.enabled,
+                "exists": entry.path.is_dir(),
+                "stale": _latest_sweep_for_repo(target, entry.repo_id) is None,
+                "commands": [{"label": command.label, "timeout": command.timeout} for command in _commands_for_entry(entry)],
+            }
+            for entry in selected
+        ],
+        "repo_count": len(selected),
+        "command_labels": command_labels,
+    }
+
+
+def sweep_plan(
+    *,
+    target: Path,
+    repo_ids: list[str] | None = None,
+    all_repos: bool = False,
+    stale_only: bool = False,
+    include_disabled: bool = False,
+    force: bool = False,
+    json_output: bool = False,
+) -> int:
+    payload = _sweep_plan_payload(target, repo_ids=repo_ids, include_disabled=include_disabled, stale_only=stale_only, force=force, all_repos=all_repos)
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0 if payload["config_loaded"] and not payload["errors"] else 1
+    print(f"repo fleet sweep plan: {payload['target_label']}")
+    print(f"repos: {payload['repo_count']}")
+    for repo in payload["repos"]:
+        labels = ",".join(command["label"] for command in repo.get("commands", []))
+        print(f"- {repo['repo_id']} {repo['repo_label']} commands={labels}")
+    for error in payload["errors"]:
+        print(f"[warn] {error}")
+    return 0 if payload["config_loaded"] and not payload["errors"] else 1
+
+
+def _summarize_output(text: str, repo_path: Path, repo_id: str, label: str, limit: int = 240) -> str:
+    safe = _safe_text(text.replace("\n", " "), repo_path, repo_id, label).strip()
+    return work_cmd._short(safe, limit)
+
+
+def _run_sweep_command(entry: RepoEntry, command: SweepCommand, sweep_dir: Path) -> dict[str, Any]:
+    started = _now()
+    command_dir = sweep_dir / "logs" / entry.repo_id / command.label
+    command_dir.mkdir(parents=True, exist_ok=True)
+    env = os.environ.copy()
+    source_path = Path(__file__).resolve().parents[1]
+    env["PYTHONPATH"] = str(source_path) + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
+    try:
+        result = subprocess.run(
+            command.argv,
+            cwd=entry.path,
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=command.timeout,
+            env=env,
+        )
+        exit_code = result.returncode
+        timed_out = False
+        stdout = result.stdout
+        stderr = result.stderr
+    except subprocess.TimeoutExpired as exc:
+        exit_code = None
+        timed_out = True
+        stdout = exc.stdout if isinstance(exc.stdout, str) else ""
+        stderr = exc.stderr if isinstance(exc.stderr, str) else ""
+    completed = _now()
+    (command_dir / "stdout.log").write_text(stdout)
+    (command_dir / "stderr.log").write_text(stderr)
+    return {
+        "label": command.label,
+        "argv_label": command.label,
+        "started_at": started.isoformat(),
+        "completed_at": completed.isoformat(),
+        "duration_seconds": round((completed - started).total_seconds(), 3),
+        "exit_code": exit_code,
+        "timed_out": timed_out,
+        "status": "timeout" if timed_out else ("completed" if exit_code == 0 else "failed"),
+        "stdout_summary": _summarize_output(stdout, entry.path, entry.repo_id, entry.label),
+        "stderr_summary": _summarize_output(stderr, entry.path, entry.repo_id, entry.label),
+        "stdout_log_label": f"{entry.repo_id}/{command.label}/stdout.log",
+        "stderr_log_label": f"{entry.repo_id}/{command.label}/stderr.log",
+    }
+
+
+def sweep_run(
+    *,
+    target: Path,
+    repo_ids: list[str] | None = None,
+    all_repos: bool = False,
+    stale_only: bool = False,
+    include_disabled: bool = False,
+    force: bool = False,
+    json_output: bool = False,
+) -> int:
+    target = target.expanduser().resolve()
+    plan = _sweep_plan_payload(target, repo_ids=repo_ids, include_disabled=include_disabled, stale_only=stale_only, force=force, all_repos=all_repos)
+    selected, errors, config_loaded = _select_sweep_entries(
+        target,
+        repo_ids=repo_ids,
+        include_disabled=include_disabled,
+        stale_only=stale_only,
+        force=force or all_repos,
+    )
+    started = _now()
+    sweep_id = f"{started.strftime('%Y%m%d-%H%M%S')}-repo-fleet-sweep-{uuid4().hex[:6]}"
+    sweep_dir = _sweeps_root(target) / sweep_id
+    repo_results: list[dict[str, Any]] = []
+    for entry in selected:
+        repo_started = _now()
+        if not entry.path.is_dir():
+            repo_results.append(
+                {
+                    "repo_id": entry.repo_id,
+                    "repo_label": entry.label,
+                    "status": "failed",
+                    "started_at": repo_started.isoformat(),
+                    "completed_at": _now().isoformat(),
+                    "commands": [],
+                    "warning_count": 1,
+                    "blocker_count": 0,
+                    "warnings": [{"name": "repo_missing", "detail": f"{entry.repo_id} is not reachable"}],
+                    "receipt_labels": [],
+                }
+            )
+            continue
+        command_results = [_run_sweep_command(entry, command, sweep_dir) for command in _commands_for_entry(entry)]
+        repo_completed = _now()
+        failed = [command for command in command_results if command.get("status") != "completed"]
+        state = _repo_brigade_state(entry)
+        receipt_labels = []
+        latest_report_ref = state.get("latest_operator_report") if isinstance(state.get("latest_operator_report"), dict) else None
+        if latest_report_ref:
+            receipt_labels.append({"repo_id": entry.repo_id, "repo_label": entry.label, "kind": "operator-report", "id": latest_report_ref.get("id")})
+        latest_release = state.get("latest_release_readiness") if isinstance(state.get("latest_release_readiness"), dict) else None
+        if latest_release:
+            receipt_labels.append({"repo_id": entry.repo_id, "repo_label": entry.label, "kind": "release-readiness", "id": latest_release.get("id")})
+        repo_results.append(
+            {
+                "repo_id": entry.repo_id,
+                "repo_label": entry.label,
+                "status": "completed" if not failed else "failed",
+                "started_at": repo_started.isoformat(),
+                "completed_at": repo_completed.isoformat(),
+                "duration_seconds": round((repo_completed - repo_started).total_seconds(), 3),
+                "commands": command_results,
+                "warning_count": len(state.get("warnings") if isinstance(state.get("warnings"), list) else []),
+                "blocker_count": len(state.get("blockers") if isinstance(state.get("blockers"), list) else []),
+                "warnings": state.get("warnings") if isinstance(state.get("warnings"), list) else [],
+                "receipt_labels": receipt_labels,
+            }
+        )
+    completed = _now()
+    failed_count = sum(1 for repo in repo_results if repo.get("status") != "completed")
+    payload = {
+        "sweep_id": sweep_id,
+        "target_label": "repo-fleet",
+        "path_label": sweep_id,
+        "started_at": started.isoformat(),
+        "completed_at": completed.isoformat(),
+        "duration_seconds": round((completed - started).total_seconds(), 3),
+        "status": "completed" if failed_count == 0 and not errors and config_loaded else "failed",
+        "config_loaded": config_loaded,
+        "errors": plan.get("errors", errors),
+        "plan": plan,
+        "repos": repo_results,
+        "repo_count": len(repo_results),
+        "failed_count": failed_count,
+        "suggested_next_commands": [
+            "brigade repos report build",
+            "brigade repos report closeout latest",
+            "brigade repos actions build latest",
+        ],
+    }
+    _write_json(sweep_dir / "sweep.json", payload)
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0 if payload["status"] == "completed" else 1
+    print(f"repo fleet sweep: {sweep_id}")
+    print(f"status: {payload['status']}")
+    print(f"repos: {payload['repo_count']}")
+    print(f"failed: {failed_count}")
+    print(f"path_label: {sweep_id}")
+    return 0 if payload["status"] == "completed" else 1
+
+
+def sweep_runs(*, target: Path, limit: int = 20, json_output: bool = False) -> int:
+    if limit < 1:
+        print("error: --limit must be a positive integer", file=sys.stderr)
+        return 2
+    target = target.expanduser().resolve()
+    sweeps = _sweeps(target)[:limit]
+    payload = {"target_label": "repo-fleet", "sweeps_root_label": ".brigade/repos/sweeps", "sweeps": sweeps, "sweep_count": len(sweeps)}
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+    print("repo fleet sweeps: repo-fleet")
+    for sweep in sweeps:
+        print(f"- {sweep.get('sweep_id')} [{sweep.get('status')}] repos={sweep.get('repo_count')} {sweep.get('started_at')}")
+    return 0
+
+
+def sweep_show(*, target: Path, sweep_id: str, json_output: bool = False) -> int:
+    target = target.expanduser().resolve()
+    sweep, error = _resolve_sweep(target, sweep_id)
+    if sweep is None:
+        print(f"error: {error}", file=sys.stderr)
+        return 1 if error and "not found" in error else 2
+    if json_output:
+        print(json.dumps({"target_label": "repo-fleet", "sweep": sweep}, indent=2, sort_keys=True))
+        return 0
+    print(f"repo fleet sweep: {sweep.get('sweep_id')}")
+    print(f"status: {sweep.get('status')}")
+    print(f"repos: {sweep.get('repo_count')}")
+    print(f"path_label: {sweep.get('path_label')}")
+    return 0
+
+
+def sweep_closeout(*, target: Path, sweep_id: str = "latest", status: str = "reviewed", reason: str | None = None, json_output: bool = False) -> int:
+    target = target.expanduser().resolve()
+    if status not in {"reviewed", "deferred", "superseded", "archived"}:
+        print("error: --status must be one of reviewed, deferred, superseded, archived", file=sys.stderr)
+        return 2
+    sweep, error = _resolve_sweep(target, sweep_id)
+    if sweep is None:
+        print(f"error: {error}", file=sys.stderr)
+        return 1 if error and "not found" in error else 2
+    sweep_path = _sweeps_root(target) / str(sweep.get("sweep_id") or "")
+    if not sweep_path.is_dir():
+        print(f"error: repo fleet sweep path is missing: {sweep.get('sweep_id')}", file=sys.stderr)
+        return 2
+    payload = {
+        "target_label": "repo-fleet",
+        "sweep_id": sweep.get("sweep_id"),
+        "status": status,
+        "reason": reason or f"repo fleet sweep marked {status}",
+        "reviewed_at": _now().isoformat(),
+        "source_fingerprint": _fingerprint_payload({"sweep_id": sweep.get("sweep_id"), "repos": sweep.get("repos")}),
+    }
+    closeout_path = sweep_path / "CLOSEOUT.json"
+    payload["path_label"] = f"{sweep.get('sweep_id')}:CLOSEOUT.json"
+    _write_json(closeout_path, payload)
+    sweep["closeout"] = payload
+    _write_json(sweep_path / "sweep.json", sweep)
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+    print(f"repo fleet sweep closeout: {sweep.get('sweep_id')}")
+    print(f"status: {status}")
+    return 0
+
+
+def sweep_health(target: Path) -> dict[str, Any]:
+    target = target.expanduser().resolve()
+    latest = latest_sweep(target)
+    checks: list[dict[str, Any]] = []
+    if latest is None:
+        checks.append({"status": WARN, "name": "repo_fleet_sweep_missing", "detail": "no repo fleet sweep has been run", "suggested_next_command": "brigade repos sweep run"})
+        return {"latest": None, "checks": checks, "issue_count": len(checks), "top_issue": checks[0]}
+    closeout = latest.get("closeout") if isinstance(latest.get("closeout"), dict) else None
+    if not closeout or closeout.get("status") not in {"reviewed", "deferred", "superseded", "archived"}:
+        checks.append({"status": WARN, "name": "repo_fleet_sweep_unclosed", "detail": f"{latest.get('sweep_id')} has not been closed out", "suggested_next_command": f"brigade repos sweep closeout {latest.get('sweep_id')}"})
+    if latest.get("status") != "completed":
+        checks.append({"status": WARN, "name": "repo_fleet_sweep_failed", "detail": f"{latest.get('sweep_id')} did not complete", "suggested_next_command": f"brigade repos sweep show {latest.get('sweep_id')}"})
+    return {"latest": latest, "checks": checks, "issue_count": len(checks), "top_issue": checks[0] if checks else None}
 
 
 def _reports_root(target: Path) -> Path:
@@ -647,6 +1102,7 @@ def _report_payload(target: Path) -> dict[str, Any]:
     target = target.expanduser().resolve()
     entries, errors, config_loaded = _load_config(target)
     repo_states = [_repo_brigade_state(entry) for entry in entries if entry.enabled]
+    sweep = sweep_health(target)
     blockers = [item for repo in repo_states for item in repo.get("blockers", []) if isinstance(item, dict)]
     warnings = [item for repo in repo_states for item in repo.get("warnings", []) if isinstance(item, dict)]
     receipt_refs = [ref for repo in repo_states for ref in repo.get("receipt_references", []) if isinstance(ref, dict)]
@@ -664,6 +1120,8 @@ def _report_payload(target: Path) -> dict[str, Any]:
         "blockers": blockers,
         "warnings": warnings + [{"name": "repo_fleet_config", "detail": error} for error in errors],
         "receipt_references": receipt_refs,
+        "latest_sweep": _safe_sweep_ref(sweep.get("latest") if isinstance(sweep.get("latest"), dict) else None),
+        "sweep_health": {"issue_count": sweep.get("issue_count"), "top_issue": sweep.get("top_issue")},
         "suggested_next_commands": [repo.get("suggested_command") for repo in repo_states if repo.get("suggested_command")],
     }
     payload["report_fingerprint"] = _fingerprint_payload(
@@ -675,6 +1133,19 @@ def _report_payload(target: Path) -> dict[str, Any]:
         }
     )
     return payload
+
+
+def _safe_sweep_ref(payload: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(payload, dict):
+        return None
+    return {
+        "sweep_id": payload.get("sweep_id"),
+        "status": payload.get("status"),
+        "started_at": payload.get("started_at"),
+        "completed_at": payload.get("completed_at"),
+        "repo_count": payload.get("repo_count"),
+        "failed_count": payload.get("failed_count"),
+    }
 
 
 def _report_markdown(payload: dict[str, Any]) -> str:
@@ -1125,8 +1596,9 @@ def health(target: Path) -> dict[str, Any]:
     payload = scan_payload(target)
     report = report_health(target)
     actions = actions_health(target)
-    issue_count = payload["issue_count"] + int(report.get("issue_count") or 0) + int(actions.get("issue_count") or 0)
-    top_issue = payload["top_issue"] or report.get("top_issue") or actions.get("top_issue")
+    sweep = sweep_health(target)
+    issue_count = payload["issue_count"] + int(report.get("issue_count") or 0) + int(actions.get("issue_count") or 0) + int(sweep.get("issue_count") or 0)
+    top_issue = payload["top_issue"] or report.get("top_issue") or actions.get("top_issue") or sweep.get("top_issue")
     return {
         "target": payload["target"],
         "config_path": payload["config_path"],
@@ -1136,6 +1608,7 @@ def health(target: Path) -> dict[str, Any]:
         "checks": payload["checks"],
         "report": report,
         "actions": actions,
+        "sweep": sweep,
     }
 
 

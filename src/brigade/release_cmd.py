@@ -421,6 +421,7 @@ def _evidence(target: Path, *, base_ref: str | None) -> dict[str, Any]:
             "top_issue": repo_health.get("top_issue"),
             "report": repo_health.get("report"),
             "actions": repo_health.get("actions"),
+            "sweep": repo_health.get("sweep"),
         },
         "roadmap": {
             "issue_count": roadmap_health.get("issue_count"),
@@ -491,6 +492,10 @@ def _assess(evidence: dict[str, Any], checks: list[dict[str, Any]], docs_warning
     if int(repo_actions.get("open_count") or 0) > 0:
         top_action = repo_actions.get("top_action") if isinstance(repo_actions.get("top_action"), dict) else {}
         warnings.append(f"repo fleet action queue has open action(s): {top_action.get('fleet_action_id') or repo_actions.get('open_count')}")
+    repo_sweep = repo_fleet.get("sweep") if isinstance(repo_fleet.get("sweep"), dict) else {}
+    if int(repo_sweep.get("issue_count") or 0) > 0:
+        top_sweep = repo_sweep.get("top_issue") if isinstance(repo_sweep.get("top_issue"), dict) else {}
+        warnings.append(f"repo fleet sweep has issue(s): {top_sweep.get('detail') or repo_sweep.get('issue_count')}")
     for check in checks:
         if check.get("status") == FAIL:
             blockers.append(f"{check.get('name')}: {check.get('detail')}")

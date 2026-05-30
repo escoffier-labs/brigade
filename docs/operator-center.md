@@ -107,10 +107,12 @@ Each action stores:
 
 ## Repo Fleet Rollups
 
+`brigade repos sweep plan/run/runs/show/closeout` explicitly refreshes safe local evidence across configured repos. A sweep runs only configured foreground local read/report commands inside each enabled repo, records per-command status and safe stdout/stderr summaries, stores raw logs only in gitignored local files, and writes one receipt under `.brigade/repos/sweeps/`. Sweep receipts use safe repo ids, labels, command labels, status counts, receipt labels, and local log labels.
+
 `brigade repos report plan/build/list/show/archive/closeout` builds a local fleet rollup from configured `.brigade/repos.toml` entries. Fleet reports live under `.brigade/repos/reports/` and use safe repo ids, labels, counts, statuses, fingerprints, and receipt labels only. They do not copy exact private repo names, owner names, org names, local paths, raw logs, raw scanner output, or raw evidence into public artifacts.
 
 `brigade repos actions plan/build/list/show/start/done/defer/archive` turns a reviewed or deferred fleet report into a local fleet action queue under `.brigade/repos/actions/`. Fleet actions are metadata records only. They point to the safe repo label, source subsystem, source local id, safe summary, and suggested command, but do not execute the command.
 
-Center status, center reviews, work brief, work doctor, release doctor, and release evidence include fleet report and fleet action queue health.
+Center status, center reviews, work brief, work doctor, release doctor, and release evidence include fleet sweep, fleet report, and fleet action queue health.
 
 The operator center never invokes scanners, tools, reviewers, handoff ingestion, release publishing, git commands that mutate state, or remote APIs. Only `center report build`, `center report archive`, and `center actions build/start/done/defer/archive` write local gitignored center files.
