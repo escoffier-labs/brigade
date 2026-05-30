@@ -691,7 +691,8 @@ def status(*, target: Path, json_output: bool = False) -> int:
     print(f"config_path: {payload['config_path']}")
     print(f"scan_path: {payload['scan_path']}")
     print(f"queue_path: {payload['queue_path']}")
-    print(f"health: {'ok' if payload['issue_count'] == 0 else f'{payload['issue_count']} issue(s)'}")
+    issue_count = payload["issue_count"]
+    print(f"health: {'ok' if issue_count == 0 else str(issue_count) + ' issue(s)'}")
     top = payload.get("top_issue") if isinstance(payload.get("top_issue"), dict) else None
     if top:
         print(f"top_issue: {top.get('issue_type') or top.get('name')} {top.get('file') or top.get('detail')}")
