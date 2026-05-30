@@ -1691,6 +1691,10 @@ def _actions_archive_path(target: Path) -> Path:
     return _actions_root(target) / "archive.jsonl"
 
 
+def _dispatch_reports_root(target: Path) -> Path:
+    return _actions_root(target) / "dispatch-reports"
+
+
 def _read_actions(target: Path) -> list[dict[str, Any]]:
     payload = _read_json(_actions_path(target))
     actions = payload.get("actions") if isinstance(payload, dict) else None
@@ -1995,6 +1999,212 @@ def actions_dispatch_apply(
     print(f"created: {payload['created_count']}")
     print(f"blocked: {payload['blocked_count']}")
     return 0 if payload["blocked_count"] == 0 else 2
+
+
+def _dispatch_import_summary(entry: RepoEntry, action: dict[str, Any], item: dict[str, Any]) -> dict[str, Any]:
+    metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+    wanted_fingerprint = str(action.get("source_fingerprint") or "")
+    source_fingerprint = str(metadata.get("source_fingerprint") or "")
+    return {
+        "import_id": item.get("id"),
+        "status": item.get("status"),
+        "task_id": item.get("task_id"),
+        "source_fingerprint": source_fingerprint,
+        "fingerprint_matches_action": bool(source_fingerprint and source_fingerprint == wanted_fingerprint),
+        "created_at": item.get("created_at"),
+        "updated_at": item.get("updated_at"),
+        "dismiss_reason": _safe_text(item.get("dismiss_reason"), entry.path, entry.repo_id, entry.label) if item.get("dismiss_reason") else None,
+        "superseded_at": item.get("superseded_at"),
+        "superseded_by": item.get("superseded_by"),
+    }
+
+
+def _dispatch_report_for_action(target: Path, action: dict[str, Any]) -> dict[str, Any]:
+    entry, error = _action_target_entry(target, action)
+    dispatch = action.get("dispatch") if isinstance(action.get("dispatch"), dict) else {}
+    warnings: list[dict[str, Any]] = []
+    imports: list[dict[str, Any]] = []
+    if error or entry is None:
+        warnings.append(
+            {
+                "status": WARN,
+                "name": "repo_fleet_dispatch_target_missing",
+                "detail": error or "target repo missing",
+                "suggested_next_command": f"brigade repos actions show {action.get('fleet_action_id')}",
+            }
+        )
+    else:
+        imports = [_dispatch_import_summary(entry, action, item) for item in _target_imports_for_action(entry.path, action)]
+    target_import_id = dispatch.get("target_import_id")
+    if dispatch and target_import_id and not any(item.get("import_id") == target_import_id for item in imports):
+        warnings.append(
+            {
+                "status": WARN,
+                "name": "repo_fleet_dispatch_target_import_missing",
+                "detail": f"{action.get('fleet_action_id')} target import is missing",
+                "suggested_next_command": f"brigade repos actions reconcile {action.get('fleet_action_id')}",
+            }
+        )
+    changed = [item for item in imports if item.get("source_fingerprint") and not item.get("fingerprint_matches_action")]
+    dismissed = [item for item in imports if item.get("status") == "dismissed"]
+    superseded = [item for item in imports if item.get("status") == "superseded"]
+    if changed:
+        warnings.append(
+            {
+                "status": WARN,
+                "name": "repo_fleet_dispatch_fingerprint_changed",
+                "detail": f"{action.get('fleet_action_id')} has {len(changed)} target import(s) from older fingerprints",
+                "suggested_next_command": f"brigade repos actions dispatch plan {action.get('fleet_action_id')}",
+            }
+        )
+    if dismissed:
+        warnings.append(
+            {
+                "status": WARN,
+                "name": "repo_fleet_dispatch_import_dismissed",
+                "detail": f"{action.get('fleet_action_id')} has dismissed target import(s)",
+                "suggested_next_command": f"brigade repos actions reconcile {action.get('fleet_action_id')}",
+            }
+        )
+    if superseded:
+        warnings.append(
+            {
+                "status": WARN,
+                "name": "repo_fleet_dispatch_import_superseded",
+                "detail": f"{action.get('fleet_action_id')} has superseded target import(s)",
+                "suggested_next_command": f"brigade repos actions dispatch plan {action.get('fleet_action_id')}",
+            }
+        )
+    resolution_status = action.get("resolution_status") or dispatch.get("status")
+    if resolution_status in {"broken-reference", "stale", "dismissed", "superseded"}:
+        warnings.append(
+            {
+                "status": WARN,
+                "name": f"repo_fleet_action_{resolution_status}",
+                "detail": f"{action.get('fleet_action_id')} reconciliation status is {resolution_status}",
+                "suggested_next_command": f"brigade repos actions reconcile {action.get('fleet_action_id')}",
+            }
+        )
+    history = [
+        {"event": "action-created", "timestamp": action.get("created_at"), "status": action.get("status")},
+        {"event": "action-reviewed", "timestamp": action.get("reviewed_at"), "status": action.get("status")} if action.get("reviewed_at") else None,
+        {"event": "dispatch-applied", "timestamp": dispatch.get("dispatched_at"), "status": dispatch.get("status"), "target_import_id": dispatch.get("target_import_id")} if dispatch else None,
+        {"event": "reconciled", "timestamp": action.get("reconciled_at"), "status": resolution_status} if action.get("reconciled_at") else None,
+    ]
+    checks = warnings or [{"status": OK, "name": "repo_fleet_dispatch_report", "detail": f"{action.get('fleet_action_id')} dispatch is traceable"}]
+    return {
+        "fleet_action_id": action.get("fleet_action_id"),
+        "repo_id": action.get("repo_id"),
+        "repo_label": action.get("repo_label"),
+        "source_report_id": action.get("source_report_id"),
+        "source_sweep_id": action.get("source_sweep_id"),
+        "source_subsystem": action.get("source_subsystem"),
+        "source_local_id": action.get("source_local_id"),
+        "action_status": action.get("status"),
+        "resolution_status": resolution_status,
+        "source_fingerprint": action.get("source_fingerprint"),
+        "dispatch": {
+            "status": dispatch.get("status"),
+            "target_import_id": dispatch.get("target_import_id"),
+            "target_inbox_label": dispatch.get("target_inbox_label"),
+            "dispatched_at": dispatch.get("dispatched_at"),
+            "source_fingerprint": dispatch.get("source_fingerprint"),
+            "superseded_import_ids": dispatch.get("superseded_import_ids") if isinstance(dispatch.get("superseded_import_ids"), list) else [],
+        },
+        "target_repo": {
+            "repo_id": entry.repo_id if entry is not None else action.get("repo_id"),
+            "repo_label": entry.label if entry is not None else action.get("repo_label"),
+            "exists": entry.path.is_dir() if entry is not None else False,
+            "path_label": f"{action.get('repo_id')}:.brigade",
+        },
+        "imports": imports,
+        "import_count": len(imports),
+        "dismissed_import_count": len(dismissed),
+        "superseded_import_count": len(superseded),
+        "changed_fingerprint_import_count": len(changed),
+        "history": [item for item in history if item is not None],
+        "checks": checks,
+        "issue_count": len(warnings),
+        "top_issue": warnings[0] if warnings else None,
+    }
+
+
+def _dispatch_report_markdown(payload: dict[str, Any]) -> str:
+    lines = [
+        "# Repo Fleet Dispatch Report",
+        "",
+        f"- Report: `{payload.get('report_id', 'planned')}`",
+        f"- Generated: {payload.get('generated_at')}",
+        f"- Actions: {payload.get('action_count')}",
+        f"- Issues: {payload.get('issue_count')}",
+        "",
+        "## Actions",
+        "",
+    ]
+    for action in payload.get("actions") if isinstance(payload.get("actions"), list) else []:
+        lines.append(f"- `{action.get('fleet_action_id')}` repo={action.get('repo_id')} status={action.get('resolution_status') or action.get('action_status')} issues={action.get('issue_count')}")
+        for check in action.get("checks") if isinstance(action.get("checks"), list) else []:
+            if check.get("status") != OK:
+                lines.append(f"  - {check.get('name')}: {check.get('detail')}")
+    if not payload.get("actions"):
+        lines.append("- none")
+    lines.extend(["", "## Boundaries", "", "- local dispatch report only", "- no target command execution", "- no promotion", "- no remote mutation"])
+    return "\n".join(lines) + "\n"
+
+
+def actions_dispatch_report(
+    *,
+    target: Path,
+    action_id: str | None = None,
+    all_actions: bool = False,
+    record: bool = False,
+    json_output: bool = False,
+) -> int:
+    target = target.expanduser().resolve()
+    actions = _read_actions(target)
+    if action_id:
+        selected = [action for action in actions if str(action.get("fleet_action_id") or "").startswith(action_id)]
+        if not selected:
+            print(f"error: fleet action not found: {action_id}", file=sys.stderr)
+            return 1
+        if len(selected) > 1:
+            print(f"error: fleet action id is ambiguous: {action_id}", file=sys.stderr)
+            return 2
+    elif all_actions:
+        selected = actions
+    else:
+        selected = [action for action in actions if action.get("status") in {"pending", "active", "deferred"} or action.get("resolution_status") in {"broken-reference", "stale", "dismissed", "superseded"}]
+    generated = _now()
+    reports = [_dispatch_report_for_action(target, action) for action in selected]
+    payload = {
+        "schema_version": 1,
+        "target_label": "repo-fleet",
+        "report_id": "planned",
+        "generated_at": generated.isoformat(),
+        "recorded": False,
+        "actions": reports,
+        "action_count": len(reports),
+        "issue_count": sum(int(report.get("issue_count") or 0) for report in reports),
+        "top_issue": next((report.get("top_issue") for report in reports if report.get("top_issue")), None),
+        "suggested_next_commands": [f"brigade repos actions reconcile {report.get('fleet_action_id')}" for report in reports if report.get("issue_count")],
+    }
+    if record:
+        report_id = f"{generated.strftime('%Y%m%d-%H%M%S')}-dispatch-report-{uuid4().hex[:6]}"
+        report_dir = _dispatch_reports_root(target) / report_id
+        payload.update({"report_id": report_id, "recorded": True, "path_label": f".brigade/repos/actions/dispatch-reports/{report_id}", "bundle_files": ["DISPATCH_REPORT.json", "DISPATCH_REPORT.md"]})
+        _write_json(report_dir / "DISPATCH_REPORT.json", payload)
+        (report_dir / "DISPATCH_REPORT.md").write_text(_dispatch_report_markdown(payload))
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+    print("repo fleet dispatch report")
+    print(f"actions: {payload['action_count']}")
+    print(f"issues: {payload['issue_count']}")
+    if record:
+        print(f"path_label: {payload.get('path_label')}")
+    for report in reports:
+        print(f"- {report.get('fleet_action_id')} issues={report.get('issue_count')}")
+    return 0
 
 
 def _latest_safe_receipts(repo_path: Path, repo_id: str, label: str) -> list[dict[str, Any]]:
@@ -4132,13 +4342,13 @@ def _dispatch_health_checks(target: Path, actions: list[dict[str, Any]]) -> list
     checks: list[dict[str, Any]] = []
     for action in actions:
         status = action.get("resolution_status")
-        if status in {"broken-reference", "stale"}:
+        if status in {"broken-reference", "stale", "dismissed", "superseded"}:
             checks.append(
                 {
                     "status": WARN,
                     "name": f"repo_fleet_action_{status}",
                     "detail": f"{action.get('fleet_action_id')} is {status}",
-                    "suggested_next_command": f"brigade repos actions reconcile {action.get('fleet_action_id')}",
+                    "suggested_next_command": f"brigade repos actions dispatch report {action.get('fleet_action_id')}",
                 }
             )
             continue
@@ -4248,10 +4458,10 @@ def actions_health(target: Path) -> dict[str, Any]:
     open_actions = [action for action in actions if action.get("status") in {"pending", "active", "deferred"}]
     open_actions.sort(key=_action_rank)
     checks: list[dict[str, Any]] = []
+    checks.extend(_dispatch_health_checks(target, actions))
     if open_actions:
         top = open_actions[0]
         checks.append({"status": WARN, "name": "repo_fleet_actions_open", "detail": f"{len(open_actions)} open fleet action(s)", "suggested_next_command": f"brigade repos actions show {top.get('fleet_action_id')}"})
-    checks.extend(_dispatch_health_checks(target, actions))
     return {
         "actions_path": str(_actions_path(target)),
         "action_count": len(actions),

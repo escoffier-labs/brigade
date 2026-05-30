@@ -34,6 +34,7 @@ brigade repos actions defer <fleet-action-id> --reason "not today"
 brigade repos actions archive --completed
 brigade repos actions dispatch plan <fleet-action-id>
 brigade repos actions dispatch apply <fleet-action-id>
+brigade repos actions dispatch report <fleet-action-id>
 brigade repos actions dispatch --all-reviewed
 brigade repos actions reconcile [fleet-action-id]
 brigade repos actions context plan <fleet-action-id>
@@ -126,6 +127,8 @@ Sweep filters include `--repo <repo-id>`, `--all`, `--stale-only`, `--include-di
 `brigade repos actions dispatch` bridges fleet-level review into the target repo's local work loop. `dispatch plan` previews the task import that would be written. `dispatch apply` writes a `source: repo-fleet` task import into the target repo's existing `.brigade/work/imports/inbox.jsonl`, with acceptance criteria and fleet provenance. `dispatch --all-reviewed` applies the same path to reviewed pending or active actions. `--dry-run` writes nothing.
 
 Dispatch is idempotent by fleet action id and source fingerprint. Repeated dispatch of the same action skips equivalent pending or promoted imports. Dismissed target imports stay dismissed until the source fingerprint changes. When the fingerprint changes, Brigade creates a new target import and marks prior dispatch imports superseded.
+
+`brigade repos actions dispatch report <fleet-action-id>` explains dispatch history, target import status, dismissed target imports, superseded imports, changed fingerprints, and broken references. `--record` writes a local report receipt under `.brigade/repos/actions/dispatch-reports/`. The report is read-only with respect to target repos and never promotes imports or runs suggested commands.
 
 `brigade repos actions context plan/build` creates an action-scoped context pack in the target repo under `.brigade/context/packs/`. These packs include safe action summary, acceptance criteria, guidance presence, local receipt labels, and explicit private-evidence exclusions. They do not copy raw guidance contents, raw logs, raw scanner output, private paths, exact private repo names, owner names, org names, hostnames, or secrets.
 

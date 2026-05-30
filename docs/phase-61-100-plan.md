@@ -240,6 +240,8 @@ Goal: add reports explaining dispatch supersession, target import changes, dismi
 
 Acceptance: tests cover dispatch history, superseded imports, reconciliation warnings, and center review integration.
 
+Status: implemented with `brigade repos actions dispatch report`, optional local dispatch report receipts, dismissed and superseded import summaries, changed-fingerprint warnings, broken-reference review surfacing, docs, and focused tests.
+
 ### Phase 94: Fleet Release Matrix Report
 Goal: generate a release train matrix across repos, evidence steps, waivers, readiness, closeouts, and manual publish evidence.
 

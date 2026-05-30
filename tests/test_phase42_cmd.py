@@ -160,6 +160,10 @@ def test_fleet_action_dispatch_dismissed_until_changed_and_supersede(tmp_path, c
     skipped = json.loads(capsys.readouterr().out)
     assert skipped["dismissed_count"] == 1
     assert len(work_cmd._read_imports(repo)) == 1
+    assert repos_cmd.actions_dispatch_report(target=tmp_path, action_id="fleet-act-alpha", json_output=True) == 0
+    dismissed_report = json.loads(capsys.readouterr().out)
+    assert dismissed_report["actions"][0]["dismissed_import_count"] == 1
+    assert any(check["name"] == "repo_fleet_dispatch_import_dismissed" for check in dismissed_report["actions"][0]["checks"])
 
     actions = repos_cmd._read_actions(tmp_path)
     actions[0]["source_fingerprint"] = "fp-two"
@@ -171,6 +175,15 @@ def test_fleet_action_dispatch_dismissed_until_changed_and_supersede(tmp_path, c
     imports = work_cmd._read_imports(repo)
     statuses = sorted(item["status"] for item in imports)
     assert statuses == ["pending", "superseded"]
+    assert cli.main(["repos", "actions", "dispatch", "report", "fleet-act-alpha", "--target", str(tmp_path), "--record", "--json"]) == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["recorded"] is True
+    assert report["actions"][0]["superseded_import_count"] == 1
+    assert report["actions"][0]["changed_fingerprint_import_count"] == 1
+    assert any(item["event"] == "dispatch-applied" for item in report["actions"][0]["history"])
+    report_path = tmp_path / ".brigade" / "repos" / "actions" / "dispatch-reports" / report["report_id"]
+    assert (report_path / "DISPATCH_REPORT.json").is_file()
+    assert (report_path / "DISPATCH_REPORT.md").is_file()
 
 
 def test_fleet_action_context_plan_build_excludes_private_evidence(tmp_path, capsys):
@@ -279,6 +292,7 @@ def test_fleet_action_dispatch_health_integrates_with_daily_surfaces(tmp_path, m
     assert center_cmd.reviews(target=tmp_path, json_output=True) == 0
     reviews = json.loads(capsys.readouterr().out)
     assert any(item["subsystem"] == "repo-fleet" for item in reviews["reviews"])
+    assert any("dispatch report" in item["suggested_next_command"] for item in reviews["reviews"] if item["subsystem"] == "repo-fleet")
     assert work_cmd.brief(target=tmp_path, json_output=True) == 0
     assert json.loads(capsys.readouterr().out)["repo_fleet"]["actions"]["issue_count"] >= 1
     assert work_cmd.doctor(target=tmp_path) == 1
