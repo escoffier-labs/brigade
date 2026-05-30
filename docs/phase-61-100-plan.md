@@ -93,6 +93,8 @@ Goal: turn project audit decisions into local readiness receipts for docs, licen
 
 Acceptance: tests cover bake-in, integrate, catalog-only, move-candidate, and leave-alone readiness without remote mutation.
 
+Status: implemented with `brigade projects readiness plan/record/list/show`, decision-specific readiness requirements, local receipts under `.brigade/projects/readiness/`, release evidence integration, deduped project-consolidation imports, and manual-only migration evidence.
+
 ### Phase 73: Project Move Plan Closeout
 Goal: add reviewed closeout for manual-only project move plans so deferred moves do not stay noisy unless fingerprints change.
 

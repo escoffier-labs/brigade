@@ -230,14 +230,62 @@ docs_ready = true
 license_ready = true
 security_ready = true
 release_ready = true
+
+[[project]]
+id = "receipt-bridge"
+category = "usage tracking"
+decision = "integrate"
+docs_ready = true
+license_ready = false
+security_ready = true
+release_ready = true
+
+[[project]]
+id = "catalog-adapter"
+category = "mcp runner"
+decision = "catalog-only"
+docs_ready = true
+security_ready = true
+
+[[project]]
+id = "product-owned"
+category = "domain product"
+decision = "leave-alone"
 """
     )
     assert projects_cmd.audit(target=tmp_path, json_output=True) == 0
     audit = json.loads(capsys.readouterr().out)
-    assert {item["decision"] for item in audit["projects"]} == {"move-candidate", "bake-in"}
+    assert {item["decision"] for item in audit["projects"]} == {"move-candidate", "bake-in", "integrate", "catalog-only", "leave-alone"}
     assert audit["issue_count"] == 1
+    assert projects_cmd.readiness_plan(target=tmp_path, json_output=True) == 0
+    readiness = json.loads(capsys.readouterr().out)
+    assert readiness["remote_mutation"] is False
+    assert readiness["manual_only"] is True
+    assert readiness["project_count"] == 5
+    assert {item["decision"] for item in readiness["projects"]} == {"move-candidate", "bake-in", "integrate", "catalog-only", "leave-alone"}
+    move = next(item for item in readiness["projects"] if item["decision"] == "move-candidate")
+    assert move["status"] == "blocked"
+    assert move["missing_readiness"] == ["license", "security", "release", "ownership"]
+    assert move["manual_commands"]
+    assert projects_cmd.readiness_record(target=tmp_path, json_output=True) == 0
+    receipt = json.loads(capsys.readouterr().out)
+    assert Path(receipt["path"], "readiness.json").is_file()
+    assert projects_cmd.readiness_list(target=tmp_path, json_output=True) == 0
+    assert json.loads(capsys.readouterr().out)["receipt_count"] == 1
+    assert projects_cmd.readiness_show(target=tmp_path, readiness_id="latest", json_output=True) == 0
+    assert json.loads(capsys.readouterr().out)["receipt"]["blocked_count"] == 1
+    assert cli.main(["projects", "readiness", "plan", "--target", str(tmp_path), "--json"]) == 0
+    assert json.loads(capsys.readouterr().out)["blocked_count"] == 1
+    assert cli.main(["projects", "readiness", "show", "latest", "--target", str(tmp_path), "--json"]) == 0
+    assert json.loads(capsys.readouterr().out)["receipt"]["remote_mutation"] is False
     assert projects_cmd.import_issues(target=tmp_path, json_output=True) == 0
     assert json.loads(capsys.readouterr().out)["created"] == 1
+    assert projects_cmd.import_issues(target=tmp_path, json_output=True) == 0
+    assert json.loads(capsys.readouterr().out)["skipped"] == 1
+
+    assert release_cmd.plan(target=tmp_path, base_ref=None, json_output=True) in {0, 1}
+    release = json.loads(capsys.readouterr().out)
+    assert release["evidence"]["projects"]["readiness"]["blocked_count"] == 1
 
     _seed_import(tmp_path)
     assert learn_cmd.plan(target=tmp_path, json_output=True) == 0

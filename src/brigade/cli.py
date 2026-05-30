@@ -1036,6 +1036,22 @@ def _build_parser() -> argparse.ArgumentParser:
     p_projects_import.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
     p_projects_import.add_argument("--dry-run", action="store_true", help="Report without writing imports.")
     p_projects_import.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_projects_readiness = projects_sub.add_parser("readiness", help="Plan and record project migration readiness receipts.")
+    projects_readiness_sub = p_projects_readiness.add_subparsers(dest="projects_readiness_command", metavar="<projects-readiness-command>")
+    projects_readiness_sub.required = True
+    p_projects_readiness_plan = projects_readiness_sub.add_parser("plan", help="Plan project migration readiness without writing a receipt.")
+    p_projects_readiness_plan.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_projects_readiness_plan.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_projects_readiness_record = projects_readiness_sub.add_parser("record", help="Write a local project migration readiness receipt.")
+    p_projects_readiness_record.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
+    p_projects_readiness_record.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_projects_readiness_list = projects_readiness_sub.add_parser("list", help="List local project migration readiness receipts.")
+    p_projects_readiness_list.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_projects_readiness_list.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_projects_readiness_show = projects_readiness_sub.add_parser("show", help="Show a local project migration readiness receipt.")
+    p_projects_readiness_show.add_argument("readiness_id", help="Readiness receipt id or latest.")
+    p_projects_readiness_show.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_projects_readiness_show.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
 
     # learn
     p_learn = sub.add_parser("learn", help="Plan local self-learning candidates without mutating memory or source.")
@@ -2102,6 +2118,17 @@ def main(argv=None) -> int:
             return projects_cmd.audit(target=args.target, json_output=args.json)
         if args.projects_command == "import-issues":
             return projects_cmd.import_issues(target=args.target, dry_run=args.dry_run, json_output=args.json)
+        if args.projects_command == "readiness":
+            if args.projects_readiness_command == "plan":
+                return projects_cmd.readiness_plan(target=args.target, json_output=args.json)
+            if args.projects_readiness_command == "record":
+                return projects_cmd.readiness_record(target=args.target, json_output=args.json)
+            if args.projects_readiness_command == "list":
+                return projects_cmd.readiness_list(target=args.target, json_output=args.json)
+            if args.projects_readiness_command == "show":
+                return projects_cmd.readiness_show(target=args.target, readiness_id=args.readiness_id, json_output=args.json)
+            parser.error(f"unknown projects readiness command: {args.projects_readiness_command}")
+            return 2
         parser.error(f"unknown projects command: {args.projects_command}")
         return 2
     if cmd == "learn":

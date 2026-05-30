@@ -88,7 +88,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `brigade context plan/build/list/show/archive` for local context engineering packs with safe summaries, task acceptance, recent evidence, and explicit private-evidence exclusions.
 - `brigade context sync plan/record` for read-only context sync planning receipts against configured harness destinations, with conflict and freshness checks but no context file writes.
 - `brigade context doctor/import-issues` for stale context packs, missing source references, stale task acceptance, stale tool references, and `source: context-pack` work imports.
-- `brigade projects audit/import-issues` for gitignored local project consolidation decisions and manual-only migration planning.
+- `brigade projects audit/import-issues` plus `brigade projects readiness plan/record/list/show` for gitignored local project consolidation decisions, manual-only migration planning, and local readiness receipts covering docs, license, security, release, ownership, and migration blockers.
 - `brigade learn plan/doctor/import-issues` for bounded local learning candidates that become reviewed tasks, handoffs, suppressions, accepted risk, archive, or dismissal.
 - `brigade tools pack build/list/show/archive` and `brigade tools sync plan/apply` for portable tool evidence bundles and reviewed projection sync over the existing managed projection path.
 - `brigade tools parity status/closeout` for local reviewed projection parity receipts that quiet unchanged missing, stale, unmanaged, conflicted, or parity-gap projection issues while resurfacing changed fingerprints.

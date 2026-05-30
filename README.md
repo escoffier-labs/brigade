@@ -320,6 +320,10 @@ brigade context sync record <pack-id|latest>
 brigade context doctor
 brigade context import-issues
 brigade projects audit
+brigade projects readiness plan
+brigade projects readiness record
+brigade projects readiness list
+brigade projects readiness show <receipt-id|latest>
 brigade projects import-issues
 brigade learn plan
 brigade learn doctor
