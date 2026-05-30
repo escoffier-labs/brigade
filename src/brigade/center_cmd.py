@@ -297,6 +297,9 @@ def _activity(target: Path) -> list[dict[str, Any]]:
     for pack in context_cmd._packs(target)[:20]:
         pack_id = str(pack.get("pack_id") or "")
         items.append(_item("context-pack", pack_id, str(pack.get("status") or "built"), str(pack.get("kind") or "context"), f"brigade context show {pack_id}", created_at=pack.get("created_at") if isinstance(pack.get("created_at"), str) else None, updated_at=pack.get("created_at") if isinstance(pack.get("created_at"), str) else None, receipt_path=str(Path(str(pack.get("path") or "")) / "context.json") if pack.get("path") else None, path=pack.get("path") if isinstance(pack.get("path"), str) else None))
+    for receipt in _iter_json_files(target / ".brigade" / "context" / "sync-plans", "*/sync-plan.json")[:20]:
+        sync_id = str(receipt.get("sync_id") or Path(str(receipt.get("path") or "sync")).parent.name)
+        items.append(_item("context-sync", sync_id, str(receipt.get("status") or "planned"), f"{receipt.get('destination_count', 0)} destination(s)", f"brigade context sync plan {receipt.get('pack_id') or 'latest'}", created_at=receipt.get("created_at") if isinstance(receipt.get("created_at"), str) else None, updated_at=receipt.get("created_at") if isinstance(receipt.get("created_at"), str) else None, receipt_path=receipt.get("path") if isinstance(receipt.get("path"), str) else None))
     for replay in _iter_json_files(target / ".brigade" / "learn" / "replays", "*/replay.json")[:20]:
         replay_id = str(replay.get("replay_id") or Path(str(replay.get("path") or "replay")).parent.name)
         items.append(_item("learning-replay", replay_id, str(replay.get("status") or "recorded"), str(replay.get("scenario_id") or "learning replay"), "brigade learn plan", updated_at=replay.get("created_at") if isinstance(replay.get("created_at"), str) else None, receipt_path=replay.get("path") if isinstance(replay.get("path"), str) else None))

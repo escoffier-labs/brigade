@@ -109,6 +109,57 @@ def test_context_pack_build_list_show_archive_excludes_private_evidence(tmp_path
     assert json.loads(capsys.readouterr().out)["status"] == "archived"
 
 
+def test_context_sync_plan_receipts_freshness_conflicts_and_release_center_integration(tmp_path, monkeypatch, capsys):
+    _seed_task(tmp_path)
+    (tmp_path / "README.md").write_text("local readme\n")
+    assert context_cmd.build(target=tmp_path, kind="task", task_id="task-one", json_output=True) == 0
+    built = json.loads(capsys.readouterr().out)
+    config = tmp_path / ".brigade" / "context" / "sync-targets.json"
+    config.parent.mkdir(parents=True, exist_ok=True)
+    _write_json(
+        config,
+        {
+            "targets": [
+                {"id": "codex", "harness": "codex", "path": ".codex/context.md", "enabled": True},
+                {"id": "claude", "harness": "claude", "path": ".claude/context.md", "enabled": True},
+            ]
+        },
+    )
+    conflict = tmp_path / ".claude" / "context.md"
+    conflict.parent.mkdir(parents=True)
+    conflict.write_text("user context\n")
+    (tmp_path / "README.md").unlink()
+
+    assert context_cmd.sync_plan(target=tmp_path, pack_id=built["pack_id"], json_output=True) == 1
+    plan = json.loads(capsys.readouterr().out)
+    statuses = {item["target_id"]: item["status"] for item in plan["destinations"]}
+    assert statuses == {"codex": "missing", "claude": "conflict"}
+    assert plan["blocker_count"] == 1
+    assert plan["write_default"] is False
+    assert any(issue["name"] == "context_sync_missing_source_reference" for issue in plan["issues"])
+
+    _write_json(config, {"targets": [{"id": "codex", "harness": "codex", "path": ".codex/context.md", "enabled": True}]})
+    assert context_cmd.sync_record(target=tmp_path, pack_id="latest", json_output=True) == 0
+    receipt = json.loads(capsys.readouterr().out)
+    assert Path(receipt["path"], "sync-plan.json").is_file()
+    assert receipt["destination_count"] == 1
+    assert receipt["destinations"][0]["status"] == "missing"
+
+    health = context_cmd.health(tmp_path)
+    assert health["sync"]["destination_count"] == 1
+    assert any(issue["name"] == "context_sync_missing_source_reference" for issue in health["issues"])
+
+    monkeypatch.setattr(release_cmd, "_run_content_guard_check", lambda *args, **kwargs: {"name": "content_guard_tip", "status": "ok", "exit_code": 0, "detail": "clean"})
+    monkeypatch.setattr(release_cmd, "_content_guard_available", lambda target: True)
+    assert release_cmd.plan(target=tmp_path, base_ref=None, json_output=True) in {0, 1}
+    release = json.loads(capsys.readouterr().out)
+    assert release["evidence"]["context"]["sync"]["destination_count"] == 1
+
+    assert center_cmd.activity(target=tmp_path, json_output=True) == 0
+    activity = json.loads(capsys.readouterr().out)
+    assert any(item["subsystem"] == "context-sync" for item in activity["activity"])
+
+
 def test_projects_audit_imports_and_learning_candidates(tmp_path, capsys):
     (tmp_path / ".brigade").mkdir()
     (tmp_path / ".brigade" / "projects.toml").write_text(
@@ -307,6 +358,8 @@ def test_center_views_and_cli_dispatch(tmp_path, capsys):
 
     assert cli.main(["context", "list", "--target", str(tmp_path), "--json"]) == 0
     assert json.loads(capsys.readouterr().out)["pack_count"] == 1
+    assert cli.main(["context", "sync", "plan", "latest", "--target", str(tmp_path), "--json"]) == 0
+    assert json.loads(capsys.readouterr().out)["write_default"] is False
     assert cli.main(["projects", "audit", "--target", str(tmp_path), "--json"]) == 1
     assert cli.main(["learn", "plan", "--target", str(tmp_path), "--json"]) == 0
     assert cli.main(["center", "reviews", "--target", str(tmp_path), "--json"]) == 0

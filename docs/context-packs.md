@@ -10,6 +10,8 @@ brigade context build
 brigade context list
 brigade context show <pack-id>
 brigade context archive <pack-id>
+brigade context sync plan <pack-id|latest>
+brigade context sync record <pack-id|latest>
 ```
 
 Packs are written under `.brigade/context/packs/` and stay gitignored. A pack contains safe summaries and references, not raw private evidence.
@@ -28,6 +30,10 @@ Pack contents include:
 - context sync plan with no writes
 
 Default exclusions include raw chat exports, secret-looking values, private infrastructure values, full local logs, private absolute paths, and raw scanner output.
+
+`brigade context sync plan` reads configured local harness destinations from `.brigade/context/sync-targets.json` and compares them to a built context pack. It reports missing destinations, current managed destinations, stale managed destinations, unmanaged conflicts, stale pack age, and missing source references. `brigade context sync record` writes the read-only plan receipt under `.brigade/context/sync-plans/`.
+
+Sync planning never writes harness context files. A future explicit apply command would be required before any configured destination is mutated.
 
 `brigade context archive` moves a local pack into `.brigade/context/archive/`. It does not delete source files, write harness context files, edit memory, or run tools.
 

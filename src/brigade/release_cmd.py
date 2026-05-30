@@ -419,6 +419,8 @@ def _evidence(target: Path, *, base_ref: str | None) -> dict[str, Any]:
             "pack_count": context_health.get("pack_count"),
             "issue_count": context_health.get("issue_count"),
             "top_issue": context_health.get("top_issue"),
+            "latest": context_health.get("latest"),
+            "sync": context_health.get("sync"),
         },
         "projects": {
             "project_count": projects_health.get("project_count"),

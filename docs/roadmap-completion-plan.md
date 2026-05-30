@@ -474,8 +474,10 @@ Acceptance:
 Phase 36 status:
 
 - Implemented command surface: `brigade context plan/build/list/show/archive`.
+- Implemented command surface: `brigade context sync plan/record`.
 - Context packs are written under `.brigade/context/packs/` and include task acceptance, doc and guidance summaries, selected tool references, recent work/security/review summaries, and an explicit private-evidence exclusion list.
 - Context pack doc and guidance summaries use presence and line-count metadata instead of copying raw file contents.
+- Context sync planning reads `.brigade/context/sync-targets.json`, reports missing/current/stale/conflicted destinations, stale pack age, and missing source references, and writes local sync-plan receipts under `.brigade/context/sync-plans/`.
 - Deferred: writing context packs into harness destinations. Reason: sync planning remains read-only until a future explicit context apply command exists.
 
 ### 9. Side Project Consolidation And Org-Move Planning

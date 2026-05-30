@@ -1013,6 +1013,11 @@ def _build_parser() -> argparse.ArgumentParser:
     p_context_archive.add_argument("pack_id", help="Pack id or unique prefix.")
     p_context_archive.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
     p_context_archive.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_context_sync = context_sub.add_parser("sync", help="Plan context pack sync into configured harness destinations.")
+    p_context_sync.add_argument("sync_command", choices=["plan", "record"], help="Plan or record a read-only sync plan.")
+    p_context_sync.add_argument("pack_id", nargs="?", default="latest", help="Pack id, unique prefix, or latest.")
+    p_context_sync.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_context_sync.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
 
     # projects
     p_projects = sub.add_parser("projects", help="Audit local side-project consolidation decisions.")
@@ -2073,6 +2078,11 @@ def main(argv=None) -> int:
             return context_cmd.show(target=args.target, pack_id=args.pack_id, json_output=args.json)
         if args.context_command == "archive":
             return context_cmd.archive(target=args.target, pack_id=args.pack_id, json_output=args.json)
+        if args.context_command == "sync":
+            if args.sync_command == "plan":
+                return context_cmd.sync_plan(target=args.target, pack_id=args.pack_id, json_output=args.json)
+            if args.sync_command == "record":
+                return context_cmd.sync_record(target=args.target, pack_id=args.pack_id, json_output=args.json)
         parser.error(f"unknown context command: {args.context_command}")
         return 2
     if cmd == "projects":

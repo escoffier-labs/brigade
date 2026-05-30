@@ -79,6 +79,8 @@ Goal: add reviewable context sync plans and receipts for configured harness dest
 
 Acceptance: tests cover context sync plan text and JSON, freshness checks, conflicts, and release/operator-center integration.
 
+Status: implemented with `brigade context sync plan/record`, configured harness destination checks, stale pack and missing source-reference warnings, unmanaged conflict detection, local sync-plan receipts, release evidence, and operator-center activity/review integration.
+
 ### Phase 71: Context Pack Freshness And Import Routing
 Goal: surface stale context packs, missing references, outdated task acceptance, and stale tool references as reviewable imports.
 
