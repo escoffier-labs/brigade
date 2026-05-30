@@ -401,6 +401,53 @@ def _context_sync_plan_payload(target: Path, pack_id: str = "latest") -> dict[st
     }
 
 
+def _context_issue(pack: dict[str, Any] | None, issue_type: str, detail: str) -> dict[str, Any]:
+    pack_id = pack.get("pack_id") if isinstance(pack, dict) else None
+    return {
+        "status": WARN,
+        "name": f"context_{issue_type}",
+        "issue_type": issue_type,
+        "pack_id": pack_id,
+        "detail": detail,
+        "source_fingerprint": _stable_hash({"pack_id": pack_id, "issue_type": issue_type, "detail": detail}),
+    }
+
+
+def _context_pack_issues(target: Path, pack: dict[str, Any]) -> list[dict[str, Any]]:
+    issues: list[dict[str, Any]] = []
+    freshness = pack.get("freshness") if isinstance(pack.get("freshness"), dict) else {}
+    created = _parse_iso_datetime(pack.get("created_at") or freshness.get("generated_at"))
+    if created is not None:
+        age_hours = (_now() - created).total_seconds() / 3600
+        if age_hours > CONTEXT_PACK_STALE_HOURS:
+            issues.append(_context_issue(pack, "pack_stale", f"{pack.get('pack_id')} is {age_hours:.1f}h old"))
+    for ref in pack.get("source_references", []) if isinstance(pack.get("source_references"), list) else []:
+        if isinstance(ref, dict) and ref.get("exists") and not (target / str(ref.get("path"))).exists():
+            issues.append(_context_issue(pack, "missing_source_reference", str(ref.get("path"))))
+    task = pack.get("task") if isinstance(pack.get("task"), dict) else {}
+    task_id = task.get("id")
+    if isinstance(task_id, str) and task_id:
+        current = next((item for item in work_cmd._read_task_ledger(target).get("tasks", []) if item.get("id") == task_id), None)
+        if current is None:
+            issues.append(_context_issue(pack, "missing_task", task_id))
+        else:
+            pack_acceptance = task.get("acceptance") if isinstance(task.get("acceptance"), list) else []
+            current_acceptance = work_cmd._task_acceptance(current)
+            if pack_acceptance != current_acceptance:
+                issues.append(_context_issue(pack, "task_acceptance_stale", task_id))
+    selected_tools = pack.get("selected_tools") if isinstance(pack.get("selected_tools"), list) else []
+    if selected_tools:
+        from . import tools_cmd
+
+        for item in selected_tools:
+            tool_id = item.get("tool_id") if isinstance(item, dict) else None
+            if isinstance(tool_id, str) and tool_id:
+                tool, errors = tools_cmd._find_tool(target, tool_id)
+                if tool is None:
+                    issues.append(_context_issue(pack, "tool_reference_stale", f"{tool_id}: {'; '.join(errors)}"))
+    return issues
+
+
 def show(*, target: Path, pack_id: str, json_output: bool = False) -> int:
     target = target.expanduser().resolve()
     pack, error = _find_pack(target, pack_id)
@@ -450,6 +497,68 @@ def sync_record(*, target: Path, pack_id: str = "latest", json_output: bool = Fa
     return 0 if payload["valid"] and payload["blocker_count"] == 0 else 1
 
 
+def doctor(*, target: Path, json_output: bool = False) -> int:
+    target = target.expanduser().resolve()
+    payload = health(target)
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+    print(f"context doctor: {target}")
+    print(f"packs: {payload['pack_count']}")
+    for issue in payload["issues"]:
+        print(f"[{issue.get('status', WARN)}] {issue.get('name')}: {issue.get('detail')}")
+    if not payload["issues"]:
+        print("[ok] context_packs: current")
+    return 0
+
+
+def import_issues(*, target: Path, json_output: bool = False) -> int:
+    target = target.expanduser().resolve()
+    payload = health(target)
+    records: list[dict[str, Any]] = []
+    for issue in payload["issues"]:
+        issue_type = str(issue.get("issue_type") or issue.get("name") or "context_issue")
+        pack_id = str(issue.get("pack_id") or "context")
+        detail = str(issue.get("detail") or "")
+        records.append(
+            {
+                "text": f"Repair context pack issue {pack_id}/{issue_type}: {detail}",
+                "kind": "task",
+                "source": "context-pack",
+                "type": "docs",
+                "priority": "normal",
+                "template": "docs",
+                "acceptance": [f"`brigade context doctor` no longer reports {pack_id}/{issue_type}."],
+                "metadata": {
+                    "context_pack_id": pack_id,
+                    "context_issue_type": issue_type,
+                    "context_issue_detail": detail,
+                    "source_item_key": f"context-pack:{pack_id}:{issue_type}",
+                    "source_fingerprint": issue.get("source_fingerprint") or _stable_hash({"pack_id": pack_id, "issue_type": issue_type, "detail": detail}),
+                },
+            }
+        )
+    imported, skipped, skipped_dismissed = work_cmd._append_import_records(target, records)
+    response = {
+        "target": str(target),
+        "imports_path": str(work_cmd._imports_path(target)),
+        "issues": len(records),
+        "created": len(imported),
+        "skipped": len(skipped),
+        "dismissed": len(skipped_dismissed),
+        "imports": imported,
+    }
+    if json_output:
+        print(json.dumps(response, indent=2, sort_keys=True))
+        return 0
+    print(f"context issue imports: {target}")
+    print(f"issues: {len(records)}")
+    print(f"created: {len(imported)}")
+    print(f"skipped: {len(skipped)}")
+    print(f"dismissed: {len(skipped_dismissed)}")
+    return 0
+
+
 def archive(*, target: Path, pack_id: str, json_output: bool = False) -> int:
     target = target.expanduser().resolve()
     pack, error = _find_pack(target, pack_id)
@@ -479,6 +588,8 @@ def health(target: Path) -> dict[str, Any]:
     issues = []
     if not packs:
         issues.append({"status": WARN, "name": "context_pack_missing", "detail": "no context packs"})
+    for pack in packs:
+        issues.extend(_context_pack_issues(target, pack))
     sync = None
     if latest is not None and _sync_config_path(target).is_file():
         sync = _context_sync_plan_payload(target, pack_id=str(latest.get("pack_id") or "latest"))

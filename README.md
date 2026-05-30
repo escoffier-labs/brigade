@@ -317,6 +317,8 @@ brigade context show <pack-id>
 brigade context archive <pack-id>
 brigade context sync plan <pack-id|latest>
 brigade context sync record <pack-id|latest>
+brigade context doctor
+brigade context import-issues
 brigade projects audit
 brigade projects import-issues
 brigade learn plan

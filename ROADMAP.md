@@ -94,7 +94,7 @@ Goal: make Brigade able to reason about callable tools across agent harnesses wi
 
 Goal: make context preparation, project consolidation, and self-learning local, explicit, and reviewable.
 
-- Build local context engineering packs for task, repo, release, and tool-use scenarios. Status: started with `brigade context plan/build/list/show/archive`, `brigade context sync plan/record`, safe summaries, task acceptance, recent evidence, private evidence exclusions, and read-only configured harness sync planning receipts.
+- Build local context engineering packs for task, repo, release, and tool-use scenarios. Status: started with `brigade context plan/build/list/show/archive`, `brigade context sync plan/record`, `brigade context doctor/import-issues`, safe summaries, task acceptance, recent evidence, private evidence exclusions, read-only configured harness sync planning receipts, and reviewable context freshness imports.
 - Audit configured related project records without cloning or mutating remotes. Status: started with gitignored `.brigade/projects.toml`, `brigade projects audit/import-issues`, decision records for bake-in, integrate, catalog-only, move-candidate, and leave-alone, plus manual-only migration plans.
 - Aggregate local learning candidates without self-modification. Status: started with `brigade learn plan/doctor/import-issues`, candidate routing into the scanner inbox, raw import text avoidance, and safe replay receipt support.
 

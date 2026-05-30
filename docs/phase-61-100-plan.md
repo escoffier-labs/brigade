@@ -86,6 +86,8 @@ Goal: surface stale context packs, missing references, outdated task acceptance,
 
 Acceptance: tests cover doctor, work brief, center reviews, release readiness, and `source: context-pack` imports.
 
+Status: implemented with `brigade context doctor/import-issues`, stale pack checks, missing source-reference checks, task acceptance drift detection, stale tool-reference detection, daily brief and work doctor visibility, center review queue entries, release evidence, and `source: context-pack` imports.
+
 ### Phase 72: Project Migration Readiness Receipts
 Goal: turn project audit decisions into local readiness receipts for docs, license, security, release, ownership, and migration blockers.
 

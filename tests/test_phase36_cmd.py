@@ -1,5 +1,6 @@
 import json
 import subprocess
+from datetime import datetime, timezone
 from pathlib import Path
 
 from brigade import center_cmd
@@ -158,6 +159,52 @@ def test_context_sync_plan_receipts_freshness_conflicts_and_release_center_integ
     assert center_cmd.activity(target=tmp_path, json_output=True) == 0
     activity = json.loads(capsys.readouterr().out)
     assert any(item["subsystem"] == "context-sync" for item in activity["activity"])
+
+
+def test_context_pack_freshness_doctor_imports_and_daily_release_surfaces(tmp_path, monkeypatch, capsys):
+    _seed_task(tmp_path)
+    _seed_import(tmp_path)
+    (tmp_path / "README.md").write_text("local readme\n")
+    monkeypatch.setattr(context_cmd, "_now", lambda: datetime(2026, 5, 30, 12, 0, 0, tzinfo=timezone.utc))
+    assert context_cmd.build(target=tmp_path, kind="task", task_id="task-one", tool_id="missing-tool", json_output=True) == 0
+    built = json.loads(capsys.readouterr().out)
+    context_path = Path(built["path"], "context.json")
+    payload = json.loads(context_path.read_text())
+    payload["created_at"] = "2026-05-20T12:00:00+00:00"
+    _write_json(context_path, payload)
+    tasks_path = tmp_path / ".brigade" / "work" / "tasks.json"
+    tasks = json.loads(tasks_path.read_text())
+    tasks["tasks"][0]["acceptance"] = ["Center status reports pending reviews.", "Context pack is refreshed."]
+    _write_json(tasks_path, tasks)
+    (tmp_path / "README.md").unlink()
+
+    assert context_cmd.doctor(target=tmp_path, json_output=True) == 0
+    health = json.loads(capsys.readouterr().out)
+    issue_types = {issue["issue_type"] for issue in health["issues"] if issue.get("issue_type")}
+    assert {"pack_stale", "missing_source_reference", "task_acceptance_stale", "tool_reference_stale"} <= issue_types
+
+    assert context_cmd.import_issues(target=tmp_path, json_output=True) == 0
+    imports = json.loads(capsys.readouterr().out)
+    assert imports["created"] == 4
+    assert {item["source"] for item in imports["imports"]} == {"context-pack"}
+
+    assert work_cmd.brief(target=tmp_path) == 0
+    brief = capsys.readouterr().out
+    assert "context_top_issue:" in brief
+
+    assert work_cmd.doctor(target=tmp_path) in {0, 1}
+    doctor = capsys.readouterr().out
+    assert "context_pack_stale" in doctor
+
+    assert center_cmd.reviews(target=tmp_path, json_output=True) == 0
+    reviews = json.loads(capsys.readouterr().out)
+    assert any(item["subsystem"] == "context" for item in reviews["reviews"])
+
+    monkeypatch.setattr(release_cmd, "_run_content_guard_check", lambda *args, **kwargs: {"name": "content_guard_tip", "status": "ok", "exit_code": 0, "detail": "clean"})
+    monkeypatch.setattr(release_cmd, "_content_guard_available", lambda target: True)
+    assert release_cmd.plan(target=tmp_path, base_ref=None, json_output=True) in {0, 1}
+    release = json.loads(capsys.readouterr().out)
+    assert release["evidence"]["context"]["top_issue"]["issue_type"] == "pack_stale"
 
 
 def test_projects_audit_imports_and_learning_candidates(tmp_path, capsys):

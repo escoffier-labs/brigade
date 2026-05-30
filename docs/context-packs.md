@@ -12,6 +12,8 @@ brigade context show <pack-id>
 brigade context archive <pack-id>
 brigade context sync plan <pack-id|latest>
 brigade context sync record <pack-id|latest>
+brigade context doctor
+brigade context import-issues
 ```
 
 Packs are written under `.brigade/context/packs/` and stay gitignored. A pack contains safe summaries and references, not raw private evidence.
@@ -34,6 +36,8 @@ Default exclusions include raw chat exports, secret-looking values, private infr
 `brigade context sync plan` reads configured local harness destinations from `.brigade/context/sync-targets.json` and compares them to a built context pack. It reports missing destinations, current managed destinations, stale managed destinations, unmanaged conflicts, stale pack age, and missing source references. `brigade context sync record` writes the read-only plan receipt under `.brigade/context/sync-plans/`.
 
 Sync planning never writes harness context files. A future explicit apply command would be required before any configured destination is mutated.
+
+`brigade context doctor` reports stale context packs, missing source references, task acceptance criteria that changed after pack build, stale tool references, and sync-plan blockers. `brigade context import-issues` routes those issues into the work inbox as `source: context-pack` tasks with stable fingerprints and dismiss-until-changed behavior.
 
 `brigade context archive` moves a local pack into `.brigade/context/archive/`. It does not delete source files, write harness context files, edit memory, or run tools.
 

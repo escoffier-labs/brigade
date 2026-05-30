@@ -1018,6 +1018,12 @@ def _build_parser() -> argparse.ArgumentParser:
     p_context_sync.add_argument("pack_id", nargs="?", default="latest", help="Pack id, unique prefix, or latest.")
     p_context_sync.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
     p_context_sync.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_context_doctor = context_sub.add_parser("doctor", help="Check context pack freshness and references.")
+    p_context_doctor.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_context_doctor.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_context_import = context_sub.add_parser("import-issues", help="Import context pack issues into the work inbox.")
+    p_context_import.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
+    p_context_import.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
 
     # projects
     p_projects = sub.add_parser("projects", help="Audit local side-project consolidation decisions.")
@@ -2083,6 +2089,10 @@ def main(argv=None) -> int:
                 return context_cmd.sync_plan(target=args.target, pack_id=args.pack_id, json_output=args.json)
             if args.sync_command == "record":
                 return context_cmd.sync_record(target=args.target, pack_id=args.pack_id, json_output=args.json)
+        if args.context_command == "doctor":
+            return context_cmd.doctor(target=args.target, json_output=args.json)
+        if args.context_command == "import-issues":
+            return context_cmd.import_issues(target=args.target, json_output=args.json)
         parser.error(f"unknown context command: {args.context_command}")
         return 2
     if cmd == "projects":

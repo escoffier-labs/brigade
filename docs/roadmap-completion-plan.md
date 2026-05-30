@@ -478,6 +478,7 @@ Phase 36 status:
 - Context packs are written under `.brigade/context/packs/` and include task acceptance, doc and guidance summaries, selected tool references, recent work/security/review summaries, and an explicit private-evidence exclusion list.
 - Context pack doc and guidance summaries use presence and line-count metadata instead of copying raw file contents.
 - Context sync planning reads `.brigade/context/sync-targets.json`, reports missing/current/stale/conflicted destinations, stale pack age, and missing source references, and writes local sync-plan receipts under `.brigade/context/sync-plans/`.
+- Context doctor and import routing report stale packs, missing source references, stale task acceptance, stale tool references, and sync blockers, then route active issues into the work inbox as `source: context-pack` tasks.
 - Deferred: writing context packs into harness destinations. Reason: sync planning remains read-only until a future explicit context apply command exists.
 
 ### 9. Side Project Consolidation And Org-Move Planning
