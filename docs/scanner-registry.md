@@ -118,3 +118,5 @@ Fields:
 - `cwd` or `target`: optional repo-relative working directory for execution.
 
 Default local producers cover chat sweep imports, memory refresh imports, handoff ingest sync, security findings, and optional disabled memory-care, backup-health, and tool-catalog entries. Product-specific chat adapters and tool projection writers remain outside this registry phase.
+
+Project consolidation, learning-loop, context-pack, and operator-center commands are not scanner executions by themselves. They can still route reviewable work into the same inbox through `brigade projects import-issues`, `brigade learn import-issues`, and subsystem-specific import commands. The operator-center commands are read-only summaries and never ingest, promote, or execute scanner output.

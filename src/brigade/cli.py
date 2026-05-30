@@ -155,6 +155,16 @@ def _build_parser() -> argparse.ArgumentParser:
     p_release_candidate_archive.add_argument("candidate_id", help="Candidate id, unique prefix, or latest.")
     p_release_candidate_archive.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
     p_release_candidate_archive.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_release_candidate_compare = release_candidate_sub.add_parser("compare", help="Compare a candidate against current local state.")
+    p_release_candidate_compare.add_argument("candidate_id", nargs="?", default="latest", help="Candidate id, unique prefix, or latest.")
+    p_release_candidate_compare.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_release_candidate_compare.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_release_candidate_closeout = release_candidate_sub.add_parser("closeout", help="Mark a local release candidate review state.")
+    p_release_candidate_closeout.add_argument("candidate_id", nargs="?", default="latest", help="Candidate id, unique prefix, or latest.")
+    p_release_candidate_closeout.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
+    p_release_candidate_closeout.add_argument("--status", choices=["draft", "reviewed", "superseded", "archived"], default="reviewed")
+    p_release_candidate_closeout.add_argument("--reason", default=None, help="Review reason.")
+    p_release_candidate_closeout.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
 
     # roadmap
     p_roadmap = sub.add_parser("roadmap", help="Inspect roadmap completion state.")
@@ -224,6 +234,14 @@ def _build_parser() -> argparse.ArgumentParser:
     p_handoff_archive.add_argument("--sources", type=Path, default=None, help="Override .brigade/handoff-sources.json.")
     p_handoff_archive.add_argument("--reason", default=None, help="Review reason to store in archive metadata.")
     p_handoff_archive.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_handoff_closeout = handoff_sub.add_parser("closeout", help="Write local handoff draft closeout metadata.")
+    p_handoff_closeout.add_argument("draft_id", nargs="?", help="Draft id, filename, path, or unique prefix. Defaults to all pending drafts.")
+    p_handoff_closeout.add_argument("--all", action="store_true", help="Close out all non-archived drafts.")
+    p_handoff_closeout.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
+    p_handoff_closeout.add_argument("--sources", type=Path, default=None, help="Override .brigade/handoff-sources.json.")
+    p_handoff_closeout.add_argument("--reason", default=None, help="Review reason.")
+    p_handoff_closeout.add_argument("--defer", action="store_true", help="Mark selected drafts deferred instead of reviewed.")
+    p_handoff_closeout.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_handoff_runs = handoff_sub.add_parser("runs", help="List local handoff ingestion receipts.")
     p_handoff_runs.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
     p_handoff_runs.add_argument("--limit", type=int, default=20, help="Maximum runs to show.")
@@ -280,6 +298,11 @@ def _build_parser() -> argparse.ArgumentParser:
     p_memory_care_import.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
     p_memory_care_import.add_argument("--dry-run", action="store_true", help="Report without writing imports.")
     p_memory_care_import.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_memory_care_closeout = memory_care_sub.add_parser("closeout", help="Write local memory-care closeout metadata.")
+    p_memory_care_closeout.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
+    p_memory_care_closeout.add_argument("--reason", default=None, help="Review reason.")
+    p_memory_care_closeout.add_argument("--defer", action="store_true", help="Mark current queue deferred instead of reviewed.")
+    p_memory_care_closeout.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
 
     # work
     p_work = sub.add_parser("work", help="Inspect and manage a daily Brigade work session.")
@@ -358,6 +381,9 @@ def _build_parser() -> argparse.ArgumentParser:
     p_work_closeout.add_argument("session_id", help="Work session id, unique prefix, or latest.")
     p_work_closeout.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
     p_work_closeout.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_work_acceptance = work_sub.add_parser("acceptance", help="Summarize task acceptance coverage.")
+    p_work_acceptance.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_work_acceptance.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_work_inbox = work_sub.add_parser("inbox", help="Review scanner-ready work imports.")
     p_work_inbox.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
     p_work_inbox.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
@@ -385,6 +411,11 @@ def _build_parser() -> argparse.ArgumentParser:
     p_work_backup_import = backup_sub.add_parser("import-issues", help="Import backup health issues into the work inbox.")
     p_work_backup_import.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
     p_work_backup_import.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_work_backup_closeout = backup_sub.add_parser("closeout", help="Write local backup health closeout metadata.")
+    p_work_backup_closeout.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
+    p_work_backup_closeout.add_argument("--reason", default=None, help="Review reason.")
+    p_work_backup_closeout.add_argument("--defer", action="store_true", help="Mark current backup issues deferred instead of reviewed.")
+    p_work_backup_closeout.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_work_scanners = work_sub.add_parser("scanners", help="Inspect local scanner registry and schedule plans.")
     scanners_sub = p_work_scanners.add_subparsers(dest="scanners_command", metavar="<scanners-command>")
     scanners_sub.required = True
@@ -716,6 +747,69 @@ def _build_parser() -> argparse.ArgumentParser:
     p_chat_sweep_import.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
     p_chat_sweep_import.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
 
+    # context
+    p_context = sub.add_parser("context", help="Plan and build local context engineering packs.")
+    context_sub = p_context.add_subparsers(dest="context_command", metavar="<context-command>")
+    context_sub.required = True
+    for name in ("plan", "build"):
+        p_context_action = context_sub.add_parser(name, help=f"{name.title()} a local context pack.")
+        p_context_action.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace.")
+        p_context_action.add_argument("--kind", choices=["task", "repo", "release", "tool-use"], default="repo")
+        p_context_action.add_argument("--task-id", default=None, help="Task id for task context packs.")
+        p_context_action.add_argument("--tool-id", default=None, help="Tool id for tool-use context packs.")
+        p_context_action.add_argument("--release-id", default=None, help="Release candidate or readiness id.")
+        p_context_action.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_context_list = context_sub.add_parser("list", help="List local context packs.")
+    p_context_list.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_context_list.add_argument("--limit", type=int, default=20, help="Maximum packs to list.")
+    p_context_list.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_context_show = context_sub.add_parser("show", help="Show one local context pack.")
+    p_context_show.add_argument("pack_id", help="Pack id or unique prefix.")
+    p_context_show.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_context_show.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_context_archive = context_sub.add_parser("archive", help="Archive one local context pack.")
+    p_context_archive.add_argument("pack_id", help="Pack id or unique prefix.")
+    p_context_archive.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
+    p_context_archive.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+
+    # projects
+    p_projects = sub.add_parser("projects", help="Audit local side-project consolidation decisions.")
+    projects_sub = p_projects.add_subparsers(dest="projects_command", metavar="<projects-command>")
+    projects_sub.required = True
+    p_projects_audit = projects_sub.add_parser("audit", help="Audit configured project consolidation records.")
+    p_projects_audit.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_projects_audit.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_projects_import = projects_sub.add_parser("import-issues", help="Import project consolidation issues into the work inbox.")
+    p_projects_import.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
+    p_projects_import.add_argument("--dry-run", action="store_true", help="Report without writing imports.")
+    p_projects_import.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+
+    # learn
+    p_learn = sub.add_parser("learn", help="Plan local self-learning candidates without mutating memory or source.")
+    learn_sub = p_learn.add_subparsers(dest="learn_command", metavar="<learn-command>")
+    learn_sub.required = True
+    p_learn_plan = learn_sub.add_parser("plan", help="List local learning candidates.")
+    p_learn_plan.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_learn_plan.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_learn_doctor = learn_sub.add_parser("doctor", help="Check local self-learning queue health.")
+    p_learn_doctor.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_learn_doctor.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_learn_import = learn_sub.add_parser("import-issues", help="Import learning candidates into the work inbox.")
+    p_learn_import.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
+    p_learn_import.add_argument("--dry-run", action="store_true", help="Report without writing imports.")
+    p_learn_import.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+
+    # center
+    p_center = sub.add_parser("center", help="Read local operator-center summaries.")
+    center_sub = p_center.add_subparsers(dest="center_command", metavar="<center-command>")
+    center_sub.required = True
+    for name in ("status", "activity", "reviews", "templates"):
+        p_center_action = center_sub.add_parser(name, help=f"Show local operator-center {name}.")
+        p_center_action.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+        p_center_action.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+        if name in {"activity", "reviews"}:
+            p_center_action.add_argument("--limit", type=int, default=50, help="Maximum rows to show.")
+
     # run
     p_run = sub.add_parser("run", help="Run a bounded cross-model orchestration task.")
     p_run.add_argument("task", help="Task for the aboyeur to plan, dispatch, and synthesize.")
@@ -882,6 +976,12 @@ def _build_parser() -> argparse.ArgumentParser:
     p_security_unsuppress = security_sub.add_parser("unsuppress", help="Remove a security finding suppression.")
     p_security_unsuppress.add_argument("fingerprint", help="Finding id, id prefix, or fingerprint to unsuppress.")
     p_security_unsuppress.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
+    p_security_closeout = security_sub.add_parser("closeout", help="Write local security review closeout metadata.")
+    p_security_closeout.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
+    p_security_closeout.add_argument("--output-dir", type=Path, default=None, help="Security evidence bundle directory.")
+    p_security_closeout.add_argument("--reason", default=None, help="Review reason.")
+    p_security_closeout.add_argument("--accept-risk", action="store_true", help="Mark open findings as locally accepted risk.")
+    p_security_closeout.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_security_scan = security_sub.add_parser("scan", help="Run a read-only agent workspace security scan.")
     p_security_scan.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to scan.")
     p_security_scan.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
@@ -1067,6 +1167,39 @@ def _build_parser() -> argparse.ArgumentParser:
     p_tools_policy_doctor = tools_policy_sub.add_parser("doctor", help="Check portable tool execution policy health.")
     p_tools_policy_doctor.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
     p_tools_policy_doctor.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_tools_pack = tools_sub.add_parser("pack", help="Build and inspect local portable tool packs.")
+    tools_pack_sub = p_tools_pack.add_subparsers(dest="tools_pack_command", metavar="<tools-pack-command>")
+    tools_pack_sub.required = True
+    p_tools_pack_build = tools_pack_sub.add_parser("build", help="Build a local portable tool pack.")
+    p_tools_pack_build.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
+    p_tools_pack_build.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_tools_pack_list = tools_pack_sub.add_parser("list", help="List local portable tool packs.")
+    p_tools_pack_list.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_tools_pack_list.add_argument("--limit", type=int, default=20, help="Maximum packs to list.")
+    p_tools_pack_list.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_tools_pack_show = tools_pack_sub.add_parser("show", help="Show one local portable tool pack.")
+    p_tools_pack_show.add_argument("pack_id", help="Pack id or unique prefix.")
+    p_tools_pack_show.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_tools_pack_show.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_tools_pack_archive = tools_pack_sub.add_parser("archive", help="Archive one local portable tool pack.")
+    p_tools_pack_archive.add_argument("pack_id", help="Pack id or unique prefix.")
+    p_tools_pack_archive.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
+    p_tools_pack_archive.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_tools_sync = tools_sub.add_parser("sync", help="Plan and apply reviewed portable tool projection sync.")
+    tools_sync_sub = p_tools_sync.add_subparsers(dest="tools_sync_command", metavar="<tools-sync-command>")
+    tools_sync_sub.required = True
+    p_tools_sync_plan = tools_sync_sub.add_parser("plan", help="Plan reviewed projection sync without writing.")
+    p_tools_sync_plan.add_argument("tool_id", nargs="?", help="Optional logical tool id.")
+    p_tools_sync_plan.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_tools_sync_plan.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_tools_sync_apply = tools_sync_sub.add_parser("apply", help="Apply reviewed projection sync.")
+    p_tools_sync_apply.add_argument("tool_id", nargs="?", help="Optional logical tool id.")
+    p_tools_sync_apply.add_argument("--all", action="store_true", help="Apply all configured tool projections.")
+    p_tools_sync_apply.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
+    p_tools_sync_apply.add_argument("--dry-run", action="store_true", default=True, help="Plan writes without changing files.")
+    p_tools_sync_apply.add_argument("--write", dest="dry_run", action="store_false", help="Write reviewed add-only projections.")
+    p_tools_sync_apply.add_argument("--force", action="store_true", help="Allow intentional overwrites through managed apply.")
+    p_tools_sync_apply.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_tools_plan = tools_sub.add_parser("plan", help="Plan portable tool projection writes.")
     p_tools_plan.add_argument("tool_id", nargs="?", help="Optional logical tool id.")
     p_tools_plan.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
@@ -1262,6 +1395,16 @@ def main(argv=None) -> int:
                 return release_cmd.candidate_show(target=args.target, candidate_id=args.candidate_id, json_output=args.json)
             if args.release_candidate_command == "archive":
                 return release_cmd.candidate_archive(target=args.target, candidate_id=args.candidate_id, json_output=args.json)
+            if args.release_candidate_command == "compare":
+                return release_cmd.candidate_compare(target=args.target, candidate_id=args.candidate_id, json_output=args.json)
+            if args.release_candidate_command == "closeout":
+                return release_cmd.candidate_closeout(
+                    target=args.target,
+                    candidate_id=args.candidate_id,
+                    status=args.status,
+                    reason=args.reason,
+                    json_output=args.json,
+                )
             parser.error(f"unknown release candidate command: {args.release_candidate_command}")
             return 2
         parser.error(f"unknown release command: {args.release_command}")
@@ -1327,6 +1470,16 @@ def main(argv=None) -> int:
                 sources=args.sources,
                 json_output=args.json,
             )
+        if args.handoff_command == "closeout":
+            return handoff_cmd.closeout(
+                target=args.target,
+                draft_id=args.draft_id,
+                all_pending=args.all,
+                reason=args.reason,
+                defer=args.defer,
+                sources=args.sources,
+                json_output=args.json,
+            )
         if args.handoff_command == "runs":
             return handoff_cmd.runs(target=args.target, json_output=args.json, limit=args.limit)
         if args.handoff_command == "run-show":
@@ -1389,6 +1542,68 @@ def main(argv=None) -> int:
             return 2
         parser.error(f"unknown chat command: {args.chat_command}")
         return 2
+    if cmd == "context":
+        from . import context_cmd
+
+        if args.context_command == "plan":
+            return context_cmd.plan(
+                target=args.target,
+                kind=args.kind,
+                task_id=args.task_id,
+                tool_id=args.tool_id,
+                release_id=args.release_id,
+                json_output=args.json,
+            )
+        if args.context_command == "build":
+            return context_cmd.build(
+                target=args.target,
+                kind=args.kind,
+                task_id=args.task_id,
+                tool_id=args.tool_id,
+                release_id=args.release_id,
+                json_output=args.json,
+            )
+        if args.context_command == "list":
+            return context_cmd.list_packs(target=args.target, limit=args.limit, json_output=args.json)
+        if args.context_command == "show":
+            return context_cmd.show(target=args.target, pack_id=args.pack_id, json_output=args.json)
+        if args.context_command == "archive":
+            return context_cmd.archive(target=args.target, pack_id=args.pack_id, json_output=args.json)
+        parser.error(f"unknown context command: {args.context_command}")
+        return 2
+    if cmd == "projects":
+        from . import projects_cmd
+
+        if args.projects_command == "audit":
+            return projects_cmd.audit(target=args.target, json_output=args.json)
+        if args.projects_command == "import-issues":
+            return projects_cmd.import_issues(target=args.target, dry_run=args.dry_run, json_output=args.json)
+        parser.error(f"unknown projects command: {args.projects_command}")
+        return 2
+    if cmd == "learn":
+        from . import learn_cmd
+
+        if args.learn_command == "plan":
+            return learn_cmd.plan(target=args.target, json_output=args.json)
+        if args.learn_command == "doctor":
+            return learn_cmd.doctor(target=args.target, json_output=args.json)
+        if args.learn_command == "import-issues":
+            return learn_cmd.import_issues(target=args.target, dry_run=args.dry_run, json_output=args.json)
+        parser.error(f"unknown learn command: {args.learn_command}")
+        return 2
+    if cmd == "center":
+        from . import center_cmd
+
+        if args.center_command == "status":
+            return center_cmd.status(target=args.target, json_output=args.json)
+        if args.center_command == "activity":
+            return center_cmd.activity(target=args.target, limit=args.limit, json_output=args.json)
+        if args.center_command == "reviews":
+            return center_cmd.reviews(target=args.target, limit=args.limit, json_output=args.json)
+        if args.center_command == "templates":
+            return center_cmd.templates(target=args.target, json_output=args.json)
+        parser.error(f"unknown center command: {args.center_command}")
+        return 2
     if cmd == "memory":
         from . import memory_cmd
 
@@ -1409,6 +1624,13 @@ def main(argv=None) -> int:
                 return memory_cmd.import_issues(
                     target=args.target,
                     dry_run=args.dry_run,
+                    json_output=args.json,
+                )
+            if args.memory_care_command == "closeout":
+                return memory_cmd.closeout(
+                    target=args.target,
+                    reason=args.reason,
+                    defer=args.defer,
                     json_output=args.json,
                 )
             parser.error(f"unknown memory care command: {args.memory_care_command}")
@@ -1487,6 +1709,8 @@ def main(argv=None) -> int:
             return 2
         if args.work_command == "closeout":
             return work_cmd.closeout(target=args.target, session_id=args.session_id, json_output=args.json)
+        if args.work_command == "acceptance":
+            return work_cmd.acceptance(target=args.target, json_output=args.json)
         if args.work_command == "inbox" and getattr(args, "inbox_command", None):
             if args.inbox_command == "doctor":
                 return work_cmd.inbox_doctor(target=args.target, json_output=args.json)
@@ -1509,6 +1733,13 @@ def main(argv=None) -> int:
                 return work_cmd.backup_doctor(target=args.target, json_output=args.json)
             if args.backup_command == "import-issues":
                 return work_cmd.backup_import_issues(target=args.target, json_output=args.json)
+            if args.backup_command == "closeout":
+                return work_cmd.backup_closeout(
+                    target=args.target,
+                    reason=args.reason,
+                    defer=args.defer,
+                    json_output=args.json,
+                )
             parser.error(f"unknown backup command: {args.backup_command}")
             return 2
         if args.work_command == "scanners":
@@ -1852,6 +2083,14 @@ def main(argv=None) -> int:
             return security_cmd.suppress(target=args.target, fingerprint=args.fingerprint, reason=args.reason)
         if args.security_command == "unsuppress":
             return security_cmd.unsuppress(target=args.target, fingerprint=args.fingerprint)
+        if args.security_command == "closeout":
+            return security_cmd.closeout(
+                target=args.target,
+                output_dir=args.output_dir,
+                reason=args.reason,
+                accept_risk=args.accept_risk,
+                json_output=args.json,
+            )
         if args.security_command == "scan":
             return security_cmd.scan(
                 target=args.target,
@@ -1981,6 +2220,31 @@ def main(argv=None) -> int:
             if args.tools_policy_command == "doctor":
                 return tools_cmd.policy_doctor(target=args.target, json_output=args.json)
             parser.error(f"unknown tools policy command: {args.tools_policy_command}")
+            return 2
+        if args.tools_command == "pack":
+            if args.tools_pack_command == "build":
+                return tools_cmd.pack_build(target=args.target, json_output=args.json)
+            if args.tools_pack_command == "list":
+                return tools_cmd.pack_list(target=args.target, limit=args.limit, json_output=args.json)
+            if args.tools_pack_command == "show":
+                return tools_cmd.pack_show(target=args.target, pack_id=args.pack_id, json_output=args.json)
+            if args.tools_pack_command == "archive":
+                return tools_cmd.pack_archive(target=args.target, pack_id=args.pack_id, json_output=args.json)
+            parser.error(f"unknown tools pack command: {args.tools_pack_command}")
+            return 2
+        if args.tools_command == "sync":
+            if args.tools_sync_command == "plan":
+                return tools_cmd.sync_plan(target=args.target, tool_id=args.tool_id, json_output=args.json)
+            if args.tools_sync_command == "apply":
+                return tools_cmd.sync_apply(
+                    target=args.target,
+                    tool_id=args.tool_id,
+                    all_tools=args.all,
+                    dry_run=args.dry_run,
+                    force=args.force,
+                    json_output=args.json,
+                )
+            parser.error(f"unknown tools sync command: {args.tools_sync_command}")
             return 2
         if args.tools_command == "plan":
             return tools_cmd.plan(target=args.target, tool_id=args.tool_id, json_output=args.json)

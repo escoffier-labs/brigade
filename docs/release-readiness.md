@@ -14,6 +14,8 @@ brigade release candidate plan
 brigade release candidate build
 brigade release candidate list
 brigade release candidate show <candidate-id>
+brigade release candidate compare <candidate-id>
+brigade release candidate closeout <candidate-id>
 brigade release candidate archive <candidate-id>
 ```
 
@@ -31,6 +33,8 @@ brigade release candidate archive <candidate-id>
 
 `release candidate` commands turn readiness receipts into local candidate bundles under `.brigade/release/candidates/`. They do not push, tag, create releases, or mutate remotes. See [`release-candidates.md`](release-candidates.md).
 
+Use `brigade release candidate compare` before publishing from an older candidate. It reports changed HEAD, missing referenced receipts, newer local verification, review, scanner, or security evidence, and docs changed after candidate build. Use `brigade release candidate closeout` to mark a candidate draft, reviewed, superseded, or archived without moving the bundle.
+
 ## Evidence
 
 Release readiness includes:
@@ -41,6 +45,8 @@ Release readiness includes:
 - latest scanner sweep review state
 - latest security health and evidence state
 - handoff draft and ingest health
+- local closeout state for backup, handoff, memory-care, security, and release candidates when available
+- context pack freshness, project consolidation state, learning candidates, and operator-center pending review summaries where configured
 - git branch, dirty tracked files, upstream, ahead count, and behind count
 - README, CHANGELOG, and ROADMAP touch warnings when user-facing code changed
 - content-guard tip scan when available

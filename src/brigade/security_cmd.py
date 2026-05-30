@@ -179,6 +179,15 @@ def default_artifacts_dir(target: Path) -> Path:
     return target / ARTIFACTS_REL_PATH
 
 
+def _closeouts_root(target: Path) -> Path:
+    return target / ".brigade" / "security" / "closeouts"
+
+
+def _write_json(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+
+
 def inspect_evidence_bundle(path: Path) -> dict[str, Any]:
     path = path.expanduser().resolve()
     json_path = path / "security-report.json"
@@ -2186,6 +2195,75 @@ def doctor(*, target: Path, json_output: bool = False) -> int:
         print(f"top_finding: {top.get('id')} [{top.get('severity')}] {top.get('path')}:{top.get('line')} {top.get('title')}")
         print(f"show_command: brigade security show {top.get('id')}")
     return 0 if payload["valid"] else 1
+
+
+def closeout(
+    *,
+    target: Path,
+    output_dir: Path | None = None,
+    reason: str | None = None,
+    accept_risk: bool = False,
+    json_output: bool = False,
+) -> int:
+    target = target.expanduser().resolve()
+    if not target.is_dir():
+        print(f"error: --target is not a directory: {target}", file=sys.stderr)
+        return 2
+    artifacts_dir = output_dir.expanduser().resolve() if output_dir is not None else default_artifacts_dir(target)
+    try:
+        report = _load_report(artifacts_dir)
+        records = _report_findings_for_review(target, report)
+    except FileNotFoundError as exc:
+        print(f"error: security report not found: {exc}", file=sys.stderr)
+        return 2
+    except (ValueError, json.JSONDecodeError) as exc:
+        print(f"error: invalid security report: {exc}", file=sys.stderr)
+        return 2
+    opened = [item for item in records if item.get("status") != "suppressed"]
+    suppressed = [item for item in records if item.get("status") == "suppressed"]
+    created_at = _utc_iso()
+    closeout_id = f"{created_at.replace(':', '').replace('.', '').replace('Z', '')}-security-closeout"
+    status = "accepted-risk" if accept_risk and opened else "reviewed"
+    finding_records = [
+        {
+            "id": item.get("id"),
+            "fingerprint": item.get("fingerprint"),
+            "status": item.get("status"),
+            "severity": item.get("severity"),
+            "category": item.get("category"),
+            "path": item.get("path"),
+            "line": item.get("line"),
+            "reason": item.get("reason"),
+        }
+        for item in records
+    ]
+    payload = {
+        "target": str(target),
+        "closeout_id": closeout_id,
+        "created_at": created_at,
+        "status": status,
+        "reason": reason or ("open findings accepted as local risk" if accept_risk else "security findings reviewed"),
+        "artifacts": str(artifacts_dir),
+        "generated_at": report.get("generated_at"),
+        "policy": report.get("policy"),
+        "finding_count": len(records),
+        "open_count": len(opened),
+        "suppressed_count": len(suppressed),
+        "source_fingerprints": [str(item.get("fingerprint")) for item in records if item.get("fingerprint")],
+        "findings": finding_records,
+        "path": str(_closeouts_root(target) / closeout_id / "closeout.json"),
+    }
+    _write_json(Path(payload["path"]), payload)
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+    print(f"security closeout: {closeout_id}")
+    print(f"status: {status}")
+    print(f"findings: {len(records)}")
+    print(f"open: {len(opened)}")
+    print(f"suppressed: {len(suppressed)}")
+    print(f"path: {payload['path']}")
+    return 0
 
 
 def scan(

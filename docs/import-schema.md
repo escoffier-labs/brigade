@@ -92,6 +92,8 @@ Roadmap and repo-fleet producers use the same import contract:
 
 - `source: roadmap-audit` records roadmap hygiene issues such as stale phase sections or documented command drift. Metadata includes `issue_type`, `safe_summary`, `source_item_key`, and `source_fingerprint`.
 - `source: repo-fleet` records local repository readiness gaps from `brigade repos import-issues`. Metadata includes `repo_id`, `issue_type`, `safe_summary`, `source_item_key`, and `source_fingerprint`.
+- `source: project-consolidation` records local project decision or readiness gaps from `brigade projects import-issues`. Metadata includes a safe project alias, `issue_type`, `safe_summary`, `source_item_key`, and `source_fingerprint`.
+- `source: learning-loop` records bounded local learning candidates from `brigade learn import-issues`. Metadata includes candidate id, source subsystem, safe summary, `source_item_key`, and `source_fingerprint`.
 
 Repo-fleet imports must use safe labels only. Do not copy full local paths, guidance file contents, private config values, raw logs, scanner output, owner names, exact private repo names, or raw evidence into import text or metadata.
 

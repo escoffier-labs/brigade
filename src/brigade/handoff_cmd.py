@@ -541,6 +541,15 @@ def _handoff_ingest_runs_root(target: Path) -> Path:
     return _handoff_state_root(target) / "ingest-runs"
 
 
+def _handoff_closeouts_root(target: Path) -> Path:
+    return _handoff_state_root(target) / "closeouts"
+
+
+def _write_json(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+
+
 def _load_source_config_for_drafts(target: Path, sources: Path | None = None) -> tuple[SourceConfig, Path | None, list[str], bool]:
     target = target.expanduser().resolve()
     sources_path = sources.expanduser().resolve() if sources is not None else default_sources_path(target)
@@ -1246,6 +1255,94 @@ def archive_draft(
     print(f"archived: {len(archived)}")
     for record in archived:
         print(f"- {record['id']} -> {record['archive_path']}")
+    return 0
+
+
+def _draft_closeout_fingerprint(draft: HandoffDraft) -> str:
+    if draft.source_fingerprint:
+        return draft.source_fingerprint
+    stable = {
+        "id": draft.id,
+        "path": str(draft.path),
+        "modified_at": draft.modified_at,
+        "target_card": draft.target_card,
+        "target_document": draft.target_document,
+        "ingestion_status": draft.ingestion_status,
+    }
+    return hashlib.sha256(json.dumps(stable, sort_keys=True).encode()).hexdigest()[:16]
+
+
+def closeout(
+    *,
+    target: Path,
+    draft_id: str | None = None,
+    all_pending: bool = False,
+    reason: str | None = None,
+    defer: bool = False,
+    sources: Path | None = None,
+    json_output: bool = False,
+) -> int:
+    target = target.expanduser().resolve()
+    if not target.is_dir():
+        print(f"error: --target is not a directory: {target}", file=sys.stderr)
+        return 2
+    if draft_id and all_pending:
+        print("error: pass a handoff id/path or --all, not both", file=sys.stderr)
+        return 2
+    if not draft_id and not all_pending:
+        all_pending = True
+    if all_pending:
+        drafts, errors, _ = _drafts(target, sources=sources)
+        if errors:
+            print(f"error: {'; '.join(errors)}", file=sys.stderr)
+            return 2
+        selected = [draft for draft in drafts if draft.status != "archived"]
+    else:
+        draft, error = _find_draft(target, draft_id or "", sources=sources)
+        if draft is None:
+            print(f"error: {error}", file=sys.stderr)
+            return 1 if error and "not found" in error else 2
+        selected = [draft]
+    created_at = time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime())
+    closeout_id = f"{created_at.replace(':', '').replace('+', 'Z')}-handoff-closeout"
+    status = "deferred" if defer else "reviewed"
+    records = []
+    for draft in selected:
+        records.append(
+            {
+                "id": draft.id,
+                "path": str(draft.path),
+                "status": draft.status,
+                "lint_valid": draft.lint.valid,
+                "ingestion_status": draft.ingestion_status,
+                "target_card": draft.target_card,
+                "target_document": draft.target_document,
+                "source_import_id": draft.source_import_id,
+                "source_fingerprint": draft.source_fingerprint,
+                "closeout_fingerprint": _draft_closeout_fingerprint(draft),
+            }
+        )
+    payload = {
+        "target": str(target),
+        "closeout_id": closeout_id,
+        "created_at": created_at,
+        "status": status,
+        "reason": reason or ("handoff drafts deferred" if defer else "handoff drafts reviewed"),
+        "draft_count": len(records),
+        "drafts": records,
+        "source_fingerprints": [item["closeout_fingerprint"] for item in records],
+        "path": str(_handoff_closeouts_root(target) / closeout_id / "closeout.json"),
+    }
+    _write_json(Path(payload["path"]), payload)
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+    print(f"handoff closeout: {closeout_id}")
+    print(f"status: {status}")
+    print(f"drafts: {len(records)}")
+    print(f"path: {payload['path']}")
+    for record in records[:20]:
+        print(f"- {record['id']} [{record['status']}] ingest={record.get('ingestion_status') or 'unreconciled'}")
     return 0
 
 

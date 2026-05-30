@@ -48,6 +48,7 @@ Goal: make Brigade a safe target for local automations that discover useful work
 - Audit roadmap closure and neutral pattern coverage. Status: started with `brigade roadmap audit`, `brigade roadmap patterns`, stale phase warnings, documented command drift checks, roadmap-audit imports, and source-pattern decision records without public reference names.
 - Inspect local repo fleet readiness without copying private repo contents. Status: started with gitignored `.brigade/repos.toml`, `brigade repos init/list/show/scan/doctor/import-issues`, safe metadata summaries, AGENTS and fallback guidance detection, repo-fleet imports, and daily-loop health surfacing.
 - Close out scanner sweeps after review. Status: started with `brigade work sweep closeout <sweep-id|latest>`, deferred import recording, missing-reference blocking, and inbox hygiene warnings for unclosed sweeps.
+- Inspect local operator state from one read-only center view. Status: started with `brigade center status/activity/reviews/templates`, aggregating local work, imports, sweeps, reviews, handoffs, tools, learning, context packs, projects, security, and release state without a daemon or server.
 
 ## Later Phase: Chat Surface Scanners
 
@@ -71,6 +72,7 @@ Goal: make backup health part of the same daily operator loop as chat, memory, a
 - Surface latest NAS snapshot age, latest cloud snapshot age, prune result, `restic check` result, and restore rehearsal date. Status: started with read-only local backup summary contracts and `brigade work backup`.
 - Send compact private backup summaries to the operator chat/status surface, including Discord or ClickClack when configured.
 - Route stale snapshot, failed check, failed prune, missing mount, and restore-rehearsal overdue signals into `brigade work import` as incidents. Status: started with `backup-health` imports and source fingerprints.
+- Close out reviewed backup risk without hiding changed issues. Status: started with `brigade work backup closeout` and local closeout receipts keyed by issue fingerprints.
 - Keep real hostnames, remote names, mount paths, webhook URLs, channel ids, and backup passwords out of public templates. Status: started with unsafe summary field warnings and public docs.
 
 ## Later Phase: Shared Tool Catalog And Runtime
@@ -86,6 +88,15 @@ Goal: make Brigade able to reason about callable tools across agent harnesses wi
 - Add a local daemon option with status, stop, restart, port tracking, and safe local auto-start for commands that need a runtime. Status: started with explicit local runtime supervision through `brigade tools runtime`, without auto-start from doctor, brief, or work run.
 - Keep shared auth, secrets, and policy decisions host-local and gitignored, while publishing only safe example configs. Status: started with `.brigade/tools/policy.toml`, policy-gated call planning and execution, and env label bindings from the current process environment.
 - Expose catalog health through `brigade doctor` and route broken source/auth/policy states into `brigade work import`. Status: started through `brigade work brief`, `brigade work doctor`, and `tool-catalog` imports.
+- Build local portable tool evidence bundles and reviewed sync plans. Status: started with `brigade tools pack build/list/show/archive` and `brigade tools sync plan/apply`, dry-run by default with managed projection conflict safety.
+
+## Later Phase: Context, Projects, And Learning
+
+Goal: make context preparation, project consolidation, and self-learning local, explicit, and reviewable.
+
+- Build local context engineering packs for task, repo, release, and tool-use scenarios. Status: started with `brigade context plan/build/list/show/archive`, safe summaries, task acceptance, recent evidence, and private evidence exclusions.
+- Audit configured related project records without cloning or mutating remotes. Status: started with gitignored `.brigade/projects.toml`, `brigade projects audit/import-issues`, decision records for bake-in, integrate, catalog-only, move-candidate, and leave-alone, plus manual-only migration plans.
+- Aggregate local learning candidates without self-modification. Status: started with `brigade learn plan/doctor/import-issues`, candidate routing into the scanner inbox, and safe replay receipt support.
 
 ## Later Phase: Cybersecurity Plugin
 
@@ -114,6 +125,7 @@ Brigade-specific additions:
 - Include dependency and package-manager hardening checks for agent plugin ecosystems, MCP packages, skills, and local tool wrappers. Status: started with package scripts, GitHub Actions refs and permissions, Python URL dependencies, and legacy install hooks.
 - Enrich reviewed indicators and suspicious package or domain findings through optional providers such as MISP, then route enriched findings into local evidence bundles and work imports. Status: started with `security-enrichment.json`, `security-enrichment.md`, and review/doctor visibility.
 - Track false-positive taxonomy, runtime-confidence rules, suppressions, and regression fixtures as first-class project artifacts. Status: started with `brigade security findings`, `show`, `review`, reasoned suppressions, unsuppress, and stale-suppression doctor warnings.
+- Close out reviewed security findings and accepted risk. Status: started with `brigade security closeout` and local receipts that preserve safe finding ids, fingerprints, suppressions, and accepted-risk status.
 
 ## Current Phase: Issue And TDD Work Loop
 

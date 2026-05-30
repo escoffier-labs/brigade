@@ -643,16 +643,25 @@ def health(target: Path) -> dict[str, Any]:
         checks.append({"status": "fail", "name": "memory_care_queue", "detail": str(exc)})
     if queue_payload is None:
         checks.append({"status": "warn", "name": "memory_care_queue", "detail": f"missing at {queue_path}"})
+    closeout = _latest_closeout(target)
+    closed = set(closeout.get("source_fingerprints", [])) if isinstance(closeout, dict) else set()
     top_issue = None
     if isinstance(queue_payload, dict) and isinstance(queue_payload.get("cards"), list) and queue_payload["cards"]:
-        top_issue = queue_payload["cards"][0]
-        checks.append(
-            {
-                "status": "warn",
-                "name": "memory_care_open_issues",
-                "detail": f"{len(queue_payload['cards'])} queued, top={top_issue.get('issue_type')}:{top_issue.get('file')}",
-            }
-        )
+        open_cards = [
+            card for card in queue_payload["cards"]
+            if isinstance(card, dict) and str(card.get("source_fingerprint") or "") not in closed
+        ]
+        if open_cards:
+            top_issue = open_cards[0]
+            checks.append(
+                {
+                    "status": "warn",
+                    "name": "memory_care_open_issues",
+                    "detail": f"{len(open_cards)} queued, top={top_issue.get('issue_type')}:{top_issue.get('file')}",
+                }
+            )
+        else:
+            checks.append({"status": "ok", "name": "memory_care_open_issues", "detail": "queued issues reviewed or deferred"})
     else:
         checks.append({"status": "ok", "name": "memory_care_open_issues", "detail": "none"})
     issues = [check for check in checks if check["status"] != "ok"]
@@ -665,6 +674,7 @@ def health(target: Path) -> dict[str, Any]:
         "issue_count": len(issues),
         "top_issue": top_issue or (issues[0] if issues else None),
         "checks": checks,
+        "latest_closeout": closeout,
     }
 
 
@@ -710,3 +720,61 @@ def import_issues(*, target: Path, json_output: bool = False, dry_run: bool = Fa
         print(f"error: invalid memory-care config: {exc}", file=sys.stderr)
         return 2
     return work_cmd.import_memory_care(target=target, queue=_queue_path(target, config), dry_run=dry_run, json_output=json_output)
+
+
+def _closeouts_root(target: Path) -> Path:
+    return target.expanduser().resolve() / ".brigade" / "memory-care" / "closeouts"
+
+
+def _latest_closeout(target: Path) -> dict[str, Any] | None:
+    root = _closeouts_root(target)
+    if not root.is_dir():
+        return None
+    payloads: list[dict[str, Any]] = []
+    for path in root.glob("*/closeout.json"):
+        try:
+            payload = json.loads(path.read_text())
+        except (OSError, json.JSONDecodeError):
+            continue
+        if isinstance(payload, dict):
+            payload.setdefault("path", str(path))
+            payloads.append(payload)
+    payloads.sort(key=lambda item: str(item.get("created_at") or item.get("closeout_id") or ""), reverse=True)
+    return payloads[0] if payloads else None
+
+
+def closeout(*, target: Path, reason: str | None = None, defer: bool = False, json_output: bool = False) -> int:
+    target = target.expanduser().resolve()
+    if not target.is_dir():
+        print(f"error: --target is not a directory: {target}", file=sys.stderr)
+        return 2
+    try:
+        config = _config_or_default(target)
+        queue = _load_json_file(_queue_path(target, config))
+    except (OSError, json.JSONDecodeError, ValueError) as exc:
+        print(f"error: cannot read memory-care queue: {exc}", file=sys.stderr)
+        return 2
+    cards = queue.get("cards") if isinstance(queue, dict) and isinstance(queue.get("cards"), list) else []
+    fingerprints = [
+        str(card.get("source_fingerprint"))
+        for card in cards
+        if isinstance(card, dict) and isinstance(card.get("source_fingerprint"), str)
+    ]
+    closeout_id = f"{_utc_iso().replace(':', '').replace('+', 'Z')}-memory-care-closeout"
+    payload = {
+        "closeout_id": closeout_id,
+        "created_at": _utc_iso(),
+        "status": "deferred" if defer else "reviewed",
+        "reason": reason or "",
+        "candidate_count": len(cards),
+        "source_fingerprints": fingerprints,
+        "safe_summary": f"{len(cards)} memory-care candidate(s) {'deferred' if defer else 'reviewed'}",
+    }
+    work_cmd._write_json(_closeouts_root(target) / closeout_id / "closeout.json", payload)
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+    print(f"memory_care_closeout: {closeout_id}")
+    print(f"status: {payload['status']}")
+    print(f"candidates: {payload['candidate_count']}")
+    return 0

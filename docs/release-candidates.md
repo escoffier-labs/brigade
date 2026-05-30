@@ -9,6 +9,8 @@ brigade release candidate plan
 brigade release candidate build
 brigade release candidate list
 brigade release candidate show <candidate-id>
+brigade release candidate compare <candidate-id>
+brigade release candidate closeout <candidate-id>
 brigade release candidate archive <candidate-id>
 ```
 
@@ -20,7 +22,9 @@ brigade release candidate archive <candidate-id>
 .brigade/release/candidates/
 ```
 
-`list` and `show` inspect bundles. `archive` moves a reviewed candidate into the local archive so it no longer appears as the latest candidate.
+`list` and `show` inspect bundles. `compare` checks the candidate against current local state, including changed HEAD, missing referenced receipts, newer verification or review evidence, newer scanner or security evidence, and docs changed after the bundle was built.
+
+`closeout` writes a local `CLOSEOUT.json` into the candidate bundle with `draft`, `reviewed`, `superseded`, or `archived` state. `archive` moves a reviewed candidate into the local archive so it no longer appears as the latest candidate.
 
 ## Bundle Files
 

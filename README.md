@@ -164,6 +164,8 @@ brigade release candidate plan
 brigade release candidate build
 brigade release candidate list
 brigade release candidate show <candidate-id>
+brigade release candidate compare <candidate-id>
+brigade release candidate closeout <candidate-id>
 brigade release candidate archive <candidate-id>
 brigade handoff doctor
 brigade handoff lint
@@ -171,6 +173,7 @@ brigade handoff list
 brigade handoff show <handoff-id-or-path>
 brigade handoff archive <handoff-id-or-path>
 brigade handoff archive --all-reviewed
+brigade handoff closeout
 brigade handoff runs
 brigade handoff run-show <run-id>
 brigade handoff reconcile
@@ -191,6 +194,7 @@ brigade work backup init
 brigade work backup status
 brigade work backup doctor
 brigade work backup import-issues
+brigade work backup closeout
 brigade work scanners init
 brigade work scanners list
 brigade work scanners show chat-memory-sweep
@@ -214,6 +218,7 @@ brigade work verify run
 brigade work verify runs
 brigade work verify show <run-id>
 brigade work closeout latest
+brigade work acceptance
 brigade work sweep
 brigade work sweep --all
 brigade work sweeps
@@ -258,6 +263,12 @@ brigade tools runtime doctor
 brigade tools policy init
 brigade tools policy show
 brigade tools policy doctor
+brigade tools pack build
+brigade tools pack list
+brigade tools pack show <pack-id>
+brigade tools pack archive <pack-id>
+brigade tools sync plan
+brigade tools sync apply --write --all
 brigade tools plan
 brigade tools plan simplify
 brigade tools apply simplify --dry-run
@@ -294,6 +305,22 @@ brigade memory care scan
 brigade memory care status
 brigade memory care doctor
 brigade memory care import-issues
+brigade memory care closeout
+brigade context plan
+brigade context build
+brigade context list
+brigade context show <pack-id>
+brigade context archive <pack-id>
+brigade projects audit
+brigade projects import-issues
+brigade learn plan
+brigade learn doctor
+brigade learn import-issues
+brigade security closeout
+brigade center status
+brigade center activity
+brigade center reviews
+brigade center templates
 brigade work run
 brigade work run --queue-next
 brigade work run "review today's changes"

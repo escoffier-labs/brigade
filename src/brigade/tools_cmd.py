@@ -1034,6 +1034,11 @@ def _read_json(path: Path) -> tuple[object | None, str | None]:
     return payload, None
 
 
+def _write_json(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+
+
 def _redact_value(key: str, value: object) -> object:
     if UNSAFE_FIELD_PATTERN.search(key):
         return "[redacted]"
@@ -4536,6 +4541,164 @@ def apply(
     for item in conflicts:
         print(f"- conflict: {item.get('tool_id')} {item.get('harness')} {item.get('detail')}")
     return 0 if not conflicts else 1
+
+
+def _packs_root(target: Path) -> Path:
+    return target / ".brigade" / "tools" / "packs"
+
+
+def _packs_archive_root(target: Path) -> Path:
+    return target / ".brigade" / "tools" / "packs-archive"
+
+
+def _tool_pack_payload(target: Path) -> dict[str, Any]:
+    catalog = _catalog_payload(target)
+    projection = _projection_plan_payload(target)
+    return {
+        "target": catalog["target"],
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "tool_count": catalog["tool_count"],
+        "tools": catalog["tools"],
+        "projection_counts": projection["counts"],
+        "projections": projection["projections"],
+        "policy": catalog["policy"],
+        "runtimes": catalog["runtimes"],
+        "call_queue": catalog["call_queue"],
+        "run_history": catalog["run_history"],
+        "checkpoints": catalog["checkpoints"],
+        "issues": catalog["issues"],
+        "issue_count": catalog["issue_count"],
+    }
+
+
+def pack_build(*, target: Path, json_output: bool = False) -> int:
+    target = target.expanduser().resolve()
+    if not target.is_dir():
+        print(f"error: --target is not a directory: {target}", file=sys.stderr)
+        return 2
+    pack_id = f"{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}-tool-pack"
+    payload = _tool_pack_payload(target)
+    payload.update({"pack_id": pack_id, "status": "built"})
+    pack_dir = _packs_root(target) / pack_id
+    _write_json(pack_dir / "tool-pack.json", payload)
+    (pack_dir / "TOOL_PACK.md").write_text(
+        f"# Tool Pack {pack_id}\n\n"
+        f"- tools: {payload['tool_count']}\n"
+        f"- issues: {payload['issue_count']}\n"
+        f"- projections: {len(payload['projections'])}\n"
+    )
+    payload["path"] = str(pack_dir)
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+    print(f"tool_pack: {pack_id}")
+    print(f"path: {pack_dir}")
+    print(f"tools: {payload['tool_count']}")
+    print(f"issues: {payload['issue_count']}")
+    return 0
+
+
+def _tool_packs(target: Path) -> list[dict[str, Any]]:
+    root = _packs_root(target)
+    packs: list[dict[str, Any]] = []
+    if root.is_dir():
+        for path in root.iterdir():
+            payload, error = _read_json(path / "tool-pack.json")
+            if error is None and isinstance(payload, dict):
+                payload.setdefault("path", str(path))
+                packs.append(payload)
+    packs.sort(key=lambda item: str(item.get("created_at") or item.get("pack_id") or ""), reverse=True)
+    return packs
+
+
+def pack_list(*, target: Path, json_output: bool = False, limit: int = 20) -> int:
+    target = target.expanduser().resolve()
+    packs = _tool_packs(target)[:limit]
+    payload = {"target": str(target), "packs": packs, "pack_count": len(packs)}
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+    print(f"tool packs: {target}")
+    for pack in packs:
+        print(f"- {pack.get('pack_id')} tools={pack.get('tool_count')} issues={pack.get('issue_count')}")
+    return 0
+
+
+def _find_tool_pack(target: Path, pack_id: str) -> tuple[dict[str, Any] | None, str | None]:
+    packs = _tool_packs(target)
+    if pack_id == "latest":
+        return (packs[0], None) if packs else (None, "tool pack not found: latest")
+    matches = [pack for pack in packs if str(pack.get("pack_id") or "").startswith(pack_id)]
+    if not matches:
+        return None, f"tool pack not found: {pack_id}"
+    if len(matches) > 1:
+        return None, f"tool pack id is ambiguous: {pack_id}"
+    return matches[0], None
+
+
+def pack_show(*, target: Path, pack_id: str, json_output: bool = False) -> int:
+    target = target.expanduser().resolve()
+    pack, error = _find_tool_pack(target, pack_id)
+    if pack is None:
+        print(f"error: {error}", file=sys.stderr)
+        return 1
+    if json_output:
+        print(json.dumps({"target": str(target), "pack": pack}, indent=2, sort_keys=True))
+        return 0
+    print(f"tool_pack: {pack.get('pack_id')}")
+    print(f"tools: {pack.get('tool_count')}")
+    print(f"issues: {pack.get('issue_count')}")
+    return 0
+
+
+def pack_archive(*, target: Path, pack_id: str, json_output: bool = False) -> int:
+    target = target.expanduser().resolve()
+    pack, error = _find_tool_pack(target, pack_id)
+    if pack is None:
+        print(f"error: {error}", file=sys.stderr)
+        return 1
+    source = Path(str(pack.get("path") or _packs_root(target) / str(pack.get("pack_id"))))
+    destination = _packs_archive_root(target) / source.name
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if destination.exists():
+        print(f"error: archived tool pack already exists: {destination}", file=sys.stderr)
+        return 2
+    source.rename(destination)
+    payload = {"target": str(target), "pack_id": pack.get("pack_id"), "status": "archived", "archive_path": str(destination)}
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+    print(f"archived: {pack.get('pack_id')}")
+    print(f"path: {destination}")
+    return 0
+
+
+def sync_plan(*, target: Path, tool_id: str | None = None, json_output: bool = False) -> int:
+    target = target.expanduser().resolve()
+    payload = _projection_plan_payload(target, tool_id=tool_id)
+    payload.update({"mode": "sync-plan", "dry_run_default": True, "delete_supported": False, "add_only": True})
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0 if payload["valid"] else 1
+    print(f"tools sync plan: {target}")
+    print(f"projections: {len(payload['projections'])}")
+    print("dry_run_default: true")
+    print("delete_supported: false")
+    return 0 if payload["valid"] else 1
+
+
+def sync_apply(*, target: Path, tool_id: str | None = None, all_tools: bool = False, dry_run: bool = True, force: bool = False, json_output: bool = False) -> int:
+    if not dry_run and not force:
+        # Sync apply is intentionally conservative: explicit non-dry-run writes require --force.
+        dry_run = True
+    return apply(
+        target=target,
+        tool_id=tool_id,
+        all_tools=all_tools,
+        dry_run=dry_run,
+        force=force,
+        json_output=json_output,
+    )
 
 
 def doctor(*, target: Path, json_output: bool = False) -> int:

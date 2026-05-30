@@ -261,6 +261,11 @@ Acceptance:
 - Tests cover each provider fixture through validate, ingest, import, inbox, sweep review, and handoff or task promotion.
 - Tests prove raw private chat text is rejected or redacted from imports, session artifacts, handoffs, docs, and release evidence.
 
+Phase 36 status:
+
+- Existing export-based chat surface commands remain the active implementation path: `brigade chat sweep validate/ingest/import-issues`.
+- Deferred: new live chat adapters and expanded provider-specific parsers. Reason: the phase kept the no-live-API boundary and focused on local operator closure.
+
 ### 6. Backup And Recovery Closure
 
 Deliverable: make backup health fully reviewable in daily operations.
@@ -277,6 +282,12 @@ Acceptance:
 - Tests cover backup review closeout and daily brief quieting.
 - Tests cover release readiness including backup risk as warning or blocker by policy.
 - Tests prove hostnames, remotes, mount paths, webhook URLs, and passwords are not copied.
+
+Phase 36 status:
+
+- Implemented command surface: `brigade work backup closeout`.
+- Implemented local closeout receipts under `.brigade/backups/closeouts/` using issue fingerprints and safe summaries only.
+- Deferred: outbound operator status messages. Reason: notifications are out of scope and would require product-specific surfaces.
 
 ### 7. Shared Tool Catalog Completion
 
@@ -308,6 +319,13 @@ Acceptance:
 - Tests cover projections, contracts, policy, runtime, approvals, run history, and checkpoints represented in pack evidence.
 - Tests cover parity closeout and work brief quieting.
 
+Phase 36 status:
+
+- Implemented command surface: `brigade tools pack build/list/show/archive`.
+- Implemented command surface: `brigade tools sync plan` and `brigade tools sync apply`.
+- Tool packs summarize catalog entries, projections, policy, runtimes, call approvals, run history, checkpoints, and catalog issues.
+- Deferred: separate parity closeout receipt. Reason: projection state is represented in packs and sync plans first, with closeout state left for a focused compatibility pass.
+
 ### 8. Context Engineering Packs
 
 Deliverable: make repo and task context explicit, reviewable, and portable across harnesses.
@@ -336,6 +354,12 @@ Acceptance:
 - Tests cover context packs for task, repo, release, and tool-use scenarios.
 - Tests cover stale context warnings and missing source references.
 - Tests prove raw private evidence is excluded by default.
+
+Phase 36 status:
+
+- Implemented command surface: `brigade context plan/build/list/show/archive`.
+- Context packs are written under `.brigade/context/packs/` and include task acceptance, doc and guidance summaries, selected tool references, recent work/security/review summaries, and an explicit private-evidence exclusion list.
+- Deferred: writing context packs into harness destinations. Reason: sync planning remains read-only until a future explicit context apply command exists.
 
 ### 9. Side Project Consolidation And Org-Move Planning
 
@@ -380,6 +404,12 @@ Acceptance:
 - Tests prove no GitHub transfer, archive, visibility, or remote mutation occurs.
 - Tests cover project-consolidation imports with dedupe and dismissed-until-changed behavior.
 
+Phase 36 status:
+
+- Implemented command surface: `brigade projects audit` and `brigade projects import-issues`.
+- Added gitignored `.brigade/projects.toml` contract for safe labels, decisions, readiness flags, and manual-only migration plans.
+- Exact project names and owner names remain local config concerns, not public docs or imports.
+
 ### 10. Self-Learning Loop Closure
 
 Deliverable: make self-learning explicit, bounded, and reviewable.
@@ -417,6 +447,13 @@ Acceptance:
 - Tests cover dismissal and accepted-risk quieting.
 - Tests prove no automatic memory edits or source edits happen.
 
+Phase 36 status:
+
+- Implemented command surface: `brigade learn plan`, `brigade learn doctor`, and `brigade learn import-issues`.
+- Learning candidates aggregate from pending scanner imports, failed review receipts, and failed portable tool run receipts.
+- Added safe local replay receipt support for before/after summaries.
+- Deferred: rich accepted-risk quieting across every source subsystem. Reason: candidate import routing exists first, while source-specific closeout policies remain subsystem-owned.
+
 ### 11. Security Plugin Closure
 
 Deliverable: complete security evidence packs and policy-driven local gates.
@@ -444,6 +481,12 @@ Acceptance:
 - Tests cover security closeout evidence in release readiness and release candidates.
 - Existing publish-guard integration still passes.
 
+Phase 36 status:
+
+- Implemented command surface: `brigade security closeout`.
+- Security closeouts write local receipts under `.brigade/security/closeouts/` with finding ids, fingerprints, status, suppressions, and accepted-risk state.
+- Deferred: SARIF. Reason: JSON and Markdown evidence bundles already exist, and SARIF needs a focused schema compatibility pass without new dependencies.
+
 ### 12. Issue And TDD Loop Closure
 
 Deliverable: close the daily task lifecycle from issue or scanner import to review and release evidence.
@@ -461,6 +504,12 @@ Acceptance:
 - Tests cover shareable workflow rule templates.
 - Tests cover acceptance coverage rollups in release evidence.
 
+Phase 36 status:
+
+- Implemented command surface: `brigade work acceptance`.
+- Acceptance summaries report pending tasks with acceptance, pending tasks missing acceptance, completed tasks with completion metadata, completed tasks missing completion metadata, and pending review-finding counts.
+- Deferred: stale active issue repair imports and shareable workflow rule templates. Reason: this phase completed the local acceptance rollup first.
+
 ### 13. Memory And Handoff Closure
 
 Deliverable: make memory handoff and memory-care review quiet, explicit, and auditable.
@@ -476,6 +525,13 @@ Acceptance:
 - Tests cover handoff and memory-care closeout states.
 - Tests cover no direct `MEMORY.md` or memory card edits.
 - Tests cover daily brief quieting after closeout.
+
+Phase 36 status:
+
+- Implemented command surface: `brigade handoff closeout`.
+- Implemented command surface: `brigade memory care closeout`.
+- Handoff closeouts record draft ids, lint state, ingestion state, target card or document, source import references, and safe fingerprints.
+- Memory-care closeouts record queue fingerprints and review or defer state without editing cards or `MEMORY.md`.
 
 ### 14. Release And Publish Gate Completion
 
@@ -493,6 +549,38 @@ Acceptance:
 - Tests cover release readiness and candidate evidence for every completed local subsystem, including context packs.
 - Tests cover candidate compare and closeout state.
 - Tests prove no push, tag, release creation, upload, or PR mutation occurs.
+
+Phase 36 status:
+
+- Implemented command surface: `brigade release candidate compare`.
+- Implemented command surface: `brigade release candidate closeout`.
+- Candidate compare detects changed HEAD, missing referenced receipts, newer release, verification, review, scanner, or security receipts, and docs changed after candidate build.
+- Candidate closeout writes local `CLOSEOUT.json` with draft, reviewed, superseded, or archived state. It does not push, tag, publish, or mutate remotes.
+
+### 15. Local Operator Center
+
+Deliverable: expose one read-only local control-plane style view over the existing Brigade state.
+
+Implementation scope:
+
+- Add `brigade center status`.
+- Add `brigade center activity`.
+- Add `brigade center reviews`.
+- Add `brigade center templates`.
+- Aggregate existing local state only: work sessions, pending tasks, pending imports, scanner runs and sweeps, review runs, handoff drafts, tool approvals, checkpoints, context packs, learning candidates, repo fleet, project decisions, security health, release readiness, and release candidates.
+- Every center item includes subsystem, local id, status, safe summary, suggested next command, and priority or severity when available.
+- Keep center commands read-only and JSON-first for future wrappers.
+
+Acceptance:
+
+- Tests cover center status, activity, reviews, and templates in text and JSON.
+- Tests prove center commands are read-only.
+- Public docs describe the operator center as local CLI output, not a hosted dashboard, app server, daemon, or sync engine.
+
+Phase 36 status:
+
+- Implemented command surface: `brigade center status/activity/reviews/templates`.
+- Center status aggregates local subsystem health. Center activity reads receipts and pack metadata. Center reviews presents one pending review queue across imports, learning, projects, and context health. Center templates lists local workflow templates for wrappers.
 
 ## Suggested Execution Order
 

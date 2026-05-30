@@ -2039,7 +2039,13 @@ def _backup_health(target: Path) -> dict[str, Any]:
             continue
         if now is not None:
             checks.extend(_backup_destination_checks(target, destination, now))
-    issues = [check for check in checks if check.get("status") != OK]
+    closeout = _backup_latest_closeout(target)
+    closed_fingerprints = set(closeout.get("source_fingerprints", [])) if isinstance(closeout, dict) else set()
+    issues = [
+        check
+        for check in checks
+        if check.get("status") != OK and _backup_issue_fingerprint(check) not in closed_fingerprints
+    ]
     return {
         "target": str(target),
         "config_path": str(_backup_config_path(target)),
@@ -2049,7 +2055,42 @@ def _backup_health(target: Path) -> dict[str, Any]:
         "issues": issues,
         "issue_count": len(issues),
         "top_issue": issues[0] if issues else None,
+        "latest_closeout": closeout,
     }
+
+
+def _backup_closeouts_root(target: Path) -> Path:
+    return target / ".brigade" / "backups" / "closeouts"
+
+
+def _backup_latest_closeout(target: Path) -> dict[str, Any] | None:
+    root = _backup_closeouts_root(target)
+    if not root.is_dir():
+        return None
+    closeouts: list[dict[str, Any]] = []
+    for path in root.glob("*/closeout.json"):
+        try:
+            payload = json.loads(path.read_text())
+        except (OSError, json.JSONDecodeError):
+            continue
+        if isinstance(payload, dict):
+            payload.setdefault("path", str(path))
+            closeouts.append(payload)
+    closeouts.sort(key=lambda item: str(item.get("created_at") or item.get("closeout_id") or ""), reverse=True)
+    return closeouts[0] if closeouts else None
+
+
+def _backup_issue_fingerprint(issue: dict[str, Any]) -> str:
+    return _stable_hash(
+        {
+            "destination": issue.get("destination") or "config",
+            "issue_type": issue.get("issue_type") or issue.get("name"),
+            "detail": issue.get("detail"),
+            "summary": issue.get("summary"),
+            "evidence_path": issue.get("evidence_path"),
+            "unsafe_fields": issue.get("unsafe_fields"),
+        }
+    )
 
 
 def _backup_issue_records(target: Path) -> list[dict[str, Any]]:
@@ -2065,16 +2106,7 @@ def _backup_issue_records(target: Path) -> list[dict[str, Any]]:
             "backup_issue_type": issue_type,
             "backup_issue_detail": detail,
             "source_item_key": f"backup-health:{destination}:{issue_type}",
-            "source_fingerprint": _stable_hash(
-                {
-                    "destination": destination,
-                    "issue_type": issue_type,
-                    "detail": detail,
-                    "summary": issue.get("summary"),
-                    "evidence_path": issue.get("evidence_path"),
-                    "unsafe_fields": issue.get("unsafe_fields"),
-                }
-            ),
+            "source_fingerprint": _backup_issue_fingerprint(issue),
         }
         if issue.get("summary"):
             metadata["safe_summary"] = issue["summary"]
@@ -4827,7 +4859,7 @@ def _suggested_command(active: dict[str, Any] | None, next_text: object, source:
 
 
 def _brief_payload(target: Path, *, limit: int = 3) -> dict[str, Any]:
-    from . import chat_cmd, handoff_cmd, memory_cmd, repos_cmd, roadmap_cmd, security_cmd, tools_cmd
+    from . import chat_cmd, context_cmd, handoff_cmd, learn_cmd, memory_cmd, projects_cmd, repos_cmd, roadmap_cmd, security_cmd, tools_cmd
 
     target = target.expanduser().resolve()
     active = _active_session_info(target)
@@ -4854,6 +4886,9 @@ def _brief_payload(target: Path, *, limit: int = 3) -> dict[str, Any]:
     tool_health = tools_cmd.health(target)
     roadmap_health = roadmap_cmd.health(target)
     repo_health = repos_cmd.health(target)
+    context_health = context_cmd.health(target)
+    projects_health = projects_cmd.health(target)
+    learning_health = learn_cmd.health(target)
     handoff_issues = handoff_cmd.collect_issues(target)
     known_handoff_issue_ids = handoff_cmd._known_local_issue_ids(target)
     new_handoff_issues = [issue for issue in handoff_issues if issue.id not in known_handoff_issue_ids]
@@ -4950,6 +4985,22 @@ def _brief_payload(target: Path, *, limit: int = 3) -> dict[str, Any]:
             "repo_count": repo_health["repo_count"],
             "issue_count": repo_health["issue_count"],
             "top_issue": repo_health["top_issue"],
+        },
+        "context_packs": {
+            "pack_count": context_health["pack_count"],
+            "issue_count": context_health["issue_count"],
+            "top_issue": context_health["top_issue"],
+            "latest": context_health["latest"],
+        },
+        "project_consolidation": {
+            "project_count": projects_health["project_count"],
+            "issue_count": projects_health["issue_count"],
+            "top_issue": projects_health["top_issue"],
+        },
+        "learning": {
+            "candidate_count": learning_health["candidate_count"],
+            "issue_count": learning_health["issue_count"],
+            "top_issue": learning_health["top_issue"],
         },
         "handoff_issues": {
             "count": len(new_handoff_issues),
@@ -5643,6 +5694,28 @@ def brief(*, target: Path, limit: int = 3, json_output: bool = False) -> int:
         top_repo = repo_fleet.get("top_issue") if isinstance(repo_fleet.get("top_issue"), dict) else None
         if top_repo:
             print(f"repo_fleet_top_issue: {top_repo.get('name')} {_short(str(top_repo.get('detail', '')))}")
+
+    context_packs = payload.get("context_packs") if isinstance(payload.get("context_packs"), dict) else {}
+    if context_packs:
+        print(f"context_packs: {context_packs.get('pack_count', 0)}")
+        if context_packs.get("issue_count"):
+            top_context = context_packs.get("top_issue") if isinstance(context_packs.get("top_issue"), dict) else None
+            if top_context:
+                print(f"context_top_issue: {top_context.get('name')} {_short(str(top_context.get('detail', '')))}")
+
+    project_consolidation = payload.get("project_consolidation") if isinstance(payload.get("project_consolidation"), dict) else {}
+    if project_consolidation:
+        print(f"project_consolidation: {'ok' if project_consolidation.get('issue_count') == 0 else f'{project_consolidation.get('issue_count')} issue(s)'}")
+        top_project = project_consolidation.get("top_issue") if isinstance(project_consolidation.get("top_issue"), dict) else None
+        if top_project:
+            print(f"project_consolidation_top_issue: {top_project.get('name')} {_short(str(top_project.get('detail', '')))}")
+
+    learning = payload.get("learning") if isinstance(payload.get("learning"), dict) else {}
+    if learning:
+        print(f"learning_candidates: {learning.get('candidate_count', 0)}")
+        top_learning = learning.get("top_issue") if isinstance(learning.get("top_issue"), dict) else None
+        if top_learning:
+            print(f"learning_top_issue: {top_learning.get('name')} {_short(str(top_learning.get('detail', '')))}")
 
     code_review = payload.get("code_review")
     if isinstance(code_review, dict):
@@ -7625,6 +7698,33 @@ def scanners_init(*, target: Path, force: bool = False, update_gitignore: bool =
     return 0
 
 
+def backup_closeout(*, target: Path, reason: str | None = None, defer: bool = False, json_output: bool = False) -> int:
+    target = target.expanduser().resolve()
+    if not target.is_dir():
+        print(f"error: --target is not a directory: {target}", file=sys.stderr)
+        return 2
+    raw_health = _backup_health(target)
+    fingerprints = [_backup_issue_fingerprint(issue) for issue in raw_health["issues"] if isinstance(issue, dict)]
+    closeout_id = f"{_now().strftime('%Y%m%d-%H%M%S')}-backup-closeout"
+    payload = {
+        "closeout_id": closeout_id,
+        "created_at": _now().isoformat(),
+        "status": "deferred" if defer else "reviewed",
+        "reason": reason or "",
+        "issue_count": len(raw_health["issues"]),
+        "source_fingerprints": fingerprints,
+        "safe_summary": f"{len(fingerprints)} backup issue(s) {'deferred' if defer else 'reviewed'}",
+    }
+    _write_json(_backup_closeouts_root(target) / closeout_id / "closeout.json", payload)
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+    print(f"backup_closeout: {closeout_id}")
+    print(f"status: {payload['status']}")
+    print(f"issues: {payload['issue_count']}")
+    return 0
+
+
 def review_init(*, target: Path, force: bool = False, update_gitignore: bool = True) -> int:
     target = target.expanduser().resolve()
     if not target.is_dir():
@@ -8126,6 +8226,58 @@ def closeout(*, target: Path, session_id: str, json_output: bool = False) -> int
     if payload.get("path"):
         print(f"receipt: {payload['path']}")
     return rc
+
+
+def _acceptance_payload(target: Path) -> dict[str, Any]:
+    tasks = [task for task in _read_task_ledger(target).get("tasks", []) if isinstance(task, dict)]
+    pending = [task for task in tasks if task.get("status", "pending") == "pending"]
+    done = [task for task in tasks if task.get("status") == "done"]
+    pending_missing = [task for task in pending if not _task_acceptance(task)]
+    done_missing_completion = [task for task in done if not task.get("completion")]
+    review_findings = [
+        item for item in _read_imports(target)
+        if item.get("source") == "code-review" and item.get("status", "pending") == "pending"
+    ]
+    issues: list[dict[str, Any]] = []
+    if pending_missing:
+        issues.append({"status": WARN, "name": "acceptance_pending_missing", "detail": f"{len(pending_missing)} pending task(s) missing acceptance"})
+    if done_missing_completion:
+        issues.append({"status": WARN, "name": "acceptance_done_missing_completion", "detail": f"{len(done_missing_completion)} done task(s) missing completion evidence"})
+    return {
+        "target": str(target),
+        "task_count": len(tasks),
+        "pending_count": len(pending),
+        "done_count": len(done),
+        "pending_missing_acceptance": [task.get("id") for task in pending_missing],
+        "done_missing_completion": [task.get("id") for task in done_missing_completion],
+        "review_finding_pending_count": len(review_findings),
+        "coverage": {
+            "pending_with_acceptance": len(pending) - len(pending_missing),
+            "pending_missing_acceptance": len(pending_missing),
+            "done_with_completion": len(done) - len(done_missing_completion),
+            "done_missing_completion": len(done_missing_completion),
+        },
+        "issues": issues,
+        "issue_count": len(issues),
+        "top_issue": issues[0] if issues else None,
+    }
+
+
+def acceptance(*, target: Path, json_output: bool = False) -> int:
+    target = target.expanduser().resolve()
+    if not target.is_dir():
+        print(f"error: --target is not a directory: {target}", file=sys.stderr)
+        return 2
+    payload = _acceptance_payload(target)
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+    print(f"work acceptance: {target}")
+    print(f"tasks: {payload['task_count']}")
+    print(f"pending_missing_acceptance: {len(payload['pending_missing_acceptance'])}")
+    print(f"done_missing_completion: {len(payload['done_missing_completion'])}")
+    print(f"review_findings_pending: {payload['review_finding_pending_count']}")
+    return 0
 
 
 def scanners_list(*, target: Path, json_output: bool = False) -> int:
@@ -9497,7 +9649,7 @@ def status(*, target: Path, limit: int = 12) -> int:
 
 
 def doctor(*, target: Path) -> int:
-    from . import chat_cmd, handoff_cmd, memory_cmd, repos_cmd, roadmap_cmd, security_cmd, tools_cmd
+    from . import chat_cmd, context_cmd, handoff_cmd, learn_cmd, memory_cmd, projects_cmd, repos_cmd, roadmap_cmd, security_cmd, tools_cmd
 
     target = target.expanduser().resolve()
     failures = 0
@@ -9755,6 +9907,23 @@ def doctor(*, target: Path) -> int:
     repo_health = repos_cmd.health(effective_target)
     for check in repo_health["checks"]:
         _doctor_line(str(check.get("status")), str(check.get("name")), check.get("detail"))
+
+    context_health = context_cmd.health(effective_target)
+    for issue in context_health.get("issues", []):
+        _doctor_line(str(issue.get("status")), str(issue.get("name")), issue.get("detail"))
+    if not context_health.get("issues"):
+        _doctor_line(OK, "context_packs", f"{context_health.get('pack_count', 0)} local pack(s)")
+
+    projects_health = projects_cmd.health(effective_target)
+    for check in projects_health.get("checks", []):
+        _doctor_line(str(check.get("status")), str(check.get("name")), check.get("detail"))
+
+    learning_health = learn_cmd.health(effective_target)
+    if learning_health.get("issue_count"):
+        top_learning = learning_health.get("top_issue") if isinstance(learning_health.get("top_issue"), dict) else {}
+        _doctor_line(WARN, "learning_candidates", top_learning.get("detail") or f"{learning_health.get('candidate_count', 0)} candidate(s)")
+    else:
+        _doctor_line(OK, "learning_candidates", "none")
 
     handoff_inbox = (
         cfg.handoff_inbox

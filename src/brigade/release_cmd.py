@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from . import handoff_cmd, security_cmd, work_cmd
+from . import context_cmd, handoff_cmd, learn_cmd, memory_cmd, projects_cmd, repos_cmd, roadmap_cmd, security_cmd, tools_cmd, work_cmd
 
 OK = "ok"
 WARN = "warn"
@@ -116,6 +116,18 @@ def _latest_review_closeout(target: Path) -> dict[str, Any] | None:
         closeout = receipt.get("closeout")
         if isinstance(closeout, dict):
             return {"run_id": receipt.get("run_id"), **closeout}
+    return None
+
+
+def _latest_closeout_json(root: Path) -> dict[str, Any] | None:
+    if not root.is_dir():
+        return None
+    candidates = sorted(root.glob("*/closeout.json"), key=lambda path: path.stat().st_mtime, reverse=True)
+    for path in candidates:
+        payload = _read_json(path)
+        if payload is not None:
+            payload.setdefault("path", str(path))
+            return payload
     return None
 
 
@@ -326,6 +338,15 @@ def _evidence(target: Path, *, base_ref: str | None) -> dict[str, Any]:
     sweep = work_cmd._scanner_sweep_health(target)
     review = work_cmd._review_health(target)
     handoffs = handoff_cmd.draft_queue_payload(target)
+    context_health = context_cmd.health(target)
+    learning_health = learn_cmd.health(target)
+    projects_health = projects_cmd.health(target)
+    repo_health = repos_cmd.health(target)
+    roadmap_health = roadmap_cmd.health(target)
+    tool_health = tools_cmd.health(target)
+    memory_health = memory_cmd.health(target)
+    backup_health = work_cmd._backup_health(target)
+    acceptance = work_cmd._acceptance_payload(target)
     return {
         "git": _git_state(target),
         "latest_work_closeout": _latest_work_closeout(target),
@@ -348,7 +369,58 @@ def _evidence(target: Path, *, base_ref: str | None) -> dict[str, Any]:
             "issue_count": handoffs.get("issue_count"),
             "top_issue": handoffs.get("top_issue"),
             "latest_ingest_run": handoffs.get("latest_ingest_run"),
+            "latest_closeout": _latest_closeout_json(target / ".brigade" / "handoffs" / "closeouts"),
         },
+        "backup": {
+            "valid": backup_health.get("valid"),
+            "issue_count": backup_health.get("issue_count"),
+            "top_issue": backup_health.get("top_issue"),
+            "latest_closeout": backup_health.get("latest_closeout"),
+        },
+        "tool_catalog": {
+            "valid": tool_health.get("valid"),
+            "issue_count": tool_health.get("issue_count"),
+            "top_issue": tool_health.get("top_issue"),
+            "call_queue": tool_health.get("call_queue"),
+            "run_history": tool_health.get("run_history"),
+            "checkpoints": tool_health.get("checkpoints"),
+        },
+        "task_acceptance": {
+            "coverage": acceptance.get("coverage"),
+            "issue_count": acceptance.get("issue_count"),
+            "top_issue": acceptance.get("top_issue"),
+        },
+        "memory_care": {
+            "valid": memory_health.get("valid"),
+            "issue_count": memory_health.get("issue_count"),
+            "top_issue": memory_health.get("top_issue"),
+            "latest_closeout": memory_health.get("latest_closeout"),
+        },
+        "context": {
+            "pack_count": context_health.get("pack_count"),
+            "issue_count": context_health.get("issue_count"),
+            "top_issue": context_health.get("top_issue"),
+        },
+        "projects": {
+            "project_count": projects_health.get("project_count"),
+            "issue_count": projects_health.get("issue_count"),
+            "top_issue": projects_health.get("top_issue"),
+        },
+        "learning": {
+            "candidate_count": learning_health.get("candidate_count"),
+            "issue_count": learning_health.get("issue_count"),
+            "top_issue": learning_health.get("top_issue"),
+        },
+        "repo_fleet": {
+            "repo_count": repo_health.get("repo_count"),
+            "issue_count": repo_health.get("issue_count"),
+            "top_issue": repo_health.get("top_issue"),
+        },
+        "roadmap": {
+            "issue_count": roadmap_health.get("issue_count"),
+            "top_issue": roadmap_health.get("top_issue"),
+        },
+        "security_closeout": _latest_closeout_json(target / ".brigade" / "security" / "closeouts"),
         "docs": {
             "base_ref": base_ref,
             "changed_files": _changed_files(target, base_ref),
@@ -539,7 +611,17 @@ def _candidate_payload(target: Path, *, base_ref: str | None) -> dict[str, Any]:
         },
         "scanner_sweep": evidence.get("scanner_sweep"),
         "security": evidence.get("security"),
+        "security_closeout": evidence.get("security_closeout"),
         "handoff_drafts": evidence.get("handoff_drafts"),
+        "backup": evidence.get("backup"),
+        "tool_catalog": evidence.get("tool_catalog"),
+        "task_acceptance": evidence.get("task_acceptance"),
+        "memory_care": evidence.get("memory_care"),
+        "context": evidence.get("context"),
+        "projects": evidence.get("projects"),
+        "learning": evidence.get("learning"),
+        "repo_fleet": evidence.get("repo_fleet"),
+        "roadmap": evidence.get("roadmap"),
         "git": git,
         "changed_files": changed_files,
         "docs_touch_status": _candidate_docs_touch([str(item) for item in changed_files]),
@@ -838,6 +920,136 @@ def candidate_archive(*, target: Path, candidate_id: str, json_output: bool = Fa
         return 0
     print(f"archived release candidate: {payload['candidate_id']}")
     print(f"archive_path: {payload['archive_path']}")
+    return 0
+
+
+def _receipt_newer_than_candidate(receipt: dict[str, Any] | None, candidate_created: datetime | None) -> bool:
+    if receipt is None or candidate_created is None:
+        return False
+    stamp = work_cmd._parse_iso_datetime(receipt.get("completed_at") or receipt.get("created_at") or receipt.get("started_at"))
+    return bool(stamp and stamp > candidate_created)
+
+
+def candidate_compare(*, target: Path, candidate_id: str = "latest", json_output: bool = False) -> int:
+    target = target.expanduser().resolve()
+    if not target.is_dir():
+        print(f"error: --target is not a directory: {target}", file=sys.stderr)
+        return 2
+    candidate, error = _resolve_candidate(target, candidate_id)
+    if candidate is None:
+        print(f"error: {error}", file=sys.stderr)
+        return 1 if error and "not found" in error else 2
+    candidate_created = work_cmd._parse_iso_datetime(candidate.get("created_at"))
+    current_git = _git_state(target)
+    candidate_git = candidate.get("git") if isinstance(candidate.get("git"), dict) else {}
+    latest_release = _latest_release_receipt(target)
+    latest_verify = work_cmd._latest_verify_receipt(target)
+    review_health = work_cmd._review_health(target)
+    latest_review = review_health.get("latest_run") if isinstance(review_health.get("latest_run"), dict) else None
+    latest_sweep = work_cmd._scanner_sweep_health(target).get("latest")
+    latest_security = security_cmd.health(target).get("evidence")
+    changed_docs_after_candidate = []
+    evidence_path = Path(str(candidate.get("path") or "")) / "EVIDENCE.json"
+    evidence_mtime = evidence_path.stat().st_mtime if evidence_path.is_file() else None
+    for path in ("README.md", "CHANGELOG.md", "ROADMAP.md"):
+        repo_file = target / path
+        if evidence_mtime is not None and repo_file.exists() and repo_file.stat().st_mtime > evidence_mtime:
+            changed_docs_after_candidate.append(path)
+    issues: list[dict[str, Any]] = []
+    if candidate_git.get("head") and current_git.get("head") and candidate_git.get("head") != current_git.get("head"):
+        issues.append({"status": WARN, "name": "candidate_head_changed", "detail": "current HEAD differs from candidate HEAD"})
+    if _receipt_newer_than_candidate(latest_release, candidate_created):
+        issues.append({"status": WARN, "name": "newer_release_readiness", "detail": str(latest_release.get("run_id"))})
+    if _receipt_newer_than_candidate(latest_verify, candidate_created):
+        issues.append({"status": WARN, "name": "newer_verification", "detail": str(latest_verify.get("run_id"))})
+    if _receipt_newer_than_candidate(latest_review, candidate_created):
+        issues.append({"status": WARN, "name": "newer_review_run", "detail": str(latest_review.get("run_id"))})
+    if _receipt_newer_than_candidate(latest_sweep, candidate_created):
+        issues.append({"status": WARN, "name": "newer_scanner_sweep", "detail": str(latest_sweep.get("sweep_id"))})
+    security_generated = work_cmd._parse_iso_datetime((latest_security or {}).get("generated_at") if isinstance(latest_security, dict) else None)
+    if candidate_created and security_generated and security_generated > candidate_created:
+        issues.append({"status": WARN, "name": "newer_security_report", "detail": str((latest_security or {}).get("path"))})
+    for key, value in (
+        ("release_readiness", (candidate.get("release_readiness") or {}).get("path") if isinstance(candidate.get("release_readiness"), dict) else None),
+        ("work_closeout", (candidate.get("work_closeout") or {}).get("path") if isinstance(candidate.get("work_closeout"), dict) else None),
+        ("verification", (candidate.get("verification") or {}).get("path") if isinstance(candidate.get("verification"), dict) else None),
+    ):
+        if value and not Path(str(value)).exists():
+            issues.append({"status": WARN, "name": f"missing_{key}_receipt", "detail": str(value)})
+    if changed_docs_after_candidate:
+        issues.append({"status": WARN, "name": "docs_changed_after_candidate", "detail": ", ".join(changed_docs_after_candidate)})
+    payload = {
+        "target": str(target),
+        "candidate_id": candidate.get("candidate_id"),
+        "candidate_path": candidate.get("path"),
+        "candidate_head": candidate_git.get("head"),
+        "current_head": current_git.get("head"),
+        "changed_docs_after_candidate": changed_docs_after_candidate,
+        "issues": issues,
+        "issue_count": len(issues),
+        "status": "current" if not issues else "stale",
+        "suggested_next_commands": [
+            "brigade release doctor",
+            "brigade release candidate build",
+            f"brigade release candidate closeout {candidate.get('candidate_id')} --status superseded",
+        ],
+    }
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0 if not issues else 1
+    print(f"release candidate compare: {candidate.get('candidate_id')}")
+    print(f"status: {payload['status']}")
+    print(f"issues: {len(issues)}")
+    for issue in issues:
+        print(f"[{issue['status']}] {issue['name']}: {issue['detail']}")
+    return 0 if not issues else 1
+
+
+def candidate_closeout(
+    *,
+    target: Path,
+    candidate_id: str = "latest",
+    status: str = "reviewed",
+    reason: str | None = None,
+    json_output: bool = False,
+) -> int:
+    target = target.expanduser().resolve()
+    if not target.is_dir():
+        print(f"error: --target is not a directory: {target}", file=sys.stderr)
+        return 2
+    if status not in {"draft", "reviewed", "superseded", "archived"}:
+        print("error: --status must be one of draft, reviewed, superseded, archived", file=sys.stderr)
+        return 2
+    candidate, error = _resolve_candidate(target, candidate_id)
+    if candidate is None:
+        print(f"error: {error}", file=sys.stderr)
+        return 1 if error and "not found" in error else 2
+    created_at = _now().isoformat()
+    payload = {
+        "target": str(target),
+        "candidate_id": candidate.get("candidate_id"),
+        "candidate_path": candidate.get("path"),
+        "status": status,
+        "reason": reason or f"release candidate marked {status}",
+        "reviewed_at": created_at,
+        "candidate_head": (candidate.get("git") or {}).get("head") if isinstance(candidate.get("git"), dict) else None,
+        "ready": candidate.get("ready"),
+        "blocker_count": len(candidate.get("blockers") or []),
+        "warning_count": len(candidate.get("warnings") or []),
+    }
+    candidate_path = Path(str(candidate.get("path") or ""))
+    if not candidate_path.is_dir():
+        print(f"error: release candidate path is missing: {candidate.get('path')}", file=sys.stderr)
+        return 2
+    closeout_path = candidate_path / "CLOSEOUT.json"
+    payload["path"] = str(closeout_path)
+    _write_json(closeout_path, payload)
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+    print(f"release candidate closeout: {candidate.get('candidate_id')}")
+    print(f"status: {status}")
+    print(f"path: {closeout_path}")
     return 0
 
 
