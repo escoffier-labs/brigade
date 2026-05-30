@@ -14,12 +14,8 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-try:
-    import tomllib
-except ModuleNotFoundError:  # pragma: no cover - Python < 3.11 fallback.
-    tomllib = None  # type: ignore[assignment]
-
 from . import dogfood_cmd
+from . import toml_compat as tomllib
 from .install import apply_gitignore
 from .selection import Selection
 

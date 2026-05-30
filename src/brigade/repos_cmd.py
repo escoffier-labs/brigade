@@ -5,7 +5,6 @@ import json
 import os
 import subprocess
 import sys
-import tomllib
 import shutil
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -15,7 +14,7 @@ from uuid import uuid4
 
 from .install import apply_gitignore
 from .selection import Selection
-from . import work_cmd
+from . import toml_compat as tomllib, work_cmd
 
 OK = "ok"
 WARN = "warn"
