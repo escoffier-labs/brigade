@@ -18,6 +18,9 @@ brigade center report build
 brigade center report list
 brigade center report show <report-id>
 brigade center report archive <report-id>
+brigade center report review <report-id>
+brigade center report compare <report-id>
+brigade center report closeout <report-id>
 ```
 
 `status` summarizes active work, pending tasks, pending imports, scanner sweep health, review health, handoff drafts, tool catalog health, learning candidates, context packs, release readiness, release candidates, repo fleet, roadmap health, project consolidation, and security health.
@@ -51,6 +54,22 @@ Each bundle contains:
 - `OPERATOR_REPORT.html`, a dependency-free escaped static rendering of the Markdown report.
 - `CENTER_EVIDENCE.json`, stable JSON evidence for wrappers.
 
-`brigade center report plan` previews the same evidence without writing. `list`, `show`, and `archive` inspect or move local bundles. Report health warns when the latest bundle is stale, references missing receipts, was built from an older git HEAD, or newer center activity exists. `brigade work brief`, `brigade work doctor`, `brigade release doctor`, and release candidate evidence surface those report health checks.
+`brigade center report plan` previews the same evidence without writing. `list`, `show`, and `archive` inspect or move local bundles. Report health warns when the latest bundle is unclosed, stale, references missing receipts, was built from an older git HEAD, or newer center activity exists. `brigade work brief`, `brigade work doctor`, `brigade release doctor`, release candidate evidence, and release candidate compare surface those report health checks.
+
+`brigade center report review <report-id|latest>` groups actionable report items into:
+
+- urgent blockers
+- pending work imports
+- code review findings
+- handoff drafts
+- scanner sweep issues
+- tool approvals, checkpoints, and runs
+- backup, security, and memory-care issues
+- release readiness and candidate issues
+- project and learning candidates
+
+`brigade center report compare <report-id|latest>` checks the report against current local state. It warns when HEAD changed, referenced receipts are missing, newer activity exists, newer release/readiness/verification/review/sweep/security receipts exist, or the review queue changed.
+
+`brigade center report closeout <report-id|latest>` writes `CLOSEOUT.json` in the report bundle. Closeout states are `reviewed`, `deferred`, `superseded`, and `archived`. Closeout stores a reviewed timestamp, reason, unresolved item count, deferred item ids, and report fingerprint.
 
 The operator center never invokes scanners, tools, reviewers, handoff ingestion, release publishing, git commands that mutate state, or remote APIs. Only `center report build` and `center report archive` write local gitignored report bundle files.

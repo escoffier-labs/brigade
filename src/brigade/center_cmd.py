@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import html
+import hashlib
 import json
 import shutil
 import subprocess
@@ -494,6 +495,15 @@ def _receipt_references(payload: dict[str, Any]) -> list[str]:
     return sorted(set(refs))
 
 
+def _item_key(item: dict[str, Any]) -> str:
+    return f"{item.get('subsystem')}:{item.get('local_id') or item.get('id')}"
+
+
+def _fingerprint_payload(value: Any) -> str:
+    encoded = json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
 def _report_payload(target: Path) -> dict[str, Any]:
     target = target.expanduser().resolve()
     status_data = status_payload(target)
@@ -536,6 +546,14 @@ def _report_payload(target: Path) -> dict[str, Any]:
         "html_policy": "dependency-free escaped static report",
     }
     payload["receipt_references"] = _receipt_references(payload)
+    payload["report_fingerprint"] = _fingerprint_payload(
+        {
+            "git": payload["git"],
+            "reviews": payload["reviews"],
+            "activity": payload["activity"],
+            "receipt_references": payload["receipt_references"],
+        }
+    )
     return payload
 
 
@@ -605,6 +623,92 @@ def _report_markdown(payload: dict[str, Any]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _review_groups(report: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
+    reviews_data = report.get("reviews") if isinstance(report.get("reviews"), list) else []
+    status_data = report.get("status") if isinstance(report.get("status"), dict) else {}
+    summaries = report.get("summaries") if isinstance(report.get("summaries"), dict) else {}
+    release_data = report.get("release") if isinstance(report.get("release"), dict) else {}
+    groups: dict[str, list[dict[str, Any]]] = {
+        "urgent_blockers": [],
+        "pending_work_imports": [],
+        "code_review_findings": [],
+        "handoff_drafts": [],
+        "scanner_sweep_issues": [],
+        "tool_approvals_checkpoints_runs": [],
+        "backup_security_memory_care_issues": [],
+        "release_readiness_candidate_issues": [],
+        "project_learning_candidates": [],
+    }
+    for item in reviews_data:
+        if not isinstance(item, dict):
+            continue
+        subsystem = str(item.get("subsystem") or "")
+        priority = str(item.get("priority") or "")
+        severity = str(item.get("severity") or "")
+        if priority in {"urgent", "high"} or severity in {"critical", "high"}:
+            groups["urgent_blockers"].append(item)
+        if subsystem == "work-import":
+            groups["pending_work_imports"].append(item)
+        elif subsystem == "code-review":
+            groups["code_review_findings"].append(item)
+        elif subsystem == "handoff-draft":
+            groups["handoff_drafts"].append(item)
+        elif subsystem in {"scanner-run", "scanner-sweep"} or "scanner" in subsystem:
+            groups["scanner_sweep_issues"].append(item)
+        elif subsystem in {"tools", "tool-call", "tool-run", "checkpoint", "tool-pack"}:
+            groups["tool_approvals_checkpoints_runs"].append(item)
+        elif subsystem in {"backup", "security", "memory-care"}:
+            groups["backup_security_memory_care_issues"].append(item)
+        elif subsystem in {"release-readiness", "release-candidate"}:
+            groups["release_readiness_candidate_issues"].append(item)
+        elif subsystem in {"project-consolidation", "learning"}:
+            groups["project_learning_candidates"].append(item)
+    sweep_review = summaries.get("scanner_sweep") if isinstance(summaries.get("scanner_sweep"), dict) else status_data.get("scanner_sweeps")
+    if isinstance(sweep_review, dict):
+        top = (sweep_review.get("review") if isinstance(sweep_review.get("review"), dict) else {}).get("top_pending_import")
+        if isinstance(top, dict):
+            groups["scanner_sweep_issues"].append(
+                _item("scanner-sweep", str(top.get("id") or "pending-import"), "pending", str(top.get("text") or "pending sweep import"), f"brigade work import plan {top.get('id')}")
+            )
+    for name, command in (
+        ("backup", "brigade work backup status"),
+        ("security", "brigade security findings"),
+        ("memory_care", "brigade memory care status"),
+    ):
+        value = summaries.get(name) if isinstance(summaries.get(name), dict) else None
+        top = value.get("top_issue") or value.get("top_finding") if isinstance(value, dict) else None
+        if isinstance(top, dict):
+            groups["backup_security_memory_care_issues"].append(
+                _item(name.replace("_", "-"), str(top.get("id") or top.get("name") or top.get("issue_type") or name), str(top.get("status") or "warn"), str(top.get("detail") or top.get("title") or name), command, severity=top.get("severity") if isinstance(top.get("severity"), str) else None)
+            )
+    readiness = release_data.get("readiness") if isinstance(release_data.get("readiness"), dict) else None
+    candidate = release_data.get("candidate") if isinstance(release_data.get("candidate"), dict) else None
+    if isinstance(readiness, dict) and readiness.get("ready") is False:
+        run_id = str(readiness.get("run_id") or "latest")
+        groups["release_readiness_candidate_issues"].append(_item("release-readiness", run_id, str(readiness.get("status") or "blocked"), "release readiness is blocked", f"brigade release show {run_id}"))
+    if isinstance(candidate, dict) and candidate.get("status") not in {None, "reviewed", "archived"}:
+        candidate_id = str(candidate.get("candidate_id") or "latest")
+        groups["release_readiness_candidate_issues"].append(_item("release-candidate", candidate_id, str(candidate.get("status") or "draft"), "release candidate awaits review", f"brigade release candidate compare {candidate_id}"))
+    return groups
+
+
+def _action_plan(report: dict[str, Any]) -> dict[str, Any]:
+    groups = _review_groups(report)
+    commands: dict[str, list[str]] = {}
+    for group, items in groups.items():
+        values = [
+            str(item.get("suggested_next_command"))
+            for item in items
+            if isinstance(item, dict) and item.get("suggested_next_command")
+        ]
+        commands[group] = list(dict.fromkeys(values))
+    return {
+        "groups": groups,
+        "commands": commands,
+        "unresolved_item_count": sum(len(items) for items in groups.values()),
+    }
+
+
 def _report_html(markdown: str, payload: dict[str, Any]) -> str:
     title = html.escape(f"Operator Report {payload.get('report_id', 'planned')}")
     body = html.escape(markdown)
@@ -633,6 +737,10 @@ def report_health(target: Path) -> dict[str, Any]:
     if latest is None:
         checks.append({"status": "warn", "name": "operator_report_missing", "detail": "no local operator report has been built", "suggested_next_command": "brigade center report build"})
         return {"latest": None, "checks": checks, "issue_count": len(checks), "top_issue": checks[0]}
+    closeout = latest.get("closeout") if isinstance(latest.get("closeout"), dict) else None
+    closeout_status = str(closeout.get("status") or "") if closeout else ""
+    if closeout_status not in {"reviewed", "deferred", "superseded", "archived"}:
+        checks.append({"status": "warn", "name": "operator_report_unclosed", "detail": f"{latest.get('report_id')} has not been closed out", "suggested_next_command": f"brigade center report review {latest.get('report_id')}"})
     created = _parse_time(latest.get("created_at") or latest.get("generated_at"))
     if created is not None:
         age_hours = (_now() - created).total_seconds() / 3600
@@ -757,4 +865,168 @@ def report_archive(*, target: Path, report_id: str, json_output: bool = False) -
         return 0
     print(f"archived operator report: {report.get('report_id')}")
     print(f"path: {destination}")
+    return 0
+
+
+def report_review(*, target: Path, report_id: str = "latest", json_output: bool = False) -> int:
+    target = target.expanduser().resolve()
+    report, error = _resolve_report(target, report_id)
+    if report is None:
+        print(f"error: {error}", file=sys.stderr)
+        return 1 if error and "not found" in error else 2
+    plan = _action_plan(report)
+    payload = {
+        "schema_version": SCHEMA_VERSION,
+        "schema": _schema("center-report-review"),
+        "target": str(target),
+        "report_id": report.get("report_id"),
+        "report_path": report.get("path"),
+        "action_plan": plan,
+        "suggested_next_commands": plan["commands"],
+    }
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+    print(f"operator report review: {report.get('report_id')}")
+    print(f"unresolved_items: {plan['unresolved_item_count']}")
+    for group, items in plan["groups"].items():
+        print(f"{group}: {len(items)}")
+        for item in items[:10]:
+            print(f"- {item.get('subsystem')} {item.get('local_id') or item.get('id')} [{item.get('status')}] {item.get('safe_summary')}")
+            if item.get("suggested_next_command"):
+                print(f"  next: {item.get('suggested_next_command')}")
+    return 0
+
+
+def _receipt_newer_than_report(receipt: dict[str, Any] | None, report_created: datetime | None) -> bool:
+    if receipt is None or report_created is None:
+        return False
+    stamp = work_cmd._parse_iso_datetime(receipt.get("completed_at") or receipt.get("created_at") or receipt.get("started_at") or receipt.get("generated_at"))
+    return bool(stamp and stamp > report_created)
+
+
+def _report_queue_changed(report: dict[str, Any], current_reviews: list[dict[str, Any]]) -> bool:
+    old = sorted(_item_key(item) for item in report.get("reviews", []) if isinstance(item, dict))
+    new = sorted(_item_key(item) for item in current_reviews if isinstance(item, dict))
+    return old != new
+
+
+def report_compare(*, target: Path, report_id: str = "latest", json_output: bool = False) -> int:
+    target = target.expanduser().resolve()
+    report, error = _resolve_report(target, report_id)
+    if report is None:
+        print(f"error: {error}", file=sys.stderr)
+        return 1 if error and "not found" in error else 2
+    report_created = _parse_time(report.get("created_at") or report.get("generated_at"))
+    issues: list[dict[str, Any]] = []
+    current_head = _git_value(target, "rev-parse", "HEAD")
+    report_git = report.get("git") if isinstance(report.get("git"), dict) else {}
+    if report_git.get("head") and current_head and report_git.get("head") != current_head:
+        issues.append({"status": "warn", "name": "operator_report_head_changed", "detail": "current HEAD differs from report HEAD"})
+    for ref in report.get("receipt_references") if isinstance(report.get("receipt_references"), list) else []:
+        if isinstance(ref, str) and ref and not Path(ref).exists():
+            issues.append({"status": "warn", "name": "operator_report_missing_receipt", "detail": ref})
+            break
+    current_activity = _activity(target)
+    report_activity = report.get("activity") if isinstance(report.get("activity"), list) else []
+    current_activity_time = _parse_time(current_activity[0].get("updated_at")) if current_activity else None
+    report_activity_time = _parse_time(report_activity[0].get("updated_at")) if report_activity else report_created
+    if current_activity_time is not None and report_activity_time is not None and current_activity_time > report_activity_time:
+        issues.append({"status": "warn", "name": "operator_report_newer_activity", "detail": "newer center activity exists"})
+    latest_release = release_cmd._latest_release_receipt(target)
+    latest_candidate = release_cmd._latest_candidate(target)
+    latest_verify = work_cmd._latest_verify_receipt(target)
+    review_health = work_cmd._review_health(target)
+    latest_review = review_health.get("latest_run") if isinstance(review_health.get("latest_run"), dict) else None
+    latest_sweep = work_cmd._scanner_sweep_health(target).get("latest")
+    latest_security = security_cmd.health(target).get("evidence")
+    for name, receipt, key in (
+        ("newer_release_readiness", latest_release, "run_id"),
+        ("newer_release_candidate", latest_candidate, "candidate_id"),
+        ("newer_verification", latest_verify, "run_id"),
+        ("newer_review_run", latest_review, "run_id"),
+        ("newer_scanner_sweep", latest_sweep, "sweep_id"),
+    ):
+        if _receipt_newer_than_report(receipt if isinstance(receipt, dict) else None, report_created):
+            issues.append({"status": "warn", "name": name, "detail": str((receipt or {}).get(key))})
+    security_generated = work_cmd._parse_iso_datetime((latest_security or {}).get("generated_at") if isinstance(latest_security, dict) else None)
+    if report_created and security_generated and security_generated > report_created:
+        issues.append({"status": "warn", "name": "newer_security_report", "detail": str((latest_security or {}).get("path"))})
+    current_reviews = _reviews(target)
+    if _report_queue_changed(report, current_reviews):
+        issues.append({"status": "warn", "name": "operator_report_review_queue_changed", "detail": "current review queue differs from report"})
+    payload = {
+        "schema_version": SCHEMA_VERSION,
+        "schema": _schema("center-report-compare"),
+        "target": str(target),
+        "report_id": report.get("report_id"),
+        "report_path": report.get("path"),
+        "report_head": report_git.get("head"),
+        "current_head": current_head,
+        "issues": issues,
+        "issue_count": len(issues),
+        "status": "current" if not issues else "stale",
+        "suggested_next_commands": [
+            "brigade center report build",
+            f"brigade center report closeout {report.get('report_id')} --status superseded",
+        ],
+    }
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0 if not issues else 1
+    print(f"operator report compare: {report.get('report_id')}")
+    print(f"status: {payload['status']}")
+    print(f"issues: {len(issues)}")
+    for issue in issues:
+        print(f"[{issue['status']}] {issue['name']}: {issue['detail']}")
+    return 0 if not issues else 1
+
+
+def report_closeout(
+    *,
+    target: Path,
+    report_id: str = "latest",
+    status: str = "reviewed",
+    reason: str | None = None,
+    deferred_item_ids: list[str] | None = None,
+    json_output: bool = False,
+) -> int:
+    target = target.expanduser().resolve()
+    if status not in {"reviewed", "deferred", "superseded", "archived"}:
+        print("error: --status must be one of reviewed, deferred, superseded, archived", file=sys.stderr)
+        return 2
+    report, error = _resolve_report(target, report_id)
+    if report is None:
+        print(f"error: {error}", file=sys.stderr)
+        return 1 if error and "not found" in error else 2
+    report_path = Path(str(report.get("path") or ""))
+    if not report_path.is_dir():
+        print(f"error: operator report path is missing: {report.get('path')}", file=sys.stderr)
+        return 2
+    plan = _action_plan(report)
+    deferred = list(deferred_item_ids or [])
+    payload = {
+        "schema_version": SCHEMA_VERSION,
+        "target": str(target),
+        "report_id": report.get("report_id"),
+        "report_path": report.get("path"),
+        "status": status,
+        "reason": reason or f"operator report marked {status}",
+        "reviewed_at": _now().isoformat(),
+        "unresolved_item_count": plan["unresolved_item_count"],
+        "deferred_item_ids": deferred,
+        "report_fingerprint": report.get("report_fingerprint") or _fingerprint_payload({"reviews": report.get("reviews"), "activity": report.get("activity")}),
+    }
+    closeout_path = report_path / "CLOSEOUT.json"
+    payload["path"] = str(closeout_path)
+    _write_json(closeout_path, payload)
+    report["closeout"] = payload
+    _write_json(report_path / "CENTER_EVIDENCE.json", report)
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+    print(f"operator report closeout: {report.get('report_id')}")
+    print(f"status: {status}")
+    print(f"unresolved_items: {payload['unresolved_item_count']}")
+    print(f"path: {closeout_path}")
     return 0

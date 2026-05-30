@@ -567,7 +567,7 @@ Implementation scope:
 - Add `brigade center activity`.
 - Add `brigade center reviews`.
 - Add `brigade center templates`.
-- Add `brigade center report plan/build/list/show/archive`.
+- Add `brigade center report plan/build/list/show/archive/review/compare/closeout`.
 - Aggregate existing local state only: work sessions, pending tasks, pending imports, scanner runs and sweeps, review runs, handoff drafts, tool approvals, checkpoints, context packs, learning candidates, repo fleet, project decisions, security health, release readiness, and release candidates.
 - Every center item includes subsystem, local id, status, safe summary, suggested next command, and priority or severity when available.
 - Keep center commands read-only and JSON-first for future wrappers.
@@ -576,7 +576,7 @@ Implementation scope:
 Acceptance:
 
 - Tests cover center status, activity, reviews, and templates in text and JSON.
-- Tests cover center report plan, build, list, show, archive, freshness checks, and release/work integration.
+- Tests cover center report plan, build, list, show, archive, review, compare, closeout, freshness checks, and release/work integration.
 - Tests prove center commands are read-only.
 - Public docs describe the operator center as local CLI output, not a hosted dashboard, app server, daemon, or sync engine.
 
@@ -588,8 +588,15 @@ Phase 36 status:
 Phase 37 status:
 
 - Implemented command surface: `brigade center report plan/build/list/show/archive`.
-- Operator reports write `OPERATOR_REPORT.md`, `OPERATOR_REPORT.html`, and `CENTER_EVIDENCE.json` under `.brigade/center/reports/`.
+- Operator reports write `OPERATOR_REPORT.md`, `OPERATOR_REPORT.html`, `CENTER_EVIDENCE.json`, and optional `CLOSEOUT.json` under `.brigade/center/reports/`.
 - Work brief, work doctor, release doctor, and release candidate evidence include operator report freshness.
+
+Phase 38 status:
+
+- Implemented command surface: `brigade center report review/compare/closeout`.
+- Report review groups pending items into an action plan with suggested commands.
+- Report compare checks changed HEAD, missing receipts, newer local activity, newer subsystem receipts, and changed review queues.
+- Report closeout stores reviewed, deferred, superseded, or archived metadata without taking actions on queued items.
 
 ## Suggested Execution Order
 

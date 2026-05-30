@@ -327,6 +327,9 @@ brigade center report build
 brigade center report list
 brigade center report show <report-id>
 brigade center report archive <report-id>
+brigade center report review <report-id>
+brigade center report compare <report-id>
+brigade center report closeout <report-id>
 brigade work run
 brigade work run --queue-next
 brigade work run "review today's changes"

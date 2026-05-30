@@ -830,6 +830,21 @@ def _build_parser() -> argparse.ArgumentParser:
     p_center_report_archive.add_argument("report_id", help="Report id, unique prefix, or latest.")
     p_center_report_archive.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
     p_center_report_archive.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_center_report_review = center_report_sub.add_parser("review", help="Review one local operator report action plan.")
+    p_center_report_review.add_argument("report_id", nargs="?", default="latest", help="Report id, unique prefix, or latest.")
+    p_center_report_review.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_center_report_review.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_center_report_compare = center_report_sub.add_parser("compare", help="Compare one operator report against current local state.")
+    p_center_report_compare.add_argument("report_id", nargs="?", default="latest", help="Report id, unique prefix, or latest.")
+    p_center_report_compare.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_center_report_compare.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_center_report_closeout = center_report_sub.add_parser("closeout", help="Mark one operator report review state.")
+    p_center_report_closeout.add_argument("report_id", nargs="?", default="latest", help="Report id, unique prefix, or latest.")
+    p_center_report_closeout.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
+    p_center_report_closeout.add_argument("--status", choices=["reviewed", "deferred", "superseded", "archived"], default="reviewed")
+    p_center_report_closeout.add_argument("--reason", default=None, help="Review reason.")
+    p_center_report_closeout.add_argument("--defer-item", action="append", default=[], help="Deferred report item id. May be repeated.")
+    p_center_report_closeout.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
 
     # run
     p_run = sub.add_parser("run", help="Run a bounded cross-model orchestration task.")
@@ -1634,6 +1649,19 @@ def main(argv=None) -> int:
                 return center_cmd.report_show(target=args.target, report_id=args.report_id, json_output=args.json)
             if args.center_report_command == "archive":
                 return center_cmd.report_archive(target=args.target, report_id=args.report_id, json_output=args.json)
+            if args.center_report_command == "review":
+                return center_cmd.report_review(target=args.target, report_id=args.report_id, json_output=args.json)
+            if args.center_report_command == "compare":
+                return center_cmd.report_compare(target=args.target, report_id=args.report_id, json_output=args.json)
+            if args.center_report_command == "closeout":
+                return center_cmd.report_closeout(
+                    target=args.target,
+                    report_id=args.report_id,
+                    status=args.status,
+                    reason=args.reason,
+                    deferred_item_ids=args.defer_item,
+                    json_output=args.json,
+                )
             parser.error(f"unknown center report command: {args.center_report_command}")
             return 2
         parser.error(f"unknown center command: {args.center_command}")

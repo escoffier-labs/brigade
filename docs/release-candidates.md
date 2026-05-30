@@ -22,7 +22,7 @@ brigade release candidate archive <candidate-id>
 .brigade/release/candidates/
 ```
 
-`list` and `show` inspect bundles. `compare` checks the candidate against current local state, including changed HEAD, missing referenced receipts, newer verification or review evidence, newer scanner or security evidence, and docs changed after the bundle was built.
+`list` and `show` inspect bundles. `compare` checks the candidate against current local state, including changed HEAD, missing referenced receipts, newer verification or review evidence, newer scanner, security, or operator report evidence, and docs changed after the bundle was built.
 
 `closeout` writes a local `CLOSEOUT.json` into the candidate bundle with `draft`, `reviewed`, `superseded`, or `archived` state. `archive` moves a reviewed candidate into the local archive so it no longer appears as the latest candidate.
 
@@ -42,7 +42,7 @@ Each candidate contains:
 
 These are warnings because candidate bundles are review artifacts. They do not replace release readiness checks, verification, code review closeout, or content guard.
 
-Release readiness and candidate bundles include operator report health so an operator can tell whether the local daily review packet is fresh before publishing manually.
+Release readiness, candidate bundles, and candidate compare include operator report health so an operator can tell whether the local daily review packet is fresh and closed out before publishing manually.
 
 ## Boundary
 

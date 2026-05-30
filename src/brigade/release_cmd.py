@@ -944,6 +944,8 @@ def _receipt_newer_than_candidate(receipt: dict[str, Any] | None, candidate_crea
 
 
 def candidate_compare(*, target: Path, candidate_id: str = "latest", json_output: bool = False) -> int:
+    from . import center_cmd
+
     target = target.expanduser().resolve()
     if not target.is_dir():
         print(f"error: --target is not a directory: {target}", file=sys.stderr)
@@ -991,6 +993,22 @@ def candidate_compare(*, target: Path, candidate_id: str = "latest", json_output
             issues.append({"status": WARN, "name": f"missing_{key}_receipt", "detail": str(value)})
     if changed_docs_after_candidate:
         issues.append({"status": WARN, "name": "docs_changed_after_candidate", "detail": ", ".join(changed_docs_after_candidate)})
+    operator_report = candidate.get("operator_report") if isinstance(candidate.get("operator_report"), dict) else {}
+    candidate_report = operator_report.get("latest") if isinstance(operator_report.get("latest"), dict) else None
+    current_report = center_cmd.latest_report(target)
+    if isinstance(candidate_report, dict) and isinstance(current_report, dict):
+        if candidate_report.get("report_id") != current_report.get("report_id"):
+            issues.append({"status": WARN, "name": "newer_operator_report", "detail": str(current_report.get("report_id"))})
+    elif current_report is not None and candidate_created and _receipt_newer_than_candidate(current_report, candidate_created):
+        issues.append({"status": WARN, "name": "newer_operator_report", "detail": str(current_report.get("report_id"))})
+    report_health = center_cmd.report_health(target)
+    top_report_issue = report_health.get("top_issue") if isinstance(report_health.get("top_issue"), dict) else None
+    if (
+        top_report_issue
+        and top_report_issue.get("name") != "operator_report_newer_activity"
+        and (current_report is not None or candidate_report is not None)
+    ):
+        issues.append({"status": WARN, "name": "operator_report_health", "detail": str(top_report_issue.get("detail"))})
     payload = {
         "target": str(target),
         "candidate_id": candidate.get("candidate_id"),
