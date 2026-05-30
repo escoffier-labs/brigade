@@ -12,6 +12,8 @@ from .prompt import prompt_for_selection  # imported here so tests can monkeypat
 
 
 def _build_parser() -> argparse.ArgumentParser:
+    from . import repos_cmd
+
     parser = argparse.ArgumentParser(
         prog="brigade",
         description="Brigade: run your agent brigade. Operator-system CLI for agent workspaces.",
@@ -327,6 +329,64 @@ def _build_parser() -> argparse.ArgumentParser:
     p_repos_release_closeout.add_argument("--status", choices=["reviewed", "deferred", "superseded", "archived"], default="reviewed")
     p_repos_release_closeout.add_argument("--reason", default=None, help="Review reason.")
     p_repos_release_closeout.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_repos_release_actions = repos_release_sub.add_parser("actions", help="Plan and manage fleet release train actions.")
+    repos_release_actions_sub = p_repos_release_actions.add_subparsers(dest="repos_release_actions_command", metavar="<repos-release-actions-command>")
+    repos_release_actions_sub.required = True
+    p_repos_release_actions_plan = repos_release_actions_sub.add_parser("plan", help="Plan actions from one fleet release train.")
+    p_repos_release_actions_plan.add_argument("train_id", nargs="?", default="latest", help="Train id, unique prefix, or latest.")
+    p_repos_release_actions_plan.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_repos_release_actions_plan.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_repos_release_actions_build = repos_release_actions_sub.add_parser("build", help="Build actions from one fleet release train.")
+    p_repos_release_actions_build.add_argument("train_id", nargs="?", default="latest", help="Train id, unique prefix, or latest.")
+    p_repos_release_actions_build.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
+    p_repos_release_actions_build.add_argument("--allow-unreviewed", action="store_true", help="Build from an unclosed release train.")
+    p_repos_release_actions_build.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_repos_release_actions_list = repos_release_actions_sub.add_parser("list", help="List fleet release train actions.")
+    p_repos_release_actions_list.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_repos_release_actions_list.add_argument("--limit", type=int, default=50, help="Maximum actions to list.")
+    p_repos_release_actions_list.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_repos_release_actions_show = repos_release_actions_sub.add_parser("show", help="Show one fleet release train action.")
+    p_repos_release_actions_show.add_argument("action_id", help="Release action id or unique prefix.")
+    p_repos_release_actions_show.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_repos_release_actions_show.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    for name in ("start", "done"):
+        p_repos_release_actions_state = repos_release_actions_sub.add_parser(name, help=f"Mark one fleet release action {name}.")
+        p_repos_release_actions_state.add_argument("action_id", help="Release action id or unique prefix.")
+        p_repos_release_actions_state.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
+        p_repos_release_actions_state.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_repos_release_actions_defer = repos_release_actions_sub.add_parser("defer", help="Defer one fleet release train action.")
+    p_repos_release_actions_defer.add_argument("action_id", help="Release action id or unique prefix.")
+    p_repos_release_actions_defer.add_argument("--reason", required=True, help="Deferral reason.")
+    p_repos_release_actions_defer.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
+    p_repos_release_actions_defer.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_repos_release_actions_archive = repos_release_actions_sub.add_parser("archive", help="Archive completed fleet release actions.")
+    p_repos_release_actions_archive.add_argument("--completed", action="store_true", required=True, help="Archive completed actions.")
+    p_repos_release_actions_archive.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
+    p_repos_release_actions_archive.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_repos_release_evidence = repos_release_sub.add_parser("evidence", help="Record manual fleet release evidence.")
+    repos_release_evidence_sub = p_repos_release_evidence.add_subparsers(dest="repos_release_evidence_command", metavar="<repos-release-evidence-command>")
+    repos_release_evidence_sub.required = True
+    p_repos_release_evidence_plan = repos_release_evidence_sub.add_parser("plan", help="Plan manual evidence records for a fleet release train.")
+    p_repos_release_evidence_plan.add_argument("train_id", nargs="?", default="latest", help="Train id, unique prefix, or latest.")
+    p_repos_release_evidence_plan.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_repos_release_evidence_plan.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_repos_release_evidence_record = repos_release_evidence_sub.add_parser("record", help="Record one manual fleet release evidence item.")
+    p_repos_release_evidence_record.add_argument("train_id", nargs="?", default="latest", help="Train id, unique prefix, or latest.")
+    p_repos_release_evidence_record.add_argument("--repo", dest="repo_id", required=True, help="Repo id from the train.")
+    p_repos_release_evidence_record.add_argument("--step", required=True, choices=sorted(repos_cmd.RELEASE_EVIDENCE_STEPS), help="Manual release evidence step.")
+    p_repos_release_evidence_record.add_argument("--status", required=True, choices=sorted(repos_cmd.RELEASE_EVIDENCE_STATUSES), help="Evidence status.")
+    p_repos_release_evidence_record.add_argument("--summary", default=None, help="Safe summary.")
+    p_repos_release_evidence_record.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
+    p_repos_release_evidence_record.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_repos_release_evidence_list = repos_release_evidence_sub.add_parser("list", help="List manual fleet release evidence records.")
+    p_repos_release_evidence_list.add_argument("train_id", nargs="?", default=None, help="Optional train id, unique prefix, or latest.")
+    p_repos_release_evidence_list.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_repos_release_evidence_list.add_argument("--limit", type=int, default=50, help="Maximum records to list.")
+    p_repos_release_evidence_list.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_repos_release_evidence_show = repos_release_evidence_sub.add_parser("show", help="Show one manual fleet release evidence record.")
+    p_repos_release_evidence_show.add_argument("evidence_id", help="Evidence id or unique prefix.")
+    p_repos_release_evidence_show.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_repos_release_evidence_show.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
 
     # handoff
     p_handoff = sub.add_parser("handoff", help="Inspect memory handoff inbox health.")
@@ -1741,6 +1801,36 @@ def main(argv=None) -> int:
                 return repos_cmd.release_closeout(target=args.target, train_id=args.train_id, status=args.status, reason=args.reason, json_output=args.json)
             if args.repos_release_command == "archive":
                 return repos_cmd.release_archive(target=args.target, train_id=args.train_id, json_output=args.json)
+            if args.repos_release_command == "actions":
+                if args.repos_release_actions_command == "plan":
+                    return repos_cmd.release_actions_plan(target=args.target, train_id=args.train_id, json_output=args.json)
+                if args.repos_release_actions_command == "build":
+                    return repos_cmd.release_actions_build(target=args.target, train_id=args.train_id, allow_unreviewed=args.allow_unreviewed, json_output=args.json)
+                if args.repos_release_actions_command == "list":
+                    return repos_cmd.release_actions_list(target=args.target, limit=args.limit, json_output=args.json)
+                if args.repos_release_actions_command == "show":
+                    return repos_cmd.release_actions_show(target=args.target, action_id=args.action_id, json_output=args.json)
+                if args.repos_release_actions_command == "start":
+                    return repos_cmd.release_actions_start(target=args.target, action_id=args.action_id, json_output=args.json)
+                if args.repos_release_actions_command == "done":
+                    return repos_cmd.release_actions_done(target=args.target, action_id=args.action_id, json_output=args.json)
+                if args.repos_release_actions_command == "defer":
+                    return repos_cmd.release_actions_defer(target=args.target, action_id=args.action_id, reason=args.reason, json_output=args.json)
+                if args.repos_release_actions_command == "archive":
+                    return repos_cmd.release_actions_archive_completed(target=args.target, json_output=args.json)
+                parser.error(f"unknown repos release actions command: {args.repos_release_actions_command}")
+                return 2
+            if args.repos_release_command == "evidence":
+                if args.repos_release_evidence_command == "plan":
+                    return repos_cmd.release_evidence_plan(target=args.target, train_id=args.train_id, json_output=args.json)
+                if args.repos_release_evidence_command == "record":
+                    return repos_cmd.release_evidence_record(target=args.target, train_id=args.train_id, repo_id=args.repo_id, step=args.step, status=args.status, summary=args.summary, json_output=args.json)
+                if args.repos_release_evidence_command == "list":
+                    return repos_cmd.release_evidence_list(target=args.target, train_id=args.train_id, limit=args.limit, json_output=args.json)
+                if args.repos_release_evidence_command == "show":
+                    return repos_cmd.release_evidence_show(target=args.target, evidence_id=args.evidence_id, json_output=args.json)
+                parser.error(f"unknown repos release evidence command: {args.repos_release_evidence_command}")
+                return 2
             parser.error(f"unknown repos release command: {args.repos_release_command}")
             return 2
         parser.error(f"unknown repos command: {args.repos_command}")

@@ -43,6 +43,18 @@ brigade repos release show <train-id>
 brigade repos release compare <train-id|latest>
 brigade repos release closeout <train-id|latest>
 brigade repos release archive <train-id>
+brigade repos release actions plan <train-id|latest>
+brigade repos release actions build <train-id|latest>
+brigade repos release actions list
+brigade repos release actions show <release-action-id>
+brigade repos release actions start <release-action-id>
+brigade repos release actions done <release-action-id>
+brigade repos release actions defer <release-action-id> --reason "not today"
+brigade repos release actions archive --completed
+brigade repos release evidence plan <train-id|latest>
+brigade repos release evidence record <train-id|latest> --repo <repo-id> --step verification --status completed
+brigade repos release evidence list
+brigade repos release evidence show <evidence-id>
 ```
 
 Fleet reports are written under:
@@ -101,6 +113,10 @@ Dispatch is idempotent by fleet action id and source fingerprint. Repeated dispa
 Each repo is classified as `ready`, `blocked`, `needs-review`, `needs-dispatch`, `in-progress`, `stale-evidence`, `no-release-candidate`, or `deferred`. `build` writes `FLEET_RELEASE_TRAIN.md`, `FLEET_RELEASE_EVIDENCE.json`, and `MANUAL_PUBLISH_PLAN.md`. The publish plan contains placeholders and manual-only checklist steps for verification, release doctor, candidate compare, tags, pushes, and release creation. Brigade does not execute any publish step.
 
 `brigade repos release compare <train-id|latest>` checks whether captured repo HEAD labels changed, newer release readiness or candidate receipts exist, fleet action reconciliation changed, referenced safe receipt ids disappeared, or unresolved fleet action state changed. `closeout` records `reviewed`, `deferred`, `superseded`, or `archived` status. Repo doctor, center status, center reviews, work brief, work doctor, and release doctor surface blocked, stale, or unclosed release train state.
+
+`brigade repos release actions plan/build/list/show/start/done/defer/archive` turns a reviewed or deferred release train into a local action queue under `.brigade/repos/releases/actions.json`. Actions are created for repos that are blocked, need review, need dispatch, are in progress, have stale evidence, lack a release candidate, or are deferred. They are metadata records only and never execute suggested commands.
+
+`brigade repos release evidence plan/record/list/show` records manual publish evidence under `.brigade/repos/releases/evidence.jsonl`. Evidence steps are `verification`, `release-doctor`, `candidate-compare`, `tag`, `push`, `release`, and `other`. Statuses are `completed`, `skipped`, `blocked`, and `deferred`. These records describe what the operator did manually; Brigade does not run verification, tag, push, or release commands.
 
 Privacy boundaries:
 
