@@ -5281,6 +5281,7 @@ def _brief_payload(target: Path, *, limit: int = 3) -> dict[str, Any]:
             "issue_count": center_report_health["issue_count"],
             "top_issue": center_report_health["top_issue"],
             "latest": center_report_health["latest"],
+            "latest_diff": center_report_health.get("latest_diff"),
         },
         "operator_actions": {
             "actions_path": center_actions_health["actions_path"],

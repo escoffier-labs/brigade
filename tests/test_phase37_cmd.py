@@ -132,6 +132,7 @@ def test_center_schema_manifest_is_stable_and_read_only(tmp_path, capsys):
         "center-templates",
         "center-report",
         "center-report-review",
+        "center-report-diff",
         "center-actions",
     } <= schema_ids
     schemas = {schema["id"]: schema for schema in payload["schemas"]}

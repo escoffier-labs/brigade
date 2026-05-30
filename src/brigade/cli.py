@@ -1178,6 +1178,12 @@ def _build_parser() -> argparse.ArgumentParser:
     p_center_report_compare.add_argument("report_id", nargs="?", default="latest", help="Report id, unique prefix, or latest.")
     p_center_report_compare.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
     p_center_report_compare.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_center_report_diff = center_report_sub.add_parser("diff", help="Diff two local operator reports.")
+    p_center_report_diff.add_argument("base_report_id", help="Older report id, unique prefix, or latest.")
+    p_center_report_diff.add_argument("compare_report_id", help="Newer report id or unique prefix.")
+    p_center_report_diff.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect or update.")
+    p_center_report_diff.add_argument("--record", action="store_true", help="Write a local report diff receipt.")
+    p_center_report_diff.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_center_report_closeout = center_report_sub.add_parser("closeout", help="Mark one operator report review state.")
     p_center_report_closeout.add_argument("report_id", nargs="?", default="latest", help="Report id, unique prefix, or latest.")
     p_center_report_closeout.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
@@ -2280,6 +2286,14 @@ def main(argv=None) -> int:
                 return center_cmd.report_review(target=args.target, report_id=args.report_id, json_output=args.json)
             if args.center_report_command == "compare":
                 return center_cmd.report_compare(target=args.target, report_id=args.report_id, json_output=args.json)
+            if args.center_report_command == "diff":
+                return center_cmd.report_diff(
+                    target=args.target,
+                    base_report_id=args.base_report_id,
+                    compare_report_id=args.compare_report_id,
+                    record=args.record,
+                    json_output=args.json,
+                )
             if args.center_report_command == "closeout":
                 return center_cmd.report_closeout(
                     target=args.target,

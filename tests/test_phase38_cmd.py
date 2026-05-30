@@ -162,6 +162,80 @@ def test_report_compare_detects_changed_head_missing_receipts_new_activity_and_r
     assert "operator_report_review_queue_changed" in names
 
 
+def test_report_diff_records_changed_queue_blockers_and_activity(tmp_path, capsys):
+    _seed_imports(tmp_path)
+    assert center_cmd.report_build(target=tmp_path, json_output=True) == 0
+    base = json.loads(capsys.readouterr().out)
+    base_path = Path(base["path"]) / "CENTER_EVIDENCE.json"
+    base_payload = json.loads(base_path.read_text())
+    base_payload["receipt_references"] = [str(tmp_path / ".brigade" / "missing" / "receipt.json")]
+    base_path.write_text(json.dumps(base_payload, indent=2, sort_keys=True) + "\n")
+    assert center_cmd.report_closeout(target=tmp_path, report_id=base["report_id"], status="reviewed", json_output=True) == 0
+    capsys.readouterr()
+
+    inbox = tmp_path / ".brigade" / "work" / "imports" / "inbox.jsonl"
+    records = [
+        {
+            "id": "import-normal",
+            "text": "Review project candidate",
+            "kind": "task",
+            "source": "project-consolidation",
+            "status": "pending",
+            "priority": "normal",
+            "metadata": {"source_fingerprint": "fp-project"},
+            "created_at": "2026-05-29T12:02:00+00:00",
+        },
+        {
+            "id": "import-critical",
+            "text": "Fix critical release gate",
+            "kind": "task",
+            "source": "security-scan",
+            "status": "pending",
+            "severity": "critical",
+            "metadata": {"source_fingerprint": "fp-critical"},
+            "created_at": "2026-05-29T12:03:00+00:00",
+        },
+    ]
+    inbox.write_text("".join(json.dumps(record, sort_keys=True) + "\n" for record in records))
+    assert center_cmd.report_build(target=tmp_path, json_output=True) == 0
+    compare = json.loads(capsys.readouterr().out)
+    assert center_cmd.report_closeout(target=tmp_path, report_id=compare["report_id"], status="reviewed", json_output=True) == 0
+    capsys.readouterr()
+
+    assert center_cmd.report_diff(target=tmp_path, base_report_id=base["report_id"], compare_report_id=compare["report_id"], json_output=True) == 0
+    planned = json.loads(capsys.readouterr().out)
+    assert planned["diff_id"] == "planned"
+    assert planned["write_required"] is False
+    assert not (tmp_path / ".brigade" / "center" / "report-diffs").exists()
+    assert planned["summary"]["new_item_count"] >= 1
+    assert planned["summary"]["resolved_item_count"] >= 1
+    assert planned["summary"]["new_blocker_count"] >= 1
+    assert planned["summary"]["stale_reference_count"] >= 1
+    assert "import-critical" in {item["local_id"] for item in planned["new_items"]}
+    assert "import-high" in {item["local_id"] for item in planned["resolved_items"]}
+
+    assert center_cmd.report_diff(target=tmp_path, base_report_id=base["report_id"], compare_report_id=compare["report_id"], record=True, json_output=True) == 0
+    recorded = json.loads(capsys.readouterr().out)
+    assert recorded["diff_id"] != "planned"
+    assert recorded["path"]
+    assert Path(recorded["path"]).is_file()
+    assert recorded["issue_count"] >= 2
+
+    assert center_cmd.activity(target=tmp_path, json_output=True) == 0
+    activity = json.loads(capsys.readouterr().out)
+    assert any(item["subsystem"] == "center-report-diff" and item["local_id"] == recorded["diff_id"] for item in activity["activity"])
+
+    health = center_cmd.report_health(tmp_path)
+    assert any(check["name"] == "operator_report_diff_has_issues" for check in health["checks"])
+    assert work_cmd.doctor(target=tmp_path) in {0, 1}
+    assert "operator_report_diff_has_issues" in capsys.readouterr().out
+    assert release_cmd.doctor(target=tmp_path, base_ref=None, json_output=True) == 1
+    release_payload = json.loads(capsys.readouterr().out)
+    assert any("operator report has issue" in warning for warning in release_payload["warnings"])
+    assert cli.main(["center", "report", "diff", base["report_id"], compare["report_id"], "--target", str(tmp_path), "--record", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out)["summary"]["new_blocker_count"] >= 1
+
+
 def test_report_closeout_integrates_with_work_and_release_compare(tmp_path, monkeypatch, capsys):
     _init_git(tmp_path)
     _seed_release_prereqs(tmp_path)

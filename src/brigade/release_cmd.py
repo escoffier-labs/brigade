@@ -470,6 +470,7 @@ def _evidence(target: Path, *, base_ref: str | None) -> dict[str, Any]:
             "issue_count": operator_report_health.get("issue_count"),
             "top_issue": operator_report_health.get("top_issue"),
             "latest": operator_report_health.get("latest"),
+            "latest_diff": operator_report_health.get("latest_diff"),
         },
         "operator_actions": {
             "action_count": operator_actions_health.get("action_count"),

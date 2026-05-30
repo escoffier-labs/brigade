@@ -226,6 +226,29 @@ def _center_schema_manifest_schemas() -> list[dict[str, Any]]:
             "item_fields": item_fields,
         },
         {
+            "id": "center-report-diff",
+            "command": "brigade center report diff <base-report-id> <compare-report-id> --json",
+            "description": "Two-report diff contract for changed review queues, resolved items, new blockers, and stale references.",
+            "top_level_fields": [
+                _schema_field("schema_version", "integer"),
+                _schema_field("schema", "object"),
+                _schema_field("target", "string"),
+                _schema_field("diff_id", "string"),
+                _schema_field("base_report_id", "string"),
+                _schema_field("compare_report_id", "string"),
+                _schema_field("status", "string"),
+                _schema_field("summary", "object"),
+                _schema_field("new_items", "array"),
+                _schema_field("resolved_items", "array"),
+                _schema_field("changed_items", "array"),
+                _schema_field("new_blockers", "array"),
+                _schema_field("stale_references", "array"),
+                _schema_field("diff_fingerprint", "string"),
+                _schema_field("path", "string|null", required=False),
+            ],
+            "item_fields": item_fields,
+        },
+        {
             "id": "center-actions",
             "command": "brigade center actions list --json",
             "description": "Daily operator action queue contract.",
@@ -266,7 +289,7 @@ def _center_schema_manifest(target: Path) -> dict[str, Any]:
             {
                 "status": "ok",
                 "name": "wrapper_field_contracts_present",
-                "detail": "status, activity, reviews, templates, reports, report review, and actions are described",
+                "detail": "status, activity, reviews, templates, reports, report review, report diff, and actions are described",
             },
         ],
     }
@@ -465,6 +488,21 @@ def _activity(target: Path) -> list[dict[str, Any]]:
     for receipt in _iter_json_files(target / ".brigade" / "handoffs" / "ingest-runs", "*.json")[:20]:
         run_id = str(receipt.get("run_id") or Path(str(receipt.get("path") or "run")).stem)
         items.append(_item("handoff-ingest", run_id, str(receipt.get("status") or "completed"), "handoff ingest receipt", f"brigade handoff run-show {run_id}", created_at=receipt.get("started_at") if isinstance(receipt.get("started_at"), str) else None, updated_at=receipt.get("completed_at") or receipt.get("started_at"), receipt_path=receipt.get("path") if isinstance(receipt.get("path"), str) else None))
+    for diff in _report_diffs(target)[:20]:
+        diff_id = str(diff.get("diff_id") or Path(str(diff.get("path") or "diff")).parent.name)
+        summary = diff.get("summary") if isinstance(diff.get("summary"), dict) else {}
+        items.append(
+            _item(
+                "center-report-diff",
+                diff_id,
+                str(diff.get("status") or "unknown"),
+                f"{summary.get('new_item_count', 0)} new, {summary.get('resolved_item_count', 0)} resolved",
+                f"brigade center report diff {diff.get('base_report_id')} {diff.get('compare_report_id')}",
+                created_at=diff.get("created_at") if isinstance(diff.get("created_at"), str) else None,
+                updated_at=diff.get("created_at") if isinstance(diff.get("created_at"), str) else None,
+                receipt_path=diff.get("path") if isinstance(diff.get("path"), str) else None,
+            )
+        )
     for call in _read_jsonl(tools_cmd.calls_path(target))[:20]:
         call_id = str(call.get("call_id") or call.get("id") or "")
         items.append(_item("tool-call", call_id, str(call.get("status") or "unknown"), str(call.get("tool_id") or "tool call"), f"brigade tools call show {call_id}", severity=call.get("severity") if isinstance(call.get("severity"), str) else None, created_at=call.get("created_at") if isinstance(call.get("created_at"), str) else None, updated_at=call.get("reviewed_at") or call.get("created_at"), receipt_path=str(tools_cmd.calls_path(target))))
@@ -749,6 +787,10 @@ def _reports_archive_root(target: Path) -> Path:
     return target / ".brigade" / "center" / "reports-archive"
 
 
+def _report_diffs_root(target: Path) -> Path:
+    return target / ".brigade" / "center" / "report-diffs"
+
+
 def _report_json_path(path: Path) -> Path:
     return path / "CENTER_EVIDENCE.json" if path.is_dir() else path
 
@@ -781,6 +823,15 @@ def _reports(target: Path, *, include_archived: bool = False) -> list[dict[str, 
 def latest_report(target: Path) -> dict[str, Any] | None:
     reports = _reports(target)
     return reports[0] if reports else None
+
+
+def _report_diffs(target: Path) -> list[dict[str, Any]]:
+    return _iter_json_files(_report_diffs_root(target), "*/diff.json")
+
+
+def latest_report_diff(target: Path) -> dict[str, Any] | None:
+    diffs = _report_diffs(target)
+    return diffs[0] if diffs else None
 
 
 def _resolve_report(target: Path, report_id: str) -> tuple[dict[str, Any] | None, str | None]:
@@ -1053,6 +1104,7 @@ def _write_report_bundle(report_dir: Path, payload: dict[str, Any]) -> None:
 def report_health(target: Path) -> dict[str, Any]:
     target = target.expanduser().resolve()
     latest = latest_report(target)
+    reports = _reports(target)
     checks: list[dict[str, Any]] = []
     if latest is None:
         checks.append({"status": "warn", "name": "operator_report_missing", "detail": "no local operator report has been built", "suggested_next_command": "brigade center report build"})
@@ -1074,13 +1126,50 @@ def report_health(target: Path) -> dict[str, Any]:
         if isinstance(ref, str) and ref and not Path(ref).exists():
             checks.append({"status": "warn", "name": "operator_report_missing_receipt", "detail": ref, "suggested_next_command": f"brigade center report show {latest.get('report_id')}"})
             break
-    latest_activity = _activity(target)
+    latest_activity = [item for item in _activity(target) if item.get("subsystem") != "center-report-diff"]
     report_activity = latest.get("activity") if isinstance(latest.get("activity"), list) else []
     latest_time = _parse_time(latest_activity[0].get("updated_at")) if latest_activity else None
     report_time = _parse_time(report_activity[0].get("updated_at")) if report_activity else created
     if latest_time is not None and report_time is not None and latest_time > report_time:
         checks.append({"status": "warn", "name": "operator_report_newer_activity", "detail": f"{latest.get('report_id')} is older than local activity", "suggested_next_command": "brigade center report build"})
-    return {"latest": latest, "checks": checks, "issue_count": len(checks), "top_issue": checks[0] if checks else None}
+    latest_diff = latest_report_diff(target)
+    if len(reports) >= 2:
+        compare_report = reports[0]
+        base_report = reports[1]
+        if latest_diff is None:
+            checks.append(
+                {
+                    "status": "warn",
+                    "name": "operator_report_diff_missing",
+                    "detail": f"{base_report.get('report_id')} -> {compare_report.get('report_id')} has no local diff receipt",
+                    "suggested_next_command": f"brigade center report diff {base_report.get('report_id')} {compare_report.get('report_id')} --record",
+                }
+            )
+        elif latest_diff.get("base_report_id") != base_report.get("report_id") or latest_diff.get("compare_report_id") != compare_report.get("report_id"):
+            checks.append(
+                {
+                    "status": "warn",
+                    "name": "operator_report_diff_stale",
+                    "detail": f"latest diff does not cover {base_report.get('report_id')} -> {compare_report.get('report_id')}",
+                    "suggested_next_command": f"brigade center report diff {base_report.get('report_id')} {compare_report.get('report_id')} --record",
+                }
+            )
+        elif int((latest_diff.get("summary") or {}).get("new_blocker_count") or 0) > 0 or int((latest_diff.get("summary") or {}).get("stale_reference_count") or 0) > 0:
+            checks.append(
+                {
+                    "status": "warn",
+                    "name": "operator_report_diff_has_issues",
+                    "detail": f"{latest_diff.get('diff_id')} has new blockers or stale references",
+                    "suggested_next_command": f"brigade center report diff {latest_diff.get('base_report_id')} {latest_diff.get('compare_report_id')}",
+                }
+            )
+    return {
+        "latest": latest,
+        "latest_diff": latest_diff,
+        "checks": checks,
+        "issue_count": len(checks),
+        "top_issue": checks[0] if checks else None,
+    }
 
 
 def report_plan(*, target: Path, json_output: bool = False) -> int:
@@ -1229,6 +1318,150 @@ def _report_queue_changed(report: dict[str, Any], current_reviews: list[dict[str
     old = sorted(_item_key(item) for item in report.get("reviews", []) if isinstance(item, dict))
     new = sorted(_item_key(item) for item in current_reviews if isinstance(item, dict))
     return old != new
+
+
+def _report_review_map(report: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    reviews_data = report.get("reviews") if isinstance(report.get("reviews"), list) else []
+    return {_item_key(item): item for item in reviews_data if isinstance(item, dict)}
+
+
+def _is_blocker_item(item: dict[str, Any]) -> bool:
+    return item.get("priority") in {"urgent", "high"} or item.get("severity") in {"critical", "high"}
+
+
+def _missing_receipt_refs(report: dict[str, Any]) -> list[dict[str, Any]]:
+    report_id = str(report.get("report_id") or "unknown")
+    stale: list[dict[str, Any]] = []
+    for ref in report.get("receipt_references") if isinstance(report.get("receipt_references"), list) else []:
+        if isinstance(ref, str) and ref and not Path(ref).exists():
+            stale.append({"report_id": report_id, "path": ref})
+    return stale
+
+
+def _report_diff_payload(
+    *,
+    target: Path,
+    base_report: dict[str, Any],
+    compare_report: dict[str, Any],
+    diff_id: str = "planned",
+    path: Path | None = None,
+) -> dict[str, Any]:
+    base_map = _report_review_map(base_report)
+    compare_map = _report_review_map(compare_report)
+    base_keys = set(base_map)
+    compare_keys = set(compare_map)
+    new_items = [compare_map[key] for key in sorted(compare_keys - base_keys)]
+    resolved_items = [base_map[key] for key in sorted(base_keys - compare_keys)]
+    changed_items = [
+        {
+            "before": base_map[key],
+            "after": compare_map[key],
+            "item_key": key,
+        }
+        for key in sorted(base_keys & compare_keys)
+        if _fingerprint_payload(base_map[key]) != _fingerprint_payload(compare_map[key])
+    ]
+    new_blockers: list[dict[str, Any]] = []
+    for key in sorted(compare_keys):
+        current = compare_map[key]
+        previous = base_map.get(key)
+        if key not in base_map and _is_blocker_item(current):
+            new_blockers.append(current)
+        elif previous is not None and not _is_blocker_item(previous) and _is_blocker_item(current):
+            new_blockers.append(current)
+    stale_references = _missing_receipt_refs(base_report) + _missing_receipt_refs(compare_report)
+    status = "changed" if new_items or resolved_items or changed_items or stale_references else "unchanged"
+    summary = {
+        "base_review_count": len(base_map),
+        "compare_review_count": len(compare_map),
+        "new_item_count": len(new_items),
+        "resolved_item_count": len(resolved_items),
+        "changed_item_count": len(changed_items),
+        "new_blocker_count": len(new_blockers),
+        "stale_reference_count": len(stale_references),
+    }
+    created_at = _now().isoformat()
+    fingerprint_payload = {
+        "base_report_id": base_report.get("report_id"),
+        "compare_report_id": compare_report.get("report_id"),
+        "summary": summary,
+        "new_items": new_items,
+        "resolved_items": resolved_items,
+        "changed_items": changed_items,
+        "new_blockers": new_blockers,
+        "stale_references": stale_references,
+    }
+    payload = {
+        "schema_version": SCHEMA_VERSION,
+        "schema": _schema("center-report-diff"),
+        "target": str(target),
+        "diff_id": diff_id,
+        "created_at": created_at,
+        "base_report_id": base_report.get("report_id"),
+        "base_report_path": base_report.get("path"),
+        "base_report_fingerprint": base_report.get("report_fingerprint"),
+        "compare_report_id": compare_report.get("report_id"),
+        "compare_report_path": compare_report.get("path"),
+        "compare_report_fingerprint": compare_report.get("report_fingerprint"),
+        "status": status,
+        "summary": summary,
+        "new_items": new_items,
+        "resolved_items": resolved_items,
+        "changed_items": changed_items,
+        "new_blockers": new_blockers,
+        "stale_references": stale_references,
+        "issue_count": len(new_blockers) + len(stale_references),
+        "diff_fingerprint": _fingerprint_payload(fingerprint_payload),
+        "path": str(path / "diff.json") if path is not None else None,
+        "write_required": path is None,
+    }
+    return payload
+
+
+def report_diff(
+    *,
+    target: Path,
+    base_report_id: str,
+    compare_report_id: str,
+    record: bool = False,
+    json_output: bool = False,
+) -> int:
+    target = target.expanduser().resolve()
+    base_report, base_error = _resolve_report(target, base_report_id)
+    compare_report, compare_error = _resolve_report(target, compare_report_id)
+    if base_report is None:
+        print(f"error: {base_error}", file=sys.stderr)
+        return 1 if base_error and "not found" in base_error else 2
+    if compare_report is None:
+        print(f"error: {compare_error}", file=sys.stderr)
+        return 1 if compare_error and "not found" in compare_error else 2
+    if base_report.get("report_id") == compare_report.get("report_id"):
+        print("error: base and compare reports must be different", file=sys.stderr)
+        return 2
+    diff_id = "planned"
+    diff_dir: Path | None = None
+    if record:
+        created = _now()
+        diff_id = f"{created.strftime('%Y%m%d-%H%M%S')}-report-diff-{uuid4().hex[:6]}"
+        diff_dir = _report_diffs_root(target) / diff_id
+    payload = _report_diff_payload(target=target, base_report=base_report, compare_report=compare_report, diff_id=diff_id, path=diff_dir)
+    payload["write_required"] = bool(record)
+    if record and diff_dir is not None:
+        _write_json(diff_dir / "diff.json", payload)
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+    print(f"operator report diff: {payload['base_report_id']} -> {payload['compare_report_id']}")
+    print(f"status: {payload['status']}")
+    print(f"new_items: {payload['summary']['new_item_count']}")
+    print(f"resolved_items: {payload['summary']['resolved_item_count']}")
+    print(f"new_blockers: {payload['summary']['new_blocker_count']}")
+    print(f"stale_references: {payload['summary']['stale_reference_count']}")
+    if record:
+        print(f"path: {payload['path']}")
+    else:
+        print("run: brigade center report diff <base> <compare> --record")
+    return 0
 
 
 def report_compare(*, target: Path, report_id: str = "latest", json_output: bool = False) -> int:

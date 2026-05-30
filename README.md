@@ -358,6 +358,7 @@ brigade center report show <report-id>
 brigade center report archive <report-id>
 brigade center report review <report-id>
 brigade center report compare <report-id>
+brigade center report diff <base-report-id> <compare-report-id> --record
 brigade center report closeout <report-id>
 brigade center actions plan <report-id>
 brigade center actions build <report-id>

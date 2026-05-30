@@ -22,6 +22,8 @@ brigade center report show <report-id>
 brigade center report archive <report-id>
 brigade center report review <report-id>
 brigade center report compare <report-id>
+brigade center report diff <base-report-id> <compare-report-id>
+brigade center report diff <base-report-id> <compare-report-id> --record
 brigade center report closeout <report-id>
 brigade center actions plan <report-id>
 brigade center actions build <report-id>
@@ -82,6 +84,14 @@ Each bundle contains:
 
 `brigade center report compare <report-id|latest>` checks the report against current local state. It warns when HEAD changed, referenced receipts are missing, newer activity exists, newer release/readiness/verification/review/sweep/security receipts exist, or the review queue changed.
 
+`brigade center report diff <base-report-id> <compare-report-id>` compares two completed report bundles. It reports new items, resolved items, changed items, new blockers, and stale receipt references. Passing `--record` writes a local diff receipt under:
+
+```text
+.brigade/center/report-diffs/
+```
+
+Diff receipts appear in `brigade center activity` and feed operator report health. `brigade work doctor` and `brigade release doctor` surface missing, stale, or issue-bearing report diffs, but no report diff command promotes, dismisses, runs, or fixes anything.
+
 `brigade center report closeout <report-id|latest>` writes `CLOSEOUT.json` in the report bundle. Closeout states are `reviewed`, `deferred`, `superseded`, and `archived`. Closeout stores a reviewed timestamp, reason, unresolved item count, deferred item ids, and report fingerprint.
 
 ## Daily Action Queue
@@ -127,4 +137,4 @@ Each action stores:
 
 Center status, center reviews, work brief, work doctor, release doctor, and release evidence include fleet sweep, fleet report, fleet action queue, dispatch, reconciliation, fleet release train action, and manual evidence health.
 
-The operator center never invokes scanners, tools, reviewers, handoff ingestion, release publishing, git commands that mutate state, or remote APIs. Only `center report build`, `center report archive`, and `center actions build/start/done/defer/archive` write local gitignored center files.
+The operator center never invokes scanners, tools, reviewers, handoff ingestion, release publishing, git commands that mutate state, or remote APIs. Only `center report build`, `center report archive`, `center report diff --record`, and `center actions build/start/done/defer/archive` write local gitignored center files.

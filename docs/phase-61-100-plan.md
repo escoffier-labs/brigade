@@ -212,6 +212,8 @@ Goal: compare two operator reports and write local diff receipts showing changed
 
 Acceptance: tests cover report diff text and JSON, center activity, work doctor, and release doctor integration.
 
+Status: implemented with `brigade center report diff`, optional local diff receipts, center activity rows, operator report health checks, work/release doctor surfacing, docs, and focused tests.
+
 ### Phase 90: Operator Action Aging And SLA Policy
 Goal: add local aging thresholds and review policies for operator actions without executing suggested commands.
 
