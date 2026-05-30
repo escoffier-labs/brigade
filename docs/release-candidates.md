@@ -54,7 +54,7 @@ The fleet publish plan is manual-only. It can include checklist labels for verif
 
 Reviewed release trains can produce local release action queues with `brigade repos release actions build`. Operators can also record manual publish evidence with `brigade repos release evidence record`. Evidence records track the repo id, train id, step, status, safe summary, and fingerprints. `brigade repos release reconcile` marks train actions done only after required evidence is completed, skipped, or deferred, and `brigade repos release summary` shows missing or blocked evidence. These are receipts of manual work, not commands to run.
 
-For final review, `brigade repos release report` writes local train review report files, `checklist` shows required manual evidence, `import-issues` routes unresolved evidence into the local work inbox, and `ready` fails until blocked repos, unresolved actions, missing evidence, and blocked evidence are cleared or explicitly reviewed.
+For final review, `brigade repos release report` writes local train review report files, `checklist` shows required manual evidence, `import-issues` routes unresolved evidence into the local work inbox, `activity` shows the local train ledger, `manifest` records bundle file labels and fingerprints, and `audit` checks bundle and evidence health. `ready` fails until blocked repos, unresolved actions, missing evidence, and blocked evidence are cleared or explicitly waived with `brigade repos release waivers`.
 
 ## Boundary
 

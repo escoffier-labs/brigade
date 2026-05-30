@@ -170,6 +170,7 @@ Acceptance:
 - Tests cover fleet release train action plan/build/list/show/start/done/defer/archive and manual release evidence plan/record/list/show, including health integration and no command execution.
 - Tests cover release train reconcile and summary for complete, skipped, deferred, blocked, and missing evidence states.
 - Tests cover release train report, checklist, hygiene, import-issues, and ready gate behavior without remote mutation.
+- Tests cover release train waivers, activity, manifests, audits, waiver-aware ready behavior, and revocation without remote mutation.
 - Tests prove private repo names, owner names, org names, local paths, and raw evidence are not copied into public docs, fixtures, imports, handoffs, release evidence, or committed diffs.
 
 Phase 35 status:
@@ -231,6 +232,15 @@ Phase 46-50 status:
 - Implemented command surface: `brigade repos release hygiene`.
 - Implemented command surface: `brigade repos release ready <train-id|latest>`.
 - Release reports write `RELEASE_TRAIN_REPORT.md` and `RELEASE_TRAIN_REPORT.json` into the local train bundle. Import routing uses `source: repo-fleet-release` and preserves source fingerprints. The ready gate remains local and fails on blocked repos, unresolved actions, missing evidence, or blocked evidence.
+
+Phase 51-55 status:
+
+- Implemented command surface: `brigade repos release waivers record/list/show/revoke`.
+- Implemented command surface: `brigade repos release activity <train-id|latest>`.
+- Implemented command surface: `brigade repos release manifest <train-id|latest>`.
+- Implemented command surface: `brigade repos release audit <train-id|latest>`.
+- Release waivers are local records for `blocked-repo`, `unresolved-action`, `missing-evidence`, and `blocked-evidence` scopes. The ready gate reports active waivers and can pass when remaining blockers are explicitly waived without hiding the underlying counts.
+- Release activity gives one chronological local ledger across train creation, closeout, train actions, manual evidence, waivers, reports, and manifests. Manifests record bundle file labels and fingerprints. Audits report missing bundle files, stale manifests, open actions, blocked repos, and unresolved manual evidence.
 
 ### 3. Inspiration Pattern Registry
 

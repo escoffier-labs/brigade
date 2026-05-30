@@ -94,6 +94,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `brigade repos release actions` and `brigade repos release evidence` for reviewed release train action queues and manual publish evidence records that stay local, explicit, and non-executing.
 - `brigade repos release reconcile` and `summary` for resolving fleet release actions against manual evidence and including reconciliation summaries in release train closeouts.
 - `brigade repos release report/checklist/hygiene/import-issues/ready` for local release train review reports, evidence checklists, hygiene checks, unresolved evidence imports, and manual publish readiness gates.
+- `brigade repos release waivers`, `activity`, `manifest`, and `audit` for explicit release-train waivers, chronological train activity, bundle manifests, bundle audits, and waiver-aware manual publish readiness.
 - `brigade work sweep closeout <sweep-id|latest>` for reviewable sweep closeout records that block unresolved pending imports, support explicit deferrals, and surface unclosed sweeps through inbox hygiene.
 - `brigade work backup init/status/doctor/import-issues` for read-only local backup health summaries and `backup-health` inbox imports.
 - Backup health checks for stale snapshots, failed or stale checks, failed or stale prunes, missing summaries, overdue restore rehearsals, and unsafe private summary fields.

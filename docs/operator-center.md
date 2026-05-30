@@ -119,7 +119,7 @@ Each action stores:
 
 `brigade repos release actions` turns reviewed release trains into local per-repo action queues, and `brigade repos release evidence` records manual publish evidence such as verification, release doctor, candidate compare, tag, push, and release outcomes. `brigade repos release reconcile` resolves actions against those evidence records, and `brigade repos release summary` reports unresolved, missing, blocked, skipped, deferred, and completed evidence. These records are local metadata only.
 
-`brigade repos release report/checklist/hygiene/import-issues/ready` provides the closeout layer around those trains: review report files, manual evidence checklists, hygiene warnings, local task imports for unresolved evidence, and a final ready gate for manual publishing.
+`brigade repos release report/checklist/hygiene/import-issues/ready/activity/manifest/audit` provides the closeout layer around those trains: review report files, manual evidence checklists, hygiene warnings, local task imports for unresolved evidence, chronological activity, bundle manifests, bundle audits, and a final waiver-aware ready gate for manual publishing. `brigade repos release waivers` records explicit local waivers for reviewed release-train risk without hiding the underlying counts.
 
 Center status, center reviews, work brief, work doctor, release doctor, and release evidence include fleet sweep, fleet report, fleet action queue, dispatch, reconciliation, fleet release train action, and manual evidence health.
 
