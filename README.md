@@ -334,6 +334,10 @@ brigade learn import-issues
 brigade learn closeout <candidate-id>
 brigade learn closeouts
 brigade learn closeout-show <closeout-id|latest>
+brigade learn replay export <scenario-id>
+brigade learn replay list
+brigade learn replay show <replay-id|latest>
+brigade learn replay compare <replay-id|latest>
 brigade security closeout
 brigade center status
 brigade center activity

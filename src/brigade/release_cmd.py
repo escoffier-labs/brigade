@@ -437,6 +437,7 @@ def _evidence(target: Path, *, base_ref: str | None) -> dict[str, Any]:
             "issue_count": learning_health.get("issue_count"),
             "top_issue": learning_health.get("top_issue"),
             "latest_closeout": learning_health.get("latest_closeout"),
+            "replay": learning_health.get("replay"),
         },
         "repo_fleet": {
             "repo_count": repo_health.get("repo_count"),

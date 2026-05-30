@@ -114,6 +114,8 @@ Goal: compare learning replay receipts before and after code, rule, or policy ch
 
 Acceptance: tests cover replay export, replay compare, redaction, release evidence, and center reviews.
 
+Status: implemented with `brigade learn replay export/list/show/compare`, redacted before/after replay receipts under `.brigade/learn/replays/`, compare receipts under `.brigade/learn/replay-compares/`, release evidence integration, and operator-center review surfacing for regressions.
+
 ### Phase 76: Dependency-Free Security SARIF Export
 Goal: add SARIF output for security findings if it can be implemented with no dependencies, otherwise record a precise deferral.
 

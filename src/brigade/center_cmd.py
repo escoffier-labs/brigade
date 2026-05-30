@@ -402,6 +402,11 @@ def _reviews(target: Path) -> list[dict[str, Any]]:
                 severity=candidate.get("severity") if isinstance(candidate.get("severity"), str) else None,
             )
         )
+    learning_health = learn_cmd.health(target)
+    replay = learning_health.get("replay") if isinstance(learning_health.get("replay"), dict) else {}
+    replay_issue = replay.get("top_issue") if isinstance(replay.get("top_issue"), dict) else None
+    if replay_issue:
+        items.append(_item("learning", str(replay_issue.get("compare_id") or "learning-replay"), str(replay_issue.get("status") or "warn"), str(replay_issue.get("detail") or "learning replay needs review"), "brigade learn replay compare latest"))
     project_health = projects_cmd.health(target)
     for issue in project_health.get("checks", []):
         if issue.get("status") != "ok":

@@ -559,6 +559,7 @@ Implementation scope:
   - export a safe local learning scenario
   - replay after code or rule changes
   - record before/after outcome summaries
+  - compare before/after replay counts and surface regressions
   - do not upload or publish private examples
 - Make every learning candidate choose one review path:
   - task
@@ -573,6 +574,7 @@ Acceptance:
 - Tests cover learning candidate aggregation from fixtures across scanners, review, security, tools, handoffs, and memory-care.
 - Tests cover source-aware learning closeout quieting and changed-fingerprint resurfacing across scanner, security, review, tool, handoff, memory-care, backup, and release candidates.
 - Tests cover safe eval replay receipts without private raw evidence.
+- Tests cover replay compare receipts, redaction, release evidence, and operator-center review surfacing.
 - Tests cover JSON output and inbox imports.
 - Tests cover dismissal and accepted-risk quieting.
 - Tests prove no automatic memory edits or source edits happen.
@@ -582,7 +584,7 @@ Phase 36 status:
 - Implemented command surface: `brigade learn plan`, `brigade learn doctor`, and `brigade learn import-issues`.
 - Added `brigade learn closeout/closeouts/closeout-show` so accepted-risk, dismissed, archived, and deferred candidates are quieted until their source fingerprint changes.
 - Learning candidates aggregate from pending scanner imports, failed review receipts, and failed portable tool run receipts.
-- Added safe local replay receipt support for before/after summaries.
+- Added `brigade learn replay export/list/show/compare` for redacted local before/after replay receipts and compare receipts that do not mutate memory, source, policy, or remote state.
 - Deferred: rich accepted-risk quieting across every source subsystem. Reason: candidate import routing exists first, while source-specific closeout policies remain subsystem-owned.
 
 ### 11. Security Plugin Closure

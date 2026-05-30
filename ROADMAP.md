@@ -96,7 +96,7 @@ Goal: make context preparation, project consolidation, and self-learning local, 
 
 - Build local context engineering packs for task, repo, release, and tool-use scenarios. Status: started with `brigade context plan/build/list/show/archive`, `brigade context sync plan/record`, `brigade context doctor/import-issues`, safe summaries, task acceptance, recent evidence, private evidence exclusions, read-only configured harness sync planning receipts, and reviewable context freshness imports.
 - Audit configured related project records without cloning or mutating remotes. Status: started with gitignored `.brigade/projects.toml`, `brigade projects audit/import-issues`, `brigade projects readiness plan/record/list/show`, `brigade projects closeout/closeouts/closeout-show`, decision records for bake-in, integrate, catalog-only, move-candidate, and leave-alone, plus manual-only migration readiness and closeout receipts.
-- Aggregate local learning candidates without self-modification. Status: started with `brigade learn plan/doctor/import-issues`, `brigade learn closeout/closeouts/closeout-show`, candidate routing into the scanner inbox, raw import text avoidance, accepted-risk or dismissal quieting, changed-fingerprint resurfacing, and safe replay receipt support.
+- Aggregate local learning candidates without self-modification. Status: started with `brigade learn plan/doctor/import-issues`, `brigade learn closeout/closeouts/closeout-show`, `brigade learn replay export/list/show/compare`, candidate routing into the scanner inbox, raw import text avoidance, accepted-risk or dismissal quieting, changed-fingerprint resurfacing, and safe replay compare receipts.
 
 ## Later Phase: Cybersecurity Plugin
 

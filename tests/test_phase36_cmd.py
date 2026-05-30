@@ -438,6 +438,39 @@ def test_learning_closeouts_quiet_sources_and_changed_fingerprints(tmp_path, cap
     assert release["evidence"]["learning"]["changed_fingerprint_count"] == 1
 
 
+def test_learning_replay_export_compare_redaction_release_and_center(tmp_path, capsys):
+    assert learn_cmd.replay_export(
+        target=tmp_path,
+        scenario_id="scenario-one",
+        before_summary="before token=super-secret https://private.invalid/path",
+        after_summary="after password=hunter2",
+        before_count=1,
+        after_count=3,
+        json_output=True,
+    ) == 0
+    replay = json.loads(capsys.readouterr().out)
+    assert replay["remote_mutation"] is False
+    rendered = json.dumps(replay)
+    assert "super-secret" not in rendered
+    assert "hunter2" not in rendered
+    assert "private.invalid" not in rendered
+    assert learn_cmd.replay_list(target=tmp_path, json_output=True) == 0
+    assert json.loads(capsys.readouterr().out)["replay_count"] == 1
+    assert learn_cmd.replay_show(target=tmp_path, replay_id="latest", json_output=True) == 0
+    assert json.loads(capsys.readouterr().out)["replay"]["scenario_id"] == "scenario-one"
+    assert cli.main(["learn", "replay", "compare", "latest", "--target", str(tmp_path), "--json"]) == 0
+    compare = json.loads(capsys.readouterr().out)
+    assert compare["outcome"] == "regressed"
+    assert compare["candidate_delta"] == 2
+    assert Path(compare["path"], "compare.json").is_file()
+    assert release_cmd.plan(target=tmp_path, base_ref=None, json_output=True) in {0, 1}
+    release = json.loads(capsys.readouterr().out)
+    assert release["evidence"]["learning"]["replay"]["latest_compare"]["outcome"] == "regressed"
+    assert center_cmd.reviews(target=tmp_path, json_output=True) == 0
+    reviews = json.loads(capsys.readouterr().out)
+    assert any(item["subsystem"] == "learning" and "regressed" in item["safe_summary"] for item in reviews["reviews"])
+
+
 def test_tool_pack_and_sync_plan(tmp_path, capsys):
     assert tools_cmd.init(target=tmp_path, update_gitignore=False) == 0
     capsys.readouterr()

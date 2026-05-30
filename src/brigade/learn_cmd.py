@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -36,6 +37,10 @@ def _replays_root(target: Path) -> Path:
     return _learning_root(target) / "replays"
 
 
+def _replay_compares_root(target: Path) -> Path:
+    return _learning_root(target) / "replay-compares"
+
+
 def _closeouts_root(target: Path) -> Path:
     return _learning_root(target) / "closeouts"
 
@@ -51,6 +56,30 @@ def _read_json(path: Path) -> dict[str, Any] | None:
     except (OSError, json.JSONDecodeError):
         return None
     return payload if isinstance(payload, dict) else None
+
+
+def _redact_text(value: str) -> str:
+    rendered = re.sub(r"(?i)\b(token|secret|password|api[_-]?key)=\S+", lambda match: f"{match.group(1)}=<redacted>", value)
+    rendered = re.sub(r"(?i)\b(bearer)\s+[A-Za-z0-9._~+/=-]+", "bearer <redacted>", rendered)
+    rendered = re.sub(r"https?://[^\s]+", "<redacted-url>", rendered)
+    return rendered
+
+
+def _safe_payload(value: Any) -> Any:
+    if isinstance(value, str):
+        return _redact_text(value)
+    if isinstance(value, dict):
+        safe: dict[str, Any] = {}
+        for key, item in value.items():
+            key_text = str(key)
+            if re.search(r"(?i)(token|secret|password|api[_-]?key|credential)", key_text):
+                safe[key_text] = "<redacted>"
+            else:
+                safe[key_text] = _safe_payload(item)
+        return safe
+    if isinstance(value, list):
+        return [_safe_payload(item) for item in value]
+    return value
 
 
 def _candidate(candidate_id: str, subsystem: str, status: str, summary: str, command: str, *, severity: str | None = None, metadata: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -344,29 +373,197 @@ def closeout_show(*, target: Path, closeout_id: str, json_output: bool = False) 
 
 def write_replay(target: Path, *, scenario_id: str, before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any]:
     target = target.expanduser().resolve()
-    replay_id = f"{_now().strftime('%Y%m%d-%H%M%S')}-learning-replay-{scenario_id}"
+    replay_id = f"{_now().strftime('%Y%m%d-%H%M%S-%f')}-learning-replay-{scenario_id}"
     payload = {
         "replay_id": replay_id,
         "scenario_id": scenario_id,
         "created_at": _now().isoformat(),
-        "before": before,
-        "after": after,
+        "before": _safe_payload(before),
+        "after": _safe_payload(after),
         "privacy": "safe summaries only",
+        "manual_only": True,
+        "remote_mutation": False,
     }
     _write_json(_replays_root(target) / replay_id / "replay.json", payload)
     return payload
 
 
+def _read_replays(target: Path) -> list[dict[str, Any]]:
+    root = _replays_root(target.expanduser().resolve())
+    receipts: list[dict[str, Any]] = []
+    if not root.is_dir():
+        return receipts
+    for path in sorted(root.glob("*/replay.json")):
+        payload = _read_json(path)
+        if payload is None:
+            continue
+        payload.setdefault("replay_id", path.parent.name)
+        payload["path"] = str(path.parent)
+        receipts.append(payload)
+    return sorted(receipts, key=lambda item: str(item.get("created_at") or item.get("replay_id") or ""), reverse=True)
+
+
+def _read_replay_compares(target: Path) -> list[dict[str, Any]]:
+    root = _replay_compares_root(target.expanduser().resolve())
+    receipts: list[dict[str, Any]] = []
+    if not root.is_dir():
+        return receipts
+    for path in sorted(root.glob("*/compare.json")):
+        payload = _read_json(path)
+        if payload is None:
+            continue
+        payload.setdefault("compare_id", path.parent.name)
+        payload["path"] = str(path.parent)
+        receipts.append(payload)
+    return sorted(receipts, key=lambda item: str(item.get("created_at") or item.get("compare_id") or ""), reverse=True)
+
+
+def _find_replay(target: Path, replay_id: str) -> tuple[dict[str, Any] | None, str | None]:
+    replays = _read_replays(target)
+    if replay_id == "latest":
+        if not replays:
+            return None, "learning replay not found: latest"
+        return replays[0], None
+    matches = [replay for replay in replays if str(replay.get("replay_id") or "").startswith(replay_id)]
+    if not matches:
+        return None, f"learning replay not found: {replay_id}"
+    if len(matches) > 1:
+        return None, f"learning replay id is ambiguous: {replay_id}"
+    return matches[0], None
+
+
+def _metric(payload: dict[str, Any], key: str) -> int | None:
+    value = payload.get(key)
+    if isinstance(value, int):
+        return value
+    try:
+        return int(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _compare_replay_payload(target: Path, replay: dict[str, Any]) -> dict[str, Any]:
+    before = replay.get("before") if isinstance(replay.get("before"), dict) else {}
+    after = replay.get("after") if isinstance(replay.get("after"), dict) else {}
+    before_count = _metric(before, "candidate_count")
+    after_count = _metric(after, "candidate_count")
+    if before_count is None:
+        before_count = _metric(before, "issue_count")
+    if after_count is None:
+        after_count = _metric(after, "issue_count")
+    if before_count is None or after_count is None:
+        outcome = "unknown"
+        delta = None
+    else:
+        delta = after_count - before_count
+        outcome = "improved" if delta < 0 else "regressed" if delta > 0 else "unchanged"
+    compare_id = f"{_now().strftime('%Y%m%d-%H%M%S-%f')}-learning-replay-compare"
+    return {
+        "target": str(target),
+        "compare_id": compare_id,
+        "replay_id": replay.get("replay_id"),
+        "scenario_id": replay.get("scenario_id"),
+        "created_at": _now().isoformat(),
+        "outcome": outcome,
+        "candidate_delta": delta,
+        "before_count": before_count,
+        "after_count": after_count,
+        "before_summary": _safe_payload(before.get("summary") or before.get("safe_summary") or ""),
+        "after_summary": _safe_payload(after.get("summary") or after.get("safe_summary") or ""),
+        "manual_only": True,
+        "remote_mutation": False,
+        "suggested_next_command": "brigade learn import-issues",
+    }
+
+
+def replay_export(*, target: Path, scenario_id: str, before_summary: str, after_summary: str, before_count: int | None = None, after_count: int | None = None, json_output: bool = False) -> int:
+    before: dict[str, Any] = {"summary": before_summary}
+    after: dict[str, Any] = {"summary": after_summary}
+    if before_count is not None:
+        before["candidate_count"] = before_count
+    if after_count is not None:
+        after["candidate_count"] = after_count
+    payload = write_replay(target, scenario_id=scenario_id, before=before, after=after)
+    payload["path"] = str(_replays_root(target.expanduser().resolve()) / str(payload["replay_id"]))
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+    print(f"learning_replay: {payload['replay_id']}")
+    print(f"path: {payload['path']}")
+    print("remote_mutation: false")
+    return 0
+
+
+def replay_list(*, target: Path, json_output: bool = False) -> int:
+    target = target.expanduser().resolve()
+    replays = _read_replays(target)
+    payload = {"target": str(target), "replays": replays, "replay_count": len(replays)}
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+    print(f"learning_replays: {target}")
+    print(f"replays: {len(replays)}")
+    for replay in replays:
+        print(f"- {replay.get('replay_id')} scenario={replay.get('scenario_id')}")
+    return 0
+
+
+def replay_show(*, target: Path, replay_id: str, json_output: bool = False) -> int:
+    target = target.expanduser().resolve()
+    replay, error = _find_replay(target, replay_id)
+    if replay is None:
+        print(f"error: {error}", file=sys.stderr)
+        return 1
+    payload = {"target": str(target), "replay": replay}
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+    print(f"learning_replay: {replay.get('replay_id')}")
+    print(f"scenario: {replay.get('scenario_id')}")
+    return 0
+
+
+def replay_compare(*, target: Path, replay_id: str, json_output: bool = False) -> int:
+    target = target.expanduser().resolve()
+    replay, error = _find_replay(target, replay_id)
+    if replay is None:
+        print(f"error: {error}", file=sys.stderr)
+        return 1
+    payload = _compare_replay_payload(target, replay)
+    root = _replay_compares_root(target) / str(payload["compare_id"])
+    _write_json(root / "compare.json", payload)
+    payload["path"] = str(root)
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+    print(f"learning_replay_compare: {payload['compare_id']}")
+    print(f"outcome: {payload['outcome']}")
+    print(f"path: {root}")
+    return 0
+
+
 def health(target: Path) -> dict[str, Any]:
     payload = plan_payload(target)
+    compares = _read_replay_compares(target)
+    replay_issue = None
+    latest_compare = compares[0] if compares else None
+    if isinstance(latest_compare, dict) and latest_compare.get("outcome") == "regressed":
+        replay_issue = {"status": WARN, "name": "learning_replay_regressed", "detail": f"{latest_compare.get('replay_id')} regressed by {latest_compare.get('candidate_delta')}", "compare_id": latest_compare.get("compare_id")}
+    issue_count = payload["issue_count"] + (1 if replay_issue else 0)
     return {
         "target": payload["target"],
         "candidate_count": payload["candidate_count"],
         "raw_candidate_count": payload["raw_candidate_count"],
         "quieted_candidate_count": payload["quieted_candidate_count"],
         "changed_fingerprint_count": payload["changed_fingerprint_count"],
-        "issue_count": payload["issue_count"],
-        "top_issue": payload["top_issue"],
+        "issue_count": issue_count,
+        "top_issue": payload["top_issue"] or replay_issue,
         "candidates": payload["candidates"],
         "latest_closeout": _read_closeouts(target)[0] if _read_closeouts(target) else None,
+        "replay": {
+            "latest": _read_replays(target)[0] if _read_replays(target) else None,
+            "latest_compare": latest_compare,
+            "top_issue": replay_issue,
+            "compare_count": len(compares),
+        },
     }
