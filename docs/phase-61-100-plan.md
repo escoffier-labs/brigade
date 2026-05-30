@@ -226,6 +226,8 @@ Goal: add an explicit root discovery plan for repo fleet entries under configure
 
 Acceptance: tests cover dry-run discovery, include/exclude rules, safe labels, private path redaction, and no cloning.
 
+Status: implemented with `brigade repos discover plan`, explicit `[[discovery_root]]` parsing, safe candidate labels, include/exclude/max-depth handling, path redaction, docs, and focused tests.
+
 ### Phase 92: Fleet Health Command Registry
 Goal: make optional read-only fleet health commands named, validated, and receipt-backed across configured repos.
 

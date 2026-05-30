@@ -6,6 +6,7 @@ import os
 import subprocess
 import sys
 import shutil
+import fnmatch
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -56,6 +57,17 @@ class SweepCommand:
     label: str
     argv: list[str]
     timeout: int = 120
+
+
+@dataclass(frozen=True)
+class DiscoveryRoot:
+    root_id: str
+    label: str
+    path: Path
+    enabled: bool = True
+    include: tuple[str, ...] = ("*",)
+    exclude: tuple[str, ...] = ()
+    max_depth: int = 2
 
 
 def config_path(target: Path) -> Path:
@@ -220,6 +232,188 @@ def _load_config(target: Path) -> tuple[list[RepoEntry], list[str], bool]:
             )
         )
     return entries, errors, True
+
+
+def _string_list(value: object, *, default: tuple[str, ...] = ()) -> tuple[str, ...]:
+    if value is None:
+        return default
+    if isinstance(value, str) and value.strip():
+        return (value.strip(),)
+    if isinstance(value, list) and all(isinstance(item, str) and item.strip() for item in value):
+        return tuple(str(item).strip() for item in value)
+    return default
+
+
+def _load_discovery_roots(target: Path) -> tuple[list[DiscoveryRoot], list[str], bool]:
+    path = config_path(target)
+    if not path.is_file():
+        return [], [f"missing config: {path}"], False
+    try:
+        data = tomllib.loads(path.read_text())
+    except (OSError, tomllib.TOMLDecodeError) as exc:
+        return [], [f"invalid config: {exc}"], True
+    raw_roots = data.get("discovery_root") or data.get("discovery_roots") or []
+    if not isinstance(raw_roots, list):
+        return [], ["discovery_root entries must be a list"], True
+    roots: list[DiscoveryRoot] = []
+    errors: list[str] = []
+    seen: set[str] = set()
+    for index, raw in enumerate(raw_roots, start=1):
+        if not isinstance(raw, dict):
+            errors.append(f"discovery_root {index}: entry must be a table")
+            continue
+        root_id = str(raw.get("id") or "").strip()
+        label = str(raw.get("label") or root_id).strip()
+        path_value = str(raw.get("path") or "").strip()
+        if not root_id:
+            errors.append(f"discovery_root {index}: id is required")
+            continue
+        if root_id in seen:
+            errors.append(f"discovery_root {index}: duplicate id {root_id}")
+            continue
+        seen.add(root_id)
+        if not path_value:
+            errors.append(f"discovery_root {root_id}: path is required")
+            continue
+        max_depth_raw = raw.get("max_depth", 2)
+        max_depth = max_depth_raw if isinstance(max_depth_raw, int) and max_depth_raw >= 0 else 2
+        roots.append(
+            DiscoveryRoot(
+                root_id=root_id,
+                label=label or root_id,
+                path=(target / path_value).expanduser().resolve(),
+                enabled=bool(raw.get("enabled", True)),
+                include=_string_list(raw.get("include"), default=("*",)),
+                exclude=_string_list(raw.get("exclude"), default=()),
+                max_depth=max_depth,
+            )
+        )
+    return roots, errors, True
+
+
+def _match_any(value: str, patterns: tuple[str, ...]) -> bool:
+    return any(fnmatch.fnmatch(value, pattern) for pattern in patterns)
+
+
+def _discovery_candidate_id(root_id: str, index: int) -> str:
+    safe_root = "".join(ch if ch.isalnum() or ch in {"-", "_"} else "-" for ch in root_id.lower()).strip("-") or "root"
+    return f"{safe_root}-candidate-{index}"
+
+
+def _discover_repos(root: DiscoveryRoot) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    candidates: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
+    if not root.enabled:
+        return candidates, [{"root_id": root.root_id, "reason": "disabled"}]
+    if not root.path.is_dir():
+        return candidates, [{"root_id": root.root_id, "reason": "missing-root", "path_label": f"{root.root_id}:root"}]
+    pending: list[tuple[Path, int]] = [(root.path, 0)]
+    seen: set[Path] = set()
+    while pending:
+        current, depth = pending.pop(0)
+        if current in seen:
+            continue
+        seen.add(current)
+        try:
+            rel = current.relative_to(root.path)
+        except ValueError:
+            continue
+        rel_label = "." if str(rel) == "." else rel.as_posix()
+        if rel_label != "." and _match_any(rel_label, root.exclude):
+            skipped.append({"root_id": root.root_id, "path_label": f"{root.root_id}:excluded-{len(skipped) + 1}", "reason": "excluded", "depth": depth})
+            continue
+        if (current / ".git").exists() and (rel_label == "." or _match_any(rel_label, root.include) or _match_any(current.name, root.include)):
+            candidate_index = len(candidates) + 1
+            path_label = f"{root.root_id}:candidate-{candidate_index}"
+            candidates.append(
+                {
+                    "candidate_id": _discovery_candidate_id(root.root_id, candidate_index),
+                    "root_id": root.root_id,
+                    "root_label": root.label,
+                    "path_label": path_label,
+                    "depth": depth,
+                    "repo_id_suggestion": _discovery_candidate_id(root.root_id, candidate_index),
+                    "label_suggestion": f"{root.label} candidate {candidate_index}",
+                    "has_git": True,
+                    "would_clone": False,
+                    "would_write": False,
+                    "source_fingerprint": _fingerprint_payload({"root_id": root.root_id, "path_label": path_label, "depth": depth}),
+                }
+            )
+            continue
+        if depth >= root.max_depth:
+            continue
+        try:
+            children = sorted(child for child in current.iterdir() if child.is_dir() and not child.is_symlink() and child.name != ".git")
+        except OSError:
+            skipped.append({"root_id": root.root_id, "path_label": f"{root.root_id}:unreadable-{len(skipped) + 1}", "reason": "unreadable", "depth": depth})
+            continue
+        pending.extend((child, depth + 1) for child in children)
+    return candidates, skipped
+
+
+def discover_plan(*, target: Path, json_output: bool = False) -> int:
+    target = target.expanduser().resolve()
+    roots, errors, config_loaded = _load_discovery_roots(target)
+    candidates: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
+    root_summaries: list[dict[str, Any]] = []
+    for root in roots:
+        found, root_skipped = _discover_repos(root)
+        candidates.extend(found)
+        skipped.extend(root_skipped)
+        root_summaries.append(
+            {
+                "root_id": root.root_id,
+                "label": root.label,
+                "enabled": root.enabled,
+                "root_path_label": f"{root.root_id}:root",
+                "include": list(root.include),
+                "exclude": list(root.exclude),
+                "max_depth": root.max_depth,
+                "candidate_count": len(found),
+            }
+        )
+    checks: list[dict[str, Any]] = []
+    if errors:
+        checks.extend({"status": WARN, "name": "repo_discovery_config", "detail": error} for error in errors)
+    if config_loaded and not roots:
+        checks.append({"status": WARN, "name": "repo_discovery_roots_missing", "detail": "no [[discovery_root]] entries configured"})
+    if not config_loaded:
+        checks.append({"status": WARN, "name": "repo_discovery_config_missing", "detail": "repo discovery uses only explicit configured roots"})
+    payload = {
+        "schema_version": 1,
+        "target_label": "repo-fleet",
+        "dry_run": True,
+        "config_loaded": config_loaded,
+        "checks": checks,
+        "issue_count": len(checks),
+        "roots": root_summaries,
+        "root_count": len(root_summaries),
+        "candidates": candidates,
+        "candidate_count": len(candidates),
+        "skipped": skipped,
+        "skipped_count": len(skipped),
+        "would_clone": False,
+        "would_write": False,
+        "privacy": {
+            "path_redaction": "absolute paths are represented as root-local labels",
+            "safe_labels_only": True,
+        },
+        "suggested_next_commands": ["edit .brigade/repos.toml manually to add reviewed candidates"],
+    }
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0 if config_loaded else 1
+    print("repo discovery plan")
+    print("dry_run: true")
+    print(f"roots: {payload['root_count']}")
+    print(f"candidates: {payload['candidate_count']}")
+    print("would_clone: false")
+    print("would_write: false")
+    for candidate in candidates:
+        print(f"- {candidate['candidate_id']} {candidate['path_label']} depth={candidate['depth']}")
+    return 0 if config_loaded else 1
 
 
 def _git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:

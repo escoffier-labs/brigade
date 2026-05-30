@@ -221,6 +221,12 @@ def _build_parser() -> argparse.ArgumentParser:
     p_repos_import.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
     p_repos_import.add_argument("--dry-run", action="store_true", help="Show counts without writing imports.")
     p_repos_import.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_repos_discover = repos_sub.add_parser("discover", help="Plan safe repo discovery under configured roots.")
+    repos_discover_sub = p_repos_discover.add_subparsers(dest="repos_discover_command", metavar="<repos-discover-command>")
+    repos_discover_sub.required = True
+    p_repos_discover_plan = repos_discover_sub.add_parser("plan", help="Dry-run discovery under configured roots.")
+    p_repos_discover_plan.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_repos_discover_plan.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_repos_report = repos_sub.add_parser("report", help="Plan, build, and inspect local repo fleet reports.")
     repos_report_sub = p_repos_report.add_subparsers(dest="repos_report_command", metavar="<repos-report-command>")
     repos_report_sub.required = True
@@ -1890,6 +1896,11 @@ def main(argv=None) -> int:
             return repos_cmd.doctor(target=args.target, json_output=args.json)
         if args.repos_command == "import-issues":
             return repos_cmd.import_issues(target=args.target, dry_run=args.dry_run, json_output=args.json)
+        if args.repos_command == "discover":
+            if args.repos_discover_command == "plan":
+                return repos_cmd.discover_plan(target=args.target, json_output=args.json)
+            parser.error(f"unknown repos discover command: {args.repos_discover_command}")
+            return 2
         if args.repos_command == "report":
             if args.repos_report_command == "plan":
                 return repos_cmd.report_plan(target=args.target, json_output=args.json)

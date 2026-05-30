@@ -87,6 +87,48 @@ def test_repos_import_issues_dedupe_and_dismissed_until_changed(tmp_path, capsys
     assert third["dismissed"] >= 1
 
 
+def test_repos_discover_plan_uses_configured_roots_and_redacts_paths(tmp_path, capsys):
+    workspace = tmp_path / "workspace"
+    included = workspace / "services" / "private-alpha"
+    excluded = workspace / "scratch" / "private-beta"
+    _init_git_repo(included)
+    _init_git_repo(excluded)
+    config = tmp_path / ".brigade" / "repos.toml"
+    config.parent.mkdir(parents=True)
+    config.write_text(
+        """
+[[discovery_root]]
+id = "workspace"
+label = "workspace root"
+path = "workspace"
+include = ["services/*"]
+exclude = ["scratch/*"]
+max_depth = 3
+enabled = true
+"""
+    )
+    before = {str(path.relative_to(tmp_path)) for path in tmp_path.rglob("*")}
+
+    assert repos_cmd.discover_plan(target=tmp_path, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    rendered = json.dumps(payload)
+    after = {str(path.relative_to(tmp_path)) for path in tmp_path.rglob("*")}
+
+    assert after == before
+    assert payload["dry_run"] is True
+    assert payload["would_clone"] is False
+    assert payload["would_write"] is False
+    assert payload["candidate_count"] == 1
+    assert payload["candidates"][0]["path_label"] == "workspace:candidate-1"
+    assert payload["candidates"][0]["label_suggestion"] == "workspace root candidate 1"
+    assert "private-alpha" not in rendered
+    assert "private-beta" not in rendered
+    assert str(tmp_path) not in rendered
+    assert any(item["reason"] == "excluded" for item in payload["skipped"])
+    assert cli.main(["repos", "discover", "plan", "--target", str(tmp_path), "--json"]) == 0
+    assert json.loads(capsys.readouterr().out)["candidate_count"] == 1
+
+
 def test_repos_cli_dispatch(tmp_path, monkeypatch):
     seen = []
 
@@ -102,6 +144,7 @@ def test_repos_cli_dispatch(tmp_path, monkeypatch):
     monkeypatch.setattr(repos_cmd, "scan", record("scan"))
     monkeypatch.setattr(repos_cmd, "doctor", record("doctor"))
     monkeypatch.setattr(repos_cmd, "import_issues", record("import-issues"))
+    monkeypatch.setattr(repos_cmd, "discover_plan", record("discover-plan"))
 
     assert cli.main(["repos", "init", "--target", str(tmp_path), "--force", "--no-gitignore", "--json"]) == 0
     assert cli.main(["repos", "list", "--target", str(tmp_path), "--json"]) == 0
@@ -109,6 +152,7 @@ def test_repos_cli_dispatch(tmp_path, monkeypatch):
     assert cli.main(["repos", "scan", "--target", str(tmp_path), "--json"]) == 0
     assert cli.main(["repos", "doctor", "--target", str(tmp_path), "--json"]) == 0
     assert cli.main(["repos", "import-issues", "--target", str(tmp_path), "--dry-run", "--json"]) == 0
+    assert cli.main(["repos", "discover", "plan", "--target", str(tmp_path), "--json"]) == 0
 
     assert seen == [
         ("init", {"target": tmp_path, "force": True, "update_gitignore": False, "json_output": True}),
@@ -117,4 +161,5 @@ def test_repos_cli_dispatch(tmp_path, monkeypatch):
         ("scan", {"target": tmp_path, "json_output": True}),
         ("doctor", {"target": tmp_path, "json_output": True}),
         ("import-issues", {"target": tmp_path, "dry_run": True, "json_output": True}),
+        ("discover-plan", {"target": tmp_path, "json_output": True}),
     ]
