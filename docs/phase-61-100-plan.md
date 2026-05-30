@@ -233,6 +233,8 @@ Goal: make optional read-only fleet health commands named, validated, and receip
 
 Acceptance: tests cover command labels, timeouts, high-risk command refusal, stale receipts, and fleet report integration.
 
+Status: implemented with `brigade repos health-commands`, latest per-command sweep receipt lookup, stale and failed receipt warnings, high-risk command validation surfacing, fleet report evidence, docs, and focused tests.
+
 ### Phase 93: Fleet Dispatch Supersede Reports
 Goal: add reports explaining dispatch supersession, target import changes, dismissed target imports, and broken references.
 

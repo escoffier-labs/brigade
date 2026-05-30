@@ -215,6 +215,77 @@ timeout = 120
     assert commands["custom-health"]["stdout_summary"] == "42"
 
 
+def test_repos_health_command_registry_labels_timeouts_receipts_and_report(tmp_path, capsys):
+    repo = tmp_path / "private" / "repo-alpha"
+    _init_repo(repo)
+    _seed_workspace(tmp_path, repo)
+    config = tmp_path / ".brigade" / "repos.toml"
+    config.write_text(
+        config.read_text()
+        + """
+[[repo.health_command]]
+label = "custom-health"
+argv = ["python3", "-c", "print(42)"]
+timeout = 7
+"""
+    )
+
+    assert repos_cmd.health_commands(target=tmp_path, json_output=True) == 1
+    missing = json.loads(capsys.readouterr().out)
+    assert missing["health_command_count"] == 1
+    assert missing["repos"][0]["health_commands"][0]["label"] == "custom-health"
+    assert missing["repos"][0]["health_commands"][0]["timeout"] == 7
+    assert missing["repos"][0]["health_commands"][0]["receipt_status"] == "missing"
+    assert missing["issues"][0]["name"] == "repo_health_command_receipt_missing"
+    assert "repo-alpha" not in json.dumps(missing)
+
+    assert repos_cmd.sweep_run(target=tmp_path, repo_ids=["alpha"], json_output=True) == 0
+    sweep = json.loads(capsys.readouterr().out)
+    sweep_path = tmp_path / ".brigade" / "repos" / "sweeps" / sweep["sweep_id"] / "sweep.json"
+    sweep_payload = json.loads(sweep_path.read_text())
+    for command in sweep_payload["repos"][0]["commands"]:
+        if command["label"] == "custom-health":
+            command["completed_at"] = "2000-01-01T00:00:00+00:00"
+    _write_json(sweep_path, sweep_payload)
+
+    assert repos_cmd.health_commands(target=tmp_path, json_output=True) == 1
+    stale = json.loads(capsys.readouterr().out)
+    command = stale["repos"][0]["health_commands"][0]
+    assert command["receipt_status"] == "completed"
+    assert command["latest_receipt"]["sweep_id"] == sweep["sweep_id"]
+    assert command["stale"] is True
+    assert any(issue["name"] == "repo_health_command_receipt_stale" for issue in stale["issues"])
+
+    assert repos_cmd.report_plan(target=tmp_path, json_output=True) == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["health_commands"]["health_command_count"] == 1
+    assert report["health_commands"]["issue_count"] >= 1
+    assert any(warning["name"] == "repo_health_command_receipt_stale" for warning in report["warnings"])
+
+
+def test_repos_health_command_registry_rejects_high_risk_commands(tmp_path, capsys):
+    repo = tmp_path / "repo-alpha"
+    _init_repo(repo)
+    _seed_workspace(tmp_path, repo)
+    config = tmp_path / ".brigade" / "repos.toml"
+    config.write_text(
+        config.read_text()
+        + """
+[[repo.health_command]]
+label = "bad-health"
+command = "sh -c echo"
+timeout = 5
+"""
+    )
+
+    assert repos_cmd.health_commands(target=tmp_path, json_output=True) == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["health_command_count"] == 0
+    assert any("high-risk" in issue["detail"] for issue in payload["issues"])
+    assert cli.main(["repos", "health-commands", "--target", str(tmp_path), "--json"]) == 1
+    assert json.loads(capsys.readouterr().out)["issues"]
+
+
 def test_repos_sweep_integrates_with_report_center_work_and_release(tmp_path, monkeypatch, capsys):
     _init_repo(tmp_path)
     _seed_release_prereqs(tmp_path)

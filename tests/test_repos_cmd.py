@@ -144,6 +144,7 @@ def test_repos_cli_dispatch(tmp_path, monkeypatch):
     monkeypatch.setattr(repos_cmd, "scan", record("scan"))
     monkeypatch.setattr(repos_cmd, "doctor", record("doctor"))
     monkeypatch.setattr(repos_cmd, "import_issues", record("import-issues"))
+    monkeypatch.setattr(repos_cmd, "health_commands", record("health-commands"))
     monkeypatch.setattr(repos_cmd, "discover_plan", record("discover-plan"))
 
     assert cli.main(["repos", "init", "--target", str(tmp_path), "--force", "--no-gitignore", "--json"]) == 0
@@ -152,6 +153,7 @@ def test_repos_cli_dispatch(tmp_path, monkeypatch):
     assert cli.main(["repos", "scan", "--target", str(tmp_path), "--json"]) == 0
     assert cli.main(["repos", "doctor", "--target", str(tmp_path), "--json"]) == 0
     assert cli.main(["repos", "import-issues", "--target", str(tmp_path), "--dry-run", "--json"]) == 0
+    assert cli.main(["repos", "health-commands", "--target", str(tmp_path), "--json"]) == 0
     assert cli.main(["repos", "discover", "plan", "--target", str(tmp_path), "--json"]) == 0
 
     assert seen == [
@@ -161,5 +163,6 @@ def test_repos_cli_dispatch(tmp_path, monkeypatch):
         ("scan", {"target": tmp_path, "json_output": True}),
         ("doctor", {"target": tmp_path, "json_output": True}),
         ("import-issues", {"target": tmp_path, "dry_run": True, "json_output": True}),
+        ("health-commands", {"target": tmp_path, "json_output": True}),
         ("discover-plan", {"target": tmp_path, "json_output": True}),
     ]

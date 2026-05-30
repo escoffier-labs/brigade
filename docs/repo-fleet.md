@@ -12,6 +12,7 @@ brigade repos scan
 brigade repos doctor
 brigade repos import-issues
 brigade repos discover plan
+brigade repos health-commands
 brigade repos sweep plan
 brigade repos sweep run
 brigade repos sweep runs
@@ -115,6 +116,8 @@ timeout = 120
 ```
 
 Health commands are parsed into argv and run without a shell. High-risk shell, remote-copy, and metacharacter-heavy command shapes are rejected before a sweep runs.
+
+`brigade repos health-commands` is the read-only registry view for optional health commands. It lists safe repo ids, command labels, timeouts, latest sweep receipt status, stale receipt warnings, failed command receipt warnings, and local log labels. It redacts argv details and does not read raw logs. Fleet reports include the same registry summary so stale or failed optional health commands are visible before release coordination.
 
 Sweep filters include `--repo <repo-id>`, `--all`, `--stale-only`, `--include-disabled`, and `--force`. `brigade repos sweep closeout` marks a sweep as `reviewed`, `deferred`, `superseded`, or `archived` after the operator has inspected the refreshed evidence. Fleet reports, center status, center reviews, work brief, work doctor, and release doctor surface stale, failed, or unclosed fleet sweeps.
 

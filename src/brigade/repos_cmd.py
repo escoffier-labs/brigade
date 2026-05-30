@@ -22,6 +22,7 @@ WARN = "warn"
 FAIL = "fail"
 CONFIG_REL_PATH = ".brigade/repos.toml"
 REPORT_STALE_HOURS = 24
+HEALTH_COMMAND_RECEIPT_STALE_HOURS = 24
 ACTION_STATUSES = {"pending", "active", "done", "deferred", "archived"}
 DISPATCH_STALE_HOURS = 24
 RELEASE_TRAIN_STALE_HOURS = 168
@@ -795,7 +796,7 @@ def doctor(*, target: Path, json_output: bool = False) -> int:
     scan_issue_count = sum(1 for check in payload["checks"] if isinstance(check, dict) and check.get("status") != OK)
     health_issue_count = int(payload.get("issue_count") or 0)
     checks = [*payload["checks"]]
-    for bucket_name in ("report", "actions", "sweep", "release_train"):
+    for bucket_name in ("report", "actions", "sweep", "health_commands", "release_train"):
         bucket = payload.get(bucket_name) if isinstance(payload.get(bucket_name), dict) else {}
         checks.extend(bucket.get("checks") if isinstance(bucket.get("checks"), list) else [])
     payload = {**payload, "checks": checks, "issue_count": scan_issue_count, "health_issue_count": health_issue_count}
@@ -921,6 +922,163 @@ def _sweep_commands() -> list[SweepCommand]:
 
 def _commands_for_entry(entry: RepoEntry) -> list[SweepCommand]:
     return [*_sweep_commands(), *entry.health_commands]
+
+
+def _latest_command_receipt(target: Path, repo_id: str, label: str) -> dict[str, Any] | None:
+    for sweep in _sweeps(target):
+        repos = sweep.get("repos") if isinstance(sweep.get("repos"), list) else []
+        for repo in repos:
+            if not isinstance(repo, dict) or repo.get("repo_id") != repo_id:
+                continue
+            commands = repo.get("commands") if isinstance(repo.get("commands"), list) else []
+            for command in commands:
+                if isinstance(command, dict) and command.get("label") == label:
+                    return {
+                        "sweep_id": sweep.get("sweep_id"),
+                        "sweep_status": sweep.get("status"),
+                        "sweep_path_label": sweep.get("path_label") or sweep.get("sweep_id"),
+                        "repo_id": repo_id,
+                        "label": label,
+                        "status": command.get("status"),
+                        "exit_code": command.get("exit_code"),
+                        "timed_out": command.get("timed_out"),
+                        "started_at": command.get("started_at"),
+                        "completed_at": command.get("completed_at"),
+                        "stdout_log_label": command.get("stdout_log_label"),
+                        "stderr_log_label": command.get("stderr_log_label"),
+                    }
+    return None
+
+
+def _health_command_registry_payload(target: Path) -> dict[str, Any]:
+    target = target.expanduser().resolve()
+    entries, errors, config_loaded = _load_config(target)
+    checks: list[dict[str, Any]] = []
+    repos: list[dict[str, Any]] = []
+    if errors:
+        checks.extend({"status": WARN, "name": "repo_health_command_config", "detail": _safe_text(error, target, "repo-fleet", "repo fleet")} for error in errors)
+    elif config_loaded:
+        checks.append({"status": OK, "name": "repo_health_command_config", "detail": CONFIG_REL_PATH})
+    for entry in entries:
+        if not entry.enabled:
+            continue
+        command_rows: list[dict[str, Any]] = []
+        seen_labels: set[str] = set()
+        duplicate_labels: set[str] = set()
+        for command in entry.health_commands:
+            if command.label in seen_labels:
+                duplicate_labels.add(command.label)
+            seen_labels.add(command.label)
+            receipt = _latest_command_receipt(target, entry.repo_id, command.label)
+            stale = False
+            age_hours: float | None = None
+            if receipt is None:
+                checks.append(
+                    {
+                        "status": WARN,
+                        "name": "repo_health_command_receipt_missing",
+                        "detail": f"{entry.repo_id}:{command.label} has no sweep receipt",
+                        "repo_id": entry.repo_id,
+                        "command_label": command.label,
+                        "suggested_next_command": f"brigade repos sweep run --repo {entry.repo_id}",
+                    }
+                )
+            else:
+                completed_at = _parse_time(receipt.get("completed_at"))
+                if completed_at is not None:
+                    age_hours = round((_now() - completed_at).total_seconds() / 3600, 2)
+                    stale = age_hours > HEALTH_COMMAND_RECEIPT_STALE_HOURS
+                if stale:
+                    checks.append(
+                        {
+                            "status": WARN,
+                            "name": "repo_health_command_receipt_stale",
+                            "detail": f"{entry.repo_id}:{command.label} receipt is stale",
+                            "repo_id": entry.repo_id,
+                            "command_label": command.label,
+                            "age_hours": age_hours,
+                            "suggested_next_command": f"brigade repos sweep run --repo {entry.repo_id} --force",
+                        }
+                    )
+                if receipt.get("status") != "completed":
+                    checks.append(
+                        {
+                            "status": WARN,
+                            "name": "repo_health_command_failed",
+                            "detail": f"{entry.repo_id}:{command.label} latest receipt status is {receipt.get('status') or 'unknown'}",
+                            "repo_id": entry.repo_id,
+                            "command_label": command.label,
+                            "suggested_next_command": f"brigade repos sweep show {receipt.get('sweep_id')}",
+                        }
+                    )
+            command_rows.append(
+                {
+                    "label": command.label,
+                    "timeout": command.timeout,
+                    "argv_label": command.label,
+                    "latest_receipt": receipt,
+                    "receipt_status": receipt.get("status") if isinstance(receipt, dict) else "missing",
+                    "receipt_age_hours": age_hours,
+                    "stale": stale,
+                    "source_fingerprint": _fingerprint_payload({"repo_id": entry.repo_id, "label": command.label, "timeout": command.timeout}),
+                }
+            )
+        for label in sorted(duplicate_labels):
+            checks.append(
+                {
+                    "status": WARN,
+                    "name": "repo_health_command_duplicate_label",
+                    "detail": f"{entry.repo_id}:{label} is configured more than once",
+                    "repo_id": entry.repo_id,
+                    "command_label": label,
+                }
+            )
+        repos.append(
+            {
+                "repo_id": entry.repo_id,
+                "repo_label": entry.label,
+                "enabled": entry.enabled,
+                "exists": entry.path.is_dir(),
+                "health_command_count": len(command_rows),
+                "health_commands": command_rows,
+            }
+        )
+    issues = [check for check in checks if check.get("status") != OK]
+    return {
+        "schema_version": 1,
+        "target_label": "repo-fleet",
+        "config_path_label": CONFIG_REL_PATH,
+        "config_loaded": config_loaded,
+        "receipt_stale_hours": HEALTH_COMMAND_RECEIPT_STALE_HOURS,
+        "repos": repos,
+        "repo_count": len(repos),
+        "health_command_count": sum(int(repo.get("health_command_count") or 0) for repo in repos),
+        "checks": checks,
+        "issues": issues,
+        "issue_count": len(issues),
+        "top_issue": issues[0] if issues else None,
+        "suggested_next_commands": ["brigade repos sweep run --all --force"] if issues else [],
+        "privacy": {
+            "argv_redacted": True,
+            "safe_labels_only": True,
+        },
+    }
+
+
+def health_commands(*, target: Path, json_output: bool = False) -> int:
+    payload = _health_command_registry_payload(target)
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0 if payload["config_loaded"] and not payload["issues"] else 1
+    print("repo health commands: repo-fleet")
+    print(f"commands: {payload['health_command_count']}")
+    print(f"issues: {payload['issue_count']}")
+    for repo in payload["repos"]:
+        for command in repo.get("health_commands", []):
+            print(f"- {repo['repo_id']}:{command['label']} timeout={command['timeout']} receipt={command['receipt_status']}")
+    for issue in payload["issues"]:
+        print(f"[{issue['status']}] {issue['name']}: {issue['detail']}")
+    return 0 if payload["config_loaded"] and not payload["issues"] else 1
 
 
 def _latest_sweep_for_repo(target: Path, repo_id: str) -> dict[str, Any] | None:
@@ -1312,8 +1470,10 @@ def _report_payload(target: Path) -> dict[str, Any]:
     entries, errors, config_loaded = _load_config(target)
     repo_states = [_repo_brigade_state(entry) for entry in entries if entry.enabled]
     sweep = sweep_health(target)
+    health_registry = _health_command_registry_payload(target)
     blockers = [item for repo in repo_states for item in repo.get("blockers", []) if isinstance(item, dict)]
     warnings = [item for repo in repo_states for item in repo.get("warnings", []) if isinstance(item, dict)]
+    health_command_warnings = [item for item in health_registry.get("issues", []) if isinstance(item, dict)]
     receipt_refs = [ref for repo in repo_states for ref in repo.get("receipt_references", []) if isinstance(ref, dict)]
     payload = {
         "schema_version": 1,
@@ -1325,12 +1485,18 @@ def _report_payload(target: Path) -> dict[str, Any]:
         "repo_count": len(repo_states),
         "repos": repo_states,
         "blocker_count": len(blockers),
-        "warning_count": len(warnings) + len(errors),
+        "warning_count": len(warnings) + len(errors) + len(health_command_warnings),
         "blockers": blockers,
-        "warnings": warnings + [{"name": "repo_fleet_config", "detail": error} for error in errors],
+        "warnings": warnings + [{"name": "repo_fleet_config", "detail": error} for error in errors] + health_command_warnings,
         "receipt_references": receipt_refs,
         "latest_sweep": _safe_sweep_ref(sweep.get("latest") if isinstance(sweep.get("latest"), dict) else None),
         "sweep_health": {"issue_count": sweep.get("issue_count"), "top_issue": sweep.get("top_issue")},
+        "health_commands": {
+            "health_command_count": health_registry.get("health_command_count"),
+            "issue_count": health_registry.get("issue_count"),
+            "top_issue": health_registry.get("top_issue"),
+            "repos": health_registry.get("repos"),
+        },
         "suggested_next_commands": [repo.get("suggested_command") for repo in repo_states if repo.get("suggested_command")],
     }
     payload["report_fingerprint"] = _fingerprint_payload(
@@ -4261,9 +4427,17 @@ def health(target: Path) -> dict[str, Any]:
     report = report_health(target)
     actions = actions_health(target)
     sweep = sweep_health(target)
+    health_registry = _health_command_registry_payload(target)
     release_train = release_train_health(target)
-    issue_count = payload["issue_count"] + int(report.get("issue_count") or 0) + int(actions.get("issue_count") or 0) + int(sweep.get("issue_count") or 0) + int(release_train.get("issue_count") or 0)
-    top_issue = payload["top_issue"] or report.get("top_issue") or actions.get("top_issue") or sweep.get("top_issue") or release_train.get("top_issue")
+    issue_count = (
+        payload["issue_count"]
+        + int(report.get("issue_count") or 0)
+        + int(actions.get("issue_count") or 0)
+        + int(sweep.get("issue_count") or 0)
+        + int(health_registry.get("issue_count") or 0)
+        + int(release_train.get("issue_count") or 0)
+    )
+    top_issue = payload["top_issue"] or report.get("top_issue") or actions.get("top_issue") or sweep.get("top_issue") or health_registry.get("top_issue") or release_train.get("top_issue")
     return {
         "target": payload["target"],
         "config_path": payload["config_path"],
@@ -4274,6 +4448,7 @@ def health(target: Path) -> dict[str, Any]:
         "report": report,
         "actions": actions,
         "sweep": sweep,
+        "health_commands": health_registry,
         "release_train": release_train,
     }
 
