@@ -33,7 +33,7 @@ Harden AFK session execution into a more useful daily-driver, release, and recov
 | 246 | Add AFK session health schema. Implemented by publishing `session_health_schemas` from `brigade work phases schema` for checkpoint, recovery, risk, verification, privacy, handoff, report, progress, and gate outputs. |
 | 247 | Add wrapper safe resume protocol. Implemented with `brigade work phases session protocol`, a read-only wrapper record over next-step, risk, progress, checkpoint, verification, privacy, handoff, and gate evidence. |
 | 248 | Add phase session release compare checks. Implemented with release candidate compare warnings for changed phase session checkpoint, checkpoint-compare, and completion-gate evidence. |
-| 249 | Add AFK session self-audit command. |
+| 249 | Add AFK session self-audit command. Implemented with `brigade work phases session audit`, a read-only check over resume protocol, progress, risk, verification, privacy, handoff, and completion gate state. |
 | 250 | Close phase 226-250 AFK hardening gate. |
 
 ## Stop Condition

@@ -270,6 +270,11 @@ def schema(*, target: Path, json_output: bool = False) -> int:
             description="Read-only wrapper protocol for safe AFK phase session resume decisions.",
         ),
         _contract_schema(
+            "phase-ledger-session-audit",
+            ["session", "ready_for_resume", "ready_for_completion_claim", "checks", "issue_count", "suggested_next_command"],
+            description="Read-only self-audit across AFK session health, evidence, and completion gate outputs.",
+        ),
+        _contract_schema(
             "phase-ledger-session-checkpoint",
             ["checkpoint_id", "session_id", "phase_id", "status", "summary", "next_step", "suggested_next_command", "source_fingerprint"],
             description="Local AFK recovery checkpoint without command execution.",
@@ -2212,6 +2217,124 @@ def session_protocol(*, target: Path, session_id: str, json_output: bool = False
         print(f"blockers: {payload['resume_blocker_count']}")
         for step in payload["wrapper_steps"]:
             print(f"- {step['step']}: {step['command']}")
+    return 0
+
+
+def _session_audit_payload(target: Path, session: dict[str, Any]) -> dict[str, Any]:
+    protocol = _session_protocol_payload(target, session)
+    progress = _session_progress_payload(target, session)
+    risk = _session_risk_payload(target, session)
+    verification = _session_verification_payload(target, session)
+    privacy = _session_privacy_payload(target, session)
+    handoffs = _session_handoffs_payload(target, session)
+    gate = _session_gate_payload(target, session)
+    checks: list[dict[str, Any]] = []
+    checks.append(
+        _gate_check(
+            "ok" if protocol.get("safe_resume") else "block",
+            "phase_session_audit_resume_protocol",
+            "resume protocol is safe" if protocol.get("safe_resume") else "resume protocol has blockers",
+            suggested=protocol.get("suggested_next_command"),
+        )
+    )
+    checks.append(
+        _gate_check(
+            "ok" if risk.get("risk_level") == "low" else "warn" if risk.get("risk_level") == "medium" else "block",
+            "phase_session_audit_risk",
+            f"risk level is {risk.get('risk_level')}",
+            suggested=risk.get("suggested_next_command"),
+        )
+    )
+    checks.append(
+        _gate_check(
+            "ok" if int(progress.get("blocker_count") or 0) == 0 else "warn",
+            "phase_session_audit_progress",
+            f"{progress.get('percent_complete')}% complete with {progress.get('blocker_count')} blocker(s)",
+            phase_id=progress.get("current_phase_id"),
+            suggested=progress.get("suggested_next_command"),
+        )
+    )
+    for name, payload in (
+        ("verification", verification),
+        ("privacy", privacy),
+        ("handoffs", handoffs),
+    ):
+        issue_count = int(payload.get("issue_count") or 0)
+        checks.append(
+            _gate_check(
+                "ok" if issue_count == 0 else "block",
+                f"phase_session_audit_{name}",
+                f"{issue_count} {name} issue(s)",
+                suggested=payload.get("suggested_next_command"),
+            )
+        )
+    checks.append(
+        _gate_check(
+            "ok" if gate.get("safe_to_claim_complete") else "block",
+            "phase_session_audit_completion_gate",
+            "completion gate is clean" if gate.get("safe_to_claim_complete") else f"completion gate has {gate.get('blocker_count')} blocker(s)",
+            suggested=gate.get("suggested_next_command"),
+        )
+    )
+    issues = [check for check in checks if check.get("status") != "ok"]
+    blockers = [check for check in checks if check.get("status") == "block"]
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "schema": _schema("phase-ledger-session-audit"),
+        "target": str(target),
+        "session_id": session.get("session_id"),
+        "phase_range": session.get("phase_range"),
+        "ready_for_resume": bool(protocol.get("safe_resume")),
+        "ready_for_completion_claim": bool(gate.get("safe_to_claim_complete")) and not blockers,
+        "checks": checks,
+        "issue_count": len(issues),
+        "blocker_count": len(blockers),
+        "top_issue": issues[0] if issues else None,
+        "protocol": {
+            "safe_resume": protocol.get("safe_resume"),
+            "resume_blocker_count": protocol.get("resume_blocker_count"),
+            "suggested_next_command": protocol.get("suggested_next_command"),
+        },
+        "progress": {
+            "percent_complete": progress.get("percent_complete"),
+            "blocker_count": progress.get("blocker_count"),
+            "current_phase_id": progress.get("current_phase_id"),
+        },
+        "risk": {
+            "risk_level": risk.get("risk_level"),
+            "risk_count": risk.get("risk_count"),
+        },
+        "verification": {"issue_count": verification.get("issue_count")},
+        "privacy": {"issue_count": privacy.get("issue_count")},
+        "handoffs": {"issue_count": handoffs.get("issue_count")},
+        "completion_gate": {
+            "safe_to_claim_complete": gate.get("safe_to_claim_complete"),
+            "blocker_count": gate.get("blocker_count"),
+            "top_blocker": gate.get("top_blocker"),
+        },
+        "suggested_next_command": issues[0]["suggested_next_command"] if issues else "brigade work phases session show latest",
+    }
+
+
+def session_audit(*, target: Path, session_id: str, json_output: bool = False) -> int:
+    target = target.expanduser().resolve()
+    _path, session, error = _resolve_session(target, session_id)
+    if session is None:
+        print(f"error: {error}", file=sys.stderr)
+        return 1
+    try:
+        payload = _session_audit_payload(target, session)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        print(f"phase session audit: {payload['session_id']}")
+        print(f"ready_for_resume: {str(payload['ready_for_resume']).lower()}")
+        print(f"ready_for_completion_claim: {str(payload['ready_for_completion_claim']).lower()}")
+        print(f"issues: {payload['issue_count']}")
+        print(f"next: {payload['suggested_next_command']}")
     return 0
 
 

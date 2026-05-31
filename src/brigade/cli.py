@@ -1190,6 +1190,10 @@ def _build_parser() -> argparse.ArgumentParser:
     p_work_phases_session_protocol.add_argument("session_id", nargs="?", default="latest", help="Session id, unique prefix, or latest.")
     p_work_phases_session_protocol.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
     p_work_phases_session_protocol.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_work_phases_session_audit = phases_session_sub.add_parser("audit", help="Self-audit AFK phase session evidence.")
+    p_work_phases_session_audit.add_argument("session_id", nargs="?", default="latest", help="Session id, unique prefix, or latest.")
+    p_work_phases_session_audit.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_work_phases_session_audit.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_work_phases_session_resume = phases_session_sub.add_parser("resume", help="Record a safe phase session resume recommendation.")
     p_work_phases_session_resume.add_argument("session_id", nargs="?", default="latest", help="Session id, unique prefix, or latest.")
     p_work_phases_session_resume.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
@@ -3356,6 +3360,8 @@ def main(argv=None) -> int:
                     return phases_cmd.session_next(target=args.target, session_id=args.session_id, json_output=args.json)
                 if args.phases_session_command == "protocol":
                     return phases_cmd.session_protocol(target=args.target, session_id=args.session_id, json_output=args.json)
+                if args.phases_session_command == "audit":
+                    return phases_cmd.session_audit(target=args.target, session_id=args.session_id, json_output=args.json)
                 if args.phases_session_command == "resume":
                     return phases_cmd.session_resume(target=args.target, session_id=args.session_id, json_output=args.json)
                 if args.phases_session_command == "closeout":

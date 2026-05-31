@@ -722,6 +722,17 @@ def test_phase_session_protocol_guides_safe_wrapper_resume(tmp_path, capsys):
     assert protocol["allowed_command_prefixes"] == ["brigade work phases "]
     assert "git push" in protocol["forbidden_actions"]
 
+    assert cli.main(["work", "phases", "session", "audit", session["session_id"], "--target", str(tmp_path), "--json"]) == 0
+    audit = json.loads(capsys.readouterr().out)
+    assert audit["schema"]["name"] == "phase-ledger-session-audit"
+    assert audit["ready_for_resume"] is True
+    assert audit["ready_for_completion_claim"] is False
+    assert audit["blocker_count"] >= 1
+    assert {check["name"] for check in audit["checks"]} >= {
+        "phase_session_audit_resume_protocol",
+        "phase_session_audit_completion_gate",
+    }
+
     assert cli.main(["work", "phases", "session", "checkpoint", session["session_id"], "--target", str(tmp_path), "--status", "blocked", "--summary", "Needs operator review.", "--json"]) == 0
     capsys.readouterr()
     assert cli.main(["work", "phases", "session", "protocol", "latest", "--target", str(tmp_path), "--json"]) == 0
@@ -735,6 +746,11 @@ def test_phase_session_protocol_guides_safe_wrapper_resume(tmp_path, capsys):
     text = capsys.readouterr().out
     assert "phase session protocol:" in text
     assert "safe_resume: false" in text
+
+    assert cli.main(["work", "phases", "session", "audit", "latest", "--target", str(tmp_path)]) == 0
+    audit_text = capsys.readouterr().out
+    assert "phase session audit:" in audit_text
+    assert "ready_for_resume: false" in audit_text
 
 
 def test_phase_session_risk_summarizes_checkpoint_notes_and_doctor(tmp_path, capsys):
