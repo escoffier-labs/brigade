@@ -542,6 +542,67 @@ def test_phase_session_report_bundle(tmp_path, capsys):
     assert shown["report_id"] == report_id
 
 
+def test_phase_session_activity_timeline(tmp_path, capsys):
+    assert cli.main(["work", "phases", "plan", "--target", str(tmp_path), "--range", "221-222", "--title", "Activity", "--goal", "afk", "--json"]) == 0
+    capsys.readouterr()
+    assert cli.main(["work", "phases", "start", "phase-221", "--target", str(tmp_path), "--json"]) == 0
+    capsys.readouterr()
+    assert cli.main(
+        [
+            "work",
+            "phases",
+            "complete",
+            "phase-221",
+            "--target",
+            str(tmp_path),
+            "--status",
+            "committed",
+            "--summary",
+            "Added a chronological activity timeline.",
+            "--file",
+            "src/brigade/phases_cmd.py",
+            "--test",
+            "pytest tests/test_phase165_cmd.py -q",
+            "--commit",
+            "abc123",
+            "--json",
+        ]
+    ) == 0
+    capsys.readouterr()
+    assert cli.main(["work", "phases", "complete", "phase-222", "--target", str(tmp_path), "--summary", "Needs more evidence.", "--json"]) == 0
+    capsys.readouterr()
+    assert cli.main(["work", "phases", "handoff", "phase-221", "--target", str(tmp_path), "--lint", "--json"]) == 0
+    capsys.readouterr()
+    assert cli.main(["work", "phases", "actions", "build", "--target", str(tmp_path), "--range", "221-222", "--json"]) == 0
+    capsys.readouterr()
+    assert cli.main(["work", "phases", "report", "build", "--target", str(tmp_path), "--range", "221-222", "--json"]) == 0
+    capsys.readouterr()
+    assert cli.main(["work", "phases", "session", "start", "--target", str(tmp_path), "--range", "221-222", "--goal", "activity session", "--json"]) == 0
+    session = json.loads(capsys.readouterr().out)
+    assert cli.main(["work", "phases", "session", "resume", session["session_id"], "--target", str(tmp_path), "--json"]) == 0
+    capsys.readouterr()
+    assert cli.main(["work", "phases", "session", "report", "build", session["session_id"], "--target", str(tmp_path), "--json"]) == 0
+    capsys.readouterr()
+
+    assert cli.main(["work", "phases", "session", "activity", session["session_id"], "--target", str(tmp_path), "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    event_types = {event["event_type"] for event in payload["events"]}
+    assert {
+        "session-started",
+        "session-resume",
+        "phase-started",
+        "phase-completed",
+        "phase-test-recorded",
+        "phase-commit-recorded",
+        "phase-action",
+        "phase-report",
+        "phase-report-compare",
+        "phase-handoff-drafted",
+        "session-report",
+    } <= event_types
+    assert payload["event_count"] == len(payload["events"])
+
+
 def test_daily_driver_surfaces_and_runs_phase_session_step(tmp_path, capsys):
     assert cli.main(["work", "phases", "plan", "--target", str(tmp_path), "--range", "214-215", "--title", "Daily", "--goal", "afk", "--json"]) == 0
     capsys.readouterr()

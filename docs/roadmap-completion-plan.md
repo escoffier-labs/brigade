@@ -110,6 +110,7 @@ Implementation scope:
 - Add `brigade work phases session start/list/show/closeout` for local AFK execution sessions over declared phase ranges.
 - Add `brigade work phases session next/resume` so AFK sessions can be resumed from the safest next local command without implicit execution.
 - Add `brigade work phases session report build/list/show` for local session evidence bundles.
+- Add `brigade work phases session activity` for read-only chronological AFK session timelines.
 - Make `brigade daily status/plan/review/run/doctor` surface active phase sessions and allow exactly one safe session report or closeout step.
 - Include latest phase session and session report state in work brief/doctor, center status/reviews, release doctor, release candidates, and candidate compare.
 - Add `brigade work phases evidence add` so phase records can carry local evidence attachments without command execution.

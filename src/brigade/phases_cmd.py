@@ -1138,6 +1138,7 @@ def _session_import_summaries(target: Path) -> list[dict[str, Any]]:
                 "kind": item.get("kind"),
                 "status": item.get("status"),
                 "text": item.get("text"),
+                "created_at": item.get("created_at"),
             }
         )
     return summaries
@@ -1290,6 +1291,161 @@ def session_report_show(*, target: Path, report_id: str, json_output: bool = Fal
         print(f"phase session report: {report.get('report_id')}")
         print(f"session: {(report.get('session') or {}).get('session_id') if isinstance(report.get('session'), dict) else 'none'}")
         print(f"issues: {(report.get('doctor') or {}).get('issue_count') if isinstance(report.get('doctor'), dict) else 0}")
+    return 0
+
+
+def _activity_event(
+    *,
+    timestamp: object,
+    event_type: str,
+    summary: str,
+    phase_id: object = None,
+    local_id: object = None,
+    status: object = None,
+    path: object = None,
+    suggested: str | None = None,
+) -> dict[str, Any]:
+    rendered_timestamp = str(timestamp or "")
+    seed = json.dumps(
+        {
+            "timestamp": rendered_timestamp,
+            "event_type": event_type,
+            "phase_id": phase_id,
+            "local_id": local_id,
+            "summary": summary,
+        },
+        sort_keys=True,
+    )
+    return {
+        "event_id": hashlib.sha256(seed.encode("utf-8")).hexdigest()[:16],
+        "timestamp": rendered_timestamp,
+        "event_type": event_type,
+        "phase_id": phase_id,
+        "local_id": local_id,
+        "status": status,
+        "safe_summary": summary,
+        "path": path,
+        "suggested_next_command": suggested,
+    }
+
+
+def _session_activity_payload(target: Path, session: dict[str, Any]) -> dict[str, Any]:
+    phase_range = str(session.get("phase_range") or "")
+    records, missing = _session_phase_records(target, phase_range)
+    phase_ids = {str(record.get("phase_id")) for record in records if record.get("phase_id")}
+    events: list[dict[str, Any]] = []
+    events.append(
+        _activity_event(
+            timestamp=session.get("started_at"),
+            event_type="session-started",
+            local_id=session.get("session_id"),
+            status=session.get("status"),
+            summary=f"phase session started for range {phase_range or 'all'}",
+            path=session.get("path"),
+            suggested=session.get("next_recommended_command"),
+        )
+    )
+    for item in session.get("resume_history") or []:
+        if not isinstance(item, dict):
+            continue
+        next_step = item.get("next_step") if isinstance(item.get("next_step"), dict) else {}
+        events.append(
+            _activity_event(
+                timestamp=item.get("resumed_at"),
+                event_type="session-resume",
+                local_id=session.get("session_id"),
+                phase_id=next_step.get("phase_id"),
+                status=next_step.get("step_type"),
+                summary=str(next_step.get("detail") or "session resume recommendation recorded"),
+                suggested=item.get("suggested_next_command"),
+            )
+        )
+    if isinstance(session.get("closeout"), dict):
+        closeout = session["closeout"]
+        events.append(
+            _activity_event(
+                timestamp=closeout.get("reviewed_at"),
+                event_type="session-closeout",
+                local_id=session.get("session_id"),
+                status=closeout.get("status"),
+                summary=str(closeout.get("reason") or "phase session closeout recorded"),
+                path=session.get("path"),
+            )
+        )
+    for record in records:
+        phase_id = record.get("phase_id")
+        if record.get("created_at"):
+            events.append(_activity_event(timestamp=record.get("created_at"), event_type="phase-record-created", phase_id=phase_id, status=record.get("status"), summary="phase record created", path=record.get("path")))
+        if record.get("started_at"):
+            events.append(_activity_event(timestamp=record.get("started_at"), event_type="phase-started", phase_id=phase_id, status=record.get("status"), summary="phase marked in progress", path=record.get("path")))
+        for command in record.get("tests_run") or []:
+            events.append(_activity_event(timestamp=record.get("completed_at") or record.get("updated_at"), event_type="phase-test-recorded", phase_id=phase_id, status=record.get("test_result_summary") or "recorded", summary=f"test recorded: {command}", path=record.get("path")))
+        if record.get("commit_hash"):
+            events.append(_activity_event(timestamp=record.get("completed_at") or record.get("updated_at"), event_type="phase-commit-recorded", phase_id=phase_id, status=record.get("status"), summary=f"commit recorded: {record.get('commit_hash')}", path=record.get("path")))
+        if record.get("push_ref"):
+            events.append(_activity_event(timestamp=record.get("completed_at") or record.get("updated_at"), event_type="phase-push-recorded", phase_id=phase_id, status=record.get("status"), summary=f"push ref recorded: {record.get('push_ref')}", path=record.get("path")))
+        if record.get("completed_at"):
+            events.append(_activity_event(timestamp=record.get("completed_at"), event_type="phase-completed", phase_id=phase_id, status=record.get("status"), summary=str(record.get("implementation_summary") or "phase completion evidence recorded"), path=record.get("path")))
+        for handoff_item in record.get("phase_handoffs") or []:
+            if isinstance(handoff_item, dict):
+                events.append(_activity_event(timestamp=handoff_item.get("created_at"), event_type="phase-handoff-drafted", phase_id=phase_id, local_id=handoff_item.get("handoff_id"), status=(handoff_item.get("lint") or {}).get("status") if isinstance(handoff_item.get("lint"), dict) else None, summary="phase handoff draft recorded", path=handoff_item.get("path"), suggested="brigade handoff lint"))
+    for closeout in _read_closeouts(target):
+        closeout_phase_ids = {str(item) for item in closeout.get("phase_ids") or []}
+        if phase_ids and not closeout_phase_ids.intersection(phase_ids):
+            continue
+        events.append(_activity_event(timestamp=closeout.get("reviewed_at"), event_type="phase-closeout", local_id=closeout.get("closeout_id"), status=closeout.get("status"), summary=str(closeout.get("reason") or "phase closeout recorded"), path=closeout.get("path")))
+    for action in _read_actions(target):
+        if phase_ids and str(action.get("phase_id")) not in phase_ids:
+            continue
+        events.append(_activity_event(timestamp=action.get("updated_at") or action.get("created_at"), event_type="phase-action", phase_id=action.get("phase_id"), local_id=action.get("action_id"), status=action.get("status"), summary=str(action.get("safe_summary") or action.get("issue_type") or "phase action"), path=action.get("path"), suggested=action.get("suggested_next_command")))
+    for report in _read_reports(target):
+        if report.get("phase_range") != phase_range:
+            continue
+        events.append(_activity_event(timestamp=report.get("created_at"), event_type="phase-report", local_id=report.get("report_id"), status=(report.get("doctor") or {}).get("issue_count") if isinstance(report.get("doctor"), dict) else None, summary="phase report built", path=report.get("path"), suggested="brigade work phases report show latest"))
+        compare_summary = _report_compare_summary(target, report)
+        if compare_summary:
+            events.append(_activity_event(timestamp=report.get("created_at"), event_type="phase-report-compare", local_id=report.get("report_id"), status=compare_summary.get("issue_count"), summary="phase report compare state available", path=report.get("path"), suggested=compare_summary.get("suggested_next_command")))
+    for report in _read_session_reports(target):
+        session_summary = report.get("session") if isinstance(report.get("session"), dict) else {}
+        if session_summary.get("session_id") != session.get("session_id"):
+            continue
+        events.append(_activity_event(timestamp=report.get("created_at"), event_type="session-report", local_id=report.get("report_id"), status=(report.get("doctor") or {}).get("issue_count") if isinstance(report.get("doctor"), dict) else None, summary="phase session report built", path=report.get("path"), suggested="brigade work phases session report show latest"))
+    for item in _session_import_summaries(target):
+        events.append(_activity_event(timestamp=item.get("created_at"), event_type="phase-import", local_id=item.get("import_id"), status=item.get("status"), summary=str(item.get("text") or "phase import"), suggested=f"brigade work import show {item.get('import_id')}"))
+    events = [event for event in events if event.get("timestamp")]
+    events.sort(key=lambda item: (str(item.get("timestamp") or ""), str(item.get("event_type") or ""), str(item.get("event_id") or "")))
+    next_payload = _session_next_payload(target, session)
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "schema": _schema("phase-ledger-session-activity"),
+        "target": str(target),
+        "session_id": session.get("session_id"),
+        "phase_range": phase_range,
+        "missing_phase_ids": missing,
+        "events": events,
+        "event_count": len(events),
+        "suggested_next_command": next_payload["suggested_next_command"],
+    }
+
+
+def session_activity(*, target: Path, session_id: str, json_output: bool = False) -> int:
+    target = target.expanduser().resolve()
+    _path, session, error = _resolve_session(target, session_id)
+    if session is None:
+        print(f"error: {error}", file=sys.stderr)
+        return 1
+    try:
+        payload = _session_activity_payload(target, session)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        print(f"phase session activity: {payload['session_id']}")
+        print(f"events: {payload['event_count']}")
+        for event in payload["events"][-20:]:
+            print(f"- {event.get('timestamp')} {event.get('event_type')} {event.get('phase_id') or event.get('local_id')}: {event.get('safe_summary')}")
     return 0
 
 

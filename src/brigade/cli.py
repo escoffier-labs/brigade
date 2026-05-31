@@ -1114,6 +1114,10 @@ def _build_parser() -> argparse.ArgumentParser:
     p_work_phases_session_closeout.add_argument("--status", choices=["reviewed", "deferred", "blocked", "archived"], default="reviewed", help="Session closeout state.")
     p_work_phases_session_closeout.add_argument("--reason", default=None, help="Closeout reason.")
     p_work_phases_session_closeout.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_work_phases_session_activity = phases_session_sub.add_parser("activity", help="Show chronological phase session activity.")
+    p_work_phases_session_activity.add_argument("session_id", nargs="?", default="latest", help="Session id, unique prefix, or latest.")
+    p_work_phases_session_activity.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_work_phases_session_activity.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_work_phases_session_report = phases_session_sub.add_parser("report", help="Build and inspect phase session reports.")
     phases_session_report_sub = p_work_phases_session_report.add_subparsers(dest="phases_session_report_command", metavar="<phases-session-report-command>")
     phases_session_report_sub.required = True
@@ -3218,6 +3222,8 @@ def main(argv=None) -> int:
                     return phases_cmd.session_resume(target=args.target, session_id=args.session_id, json_output=args.json)
                 if args.phases_session_command == "closeout":
                     return phases_cmd.session_closeout(target=args.target, session_id=args.session_id, status=args.status, reason=args.reason, json_output=args.json)
+                if args.phases_session_command == "activity":
+                    return phases_cmd.session_activity(target=args.target, session_id=args.session_id, json_output=args.json)
                 if args.phases_session_command == "report":
                     if args.phases_session_report_command == "build":
                         return phases_cmd.session_report_build(target=args.target, session_id=args.session_id, json_output=args.json)

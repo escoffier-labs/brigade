@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `brigade work phases session start/list/show/closeout` for local AFK phase execution sessions that track a requested range, current phase, phase status, commit and test counts, report references, closeout state, and next command.
 - `brigade work phases session next/resume` for read-only or metadata-only AFK session recovery that identifies the safest next phase command without executing it.
 - `brigade work phases session report build/list/show` for local Markdown and JSON evidence bundles over phase execution sessions.
+- `brigade work phases session activity <session-id|latest>` for a chronological read-only activity ledger across phase records, starts, completions, tests, commits, reports, actions, imports, closeouts, handoffs, and resumes.
 - `brigade daily status/plan/review/run/doctor` now surface active phase sessions, and daily run can build one phase session report or close out one completed reviewed session as its single safe step.
 - Release doctor, release candidate evidence, center status/reviews, and work brief/doctor now include compact phase session and session report state.
 - `brigade work phases evidence add <phase-id>` for appending local evidence attachments to phase records, with doctor warnings for missing referenced evidence files.
