@@ -280,3 +280,40 @@ def test_phase_ledger_closeout_range_and_deferred_state(tmp_path, capsys):
     assert payload["phase_ids"] == ["phase-240", "phase-241"]
     assert payload["deferred_phase_ids"] == ["phase-240", "phase-241"]
     assert payload["unresolved_issue_count"] >= 0
+
+
+def test_phase_ledger_compare_detects_local_evidence_drift(tmp_path, capsys, monkeypatch):
+    assert phases_cmd.plan(target=tmp_path, phase_id="phase-250", title="Compare", source_goal="audit", json_output=True) == 0
+    capsys.readouterr()
+    assert phases_cmd.complete(
+        target=tmp_path,
+        phase_id="phase-250",
+        status="pushed",
+        summary="Done",
+        files_changed=["missing.py"],
+        tests_run=["pytest"],
+        commit_hash="old123",
+        json_output=True,
+    ) == 0
+    record = json.loads(capsys.readouterr().out)
+    record["completed_at"] = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+    record["doctor_issue_count"] = 0
+    path = tmp_path / ".brigade" / "work" / "phases" / "records" / "phase-250.json"
+    path.write_text(json.dumps(record) + "\n")
+    assert phases_cmd.report_build(target=tmp_path, json_output=True) == 0
+    capsys.readouterr()
+    monkeypatch.setattr(phases_cmd, "_git_head", lambda target: "new456")
+
+    assert cli.main(["work", "phases", "compare", "phase-250", "--target", str(tmp_path), "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    names = {check["name"] for check in payload["checks"]}
+    assert "phase_compare_changed_head" in names
+    assert "phase_compare_missing_push_ref" in names
+    assert "phase_compare_missing_referenced_files" in names
+    assert "phase_compare_newer_phase_report" in names
+    assert "phase_compare_newer_test_evidence" in names
+    assert "phase_compare_changed_doctor_issue_count" in names
+
+    assert cli.main(["work", "phases", "compare", "250-251", "--target", str(tmp_path), "--json"]) == 0
+    range_payload = json.loads(capsys.readouterr().out)
+    assert any(check["name"] == "phase_compare_missing_records" for check in range_payload["checks"])

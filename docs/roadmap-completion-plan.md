@@ -103,7 +103,7 @@ Deliverable: future long-run goals are auditable before completion is claimed.
 
 Implementation scope:
 
-- Add `brigade work phases init/plan/list/schema/status/next/show/start/complete/defer/closeout/doctor/import-issues`.
+- Add `brigade work phases init/plan/list/schema/status/next/show/start/complete/defer/closeout/compare/doctor/import-issues`.
 - Add `brigade work phases report build/list/show`.
 - Store local phase records under `.brigade/work/phases/`.
 - Require each phase to record goal, status, summary, changed files, tests, commit, push ref, deferrals, blockers, and next recommendation.
@@ -113,7 +113,7 @@ Implementation scope:
 Acceptance:
 
 - Tests cover command text and JSON output.
-- Tests cover missing phase records, incomplete evidence, missing commit or push metadata, stale in-progress phases, stale unreviewed completed phases, blocked phases without next steps, closeout states, and explicit grouped records.
+- Tests cover missing phase records, incomplete evidence, missing commit or push metadata, stale in-progress phases, stale unreviewed completed phases, compare drift warnings, blocked phases without next steps, closeout states, and explicit grouped records.
 - Docs state that future AFK multi-phase work is not complete unless ledger evidence or explicit deferrals exist.
 
 Phase 165 status:

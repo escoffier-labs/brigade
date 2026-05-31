@@ -58,6 +58,7 @@ See [`ROADMAP.md`](ROADMAP.md) for the daily-driver, scanner inbox, chat-surface
 The production-hardening queue for the daily operator system is tracked in [`docs/phase-115-164-plan.md`](docs/phase-115-164-plan.md).
 Long unattended phase work is audited through the local phase execution ledger described in [`docs/phase-execution-ledger.md`](docs/phase-execution-ledger.md). Future multi-phase work is not complete unless each phase has ledger evidence or an explicit deferral.
 Phase ledger closeouts let an operator mark completed phase evidence as reviewed, deferred, blocked, or archived, and stale unreviewed completed phases surface in doctor output.
+Phase ledger compare checks make it clear when local HEAD, referenced files, reports, or doctor issue counts drift after a phase is recorded.
 The current AFK ledger hardening tranche is described in [`docs/phase-166-200-plan.md`](docs/phase-166-200-plan.md).
 See [`docs/workflow-rules.md`](docs/workflow-rules.md) for the public-safe repo workflow rule templates installed under `rules/`.
 

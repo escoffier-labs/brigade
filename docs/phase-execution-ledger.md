@@ -25,6 +25,7 @@ brigade work phases start <phase-id>
 brigade work phases complete <phase-id> --summary "..." --file src/file.py --test "pytest ..." --commit <hash> --push-ref main
 brigade work phases defer <phase-id> --reason "..."
 brigade work phases closeout <phase-id|range|latest> --status reviewed --reason "checked evidence"
+brigade work phases compare <phase-id|range|latest>
 brigade work phases doctor --range 165-170
 brigade work phases import-issues --range 165-170
 brigade work phases report build --range 165-170
@@ -112,6 +113,8 @@ The phase ledger is surfaced in `brigade daily status`, `brigade daily doctor`, 
 ```
 
 Closeouts can be `reviewed`, `deferred`, `blocked`, or `archived`. Each record stores the affected phase ids, unresolved issue count, deferred phase ids, reason, review timestamp, and source fingerprint. Doctor uses those fingerprints to warn when completed phase evidence becomes stale or unreviewed again.
+
+`brigade work phases compare <phase-id|range|latest>` is a read-only freshness check for phase evidence. It reports changed HEAD labels, missing referenced files, missing commit hashes, missing push refs, newer phase reports, newer test evidence, and changed doctor issue counts when a record carries a baseline.
 
 `brigade work phases report build` writes a local bundle under:
 

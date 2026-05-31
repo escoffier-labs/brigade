@@ -966,6 +966,10 @@ def _build_parser() -> argparse.ArgumentParser:
     p_work_phases_closeout.add_argument("--status", choices=["reviewed", "deferred", "blocked", "archived"], default="reviewed", help="Closeout state.")
     p_work_phases_closeout.add_argument("--reason", default=None, help="Closeout reason.")
     p_work_phases_closeout.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_work_phases_compare = phases_sub.add_parser("compare", help="Compare phase evidence against current local state.")
+    p_work_phases_compare.add_argument("selector", help="Phase id, range such as 201-205, or latest.")
+    p_work_phases_compare.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_work_phases_compare.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_work_phases_doctor = phases_sub.add_parser("doctor", help="Check phase execution ledger health.")
     p_work_phases_doctor.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
     p_work_phases_doctor.add_argument("--range", dest="phase_range", default=None, help="Required phase range, such as 165-170.")
@@ -2998,6 +3002,8 @@ def main(argv=None) -> int:
                 )
             if args.phases_command == "closeout":
                 return phases_cmd.closeout(target=args.target, selector=args.selector, status=args.status, reason=args.reason, json_output=args.json)
+            if args.phases_command == "compare":
+                return phases_cmd.compare(target=args.target, selector=args.selector, json_output=args.json)
             if args.phases_command == "doctor":
                 return phases_cmd.doctor(target=args.target, phase_range=args.phase_range, json_output=args.json)
             if args.phases_command == "import-issues":

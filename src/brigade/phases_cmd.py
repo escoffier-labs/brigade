@@ -5,6 +5,7 @@ import json
 import re
 import sys
 import hashlib
+import subprocess
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -626,6 +627,38 @@ def _read_closeouts(target: Path) -> list[dict[str, Any]]:
     return closeouts
 
 
+def _read_reports(target: Path) -> list[dict[str, Any]]:
+    reports: list[dict[str, Any]] = []
+    for path in sorted(_reports_root(target).glob("*/PHASE_EVIDENCE.json")):
+        payload = _read_json(path)
+        if payload is None:
+            continue
+        payload.setdefault("path", str(path.parent))
+        reports.append(payload)
+    return reports
+
+
+def _latest_report(target: Path) -> dict[str, Any] | None:
+    reports = _read_reports(target)
+    if not reports:
+        return None
+    return sorted(reports, key=lambda item: str(item.get("created_at") or ""))[-1]
+
+
+def _git_head(target: Path) -> str:
+    try:
+        result = subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=target, check=False, text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    except OSError:
+        return ""
+    return result.stdout.strip() if result.returncode == 0 else ""
+
+
+def _same_commit(expected: str, current: str) -> bool:
+    if not expected or not current:
+        return True
+    return expected.startswith(current) or current.startswith(expected)
+
+
 def _phase_has_current_closeout(target: Path, phase_id: str, record: dict[str, Any]) -> bool:
     wanted = _source_fingerprint([record])
     for item in _read_closeouts(target):
@@ -794,6 +827,80 @@ def closeout(*, target: Path, selector: str, status: str = "reviewed", reason: s
         print(f"status: {status}")
         print(f"phases: {', '.join(phase_ids)}")
         print(f"unresolved: {len(selected_issues)}")
+    return 0
+
+
+def compare(*, target: Path, selector: str, json_output: bool = False) -> int:
+    target = target.expanduser().resolve()
+    records, missing, parsed_range = _selected_records(target, selector)
+    checks: list[dict[str, Any]] = []
+    if missing:
+        checks.append(_check("warn", "phase_compare_missing_records", f"missing phase record(s): {', '.join(missing)}", suggested=f"brigade work phases plan --range {parsed_range or selector}"))
+    current_head = _git_head(target)
+    latest_report = _latest_report(target)
+    doctor_data = doctor_payload(target, phase_range=parsed_range)
+    current_issue_count = doctor_data["issue_count"]
+    for record in records:
+        phase_id = str(record.get("phase_id") or "unknown")
+        commit_hash = str(record.get("commit_hash") or "")
+        push_ref = str(record.get("push_ref") or "")
+        if not commit_hash:
+            checks.append(_check("warn", "phase_compare_missing_commit_hash", "phase record has no commit hash", phase_id=phase_id, suggested=f"brigade work phases complete {phase_id} --commit <hash>"))
+        elif current_head and not _same_commit(commit_hash, current_head):
+            checks.append(_check("warn", "phase_compare_changed_head", f"current HEAD {current_head} differs from phase commit {commit_hash}", phase_id=phase_id, suggested=f"brigade work phases show {phase_id}"))
+        if record.get("status") == "pushed" and not push_ref:
+            checks.append(_check("warn", "phase_compare_missing_push_ref", "pushed phase record has no push ref", phase_id=phase_id, suggested=f"brigade work phases complete {phase_id} --push-ref <ref>"))
+        missing_files = [path for path in record.get("files_changed") or [] if path and not (target / str(path)).exists()]
+        if missing_files:
+            checks.append(_check("warn", "phase_compare_missing_referenced_files", f"missing referenced file(s): {', '.join(missing_files[:5])}", phase_id=phase_id, suggested=f"brigade work phases show {phase_id}"))
+        completed = _parse_time(record.get("completed_at"))
+        report_created = _parse_time(latest_report.get("created_at")) if latest_report else None
+        if completed and report_created and report_created > completed:
+            checks.append(_check("warn", "phase_compare_newer_phase_report", f"newer phase report exists: {latest_report.get('report_id')}", phase_id=phase_id, suggested="brigade work phases report show latest"))
+        stored_issue_count = record.get("doctor_issue_count")
+        if isinstance(stored_issue_count, int) and stored_issue_count != current_issue_count:
+            checks.append(
+                _check(
+                    "warn",
+                    "phase_compare_changed_doctor_issue_count",
+                    f"doctor issue count changed from {stored_issue_count} to {current_issue_count}",
+                    phase_id=phase_id,
+                    suggested="brigade work phases doctor",
+                )
+            )
+        if record.get("tests_run") and completed and report_created and report_created > completed:
+            checks.append(_check("warn", "phase_compare_newer_test_evidence", "phase report is newer than stored test evidence", phase_id=phase_id, suggested="brigade work phases report show latest"))
+    if not checks:
+        checks.append(_check("ok", "phase_compare_current", "selected phase evidence matches current local checks"))
+    issues = [check for check in checks if check["status"] != "ok"]
+    payload = {
+        "schema_version": SCHEMA_VERSION,
+        "schema": _schema("phase-ledger-compare"),
+        "target": str(target),
+        "selector": selector,
+        "phase_range": parsed_range,
+        "current_head": current_head,
+        "latest_report": {
+            "report_id": latest_report.get("report_id"),
+            "created_at": latest_report.get("created_at"),
+            "path": latest_report.get("path"),
+        }
+        if latest_report
+        else None,
+        "records": [_record_summary(record) for record in records],
+        "record_count": len(records),
+        "checks": checks,
+        "issue_count": len(issues),
+        "top_issue": issues[0] if issues else None,
+        "suggested_next_command": issues[0]["suggested_next_command"] if issues else "brigade work phases doctor",
+    }
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        print(f"phase compare: {selector}")
+        print(f"records: {len(records)}")
+        for check in checks:
+            print(f"[{check['status']}] {check['name']}: {check['detail']}")
     return 0
 
 
