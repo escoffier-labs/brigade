@@ -836,6 +836,29 @@ def _checkpoint_summary(checkpoint: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _resolve_session_checkpoint(target: Path, checkpoint_id: str) -> tuple[dict[str, Any] | None, str | None]:
+    target = target.expanduser().resolve()
+    checkpoints = _read_session_checkpoints(target)
+    if checkpoint_id == "latest":
+        return (checkpoints[-1], None) if checkpoints else (None, "phase session checkpoint not found: latest")
+    wanted = _slug(checkpoint_id)
+    exact = _session_checkpoints_root(target) / f"{wanted}.json"
+    if exact.is_file():
+        checkpoint = _read_json(exact)
+        if checkpoint is not None:
+            checkpoint.setdefault("path", str(exact))
+        return checkpoint, None
+    matches = [path for path in _session_checkpoints_root(target).glob("*.json") if path.stem.startswith(wanted)]
+    if len(matches) == 1:
+        checkpoint = _read_json(matches[0])
+        if checkpoint is not None:
+            checkpoint.setdefault("path", str(matches[0]))
+        return checkpoint, None
+    if len(matches) > 1:
+        return None, f"phase session checkpoint id is ambiguous: {checkpoint_id}"
+    return None, f"phase session checkpoint not found: {checkpoint_id}"
+
+
 def _resolve_session(target: Path, session_id: str) -> tuple[Path | None, dict[str, Any] | None, str | None]:
     target = target.expanduser().resolve()
     if session_id == "latest":
@@ -1024,6 +1047,55 @@ def session_checkpoint(
         print(f"phase: {selected_phase_id or 'none'}")
         print(f"status: {status}")
         print(f"next: {record['suggested_next_command']}")
+    return 0
+
+
+def session_checkpoint_list(*, target: Path, session_id: str | None = None, limit: int = 20, json_output: bool = False) -> int:
+    target = target.expanduser().resolve()
+    checkpoints = list(reversed(_read_session_checkpoints(target)))
+    if session_id:
+        _path, session, error = _resolve_session(target, session_id)
+        if session is None:
+            print(f"error: {error}", file=sys.stderr)
+            return 1
+        resolved_session_id = str(session.get("session_id") or "")
+        checkpoints = [checkpoint for checkpoint in checkpoints if checkpoint.get("session_id") == resolved_session_id]
+    else:
+        resolved_session_id = None
+    summaries = [_checkpoint_summary(checkpoint) for checkpoint in checkpoints[:limit]]
+    payload = {
+        "schema_version": SCHEMA_VERSION,
+        "schema": _schema("phase-ledger-session-checkpoint-list"),
+        "target": str(target),
+        "session_id": resolved_session_id,
+        "checkpoints": summaries,
+        "checkpoint_count": len(summaries),
+        "suggested_next_command": "brigade work phases session checkpoints show latest" if summaries else "brigade work phases session checkpoint latest",
+    }
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        print(f"phase session checkpoints: {len(summaries)}")
+        for checkpoint in summaries:
+            print(f"- {checkpoint.get('checkpoint_id')} [{checkpoint.get('status')}] phase={checkpoint.get('phase_id') or 'none'}")
+    return 0
+
+
+def session_checkpoint_show(*, target: Path, checkpoint_id: str, json_output: bool = False) -> int:
+    target = target.expanduser().resolve()
+    checkpoint, error = _resolve_session_checkpoint(target, checkpoint_id)
+    if checkpoint is None:
+        print(f"error: {error}", file=sys.stderr)
+        return 1
+    if json_output:
+        print(json.dumps(checkpoint, indent=2, sort_keys=True))
+    else:
+        print(f"phase session checkpoint: {checkpoint.get('checkpoint_id')}")
+        print(f"session: {checkpoint.get('session_id')}")
+        print(f"phase: {checkpoint.get('phase_id') or 'none'}")
+        print(f"status: {checkpoint.get('status')}")
+        print(f"summary: {checkpoint.get('summary')}")
+        print(f"next: {checkpoint.get('suggested_next_command') or 'none'}")
     return 0
 
 

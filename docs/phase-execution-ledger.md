@@ -169,6 +169,8 @@ Each report includes `PHASE_REPORT.md` and `PHASE_EVIDENCE.json` with range stat
 
 `brigade work phases session checkpoint <session-id|latest>` records a local checkpoint under `.brigade/work/phases/session-checkpoints/` and attaches a compact reference to the session. A checkpoint stores the session id, phase range, phase id when known, status, safe summary, safe notes, current next-step recommendation, suggested next command, and source fingerprint. It is recovery metadata only. It does not execute the suggested command.
 
+`brigade work phases session checkpoints list` and `show` inspect those recovery points with text and JSON output. `list --session <session-id|latest>` narrows the view to one AFK session, and `show latest` returns the newest checkpoint without executing its suggested next command.
+
 `brigade work phases session activity <session-id|latest>` produces a chronological read-only activity ledger from phase starts, completions, tests, commits, reports, compare summaries, actions, imports, closeouts, handoff drafts, and session resume events.
 
 `brigade work phases session progress <session-id|latest>` summarizes percent complete, status counts, blockers, current phase, next command, test coverage, commit and push coverage, and estimated remaining local steps. It is read-only.

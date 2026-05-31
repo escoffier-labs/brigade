@@ -1115,6 +1115,18 @@ def _build_parser() -> argparse.ArgumentParser:
     p_work_phases_session_checkpoint.add_argument("--summary", default=None, help="Safe checkpoint summary.")
     p_work_phases_session_checkpoint.add_argument("--note", dest="notes", action="append", default=[], help="Safe local note. May be repeated.")
     p_work_phases_session_checkpoint.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_work_phases_session_checkpoints = phases_session_sub.add_parser("checkpoints", help="List and inspect phase session checkpoints.")
+    phases_session_checkpoints_sub = p_work_phases_session_checkpoints.add_subparsers(dest="phases_session_checkpoints_command", metavar="<phases-session-checkpoints-command>")
+    phases_session_checkpoints_sub.required = True
+    p_work_phases_session_checkpoints_list = phases_session_checkpoints_sub.add_parser("list", help="List phase session checkpoints.")
+    p_work_phases_session_checkpoints_list.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_work_phases_session_checkpoints_list.add_argument("--session", dest="session_id", default=None, help="Limit to one session id, prefix, or latest.")
+    p_work_phases_session_checkpoints_list.add_argument("--limit", type=int, default=20, help="Maximum checkpoints to list.")
+    p_work_phases_session_checkpoints_list.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_work_phases_session_checkpoints_show = phases_session_checkpoints_sub.add_parser("show", help="Show one phase session checkpoint.")
+    p_work_phases_session_checkpoints_show.add_argument("checkpoint_id", help="Checkpoint id, unique prefix, or latest.")
+    p_work_phases_session_checkpoints_show.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_work_phases_session_checkpoints_show.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_work_phases_session_next = phases_session_sub.add_parser("next", help="Show the next required phase session step.")
     p_work_phases_session_next.add_argument("session_id", nargs="?", default="latest", help="Session id, unique prefix, or latest.")
     p_work_phases_session_next.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
@@ -3251,6 +3263,12 @@ def main(argv=None) -> int:
                     return phases_cmd.session_show(target=args.target, session_id=args.session_id, json_output=args.json)
                 if args.phases_session_command == "checkpoint":
                     return phases_cmd.session_checkpoint(target=args.target, session_id=args.session_id, phase_id=args.phase_id, status=args.status, summary=args.summary, notes=args.notes, json_output=args.json)
+                if args.phases_session_command == "checkpoints":
+                    if args.phases_session_checkpoints_command == "list":
+                        return phases_cmd.session_checkpoint_list(target=args.target, session_id=args.session_id, limit=args.limit, json_output=args.json)
+                    if args.phases_session_checkpoints_command == "show":
+                        return phases_cmd.session_checkpoint_show(target=args.target, checkpoint_id=args.checkpoint_id, json_output=args.json)
+                    parser.error(f"unknown phases session checkpoints command: {args.phases_session_checkpoints_command}")
                 if args.phases_session_command == "next":
                     return phases_cmd.session_next(target=args.target, session_id=args.session_id, json_output=args.json)
                 if args.phases_session_command == "resume":

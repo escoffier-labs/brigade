@@ -61,6 +61,7 @@ Phase ledger closeouts let an operator mark completed phase evidence as reviewed
 Phase execution sessions group a declared AFK range into one local record with current phase, status, commit and test counts, report references, closeout state, and the next recommended command.
 Session next/resume commands identify the safest next local command and record resume metadata without executing hidden work.
 Session checkpoints record local recovery points with safe summaries, notes, current next-step state, and suggested commands without executing the suggested command.
+Session checkpoint list/show commands inspect those local recovery points without executing their suggested commands.
 Session report bundles collect the phase records, checks, actions, imports, commits, tests, and blockers into local Markdown and JSON evidence.
 The daily driver can surface active phase sessions and run exactly one safe session step, such as building a session report or writing session closeout metadata.
 Release and operator review surfaces include phase session state so stale or unreported AFK work blocks publish review visibly.

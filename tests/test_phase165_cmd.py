@@ -552,6 +552,16 @@ def test_phase_session_checkpoint_records_recovery_metadata(tmp_path, capsys):
     assert shown["latest_checkpoint"]["checkpoint_id"] == checkpoint["checkpoint_id"]
     assert shown["checkpoint_references"][-1]["status"] == "blocked"
 
+    assert cli.main(["work", "phases", "session", "checkpoints", "list", "--target", str(tmp_path), "--session", session["session_id"], "--json"]) == 0
+    listed = json.loads(capsys.readouterr().out)
+    assert listed["checkpoint_count"] == 1
+    assert listed["checkpoints"][0]["checkpoint_id"] == checkpoint["checkpoint_id"]
+
+    assert cli.main(["work", "phases", "session", "checkpoints", "show", "latest", "--target", str(tmp_path), "--json"]) == 0
+    checkpoint_shown = json.loads(capsys.readouterr().out)
+    assert checkpoint_shown["checkpoint_id"] == checkpoint["checkpoint_id"]
+    assert checkpoint_shown["next_step"]["step_type"] == "pending_phase"
+
     assert cli.main(["work", "phases", "session", "activity", session["session_id"], "--target", str(tmp_path), "--json"]) == 0
     activity = json.loads(capsys.readouterr().out)
     assert any(event["event_type"] == "session-checkpoint" and event["local_id"] == checkpoint["checkpoint_id"] for event in activity["events"])
