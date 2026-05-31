@@ -691,6 +691,26 @@ def test_phase_session_risk_summarizes_checkpoint_notes_and_doctor(tmp_path, cap
     assert risk["checkpoint"]["issue_count"] >= 1
 
 
+def test_phase_session_verification_rollup(tmp_path, capsys):
+    assert cli.main(["work", "phases", "plan", "--target", str(tmp_path), "--range", "236-237", "--title", "Verify Session", "--goal", "afk", "--json"]) == 0
+    capsys.readouterr()
+    assert cli.main(["work", "phases", "complete", "phase-236", "--target", str(tmp_path), "--summary", "Done", "--test", "pytest focused", "--json"]) == 0
+    capsys.readouterr()
+    assert cli.main(["work", "phases", "verify", "record", "phase-236", "--target", str(tmp_path), "--command", "pytest focused", "--status", "passed", "--summary", "Passed.", "--json"]) == 0
+    capsys.readouterr()
+    assert cli.main(["work", "phases", "session", "start", "--target", str(tmp_path), "--range", "236-237", "--goal", "verification session", "--json"]) == 0
+    session = json.loads(capsys.readouterr().out)
+
+    assert cli.main(["work", "phases", "session", "verification", session["session_id"], "--target", str(tmp_path), "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["session_id"] == session["session_id"]
+    assert payload["record_count"] == 2
+    assert payload["status_counts"]["passed"] == 1
+    assert "phase-237" in payload["missing_verification_phase_ids"]
+    assert payload["issue_count"] == 1
+    assert payload["suggested_next_command"] == "brigade work phases verify plan phase-237"
+
+
 def test_phase_session_report_bundle(tmp_path, capsys):
     assert cli.main(["work", "phases", "plan", "--target", str(tmp_path), "--range", "213-214", "--title", "Report", "--goal", "afk", "--json"]) == 0
     capsys.readouterr()

@@ -1559,6 +1559,66 @@ def session_risk(*, target: Path, session_id: str, json_output: bool = False) ->
     return 0
 
 
+def _session_verification_payload(target: Path, session: dict[str, Any]) -> dict[str, Any]:
+    records, missing = _session_phase_records(target, str(session.get("phase_range") or ""))
+    status_counts: dict[str, int] = {status: 0 for status in sorted(PHASE_VERIFY_STATUSES)}
+    phase_rows: list[dict[str, Any]] = []
+    missing_verification: list[str] = []
+    failed_verification: list[str] = []
+    for record in records:
+        entries = _verification_entries(record)
+        for entry in entries:
+            status = str(entry.get("status") or "expected")
+            status_counts[status] = status_counts.get(status, 0) + 1
+        if any(entry.get("command") == "focused verification not declared" for entry in entries):
+            missing_verification.append(str(record.get("phase_id")))
+        if any(entry.get("status") == "failed" for entry in entries):
+            failed_verification.append(str(record.get("phase_id")))
+        phase_rows.append(
+            {
+                "phase_id": record.get("phase_id"),
+                "status": record.get("status"),
+                "verification": entries,
+                "verification_count": len(entries),
+                "has_tests": bool(record.get("tests_run")),
+            }
+        )
+    issue_count = len(missing) + len(missing_verification) + len(failed_verification)
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "schema": _schema("phase-ledger-session-verification"),
+        "target": str(target),
+        "session_id": session.get("session_id"),
+        "phase_range": session.get("phase_range"),
+        "record_count": len(records),
+        "missing_phase_ids": missing,
+        "status_counts": status_counts,
+        "phases": phase_rows,
+        "missing_verification_phase_ids": missing_verification,
+        "failed_verification_phase_ids": failed_verification,
+        "issue_count": issue_count,
+        "suggested_next_command": f"brigade work phases verify plan {missing_verification[0]}" if missing_verification else "brigade work phases session progress latest",
+    }
+
+
+def session_verification(*, target: Path, session_id: str, json_output: bool = False) -> int:
+    target = target.expanduser().resolve()
+    _path, session, error = _resolve_session(target, session_id)
+    if session is None:
+        print(f"error: {error}", file=sys.stderr)
+        return 1
+    payload = _session_verification_payload(target, session)
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        print(f"phase session verification: {payload['session_id']}")
+        print(f"records: {payload['record_count']}")
+        print(f"issues: {payload['issue_count']}")
+        print(f"passed: {payload['status_counts'].get('passed', 0)}")
+        print(f"next: {payload['suggested_next_command']}")
+    return 0
+
+
 def _checkpoint_state_for_session_next(target: Path, session: dict[str, Any], step: dict[str, Any]) -> dict[str, Any] | None:
     checkpoint = _latest_checkpoint_for_session(target, session.get("session_id"))
     if checkpoint is None:
