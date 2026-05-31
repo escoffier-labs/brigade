@@ -60,6 +60,7 @@ Long unattended phase work is audited through the local phase execution ledger d
 Phase ledger closeouts let an operator mark completed phase evidence as reviewed, deferred, blocked, or archived, and stale unreviewed completed phases surface in doctor output.
 Phase execution sessions group a declared AFK range into one local record with current phase, status, commit and test counts, report references, closeout state, and the next recommended command.
 Session next/resume commands identify the safest next local command and record resume metadata without executing hidden work.
+Session checkpoints record local recovery points with safe summaries, notes, current next-step state, and suggested commands without executing the suggested command.
 Session report bundles collect the phase records, checks, actions, imports, commits, tests, and blockers into local Markdown and JSON evidence.
 The daily driver can surface active phase sessions and run exactly one safe session step, such as building a session report or writing session closeout metadata.
 Release and operator review surfaces include phase session state so stale or unreported AFK work blocks publish review visibly.
@@ -82,7 +83,7 @@ Phase report compare checks saved report bundles against current ledger state be
 Work brief and center status include open phase action counts so ledger follow-ups stay visible in the daily loop.
 Open phase actions can be imported into the normal work inbox when they need a reviewed task.
 Release candidate evidence includes the latest phase report compare summary.
-The current AFK ledger hardening tranche is described in [`docs/phase-166-200-plan.md`](docs/phase-166-200-plan.md).
+The current AFK ledger hardening tranche is described in [`docs/phase-226-250-plan.md`](docs/phase-226-250-plan.md).
 See [`docs/workflow-rules.md`](docs/workflow-rules.md) for the public-safe repo workflow rule templates installed under `rules/`.
 
 ## What you do not get

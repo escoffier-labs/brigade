@@ -1107,6 +1107,14 @@ def _build_parser() -> argparse.ArgumentParser:
     p_work_phases_session_show.add_argument("session_id", help="Session id, unique prefix, or latest.")
     p_work_phases_session_show.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
     p_work_phases_session_show.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_work_phases_session_checkpoint = phases_session_sub.add_parser("checkpoint", help="Record a local phase session checkpoint.")
+    p_work_phases_session_checkpoint.add_argument("session_id", nargs="?", default="latest", help="Session id, unique prefix, or latest.")
+    p_work_phases_session_checkpoint.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
+    p_work_phases_session_checkpoint.add_argument("--phase-id", default=None, help="Phase id for the checkpoint.")
+    p_work_phases_session_checkpoint.add_argument("--status", choices=["noted", "blocked", "recovered"], default="noted", help="Checkpoint state.")
+    p_work_phases_session_checkpoint.add_argument("--summary", default=None, help="Safe checkpoint summary.")
+    p_work_phases_session_checkpoint.add_argument("--note", dest="notes", action="append", default=[], help="Safe local note. May be repeated.")
+    p_work_phases_session_checkpoint.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_work_phases_session_next = phases_session_sub.add_parser("next", help="Show the next required phase session step.")
     p_work_phases_session_next.add_argument("session_id", nargs="?", default="latest", help="Session id, unique prefix, or latest.")
     p_work_phases_session_next.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
@@ -3241,6 +3249,8 @@ def main(argv=None) -> int:
                     return phases_cmd.session_list(target=args.target, limit=args.limit, json_output=args.json)
                 if args.phases_session_command == "show":
                     return phases_cmd.session_show(target=args.target, session_id=args.session_id, json_output=args.json)
+                if args.phases_session_command == "checkpoint":
+                    return phases_cmd.session_checkpoint(target=args.target, session_id=args.session_id, phase_id=args.phase_id, status=args.status, summary=args.summary, notes=args.notes, json_output=args.json)
                 if args.phases_session_command == "next":
                     return phases_cmd.session_next(target=args.target, session_id=args.session_id, json_output=args.json)
                 if args.phases_session_command == "resume":

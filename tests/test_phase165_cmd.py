@@ -514,6 +514,49 @@ def test_phase_session_next_and_resume_classify_safe_step(tmp_path, capsys):
     assert shown["resume_history"][-1]["next_step"]["step_type"] == "pending_phase"
 
 
+def test_phase_session_checkpoint_records_recovery_metadata(tmp_path, capsys):
+    assert cli.main(["work", "phases", "plan", "--target", str(tmp_path), "--range", "226-227", "--title", "Checkpoint", "--goal", "afk", "--json"]) == 0
+    capsys.readouterr()
+    assert cli.main(["work", "phases", "session", "start", "--target", str(tmp_path), "--range", "226-227", "--goal", "checkpoint session", "--json"]) == 0
+    session = json.loads(capsys.readouterr().out)
+
+    assert cli.main(
+        [
+            "work",
+            "phases",
+            "session",
+            "checkpoint",
+            session["session_id"],
+            "--target",
+            str(tmp_path),
+            "--status",
+            "blocked",
+            "--summary",
+            "Waiting on focused verification.",
+            "--note",
+            "No command executed.",
+            "--json",
+        ]
+    ) == 0
+    checkpoint = json.loads(capsys.readouterr().out)
+    assert checkpoint["session_id"] == session["session_id"]
+    assert checkpoint["phase_id"] == "phase-226"
+    assert checkpoint["status"] == "blocked"
+    assert checkpoint["summary"] == "Waiting on focused verification."
+    assert checkpoint["notes"] == ["No command executed."]
+    assert "source_fingerprint" in checkpoint
+    assert (tmp_path / ".brigade" / "work" / "phases" / "session-checkpoints" / f"{checkpoint['checkpoint_id']}.json").is_file()
+
+    assert cli.main(["work", "phases", "session", "show", session["session_id"], "--target", str(tmp_path), "--json"]) == 0
+    shown = json.loads(capsys.readouterr().out)
+    assert shown["latest_checkpoint"]["checkpoint_id"] == checkpoint["checkpoint_id"]
+    assert shown["checkpoint_references"][-1]["status"] == "blocked"
+
+    assert cli.main(["work", "phases", "session", "activity", session["session_id"], "--target", str(tmp_path), "--json"]) == 0
+    activity = json.loads(capsys.readouterr().out)
+    assert any(event["event_type"] == "session-checkpoint" and event["local_id"] == checkpoint["checkpoint_id"] for event in activity["events"])
+
+
 def test_phase_session_report_bundle(tmp_path, capsys):
     assert cli.main(["work", "phases", "plan", "--target", str(tmp_path), "--range", "213-214", "--title", "Report", "--goal", "afk", "--json"]) == 0
     capsys.readouterr()

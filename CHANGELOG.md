@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `brigade work phases session checkpoint <session-id|latest>` for local AFK session recovery points that record safe summaries, notes, current next-step state, and suggested commands without executing anything.
 - `brigade work phases session start/list/show/closeout` for local AFK phase execution sessions that track a requested range, current phase, phase status, commit and test counts, report references, closeout state, and next command.
 - `brigade work phases session next/resume` for read-only or metadata-only AFK session recovery that identifies the safest next phase command without executing it.
 - `brigade work phases session report build/list/show` for local Markdown and JSON evidence bundles over phase execution sessions.

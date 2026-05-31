@@ -64,6 +64,10 @@ def _session_reports_root(target: Path) -> Path:
     return _root(target) / "session-reports"
 
 
+def _session_checkpoints_root(target: Path) -> Path:
+    return _root(target) / "session-checkpoints"
+
+
 def _goals_root(target: Path) -> Path:
     return _root(target) / "goals"
 
@@ -807,6 +811,31 @@ def _read_session_reports(target: Path) -> list[dict[str, Any]]:
     return reports
 
 
+def _read_session_checkpoints(target: Path) -> list[dict[str, Any]]:
+    checkpoints: list[dict[str, Any]] = []
+    for path in sorted(_session_checkpoints_root(target).glob("*.json")):
+        payload = _read_json(path)
+        if payload is None:
+            continue
+        payload.setdefault("path", str(path))
+        checkpoints.append(payload)
+    checkpoints.sort(key=lambda item: str(item.get("created_at") or item.get("checkpoint_id") or ""))
+    return checkpoints
+
+
+def _checkpoint_summary(checkpoint: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "checkpoint_id": checkpoint.get("checkpoint_id"),
+        "session_id": checkpoint.get("session_id"),
+        "phase_id": checkpoint.get("phase_id"),
+        "status": checkpoint.get("status"),
+        "summary": checkpoint.get("summary"),
+        "created_at": checkpoint.get("created_at"),
+        "path": checkpoint.get("path"),
+        "suggested_next_command": checkpoint.get("suggested_next_command"),
+    }
+
+
 def _resolve_session(target: Path, session_id: str) -> tuple[Path | None, dict[str, Any] | None, str | None]:
     target = target.expanduser().resolve()
     if session_id == "latest":
@@ -930,6 +959,71 @@ def session_show(*, target: Path, session_id: str, json_output: bool = False) ->
         print(f"range: {session.get('phase_range')}")
         print(f"current: {session.get('current_phase_id') or 'none'}")
         print(f"next: {session.get('next_recommended_command') or 'none'}")
+    return 0
+
+
+def session_checkpoint(
+    *,
+    target: Path,
+    session_id: str,
+    phase_id: str | None = None,
+    status: str = "noted",
+    summary: str | None = None,
+    notes: list[str] | None = None,
+    json_output: bool = False,
+) -> int:
+    target = target.expanduser().resolve()
+    path, session, error = _resolve_session(target, session_id)
+    if session is None or path is None:
+        print(f"error: {error}", file=sys.stderr)
+        return 1
+    if status not in {"noted", "blocked", "recovered"}:
+        print("error: --status must be one of ['blocked', 'noted', 'recovered']", file=sys.stderr)
+        return 2
+    try:
+        next_payload = _session_next_payload(target, session)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    selected_phase_id = phase_id or next_payload["next_step"].get("phase_id") or session.get("current_phase_id")
+    created_at = _now().isoformat()
+    checkpoint_id = f"{_now().strftime('%Y%m%d-%H%M%S')}-session-checkpoint-{uuid4().hex[:6]}"
+    checkpoint_path = _session_checkpoints_root(target) / f"{checkpoint_id}.json"
+    record = {
+        "schema_version": SCHEMA_VERSION,
+        "schema": _schema("phase-ledger-session-checkpoint"),
+        "target": str(target),
+        "checkpoint_id": checkpoint_id,
+        "session_id": session.get("session_id"),
+        "phase_range": session.get("phase_range"),
+        "phase_id": selected_phase_id,
+        "status": status,
+        "summary": summary or str(next_payload["next_step"].get("detail") or "phase session checkpoint recorded"),
+        "notes": [str(item) for item in (notes or []) if str(item)],
+        "created_at": created_at,
+        "next_step": next_payload["next_step"],
+        "suggested_next_command": next_payload["suggested_next_command"],
+        "source_fingerprint": _source_fingerprint([], {"session_id": session.get("session_id"), "phase_id": selected_phase_id, "status": status, "next_step": next_payload["next_step"]}),
+        "path": str(checkpoint_path),
+    }
+    _write_json(checkpoint_path, record)
+    references = session.get("checkpoint_references") if isinstance(session.get("checkpoint_references"), list) else []
+    references.append(_checkpoint_summary(record))
+    session["checkpoint_references"] = references[-50:]
+    session["latest_checkpoint"] = _checkpoint_summary(record)
+    session["current_phase_id"] = selected_phase_id
+    session["next_recommended_command"] = next_payload["suggested_next_command"]
+    session["updated_at"] = created_at
+    session["path"] = str(path)
+    _write_json(path, session)
+    if json_output:
+        print(json.dumps(record, indent=2, sort_keys=True))
+    else:
+        print(f"phase session checkpoint: {checkpoint_id}")
+        print(f"session: {session.get('session_id')}")
+        print(f"phase: {selected_phase_id or 'none'}")
+        print(f"status: {status}")
+        print(f"next: {record['suggested_next_command']}")
     return 0
 
 
@@ -1379,6 +1473,21 @@ def _session_activity_payload(target: Path, session: dict[str, Any]) -> dict[str
                 status=next_step.get("step_type"),
                 summary=str(next_step.get("detail") or "session resume recommendation recorded"),
                 suggested=item.get("suggested_next_command"),
+            )
+        )
+    for checkpoint in _read_session_checkpoints(target):
+        if checkpoint.get("session_id") != session.get("session_id"):
+            continue
+        events.append(
+            _activity_event(
+                timestamp=checkpoint.get("created_at"),
+                event_type="session-checkpoint",
+                local_id=checkpoint.get("checkpoint_id"),
+                phase_id=checkpoint.get("phase_id"),
+                status=checkpoint.get("status"),
+                summary=str(checkpoint.get("summary") or "phase session checkpoint recorded"),
+                path=checkpoint.get("path"),
+                suggested=checkpoint.get("suggested_next_command"),
             )
         )
     if isinstance(session.get("closeout"), dict):

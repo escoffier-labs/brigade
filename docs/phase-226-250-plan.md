@@ -1,0 +1,41 @@
+# Brigade Phase 226-250 Plan
+
+This plan keeps the next AFK hardening range bounded and auditable. The local phase execution ledger under `.brigade/work/phases/` is still the source of truth for run evidence, commits, pushes, privacy checks, and closeout.
+
+## Objective
+
+Harden AFK session execution into a more useful daily-driver, release, and recovery surface. The work should make session progress easier to checkpoint, resume, review, and prove in release evidence without adding a daemon, scheduler, remote mutation, or automatic code execution.
+
+## Phase Map
+
+| Phase | Deliverable |
+| --- | --- |
+| 226 | Add phase session checkpoints. |
+| 227 | List and inspect phase session checkpoints. |
+| 228 | Compare phase session checkpoints against current session state. |
+| 229 | Import checkpoint blockers into the work inbox. |
+| 230 | Surface checkpoints in session next and resume. |
+| 231 | Add session recovery notes. |
+| 232 | Add recovery note closeout. |
+| 233 | Add daily phase checkpoint candidates. |
+| 234 | Allow daily run to write one checkpoint. |
+| 235 | Add phase session risk summary. |
+| 236 | Add session verification rollup. |
+| 237 | Add session privacy rollup. |
+| 238 | Add session handoff rollup. |
+| 239 | Add release doctor checkpoint evidence. |
+| 240 | Add release candidate checkpoint evidence. |
+| 241 | Add center checkpoint review items. |
+| 242 | Add work brief checkpoint summary. |
+| 243 | Add phase checkpoint action queue. |
+| 244 | Add checkpoint archive. |
+| 245 | Add session recovery report section. |
+| 246 | Add AFK session health schema. |
+| 247 | Add wrapper safe resume protocol. |
+| 248 | Add phase session release compare checks. |
+| 249 | Add AFK session self-audit command. |
+| 250 | Close phase 226-250 AFK hardening gate. |
+
+## Stop Condition
+
+Stop only when phases 226-250 have individual local ledger records, each implemented or explicitly deferred phase has evidence, commits, verification, privacy checks, docs where needed, pushed commit evidence, a linted Memory Handoff, and the session gate says the range is safe to claim complete.
