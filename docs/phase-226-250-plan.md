@@ -27,7 +27,7 @@ Harden AFK session execution into a more useful daily-driver, release, and recov
 | 240 | Add release candidate checkpoint evidence. Implemented with latest session checkpoint and compare summaries in candidate evidence. |
 | 241 | Add center checkpoint review items. Implemented with blocked or stale phase session checkpoints in center reviews. |
 | 242 | Add work brief checkpoint summary. Implemented with latest checkpoint and compare evidence in work brief JSON and text output. |
-| 243 | Add phase checkpoint action queue. |
+| 243 | Add phase checkpoint action queue. Implemented by routing blocked or stale checkpoint issues into phase actions. |
 | 244 | Add checkpoint archive. |
 | 245 | Add session recovery report section. |
 | 246 | Add AFK session health schema. |

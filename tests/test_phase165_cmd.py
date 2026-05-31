@@ -587,6 +587,11 @@ def test_phase_session_checkpoint_records_recovery_metadata(tmp_path, capsys):
     brief_payload = json.loads(capsys.readouterr().out)
     assert brief_payload["phase_ledger"]["latest_session_checkpoint"]["checkpoint_id"] == checkpoint["checkpoint_id"]
     assert brief_payload["phase_ledger"]["latest_session_checkpoint_compare"]["issue_count"] >= 1
+    assert phases_cmd.actions_build(target=tmp_path, phase_range="226-227", json_output=True) == 0
+    action_payload = json.loads(capsys.readouterr().out)
+    checkpoint_actions = [item for item in action_payload["created"] if str(item["issue_type"]).startswith("phase_session_checkpoint")]
+    assert checkpoint_actions
+    assert checkpoint_actions[0]["suggested_next_command"].startswith("brigade work phases session checkpoints")
 
     assert cli.main(["work", "phases", "session", "resume", session["session_id"], "--target", str(tmp_path), "--json"]) == 0
     resume_with_checkpoint = json.loads(capsys.readouterr().out)

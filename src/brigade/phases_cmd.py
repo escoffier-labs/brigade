@@ -2891,10 +2891,26 @@ def _action_summary(action: dict[str, Any]) -> dict[str, Any]:
 def _phase_action_candidates(target: Path, *, phase_range: str | None = None) -> list[dict[str, Any]]:
     doctor_data = doctor_payload(target, phase_range=phase_range)
     candidates: list[dict[str, Any]] = []
+    try:
+        parsed_range = _parse_range(phase_range)
+    except ValueError:
+        parsed_range = None
+
+    def phase_in_scope(phase_id: str) -> bool:
+        if parsed_range is None or phase_id == "ledger" or not phase_id.startswith("phase-"):
+            return True
+        try:
+            number = int(phase_id.split("-", 1)[1])
+        except ValueError:
+            return True
+        return number in parsed_range
+
     for check in doctor_data["checks"]:
         if check.get("status") == "ok":
             continue
         phase_id = str(check.get("phase_id") or "ledger")
+        if not phase_in_scope(phase_id):
+            continue
         issue_type = str(check.get("name") or "phase_issue")
         detail = str(check.get("detail") or "")
         fingerprint = _action_source_fingerprint(phase_id, issue_type, detail)
@@ -2924,6 +2940,8 @@ def _phase_action_candidates(target: Path, *, phase_range: str | None = None) ->
             if not isinstance(issue, dict):
                 continue
             phase_id = str(issue.get("phase_id") or "ledger")
+            if not phase_in_scope(phase_id):
+                continue
             issue_type = f"closeout_{issue.get('name') or 'blocker'}"
             detail = str(issue.get("detail") or closeout_record.get("reason") or "closeout blocker")
             fingerprint = _action_source_fingerprint(phase_id, issue_type, detail)
@@ -2947,6 +2965,68 @@ def _phase_action_candidates(target: Path, *, phase_range: str | None = None) ->
                     "suggested_next_command": issue.get("suggested_next_command") or "brigade work phases closeout latest",
                 }
             )
+    latest_checkpoint, _checkpoint_error = _resolve_session_checkpoint(target, "latest")
+    if isinstance(latest_checkpoint, dict):
+        checkpoint_id = str(latest_checkpoint.get("checkpoint_id") or "latest")
+        phase_id = str(latest_checkpoint.get("phase_id") or "ledger")
+        if phase_in_scope(phase_id) and latest_checkpoint.get("status") == "blocked":
+            issue_type = "phase_session_checkpoint_blocked"
+            detail = str(latest_checkpoint.get("summary") or "phase session checkpoint is blocked")
+            fingerprint = _action_source_fingerprint(phase_id, issue_type, detail)
+            candidates.append(
+                {
+                    "schema_version": SCHEMA_VERSION,
+                    "schema": _schema("phase-ledger-action"),
+                    "action_id": f"phase-action-{_slug(phase_id)}-{_slug(issue_type)}-{fingerprint[:8]}",
+                    "phase_id": phase_id,
+                    "issue_type": issue_type,
+                    "status": "pending",
+                    "safe_summary": detail,
+                    "source": "checkpoint",
+                    "source_checkpoint_id": checkpoint_id,
+                    "source_fingerprint": fingerprint,
+                    "source_status": latest_checkpoint.get("status"),
+                    "created_at": None,
+                    "updated_at": None,
+                    "reviewed_at": None,
+                    "review_reason": "",
+                    "suggested_next_command": f"brigade work phases session checkpoints show {checkpoint_id}",
+                }
+            )
+        try:
+            checkpoint_compare = _session_checkpoint_compare_payload(target, latest_checkpoint)
+        except ValueError:
+            checkpoint_compare = None
+        if isinstance(checkpoint_compare, dict):
+            for check in checkpoint_compare.get("checks") or []:
+                if not isinstance(check, dict) or check.get("status") == "ok":
+                    continue
+                phase_id = str(check.get("phase_id") or latest_checkpoint.get("phase_id") or "ledger")
+                if not phase_in_scope(phase_id):
+                    continue
+                issue_type = str(check.get("name") or "phase_session_checkpoint_issue")
+                detail = str(check.get("detail") or "phase session checkpoint compare issue")
+                fingerprint = _action_source_fingerprint(phase_id, issue_type, detail)
+                candidates.append(
+                    {
+                        "schema_version": SCHEMA_VERSION,
+                        "schema": _schema("phase-ledger-action"),
+                        "action_id": f"phase-action-{_slug(phase_id)}-{_slug(issue_type)}-{fingerprint[:8]}",
+                        "phase_id": phase_id,
+                        "issue_type": issue_type,
+                        "status": "pending",
+                        "safe_summary": detail,
+                        "source": "checkpoint",
+                        "source_checkpoint_id": checkpoint_id,
+                        "source_fingerprint": fingerprint,
+                        "source_status": check.get("status"),
+                        "created_at": None,
+                        "updated_at": None,
+                        "reviewed_at": None,
+                        "review_reason": "",
+                        "suggested_next_command": check.get("suggested_next_command") or "brigade work phases session checkpoints compare latest",
+                    }
+                )
     deduped: dict[tuple[str, str, str], dict[str, Any]] = {}
     for candidate in candidates:
         key = (str(candidate.get("phase_id")), str(candidate.get("issue_type")), str(candidate.get("source_fingerprint")))
