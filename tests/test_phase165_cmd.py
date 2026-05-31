@@ -711,6 +711,26 @@ def test_phase_session_verification_rollup(tmp_path, capsys):
     assert payload["suggested_next_command"] == "brigade work phases verify plan phase-237"
 
 
+def test_phase_session_privacy_rollup(tmp_path, capsys):
+    (tmp_path / "safe.txt").write_text("safe public text\n")
+    assert cli.main(["work", "phases", "plan", "--target", str(tmp_path), "--range", "237-238", "--title", "Privacy Session", "--goal", "afk", "--json"]) == 0
+    capsys.readouterr()
+    assert cli.main(["work", "phases", "evidence", "add", "phase-237", "--target", str(tmp_path), "--file", "safe.txt", "--json"]) == 0
+    capsys.readouterr()
+    assert cli.main(["work", "phases", "privacy", "phase-237", "--target", str(tmp_path), "--json"]) == 0
+    capsys.readouterr()
+    assert cli.main(["work", "phases", "session", "start", "--target", str(tmp_path), "--range", "237-238", "--goal", "privacy session", "--json"]) == 0
+    session = json.loads(capsys.readouterr().out)
+
+    assert cli.main(["work", "phases", "session", "privacy", session["session_id"], "--target", str(tmp_path), "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["record_count"] == 2
+    assert payload["status_counts"]["clean"] == 1
+    assert payload["status_counts"]["missing"] == 1
+    assert payload["missing_privacy_phase_ids"] == ["phase-238"]
+    assert payload["suggested_next_command"] == "brigade work phases privacy phase-238"
+
+
 def test_phase_session_report_bundle(tmp_path, capsys):
     assert cli.main(["work", "phases", "plan", "--target", str(tmp_path), "--range", "213-214", "--title", "Report", "--goal", "afk", "--json"]) == 0
     capsys.readouterr()

@@ -1619,6 +1619,76 @@ def session_verification(*, target: Path, session_id: str, json_output: bool = F
     return 0
 
 
+def _latest_privacy_check(record: dict[str, Any]) -> dict[str, Any] | None:
+    checks = record.get("privacy_checks") if isinstance(record.get("privacy_checks"), list) else []
+    for check in reversed(checks):
+        if isinstance(check, dict):
+            return check
+    return None
+
+
+def _session_privacy_payload(target: Path, session: dict[str, Any]) -> dict[str, Any]:
+    records, missing = _session_phase_records(target, str(session.get("phase_range") or ""))
+    phase_rows: list[dict[str, Any]] = []
+    status_counts: dict[str, int] = {"clean": 0, "blocked": 0, "missing": 0}
+    blocked_phase_ids: list[str] = []
+    missing_privacy_phase_ids: list[str] = []
+    for record in records:
+        latest = _latest_privacy_check(record)
+        status = str((latest or {}).get("status") or "missing")
+        if status not in status_counts:
+            status_counts[status] = 0
+        status_counts[status] += 1
+        phase_id = str(record.get("phase_id") or "")
+        if status == "blocked":
+            blocked_phase_ids.append(phase_id)
+        if status == "missing":
+            missing_privacy_phase_ids.append(phase_id)
+        phase_rows.append(
+            {
+                "phase_id": phase_id,
+                "status": record.get("status"),
+                "privacy_status": status,
+                "latest_privacy_check": latest,
+            }
+        )
+    issue_count = len(missing) + len(blocked_phase_ids) + len(missing_privacy_phase_ids)
+    next_phase = blocked_phase_ids[0] if blocked_phase_ids else missing_privacy_phase_ids[0] if missing_privacy_phase_ids else None
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "schema": _schema("phase-ledger-session-privacy"),
+        "target": str(target),
+        "session_id": session.get("session_id"),
+        "phase_range": session.get("phase_range"),
+        "record_count": len(records),
+        "missing_phase_ids": missing,
+        "status_counts": status_counts,
+        "phases": phase_rows,
+        "blocked_phase_ids": blocked_phase_ids,
+        "missing_privacy_phase_ids": missing_privacy_phase_ids,
+        "issue_count": issue_count,
+        "suggested_next_command": f"brigade work phases privacy {next_phase}" if next_phase else "brigade work phases session progress latest",
+    }
+
+
+def session_privacy(*, target: Path, session_id: str, json_output: bool = False) -> int:
+    target = target.expanduser().resolve()
+    _path, session, error = _resolve_session(target, session_id)
+    if session is None:
+        print(f"error: {error}", file=sys.stderr)
+        return 1
+    payload = _session_privacy_payload(target, session)
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        print(f"phase session privacy: {payload['session_id']}")
+        print(f"records: {payload['record_count']}")
+        print(f"issues: {payload['issue_count']}")
+        print(f"clean: {payload['status_counts'].get('clean', 0)}")
+        print(f"next: {payload['suggested_next_command']}")
+    return 0
+
+
 def _checkpoint_state_for_session_next(target: Path, session: dict[str, Any], step: dict[str, Any]) -> dict[str, Any] | None:
     checkpoint = _latest_checkpoint_for_session(target, session.get("session_id"))
     if checkpoint is None:

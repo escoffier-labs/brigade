@@ -1170,6 +1170,10 @@ def _build_parser() -> argparse.ArgumentParser:
     p_work_phases_session_verification.add_argument("session_id", nargs="?", default="latest", help="Session id, unique prefix, or latest.")
     p_work_phases_session_verification.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
     p_work_phases_session_verification.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_work_phases_session_privacy = phases_session_sub.add_parser("privacy", help="Summarize phase session privacy checks.")
+    p_work_phases_session_privacy.add_argument("session_id", nargs="?", default="latest", help="Session id, unique prefix, or latest.")
+    p_work_phases_session_privacy.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_work_phases_session_privacy.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_work_phases_session_next = phases_session_sub.add_parser("next", help="Show the next required phase session step.")
     p_work_phases_session_next.add_argument("session_id", nargs="?", default="latest", help="Session id, unique prefix, or latest.")
     p_work_phases_session_next.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
@@ -3330,6 +3334,8 @@ def main(argv=None) -> int:
                     return phases_cmd.session_risk(target=args.target, session_id=args.session_id, json_output=args.json)
                 if args.phases_session_command == "verification":
                     return phases_cmd.session_verification(target=args.target, session_id=args.session_id, json_output=args.json)
+                if args.phases_session_command == "privacy":
+                    return phases_cmd.session_privacy(target=args.target, session_id=args.session_id, json_output=args.json)
                 if args.phases_session_command == "next":
                     return phases_cmd.session_next(target=args.target, session_id=args.session_id, json_output=args.json)
                 if args.phases_session_command == "resume":

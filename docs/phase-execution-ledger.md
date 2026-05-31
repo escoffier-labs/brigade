@@ -185,6 +185,8 @@ Each report includes `PHASE_REPORT.md` and `PHASE_EVIDENCE.json` with range stat
 
 `brigade work phases session verification <session-id|latest>` summarizes verification entries across the session range. It counts expected, passed, failed, skipped, and deferred verification, lists phases with missing or failed verification, and suggests the next `brigade work phases verify plan` command without running tests.
 
+`brigade work phases session privacy <session-id|latest>` summarizes privacy-check state across the session range. It counts clean, blocked, and missing privacy checks, lists phases that still need review, and suggests the next `brigade work phases privacy` command without running a scan.
+
 `brigade work phases session activity <session-id|latest>` produces a chronological read-only activity ledger from phase starts, completions, tests, commits, reports, compare summaries, actions, imports, closeouts, handoff drafts, and session resume events.
 
 `brigade work phases session progress <session-id|latest>` summarizes percent complete, status counts, blockers, current phase, next command, test coverage, commit and push coverage, and estimated remaining local steps. It is read-only.
