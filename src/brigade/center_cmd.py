@@ -702,6 +702,11 @@ def _reviews(target: Path) -> list[dict[str, Any]]:
     if top_readiness:
         items.append(_item("center-readiness", str(top_readiness.get("name") or "readiness"), str(top_readiness.get("status") or "warn"), str(top_readiness.get("detail") or "operator readiness needs review"), "brigade center readiness plan"))
     daily_health = daily_cmd.health(target)
+    approvals = daily_health.get("approvals") if isinstance(daily_health.get("approvals"), dict) else {}
+    top_approval = approvals.get("top_pending") if isinstance(approvals.get("top_pending"), dict) else None
+    if top_approval:
+        approval_id = str(top_approval.get("approval_id") or "approval")
+        items.append(_item("daily-approval", approval_id, str(top_approval.get("status") or "pending"), str(top_approval.get("safe_summary") or "daily approval pending"), f"brigade daily approvals show {approval_id}"))
     top_daily = daily_health.get("top_issue") if isinstance(daily_health.get("top_issue"), dict) else None
     if top_daily:
         items.append(_item("daily-driver", str(top_daily.get("name") or "daily"), str(top_daily.get("status") or "warn"), str(top_daily.get("detail") or "daily driver needs review"), "brigade daily doctor"))

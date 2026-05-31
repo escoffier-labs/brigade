@@ -52,6 +52,11 @@ brigade daily history
 brigade daily show <run-id>
 brigade daily doctor
 brigade daily schema
+brigade daily approvals list
+brigade daily approvals show <approval-id>
+brigade daily approvals approve <approval-id>
+brigade daily approvals reject <approval-id> --reason "not now"
+brigade daily approvals hold <approval-id> --reason "needs review"
 ```
 
 `status` summarizes active work, pending tasks, pending imports, scanner sweep health, review health, handoff drafts, tool catalog health, learning candidates, context packs, release readiness, release candidates, repo fleet, roadmap health, project consolidation, and security health.
@@ -83,7 +88,9 @@ Every center row uses the same wrapper-facing fields: `subsystem`, `local_id`, `
 
 `brigade daily review` previews the selected action with selected adapter, safe evidence references, acceptance criteria when available, risk, config blockers, approval boundary, likely next command, and context pack planning.
 
-`brigade daily run` executes exactly one bounded local step. It can run a pending task, promote an approved import, start a reviewed center action, build an operator report, build a safe context pack, or import readiness issues. It refuses approval-required actions unless `--approved` is passed, refuses disabled adapters, and records receipts under `.brigade/daily/runs/`.
+`brigade daily run` executes exactly one bounded local step. It can run a pending task, promote an approved import, start a reviewed center action, build an operator report, build a safe context pack, or import readiness issues. It refuses approval-required actions unless `--approved` or `--approval <approval-id>` is passed, refuses disabled adapters, and records receipts under `.brigade/daily/runs/`.
+
+Approval-required daily actions can be paused as local requests under `.brigade/daily/approvals/`. `brigade daily approvals list/show/approve/reject/hold` reviews those requests without executing anything. `brigade daily run --approval <approval-id>` consumes one approved, unconsumed request only after revalidating the current config, source evidence, and source fingerprint.
 
 `brigade daily closeout` updates the latest daily receipt as reviewed, deferred, blocked, or archived. It can also write a Memory Handoff draft for durable knowledge, but it never edits canonical memory.
 

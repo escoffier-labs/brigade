@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `brigade daily approvals list/show/approve/reject/hold` plus `brigade daily run --approval <approval-id>` for local approval requests that preserve daily-driver context across approval-required boundaries.
 - `brigade daily init/schema/history/show/doctor` plus local `.brigade/daily.toml` settings for daily-driver config, JSON contracts, receipt inspection, and stale or blocked run health.
 - `brigade daily status/plan/review/run/closeout` for an agent-facing daily driver that ranks local operator evidence, selects one safe action, runs or stages one bounded item with receipts, and closes out the day without arbitrary execution or remote mutation.
 - `brigade work import provenance` for a read-only cross-producer import provenance audit with text and JSON output.

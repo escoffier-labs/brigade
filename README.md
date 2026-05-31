@@ -392,6 +392,11 @@ brigade daily history
 brigade daily show latest
 brigade daily doctor
 brigade daily schema
+brigade daily approvals list
+brigade daily approvals show <approval-id>
+brigade daily approvals approve <approval-id>
+brigade daily approvals reject <approval-id> --reason "not now"
+brigade daily approvals hold <approval-id> --reason "needs review"
 brigade work run
 brigade work run --queue-next
 brigade work run "review today's changes"
@@ -658,9 +663,11 @@ brigade daily closeout --json
 `brigade daily status` summarizes the current operating state and prints the next recommended command.
 `brigade daily plan` ranks local candidate actions by urgency, safety, acceptance coverage, provenance, and usefulness, then chooses exactly one recommended action. It writes no state unless `--record` is passed.
 `brigade daily review` previews the selected action, selected adapter, risk, evidence references, acceptance criteria, config blockers, approval boundary, and likely next command.
-`brigade daily run` executes at most one safe local step, such as running a pending accepted task, promoting an approved import, building a context pack, building an operator report, or importing readiness issues. It refuses approval-required actions unless `--approved` is passed, respects local `.brigade/daily.toml` adapter settings, and writes a local receipt under `.brigade/daily/runs/`.
+`brigade daily run` executes at most one safe local step, such as running a pending accepted task, promoting an approved import, building a context pack, building an operator report, or importing readiness issues. It refuses approval-required actions unless `--approved` or `--approval <approval-id>` is passed, respects local `.brigade/daily.toml` adapter settings, and writes a local receipt under `.brigade/daily/runs/`.
 `brigade daily closeout` marks the latest daily run reviewed, deferred, blocked, or archived and can write a Memory Handoff draft without editing canonical memory.
 `brigade daily init` writes conservative local defaults to `.brigade/daily.toml`. `brigade daily history`, `show`, `doctor`, and `schema` inspect local daily receipts, health, and wrapper-facing JSON contracts.
+
+When the selected action needs approval, `brigade daily run` creates or reuses a local approval request under `.brigade/daily/approvals/` instead of losing the plan context. `brigade daily approvals list/show/approve/reject/hold` reviews those requests without executing anything. A later `brigade daily run --approval <approval-id>` consumes one approved, unconsumed request after revalidating the current config, source evidence, and fingerprint.
 
 The daily driver is local and explicit. It does not start daemons, run arbitrary commands, execute scanners, reviewers, tools, or fleet sweeps, mutate remotes, push, tag, publish, or edit canonical memory.
 

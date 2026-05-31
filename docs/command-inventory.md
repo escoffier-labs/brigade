@@ -14,7 +14,7 @@ brigade roadmap commands --write
 - `brigade center`: 29 command path(s)
 - `brigade chat`: 7 command path(s)
 - `brigade context`: 8 command path(s)
-- `brigade daily`: 10 command path(s)
+- `brigade daily`: 15 command path(s)
 - `brigade doctor`: 1 command path(s)
 - `brigade dogfood`: 1 command path(s)
 - `brigade handoff`: 12 command path(s)
@@ -86,6 +86,11 @@ brigade roadmap commands --write
 - `brigade context plan`
 - `brigade context show`
 - `brigade context sync`
+- `brigade daily approvals approve`
+- `brigade daily approvals hold`
+- `brigade daily approvals list`
+- `brigade daily approvals reject`
+- `brigade daily approvals show`
 - `brigade daily closeout`
 - `brigade daily doctor`
 - `brigade daily history`

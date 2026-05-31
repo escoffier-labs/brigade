@@ -778,6 +778,16 @@ Phase 102 status:
 - Daily run now refuses disabled adapters, stale recorded plans, approval-required actions without `--approved`, and missing source evidence, while preserving clean JSON output from wrapped commands.
 - Daily health now surfaces lightly in work brief, work doctor, center status, and center reviews.
 
+Phase 104 status:
+
+- Added local daily approval requests under `.brigade/daily/approvals/` for approval-required selected actions.
+- Added command surface: `brigade daily approvals list/show/approve/reject/hold`.
+- Added `brigade daily run --approval <approval-id>` so an approved, unconsumed request can resume the selected daily action without reassembling context.
+- Approval requests preserve selected adapter, source evidence, acceptance criteria, risk, config snapshot, source fingerprint, and suggested next command.
+- Daily run now creates or reuses a pending approval request when it blocks on approval, revalidates config and source fingerprints before approved runs, marks requests consumed after the run starts, and records the approval id in daily run receipts.
+- Daily doctor, daily status, daily review, work brief, and center reviews surface pending, stale, held, rejected, approved, or changed-evidence approval requests.
+- Approval commands are local review actions only. They do not execute selected actions, run arbitrary commands, mutate remotes, or edit canonical memory.
+
 ## Suggested Execution Order
 
 1. Roadmap audit, inspiration pattern registry, and repo-fleet readiness.

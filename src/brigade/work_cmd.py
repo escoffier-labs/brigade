@@ -5301,6 +5301,7 @@ def _brief_payload(target: Path, *, limit: int = 3) -> dict[str, Any]:
             "top_issue": daily_health["top_issue"],
             "latest_run": daily_health["latest_run"],
             "latest_plan": daily_health["latest_plan"],
+            "approvals": daily_health.get("approvals"),
         },
         "handoff_issues": {
             "count": len(new_handoff_issues),
@@ -5959,6 +5960,10 @@ def brief(*, target: Path, limit: int = 3, json_output: bool = False) -> int:
         top_daily = daily_driver.get("top_issue") if isinstance(daily_driver.get("top_issue"), dict) else None
         if top_daily:
             print(f"daily_top_issue: {top_daily.get('name')} {_short(str(top_daily.get('detail', '')))}")
+        approvals = daily_driver.get("approvals") if isinstance(daily_driver.get("approvals"), dict) else {}
+        if approvals.get("pending_count"):
+            top_approval = approvals.get("top_pending") if isinstance(approvals.get("top_pending"), dict) else {}
+            print(f"daily_pending_approval: {top_approval.get('approval_id')} {_short(str(top_approval.get('safe_summary', '')))}")
 
     tool_catalog = payload.get("tool_catalog") if isinstance(payload.get("tool_catalog"), dict) else {}
     if tool_catalog:

@@ -99,9 +99,30 @@ def _build_parser() -> argparse.ArgumentParser:
     p_daily_run = daily_sub.add_parser("run", help="Run one bounded safe daily action.")
     p_daily_run.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
     p_daily_run.add_argument("--approved", action="store_true", help="Allow the selected action when it requires explicit approval.")
+    p_daily_run.add_argument("--approval", default=None, help="Run using an approved daily approval request.")
     p_daily_run.add_argument("--plan-id", default=None, help="Run from a recorded daily plan id or latest.")
     p_daily_run.add_argument("--replan", action="store_true", help="Ignore a stale or supplied plan and choose a fresh action.")
     p_daily_run.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_daily_approvals = daily_sub.add_parser("approvals", help="Review daily approval requests.")
+    approvals_sub = p_daily_approvals.add_subparsers(dest="daily_approval_command", metavar="<approval-command>")
+    approvals_sub.required = True
+    p_daily_approvals_list = approvals_sub.add_parser("list", help="List daily approval requests.")
+    p_daily_approvals_list.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_daily_approvals_list.add_argument("--limit", type=int, default=50, help="Maximum approvals to show.")
+    p_daily_approvals_list.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_daily_approvals_show = approvals_sub.add_parser("show", help="Show a daily approval request.")
+    p_daily_approvals_show.add_argument("approval_id")
+    p_daily_approvals_show.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_daily_approvals_show.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    for name in ("approve", "reject", "hold"):
+        p_daily_approval_review = approvals_sub.add_parser(name, help=f"{name.title()} a daily approval request.")
+        p_daily_approval_review.add_argument("approval_id")
+        p_daily_approval_review.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
+        if name in {"reject", "hold"}:
+            p_daily_approval_review.add_argument("--reason", required=True, help="Review reason.")
+        else:
+            p_daily_approval_review.add_argument("--reason", default=None, help="Optional review reason.")
+        p_daily_approval_review.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_daily_history = daily_sub.add_parser("history", help="List local daily receipts.")
     p_daily_history.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
     p_daily_history.add_argument("--limit", type=int, default=20, help="Maximum receipts to show.")
@@ -1900,8 +1921,21 @@ def main(argv=None) -> int:
             return daily_cmd.show(target=args.target, run_id=args.run_id, json_output=args.json)
         if args.daily_command == "doctor":
             return daily_cmd.doctor(target=args.target, json_output=args.json)
+        if args.daily_command == "approvals":
+            if args.daily_approval_command == "list":
+                return daily_cmd.approvals_list(target=args.target, limit=args.limit, json_output=args.json)
+            if args.daily_approval_command == "show":
+                return daily_cmd.approvals_show(target=args.target, approval_id=args.approval_id, json_output=args.json)
+            if args.daily_approval_command == "approve":
+                return daily_cmd.approvals_approve(target=args.target, approval_id=args.approval_id, json_output=args.json)
+            if args.daily_approval_command == "reject":
+                return daily_cmd.approvals_reject(target=args.target, approval_id=args.approval_id, reason=args.reason, json_output=args.json)
+            if args.daily_approval_command == "hold":
+                return daily_cmd.approvals_hold(target=args.target, approval_id=args.approval_id, reason=args.reason, json_output=args.json)
+            parser.error(f"unknown daily approvals command: {args.daily_approval_command}")
+            return 2
         if args.daily_command == "run":
-            return daily_cmd.run(target=args.target, approved=args.approved, plan_id=args.plan_id, replan=args.replan, json_output=args.json)
+            return daily_cmd.run(target=args.target, approved=args.approved, approval_id=args.approval, plan_id=args.plan_id, replan=args.replan, json_output=args.json)
         if args.daily_command == "closeout":
             return daily_cmd.closeout(target=args.target, status=args.status, reason=args.reason, handoff=args.handoff, json_output=args.json)
         parser.error(f"unknown daily command: {args.daily_command}")

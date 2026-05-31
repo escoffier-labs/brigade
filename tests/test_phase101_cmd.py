@@ -257,6 +257,7 @@ def test_daily_run_refuses_approval_required_import_and_promotes_when_approved(t
     assert daily_cmd.run(target=tmp_path, json_output=True) == 1
     blocked = json.loads(capsys.readouterr().out)
     assert blocked["status"] == "blocked"
+    assert blocked["approval_id"]
     assert "approval" in blocked["blockers"][0] or "local task ledger" in blocked["blockers"][0]
 
     assert cli.main(["daily", "run", "--target", str(tmp_path), "--approved", "--json"]) == 0
@@ -265,6 +266,192 @@ def test_daily_run_refuses_approval_required_import_and_promotes_when_approved(t
     assert receipt["selected_action"]["metadata"]["import_id"] == import_id
     assert not any("push" in command["command"] or "tag" in command["command"] for command in receipt["commands_invoked"])
     assert work_cmd._pending_tasks(tmp_path)
+
+
+def test_daily_approvals_list_show_review_and_no_execution(tmp_path, capsys):
+    _seed_ready_repo(tmp_path, capsys)
+    imported, _, _ = work_cmd._append_import_records(
+        tmp_path,
+        [
+            {
+                "text": "Approval import",
+                "kind": "task",
+                "source": "scanner",
+                "priority": "high",
+                "acceptance": ["Approval is reviewed."],
+                "metadata": {"source_fingerprint": "approval-fp"},
+            }
+        ],
+    )
+
+    assert daily_cmd.run(target=tmp_path, json_output=True) == 1
+    blocked = json.loads(capsys.readouterr().out)
+    approval_id = blocked["approval_id"]
+    assert approval_id
+    assert not work_cmd._pending_tasks(tmp_path)
+
+    assert cli.main(["daily", "approvals", "list", "--target", str(tmp_path), "--json"]) == 0
+    listed = json.loads(capsys.readouterr().out)
+    assert listed["approval_count"] == 1
+
+    assert cli.main(["daily", "approvals", "show", approval_id, "--target", str(tmp_path), "--json"]) == 0
+    shown = json.loads(capsys.readouterr().out)
+    assert shown["selected_adapter"] == "brigade work import promote"
+    assert shown["source_local_id"] == imported[0]["id"]
+
+    assert cli.main(["daily", "approvals", "hold", approval_id, "--target", str(tmp_path), "--reason", "later", "--json"]) == 0
+    held = json.loads(capsys.readouterr().out)
+    assert held["status"] == "held"
+    assert not work_cmd._pending_tasks(tmp_path)
+
+    assert cli.main(["daily", "approvals", "reject", approval_id, "--target", str(tmp_path), "--reason", "no", "--json"]) == 0
+    rejected = json.loads(capsys.readouterr().out)
+    assert rejected["status"] == "rejected"
+    assert rejected["review_reason"] == "no"
+    assert not work_cmd._pending_tasks(tmp_path)
+
+    assert cli.main(["daily", "approvals", "approve", approval_id, "--target", str(tmp_path), "--json"]) == 0
+    approved = json.loads(capsys.readouterr().out)
+    assert approved["status"] == "approved"
+    assert not work_cmd._pending_tasks(tmp_path)
+
+
+def test_daily_run_approval_lifecycle_and_idempotency(tmp_path, capsys):
+    _seed_ready_repo(tmp_path, capsys)
+    work_cmd._append_import_records(
+        tmp_path,
+        [
+            {
+                "text": "Approved import",
+                "kind": "task",
+                "source": "scanner",
+                "priority": "high",
+                "acceptance": ["Approved import is promoted."],
+                "metadata": {"source_fingerprint": "approved-fp"},
+            }
+        ],
+    )
+
+    assert daily_cmd.run(target=tmp_path, json_output=True) == 1
+    first = json.loads(capsys.readouterr().out)
+    assert daily_cmd.run(target=tmp_path, json_output=True) == 1
+    second = json.loads(capsys.readouterr().out)
+    assert first["approval_id"] == second["approval_id"]
+    approval_id = first["approval_id"]
+
+    assert daily_cmd.run(target=tmp_path, approval_id=approval_id, json_output=True) == 1
+    pending = json.loads(capsys.readouterr().out)
+    assert "pending" in pending["blockers"][0]
+
+    assert daily_cmd.approvals_approve(target=tmp_path, approval_id=approval_id, json_output=True) == 0
+    capsys.readouterr()
+
+    assert daily_cmd.run(target=tmp_path, approval_id=approval_id, json_output=True) == 0
+    receipt = json.loads(capsys.readouterr().out)
+    assert receipt["approval_id"] == approval_id
+    assert receipt["status"] == "completed"
+    consumed = daily_cmd._find_approval(tmp_path, approval_id)
+    assert consumed["status"] == "consumed"
+    assert consumed["consumed_run_id"] == receipt["run_id"]
+    assert work_cmd._pending_tasks(tmp_path)
+
+    assert daily_cmd.run(target=tmp_path, approval_id=approval_id, json_output=True) == 1
+    reused = json.loads(capsys.readouterr().out)
+    assert "consumed" in " ".join(reused["blockers"])
+
+
+def test_daily_approval_refuses_stale_missing_and_changed_evidence(tmp_path, capsys):
+    _seed_ready_repo(tmp_path, capsys)
+    imported, _, _ = work_cmd._append_import_records(
+        tmp_path,
+        [
+            {
+                "text": "Changed import",
+                "kind": "task",
+                "source": "scanner",
+                "priority": "high",
+                "acceptance": ["Changed evidence is blocked."],
+                "metadata": {"source_fingerprint": "old-fp"},
+            }
+        ],
+    )
+    assert daily_cmd.run(target=tmp_path, json_output=True) == 1
+    blocked = json.loads(capsys.readouterr().out)
+    approval_id = blocked["approval_id"]
+    assert daily_cmd.approvals_approve(target=tmp_path, approval_id=approval_id, json_output=True) == 0
+    capsys.readouterr()
+
+    imports = work_cmd._read_imports(tmp_path)
+    imports[0]["metadata"]["source_fingerprint"] = "new-fp"
+    work_cmd._write_imports(tmp_path, imports)
+    assert daily_cmd.run(target=tmp_path, approval_id=approval_id, json_output=True) == 1
+    changed = json.loads(capsys.readouterr().out)
+    assert any("fingerprint changed" in blocker for blocker in changed["blockers"])
+
+    imports = work_cmd._read_imports(tmp_path)
+    imports[0]["metadata"]["source_fingerprint"] = "old-fp"
+    work_cmd._write_imports(tmp_path, imports)
+    assert daily_cmd.approvals_hold(target=tmp_path, approval_id=approval_id, reason="wait", json_output=True) == 0
+    capsys.readouterr()
+    assert daily_cmd.run(target=tmp_path, approval_id=approval_id, json_output=True) == 1
+    held = json.loads(capsys.readouterr().out)
+    assert "held" in held["blockers"][0]
+
+    assert daily_cmd.approvals_reject(target=tmp_path, approval_id=approval_id, reason="no", json_output=True) == 0
+    capsys.readouterr()
+    assert daily_cmd.run(target=tmp_path, approval_id=approval_id, json_output=True) == 1
+    rejected = json.loads(capsys.readouterr().out)
+    assert "rejected" in rejected["blockers"][0]
+
+    assert daily_cmd.approvals_approve(target=tmp_path, approval_id=approval_id, json_output=True) == 0
+    capsys.readouterr()
+    work_cmd._write_imports(tmp_path, [])
+    assert daily_cmd.run(target=tmp_path, approval_id=approval_id, json_output=True) == 1
+    missing = json.loads(capsys.readouterr().out)
+    assert any("not found" in blocker or "no longer available" in blocker for blocker in missing["blockers"])
+
+
+def test_daily_approval_health_integration(tmp_path, capsys):
+    _seed_ready_repo(tmp_path, capsys)
+    work_cmd._append_import_records(
+        tmp_path,
+        [
+            {
+                "text": "Health approval",
+                "kind": "task",
+                "source": "scanner",
+                "priority": "high",
+                "acceptance": ["Approval health is surfaced."],
+                "metadata": {"source_fingerprint": "health-fp"},
+            }
+        ],
+    )
+    assert daily_cmd.run(target=tmp_path, json_output=True) == 1
+    blocked = json.loads(capsys.readouterr().out)
+    approval_id = blocked["approval_id"]
+
+    assert daily_cmd.status(target=tmp_path, json_output=True) == 0
+    status = json.loads(capsys.readouterr().out)
+    assert status["top_pending_approval"]["approval_id"] == approval_id
+
+    assert daily_cmd.review(target=tmp_path, json_output=True) == 0
+    review = json.loads(capsys.readouterr().out)
+    assert review["approval_request"]["approval_id"] == approval_id
+
+    assert cli.main(["work", "brief", "--target", str(tmp_path), "--json"]) == 0
+    brief = json.loads(capsys.readouterr().out)
+    assert brief["daily_driver"]["approvals"]["top_pending"]["approval_id"] == approval_id
+
+    assert cli.main(["center", "reviews", "--target", str(tmp_path), "--json"]) == 0
+    reviews = json.loads(capsys.readouterr().out)
+    assert any(item["subsystem"] == "daily-approval" for item in reviews["reviews"])
+
+    approvals = daily_cmd.approvals_payload(tmp_path)["approvals"]
+    approvals[0]["created_at"] = "2026-05-29T00:00:00+00:00"
+    daily_cmd._write_approval(tmp_path, approvals[0])
+    assert daily_cmd.doctor(target=tmp_path, json_output=True) == 0
+    doctor = json.loads(capsys.readouterr().out)
+    assert any(check["name"] == "daily_stale_pending_approval" for check in doctor["checks"])
 
 
 def test_daily_run_disabled_adapters_and_stale_recorded_plan(tmp_path, capsys):

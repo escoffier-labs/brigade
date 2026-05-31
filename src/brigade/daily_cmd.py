@@ -16,6 +16,7 @@ from . import center_cmd, context_cmd, handoff_cmd, memory_cmd, security_cmd, to
 
 SCHEMA_VERSION = 1
 RUN_STATUSES = {"reviewed", "deferred", "blocked", "archived"}
+APPROVAL_STATUSES = {"pending", "approved", "rejected", "held", "consumed"}
 PREFERRED_MODES = {"task-first", "inbox-first", "readiness-first"}
 RISK_LEVELS = {"low": 1, "medium": 2, "high": 3}
 DEFAULT_CONFIG: dict[str, Any] = {
@@ -50,6 +51,10 @@ def _plans_root(target: Path) -> Path:
 
 def _runs_root(target: Path) -> Path:
     return _daily_root(target) / "runs"
+
+
+def _approvals_root(target: Path) -> Path:
+    return _daily_root(target) / "approvals"
 
 
 def _read_json(path: Path) -> dict[str, Any] | None:
@@ -94,6 +99,7 @@ def _schemas() -> dict[str, Any]:
             {"name": "daily-closeout", "top_level_fields": ["run_id", "closeout_status", "reviewed_at", "handoff_path"], "item_fields": []},
             {"name": "daily-history", "top_level_fields": ["runs", "plans", "run_count", "plan_count"], "item_fields": ["id", "status", "created_at", "path"]},
             {"name": "daily-doctor", "top_level_fields": ["checks", "issue_count", "top_issue", "health"], "item_fields": ["status", "name", "detail"]},
+            {"name": "daily-approval", "top_level_fields": ["approval_id", "status", "selected_action", "selected_adapter", "source_fingerprint"], "item_fields": ["approval_id", "status", "safe_summary", "suggested_next_command"]},
         ],
     }
 
@@ -172,6 +178,11 @@ def _safe_text(target: Path, value: object) -> str:
 
 def _fingerprint(value: Any) -> str:
     return work_cmd._stable_hash(value)
+
+
+def _slug(value: object) -> str:
+    text = re.sub(r"[^A-Za-z0-9_.-]+", "-", str(value or "item").strip().lower()).strip("-")
+    return text[:80] or "item"
 
 
 def _priority_score(priority: object) -> int:
@@ -461,6 +472,138 @@ def _adapter_for(action: dict[str, Any] | None) -> str | None:
     }.get(str(action.get("action_type")), "unsupported")
 
 
+def _config_fingerprint(config: dict[str, Any]) -> str:
+    stable = {key: config.get(key) for key in sorted(DEFAULT_CONFIG)}
+    return _fingerprint(stable)
+
+
+def _approval_id(action: dict[str, Any], config: dict[str, Any]) -> str:
+    source = _slug(action.get("source_subsystem"))
+    local = _slug(action.get("source_local_id"))
+    digest = _fingerprint(
+        {
+            "action_id": action.get("action_id"),
+            "source_fingerprint": action.get("source_fingerprint"),
+            "config_fingerprint": _config_fingerprint(config),
+        }
+    )[:12]
+    return f"approval-{source}-{local}-{digest}"
+
+
+def _approval_path(target: Path, approval_id: str) -> Path:
+    return _approvals_root(target) / approval_id / "approval.json"
+
+
+def _read_approvals(target: Path) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
+    return _iter_receipts(_approvals_root(target), "approval.json")
+
+
+def _write_approval(target: Path, approval: dict[str, Any]) -> dict[str, Any]:
+    approval_id = str(approval["approval_id"])
+    approval["path"] = str(_approvals_root(target) / approval_id)
+    _write_json(_approval_path(target, approval_id), approval)
+    return approval
+
+
+def _find_approval(target: Path, approval_id: str) -> dict[str, Any] | None:
+    return _read_json(_approval_path(target, approval_id))
+
+
+def _matching_approvals(target: Path, action: dict[str, Any], config: dict[str, Any]) -> list[dict[str, Any]]:
+    approvals, _ = _read_approvals(target)
+    config_fp = _config_fingerprint(config)
+    return [
+        approval
+        for approval in approvals
+        if approval.get("selected_action_id") == action.get("action_id")
+        and approval.get("source_fingerprint") == action.get("source_fingerprint")
+        and approval.get("config_fingerprint") == config_fp
+    ]
+
+
+def _ensure_approval(target: Path, plan_data: dict[str, Any], action: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]:
+    matches = _matching_approvals(target, action, config)
+    for status in ("pending", "approved"):
+        existing = next((approval for approval in matches if approval.get("status") == status), None)
+        if existing:
+            return existing
+    for status in ("rejected", "held", "consumed"):
+        existing = next((approval for approval in matches if approval.get("status") == status), None)
+        if existing:
+            return existing
+    approval = {
+        "schema_version": SCHEMA_VERSION,
+        "approval_id": _approval_id(action, config),
+        "created_at": _now().isoformat(),
+        "status": "pending",
+        "source_plan_id": plan_data.get("plan_id"),
+        "selected_action_id": action.get("action_id"),
+        "selected_action": action,
+        "selected_adapter": _adapter_for(action),
+        "source_subsystem": action.get("source_subsystem"),
+        "source_local_id": action.get("source_local_id"),
+        "source_fingerprint": action.get("source_fingerprint"),
+        "config_fingerprint": _config_fingerprint(config),
+        "acceptance": action.get("acceptance") if isinstance(action.get("acceptance"), list) else [],
+        "safe_summary": action.get("safe_summary"),
+        "evidence_refs": action.get("evidence_refs") if isinstance(action.get("evidence_refs"), list) else [],
+        "risk_level": action.get("risk_level"),
+        "approval_reason": action.get("approval_reason") or "explicit approval required",
+        "config": config,
+        "suggested_next_command": action.get("suggested_next_command"),
+        "reviewed_at": None,
+        "review_reason": None,
+        "consumed_run_id": None,
+    }
+    return _write_approval(target, approval)
+
+
+def _current_action_for_approval(target: Path, approval: dict[str, Any]) -> dict[str, Any] | None:
+    selected_action = approval.get("selected_action") if isinstance(approval.get("selected_action"), dict) else {}
+    action_type = str(selected_action.get("action_type") or "")
+    source_id = str(approval.get("source_local_id") or selected_action.get("source_local_id") or "")
+    candidate_builders = {
+        "run-task": _pending_task_candidates,
+        "promote-import": _pending_import_candidates,
+        "start-center-action": _center_action_candidates,
+        "import-readiness-issues": _readiness_candidates,
+        "build-operator-report": _report_candidate,
+    }
+    builder = candidate_builders.get(action_type)
+    if builder is None:
+        return selected_action if selected_action and not _evidence_blockers(target, selected_action) else None
+    for action in builder(target):
+        if action.get("source_local_id") == source_id:
+            return action
+    return None
+
+
+def _approval_blockers(target: Path, approval: dict[str, Any], config: dict[str, Any]) -> list[str]:
+    blockers: list[str] = []
+    status = str(approval.get("status") or "")
+    if status != "approved":
+        blockers.append(f"approval status is {status or 'unknown'}")
+    if approval.get("consumed_run_id"):
+        blockers.append(f"approval already consumed by {approval.get('consumed_run_id')}")
+    if approval.get("config_fingerprint") != _config_fingerprint(config):
+        blockers.append("daily config changed since approval")
+    action = approval.get("selected_action") if isinstance(approval.get("selected_action"), dict) else None
+    blockers.extend(_evidence_blockers(target, action))
+    current = _current_action_for_approval(target, approval)
+    if current is None:
+        blockers.append("selected action is no longer available")
+    elif current.get("source_fingerprint") != approval.get("source_fingerprint"):
+        blockers.append("selected action fingerprint changed since approval")
+    return list(dict.fromkeys(blockers))
+
+
+def _consume_approval(target: Path, approval: dict[str, Any], run_id: str) -> None:
+    approval["status"] = "consumed"
+    approval["consumed_run_id"] = run_id
+    approval["consumed_at"] = _now().isoformat()
+    _write_approval(target, approval)
+
+
 def _config_blockers(config: dict[str, Any], action: dict[str, Any] | None, *, approved: bool = False) -> list[str]:
     blockers: list[str] = []
     if not config.get("enabled", True):
@@ -535,13 +678,16 @@ def status_payload(target: Path) -> dict[str, Any]:
     security = center.get("security") if isinstance(center.get("security"), dict) else {}
     tools = center.get("tool_catalog") if isinstance(center.get("tool_catalog"), dict) else {}
     latest_report = center_cmd.latest_report(target)
+    daily_health = health(target)
+    approvals = daily_health.get("approvals") if isinstance(daily_health.get("approvals"), dict) else {}
     return {
         "schema_version": SCHEMA_VERSION,
         "schema": _schema("daily-status"),
         "target": str(target),
         "config": config,
         "config_checks": config_checks,
-        "daily_health": health(target),
+        "daily_health": daily_health,
+        "top_pending_approval": approvals.get("top_pending"),
         "active_session": center.get("active_session"),
         "pending_task_count": center.get("pending_task_count", 0),
         "pending_import_count": center.get("pending_import_count", 0),
@@ -646,6 +792,16 @@ def _review_payload(target: Path, selected: dict[str, Any] | None = None) -> dic
     action = selected or _selected(_all_candidates(target))
     context_plan = None
     context_would_build = bool(action and action.get("context_kind") and config.get("allow_context_pack_build", True))
+    approval_request = None
+    if action and action.get("approval_required"):
+        approval_request = next(
+            (
+                approval
+                for approval in _matching_approvals(target, action, config)
+                if approval.get("status") in {"pending", "approved"}
+            ),
+            None,
+        )
     if action and action.get("context_kind") and config.get("allow_context_pack_build", True):
         context_plan = context_cmd._context_payload(
             target,
@@ -668,6 +824,7 @@ def _review_payload(target: Path, selected: dict[str, Any] | None = None) -> dic
         "risk_level": action.get("risk_level") if action else None,
         "approval_required": bool(action.get("approval_required")) if action else False,
         "approval_boundary": action.get("approval_reason") if action and action.get("approval_required") else "no explicit approval required",
+        "approval_request": approval_request,
         "likely_next_command": action.get("suggested_next_command") if action else None,
         "context_pack_plan": context_plan,
         "context_pack_would_build": context_would_build,
@@ -770,11 +927,16 @@ def _blocked_run(
     blockers: list[str],
     json_output: bool,
     next_command: str = "brigade daily review",
+    approval: dict[str, Any] | None = None,
 ) -> int:
     receipt["status"] = "blocked"
     receipt["completed_at"] = _now().isoformat()
     receipt["next_recommended_command"] = next_command
     receipt["blockers"].extend(blockers)
+    if approval is not None:
+        receipt["approval_id"] = approval.get("approval_id")
+        receipt["approval_request"] = approval
+        receipt["next_recommended_command"] = f"brigade daily approvals show {approval.get('approval_id')}"
     _record_run(target, receipt)
     if json_output:
         print(json.dumps(receipt, indent=2, sort_keys=True))
@@ -786,10 +948,30 @@ def _blocked_run(
     return 1
 
 
-def run(*, target: Path, approved: bool = False, plan_id: str | None = None, replan: bool = False, json_output: bool = False) -> int:
+def run(
+    *,
+    target: Path,
+    approved: bool = False,
+    approval_id: str | None = None,
+    plan_id: str | None = None,
+    replan: bool = False,
+    json_output: bool = False,
+) -> int:
     target = target.expanduser().resolve()
     config, _ = _load_config(target)
-    if plan_id and not replan:
+    approval: dict[str, Any] | None = None
+    if approval_id:
+        approval = _find_approval(target, approval_id)
+        if approval is not None and isinstance(approval.get("selected_action"), dict):
+            plan_data = {
+                "plan_id": approval.get("source_plan_id"),
+                "selected_action": approval.get("selected_action"),
+                "path": None,
+            }
+        else:
+            plan_data = plan_payload(target, record=True)
+            plan_data["approval_load_error"] = f"approval not found: {approval_id}"
+    elif plan_id and not replan:
         plan_data = _resolve_plan(target, plan_id)
         if plan_data is None:
             plan_data = plan_payload(target, record=True)
@@ -817,22 +999,34 @@ def run(*, target: Path, approved: bool = False, plan_id: str | None = None, rep
         "context_pack_id": None,
         "verification_receipt": None,
         "handoff_path": None,
+        "approval_id": approval.get("approval_id") if approval else None,
         "blockers": [],
         "next_recommended_command": "brigade daily status",
         "config": config,
     }
+    if plan_data.get("approval_load_error"):
+        return _blocked_run(target=target, receipt=receipt, blockers=[str(plan_data["approval_load_error"])], json_output=json_output)
     if plan_data.get("plan_load_error"):
         return _blocked_run(target=target, receipt=receipt, blockers=[str(plan_data["plan_load_error"])], json_output=json_output)
     if plan_id and not replan and _is_stale(plan_data.get("created_at"), int(config.get("stale_plan_threshold_hours") or 12)):
         return _blocked_run(target=target, receipt=receipt, blockers=[f"recorded plan is stale: {plan_data.get('plan_id')}"], json_output=json_output, next_command="brigade daily plan --record")
     if action is None:
         return _blocked_run(target=target, receipt=receipt, blockers=["no daily action selected"], json_output=json_output, next_command="brigade daily plan")
-    config_blockers = _config_blockers(config, action, approved=approved)
+    approval_granted = approved or approval is not None
+    config_blockers = _config_blockers(config, action, approved=approval_granted)
+    if approval is not None:
+        approval_blockers = _approval_blockers(target, approval, config)
+        if config_blockers or approval_blockers:
+            return _blocked_run(target=target, receipt=receipt, blockers=[*config_blockers, *approval_blockers], json_output=json_output)
     evidence_blockers = _evidence_blockers(target, action)
     if config_blockers or evidence_blockers:
         return _blocked_run(target=target, receipt=receipt, blockers=[*config_blockers, *evidence_blockers], json_output=json_output)
-    if action.get("approval_required") and not approved:
-        return _blocked_run(target=target, receipt=receipt, blockers=[str(action.get("approval_reason") or "explicit approval required")], json_output=json_output)
+    if action.get("approval_required") and not approval_granted:
+        approval = _ensure_approval(target, plan_data, action, config)
+        blockers = [str(action.get("approval_reason") or "explicit approval required")]
+        if approval.get("status") not in {"pending", "approved"}:
+            blockers.append(f"approval status is {approval.get('status')}")
+        return _blocked_run(target=target, receipt=receipt, blockers=blockers, json_output=json_output, approval=approval)
     if action.get("context_kind") and config.get("allow_context_pack_build", True):
         context_pack_id, context_commands = _invoke_context_build(target, action)
     else:
@@ -841,6 +1035,8 @@ def run(*, target: Path, approved: bool = False, plan_id: str | None = None, rep
     receipt["commands_invoked"].extend(context_commands)
     if context_pack_id:
         receipt["receipts_created"].append(str(context_cmd._packs_root(target) / context_pack_id / "context.json"))
+    if approval is not None:
+        _consume_approval(target, approval, run_id)
     rc = 0
     action_type = str(action.get("action_type"))
     if action_type == "run-task":
@@ -884,6 +1080,83 @@ def run(*, target: Path, approved: bool = False, plan_id: str | None = None, rep
         print(f"selected: {receipt['selected_action_id']}")
         print(f"next: {receipt['next_recommended_command']}")
     return rc
+
+
+def approvals_payload(target: Path, *, limit: int = 50) -> dict[str, Any]:
+    target = target.expanduser().resolve()
+    approvals, errors = _read_approvals(target)
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "schema": {"name": "daily-approvals", "version": SCHEMA_VERSION},
+        "target": str(target),
+        "approvals": approvals[:limit],
+        "approval_count": len(approvals),
+        "parse_errors": errors,
+    }
+
+
+def approvals_list(*, target: Path, limit: int = 50, json_output: bool = False) -> int:
+    payload = approvals_payload(target, limit=limit)
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        print(f"daily approvals: {payload['target']}")
+        for approval in payload["approvals"]:
+            print(f"- {approval.get('approval_id')} [{approval.get('status')}] {approval.get('safe_summary')}")
+    return 0
+
+
+def approvals_show(*, target: Path, approval_id: str, json_output: bool = False) -> int:
+    target = target.expanduser().resolve()
+    approval = _find_approval(target, approval_id)
+    if approval is None:
+        print(f"error: approval not found: {approval_id}", file=sys.stderr)
+        return 1
+    if json_output:
+        print(json.dumps(approval, indent=2, sort_keys=True))
+    else:
+        print(f"daily approval: {approval.get('approval_id')}")
+        print(f"status: {approval.get('status')}")
+        print(f"summary: {approval.get('safe_summary')}")
+        print(f"adapter: {approval.get('selected_adapter')}")
+        print(f"next: {approval.get('suggested_next_command')}")
+    return 0
+
+
+def _review_approval(target: Path, approval_id: str, status: str, reason: str | None, *, json_output: bool = False) -> int:
+    if status not in {"approved", "rejected", "held"}:
+        print(f"error: invalid approval status: {status}", file=sys.stderr)
+        return 2
+    target = target.expanduser().resolve()
+    approval = _find_approval(target, approval_id)
+    if approval is None:
+        print(f"error: approval not found: {approval_id}", file=sys.stderr)
+        return 1
+    if approval.get("status") == "consumed":
+        print(f"error: approval already consumed: {approval_id}", file=sys.stderr)
+        return 1
+    approval["status"] = status
+    approval["reviewed_at"] = _now().isoformat()
+    approval["review_reason"] = reason
+    _write_approval(target, approval)
+    if json_output:
+        print(json.dumps(approval, indent=2, sort_keys=True))
+    else:
+        print(f"daily approval: {approval_id}")
+        print(f"status: {status}")
+    return 0
+
+
+def approvals_approve(*, target: Path, approval_id: str, json_output: bool = False) -> int:
+    return _review_approval(target, approval_id, "approved", None, json_output=json_output)
+
+
+def approvals_reject(*, target: Path, approval_id: str, reason: str, json_output: bool = False) -> int:
+    return _review_approval(target, approval_id, "rejected", reason, json_output=json_output)
+
+
+def approvals_hold(*, target: Path, approval_id: str, reason: str, json_output: bool = False) -> int:
+    return _review_approval(target, approval_id, "held", reason, json_output=json_output)
 
 
 def init(*, target: Path, force: bool = False, json_output: bool = False) -> int:
@@ -967,8 +1240,11 @@ def health(target: Path) -> dict[str, Any]:
     checks = list(config_checks)
     runs, run_errors = _iter_receipts(_runs_root(target), "run.json")
     plans, plan_errors = _iter_receipts(_plans_root(target), "plan.json")
+    approvals, approval_errors = _read_approvals(target)
     for error in [*run_errors, *plan_errors]:
         checks.append({"status": "fail", "name": "daily_receipt_parse", "detail": f"{error['path']}: {error['error']}"})
+    for error in approval_errors:
+        checks.append({"status": "fail", "name": "daily_approval_parse", "detail": f"{error['path']}: {error['error']}"})
     plan_hours = int(config.get("stale_plan_threshold_hours") or 12)
     run_hours = int(config.get("stale_run_threshold_hours") or 12)
     latest_plan = plans[0] if plans else None
@@ -987,6 +1263,29 @@ def health(target: Path) -> dict[str, Any]:
         for blocker in _evidence_blockers(target, action):
             checks.append({"status": "warn", "name": "daily_missing_evidence", "detail": blocker})
             break
+    pending_approvals = [approval for approval in approvals if approval.get("status") == "pending"]
+    approved_approvals = [approval for approval in approvals if approval.get("status") == "approved"]
+    held_approvals = [approval for approval in approvals if approval.get("status") == "held"]
+    rejected_approvals = [approval for approval in approvals if approval.get("status") == "rejected"]
+    top_pending = pending_approvals[0] if pending_approvals else None
+    for approval in pending_approvals:
+        if _is_stale(approval.get("created_at"), run_hours):
+            checks.append({"status": "warn", "name": "daily_stale_pending_approval", "detail": str(approval.get("approval_id"))})
+            break
+    if approved_approvals:
+        checks.append({"status": "warn", "name": "daily_approved_approval", "detail": str(approved_approvals[0].get("approval_id"))})
+    if held_approvals:
+        checks.append({"status": "warn", "name": "daily_held_approval", "detail": str(held_approvals[0].get("approval_id"))})
+    if rejected_approvals:
+        checks.append({"status": "warn", "name": "daily_rejected_approval", "detail": str(rejected_approvals[0].get("approval_id"))})
+    for approval in approvals:
+        current = _current_action_for_approval(target, approval)
+        if current is None and approval.get("status") in {"pending", "approved"}:
+            checks.append({"status": "warn", "name": "daily_approval_missing_evidence", "detail": str(approval.get("approval_id"))})
+            break
+        if current is not None and current.get("source_fingerprint") != approval.get("source_fingerprint"):
+            checks.append({"status": "warn", "name": "daily_approval_changed_evidence", "detail": str(approval.get("approval_id"))})
+            break
     active_checks = [check for check in checks if check.get("status") != "ok"]
     top_issue = active_checks[0] if active_checks else None
     return {
@@ -996,6 +1295,15 @@ def health(target: Path) -> dict[str, Any]:
         "plan_count": len(plans),
         "latest_run": latest_run,
         "latest_plan": latest_plan,
+        "approvals": {
+            "approval_count": len(approvals),
+            "pending_count": len(pending_approvals),
+            "approved_count": len(approved_approvals),
+            "held_count": len(held_approvals),
+            "rejected_count": len(rejected_approvals),
+            "top_pending": top_pending,
+            "top_approved": approved_approvals[0] if approved_approvals else None,
+        },
         "checks": checks,
         "issue_count": len(active_checks),
         "top_issue": top_issue,
