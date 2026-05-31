@@ -819,6 +819,16 @@ def _phase_release_checks(target: Path) -> list[dict[str, Any]]:
     if latest_report_compare is not None and int(latest_report_compare.get("issue_count") or 0) > 0:
         top_compare = latest_report_compare.get("top_issue") if isinstance(latest_report_compare.get("top_issue"), dict) else {}
         checks.append({"status": WARN, "name": "phase_ledger_report_compare_issue", "detail": str(top_compare.get("name") or latest_report_compare.get("issue_count"))})
+    latest_session = health.get("latest_session") if isinstance(health.get("latest_session"), dict) else None
+    latest_session_report = health.get("latest_session_report") if isinstance(health.get("latest_session_report"), dict) else None
+    if latest_session and latest_session.get("status") not in {"closed", "archived"}:
+        checks.append({"status": WARN, "name": "phase_session_active", "detail": str(latest_session.get("session_id"))})
+        if latest_session_report is None:
+            checks.append({"status": WARN, "name": "phase_session_missing_report", "detail": str(latest_session.get("session_id"))})
+        if latest_session.get("closeout_status") is None and latest_session.get("current_phase_id") is None:
+            checks.append({"status": WARN, "name": "phase_session_missing_closeout", "detail": str(latest_session.get("session_id"))})
+    if int(health.get("open_action_count") or 0) > 0:
+        checks.append({"status": WARN, "name": "phase_session_unresolved_actions", "detail": str(health.get("open_action_count"))})
     records = phases_cmd._records(target)
     pushed_without_closeout = []
     for record in records:
@@ -1034,6 +1044,8 @@ def _evidence(target: Path, *, base_ref: str | None) -> dict[str, Any]:
             "latest_closeout": phase_ledger.get("latest_closeout"),
             "latest_report": phase_ledger.get("latest_report"),
             "latest_report_compare": phase_ledger.get("latest_report_compare"),
+            "latest_session": phase_ledger.get("latest_session"),
+            "latest_session_report": phase_ledger.get("latest_session_report"),
             "closeout_count": phase_ledger.get("closeout_count"),
         },
         "operator_report": {
@@ -2196,6 +2208,14 @@ def candidate_compare(*, target: Path, candidate_id: str = "latest", json_output
     current_phase_report = current_phase.get("latest_report") if isinstance(current_phase.get("latest_report"), dict) else None
     if isinstance(current_phase_report, dict) and (not isinstance(candidate_report, dict) or candidate_report.get("report_id") != current_phase_report.get("report_id")):
         issues.append({"status": WARN, "name": "newer_phase_report", "detail": str(current_phase_report.get("report_id"))})
+    candidate_session = candidate_phase.get("latest_session") if isinstance(candidate_phase.get("latest_session"), dict) else None
+    current_session = current_phase.get("latest_session") if isinstance(current_phase.get("latest_session"), dict) else None
+    if isinstance(current_session, dict) and (not isinstance(candidate_session, dict) or candidate_session.get("session_id") != current_session.get("session_id") or candidate_session.get("status") != current_session.get("status")):
+        issues.append({"status": WARN, "name": "newer_phase_session", "detail": str(current_session.get("session_id"))})
+    candidate_session_report = candidate_phase.get("latest_session_report") if isinstance(candidate_phase.get("latest_session_report"), dict) else None
+    current_session_report = current_phase.get("latest_session_report") if isinstance(current_phase.get("latest_session_report"), dict) else None
+    if isinstance(current_session_report, dict) and (not isinstance(candidate_session_report, dict) or candidate_session_report.get("report_id") != current_session_report.get("report_id")):
+        issues.append({"status": WARN, "name": "newer_phase_session_report", "detail": str(current_session_report.get("report_id"))})
     phase_checks = _phase_release_checks(target)
     issues.extend({"status": check.get("status", WARN), "name": f"release_{check.get('name')}", "detail": check.get("detail")} for check in phase_checks)
     payload = {

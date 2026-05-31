@@ -160,3 +160,4 @@ Each report includes `PHASE_REPORT.md` and `PHASE_EVIDENCE.json` with range stat
 
 Release readiness and release candidate evidence include a compact phase-ledger summary so publish review can see whether long unattended work still has open ledger issues.
 Release doctor and release candidate compare also warn when pushed phases are unreviewed, phase reports are missing or stale, closeouts have unresolved issues, report compare has open issues, or newer phase closeout/report evidence exists after a candidate was built.
+Those release and operator surfaces also include latest phase session and session report references, warning when active sessions are stale, unreported, or changed after a candidate was built.

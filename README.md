@@ -62,6 +62,7 @@ Phase execution sessions group a declared AFK range into one local record with c
 Session next/resume commands identify the safest next local command and record resume metadata without executing hidden work.
 Session report bundles collect the phase records, checks, actions, imports, commits, tests, and blockers into local Markdown and JSON evidence.
 The daily driver can surface active phase sessions and run exactly one safe session step, such as building a session report or writing session closeout metadata.
+Release and operator review surfaces include phase session state so stale or unreported AFK work blocks publish review visibly.
 Phase ledger compare checks make it clear when local HEAD, referenced files, reports, or doctor issue counts drift after a phase is recorded.
 Phase ledger action queues turn those ledger issues into local metadata-only next steps without executing commands.
 The daily driver can select those phase-ledger actions when they block AFK or release completion, then start one action or build one phase report as a bounded local step.

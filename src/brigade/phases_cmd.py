@@ -1504,6 +1504,8 @@ def health(target: Path) -> dict[str, Any]:
     closeouts = _read_closeouts(target)
     latest_report = _latest_report(target)
     latest_report_compare = _report_compare_summary(target, latest_report)
+    latest_session = _latest_session(target)
+    latest_session_report = _read_session_reports(target)[-1] if _read_session_reports(target) else None
     actions = _read_actions(target)
     open_actions = [action for action in actions if action.get("status") in {"pending", "active"}]
     action_counts: dict[str, int] = {}
@@ -1525,6 +1527,16 @@ def health(target: Path) -> dict[str, Any]:
         if latest_report
         else None,
         "latest_report_compare": latest_report_compare,
+        "latest_session": _session_summary(latest_session) if isinstance(latest_session, dict) else None,
+        "latest_session_report": {
+            "report_id": latest_session_report.get("report_id"),
+            "session_id": (latest_session_report.get("session") or {}).get("session_id") if isinstance(latest_session_report.get("session"), dict) else None,
+            "created_at": latest_session_report.get("created_at"),
+            "path": latest_session_report.get("path"),
+            "issue_count": (latest_session_report.get("doctor") or {}).get("issue_count") if isinstance(latest_session_report.get("doctor"), dict) else None,
+        }
+        if isinstance(latest_session_report, dict)
+        else None,
         "closeout_count": len(closeouts),
         "actions_path": str(_actions_root(target)),
         "action_count": len(actions),

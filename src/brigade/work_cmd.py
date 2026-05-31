@@ -5313,6 +5313,8 @@ def _brief_payload(target: Path, *, limit: int = 3) -> dict[str, Any]:
             "issue_count": phase_health["issue_count"],
             "top_issue": phase_health["top_issue"],
             "latest": phase_health["latest"],
+            "latest_session": phase_health.get("latest_session"),
+            "latest_session_report": phase_health.get("latest_session_report"),
             "open_action_count": phase_health.get("open_action_count", 0),
             "top_action": phase_health.get("top_action"),
             "action_counts": phase_health.get("action_counts", {}),
@@ -5984,6 +5986,9 @@ def brief(*, target: Path, limit: int = 3, json_output: bool = False) -> int:
         print(f"phase_ledger: {_count_status(phase_ledger.get('issue_count'))}")
         print(f"phase_records: {phase_ledger.get('record_count', 0)}")
         print(f"phase_actions: {phase_ledger.get('open_action_count', 0)}")
+        latest_phase_session = phase_ledger.get("latest_session") if isinstance(phase_ledger.get("latest_session"), dict) else None
+        if latest_phase_session:
+            print(f"phase_session: {latest_phase_session.get('session_id')} [{latest_phase_session.get('status')}]")
         top_phase = phase_ledger.get("top_issue") if isinstance(phase_ledger.get("top_issue"), dict) else None
         if top_phase:
             print(f"phase_top_issue: {top_phase.get('name')} {_short(str(top_phase.get('detail', '')))}")

@@ -494,21 +494,33 @@ def test_release_phase_ledger_closeout_and_report_evidence(tmp_path, monkeypatch
     report = json.loads(capsys.readouterr().out)
     assert phases_cmd.report_closeout(target=tmp_path, report_id=report["report_id"], status="reviewed", reason="Report reviewed.", json_output=True) == 0
     capsys.readouterr()
+    assert phases_cmd.session_start(target=tmp_path, phase_range="280", source_goal="release session", json_output=True) == 0
+    session = json.loads(capsys.readouterr().out)
+    assert phases_cmd.session_report_build(target=tmp_path, session_id=session["session_id"], json_output=True) == 0
+    session_report = json.loads(capsys.readouterr().out)
     assert release_cmd.candidate_build(target=tmp_path, base_ref=None, json_output=True) == 0
     candidate = json.loads(capsys.readouterr().out)
     assert candidate["phase_ledger"]["latest_closeout"]["closeout_id"] == closeout["closeout_id"]
     assert candidate["phase_ledger"]["latest_report"]["report_id"] == report["report_id"]
     assert candidate["phase_ledger"]["latest_report_compare"]["issue_count"] == 0
+    assert candidate["phase_ledger"]["latest_session"]["session_id"] == session["session_id"]
+    assert candidate["phase_ledger"]["latest_session_report"]["report_id"] == session_report["report_id"]
 
     assert phases_cmd.closeout(target=tmp_path, selector="phase-280", status="blocked", reason="Needs another look.", json_output=True) == 0
     capsys.readouterr()
     assert phases_cmd.report_build(target=tmp_path, json_output=True) == 0
+    capsys.readouterr()
+    assert phases_cmd.session_start(target=tmp_path, phase_range="280", source_goal="newer session", json_output=True) == 0
+    newer_session = json.loads(capsys.readouterr().out)
+    assert phases_cmd.session_report_build(target=tmp_path, session_id=newer_session["session_id"], json_output=True) == 0
     capsys.readouterr()
     assert release_cmd.candidate_compare(target=tmp_path, candidate_id=candidate["candidate_id"], json_output=True) == 1
     compare = json.loads(capsys.readouterr().out)
     compare_names = {issue["name"] for issue in compare["issues"]}
     assert "newer_phase_closeout" in compare_names
     assert "newer_phase_report" in compare_names
+    assert "newer_phase_session" in compare_names
+    assert "newer_phase_session_report" in compare_names
 
 
 def test_release_schema_manifest_reports_contracts_and_latest_receipts(tmp_path, monkeypatch, capsys):

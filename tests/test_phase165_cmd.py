@@ -570,3 +570,15 @@ def test_daily_driver_surfaces_and_runs_phase_session_step(tmp_path, capsys):
     assert daily_cmd.doctor(target=tmp_path, json_output=True) == 0
     doctor_payload = json.loads(capsys.readouterr().out)
     assert any(check["name"] == "phase_session_active" for check in doctor_payload["checks"])
+
+    assert work_cmd.brief(target=tmp_path, json_output=True) == 0
+    brief = json.loads(capsys.readouterr().out)
+    assert brief["phase_ledger"]["latest_session"]["session_id"] == session["session_id"]
+
+    assert center_cmd.status(target=tmp_path, json_output=True) == 0
+    center_status = json.loads(capsys.readouterr().out)
+    assert center_status["phase_ledger"]["latest_session"]["session_id"] == session["session_id"]
+
+    assert center_cmd.reviews(target=tmp_path, json_output=True) == 0
+    center_reviews = json.loads(capsys.readouterr().out)
+    assert any(item["subsystem"] == "phase-session" for item in center_reviews["reviews"])

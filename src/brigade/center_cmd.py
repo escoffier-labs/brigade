@@ -881,6 +881,9 @@ def _reviews(target: Path) -> list[dict[str, Any]]:
     top_phase = phase_health.get("top_issue") if isinstance(phase_health.get("top_issue"), dict) else None
     if top_phase:
         items.append(_item("phase-ledger", str(top_phase.get("phase_id") or top_phase.get("name") or "phase-ledger"), str(top_phase.get("status") or "warn"), str(top_phase.get("detail") or "phase execution ledger needs review"), "brigade work phases doctor"))
+    latest_phase_session = phase_health.get("latest_session") if isinstance(phase_health.get("latest_session"), dict) else None
+    if latest_phase_session and latest_phase_session.get("status") not in {"closed", "archived"}:
+        items.append(_item("phase-session", str(latest_phase_session.get("session_id") or "phase-session"), "warn", "active phase execution session needs review", "brigade work phases session next latest"))
     return items
 
 
@@ -939,6 +942,9 @@ def status(*, target: Path, json_output: bool = False) -> int:
         print(f"phase_records: {phase_ledger.get('record_count', 0)}")
         print(f"phase_issues: {phase_ledger.get('issue_count', 0)}")
         print(f"phase_actions: {phase_ledger.get('open_action_count', 0)}")
+        latest_phase_session = phase_ledger.get("latest_session") if isinstance(phase_ledger.get("latest_session"), dict) else None
+        if latest_phase_session:
+            print(f"phase_session: {latest_phase_session.get('session_id')} [{latest_phase_session.get('status')}]")
     return 0
 
 

@@ -168,6 +168,8 @@ Phase execution sessions group a declared AFK range into one local record under 
 
 The daily driver surfaces active phase sessions in `daily status`, `plan`, `review`, `run`, and `doctor`. A session can become the selected daily action when it blocks AFK completion. `daily run` still performs exactly one bounded local step: building a session report or writing reviewed session closeout metadata.
 
+Release and operator surfaces include compact phase session state. Work brief, work doctor, center status, center reviews, release doctor, release candidate evidence, and candidate compare can show active sessions, missing session reports, unresolved session actions, and newer session evidence after a candidate was built.
+
 The phase ledger is surfaced in `brigade daily status`, `brigade daily doctor`, `brigade work brief`, `brigade work doctor`, and `brigade center status`. Future AFK multi-phase work is not complete unless the ledger shows evidence or explicit deferrals.
 
 Phase health includes open phase action counts and the top open phase action. `brigade work brief` and `brigade center status` expose those counts so the daily loop can see whether ledger issues already have local follow-up actions.
