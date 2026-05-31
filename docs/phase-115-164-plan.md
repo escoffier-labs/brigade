@@ -78,6 +78,15 @@ Goal: reduce queue noise and improve provenance, acceptance, and evidence qualit
 - 143: Document inbox quality expectations.
 - 144: Carry inbox quality state into release evidence.
 
+Status: implemented.
+
+Implementation notes:
+
+- `work_cmd._inbox_quality_payload` now scores pending imports for acceptance, provenance, age, deferred state, noisy source history, duplicate pending identity, and changed dismissed fingerprints.
+- `brigade daily plan` carries inbox quality metadata on import candidates and uses the shared quality score in ranking.
+- `brigade daily hardening audit` now reports phase-specific inbox quality findings for acceptance, provenance, hygiene, stale/deferred/noisy imports, changed dismissed fingerprints, duplicate pending imports, and weak top candidates.
+- Release readiness and release candidate evidence now include inbox quality summaries.
+
 ## Workstream 4: Phase 145-154, Repo Fleet Daily Use
 
 Goal: keep fleet reports, actions, dispatch, and release trains visible in daily planning without making fleet execution automatic.

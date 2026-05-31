@@ -9,6 +9,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+from collections import Counter
 from datetime import datetime, time, timezone
 from pathlib import Path
 from typing import Any
@@ -7578,6 +7579,116 @@ def _inbox_hygiene_payload(target: Path) -> dict[str, Any]:
         "issues": issues,
         "issue_count": len(issues),
         "top_issue": issues[0] if issues else None,
+    }
+
+
+def _inbox_quality_payload(target: Path) -> dict[str, Any]:
+    target = target.expanduser().resolve()
+    imports = [item for item in _read_imports(target) if isinstance(item, dict)]
+    pending = [item for item in imports if item.get("status", "pending") == "pending"]
+    dismissed_by_source = Counter(str(item.get("source") or "unknown") for item in imports if item.get("status") == "dismissed")
+    promoted_by_source = Counter(str(item.get("source") or "unknown") for item in imports if item.get("status") == "promoted")
+    noisy_sources = {
+        source
+        for source, count in dismissed_by_source.items()
+        if count >= max(3, promoted_by_source[source] * 3)
+    }
+    by_identity: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
+    for item in imports:
+        identity = _import_source_identity(item)
+        if identity is not None:
+            by_identity.setdefault(identity, []).append(item)
+    changed_dismissed: list[str] = []
+    duplicate_pending: list[str] = []
+    for items in by_identity.values():
+        pending_items = [item for item in items if item.get("status", "pending") == "pending"]
+        if len(pending_items) > 1:
+            duplicate_pending.extend(str(item.get("id")) for item in pending_items[1:])
+        dismissed_items = [item for item in items if item.get("status") == "dismissed"]
+        active_fingerprints = {_import_fingerprint(item) for item in pending_items if _import_fingerprint(item)}
+        for item in dismissed_items:
+            fingerprint = _import_fingerprint(item)
+            if fingerprint and active_fingerprints and fingerprint not in active_fingerprints:
+                changed_dismissed.append(str(item.get("id")))
+
+    scored: list[dict[str, Any]] = []
+    now = _now()
+    for item in pending:
+        import_id = str(item.get("id") or "")
+        source = str(item.get("source") or "unknown")
+        metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+        acceptance = item.get("acceptance") if isinstance(item.get("acceptance"), list) else []
+        has_acceptance = bool(acceptance)
+        has_provenance = bool(metadata.get("source_fingerprint") or metadata.get("scanner_run_id") or item.get("source"))
+        created = _parse_iso_datetime(item.get("created_at"))
+        age_hours = (now - created).total_seconds() / 3600 if created is not None else None
+        flags: list[str] = []
+        score = 100
+        if has_acceptance:
+            flags.append("acceptance-ready")
+        else:
+            flags.append("missing-acceptance")
+            score -= 30
+        if has_provenance:
+            flags.append("provenance-ready")
+        else:
+            flags.append("missing-provenance")
+            score -= 35
+        if age_hours is not None and age_hours > IMPORT_STALE_HOURS:
+            flags.append("stale")
+            score -= 20
+        if bool(metadata.get("deferred") or metadata.get("deferred_at") or item.get("deferred_at")):
+            flags.append("deferred")
+            score -= 45
+        if source in noisy_sources:
+            flags.append("noisy-source")
+            score -= 40
+        if import_id in duplicate_pending:
+            flags.append("duplicate-pending")
+            score -= 30
+        scored.append(
+            {
+                "import_id": import_id,
+                "source": source,
+                "kind": item.get("kind", "task"),
+                "priority": item.get("priority", "normal"),
+                "quality_score": max(0, score),
+                "quality_flags": flags,
+                "acceptance_count": len(acceptance),
+                "has_acceptance": has_acceptance,
+                "has_provenance": has_provenance,
+                "age_hours": round(age_hours, 2) if age_hours is not None else None,
+                "source_fingerprint": metadata.get("source_fingerprint"),
+            }
+        )
+    scored.sort(key=lambda item: (int(item.get("quality_score") or 0), str(item.get("import_id") or "")), reverse=True)
+    issue_counts = {
+        "missing_acceptance": sum(1 for item in scored if "missing-acceptance" in item["quality_flags"]),
+        "missing_provenance": sum(1 for item in scored if "missing-provenance" in item["quality_flags"]),
+        "stale": sum(1 for item in scored if "stale" in item["quality_flags"]),
+        "deferred": sum(1 for item in scored if "deferred" in item["quality_flags"]),
+        "noisy_source": sum(1 for item in scored if "noisy-source" in item["quality_flags"]),
+        "duplicate_pending": sum(1 for item in scored if "duplicate-pending" in item["quality_flags"]),
+        "changed_dismissed": len(changed_dismissed),
+    }
+    issues = [
+        {"status": WARN, "name": f"inbox_quality_{name}", "detail": str(count)}
+        for name, count in issue_counts.items()
+        if count
+    ]
+    return {
+        "schema_version": 1,
+        "schema": {"name": "work-inbox-quality", "version": 1},
+        "target": str(target),
+        "pending_count": len(pending),
+        "scored_imports": scored,
+        "best_import": scored[0] if scored else None,
+        "issue_counts": issue_counts,
+        "issues": issues,
+        "issue_count": len(issues),
+        "top_issue": issues[0] if issues else None,
+        "noisy_sources": sorted(noisy_sources),
+        "changed_dismissed_import_ids": sorted(set(changed_dismissed)),
     }
 
 

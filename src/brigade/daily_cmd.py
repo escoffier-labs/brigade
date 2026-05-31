@@ -182,7 +182,7 @@ HARDENING_PHASE_TITLES: dict[int, str] = {
 }
 
 
-IMPLEMENTED_HARDENING_PHASES: set[int] = set(range(115, 135))
+IMPLEMENTED_HARDENING_PHASES: set[int] = set(range(115, 145))
 
 
 def _hardening_phases() -> list[dict[str, Any]]:
@@ -434,6 +434,12 @@ def _pending_task_candidates(target: Path) -> list[dict[str, Any]]:
 
 def _pending_import_candidates(target: Path) -> list[dict[str, Any]]:
     candidates: list[dict[str, Any]] = []
+    quality = work_cmd._inbox_quality_payload(target)
+    quality_by_id = {
+        str(item.get("import_id")): item
+        for item in quality.get("scored_imports", [])
+        if isinstance(item, dict)
+    }
     all_imports = work_cmd._read_imports(target)
     dismissed_by_source = Counter(str(item.get("source") or "unknown") for item in all_imports if item.get("status") == "dismissed")
     promoted_by_source = Counter(str(item.get("source") or "unknown") for item in all_imports if item.get("status") == "promoted")
@@ -446,7 +452,9 @@ def _pending_import_candidates(target: Path) -> list[dict[str, Any]]:
         noisy_source = dismissed_by_source[source] >= max(3, promoted_by_source[source] * 3)
         deferred = bool(metadata.get("deferred") or metadata.get("deferred_at") or item.get("deferred_at"))
         stale = _is_stale(item.get("created_at"), 72)
-        score = 240 + _priority_score(item.get("priority")) + (40 if acceptance else -30) + (20 if has_provenance else -45)
+        quality_item = quality_by_id.get(import_id, {})
+        quality_score = int(quality_item.get("quality_score") or 0) if isinstance(quality_item, dict) else 0
+        score = 220 + _priority_score(item.get("priority")) + quality_score
         if noisy_source:
             score -= 50
         if deferred:
@@ -464,6 +472,7 @@ def _pending_import_candidates(target: Path) -> list[dict[str, Any]]:
             ranking_reasons.append("deferred import")
         if stale:
             ranking_reasons.append("stale import")
+        ranking_reasons.append(f"quality={quality_score}")
         candidates.append(
             _candidate(
                 target=target,
@@ -481,7 +490,7 @@ def _pending_import_candidates(target: Path) -> list[dict[str, Any]]:
                 evidence_refs=[str(work_cmd._imports_path(target))],
                 source_fingerprint=str(metadata.get("source_fingerprint") or _fingerprint(item)),
                 context_kind="task" if item.get("kind", "task") == "task" else None,
-                metadata={"import_id": import_id, "kind": item.get("kind", "task")},
+                metadata={"import_id": import_id, "kind": item.get("kind", "task"), "inbox_quality": quality_item},
             )
         )
     return candidates
@@ -2345,9 +2354,64 @@ def hardening_audit_payload(target: Path) -> dict[str, Any]:
     if missing_provenance:
         findings.append(_hardening_finding(workstream="inbox-evidence-quality", phase=136, name="pending_import_missing_provenance", severity="medium", safe_summary=f"{len(missing_provenance)} pending import(s) missing provenance", suggested_command="brigade work import provenance", evidence_refs=[str(work_cmd._imports_path(target))]))
     inbox_hygiene = work_cmd._inbox_hygiene_payload(target)
+    inbox_quality = work_cmd._inbox_quality_payload(target)
     if int(inbox_hygiene.get("issue_count") or 0) > 0:
         top = inbox_hygiene.get("top_issue") if isinstance(inbox_hygiene.get("top_issue"), dict) else {}
         findings.append(_hardening_finding(workstream="inbox-evidence-quality", phase=137, name="inbox_hygiene_issue", severity="medium", safe_summary=str(top.get("detail") or "work inbox has hygiene issues"), suggested_command="brigade work inbox doctor", evidence_refs=[str(work_cmd._imports_path(target))]))
+    quality_counts = inbox_quality.get("issue_counts") if isinstance(inbox_quality.get("issue_counts"), dict) else {}
+    noisy_or_deferred = int(quality_counts.get("noisy_source") or 0) + int(quality_counts.get("deferred") or 0) + int(quality_counts.get("stale") or 0)
+    if noisy_or_deferred:
+        findings.append(
+            _hardening_finding(
+                workstream="inbox-evidence-quality",
+                phase=138,
+                name="inbox_selection_penalties",
+                severity="medium",
+                safe_summary=f"{noisy_or_deferred} pending import(s) are stale, deferred, or from noisy sources",
+                suggested_command="brigade daily plan",
+                evidence_refs=[str(work_cmd._imports_path(target))],
+                metadata={"issue_counts": quality_counts},
+            )
+        )
+    if int(quality_counts.get("changed_dismissed") or 0):
+        findings.append(
+            _hardening_finding(
+                workstream="inbox-evidence-quality",
+                phase=139,
+                name="inbox_changed_dismissed",
+                severity="medium",
+                safe_summary=f"{quality_counts.get('changed_dismissed')} dismissed import(s) resurfaced with changed fingerprints",
+                suggested_command="brigade work inbox doctor",
+                evidence_refs=[str(work_cmd._imports_path(target))],
+                metadata={"changed_dismissed_import_ids": inbox_quality.get("changed_dismissed_import_ids")},
+            )
+        )
+    if int(quality_counts.get("duplicate_pending") or 0):
+        findings.append(
+            _hardening_finding(
+                workstream="inbox-evidence-quality",
+                phase=141,
+                name="inbox_duplicate_pending",
+                severity="medium",
+                safe_summary=f"{quality_counts.get('duplicate_pending')} duplicate pending import(s) need dedupe review",
+                suggested_command="brigade work inbox doctor",
+                evidence_refs=[str(work_cmd._imports_path(target))],
+                metadata={"issue_counts": quality_counts},
+            )
+        )
+    if inbox_quality.get("best_import") and int((inbox_quality.get("best_import") or {}).get("quality_score") or 0) < 80:
+        findings.append(
+            _hardening_finding(
+                workstream="inbox-evidence-quality",
+                phase=142,
+                name="inbox_low_evidence_top_candidate",
+                severity="low",
+                safe_summary="best pending import has weak acceptance or provenance quality",
+                suggested_command="brigade work inbox",
+                evidence_refs=[str(work_cmd._imports_path(target))],
+                metadata={"best_import": inbox_quality.get("best_import")},
+            )
+        )
 
     repo_health = repos_cmd.health(target)
     if int(repo_health.get("issue_count") or 0) > 0:

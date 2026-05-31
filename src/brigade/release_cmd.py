@@ -839,6 +839,7 @@ def _evidence(target: Path, *, base_ref: str | None) -> dict[str, Any]:
     memory_health = memory_cmd.health(target)
     backup_health = work_cmd._backup_health(target)
     acceptance = work_cmd._acceptance_payload(target)
+    inbox_quality = work_cmd._inbox_quality_payload(target)
     operator_report_health = center_cmd.report_health(target)
     operator_actions_health = center_cmd.actions_health(target)
     ci_platform = ci_platform_payload(target)
@@ -919,6 +920,14 @@ def _evidence(target: Path, *, base_ref: str | None) -> dict[str, Any]:
             "review_findings": acceptance.get("review_findings"),
             "latest_work_closeout": acceptance.get("latest_work_closeout"),
             "issues": acceptance.get("issues"),
+        },
+        "inbox_quality": {
+            "pending_count": inbox_quality.get("pending_count"),
+            "issue_count": inbox_quality.get("issue_count"),
+            "issue_counts": inbox_quality.get("issue_counts"),
+            "top_issue": inbox_quality.get("top_issue"),
+            "best_import": inbox_quality.get("best_import"),
+            "noisy_sources": inbox_quality.get("noisy_sources"),
         },
         "memory_care": {
             "valid": memory_health.get("valid"),
@@ -1265,6 +1274,7 @@ def _candidate_payload(target: Path, *, base_ref: str | None) -> dict[str, Any]:
         "backup": evidence.get("backup"),
         "tool_catalog": evidence.get("tool_catalog"),
         "task_acceptance": evidence.get("task_acceptance"),
+        "inbox_quality": evidence.get("inbox_quality"),
         "memory_care": evidence.get("memory_care"),
         "context": evidence.get("context"),
         "projects": evidence.get("projects"),

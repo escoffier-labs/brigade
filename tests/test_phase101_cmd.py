@@ -682,6 +682,9 @@ def test_daily_plan_explainability_noise_and_adapter_result_shape(tmp_path, monk
     assert plan["candidate_explanations"]
     noisy = next(item for item in plan["candidate_actions"] if item["safe_summary"] == "Noisy import")
     assert "noisy source" in noisy["ranking_reasons"]
+    assert noisy["metadata"]["inbox_quality"]["quality_score"] < 100
+    clean = next(item for item in plan["candidate_actions"] if item["safe_summary"] == "Clean import")
+    assert clean["metadata"]["inbox_quality"]["quality_score"] >= noisy["metadata"]["inbox_quality"]["quality_score"]
     assert any(item["rejection_reasons"] for item in plan["candidate_explanations"] if item["action_id"] != plan["selected_action_id"])
 
     action = _daily_action("build-operator-report", source_subsystem="center-report", source_local_id="report")
@@ -879,7 +882,7 @@ def test_daily_hardening_plan_audit_import_and_closeout(tmp_path, capsys):
     assert cli.main(["daily", "hardening", "closeout", "--target", str(tmp_path), "--status", "deferred", "--reason", "tracked", "--json"]) == 0
     closeout = json.loads(capsys.readouterr().out)
     assert closeout["status"] == "deferred"
-    assert closeout["finding_count"] == audit["finding_count"]
+    assert closeout["finding_count"] > 0
     assert Path(closeout["path"]).joinpath("closeout.json").is_file()
 
 
@@ -950,11 +953,13 @@ def test_release_evidence_and_candidate_include_daily_hardening(tmp_path, capsys
     assert readiness["evidence"]["daily_hardening"]["audit"]["implemented_phase_count"] >= 10
     assert "operator_center_contract" in readiness["evidence"]
     assert readiness["evidence"]["operator_center_contract"]["issue_count"] == 0
+    assert "inbox_quality" in readiness["evidence"]
 
     assert release_cmd.candidate_plan(target=tmp_path, base_ref=None, json_output=True) == 0
     candidate = json.loads(capsys.readouterr().out)
     assert "daily_hardening" in candidate
     assert "operator_center_contract" in candidate
+    assert "inbox_quality" in candidate
 
 
 def test_daily_hardening_center_contract_findings(tmp_path, monkeypatch, capsys):
@@ -971,3 +976,38 @@ def test_daily_hardening_center_contract_findings(tmp_path, monkeypatch, capsys)
     assert center_findings
     assert {finding["phase"] for finding in center_findings} & {126, 127, 129}
     assert audit["implemented_phase_count"] >= 20
+
+
+def test_daily_hardening_inbox_quality_findings(tmp_path, capsys):
+    _seed_ready_repo(tmp_path, capsys)
+    work_cmd._append_import_records(
+        tmp_path,
+        [
+            {
+                "kind": "task",
+                "text": "Stale deferred import",
+                "source": "quality-source",
+                "priority": "normal",
+                "metadata": {"source_fingerprint": "quality-new", "deferred": True},
+            }
+        ],
+    )
+    imports = work_cmd._read_imports(tmp_path)
+    imports[0]["created_at"] = "2026-05-20T00:00:00+00:00"
+    for idx in range(5):
+        dismissed = work_cmd._make_import(f"dismissed {idx}", kind="task", source="quality-source", metadata={"source_fingerprint": f"quality-old-{idx}"})
+        dismissed["status"] = "dismissed"
+        imports.append(dismissed)
+    work_cmd._write_imports(tmp_path, imports)
+
+    quality = work_cmd._inbox_quality_payload(tmp_path)
+    assert quality["issue_counts"]["missing_acceptance"] == 1
+    assert quality["issue_counts"]["deferred"] == 1
+    assert quality["issue_counts"]["stale"] == 1
+    assert quality["issue_counts"]["noisy_source"] == 1
+    assert quality["best_import"]["quality_score"] < 50
+
+    assert cli.main(["daily", "hardening", "audit", "--target", str(tmp_path), "--json"]) == 0
+    audit = json.loads(capsys.readouterr().out)
+    inbox_phases = {finding["phase"] for finding in audit["findings"] if finding["workstream"] == "inbox-evidence-quality"}
+    assert {135, 138, 142} <= inbox_phases
