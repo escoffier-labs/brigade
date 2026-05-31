@@ -54,6 +54,15 @@ Goal: keep center status, activity, reviews, templates, and schema output consis
 - 133: Document center schema expectations for wrappers.
 - 134: Carry center contract state into release evidence.
 
+Status: implemented.
+
+Implementation notes:
+
+- Center schema output now includes a `center-contract-health` contract that documents the audit payload used by daily hardening and release evidence.
+- The center contract health payload validates required schema ids, required item fields, suggested next commands, and unsafe reference shapes across status, activity, reviews, and templates.
+- `brigade daily hardening audit` consumes center contract health and routes contract findings with phase metadata.
+- Release readiness and release candidate evidence now include an operator-center contract summary.
+
 ## Workstream 3: Phase 135-144, Inbox And Evidence Quality
 
 Goal: reduce queue noise and improve provenance, acceptance, and evidence quality.

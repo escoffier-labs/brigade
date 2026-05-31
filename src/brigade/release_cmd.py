@@ -969,6 +969,24 @@ def _evidence(target: Path, *, base_ref: str | None) -> dict[str, Any]:
             "latest": operator_report_health.get("latest"),
             "latest_diff": operator_report_health.get("latest_diff"),
         },
+        "operator_center_contract": {
+            key: value
+            for key, value in center_cmd._center_contract_health(target).items()
+            if key
+            in {
+                "schema_version",
+                "schema",
+                "required_schema_ids",
+                "schema_ids",
+                "missing_schema_ids",
+                "required_item_fields",
+                "activity_count",
+                "review_count",
+                "template_count",
+                "issue_count",
+                "top_issue",
+            }
+        },
         "operator_actions": {
             "action_count": operator_actions_health.get("action_count"),
             "open_count": operator_actions_health.get("open_count"),
@@ -1252,6 +1270,7 @@ def _candidate_payload(target: Path, *, base_ref: str | None) -> dict[str, Any]:
         "projects": evidence.get("projects"),
         "learning": evidence.get("learning"),
         "operator_report": evidence.get("operator_report"),
+        "operator_center_contract": evidence.get("operator_center_contract"),
         "daily_driver": evidence.get("daily_driver"),
         "daily_hardening": evidence.get("daily_hardening"),
         "repo_fleet": evidence.get("repo_fleet"),

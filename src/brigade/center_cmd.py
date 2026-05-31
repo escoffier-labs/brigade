@@ -24,6 +24,26 @@ ACTION_ACTIVE_STALE_HOURS = 8
 ACTION_DEFERRED_STALE_HOURS = 72
 ACTION_DONE_ARCHIVE_HOURS = 24
 READINESS_STATUSES = {"reviewed", "deferred", "blocked", "archived"}
+CENTER_REQUIRED_SCHEMA_IDS = {
+    "center-status",
+    "center-activity",
+    "center-reviews",
+    "center-templates",
+    "center-report",
+    "center-report-review",
+    "center-report-diff",
+    "center-actions",
+    "center-readiness",
+    "center-contract-health",
+}
+CENTER_REQUIRED_ITEM_FIELDS = {
+    "subsystem",
+    "id",
+    "local_id",
+    "status",
+    "safe_summary",
+    "suggested_next_command",
+}
 
 
 def _read_json(path: Path) -> dict[str, Any] | None:
@@ -286,6 +306,22 @@ def _center_schema_manifest_schemas() -> list[dict[str, Any]]:
             ],
             "item_fields": item_fields,
         },
+        {
+            "id": "center-contract-health",
+            "command": "internal: center contract health",
+            "description": "Read-only contract audit used by daily hardening and release evidence.",
+            "top_level_fields": [
+                _schema_field("schema_version", "integer"),
+                _schema_field("schema", "object"),
+                _schema_field("target", "string"),
+                _schema_field("required_schema_ids", "array"),
+                _schema_field("schema_ids", "array"),
+                _schema_field("required_item_fields", "array"),
+                _schema_field("issues", "array"),
+                _schema_field("issue_count", "integer"),
+            ],
+            "item_fields": item_fields,
+        },
     ]
 
 
@@ -312,9 +348,140 @@ def _center_schema_manifest(target: Path) -> dict[str, Any]:
             {
                 "status": "ok",
                 "name": "wrapper_field_contracts_present",
-                "detail": "status, activity, reviews, templates, reports, report review, report diff, and actions are described",
+                "detail": "status, activity, reviews, templates, reports, report review, report diff, actions, readiness, and contract health are described",
             },
         ],
+    }
+
+
+def _unsafe_reference(value: object) -> str | None:
+    if not isinstance(value, str) or not value:
+        return None
+    if re.search(r"(?i)(token|secret|password|api[_-]?key)=\S+", value):
+        return "secret-looking value"
+    if re.search(r"https?://", value):
+        return "url reference"
+    return None
+
+
+def _center_contract_health(target: Path) -> dict[str, Any]:
+    target = target.expanduser().resolve()
+    manifest = _center_schema_manifest(target)
+    schemas = manifest.get("schemas") if isinstance(manifest.get("schemas"), list) else []
+    schema_ids = {str(item.get("id")) for item in schemas if isinstance(item, dict)}
+    issues: list[dict[str, Any]] = []
+    missing_schema_ids = sorted(CENTER_REQUIRED_SCHEMA_IDS - schema_ids)
+    if missing_schema_ids:
+        issues.append(
+            {
+                "status": "fail",
+                "name": "center_schema_missing_required_ids",
+                "detail": ", ".join(missing_schema_ids),
+                "phase": 125,
+                "suggested_next_command": "brigade center schema",
+            }
+        )
+
+    outputs: dict[str, Any] = {
+        "activity": _activity(target)[:100],
+        "reviews": _reviews(target)[:100],
+        "templates": [
+            _item("context", "task", "available", "Task context pack template", "brigade context plan --kind task"),
+            _item("context", "repo", "available", "Repo context pack template", "brigade context plan --kind repo"),
+            _item("context", "release", "available", "Release context pack template", "brigade context plan --kind release"),
+            _item("tools", "tool-pack", "available", "Portable tool pack template", "brigade tools pack build"),
+            _item("projects", "audit-plan", "available", "Project audit plan template", "brigade projects audit"),
+            _item("release", "candidate", "available", "Release candidate checklist template", "brigade release candidate plan"),
+            _item("review", "closeout", "available", "Review closeout template", "brigade work review closeout latest"),
+        ],
+    }
+    status_data = status_payload(target)
+    status_required = {"schema_version", "schema", "target", "pending_task_count", "pending_import_count", "review_queue_count", "operator_report", "action_queue"}
+    missing_status_fields = sorted(status_required - set(status_data))
+    if missing_status_fields:
+        issues.append(
+            {
+                "status": "fail",
+                "name": "center_status_missing_fields",
+                "detail": ", ".join(missing_status_fields),
+                "phase": 131,
+                "suggested_next_command": "brigade center status --json",
+            }
+        )
+    item_issues: list[dict[str, Any]] = []
+    for output_name, items in outputs.items():
+        for item in items:
+            if not isinstance(item, dict):
+                item_issues.append({"output": output_name, "field": "item", "local_id": None})
+                continue
+            missing = sorted(CENTER_REQUIRED_ITEM_FIELDS - set(item))
+            if missing:
+                item_issues.append({"output": output_name, "field": ",".join(missing), "local_id": item.get("local_id") or item.get("id")})
+            command = item.get("suggested_next_command")
+            if not isinstance(command, str) or not command.startswith("brigade "):
+                item_issues.append({"output": output_name, "field": "suggested_next_command", "local_id": item.get("local_id") or item.get("id")})
+            for key in ("path", "receipt_path"):
+                reason = _unsafe_reference(item.get(key))
+                if reason:
+                    item_issues.append({"output": output_name, "field": key, "local_id": item.get("local_id") or item.get("id"), "reason": reason})
+    if item_issues:
+        issues.append(
+            {
+                "status": "warn",
+                "name": "center_item_contract_gap",
+                "detail": f"{len(item_issues)} center item contract gap(s)",
+                "phase": 126,
+                "suggested_next_command": "brigade center reviews --json",
+                "items": item_issues[:20],
+            }
+        )
+    command_gaps = [
+        {"output": issue["output"], "local_id": issue.get("local_id")}
+        for issue in item_issues
+        if issue.get("field") == "suggested_next_command"
+    ]
+    if command_gaps:
+        issues.append(
+            {
+                "status": "warn",
+                "name": "center_missing_suggested_commands",
+                "detail": f"{len(command_gaps)} center item(s) have missing suggested commands",
+                "phase": 127,
+                "suggested_next_command": "brigade center reviews --json",
+                "items": command_gaps[:20],
+            }
+        )
+    reference_gaps = [
+        issue
+        for issue in item_issues
+        if issue.get("field") in {"path", "receipt_path"}
+    ]
+    if reference_gaps:
+        issues.append(
+            {
+                "status": "warn",
+                "name": "center_unsafe_references",
+                "detail": f"{len(reference_gaps)} center reference(s) need safer labels",
+                "phase": 128,
+                "suggested_next_command": "brigade center activity --json",
+                "items": reference_gaps[:20],
+            }
+        )
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "schema": _schema("center-contract-health"),
+        "target": str(target),
+        "required_schema_ids": sorted(CENTER_REQUIRED_SCHEMA_IDS),
+        "schema_ids": sorted(schema_ids),
+        "missing_schema_ids": missing_schema_ids,
+        "required_item_fields": sorted(CENTER_REQUIRED_ITEM_FIELDS),
+        "status_field_count": len(status_data),
+        "activity_count": len(outputs["activity"]),
+        "review_count": len(outputs["reviews"]),
+        "template_count": len(outputs["templates"]),
+        "issues": issues,
+        "issue_count": len(issues),
+        "top_issue": issues[0] if issues else None,
     }
 
 

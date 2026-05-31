@@ -948,7 +948,26 @@ def test_release_evidence_and_candidate_include_daily_hardening(tmp_path, capsys
     readiness = json.loads(capsys.readouterr().out)
     assert "daily_hardening" in readiness["evidence"]
     assert readiness["evidence"]["daily_hardening"]["audit"]["implemented_phase_count"] >= 10
+    assert "operator_center_contract" in readiness["evidence"]
+    assert readiness["evidence"]["operator_center_contract"]["issue_count"] == 0
 
     assert release_cmd.candidate_plan(target=tmp_path, base_ref=None, json_output=True) == 0
     candidate = json.loads(capsys.readouterr().out)
     assert "daily_hardening" in candidate
+    assert "operator_center_contract" in candidate
+
+
+def test_daily_hardening_center_contract_findings(tmp_path, monkeypatch, capsys):
+    _seed_ready_repo(tmp_path, capsys)
+
+    def broken_reviews(_target):
+        return [{"subsystem": "broken", "local_id": "one", "status": "pending", "safe_summary": "missing command"}]
+
+    monkeypatch.setattr(center_cmd, "_reviews", broken_reviews)
+
+    assert cli.main(["daily", "hardening", "audit", "--target", str(tmp_path), "--json"]) == 0
+    audit = json.loads(capsys.readouterr().out)
+    center_findings = [finding for finding in audit["findings"] if finding["workstream"] == "operator-center-contract-cleanup"]
+    assert center_findings
+    assert {finding["phase"] for finding in center_findings} & {126, 127, 129}
+    assert audit["implemented_phase_count"] >= 20

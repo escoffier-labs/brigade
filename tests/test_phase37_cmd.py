@@ -134,6 +134,7 @@ def test_center_schema_manifest_is_stable_and_read_only(tmp_path, capsys):
         "center-report-review",
         "center-report-diff",
         "center-actions",
+        "center-contract-health",
     } <= schema_ids
     schemas = {schema["id"]: schema for schema in payload["schemas"]}
     status_fields = {field["name"] for field in schemas["center-status"]["top_level_fields"]}
@@ -150,6 +151,11 @@ def test_center_schema_manifest_is_stable_and_read_only(tmp_path, capsys):
     assert "- center-actions: brigade center actions list --json" in out
     assert cli.main(["center", "schema", "--target", str(tmp_path), "--json"]) == 0
     assert json.loads(capsys.readouterr().out)["schema_count"] == payload["schema_count"]
+
+    contract = center_cmd._center_contract_health(tmp_path)
+    assert contract["issue_count"] == 0
+    assert "center-status" in contract["schema_ids"]
+    assert {"subsystem", "local_id", "status", "safe_summary", "suggested_next_command"} <= set(contract["required_item_fields"])
 
 
 def test_center_report_plan_build_list_show_archive_and_cli(tmp_path, capsys):

@@ -182,7 +182,7 @@ HARDENING_PHASE_TITLES: dict[int, str] = {
 }
 
 
-IMPLEMENTED_HARDENING_PHASES: set[int] = set(range(115, 125))
+IMPLEMENTED_HARDENING_PHASES: set[int] = set(range(115, 135))
 
 
 def _hardening_phases() -> list[dict[str, Any]]:
@@ -2310,6 +2310,7 @@ def hardening_audit_payload(target: Path) -> dict[str, Any]:
         findings.append(_hardening_finding(workstream="daily-production-hardening", phase=123, name="wrapped_output_in_run_json", severity="medium", safe_summary="daily run receipt appears to include wrapped command output instead of receipt references", suggested_command="brigade daily show latest", evidence_refs=[str(_runs_root(target))]))
 
     center_manifest = center_cmd._center_schema_manifest(target)
+    center_contract = center_cmd._center_contract_health(target)
     if int(center_manifest.get("schema_count") or 0) < 1:
         findings.append(_hardening_finding(workstream="operator-center-contract-cleanup", phase=125, name="center_schema_missing", severity="high", safe_summary="center schema manifest is empty", suggested_command="brigade center schema", evidence_refs=["center schema"]))
     center_reviews = center_cmd._reviews(target)
@@ -2317,6 +2318,20 @@ def hardening_audit_payload(target: Path) -> dict[str, Any]:
     malformed_review = next((item for item in center_reviews if not required_review_fields <= set(item)), None)
     if malformed_review:
         findings.append(_hardening_finding(workstream="operator-center-contract-cleanup", phase=126, name="center_review_shape", severity="medium", safe_summary="center review item is missing wrapper-facing fields", suggested_command="brigade center reviews --json", evidence_refs=["center reviews"]))
+    for issue in center_contract.get("issues", []) if isinstance(center_contract.get("issues"), list) else []:
+        phase = issue.get("phase") if isinstance(issue.get("phase"), int) else 129
+        findings.append(
+            _hardening_finding(
+                workstream="operator-center-contract-cleanup",
+                phase=phase,
+                name=str(issue.get("name") or "center_contract_issue"),
+                severity="high" if issue.get("status") == "fail" else "medium",
+                safe_summary=str(issue.get("detail") or "center contract has an issue"),
+                suggested_command=str(issue.get("suggested_next_command") or "brigade center status --json"),
+                evidence_refs=["center contract health"],
+                metadata={"issue": issue},
+            )
+        )
 
     pending_imports = work_cmd._pending_imports(target)
     missing_acceptance = [item for item in pending_imports if not item.get("acceptance")]
