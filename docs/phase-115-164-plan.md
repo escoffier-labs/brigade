@@ -126,6 +126,16 @@ Goal: make Brigade's own local release path readable through daily receipts and 
 - 163: Keep release schema output stable for wrappers.
 - 164: Close out this hardening tranche with tests, docs, privacy scan, handoff, commit, and push.
 
+Status: implemented.
+
+Implementation notes:
+
+- `release_cmd._release_dogfood_health` now audits latest readiness, latest candidate, daily-driver evidence, hardening evidence, inbox quality, repo-fleet daily-use evidence, manual-only publish plan markers, daily closeout verification visibility, and release schema coverage.
+- `brigade daily hardening audit` consumes release dogfood health and maps release-loop findings to phases 155-164.
+- Release readiness and release candidate evidence now include a compact release dogfood summary.
+- The release schema manifest documents `release-dogfood-health` for wrapper-facing contract checks.
+- Publish steps remain manual-only. No push, tag, release creation, upload, PR mutation, or remote mutation was added.
+
 ## Command Surface
 
 - `brigade daily hardening plan`

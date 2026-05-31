@@ -444,6 +444,8 @@ def test_release_candidate_plan_build_list_show_archive(tmp_path, monkeypatch, c
     evidence = json.loads((candidate_dir / "EVIDENCE.json").read_text())
     assert evidence["work_closeout"]["closeout_id"] == "closeout-one"
     assert evidence["verification"]["run_id"] == "verify-one"
+    assert evidence["release_dogfood"]["issue_count"] >= 0
+    assert "Manual-only remote step" in (candidate_dir / "PUBLISH_PLAN.md").read_text()
 
     assert release_cmd.candidate_list(target=tmp_path, json_output=True) == 0
     listed = json.loads(capsys.readouterr().out)
@@ -478,6 +480,7 @@ def test_release_schema_manifest_reports_contracts_and_latest_receipts(tmp_path,
         "fleet-release-train-evidence",
         "fleet-release-waiver",
         "fleet-release-manual-evidence",
+        "release-dogfood-health",
     } <= schema_ids
     checks = {check["name"]: check for check in payload["checks"]}
     assert checks["release_readiness_latest"]["status"] == "ok"

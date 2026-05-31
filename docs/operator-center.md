@@ -108,7 +108,7 @@ Approval-required daily actions can be paused as local requests under `.brigade/
 
 `brigade daily resume`, `brigade daily repair`, and `brigade daily unblock` recover from blocked, failed, stale, or approval-waiting runs by suggesting the next safe command or writing local repair, approval, or import metadata. They do not run arbitrary suggested commands.
 
-`brigade daily hardening plan`, `audit`, `import-issues`, and `closeout` track the phase 115-164 production-hardening tranche. The audit checks daily reliability, center contracts, inbox evidence quality, repo-fleet daily-use state, and self-dogfood release evidence. Import routing creates reviewed `source: daily-hardening` work imports. Closeout writes only local hardening receipts.
+`brigade daily hardening plan`, `audit`, `import-issues`, and `closeout` track the phase 115-164 production-hardening tranche. The audit checks daily reliability, center contracts, inbox evidence quality, repo-fleet daily-use state, and self-dogfood release evidence with phase metadata. Import routing creates reviewed `source: daily-hardening` work imports, and release readiness carries compact hardening summaries. Closeout writes only local hardening receipts.
 
 `brigade daily history` and `brigade daily show <run-id|latest>` inspect local plan and run receipts. `brigade daily doctor` reports missing or invalid config, stale plans, stale unclosed or blocked runs, parse errors, missing source evidence, approval issues, telemetry parse errors, and unsafe config. `brigade daily schema` prints wrapper-facing JSON contracts. `brigade daily protocol` documents the JSON-first agent loop, and `brigade daily telemetry` summarizes local-only dogfood metrics.
 

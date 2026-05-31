@@ -807,7 +807,8 @@ Phase 115-164 status:
 - Added `docs/phase-115-164-plan.md` as the source of truth for five production-hardening workstreams.
 - Added command surface: `brigade daily hardening plan/audit/import-issues/closeout`.
 - The hardening plan covers 50 phases across daily production hardening, operator-center contract cleanup, inbox evidence quality, repo-fleet daily use, and the self-dogfood release loop.
-- The hardening audit checks daily adapter receipts, plan explainability, approval hygiene, telemetry, center schema/review contracts, inbox acceptance/provenance/hygiene, repo-fleet health, and release readiness/candidate evidence.
+- The hardening audit checks daily adapter receipts, plan explainability, approval hygiene, telemetry, center schema/review contracts, inbox quality scoring, repo-fleet daily-use health, and release dogfood evidence.
+- Release readiness and release candidates include compact hardening, center contract, inbox quality, repo-fleet daily-use, and release dogfood summaries.
 - `daily hardening import-issues` routes audit findings into reviewed `source: daily-hardening` work imports with stable fingerprints and acceptance criteria.
 - `daily hardening closeout` writes local reviewed, deferred, blocked, or archived closeout receipts under `.brigade/daily/hardening/`.
 - Deferred: automatic hardening repair. Reason: this tranche keeps hardening explicit, local, and reviewable through imports and closeouts instead of applying fixes.

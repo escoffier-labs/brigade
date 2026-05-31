@@ -955,6 +955,7 @@ def test_release_evidence_and_candidate_include_daily_hardening(tmp_path, capsys
     assert readiness["evidence"]["operator_center_contract"]["issue_count"] == 0
     assert "inbox_quality" in readiness["evidence"]
     assert "repo_fleet_daily_use" in readiness["evidence"]
+    assert "release_dogfood" in readiness["evidence"]
 
     assert release_cmd.candidate_plan(target=tmp_path, base_ref=None, json_output=True) == 0
     candidate = json.loads(capsys.readouterr().out)
@@ -962,6 +963,11 @@ def test_release_evidence_and_candidate_include_daily_hardening(tmp_path, capsys
     assert "operator_center_contract" in candidate
     assert "inbox_quality" in candidate
     assert "repo_fleet_daily_use" in candidate
+    assert "release_dogfood" in candidate
+
+    dogfood = release_cmd._release_dogfood_health(tmp_path)
+    assert dogfood["schema"]["name"] == "release-dogfood-health"
+    assert any(check["phase"] in {156, 158} for check in dogfood["checks"])
 
 
 def test_daily_hardening_center_contract_findings(tmp_path, monkeypatch, capsys):
@@ -1034,4 +1040,4 @@ def test_daily_hardening_repo_fleet_daily_use_findings(tmp_path, monkeypatch, ca
     audit = json.loads(capsys.readouterr().out)
     fleet_phases = {finding["phase"] for finding in audit["findings"] if finding["workstream"] == "repo-fleet-daily-use"}
     assert {146, 151} <= fleet_phases
-    assert audit["implemented_phase_count"] >= 40
+    assert audit["implemented_phase_count"] == 50

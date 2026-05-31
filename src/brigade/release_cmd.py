@@ -836,6 +836,7 @@ def _evidence(target: Path, *, base_ref: str | None) -> dict[str, Any]:
     repo_health = repos_cmd.health(target)
     repo_daily_use = repos_cmd.daily_use_health(target)
     roadmap_health = roadmap_cmd.health(target)
+    dogfood_health = _release_dogfood_health(target)
     tool_health = tools_cmd.health(target)
     memory_health = memory_cmd.health(target)
     backup_health = work_cmd._backup_health(target)
@@ -1038,6 +1039,13 @@ def _evidence(target: Path, *, base_ref: str | None) -> dict[str, Any]:
                 }
             },
             "latest_closeout": daily_cmd._latest_hardening_closeout(target),
+        },
+        "release_dogfood": {
+            "issue_count": dogfood_health.get("issue_count"),
+            "top_issue": dogfood_health.get("top_issue"),
+            "latest_readiness": dogfood_health.get("latest_readiness"),
+            "latest_candidate": dogfood_health.get("latest_candidate"),
+            "latest_daily_run": dogfood_health.get("latest_daily_run"),
         },
         "security_closeout": _latest_closeout_json(target / ".brigade" / "security" / "closeouts"),
         "docs": {
@@ -1295,6 +1303,7 @@ def _candidate_payload(target: Path, *, base_ref: str | None) -> dict[str, Any]:
         "operator_center_contract": evidence.get("operator_center_contract"),
         "daily_driver": evidence.get("daily_driver"),
         "daily_hardening": evidence.get("daily_hardening"),
+        "release_dogfood": evidence.get("release_dogfood"),
         "repo_fleet": evidence.get("repo_fleet"),
         "repo_fleet_daily_use": evidence.get("repo_fleet_daily_use"),
         "roadmap": evidence.get("roadmap"),
@@ -1360,6 +1369,65 @@ def _candidate_health(target: Path) -> dict[str, Any]:
         if value and not Path(str(value)).exists():
             checks.append({"status": WARN, "name": label, "detail": str(value)})
     return {"latest": latest, "checks": checks, "issue_count": len(checks), "top_issue": checks[0] if checks else None}
+
+
+def _release_dogfood_health(target: Path) -> dict[str, Any]:
+    from . import daily_cmd
+
+    target = target.expanduser().resolve()
+    def local_ref(payload: dict[str, Any] | None, id_field: str) -> dict[str, Any] | None:
+        if not isinstance(payload, dict):
+            return None
+        return {
+            "id": payload.get(id_field),
+            "status": payload.get("status"),
+            "path": payload.get("path"),
+        }
+
+    checks: list[dict[str, Any]] = []
+    latest_readiness = _latest_release_receipt(target)
+    latest_candidate = _latest_candidate(target)
+    latest_daily_run = daily_cmd._latest_run(target)
+    if latest_readiness is None:
+        checks.append({"status": WARN, "name": "release_dogfood_readiness_missing", "detail": "no release readiness receipt found", "phase": 155, "suggested_next_command": "brigade release run"})
+    elif not latest_readiness.get("ready"):
+        checks.append({"status": WARN, "name": "release_dogfood_readiness_blocked", "detail": str(latest_readiness.get("run_id") or "latest"), "phase": 158, "suggested_next_command": f"brigade release show {latest_readiness.get('run_id')}"})
+    if latest_candidate is None:
+        checks.append({"status": WARN, "name": "release_dogfood_candidate_missing", "detail": "no release candidate evidence found", "phase": 156, "suggested_next_command": "brigade release candidate build"})
+    else:
+        for key in ("daily_driver", "daily_hardening", "inbox_quality", "repo_fleet_daily_use"):
+            if not isinstance(latest_candidate.get(key), dict):
+                checks.append({"status": WARN, "name": f"release_dogfood_candidate_missing_{key}", "detail": f"candidate missing {key}", "phase": 157, "suggested_next_command": "brigade release candidate build"})
+        candidate_path = Path(str(latest_candidate.get("path") or ""))
+        publish_plan = candidate_path / "PUBLISH_PLAN.md"
+        if publish_plan.is_file():
+            unsafe_lines = [
+                line
+                for line in publish_plan.read_text().splitlines()
+                if any(command in line for command in ("git push", "git tag", "gh release create"))
+                and "Manual-only" not in line
+            ]
+            if unsafe_lines:
+                checks.append({"status": WARN, "name": "release_dogfood_publish_plan_not_manual", "detail": "remote-mutating publish command is not marked manual-only", "phase": 160, "suggested_next_command": f"brigade release candidate show {latest_candidate.get('candidate_id')}"})
+        else:
+            checks.append({"status": WARN, "name": "release_dogfood_publish_plan_missing", "detail": "candidate publish plan is missing", "phase": 160, "suggested_next_command": "brigade release candidate build"})
+    if latest_daily_run is not None:
+        if latest_daily_run.get("closeout_status") and "verification_status" not in latest_daily_run:
+            checks.append({"status": WARN, "name": "release_dogfood_daily_closeout_missing_verification", "detail": str(latest_daily_run.get("run_id") or "latest"), "phase": 161, "suggested_next_command": "brigade daily closeout --json"})
+    schema_ids = {schema["id"] for schema in _schema_manifest_schemas()}
+    if "release-dogfood-health" not in schema_ids:
+        checks.append({"status": WARN, "name": "release_dogfood_schema_missing", "detail": "schema manifest missing release dogfood health", "phase": 163, "suggested_next_command": "brigade release schema"})
+    return {
+        "schema_version": SCHEMA_MANIFEST_VERSION,
+        "schema": {"name": "release-dogfood-health", "version": SCHEMA_MANIFEST_VERSION},
+        "target": str(target),
+        "latest_readiness": local_ref(latest_readiness, "run_id"),
+        "latest_candidate": local_ref(latest_candidate, "candidate_id"),
+        "latest_daily_run": local_ref(latest_daily_run, "run_id"),
+        "checks": checks,
+        "issue_count": len(checks),
+        "top_issue": checks[0] if checks else None,
+    }
 
 
 def _schema_manifest_schemas() -> list[dict[str, Any]]:
@@ -1457,6 +1525,18 @@ def _schema_manifest_schemas() -> list[dict[str, Any]]:
             "optional_fields": [
                 _field("source_fingerprint", "string", "Fingerprint for reconciliation."),
                 _field("receipt_label", "string", "Local receipt label."),
+            ],
+        },
+        {
+            "id": "release-dogfood-health",
+            "file": "computed",
+            "description": "Local self-dogfood release health summary used by daily hardening and release evidence.",
+            "required_fields": [
+                _field("latest_readiness", "object|null", "Latest local release readiness reference."),
+                _field("latest_candidate", "object|null", "Latest local release candidate reference."),
+                _field("latest_daily_run", "object|null", "Latest local daily run reference."),
+                _field("checks", "array<object>", "Dogfood release checks."),
+                _field("issue_count", "integer", "Number of dogfood health issues."),
             ],
         },
     ]

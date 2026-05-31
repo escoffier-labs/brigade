@@ -182,7 +182,7 @@ HARDENING_PHASE_TITLES: dict[int, str] = {
 }
 
 
-IMPLEMENTED_HARDENING_PHASES: set[int] = set(range(115, 155))
+IMPLEMENTED_HARDENING_PHASES: set[int] = set(range(115, 165))
 
 
 def _hardening_phases() -> list[dict[str, Any]]:
@@ -2436,6 +2436,7 @@ def hardening_audit_payload(target: Path) -> dict[str, Any]:
 
     release_readiness = release_cmd._latest_release_receipt(target)
     release_candidate = release_cmd._latest_candidate(target)
+    release_dogfood = release_cmd._release_dogfood_health(target)
     if not release_readiness:
         findings.append(_hardening_finding(workstream="self-dogfood-release-loop", phase=155, name="missing_release_readiness", severity="medium", safe_summary="latest release readiness receipt is missing", suggested_command="brigade release run", evidence_refs=[".brigade/release/runs"]))
     elif not release_readiness.get("ready"):
@@ -2448,6 +2449,21 @@ def hardening_audit_payload(target: Path) -> dict[str, Any]:
         evidence = release_readiness.get("evidence") if isinstance(release_readiness.get("evidence"), dict) else {}
         if not isinstance(evidence.get("daily_hardening"), dict):
             findings.append(_hardening_finding(workstream="daily-production-hardening", phase=124, name="release_missing_daily_hardening", severity="medium", safe_summary="latest release readiness evidence is missing daily hardening state", suggested_command="brigade release run", evidence_refs=[str(release_readiness.get("path") or ".brigade/release/runs")]))
+    for issue in release_dogfood.get("checks", []) if isinstance(release_dogfood.get("checks"), list) else []:
+        if not isinstance(issue, dict) or issue.get("status") == "ok":
+            continue
+        findings.append(
+            _hardening_finding(
+                workstream="self-dogfood-release-loop",
+                phase=issue.get("phase") if isinstance(issue.get("phase"), int) else 155,
+                name=str(issue.get("name") or "release_dogfood_issue"),
+                severity="high" if issue.get("name") == "release_dogfood_readiness_blocked" else "medium",
+                safe_summary=str(issue.get("detail") or "release dogfood issue"),
+                suggested_command=str(issue.get("suggested_next_command") or "brigade release doctor"),
+                evidence_refs=["release dogfood health"],
+                metadata={"issue": issue},
+            )
+        )
 
     findings.sort(key=lambda item: ({"high": 3, "medium": 2, "low": 1}.get(str(item.get("severity")), 0), str(item.get("finding_id"))), reverse=True)
     raw_findings = list(findings)
