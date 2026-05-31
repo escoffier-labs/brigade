@@ -1306,6 +1306,40 @@ def _git_head(target: Path) -> str:
     return result.stdout.strip() if result.returncode == 0 else ""
 
 
+def _git_commit_exists(target: Path, commit_hash: str) -> bool:
+    if not commit_hash:
+        return False
+    try:
+        result = subprocess.run(["git", "cat-file", "-e", f"{commit_hash}^{{commit}}"], cwd=target, check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except OSError:
+        return False
+    return result.returncode == 0
+
+
+def _git_commit_on_branch(target: Path, commit_hash: str) -> bool:
+    if not commit_hash:
+        return False
+    try:
+        result = subprocess.run(["git", "branch", "--contains", commit_hash], cwd=target, check=False, text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    except OSError:
+        return False
+    return result.returncode == 0 and bool(result.stdout.strip())
+
+
+def _git_dirty_paths(target: Path) -> list[str]:
+    try:
+        result = subprocess.run(["git", "status", "--porcelain"], cwd=target, check=False, text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    except OSError:
+        return []
+    if result.returncode != 0:
+        return []
+    paths = []
+    for line in result.stdout.splitlines():
+        if line.strip():
+            paths.append(line[3:] if len(line) > 3 else line.strip())
+    return paths
+
+
 def _same_commit(expected: str, current: str) -> bool:
     if not expected or not current:
         return True
@@ -1763,6 +1797,56 @@ def verify_record(*, target: Path, phase_id: str, command: str, status: str, sum
     else:
         print(f"phase verification: {record.get('phase_id')}")
         print(f"status: {status}")
+    return 0
+
+
+def reconcile(*, target: Path, selector: str, json_output: bool = False) -> int:
+    target = target.expanduser().resolve()
+    records, missing, parsed_range = _selected_records(target, selector)
+    checks: list[dict[str, Any]] = []
+    if missing:
+        checks.append(_check("warn", "phase_reconcile_missing_records", f"missing phase record(s): {', '.join(missing)}", suggested=f"brigade work phases plan --range {parsed_range or selector}"))
+    dirty_paths = _git_dirty_paths(target)
+    if dirty_paths:
+        checks.append(_check("warn", "phase_reconcile_dirty_worktree", f"{len(dirty_paths)} dirty path(s)", suggested="git status --short"))
+    for record in records:
+        phase_id = str(record.get("phase_id") or "unknown")
+        status = str(record.get("status") or "")
+        commit_hash = str(record.get("commit_hash") or "")
+        push_ref = str(record.get("push_ref") or "")
+        if status in {"committed", "pushed"} and not commit_hash:
+            checks.append(_check("warn", "phase_reconcile_missing_commit_hash", "phase status requires commit hash", phase_id=phase_id, suggested=f"brigade work phases complete {phase_id} --commit <hash>"))
+            continue
+        if commit_hash and not _git_commit_exists(target, commit_hash):
+            checks.append(_check("warn", "phase_reconcile_commit_missing", f"commit not found locally: {commit_hash}", phase_id=phase_id, suggested="git log --oneline"))
+        elif commit_hash and not _git_commit_on_branch(target, commit_hash):
+            checks.append(_check("warn", "phase_reconcile_commit_not_on_branch", f"commit is not on a local branch: {commit_hash}", phase_id=phase_id, suggested="git branch --contains <hash>"))
+        if status == "pushed" and not push_ref:
+            checks.append(_check("warn", "phase_reconcile_pushed_without_ref", "pushed phase lacks push ref", phase_id=phase_id, suggested=f"brigade work phases complete {phase_id} --push-ref <ref>"))
+    if not checks:
+        checks.append(_check("ok", "phase_reconcile_clean", "selected phase records match local git evidence"))
+    issues = [check for check in checks if check.get("status") != "ok"]
+    payload = {
+        "schema_version": SCHEMA_VERSION,
+        "schema": _schema("phase-ledger-reconcile"),
+        "target": str(target),
+        "selector": selector,
+        "phase_range": parsed_range,
+        "records": [_record_summary(record) for record in records],
+        "record_count": len(records),
+        "dirty_paths": dirty_paths[:20],
+        "checks": checks,
+        "issue_count": len(issues),
+        "top_issue": issues[0] if issues else None,
+        "suggested_next_command": issues[0]["suggested_next_command"] if issues else "brigade work phases status",
+    }
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        print(f"phase reconcile: {selector}")
+        print(f"records: {len(records)}")
+        for check in checks:
+            print(f"[{check['status']}] {check['name']}: {check['detail']}")
     return 0
 
 

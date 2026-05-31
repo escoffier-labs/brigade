@@ -114,6 +114,7 @@ Implementation scope:
 - Include latest phase session and session report state in work brief/doctor, center status/reviews, release doctor, release candidates, and candidate compare.
 - Add `brigade work phases evidence add` so phase records can carry local evidence attachments without command execution.
 - Add `brigade work phases verify plan/record` for expected verification matrices and operator-recorded outcomes.
+- Add `brigade work phases reconcile` for read-only local commit, push ref, and dirty worktree checks.
 - Add `brigade work phases actions plan/build/list/show/start/done/defer/archive`.
 - Make `brigade daily plan`, `daily review`, and `daily run` understand phase-ledger actions and unresolved phase issues as bounded local daily steps.
 - Include latest phase closeout and phase report references in release readiness and release candidate evidence, with release doctor and candidate compare warnings for unresolved or stale phase evidence.

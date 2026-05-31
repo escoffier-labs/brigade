@@ -174,6 +174,8 @@ Release and operator surfaces include compact phase session state. Work brief, w
 
 `brigade work phases verify plan` and `verify record` provide a local verification matrix for phase records. Planning reads expected commands from recorded tests, and recording stores passed, failed, skipped, or deferred outcomes without executing the commands.
 
+`brigade work phases reconcile` is a read-only git evidence check. It compares recorded commit hashes and push refs with local git history and reports dirty worktree state after claimed completion.
+
 The phase ledger is surfaced in `brigade daily status`, `brigade daily doctor`, `brigade work brief`, `brigade work doctor`, and `brigade center status`. Future AFK multi-phase work is not complete unless the ledger shows evidence or explicit deferrals.
 
 Phase health includes open phase action counts and the top open phase action. `brigade work brief` and `brigade center status` expose those counts so the daily loop can see whether ledger issues already have local follow-up actions.

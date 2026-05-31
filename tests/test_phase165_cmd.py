@@ -646,3 +646,20 @@ def test_phase_verification_plan_and_record(tmp_path, capsys):
     assert cli.main(["work", "phases", "verify", "plan", "phase-217", "--target", str(tmp_path), "--json"]) == 0
     updated = json.loads(capsys.readouterr().out)
     assert updated["records"][0]["verification"][0]["status"] == "passed"
+
+
+def test_phase_reconcile_reports_git_evidence_warnings(tmp_path, capsys, monkeypatch):
+    assert cli.main(["work", "phases", "plan", "--target", str(tmp_path), "--range", "218-219", "--title", "Reconcile", "--goal", "afk", "--json"]) == 0
+    capsys.readouterr()
+    assert cli.main(["work", "phases", "complete", "phase-218", "--target", str(tmp_path), "--status", "pushed", "--summary", "Done", "--file", "file.py", "--test", "pytest", "--commit", "deadbeef", "--json"]) == 0
+    capsys.readouterr()
+    monkeypatch.setattr(phases_cmd, "_git_commit_exists", lambda target, commit_hash: False)
+    monkeypatch.setattr(phases_cmd, "_git_commit_on_branch", lambda target, commit_hash: False)
+    monkeypatch.setattr(phases_cmd, "_git_dirty_paths", lambda target: ["dirty.py"])
+
+    assert cli.main(["work", "phases", "reconcile", "218-219", "--target", str(tmp_path), "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    names = {check["name"] for check in payload["checks"]}
+    assert "phase_reconcile_dirty_worktree" in names
+    assert "phase_reconcile_commit_missing" in names
+    assert "phase_reconcile_pushed_without_ref" in names

@@ -26,6 +26,7 @@ brigade work phases complete <phase-id> --summary "..." --file src/file.py --tes
 brigade work phases defer <phase-id> --reason "..."
 brigade work phases closeout <phase-id|range|latest> --status reviewed --reason "checked evidence"
 brigade work phases compare <phase-id|range|latest>
+brigade work phases reconcile <phase-id|range|latest>
 brigade work phases doctor --range 165-170
 brigade work phases import-issues --range 165-170
 brigade work phases evidence add <phase-id> --file src/file.py --test "pytest ..."
@@ -164,6 +165,8 @@ Each report includes `PHASE_REPORT.md` and `PHASE_EVIDENCE.json` with range stat
 `brigade work phases evidence add <phase-id>` appends local evidence metadata to a phase record. Evidence attachments can include changed files, test commands, test result summaries, report ids, handoff paths, and notes. Doctor warns when attached local file or handoff references are missing.
 
 `brigade work phases verify plan <phase-id|range|latest>` shows expected verification commands from the selected phase records and current recorded outcomes. `brigade work phases verify record <phase-id>` records an operator-supplied verification result as local metadata. It never runs the command.
+
+`brigade work phases reconcile <phase-id|range|latest>` compares phase commit and push metadata against local git state. It reports missing commits, commits not on a local branch, pushed phases without push refs, and dirty worktree state after claimed completion. It never mutates git.
 
 Release readiness and release candidate evidence include a compact phase-ledger summary so publish review can see whether long unattended work still has open ledger issues.
 Release doctor and release candidate compare also warn when pushed phases are unreviewed, phase reports are missing or stale, closeouts have unresolved issues, report compare has open issues, or newer phase closeout/report evidence exists after a candidate was built.
