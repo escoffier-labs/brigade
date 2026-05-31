@@ -1136,6 +1136,26 @@ def _build_parser() -> argparse.ArgumentParser:
     p_work_phases_session_checkpoints_import.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
     p_work_phases_session_checkpoints_import.add_argument("--dry-run", action="store_true", help="Preview imports without writing them.")
     p_work_phases_session_checkpoints_import.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_work_phases_session_recovery_note = phases_session_sub.add_parser("recovery-note", help="Record a local phase session recovery note.")
+    p_work_phases_session_recovery_note.add_argument("session_id", nargs="?", default="latest", help="Session id, unique prefix, or latest.")
+    p_work_phases_session_recovery_note.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
+    p_work_phases_session_recovery_note.add_argument("--phase-id", default=None, help="Phase id for the recovery note.")
+    p_work_phases_session_recovery_note.add_argument("--summary", default=None, help="Safe recovery note summary.")
+    p_work_phases_session_recovery_note.add_argument("--note", dest="notes", action="append", default=[], help="Safe local note. May be repeated.")
+    p_work_phases_session_recovery_note.add_argument("--evidence", action="append", default=[], help="Local evidence label or reference. May be repeated.")
+    p_work_phases_session_recovery_note.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_work_phases_session_recovery_notes = phases_session_sub.add_parser("recovery-notes", help="List and inspect phase session recovery notes.")
+    phases_session_recovery_notes_sub = p_work_phases_session_recovery_notes.add_subparsers(dest="phases_session_recovery_notes_command", metavar="<phases-session-recovery-notes-command>")
+    phases_session_recovery_notes_sub.required = True
+    p_work_phases_session_recovery_notes_list = phases_session_recovery_notes_sub.add_parser("list", help="List phase session recovery notes.")
+    p_work_phases_session_recovery_notes_list.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_work_phases_session_recovery_notes_list.add_argument("--session", dest="session_id", default=None, help="Limit to one session id, prefix, or latest.")
+    p_work_phases_session_recovery_notes_list.add_argument("--limit", type=int, default=20, help="Maximum recovery notes to list.")
+    p_work_phases_session_recovery_notes_list.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_work_phases_session_recovery_notes_show = phases_session_recovery_notes_sub.add_parser("show", help="Show one phase session recovery note.")
+    p_work_phases_session_recovery_notes_show.add_argument("note_id", help="Recovery note id, unique prefix, or latest.")
+    p_work_phases_session_recovery_notes_show.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_work_phases_session_recovery_notes_show.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_work_phases_session_next = phases_session_sub.add_parser("next", help="Show the next required phase session step.")
     p_work_phases_session_next.add_argument("session_id", nargs="?", default="latest", help="Session id, unique prefix, or latest.")
     p_work_phases_session_next.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
@@ -3282,6 +3302,14 @@ def main(argv=None) -> int:
                     if args.phases_session_checkpoints_command == "import-issues":
                         return phases_cmd.session_checkpoint_import_issues(target=args.target, checkpoint_id=args.checkpoint_id, dry_run=args.dry_run, json_output=args.json)
                     parser.error(f"unknown phases session checkpoints command: {args.phases_session_checkpoints_command}")
+                if args.phases_session_command == "recovery-note":
+                    return phases_cmd.session_recovery_note(target=args.target, session_id=args.session_id, phase_id=args.phase_id, summary=args.summary, notes=args.notes, evidence=args.evidence, json_output=args.json)
+                if args.phases_session_command == "recovery-notes":
+                    if args.phases_session_recovery_notes_command == "list":
+                        return phases_cmd.session_recovery_note_list(target=args.target, session_id=args.session_id, limit=args.limit, json_output=args.json)
+                    if args.phases_session_recovery_notes_command == "show":
+                        return phases_cmd.session_recovery_note_show(target=args.target, note_id=args.note_id, json_output=args.json)
+                    parser.error(f"unknown phases session recovery notes command: {args.phases_session_recovery_notes_command}")
                 if args.phases_session_command == "next":
                     return phases_cmd.session_next(target=args.target, session_id=args.session_id, json_output=args.json)
                 if args.phases_session_command == "resume":

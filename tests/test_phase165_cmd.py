@@ -613,6 +613,57 @@ def test_phase_session_checkpoint_records_recovery_metadata(tmp_path, capsys):
     assert any(event["event_type"] == "session-checkpoint" and event["local_id"] == checkpoint["checkpoint_id"] for event in activity["events"])
 
 
+def test_phase_session_recovery_notes_are_reviewable(tmp_path, capsys):
+    assert cli.main(["work", "phases", "plan", "--target", str(tmp_path), "--range", "231-232", "--title", "Recovery", "--goal", "afk", "--json"]) == 0
+    capsys.readouterr()
+    assert cli.main(["work", "phases", "session", "start", "--target", str(tmp_path), "--range", "231-232", "--goal", "recovery session", "--json"]) == 0
+    session = json.loads(capsys.readouterr().out)
+
+    assert cli.main(
+        [
+            "work",
+            "phases",
+            "session",
+            "recovery-note",
+            session["session_id"],
+            "--target",
+            str(tmp_path),
+            "--summary",
+            "Need to resume after focused tests.",
+            "--note",
+            "Only local metadata was written.",
+            "--evidence",
+            "tests/test_phase165_cmd.py",
+            "--json",
+        ]
+    ) == 0
+    note = json.loads(capsys.readouterr().out)
+    assert note["session_id"] == session["session_id"]
+    assert note["phase_id"] == "phase-231"
+    assert note["status"] == "open"
+    assert note["notes"] == ["Only local metadata was written."]
+    assert note["evidence"] == ["tests/test_phase165_cmd.py"]
+    assert "source_fingerprint" in note
+
+    assert cli.main(["work", "phases", "session", "recovery-notes", "list", "--target", str(tmp_path), "--session", session["session_id"], "--json"]) == 0
+    listed = json.loads(capsys.readouterr().out)
+    assert listed["note_count"] == 1
+    assert listed["notes"][0]["note_id"] == note["note_id"]
+
+    assert cli.main(["work", "phases", "session", "recovery-notes", "show", "latest", "--target", str(tmp_path), "--json"]) == 0
+    shown = json.loads(capsys.readouterr().out)
+    assert shown["note_id"] == note["note_id"]
+    assert shown["next_step"]["step_type"] == "pending_phase"
+
+    assert cli.main(["work", "phases", "session", "show", "latest", "--target", str(tmp_path), "--json"]) == 0
+    session_shown = json.loads(capsys.readouterr().out)
+    assert session_shown["latest_recovery_note"]["note_id"] == note["note_id"]
+
+    assert cli.main(["work", "phases", "session", "activity", session["session_id"], "--target", str(tmp_path), "--json"]) == 0
+    activity = json.loads(capsys.readouterr().out)
+    assert any(event["event_type"] == "session-recovery-note" and event["local_id"] == note["note_id"] for event in activity["events"])
+
+
 def test_phase_session_report_bundle(tmp_path, capsys):
     assert cli.main(["work", "phases", "plan", "--target", str(tmp_path), "--range", "213-214", "--title", "Report", "--goal", "afk", "--json"]) == 0
     capsys.readouterr()

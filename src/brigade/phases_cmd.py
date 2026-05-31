@@ -68,6 +68,10 @@ def _session_checkpoints_root(target: Path) -> Path:
     return _root(target) / "session-checkpoints"
 
 
+def _session_recovery_notes_root(target: Path) -> Path:
+    return _root(target) / "session-recovery-notes"
+
+
 def _goals_root(target: Path) -> Path:
     return _root(target) / "goals"
 
@@ -823,6 +827,18 @@ def _read_session_checkpoints(target: Path) -> list[dict[str, Any]]:
     return checkpoints
 
 
+def _read_session_recovery_notes(target: Path) -> list[dict[str, Any]]:
+    notes: list[dict[str, Any]] = []
+    for path in sorted(_session_recovery_notes_root(target).glob("*.json")):
+        payload = _read_json(path)
+        if payload is None:
+            continue
+        payload.setdefault("path", str(path))
+        notes.append(payload)
+    notes.sort(key=lambda item: str(item.get("created_at") or item.get("note_id") or ""))
+    return notes
+
+
 def _checkpoint_summary(checkpoint: dict[str, Any]) -> dict[str, Any]:
     return {
         "checkpoint_id": checkpoint.get("checkpoint_id"),
@@ -833,6 +849,19 @@ def _checkpoint_summary(checkpoint: dict[str, Any]) -> dict[str, Any]:
         "created_at": checkpoint.get("created_at"),
         "path": checkpoint.get("path"),
         "suggested_next_command": checkpoint.get("suggested_next_command"),
+    }
+
+
+def _recovery_note_summary(note: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "note_id": note.get("note_id"),
+        "session_id": note.get("session_id"),
+        "phase_id": note.get("phase_id"),
+        "status": note.get("status"),
+        "summary": note.get("summary"),
+        "created_at": note.get("created_at"),
+        "path": note.get("path"),
+        "suggested_next_command": note.get("suggested_next_command"),
     }
 
 
@@ -857,6 +886,29 @@ def _resolve_session_checkpoint(target: Path, checkpoint_id: str) -> tuple[dict[
     if len(matches) > 1:
         return None, f"phase session checkpoint id is ambiguous: {checkpoint_id}"
     return None, f"phase session checkpoint not found: {checkpoint_id}"
+
+
+def _resolve_session_recovery_note(target: Path, note_id: str) -> tuple[dict[str, Any] | None, str | None]:
+    target = target.expanduser().resolve()
+    notes = _read_session_recovery_notes(target)
+    if note_id == "latest":
+        return (notes[-1], None) if notes else (None, "phase session recovery note not found: latest")
+    wanted = _slug(note_id)
+    exact = _session_recovery_notes_root(target) / f"{wanted}.json"
+    if exact.is_file():
+        note = _read_json(exact)
+        if note is not None:
+            note.setdefault("path", str(exact))
+        return note, None
+    matches = [path for path in _session_recovery_notes_root(target).glob("*.json") if path.stem.startswith(wanted)]
+    if len(matches) == 1:
+        note = _read_json(matches[0])
+        if note is not None:
+            note.setdefault("path", str(matches[0]))
+        return note, None
+    if len(matches) > 1:
+        return None, f"phase session recovery note id is ambiguous: {note_id}"
+    return None, f"phase session recovery note not found: {note_id}"
 
 
 def _latest_checkpoint_for_session(target: Path, session_id: object) -> dict[str, Any] | None:
@@ -1275,6 +1327,116 @@ def session_checkpoint_import_issues(*, target: Path, checkpoint_id: str, dry_ru
         print(f"created: {payload['created_count']}")
         print(f"skipped: {payload['skipped_count']}")
         print(f"dismissed: {payload['dismissed_count']}")
+    return 0
+
+
+def session_recovery_note(
+    *,
+    target: Path,
+    session_id: str,
+    phase_id: str | None = None,
+    summary: str | None = None,
+    notes: list[str] | None = None,
+    evidence: list[str] | None = None,
+    json_output: bool = False,
+) -> int:
+    target = target.expanduser().resolve()
+    path, session, error = _resolve_session(target, session_id)
+    if session is None or path is None:
+        print(f"error: {error}", file=sys.stderr)
+        return 1
+    try:
+        next_payload = _session_next_payload(target, session)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    selected_phase_id = phase_id or next_payload["next_step"].get("phase_id") or session.get("current_phase_id")
+    created_at = _now().isoformat()
+    note_id = f"{_now().strftime('%Y%m%d-%H%M%S')}-session-recovery-note-{uuid4().hex[:6]}"
+    note_path = _session_recovery_notes_root(target) / f"{note_id}.json"
+    safe_notes = [str(item) for item in (notes or []) if str(item)]
+    safe_evidence = [str(item) for item in (evidence or []) if str(item)]
+    record = {
+        "schema_version": SCHEMA_VERSION,
+        "schema": _schema("phase-ledger-session-recovery-note"),
+        "target": str(target),
+        "note_id": note_id,
+        "session_id": session.get("session_id"),
+        "phase_range": session.get("phase_range"),
+        "phase_id": selected_phase_id,
+        "status": "open",
+        "summary": summary or str(next_payload["next_step"].get("detail") or "phase session recovery note recorded"),
+        "notes": safe_notes,
+        "evidence": safe_evidence,
+        "created_at": created_at,
+        "next_step": next_payload["next_step"],
+        "suggested_next_command": next_payload["suggested_next_command"],
+        "source_fingerprint": _source_fingerprint([], {"session_id": session.get("session_id"), "phase_id": selected_phase_id, "next_step": next_payload["next_step"], "summary": summary, "notes": safe_notes, "evidence": safe_evidence}),
+        "path": str(note_path),
+    }
+    _write_json(note_path, record)
+    references = session.get("recovery_note_references") if isinstance(session.get("recovery_note_references"), list) else []
+    references.append(_recovery_note_summary(record))
+    session["recovery_note_references"] = references[-50:]
+    session["latest_recovery_note"] = _recovery_note_summary(record)
+    session["updated_at"] = created_at
+    session["path"] = str(path)
+    _write_json(path, session)
+    if json_output:
+        print(json.dumps(record, indent=2, sort_keys=True))
+    else:
+        print(f"phase session recovery note: {note_id}")
+        print(f"session: {session.get('session_id')}")
+        print(f"phase: {selected_phase_id or 'none'}")
+        print(f"summary: {record['summary']}")
+    return 0
+
+
+def session_recovery_note_list(*, target: Path, session_id: str | None = None, limit: int = 20, json_output: bool = False) -> int:
+    target = target.expanduser().resolve()
+    notes = list(reversed(_read_session_recovery_notes(target)))
+    if session_id:
+        _path, session, error = _resolve_session(target, session_id)
+        if session is None:
+            print(f"error: {error}", file=sys.stderr)
+            return 1
+        resolved_session_id = str(session.get("session_id") or "")
+        notes = [note for note in notes if note.get("session_id") == resolved_session_id]
+    else:
+        resolved_session_id = None
+    summaries = [_recovery_note_summary(note) for note in notes[:limit]]
+    payload = {
+        "schema_version": SCHEMA_VERSION,
+        "schema": _schema("phase-ledger-session-recovery-note-list"),
+        "target": str(target),
+        "session_id": resolved_session_id,
+        "notes": summaries,
+        "note_count": len(summaries),
+        "suggested_next_command": "brigade work phases session recovery-notes show latest" if summaries else "brigade work phases session recovery-note latest",
+    }
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        print(f"phase session recovery notes: {len(summaries)}")
+        for note in summaries:
+            print(f"- {note.get('note_id')} [{note.get('status')}] phase={note.get('phase_id') or 'none'}")
+    return 0
+
+
+def session_recovery_note_show(*, target: Path, note_id: str, json_output: bool = False) -> int:
+    target = target.expanduser().resolve()
+    note, error = _resolve_session_recovery_note(target, note_id)
+    if note is None:
+        print(f"error: {error}", file=sys.stderr)
+        return 1
+    if json_output:
+        print(json.dumps(note, indent=2, sort_keys=True))
+    else:
+        print(f"phase session recovery note: {note.get('note_id')}")
+        print(f"session: {note.get('session_id')}")
+        print(f"phase: {note.get('phase_id') or 'none'}")
+        print(f"status: {note.get('status')}")
+        print(f"summary: {note.get('summary')}")
     return 0
 
 
@@ -1776,6 +1938,21 @@ def _session_activity_payload(target: Path, session: dict[str, Any]) -> dict[str
                 summary=str(checkpoint.get("summary") or "phase session checkpoint recorded"),
                 path=checkpoint.get("path"),
                 suggested=checkpoint.get("suggested_next_command"),
+            )
+        )
+    for note in _read_session_recovery_notes(target):
+        if note.get("session_id") != session.get("session_id"):
+            continue
+        events.append(
+            _activity_event(
+                timestamp=note.get("created_at"),
+                event_type="session-recovery-note",
+                local_id=note.get("note_id"),
+                phase_id=note.get("phase_id"),
+                status=note.get("status"),
+                summary=str(note.get("summary") or "phase session recovery note recorded"),
+                path=note.get("path"),
+                suggested=note.get("suggested_next_command"),
             )
         )
     if isinstance(session.get("closeout"), dict):
