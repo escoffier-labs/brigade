@@ -14,7 +14,7 @@ Harden AFK session execution into a more useful daily-driver, release, and recov
 | 227 | List and inspect phase session checkpoints. |
 | 228 | Compare phase session checkpoints against current session state. |
 | 229 | Import checkpoint blockers into the work inbox. Implemented with `brigade work phases session checkpoints import-issues`, dry-run support, and deduped `source: phase-session-checkpoint` imports. |
-| 230 | Surface checkpoints in session next and resume. |
+| 230 | Surface checkpoints in session next and resume. Implemented with latest checkpoint summaries and issue counts in both outputs. |
 | 231 | Add session recovery notes. |
 | 232 | Add recovery note closeout. |
 | 233 | Add daily phase checkpoint candidates. |

@@ -111,6 +111,7 @@ Implementation scope:
 - Add `brigade work phases session next/resume` so AFK sessions can be resumed from the safest next local command without implicit execution.
 - Add `brigade work phases session checkpoint` so AFK sessions can record safe local recovery points without executing suggested commands.
 - Add checkpoint inspection and import routing so blocked or stale checkpoints can become normal reviewed work inbox tasks without promotion or execution.
+- Keep `session next` and `session resume` checkpoint-aware so wrappers see recovery metadata and stale checkpoint issue counts in the normal AFK resume path.
 - Add `brigade work phases session report build/list/show` for local session evidence bundles.
 - Add `brigade work phases session activity` for read-only chronological AFK session timelines.
 - Add `brigade work phases session progress` for read-only session completion, blocker, test, commit, push, and remaining-step summaries.

@@ -173,6 +173,8 @@ Each report includes `PHASE_REPORT.md` and `PHASE_EVIDENCE.json` with range stat
 
 `brigade work phases session checkpoints import-issues <checkpoint-id|latest>` routes blocked or stale checkpoint issues into deduped `source: phase-session-checkpoint` work imports. The records preserve checkpoint id, session id, phase id, issue type, source fingerprint, safe summary, and suggested next command. It never promotes or runs the imported work.
 
+`brigade work phases session next` and `brigade work phases session resume` include the latest checkpoint summary and checkpoint issue count when a session has recovery metadata. This keeps wrapper-facing resume decisions checkpoint-aware without requiring an extra command before every AFK resume.
+
 `brigade work phases session activity <session-id|latest>` produces a chronological read-only activity ledger from phase starts, completions, tests, commits, reports, compare summaries, actions, imports, closeouts, handoff drafts, and session resume events.
 
 `brigade work phases session progress <session-id|latest>` summarizes percent complete, status counts, blockers, current phase, next command, test coverage, commit and push coverage, and estimated remaining local steps. It is read-only.

@@ -859,6 +859,14 @@ def _resolve_session_checkpoint(target: Path, checkpoint_id: str) -> tuple[dict[
     return None, f"phase session checkpoint not found: {checkpoint_id}"
 
 
+def _latest_checkpoint_for_session(target: Path, session_id: object) -> dict[str, Any] | None:
+    wanted = str(session_id or "")
+    if not wanted:
+        return None
+    matches = [checkpoint for checkpoint in _read_session_checkpoints(target) if checkpoint.get("session_id") == wanted]
+    return matches[-1] if matches else None
+
+
 def _resolve_session(target: Path, session_id: str) -> tuple[Path | None, dict[str, Any] | None, str | None]:
     target = target.expanduser().resolve()
     if session_id == "latest":
@@ -1270,6 +1278,32 @@ def session_checkpoint_import_issues(*, target: Path, checkpoint_id: str, dry_ru
     return 0
 
 
+def _checkpoint_state_for_session_next(target: Path, session: dict[str, Any], step: dict[str, Any]) -> dict[str, Any] | None:
+    checkpoint = _latest_checkpoint_for_session(target, session.get("session_id"))
+    if checkpoint is None:
+        return None
+    checks: list[dict[str, Any]] = []
+    saved_step = checkpoint.get("next_step") if isinstance(checkpoint.get("next_step"), dict) else {}
+    if checkpoint.get("status") == "blocked":
+        checks.append(_check("block", "phase_session_checkpoint_blocked", str(checkpoint.get("summary") or "checkpoint is marked blocked"), phase_id=checkpoint.get("phase_id"), suggested=checkpoint.get("suggested_next_command")))
+    if saved_step.get("step_type") != step.get("step_type"):
+        checks.append(_check("warn", "phase_session_checkpoint_step_changed", f"{saved_step.get('step_type')} -> {step.get('step_type')}", phase_id=step.get("phase_id"), suggested="brigade work phases session checkpoint latest"))
+    if saved_step.get("phase_id") != step.get("phase_id"):
+        checks.append(_check("warn", "phase_session_checkpoint_phase_changed", f"{saved_step.get('phase_id')} -> {step.get('phase_id')}", phase_id=step.get("phase_id"), suggested="brigade work phases session checkpoint latest"))
+    if checkpoint.get("suggested_next_command") != step.get("suggested_next_command"):
+        checks.append(_check("warn", "phase_session_checkpoint_command_changed", "saved suggested command differs from current session next command", phase_id=step.get("phase_id"), suggested="brigade work phases session next latest"))
+    current_fingerprint = _source_fingerprint([], {"session_id": session.get("session_id"), "phase_id": checkpoint.get("phase_id"), "status": checkpoint.get("status"), "next_step": step})
+    if checkpoint.get("source_fingerprint") != current_fingerprint:
+        checks.append(_check("warn", "phase_session_checkpoint_fingerprint_changed", "checkpoint source fingerprint differs from current session state", phase_id=step.get("phase_id"), suggested="brigade work phases session checkpoint latest"))
+    issues = [check for check in checks if check["status"] != "ok"]
+    return {
+        "latest_checkpoint": _checkpoint_summary(checkpoint),
+        "issue_count": len(issues),
+        "top_issue": issues[0] if issues else None,
+        "suggested_next_command": "brigade work phases session checkpoints import-issues latest" if issues else "brigade work phases session checkpoints show latest",
+    }
+
+
 def session_closeout(*, target: Path, session_id: str, status: str = "reviewed", reason: str | None = None, json_output: bool = False) -> int:
     if status not in PHASE_SESSION_CLOSEOUT_STATUSES:
         print(f"error: --status must be one of {sorted(PHASE_SESSION_CLOSEOUT_STATUSES)}", file=sys.stderr)
@@ -1402,6 +1436,7 @@ def _session_next_payload(target: Path, session: dict[str, Any]) -> dict[str, An
                 "detail": "all phases are done or deferred, but the session is not reviewed",
                 "suggested_next_command": f"brigade work phases session closeout {session.get('session_id')}",
             }
+    checkpoint_state = _checkpoint_state_for_session_next(target, session, step)
     return {
         "schema_version": SCHEMA_VERSION,
         "schema": _schema("phase-ledger-session-next"),
@@ -1410,6 +1445,7 @@ def _session_next_payload(target: Path, session: dict[str, Any]) -> dict[str, An
         "phase_range": phase_range,
         "missing_phase_ids": missing,
         "next_step": step,
+        "checkpoint": checkpoint_state,
         "suggested_next_command": step["suggested_next_command"],
     }
 
@@ -1432,6 +1468,10 @@ def session_next(*, target: Path, session_id: str, json_output: bool = False) ->
         print(f"phase session next: {payload['session_id']}")
         print(f"step: {step['step_type']}")
         print(f"detail: {step['detail']}")
+        checkpoint = payload.get("checkpoint") if isinstance(payload.get("checkpoint"), dict) else None
+        if checkpoint:
+            latest = checkpoint.get("latest_checkpoint") if isinstance(checkpoint.get("latest_checkpoint"), dict) else {}
+            print(f"checkpoint: {latest.get('checkpoint_id')} issues={checkpoint.get('issue_count')}")
         print(f"next: {payload['suggested_next_command']}")
     return 0
 
@@ -1450,6 +1490,7 @@ def session_resume(*, target: Path, session_id: str, json_output: bool = False) 
     resume_event = {
         "resumed_at": _now().isoformat(),
         "next_step": next_payload["next_step"],
+        "checkpoint": next_payload.get("checkpoint"),
         "suggested_next_command": next_payload["suggested_next_command"],
     }
     history = session.get("resume_history") if isinstance(session.get("resume_history"), list) else []
@@ -1474,6 +1515,10 @@ def session_resume(*, target: Path, session_id: str, json_output: bool = False) 
     else:
         print(f"phase session resume: {session.get('session_id')}")
         print("executed: false")
+        checkpoint = next_payload.get("checkpoint") if isinstance(next_payload.get("checkpoint"), dict) else None
+        if checkpoint:
+            latest = checkpoint.get("latest_checkpoint") if isinstance(checkpoint.get("latest_checkpoint"), dict) else {}
+            print(f"checkpoint: {latest.get('checkpoint_id')} issues={checkpoint.get('issue_count')}")
         print(f"next: {payload['suggested_next_command']}")
     return 0
 

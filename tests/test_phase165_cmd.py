@@ -575,6 +575,17 @@ def test_phase_session_checkpoint_records_recovery_metadata(tmp_path, capsys):
     assert "phase_session_checkpoint_step_changed" in names
     assert "phase_session_checkpoint_fingerprint_changed" in names
 
+    assert cli.main(["work", "phases", "session", "next", session["session_id"], "--target", str(tmp_path), "--json"]) == 0
+    next_with_checkpoint = json.loads(capsys.readouterr().out)
+    assert next_with_checkpoint["checkpoint"]["latest_checkpoint"]["checkpoint_id"] == checkpoint["checkpoint_id"]
+    assert next_with_checkpoint["checkpoint"]["issue_count"] >= 1
+    assert next_with_checkpoint["checkpoint"]["suggested_next_command"] == "brigade work phases session checkpoints import-issues latest"
+
+    assert cli.main(["work", "phases", "session", "resume", session["session_id"], "--target", str(tmp_path), "--json"]) == 0
+    resume_with_checkpoint = json.loads(capsys.readouterr().out)
+    assert resume_with_checkpoint["resume"]["checkpoint"]["latest_checkpoint"]["checkpoint_id"] == checkpoint["checkpoint_id"]
+    assert resume_with_checkpoint["resume"]["checkpoint"]["issue_count"] >= 1
+
     assert cli.main(["work", "phases", "session", "checkpoints", "import-issues", checkpoint["checkpoint_id"], "--target", str(tmp_path), "--dry-run", "--json"]) == 0
     dry_run = json.loads(capsys.readouterr().out)
     assert dry_run["dry_run"] is True
