@@ -5,7 +5,13 @@ Five minutes from clone to a working agent kitchen.
 ## 1. Install
 
 ```bash
-pipx install git+https://github.com/solomonneas/solo-mise
+pipx install brigade-cli
+```
+
+To track the latest `main` branch instead of the latest package release:
+
+```bash
+pipx install git+https://github.com/escoffier-labs/brigade
 ```
 
 If you do not have `pipx`:
@@ -17,10 +23,10 @@ python3 -m pipx ensurepath
 
 ## First install
 
-The fastest path is to run `solo-mise init` with no flags and answer the prompts:
+The fastest path is to run `brigade init` with no flags and answer the prompts:
 
 ```bash
-$ solo-mise init --target ~/agent-kitchen
+$ brigade init --target ~/agent-kitchen
 
 Which harnesses do you use? (type numbers separated by space/comma to toggle, enter to confirm)
   [x] 1. Claude Code
@@ -44,23 +50,23 @@ Pass flags directly to skip the prompt:
 
 ```bash
 # Claude Code + Codex + OpenClaw, full workspace
-solo-mise init --target ~/agent-kitchen \
+brigade init --target ~/agent-kitchen \
   --depth workspace \
   --harnesses claude,codex,openclaw
 
 # Codex-only project, minimal install
-solo-mise init --target ./my-project --depth repo --harnesses codex
+brigade init --target ./my-project --depth repo --harnesses codex
 
 # Generic layout, no harness-specific files
-solo-mise init --target ./my-project --harnesses none
+brigade init --target ./my-project --harnesses none
 ```
 
 ## Verifying
 
-After install, `solo-mise doctor --target <path>` reports the apparent harness shape and checks every configured inbox and adapter:
+After install, `brigade doctor --target <path>` reports the apparent harness shape and checks every configured inbox and adapter:
 
 ```
-solo-mise doctor: target /home/you/agent-kitchen
+brigade doctor: target /home/you/agent-kitchen
   harnesses: claude, codex, openclaw (owner=openclaw, depth=workspace)
   [ok]   bootstrap: AGENTS.md   /home/you/agent-kitchen/AGENTS.md
   [ok]   handoff: claude inbox  /home/you/agent-kitchen/.claude/memory-handoffs
@@ -77,13 +83,13 @@ To change which harnesses are installed on an existing target:
 
 ```bash
 # Add a harness
-solo-mise reconfigure --target . --harnesses claude,codex
+brigade reconfigure --target . --harnesses claude,codex
 
 # Drop one (without removing its files)
-solo-mise reconfigure --target . --harnesses claude
+brigade reconfigure --target . --harnesses claude
 
 # Drop one and remove its files
-solo-mise reconfigure --target . --harnesses claude --prune
+brigade reconfigure --target . --harnesses claude --prune
 ```
 
 ## The handoff flow
@@ -99,3 +105,4 @@ See the [Solo Cookbook](https://github.com/solomonneas/solos-cookbook) for the l
 - Wire the ingester on a cron or a manual end-of-day workflow.
 - Add a memory-care staleness scan when your card set starts to matter. See `memory/cards/memory-care-staleness.md`.
 - If you use TokenJuice, wire Claude Code and Codex hooks deliberately and tell agents what the wrapper means. See `memory/cards/tokenjuice-output-compaction.md`.
+- Run `brigade work bootstrap` inside active repos when you want the dogfood-backed daily work loop, scanner inbox, and local evidence receipts.

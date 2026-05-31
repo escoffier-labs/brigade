@@ -37,7 +37,7 @@ brigade roadmap commands --write
 - `brigade security`: 14 command path(s)
 - `brigade status`: 1 command path(s)
 - `brigade tools`: 46 command path(s)
-- `brigade work`: 84 command path(s)
+- `brigade work`: 133 command path(s)
 
 ## Commands
 
@@ -352,21 +352,70 @@ brigade roadmap commands --write
 - `brigade work list`
 - `brigade work next`
 - `brigade work note`
+- `brigade work phases actions archive`
+- `brigade work phases actions build`
+- `brigade work phases actions defer`
+- `brigade work phases actions done`
+- `brigade work phases actions import-issues`
+- `brigade work phases actions list`
+- `brigade work phases actions plan`
+- `brigade work phases actions show`
+- `brigade work phases actions start`
+- `brigade work phases closeout`
+- `brigade work phases compare`
 - `brigade work phases complete`
 - `brigade work phases defer`
 - `brigade work phases doctor`
+- `brigade work phases evidence add`
+- `brigade work phases goal scaffold`
+- `brigade work phases handoff`
 - `brigade work phases import-issues`
 - `brigade work phases init`
 - `brigade work phases list`
 - `brigade work phases next`
 - `brigade work phases plan`
+- `brigade work phases privacy`
+- `brigade work phases reconcile`
 - `brigade work phases report build`
+- `brigade work phases report closeout`
+- `brigade work phases report compare`
 - `brigade work phases report list`
 - `brigade work phases report show`
 - `brigade work phases schema`
+- `brigade work phases session activity`
+- `brigade work phases session audit`
+- `brigade work phases session checkpoint`
+- `brigade work phases session checkpoints archive`
+- `brigade work phases session checkpoints compare`
+- `brigade work phases session checkpoints import-issues`
+- `brigade work phases session checkpoints list`
+- `brigade work phases session checkpoints show`
+- `brigade work phases session closeout`
+- `brigade work phases session gate`
+- `brigade work phases session handoffs`
+- `brigade work phases session import-issues`
+- `brigade work phases session list`
+- `brigade work phases session next`
+- `brigade work phases session privacy`
+- `brigade work phases session progress`
+- `brigade work phases session protocol`
+- `brigade work phases session recovery-note`
+- `brigade work phases session recovery-notes closeout`
+- `brigade work phases session recovery-notes list`
+- `brigade work phases session recovery-notes show`
+- `brigade work phases session report build`
+- `brigade work phases session report list`
+- `brigade work phases session report show`
+- `brigade work phases session resume`
+- `brigade work phases session risk`
+- `brigade work phases session show`
+- `brigade work phases session start`
+- `brigade work phases session verification`
 - `brigade work phases show`
 - `brigade work phases start`
 - `brigade work phases status`
+- `brigade work phases verify plan`
+- `brigade work phases verify record`
 - `brigade work recap`
 - `brigade work resume`
 - `brigade work review closeout`

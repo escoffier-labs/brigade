@@ -1,3 +1,3 @@
-"""Solomon's Mise en Place: installable starter kit for an agent kitchen."""
+"""Brigade: local operator-system CLI for agent workspaces."""
 
 __version__ = "0.6.0"

@@ -13,32 +13,31 @@ Target: 100% green. No xfail in main suite.
 ## 2. Content-guard
 
 ```bash
-PYTHONPATH=$HOME/repos/content-guard/src python3 -m content_guard scan . \
-  --policy $HOME/repos/content-guard/policies/public-repo.json
+brigade security template-audit --target .
 ```
 
-Target: `Clean.` or warn-only output. No `BLOCK` findings.
+Target: no blocker findings.
 
 ## 3. Local install smoke
 
 ```bash
-rm -rf /tmp/solo-mise-rc
+rm -rf /tmp/brigade-rc
 pipx install --force "$PWD"
-solo-mise --version
-solo-mise init --target /tmp/solo-mise-rc --profile workspace
-solo-mise doctor --target /tmp/solo-mise-rc
+brigade --version
+brigade init --target /tmp/brigade-rc --depth workspace --harnesses claude,codex,openclaw
+brigade doctor --target /tmp/brigade-rc
 ```
 
-Target: zero failed checks. Manual checks for content-guard / OpenClaw are expected when those tools are not installed.
+Target: zero failed checks. Manual checks for optional external tools are expected when those tools are not installed.
 
 ## 4. Version bump
 
 Edit:
 
 - `pyproject.toml` → `[project] version = "X.Y.Z"`
-- `src/solo_mise/__init__.py` → `__version__ = "X.Y.Z"`
-- `src/solo_mise/templates/policies/*.json` → `_solo_mise_version` fields
-- `src/solo_mise/templates/hermes/*.json` → `_solo_mise_version` fields
+- `src/brigade/__init__.py` → `__version__ = "X.Y.Z"`
+- `src/brigade/templates/policies/*.json` → `_brigade_version` fields, if present
+- `src/brigade/templates/hermes/*.json` → `_brigade_version` fields, if present
 
 Bump both numbers together. Mismatches break `--version` reporting.
 
@@ -54,17 +53,18 @@ git push origin vX.Y.Z
 ## 6. Verify pipx install from tag
 
 ```bash
-pipx uninstall solo-mise
-pipx install git+https://github.com/solomonneas/solo-mise@vX.Y.Z
-solo-mise --version
+pipx uninstall brigade-cli
+pipx install git+https://github.com/escoffier-labs/brigade@vX.Y.Z
+brigade --version
 ```
 
-Target: prints `solo-mise X.Y.Z`.
+Target: prints `brigade X.Y.Z`.
 
 ## 7. Update README install line
 
 If the install command in README points at `main`, leave it. If it points at a tag, bump it.
 
-## 8. Cookbook handoff
+## 8. Docs and handoff
 
-Update the cookbook pointer in `~/repos/solos-cookbook/README.md` if anything user-visible changed (new profile, new command, new flag).
+Update README, QUICKSTART, CHANGELOG, and `docs/command-inventory.md` when the release adds or changes user-visible commands.
+Create a Memory Handoff in `.claude/memory-handoffs/` for durable release workflow changes, root causes, or setup gotchas.

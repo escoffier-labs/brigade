@@ -20,9 +20,10 @@
 </p>
 
 <p align="center">
-  <code>brigade</code> is the operator-system CLI for agent workspaces.
-  It gives you the workspace skeleton, handoff inbox, conservative ingester,
-  and publish guards that make a multi-agent setup usable.
+  <code>brigade</code> is a local operator-system CLI for agent workspaces.
+  It bootstraps the workspace, runs bounded multi-agent work, routes scanner
+  findings into reviewable queues, records release evidence, and keeps publish
+  decisions manual.
 </p>
 
 ## What this is
@@ -31,25 +32,29 @@ Mise en place means "everything in its place before the work starts."
 In a kitchen, that is chopped mirepoix, clean pans, labels, and a station that does not make you hunt for salt mid-service.
 For agents, it is the same idea: rules, memory, tools, handoff inboxes, publish guards, and boring verification already laid out before the session gets expensive.
 
-This package lays down a clean starting point for an agent workspace or a repo that needs durable memory handoffs.
+This package lays down a clean starting point for an agent workspace or a repo that needs durable memory handoffs, local work receipts, scanner inboxes, portable tool review, repo-fleet evidence, and release gates.
 It is meant for people running real tools, real docs, and real automation across OpenClaw, Claude Code, Codex, Hermes, or a similar harness.
 
 The cookbook explains the why. This package gives you the kitchen.
 
 ## What you get
 
-- sanitized bootstrap files for agent behavior, safety, tools, identity, and memory
-- a canonical memory layout where one configured owner holds durable knowledge
-- writer-specific Memory Handoff inboxes, such as `.claude/memory-handoffs/` for Claude Code and `.codex/memory-handoffs/` for Codex
-- starter memory cards and routing rules
-- repo-shareable workflow rules for issue-backed and acceptance-driven work loops
-- multi-workspace handoff patterns for people administering more than one agent setup
-- memory-care freshness metadata checks so durable cards do not quietly rot
-- TokenJuice output-compaction guidance for Claude Code and Codex, including wrapper notes and savings expectations
-- content-guard publish gates so private infrastructure does not leak into public docs
-- built-in agent workspace security scan for secrets, permissions, hooks, MCP configs, supply-chain patterns, and instruction risks
-- adapter fragments for OpenClaw (tested), Hermes (stubbed), and generic harnesses
-- doctor checks that prove the system is wired before you trust it
+Brigade has grown from a bootstrap kit into a local control plane for agent work. The current public surface includes:
+
+- Bootstrap and memory layout: sanitized `AGENTS.md`, safety, tool, identity, user, memory, rule, handoff, and harness files with a canonical memory-owner model.
+- Multi-harness handoffs: `.claude/memory-handoffs/`, `.codex/memory-handoffs/`, source coverage checks, linting, reconciliation receipts, issue imports, sync repair, and archive closeouts.
+- Work loop: dogfood runs, work sessions, task ledgers, issue imports, acceptance criteria, verification receipts, review closeouts, sweep closeouts, and work closeout receipts.
+- Scanner inbox: explicit local scanner registry, scanner runs, scanner sweeps, import validation, provenance checks, dedupe, dismiss-until-changed behavior, handoff promotion, and inbox hygiene.
+- Daily driver: `brigade daily status/plan/review/run/closeout` plus approvals, resume, repair, unblock, protocol, telemetry, and hardening audits for one bounded local action at a time.
+- Operator center: local status, activity, reviews, templates, reports, report diffs, action queues, readiness closeouts, and wrapper-facing schemas.
+- Release gates: release readiness receipts, CI deprecation checks, install-smoke receipts, release candidates, candidate audit and compare, candidate closeouts, manual-only publish plans, and schema contracts.
+- Repo fleet: local repo discovery plans, repo health scans, fleet sweeps, reports, actions, action dispatch, context packs, release trains, train evidence, waivers, manifests, audits, and ready gates.
+- AFK phase ledger: phase records, reports, closeouts, compares, action queues, sessions, checkpoints, recovery notes, risk, verification, privacy, handoff, progress, protocol, audit, gate, and release evidence.
+- Portable tool catalog: tool discovery, contracts, call planning, approval queues, explicit script and local MCP execution, run receipts, replay candidates, checkpoints, runtimes, host-local policy, parity, packs, sync, and projection health.
+- Local producers: memory care, chat export sweeps, backup health, code review, context packs, project consolidation, learning candidates and replay, and security scans.
+- Security and publish guards: content-guard integration, template audit, SARIF output, suppressions, accepted-risk closeouts, policy presets, prompt and instruction checks, MCP checks, supply-chain checks, and redacted reports.
+
+The common rule is deliberate friction: Brigade writes local receipts and review queues, but it does not start daemons, mutate remotes, edit canonical memory, run arbitrary commands, publish releases, or auto-promote findings without an explicit operator command.
 
 Browse the public template index in [`templates/`](templates/).
 The installable source files live under `src/brigade/templates/`; root workspace files are local dogfood state and stay ignored.
@@ -455,6 +460,43 @@ brigade daily approvals reject <approval-id> --reason "not now"
 brigade daily approvals hold <approval-id> --reason "needs review"
 brigade daily approvals compare <approval-id>
 brigade daily approvals archive --consumed
+brigade work phases init
+brigade work phases plan --range 226-250
+brigade work phases status
+brigade work phases start <phase-id>
+brigade work phases evidence add <phase-id> --note "recorded safe evidence"
+brigade work phases verify plan <phase-id>
+brigade work phases verify record <phase-id> --command "pytest" --status passed
+brigade work phases reconcile <phase-id>
+brigade work phases privacy <phase-id>
+brigade work phases handoff <phase-id>
+brigade work phases compare <phase-id>
+brigade work phases closeout <phase-id> --status reviewed
+brigade work phases report build
+brigade work phases report compare latest
+brigade work phases actions plan
+brigade work phases actions build
+brigade work phases actions import-issues
+brigade work phases session start --range 226-250
+brigade work phases session checkpoint latest --summary "safe recovery point"
+brigade work phases session checkpoints list
+brigade work phases session checkpoints compare latest
+brigade work phases session checkpoints import-issues
+brigade work phases session recovery-note latest --summary "safe resume context"
+brigade work phases session recovery-notes list
+brigade work phases session next latest
+brigade work phases session resume latest
+brigade work phases session risk latest
+brigade work phases session verification latest
+brigade work phases session privacy latest
+brigade work phases session handoffs latest
+brigade work phases session progress latest
+brigade work phases session activity latest
+brigade work phases session protocol latest
+brigade work phases session audit latest
+brigade work phases session gate latest
+brigade work phases session report build latest
+brigade work phases goal scaffold --range 226-250
 brigade work run
 brigade work run --queue-next
 brigade work run "review today's changes"
