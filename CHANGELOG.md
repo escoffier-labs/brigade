@@ -31,6 +31,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `brigade work phases session protocol <session-id|latest>` for a wrapper-safe AFK resume protocol that summarizes next step, risk, progress, checkpoint state, completion gate, allowed command prefixes, forbidden actions, and whether `session resume` is safe to record.
 - `brigade release candidate compare` now detects phase session checkpoint, checkpoint-compare, and completion-gate drift after a candidate bundle is built.
 - `brigade work phases session audit <session-id|latest>` for a read-only AFK session self-audit across resume protocol, progress, risk, verification, privacy, handoff, and completion-gate evidence.
+- Phase 226-250 AFK hardening closeout recorded the final session gate path for checkpoint, recovery, wrapper protocol, release compare, and self-audit work.
 - `brigade work phases session start/list/show/closeout` for local AFK phase execution sessions that track a requested range, current phase, phase status, commit and test counts, report references, closeout state, and next command.
 - `brigade work phases session next/resume` for read-only or metadata-only AFK session recovery that identifies the safest next phase command without executing it.
 - `brigade work phases session report build/list/show` for local Markdown and JSON evidence bundles over phase execution sessions.
