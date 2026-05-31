@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `brigade work phases session progress <session-id|latest>` for read-only percent complete, status counts, blockers, current phase, next command, test coverage, commit and push coverage, and remaining-step summaries.
 - `brigade work phases session import-issues <session-id|latest>` for routing unresolved AFK session blockers into deduped `source: phase-session` work imports.
 - `brigade work phases goal scaffold --range <range>` for local editable `/goal` drafts from ledger state, session evidence, blockers, and roadmap references.
+- `brigade work phases session gate <session-id|latest>` for the final read-only AFK session claim check, with release doctor and candidate evidence carrying the latest gate result.
 - `brigade daily status/plan/review/run/doctor` now surface active phase sessions, and daily run can build one phase session report or close out one completed reviewed session as its single safe step.
 - Release doctor, release candidate evidence, center status/reviews, and work brief/doctor now include compact phase session and session report state.
 - `brigade work phases evidence add <phase-id>` for appending local evidence attachments to phase records, with doctor warnings for missing referenced evidence files.

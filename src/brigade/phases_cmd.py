@@ -25,7 +25,10 @@ STALE_UNREVIEWED_COMPLETED_HOURS = 24
 PRIVACY_PATTERNS = {
     "private_path": re.compile(r"/(?:home|Users|private|mnt|Volumes)/[^\s`\"'<>]+"),
     "token_like": re.compile(r"(?i)(token|secret|password|api[_-]?key)\s*[=:]\s*[^\s`\"'<>]+"),
-    "private_url": re.compile(r"https?://[^\s`\"'<>]+"),
+    "private_url": re.compile(
+        r"(?i)https?://(?:local"
+        r"host|127\.0\.0\.1|10\.|192\.168\.|172\.(?:1[6-9]|2\d|3[01])|[^/\s`\"'<>]*(?:internal|private|corp|lan|local|nas)[^/\s`\"'<>]*)[^\s`\"'<>]*"
+    ),
 }
 
 
@@ -669,6 +672,13 @@ def _read_reports(target: Path) -> list[dict[str, Any]]:
 
 def _latest_report(target: Path) -> dict[str, Any] | None:
     reports = _read_reports(target)
+    if not reports:
+        return None
+    return sorted(reports, key=lambda item: str(item.get("created_at") or ""))[-1]
+
+
+def _latest_report_for_range(target: Path, phase_range: str) -> dict[str, Any] | None:
+    reports = [report for report in _read_reports(target) if report.get("phase_range") == phase_range]
     if not reports:
         return None
     return sorted(reports, key=lambda item: str(item.get("created_at") or ""))[-1]
@@ -1674,6 +1684,122 @@ def session_import_issues(*, target: Path, session_id: str, dry_run: bool = Fals
     return 0
 
 
+def _record_has_clean_privacy(record: dict[str, Any]) -> bool:
+    checks = record.get("privacy_checks") if isinstance(record.get("privacy_checks"), list) else []
+    return bool(checks and isinstance(checks[-1], dict) and checks[-1].get("status") == "clean")
+
+
+def _record_has_linted_handoff(record: dict[str, Any]) -> bool:
+    handoffs = record.get("phase_handoffs") if isinstance(record.get("phase_handoffs"), list) else []
+    for item in reversed(handoffs):
+        if not isinstance(item, dict):
+            continue
+        lint = item.get("lint") if isinstance(item.get("lint"), dict) else {}
+        if lint.get("status") == "passed":
+            return True
+    deferred = " ".join(str(item).casefold() for item in record.get("deferred_items") or [])
+    return "handoff" in deferred
+
+
+def _latest_session_report_for_session(target: Path, session_id: object) -> dict[str, Any] | None:
+    reports = []
+    for report in _read_session_reports(target):
+        session_summary = report.get("session") if isinstance(report.get("session"), dict) else {}
+        if session_summary.get("session_id") == session_id:
+            reports.append(report)
+    return reports[-1] if reports else None
+
+
+def _gate_check(status: str, name: str, detail: str, *, phase_id: object = None, suggested: str | None = None) -> dict[str, Any]:
+    return {
+        "status": status,
+        "name": name,
+        "detail": detail,
+        "phase_id": phase_id,
+        "suggested_next_command": suggested or "brigade work phases session next latest",
+    }
+
+
+def _session_gate_payload(target: Path, session: dict[str, Any]) -> dict[str, Any]:
+    phase_range = str(session.get("phase_range") or "")
+    records, missing = _session_phase_records(target, phase_range)
+    checks: list[dict[str, Any]] = []
+    if missing:
+        checks.append(_gate_check("block", "phase_session_gate_missing_records", f"missing phase record(s): {', '.join(missing)}", suggested=f"brigade work phases plan --range {phase_range}"))
+    for record in records:
+        phase_id = record.get("phase_id")
+        status = str(record.get("status") or "pending")
+        if status not in DONE_STATUSES | {"deferred"}:
+            checks.append(_gate_check("block", "phase_session_gate_phase_open", f"{phase_id} status is {status}", phase_id=phase_id, suggested=f"brigade work phases show {phase_id}"))
+            continue
+        if status == "deferred":
+            continue
+        if not record.get("tests_run"):
+            checks.append(_gate_check("block", "phase_session_gate_missing_tests", f"{phase_id} has no recorded tests", phase_id=phase_id, suggested=f"brigade work phases verify plan {phase_id}"))
+        if not record.get("commit_hash"):
+            checks.append(_gate_check("block", "phase_session_gate_missing_commit", f"{phase_id} has no commit hash", phase_id=phase_id, suggested=f"brigade work phases complete {phase_id} --commit <hash>"))
+        if not record.get("push_ref"):
+            checks.append(_gate_check("block", "phase_session_gate_missing_push_ref", f"{phase_id} has no push ref", phase_id=phase_id, suggested=f"brigade work phases complete {phase_id} --push-ref <ref>"))
+        if not _record_has_clean_privacy(record):
+            checks.append(_gate_check("block", "phase_session_gate_missing_privacy_check", f"{phase_id} has no clean privacy check", phase_id=phase_id, suggested=f"brigade work phases privacy {phase_id}"))
+        if not _record_has_linted_handoff(record):
+            checks.append(_gate_check("block", "phase_session_gate_missing_handoff", f"{phase_id} has no linted handoff or handoff deferral", phase_id=phase_id, suggested=f"brigade work phases handoff {phase_id} --lint"))
+    phase_report = _latest_report_for_range(target, phase_range)
+    if phase_report is None:
+        checks.append(_gate_check("block", "phase_session_gate_missing_phase_report", "no phase report exists for the session range", suggested=f"brigade work phases report build --range {phase_range}"))
+    else:
+        compare = _report_compare_summary(target, phase_report)
+        if compare and int(compare.get("issue_count") or 0) > 0:
+            top = compare.get("top_issue") if isinstance(compare.get("top_issue"), dict) else {}
+            checks.append(_gate_check("block", "phase_session_gate_compare_not_clean", str(top.get("name") or "phase report compare has issues"), suggested=compare.get("suggested_next_command")))
+    session_report = _latest_session_report_for_session(target, session.get("session_id"))
+    if session_report is None:
+        checks.append(_gate_check("block", "phase_session_gate_missing_session_report", "no session report exists", suggested=f"brigade work phases session report build {session.get('session_id')}"))
+    closeout = session.get("closeout") if isinstance(session.get("closeout"), dict) else {}
+    if closeout.get("status") != "reviewed":
+        checks.append(_gate_check("block", "phase_session_gate_missing_reviewed_closeout", "session closeout is not reviewed", suggested=f"brigade work phases session closeout {session.get('session_id')} --status reviewed"))
+    if not checks:
+        checks.append(_gate_check("ok", "phase_session_gate_ready", "phase session satisfies completion gate", suggested="brigade work phases session show latest"))
+    blockers = [check for check in checks if check.get("status") != "ok"]
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "schema": _schema("phase-ledger-session-gate"),
+        "target": str(target),
+        "session_id": session.get("session_id"),
+        "phase_range": phase_range,
+        "safe_to_claim_complete": not blockers,
+        "checks": checks,
+        "blocker_count": len(blockers),
+        "top_blocker": blockers[0] if blockers else None,
+        "phase_report": {"report_id": phase_report.get("report_id"), "path": phase_report.get("path")} if isinstance(phase_report, dict) else None,
+        "session_report": {"report_id": session_report.get("report_id"), "path": session_report.get("path")} if isinstance(session_report, dict) else None,
+        "suggested_next_command": blockers[0]["suggested_next_command"] if blockers else "brigade work phases session show latest",
+    }
+
+
+def session_gate(*, target: Path, session_id: str, json_output: bool = False) -> int:
+    target = target.expanduser().resolve()
+    _path, session, error = _resolve_session(target, session_id)
+    if session is None:
+        print(f"error: {error}", file=sys.stderr)
+        return 1
+    try:
+        payload = _session_gate_payload(target, session)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        print(f"phase session gate: {payload['session_id']}")
+        print(f"safe: {str(payload['safe_to_claim_complete']).lower()}")
+        print(f"blockers: {payload['blocker_count']}")
+        print(f"next: {payload['suggested_next_command']}")
+        for check in payload["checks"]:
+            print(f"[{check['status']}] {check['name']}: {check['detail']}")
+    return 0
+
+
 def _goal_scaffold_markdown(payload: dict[str, Any]) -> str:
     blockers = payload.get("blockers") if isinstance(payload.get("blockers"), list) else []
     records = payload.get("records") if isinstance(payload.get("records"), list) else []
@@ -2034,6 +2160,7 @@ def health(target: Path) -> dict[str, Any]:
     latest_report_compare = _report_compare_summary(target, latest_report)
     latest_session = _latest_session(target)
     latest_session_report = _read_session_reports(target)[-1] if _read_session_reports(target) else None
+    latest_session_gate = _session_gate_payload(target, latest_session) if isinstance(latest_session, dict) else None
     actions = _read_actions(target)
     open_actions = [action for action in actions if action.get("status") in {"pending", "active"}]
     action_counts: dict[str, int] = {}
@@ -2056,6 +2183,15 @@ def health(target: Path) -> dict[str, Any]:
         else None,
         "latest_report_compare": latest_report_compare,
         "latest_session": _session_summary(latest_session) if isinstance(latest_session, dict) else None,
+        "latest_session_gate": {
+            "session_id": latest_session_gate.get("session_id"),
+            "safe_to_claim_complete": latest_session_gate.get("safe_to_claim_complete"),
+            "blocker_count": latest_session_gate.get("blocker_count"),
+            "top_blocker": latest_session_gate.get("top_blocker"),
+            "suggested_next_command": latest_session_gate.get("suggested_next_command"),
+        }
+        if isinstance(latest_session_gate, dict)
+        else None,
         "latest_session_report": {
             "report_id": latest_session_report.get("report_id"),
             "session_id": (latest_session_report.get("session") or {}).get("session_id") if isinstance(latest_session_report.get("session"), dict) else None,

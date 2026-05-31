@@ -1134,6 +1134,10 @@ def _build_parser() -> argparse.ArgumentParser:
     p_work_phases_session_import.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
     p_work_phases_session_import.add_argument("--dry-run", action="store_true", help="Preview imports without writing them.")
     p_work_phases_session_import.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_work_phases_session_gate = phases_session_sub.add_parser("gate", help="Check whether a phase session is safe to claim complete.")
+    p_work_phases_session_gate.add_argument("session_id", nargs="?", default="latest", help="Session id, unique prefix, or latest.")
+    p_work_phases_session_gate.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_work_phases_session_gate.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_work_phases_session_report = phases_session_sub.add_parser("report", help="Build and inspect phase session reports.")
     phases_session_report_sub = p_work_phases_session_report.add_subparsers(dest="phases_session_report_command", metavar="<phases-session-report-command>")
     phases_session_report_sub.required = True
@@ -3249,6 +3253,8 @@ def main(argv=None) -> int:
                     return phases_cmd.session_progress(target=args.target, session_id=args.session_id, json_output=args.json)
                 if args.phases_session_command == "import-issues":
                     return phases_cmd.session_import_issues(target=args.target, session_id=args.session_id, dry_run=args.dry_run, json_output=args.json)
+                if args.phases_session_command == "gate":
+                    return phases_cmd.session_gate(target=args.target, session_id=args.session_id, json_output=args.json)
                 if args.phases_session_command == "report":
                     if args.phases_session_report_command == "build":
                         return phases_cmd.session_report_build(target=args.target, session_id=args.session_id, json_output=args.json)

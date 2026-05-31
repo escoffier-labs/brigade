@@ -498,12 +498,17 @@ def test_release_phase_ledger_closeout_and_report_evidence(tmp_path, monkeypatch
     session = json.loads(capsys.readouterr().out)
     assert phases_cmd.session_report_build(target=tmp_path, session_id=session["session_id"], json_output=True) == 0
     session_report = json.loads(capsys.readouterr().out)
+    assert release_cmd.doctor(target=tmp_path, base_ref=None, json_output=True) == 0
+    session_doctor = json.loads(capsys.readouterr().out)
+    session_check_names = {check["name"] for check in session_doctor["checks"]}
+    assert "phase_session_gate_blocked" in session_check_names
     assert release_cmd.candidate_build(target=tmp_path, base_ref=None, json_output=True) == 0
     candidate = json.loads(capsys.readouterr().out)
     assert candidate["phase_ledger"]["latest_closeout"]["closeout_id"] == closeout["closeout_id"]
     assert candidate["phase_ledger"]["latest_report"]["report_id"] == report["report_id"]
     assert candidate["phase_ledger"]["latest_report_compare"]["issue_count"] == 0
     assert candidate["phase_ledger"]["latest_session"]["session_id"] == session["session_id"]
+    assert candidate["phase_ledger"]["latest_session_gate"]["safe_to_claim_complete"] is False
     assert candidate["phase_ledger"]["latest_session_report"]["report_id"] == session_report["report_id"]
 
     assert phases_cmd.closeout(target=tmp_path, selector="phase-280", status="blocked", reason="Needs another look.", json_output=True) == 0

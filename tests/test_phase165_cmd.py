@@ -682,6 +682,68 @@ def test_phase_goal_scaffold_builds_safe_goal_draft(tmp_path, capsys):
     assert "raw logs" in content
 
 
+def test_phase_session_gate_blocks_then_passes_when_evidence_is_complete(tmp_path, capsys):
+    evidence_file = tmp_path / "safe.txt"
+    evidence_file.write_text("safe public evidence\n")
+    assert cli.main(["work", "phases", "plan", "--target", str(tmp_path), "--range", "225-226", "--title", "Gate", "--goal", "afk", "--json"]) == 0
+    capsys.readouterr()
+    for phase_id in ("phase-225", "phase-226"):
+        assert cli.main(
+            [
+                "work",
+                "phases",
+                "complete",
+                phase_id,
+                "--target",
+                str(tmp_path),
+                "--status",
+                "pushed",
+                "--summary",
+                "Complete gate evidence.",
+                "--file",
+                "safe.txt",
+                "--test",
+                "pytest tests/test_phase165_cmd.py -q",
+                "--commit",
+                phase_id,
+                "--push-ref",
+                "main",
+                "--json",
+            ]
+        ) == 0
+        capsys.readouterr()
+    assert cli.main(["work", "phases", "session", "start", "--target", str(tmp_path), "--range", "225-226", "--goal", "gate session", "--json"]) == 0
+    session = json.loads(capsys.readouterr().out)
+
+    assert cli.main(["work", "phases", "session", "gate", session["session_id"], "--target", str(tmp_path), "--json"]) == 0
+    blocked = json.loads(capsys.readouterr().out)
+    blocked_names = {check["name"] for check in blocked["checks"]}
+    assert blocked["safe_to_claim_complete"] is False
+    assert "phase_session_gate_missing_privacy_check" in blocked_names
+    assert "phase_session_gate_missing_handoff" in blocked_names
+    assert "phase_session_gate_missing_phase_report" in blocked_names
+
+    assert cli.main(["work", "phases", "privacy", "225-226", "--target", str(tmp_path), "--json"]) == 0
+    capsys.readouterr()
+    assert cli.main(["work", "phases", "handoff", "225-226", "--target", str(tmp_path), "--lint", "--json"]) == 0
+    capsys.readouterr()
+    assert cli.main(["work", "phases", "report", "build", "--target", str(tmp_path), "--range", "225-226", "--json"]) == 0
+    report = json.loads(capsys.readouterr().out)
+    assert cli.main(["work", "phases", "report", "closeout", report["report_id"], "--target", str(tmp_path), "--status", "reviewed", "--json"]) == 0
+    capsys.readouterr()
+    assert cli.main(["work", "phases", "session", "report", "build", session["session_id"], "--target", str(tmp_path), "--json"]) == 0
+    capsys.readouterr()
+    assert cli.main(["work", "phases", "session", "closeout", session["session_id"], "--target", str(tmp_path), "--status", "reviewed", "--json"]) == 0
+    capsys.readouterr()
+
+    assert cli.main(["work", "phases", "session", "gate", session["session_id"], "--target", str(tmp_path), "--json"]) == 0
+    ready = json.loads(capsys.readouterr().out)
+    assert ready["safe_to_claim_complete"] is True
+    assert ready["blocker_count"] == 0
+    assert ready["phase_report"]["report_id"] == report["report_id"]
+    assert ready["session_report"]["report_id"]
+
+
 def test_daily_driver_surfaces_and_runs_phase_session_step(tmp_path, capsys):
     assert cli.main(["work", "phases", "plan", "--target", str(tmp_path), "--range", "214-215", "--title", "Daily", "--goal", "afk", "--json"]) == 0
     capsys.readouterr()
@@ -808,6 +870,8 @@ def test_phase_reconcile_reports_git_evidence_warnings(tmp_path, capsys, monkeyp
 def test_phase_privacy_scans_evidence_and_records_summary(tmp_path, capsys):
     public_file = tmp_path / "public.txt"
     public_file.write_text("api_" + "key=example\n")
+    safe_public_file = tmp_path / "safe-public-url.txt"
+    safe_public_file.write_text("See https://example.com/docs for public docs.\n")
     assert cli.main(["work", "phases", "plan", "--target", str(tmp_path), "--phase-id", "phase-219", "--title", "Privacy", "--goal", "afk", "--json"]) == 0
     capsys.readouterr()
     assert cli.main(["work", "phases", "evidence", "add", "phase-219", "--target", str(tmp_path), "--file", "public.txt", "--json"]) == 0
@@ -823,6 +887,14 @@ def test_phase_privacy_scans_evidence_and_records_summary(tmp_path, capsys):
     assert cli.main(["work", "phases", "show", "phase-219", "--target", str(tmp_path), "--json"]) == 0
     record = json.loads(capsys.readouterr().out)
     assert record["privacy_checks"][-1]["status"] == "blocked"
+
+    assert cli.main(["work", "phases", "plan", "--target", str(tmp_path), "--phase-id", "phase-220", "--title", "Safe URL", "--goal", "afk", "--json"]) == 0
+    capsys.readouterr()
+    assert cli.main(["work", "phases", "evidence", "add", "phase-220", "--target", str(tmp_path), "--file", "safe-public-url.txt", "--json"]) == 0
+    capsys.readouterr()
+    assert cli.main(["work", "phases", "privacy", "phase-220", "--target", str(tmp_path), "--json"]) == 0
+    safe_payload = json.loads(capsys.readouterr().out)
+    assert safe_payload["status"] == "clean"
 
 
 def test_phase_handoff_drafts_and_lints_memory_handoff(tmp_path, capsys):

@@ -58,6 +58,7 @@ brigade work phases session closeout latest --status reviewed --reason "checked 
 brigade work phases session activity latest
 brigade work phases session progress latest
 brigade work phases session import-issues latest
+brigade work phases session gate latest
 brigade work phases session report build latest
 brigade work phases session report list
 brigade work phases session report show latest
@@ -171,6 +172,8 @@ Each report includes `PHASE_REPORT.md` and `PHASE_EVIDENCE.json` with range stat
 `brigade work phases session progress <session-id|latest>` summarizes percent complete, status counts, blockers, current phase, next command, test coverage, commit and push coverage, and estimated remaining local steps. It is read-only.
 
 `brigade work phases session import-issues <session-id|latest>` routes unresolved session blockers into the existing work inbox as `source: phase-session` task imports. Imports dedupe by session id, phase id, issue type, and source fingerprint, and dismissed imports stay quiet until the source blocker changes.
+
+`brigade work phases session gate <session-id|latest>` reports whether a session is safe to claim complete. The gate requires every phase to be implemented or deferred, tests recorded, commit and push evidence recorded, a clean privacy check, a linted handoff or handoff deferral, phase and session reports, clean report compare checks, and reviewed session closeout. Release doctor and release candidate evidence include the latest gate summary.
 
 `brigade work phases session report build <session-id|latest>` writes a local bundle under `.brigade/work/phases/session-reports/` with `SESSION_REPORT.md` and `SESSION_EVIDENCE.json`. The bundle includes phase records, doctor issues, report compare summary, phase actions, phase-related imports, commits, push refs, test counts, blockers, and suggested next commands.
 

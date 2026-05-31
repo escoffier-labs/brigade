@@ -114,6 +114,7 @@ Implementation scope:
 - Add `brigade work phases session progress` for read-only session completion, blocker, test, commit, push, and remaining-step summaries.
 - Add `brigade work phases session import-issues` for deduped `source: phase-session` work imports from unresolved session blockers.
 - Add `brigade work phases goal scaffold --range <range>` for local editable goal drafts from ledger state, session evidence, blockers, and roadmap references.
+- Add `brigade work phases session gate` as the final local AFK completion claim check, with release doctor and release candidate evidence carrying the latest gate summary.
 - Make `brigade daily status/plan/review/run/doctor` surface active phase sessions and allow exactly one safe session report or closeout step.
 - Include latest phase session and session report state in work brief/doctor, center status/reviews, release doctor, release candidates, and candidate compare.
 - Add `brigade work phases evidence add` so phase records can carry local evidence attachments without command execution.

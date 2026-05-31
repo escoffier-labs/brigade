@@ -821,12 +821,16 @@ def _phase_release_checks(target: Path) -> list[dict[str, Any]]:
         checks.append({"status": WARN, "name": "phase_ledger_report_compare_issue", "detail": str(top_compare.get("name") or latest_report_compare.get("issue_count"))})
     latest_session = health.get("latest_session") if isinstance(health.get("latest_session"), dict) else None
     latest_session_report = health.get("latest_session_report") if isinstance(health.get("latest_session_report"), dict) else None
+    latest_session_gate = health.get("latest_session_gate") if isinstance(health.get("latest_session_gate"), dict) else None
     if latest_session and latest_session.get("status") not in {"closed", "archived"}:
         checks.append({"status": WARN, "name": "phase_session_active", "detail": str(latest_session.get("session_id"))})
         if latest_session_report is None:
             checks.append({"status": WARN, "name": "phase_session_missing_report", "detail": str(latest_session.get("session_id"))})
         if latest_session.get("closeout_status") is None and latest_session.get("current_phase_id") is None:
             checks.append({"status": WARN, "name": "phase_session_missing_closeout", "detail": str(latest_session.get("session_id"))})
+    if latest_session_gate and not latest_session_gate.get("safe_to_claim_complete"):
+        top_blocker = latest_session_gate.get("top_blocker") if isinstance(latest_session_gate.get("top_blocker"), dict) else {}
+        checks.append({"status": WARN, "name": "phase_session_gate_blocked", "detail": str(top_blocker.get("name") or latest_session_gate.get("blocker_count"))})
     if int(health.get("open_action_count") or 0) > 0:
         checks.append({"status": WARN, "name": "phase_session_unresolved_actions", "detail": str(health.get("open_action_count"))})
     records = phases_cmd._records(target)
@@ -1045,6 +1049,7 @@ def _evidence(target: Path, *, base_ref: str | None) -> dict[str, Any]:
             "latest_report": phase_ledger.get("latest_report"),
             "latest_report_compare": phase_ledger.get("latest_report_compare"),
             "latest_session": phase_ledger.get("latest_session"),
+            "latest_session_gate": phase_ledger.get("latest_session_gate"),
             "latest_session_report": phase_ledger.get("latest_session_report"),
             "closeout_count": phase_ledger.get("closeout_count"),
         },
