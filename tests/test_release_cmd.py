@@ -492,10 +492,13 @@ def test_release_phase_ledger_closeout_and_report_evidence(tmp_path, monkeypatch
     closeout = json.loads(capsys.readouterr().out)
     assert phases_cmd.report_build(target=tmp_path, json_output=True) == 0
     report = json.loads(capsys.readouterr().out)
+    assert phases_cmd.report_closeout(target=tmp_path, report_id=report["report_id"], status="reviewed", reason="Report reviewed.", json_output=True) == 0
+    capsys.readouterr()
     assert release_cmd.candidate_build(target=tmp_path, base_ref=None, json_output=True) == 0
     candidate = json.loads(capsys.readouterr().out)
     assert candidate["phase_ledger"]["latest_closeout"]["closeout_id"] == closeout["closeout_id"]
     assert candidate["phase_ledger"]["latest_report"]["report_id"] == report["report_id"]
+    assert candidate["phase_ledger"]["latest_report_compare"]["issue_count"] == 0
 
     assert phases_cmd.closeout(target=tmp_path, selector="phase-280", status="blocked", reason="Needs another look.", json_output=True) == 0
     capsys.readouterr()

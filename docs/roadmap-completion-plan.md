@@ -112,6 +112,7 @@ Implementation scope:
 - Include latest phase closeout and phase report references in release readiness and release candidate evidence, with release doctor and candidate compare warnings for unresolved or stale phase evidence.
 - Surface phase action queue health in daily status, work brief, work doctor, and center status.
 - Route open phase action records into the normal work import inbox with `brigade work phases actions import-issues`.
+- Include latest phase report compare summaries in phase health and release candidate evidence.
 - Store local phase records under `.brigade/work/phases/`.
 - Require each phase to record goal, status, summary, changed files, tests, commit, push ref, deferrals, blockers, and next recommendation.
 - Detect silent compression by requiring explicit grouped records before grouped phase work starts.

@@ -146,4 +146,4 @@ Each report includes `PHASE_REPORT.md` and `PHASE_EVIDENCE.json` with range stat
 `brigade work phases import-issues` routes unresolved ledger issues into the scanner-ready work inbox as `source: phase-ledger` task imports. Imports dedupe by a stable source fingerprint and keep promotion explicit.
 
 Release readiness and release candidate evidence include a compact phase-ledger summary so publish review can see whether long unattended work still has open ledger issues.
-Release doctor and release candidate compare also warn when pushed phases are unreviewed, phase reports are missing or stale, closeouts have unresolved issues, or newer phase closeout/report evidence exists after a candidate was built.
+Release doctor and release candidate compare also warn when pushed phases are unreviewed, phase reports are missing or stale, closeouts have unresolved issues, report compare has open issues, or newer phase closeout/report evidence exists after a candidate was built.

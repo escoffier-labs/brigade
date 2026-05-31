@@ -66,6 +66,7 @@ Phase report closeouts let an operator review, defer, supersede, or archive a ge
 Phase report compare checks saved report bundles against current ledger state before relying on them.
 Work brief and center status include open phase action counts so ledger follow-ups stay visible in the daily loop.
 Open phase actions can be imported into the normal work inbox when they need a reviewed task.
+Release candidate evidence includes the latest phase report compare summary.
 The current AFK ledger hardening tranche is described in [`docs/phase-166-200-plan.md`](docs/phase-166-200-plan.md).
 See [`docs/workflow-rules.md`](docs/workflow-rules.md) for the public-safe repo workflow rule templates installed under `rules/`.
 

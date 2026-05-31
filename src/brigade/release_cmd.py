@@ -815,6 +815,10 @@ def _phase_release_checks(target: Path) -> list[dict[str, Any]]:
     latest_report = health.get("latest_report") if isinstance(health.get("latest_report"), dict) else None
     if latest_closeout is not None and int(latest_closeout.get("unresolved_issue_count") or 0) > 0:
         checks.append({"status": WARN, "name": "phase_ledger_unresolved_closeout", "detail": str(latest_closeout.get("closeout_id"))})
+    latest_report_compare = health.get("latest_report_compare") if isinstance(health.get("latest_report_compare"), dict) else None
+    if latest_report_compare is not None and int(latest_report_compare.get("issue_count") or 0) > 0:
+        top_compare = latest_report_compare.get("top_issue") if isinstance(latest_report_compare.get("top_issue"), dict) else {}
+        checks.append({"status": WARN, "name": "phase_ledger_report_compare_issue", "detail": str(top_compare.get("name") or latest_report_compare.get("issue_count"))})
     records = phases_cmd._records(target)
     pushed_without_closeout = []
     for record in records:
@@ -1029,6 +1033,7 @@ def _evidence(target: Path, *, base_ref: str | None) -> dict[str, Any]:
             "latest": phase_ledger.get("latest"),
             "latest_closeout": phase_ledger.get("latest_closeout"),
             "latest_report": phase_ledger.get("latest_report"),
+            "latest_report_compare": phase_ledger.get("latest_report_compare"),
             "closeout_count": phase_ledger.get("closeout_count"),
         },
         "operator_report": {

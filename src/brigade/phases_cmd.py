@@ -653,6 +653,53 @@ def _latest_report(target: Path) -> dict[str, Any] | None:
     return sorted(reports, key=lambda item: str(item.get("created_at") or ""))[-1]
 
 
+def _report_compare_summary(target: Path, report: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(report, dict):
+        return None
+    phase_range = report.get("phase_range") if isinstance(report.get("phase_range"), str) else None
+    current_status = status_payload(target, phase_range=phase_range)
+    current_doctor = doctor_payload(target, phase_range=phase_range)
+    checks: list[dict[str, Any]] = []
+    report_status = report.get("status") if isinstance(report.get("status"), dict) else {}
+    report_doctor = report.get("doctor") if isinstance(report.get("doctor"), dict) else {}
+    if current_status.get("status_counts") != report_status.get("status_counts"):
+        checks.append(_check("warn", "phase_report_status_counts_changed", "current phase status counts differ from report", suggested="brigade work phases report build"))
+    if int(current_doctor.get("issue_count") or 0) != int(report_doctor.get("issue_count") or 0):
+        checks.append(_check("warn", "phase_report_doctor_issue_count_changed", f"{report_doctor.get('issue_count')} -> {current_doctor.get('issue_count')}", suggested="brigade work phases doctor"))
+    current_head = _git_head(target)
+    report_head = str(report.get("git_head") or "")
+    if report_head and current_head and not _same_commit(report_head, current_head):
+        checks.append(_check("warn", "phase_report_head_changed", f"current HEAD {current_head} differs from report HEAD {report_head}", suggested="brigade work phases report build"))
+    report_path = Path(str(report.get("path") or ""))
+    closeout = _read_json(report_path / "CLOSEOUT.json")
+    if closeout is None:
+        checks.append(_check("warn", "phase_report_missing_closeout", "phase report has no CLOSEOUT.json", suggested=f"brigade work phases report closeout {report.get('report_id')}"))
+    elif closeout.get("status") in {"deferred", "superseded", "archived"}:
+        checks.append(_check("warn", "phase_report_not_reviewed", f"phase report closeout status is {closeout.get('status')}", suggested=f"brigade work phases report closeout {report.get('report_id')} --status reviewed"))
+    created = _parse_time(report.get("created_at"))
+    latest_record_time = max(
+        [
+            parsed
+            for parsed in (_parse_time(record.get("updated_at") or record.get("completed_at") or record.get("created_at")) for record in _records(target))
+            if parsed is not None
+        ],
+        default=None,
+    )
+    if created and latest_record_time and latest_record_time > created:
+        checks.append(_check("warn", "phase_report_newer_phase_record", "a phase record changed after this report was built", suggested="brigade work phases report build"))
+    if not checks:
+        checks.append(_check("ok", "phase_report_current", "phase report matches current ledger checks"))
+    issues = [check for check in checks if check["status"] != "ok"]
+    return {
+        "report_id": report.get("report_id"),
+        "phase_range": phase_range,
+        "checks": checks,
+        "issue_count": len(issues),
+        "top_issue": issues[0] if issues else None,
+        "suggested_next_command": issues[0]["suggested_next_command"] if issues else "brigade work phases report show latest",
+    }
+
+
 def _resolve_report(target: Path, report_id: str) -> tuple[dict[str, Any] | None, str | None]:
     target = target.expanduser().resolve()
     if report_id == "latest":
@@ -896,6 +943,7 @@ def health(target: Path) -> dict[str, Any]:
     target = target.expanduser().resolve()
     closeouts = _read_closeouts(target)
     latest_report = _latest_report(target)
+    latest_report_compare = _report_compare_summary(target, latest_report)
     actions = _read_actions(target)
     open_actions = [action for action in actions if action.get("status") in {"pending", "active"}]
     action_counts: dict[str, int] = {}
@@ -916,6 +964,7 @@ def health(target: Path) -> dict[str, Any]:
         }
         if latest_report
         else None,
+        "latest_report_compare": latest_report_compare,
         "closeout_count": len(closeouts),
         "actions_path": str(_actions_root(target)),
         "action_count": len(actions),
@@ -1448,49 +1497,17 @@ def report_compare(*, target: Path, report_id: str, json_output: bool = False) -
         print(f"error: {error}", file=sys.stderr)
         return 1
     report_path = Path(str(report.get("path") or ""))
-    phase_range = report.get("phase_range") if isinstance(report.get("phase_range"), str) else None
-    current_status = status_payload(target, phase_range=phase_range)
-    current_doctor = doctor_payload(target, phase_range=phase_range)
-    checks: list[dict[str, Any]] = []
-    report_status = report.get("status") if isinstance(report.get("status"), dict) else {}
-    report_doctor = report.get("doctor") if isinstance(report.get("doctor"), dict) else {}
-    if current_status.get("status_counts") != report_status.get("status_counts"):
-        checks.append(_check("warn", "phase_report_status_counts_changed", "current phase status counts differ from report", suggested="brigade work phases report build"))
-    if int(current_doctor.get("issue_count") or 0) != int(report_doctor.get("issue_count") or 0):
-        checks.append(_check("warn", "phase_report_doctor_issue_count_changed", f"{report_doctor.get('issue_count')} -> {current_doctor.get('issue_count')}", suggested="brigade work phases doctor"))
-    current_head = _git_head(target)
-    report_head = str(report.get("git_head") or "")
-    if report_head and current_head and not _same_commit(report_head, current_head):
-        checks.append(_check("warn", "phase_report_head_changed", f"current HEAD {current_head} differs from report HEAD {report_head}", suggested="brigade work phases report build"))
-    closeout_path = report_path / "CLOSEOUT.json"
-    closeout = _read_json(closeout_path)
-    if closeout is None:
-        checks.append(_check("warn", "phase_report_missing_closeout", "phase report has no CLOSEOUT.json", suggested=f"brigade work phases report closeout {report.get('report_id')}"))
-    elif closeout.get("status") in {"deferred", "superseded", "archived"}:
-        checks.append(_check("warn", "phase_report_not_reviewed", f"phase report closeout status is {closeout.get('status')}", suggested=f"brigade work phases report closeout {report.get('report_id')} --status reviewed"))
-    created = _parse_time(report.get("created_at"))
-    latest_record_time = max(
-        [
-            parsed
-            for parsed in (_parse_time(record.get("updated_at") or record.get("completed_at") or record.get("created_at")) for record in _records(target))
-            if parsed is not None
-        ],
-        default=None,
-    )
-    if created and latest_record_time and latest_record_time > created:
-        checks.append(_check("warn", "phase_report_newer_phase_record", "a phase record changed after this report was built", suggested="brigade work phases report build"))
-    if not checks:
-        checks.append(_check("ok", "phase_report_current", "phase report matches current ledger checks"))
-    issues = [check for check in checks if check["status"] != "ok"]
+    summary = _report_compare_summary(target, report) or {"checks": [], "issue_count": 0, "top_issue": None, "phase_range": None}
+    issues = [check for check in summary["checks"] if check["status"] != "ok"]
     payload = {
         "schema_version": SCHEMA_VERSION,
         "schema": _schema("phase-ledger-report-compare"),
         "target": str(target),
         "report_id": report.get("report_id"),
         "report_path": str(report_path),
-        "phase_range": phase_range,
-        "current_head": current_head,
-        "checks": checks,
+        "phase_range": summary.get("phase_range"),
+        "current_head": _git_head(target),
+        "checks": summary["checks"],
         "issue_count": len(issues),
         "top_issue": issues[0] if issues else None,
         "suggested_next_command": issues[0]["suggested_next_command"] if issues else "brigade work phases report show latest",
@@ -1500,7 +1517,7 @@ def report_compare(*, target: Path, report_id: str, json_output: bool = False) -
     else:
         print(f"phase report compare: {report.get('report_id')}")
         print(f"issues: {len(issues)}")
-        for check in checks:
+        for check in summary["checks"]:
             print(f"[{check['status']}] {check['name']}: {check['detail']}")
     return 0 if not issues else 1
 

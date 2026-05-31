@@ -161,7 +161,7 @@ Open phase actions can be routed into the normal scanner-ready inbox with `briga
 
 The daily driver also treats phase-ledger actions and unresolved phase issues as candidate work. It ranks them below accepted tasks and high-quality imports unless the issue blocks AFK or release completion. `brigade daily run` may start one local phase action or build one phase report as its single bounded step, but it does not execute the suggested repair command.
 
-Release gates include phase-ledger evidence. `brigade release doctor` warns on unresolved closeouts, missing or stale phase reports, and pushed phases without current review closeouts. Release candidate bundles record the latest phase closeout and report references, and candidate compare warns when newer phase evidence appears after the bundle was built.
+Release gates include phase-ledger evidence. `brigade release doctor` warns on unresolved closeouts, missing or stale phase reports, report compare issues, and pushed phases without current review closeouts. Release candidate bundles record the latest phase closeout, report references, and latest report compare summary, and candidate compare warns when newer phase evidence appears after the bundle was built.
 
 ## Operator Reports
 

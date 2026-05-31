@@ -432,6 +432,9 @@ def test_phase_report_compare_warns_on_missing_closeout_and_stale_report(tmp_pat
 
     assert phases_cmd.report_closeout(target=tmp_path, report_id=report["report_id"], status="reviewed", reason="Reviewed.", json_output=True) == 0
     capsys.readouterr()
+    health = phases_cmd.health(tmp_path)
+    assert health["latest_report_compare"]["issue_count"] == 0
+
     assert cli.main(["work", "phases", "report", "compare", report["report_id"], "--target", str(tmp_path), "--json"]) == 0
     current = json.loads(capsys.readouterr().out)
     assert current["issue_count"] == 0
