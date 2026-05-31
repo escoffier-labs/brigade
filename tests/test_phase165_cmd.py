@@ -913,17 +913,17 @@ def test_daily_driver_surfaces_and_runs_phase_session_step(tmp_path, capsys):
     assert daily_cmd.plan(target=tmp_path, json_output=True) == 0
     plan_payload = json.loads(capsys.readouterr().out)
     assert plan_payload["selected_action"]["source_subsystem"] == "phase-session"
-    assert plan_payload["selected_action"]["action_type"] == "build-phase-session-report"
+    assert plan_payload["selected_action"]["action_type"] == "write-phase-session-checkpoint"
 
     assert daily_cmd.review(target=tmp_path, json_output=True) == 0
     review_payload = json.loads(capsys.readouterr().out)
-    assert review_payload["selected_adapter"] == "brigade work phases session report build"
+    assert review_payload["selected_adapter"] == "brigade work phases session checkpoint"
 
     assert daily_cmd.run(target=tmp_path, json_output=True) == 0
     run_payload = json.loads(capsys.readouterr().out)
     assert run_payload["status"] == "completed"
-    assert run_payload["adapter_result"]["action_type"] == "build-phase-session-report"
-    assert (tmp_path / ".brigade" / "work" / "phases" / "session-reports").is_dir()
+    assert run_payload["adapter_result"]["action_type"] == "write-phase-session-checkpoint"
+    assert (tmp_path / ".brigade" / "work" / "phases" / "session-checkpoints").is_dir()
 
     assert daily_cmd.doctor(target=tmp_path, json_output=True) == 0
     doctor_payload = json.loads(capsys.readouterr().out)

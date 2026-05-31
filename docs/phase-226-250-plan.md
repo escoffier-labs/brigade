@@ -18,7 +18,7 @@ Harden AFK session execution into a more useful daily-driver, release, and recov
 | 231 | Add session recovery notes. Implemented with local recovery-note records, list/show commands, session references, and activity timeline events. |
 | 232 | Add recovery note closeout. Implemented with reviewed, deferred, blocked, and archived note closeout metadata. |
 | 233 | Add daily phase checkpoint candidates. Implemented with `phase-session-checkpoint` daily plan candidates for unresolved checkpoint issues. |
-| 234 | Allow daily run to write one checkpoint. |
+| 234 | Allow daily run to write one checkpoint. Implemented with the `write-phase-session-checkpoint` daily adapter. |
 | 235 | Add phase session risk summary. |
 | 236 | Add session verification rollup. |
 | 237 | Add session privacy rollup. |

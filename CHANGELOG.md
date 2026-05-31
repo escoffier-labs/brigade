@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `brigade work phases session recovery-note` plus `recovery-notes list/show` for local AFK recovery notes with safe summaries, notes, evidence labels, session references, and activity timeline events.
 - `brigade work phases session recovery-notes closeout` for reviewed, deferred, blocked, or archived closeout metadata on AFK recovery notes.
 - `brigade daily plan` now includes active phase session checkpoint issues as `phase-session-checkpoint` candidates with suggested checkpoint import commands.
+- `brigade daily run` can write one safe local phase session checkpoint as its selected bounded action.
 - `brigade work phases session start/list/show/closeout` for local AFK phase execution sessions that track a requested range, current phase, phase status, commit and test counts, report references, closeout state, and next command.
 - `brigade work phases session next/resume` for read-only or metadata-only AFK session recovery that identifies the safest next phase command without executing it.
 - `brigade work phases session report build/list/show` for local Markdown and JSON evidence bundles over phase execution sessions.

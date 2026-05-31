@@ -710,6 +710,28 @@ def _phase_session_candidates(target: Path) -> list[dict[str, Any]]:
                 metadata={"checkpoint_id": checkpoint_id, "session_id": session_id, "issue_count": checkpoint.get("issue_count"), "top_issue": top_issue},
             )
         )
+    elif step_type not in {"session_closeout_needed", "session_reviewed"}:
+        candidates.append(
+            _candidate(
+                target=target,
+                action_type="write-phase-session-checkpoint",
+                source_subsystem="phase-session",
+                source_local_id=session_id,
+                safe_summary=str(step.get("detail") or "phase execution session needs a local checkpoint"),
+                suggested_next_command=f"brigade work phases session checkpoint {session_id}",
+                score=270,
+                ranking_reasons=[
+                    "active phase execution session",
+                    f"next_step={step_type}",
+                    "write a local checkpoint before continuing AFK work",
+                ],
+                approval_required=False,
+                risk_level="low",
+                evidence_refs=[str(phases_cmd._sessions_root(target))],
+                source_fingerprint=_fingerprint({"session_id": session_id, "next_step": step, "checkpoint": "write"}),
+                metadata={"session_id": session_id, "step_type": step_type},
+            )
+        )
     action_type = "closeout-phase-session" if step_type == "session_closeout_needed" else "build-phase-session-report"
     score = 260 if step_type in {"missing_record", "pending_phase", "blocked_phase", "stale_in_progress_phase", "session_closeout_needed"} else 125
     candidates.append(
@@ -790,6 +812,7 @@ def _adapter_for(action: dict[str, Any] | None) -> str | None:
         "build-operator-report": "brigade center report build",
         "start-phase-action": "brigade work phases actions start",
         "build-phase-report": "brigade work phases report build",
+        "write-phase-session-checkpoint": "brigade work phases session checkpoint",
         "build-phase-session-report": "brigade work phases session report build",
         "closeout-phase-session": "brigade work phases session closeout",
         "review-center-action": "review-only",
@@ -1058,7 +1081,7 @@ def _evidence_blockers(target: Path, action: dict[str, Any] | None) -> list[str]
         action_id = str(metadata.get("action_id") or source_id)
         if not any(str(item.get("action_id")) == action_id and item.get("status") in {"pending", "active"} for item in phases_cmd._read_actions(target)):
             return [f"phase action not found: {action_id}"]
-    if action_type in {"build-phase-session-report", "closeout-phase-session"}:
+    if action_type in {"write-phase-session-checkpoint", "build-phase-session-report", "closeout-phase-session"}:
         session_id = str(metadata.get("session_id") or source_id)
         _path, session, _error = phases_cmd._resolve_session(target, session_id)
         if session is None:
@@ -1590,6 +1613,16 @@ def run(
             rc = phases_cmd.report_build(target=target)
         receipt["commands_invoked"].append({"command": "brigade work phases report build", "exit_code": rc})
         receipt["adapter_result"]["commands_invoked"].append({"command": "brigade work phases report build", "exit_code": rc})
+    elif action_type == "write-phase-session-checkpoint":
+        session_id = str((action.get("metadata") or {}).get("session_id") or action.get("source_local_id") or "latest")
+        with redirect_stdout(StringIO()):
+            rc = phases_cmd.session_checkpoint(target=target, session_id=session_id, status="noted", summary="Daily driver checkpoint before continuing AFK session.")
+        receipt["commands_invoked"].append({"command": f"brigade work phases session checkpoint {session_id}", "exit_code": rc})
+        receipt["adapter_result"]["commands_invoked"].append({"command": f"brigade work phases session checkpoint {session_id}", "exit_code": rc})
+        latest_checkpoint = phases_cmd._latest_checkpoint_for_session(target, session_id)
+        if isinstance(latest_checkpoint, dict) and latest_checkpoint.get("path"):
+            receipt["receipts_created"].append(str(latest_checkpoint["path"]))
+            receipt["adapter_result"]["receipts_created"].append(str(latest_checkpoint["path"]))
     elif action_type == "build-phase-session-report":
         session_id = str((action.get("metadata") or {}).get("session_id") or action.get("source_local_id") or "latest")
         with redirect_stdout(StringIO()):

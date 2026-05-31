@@ -66,6 +66,7 @@ Session checkpoint import commands route blocked or stale checkpoint issues into
 Session next/resume output includes the latest checkpoint summary and issue counts when checkpoint recovery metadata exists.
 Session recovery notes record safe summaries, notes, and evidence labels for AFK resume context, with list/show/closeout commands and activity timeline entries.
 Daily planning can surface checkpoint issues as local candidates that point at checkpoint import commands instead of hiding AFK recovery drift.
+Daily run can also write one local phase session checkpoint as its single bounded action when the selected session needs safe AFK recovery metadata.
 Session report bundles collect the phase records, checks, actions, imports, commits, tests, and blockers into local Markdown and JSON evidence.
 The daily driver can surface active phase sessions and run exactly one safe session step, such as building a session report or writing session closeout metadata.
 Release and operator review surfaces include phase session state so stale or unreported AFK work blocks publish review visibly.

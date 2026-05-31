@@ -257,6 +257,26 @@ def test_daily_plan_includes_phase_checkpoint_candidates(tmp_path, capsys):
     assert "phase session checkpoint issue" in candidate["ranking_reasons"]
 
 
+def test_daily_run_writes_one_phase_session_checkpoint(tmp_path, capsys):
+    _seed_ready_repo(tmp_path, capsys)
+    assert phases_cmd.plan(target=tmp_path, phase_range="234-235", title="Checkpoint Run", source_goal="afk", json_output=True) == 0
+    capsys.readouterr()
+    assert phases_cmd.session_start(target=tmp_path, phase_range="234-235", source_goal="checkpoint run", json_output=True) == 0
+    session = json.loads(capsys.readouterr().out)
+
+    assert daily_cmd.run(target=tmp_path, json_output=True) == 0
+    run_payload = json.loads(capsys.readouterr().out)
+    assert run_payload["selected_action"]["action_type"] == "write-phase-session-checkpoint"
+    assert len(run_payload["adapter_result"]["commands_invoked"]) == 1
+    assert run_payload["adapter_result"]["commands_invoked"][0]["command"].startswith("brigade work phases session checkpoint")
+    assert run_payload["adapter_result"]["receipts_created"]
+
+    checkpoints = phases_cmd._read_session_checkpoints(tmp_path)
+    assert len(checkpoints) == 1
+    assert checkpoints[0]["session_id"] == session["session_id"]
+    assert checkpoints[0]["summary"] == "Daily driver checkpoint before continuing AFK session."
+
+
 def test_daily_plan_records_and_review_previews_action(tmp_path, capsys):
     _seed_ready_repo(tmp_path, capsys)
     task, _ = work_cmd._add_task(
