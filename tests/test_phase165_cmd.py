@@ -230,3 +230,53 @@ def test_phase_ledger_schema_status_next_report_and_imports(tmp_path, capsys):
     second = json.loads(capsys.readouterr().out)
     assert second["created_count"] == 0
     assert second["skipped_count"] >= 1
+
+
+def test_phase_ledger_closeout_records_review_state_and_doctor_warns_on_stale_unreviewed(tmp_path, capsys):
+    assert phases_cmd.plan(target=tmp_path, phase_id="phase-230", title="Review me", source_goal="audit", json_output=True) == 0
+    capsys.readouterr()
+    assert phases_cmd.complete(
+        target=tmp_path,
+        phase_id="phase-230",
+        status="pushed",
+        summary="Done",
+        files_changed=["file.py"],
+        tests_run=["pytest"],
+        commit_hash="abc123",
+        push_ref="main",
+        json_output=True,
+    ) == 0
+    completed = json.loads(capsys.readouterr().out)
+    completed["completed_at"] = (datetime.now(timezone.utc) - timedelta(hours=48)).isoformat()
+    path = tmp_path / ".brigade" / "work" / "phases" / "records" / "phase-230.json"
+    path.write_text(json.dumps(completed) + "\n")
+
+    assert phases_cmd.doctor(target=tmp_path, json_output=True) == 0
+    doctor_payload = json.loads(capsys.readouterr().out)
+    assert any(check["name"] == "phase_stale_unreviewed_completed" for check in doctor_payload["checks"])
+
+    assert cli.main(["work", "phases", "closeout", "phase-230", "--target", str(tmp_path), "--status", "reviewed", "--reason", "Checked evidence.", "--json"]) == 0
+    closeout = json.loads(capsys.readouterr().out)
+    assert closeout["status"] == "reviewed"
+    assert closeout["phase_ids"] == ["phase-230"]
+    assert closeout["reason"] == "Checked evidence."
+    assert closeout["source_fingerprint"]
+    assert (tmp_path / ".brigade" / "work" / "phases" / "closeouts" / f"{closeout['closeout_id']}.json").is_file()
+
+    assert phases_cmd.doctor(target=tmp_path, json_output=True) == 0
+    reviewed_doctor = json.loads(capsys.readouterr().out)
+    assert not any(check["name"] == "phase_stale_unreviewed_completed" for check in reviewed_doctor["checks"])
+
+
+def test_phase_ledger_closeout_range_and_deferred_state(tmp_path, capsys):
+    assert cli.main(["work", "phases", "plan", "--target", str(tmp_path), "--range", "240-241", "--title", "Range", "--goal", "audit", "--json"]) == 0
+    capsys.readouterr()
+    assert cli.main(["work", "phases", "defer", "phase-241", "--target", str(tmp_path), "--reason", "Later", "--json"]) == 0
+    capsys.readouterr()
+
+    assert cli.main(["work", "phases", "closeout", "240-241", "--target", str(tmp_path), "--status", "deferred", "--reason", "Reviewed as a range.", "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == "deferred"
+    assert payload["phase_ids"] == ["phase-240", "phase-241"]
+    assert payload["deferred_phase_ids"] == ["phase-240", "phase-241"]
+    assert payload["unresolved_issue_count"] >= 0

@@ -24,6 +24,7 @@ brigade work phases show <phase-id>
 brigade work phases start <phase-id>
 brigade work phases complete <phase-id> --summary "..." --file src/file.py --test "pytest ..." --commit <hash> --push-ref main
 brigade work phases defer <phase-id> --reason "..."
+brigade work phases closeout <phase-id|range|latest> --status reviewed --reason "checked evidence"
 brigade work phases doctor --range 165-170
 brigade work phases import-issues --range 165-170
 brigade work phases report build --range 165-170
@@ -98,10 +99,19 @@ Deferral is acceptable. Silent compression is not.
 - range records compressed without explicit grouping
 - stale in-progress phases
 - blocked phases without a next recommendation
+- stale completed phases that have not been reviewed
 
 The phase ledger is surfaced in `brigade daily status`, `brigade daily doctor`, `brigade work brief`, `brigade work doctor`, and `brigade center status`.
 
-## Reports And Imports
+## Closeouts, Reports, And Imports
+
+`brigade work phases closeout <phase-id|range|latest>` writes a local review record under:
+
+```text
+.brigade/work/phases/closeouts/
+```
+
+Closeouts can be `reviewed`, `deferred`, `blocked`, or `archived`. Each record stores the affected phase ids, unresolved issue count, deferred phase ids, reason, review timestamp, and source fingerprint. Doctor uses those fingerprints to warn when completed phase evidence becomes stale or unreviewed again.
 
 `brigade work phases report build` writes a local bundle under:
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import re
 import sys
+import hashlib
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -11,9 +12,11 @@ from uuid import uuid4
 
 SCHEMA_VERSION = 1
 PHASE_STATUSES = {"pending", "in-progress", "implemented", "verified", "committed", "pushed", "deferred", "blocked"}
+PHASE_CLOSEOUT_STATUSES = {"reviewed", "deferred", "blocked", "archived"}
 DONE_STATUSES = {"implemented", "verified", "committed", "pushed"}
 STALE_IN_PROGRESS_HOURS = 12
 REPORT_STALE_HOURS = 24
+STALE_UNREVIEWED_COMPLETED_HOURS = 24
 
 
 def _now() -> datetime:
@@ -30,6 +33,10 @@ def _records_root(target: Path) -> Path:
 
 def _reports_root(target: Path) -> Path:
     return _root(target) / "reports"
+
+
+def _closeouts_root(target: Path) -> Path:
+    return _root(target) / "closeouts"
 
 
 def _index_path(target: Path) -> Path:
@@ -200,6 +207,7 @@ def schema(*, target: Path, json_output: bool = False) -> int:
             _schema("phase-ledger-plan"),
             _schema("phase-ledger-status"),
             _schema("phase-ledger-report"),
+            _schema("phase-ledger-closeout"),
             _schema("phase-ledger-doctor"),
         ],
         "status_values": sorted(PHASE_STATUSES),
@@ -558,6 +566,74 @@ def _parse_time(value: object) -> datetime | None:
     return parsed.astimezone(timezone.utc)
 
 
+def _latest_record(records: list[dict[str, Any]]) -> dict[str, Any] | None:
+    valid_records = [record for record in records if record.get("phase_id")]
+    if not valid_records:
+        return None
+    return sorted(valid_records, key=lambda item: (_safe_phase_number(item.get("phase_id")) or -1, str(item.get("created_at") or "")))[-1]
+
+
+def _selected_records(target: Path, selector: str) -> tuple[list[dict[str, Any]], list[str], str | None]:
+    target = target.expanduser().resolve()
+    records = _records(target)
+    if selector == "latest":
+        latest = _latest_record(records)
+        return ([latest] if latest else []), ([] if latest else ["latest"]), None
+    parsed_range: tuple[int, int] | None = None
+    try:
+        parsed_range = _parse_range(selector)
+    except ValueError:
+        parsed_range = None
+    if parsed_range is not None:
+        start, end = parsed_range
+        by_id = {str(record.get("phase_id")): record for record in records}
+        expected = [_phase_id_for(number) for number in range(start, end + 1)]
+        return [by_id[phase_id] for phase_id in expected if phase_id in by_id], [phase_id for phase_id in expected if phase_id not in by_id], f"{start}-{end}"
+    path, record = _find_record(target, selector)
+    if record is None:
+        return [], [selector], None
+    record["path"] = str(path)
+    return [record], [], None
+
+
+def _source_fingerprint(records: list[dict[str, Any]], extra: dict[str, Any] | None = None) -> str:
+    safe_records = [
+        {
+            "phase_id": record.get("phase_id"),
+            "status": record.get("status"),
+            "updated_at": record.get("updated_at"),
+            "completed_at": record.get("completed_at"),
+            "commit_hash": record.get("commit_hash"),
+            "push_ref": record.get("push_ref"),
+            "files_changed": record.get("files_changed") or [],
+            "tests_run": record.get("tests_run") or [],
+            "deferred_items": record.get("deferred_items") or [],
+        }
+        for record in records
+    ]
+    payload = {"records": safe_records, "extra": extra or {}}
+    return hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()[:16]
+
+
+def _read_closeouts(target: Path) -> list[dict[str, Any]]:
+    closeouts: list[dict[str, Any]] = []
+    for path in sorted(_closeouts_root(target).glob("*.json")):
+        payload = _read_json(path)
+        if payload is None:
+            continue
+        payload.setdefault("path", str(path))
+        closeouts.append(payload)
+    return closeouts
+
+
+def _phase_has_current_closeout(target: Path, phase_id: str, record: dict[str, Any]) -> bool:
+    wanted = _source_fingerprint([record])
+    for item in _read_closeouts(target):
+        if phase_id in (item.get("phase_ids") or []) and item.get("source_fingerprint") == wanted and item.get("status") in PHASE_CLOSEOUT_STATUSES:
+            return True
+    return False
+
+
 def _check(status: str, name: str, detail: str, *, phase_id: str | None = None, suggested: str = "brigade work phases doctor") -> dict[str, Any]:
     return {
         "status": status,
@@ -598,6 +674,17 @@ def doctor_payload(target: Path, *, phase_range: str | None = None) -> dict[str,
                 checks.append(_check("warn", "phase_complete_without_tests", "phase is marked complete without tests run", phase_id=phase_id, suggested=f"brigade work phases show {phase_id}"))
             if not record.get("files_changed") and not record.get("deferred_items"):
                 checks.append(_check("warn", "phase_complete_without_changes_or_deferral", "phase is complete without changed files or deferral evidence", phase_id=phase_id, suggested=f"brigade work phases show {phase_id}"))
+            completed = _parse_time(record.get("completed_at"))
+            if completed and now - completed > timedelta(hours=STALE_UNREVIEWED_COMPLETED_HOURS) and not _phase_has_current_closeout(target, phase_id, record):
+                checks.append(
+                    _check(
+                        "warn",
+                        "phase_stale_unreviewed_completed",
+                        f"completed phase has not been reviewed for more than {STALE_UNREVIEWED_COMPLETED_HOURS}h",
+                        phase_id=phase_id,
+                        suggested=f"brigade work phases closeout {phase_id}",
+                    )
+                )
         if status in {"committed", "pushed"} and not str(record.get("commit_hash") or "").strip():
             checks.append(_check("warn", "phase_committed_without_hash", "phase is committed without a commit hash", phase_id=phase_id, suggested=f"brigade work phases complete {phase_id} --commit <hash>"))
         if status == "pushed" and not str(record.get("push_ref") or "").strip():
@@ -645,15 +732,69 @@ def health(target: Path) -> dict[str, Any]:
     payload = doctor_payload(target)
     records = _records(target)
     open_records = [record for record in records if record.get("status") in {"pending", "in-progress", "blocked"}]
+    closeouts = _read_closeouts(target.expanduser().resolve())
     return {
         "records_path": str(_records_root(target.expanduser().resolve())),
         "record_count": len(records),
         "open_count": len(open_records),
         "latest": _record_summary(records[-1]) if records else None,
+        "latest_closeout": closeouts[-1] if closeouts else None,
+        "closeout_count": len(closeouts),
         "checks": payload["checks"],
         "issue_count": payload["issue_count"],
         "top_issue": payload["top_issue"],
     }
+
+
+def closeout(*, target: Path, selector: str, status: str = "reviewed", reason: str | None = None, json_output: bool = False) -> int:
+    if status not in PHASE_CLOSEOUT_STATUSES:
+        print(f"error: --status must be one of {sorted(PHASE_CLOSEOUT_STATUSES)}", file=sys.stderr)
+        return 2
+    target = target.expanduser().resolve()
+    records, missing, parsed_range = _selected_records(target, selector)
+    if not records or missing:
+        print(f"error: phase selector has missing records: {', '.join(missing or [selector])}", file=sys.stderr)
+        return 1
+    phase_ids = [str(record.get("phase_id")) for record in records if record.get("phase_id")]
+    doctor_data = doctor_payload(target, phase_range=parsed_range)
+    selected_issues = [
+        check
+        for check in doctor_data["checks"]
+        if check.get("status") != "ok" and (not check.get("phase_id") or check.get("phase_id") in phase_ids)
+    ]
+    deferred_phase_ids = [str(record.get("phase_id")) for record in records if record.get("status") == "deferred"]
+    if status == "deferred":
+        deferred_phase_ids = phase_ids
+    fingerprint = _source_fingerprint(records)
+    closeout_id = f"{_now().strftime('%Y%m%d-%H%M%S')}-phase-closeout-{uuid4().hex[:6]}"
+    payload = {
+        "schema_version": SCHEMA_VERSION,
+        "schema": _schema("phase-ledger-closeout"),
+        "target": str(target),
+        "closeout_id": closeout_id,
+        "selector": selector,
+        "phase_range": parsed_range,
+        "phase_ids": phase_ids,
+        "status": status,
+        "reason": reason or "",
+        "reviewed_at": _now().isoformat(),
+        "unresolved_issue_count": len(selected_issues),
+        "unresolved_issues": selected_issues,
+        "deferred_phase_ids": deferred_phase_ids,
+        "source_fingerprint": fingerprint,
+        "suggested_next_command": "brigade work phases doctor",
+    }
+    path = _closeouts_root(target) / f"{closeout_id}.json"
+    payload["path"] = str(path)
+    _write_json(path, payload)
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        print(f"phase closeout: {closeout_id}")
+        print(f"status: {status}")
+        print(f"phases: {', '.join(phase_ids)}")
+        print(f"unresolved: {len(selected_issues)}")
+    return 0
 
 
 def _report_payload(target: Path, *, phase_range: str | None = None) -> dict[str, Any]:

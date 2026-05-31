@@ -57,6 +57,7 @@ The installable source files live under `src/brigade/templates/`; root workspace
 See [`ROADMAP.md`](ROADMAP.md) for the daily-driver, scanner inbox, chat-surface scanner, and memory-card decay roadmap. The active phase queue for roadmap completion hardening is tracked in [`docs/phase-61-100-plan.md`](docs/phase-61-100-plan.md).
 The production-hardening queue for the daily operator system is tracked in [`docs/phase-115-164-plan.md`](docs/phase-115-164-plan.md).
 Long unattended phase work is audited through the local phase execution ledger described in [`docs/phase-execution-ledger.md`](docs/phase-execution-ledger.md). Future multi-phase work is not complete unless each phase has ledger evidence or an explicit deferral.
+Phase ledger closeouts let an operator mark completed phase evidence as reviewed, deferred, blocked, or archived, and stale unreviewed completed phases surface in doctor output.
 The current AFK ledger hardening tranche is described in [`docs/phase-166-200-plan.md`](docs/phase-166-200-plan.md).
 See [`docs/workflow-rules.md`](docs/workflow-rules.md) for the public-safe repo workflow rule templates installed under `rules/`.
 

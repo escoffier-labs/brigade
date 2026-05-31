@@ -960,6 +960,12 @@ def _build_parser() -> argparse.ArgumentParser:
     p_work_phases_defer.add_argument("--reason", required=True, help="Deferral reason.")
     p_work_phases_defer.add_argument("--next", dest="next_phase_recommendation", default=None, help="Next phase recommendation.")
     p_work_phases_defer.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_work_phases_closeout = phases_sub.add_parser("closeout", help="Review or close out phase records.")
+    p_work_phases_closeout.add_argument("selector", help="Phase id, range such as 201-205, or latest.")
+    p_work_phases_closeout.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
+    p_work_phases_closeout.add_argument("--status", choices=["reviewed", "deferred", "blocked", "archived"], default="reviewed", help="Closeout state.")
+    p_work_phases_closeout.add_argument("--reason", default=None, help="Closeout reason.")
+    p_work_phases_closeout.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_work_phases_doctor = phases_sub.add_parser("doctor", help="Check phase execution ledger health.")
     p_work_phases_doctor.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
     p_work_phases_doctor.add_argument("--range", dest="phase_range", default=None, help="Required phase range, such as 165-170.")
@@ -2990,6 +2996,8 @@ def main(argv=None) -> int:
                     next_phase_recommendation=args.next_phase_recommendation,
                     json_output=args.json,
                 )
+            if args.phases_command == "closeout":
+                return phases_cmd.closeout(target=args.target, selector=args.selector, status=args.status, reason=args.reason, json_output=args.json)
             if args.phases_command == "doctor":
                 return phases_cmd.doctor(target=args.target, phase_range=args.phase_range, json_output=args.json)
             if args.phases_command == "import-issues":
