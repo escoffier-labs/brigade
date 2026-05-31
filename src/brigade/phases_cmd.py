@@ -923,6 +923,180 @@ def session_closeout(*, target: Path, session_id: str, status: str = "reviewed",
     return 0
 
 
+def _session_next_payload(target: Path, session: dict[str, Any]) -> dict[str, Any]:
+    phase_range = str(session.get("phase_range") or "")
+    records, missing = _session_phase_records(target, phase_range)
+    by_id = {str(record.get("phase_id")): record for record in records}
+    parsed = _parse_range(phase_range)
+    expected = [_phase_id_for(number) for number in range(parsed[0], parsed[1] + 1)] if parsed else []
+    step = {
+        "step_type": "session_complete",
+        "phase_id": None,
+        "detail": "phase session range is complete",
+        "suggested_next_command": f"brigade work phases session closeout {session.get('session_id')}",
+    }
+    for phase_id in expected:
+        if phase_id not in by_id:
+            step = {
+                "step_type": "missing_record",
+                "phase_id": phase_id,
+                "detail": f"{phase_id} is missing from the phase ledger",
+                "suggested_next_command": f"brigade work phases plan --phase-id {phase_id}",
+            }
+            break
+        record = by_id[phase_id]
+        status = str(record.get("status") or "pending")
+        if status == "pending":
+            step = {
+                "step_type": "pending_phase",
+                "phase_id": phase_id,
+                "detail": f"{phase_id} is pending",
+                "suggested_next_command": f"brigade work phases start {phase_id}",
+            }
+            break
+        if status == "in-progress":
+            started = _parse_time(record.get("started_at"))
+            stale = bool(started and _now() - started > timedelta(hours=STALE_IN_PROGRESS_HOURS))
+            step = {
+                "step_type": "stale_in_progress_phase" if stale else "in_progress_phase",
+                "phase_id": phase_id,
+                "detail": f"{phase_id} is in progress" + (" and stale" if stale else ""),
+                "suggested_next_command": f"brigade work phases show {phase_id}",
+            }
+            break
+        if status == "blocked":
+            step = {
+                "step_type": "blocked_phase",
+                "phase_id": phase_id,
+                "detail": str(record.get("blocker_reason") or f"{phase_id} is blocked"),
+                "suggested_next_command": record.get("next_phase_recommendation") or f"brigade work phases show {phase_id}",
+            }
+            break
+        if status in DONE_STATUSES:
+            if not record.get("tests_run"):
+                step = {
+                    "step_type": "unverified_phase",
+                    "phase_id": phase_id,
+                    "detail": f"{phase_id} has no recorded tests",
+                    "suggested_next_command": f"brigade work phases complete {phase_id} --test \"<command>\"",
+                }
+                break
+            if status in {"committed", "pushed"} and not record.get("commit_hash"):
+                step = {
+                    "step_type": "missing_commit_hash",
+                    "phase_id": phase_id,
+                    "detail": f"{phase_id} is missing commit evidence",
+                    "suggested_next_command": f"brigade work phases complete {phase_id} --commit <hash>",
+                }
+                break
+            if status == "pushed" and not record.get("push_ref"):
+                step = {
+                    "step_type": "missing_push_ref",
+                    "phase_id": phase_id,
+                    "detail": f"{phase_id} is missing push evidence",
+                    "suggested_next_command": f"brigade work phases complete {phase_id} --push-ref <ref>",
+                }
+                break
+            if status == "pushed" and not _phase_has_current_closeout(target, phase_id, record):
+                step = {
+                    "step_type": "unreviewed_pushed_phase",
+                    "phase_id": phase_id,
+                    "detail": f"{phase_id} is pushed but lacks a current closeout",
+                    "suggested_next_command": f"brigade work phases closeout {phase_id}",
+                }
+                break
+    if not missing and expected and all(by_id.get(phase_id, {}).get("status") in DONE_STATUSES | {"deferred"} for phase_id in expected):
+        closeout = session.get("closeout") if isinstance(session.get("closeout"), dict) else None
+        if closeout and closeout.get("status") == "reviewed":
+            step = {
+                "step_type": "session_reviewed",
+                "phase_id": None,
+                "detail": "phase session is reviewed",
+                "suggested_next_command": "brigade work phases session list",
+            }
+        elif step["step_type"] == "session_complete":
+            step = {
+                "step_type": "session_closeout_needed",
+                "phase_id": None,
+                "detail": "all phases are done or deferred, but the session is not reviewed",
+                "suggested_next_command": f"brigade work phases session closeout {session.get('session_id')}",
+            }
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "schema": _schema("phase-ledger-session-next"),
+        "target": str(target),
+        "session_id": session.get("session_id"),
+        "phase_range": phase_range,
+        "missing_phase_ids": missing,
+        "next_step": step,
+        "suggested_next_command": step["suggested_next_command"],
+    }
+
+
+def session_next(*, target: Path, session_id: str, json_output: bool = False) -> int:
+    target = target.expanduser().resolve()
+    _path, session, error = _resolve_session(target, session_id)
+    if session is None:
+        print(f"error: {error}", file=sys.stderr)
+        return 1
+    try:
+        payload = _session_next_payload(target, session)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        step = payload["next_step"]
+        print(f"phase session next: {payload['session_id']}")
+        print(f"step: {step['step_type']}")
+        print(f"detail: {step['detail']}")
+        print(f"next: {payload['suggested_next_command']}")
+    return 0
+
+
+def session_resume(*, target: Path, session_id: str, json_output: bool = False) -> int:
+    target = target.expanduser().resolve()
+    path, session, error = _resolve_session(target, session_id)
+    if session is None or path is None:
+        print(f"error: {error}", file=sys.stderr)
+        return 1
+    try:
+        next_payload = _session_next_payload(target, session)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    resume_event = {
+        "resumed_at": _now().isoformat(),
+        "next_step": next_payload["next_step"],
+        "suggested_next_command": next_payload["suggested_next_command"],
+    }
+    history = session.get("resume_history") if isinstance(session.get("resume_history"), list) else []
+    history.append(resume_event)
+    session["resume_history"] = history[-20:]
+    session["current_phase_id"] = next_payload["next_step"].get("phase_id")
+    session["next_recommended_command"] = next_payload["suggested_next_command"]
+    session["updated_at"] = _now().isoformat()
+    _write_json(path, session)
+    payload = {
+        "schema_version": SCHEMA_VERSION,
+        "schema": _schema("phase-ledger-session-resume"),
+        "target": str(target),
+        "session_id": session.get("session_id"),
+        "resume": resume_event,
+        "writes": ["session resume metadata"],
+        "executed": False,
+        "suggested_next_command": next_payload["suggested_next_command"],
+    }
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        print(f"phase session resume: {session.get('session_id')}")
+        print("executed: false")
+        print(f"next: {payload['suggested_next_command']}")
+    return 0
+
+
 def _find_action(target: Path, action_id: str) -> tuple[Path, dict[str, Any] | None]:
     wanted = _slug(action_id)
     exact = _actions_root(target) / f"{wanted}.json"

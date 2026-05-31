@@ -1060,6 +1060,14 @@ def _build_parser() -> argparse.ArgumentParser:
     p_work_phases_session_show.add_argument("session_id", help="Session id, unique prefix, or latest.")
     p_work_phases_session_show.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
     p_work_phases_session_show.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_work_phases_session_next = phases_session_sub.add_parser("next", help="Show the next required phase session step.")
+    p_work_phases_session_next.add_argument("session_id", nargs="?", default="latest", help="Session id, unique prefix, or latest.")
+    p_work_phases_session_next.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_work_phases_session_next.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_work_phases_session_resume = phases_session_sub.add_parser("resume", help="Record a safe phase session resume recommendation.")
+    p_work_phases_session_resume.add_argument("session_id", nargs="?", default="latest", help="Session id, unique prefix, or latest.")
+    p_work_phases_session_resume.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
+    p_work_phases_session_resume.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_work_phases_session_closeout = phases_session_sub.add_parser("closeout", help="Close out one phase execution session.")
     p_work_phases_session_closeout.add_argument("session_id", help="Session id, unique prefix, or latest.")
     p_work_phases_session_closeout.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
@@ -3121,6 +3129,10 @@ def main(argv=None) -> int:
                     return phases_cmd.session_list(target=args.target, limit=args.limit, json_output=args.json)
                 if args.phases_session_command == "show":
                     return phases_cmd.session_show(target=args.target, session_id=args.session_id, json_output=args.json)
+                if args.phases_session_command == "next":
+                    return phases_cmd.session_next(target=args.target, session_id=args.session_id, json_output=args.json)
+                if args.phases_session_command == "resume":
+                    return phases_cmd.session_resume(target=args.target, session_id=args.session_id, json_output=args.json)
                 if args.phases_session_command == "closeout":
                     return phases_cmd.session_closeout(target=args.target, session_id=args.session_id, status=args.status, reason=args.reason, json_output=args.json)
                 parser.error(f"unknown phases session command: {args.phases_session_command}")

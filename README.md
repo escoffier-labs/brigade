@@ -59,6 +59,7 @@ The production-hardening queue for the daily operator system is tracked in [`doc
 Long unattended phase work is audited through the local phase execution ledger described in [`docs/phase-execution-ledger.md`](docs/phase-execution-ledger.md). Future multi-phase work is not complete unless each phase has ledger evidence or an explicit deferral.
 Phase ledger closeouts let an operator mark completed phase evidence as reviewed, deferred, blocked, or archived, and stale unreviewed completed phases surface in doctor output.
 Phase execution sessions group a declared AFK range into one local record with current phase, status, commit and test counts, report references, closeout state, and the next recommended command.
+Session next/resume commands identify the safest next local command and record resume metadata without executing hidden work.
 Phase ledger compare checks make it clear when local HEAD, referenced files, reports, or doctor issue counts drift after a phase is recorded.
 Phase ledger action queues turn those ledger issues into local metadata-only next steps without executing commands.
 The daily driver can select those phase-ledger actions when they block AFK or release completion, then start one action or build one phase report as a bounded local step.

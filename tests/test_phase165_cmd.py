@@ -481,3 +481,34 @@ def test_phase_execution_session_lifecycle(tmp_path, capsys):
     assert closed["status"] == "closed"
     assert closed["closeout"]["status"] == "reviewed"
     assert closed["closeout"]["reason"] == "Checked session."
+
+
+def test_phase_session_next_and_resume_classify_safe_step(tmp_path, capsys):
+    assert cli.main(["work", "phases", "plan", "--target", str(tmp_path), "--range", "212-214", "--title", "Resume", "--goal", "afk", "--json"]) == 0
+    capsys.readouterr()
+    assert cli.main(["work", "phases", "complete", "phase-212", "--target", str(tmp_path), "--status", "pushed", "--summary", "Done", "--file", "file.py", "--test", "pytest", "--commit", "abc123", "--push-ref", "main", "--json"]) == 0
+    capsys.readouterr()
+    assert cli.main(["work", "phases", "session", "start", "--target", str(tmp_path), "--range", "212-214", "--goal", "resume session", "--json"]) == 0
+    session = json.loads(capsys.readouterr().out)
+
+    assert cli.main(["work", "phases", "session", "next", session["session_id"], "--target", str(tmp_path), "--json"]) == 0
+    next_payload = json.loads(capsys.readouterr().out)
+    assert next_payload["next_step"]["step_type"] == "unreviewed_pushed_phase"
+    assert next_payload["next_step"]["phase_id"] == "phase-212"
+    assert "closeout phase-212" in next_payload["suggested_next_command"]
+
+    assert cli.main(["work", "phases", "closeout", "phase-212", "--target", str(tmp_path), "--status", "reviewed", "--reason", "Reviewed.", "--json"]) == 0
+    capsys.readouterr()
+    assert cli.main(["work", "phases", "session", "next", "latest", "--target", str(tmp_path), "--json"]) == 0
+    next_after_review = json.loads(capsys.readouterr().out)
+    assert next_after_review["next_step"]["step_type"] == "pending_phase"
+    assert next_after_review["next_step"]["phase_id"] == "phase-213"
+
+    assert cli.main(["work", "phases", "session", "resume", "latest", "--target", str(tmp_path), "--json"]) == 0
+    resumed = json.loads(capsys.readouterr().out)
+    assert resumed["executed"] is False
+    assert resumed["resume"]["next_step"]["phase_id"] == "phase-213"
+
+    assert cli.main(["work", "phases", "session", "show", "latest", "--target", str(tmp_path), "--json"]) == 0
+    shown = json.loads(capsys.readouterr().out)
+    assert shown["resume_history"][-1]["next_step"]["step_type"] == "pending_phase"
