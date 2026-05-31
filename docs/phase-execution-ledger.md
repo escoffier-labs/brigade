@@ -199,6 +199,8 @@ Each report includes `PHASE_REPORT.md` and `PHASE_EVIDENCE.json` with range stat
 
 `brigade work phases session report build <session-id|latest>` writes a local bundle under `.brigade/work/phases/session-reports/` with `SESSION_REPORT.md` and `SESSION_EVIDENCE.json`. The bundle includes phase records, doctor issues, report compare summary, recovery checkpoints, recovery notes, phase actions, phase-related imports, commits, push refs, test counts, blockers, and suggested next commands.
 
+`brigade work phases schema` includes `session_health_schemas` for wrapper-facing AFK session health output. The manifest names stable fields for session next, resume, checkpoints, checkpoint compare, recovery notes, risk, verification, privacy, handoffs, reports, progress, and gate records so agents can consume those outputs without inferring contracts from examples.
+
 `brigade work phases import-issues` routes unresolved ledger issues into the scanner-ready work inbox as `source: phase-ledger` task imports. Imports dedupe by a stable source fingerprint and keep promotion explicit.
 
 `brigade work phases evidence add <phase-id>` appends local evidence metadata to a phase record. Evidence attachments can include changed files, test commands, test result summaries, report ids, handoff paths, and notes. Doctor warns when attached local file or handoff references are missing.

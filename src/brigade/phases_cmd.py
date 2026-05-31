@@ -127,6 +127,15 @@ def _schema(name: str) -> dict[str, Any]:
     }
 
 
+def _contract_schema(name: str, fields: list[str], *, description: str) -> dict[str, Any]:
+    return {
+        "name": name,
+        "version": SCHEMA_VERSION,
+        "description": description,
+        "record_fields": fields,
+    }
+
+
 def _slug(value: str) -> str:
     rendered = re.sub(r"[^A-Za-z0-9._-]+", "-", value.strip()).strip("-").lower()
     return rendered or f"phase-{uuid4().hex[:8]}"
@@ -244,6 +253,68 @@ def _append_unique(values: list[Any], additions: list[str]) -> list[str]:
 
 def schema(*, target: Path, json_output: bool = False) -> int:
     target = target.expanduser().resolve()
+    session_health_schemas = [
+        _contract_schema(
+            "phase-ledger-session-next",
+            ["session", "next_step", "checks", "checkpoint", "suggested_next_command"],
+            description="Read-only next-step decision for an AFK phase session.",
+        ),
+        _contract_schema(
+            "phase-ledger-session-resume",
+            ["session", "resume", "metadata_path", "suggested_next_command"],
+            description="Metadata-only resume receipt for an AFK phase session.",
+        ),
+        _contract_schema(
+            "phase-ledger-session-checkpoint",
+            ["checkpoint_id", "session_id", "phase_id", "status", "summary", "next_step", "suggested_next_command", "source_fingerprint"],
+            description="Local AFK recovery checkpoint without command execution.",
+        ),
+        _contract_schema(
+            "phase-ledger-session-checkpoint-compare",
+            ["checkpoint_id", "session_id", "issue_count", "checks", "top_issue", "suggested_next_command"],
+            description="Read-only drift check between a checkpoint and current session state.",
+        ),
+        _contract_schema(
+            "phase-ledger-session-recovery-note",
+            ["note_id", "session_id", "status", "summary", "evidence_labels", "next_step", "source_fingerprint"],
+            description="Safe local resume context attached to an AFK phase session.",
+        ),
+        _contract_schema(
+            "phase-ledger-session-risk",
+            ["session", "risk_level", "risk_count", "risks", "checkpoint", "recovery_note_count", "suggested_next_command"],
+            description="Read-only session risk summary across next step, checkpoint, notes, and doctor issues.",
+        ),
+        _contract_schema(
+            "phase-ledger-session-verification",
+            ["session", "status_counts", "missing_phases", "failed_phases", "deferred_phases", "suggested_next_command"],
+            description="Read-only verification coverage rollup across an AFK phase session.",
+        ),
+        _contract_schema(
+            "phase-ledger-session-privacy",
+            ["session", "status_counts", "missing_phases", "blocked_phases", "suggested_next_command"],
+            description="Read-only privacy-check coverage rollup across an AFK phase session.",
+        ),
+        _contract_schema(
+            "phase-ledger-session-handoffs",
+            ["session", "status_counts", "missing_phases", "failed_phases", "deferred_phases", "suggested_next_command"],
+            description="Read-only Memory Handoff coverage rollup across an AFK phase session.",
+        ),
+        _contract_schema(
+            "phase-ledger-session-report",
+            ["session", "records", "doctor", "recovery", "actions", "imports", "commits", "tests", "blockers", "suggested_next_command"],
+            description="Local session report evidence bundle with recovery context.",
+        ),
+        _contract_schema(
+            "phase-ledger-session-progress",
+            ["session", "percent_complete", "status_counts", "blockers", "current_phase", "test_summary", "commit_summary", "push_summary", "suggested_next_command"],
+            description="Read-only progress summary for an AFK phase session.",
+        ),
+        _contract_schema(
+            "phase-ledger-session-gate",
+            ["session", "safe_to_claim_complete", "checks", "blocker_count", "warning_count", "suggested_next_command"],
+            description="Final local claim gate for an AFK phase session.",
+        ),
+    ]
     payload = {
         "schema_version": SCHEMA_VERSION,
         "schema": _schema("phase-ledger-schema"),
@@ -259,7 +330,9 @@ def schema(*, target: Path, json_output: bool = False) -> int:
             _schema("phase-ledger-session"),
             _schema("phase-ledger-handoff"),
             _schema("phase-ledger-doctor"),
+            *session_health_schemas,
         ],
+        "session_health_schemas": session_health_schemas,
         "status_values": sorted(PHASE_STATUSES),
         "completion_rule": "A phase is complete only with evidence or an explicit deferral.",
         "no_silent_compression": True,

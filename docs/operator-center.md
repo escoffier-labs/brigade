@@ -138,6 +138,8 @@ brigade work phases session report show <report-id|latest>
 
 `schema` exports a read-only manifest for wrapper-facing JSON contracts. It covers `status`, `activity`, `reviews`, `templates`, report evidence, report review action plans, daily action queues, and operator readiness closeouts. The manifest names stable top-level fields, item fields, action fields, and source commands without reading or writing local receipts.
 
+`brigade work phases schema` complements the center schema with phase-ledger and AFK session health contracts. Its `session_health_schemas` block names stable fields for session next, resume, checkpoints, checkpoint compare, recovery notes, risk, verification, privacy, handoffs, reports, progress, and gate outputs.
+
 `templates` lists local workflow templates for context packs, tool packs, project audits, release candidates, and review closeouts.
 
 Every center row uses the same wrapper-facing fields: `subsystem`, `local_id`, `status`, `priority`, `severity`, `safe_summary`, `created_at`, `updated_at`, `receipt_path`, `path`, and `suggested_next_command`.

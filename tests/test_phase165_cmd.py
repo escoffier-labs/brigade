@@ -209,6 +209,22 @@ def test_phase_ledger_schema_status_next_report_and_imports(tmp_path, capsys):
     schema_payload = json.loads(capsys.readouterr().out)
     schema_names = {item["name"] for item in schema_payload["schemas"]}
     assert {"phase-record", "phase-ledger-status", "phase-ledger-report"} <= schema_names
+    session_schema_names = {item["name"] for item in schema_payload["session_health_schemas"]}
+    assert {
+        "phase-ledger-session-checkpoint",
+        "phase-ledger-session-checkpoint-compare",
+        "phase-ledger-session-risk",
+        "phase-ledger-session-verification",
+        "phase-ledger-session-privacy",
+        "phase-ledger-session-handoffs",
+        "phase-ledger-session-report",
+        "phase-ledger-session-progress",
+        "phase-ledger-session-gate",
+    } <= session_schema_names
+    checkpoint_schema = next(item for item in schema_payload["session_health_schemas"] if item["name"] == "phase-ledger-session-checkpoint")
+    assert {"checkpoint_id", "session_id", "source_fingerprint"} <= set(checkpoint_schema["record_fields"])
+    gate_schema = next(item for item in schema_payload["session_health_schemas"] if item["name"] == "phase-ledger-session-gate")
+    assert {"safe_to_claim_complete", "blocker_count"} <= set(gate_schema["record_fields"])
 
     assert cli.main(["work", "phases", "status", "--target", str(tmp_path), "--range", "220-222", "--json"]) == 0
     status_payload = json.loads(capsys.readouterr().out)

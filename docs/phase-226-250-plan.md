@@ -30,7 +30,7 @@ Harden AFK session execution into a more useful daily-driver, release, and recov
 | 243 | Add phase checkpoint action queue. Implemented by routing blocked or stale checkpoint issues into phase actions. |
 | 244 | Add checkpoint archive. Implemented with local archive metadata for phase session checkpoints. |
 | 245 | Add session recovery report section. Implemented with checkpoint and recovery-note evidence in session reports. |
-| 246 | Add AFK session health schema. |
+| 246 | Add AFK session health schema. Implemented by publishing `session_health_schemas` from `brigade work phases schema` for checkpoint, recovery, risk, verification, privacy, handoff, report, progress, and gate outputs. |
 | 247 | Add wrapper safe resume protocol. |
 | 248 | Add phase session release compare checks. |
 | 249 | Add AFK session self-audit command. |
