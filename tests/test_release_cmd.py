@@ -513,6 +513,8 @@ def test_release_phase_ledger_closeout_and_report_evidence(tmp_path, monkeypatch
     assert candidate["phase_ledger"]["latest_report"]["report_id"] == report["report_id"]
     assert candidate["phase_ledger"]["latest_report_compare"]["issue_count"] == 0
     assert candidate["phase_ledger"]["latest_session"]["session_id"] == session["session_id"]
+    assert candidate["phase_ledger"]["latest_session_checkpoint"]["checkpoint_id"] == checkpoint["checkpoint_id"]
+    assert candidate["phase_ledger"]["latest_session_checkpoint_compare"]["issue_count"] >= 0
     assert candidate["phase_ledger"]["latest_session_gate"]["safe_to_claim_complete"] is False
     assert candidate["phase_ledger"]["latest_session_report"]["report_id"] == session_report["report_id"]
 

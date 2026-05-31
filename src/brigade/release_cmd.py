@@ -1056,6 +1056,8 @@ def _evidence(target: Path, *, base_ref: str | None) -> dict[str, Any]:
             "latest_report": phase_ledger.get("latest_report"),
             "latest_report_compare": phase_ledger.get("latest_report_compare"),
             "latest_session": phase_ledger.get("latest_session"),
+            "latest_session_checkpoint": phase_ledger.get("latest_session_checkpoint"),
+            "latest_session_checkpoint_compare": phase_ledger.get("latest_session_checkpoint_compare"),
             "latest_session_gate": phase_ledger.get("latest_session_gate"),
             "latest_session_report": phase_ledger.get("latest_session_report"),
             "closeout_count": phase_ledger.get("closeout_count"),
