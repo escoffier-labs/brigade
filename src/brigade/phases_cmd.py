@@ -1226,6 +1226,7 @@ def _report_payload(target: Path, *, phase_range: str | None = None) -> dict[str
         "target": str(target),
         "report_id": report_id,
         "created_at": _now().isoformat(),
+        "git_head": _git_head(target),
         "phase_range": phase_range,
         "status": status_data,
         "doctor": {
@@ -1362,6 +1363,70 @@ def report_closeout(*, target: Path, report_id: str, status: str = "reviewed", r
         print(f"status: {status}")
         print(f"reason: {closeout['reason']}")
     return 0
+
+
+def report_compare(*, target: Path, report_id: str, json_output: bool = False) -> int:
+    target = target.expanduser().resolve()
+    report, error = _resolve_report(target, report_id)
+    if report is None:
+        print(f"error: {error}", file=sys.stderr)
+        return 1
+    report_path = Path(str(report.get("path") or ""))
+    phase_range = report.get("phase_range") if isinstance(report.get("phase_range"), str) else None
+    current_status = status_payload(target, phase_range=phase_range)
+    current_doctor = doctor_payload(target, phase_range=phase_range)
+    checks: list[dict[str, Any]] = []
+    report_status = report.get("status") if isinstance(report.get("status"), dict) else {}
+    report_doctor = report.get("doctor") if isinstance(report.get("doctor"), dict) else {}
+    if current_status.get("status_counts") != report_status.get("status_counts"):
+        checks.append(_check("warn", "phase_report_status_counts_changed", "current phase status counts differ from report", suggested="brigade work phases report build"))
+    if int(current_doctor.get("issue_count") or 0) != int(report_doctor.get("issue_count") or 0):
+        checks.append(_check("warn", "phase_report_doctor_issue_count_changed", f"{report_doctor.get('issue_count')} -> {current_doctor.get('issue_count')}", suggested="brigade work phases doctor"))
+    current_head = _git_head(target)
+    report_head = str(report.get("git_head") or "")
+    if report_head and current_head and not _same_commit(report_head, current_head):
+        checks.append(_check("warn", "phase_report_head_changed", f"current HEAD {current_head} differs from report HEAD {report_head}", suggested="brigade work phases report build"))
+    closeout_path = report_path / "CLOSEOUT.json"
+    closeout = _read_json(closeout_path)
+    if closeout is None:
+        checks.append(_check("warn", "phase_report_missing_closeout", "phase report has no CLOSEOUT.json", suggested=f"brigade work phases report closeout {report.get('report_id')}"))
+    elif closeout.get("status") in {"deferred", "superseded", "archived"}:
+        checks.append(_check("warn", "phase_report_not_reviewed", f"phase report closeout status is {closeout.get('status')}", suggested=f"brigade work phases report closeout {report.get('report_id')} --status reviewed"))
+    created = _parse_time(report.get("created_at"))
+    latest_record_time = max(
+        [
+            parsed
+            for parsed in (_parse_time(record.get("updated_at") or record.get("completed_at") or record.get("created_at")) for record in _records(target))
+            if parsed is not None
+        ],
+        default=None,
+    )
+    if created and latest_record_time and latest_record_time > created:
+        checks.append(_check("warn", "phase_report_newer_phase_record", "a phase record changed after this report was built", suggested="brigade work phases report build"))
+    if not checks:
+        checks.append(_check("ok", "phase_report_current", "phase report matches current ledger checks"))
+    issues = [check for check in checks if check["status"] != "ok"]
+    payload = {
+        "schema_version": SCHEMA_VERSION,
+        "schema": _schema("phase-ledger-report-compare"),
+        "target": str(target),
+        "report_id": report.get("report_id"),
+        "report_path": str(report_path),
+        "phase_range": phase_range,
+        "current_head": current_head,
+        "checks": checks,
+        "issue_count": len(issues),
+        "top_issue": issues[0] if issues else None,
+        "suggested_next_command": issues[0]["suggested_next_command"] if issues else "brigade work phases report show latest",
+    }
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        print(f"phase report compare: {report.get('report_id')}")
+        print(f"issues: {len(issues)}")
+        for check in checks:
+            print(f"[{check['status']}] {check['name']}: {check['detail']}")
+    return 0 if not issues else 1
 
 
 def import_issues(*, target: Path, phase_range: str | None = None, dry_run: bool = False, json_output: bool = False) -> int:

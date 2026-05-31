@@ -380,3 +380,34 @@ def test_phase_ledger_actions_defer_requires_reason(tmp_path, capsys):
     deferred = json.loads(capsys.readouterr().out)
     assert deferred["status"] == "deferred"
     assert deferred["review_reason"] == "Waiting for review."
+
+
+def test_phase_report_compare_warns_on_missing_closeout_and_stale_report(tmp_path, capsys):
+    assert phases_cmd.plan(target=tmp_path, phase_id="phase-262", title="Report compare", source_goal="audit", json_output=True) == 0
+    capsys.readouterr()
+    assert phases_cmd.complete(target=tmp_path, phase_id="phase-262", summary="Done", files_changed=["file.py"], tests_run=["pytest"], json_output=True) == 0
+    capsys.readouterr()
+    assert phases_cmd.report_build(target=tmp_path, phase_range="262", json_output=True) == 0
+    report = json.loads(capsys.readouterr().out)
+
+    assert cli.main(["work", "phases", "report", "compare", report["report_id"], "--target", str(tmp_path), "--json"]) == 1
+    first = json.loads(capsys.readouterr().out)
+    assert any(check["name"] == "phase_report_missing_closeout" for check in first["checks"])
+
+    assert phases_cmd.report_closeout(target=tmp_path, report_id=report["report_id"], status="reviewed", reason="Reviewed.", json_output=True) == 0
+    capsys.readouterr()
+    assert cli.main(["work", "phases", "report", "compare", report["report_id"], "--target", str(tmp_path), "--json"]) == 0
+    current = json.loads(capsys.readouterr().out)
+    assert current["issue_count"] == 0
+
+    record_path = tmp_path / ".brigade" / "work" / "phases" / "records" / "phase-262.json"
+    record = json.loads(record_path.read_text())
+    record["updated_at"] = datetime.now(timezone.utc).isoformat()
+    record["tests_run"].append("pytest again")
+    record_path.write_text(json.dumps(record) + "\n")
+
+    assert cli.main(["work", "phases", "report", "compare", report["report_id"], "--target", str(tmp_path), "--json"]) == 1
+    stale = json.loads(capsys.readouterr().out)
+    names = {check["name"] for check in stale["checks"]}
+    assert "phase_report_status_counts_changed" not in names
+    assert "phase_report_newer_phase_record" in names

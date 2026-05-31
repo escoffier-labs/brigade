@@ -63,6 +63,7 @@ Phase ledger action queues turn those ledger issues into local metadata-only nex
 The daily driver can select those phase-ledger actions when they block AFK or release completion, then start one action or build one phase report as a bounded local step.
 Release readiness and candidate compare include phase closeout and report references so publish review can catch unreviewed or stale phase evidence.
 Phase report closeouts let an operator review, defer, supersede, or archive a generated phase report without changing its evidence.
+Phase report compare checks saved report bundles against current ledger state before relying on them.
 The current AFK ledger hardening tranche is described in [`docs/phase-166-200-plan.md`](docs/phase-166-200-plan.md).
 See [`docs/workflow-rules.md`](docs/workflow-rules.md) for the public-safe repo workflow rule templates installed under `rules/`.
 

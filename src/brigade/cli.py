@@ -1036,6 +1036,10 @@ def _build_parser() -> argparse.ArgumentParser:
     p_work_phases_report_closeout.add_argument("--status", choices=["reviewed", "deferred", "superseded", "archived"], default="reviewed", help="Report closeout state.")
     p_work_phases_report_closeout.add_argument("--reason", default=None, help="Closeout reason.")
     p_work_phases_report_closeout.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_work_phases_report_compare = phases_report_sub.add_parser("compare", help="Compare one phase ledger report against current state.")
+    p_work_phases_report_compare.add_argument("report_id", help="Report id, unique prefix, or latest.")
+    p_work_phases_report_compare.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_work_phases_report_compare.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_work_next = work_sub.add_parser("next", help="Show the next daily work task and suggested command.")
     p_work_next.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
     p_work_next.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
@@ -3078,6 +3082,8 @@ def main(argv=None) -> int:
                     return phases_cmd.report_show(target=args.target, report_id=args.report_id, json_output=args.json)
                 if args.phases_report_command == "closeout":
                     return phases_cmd.report_closeout(target=args.target, report_id=args.report_id, status=args.status, reason=args.reason, json_output=args.json)
+                if args.phases_report_command == "compare":
+                    return phases_cmd.report_compare(target=args.target, report_id=args.report_id, json_output=args.json)
                 parser.error(f"unknown phases report command: {args.phases_report_command}")
                 return 2
             parser.error(f"unknown phases command: {args.phases_command}")
