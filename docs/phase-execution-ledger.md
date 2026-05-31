@@ -48,6 +48,9 @@ brigade work phases session show latest
 brigade work phases session next latest
 brigade work phases session resume latest
 brigade work phases session closeout latest --status reviewed --reason "checked session"
+brigade work phases session report build latest
+brigade work phases session report list
+brigade work phases session report show latest
 ```
 
 Every command supports stable JSON output with `--json`.
@@ -150,6 +153,8 @@ Each report includes `PHASE_REPORT.md` and `PHASE_EVIDENCE.json` with range stat
 `brigade work phases report compare <report-id|latest>` checks a report bundle against current phase status counts, doctor issue count, HEAD label when captured, closeout state, and newer phase record changes.
 
 `brigade work phases session start --range <range>` creates a local AFK execution session under `.brigade/work/phases/sessions/`. A session records the requested phase range, source goal, current phase, phase status summary, commit and test counts, report references, closeout state, and next recommended command. `session list`, `session show`, and `session closeout` inspect or review that local metadata without executing work. `session next` and `session resume` classify the safest next step, such as a missing phase record, pending phase, stale in-progress phase, unverified phase, missing commit or push evidence, unreviewed pushed phase, or session closeout. `resume` writes only local resume metadata and never executes the suggested command.
+
+`brigade work phases session report build <session-id|latest>` writes a local bundle under `.brigade/work/phases/session-reports/` with `SESSION_REPORT.md` and `SESSION_EVIDENCE.json`. The bundle includes phase records, doctor issues, report compare summary, phase actions, phase-related imports, commits, push refs, test counts, blockers, and suggested next commands.
 
 `brigade work phases import-issues` routes unresolved ledger issues into the scanner-ready work inbox as `source: phase-ledger` task imports. Imports dedupe by a stable source fingerprint and keep promotion explicit.
 

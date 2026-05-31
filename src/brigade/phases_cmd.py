@@ -51,6 +51,10 @@ def _sessions_root(target: Path) -> Path:
     return _root(target) / "sessions"
 
 
+def _session_reports_root(target: Path) -> Path:
+    return _root(target) / "session-reports"
+
+
 def _index_path(target: Path) -> Path:
     return _root(target) / "index.json"
 
@@ -763,6 +767,18 @@ def _latest_session(target: Path) -> dict[str, Any] | None:
     return sessions[-1] if sessions else None
 
 
+def _read_session_reports(target: Path) -> list[dict[str, Any]]:
+    reports: list[dict[str, Any]] = []
+    for path in sorted(_session_reports_root(target).glob("*/SESSION_EVIDENCE.json")):
+        payload = _read_json(path)
+        if payload is None:
+            continue
+        payload.setdefault("path", str(path.parent))
+        reports.append(payload)
+    reports.sort(key=lambda item: str(item.get("created_at") or item.get("report_id") or ""))
+    return reports
+
+
 def _resolve_session(target: Path, session_id: str) -> tuple[Path | None, dict[str, Any] | None, str | None]:
     target = target.expanduser().resolve()
     if session_id == "latest":
@@ -1094,6 +1110,179 @@ def session_resume(*, target: Path, session_id: str, json_output: bool = False) 
         print(f"phase session resume: {session.get('session_id')}")
         print("executed: false")
         print(f"next: {payload['suggested_next_command']}")
+    return 0
+
+
+def _session_import_summaries(target: Path) -> list[dict[str, Any]]:
+    try:
+        from . import work_cmd
+
+        imports = work_cmd._pending_imports(target)
+    except Exception:
+        imports = []
+    summaries = []
+    for item in imports:
+        if item.get("source") not in {"phase-ledger", "phase-ledger-action", "phase-session"}:
+            continue
+        summaries.append(
+            {
+                "import_id": item.get("id"),
+                "source": item.get("source"),
+                "kind": item.get("kind"),
+                "status": item.get("status"),
+                "text": item.get("text"),
+            }
+        )
+    return summaries
+
+
+def _session_report_payload(target: Path, session: dict[str, Any]) -> dict[str, Any]:
+    phase_range = str(session.get("phase_range") or "")
+    records, missing = _session_phase_records(target, phase_range)
+    doctor_data = doctor_payload(target, phase_range=phase_range)
+    next_data = _session_next_payload(target, session)
+    actions = [_action_summary(action) for action in _read_actions(target) if action.get("status") in {"pending", "active"}]
+    latest_report = _latest_report(target)
+    report_compare = _report_compare_summary(target, latest_report)
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "schema": _schema("phase-ledger-session-report"),
+        "target": str(target),
+        "report_id": f"{_now().strftime('%Y%m%d-%H%M%S')}-phase-session-report-{uuid4().hex[:6]}",
+        "created_at": _now().isoformat(),
+        "git_head": _git_head(target),
+        "session": _session_summary(session),
+        "phase_range": phase_range,
+        "missing_phase_ids": missing,
+        "phase_records": [_record_summary(record) for record in records],
+        "doctor": {
+            "issue_count": doctor_data["issue_count"],
+            "top_issue": doctor_data["top_issue"],
+            "checks": doctor_data["checks"],
+        },
+        "next": next_data,
+        "actions": actions,
+        "action_count": len(actions),
+        "imports": _session_import_summaries(target),
+        "phase_report_compare": report_compare,
+        "commit_summary": {
+            "committed": len([record for record in records if record.get("commit_hash")]),
+            "pushed": len([record for record in records if record.get("push_ref")]),
+        },
+        "test_summary": {
+            "with_tests": len([record for record in records if record.get("tests_run")]),
+            "without_tests": len([record for record in records if not record.get("tests_run")]),
+        },
+        "blockers": [check for check in doctor_data["checks"] if check.get("status") != "ok"],
+        "suggested_next_commands": [
+            next_data["suggested_next_command"],
+            "brigade work phases session closeout latest",
+        ],
+    }
+
+
+def _write_session_report_markdown(path: Path, payload: dict[str, Any]) -> None:
+    session = payload.get("session") if isinstance(payload.get("session"), dict) else {}
+    lines = [
+        "# Brigade Phase Session Report",
+        "",
+        f"- Report id: `{payload['report_id']}`",
+        f"- Session id: `{session.get('session_id')}`",
+        f"- Created: `{payload['created_at']}`",
+        f"- Phase range: `{payload.get('phase_range') or 'all'}`",
+        f"- Doctor issues: `{payload['doctor']['issue_count']}`",
+        f"- Open actions: `{payload['action_count']}`",
+        "",
+        "## Next Step",
+        "",
+        f"- `{payload['next']['next_step']['step_type']}`: {payload['next']['next_step']['detail']}",
+        f"- Command: `{payload['next']['suggested_next_command']}`",
+        "",
+        "## Records",
+        "",
+    ]
+    for record in payload.get("phase_records", []):
+        lines.append(f"- `{record.get('phase_id')}` `{record.get('status')}` commit=`{record.get('commit_hash') or 'none'}` push=`{record.get('push_ref') or 'none'}`")
+    lines.extend(["", "## Blockers", ""])
+    blockers = payload.get("blockers") or []
+    if not blockers:
+        lines.append("- none")
+    for blocker in blockers:
+        lines.append(f"- `{blocker.get('status')}` `{blocker.get('name')}`: {blocker.get('detail')}")
+    path.write_text("\n".join(lines).rstrip() + "\n")
+
+
+def _resolve_session_report(target: Path, report_id: str) -> tuple[dict[str, Any] | None, str | None]:
+    target = target.expanduser().resolve()
+    if report_id == "latest":
+        reports = _read_session_reports(target)
+        return (reports[-1], None) if reports else (None, "phase session report not found: latest")
+    candidates = sorted(_session_reports_root(target).glob(f"{report_id}*/SESSION_EVIDENCE.json"))
+    if len(candidates) != 1:
+        return None, f"phase session report not found: {report_id}" if not candidates else f"phase session report id is ambiguous: {report_id}"
+    payload = _read_json(candidates[0])
+    if payload is None:
+        return None, f"invalid phase session report: {candidates[0]}"
+    payload.setdefault("path", str(candidates[0].parent))
+    return payload, None
+
+
+def session_report_build(*, target: Path, session_id: str, json_output: bool = False) -> int:
+    target = target.expanduser().resolve()
+    _path, session, error = _resolve_session(target, session_id)
+    if session is None:
+        print(f"error: {error}", file=sys.stderr)
+        return 1
+    payload = _session_report_payload(target, session)
+    report_dir = _session_reports_root(target) / str(payload["report_id"])
+    payload["path"] = str(report_dir)
+    payload["bundle_files"] = ["SESSION_REPORT.md", "SESSION_EVIDENCE.json"]
+    _write_json(report_dir / "SESSION_EVIDENCE.json", payload)
+    _write_session_report_markdown(report_dir / "SESSION_REPORT.md", payload)
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        print(f"phase session report: {payload['report_id']}")
+        print(f"session: {payload['session'].get('session_id')}")
+        print(f"issues: {payload['doctor']['issue_count']}")
+    return 0
+
+
+def session_report_list(*, target: Path, limit: int = 20, json_output: bool = False) -> int:
+    target = target.expanduser().resolve()
+    reports = [
+        {
+            "report_id": report.get("report_id"),
+            "session_id": (report.get("session") or {}).get("session_id") if isinstance(report.get("session"), dict) else None,
+            "created_at": report.get("created_at"),
+            "phase_range": report.get("phase_range"),
+            "issue_count": (report.get("doctor") or {}).get("issue_count") if isinstance(report.get("doctor"), dict) else None,
+            "path": report.get("path"),
+        }
+        for report in reversed(_read_session_reports(target))
+    ][:limit]
+    payload = {"schema_version": SCHEMA_VERSION, "schema": _schema("phase-ledger-session-report-list"), "target": str(target), "reports": reports, "report_count": len(reports)}
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        print(f"phase session reports: {len(reports)}")
+        for report in reports:
+            print(f"- {report.get('report_id')} session={report.get('session_id')} issues={report.get('issue_count')}")
+    return 0
+
+
+def session_report_show(*, target: Path, report_id: str, json_output: bool = False) -> int:
+    target = target.expanduser().resolve()
+    report, error = _resolve_session_report(target, report_id)
+    if report is None:
+        print(f"error: {error}", file=sys.stderr)
+        return 1
+    if json_output:
+        print(json.dumps(report, indent=2, sort_keys=True))
+    else:
+        print(f"phase session report: {report.get('report_id')}")
+        print(f"session: {(report.get('session') or {}).get('session_id') if isinstance(report.get('session'), dict) else 'none'}")
+        print(f"issues: {(report.get('doctor') or {}).get('issue_count') if isinstance(report.get('doctor'), dict) else 0}")
     return 0
 
 

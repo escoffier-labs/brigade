@@ -512,3 +512,31 @@ def test_phase_session_next_and_resume_classify_safe_step(tmp_path, capsys):
     assert cli.main(["work", "phases", "session", "show", "latest", "--target", str(tmp_path), "--json"]) == 0
     shown = json.loads(capsys.readouterr().out)
     assert shown["resume_history"][-1]["next_step"]["step_type"] == "pending_phase"
+
+
+def test_phase_session_report_bundle(tmp_path, capsys):
+    assert cli.main(["work", "phases", "plan", "--target", str(tmp_path), "--range", "213-214", "--title", "Report", "--goal", "afk", "--json"]) == 0
+    capsys.readouterr()
+    assert cli.main(["work", "phases", "complete", "phase-213", "--target", str(tmp_path), "--summary", "Done", "--file", "file.py", "--test", "pytest", "--json"]) == 0
+    capsys.readouterr()
+    assert cli.main(["work", "phases", "session", "start", "--target", str(tmp_path), "--range", "213-214", "--goal", "report session", "--json"]) == 0
+    session = json.loads(capsys.readouterr().out)
+
+    assert cli.main(["work", "phases", "session", "report", "build", session["session_id"], "--target", str(tmp_path), "--json"]) == 0
+    report = json.loads(capsys.readouterr().out)
+    report_id = report["report_id"]
+    report_dir = tmp_path / ".brigade" / "work" / "phases" / "session-reports" / report_id
+    assert (report_dir / "SESSION_REPORT.md").is_file()
+    assert (report_dir / "SESSION_EVIDENCE.json").is_file()
+    assert report["session"]["session_id"] == session["session_id"]
+    assert report["next"]["next_step"]["phase_id"] == "phase-214"
+    assert "commit_summary" in report
+    assert "test_summary" in report
+
+    assert cli.main(["work", "phases", "session", "report", "list", "--target", str(tmp_path), "--json"]) == 0
+    listed = json.loads(capsys.readouterr().out)
+    assert listed["report_count"] == 1
+
+    assert cli.main(["work", "phases", "session", "report", "show", "latest", "--target", str(tmp_path), "--json"]) == 0
+    shown = json.loads(capsys.readouterr().out)
+    assert shown["report_id"] == report_id

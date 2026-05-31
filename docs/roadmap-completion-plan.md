@@ -109,6 +109,7 @@ Implementation scope:
 - Add `brigade work phases report compare` for read-only report freshness checks against current ledger evidence.
 - Add `brigade work phases session start/list/show/closeout` for local AFK execution sessions over declared phase ranges.
 - Add `brigade work phases session next/resume` so AFK sessions can be resumed from the safest next local command without implicit execution.
+- Add `brigade work phases session report build/list/show` for local session evidence bundles.
 - Add `brigade work phases actions plan/build/list/show/start/done/defer/archive`.
 - Make `brigade daily plan`, `daily review`, and `daily run` understand phase-ledger actions and unresolved phase issues as bounded local daily steps.
 - Include latest phase closeout and phase report references in release readiness and release candidate evidence, with release doctor and candidate compare warnings for unresolved or stale phase evidence.
