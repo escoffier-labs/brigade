@@ -13,7 +13,7 @@ Status: in progress.
 - `brigade work tasks` plus `brigade work task add/show/done` provide a gitignored local task ledger.
 - `brigade work run --queue-next` queues extracted follow-up work without duplicating equivalent pending tasks.
 - `brigade work import add/list/show/promote` gives scanners and wrappers a stable local inbox for candidate work.
-- `brigade work phases` provides a gitignored execution ledger for long unattended multi-phase work, including no-silent-compression checks, completion evidence requirements, range status, review closeouts, compare checks, action queues, evidence attachments, daily-driver candidates, report closeouts, report compare checks, AFK execution sessions, session next/resume recovery, session reports, daily session candidates, inbox issue routing, and release/operator evidence. Status: strengthened through phase 216 evidence attachments.
+- `brigade work phases` provides a gitignored execution ledger for long unattended multi-phase work, including no-silent-compression checks, completion evidence requirements, range status, review closeouts, compare checks, action queues, evidence attachments, verification matrices, daily-driver candidates, report closeouts, report compare checks, AFK execution sessions, session next/resume recovery, session reports, daily session candidates, inbox issue routing, and release/operator evidence. Status: strengthened through phase 217 verification matrix.
 
 ## Foundation: Scanner-Ready Inbox
 

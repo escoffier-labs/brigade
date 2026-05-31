@@ -622,3 +622,27 @@ def test_phase_evidence_add_attaches_metadata_and_doctor_warns_on_missing_refs(t
     assert phases_cmd.doctor(target=tmp_path, json_output=True) == 0
     doctor_payload = json.loads(capsys.readouterr().out)
     assert any(check["name"] == "phase_evidence_missing_reference" for check in doctor_payload["checks"])
+
+
+def test_phase_verification_plan_and_record(tmp_path, capsys):
+    assert cli.main(["work", "phases", "plan", "--target", str(tmp_path), "--range", "217-218", "--title", "Verify", "--goal", "afk", "--json"]) == 0
+    capsys.readouterr()
+    assert cli.main(["work", "phases", "complete", "phase-217", "--target", str(tmp_path), "--summary", "Done", "--test", "pytest existing", "--json"]) == 0
+    capsys.readouterr()
+
+    assert cli.main(["work", "phases", "verify", "plan", "217-218", "--target", str(tmp_path), "--json"]) == 0
+    plan_payload = json.loads(capsys.readouterr().out)
+    assert plan_payload["record_count"] == 2
+    first = next(record for record in plan_payload["records"] if record["phase_id"] == "phase-217")
+    assert first["verification"][0]["command"] == "pytest existing"
+    second = next(record for record in plan_payload["records"] if record["phase_id"] == "phase-218")
+    assert second["verification"][0]["status"] == "deferred"
+
+    assert cli.main(["work", "phases", "verify", "record", "phase-217", "--target", str(tmp_path), "--command", "pytest existing", "--status", "passed", "--summary", "passed", "--json"]) == 0
+    recorded = json.loads(capsys.readouterr().out)
+    assert recorded["recorded"]["status"] == "passed"
+    assert recorded["recorded"]["summary"] == "passed"
+
+    assert cli.main(["work", "phases", "verify", "plan", "phase-217", "--target", str(tmp_path), "--json"]) == 0
+    updated = json.loads(capsys.readouterr().out)
+    assert updated["records"][0]["verification"][0]["status"] == "passed"

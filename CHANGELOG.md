@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `brigade daily status/plan/review/run/doctor` now surface active phase sessions, and daily run can build one phase session report or close out one completed reviewed session as its single safe step.
 - Release doctor, release candidate evidence, center status/reviews, and work brief/doctor now include compact phase session and session report state.
 - `brigade work phases evidence add <phase-id>` for appending local evidence attachments to phase records, with doctor warnings for missing referenced evidence files.
+- `brigade work phases verify plan/record` for local phase verification matrices that show expected commands and record operator-supplied outcomes without executing tests.
 - `brigade work phases closeout <phase-id|range|latest>` for local reviewed, deferred, blocked, or archived phase ledger closeouts, plus stale unreviewed completed-phase doctor warnings.
 - `brigade work phases compare <phase-id|range|latest>` for read-only phase evidence freshness checks against local HEAD, referenced files, report age, test evidence, and doctor issue counts.
 - `brigade work phases actions plan/build/list/show/start/done/defer/archive` for metadata-only phase-ledger action queues sourced from doctor issues and closeout blockers.

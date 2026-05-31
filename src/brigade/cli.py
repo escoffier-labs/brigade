@@ -992,6 +992,20 @@ def _build_parser() -> argparse.ArgumentParser:
     p_work_phases_evidence_add.add_argument("--handoff", dest="handoff_paths", action="append", default=[], help="Memory Handoff path. May be repeated.")
     p_work_phases_evidence_add.add_argument("--note", dest="notes", action="append", default=[], help="Evidence note. May be repeated.")
     p_work_phases_evidence_add.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_work_phases_verify = phases_sub.add_parser("verify", help="Plan and record phase verification metadata.")
+    phases_verify_sub = p_work_phases_verify.add_subparsers(dest="phases_verify_command", metavar="<phases-verify-command>")
+    phases_verify_sub.required = True
+    p_work_phases_verify_plan = phases_verify_sub.add_parser("plan", help="Plan verification for a phase selector.")
+    p_work_phases_verify_plan.add_argument("selector", help="Phase id, range such as 211-225, or latest.")
+    p_work_phases_verify_plan.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_work_phases_verify_plan.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_work_phases_verify_record = phases_verify_sub.add_parser("record", help="Record one phase verification result.")
+    p_work_phases_verify_record.add_argument("phase_id", help="Phase id or unique prefix.")
+    p_work_phases_verify_record.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
+    p_work_phases_verify_record.add_argument("--command", dest="verification_command", required=True, help="Verification command label.")
+    p_work_phases_verify_record.add_argument("--status", choices=["passed", "failed", "skipped", "deferred"], required=True, help="Verification result.")
+    p_work_phases_verify_record.add_argument("--summary", default=None, help="Verification result summary.")
+    p_work_phases_verify_record.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_work_phases_actions = phases_sub.add_parser("actions", help="Plan and manage local phase ledger action records.")
     phases_actions_sub = p_work_phases_actions.add_subparsers(dest="phases_actions_command", metavar="<phases-actions-command>")
     phases_actions_sub.required = True
@@ -3130,6 +3144,13 @@ def main(argv=None) -> int:
                         json_output=args.json,
                     )
                 parser.error(f"unknown phases evidence command: {args.phases_evidence_command}")
+                return 2
+            if args.phases_command == "verify":
+                if args.phases_verify_command == "plan":
+                    return phases_cmd.verify_plan(target=args.target, selector=args.selector, json_output=args.json)
+                if args.phases_verify_command == "record":
+                    return phases_cmd.verify_record(target=args.target, phase_id=args.phase_id, command=args.verification_command, status=args.status, summary=args.summary, json_output=args.json)
+                parser.error(f"unknown phases verify command: {args.phases_verify_command}")
                 return 2
             if args.phases_command == "actions":
                 if args.phases_actions_command == "plan":

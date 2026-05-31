@@ -17,6 +17,7 @@ PHASE_CLOSEOUT_STATUSES = {"reviewed", "deferred", "blocked", "archived"}
 PHASE_ACTION_STATUSES = {"pending", "active", "done", "deferred", "archived"}
 PHASE_REPORT_CLOSEOUT_STATUSES = {"reviewed", "deferred", "superseded", "archived"}
 PHASE_SESSION_CLOSEOUT_STATUSES = {"reviewed", "deferred", "blocked", "archived"}
+PHASE_VERIFY_STATUSES = {"expected", "passed", "failed", "skipped", "deferred"}
 DONE_STATUSES = {"implemented", "verified", "committed", "pushed"}
 STALE_IN_PROGRESS_HOURS = 12
 REPORT_STALE_HOURS = 24
@@ -1650,6 +1651,118 @@ def evidence_add(
     else:
         print(f"phase evidence: {record.get('phase_id')}")
         print(f"attachments: {len(attachments)}")
+    return 0
+
+
+def _verification_entries(record: dict[str, Any]) -> list[dict[str, Any]]:
+    existing = record.get("verification_matrix") if isinstance(record.get("verification_matrix"), list) else []
+    by_command = {str(item.get("command")): dict(item) for item in existing if isinstance(item, dict) and item.get("command")}
+    for command in record.get("tests_run") or []:
+        rendered = str(command)
+        by_command.setdefault(
+            rendered,
+            {
+                "command": rendered,
+                "status": "expected",
+                "summary": "",
+                "recorded_at": None,
+            },
+        )
+    if not by_command:
+        by_command["focused verification not declared"] = {
+            "command": "focused verification not declared",
+            "status": "deferred",
+            "summary": "No phase-specific verification command has been recorded.",
+            "recorded_at": None,
+        }
+    return list(by_command.values())
+
+
+def verify_plan(*, target: Path, selector: str, json_output: bool = False) -> int:
+    target = target.expanduser().resolve()
+    records, missing, parsed_range = _selected_records(target, selector)
+    if missing:
+        payload = {
+            "schema_version": SCHEMA_VERSION,
+            "schema": _schema("phase-ledger-verify-plan"),
+            "target": str(target),
+            "selector": selector,
+            "phase_range": parsed_range,
+            "missing_phase_ids": missing,
+            "records": [],
+            "record_count": 0,
+            "suggested_next_command": f"brigade work phases plan --range {parsed_range or selector}",
+        }
+    else:
+        record_payloads = []
+        for record in records:
+            record_payloads.append(
+                {
+                    "phase_id": record.get("phase_id"),
+                    "status": record.get("status"),
+                    "verification": _verification_entries(record),
+                }
+            )
+        payload = {
+            "schema_version": SCHEMA_VERSION,
+            "schema": _schema("phase-ledger-verify-plan"),
+            "target": str(target),
+            "selector": selector,
+            "phase_range": parsed_range,
+            "missing_phase_ids": [],
+            "records": record_payloads,
+            "record_count": len(record_payloads),
+            "suggested_next_command": f"brigade work phases verify record {records[0].get('phase_id')}" if records else "brigade work phases status",
+        }
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        print(f"phase verification plan: {selector}")
+        print(f"records: {payload['record_count']}")
+        for record in payload["records"]:
+            print(f"- {record.get('phase_id')} verification={len(record.get('verification') or [])}")
+    return 0
+
+
+def verify_record(*, target: Path, phase_id: str, command: str, status: str, summary: str | None = None, json_output: bool = False) -> int:
+    if status not in PHASE_VERIFY_STATUSES - {"expected"}:
+        print(f"error: --status must be one of {sorted(PHASE_VERIFY_STATUSES - {'expected'})}", file=sys.stderr)
+        return 2
+    target = target.expanduser().resolve()
+    path, record = _find_record(target, phase_id)
+    if record is None:
+        print(f"error: phase record not found: {phase_id}", file=sys.stderr)
+        return 1
+    entries = [entry for entry in _verification_entries(record) if entry.get("command") != command]
+    entry = {
+        "command": command,
+        "status": status,
+        "summary": summary or "",
+        "recorded_at": _now().isoformat(),
+    }
+    entries.append(entry)
+    record["verification_matrix"] = entries
+    if command != "focused verification not declared":
+        record["tests_run"] = _append_unique(record.get("tests_run", []), [command])
+    if summary:
+        record["test_result_summary"] = summary
+    record["updated_at"] = _now().isoformat()
+    record["path"] = str(path)
+    _write_json(path, record)
+    payload = {
+        "schema_version": SCHEMA_VERSION,
+        "schema": _schema("phase-ledger-verify-record"),
+        "target": str(target),
+        "phase_id": record.get("phase_id"),
+        "recorded": entry,
+        "verification": entries,
+        "suggested_next_command": f"brigade work phases verify plan {record.get('phase_id')}",
+    }
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        print(f"phase verification: {record.get('phase_id')}")
+        print(f"status: {status}")
     return 0
 
 
