@@ -22,6 +22,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `brigade work phases session handoffs` for read-only handoff coverage rollups across the phase records in an AFK session.
 - `brigade release doctor` now warns when active phase-session checkpoint evidence is blocked or stale.
 - Release candidate evidence now includes the latest phase session checkpoint and checkpoint compare summary.
+- `brigade center reviews` now includes blocked or stale phase-session checkpoint review items.
 - `brigade work phases session start/list/show/closeout` for local AFK phase execution sessions that track a requested range, current phase, phase status, commit and test counts, report references, closeout state, and next command.
 - `brigade work phases session next/resume` for read-only or metadata-only AFK session recovery that identifies the safest next phase command without executing it.
 - `brigade work phases session report build/list/show` for local Markdown and JSON evidence bundles over phase execution sessions.

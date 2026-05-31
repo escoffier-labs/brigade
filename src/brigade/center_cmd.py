@@ -884,6 +884,15 @@ def _reviews(target: Path) -> list[dict[str, Any]]:
     latest_phase_session = phase_health.get("latest_session") if isinstance(phase_health.get("latest_session"), dict) else None
     if latest_phase_session and latest_phase_session.get("status") not in {"closed", "archived"}:
         items.append(_item("phase-session", str(latest_phase_session.get("session_id") or "phase-session"), "warn", "active phase execution session needs review", "brigade work phases session next latest"))
+    latest_checkpoint = phase_health.get("latest_session_checkpoint") if isinstance(phase_health.get("latest_session_checkpoint"), dict) else None
+    latest_checkpoint_compare = phase_health.get("latest_session_checkpoint_compare") if isinstance(phase_health.get("latest_session_checkpoint_compare"), dict) else None
+    if latest_checkpoint and latest_checkpoint.get("status") == "blocked":
+        checkpoint_id = str(latest_checkpoint.get("checkpoint_id") or "phase-session-checkpoint")
+        items.append(_item("phase-session-checkpoint", checkpoint_id, "blocked", str(latest_checkpoint.get("summary") or "phase session checkpoint is blocked"), f"brigade work phases session checkpoints show {checkpoint_id}", severity="high", updated_at=latest_checkpoint.get("created_at") if isinstance(latest_checkpoint.get("created_at"), str) else None, receipt_path=latest_checkpoint.get("path") if isinstance(latest_checkpoint.get("path"), str) else None))
+    if latest_checkpoint_compare and int(latest_checkpoint_compare.get("issue_count") or 0) > 0:
+        checkpoint_id = str(latest_checkpoint_compare.get("checkpoint_id") or "latest")
+        top_checkpoint = latest_checkpoint_compare.get("top_issue") if isinstance(latest_checkpoint_compare.get("top_issue"), dict) else {}
+        items.append(_item("phase-session-checkpoint", checkpoint_id, "warn", str(top_checkpoint.get("detail") or "phase session checkpoint compare needs review"), str(latest_checkpoint_compare.get("suggested_next_command") or "brigade work phases session checkpoints compare latest"), severity="medium"))
     return items
 
 

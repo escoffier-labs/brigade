@@ -122,6 +122,7 @@ Implementation scope:
 - Add a read-only phase session handoff rollup across linted, drafted, failed, deferred, and missing handoff evidence.
 - Surface blocked or stale phase session checkpoints in release doctor.
 - Preserve latest phase session checkpoint evidence in release candidate bundles.
+- Surface blocked or stale phase session checkpoints in center reviews.
 - Add `brigade work phases session report build/list/show` for local session evidence bundles.
 - Add `brigade work phases session activity` for read-only chronological AFK session timelines.
 - Add `brigade work phases session progress` for read-only session completion, blocker, test, commit, push, and remaining-step summaries.
