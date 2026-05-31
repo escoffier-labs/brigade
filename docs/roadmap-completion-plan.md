@@ -129,6 +129,7 @@ Implementation scope:
 - Add recovery checkpoint and recovery-note sections to phase session reports.
 - Publish AFK session health contracts from `brigade work phases schema` for checkpoint, recovery, risk, verification, privacy, handoff, report, progress, and gate outputs.
 - Add a wrapper-safe `brigade work phases session protocol` output that combines next-step, risk, checkpoint, progress, verification, privacy, handoff, and gate evidence without executing suggested commands.
+- Add release candidate compare checks for phase session checkpoint, checkpoint-compare, and completion-gate drift after bundle creation.
 - Add `brigade work phases session report build/list/show` for local session evidence bundles.
 - Add `brigade work phases session activity` for read-only chronological AFK session timelines.
 - Add `brigade work phases session progress` for read-only session completion, blocker, test, commit, push, and remaining-step summaries.

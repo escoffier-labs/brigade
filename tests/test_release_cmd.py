@@ -526,6 +526,8 @@ def test_release_phase_ledger_closeout_and_report_evidence(tmp_path, monkeypatch
     newer_session = json.loads(capsys.readouterr().out)
     assert phases_cmd.session_report_build(target=tmp_path, session_id=newer_session["session_id"], json_output=True) == 0
     capsys.readouterr()
+    assert phases_cmd.session_closeout(target=tmp_path, session_id=newer_session["session_id"], status="reviewed", reason="Session reviewed.", json_output=True) == 0
+    capsys.readouterr()
     assert release_cmd.candidate_compare(target=tmp_path, candidate_id=candidate["candidate_id"], json_output=True) == 1
     compare = json.loads(capsys.readouterr().out)
     compare_names = {issue["name"] for issue in compare["issues"]}
@@ -533,6 +535,9 @@ def test_release_phase_ledger_closeout_and_report_evidence(tmp_path, monkeypatch
     assert "newer_phase_report" in compare_names
     assert "newer_phase_session" in compare_names
     assert "newer_phase_session_report" in compare_names
+    assert "phase_session_checkpoint_changed" in compare_names
+    assert "phase_session_checkpoint_compare_changed" in compare_names
+    assert "phase_session_gate_changed" in compare_names
 
 
 def test_release_schema_manifest_reports_contracts_and_latest_receipts(tmp_path, monkeypatch, capsys):

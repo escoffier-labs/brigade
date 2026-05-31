@@ -2230,6 +2230,50 @@ def candidate_compare(*, target: Path, candidate_id: str = "latest", json_output
     current_session_report = current_phase.get("latest_session_report") if isinstance(current_phase.get("latest_session_report"), dict) else None
     if isinstance(current_session_report, dict) and (not isinstance(candidate_session_report, dict) or candidate_session_report.get("report_id") != current_session_report.get("report_id")):
         issues.append({"status": WARN, "name": "newer_phase_session_report", "detail": str(current_session_report.get("report_id"))})
+    candidate_session_checkpoint = candidate_phase.get("latest_session_checkpoint") if isinstance(candidate_phase.get("latest_session_checkpoint"), dict) else None
+    current_session_checkpoint = current_phase.get("latest_session_checkpoint") if isinstance(current_phase.get("latest_session_checkpoint"), dict) else None
+    if isinstance(candidate_session_checkpoint, dict) or isinstance(current_session_checkpoint, dict):
+        candidate_checkpoint_key = (
+            candidate_session_checkpoint.get("checkpoint_id"),
+            candidate_session_checkpoint.get("status"),
+            candidate_session_checkpoint.get("suggested_next_command"),
+        ) if isinstance(candidate_session_checkpoint, dict) else None
+        current_checkpoint_key = (
+            current_session_checkpoint.get("checkpoint_id"),
+            current_session_checkpoint.get("status"),
+            current_session_checkpoint.get("suggested_next_command"),
+        ) if isinstance(current_session_checkpoint, dict) else None
+        if candidate_checkpoint_key != current_checkpoint_key:
+            detail = str((current_session_checkpoint or candidate_session_checkpoint or {}).get("checkpoint_id") or "missing")
+            issues.append({"status": WARN, "name": "phase_session_checkpoint_changed", "detail": detail})
+    candidate_checkpoint_compare = candidate_phase.get("latest_session_checkpoint_compare") if isinstance(candidate_phase.get("latest_session_checkpoint_compare"), dict) else None
+    current_checkpoint_compare = current_phase.get("latest_session_checkpoint_compare") if isinstance(current_phase.get("latest_session_checkpoint_compare"), dict) else None
+    if isinstance(candidate_checkpoint_compare, dict) or isinstance(current_checkpoint_compare, dict):
+        candidate_compare_key = (
+            candidate_checkpoint_compare.get("issue_count"),
+            (candidate_checkpoint_compare.get("top_issue") or {}).get("name") if isinstance(candidate_checkpoint_compare, dict) and isinstance(candidate_checkpoint_compare.get("top_issue"), dict) else None,
+        ) if isinstance(candidate_checkpoint_compare, dict) else None
+        current_compare_key = (
+            current_checkpoint_compare.get("issue_count"),
+            (current_checkpoint_compare.get("top_issue") or {}).get("name") if isinstance(current_checkpoint_compare, dict) and isinstance(current_checkpoint_compare.get("top_issue"), dict) else None,
+        ) if isinstance(current_checkpoint_compare, dict) else None
+        if candidate_compare_key != current_compare_key:
+            issues.append({"status": WARN, "name": "phase_session_checkpoint_compare_changed", "detail": f"{candidate_compare_key} -> {current_compare_key}"})
+    candidate_session_gate = candidate_phase.get("latest_session_gate") if isinstance(candidate_phase.get("latest_session_gate"), dict) else None
+    current_session_gate = current_phase.get("latest_session_gate") if isinstance(current_phase.get("latest_session_gate"), dict) else None
+    if isinstance(candidate_session_gate, dict) or isinstance(current_session_gate, dict):
+        candidate_gate_key = (
+            candidate_session_gate.get("safe_to_claim_complete"),
+            candidate_session_gate.get("blocker_count"),
+            (candidate_session_gate.get("top_blocker") or {}).get("name") if isinstance(candidate_session_gate, dict) and isinstance(candidate_session_gate.get("top_blocker"), dict) else None,
+        ) if isinstance(candidate_session_gate, dict) else None
+        current_gate_key = (
+            current_session_gate.get("safe_to_claim_complete"),
+            current_session_gate.get("blocker_count"),
+            (current_session_gate.get("top_blocker") or {}).get("name") if isinstance(current_session_gate, dict) and isinstance(current_session_gate.get("top_blocker"), dict) else None,
+        ) if isinstance(current_session_gate, dict) else None
+        if candidate_gate_key != current_gate_key:
+            issues.append({"status": WARN, "name": "phase_session_gate_changed", "detail": f"{candidate_gate_key} -> {current_gate_key}"})
     phase_checks = _phase_release_checks(target)
     issues.extend({"status": check.get("status", WARN), "name": f"release_{check.get('name')}", "detail": check.get("detail")} for check in phase_checks)
     payload = {
