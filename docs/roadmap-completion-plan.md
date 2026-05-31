@@ -119,6 +119,7 @@ Implementation scope:
 - Add a read-only phase session risk summary across next-step state, checkpoint issues, recovery notes, and phase doctor output.
 - Add a read-only phase session verification rollup across expected, passed, failed, skipped, and deferred phase verification.
 - Add a read-only phase session privacy rollup across clean, blocked, and missing privacy-check evidence.
+- Add a read-only phase session handoff rollup across linted, drafted, failed, deferred, and missing handoff evidence.
 - Add `brigade work phases session report build/list/show` for local session evidence bundles.
 - Add `brigade work phases session activity` for read-only chronological AFK session timelines.
 - Add `brigade work phases session progress` for read-only session completion, blocker, test, commit, push, and remaining-step summaries.

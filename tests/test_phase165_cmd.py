@@ -731,6 +731,26 @@ def test_phase_session_privacy_rollup(tmp_path, capsys):
     assert payload["suggested_next_command"] == "brigade work phases privacy phase-238"
 
 
+def test_phase_session_handoffs_rollup(tmp_path, capsys):
+    assert cli.main(["work", "phases", "plan", "--target", str(tmp_path), "--range", "238-239", "--title", "Handoff Session", "--goal", "afk", "--json"]) == 0
+    capsys.readouterr()
+    assert cli.main(["work", "phases", "complete", "phase-238", "--target", str(tmp_path), "--summary", "Added session handoff rollup.", "--file", "src/brigade/phases_cmd.py", "--test", "pytest focused", "--json"]) == 0
+    capsys.readouterr()
+    assert cli.main(["work", "phases", "handoff", "phase-238", "--target", str(tmp_path), "--lint", "--json"]) == 0
+    handoff = json.loads(capsys.readouterr().out)
+    assert handoff["lint"]["status"] == "passed"
+    assert cli.main(["work", "phases", "session", "start", "--target", str(tmp_path), "--range", "238-239", "--goal", "handoff session", "--json"]) == 0
+    session = json.loads(capsys.readouterr().out)
+
+    assert cli.main(["work", "phases", "session", "handoffs", session["session_id"], "--target", str(tmp_path), "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["record_count"] == 2
+    assert payload["status_counts"]["linted"] == 1
+    assert payload["status_counts"]["missing"] == 1
+    assert payload["missing_handoff_phase_ids"] == ["phase-239"]
+    assert payload["suggested_next_command"] == "brigade work phases handoff phase-239 --lint"
+
+
 def test_phase_session_report_bundle(tmp_path, capsys):
     assert cli.main(["work", "phases", "plan", "--target", str(tmp_path), "--range", "213-214", "--title", "Report", "--goal", "afk", "--json"]) == 0
     capsys.readouterr()

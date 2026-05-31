@@ -187,6 +187,8 @@ Each report includes `PHASE_REPORT.md` and `PHASE_EVIDENCE.json` with range stat
 
 `brigade work phases session privacy <session-id|latest>` summarizes privacy-check state across the session range. It counts clean, blocked, and missing privacy checks, lists phases that still need review, and suggests the next `brigade work phases privacy` command without running a scan.
 
+`brigade work phases session handoffs <session-id|latest>` summarizes handoff coverage across the session range. It counts linted, drafted, failed, deferred, and missing handoffs, lists phases that still need a draft or lint repair, and suggests the next `brigade work phases handoff` command without writing a new handoff.
+
 `brigade work phases session activity <session-id|latest>` produces a chronological read-only activity ledger from phase starts, completions, tests, commits, reports, compare summaries, actions, imports, closeouts, handoff drafts, and session resume events.
 
 `brigade work phases session progress <session-id|latest>` summarizes percent complete, status counts, blockers, current phase, next command, test coverage, commit and push coverage, and estimated remaining local steps. It is read-only.

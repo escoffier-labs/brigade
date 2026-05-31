@@ -1689,6 +1689,88 @@ def session_privacy(*, target: Path, session_id: str, json_output: bool = False)
     return 0
 
 
+def _latest_phase_handoff(record: dict[str, Any]) -> dict[str, Any] | None:
+    handoffs = record.get("phase_handoffs") if isinstance(record.get("phase_handoffs"), list) else []
+    for handoff_item in reversed(handoffs):
+        if isinstance(handoff_item, dict):
+            return handoff_item
+    return None
+
+
+def _record_has_handoff_deferral(record: dict[str, Any]) -> bool:
+    deferred = " ".join(str(item).casefold() for item in record.get("deferred_items") or [])
+    return "handoff" in deferred
+
+
+def _session_handoffs_payload(target: Path, session: dict[str, Any]) -> dict[str, Any]:
+    records, missing = _session_phase_records(target, str(session.get("phase_range") or ""))
+    status_counts: dict[str, int] = {"linted": 0, "drafted": 0, "failed": 0, "deferred": 0, "missing": 0}
+    missing_handoff_phase_ids: list[str] = []
+    failed_handoff_phase_ids: list[str] = []
+    phase_rows: list[dict[str, Any]] = []
+    for record in records:
+        phase_id = str(record.get("phase_id") or "")
+        latest = _latest_phase_handoff(record)
+        lint = latest.get("lint") if isinstance(latest, dict) and isinstance(latest.get("lint"), dict) else {}
+        lint_status = str(lint.get("status") or "not-run")
+        if lint_status == "passed":
+            handoff_status = "linted"
+        elif lint_status == "failed":
+            handoff_status = "failed"
+            failed_handoff_phase_ids.append(phase_id)
+        elif latest is not None:
+            handoff_status = "drafted"
+        elif _record_has_handoff_deferral(record):
+            handoff_status = "deferred"
+        else:
+            handoff_status = "missing"
+            missing_handoff_phase_ids.append(phase_id)
+        status_counts[handoff_status] = status_counts.get(handoff_status, 0) + 1
+        phase_rows.append(
+            {
+                "phase_id": phase_id,
+                "status": record.get("status"),
+                "handoff_status": handoff_status,
+                "latest_handoff": latest,
+            }
+        )
+    issue_count = len(missing) + len(failed_handoff_phase_ids) + len(missing_handoff_phase_ids)
+    next_phase = failed_handoff_phase_ids[0] if failed_handoff_phase_ids else missing_handoff_phase_ids[0] if missing_handoff_phase_ids else None
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "schema": _schema("phase-ledger-session-handoffs"),
+        "target": str(target),
+        "session_id": session.get("session_id"),
+        "phase_range": session.get("phase_range"),
+        "record_count": len(records),
+        "missing_phase_ids": missing,
+        "status_counts": status_counts,
+        "phases": phase_rows,
+        "missing_handoff_phase_ids": missing_handoff_phase_ids,
+        "failed_handoff_phase_ids": failed_handoff_phase_ids,
+        "issue_count": issue_count,
+        "suggested_next_command": f"brigade work phases handoff {next_phase} --lint" if next_phase else "brigade work phases session progress latest",
+    }
+
+
+def session_handoffs(*, target: Path, session_id: str, json_output: bool = False) -> int:
+    target = target.expanduser().resolve()
+    _path, session, error = _resolve_session(target, session_id)
+    if session is None:
+        print(f"error: {error}", file=sys.stderr)
+        return 1
+    payload = _session_handoffs_payload(target, session)
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        print(f"phase session handoffs: {payload['session_id']}")
+        print(f"records: {payload['record_count']}")
+        print(f"issues: {payload['issue_count']}")
+        print(f"linted: {payload['status_counts'].get('linted', 0)}")
+        print(f"next: {payload['suggested_next_command']}")
+    return 0
+
+
 def _checkpoint_state_for_session_next(target: Path, session: dict[str, Any], step: dict[str, Any]) -> dict[str, Any] | None:
     checkpoint = _latest_checkpoint_for_session(target, session.get("session_id"))
     if checkpoint is None:
