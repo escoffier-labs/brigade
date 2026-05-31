@@ -23,7 +23,7 @@ Harden AFK session execution into a more useful daily-driver, release, and recov
 | 236 | Add session verification rollup. Implemented with read-only status counts and missing or failed phase lists. |
 | 237 | Add session privacy rollup. Implemented with read-only clean, blocked, and missing privacy-check counts. |
 | 238 | Add session handoff rollup. Implemented with read-only linted, drafted, failed, deferred, and missing handoff coverage. |
-| 239 | Add release doctor checkpoint evidence. |
+| 239 | Add release doctor checkpoint evidence. Implemented with release warnings for blocked or stale phase session checkpoints. |
 | 240 | Add release candidate checkpoint evidence. |
 | 241 | Add center checkpoint review items. |
 | 242 | Add work brief checkpoint summary. |

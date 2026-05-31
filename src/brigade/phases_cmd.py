@@ -3064,6 +3064,13 @@ def health(target: Path) -> dict[str, Any]:
     latest_report = _latest_report(target)
     latest_report_compare = _report_compare_summary(target, latest_report)
     latest_session = _latest_session(target)
+    latest_session_checkpoint = _latest_checkpoint_for_session(target, latest_session.get("session_id")) if isinstance(latest_session, dict) else None
+    latest_session_checkpoint_compare = None
+    if isinstance(latest_session_checkpoint, dict):
+        try:
+            latest_session_checkpoint_compare = _session_checkpoint_compare_payload(target, latest_session_checkpoint)
+        except ValueError:
+            latest_session_checkpoint_compare = None
     latest_session_report = _read_session_reports(target)[-1] if _read_session_reports(target) else None
     latest_session_gate = _session_gate_payload(target, latest_session) if isinstance(latest_session, dict) else None
     actions = _read_actions(target)
@@ -3088,6 +3095,16 @@ def health(target: Path) -> dict[str, Any]:
         else None,
         "latest_report_compare": latest_report_compare,
         "latest_session": _session_summary(latest_session) if isinstance(latest_session, dict) else None,
+        "latest_session_checkpoint": _checkpoint_summary(latest_session_checkpoint) if isinstance(latest_session_checkpoint, dict) else None,
+        "latest_session_checkpoint_compare": {
+            "checkpoint_id": latest_session_checkpoint_compare.get("checkpoint_id"),
+            "session_id": latest_session_checkpoint_compare.get("session_id"),
+            "issue_count": latest_session_checkpoint_compare.get("issue_count"),
+            "top_issue": latest_session_checkpoint_compare.get("top_issue"),
+            "suggested_next_command": latest_session_checkpoint_compare.get("suggested_next_command"),
+        }
+        if isinstance(latest_session_checkpoint_compare, dict)
+        else None,
         "latest_session_gate": {
             "session_id": latest_session_gate.get("session_id"),
             "safe_to_claim_complete": latest_session_gate.get("safe_to_claim_complete"),

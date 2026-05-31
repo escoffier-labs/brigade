@@ -195,7 +195,7 @@ Phase execution sessions group a declared AFK range into one local record under 
 
 The daily driver surfaces active phase sessions in `daily status`, `plan`, `review`, `run`, and `doctor`. A session can become the selected daily action when it blocks AFK completion. `daily run` still performs exactly one bounded local step: building a session report or writing reviewed session closeout metadata.
 
-Release and operator surfaces include compact phase session state. Work brief, work doctor, center status, center reviews, release doctor, release candidate evidence, and candidate compare can show active sessions, missing session reports, unresolved session actions, and newer session evidence after a candidate was built.
+Release and operator surfaces include compact phase session state. Work brief, work doctor, center status, center reviews, release doctor, release candidate evidence, and candidate compare can show active sessions, missing session reports, unresolved session actions, blocked or stale session checkpoints, and newer session evidence after a candidate was built.
 
 `brigade work phases evidence add` appends local evidence metadata to one phase record. It mirrors attached files and tests into the existing phase fields and keeps report ids, handoff paths, and notes under `evidence_attachments`. It never runs the referenced commands.
 

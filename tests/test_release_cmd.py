@@ -496,12 +496,17 @@ def test_release_phase_ledger_closeout_and_report_evidence(tmp_path, monkeypatch
     capsys.readouterr()
     assert phases_cmd.session_start(target=tmp_path, phase_range="280", source_goal="release session", json_output=True) == 0
     session = json.loads(capsys.readouterr().out)
+    assert phases_cmd.session_checkpoint(target=tmp_path, session_id=session["session_id"], status="blocked", summary="Needs release review.", json_output=True) == 0
+    checkpoint = json.loads(capsys.readouterr().out)
     assert phases_cmd.session_report_build(target=tmp_path, session_id=session["session_id"], json_output=True) == 0
     session_report = json.loads(capsys.readouterr().out)
     assert release_cmd.doctor(target=tmp_path, base_ref=None, json_output=True) == 0
     session_doctor = json.loads(capsys.readouterr().out)
     session_check_names = {check["name"] for check in session_doctor["checks"]}
     assert "phase_session_gate_blocked" in session_check_names
+    assert "phase_session_checkpoint_blocked" in session_check_names
+    phase_health = phases_cmd.health(tmp_path)
+    assert phase_health["latest_session_checkpoint"]["checkpoint_id"] == checkpoint["checkpoint_id"]
     assert release_cmd.candidate_build(target=tmp_path, base_ref=None, json_output=True) == 0
     candidate = json.loads(capsys.readouterr().out)
     assert candidate["phase_ledger"]["latest_closeout"]["closeout_id"] == closeout["closeout_id"]

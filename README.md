@@ -74,6 +74,7 @@ Session handoff output rolls up linted, drafted, failed, deferred, and missing h
 Session report bundles collect the phase records, checks, actions, imports, commits, tests, and blockers into local Markdown and JSON evidence.
 The daily driver can surface active phase sessions and run exactly one safe session step, such as building a session report or writing session closeout metadata.
 Release and operator review surfaces include phase session state so stale or unreported AFK work blocks publish review visibly.
+Release doctor also reports blocked or stale phase-session checkpoint evidence before publish review.
 `brigade work phases evidence add` appends local files, tests, report ids, handoff paths, and notes to a phase record without running commands.
 `brigade work phases verify plan/record` keeps expected verification and recorded outcomes visible without executing tests.
 `brigade work phases reconcile` checks recorded commit and push evidence against local git state without changing git.

@@ -820,6 +820,8 @@ def _phase_release_checks(target: Path) -> list[dict[str, Any]]:
         top_compare = latest_report_compare.get("top_issue") if isinstance(latest_report_compare.get("top_issue"), dict) else {}
         checks.append({"status": WARN, "name": "phase_ledger_report_compare_issue", "detail": str(top_compare.get("name") or latest_report_compare.get("issue_count"))})
     latest_session = health.get("latest_session") if isinstance(health.get("latest_session"), dict) else None
+    latest_session_checkpoint = health.get("latest_session_checkpoint") if isinstance(health.get("latest_session_checkpoint"), dict) else None
+    latest_session_checkpoint_compare = health.get("latest_session_checkpoint_compare") if isinstance(health.get("latest_session_checkpoint_compare"), dict) else None
     latest_session_report = health.get("latest_session_report") if isinstance(health.get("latest_session_report"), dict) else None
     latest_session_gate = health.get("latest_session_gate") if isinstance(health.get("latest_session_gate"), dict) else None
     if latest_session and latest_session.get("status") not in {"closed", "archived"}:
@@ -831,6 +833,11 @@ def _phase_release_checks(target: Path) -> list[dict[str, Any]]:
     if latest_session_gate and not latest_session_gate.get("safe_to_claim_complete"):
         top_blocker = latest_session_gate.get("top_blocker") if isinstance(latest_session_gate.get("top_blocker"), dict) else {}
         checks.append({"status": WARN, "name": "phase_session_gate_blocked", "detail": str(top_blocker.get("name") or latest_session_gate.get("blocker_count"))})
+    if latest_session_checkpoint and latest_session_checkpoint.get("status") == "blocked":
+        checks.append({"status": WARN, "name": "phase_session_checkpoint_blocked", "detail": str(latest_session_checkpoint.get("checkpoint_id"))})
+    if latest_session_checkpoint_compare and int(latest_session_checkpoint_compare.get("issue_count") or 0) > 0:
+        top_checkpoint = latest_session_checkpoint_compare.get("top_issue") if isinstance(latest_session_checkpoint_compare.get("top_issue"), dict) else {}
+        checks.append({"status": WARN, "name": "phase_session_checkpoint_compare_issue", "detail": str(top_checkpoint.get("name") or latest_session_checkpoint_compare.get("issue_count"))})
     if int(health.get("open_action_count") or 0) > 0:
         checks.append({"status": WARN, "name": "phase_session_unresolved_actions", "detail": str(health.get("open_action_count"))})
     records = phases_cmd._records(target)
