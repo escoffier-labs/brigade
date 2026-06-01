@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "brigade-cli"
-version = "0.6.0"
+version = "0.7.0"
 description = "Run your agent brigade: an operator-system CLI that bootstraps, checks, and operates agent workspaces across harnesses."
 readme = "README.md"
 requires-python = ">=3.10"
