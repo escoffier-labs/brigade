@@ -37,6 +37,41 @@ It is meant for people running real tools, real docs, and real automation across
 
 The cookbook explains the why. This package gives you the kitchen.
 
+## The design
+
+One memory owner stays canonical.
+That is typically OpenClaw or Hermes when present, otherwise `this-repo`.
+Writer harnesses drop handoffs into their own inboxes, and the ingester scans all of them.
+
+```text
+Claude Code              Codex
+     |                     |
+     v                     v
+.claude/memory-handoffs/ .codex/memory-handoffs/
+     \                   /
+      \                 /
+       v               v
+      brigade ingest
+              |
+              v
+  memory/cards/*.md, TOOLS.md, USER.md,
+  rules/*.md, .learnings/*.md
+```
+
+The ingester is intentionally conservative.
+Safe card handoffs become cards.
+Targeted updates append to the right file.
+Ambiguous material gets kicked out for review instead of being trusted automatically.
+
+For users running multiple agent homes, treat the owner workspace as the hub.
+Remote or secondary workspaces can write handoffs into their own per-harness inboxes.
+A trusted sync can pull those files into a staging inbox on the owner.
+That keeps agents informed without creating multiple canonical memories.
+
+Token-heavy terminal work gets the same treatment.
+Make the wrapper explicit, make the escape hatch obvious, and tell every harness what is happening.
+The TokenJuice starter card documents Claude Code's PreToolUse wrapper path, Codex's hook setup, and the savings model.
+
 ## What you get
 
 Brigade has grown from a bootstrap kit into a local control plane for agent work. The current public surface includes:
@@ -1127,41 +1162,6 @@ The normal exception is your own configured tooling:
 
 - the `pre-push` hook runs the local `content-guard` scanner before commits leave the machine
 - `brigade security enrich` can call MISP only when you explicitly configure and run the `misp` provider
-
-## The design
-
-One memory owner stays canonical.
-That is typically OpenClaw or Hermes when present, otherwise `this-repo`.
-Writer harnesses drop handoffs into their own inboxes, and the ingester scans all of them.
-
-```text
-Claude Code              Codex
-     |                     |
-     v                     v
-.claude/memory-handoffs/ .codex/memory-handoffs/
-     \                   /
-      \                 /
-       v               v
-      brigade ingest
-              |
-              v
-  memory/cards/*.md, TOOLS.md, USER.md,
-  rules/*.md, .learnings/*.md
-```
-
-The ingester is intentionally conservative.
-Safe card handoffs become cards.
-Targeted updates append to the right file.
-Ambiguous material gets kicked out for review instead of being trusted automatically.
-
-For users running multiple agent homes, treat the owner workspace as the hub.
-Remote or secondary workspaces can write handoffs into their own per-harness inboxes.
-A trusted sync can pull those files into a staging inbox on the owner.
-That keeps agents informed without creating multiple canonical memories.
-
-Token-heavy terminal work gets the same treatment.
-Make the wrapper explicit, make the escape hatch obvious, and tell every harness what is happening.
-The TokenJuice starter card documents Claude Code's PreToolUse wrapper path, Codex's hook setup, and the savings model.
 
 ## Maintenance and utility commands
 
