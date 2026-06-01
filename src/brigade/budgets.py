@@ -31,6 +31,15 @@ BOOTSTRAP_BUDGETS: dict[str, int] = {
     "HEARTBEAT.md": 5_000,
 }
 
+# Flat whole-file thresholds for the simpler bootstrap auditor model (one soft
+# warning level and one hard limit applied across tracked files), as opposed to
+# the per-file BOOTSTRAP_BUDGETS above. Canonical here so the bootstrap-doctor
+# satellite sources them instead of redeclaring its own (which had drifted).
+# Invariant: soft < hard < ceiling. The ceiling is the empirical truncation point.
+DEFAULT_BOOTSTRAP_SOFT_LIMIT = 10_000
+DEFAULT_BOOTSTRAP_HARD_LIMIT = 11_500
+BOOTSTRAP_HARD_LIMIT_CEILING = 12_000
+
 # --- Memory cards ----------------------------------------------------------
 MEMORY_CARD_BUDGET_BYTES = 8_000
 
