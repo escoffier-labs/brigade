@@ -194,6 +194,21 @@ class Outcome:
     reason: str = ""
 
 
+def _normalize_for_dedupe(text: str) -> str:
+    """Collapse whitespace and drop blank lines for content-equality checks."""
+    lines = [re.sub(r"\s+", " ", line).strip() for line in text.splitlines()]
+    return "\n".join(line for line in lines if line)
+
+
+def _first_meaningful_line(text: str) -> str:
+    """First non-blank, stripped line of `text`, or '' if there is none."""
+    for line in text.splitlines():
+        cleaned = line.strip()
+        if cleaned:
+            return cleaned
+    return ""
+
+
 def decide(
     sections: Dict[str, str],
     target: Path,
@@ -233,6 +248,16 @@ def decide(
                 reason="document content contains `##` headings (would parse as new section)",
             )
         dest = target / document
+        # Dedupe: never re-append content that is already present in the target.
+        # Without this, a re-routed handoff duplicates its content on every run.
+        existing = dest.read_text() if dest.is_file() else ""
+        normalized_existing = _normalize_for_dedupe(existing)
+        normalized_suggested = _normalize_for_dedupe(content)
+        if normalized_suggested and normalized_suggested in normalized_existing:
+            return Outcome("inboxed", reason=f"document content already present in {document}")
+        anchor = _first_meaningful_line(content)
+        if anchor and anchor in existing:
+            return Outcome("inboxed", reason=f"anchor already present in {document}: {anchor}")
         # Bootstrap files load into the session prefix every turn and silently
         # truncate past ~12k chars. Refuse an append that would push the file
         # over its budget; route to the inbox so a human trims or re-homes it.
