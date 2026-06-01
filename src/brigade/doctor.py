@@ -17,20 +17,11 @@ WARN = "WARN"
 FAIL = "FAIL"
 MANUAL = "MANUAL"
 
-BOOTSTRAP_BUDGETS = {
-    "AGENTS.md": 12_000,
-    "CLAUDE.md": 6_000,
-    "MEMORY.md": 7_000,
-    "TOOLS.md": 10_000,
-    "USER.md": 8_000,
-    "SAFETY_RULES.md": 10_000,
-    "INSTALL_FOR_AGENTS.md": 8_000,
-    "SOUL.md": 8_000,
-    "IDENTITY.md": 4_000,
-    "HEARTBEAT.md": 5_000,
-}
-MEMORY_CARD_BUDGET_BYTES = 8_000
-MEMORY_CARE_SCAN_STALE_DAYS = 7
+from .budgets import (
+    BOOTSTRAP_BUDGETS,
+    MEMORY_CARD_BUDGET_BYTES,
+    MEMORY_CARE_SCAN_STALE_DAYS,
+)
 
 from .station import DoctorContext
 

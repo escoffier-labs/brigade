@@ -293,3 +293,65 @@ def test_ingest_scans_multiple_writer_inboxes(tmp_path):
     tools = (tmp_path / "TOOLS.md").read_text()
     assert "- claude entry" in tools
     assert "- codex entry" in tools
+
+
+def test_no_card_route_to_bootstrap_file_over_budget_goes_to_inbox(tmp_target: Path):
+    """A route that would push a bootstrap file past its budget must inbox, not append."""
+    from brigade import budgets
+
+    inbox = _seed(tmp_target)
+    budget = budgets.BOOTSTRAP_BUDGETS["TOOLS.md"]
+    # Fill TOOLS.md to just under budget (20B headroom) so the append crosses it.
+    existing = "x" * (budget - 20)
+    (tmp_target / "TOOLS.md").write_text(existing)
+    _write_handoff(
+        inbox,
+        "2026-06-01-0100-too-big.md",
+        """\
+        # Memory Handoff
+
+        ## Recommended memory action
+        no-card
+
+        ## Target document
+        TOOLS.md
+
+        ## Suggested document content
+        a runbook line that pushes the file past its bootstrap budget
+        """,
+    )
+    rc = ingest_mod.run(target=tmp_target, dry_run=False, promote_cards=True, route_documents=True)
+    assert rc == 0
+    # TOOLS.md untouched (guard refused the append)
+    assert (tmp_target / "TOOLS.md").read_text() == existing
+    # content preserved in the review inbox instead
+    drafts = list((tmp_target / "memory" / "handoff-inbox").glob("*.md"))
+    assert drafts, "expected the oversized route to land in the inbox"
+    assert any("too-big" in d.name for d in drafts)
+
+
+def test_no_card_route_to_learnings_not_size_guarded(tmp_target: Path):
+    """.learnings/* are not bootstrap files and may grow freely."""
+    inbox = _seed(tmp_target)
+    learnings = tmp_target / ".learnings" / "LEARNINGS.md"
+    learnings.parent.mkdir(parents=True, exist_ok=True)
+    learnings.write_text("# LEARNINGS\n\n" + ("y" * 30000) + "\n")
+    _write_handoff(
+        inbox,
+        "2026-06-01-0100-learn.md",
+        """\
+        # Memory Handoff
+
+        ## Recommended memory action
+        no-card
+
+        ## Target document
+        .learnings/LEARNINGS.md
+
+        ## Suggested document content
+        another durable lesson
+        """,
+    )
+    rc = ingest_mod.run(target=tmp_target, dry_run=False, promote_cards=True, route_documents=True)
+    assert rc == 0
+    assert "another durable lesson" in learnings.read_text()

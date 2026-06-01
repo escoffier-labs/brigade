@@ -16,6 +16,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List
 
+from . import budgets
+
 SECTION_RE = re.compile(r"^##\s+(?P<name>.+?)\s*$", re.MULTILINE)
 SAFE_CARD_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+\.md$")
 SAFE_RULE_PATH_RE = re.compile(r"^rules/[A-Za-z0-9._-]+\.md$")
@@ -85,23 +87,57 @@ def run(
     dry_run: bool = False,
     promote_cards: bool = False,
     route_documents: bool = False,
+    owner: Path | None = None,
 ) -> int:
     """Process handoffs.
+
+    Reads handoffs from `target`'s writer inboxes. By default the resulting
+    cards/documents and review drafts are written back into `target` itself.
+    Pass `owner` to write them into a different canonical memory owner instead
+    (the fleet model: many writer repos, one owner); processed handoffs are
+    still archived in the source repo they came from.
 
     `promote_cards` and `route_documents` are opt-in. With neither flag,
     every handoff routes to the review inbox so a human picks the action.
     Match the cookbook wrapper by passing both flags explicitly.
     """
-    target = target.expanduser().resolve()
-    inbox_dir = target / "memory" / "handoff-inbox"
+    source = target.expanduser().resolve()
+    owner = source if owner is None else owner.expanduser().resolve()
+    stats = IngestStats()
+    rc = ingest_into(
+        source=source,
+        owner=owner,
+        stats=stats,
+        dry_run=dry_run,
+        promote_cards=promote_cards,
+        route_documents=route_documents,
+    )
+    if rc != 0:
+        return rc
+    _report(stats, dry_run=dry_run)
+    return 0
 
-    handoff_dirs = _resolve_inbox_paths(target)
+
+def ingest_into(
+    *,
+    source: Path,
+    owner: Path,
+    stats: IngestStats,
+    dry_run: bool = False,
+    promote_cards: bool = False,
+    route_documents: bool = False,
+) -> int:
+    """Ingest `source`'s handoffs into `owner`'s memory, accumulating `stats`.
+
+    Returns 0 on success, 2 if `source` has no handoff inbox. Used directly by
+    the fleet driver so it can sweep many sources into one owner and report once.
+    """
+    inbox_dir = owner / "memory" / "handoff-inbox"
+    handoff_dirs = _resolve_inbox_paths(source)
     if not handoff_dirs:
-        legacy = target / ".claude" / "memory-handoffs"
+        legacy = source / ".claude" / "memory-handoffs"
         print(f"brigade ingest: no handoff inbox at {legacy}", file=sys.stderr)
         return 2
-
-    stats = IngestStats()
 
     for handoffs_dir in handoff_dirs:
         processed_dir = handoffs_dir / "processed"
@@ -110,14 +146,14 @@ def run(
             sections = parse(path)
             outcome = decide(
                 sections,
-                target=target,
+                target=owner,
                 promote_cards=promote_cards,
                 route_documents=route_documents,
             )
             action = _execute(
                 outcome,
                 handoff_path=path,
-                target=target,
+                target=owner,
                 sections=sections,
                 inbox_dir=inbox_dir,
                 processed_dir=processed_dir,
@@ -132,8 +168,6 @@ def run(
                 stats.inboxed += 1
             elif action.kind == "skipped":
                 stats.skipped += 1
-
-    _report(stats, dry_run=dry_run)
     return 0
 
 
@@ -198,7 +232,21 @@ def decide(
                 "inboxed",
                 reason="document content contains `##` headings (would parse as new section)",
             )
-        return Outcome("routed", dest=target / document)
+        dest = target / document
+        # Bootstrap files load into the session prefix every turn and silently
+        # truncate past ~12k chars. Refuse an append that would push the file
+        # over its budget; route to the inbox so a human trims or re-homes it.
+        addition = "\n\n" + content.strip() + "\n"
+        would_exceed, budget = budgets.route_would_exceed_budget(dest, addition)
+        if would_exceed:
+            return Outcome(
+                "inboxed",
+                reason=(
+                    f"bootstrap budget guard: appending to {document} would exceed "
+                    f"its {budget}B budget; trim the file or promote to a memory card"
+                ),
+            )
+        return Outcome("routed", dest=dest)
 
     if action == "":
         return Outcome("inboxed", reason="missing `Recommended memory action`")

@@ -172,3 +172,82 @@ def test_repos_cli_dispatch(tmp_path, monkeypatch):
         ("health-commands", {"target": tmp_path, "json_output": True}),
         ("discover-plan", {"target": tmp_path, "json_output": True}),
     ]
+
+
+def test_repos_doctor_warns_on_stale_handoff_backlog(tmp_path, capsys):
+    import os
+    import time
+
+    _init_git_repo(tmp_path)
+    (tmp_path / "AGENTS.md").write_text("local guidance\n")
+    inbox = tmp_path / ".claude" / "memory-handoffs"
+    inbox.mkdir(parents=True)
+    stale = inbox / "stuck.md"
+    stale.write_text("# Memory Handoff\n")
+    old = time.time() - (repos_cmd.BACKLOG_STALE_DAYS + 1) * 24 * 60 * 60
+    os.utime(stale, (old, old))
+
+    assert repos_cmd.init(target=tmp_path, json_output=True) == 0
+    capsys.readouterr()
+
+    assert repos_cmd.scan(target=tmp_path, json_output=True) == 0
+    scanned = json.loads(capsys.readouterr().out)
+    names = {c["name"] for c in scanned["checks"]}
+    assert "repo_handoff_backlog" in names
+    backlog = next(c for c in scanned["checks"] if c["name"] == "repo_handoff_backlog")
+    assert "un-ingested" in backlog["detail"]
+
+
+def test_repos_scan_no_backlog_warn_for_fresh_handoff(tmp_path, capsys):
+    _init_git_repo(tmp_path)
+    (tmp_path / "AGENTS.md").write_text("local guidance\n")
+    inbox = tmp_path / ".claude" / "memory-handoffs"
+    inbox.mkdir(parents=True)
+    (inbox / "fresh.md").write_text("# Memory Handoff\n")  # just written, not stale
+
+    assert repos_cmd.init(target=tmp_path, json_output=True) == 0
+    capsys.readouterr()
+    assert repos_cmd.scan(target=tmp_path, json_output=True) == 0
+    scanned = json.loads(capsys.readouterr().out)
+    names = {c["name"] for c in scanned["checks"]}
+    assert "repo_handoff_backlog" not in names
+
+
+def test_repos_ingest_routes_fleet_handoffs_into_owner(tmp_path, capsys):
+    """brigade repos ingest sweeps each fleet repo's handoffs into the owner."""
+    owner = tmp_path / "workspace"
+    repo = tmp_path / "writer-repo"
+    _init_git_repo(owner)
+    _init_git_repo(repo)
+    (owner / "AGENTS.md").write_text("owner guidance\n")
+    (repo / "AGENTS.md").write_text("repo guidance\n")
+    # owner registers itself + the writer repo in its fleet config
+    assert repos_cmd.init(target=owner, json_output=True) == 0
+    capsys.readouterr()
+    cfg = repos_cmd.config_path(owner)
+    cfg.write_text(
+        cfg.read_text()
+        + f'\n[[repo]]\nid = "writer-repo"\nlabel = "writer"\npath = "{repo}"\n'
+    )
+    # the writer repo has a card handoff pending
+    inbox = repo / ".claude" / "memory-handoffs"
+    inbox.mkdir(parents=True)
+    (inbox / "note.md").write_text(
+        "# Memory Handoff\n\n## Recommended memory action\ncreate-card\n\n"
+        "## Target card\nfleet-note.md\n\n## Suggested card content\n"
+        "---\ntopic: fleet\n---\n\n# Fleet note\nbody\n"
+    )
+
+    # dry run writes nothing
+    assert repos_cmd.ingest_fleet(target=owner, apply=False, json_output=True) == 0
+    dry = json.loads(capsys.readouterr().out)
+    assert dry["dry_run"] is True
+    assert not (owner / "memory" / "cards" / "fleet-note.md").exists()
+
+    # apply routes the card into the OWNER and archives the source handoff in the REPO
+    assert repos_cmd.ingest_fleet(target=owner, apply=True, json_output=True) == 0
+    applied = json.loads(capsys.readouterr().out)
+    assert applied["totals"]["promoted"] == 1
+    assert (owner / "memory" / "cards" / "fleet-note.md").is_file()
+    assert (inbox / "processed" / "note.md").is_file()
+    assert not (inbox / "note.md").exists()

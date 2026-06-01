@@ -19,6 +19,12 @@ WRITER_INBOXES = (".claude/memory-handoffs", ".codex/memory-handoffs")
 IGNORED_HANDOFF_NAMES = {"TEMPLATE.md"}
 DEFAULT_STALE_AFTER_MINUTES = 90
 HANDOFF_DRAFT_STALE_HOURS = 72
+# A handoff inbox with pending files whose oldest entry is older than this is
+# treated as a stalled backlog: handoffs are being written but nothing is
+# ingesting them. Catches the silent pile-up where a repo's inbox is never
+# reached by the canonical ingester (e.g. an uncovered repo in the fleet).
+# Canonical value lives in budgets.py so doctor/ingest/repos all agree.
+from .budgets import HANDOFF_BACKLOG_STALE_SECONDS as BACKLOG_STALE_SECONDS
 MAX_INGESTOR_WARNING_SIGNALS = 5
 CARD_ACTIONS = ("create-card", "update-card")
 NO_CARD_ACTION = "no-card"
@@ -68,6 +74,7 @@ class InboxHealth:
     pending: int
     processed: int
     watched: bool
+    oldest_pending_age_seconds: int | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -77,6 +84,7 @@ class InboxHealth:
             "pending": self.pending,
             "processed": self.processed,
             "watched": self.watched,
+            "oldest_pending_age_seconds": self.oldest_pending_age_seconds,
         }
 
 
@@ -321,6 +329,29 @@ def doctor_checks(target: Path, sources: Path | None = None) -> list[tuple[str, 
             f"(exists={exists}, pending={inbox.pending}, processed={inbox.processed}, watched={watched})"
         )
         checks.append((level, f"handoff_watch: {inbox.inbox}", detail))
+
+    stale_backlog = [
+        inbox
+        for inbox in health.inboxes
+        if inbox.pending
+        and inbox.oldest_pending_age_seconds is not None
+        and inbox.oldest_pending_age_seconds >= BACKLOG_STALE_SECONDS
+    ]
+    if stale_backlog:
+        pending_total = sum(inbox.pending for inbox in stale_backlog)
+        oldest = max(
+            inbox.oldest_pending_age_seconds or 0 for inbox in stale_backlog
+        )
+        oldest_days = oldest // (24 * 60 * 60)
+        names = ", ".join(inbox.inbox for inbox in stale_backlog)
+        checks.append(
+            (
+                WARN,
+                "handoff_backlog",
+                f"{pending_total} pending handoff(s) not ingested, oldest {oldest_days}d old "
+                f"({names}); ingester is not reaching this inbox",
+            )
+        )
 
     if source_config := _source_config_for_checks(health.target, health.sources_path):
         for watched_inbox in source_config.watched:
@@ -2475,7 +2506,26 @@ def _inspect_inbox(target: Path, rel: str, watched: tuple[WatchedInbox, ...]) ->
         pending=_count_pending(path),
         processed=_count_processed(path),
         watched=_is_watched(target, rel, watched),
+        oldest_pending_age_seconds=_oldest_pending_age_seconds(path),
     )
+
+
+def _oldest_pending_age_seconds(path: Path) -> int | None:
+    """Age in seconds of the oldest pending handoff, or None if the inbox is empty."""
+    if not path.is_dir():
+        return None
+    oldest_mtime: float | None = None
+    for candidate in path.glob("*.md"):
+        if not candidate.is_file():
+            continue
+        if candidate.name.startswith(".") or candidate.name in IGNORED_HANDOFF_NAMES:
+            continue
+        mtime = candidate.stat().st_mtime
+        if oldest_mtime is None or mtime < oldest_mtime:
+            oldest_mtime = mtime
+    if oldest_mtime is None:
+        return None
+    return max(0, int(time.time() - oldest_mtime))
 
 
 def _count_pending(path: Path) -> int:
