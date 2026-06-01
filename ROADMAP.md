@@ -199,7 +199,8 @@ Near-term, CLI-native:
 
 The workspace on top of the bones:
 
-- A workspace UI that is a view over the CLI: chat against local or API models, side-by-side blind model comparison with synthesis, an assisted document editor, and a viewer for the deep-research reports. Each panel maps to an existing command and its JSON output. Status: planned direction.
+- A workspace UI that is a view over the CLI: side-by-side blind model comparison with synthesis, an assisted document editor, and a viewer for the deep-research reports. Each panel maps to an existing command and its JSON output. Status: planned direction.
+- Agent-interaction chat GUI: prefer adopting a mature, MIT-licensed open-source agent front end (the OpenCode terminal agent, already supported as a writer harness) rather than building a chat surface from scratch. Brigade supplies the operator-system bones beneath it (memory, ingest, scanners, tool contracts, publish guards); the front end is the conversation surface. Target its in-progress v2 line, and keep the integration a thin adapter so the bones stay the source of behavior. Status: planned direction; evaluate against v2.
 - Local-first, hardware-aware model selection and serving guidance, surfaced in the workspace and scriptable from the CLI. Status: planned direction.
 - Personal-data surfaces such as calendar and email triage as Brigade becomes a daily workspace, behind the same privacy and approval gates that already govern the CLI. Status: planned direction.
 
