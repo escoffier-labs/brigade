@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-05-31
+
 ### Added
 - `brigade work phases session checkpoint <session-id|latest>` for local AFK session recovery points that record safe summaries, notes, current next-step state, and suggested commands without executing anything.
 - `brigade work phases session checkpoints list/show/compare` for text and JSON inspection of local AFK session recovery points and stale next-step detection.
@@ -383,7 +385,8 @@ Initial release.
 - OpenClaw adapter fragments and harness-aware doctor checks.
 - Experimental Hermes adapter fragments.
 
-[Unreleased]: https://github.com/escoffier-labs/brigade/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/escoffier-labs/brigade/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/escoffier-labs/brigade/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/escoffier-labs/brigade/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/escoffier-labs/brigade/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/escoffier-labs/brigade/compare/v0.3.0...v0.4.0
