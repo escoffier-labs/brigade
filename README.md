@@ -43,19 +43,30 @@ One memory owner stays canonical.
 That is typically OpenClaw or Hermes when present, otherwise `this-repo`.
 Writer harnesses drop handoffs into their own inboxes, and the ingester scans all of them.
 
-```text
-Claude Code              Codex
-     |                     |
-     v                     v
-.claude/memory-handoffs/ .codex/memory-handoffs/
-     \                   /
-      \                 /
-       v               v
-      brigade ingest
-              |
-              v
-  memory/cards/*.md, TOOLS.md, USER.md,
-  rules/*.md, .learnings/*.md
+```mermaid
+flowchart TB
+    CC["<b>Claude Code</b>"]
+    CX["<b>Codex</b>"]
+    CCI[".claude/memory-handoffs/"]
+    CXI[".codex/memory-handoffs/"]
+    CC --> CCI
+    CX --> CXI
+
+    ING(["<b>brigade ingest</b>"])
+    CCI --> ING
+    CXI --> ING
+
+    OUT["memory/cards/*.md · TOOLS.md · USER.md<br/>rules/*.md · .learnings/*.md"]
+    ING --> OUT
+
+    classDef harness fill:#e0f2fe,stroke:#0284c7,color:#075985;
+    classDef inbox fill:#f1f5f9,stroke:#94a3b8,color:#334155;
+    classDef ingest fill:#fef3c7,stroke:#d97706,color:#92400e;
+    classDef store fill:#dcfce7,stroke:#16a34a,color:#166534;
+    class CC,CX harness;
+    class CCI,CXI inbox;
+    class ING ingest;
+    class OUT store;
 ```
 
 The ingester is intentionally conservative.
