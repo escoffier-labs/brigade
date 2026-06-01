@@ -361,6 +361,12 @@ def _build_parser() -> argparse.ArgumentParser:
     p_repos_import.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
     p_repos_import.add_argument("--dry-run", action="store_true", help="Show counts without writing imports.")
     p_repos_import.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_repos_ingest = repos_sub.add_parser("ingest", help="Ingest every fleet repo's handoffs into the canonical owner.")
+    p_repos_ingest.add_argument("--target", "-t", type=Path, default=Path("."), help="Canonical memory owner (where the fleet config lives).")
+    p_repos_ingest.add_argument("--apply", action="store_true", help="Write changes. Default is a dry run.")
+    p_repos_ingest.add_argument("--no-promote-cards", action="store_true", help="Do not auto-promote cards.")
+    p_repos_ingest.add_argument("--no-route-documents", action="store_true", help="Do not auto-route documents.")
+    p_repos_ingest.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_repos_health_commands = repos_sub.add_parser("health-commands", help="Inspect configured optional repo health commands.")
     p_repos_health_commands.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
     p_repos_health_commands.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
@@ -2489,6 +2495,14 @@ def main(argv=None) -> int:
             return repos_cmd.doctor(target=args.target, json_output=args.json)
         if args.repos_command == "import-issues":
             return repos_cmd.import_issues(target=args.target, dry_run=args.dry_run, json_output=args.json)
+        if args.repos_command == "ingest":
+            return repos_cmd.ingest_fleet(
+                target=args.target,
+                apply=args.apply,
+                promote_cards=not args.no_promote_cards,
+                route_documents=not args.no_route_documents,
+                json_output=args.json,
+            )
         if args.repos_command == "health-commands":
             return repos_cmd.health_commands(target=args.target, json_output=args.json)
         if args.repos_command == "discover":

@@ -23,6 +23,10 @@ WARN = "warn"
 FAIL = "fail"
 CONFIG_REL_PATH = ".brigade/repos.toml"
 REPORT_STALE_HOURS = 24
+# A fleet repo with pending handoffs whose oldest is older than this is flagged
+# as an un-ingested backlog (handoffs written but the ingester never reaches it).
+# Canonical value lives in budgets.py so doctor/ingest/repos all agree.
+from .budgets import HANDOFF_BACKLOG_STALE_DAYS as BACKLOG_STALE_DAYS
 HEALTH_COMMAND_RECEIPT_STALE_HOURS = 24
 ACTION_STATUSES = {"pending", "active", "done", "deferred", "archived"}
 DISPATCH_STALE_HOURS = 24
@@ -630,6 +634,31 @@ def _repo_suggested_command(repo_id: str, pending_imports: list[dict[str, Any]],
     return f"brigade repos show {repo_id}"
 
 
+def _handoff_backlog(repo: Path) -> tuple[int, int | None]:
+    """Total pending handoffs across a repo's inboxes and the oldest age in days.
+
+    Surfaces the silent pile-up where handoffs are written but never ingested,
+    e.g. a repo that is outside the canonical ingester's coverage.
+    """
+    if not repo.is_dir():
+        return 0, None
+    from . import handoff_cmd
+
+    pending = 0
+    oldest_seconds: int | None = None
+    try:
+        health = handoff_cmd.inspect(repo)
+    except (ValueError, OSError):
+        return 0, None
+    for inbox in health.inboxes:
+        pending += inbox.pending
+        age = inbox.oldest_pending_age_seconds
+        if age is not None and (oldest_seconds is None or age > oldest_seconds):
+            oldest_seconds = age
+    oldest_days = oldest_seconds // (24 * 60 * 60) if oldest_seconds is not None else None
+    return pending, oldest_days
+
+
 def _repo_summary(entry: RepoEntry) -> dict[str, Any]:
     repo = entry.path
     tracked_dirty, untracked_dirty = _dirty_counts(repo) if repo.is_dir() else (0, 0)
@@ -640,6 +669,7 @@ def _repo_summary(entry: RepoEntry) -> dict[str, Any]:
         for inbox in (".claude/memory-handoffs", ".codex/memory-handoffs")
         if (repo / inbox).is_dir()
     ]
+    handoff_pending, handoff_backlog_oldest_days = _handoff_backlog(repo)
     hooks = repo / ".git" / "hooks"
     publish_guard_hooks = [
         hook.name
@@ -663,6 +693,8 @@ def _repo_summary(entry: RepoEntry) -> dict[str, Any]:
         "has_changelog": (repo / "CHANGELOG.md").is_file(),
         "test_hints": _test_hints(repo) if repo.is_dir() else [],
         "handoff_inboxes": handoff_inboxes,
+        "handoff_pending": handoff_pending,
+        "handoff_backlog_oldest_days": handoff_backlog_oldest_days,
         "publish_guard_hooks": publish_guard_hooks,
         "has_brigade_config": (repo / ".brigade").is_dir(),
         "latest_release_readiness": _latest_json(repo / ".brigade" / "release" / "runs", "release.json"),
@@ -693,6 +725,15 @@ def _repo_checks(summary: dict[str, Any]) -> list[dict[str, Any]]:
         checks.append({"status": WARN, "name": "repo_dirty_tracked", "detail": f"{repo_id} has dirty tracked files", "repo_id": repo_id})
     if not summary.get("handoff_inboxes"):
         checks.append({"status": WARN, "name": "repo_missing_handoff_inbox", "detail": f"{repo_id} has no local handoff inbox", "repo_id": repo_id})
+    pending = int(summary.get("handoff_pending", 0) or 0)
+    oldest_days = summary.get("handoff_backlog_oldest_days")
+    if pending and isinstance(oldest_days, int) and oldest_days >= BACKLOG_STALE_DAYS:
+        checks.append({
+            "status": WARN,
+            "name": "repo_handoff_backlog",
+            "detail": f"{repo_id} has {pending} un-ingested handoff(s), oldest {oldest_days}d old; ingester is not reaching it",
+            "repo_id": repo_id,
+        })
     return checks
 
 
@@ -723,6 +764,97 @@ def scan_payload(target: Path) -> dict[str, Any]:
         "issue_count": len(issues),
         "top_issue": issues[0] if issues else None,
     }
+
+
+def ingest_fleet(
+    *,
+    target: Path,
+    apply: bool = False,
+    promote_cards: bool = True,
+    route_documents: bool = True,
+    json_output: bool = False,
+) -> int:
+    """Ingest every fleet repo's handoffs into the canonical owner (`target`).
+
+    The fleet model: many writer repos drop handoffs into their own inboxes; one
+    owner holds canonical memory. This sweeps each registered, reachable repo,
+    routing its handoffs into `target`'s memory and archiving the processed
+    handoffs back in the source repo. Defaults to a dry run; pass apply=True to
+    write. Closes the gap where each repo had to be ingested by hand.
+    """
+    from . import ingest as ingest_mod
+
+    target = target.expanduser().resolve()
+    entries, errors, config_loaded = _load_config(target)
+    if not config_loaded:
+        print(f"error: no repo fleet config at {config_path(target)}", file=sys.stderr)
+        return 2
+
+    dry_run = not apply
+    stats = ingest_mod.IngestStats()
+    per_repo: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
+    for entry in entries:
+        if not entry.enabled:
+            continue
+        if not entry.path.is_dir():
+            skipped.append({"repo_id": entry.repo_id, "reason": "not reachable"})
+            continue
+        before = (stats.processed, stats.promoted, stats.routed, stats.inboxed, stats.skipped)
+        rc = ingest_mod.ingest_into(
+            source=entry.path,
+            owner=target,
+            stats=stats,
+            dry_run=dry_run,
+            promote_cards=promote_cards,
+            route_documents=route_documents,
+        )
+        if rc == 2:
+            skipped.append({"repo_id": entry.repo_id, "reason": "no handoff inbox"})
+            continue
+        per_repo.append({
+            "repo_id": entry.repo_id,
+            "processed": stats.processed - before[0],
+            "promoted": stats.promoted - before[1],
+            "routed": stats.routed - before[2],
+            "inboxed": stats.inboxed - before[3],
+            "skipped": stats.skipped - before[4],
+        })
+
+    payload = {
+        "target": str(target),
+        "owner": str(target),
+        "dry_run": dry_run,
+        "config_loaded": config_loaded,
+        "config_errors": errors,
+        "repos_ingested": per_repo,
+        "skipped": skipped,
+        "totals": {
+            "processed": stats.processed,
+            "promoted": stats.promoted,
+            "routed": stats.routed,
+            "inboxed": stats.inboxed,
+            "skipped": stats.skipped,
+        },
+    }
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+    mode = "DRY-RUN (pass --apply to write)" if dry_run else "applied"
+    print(f"repos ingest [{mode}] -> owner {target}")
+    for repo in per_repo:
+        print(
+            f"- {repo['repo_id']}: processed={repo['processed']} promoted={repo['promoted']} "
+            f"routed={repo['routed']} inboxed={repo['inboxed']}"
+        )
+    for item in skipped:
+        print(f"- {item['repo_id']}: skipped ({item['reason']})")
+    totals = payload["totals"]
+    print(
+        f"totals: processed={totals['processed']} promoted={totals['promoted']} "
+        f"routed={totals['routed']} inboxed={totals['inboxed']} skipped={totals['skipped']}"
+    )
+    return 0
 
 
 def init(*, target: Path, force: bool = False, update_gitignore: bool = True, json_output: bool = False) -> int:

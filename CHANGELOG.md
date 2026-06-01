@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Handoff backlog detection. `brigade handoff doctor` (and the memory station in `brigade doctor`) now emits a `handoff_backlog` warning when an inbox has pending handoffs whose oldest entry is older than three days, i.e. handoffs are being written but nothing is ingesting them. `InboxHealth` gained an `oldest_pending_age_seconds` field. At the fleet level, `brigade repos scan`/`doctor` now emit a `repo_handoff_backlog` warning for any fleet repo with an un-ingested, stale handoff pile-up. This catches the silent gap where a repo's inbox is never reached by the canonical ingester (for example an uncovered repo missing from the ingest config).
+- Canonical budgets module `brigade.budgets` is now the single source of truth for bootstrap-file byte budgets, memory-card budgets, the MEMORY.md index line limit, and the handoff-backlog and memory-care staleness thresholds. `doctor`, `ingest`, `handoff`, and `repos` all consume it so preventive guards and post-hoc warnings can never disagree. Satellite tools (bootstrap-doctor, memory-doctor) are intended to depend on brigade and consume these definitions rather than redeclaring them.
+- Bootstrap budget guard in `brigade ingest`. A `no-card` handoff that would push a bootstrap file (e.g. `TOOLS.md`, `USER.md`) past its byte budget is now routed to the review inbox instead of appended, so the ingester can no longer silently bloat a session-prefix file past its truncation ceiling. Non-bootstrap targets such as `.learnings/*` are unaffected.
+- `brigade repos ingest` fleet driver. Sweeps every registered, reachable fleet repo, routing each repo's handoffs into the canonical owner's memory and archiving the processed handoffs back in the source repo. Defaults to a dry run; pass `--apply` to write. `ingest.run` gained an `owner` parameter and a reusable `ingest.ingest_into` core to support the many-writers/one-owner model.
+
 ### Changed
 - `brigade work backup init` now writes wider staleness thresholds for the `cloud` destination (`snapshot_stale_hours = 192`, `check_stale_hours`/`prune_stale_hours = 336`) so an off-site copy on a slower cadence such as a weekly backup does not report stale every day. The `nas` destination defaults are unchanged. Existing `.brigade/backups.toml` files are not modified.
 

@@ -174,6 +174,35 @@ Goal: keep the system usable by the original operator while making it adaptable 
 - Keep public repo docs focused on patterns, commands, and safety contracts.
 - Leave release, tag, push-to-main, and production-impacting actions behind explicit approval gates.
 
+## Later Phase: Deep Research Lane
+
+Goal: turn open-ended research questions into durable, cited memory instead of one-shot answers, reusing the existing researcher role and the handoff -> card pipeline.
+
+- Add `brigade research run "<question>"` that drives an iterative, LLM-in-the-loop research loop (gather -> read -> extract -> synthesize) using the configured `researcher` model from the roster, not a new hardcoded provider. Status: proposed.
+- Use goal-based extraction: for each fetched source, pull only the content relevant to the research goal before synthesis, to keep context small and on-topic. Status: proposed.
+- Persist runs under `.brigade/research/` with a cancellable, resumable task registry so a long research run survives interruption and reports partial progress, mirroring the work/runs receipt model. Status: proposed.
+- Emit two artifacts per run: a self-contained visual HTML report and a structured memory handoff, so research output flows straight into the existing ingest -> cards/`.learnings` pipeline and becomes durable, cited memory. Status: proposed.
+- Treat every fetched source as untrusted context (see prompt-injection hardening below); web content and tool output are data, not instructions. Status: proposed.
+- Bound cost explicitly: per-run search count and per-page content caps, surfaced in the run receipt, with no silent truncation. Status: proposed.
+
+## Later Phase: Operator Capabilities Beyond The CLI
+
+Goal: the CLI is just the bones. It is the load-bearing skeleton, the testable, scriptable engine that every capability hangs off, but the destination is a full operator workspace, not a terminal tool. Architecture principle: every higher-level surface (including a future UI) sits on top of a CLI command plus a structured (JSON) contract, so the bones stay authoritative, automatable, and the single source of behavior. The UI becomes a view over the same commands, never a parallel implementation. Near-term items below are CLI-native; later items put a workspace on top of the same bones.
+
+Near-term, CLI-native:
+
+- Prompt-injection hardening. Add an untrusted-context policy helper that tags external content (web results, tool output, retrieved documents, saved memories, skill text) as data-not-instructions before it reaches a model. High value for the research lane and for any ingest path that reads handoffs which could carry injected instructions. Status: proposed.
+- Owner-scoped tool gating. Complement the existing tool contracts/approvals/runtime policy with owner-tier tool blocking (admin / single-user vs publicly exposed), so a publicly reachable instance refuses high-risk tools by default. Status: proposed.
+- Self-contained visual report renderer. A dependency-free styled HTML report (system fonts only, dark/light via `prefers-color-scheme`, auto table of contents, collapsible sources). Reused by the research lane and available to operator-center and release-evidence reports. No remote fonts or CDNs, consistent with the offline and content-guard ethos. Status: proposed.
+- Optional semantic memory retrieval. An opt-in local vector + keyword hybrid retrieval layer over `memory/cards/` using on-device embeddings (no external API), with import/export. Stays optional: core memory remains file-first and zero-dependency. Status: proposed.
+- Multi-channel operator notifications. A small notification-channel abstraction so backlog and release-gate warnings can reach the operator off-terminal. Status: proposed.
+
+The workspace on top of the bones:
+
+- A workspace UI that is a view over the CLI: chat against local or API models, side-by-side blind model comparison with synthesis, an assisted document editor, and a viewer for the deep-research reports. Each panel maps to an existing command and its JSON output. Status: planned direction.
+- Local-first, hardware-aware model selection and serving guidance, surfaced in the workspace and scriptable from the CLI. Status: planned direction.
+- Personal-data surfaces such as calendar and email triage as Brigade becomes a daily workspace, behind the same privacy and approval gates that already govern the CLI. Status: planned direction.
+
 ## Active Phase Queue: Roadmap Completion Hardening
 
 Status: active.

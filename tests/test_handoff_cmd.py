@@ -1225,3 +1225,53 @@ def test_handoff_sync_issues_cli(tmp_path, monkeypatch):
         "categories": ["route-skip"],
         "close_stale": False,
     }
+
+
+# --- Handoff backlog detection (pending AND stale) -------------------------
+
+BACKLOG_STALE_SECONDS = 3 * 24 * 60 * 60  # mirror handoff_cmd.BACKLOG_STALE_SECONDS
+
+
+def _write_handoff(tmp_path, name: str, *, age_seconds: float | None = None) -> None:
+    inbox = tmp_path / ".claude" / "memory-handoffs"
+    inbox.mkdir(parents=True, exist_ok=True)
+    path = inbox / name
+    path.write_text("# Memory Handoff\n")
+    if age_seconds is not None:
+        ts = time.time() - age_seconds
+        os.utime(path, (ts, ts))
+
+
+def test_inspect_tracks_oldest_pending_age(tmp_path):
+    _write_handoff(tmp_path, "old.md", age_seconds=BACKLOG_STALE_SECONDS + 3600)
+    _write_handoff(tmp_path, "new.md", age_seconds=10)
+
+    health = handoff_cmd.inspect(tmp_path)
+    claude_inbox = next(i for i in health.inboxes if i.inbox == ".claude/memory-handoffs")
+
+    assert claude_inbox.pending == 2
+    assert claude_inbox.oldest_pending_age_seconds is not None
+    # oldest is the stale one
+    assert claude_inbox.oldest_pending_age_seconds >= BACKLOG_STALE_SECONDS
+
+
+def test_doctor_checks_warn_on_stale_backlog(tmp_path):
+    _write_handoff(tmp_path, "stuck.md", age_seconds=BACKLOG_STALE_SECONDS + 3600)
+
+    checks = handoff_cmd.doctor_checks(tmp_path)
+    backlog = [c for c in checks if c[1] == "handoff_backlog"]
+
+    assert backlog, "expected a handoff_backlog check"
+    status, _name, detail = backlog[0]
+    assert status == handoff_cmd.WARN
+    assert "1" in detail  # one pending
+
+
+def test_doctor_checks_no_backlog_warn_for_fresh_pending(tmp_path):
+    _write_handoff(tmp_path, "fresh.md", age_seconds=30)
+
+    checks = handoff_cmd.doctor_checks(tmp_path)
+    backlog_warns = [
+        c for c in checks if c[1] == "handoff_backlog" and c[0] == handoff_cmd.WARN
+    ]
+    assert not backlog_warns, "fresh pending handoff should not trip the stale backlog warning"
