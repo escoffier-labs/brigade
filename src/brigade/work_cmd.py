@@ -134,9 +134,13 @@ BACKUP_DEFAULTS = (
         "kind": "cloud",
         "command_label": "cloud backup summary producer",
         "summary_path": ".brigade/backups/cloud-summary.json",
-        "snapshot_stale_hours": 36,
-        "check_stale_hours": 168,
-        "prune_stale_hours": 168,
+        # Off-site cloud copies usually run on a slower cadence than the local
+        # NAS (a weekly off-site backup is common). Default thresholds are
+        # widened so a once-a-week cloud repo does not report stale every day.
+        # Tighten these per destination if your cloud backup runs more often.
+        "snapshot_stale_hours": 192,
+        "check_stale_hours": 336,
+        "prune_stale_hours": 336,
         "restore_rehearsal_stale_days": 90,
         "enabled": True,
     },

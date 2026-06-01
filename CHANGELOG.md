@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- `brigade work backup init` now writes wider staleness thresholds for the `cloud` destination (`snapshot_stale_hours = 192`, `check_stale_hours`/`prune_stale_hours = 336`) so an off-site copy on a slower cadence such as a weekly backup does not report stale every day. The `nas` destination defaults are unchanged. Existing `.brigade/backups.toml` files are not modified.
+
+### Documentation
+- `docs/backup-health.md` now documents the two-tier NAS-frequent plus cloud-weekly threshold pattern and clarifies that backup health monitors snapshot-history backups (restic/borg), not bidirectional last-writer-wins file syncs such as a KeePass database mirror.
+
 ## [0.7.0] - 2026-05-31
 
 ### Added

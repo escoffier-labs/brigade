@@ -2,6 +2,8 @@
 
 `brigade work backup` reads local backup summary files and routes backup risk into the daily work loop. It is read-only: Brigade does not run `restic`, mount storage, prune, restore, notify chat, or mutate remote backup state.
 
+It monitors snapshot-history backups - the kind that have a latest snapshot, a check, a prune, and a restore rehearsal (restic, borg, and similar). It is not designed to monitor a bidirectional last-writer-wins file sync (for example a KeePass database mirrored between a NAS and cloud on a short timer). Those have no snapshot or prune lifecycle to track. If you want such a sync watched, emit your own summary JSON with a `latest_snapshot_at` standing in for the last successful sync, but treat it as a coarse freshness check, not full backup health.
+
 The local config is gitignored:
 
 ```text
@@ -31,9 +33,12 @@ brigade work backup closeout --json
 
 ## Config Shape
 
-Each destination is a TOML table:
+Each destination is a TOML table. A common topology is a frequently written
+local NAS plus a slower off-site cloud copy, so the staleness thresholds differ
+per destination:
 
 ```toml
+# Local NAS, backed up twice daily.
 [[destination]]
 id = "nas"
 kind = "nas"
@@ -44,7 +49,27 @@ check_stale_hours = 168
 prune_stale_hours = 168
 restore_rehearsal_stale_days = 90
 enabled = true
+
+# Off-site cloud, backed up weekly. Thresholds widened so a once-a-week repo
+# does not report stale every day. `brigade work backup init` writes these
+# wider defaults for the `cloud` destination automatically.
+[[destination]]
+id = "cloud"
+kind = "cloud"
+command_label = "cloud backup summary producer"
+summary_path = ".brigade/backups/cloud-summary.json"
+snapshot_stale_hours = 192
+check_stale_hours = 336
+prune_stale_hours = 336
+restore_rehearsal_stale_days = 90
+enabled = true
 ```
+
+Match the thresholds to each destination's real cadence. A twice-daily NAS
+should warn within a day or so of a missed snapshot, while a weekly cloud copy
+needs more than seven days of slack before stale is meaningful. Setting the
+cloud threshold as tight as the NAS produces a false stale alarm on every day
+the weekly backup did not run.
 
 Fields:
 
