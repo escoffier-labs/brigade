@@ -355,3 +355,36 @@ def test_no_card_route_to_learnings_not_size_guarded(tmp_target: Path):
     rc = ingest_mod.run(target=tmp_target, dry_run=False, promote_cards=True, route_documents=True)
     assert rc == 0
     assert "another durable lesson" in learnings.read_text()
+
+
+def test_no_card_route_skips_content_already_present(tmp_target: Path):
+    """Re-routing content already in the target must inbox, not duplicate-append."""
+    inbox = _seed(tmp_target)
+    learnings = tmp_target / ".learnings" / "LEARNINGS.md"
+    learnings.parent.mkdir(parents=True, exist_ok=True)
+    learnings.write_text("# LEARNINGS\n\n### Existing lesson\nalready captured here\n")
+    _write_handoff(
+        inbox,
+        "2026-06-01-0200-dup.md",
+        """\
+        # Memory Handoff
+
+        ## Recommended memory action
+        no-card
+
+        ## Target document
+        .learnings/LEARNINGS.md
+
+        ## Suggested document content
+        ### Existing lesson
+        already captured here
+        """,
+    )
+    before = learnings.read_text()
+    rc = ingest_mod.run(target=tmp_target, dry_run=False, promote_cards=True, route_documents=True)
+    assert rc == 0
+    # not appended again
+    assert learnings.read_text() == before
+    # landed in the review inbox instead
+    drafts = list((tmp_target / "memory" / "handoff-inbox").glob("*dup*.md"))
+    assert drafts, "duplicate content should route to the inbox"

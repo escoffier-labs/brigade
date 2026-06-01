@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- Dedupe guard in `brigade ingest` document routing. A `no-card` route whose content (or its first meaningful line/anchor) is already present in the target document is now sent to the review inbox instead of being appended again, matching the canonical pipeline and preventing duplicate content on re-routed handoffs.
+
+
 ## [0.8.0] - 2026-06-01
 
 ### Added
