@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-06-01
+
 ### Added
 - Canonical flat bootstrap thresholds in `brigade.budgets` (`DEFAULT_BOOTSTRAP_SOFT_LIMIT`, `DEFAULT_BOOTSTRAP_HARD_LIMIT`, `BOOTSTRAP_HARD_LIMIT_CEILING`) for the whole-file auditor model, so downstream bootstrap tooling can source one set of limits instead of redeclaring its own.
 - Handoff backlog detection. `brigade handoff doctor` (and the memory station in `brigade doctor`) now emits a `handoff_backlog` warning when an inbox has pending handoffs whose oldest entry is older than three days, i.e. handoffs are being written but nothing is ingesting them. `InboxHealth` gained an `oldest_pending_age_seconds` field. At the fleet level, `brigade repos scan`/`doctor` now emit a `repo_handoff_backlog` warning for any fleet repo with an un-ingested, stale handoff pile-up. This catches the silent gap where a repo's inbox is never reached by the canonical ingester (for example an uncovered repo missing from the ingest config).
