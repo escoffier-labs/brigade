@@ -210,6 +210,7 @@ Goal: prevent durable memory from silently rotting.
 Goal: keep the system usable by the original operator while making it adaptable by others.
 
 - Keep Codex-first defaults, with Claude Code, OpenCode, Hermes, OpenClaw, and generic harness paths supported through writer-specific inboxes.
+- Promote OpenCode to a first-class built-in handoff source. Today only `.claude/memory-handoffs/` and `.codex/memory-handoffs/` are hardcoded in the ingest, doctor, fleet sweep, and security scan source maps; OpenCode handoffs only flow through a manual `--handoff-inbox` flag. Add `.opencode/memory-handoffs/` to the same built-in source maps, ship a template scaffold, and cover it in handoff doctor source-coverage and the repo sweep so OpenCode handoffs route automatically. Status: proposed (next).
 - Make local paths configurable and gitignored.
 - Provide templates for fresh-start users without publishing private workspace state.
 - Keep public repo docs focused on patterns, commands, and safety contracts.
@@ -236,7 +237,7 @@ Goal: the CLI is just the bones. It is the load-bearing skeleton, the testable, 
 
 Near-term, CLI-native:
 
-- Prompt-injection hardening. Add an untrusted-context policy helper that tags external content (web results, tool output, retrieved documents, saved memories, skill text) as data-not-instructions before it reaches a model. High value for the research lane and for any ingest path that reads handoffs which could carry injected instructions. Status: proposed.
+- Prompt-injection hardening. Add an untrusted-context policy helper that tags external content (web results, tool output, retrieved documents, saved memories, skill text) as data-not-instructions before it reaches a model. High value for the research lane and for any ingest path that reads handoffs which could carry injected instructions. Status: implemented with the shared `brigade.untrusted` policy helper (`wrap_untrusted` content-fenced framing + `scan_untrusted` injection signal), adopted in the research extractor and used to gate injection-flagged handoffs to the ingest inbox.
 - Owner-scoped tool gating. Complement the existing tool contracts/approvals/runtime policy with owner-tier tool blocking (admin / single-user vs publicly exposed), so a publicly reachable instance refuses high-risk tools by default. Status: proposed.
 - Self-contained visual report renderer. A dependency-free styled HTML report (system fonts only, dark/light via `prefers-color-scheme`, auto table of contents, collapsible sources). Reused by the research lane and available to operator-center and release-evidence reports. No remote fonts or CDNs, consistent with the offline and content-guard ethos. Status: proposed.
 - Optional semantic memory retrieval. An opt-in local vector + keyword hybrid retrieval layer over `memory/cards/` using on-device embeddings (no external API), with import/export. Stays optional: core memory remains file-first and zero-dependency. Status: proposed.
