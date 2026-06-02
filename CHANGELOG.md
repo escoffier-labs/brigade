@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- New `research` command group: local-first iterative deep research grounded in a
+  trusted local corpus, with an opt-in, quarantined web tier (Playwright, no API
+  keys required). Emits a self-contained HTML report and a memory handoff; runs
+  persist under `.brigade/research/` and are resumable/cancellable. Uses the
+  roster `researcher` model (cloud); Brigade never runs a model locally.
 - New `pantry` station (alias `larder`) and the `agentpantry` managed tool. `brigade add pantry` installs agentpantry via `go install`, and `brigade doctor`/`brigade status` health-check it by shelling out to `agentpantry status --json`. Like the memory satellites, agentpantry inspects host-global state, so its checks are advisory and never FAIL a workspace run: an unwired install (no config) is a `WARN`, a missing pre-shared key is a `WARN`, otherwise `OK`.
 
 ### Fixed

@@ -217,16 +217,16 @@ Goal: keep the system usable by the original operator while making it adaptable 
 
 ## Later Phase: Deep Research Lane
 
-> **In plain terms (not built yet):** turn a research question into durable, cited memory instead of a throwaway answer. `brigade research run "<question>"` would loop gather, read, extract, synthesize, save progress so a long run survives a crash, and output an HTML report plus a memory note. Every web page is treated as untrusted (it could carry injected instructions), and cost is capped so a run cannot blow up.
+> **In plain terms:** turn a research question into durable, cited memory instead of a throwaway answer. `brigade research run "<question>"` loops gather, read, extract, synthesize, saves progress so a long run survives a crash, and outputs an HTML report plus a memory note. It grounds in your trusted local sources first; the web tier is opt-in and every page is treated as untrusted (it could carry injected instructions), and cost is capped so a run cannot blow up.
 
 Goal: turn open-ended research questions into durable, cited memory instead of one-shot answers, reusing the existing researcher role and the handoff -> card pipeline.
 
-- Add `brigade research run "<question>"` that drives an iterative, LLM-in-the-loop research loop (gather -> read -> extract -> synthesize) using the configured `researcher` model from the roster, not a new hardcoded provider. Status: proposed.
-- Use goal-based extraction: for each fetched source, pull only the content relevant to the research goal before synthesis, to keep context small and on-topic. Status: proposed.
-- Persist runs under `.brigade/research/` with a cancellable, resumable task registry so a long research run survives interruption and reports partial progress, mirroring the work/runs receipt model. Status: proposed.
-- Emit two artifacts per run: a self-contained visual HTML report and a structured memory handoff, so research output flows straight into the existing ingest -> cards/`.learnings` pipeline and becomes durable, cited memory. Status: proposed.
-- Treat every fetched source as untrusted context (see prompt-injection hardening below); web content and tool output are data, not instructions. Status: proposed.
-- Bound cost explicitly: per-run search count and per-page content caps, surfaced in the run receipt, with no silent truncation. Status: proposed.
+- Add `brigade research run "<question>"` that drives an iterative, LLM-in-the-loop research loop (gather -> read -> extract -> synthesize) using the configured `researcher` model from the roster, not a new hardcoded provider. Status: implemented with `brigade research run/list/show/cancel/resume/open`, local-first trusted sourcing, and an opt-in web tier.
+- Use goal-based extraction: for each fetched source, pull only the content relevant to the research goal before synthesis, to keep context small and on-topic. Status: implemented with untrusted-content framing in the extraction prompt.
+- Persist runs under `.brigade/research/` with a cancellable, resumable task registry so a long research run survives interruption and reports partial progress, mirroring the work/runs receipt model. Status: implemented with per-round checkpoints, `brigade research resume`, and `brigade research cancel`.
+- Emit two artifacts per run: a self-contained visual HTML report and a structured memory handoff, so research output flows straight into the existing ingest -> cards/`.learnings` pipeline and becomes durable, cited memory. Status: implemented with a dependency-free HTML report and a memory handoff that separate trusted-local from untrusted-web provenance.
+- Treat every fetched source as untrusted context (see prompt-injection hardening below); web content and tool output are data, not instructions. Status: implemented with an opt-in (`--web`) web tier that is quarantined and labeled untrusted in the report and handoff.
+- Bound cost explicitly: per-run search count and per-page content caps, surfaced in the run receipt, with no silent truncation. Status: implemented with configurable round, time, URL, and content caps recorded in the run stats.
 
 ## Later Phase: Operator Capabilities Beyond The CLI
 

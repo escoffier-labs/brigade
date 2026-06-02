@@ -28,7 +28,8 @@ brigade roadmap commands --write
 - `brigade projects`: 9 command path(s)
 - `brigade reconfigure`: 1 command path(s)
 - `brigade release`: 22 command path(s)
-- `brigade repos`: 68 command path(s)
+- `brigade repos`: 69 command path(s)
+- `brigade research`: 6 command path(s)
 - `brigade roadmap`: 3 command path(s)
 - `brigade roster`: 2 command path(s)
 - `brigade run`: 1 command path(s)
@@ -195,6 +196,7 @@ brigade roadmap commands --write
 - `brigade repos doctor`
 - `brigade repos health-commands`
 - `brigade repos import-issues`
+- `brigade repos ingest`
 - `brigade repos init`
 - `brigade repos list`
 - `brigade repos release actions archive`
@@ -248,6 +250,12 @@ brigade roadmap commands --write
 - `brigade repos sweep run`
 - `brigade repos sweep runs`
 - `brigade repos sweep show`
+- `brigade research cancel`
+- `brigade research list`
+- `brigade research open`
+- `brigade research resume`
+- `brigade research run`
+- `brigade research show`
 - `brigade roadmap audit`
 - `brigade roadmap commands`
 - `brigade roadmap patterns`
