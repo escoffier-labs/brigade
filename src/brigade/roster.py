@@ -17,9 +17,12 @@ except ModuleNotFoundError:  # pragma: no cover - exercised only on Python 3.10
 @dataclass(frozen=True)
 class Agent:
     name: str
-    cli: str
+    cli: str | None
     role: str
     timeout_seconds: float | None = None
+    endpoint: str | None = None
+    model: str | None = None
+    headers: dict | None = None
 
 
 @dataclass(frozen=True)
@@ -29,6 +32,9 @@ class Roster:
     max_workers: int = 4
     allow_models: tuple[str, ...] = ()
     timeout_seconds: float = 600.0
+
+    def find_role(self, role: str) -> Agent | None:
+        return next((a for a in self.agents.values() if a.role == role), None)
 
 
 def _as_str(value: object, field: str) -> str:
@@ -134,7 +140,6 @@ def load_roster(path: Path) -> Roster:
         if not isinstance(raw_agent, dict):
             raise ValueError(f"agents.{name} must be a TOML table")
         agent_name = _as_str(name, "agent name")
-        cli = _as_str(raw_agent.get("cli"), f"agents.{agent_name}.cli")
         role = _as_str(raw_agent.get("role"), f"agents.{agent_name}.role")
         agent_timeout = raw_agent.get("timeout_seconds")
         timeout_seconds_for_agent = (
@@ -142,15 +147,36 @@ def load_roster(path: Path) -> Roster:
             if agent_timeout is None
             else _as_positive_number(agent_timeout, f"agents.{agent_name}.timeout_seconds")
         )
-        if not agent_adapters.is_known(cli):
-            raise ValueError(f"agents.{agent_name}.cli is unknown: {cli!r}")
-        if not _allowed(cli, allow_models):
-            raise ValueError(f"agents.{agent_name}.cli is not allowed by limits.allow_models: {cli!r}")
+
+        endpoint_raw = raw_agent.get("endpoint")
+        model_raw = raw_agent.get("model")
+        endpoint = _as_str(endpoint_raw, f"agents.{agent_name}.endpoint") if endpoint_raw is not None else None
+        model = _as_str(model_raw, f"agents.{agent_name}.model") if model_raw is not None else None
+
+        headers_raw = raw_agent.get("headers")
+        if headers_raw is not None and not isinstance(headers_raw, dict):
+            raise ValueError(f"agents.{agent_name}.headers must be a TOML table")
+        headers = dict(headers_raw) if headers_raw is not None else None
+
+        cli_raw = raw_agent.get("cli")
+        has_endpoint = endpoint is not None and model is not None
+        if cli_raw is None and has_endpoint:
+            cli = None
+        else:
+            cli = _as_str(cli_raw, f"agents.{agent_name}.cli")
+            if not agent_adapters.is_known(cli):
+                raise ValueError(f"agents.{agent_name}.cli is unknown: {cli!r}")
+            if not _allowed(cli, allow_models):
+                raise ValueError(f"agents.{agent_name}.cli is not allowed by limits.allow_models: {cli!r}")
+
         parsed_agents[agent_name] = Agent(
             name=agent_name,
             cli=cli,
             role=role,
             timeout_seconds=timeout_seconds_for_agent,
+            endpoint=endpoint,
+            model=model,
+            headers=headers,
         )
 
     if orchestrator not in parsed_agents:

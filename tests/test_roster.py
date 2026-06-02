@@ -88,3 +88,42 @@ def test_load_rejects_disallowed_model(tmp_path):
     text = VALID.replace('allow_models = ["codex", "ollama:*"]', 'allow_models = ["codex"]')
     with pytest.raises(ValueError, match="not allowed"):
         roster_mod.load_roster(_write(tmp_path, text))
+
+
+def test_find_role_returns_matching_agent(tmp_path):
+    r = roster_mod.load_roster(_write(tmp_path, VALID))
+    assert r.find_role("write code").name == "coder"
+    assert r.find_role("nope") is None
+
+
+def test_researcher_agent_accepts_endpoint(tmp_path):
+    text = (
+        'orchestrator = "chef"\n'
+        '[agents.chef]\ncli = "codex"\nrole = "plan"\n'
+        '[agents.api]\nrole = "researcher"\nendpoint = "http://x/v1"\nmodel = "m"\n'
+    )
+    loaded = roster_mod.load_roster(_write(tmp_path, text))
+    a = loaded.find_role("researcher")
+    assert a is not None and a.endpoint == "http://x/v1" and a.model == "m"
+    assert a.cli is None
+
+
+def test_researcher_agent_accepts_headers(tmp_path):
+    text = (
+        'orchestrator = "chef"\n'
+        '[agents.chef]\ncli = "codex"\nrole = "plan"\n'
+        '[agents.api]\nrole = "researcher"\nendpoint = "http://x/v1"\nmodel = "m"\n'
+        'headers = {"Authorization" = "Bearer t"}\n'
+    )
+    loaded = roster_mod.load_roster(_write(tmp_path, text))
+    a = loaded.find_role("researcher")
+    assert a.headers == {"Authorization": "Bearer t"}
+
+
+def test_cli_agent_still_requires_cli_or_endpoint(tmp_path):
+    text = (
+        'orchestrator = "chef"\n'
+        '[agents.chef]\nrole = "plan"\n'
+    )
+    with pytest.raises(ValueError):
+        roster_mod.load_roster(_write(tmp_path, text))
