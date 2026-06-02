@@ -90,4 +90,13 @@ def scan_untrusted(content: str) -> InjectionSignal:
     for line in text.splitlines():
         if PROMPT_INJECTION_RE.search(line):
             markers.append(line.strip()[:_MARKER_MAX])
+    # Per-line matching alone is evadable by splitting a phrase across newlines
+    # ("ignore all\nprevious instructions"). Scan a whitespace-normalized copy
+    # too so a cross-line phrase is still caught; only add a marker if the
+    # per-line pass missed it, to avoid double-counting single-line hits.
+    if not markers:
+        normalized = re.sub(r"\s+", " ", text)
+        m = PROMPT_INJECTION_RE.search(normalized)
+        if m:
+            markers.append(normalized[m.start():].strip()[:_MARKER_MAX])
     return InjectionSignal(flagged=bool(markers), count=len(markers), markers=markers)
