@@ -353,6 +353,29 @@ CLI runs write artifacts by default under `.brigade/runs/<id>` below `--cwd`; do
 
 Use `--output-dir <path>` to pick the artifact directory, or `--no-artifacts` for a throwaway run.
 
+### Deep research
+
+`brigade research run "<question>"` drives an iterative research loop (gather, read, extract, synthesize) and turns the answer into durable, cited memory instead of a throwaway reply.
+It grounds in your trusted local sources first, for example a class corpus or a project's notes, so the operator's own data and trusted material stay local.
+The web tier is opt-in with `--web` and is treated as untrusted: fetched pages are quarantined as data, never instructions, and rendered in a separate, labeled section of the report.
+
+The loop uses the cloud `researcher` model from your `.brigade/roster.toml`; Brigade never runs a model locally.
+Each run persists under `.brigade/research/`, is cancellable and resumable so a long run survives interruption, and emits two artifacts: a self-contained HTML report and a memory handoff that flows into the usual ingest pipeline.
+
+```bash
+brigade research run "summarize the key themes" --corpus cs101
+brigade research run "latest on X" --web
+brigade research show <run-id>
+```
+
+The web tier needs the optional browser dependency, installed once:
+
+```bash
+pip install 'brigade[research]' && playwright install chromium
+```
+
+Local-only runs need no extra dependency. Without the extra, `--web` records a blocker telling you to install it rather than crashing.
+
 ### Daily Work Loop
 
 > **In plain terms:** this section is long because it lists every command in the daily routine, but the spine is short. `brigade work bootstrap` once per repo, `brigade work brief` to start the day, `brigade work run` to do a task, `brigade work closeout` to confirm it met its "done" criteria. Everything else (inbox, scanners, sweeps, reviews, backups, tools, the daily driver, phase ledgers) is an optional station you reach for only when you need it. Read for the command you want and ignore the rest.

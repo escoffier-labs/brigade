@@ -23,6 +23,7 @@ dependencies = []
 
 [project.optional-dependencies]
 dev = ["pytest>=7"]
+research = ["playwright>=1.40"]
 
 [project.urls]
 Homepage = "https://github.com/escoffier-labs/brigade"
