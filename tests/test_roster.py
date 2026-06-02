@@ -43,7 +43,9 @@ def test_load_valid_roster(tmp_path):
 
 
 def test_load_roster_fallback_parser(monkeypatch, tmp_path):
-    monkeypatch.setattr(roster_mod, "tomllib", None)
+    # Force the pure-Python TOML fallback (the Python 3.10 path, where tomllib
+    # is absent) and confirm a real roster still loads through it.
+    monkeypatch.setattr(roster_mod.toml_compat, "_stdlib_tomllib", None)
     r = roster_mod.load_roster(_write(tmp_path, VALID))
     assert r.orchestrator == "chef"
     assert r.allow_models == ("codex", "ollama:*")
@@ -118,6 +120,20 @@ def test_researcher_agent_accepts_headers(tmp_path):
     loaded = roster_mod.load_roster(_write(tmp_path, text))
     a = loaded.find_role("researcher")
     assert a.headers == {"Authorization": "Bearer t"}
+
+
+def test_researcher_headers_via_fallback_parser(monkeypatch, tmp_path):
+    # Regression: the Python 3.10 fallback must parse the inline-table headers
+    # value. Force the fallback even on 3.11+ so this is guarded everywhere.
+    monkeypatch.setattr(roster_mod.toml_compat, "_stdlib_tomllib", None)
+    text = (
+        'orchestrator = "chef"\n'
+        '[agents.chef]\ncli = "codex"\nrole = "plan"\n'
+        '[agents.api]\nrole = "researcher"\nendpoint = "http://x/v1"\nmodel = "m"\n'
+        'headers = {"Authorization" = "Bearer t"}\n'
+    )
+    loaded = roster_mod.load_roster(_write(tmp_path, text))
+    assert loaded.find_role("researcher").headers == {"Authorization": "Bearer t"}
 
 
 def test_cli_agent_still_requires_cli_or_endpoint(tmp_path):

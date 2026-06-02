@@ -2,16 +2,11 @@
 from __future__ import annotations
 
 import fnmatch
-import ast
 from dataclasses import dataclass
 from pathlib import Path
 
 from . import agents as agent_adapters
-
-try:  # Python 3.11+
-    import tomllib
-except ModuleNotFoundError:  # pragma: no cover - exercised only on Python 3.10
-    tomllib = None
+from . import toml_compat
 
 
 @dataclass(frozen=True)
@@ -63,52 +58,11 @@ def _allowed(cli_ref: str, patterns: tuple[str, ...]) -> bool:
     return any(fnmatch.fnmatchcase(cli_ref, pattern) for pattern in patterns)
 
 
-def _fallback_toml_loads(text: str) -> dict[str, object]:
-    """Parse the small TOML subset used by rosters on Python 3.10."""
-    data: dict[str, object] = {}
-    current: dict[str, object] = data
-
-    for line_number, raw_line in enumerate(text.splitlines(), start=1):
-        line = raw_line.split("#", 1)[0].strip()
-        if not line:
-            continue
-        if line.startswith("[") and line.endswith("]"):
-            path = [part.strip() for part in line[1:-1].split(".") if part.strip()]
-            if not path:
-                raise ValueError(f"invalid TOML table on line {line_number}")
-            current = data
-            for part in path:
-                next_table = current.setdefault(part, {})
-                if not isinstance(next_table, dict):
-                    raise ValueError(f"invalid TOML table on line {line_number}")
-                current = next_table
-            continue
-        if "=" not in line:
-            raise ValueError(f"invalid TOML assignment on line {line_number}")
-        key, raw_value = line.split("=", 1)
-        key = key.strip()
-        raw_value = raw_value.strip()
-        if not key:
-            raise ValueError(f"invalid TOML key on line {line_number}")
-        try:
-            current[key] = ast.literal_eval(raw_value)
-        except (SyntaxError, ValueError) as exc:
-            raise ValueError(f"unsupported TOML value on line {line_number}") from exc
-
-    return data
-
-
-def _loads_toml(text: str) -> dict[str, object]:
-    if tomllib is not None:
-        return tomllib.loads(text)
-    return _fallback_toml_loads(text)
-
-
 def load_roster(path: Path) -> Roster:
     if not path.exists():
         raise FileNotFoundError(f"roster not found: {path}")
 
-    data = _loads_toml(path.read_text())
+    data = toml_compat.loads(path.read_text())
     if not isinstance(data, dict):
         raise ValueError("roster must be a TOML table")
 
