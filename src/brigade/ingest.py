@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Dict, List
 
 from . import budgets
+from .untrusted import scan_untrusted
 
 SECTION_RE = re.compile(r"^##\s+(?P<name>.+?)\s*$", re.MULTILINE)
 SAFE_CARD_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+\.md$")
@@ -231,6 +232,12 @@ def decide(
             return Outcome("inboxed", reason=f"target card name unsafe: {card!r}")
         if not content.lstrip().startswith("---"):
             return Outcome("inboxed", reason="card content missing YAML frontmatter")
+        sig = scan_untrusted(content)
+        if sig.flagged:
+            return Outcome(
+                "inboxed",
+                reason=f"injection signal in card content ({sig.count} marker(s)): {sig.markers[0]}",
+            )
         return Outcome("promoted", dest=target / "memory" / "cards" / card)
 
     if action == "no-card" and route_documents:
@@ -270,6 +277,12 @@ def decide(
                     f"bootstrap budget guard: appending to {document} would exceed "
                     f"its {budget}B budget; trim the file or promote to a memory card"
                 ),
+            )
+        sig = scan_untrusted(content)
+        if sig.flagged:
+            return Outcome(
+                "inboxed",
+                reason=f"injection signal in document content ({sig.count} marker(s)): {sig.markers[0]}",
             )
         return Outcome("routed", dest=dest)
 
