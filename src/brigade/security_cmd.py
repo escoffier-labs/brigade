@@ -16,6 +16,7 @@ from urllib import request as urlrequest
 from urllib.parse import urlparse
 
 from . import work_cmd
+from .untrusted import PROMPT_INJECTION_RE
 
 SEVERITY_ORDER = {
     "info": 0,
@@ -111,10 +112,6 @@ PINNED_ACTION_RE = re.compile(r"uses:\s*['\"]?([^@\s'\"]+)@([^@\s'\"]+)")
 PYTHON_URL_DEP_RE = re.compile(r"(?i)(https?://|git\+https?://|git\+ssh://)")
 HTTP_MCP_RE = re.compile(r'"url"\s*:\s*"https?://')
 AUTO_APPROVE_RE = re.compile(r"(?i)(auto[_-]?approve|always[_-]?allow|allow[_-]?all)")
-PROMPT_INJECTION_RE = re.compile(
-    r"(?i)(ignore (all )?(previous|prior) instructions|do not (tell|reveal)|hidden instruction|"
-    r"send (all )?(secrets|tokens)|exfiltrat|disable safety|bypass safety)"
-)
 MCP_SENSITIVE_ARG_RE = re.compile(
     r"(^|/)(\.env|id_rsa|id_ed25519|credentials|known_hosts|passwd|shadow)$|"
     r"(\.ssh/|\.aws/|\.config/gh/|\.docker/|/etc/passwd|/etc/shadow)",
