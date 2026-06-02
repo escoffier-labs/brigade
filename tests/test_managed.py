@@ -14,7 +14,7 @@ def test_all_tools_declare_required_fields():
 
 def test_tools_attach_to_known_stations():
     stations = {t.station for t in managed.all_tools()}
-    assert stations <= {"memory", "guard", "tokens"}
+    assert stations <= {"memory", "guard", "tokens", "pantry"}
 
 
 def test_for_station_filters():
@@ -55,3 +55,69 @@ def test_tokenjuice_doctor_reads_status_field_not_exit(monkeypatch):
     ctx = DoctorContext(target=Path("/tmp/ws"), selection=None, harnesses=[])
     results = t.doctor(ctx)
     assert any(status == "WARN" for status, _, _ in results)
+
+
+def test_agentpantry_doctor_unwired(monkeypatch):
+    t = managed.resolve("agentpantry")
+    assert t is not None and t.station == "pantry"
+
+    def fake_run(args, **kw):
+        return managed.proc.Result(code=2, stdout="", stderr="unwired: no config")
+
+    monkeypatch.setattr(managed.proc, "run", fake_run)
+    ctx = DoctorContext(target=Path("/tmp/ws"), selection=None, harnesses=[])
+    results = t.doctor(ctx)
+    assert any(status == "WARN" and "unwired" in detail for status, _, detail in results)
+
+
+def test_agentpantry_doctor_parses_status(monkeypatch):
+    t = managed.resolve("agentpantry")
+
+    def fake_run(args, **kw):
+        return managed.proc.Result(
+            code=0,
+            stdout='{"role": "source", "configured": true, "peer": "127.0.0.1:8787",'
+                   ' "key_present": true, "surfaces": ["sidecar"], "browsers": 1,'
+                   ' "allow": [], "deny": []}',
+            stderr="",
+        )
+
+    monkeypatch.setattr(managed.proc, "run", fake_run)
+    ctx = DoctorContext(target=Path("/tmp/ws"), selection=None, harnesses=[])
+    results = t.doctor(ctx)
+    assert any(status == "OK" and "agentpantry" in name for status, name, _ in results)
+
+
+def test_agentpantry_never_fails_workspace(monkeypatch):
+    # Advisory/operator-scoped: missing key is at most a WARN, never FAIL.
+    t = managed.resolve("agentpantry")
+
+    def fake_run(args, **kw):
+        return managed.proc.Result(
+            code=0,
+            stdout='{"role": "sink", "configured": true, "peer": "0.0.0.0:8787",'
+                   ' "key_present": false, "surfaces": ["sidecar"], "browsers": 0,'
+                   ' "allow": [], "deny": []}',
+            stderr="",
+        )
+
+    monkeypatch.setattr(managed.proc, "run", fake_run)
+    ctx = DoctorContext(target=Path("/tmp/ws"), selection=None, harnesses=[])
+    results = t.doctor(ctx)
+    assert all(status != "FAIL" for status, _, _ in results)
+    assert any(status == "WARN" for status, _, _ in results)
+
+
+def test_agentpantry_doctor_handles_garbage_output(monkeypatch):
+    # A misbehaving binary (non-2 exit, non-JSON stdout) must degrade to WARN,
+    # never throw - the doctor loop runs adapters unguarded.
+    t = managed.resolve("agentpantry")
+
+    def fake_run(args, **kw):
+        return managed.proc.Result(code=1, stdout="boom", stderr="kaboom")
+
+    monkeypatch.setattr(managed.proc, "run", fake_run)
+    ctx = DoctorContext(target=Path("/tmp/ws"), selection=None, harnesses=[])
+    results = t.doctor(ctx)
+    assert any(status == "WARN" and "unexpected output" in detail for status, _, detail in results)
+    assert all(status != "FAIL" for status, _, _ in results)

@@ -1073,9 +1073,15 @@ Tools are never imported in process; Brigade shells out to each CLI, so the boun
 brigade add memory   # memory-doctor + bootstrap-doctor
 brigade add guard    # content-guard
 brigade add tokens   # tokenjuice
+brigade add pantry   # agentpantry
 ```
 
 `security` is a built-in station with no external managed tool yet.
+
+`pantry` (alias `larder`) is the agent session auth sync station.
+`brigade add pantry` installs agentpantry via `go install github.com/escoffier-labs/agentpantry/cmd/agentpantry@latest`.
+`brigade doctor` and `brigade status` health-check it by shelling out to `agentpantry status --json`.
+Like the memory satellites, agentpantry inspects host-global state, so its checks are advisory and never FAIL a workspace run: an unwired install (exit 2, no config) is a `WARN`, a missing pre-shared key is a `WARN`, otherwise `OK`.
 
 Security commands:
 
