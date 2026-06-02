@@ -1629,6 +1629,43 @@ def _build_parser() -> argparse.ArgumentParser:
     p_learn_replay_compare.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
     p_learn_replay_compare.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
 
+    # research
+    p_research = sub.add_parser("research", help="Run local-first deep research grounded in a trusted local corpus.")
+    research_sub = p_research.add_subparsers(dest="research_command", metavar="<research-command>")
+    research_sub.required = True
+    p_research_run = research_sub.add_parser("run", help="Run a deep research question.")
+    p_research_run.add_argument("question", help="Research question.")
+    p_research_run.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to use.")
+    p_research_run.add_argument("--corpus", default=None, help="Named corpus from research.toml.")
+    p_research_run.add_argument("--source", action="append", default=[], dest="source", help="Glob path of trusted local sources (repeatable).")
+    p_research_run.add_argument("--web", action="store_true", help="Enable the opt-in untrusted web tier.")
+    p_research_run.add_argument("--rounds", type=int, default=None, help="Max research rounds (max_rounds).")
+    p_research_run.add_argument("--max-time", type=int, default=None, dest="max_time", help="Wall-clock budget in seconds (max_time).")
+    p_research_run.add_argument("--provider", default=None, help="Web search provider override.")
+    p_research_run.add_argument("--category", default=None, help="Optional category label for the run.")
+    p_research_run.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_research_list = research_sub.add_parser("list", help="List local research runs.")
+    p_research_list.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_research_list.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_research_show = research_sub.add_parser("show", help="Show one local research run.")
+    p_research_show.add_argument("run_id", help="Run id.")
+    p_research_show.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_research_show.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_research_cancel = research_sub.add_parser("cancel", help="Cancel a local research run.")
+    p_research_cancel.add_argument("run_id", help="Run id.")
+    p_research_cancel.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
+    p_research_cancel.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_research_resume = research_sub.add_parser("resume", help="Resume a local research run from its checkpoint.")
+    p_research_resume.add_argument("run_id", help="Run id.")
+    p_research_resume.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
+    p_research_resume.add_argument("--rounds", type=int, default=None, help="Max research rounds (max_rounds).")
+    p_research_resume.add_argument("--max-time", type=int, default=None, dest="max_time", help="Wall-clock budget in seconds (max_time).")
+    p_research_resume.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_research_open = research_sub.add_parser("open", help="Print the HTML report path for a local research run.")
+    p_research_open.add_argument("run_id", help="Run id.")
+    p_research_open.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_research_open.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+
     # center
     p_center = sub.add_parser("center", help="Read local operator-center summaries.")
     center_sub = p_center.add_subparsers(dest="center_command", metavar="<center-command>")
@@ -2896,6 +2933,34 @@ def main(argv=None) -> int:
             parser.error(f"unknown learn replay command: {args.learn_replay_command}")
             return 2
         parser.error(f"unknown learn command: {args.learn_command}")
+        return 2
+    if cmd == "research":
+        from . import research_cmd
+
+        if args.research_command == "run":
+            overrides = {"max_rounds": args.rounds, "max_time": args.max_time}
+            return research_cmd.cli_run(
+                target=args.target,
+                question=args.question,
+                corpus=args.corpus,
+                sources=list(args.source),
+                web=args.web,
+                overrides=overrides,
+                provider=args.provider,
+                json_output=args.json,
+            )
+        if args.research_command == "list":
+            return research_cmd.cli_list(target=args.target, json_output=args.json)
+        if args.research_command == "show":
+            return research_cmd.cli_show(target=args.target, run_id=args.run_id, json_output=args.json)
+        if args.research_command == "cancel":
+            return research_cmd.cli_cancel(target=args.target, run_id=args.run_id, json_output=args.json)
+        if args.research_command == "resume":
+            overrides = {"max_rounds": args.rounds, "max_time": args.max_time}
+            return research_cmd.cli_resume(target=args.target, run_id=args.run_id, overrides=overrides, json_output=args.json)
+        if args.research_command == "open":
+            return research_cmd.cli_open(target=args.target, run_id=args.run_id, json_output=args.json)
+        parser.error(f"unknown research command: {args.research_command}")
         return 2
     if cmd == "center":
         from . import center_cmd
