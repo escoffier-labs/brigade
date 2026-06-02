@@ -2,7 +2,30 @@
 
 Brigade is being built as a practical daily workflow first, then a portable setup other people can adapt. The core direction is an organized version of real agent work: one command to start, predictable local artifacts, reviewable memory handoffs, and enough inspection to trust the loop during normal work.
 
+## How to read this roadmap
+
+Every section below has the same shape: a plain-English summary in a quote block, then the detailed technical bullets with exact command names and status tags. If the bullets read like buzzword soup, the quote block is the human version. Read that first.
+
+A few words show up everywhere:
+
+- **harness**: an AI agent program (Claude Code, Codex, OpenClaw, Hermes).
+- **operator**: you, the human running the agents.
+- **handoff**: a memory note an agent writes to be saved long-term.
+- **ingest**: reading those notes and filing them into permanent memory.
+- **scanner**: an automation that goes looking for useful work (in chat, backups, code, and so on).
+- **import / inbox**: a holding queue where found work waits for your review.
+- **promote**: move an item out of the queue into a real task or memory note.
+- **receipt**: a local file logging that something happened, kept for audit and proof.
+- **closeout**: marking something reviewed or done so it stops nagging you.
+- **gate**: a manual approval checkpoint; nothing risky happens without your yes.
+- **AFK**: away from keyboard, a long unattended run the agent does solo.
+- **dogfood**: Brigade being used on itself or another trusted repo.
+
+The one rule behind all of it: Brigade writes local files and queues, but it never publishes, edits canonical memory, runs background daemons, or touches remote servers on its own. Everything waits for an explicit command.
+
 ## Foundation: Daily Driver
+
+> **In plain terms:** the everyday loop. `brigade work brief` each morning shows what is up, `brigade work run` does a chunk of work and auto-saves its artifacts and a memory note, and there is a private local to-do list that never gets committed. The long run-on bullet below is just the full feature list for long unattended runs; it boils down to "log every step in checkpoints so you can see what happened and resume if it crashes."
 
 Status: in progress.
 
@@ -16,6 +39,8 @@ Status: in progress.
 - `brigade work phases` provides a gitignored execution ledger for long unattended multi-phase work, including no-silent-compression checks, completion evidence requirements, range status, review closeouts, compare checks, commit reconciliation, privacy scans, handoff drafts, goal scaffolds, action queues, evidence attachments, verification matrices, daily-driver candidates, report closeouts, report compare checks, AFK execution sessions, checkpoint-aware session next/resume recovery, wrapper-safe session protocol output, session self-audit, session risk summaries, session verification, privacy, and handoff rollups, session checkpoints, session checkpoint inspection, compare, archive checks, checkpoint issue imports, recovery notes and closeouts, checkpoint-aware daily candidates, daily checkpoint writes, session activity timelines, session progress summaries, session blocker imports, session gates, session reports with recovery evidence, session health schema manifests, daily session candidates, inbox issue routing, and release/operator evidence with session compare drift checks. Status: strengthened through phase 250 AFK hardening closeout.
 
 ## Foundation: Scanner-Ready Inbox
+
+> **In plain terms:** make it safe for automations to drop "here is some work" into Brigade. A scanner finds something, it lands in a private inbox, and it sits there until you review and promote it. The rest is validating, deduping, grouping, dismissing noise, and turning keepers into tasks or memory notes. No daemon, no auto-promotion: things only move when you run a command.
 
 Status: active.
 
@@ -53,6 +78,8 @@ Goal: make Brigade a safe target for local automations that discover useful work
 
 ## Later Phase: Chat Surface Scanners
 
+> **In plain terms:** pull work items out of chat apps (Discord, Slack, Telegram, and so on). It summarizes private messages instead of pasting raw chat into public docs, and events become inbox items rather than direct memory writes. The long platform list is just "we do not want to hardcode one chat product."
+
 Goal: support the common places agent work happens without making any one chat product mandatory.
 
 - Build adapters for Discord, Slack, ClickClack, Telegram, and export-based chat archives as separate scanner layers.
@@ -67,6 +94,8 @@ Goal: support the common places agent work happens without making any one chat p
 
 ## Later Phase: Backup And Recovery Visibility
 
+> **In plain terms:** fold backup health into the same daily dashboard. Show how old your latest NAS and cloud snapshots are, whether the integrity check passed, and when you last test-restored. Stale or broken backups become "incident" items in the inbox.
+
 Goal: make backup health part of the same daily operator loop as chat, memory, and work imports.
 
 - Track restic backups to both NAS and cloud destinations.
@@ -77,6 +106,8 @@ Goal: make backup health part of the same daily operator loop as chat, memory, a
 - Keep real hostnames, remote names, mount paths, webhook URLs, channel ids, and backup passwords out of public templates. Status: started with unsafe summary field warnings and public docs.
 
 ## Later Phase: Shared Tool Catalog And Runtime
+
+> **In plain terms:** one master list of every tool your agents can call, so each agent does not keep its own separate config. You can search, describe, and call tools from one place. Anything that changes state sits behind an approval gate, secrets stay local, and the optional local runtime never auto-starts.
 
 Goal: make Brigade able to reason about callable tools across agent harnesses without making each harness own separate tool config.
 
@@ -93,6 +124,8 @@ Goal: make Brigade able to reason about callable tools across agent harnesses wi
 
 ## Later Phase: Context, Projects, And Learning
 
+> **In plain terms:** three related things. (1) Reusable "context packs" so you do not re-explain a repo to an agent every time. (2) Auditing related side-projects to decide keep, merge, or drop without touching their git. (3) Collecting "lessons learned" candidates, but only as suggestions you review; Brigade never rewrites itself.
+
 Goal: make context preparation, project consolidation, and self-learning local, explicit, and reviewable.
 
 - Build local context engineering packs for task, repo, release, and tool-use scenarios. Status: started with `brigade context plan/build/list/show/archive`, `brigade context sync plan/record`, `brigade context doctor/import-issues`, safe summaries, task acceptance, recent evidence, private evidence exclusions, read-only configured harness sync planning receipts, and reviewable context freshness imports.
@@ -100,6 +133,8 @@ Goal: make context preparation, project consolidation, and self-learning local, 
 - Aggregate local learning candidates without self-modification. Status: started with `brigade learn plan/doctor/import-issues`, `brigade learn closeout/closeouts/closeout-show`, `brigade learn replay export/list/show/compare`, candidate routing into the scanner inbox, raw import text avoidance, accepted-risk or dismissal quieting, changed-fingerprint resurfacing, and safe replay compare receipts.
 
 ## Later Phase: Cybersecurity Plugin
+
+> **In plain terms:** a security scanner built for AI agent setups. It hunts for hardcoded secrets, over-broad tool permissions, dangerous hooks, risky MCP configs, and prompt-injection traps in agent instructions, then grades the findings. It scores a sample secret in a template differently from a live credential, so docs do not trigger false alarms. Threat-intel enrichment is opt-in and offline by default.
 
 Goal: ship a Brigade cybersecurity plugin with broad coverage for agent workspaces, then go deeper on Brigade's multi-harness, memory, scanner, and dogfood workflows.
 
@@ -130,6 +165,8 @@ Brigade-specific additions:
 
 ## Active Phase: Issue And TDD Work Loop
 
+> **In plain terms:** support a clean one-task-at-a-time flow: pick a task, write down what "done" means, write the test first when sensible, build, review, close. It can import GitHub issues into the local to-do list using plain `gh`, with no background sync engine.
+
 Goal: make Brigade support a narrow issue lifecycle for daily work: pick one task, define acceptance, test first when practical, implement, review, refactor, and close.
 
 - Add task templates for vertical-slice work, bugfix work, RED/GREEN/REFACTOR loops, docs work, and security follow-ups. Status: implemented in the local task ledger.
@@ -150,6 +187,8 @@ First build slice:
 
 ## Later Phase: Memory Card Decay And Refresh
 
+> **In plain terms:** stop memory notes from silently rotting. Track when each note was last reviewed and how well-sourced it is, then flag stale or contradictory ones for refresh. "Bootstrap truncation is a hard failure" means the always-loaded startup files must stay small; if they get bloated and cut off, that is treated as a real error, not a shrug.
+
 Goal: prevent durable memory from silently rotting.
 
 - Track freshness metadata, confidence, evidence, and review dates for memory cards. Status: started with memory-care metadata coverage summaries, missing reviewed-date issues, missing freshness-date issues, confidence counts, evidence metadata counts, reviewed imports, and planning-only safe metadata repair output.
@@ -166,6 +205,8 @@ Goal: prevent durable memory from silently rotting.
 
 ## Later Phase: Portable Operator Setup
 
+> **In plain terms:** make it work for other people, not just the original operator. Codex stays the default, but Claude Code, OpenCode, Hermes, and OpenClaw are all supported. Local paths are configurable and gitignored, public docs focus on patterns instead of private workspace state, and anything that publishes stays behind an approval gate.
+
 Goal: keep the system usable by the original operator while making it adaptable by others.
 
 - Keep Codex-first defaults, with Claude Code, OpenCode, Hermes, OpenClaw, and generic harness paths supported through writer-specific inboxes.
@@ -175,6 +216,8 @@ Goal: keep the system usable by the original operator while making it adaptable 
 - Leave release, tag, push-to-main, and production-impacting actions behind explicit approval gates.
 
 ## Later Phase: Deep Research Lane
+
+> **In plain terms (not built yet):** turn a research question into durable, cited memory instead of a throwaway answer. `brigade research run "<question>"` would loop gather, read, extract, synthesize, save progress so a long run survives a crash, and output an HTML report plus a memory note. Every web page is treated as untrusted (it could carry injected instructions), and cost is capped so a run cannot blow up.
 
 Goal: turn open-ended research questions into durable, cited memory instead of one-shot answers, reusing the existing researcher role and the handoff -> card pipeline.
 
@@ -186,6 +229,8 @@ Goal: turn open-ended research questions into durable, cited memory instead of o
 - Bound cost explicitly: per-run search count and per-page content caps, surfaced in the run receipt, with no silent truncation. Status: proposed.
 
 ## Later Phase: Operator Capabilities Beyond The CLI
+
+> **In plain terms:** the vision past the terminal. The principle: the CLI is the engine, and any future UI is just a window onto the same commands, never a separate codebase. Near-term, still-CLI ideas include prompt-injection protection, blocking risky tools on publicly exposed instances, a dependency-free HTML report renderer, optional on-device memory search, and off-terminal notifications. Longer-term: an actual workspace UI, adopting an existing open-source chat front end, local model-serving guidance, and calendar/email triage. The later items are "planned direction," meaning not committed yet.
 
 Goal: the CLI is just the bones. It is the load-bearing skeleton, the testable, scriptable engine that every capability hangs off, but the destination is a full operator workspace, not a terminal tool. Architecture principle: every higher-level surface (including a future UI) sits on top of a CLI command plus a structured (JSON) contract, so the bones stay authoritative, automatable, and the single source of behavior. The UI becomes a view over the same commands, never a parallel implementation. Near-term items below are CLI-native; later items put a workspace on top of the same bones.
 
@@ -205,6 +250,8 @@ The workspace on top of the bones:
 - Personal-data surfaces such as calendar and email triage as Brigade becomes a daily workspace, behind the same privacy and approval gates that already govern the CLI. Status: planned direction.
 
 ## Active Phase Queue: Roadmap Completion Hardening
+
+> **In plain terms:** not new features, this is the polish and cleanup backlog: tighten audits, fix documentation drift, add privacy regression tests, finish closeouts. The actual checklist lives in the linked plan file.
 
 Status: active.
 

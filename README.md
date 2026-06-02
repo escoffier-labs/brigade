@@ -37,6 +37,28 @@ It is meant for people running real tools, real docs, and real automation across
 
 The cookbook explains the why. This package gives you the kitchen.
 
+## Plain-English glossary
+
+This README is dense, and a handful of words carry most of the weight. Learn these and the rest reads cleanly:
+
+| Word | What it actually means |
+|---|---|
+| **harness** | An AI agent program: Claude Code, Codex, OpenClaw, Hermes. |
+| **operator** | You, the human running the agents. |
+| **dogfood** | Brigade used on itself or another trusted repo. |
+| **handoff** | A memory note an agent writes to be saved long-term. |
+| **ingest / ingester** | Reading those notes and filing them into permanent memory. |
+| **scanner** | An automation that goes looking for useful work (chat, backups, code). |
+| **import / inbox** | A holding queue where found work waits for your review. |
+| **promote** | Move an item out of the queue into a real task or memory note. |
+| **receipt** | A local file logging that something happened, kept for audit and proof. |
+| **closeout** | Marking something reviewed or done so it stops nagging you. |
+| **gate** | A manual approval checkpoint; nothing risky happens without your yes. |
+| **AFK** | Away from keyboard, a long unattended run the agent does solo. |
+| **station** | A subsystem of Brigade (memory, security, tokens, pantry) with its own commands. |
+
+The one rule behind all of it: Brigade writes local files and review queues, but it does not publish, edit canonical memory, run background daemons, run arbitrary commands, or touch remote servers on its own. Everything waits for an explicit operator command. That is the "deliberate friction" the rest of this doc keeps repeating.
+
 ## The design
 
 One memory owner stays canonical.
@@ -84,6 +106,8 @@ Make the wrapper explicit, make the escape hatch obvious, and tell every harness
 The TokenJuice starter card documents Claude Code's PreToolUse wrapper path, Codex's hook setup, and the savings model.
 
 ## What you get
+
+> **In plain terms:** the list below is everything Brigade can do today. Skim the bold labels; each one is a "station" documented in detail later. You do not need most of them on day one.
 
 Brigade has grown from a bootstrap kit into a local control plane for agent work. The current public surface includes:
 
@@ -209,6 +233,8 @@ Use `brigade work import issue-repairs` when issue-backed local tasks need revie
 
 ## Run a brigade
 
+> **In plain terms:** you give one plain-language task, a lead agent ("orchestrator") plans it and farms pieces out to worker agents through their own CLIs, then the lead stitches the results into one answer. It is deliberately bounded: two lead calls plus the planned worker calls, so it cannot run away. ("Aboyeur" is the kitchen expediter who calls out orders.)
+
 `brigade run "<task>"` is the aboyeur path.
 One orchestrator plans the work, Brigade dispatches assigned workers through their own CLIs, then the orchestrator synthesizes the final answer.
 It is intentionally bounded: two orchestrator calls plus the worker calls in the plan.
@@ -258,309 +284,9 @@ brigade run "review this repo" --cwd /path/to/repo
 brigade run "review this repo" --handoff
 brigade run "review this repo" --read-only
 brigade run "review this repo" --read-only --inspect
-brigade dogfood init --target /path/to/repo
-brigade dogfood status
-brigade dogfood
-brigade dogfood next
-brigade dogfood --target /path/to/repo
-brigade release plan
-brigade release doctor
-brigade release run
-brigade release runs
-brigade release show <run-id>
-brigade release schema
-brigade release ci doctor
-brigade release ci import-issues
-brigade release smoke plan
-brigade release smoke record
-brigade release smoke list
-brigade release smoke show <receipt-id>
-brigade release smoke doctor
-brigade release candidate plan
-brigade release candidate build
-brigade release candidate list
-brigade release candidate show <candidate-id>
-brigade release candidate audit <candidate-id>
-brigade release candidate compare <candidate-id>
-brigade release candidate import-issues <candidate-id>
-brigade release candidate closeout <candidate-id>
-brigade release candidate archive <candidate-id>
-brigade handoff doctor
-brigade handoff lint
-brigade handoff list
-brigade handoff show <handoff-id-or-path>
-brigade handoff archive <handoff-id-or-path>
-brigade handoff archive --all-reviewed
-brigade handoff closeout
-brigade handoff runs
-brigade handoff run-show <run-id>
-brigade handoff reconcile
-brigade handoff issues
-brigade handoff import-issues
-brigade handoff sync-issues
-brigade work bootstrap
-brigade work status
-brigade work doctor
-brigade work resume
-brigade work brief
-brigade work brief --json
-brigade work inbox
-brigade work inbox --json
-brigade work inbox doctor
-brigade work inbox archive
-brigade work backup init
-brigade work backup status
-brigade work backup doctor
-brigade work backup import-issues
-brigade work backup closeout
-brigade work scanners init
-brigade work scanners list
-brigade work scanners show chat-memory-sweep
-brigade work scanners plan
-brigade work scanners doctor
-brigade work scanners run chat-memory-sweep
-brigade work scanners run --due
-brigade work scanners runs
-brigade work scanners run-show <run-id>
-brigade work review init
-brigade work review plan
-brigade work review run <reviewer-id>
-brigade work review runs
-brigade work review show <run-id>
-brigade work review import-findings <run-id>
-brigade work review findings
-brigade work review finding-show <finding-id-or-import-id>
-brigade work review closeout latest
-brigade work verify plan
-brigade work verify run
-brigade work verify runs
-brigade work verify show <run-id>
-brigade work closeout latest
-brigade work acceptance
-brigade work sweep
-brigade work sweep --all
-brigade work sweeps
-brigade work sweep-show <sweep-id>
-brigade work sweep-review latest
-brigade chat surfaces init
-brigade chat surfaces list
-brigade chat surfaces doctor
-brigade chat sweep validate .brigade/chat-surfaces/discord-export.json
-brigade chat sweep ingest discord-export
-brigade chat sweep import-issues discord-export
-brigade tools init
-brigade tools list
-brigade tools show simplify
-brigade tools search simplify
-brigade tools describe simplify
-brigade tools contracts
-brigade tools call plan simplify --args '{"path":"README.md"}'
-brigade tools call queue simplify --args '{"path":"README.md"}'
-brigade tools call list
-brigade tools call show <call-id>
-brigade tools call approve <call-id>
-brigade tools call reject <call-id> --reason "not needed"
-brigade tools call hold <call-id> --reason "needs review"
-brigade tools call run <call-id>
-brigade tools call run --next
-brigade tools run list
-brigade tools run show <run-id>
-brigade tools run latest
-brigade tools run replay <run-id>
-brigade tools checkpoint list
-brigade tools checkpoint show <checkpoint-id>
-brigade tools checkpoint approve <checkpoint-id> --choice continue
-brigade tools checkpoint reject <checkpoint-id> --reason "not safe"
-brigade tools checkpoint resume <checkpoint-id>
-brigade tools runtime init
-brigade tools runtime list
-brigade tools runtime status
-brigade tools runtime start <runtime-id>
-brigade tools runtime stop <runtime-id>
-brigade tools runtime doctor
-brigade tools policy init
-brigade tools policy show
-brigade tools policy doctor
-brigade tools parity status
-brigade tools parity closeout
-brigade tools pack build
-brigade tools pack list
-brigade tools pack show <pack-id>
-brigade tools pack archive <pack-id>
-brigade tools sync plan
-brigade tools sync apply
-brigade tools sync apply --write --all
-brigade tools plan
-brigade tools plan simplify
-brigade tools apply simplify --dry-run
-brigade tools apply simplify
-brigade tools apply --all
-brigade tools doctor
-brigade tools import-issues
-brigade work next
-brigade work next --json
-brigade work tasks
-brigade work task add "build the next slice"
-brigade work task add "build the next slice" --type feature --priority high --acceptance "focused tests pass"
-brigade work task add --from-next
-brigade work task plan <task-id>
-brigade work task done <task-id>
-brigade work import add --kind task --source slack "refresh the stale memory card"
-brigade work import list
-brigade work import validate imports.jsonl
-brigade work import ingest imports.jsonl
-brigade work import memory-care
-brigade work import memory-refresh
-brigade work import triage
-brigade work import provenance
-brigade work import plan <import-id>
-brigade work import plan-handoff <import-id>
-brigade work import promote <import-id>
-brigade work import promote-handoff <import-id>
-brigade work import promote --run <import-id>
-brigade work import promote --all --source memory-care --kind task
-brigade work import promote --all --source handoff-ingest --metadata handoff_issue_category=route-skip
-brigade work import dismiss <import-id> --reason "not actionable"
-brigade work import dismiss --all --source handoff-ingest --metadata handoff_issue_category=skip --reason "historical noise"
-brigade memory care init
-brigade memory care scan
-brigade memory care plan-fixes
-brigade memory care status
-brigade memory care doctor
-brigade memory care import-issues
-brigade memory care closeout
-brigade context plan
-brigade context build
-brigade context list
-brigade context show <pack-id>
-brigade context archive <pack-id>
-brigade context sync plan <pack-id|latest>
-brigade context sync record <pack-id|latest>
-brigade context doctor
-brigade context import-issues
-brigade projects audit
-brigade projects readiness plan
-brigade projects readiness record
-brigade projects readiness list
-brigade projects readiness show <receipt-id|latest>
-brigade projects closeout
-brigade projects closeouts
-brigade projects closeout-show <closeout-id|latest>
-brigade projects import-issues
-brigade learn plan
-brigade learn doctor
-brigade learn import-issues
-brigade learn closeout <candidate-id>
-brigade learn closeouts
-brigade learn closeout-show <closeout-id|latest>
-brigade learn replay export <scenario-id>
-brigade learn replay list
-brigade learn replay show <replay-id|latest>
-brigade learn replay compare <replay-id|latest>
-brigade security closeout
-brigade center status
-brigade center activity
-brigade center reviews
-brigade center templates
-brigade center schema
-brigade center report plan
-brigade center report build
-brigade center report list
-brigade center report show <report-id>
-brigade center report archive <report-id>
-brigade center report review <report-id>
-brigade center report compare <report-id>
-brigade center report diff <base-report-id> <compare-report-id> --record
-brigade center report closeout <report-id>
-brigade center actions plan <report-id>
-brigade center actions build <report-id>
-brigade center actions list
-brigade center actions show <action-id>
-brigade center actions doctor
-brigade center actions import-issues
-brigade center actions start <action-id>
-brigade center actions done <action-id>
-brigade center actions defer <action-id> --reason "not today"
-brigade center actions archive --completed
-brigade center readiness plan
-brigade center readiness closeout
-brigade center readiness list
-brigade center readiness show <readiness-id>
-brigade center readiness import-issues
-brigade daily init
-brigade daily status
-brigade daily plan
-brigade daily review
-brigade daily run
-brigade daily closeout
-brigade daily history
-brigade daily show latest
-brigade daily doctor
-brigade daily schema
-brigade daily resume
-brigade daily repair
-brigade daily unblock
-brigade daily protocol
-brigade daily telemetry
-brigade daily telemetry doctor
-brigade daily hardening plan
-brigade daily hardening audit
-brigade daily hardening import-issues
-brigade daily hardening closeout
-brigade daily approvals list
-brigade daily approvals show <approval-id>
-brigade daily approvals approve <approval-id>
-brigade daily approvals reject <approval-id> --reason "not now"
-brigade daily approvals hold <approval-id> --reason "needs review"
-brigade daily approvals compare <approval-id>
-brigade daily approvals archive --consumed
-brigade work phases init
-brigade work phases plan --range 226-250
-brigade work phases status
-brigade work phases start <phase-id>
-brigade work phases evidence add <phase-id> --note "recorded safe evidence"
-brigade work phases verify plan <phase-id>
-brigade work phases verify record <phase-id> --command "pytest" --status passed
-brigade work phases reconcile <phase-id>
-brigade work phases privacy <phase-id>
-brigade work phases handoff <phase-id>
-brigade work phases compare <phase-id>
-brigade work phases closeout <phase-id> --status reviewed
-brigade work phases report build
-brigade work phases report compare latest
-brigade work phases actions plan
-brigade work phases actions build
-brigade work phases actions import-issues
-brigade work phases session start --range 226-250
-brigade work phases session checkpoint latest --summary "safe recovery point"
-brigade work phases session checkpoints list
-brigade work phases session checkpoints compare latest
-brigade work phases session checkpoints import-issues
-brigade work phases session recovery-note latest --summary "safe resume context"
-brigade work phases session recovery-notes list
-brigade work phases session next latest
-brigade work phases session resume latest
-brigade work phases session risk latest
-brigade work phases session verification latest
-brigade work phases session privacy latest
-brigade work phases session handoffs latest
-brigade work phases session progress latest
-brigade work phases session activity latest
-brigade work phases session protocol latest
-brigade work phases session audit latest
-brigade work phases session gate latest
-brigade work phases session report build latest
-brigade work phases goal scaffold --range 226-250
-brigade work run
-brigade work run --queue-next
-brigade work run "review today's changes"
-brigade work start "next slice"
-brigade work note "wired parser and tests"
-brigade work end --note "tests passed" --handoff
-brigade work list
-brigade work latest
-brigade work recap --since 2026-05-26
 ```
+
+The eight examples above all drive the same `brigade run` command to show its main flags. Brigade's full surface (work loop, scanners, handoffs, tools, release gates, repo fleet, and more) is documented section by section below. For the complete, auto-generated list of every command, see [`docs/command-inventory.md`](docs/command-inventory.md), and regenerate it with `brigade roadmap commands --write`.
 
 Common `brigade run` flags:
 
@@ -628,6 +354,8 @@ CLI runs write artifacts by default under `.brigade/runs/<id>` below `--cwd`; do
 Use `--output-dir <path>` to pick the artifact directory, or `--no-artifacts` for a throwaway run.
 
 ### Daily Work Loop
+
+> **In plain terms:** this section is long because it lists every command in the daily routine, but the spine is short. `brigade work bootstrap` once per repo, `brigade work brief` to start the day, `brigade work run` to do a task, `brigade work closeout` to confirm it met its "done" criteria. Everything else (inbox, scanners, sweeps, reviews, backups, tools, the daily driver, phase ledgers) is an optional station you reach for only when you need it. Read for the command you want and ignore the rest.
 
 Use `brigade work bootstrap` once per repo.
 It writes or verifies `.brigade/dogfood.toml`, creates local artifact directories, creates the handoff inbox, updates `.gitignore`, and reports readiness.
@@ -920,6 +648,8 @@ See [`docs/release-candidates.md`](docs/release-candidates.md) for the candidate
 
 ### Memory And Bootstrap Health
 
+> **In plain terms:** keep the always-loaded startup files small and the memory notes fresh. `brigade doctor` fails loudly if a startup file grows past its size budget, because an oversized file gets silently cut off and the agent loads only half its context. Durable detail belongs in memory cards, not in the files loaded every session.
+
 Memory and bootstrap readiness are part of the same operating-system health story.
 `brigade doctor` checks installed bootstrap files against hard byte budgets so overgrown files fail before agents load truncated context.
 
@@ -1064,6 +794,8 @@ The managed `.gitignore` block is replaced between its markers without touching 
 See [QUICKSTART.md](QUICKSTART.md) for setup, verification, and the ingest flow.
 
 ## Managed stations
+
+> **In plain terms:** "stations" are optional add-on tools Brigade can install and wire up for you (memory health, content guard, token compaction, auth sync, security scanning). `brigade add <station>` installs whatever is missing. They always run as separate command-line tools, never imported into Brigade, so the boundary stays clean and language-agnostic. A missing one is never a failure, just a "todo" hint.
 
 Some stations can install and wire external tools for you.
 Run `brigade add <station>` to install any tool attached to that station that is not already on your PATH, then wire its default config.
