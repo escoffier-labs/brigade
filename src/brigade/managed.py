@@ -91,6 +91,31 @@ def _tokenjuice_doctor(ctx: DoctorContext) -> List[CheckResult]:
     return [(mapping.get(status, WARN), "tokenjuice", f"hook status: {status}")]
 
 
+# agentpantry keeps the agent's machine authenticated by syncing browser sessions
+# from a daily-driver (source) to the agent host (sink). Like the memory satellites
+# it inspects host-global state, so its findings are advisory and never FAIL a
+# workspace doctor run.
+def _agentpantry_doctor(ctx: DoctorContext) -> List[CheckResult]:
+    name = "agentpantry (session auth sync)"
+    r = proc.run(["agentpantry", "status", "--json"])
+    if r.code == 2:
+        return [(WARN, name, "installed but unwired (no config)")]
+    data = r.json()
+    if data is None:
+        return [(WARN, name, f"unexpected output (exit {r.code})")]
+    role = data.get("role") or "?"
+    peer = data.get("peer") or "?"
+    surfaces = data.get("surfaces") or []
+    key_present = bool(data.get("key_present"))
+    status = OK if key_present else WARN
+    detail = (
+        f"role={role}, peer={peer}, "
+        f"surfaces={','.join(str(s) for s in surfaces) or 'none'}, "
+        f"key={'present' if key_present else 'MISSING'}"
+    )
+    return [(status, name, detail)]
+
+
 def _tokenjuice_wire(ctx: DoctorContext) -> List[CheckResult]:
     # Wiring installs a host hook; which host depends on the workspace's harnesses.
     hosts = [h for h in ctx.harnesses if h in ("claude", "codex", "cursor")]
@@ -110,13 +135,13 @@ _TOOLS: Tuple[ManagedTool, ...] = (
     ManagedTool(
         name="memory-doctor", station="memory", command="memory-doctor",
         summary="memory index health, dead-link lint, handoff counts",
-        install_args=["pipx", "install", "git+https://github.com/solomonneas/memory-doctor"],
+        install_args=["pipx", "install", "git+https://github.com/escoffier-labs/memory-doctor"],
         wire=_noop_wire, doctor=_memory_doctor_doctor,
     ),
     ManagedTool(
         name="bootstrap-doctor", station="memory", command="bootstrap-doctor",
         summary="bootstrap-file size/limit audit",
-        install_args=["pipx", "install", "git+https://github.com/solomonneas/bootstrap-doctor"],
+        install_args=["pipx", "install", "git+https://github.com/escoffier-labs/bootstrap-doctor"],
         wire=_noop_wire, doctor=_bootstrap_doctor_doctor,
     ),
     ManagedTool(
@@ -130,6 +155,12 @@ _TOOLS: Tuple[ManagedTool, ...] = (
         summary="output compaction via host hooks",
         install_args=["npm", "install", "-g", "tokenjuice"],
         wire=_tokenjuice_wire, doctor=_tokenjuice_doctor,
+    ),
+    ManagedTool(
+        name="agentpantry", station="pantry", command="agentpantry",
+        summary="browser session auth sync (source -> sink)",
+        install_args=["go", "install", "github.com/escoffier-labs/agentpantry/cmd/agentpantry@latest"],
+        wire=_noop_wire, doctor=_agentpantry_doctor,
     ),
 )
 
