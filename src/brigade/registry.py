@@ -39,8 +39,15 @@ SECURITY = Station(
     aliases=("sec",),
     doctor=_doctor.security_station_checks,
 )
+PANTRY = Station(
+    name="pantry",
+    summary="agent session auth sync",
+    aliases=("larder",),
+    doctor=_doctor.pantry_station_checks,
+    tools=("agentpantry",),
+)
 
-_BUILTIN: Tuple[Station, ...] = (CORE, MEMORY, GUARD, TOKENS, SECURITY)
+_BUILTIN: Tuple[Station, ...] = (CORE, MEMORY, GUARD, TOKENS, SECURITY, PANTRY)
 
 
 def all_stations() -> Tuple[Station, ...]:

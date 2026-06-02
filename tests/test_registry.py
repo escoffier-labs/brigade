@@ -17,6 +17,8 @@ def test_resolve_by_name_and_alias():
     assert registry.resolve("pass").name == "guard"
     assert registry.resolve("sec").name == "security"
     assert registry.resolve("nope") is None
+    assert registry.resolve("pantry").name == "pantry"
+    assert registry.resolve("larder").name == "pantry"
 
 
 def test_stations_declare_attached_tools():
@@ -29,3 +31,10 @@ def test_stations_declare_attached_tools():
     assert set(guard.tools) == {"content-guard"}
     assert tokens is not None and set(tokens.tools) == {"tokenjuice"}
     assert security is not None and set(security.tools) == set()
+
+
+def test_pantry_station_declares_agentpantry():
+    pantry = registry.resolve("pantry")
+    assert pantry is not None
+    assert set(pantry.tools) == {"agentpantry"}
+    assert callable(pantry.doctor)

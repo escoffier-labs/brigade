@@ -74,6 +74,12 @@ def tokens_station_checks(ctx: DoctorContext) -> List[CheckResult]:
     return []
 
 
+def pantry_station_checks(ctx: DoctorContext) -> List[CheckResult]:
+    # The agentpantry managed tool carries this station's signal; the station
+    # itself lays down no per-workspace files.
+    return []
+
+
 def security_station_checks(ctx: DoctorContext) -> List[CheckResult]:
     from . import dogfood_cmd, security_cmd
 
