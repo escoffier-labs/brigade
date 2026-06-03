@@ -138,6 +138,21 @@ Goal: make Brigade able to reason about callable tools across agent harnesses wi
 - Expose catalog health through `brigade doctor` and route broken source/auth/policy states into `brigade work import`. Status: started through `brigade work brief`, `brigade work doctor`, and `tool-catalog` imports.
 - Build local portable tool evidence bundles and reviewed sync plans. Status: strengthened with `brigade tools pack build/list/show/archive`, `brigade tools sync plan/apply`, and `brigade tools parity status/closeout` for reviewed projection parity receipts, dry-run sync by default, managed projection conflict safety, changed-fingerprint resurfacing, and release evidence for pack freshness, sync blockers, approvals, run history, and checkpoints.
 
+## Later Phase: Shared Skill Registry
+
+> **In plain terms:** skills are reusable workflow instructions, not random prompt snippets. Brigade should keep one reviewed library, then install the same skill into Codex, Claude Code, Gemini, OpenClaw, or an MCP resource shape. Agent-written skill ideas go to an inbox for review instead of becoming instant startup text.
+
+Goal: make skills shareable across harnesses while treating them like code: provenance, linting, permissions, compatibility checks, fingerprints, tests, review, and rollback before installation.
+
+- Maintain a canonical local skill registry where each skill pack has `SKILL.md`, `skill.json` metadata, version, source, required tools, required MCP servers, supported harnesses, trust level, tests, and optional bundled assets or scripts. Status: started with `brigade skills import`, local registry fingerprints, lint checks, and injection-signal warnings.
+- Materialize one reviewed skill into multiple harness formats instead of maintaining separate prompt copies. Status: started with `brigade skills install <skill> --target codex|claude|opencode|gemini|openclaw|hermes|mcp|all`, installing Codex, Claude, OpenCode, Gemini `.agents/skills`, OpenClaw, Hermes, and MCP-resource folders with per-harness receipts.
+- Keep harness support adapter-based so future targets such as Antigravity, Pi, Cursor, and similar agent surfaces can be added without changing the registry contract. Status: planned.
+- Search and lint skill packs before use. Status: started with `brigade skills search` and `brigade skills lint`.
+- Keep the Skills Over MCP direction as an explicit experimental contract. Status: started with `brigade skills serve-mcp`, which reports planned resources such as `skill://registry/{skill_id}/SKILL.md` and tools such as `search_skills`, `get_skill`, `install_skill`, `publish_skill`, `fork_skill`, and `lint_skill` without starting a server yet.
+- Publish through reviewed proposals instead of direct sharing. Status: started with `brigade skills publish <skill> --scope local|workspace|team|public`, writing local publish proposals that preserve fingerprint and review state.
+- Add an agent skill inbox for proposed new skills or improvements, then lint, diff, fingerprint, and review them before import. Status: planned.
+- Add compatibility and version views for Codex, Claude Code, Gemini, OpenClaw, and MCP-native installs, including diffs, changelog, source, and trust score. Status: planned.
+
 ## Later Phase: Context, Projects, And Learning
 
 > **In plain terms:** three related things. (1) Reusable "context packs" so you do not re-explain a repo to an agent every time. (2) Auditing related side-projects to decide keep, merge, or drop without touching their git. (3) Collecting "lessons learned" candidates, but only as suggestions you review; Brigade never rewrites itself.

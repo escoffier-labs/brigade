@@ -213,6 +213,78 @@ def _build_parser() -> argparse.ArgumentParser:
     p_pantry_service_plan.add_argument("--write", action="store_true", help="Write a local reviewed plan under .brigade/pantry/plans/.")
     p_pantry_service_plan.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
 
+    # budgets
+    p_budgets = sub.add_parser("budgets", help="Inspect Brigade's canonical operator budgets.")
+    budgets_sub = p_budgets.add_subparsers(dest="budgets_command", metavar="<budgets-command>")
+    budgets_sub.required = True
+    p_budgets_show = budgets_sub.add_parser("show", help="Show canonical size and staleness budgets.")
+    p_budgets_show.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_budgets_check = budgets_sub.add_parser("check", help="Check local bootstrap files against budgets.")
+    p_budgets_check.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_budgets_check.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+
+    # untrusted
+    p_untrusted = sub.add_parser("untrusted", help="Wrap and scan untrusted context.")
+    untrusted_sub = p_untrusted.add_subparsers(dest="untrusted_command", metavar="<untrusted-command>")
+    untrusted_sub.required = True
+    p_untrusted_scan = untrusted_sub.add_parser("scan", help="Scan text for prompt-injection-style instructions.")
+    p_untrusted_scan.add_argument("text", nargs="*", help="Text to scan.")
+    p_untrusted_scan.add_argument("--from-file", type=Path, default=None, help="Read text from a file.")
+    p_untrusted_scan.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_untrusted_wrap = untrusted_sub.add_parser("wrap", help="Frame external content as untrusted data.")
+    p_untrusted_wrap.add_argument("text", nargs="*", help="Text to wrap.")
+    p_untrusted_wrap.add_argument("--from-file", type=Path, default=None, help="Read text from a file.")
+    p_untrusted_wrap.add_argument("--source-kind", choices=["web", "tool-output", "retrieved-doc", "memory", "skill", "handoff"], required=True)
+    p_untrusted_wrap.add_argument("--goal", default=None, help="Trusted goal to include outside the untrusted block.")
+    p_untrusted_wrap.add_argument("--max-chars", type=int, default=None, help="Explicitly truncate content before wrapping.")
+    p_untrusted_wrap.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+
+    # skills
+    p_skills = sub.add_parser("skills", help="Manage reviewed cross-harness skill packs.")
+    skills_sub = p_skills.add_subparsers(dest="skills_command", metavar="<skills-command>")
+    skills_sub.required = True
+    p_skills_search = skills_sub.add_parser("search", help="Search the local skill registry.")
+    p_skills_search.add_argument("query", help="Search query.")
+    p_skills_search.add_argument("--target", "-t", type=Path, default=Path("."), help="Workspace registry to inspect.")
+    p_skills_search.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_skills_import = skills_sub.add_parser("import", help="Import a skill pack into the local registry.")
+    p_skills_import.add_argument("source", type=Path, help="SKILL.md file or directory containing SKILL.md.")
+    p_skills_import.add_argument("--target", "-t", type=Path, default=Path("."), help="Workspace registry to update.")
+    p_skills_import.add_argument("--id", dest="skill_id", default=None, help="Override imported skill id.")
+    p_skills_import.add_argument("--force", action="store_true", help="Overwrite an existing registry entry.")
+    p_skills_import.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_skills_lint = skills_sub.add_parser("lint", help="Lint a registry skill or skill directory.")
+    p_skills_lint.add_argument("skill", help="Skill id, path, or directory.")
+    p_skills_lint.add_argument("--target", "-t", type=Path, default=Path("."), help="Workspace registry to inspect.")
+    p_skills_lint.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_skills_install = skills_sub.add_parser("install", help="Install a reviewed skill into one or all harnesses.")
+    p_skills_install.add_argument("skill", help="Skill id, path, or directory.")
+    p_skills_install.add_argument("--workspace", type=Path, default=Path("."), help="Workspace to update.")
+    p_skills_install.add_argument("--target", dest="install_target", choices=["codex", "claude", "opencode", "gemini", "openclaw", "hermes", "mcp", "all"], required=True, help="Harness target or all.")
+    p_skills_install.add_argument("--force", action="store_true", help="Overwrite an existing installed skill.")
+    p_skills_install.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_skills_serve = skills_sub.add_parser("serve-mcp", help="Show the planned MCP skills server contract.")
+    p_skills_serve.add_argument("--target", "-t", type=Path, default=Path("."), help="Workspace registry to inspect.")
+    p_skills_serve.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_skills_publish = skills_sub.add_parser("publish", help="Create a reviewed skill publish proposal.")
+    p_skills_publish.add_argument("skill", help="Skill id, path, or directory.")
+    p_skills_publish.add_argument("--target", "-t", type=Path, default=Path("."), help="Workspace registry to inspect.")
+    p_skills_publish.add_argument("--scope", choices=["local", "workspace", "team", "public"], required=True)
+    p_skills_publish.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+
+    # operator
+    p_operator = sub.add_parser("operator", help="Plan and initialize safe local operator config.")
+    operator_sub = p_operator.add_subparsers(dest="operator_command", metavar="<operator-command>")
+    operator_sub.required = True
+    p_operator_plan = operator_sub.add_parser("plan", help="Plan local operator config bootstrap.")
+    p_operator_plan.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_operator_plan.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_operator_init = operator_sub.add_parser("init", help="Write missing gitignored local operator config defaults.")
+    p_operator_init.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
+    p_operator_init.add_argument("--force", action="store_true", help="Overwrite existing local config files.")
+    p_operator_init.add_argument("--dry-run", action="store_true", help="Show planned writes without changing files.")
+    p_operator_init.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+
     # dogfood
     p_dogfood = sub.add_parser("dogfood", help="Run a safe Codex-only Brigade dogfood review.")
     p_dogfood.add_argument(
@@ -649,6 +721,13 @@ def _build_parser() -> argparse.ArgumentParser:
     p_handoff = sub.add_parser("handoff", help="Inspect memory handoff inbox health.")
     handoff_sub = p_handoff.add_subparsers(dest="handoff_command", metavar="<handoff-command>")
     handoff_sub.required = True
+    p_handoff_sources = handoff_sub.add_parser("sources", help="Manage local handoff source coverage.")
+    handoff_sources_sub = p_handoff_sources.add_subparsers(dest="handoff_sources_command", metavar="<handoff-sources-command>")
+    handoff_sources_sub.required = True
+    p_handoff_sources_init = handoff_sources_sub.add_parser("init", help="Write local handoff source coverage for Claude, Codex, and OpenCode.")
+    p_handoff_sources_init.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
+    p_handoff_sources_init.add_argument("--force", action="store_true", help="Overwrite an existing source config.")
+    p_handoff_sources_init.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_handoff_doctor = handoff_sub.add_parser("doctor", help="Check handoff inboxes against local source config.")
     p_handoff_doctor.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
     p_handoff_doctor.add_argument("--sources", type=Path, default=None, help="Override .brigade/handoff-sources.json.")
@@ -2492,6 +2571,69 @@ def main(argv=None) -> int:
             return 2
         parser.error(f"unknown pantry command: {args.pantry_command}")
         return 2
+    if cmd == "budgets":
+        from . import budgets_cmd
+
+        if args.budgets_command == "show":
+            return budgets_cmd.show(json_output=args.json)
+        if args.budgets_command == "check":
+            return budgets_cmd.check(target=args.target, json_output=args.json)
+        parser.error(f"unknown budgets command: {args.budgets_command}")
+        return 2
+    if cmd == "untrusted":
+        from . import untrusted_cmd
+
+        if args.untrusted_command == "scan":
+            return untrusted_cmd.scan(text=args.text, from_file=args.from_file, json_output=args.json)
+        if args.untrusted_command == "wrap":
+            return untrusted_cmd.wrap(
+                text=args.text,
+                from_file=args.from_file,
+                source_kind=args.source_kind,
+                goal=args.goal,
+                max_chars=args.max_chars,
+                json_output=args.json,
+            )
+        parser.error(f"unknown untrusted command: {args.untrusted_command}")
+        return 2
+    if cmd == "skills":
+        from . import skills_cmd
+
+        if args.skills_command == "search":
+            return skills_cmd.search(target=args.target, query=args.query, json_output=args.json)
+        if args.skills_command == "import":
+            return skills_cmd.import_skill(
+                target=args.target,
+                source=args.source,
+                skill_id=args.skill_id,
+                force=args.force,
+                json_output=args.json,
+            )
+        if args.skills_command == "lint":
+            return skills_cmd.lint(target=args.target, skill=args.skill, json_output=args.json)
+        if args.skills_command == "install":
+            return skills_cmd.install(
+                workspace=args.workspace,
+                skill=args.skill,
+                harness=args.install_target,
+                force=args.force,
+                json_output=args.json,
+            )
+        if args.skills_command == "serve-mcp":
+            return skills_cmd.serve_mcp(target=args.target, json_output=args.json)
+        if args.skills_command == "publish":
+            return skills_cmd.publish(target=args.target, skill=args.skill, scope=args.scope, json_output=args.json)
+        parser.error(f"unknown skills command: {args.skills_command}")
+        return 2
+    if cmd == "operator":
+        from . import operator_cmd
+
+        if args.operator_command == "plan":
+            return operator_cmd.plan(target=args.target, json_output=args.json)
+        if args.operator_command == "init":
+            return operator_cmd.init(target=args.target, force=args.force, dry_run=args.dry_run, json_output=args.json)
+        parser.error(f"unknown operator command: {args.operator_command}")
+        return 2
     if cmd == "dogfood":
         from . import dogfood_cmd
 
@@ -2847,6 +2989,11 @@ def main(argv=None) -> int:
     if cmd == "handoff":
         from . import handoff_cmd
 
+        if args.handoff_command == "sources":
+            if args.handoff_sources_command == "init":
+                return handoff_cmd.sources_init(target=args.target, force=args.force, json_output=args.json)
+            parser.error(f"unknown handoff sources command: {args.handoff_sources_command}")
+            return 2
         if args.handoff_command == "doctor":
             return handoff_cmd.doctor(target=args.target, sources=args.sources, json_output=args.json)
         if args.handoff_command == "lint":

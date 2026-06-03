@@ -125,6 +125,7 @@ Brigade has grown from a bootstrap kit into a local control plane for agent work
 - Repo fleet: local repo discovery plans, repo health scans, fleet sweeps, reports, actions, action dispatch, context packs, release trains, train evidence, waivers, manifests, audits, and ready gates.
 - AFK phase ledger: phase records, reports, closeouts, compares, action queues, sessions, checkpoints, recovery notes, risk, verification, privacy, handoff, progress, protocol, audit, gate, and release evidence.
 - Portable tool catalog: tool discovery, contracts, call planning, approval queues, explicit script and local MCP execution, run receipts, replay candidates, checkpoints, runtimes, host-local policy, parity, packs, sync, and projection health.
+- Shared skills: reviewed `SKILL.md` packs with metadata, provenance, linting, fingerprints, publish proposals, and one-command installation across Codex, Claude, OpenCode, Gemini, OpenClaw, Hermes, and MCP-resource targets.
 - Local producers: memory care, chat export sweeps, backup health, code review, context packs, project consolidation, learning candidates and replay, and security scans.
 - Security and publish guards: content-guard integration, template audit, SARIF output, suppressions, accepted-risk closeouts, policy presets, prompt and instruction checks, MCP checks, supply-chain checks, and redacted reports.
 
@@ -406,6 +407,8 @@ Start-of-day commands:
 - `brigade repos scan` inspects configured local repos for safe setup metadata, and `brigade repos import-issues` routes repo-fleet gaps into the work inbox.
 - `brigade chat sweep import-issues <surface-id>` converts a local chat export sweep into public-safe scanner inbox imports.
 - `brigade tools doctor` inspects the local portable tool catalog and reports source, projection, schema, MCP, auth-field, and command-shape issues without invoking tools.
+- `brigade skills search "mcp security review"` searches reviewed reusable skill packs.
+- `brigade operator plan` shows which gitignored local operator configs are missing before writing anything.
 - `brigade work next` prints only the next task. Add `--json` for wrappers.
 
 Task ledger commands:
@@ -564,6 +567,19 @@ Tool call execution is explicit through `brigade tools call run`, limited to app
 Replay creates a pending call from redacted receipt arguments and never recovers secret values or bypasses approval, runtime, or policy gates. Checkpoint resume is explicit through `brigade tools checkpoint resume` and never runs automatically after approval. Runtime start and stop are explicit through `brigade tools runtime`; `doctor`, `brief`, and `work run` never auto-start runtimes.
 
 Execution policy is host-local and gitignored; environment values come only from the current process and are not stored in calls, checkpoints, receipts, logs, imports, or docs. Brigade does not connect to remote MCP servers, fetch OpenAPI or GraphQL schemas, store auth, install schedulers, send approval notifications, or auto-sync harness configs from `doctor`, `brief`, or `work run`. Keep tokens, secrets, private URLs, and host-private paths out of public catalog templates.
+
+Shared skill registry commands:
+
+- `brigade skills import ./some-skill` imports a directory containing `SKILL.md` into `.brigade/skills/registry/` with metadata, provenance, trust level, supported harnesses, and a stable fingerprint.
+- `brigade skills lint security-review` checks `SKILL.md`, metadata shape, trust level, bundled tests, and prompt-injection signals before installation.
+- `brigade skills search "mcp security review"` searches approved local registry metadata.
+- `brigade skills install security-review --target codex`, `--target claude`, `--target opencode`, `--target gemini`, `--target openclaw`, `--target hermes`, or `--target mcp` materializes one reviewed skill into a specific harness shape.
+- `brigade skills install security-review --target all` installs the same reviewed skill into Codex, Claude, OpenCode, Gemini `.agents/skills`, OpenClaw, Hermes, and MCP-resource folders, writing per-harness receipts.
+- `brigade skills serve-mcp` reports the planned MCP skills server resources and tools without starting a server.
+- `brigade skills publish security-review --scope workspace` writes a reviewed publish proposal instead of pushing a prompt pack directly.
+
+Skills are treated like code: provenance, linting, compatibility, fingerprints, tests, review, and rollback come before installation or sharing. Agent-proposed skills should land as proposals or imports for review, not as automatic startup prompt text.
+Harness support is intended to stay adapter-based. The current built-ins cover Codex, Claude, OpenCode, Gemini, OpenClaw, Hermes, and MCP resources, and future adapters can add Antigravity, Pi, Cursor, or similar agent surfaces without changing the skill registry contract.
 
 Backup health commands:
 

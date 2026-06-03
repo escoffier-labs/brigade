@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from brigade import budgets
+from brigade import budgets, budgets_cmd
 
 
 def test_bootstrap_flat_limit_invariant():
@@ -30,3 +30,22 @@ def test_route_would_exceed_budget_guards_only_bootstrap(tmp_path: Path):
     learnings.write_text("y" * 50_000)
     exceed, budget = budgets.route_would_exceed_budget(learnings, "more")
     assert exceed is False and budget is None
+
+
+def test_budgets_show_json_reports_canonical_values(capsys):
+    assert budgets_cmd.show(json_output=True) == 0
+    import json
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["bootstrap_budgets"]["TOOLS.md"] == budgets.BOOTSTRAP_BUDGETS["TOOLS.md"]
+    assert payload["handoff_backlog_stale_days"] == budgets.HANDOFF_BACKLOG_STALE_DAYS
+
+
+def test_budgets_check_fails_oversized_bootstrap_file(tmp_path: Path, capsys):
+    (tmp_path / "TOOLS.md").write_text("x" * (budgets.BOOTSTRAP_BUDGETS["TOOLS.md"] + 1))
+
+    assert budgets_cmd.check(target=tmp_path, json_output=True) == 1
+
+    import json
+    payload = json.loads(capsys.readouterr().out)
+    tools = [row for row in payload["checks"] if row["name"] == "TOOLS.md"][0]
+    assert tools["status"] == "fail"

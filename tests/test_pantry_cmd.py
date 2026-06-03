@@ -1,6 +1,6 @@
 import json
 
-from brigade import pantry_cmd
+from brigade import center_cmd, pantry_cmd, work_cmd
 
 
 def test_pantry_status_reports_uninstalled(monkeypatch, tmp_path):
@@ -76,3 +76,19 @@ def test_setup_plan_write_creates_json_and_markdown(tmp_path):
     assert payload["role"] == "source"
     assert "receipt_path" in payload
     assert (plans[0].parent / "PLAN.md").exists()
+
+
+def test_work_brief_includes_pantry_health(monkeypatch, tmp_path):
+    monkeypatch.setattr(pantry_cmd, "status_payload", lambda target: {"installed": False, "summary": "pantry test summary"})
+
+    payload = work_cmd._brief_payload(tmp_path)
+
+    assert payload["pantry"]["summary"] == "pantry test summary"
+
+
+def test_center_status_includes_pantry_health(monkeypatch, tmp_path):
+    monkeypatch.setattr(pantry_cmd, "status_payload", lambda target: {"installed": False, "summary": "pantry center summary"})
+
+    payload = center_cmd.status_payload(tmp_path)
+
+    assert payload["pantry"]["summary"] == "pantry center summary"

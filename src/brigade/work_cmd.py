@@ -5140,7 +5140,7 @@ def _suggested_command(active: dict[str, Any] | None, next_text: object, source:
 
 
 def _brief_payload(target: Path, *, limit: int = 3) -> dict[str, Any]:
-    from . import center_cmd, chat_cmd, context_cmd, daily_cmd, handoff_cmd, learn_cmd, memory_cmd, phases_cmd, projects_cmd, repos_cmd, roadmap_cmd, security_cmd, tools_cmd
+    from . import center_cmd, chat_cmd, context_cmd, daily_cmd, handoff_cmd, learn_cmd, memory_cmd, pantry_cmd, phases_cmd, projects_cmd, repos_cmd, roadmap_cmd, security_cmd, tools_cmd
 
     target = target.expanduser().resolve()
     active = _active_session_info(target)
@@ -5167,6 +5167,7 @@ def _brief_payload(target: Path, *, limit: int = 3) -> dict[str, Any]:
     tool_health = tools_cmd.health(target)
     roadmap_health = roadmap_cmd.health(target)
     repo_health = repos_cmd.health(target)
+    pantry_health = pantry_cmd.status_payload(target)
     context_health = context_cmd.health(target)
     projects_health = projects_cmd.health(target)
     learning_health = learn_cmd.health(target)
@@ -5272,16 +5273,17 @@ def _brief_payload(target: Path, *, limit: int = 3) -> dict[str, Any]:
             "audit": roadmap_health["audit"],
             "patterns": roadmap_health["patterns"],
         },
-            "repo_fleet": {
-                "config_path": repo_health["config_path"],
-                "repo_count": repo_health["repo_count"],
-                "issue_count": repo_health["issue_count"],
-                "top_issue": repo_health["top_issue"],
+        "repo_fleet": {
+            "config_path": repo_health["config_path"],
+            "repo_count": repo_health["repo_count"],
+            "issue_count": repo_health["issue_count"],
+            "top_issue": repo_health["top_issue"],
                 "report": repo_health.get("report"),
                 "actions": repo_health.get("actions"),
                 "sweep": repo_health.get("sweep"),
-                "release_train": repo_health.get("release_train"),
-            },
+            "release_train": repo_health.get("release_train"),
+        },
+        "pantry": pantry_health,
         "context_packs": {
             "pack_count": context_health["pack_count"],
             "issue_count": context_health["issue_count"],
@@ -5791,6 +5793,10 @@ def brief(*, target: Path, limit: int = 3, json_output: bool = False) -> int:
             print(f"latest_task: {_short(str(latest_run['task']))}")
     else:
         print("latest_run: none")
+
+    pantry = payload.get("pantry") if isinstance(payload.get("pantry"), dict) else {}
+    if pantry:
+        print(f"pantry: {pantry.get('summary')}")
 
     print(f"next_source: {payload['next_source']}")
     if payload.get("task_id"):

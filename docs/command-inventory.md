@@ -11,13 +11,14 @@ brigade roadmap commands --write
 ## Command Groups
 
 - `brigade add`: 1 command path(s)
+- `brigade budgets`: 2 command path(s)
 - `brigade center`: 29 command path(s)
 - `brigade chat`: 7 command path(s)
 - `brigade context`: 8 command path(s)
 - `brigade daily`: 26 command path(s)
 - `brigade doctor`: 1 command path(s)
 - `brigade dogfood`: 1 command path(s)
-- `brigade handoff`: 12 command path(s)
+- `brigade handoff`: 13 command path(s)
 - `brigade handoff-template`: 1 command path(s)
 - `brigade hermes-fragments`: 1 command path(s)
 - `brigade ingest`: 1 command path(s)
@@ -25,6 +26,7 @@ brigade roadmap commands --write
 - `brigade learn`: 10 command path(s)
 - `brigade memory`: 7 command path(s)
 - `brigade openclaw-fragments`: 1 command path(s)
+- `brigade operator`: 2 command path(s)
 - `brigade pantry`: 3 command path(s)
 - `brigade projects`: 9 command path(s)
 - `brigade reconfigure`: 1 command path(s)
@@ -37,13 +39,17 @@ brigade roadmap commands --write
 - `brigade runs`: 3 command path(s)
 - `brigade scrub`: 1 command path(s)
 - `brigade security`: 14 command path(s)
+- `brigade skills`: 6 command path(s)
 - `brigade status`: 1 command path(s)
 - `brigade tools`: 46 command path(s)
+- `brigade untrusted`: 2 command path(s)
 - `brigade work`: 137 command path(s)
 
 ## Commands
 
 - `brigade add`
+- `brigade budgets check`
+- `brigade budgets show`
 - `brigade center actions archive`
 - `brigade center actions build`
 - `brigade center actions defer`
@@ -127,6 +133,7 @@ brigade roadmap commands --write
 - `brigade handoff run-show`
 - `brigade handoff runs`
 - `brigade handoff show`
+- `brigade handoff sources init`
 - `brigade handoff sync-issues`
 - `brigade handoff-template`
 - `brigade hermes-fragments`
@@ -150,6 +157,8 @@ brigade roadmap commands --write
 - `brigade memory care scan`
 - `brigade memory care status`
 - `brigade openclaw-fragments`
+- `brigade operator init`
+- `brigade operator plan`
 - `brigade pantry service plan`
 - `brigade pantry setup plan`
 - `brigade pantry status`
@@ -284,6 +293,12 @@ brigade roadmap commands --write
 - `brigade security suppress`
 - `brigade security template-audit`
 - `brigade security unsuppress`
+- `brigade skills import`
+- `brigade skills install`
+- `brigade skills lint`
+- `brigade skills publish`
+- `brigade skills search`
+- `brigade skills serve-mcp`
 - `brigade status`
 - `brigade tools apply`
 - `brigade tools call approve`
@@ -331,6 +346,8 @@ brigade roadmap commands --write
 - `brigade tools show`
 - `brigade tools sync apply`
 - `brigade tools sync plan`
+- `brigade untrusted scan`
+- `brigade untrusted wrap`
 - `brigade work acceptance`
 - `brigade work backup closeout`
 - `brigade work backup doctor`

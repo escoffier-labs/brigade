@@ -1049,6 +1049,18 @@ def test_handoff_doctor_cli(tmp_path, monkeypatch):
     assert seen == {"target": tmp_path, "sources": None, "json_output": True}
 
 
+def test_handoff_sources_init_writes_all_writer_inboxes(tmp_path, capsys):
+    assert handoff_cmd.sources_init(target=tmp_path, json_output=True) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    path = tmp_path / ".brigade" / "handoff-sources.json"
+    data = json.loads(path.read_text())
+    assert payload["path"] == str(path)
+    assert ".claude/memory-handoffs" in data["sources"][0]["inboxes"]
+    assert ".codex/memory-handoffs" in data["sources"][0]["inboxes"]
+    assert ".opencode/memory-handoffs" in data["sources"][0]["inboxes"]
+
+
 def test_handoff_lint_cli(tmp_path, monkeypatch):
     seen = {}
 
