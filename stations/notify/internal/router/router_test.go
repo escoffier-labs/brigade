@@ -72,8 +72,8 @@ func TestResolve_FallbackToAllWhenNoDefault(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := []string{"disc", "signal", "tg"}
-	if !reflect.DeepEqual(sortedNames(got), want) {
-		t.Errorf("got %v, want %v", sortedNames(got), want)
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got %v, want %v", got, want)
 	}
 }
 
@@ -99,5 +99,15 @@ func TestResolve_UnknownProfileErrors(t *testing.T) {
 	_, err := Resolve(baseConfig(), "", "missing-profile", "")
 	if err == nil {
 		t.Fatal("expected error for unknown profile")
+	}
+}
+
+func TestResolve_ProfileReferencesUnknownChannelErrors(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Profiles["broken"] = config.ProfileConfig{Channels: []string{"missing"}}
+
+	_, err := Resolve(cfg, "", "broken", "")
+	if err == nil {
+		t.Fatal("expected error for profile that references an unknown channel")
 	}
 }

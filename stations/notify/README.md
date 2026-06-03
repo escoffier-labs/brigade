@@ -26,6 +26,12 @@ make install   # builds and copies to ~/bin/agent-notify
 
 Or download a prebuilt binary from the releases page (when available) and drop it in `~/bin/` or `/usr/local/bin/`.
 
+Confirm the installed binary:
+
+```bash
+agent-notify version
+```
+
 ## Quickstart (no config file)
 
 Set env vars for the channel(s) you want and run:
@@ -33,6 +39,12 @@ Set env vars for the channel(s) you want and run:
 ```bash
 export DISCORD_WEBHOOK_URL='https://discord.com/api/webhooks/...'
 agent-notify "hello from agent-notify"
+```
+
+The explicit subcommand form is equivalent:
+
+```bash
+agent-notify send "hello from agent-notify"
 ```
 
 Multiple channels at once:
@@ -46,7 +58,13 @@ agent-notify "build finished"   # fans out to both
 
 ## Config file (when you outgrow env-only)
 
-Create `~/.config/agent-notify/config.toml`:
+Generate a starter config:
+
+```bash
+agent-notify init
+```
+
+Or create `~/.config/agent-notify/config.toml` manually:
 
 ```toml
 [channels.tg-personal]
@@ -75,6 +93,14 @@ prefix   = "🚨 "
 
 Secrets stay in env vars (the config references env-var names, not literal tokens).
 
+Validate the wiring without sending a live notification:
+
+```bash
+agent-notify status --json
+agent-notify doctor
+agent-notify doctor --json
+```
+
 ## Routing precedence
 
 1. `--to <names>` (explicit, comma-separated) - overrides everything else.
@@ -94,6 +120,12 @@ agent-notify --profile error --skip signal "minor"     # error profile minus Sig
 ## Hook integrations
 
 ### Claude Code (`~/.claude/settings.json`)
+
+Generate the snippet:
+
+```bash
+agent-notify hooks print claude-code --profile agent-stop
+```
 
 ```json
 {
@@ -137,6 +169,12 @@ api.on("agent_end", async (event, ctx) => {
 Same pattern as OpenClaw - wire `agent-notify` to whichever scheduled-task or session-end hook Hermes exposes in your version. Pass canonical JSON via stdin and use `--hook custom` (the default).
 
 ### Codex CLI (`~/.codex/config.toml`)
+
+Generate the snippet:
+
+```bash
+agent-notify hooks print codex --profile agent-stop
+```
 
 ```toml
 notify = ["agent-notify", "--hook", "codex-notify", "--profile", "agent-stop"]

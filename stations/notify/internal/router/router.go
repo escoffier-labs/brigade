@@ -4,6 +4,7 @@ package router
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/solomonneas/agent-notify/internal/config"
@@ -34,21 +35,30 @@ func Resolve(cfg *config.Config, explicitTo, profile, skip string) ([]string, er
 		if !ok {
 			return nil, fmt.Errorf("--profile %q not found in config", profile)
 		}
+		for _, n := range p.Channels {
+			if _, ok := cfg.Channels[n]; !ok {
+				return nil, fmt.Errorf("--profile %q references unknown channel %q", profile, n)
+			}
+		}
 		resolved = append(resolved, p.Channels...)
 
 	default:
 		// Look for a default profile.
-		for _, p := range cfg.Profiles {
+		for _, profileName := range sortedProfileNames(cfg) {
+			p := cfg.Profiles[profileName]
 			if p.Default {
+				for _, n := range p.Channels {
+					if _, ok := cfg.Channels[n]; !ok {
+						return nil, fmt.Errorf("default profile %q references unknown channel %q", profileName, n)
+					}
+				}
 				resolved = append(resolved, p.Channels...)
 				break
 			}
 		}
 		// Fallback to all channels.
 		if len(resolved) == 0 {
-			for n := range cfg.Channels {
-				resolved = append(resolved, n)
-			}
+			resolved = sortedChannelNames(cfg)
 		}
 	}
 
@@ -67,6 +77,24 @@ func Resolve(cfg *config.Config, explicitTo, profile, skip string) ([]string, er
 	}
 
 	return resolved, nil
+}
+
+func sortedProfileNames(cfg *config.Config) []string {
+	names := make([]string, 0, len(cfg.Profiles))
+	for n := range cfg.Profiles {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	return names
+}
+
+func sortedChannelNames(cfg *config.Config) []string {
+	names := make([]string, 0, len(cfg.Channels))
+	for n := range cfg.Channels {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	return names
 }
 
 func splitCSV(s string) []string {

@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -100,5 +101,217 @@ func TestRun_StdinStringWorks(t *testing.T) {
 	}
 	if hits != 1 {
 		t.Errorf("expected 1 webhook hit, got %d", hits)
+	}
+}
+
+func TestRun_SendSubcommandPreservesDispatch(t *testing.T) {
+	var got map[string]interface{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(body, &got)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	code, _, stderr := runMain(t,
+		[]string{"agent-notify", "send", "build", "done"},
+		"",
+		map[string]string{"DISCORD_WEBHOOK_URL": srv.URL},
+	)
+	if code != 0 {
+		t.Fatalf("exit = %d, stderr = %s", code, stderr)
+	}
+	embeds, _ := got["embeds"].([]interface{})
+	if len(embeds) != 1 {
+		t.Fatalf("expected one embed, got %#v", got["embeds"])
+	}
+	embed, _ := embeds[0].(map[string]interface{})
+	if embed["description"] != "build done" {
+		t.Fatalf("description = %#v, want build done", embed["description"])
+	}
+}
+
+func TestRun_DefaultProfilePrefixApplies(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.toml")
+	if err := os.WriteFile(cfgPath, []byte(`
+[channels.discord-main]
+type = "discord"
+webhook_url_env = "DISCORD_WEBHOOK_URL"
+
+[profiles.operator]
+channels = ["discord-main"]
+default = true
+prefix = "[agent] "
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]interface{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(body, &got)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	code, _, stderr := runMain(t,
+		[]string{"agent-notify", "--config", cfgPath, "done"},
+		"",
+		map[string]string{"DISCORD_WEBHOOK_URL": srv.URL},
+	)
+	if code != 0 {
+		t.Fatalf("exit = %d, stderr = %s", code, stderr)
+	}
+	embeds, _ := got["embeds"].([]interface{})
+	embed, _ := embeds[0].(map[string]interface{})
+	if embed["description"] != "[agent] done" {
+		t.Fatalf("description = %#v, want prefixed body", embed["description"])
+	}
+}
+
+func TestRun_MultipleDefaultProfilesUseStableOrder(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.toml")
+	if err := os.WriteFile(cfgPath, []byte(`
+[channels.discord-main]
+type = "discord"
+webhook_url_env = "DISCORD_WEBHOOK_URL"
+
+[profiles.z-last]
+channels = ["discord-main"]
+default = true
+prefix = "[z] "
+
+[profiles.a-first]
+channels = ["discord-main"]
+default = true
+prefix = "[a] "
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]interface{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(body, &got)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	code, _, stderr := runMain(t,
+		[]string{"agent-notify", "--config", cfgPath, "done"},
+		"",
+		map[string]string{"DISCORD_WEBHOOK_URL": srv.URL},
+	)
+	if code != 0 {
+		t.Fatalf("exit = %d, stderr = %s", code, stderr)
+	}
+	embeds, _ := got["embeds"].([]interface{})
+	embed, _ := embeds[0].(map[string]interface{})
+	if embed["description"] != "[a] done" {
+		t.Fatalf("description = %#v, want stable first default prefix", embed["description"])
+	}
+}
+
+func TestRun_VersionJSON(t *testing.T) {
+	code, stdout, stderr := runMain(t, []string{"agent-notify", "version", "--json"}, "", nil)
+	if code != 0 {
+		t.Fatalf("exit = %d, stderr = %s", code, stderr)
+	}
+	var payload map[string]interface{}
+	if err := json.Unmarshal([]byte(stdout), &payload); err != nil {
+		t.Fatalf("invalid json: %v\n%s", err, stdout)
+	}
+	if payload["version"] == "" || payload["go_version"] == "" {
+		t.Fatalf("missing version fields: %#v", payload)
+	}
+}
+
+func TestRun_InitWritesSampleConfig(t *testing.T) {
+	cfgPath := filepath.Join(t.TempDir(), "agent-notify", "config.toml")
+	code, _, stderr := runMain(t, []string{"agent-notify", "init", "--config", cfgPath}, "", nil)
+	if code != 0 {
+		t.Fatalf("exit = %d, stderr = %s", code, stderr)
+	}
+	body, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(body), "[profiles.agent-stop]") {
+		t.Fatalf("sample config missing agent-stop profile:\n%s", body)
+	}
+}
+
+func TestRun_DoctorJSONReportsMissingConfigAsUnconfigured(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "missing.toml")
+	for _, k := range []string{"DISCORD_WEBHOOK_URL", "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID", "SIGNAL_CLI_URL", "SIGNAL_FROM", "SIGNAL_TO"} {
+		os.Unsetenv(k)
+	}
+	code, stdout, stderr := runMain(t, []string{"agent-notify", "doctor", "--json", "--config", missing}, "", nil)
+	if code != 2 {
+		t.Fatalf("exit = %d, want 2 (stderr=%s)", code, stderr)
+	}
+	var payload map[string]interface{}
+	if err := json.Unmarshal([]byte(stdout), &payload); err != nil {
+		t.Fatalf("invalid json: %v\n%s", err, stdout)
+	}
+	if payload["configured"] != false {
+		t.Fatalf("configured = %#v, want false", payload["configured"])
+	}
+	if payload["fail_count"].(float64) == 0 {
+		t.Fatalf("expected failures, got %#v", payload)
+	}
+}
+
+func TestRun_StatusJSONWarnsForInactiveChannelMissingEnv(t *testing.T) {
+	cfgPath := filepath.Join(t.TempDir(), "config.toml")
+	if err := os.WriteFile(cfgPath, []byte(`
+[channels.discord-main]
+type = "discord"
+webhook_url_env = "DISCORD_WEBHOOK_URL"
+
+[channels.signal-personal]
+type = "signal"
+url_env = "SIGNAL_CLI_URL"
+from_env = "SIGNAL_FROM"
+to_env = "SIGNAL_TO"
+
+[profiles.operator]
+channels = ["discord-main"]
+default = true
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, k := range []string{"SIGNAL_CLI_URL", "SIGNAL_FROM", "SIGNAL_TO"} {
+		os.Unsetenv(k)
+	}
+
+	code, stdout, stderr := runMain(t,
+		[]string{"agent-notify", "status", "--json", "--config", cfgPath},
+		"",
+		map[string]string{"DISCORD_WEBHOOK_URL": "http://127.0.0.1:1/webhook"},
+	)
+	if code != 0 {
+		t.Fatalf("exit = %d, stderr = %s\nstdout=%s", code, stderr, stdout)
+	}
+	var payload map[string]interface{}
+	if err := json.Unmarshal([]byte(stdout), &payload); err != nil {
+		t.Fatalf("invalid json: %v\n%s", err, stdout)
+	}
+	if payload["fail_count"].(float64) != 0 {
+		t.Fatalf("fail_count = %#v, want 0: %#v", payload["fail_count"], payload)
+	}
+	if payload["warn_count"].(float64) == 0 {
+		t.Fatalf("expected inactive channel warning: %#v", payload)
+	}
+}
+
+func TestRun_HooksPrintCodex(t *testing.T) {
+	code, stdout, stderr := runMain(t, []string{"agent-notify", "hooks", "print", "codex", "--profile", "agent-stop"}, "", nil)
+	if code != 0 {
+		t.Fatalf("exit = %d, stderr = %s", code, stderr)
+	}
+	want := `notify = ["agent-notify", "--hook", "codex-notify", "--profile", "agent-stop"]`
+	if strings.TrimSpace(stdout) != want {
+		t.Fatalf("stdout = %q, want %q", strings.TrimSpace(stdout), want)
 	}
 }
