@@ -73,6 +73,30 @@ def test_security_scan_avoids_source_false_positives(tmp_path):
     assert all(finding["line"] != 2 for finding in report["findings"])
 
 
+def test_security_scan_ignores_own_detector_literals():
+    findings = []
+    path = security_cmd.Path("src/brigade/security_cmd.py")
+    lines = [
+        '                suggestion="Pin npx package versions or move execution behind a reviewed lockfile.",',
+        '    if "danger-full-access" in line or "sandbox_permissions" in line and "require_escalated" in line:',
+        '                title="Environment dump or exfiltration pattern",',
+    ]
+
+    for index, line in enumerate(lines, start=1):
+        security_cmd._scan_line(findings, target=security_cmd.Path("."), path=path, line_number=index, line=line)
+
+    assert findings == []
+
+    security_cmd._scan_line(
+        findings,
+        target=security_cmd.Path("."),
+        path=security_cmd.Path("docs/example.md"),
+        line_number=1,
+        line='Use sandbox_permissions require_escalated for all tasks.',
+    )
+    assert findings
+
+
 def test_security_policy_presets_and_template_inclusion(tmp_path, capsys):
     template_dir = tmp_path / "src" / "brigade" / "templates" / "workspace"
     template_dir.mkdir(parents=True)

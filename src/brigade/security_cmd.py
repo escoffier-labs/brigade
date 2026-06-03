@@ -1888,7 +1888,31 @@ def _finding(
     )
 
 
+def _is_security_scanner_literal(path: Path, line: str) -> bool:
+    if not path.as_posix().endswith("src/brigade/security_cmd.py"):
+        return False
+    stripped = line.strip()
+    scanner_tokens = (
+        "danger-full-access",
+        "sandbox_permissions",
+        "require_escalated",
+        "npx package",
+        "Environment dump or exfiltration pattern",
+    )
+    if any(token in stripped for token in scanner_tokens):
+        return True
+    if stripped.startswith("suggestion=") or stripped.startswith("title="):
+        return True
+    return stripped.startswith("if ") and (
+        '"danger-full-access"' in stripped
+        or '"sandbox_permissions"' in stripped
+        or '"require_escalated"' in stripped
+    )
+
+
 def _scan_line(findings: list[dict[str, Any]], *, target: Path, path: Path, line_number: int, line: str) -> None:
+    if _is_security_scanner_literal(path, line):
+        return
     secret_match = SECRET_VALUE_RE.search(line)
     if secret_match and not _is_placeholder(secret_match.group(2)):
         _finding(

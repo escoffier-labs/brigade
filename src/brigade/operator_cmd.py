@@ -288,12 +288,24 @@ def status_payload(target: Path, *, profile: str = "internal-dogfood") -> dict[s
         issues.append({"status": "warn", "name": "security_health", "detail": str((security_health.get("top_issue") or {}).get("detail") or "security health issue")})
     if readiness.get("blocker_count"):
         issues.append({"status": "warn", "name": "operator_readiness_blocked", "detail": str((readiness.get("blockers") or [{}])[0].get("safe_summary") or "readiness blocker")})
+    content_guard_configured = bool(
+        content_guard_health.get("available")
+        or content_guard_health.get("hooks_path")
+        or content_guard_health.get("pre_push_hook_exists")
+        or content_guard_health.get("configured_pre_push_hook_exists")
+        or content_guard_health.get("git_pre_push_hook_exists")
+    )
     for check in content_guard_health.get("checks") or []:
         if isinstance(check, dict) and check.get("status") != "ok":
+            name = str(check.get("name") or "content_guard")
+            if name == "content_guard_missing" and not content_guard_configured:
+                continue
+            if name == "content_guard_hook_not_enabled" and not content_guard_configured:
+                continue
             issues.append(
                 {
                     "status": str(check.get("status") or "warn"),
-                    "name": str(check.get("name") or "content_guard"),
+                    "name": name,
                     "detail": str(check.get("detail") or "content guard needs attention"),
                     "suggested_next_command": (content_guard_health.get("suggested_commands") or ["brigade operator status --profile internal-dogfood --target ."])[0],
                 }

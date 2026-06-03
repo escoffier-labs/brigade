@@ -1,0 +1,32 @@
+{
+  "_description": "Example receipt an OpenClaw memory owner can write under .brigade/handoffs/ingest-runs/<run_id>.json after ingesting reviewed Brigade handoffs.",
+  "run_id": "openclaw-ingest-20260603T210000Z",
+  "started_at": "2026-06-03T21:00:00Z",
+  "completed_at": "2026-06-03T21:00:12Z",
+  "source_root": ".",
+  "inbox_paths": [
+    ".claude/memory-handoffs",
+    ".codex/memory-handoffs",
+    ".opencode/memory-handoffs",
+    ".hermes/memory-handoffs"
+  ],
+  "processed_handoff_paths": [
+    ".hermes/memory-handoffs/20260603-210000-hermes-note.md"
+  ],
+  "promoted_card_targets": [],
+  "routed_document_targets": [
+    {
+      "handoff_path": ".hermes/memory-handoffs/20260603-210000-hermes-note.md",
+      "target": ".learnings/LEARNINGS.md"
+    }
+  ],
+  "skipped_handoff_paths": [],
+  "failed_handoff_paths": [],
+  "malformed_handoff_paths": [],
+  "unreachable_sources": [],
+  "warning_events": [],
+  "warning_count": 0,
+  "no_reply": false,
+  "safe_summary": "OpenClaw ingested one reviewed Hermes handoff into durable memory.",
+  "log_path": ".brigade/handoff-ingest/openclaw-20260603T210000Z.log"
+}

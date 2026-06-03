@@ -1242,6 +1242,7 @@ def test_handoff_sources_init_writes_all_writer_inboxes(tmp_path, capsys):
     assert ".claude/memory-handoffs" in data["sources"][0]["inboxes"]
     assert ".codex/memory-handoffs" in data["sources"][0]["inboxes"]
     assert ".opencode/memory-handoffs" in data["sources"][0]["inboxes"]
+    assert ".hermes/memory-handoffs" in data["sources"][0]["inboxes"]
 
 
 def test_handoff_lint_cli(tmp_path, monkeypatch):
@@ -1481,6 +1482,7 @@ def test_doctor_checks_no_backlog_warn_for_fresh_pending(tmp_path):
 def test_handoff_writer_inboxes_include_opencode():
     from brigade import handoff_cmd
     assert ".opencode/memory-handoffs" in handoff_cmd.WRITER_INBOXES
+    assert ".hermes/memory-handoffs" in handoff_cmd.WRITER_INBOXES
 
 
 def test_handoff_sources_example_lists_opencode():
@@ -1488,3 +1490,66 @@ def test_handoff_sources_example_lists_opencode():
     from brigade.templates import template_root
     data = json.loads((template_root() / "handoff" / "handoff-sources.example.json").read_text())
     assert ".opencode/memory-handoffs" in data["sources"][0]["inboxes"]
+    assert ".hermes/memory-handoffs" in data["sources"][0]["inboxes"]
+
+
+def test_openclaw_ingest_receipt_contract_updates_handoff_status(tmp_path, capsys):
+    from brigade.templates import template_root
+
+    inbox = tmp_path / ".hermes" / "memory-handoffs"
+    inbox.mkdir(parents=True)
+    draft = inbox / "20260603-210000-hermes-note.md"
+    draft.write_text(
+        "\n".join(
+            [
+                "# Memory Handoff",
+                "",
+                "## Type",
+                "",
+                "workflow",
+                "",
+                "## Title",
+                "",
+                "Hermes note",
+                "",
+                "## Summary",
+                "",
+                "Hermes wrote a reviewed note.",
+                "",
+                "## Recommended memory action",
+                "",
+                "no-card",
+                "",
+                "## Target document",
+                "",
+                ".learnings/LEARNINGS.md",
+                "",
+                "## Suggested document content",
+                "",
+                "Hermes handoffs can be ingested by OpenClaw after review.",
+                "",
+            ]
+        )
+    )
+    receipt = json.loads((template_root() / "handoff" / "openclaw-ingest-receipt.example.json").read_text())
+    receipt_path = tmp_path / ".brigade" / "handoffs" / "ingest-runs" / f"{receipt['run_id']}.json"
+    receipt_path.parent.mkdir(parents=True)
+    receipt_path.write_text(json.dumps(receipt))
+
+    assert handoff_cmd.runs(target=tmp_path, json_output=True) == 0
+    runs_payload = json.loads(capsys.readouterr().out)
+    assert runs_payload["runs"][0]["run_id"] == receipt["run_id"]
+    assert runs_payload["runs"][0]["outcome_counts"]["ingested"] == 1
+
+    assert handoff_cmd.run_show(target=tmp_path, run_id="openclaw-ingest", json_output=True) == 0
+    show_run = json.loads(capsys.readouterr().out)
+    assert show_run["run"]["safe_summary"].startswith("OpenClaw ingested")
+
+    assert handoff_cmd.list_drafts(target=tmp_path, json_output=True) == 0
+    list_payload = json.loads(capsys.readouterr().out)
+    assert list_payload["drafts"][0]["ingestion_status"] == "ingested"
+    assert list_payload["drafts"][0]["ingest_run_id"] == receipt["run_id"]
+
+    assert handoff_cmd.show_draft(target=tmp_path, draft_id="20260603-210000-hermes-note", json_output=True) == 0
+    draft_payload = json.loads(capsys.readouterr().out)
+    assert draft_payload["draft"]["ingestion_status"] == "ingested"
