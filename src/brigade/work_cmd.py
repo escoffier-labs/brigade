@@ -5187,6 +5187,7 @@ def _brief_payload(target: Path, *, limit: int = 3) -> dict[str, Any]:
         "skipped_sessions": skipped,
         "tasks_path": str(_tasks_path(target)),
         "pending_tasks": pending,
+        "plan_coverage": _plan_coverage_payload(target),
         "imports_path": str(_imports_path(target)),
         "pending_imports": pending_imports,
         "pending_import_counts": pending_import_counts,
@@ -5830,6 +5831,16 @@ def brief(*, target: Path, limit: int = 3, json_output: bool = False) -> int:
             )
         if len(pending) > 5:
             print(f"  ... {len(pending) - 5} more")
+
+    plan_coverage = payload.get("plan_coverage")
+    if isinstance(plan_coverage, dict):
+        if plan_coverage.get("significant_without_plan"):
+            ids = ", ".join(plan_coverage.get("task_ids", [])[:5])
+            print(f"plans: {plan_coverage['significant_without_plan']} pending task(s) without a plan artifact ({ids})")
+        elif not plan_coverage.get("pending_total"):
+            print("plans: no pending tasks")
+        else:
+            print("plans: significant pending tasks have plan artifacts")
 
     pending_imports = payload["pending_imports"]
     if isinstance(pending_imports, list) and pending_imports:
@@ -6574,6 +6585,27 @@ def _plan_artifact_summary(target: Path, task_id: str, kind: str = "plan") -> di
         "status": receipt.get("status"),
         "path": _plan_rel_path(target, md_path),
         "updated_at": receipt.get("updated_at"),
+    }
+
+
+def _significant_pending_without_plan(target: Path) -> list[dict[str, Any]]:
+    missing: list[dict[str, Any]] = []
+    for task in _pending_tasks(target):
+        significant = bool(_task_acceptance(task)) or task.get("priority") == "high" or bool(task.get("issue"))
+        if not significant:
+            continue
+        if _plan_artifact_summary(target, str(task.get("id")), kind="plan") is None:
+            missing.append(task)
+    return missing
+
+
+def _plan_coverage_payload(target: Path) -> dict[str, Any]:
+    pending_total = len(_pending_tasks(target))
+    missing = _significant_pending_without_plan(target)
+    return {
+        "pending_total": pending_total,
+        "significant_without_plan": len(missing),
+        "task_ids": [str(task.get("id")) for task in missing[:10]],
     }
 
 
@@ -10968,6 +11000,17 @@ def doctor(*, target: Path) -> int:
         _doctor_line(WARN, "task_acceptance", f"{len(missing_acceptance)} pending task(s) missing acceptance criteria: {sample}")
     else:
         _doctor_line(OK, "task_acceptance", "pending tasks have acceptance criteria or no tasks are pending")
+
+    plan_coverage = _plan_coverage_payload(effective_target)
+    if plan_coverage["significant_without_plan"] > 0:
+        plan_sample = ", ".join(plan_coverage["task_ids"][:5])
+        _doctor_line(
+            WARN,
+            "plan_coverage",
+            f"{plan_coverage['significant_without_plan']} significant pending task(s) without a plan artifact: {plan_sample}",
+        )
+    else:
+        _doctor_line(OK, "plan_coverage", "significant pending tasks have plan artifacts")
 
     workflow_rules = _workflow_rule_health(effective_target)
     _doctor_line(str(workflow_rules["status"]), str(workflow_rules["name"]), workflow_rules["detail"])

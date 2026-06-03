@@ -1327,6 +1327,76 @@ def test_task_plan_write_unknown_task_exits_1(tmp_path, capsys):
     assert "task not found" in err
 
 
+def test_significant_pending_without_plan_lists_accepted_task(tmp_path, capsys):
+    _init_git_repo(tmp_path)
+    task_id = _plan_task_id(tmp_path, capsys)
+
+    missing = work_cmd._significant_pending_without_plan(tmp_path)
+    assert [task["id"] for task in missing] == [task_id]
+
+
+def test_significant_pending_without_plan_drops_task_after_plan_written(tmp_path, capsys):
+    _init_git_repo(tmp_path)
+    task_id = _plan_task_id(tmp_path, capsys)
+    assert work_cmd.task_plan(target=tmp_path, task_id=task_id[:12], write=True) == 0
+    capsys.readouterr()
+
+    missing = work_cmd._significant_pending_without_plan(tmp_path)
+    assert missing == []
+
+
+def test_significant_pending_without_plan_ignores_insignificant_task(tmp_path, capsys):
+    _init_git_repo(tmp_path)
+    assert work_cmd.task_add(target=tmp_path, text="Trivial chore") == 0
+    capsys.readouterr()
+
+    missing = work_cmd._significant_pending_without_plan(tmp_path)
+    assert missing == []
+    payload = work_cmd._plan_coverage_payload(tmp_path)
+    assert payload == {"pending_total": 1, "significant_without_plan": 0, "task_ids": []}
+
+
+def test_work_doctor_warns_for_plan_coverage(tmp_path, monkeypatch, capsys):
+    _init_git_repo(tmp_path)
+    dogfood_cmd.init(target=tmp_path)
+    monkeypatch.setattr(work_cmd.shutil, "which", lambda name: "/usr/bin/codex" if name == "codex" else None)
+    monkeypatch.setattr(dogfood_cmd, "_check_git_ignored", lambda repo, path: "yes")
+    task_id = _plan_task_id(tmp_path, capsys)
+    capsys.readouterr()
+
+    assert work_cmd.doctor(target=tmp_path) == 0
+    out = capsys.readouterr().out
+    assert f"[warn] plan_coverage: 1 significant pending task(s) without a plan artifact: {task_id}" in out
+
+    assert work_cmd.task_plan(target=tmp_path, task_id=task_id[:12], write=True) == 0
+    capsys.readouterr()
+    assert work_cmd.doctor(target=tmp_path) == 0
+    out = capsys.readouterr().out
+    assert "[ok] plan_coverage: significant pending tasks have plan artifacts" in out
+
+
+def test_brief_payload_includes_plan_coverage(tmp_path, capsys):
+    _init_git_repo(tmp_path)
+    task_id = _plan_task_id(tmp_path, capsys)
+    capsys.readouterr()
+
+    payload = work_cmd._brief_payload(tmp_path)
+    assert payload["plan_coverage"] == {
+        "pending_total": 1,
+        "significant_without_plan": 1,
+        "task_ids": [task_id],
+    }
+
+    assert work_cmd.brief(target=tmp_path, json_output=True) == 0
+    json_payload = json.loads(capsys.readouterr().out)
+    assert json_payload["plan_coverage"]["significant_without_plan"] == 1
+    assert json_payload["plan_coverage"]["task_ids"] == [task_id]
+
+    assert work_cmd.brief(target=tmp_path) == 0
+    out = capsys.readouterr().out
+    assert f"plans: 1 pending task(s) without a plan artifact ({task_id})" in out
+
+
 def _make_research_run(tmp_path, run_id="r1", question="q"):
     from brigade.research import registry
 
