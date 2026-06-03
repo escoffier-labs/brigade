@@ -37,6 +37,26 @@ func TestInitCreatesPrivateDirsAndDoctorJSON(t *testing.T) {
 	}
 }
 
+func TestDoctorMCPJSON(t *testing.T) {
+	withTempHome(t)
+	runOK(t, "init")
+	got := runJSON(t, "doctor", "--mcp", "--json")
+	if got["ok"] != true {
+		t.Fatalf("doctor --mcp not ok: %v", got)
+	}
+	checks := got["checks"].([]any)
+	seen := map[string]bool{}
+	for _, raw := range checks {
+		check := raw.(map[string]any)
+		seen[check["name"].(string)] = check["ok"] == true
+	}
+	for _, name := range []string{"mcp_initialize", "mcp_tools"} {
+		if !seen[name] {
+			t.Fatalf("missing passing %s check in %v", name, checks)
+		}
+	}
+}
+
 func TestAdapterImportSearchShowExportAndIdempotency(t *testing.T) {
 	withTempHome(t)
 	fixture := repoPath(t, "testdata/adapters/discrawl.fixture.jsonl")

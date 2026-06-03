@@ -31,6 +31,8 @@ Install from a release:
 curl -fsSL https://raw.githubusercontent.com/solomonneas/logspine/master/install.sh | sh
 ```
 
+For a first archive and agent integration path, see [docs/QUICKSTART.md](docs/QUICKSTART.md). For MCP client configuration, see [docs/MCP.md](docs/MCP.md).
+
 ## Runtime Paths
 
 Logspine uses XDG paths when present:
@@ -60,6 +62,7 @@ spine show <returned-item-id> --json
 spine export markdown --out /tmp/logspine-md
 spine sql "select count(*) as items from items" --json
 spine doctor --json
+spine doctor --mcp --json
 ```
 
 Re-running the same imports is idempotent and does not increase item counts.
@@ -178,6 +181,7 @@ The stdio MCP server exposes `search_evidence`, `show_item`, `create_evidence_bu
 
 ```bash
 spine mcp
+spine doctor --mcp --json
 ```
 
 Fixture smoke scripts exercise these surfaces without private transcript content:

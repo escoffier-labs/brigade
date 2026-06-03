@@ -30,6 +30,8 @@ spine mcp
 
 HTTP exposes `GET /search?q=...`, `GET /items/<id>`, and `POST /evidence`. MCP exposes `search_evidence`, `show_item`, `create_evidence_bundle`, and `list_sources`. Both surfaces return untrusted evidence only.
 
+Use `spine doctor --mcp --json` to validate the MCP protocol surface without printing transcript content. See [MCP.md](MCP.md) for client configuration.
+
 Evidence output includes:
 
 - query used

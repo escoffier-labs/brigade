@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -28,6 +29,12 @@ type mcpResponse struct {
 type mcpErrorBody struct {
 	Code    int    `json:"code"`
 	Message string `json:"message"`
+}
+
+type doctorCheck struct {
+	Name   string
+	OK     bool
+	Detail string
 }
 
 func cmdMCP(args []string, out, errw io.Writer) int {
@@ -80,6 +87,58 @@ func handleMCPRequest(req mcpRequest) mcpResponse {
 		resp.Error = &mcpErrorBody{Code: -32601, Message: "method not found"}
 	}
 	return resp
+}
+
+func mcpDoctorChecks() []doctorCheck {
+	checks := []doctorCheck{}
+	add := func(name string, ok bool, detail string) {
+		checks = append(checks, doctorCheck{Name: name, OK: ok, Detail: detail})
+	}
+
+	initResp := handleMCPRequest(mcpRequest{JSONRPC: "2.0", ID: "doctor-init", Method: "initialize"})
+	if initResp.Error != nil {
+		add("mcp_initialize", false, initResp.Error.Message)
+	} else {
+		result, ok := initResp.Result.(map[string]any)
+		server, _ := result["serverInfo"].(map[string]any)
+		name, _ := server["name"].(string)
+		version, _ := server["version"].(string)
+		add("mcp_initialize", ok && name == "logspine" && version != "", fmt.Sprintf("server=%s version=%s", name, version))
+	}
+
+	toolsResp := handleMCPRequest(mcpRequest{JSONRPC: "2.0", ID: "doctor-tools", Method: "tools/list"})
+	if toolsResp.Error != nil {
+		add("mcp_tools", false, toolsResp.Error.Message)
+		return checks
+	}
+	result, ok := toolsResp.Result.(map[string]any)
+	tools, _ := result["tools"].([]map[string]any)
+	required := map[string]bool{
+		"search_evidence":        false,
+		"show_item":              false,
+		"create_evidence_bundle": false,
+		"list_sources":           false,
+	}
+	for _, tool := range tools {
+		if name, _ := tool["name"].(string); name != "" {
+			if _, exists := required[name]; exists {
+				required[name] = true
+			}
+		}
+	}
+	missing := []string{}
+	for name, found := range required {
+		if !found {
+			missing = append(missing, name)
+		}
+	}
+	sort.Strings(missing)
+	detail := fmt.Sprintf("tools=%d", len(tools))
+	if len(missing) != 0 {
+		detail = "missing " + strings.Join(missing, ",")
+	}
+	add("mcp_tools", ok && len(missing) == 0, detail)
+	return checks
 }
 
 func mcpTools() []map[string]any {

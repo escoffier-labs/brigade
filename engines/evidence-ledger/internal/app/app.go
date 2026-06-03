@@ -189,14 +189,15 @@ func collectStatus(db *sql.DB, paths Paths) (Status, error) {
 }
 
 func cmdDoctor(args []string, out, errw io.Writer) int {
-	_, bools, rest, err := splitFlags(args, nil, map[string]bool{"json": true})
+	_, bools, rest, err := splitFlags(args, nil, map[string]bool{"json": true, "mcp": true})
 	if err != nil {
 		return fatalf(errw, "doctor: %s", err)
 	}
 	if len(rest) != 0 {
-		return fatalf(errw, "usage: spine doctor [--json]")
+		return fatalf(errw, "usage: spine doctor [--json] [--mcp]")
 	}
 	asJSON := bools["json"]
+	checkMCP := bools["mcp"]
 	db, paths, err := openMigrated()
 	checks := []map[string]any{}
 	add := func(name string, ok bool, detail string) {
@@ -213,6 +214,11 @@ func cmdDoctor(args []string, out, errw io.Writer) int {
 	add("schema", versionErr == nil && version == archive.SchemaVersion, fmt.Sprintf("version %d", version))
 	add("fts", archive.HasFTS(db), "sqlite fts5")
 	add("permissions", checkPrivate(paths.DataDir) && checkPrivate(paths.CacheDir), "runtime dirs private")
+	if checkMCP {
+		for _, check := range mcpDoctorChecks() {
+			add(check.Name, check.OK, check.Detail)
+		}
+	}
 	result := map[string]any{"ok": true, "checks": checks, "paths": paths}
 	for _, c := range checks {
 		if c["ok"] == false {
