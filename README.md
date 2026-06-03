@@ -69,14 +69,18 @@ Writer harnesses drop handoffs into their own inboxes, and the ingester scans al
 flowchart TB
     CC["<b>Claude Code</b>"]
     CX["<b>Codex</b>"]
+    OC["<b>OpenCode</b>"]
     CCI[".claude/memory-handoffs/"]
     CXI[".codex/memory-handoffs/"]
+    OCI[".opencode/memory-handoffs/"]
     CC --> CCI
     CX --> CXI
+    OC --> OCI
 
     ING(["<b>brigade ingest</b>"])
     CCI --> ING
     CXI --> ING
+    OCI --> ING
 
     OUT["memory/cards/*.md · TOOLS.md · USER.md<br/>rules/*.md · .learnings/*.md"]
     ING --> OUT
@@ -85,8 +89,8 @@ flowchart TB
     classDef inbox fill:#f1f5f9,stroke:#94a3b8,color:#334155;
     classDef ingest fill:#fef3c7,stroke:#d97706,color:#92400e;
     classDef store fill:#dcfce7,stroke:#16a34a,color:#166534;
-    class CC,CX harness;
-    class CCI,CXI inbox;
+    class CC,CX,OC harness;
+    class CCI,CXI,OCI inbox;
     class ING ingest;
     class OUT store;
 ```
@@ -112,7 +116,7 @@ The TokenJuice starter card documents Claude Code's PreToolUse wrapper path, Cod
 Brigade has grown from a bootstrap kit into a local control plane for agent work. The current public surface includes:
 
 - Bootstrap and memory layout: sanitized `AGENTS.md`, safety, tool, identity, user, memory, rule, handoff, and harness files with a canonical memory-owner model.
-- Multi-harness handoffs: `.claude/memory-handoffs/`, `.codex/memory-handoffs/`, source coverage checks, linting, reconciliation receipts, issue imports, sync repair, and archive closeouts.
+- Multi-harness handoffs: `.claude/memory-handoffs/`, `.codex/memory-handoffs/`, `.opencode/memory-handoffs/`, source coverage checks, linting, reconciliation receipts, issue imports, sync repair, and archive closeouts.
 - Work loop: dogfood runs, work sessions, task ledgers, issue imports, acceptance criteria, verification receipts, review closeouts, sweep closeouts, and work closeout receipts.
 - Scanner inbox: explicit local scanner registry, scanner runs, scanner sweeps, import validation, provenance checks, dedupe, dismiss-until-changed behavior, handoff promotion, and inbox hygiene.
 - Daily driver: `brigade daily status/plan/review/run/closeout` plus approvals, resume, repair, unblock, protocol, telemetry, and hardening audits for one bounded local action at a time.
@@ -225,7 +229,7 @@ brigade init --target ./repo --harnesses none           # generic install
 
 Once installed, `brigade doctor` verifies the wiring and `brigade status` reports over the station registry.
 For machines that ingest handoffs from multiple repos, copy `.brigade/handoff-sources.example.json` to `.brigade/handoff-sources.json` and list the repo roots and writer inboxes the canonical ingestor scans.
-`brigade handoff doctor` reports pending `.claude/memory-handoffs/` and `.codex/memory-handoffs/` files that are not covered by that local source list.
+`brigade handoff doctor` reports pending `.claude/memory-handoffs/`, `.codex/memory-handoffs/`, and `.opencode/memory-handoffs/` files that are not covered by that local source list.
 Run `brigade handoff lint` before ingesting pending handoffs when you want to catch action/target mismatches early.
 If your ingestor writes a latest-run log, set `ingestor.last_run_log` in that local config so the doctor can warn on stale runs, skipped or malformed handoffs, failed ingests, unreachable sources, and warning summaries hidden behind no-reply cron output.
 Use `brigade handoff issues` to group those warnings with repair guidance, then `brigade handoff sync-issues` to import new issues and close stale local handoff tasks/imports once the latest scan no longer reports them. Handoff source coverage issues carry stable source keys and fingerprints, so dismissed uncovered-inbox repairs stay dismissed until the pending coverage state changes.
@@ -455,7 +459,7 @@ For handoff-ingest issues, prefer `brigade handoff sync-issues` over repeated ra
 
 Handoff draft queue commands:
 
-- `brigade handoff list` lists local Memory Handoff drafts from `.claude/memory-handoffs/`, `.codex/memory-handoffs/`, and configured source inboxes.
+- `brigade handoff list` lists local Memory Handoff drafts from `.claude/memory-handoffs/`, `.codex/memory-handoffs/`, `.opencode/memory-handoffs/`, and configured source inboxes.
 - `brigade handoff show <handoff-id-or-path>` shows lint status, target card or document, source import id, source fingerprint, scanner provenance, and stale age.
 - `brigade handoff archive <handoff-id-or-path>` moves one reviewed draft into `.brigade/handoffs/archive/` and records closeout metadata in `.brigade/handoffs/archive.jsonl`.
 - `brigade handoff archive --all-reviewed` archives lint-valid drafts only. It does not run the canonical ingestor or edit memory.
