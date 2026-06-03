@@ -55,6 +55,7 @@ spine import openclaw <path-or-dir> --json
 spine import claude <path-or-dir> --json
 spine import discovered --json
 spine watch once --json
+spine watch once --if-changed --json
 ```
 
 Scanner rules:
@@ -103,4 +104,14 @@ Scan manifests can be compared without reading transcript content into output:
 ```bash
 spine scans diff <path> --json
 spine scans changed --json
+```
+
+SourceHarvest can be wrapped directly by Logspine when the `sourceharvest` binary is installed on `PATH`:
+
+```bash
+spine import sourceharvest markdown ./notes --source notes --collection notes:local --json
+spine import sourceharvest files ./notes --source notes --collection notes:files --glob "*.md,*.txt" --json
+spine import sourceharvest html ./site-export --source docs --collection docs:html --json
+spine import sourceharvest gitlog . --source gitlog --collection repo:logspine --json
+spine import sourceharvest json export.json --source export --collection export:records --records-path records --json
 ```

@@ -202,6 +202,33 @@ printf '{"schema":"logspine.adapter.v1","source":{"kind":"%s","name":"AgentTrail
 	}
 }
 
+func TestImportSourceHarvestWrapper(t *testing.T) {
+	withTempHome(t)
+	runOK(t, "init")
+	sourceharvestDir := t.TempDir()
+	script := filepath.Join(sourceharvestDir, "sourceharvest")
+	body := `#!/bin/sh
+printf '{"schema":"logspine.adapter.v1","source":{"kind":"notes","name":"SourceHarvest Fixture"},"collection":{"external_id":"notes:local","kind":"notes","name":"notes"},"item":{"external_id":"notes:item:fixture","kind":"note","created_at":"2026-06-03T00:00:00Z","text":"SourceHarvest wrapper fixture evidence","tags":["notes"]},"actor":{"external_id":"notes:system:fixture","type":"system","name":"fixture"},"artifacts":[],"links":[],"relations":[],"raw":{"format":"json","hash":"sha256:test","path":"notes.fixture","ordinal":1}}\n'
+`
+	if err := os.WriteFile(script, []byte(body), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	oldPath := os.Getenv("PATH")
+	t.Setenv("PATH", sourceharvestDir+string(os.PathListSeparator)+oldPath)
+	dry := runJSON(t, "import", "sourceharvest", "markdown", "fixture", "--source", "notes", "--collection", "notes:local", "--dry-run", "--json")
+	if dry["generated_records"].(float64) != 1 {
+		t.Fatalf("dry-run generated = %v, want 1: %v", dry["generated_records"], dry)
+	}
+	out := runJSON(t, "import", "sourceharvest", "markdown", "fixture", "--source", "notes", "--collection", "notes:local", "--json")
+	if out["inserted_items"].(float64) != 1 {
+		t.Fatalf("inserted = %v, want 1: %v", out["inserted_items"], out)
+	}
+	search := runJSON(t, "search", "SourceHarvest wrapper", "--json")
+	if len(search["results"].([]any)) != 1 {
+		t.Fatalf("sourceharvest wrapper search failed: %v", search)
+	}
+}
+
 func TestSourceDiscoveryDoesNotPrintTranscriptContent(t *testing.T) {
 	withTempHome(t)
 	secret := "PRIVATE_TRANSCRIPT_SHOULD_NOT_APPEAR"
@@ -456,6 +483,11 @@ func TestImportDiscoveredAndWatchOnce(t *testing.T) {
 	if len(scans["scans"].([]any)) != 1 {
 		t.Fatalf("expected discovered scan manifest: %v", scans)
 	}
+	skipped := runJSON(t, "watch", "once", "--if-changed", "--json")
+	if skipped["skipped"] != true {
+		t.Fatalf("watch once --if-changed should skip unchanged scans: %v", skipped)
+	}
+	runOK(t, "watch", "daemon", "--max-runs", "1", "--json")
 }
 
 func TestHTTPAPIAndMCPTools(t *testing.T) {
@@ -487,7 +519,7 @@ func TestHTTPAPIAndMCPTools(t *testing.T) {
 		t.Fatalf("show http status=%d body=%s", rec.Code, rec.Body.String())
 	}
 
-	req = httptest.NewRequest(http.MethodPost, "/evidence", strings.NewReader(`{"query":"adapter contract","source":"discrawl","limit":5}`))
+	req = httptest.NewRequest(http.MethodPost, "/evidence", strings.NewReader(`{"query":"adapter contract","source":"discrawl","limit":5,"include_related":true,"include_artifact_text":true}`))
 	rec = httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
@@ -500,8 +532,12 @@ func TestHTTPAPIAndMCPTools(t *testing.T) {
 	if evidence["untrusted_context"] != true || len(evidence["grouped_by_source"].(map[string]any)) == 0 {
 		t.Fatalf("bad evidence body: %v", evidence)
 	}
+	firstEvidence := evidence["results"].([]any)[0].(map[string]any)
+	if firstEvidence["score"] == "" {
+		t.Fatalf("evidence missing score: %v", firstEvidence)
+	}
 
-	params := json.RawMessage(`{"name":"create_evidence_bundle","arguments":{"query":"adapter contract","source":"discrawl","limit":5}}`)
+	params := json.RawMessage(`{"name":"create_evidence_bundle","arguments":{"query":"adapter contract","source":"discrawl","limit":5,"include_related":true,"include_artifact_text":true}}`)
 	resp := handleMCPRequest(mcpRequest{JSONRPC: "2.0", ID: float64(1), Method: "tools/call", Params: params})
 	if resp.Error != nil {
 		t.Fatalf("mcp error: %#v", resp.Error)

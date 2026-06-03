@@ -145,12 +145,14 @@ func handleEvidence(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		Query   string `json:"query"`
-		Source  string `json:"source"`
-		Project string `json:"project"`
-		From    string `json:"from"`
-		To      string `json:"to"`
-		Limit   int    `json:"limit"`
+		Query               string `json:"query"`
+		Source              string `json:"source"`
+		Project             string `json:"project"`
+		From                string `json:"from"`
+		To                  string `json:"to"`
+		Limit               int    `json:"limit"`
+		IncludeRelated      bool   `json:"include_related"`
+		IncludeArtifactText bool   `json:"include_artifact_text"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		httpError(w, http.StatusBadRequest, err.Error())
@@ -166,7 +168,7 @@ func handleEvidence(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer db.Close()
-	bundle, err := evidenceBundle(db, SearchOpts{Query: req.Query, Source: req.Source, Project: req.Project, From: req.From, To: req.To, Limit: req.Limit})
+	bundle, err := evidenceBundle(db, SearchOpts{Query: req.Query, Source: req.Source, Project: req.Project, From: req.From, To: req.To, Limit: req.Limit, IncludeRelated: req.IncludeRelated, IncludeArtifactText: req.IncludeArtifactText})
 	if err != nil {
 		httpError(w, http.StatusInternalServerError, err.Error())
 		return

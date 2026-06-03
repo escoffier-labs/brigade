@@ -17,6 +17,7 @@ spine evidence "query" --json
 spine evidence "query" --source discrawl --from 2026-06-01 --to 2026-06-03 --limit 20 --json
 spine evidence "query" --project logspine --json
 spine evidence "query" --include-related --json
+spine evidence "query" --include-artifact-text --json
 spine evidence "query" --markdown
 ```
 
@@ -27,7 +28,7 @@ spine serve --addr 127.0.0.1:8765
 spine mcp
 ```
 
-HTTP exposes `GET /search?q=...`, `GET /items/<id>`, and `POST /evidence`. MCP exposes `search_evidence`, `show_item`, `create_evidence_bundle`, and `list_sources`.
+HTTP exposes `GET /search?q=...`, `GET /items/<id>`, and `POST /evidence`. MCP exposes `search_evidence`, `show_item`, `create_evidence_bundle`, and `list_sources`. Both surfaces return untrusted evidence only.
 
 Evidence output includes:
 
@@ -65,6 +66,7 @@ JSON shape:
       "snippet": "matching text",
       "timestamp": "2026-06-03T12:39:06-04:00",
       "source_kind": "discrawl",
+      "score": "-0.000001",
       "collection": {},
       "actor": {},
       "raw_ref": {},

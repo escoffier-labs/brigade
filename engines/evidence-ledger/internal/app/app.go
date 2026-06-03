@@ -27,7 +27,7 @@ import (
 
 var stdin io.Reader = os.Stdin
 
-const Version = "0.1.0"
+const Version = "0.1.1"
 
 func Run(args []string, out, errw io.Writer) int {
 	if len(args) == 0 || args[0] == "--help" || args[0] == "-h" || args[0] == "help" {
@@ -550,6 +550,8 @@ func cmdImport(args []string, out, errw io.Writer) int {
 		return cmdImportDiscovered(args[1:], out, errw)
 	case "agenttrail":
 		return cmdImportAgentTrail(args[1:], out, errw)
+	case "sourceharvest":
+		return cmdImportSourceHarvest(args[1:], out, errw)
 	case "codex":
 		return cmdImportNative("codex", codex.Generate, args[1:], out, errw)
 	case "openclaw":
@@ -557,7 +559,7 @@ func cmdImport(args []string, out, errw io.Writer) int {
 	case "claude":
 		return cmdImportNative("claude", claude.Generate, args[1:], out, errw)
 	default:
-		return fatalf(errw, "usage: spine import adapter|discovered|agenttrail|codex|openclaw|claude <path>")
+		return fatalf(errw, "usage: spine import adapter|discovered|agenttrail|sourceharvest|codex|openclaw|claude <path>")
 	}
 }
 
@@ -877,6 +879,7 @@ type SearchOpts struct {
 	Query, Source, Collection, Kind, ActorType, From, To, Project, Tags string
 	Limit                                                               int
 	IncludeRelated                                                      bool
+	IncludeArtifactText                                                 bool
 }
 
 type SearchResult struct {
@@ -889,6 +892,8 @@ type SearchResult struct {
 	ActorName      string `json:"actor_name"`
 	CreatedAt      string `json:"created_at"`
 	Snippet        string `json:"snippet"`
+	Score          string `json:"score"`
+	ContentHash    string `json:"-"`
 }
 
 func search(db *sql.DB, opts SearchOpts) ([]SearchResult, error) {
@@ -936,14 +941,14 @@ func search(db *sql.DB, opts SearchOpts) ([]SearchResult, error) {
 		}
 	}
 	params = append(params, opts.Limit)
-	sqlText := `select i.id, s.kind, c.name, c.kind, i.kind, coalesce(a.type,''), coalesce(a.name,''), coalesce(i.created_at,''), snippet(item_fts, 5, '[', ']', '...', 20)
+	sqlText := `select i.id, s.kind, c.name, c.kind, i.kind, coalesce(a.type,''), coalesce(a.name,''), coalesce(i.created_at,''), snippet(item_fts, 5, '[', ']', '...', 20), printf('%.6f', bm25(item_fts)), i.content_hash
 from item_fts
 join items i on i.id = item_fts.item_id
 join sources s on s.id = i.source_id
 join collections c on c.id = i.collection_id
 left join actors a on a.id = i.actor_id
 where ` + strings.Join(where, " and ") + `
-order by i.created_at desc, i.id
+order by (bm25(item_fts) - case when exists(select 1 from relations rr where rr.source_item_id = i.id or rr.target_item_id = i.id) then 0.25 else 0 end), i.created_at desc, i.id
 limit ?`
 	rows, err := db.Query(sqlText, params...)
 	if err != nil {
@@ -953,7 +958,7 @@ limit ?`
 	results := []SearchResult{}
 	for rows.Next() {
 		var r SearchResult
-		if err := rows.Scan(&r.ID, &r.SourceKind, &r.CollectionName, &r.CollectionKind, &r.Kind, &r.ActorType, &r.ActorName, &r.CreatedAt, &r.Snippet); err != nil {
+		if err := rows.Scan(&r.ID, &r.SourceKind, &r.CollectionName, &r.CollectionKind, &r.Kind, &r.ActorType, &r.ActorName, &r.CreatedAt, &r.Snippet, &r.Score, &r.ContentHash); err != nil {
 			return nil, err
 		}
 		results = append(results, r)
@@ -992,12 +997,12 @@ func cmdShow(args []string, out, errw io.Writer) int {
 }
 
 func cmdEvidence(args []string, out, errw io.Writer) int {
-	values, bools, rest, err := splitFlags(args, map[string]bool{"source": true, "from": true, "to": true, "limit": true, "project": true}, map[string]bool{"json": true, "markdown": true, "include-related": true})
+	values, bools, rest, err := splitFlags(args, map[string]bool{"source": true, "from": true, "to": true, "limit": true, "project": true}, map[string]bool{"json": true, "markdown": true, "include-related": true, "include-artifact-text": true})
 	if err != nil {
 		return fatalf(errw, "evidence: %s", err)
 	}
 	if len(rest) < 1 {
-		return fatalf(errw, "usage: spine evidence <query> [--json] [--markdown] [--include-related] [--limit N] [--source KIND] [--project NAME] [--from DATE] [--to DATE]")
+		return fatalf(errw, "usage: spine evidence <query> [--json] [--markdown] [--include-related] [--include-artifact-text] [--limit N] [--source KIND] [--project NAME] [--from DATE] [--to DATE]")
 	}
 	limit, err := parseLimit(values["limit"], 20)
 	if err != nil {
@@ -1009,7 +1014,7 @@ func cmdEvidence(args []string, out, errw io.Writer) int {
 		return fatalf(errw, "evidence: %s", err)
 	}
 	defer db.Close()
-	bundle, err := evidenceBundle(db, SearchOpts{Query: query, Source: values["source"], Project: values["project"], From: values["from"], To: values["to"], Limit: limit, IncludeRelated: bools["include-related"]})
+	bundle, err := evidenceBundle(db, SearchOpts{Query: query, Source: values["source"], Project: values["project"], From: values["from"], To: values["to"], Limit: limit, IncludeRelated: bools["include-related"], IncludeArtifactText: bools["include-artifact-text"]})
 	if err != nil {
 		return fatalf(errw, "evidence: %s", err)
 	}
@@ -1028,7 +1033,14 @@ func evidenceBundle(db *sql.DB, opts SearchOpts) (map[string]any, error) {
 	}
 	items := make([]map[string]any, 0, len(results))
 	groups := map[string]int{}
+	seenHashes := map[string]bool{}
 	for _, r := range results {
+		if r.ContentHash != "" && seenHashes[r.ContentHash] {
+			continue
+		}
+		if r.ContentHash != "" {
+			seenHashes[r.ContentHash] = true
+		}
 		row := db.QueryRow(`select i.id, i.external_id, coalesce(i.raw_hash,''), coalesce(i.raw_path,''), coalesce(i.raw_ordinal,0), c.external_id, c.kind, c.name, coalesce(a.external_id,''), coalesce(a.type,''), coalesce(a.name,'')
 from items i
 join collections c on c.id = i.collection_id
@@ -1039,7 +1051,11 @@ where i.id = ?`, r.ID)
 		if err := row.Scan(&itemID, &externalID, &rawHash, &rawPath, &rawOrdinal, &collectionExternalID, &collectionKind, &collectionName, &actorExternalID, &actorType, &actorName); err != nil {
 			return nil, err
 		}
-		artifacts := queryMaps(db, `select id, kind, path, url, mime_type, content_hash from artifacts where item_id = ? order by kind, path, url, id`, itemID)
+		artifactSQL := `select id, kind, path, url, mime_type, content_hash from artifacts where item_id = ? order by kind, path, url, id`
+		if opts.IncludeArtifactText {
+			artifactSQL = `select id, kind, path, url, mime_type, content_hash, text from artifacts where item_id = ? order by kind, path, url, id`
+		}
+		artifacts := queryMaps(db, artifactSQL, itemID)
 		item := map[string]any{
 			"id":          itemID,
 			"external_id": externalID,
@@ -1047,6 +1063,7 @@ where i.id = ?`, r.ID)
 			"timestamp":   r.CreatedAt,
 			"source_kind": r.SourceKind,
 			"kind":        r.Kind,
+			"score":       r.Score,
 			"collection":  map[string]any{"external_id": collectionExternalID, "kind": collectionKind, "name": collectionName},
 			"actor":       map[string]any{"external_id": actorExternalID, "type": actorType, "name": actorName},
 			"raw_ref":     map[string]any{"path": rawPath, "hash": rawHash, "ordinal": rawOrdinal},
@@ -1060,7 +1077,7 @@ where i.id = ?`, r.ID)
 	}
 	return map[string]any{
 		"query":             opts.Query,
-		"filters":           map[string]any{"source": opts.Source, "project": opts.Project, "from": opts.From, "to": opts.To, "limit": opts.Limit},
+		"filters":           map[string]any{"source": opts.Source, "project": opts.Project, "from": opts.From, "to": opts.To, "limit": opts.Limit, "include_related": opts.IncludeRelated, "include_artifact_text": opts.IncludeArtifactText},
 		"generated_at":      time.Now().UTC().Format(time.RFC3339Nano),
 		"untrusted_context": true,
 		"results":           items,

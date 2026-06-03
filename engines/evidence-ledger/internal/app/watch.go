@@ -2,14 +2,17 @@ package app
 
 import (
 	"bytes"
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/openclaw/logspine/internal/sources"
@@ -44,14 +47,28 @@ func cmdWatch(args []string, out, errw io.Writer) int {
 	}
 	switch args[0] {
 	case "once":
-		return cmdImportDiscovered(args[1:], out, errw)
+		ifChanged, importArgs, err := parseWatchOnceArgs(args[1:])
+		if err != nil {
+			return fatalf(errw, "watch once: %s", err)
+		}
+		if ifChanged {
+			shouldRun, err := shouldImportForChangedScans()
+			if err != nil {
+				return fatalf(errw, "watch once: %s", err)
+			}
+			if !shouldRun {
+				writeJSON(out, map[string]any{"skipped": true, "reason": "no changed scans"})
+				return 0
+			}
+		}
+		return cmdImportDiscovered(importArgs, out, errw)
 	case "daemon":
-		values, _, rest, err := splitFlags(args[1:], map[string]bool{"interval": true, "limit": true, "since": true, "redact": true}, map[string]bool{"json": true, "dry-run": true})
+		values, _, rest, err := splitFlags(args[1:], map[string]bool{"interval": true, "limit": true, "since": true, "redact": true, "max-runs": true}, map[string]bool{"json": true, "dry-run": true, "if-changed": true})
 		if err != nil {
 			return fatalf(errw, "watch daemon: %s", err)
 		}
 		if len(rest) != 0 {
-			return fatalf(errw, "usage: spine watch daemon [--interval DURATION] [--json] [--dry-run] [--limit N] [--since DATE] [--redact LIST]")
+			return fatalf(errw, "usage: spine watch daemon [--interval DURATION] [--max-runs N] [--if-changed] [--json] [--dry-run] [--limit N] [--since DATE] [--redact LIST]")
 		}
 		interval := time.Minute
 		if values["interval"] != "" {
@@ -61,16 +78,75 @@ func cmdWatch(args []string, out, errw io.Writer) int {
 			}
 			interval = parsed
 		}
-		importArgs := stripValueFlag(args[1:], "interval")
+		maxRuns, err := parseLimit(values["max-runs"], 0)
+		if err != nil {
+			return fatalf(errw, "watch daemon: invalid --max-runs")
+		}
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+		importArgs := stripValueFlag(stripValueFlag(args[1:], "interval"), "max-runs")
+		runs := 0
 		for {
-			if code := cmdImportDiscovered(importArgs, out, errw); code != 0 {
+			if hasBoolFlag(args[1:], "if-changed") {
+				shouldRun, err := shouldImportForChangedScans()
+				if err != nil {
+					return fatalf(errw, "watch daemon: %s", err)
+				}
+				if !shouldRun {
+					fmt.Fprintf(errw, "watch skipped: no changed scans\n")
+				} else if code := cmdImportDiscovered(importArgs, out, errw); code != 0 {
+					return code
+				}
+			} else if code := cmdImportDiscovered(importArgs, out, errw); code != 0 {
 				return code
 			}
-			time.Sleep(interval)
+			runs++
+			if maxRuns > 0 && runs >= maxRuns {
+				return 0
+			}
+			timer := time.NewTimer(interval)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				fmt.Fprintf(errw, "watch stopped\n")
+				return 0
+			case <-timer.C:
+			}
 		}
 	default:
 		return fatalf(errw, "usage: spine watch once|daemon")
 	}
+}
+
+func parseWatchOnceArgs(args []string) (bool, []string, error) {
+	_, bools, rest, err := splitFlags(args, map[string]bool{"limit": true, "since": true, "redact": true}, map[string]bool{"json": true, "dry-run": true, "if-changed": true})
+	if err != nil {
+		return false, nil, err
+	}
+	if len(rest) != 0 {
+		return false, nil, fmt.Errorf("usage: spine watch once [--if-changed] [--json] [--dry-run] [--limit N] [--since DATE] [--redact LIST]")
+	}
+	return bools["if-changed"], stripBoolFlag(args, "if-changed"), nil
+}
+
+func shouldImportForChangedScans() (bool, error) {
+	db, _, err := openMigrated()
+	if err != nil {
+		return false, err
+	}
+	defer db.Close()
+	var scans int
+	if err := db.QueryRow(`select count(*) from source_scans`).Scan(&scans); err != nil {
+		return false, err
+	}
+	if scans == 0 {
+		return true, nil
+	}
+	changed, err := changedScans(db, "")
+	if err != nil {
+		return false, err
+	}
+	return len(changed) > 0, nil
 }
 
 func stripValueFlag(args []string, name string) []string {
@@ -87,6 +163,28 @@ func stripValueFlag(args []string, name string) []string {
 		out = append(out, args[i])
 	}
 	return out
+}
+
+func stripBoolFlag(args []string, name string) []string {
+	out := make([]string, 0, len(args))
+	long := "--" + name
+	for _, arg := range args {
+		if arg == long {
+			continue
+		}
+		out = append(out, arg)
+	}
+	return out
+}
+
+func hasBoolFlag(args []string, name string) bool {
+	long := "--" + name
+	for _, arg := range args {
+		if arg == long {
+			return true
+		}
+	}
+	return false
 }
 
 func cmdImportDiscovered(args []string, out, errw io.Writer) int {

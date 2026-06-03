@@ -83,6 +83,7 @@ spine import claude ~/.claude/projects --json
 spine import codex testdata/harnesses/malformed-unknown.fixture.jsonl --dry-run --json
 spine import discovered --json
 spine watch once --json
+spine watch once --if-changed --json
 ```
 
 The scanners accept a file or directory, walk JSONL files recursively, skip obvious backups and sidecars, preserve raw refs, and warn rather than crash on malformed or unknown events.
@@ -124,6 +125,16 @@ SourceHarvest is the separate local source-system exporter for non-harness recor
 ```bash
 sourceharvest jsonl export.jsonl --source notes --collection notes:local --out - | spine import adapter -
 sourceharvest markdown ./notes --source notes --collection notes:local --out - | spine import adapter -
+```
+
+When `sourceharvest` is installed on `PATH`, Logspine can run it directly:
+
+```bash
+spine import sourceharvest markdown ./notes --source notes --collection notes:local --json
+spine import sourceharvest files ./notes --source notes --collection notes:files --glob "*.md,*.txt" --json
+spine import sourceharvest html ./site-export --source docs --collection docs:html --json
+spine import sourceharvest gitlog . --source gitlog --collection repo:logspine --json
+spine import sourceharvest json export.json --source export --collection export:records --records-path records --json
 ```
 
 Use AgentTrail for agent-session logs. Use SourceHarvest for other local source-system exports. Logspine remains the archive, search, relation, and evidence layer for both.
@@ -169,6 +180,13 @@ The stdio MCP server exposes `search_evidence`, `show_item`, `create_evidence_bu
 spine mcp
 ```
 
+Fixture smoke scripts exercise these surfaces without private transcript content:
+
+```bash
+scripts/smoke_http.sh
+scripts/smoke_mcp.sh
+```
+
 ## Evidence
 
 Brigade-facing evidence bundles are structured and explicitly untrusted:
@@ -177,10 +195,11 @@ Brigade-facing evidence bundles are structured and explicitly untrusted:
 spine evidence "auth timeout" --source discrawl --limit 20 --json
 spine evidence "Claude native import" --project logspine --json
 spine evidence "adapter contract" --include-related --json
+spine evidence "adapter contract" --include-artifact-text --json
 spine evidence "adapter contract" --markdown
 ```
 
-Evidence output includes the query, filters, generated timestamp, result item IDs, snippets, source and collection context, actor context, raw refs, artifact refs, source grouping, optional related items, and warnings.
+Evidence output includes the query, filters, generated timestamp, result item IDs, snippets, FTS scores, source and collection context, actor context, raw refs, artifact refs, source grouping, optional related items, optional artifact text, and warnings. Evidence results dedupe repeated content hashes.
 
 ## Relations
 
