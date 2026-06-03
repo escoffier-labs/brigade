@@ -82,6 +82,7 @@ SKIP_PREFIXES = (
     (".claude", "memory-handoffs"),
     (".codex", "memory-handoffs"),
     (".opencode", "memory-handoffs"),
+    (".hermes", "memory-handoffs"),
 )
 
 TEXT_SUFFIXES = {

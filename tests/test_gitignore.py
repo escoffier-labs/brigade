@@ -205,6 +205,15 @@ def test_gitignore_block_includes_codex_section_when_selected():
     assert "!.codex/memory-handoffs/TEMPLATE.md" in block
 
 
+def test_gitignore_block_includes_hermes_section_when_selected():
+    from brigade.install import build_gitignore_block
+    sel = Selection(depth="repo", harnesses=["hermes"], owner="hermes", includes=[])
+    block = build_gitignore_block(sel)
+    assert ".hermes/memory-handoffs/*" in block
+    assert "!.hermes/memory-handoffs/TEMPLATE.md" in block
+    assert "!.hermes/memory-handoffs/.gitkeep" in block
+
+
 def test_gitignore_block_no_inbox_section_for_readers_only():
     from brigade.install import build_gitignore_block
     sel = Selection(depth="workspace", harnesses=["openclaw"], owner="openclaw", includes=[])

@@ -51,6 +51,7 @@ If a session changes how Brigade should be used in this repo, write that durable
 - Codex dogfood runs default to `.codex/memory-handoffs/`.
 - Claude Code uses `.claude/memory-handoffs/`.
 - OpenCode uses `.opencode/memory-handoffs/`.
+- Hermes uses `.hermes/memory-handoffs/`.
 
 Prefer the writer command so the draft matches Brigade's expected section style and lints before handoff:
 
@@ -68,6 +69,7 @@ The internal dogfood profile:
 - refreshes read-only security evidence
 - reports repo-local versus machine-level wiring
 - projects tracked `tools/*.md` sources into local harness folders when `brigade operator sync-tools --target .` is run
+- verifies a harness handoff inbox with `brigade operator verify-harness --harness hermes --target .`
 - keeps public release readiness separate from internal production readiness
 
 It does not:

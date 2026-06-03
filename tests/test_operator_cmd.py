@@ -154,6 +154,48 @@ def test_operator_doctor_blocks_on_tool_projection_health(tmp_path, capsys, monk
     assert payload["blockers"][0]["name"] == "tool_projection_health"
 
 
+def test_operator_verify_harness_hermes_after_handoff_init_and_draft(tmp_path, capsys):
+    assert cli.main(["handoff", "sources", "init", "--target", str(tmp_path), "--json"]) == 0
+    capsys.readouterr()
+    assert cli.main(
+        [
+            "handoff",
+            "draft",
+            "--target",
+            str(tmp_path),
+            "--inbox",
+            "hermes",
+            "--title",
+            "Hermes verification",
+            "--summary",
+            "Hermes has a local handoff draft.",
+            "--content",
+            "### Hermes verification\n\nUse the Hermes inbox for local handoffs.",
+            "--json",
+        ]
+    ) == 0
+    capsys.readouterr()
+
+    assert operator_cmd.verify_harness(target=tmp_path, harness="hermes", json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ready"] is True
+    assert payload["handoff_inbox"]["relative_path"] == ".hermes/memory-handoffs"
+    assert payload["handoff_inbox"]["watched"] is True
+    assert any(row["name"] == "handoff_lint" and row["status"] == "ok" for row in payload["checks"])
+
+
+def test_operator_verify_harness_cli_dispatch(tmp_path, monkeypatch):
+    seen = {}
+
+    def fake_verify_harness(**kwargs):
+        seen.update(kwargs)
+        return 0
+
+    monkeypatch.setattr(operator_cmd, "verify_harness", fake_verify_harness)
+    assert cli.main(["operator", "verify-harness", "--target", str(tmp_path), "--harness", "hermes", "--json"]) == 0
+    assert seen == {"target": tmp_path, "harness": "hermes", "json_output": True}
+
+
 def test_operator_sync_tools_cli_dispatch(tmp_path, monkeypatch):
     seen = {}
 

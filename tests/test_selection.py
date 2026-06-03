@@ -20,6 +20,7 @@ def test_writer_inboxes_cover_known_writers():
     from brigade.selection import WRITER_INBOXES
     assert WRITER_INBOXES["claude"] == ".claude/memory-handoffs"
     assert WRITER_INBOXES["codex"] == ".codex/memory-handoffs"
+    assert WRITER_INBOXES["hermes"] == ".hermes/memory-handoffs"
 
 
 def test_harness_priority_order():

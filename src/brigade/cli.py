@@ -369,6 +369,10 @@ def _build_parser() -> argparse.ArgumentParser:
     p_operator_doctor.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
     p_operator_doctor.add_argument("--profile", choices=["local-operator", "internal-dogfood"], default="internal-dogfood", help="Operator profile to inspect.")
     p_operator_doctor.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_operator_verify_harness = operator_sub.add_parser("verify-harness", help="Verify repo-local wiring for one harness.")
+    p_operator_verify_harness.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_operator_verify_harness.add_argument("--harness", choices=["claude", "codex", "opencode", "openclaw", "hermes"], required=True, help="Harness id to verify.")
+    p_operator_verify_harness.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_operator_sync_tools = operator_sub.add_parser("sync-tools", help="Project tracked portable tool sources into local harness folders.")
     p_operator_sync_tools.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
     p_operator_sync_tools.add_argument("--dry-run", action="store_true", help="Plan projection writes without changing files.")
@@ -840,7 +844,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p_handoff_sources = handoff_sub.add_parser("sources", help="Manage local handoff source coverage.")
     handoff_sources_sub = p_handoff_sources.add_subparsers(dest="handoff_sources_command", metavar="<handoff-sources-command>")
     handoff_sources_sub.required = True
-    p_handoff_sources_init = handoff_sources_sub.add_parser("init", help="Write local handoff source coverage for Claude, Codex, and OpenCode.")
+    p_handoff_sources_init = handoff_sources_sub.add_parser("init", help="Write local handoff source coverage for Claude, Codex, OpenCode, and Hermes.")
     p_handoff_sources_init.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
     p_handoff_sources_init.add_argument("--force", action="store_true", help="Overwrite an existing source config.")
     p_handoff_sources_init.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
@@ -854,7 +858,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p_handoff_lint.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_handoff_draft = handoff_sub.add_parser("draft", help="Write a linted Memory Handoff draft in Brigade style.")
     p_handoff_draft.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
-    p_handoff_draft.add_argument("--inbox", default="codex", help="Writer inbox path or alias: claude, codex, opencode.")
+    p_handoff_draft.add_argument("--inbox", default="codex", help="Writer inbox path or alias: claude, codex, opencode, hermes.")
     p_handoff_draft.add_argument("--type", default="workflow", help="Handoff type, such as workflow, decision, setup, or bugfix.")
     p_handoff_draft.add_argument("--title", required=True, help="Short handoff title.")
     p_handoff_draft.add_argument("--summary", required=True, help="Short handoff summary.")
@@ -2817,6 +2821,8 @@ def main(argv=None) -> int:
             return operator_cmd.status(target=args.target, profile=args.profile, json_output=args.json)
         if args.operator_command == "doctor":
             return operator_cmd.doctor(target=args.target, profile=args.profile, json_output=args.json)
+        if args.operator_command == "verify-harness":
+            return operator_cmd.verify_harness(target=args.target, harness=args.harness, json_output=args.json)
         if args.operator_command == "sync-tools":
             return operator_cmd.sync_tools(target=args.target, dry_run=args.dry_run, force=args.force, json_output=args.json)
         parser.error(f"unknown operator command: {args.operator_command}")

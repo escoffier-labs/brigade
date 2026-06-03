@@ -13,6 +13,7 @@ WRITER_INBOXES = {
     "claude": ".claude/memory-handoffs",
     "codex": ".codex/memory-handoffs",
     "opencode": ".opencode/memory-handoffs",
+    "hermes": ".hermes/memory-handoffs",
 }
 KNOWN_INCLUDES = ("publisher",)
 

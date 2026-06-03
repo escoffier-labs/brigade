@@ -6,9 +6,12 @@
     {"src": "hermes/workspace.harness.json", "dst": ".brigade/hermes/workspace.harness.json"},
     {"src": "hermes/memory-handoff.harness.json", "dst": ".brigade/hermes/memory-handoff.harness.json"},
     {"src": "hermes/model-lanes.harness.json", "dst": ".brigade/hermes/model-lanes.harness.json"},
-    {"src": "hermes/README.md", "dst": ".brigade/hermes/README.md"}
+    {"src": "hermes/README.md", "dst": ".brigade/hermes/README.md"},
+    {"src": "hermes/memory-handoffs/TEMPLATE.md", "dst": ".hermes/memory-handoffs/TEMPLATE.md"}
   ],
-  "dirs": [],
+  "dirs": [
+    ".hermes/memory-handoffs/processed"
+  ],
   "post_install_notes": [
     "Hermes support is experimental. Validate against your real Hermes install before relying on it.",
     "Open an issue with your config layout to help promote the adapter from experimental to tested."

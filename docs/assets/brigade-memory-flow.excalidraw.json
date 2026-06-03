@@ -1,0 +1,246 @@
+{
+  "elements": [
+    {
+      "id": "title",
+      "type": "text",
+      "x": 80,
+      "y": 30,
+      "width": 560,
+      "height": 38,
+      "strokeColor": "#1f2937",
+      "text": "One shared memory, many agent tools",
+      "fontSize": 28
+    },
+    {
+      "id": "owner",
+      "type": "rectangle",
+      "x": 250,
+      "y": 110,
+      "width": 220,
+      "height": 86,
+      "strokeColor": "#2563eb",
+      "backgroundColor": "#dbeafe",
+      "fillStyle": "solid",
+      "roundness": {
+        "type": 3
+      },
+      "label": {
+        "text": "Shared memory\nOpenClaw / Hermes / repo",
+        "fontSize": 18,
+        "strokeColor": "#1f2937",
+        "textAlign": "center",
+        "verticalAlign": "middle"
+      }
+    },
+    {
+      "id": "inbox",
+      "type": "rectangle",
+      "x": 250,
+      "y": 285,
+      "width": 220,
+      "height": 86,
+      "strokeColor": "#d97706",
+      "backgroundColor": "#fef3c7",
+      "fillStyle": "solid",
+      "roundness": {
+        "type": 3
+      },
+      "label": {
+        "text": "Handoff inboxes\nreview before saving",
+        "fontSize": 18,
+        "strokeColor": "#1f2937",
+        "textAlign": "center",
+        "verticalAlign": "middle"
+      }
+    },
+    {
+      "id": "codex",
+      "type": "rectangle",
+      "x": 35,
+      "y": 250,
+      "width": 150,
+      "height": 60,
+      "strokeColor": "#16a34a",
+      "backgroundColor": "#dcfce7",
+      "fillStyle": "solid",
+      "roundness": {
+        "type": 3
+      },
+      "label": {
+        "text": "Codex",
+        "fontSize": 18,
+        "strokeColor": "#1f2937",
+        "textAlign": "center",
+        "verticalAlign": "middle"
+      }
+    },
+    {
+      "id": "claude",
+      "type": "rectangle",
+      "x": 35,
+      "y": 340,
+      "width": 150,
+      "height": 60,
+      "strokeColor": "#16a34a",
+      "backgroundColor": "#dcfce7",
+      "fillStyle": "solid",
+      "roundness": {
+        "type": 3
+      },
+      "label": {
+        "text": "Claude Code",
+        "fontSize": 18,
+        "strokeColor": "#1f2937",
+        "textAlign": "center",
+        "verticalAlign": "middle"
+      }
+    },
+    {
+      "id": "opencode",
+      "type": "rectangle",
+      "x": 535,
+      "y": 250,
+      "width": 150,
+      "height": 60,
+      "strokeColor": "#16a34a",
+      "backgroundColor": "#dcfce7",
+      "fillStyle": "solid",
+      "roundness": {
+        "type": 3
+      },
+      "label": {
+        "text": "OpenCode",
+        "fontSize": 18,
+        "strokeColor": "#1f2937",
+        "textAlign": "center",
+        "verticalAlign": "middle"
+      }
+    },
+    {
+      "id": "hermes",
+      "type": "rectangle",
+      "x": 535,
+      "y": 340,
+      "width": 150,
+      "height": 60,
+      "strokeColor": "#16a34a",
+      "backgroundColor": "#dcfce7",
+      "fillStyle": "solid",
+      "roundness": {
+        "type": 3
+      },
+      "label": {
+        "text": "Hermes",
+        "fontSize": 18,
+        "strokeColor": "#1f2937",
+        "textAlign": "center",
+        "verticalAlign": "middle"
+      }
+    },
+    {
+      "id": "arrow-codex-inbox",
+      "type": "arrow",
+      "x": 185,
+      "y": 280,
+      "width": 65,
+      "height": 28,
+      "strokeColor": "#475569",
+      "strokeWidth": 2,
+      "endArrowhead": "arrow"
+    },
+    {
+      "id": "arrow-claude-inbox",
+      "type": "arrow",
+      "x": 185,
+      "y": 370,
+      "width": 65,
+      "height": -28,
+      "strokeColor": "#475569",
+      "strokeWidth": 2,
+      "endArrowhead": "arrow"
+    },
+    {
+      "id": "arrow-opencode-inbox",
+      "type": "arrow",
+      "x": 535,
+      "y": 280,
+      "width": -65,
+      "height": 28,
+      "strokeColor": "#475569",
+      "strokeWidth": 2,
+      "endArrowhead": "arrow"
+    },
+    {
+      "id": "arrow-hermes-inbox",
+      "type": "arrow",
+      "x": 535,
+      "y": 370,
+      "width": -65,
+      "height": -28,
+      "strokeColor": "#475569",
+      "strokeWidth": 2,
+      "endArrowhead": "arrow"
+    },
+    {
+      "id": "arrow-review-memory",
+      "type": "arrow",
+      "x": 360,
+      "y": 285,
+      "width": 0,
+      "height": -88,
+      "strokeColor": "#475569",
+      "strokeWidth": 2,
+      "label": {
+        "text": "approved notes",
+        "fontSize": 15,
+        "strokeColor": "#475569",
+        "textAlign": "center",
+        "verticalAlign": "middle"
+      },
+      "endArrowhead": "arrow"
+    },
+    {
+      "id": "memory-back",
+      "type": "arrow",
+      "x": 250,
+      "y": 150,
+      "width": -120,
+      "height": 88,
+      "strokeColor": "#94a3b8",
+      "strokeWidth": 2,
+      "strokeStyle": "dashed",
+      "label": {
+        "text": "agents read context",
+        "fontSize": 14,
+        "strokeColor": "#475569",
+        "textAlign": "center",
+        "verticalAlign": "middle"
+      },
+      "endArrowhead": "arrow"
+    },
+    {
+      "id": "memory-back-2",
+      "type": "arrow",
+      "x": 470,
+      "y": 150,
+      "width": 120,
+      "height": 88,
+      "strokeColor": "#94a3b8",
+      "strokeWidth": 2,
+      "strokeStyle": "dashed",
+      "endArrowhead": "arrow"
+    }
+  ],
+  "appState": {
+    "viewBackgroundColor": "#ffffff",
+    "currentItemStrokeColor": "#1e1e1e",
+    "currentItemBackgroundColor": "transparent",
+    "currentItemFillStyle": "solid",
+    "currentItemStrokeWidth": 2,
+    "currentItemRoughness": 1,
+    "zoom": {
+      "value": 1
+    }
+  },
+  "version": 2
+}

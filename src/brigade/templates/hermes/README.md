@@ -7,12 +7,13 @@
 - `workspace.harness.json` - which bootstrap files Hermes should load
 - `memory-handoff.harness.json` - the handoff inbox and routing targets
 - `model-lanes.harness.json` - suggested model alias names
+- `.hermes/memory-handoffs/TEMPLATE.md` - the local handoff writer template
 
 ## What it does not do yet
 
 - Validate against the live Hermes config schema
 - Generate Hermes-specific plugin entries
-- Replace `brigade hermes doctor` with anything beyond file existence checks
+- Ingest handoffs into canonical memory automatically
 
 ## Contributing
 

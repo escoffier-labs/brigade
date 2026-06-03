@@ -408,7 +408,7 @@ def doctor_payload(target: Path, *, profile: str = "internal-dogfood") -> dict[s
         ],
         "tracked_vs_generated": [
             "Track reviewed cross-harness source docs under tools/.",
-            "Generated harness projections under .claude/, .codex/, and .opencode/ are local ignored state.",
+            "Generated harness projections and handoff inboxes under .claude/, .codex/, .opencode/, and .hermes/ are local ignored state.",
             "Run brigade operator sync-tools --target . after changing tracked tool sources.",
         ],
     }
@@ -438,6 +438,140 @@ def doctor(*, target: Path, profile: str = "internal-dogfood", json_output: bool
     print("tracked_vs_generated:")
     for item in payload["tracked_vs_generated"]:
         print(f"- {item}")
+    return 0 if payload["ready"] else 1
+
+
+def verify_harness_payload(target: Path, *, harness: str) -> dict[str, Any]:
+    from .selection import KNOWN_HARNESSES, WRITER_INBOXES
+
+    target = target.expanduser().resolve()
+    checks: list[dict[str, Any]] = []
+    if harness not in KNOWN_HARNESSES:
+        raise ValueError(f"harness must be one of: {', '.join(KNOWN_HARNESSES)}")
+    inbox_rel = WRITER_INBOXES.get(harness)
+    if inbox_rel is None:
+        checks.append(
+            {
+                "status": "fail",
+                "name": "handoff_writer",
+                "detail": f"{harness} is not configured as a handoff writer harness",
+            }
+        )
+        return {
+            "target": str(target),
+            "harness": harness,
+            "supported": False,
+            "handoff_inbox": None,
+            "checks": checks,
+            "issue_count": 1,
+            "ready": False,
+            "next_command": "choose a writer harness: claude, codex, opencode, hermes",
+        }
+
+    health = handoff_cmd.inspect(target)
+    inbox_health = next((item for item in health.inboxes if item.inbox == inbox_rel), None)
+    inbox_path = target / inbox_rel
+    if inbox_health is None:
+        checks.append({"status": "fail", "name": "handoff_inbox_known", "detail": f"{inbox_rel} was not inspected"})
+    elif not inbox_health.exists:
+        checks.append({"status": "fail", "name": "handoff_inbox_exists", "detail": f"{inbox_path} does not exist"})
+    else:
+        checks.append(
+            {
+                "status": "ok",
+                "name": "handoff_inbox_exists",
+                "detail": f"{inbox_path} exists with {inbox_health.pending} pending handoff(s)",
+            }
+        )
+        if inbox_health.watched:
+            checks.append({"status": "ok", "name": "handoff_source_coverage", "detail": f"{inbox_rel} is watched"})
+        else:
+            checks.append({"status": "fail", "name": "handoff_source_coverage", "detail": f"{inbox_rel} is not watched by .brigade/handoff-sources.json"})
+
+    gitignore_probe = inbox_path / ".brigade-ignore-probe"
+    gitignored = dogfood_cmd._check_git_ignored(target, gitignore_probe)
+    if gitignored == "no":
+        checks.append({"status": "fail", "name": "handoff_inbox_gitignored", "detail": f"{inbox_rel} is not ignored by git"})
+    elif gitignored in {"yes", "unknown"}:
+        checks.append({"status": "ok", "name": "handoff_inbox_gitignored", "detail": f"gitignore status: {gitignored}"})
+    else:
+        checks.append({"status": "warn", "name": "handoff_inbox_gitignored", "detail": f"gitignore status: {gitignored}"})
+
+    lint_results = [
+        result
+        for result in health.lint
+        if _path_under(result.path, inbox_path)
+    ]
+    invalid = [result for result in lint_results if not result.valid]
+    if invalid:
+        checks.append({"status": "fail", "name": "handoff_lint", "detail": f"{len(invalid)} invalid of {len(lint_results)} pending {harness} handoff(s)"})
+    elif lint_results:
+        checks.append({"status": "ok", "name": "handoff_lint", "detail": f"{len(lint_results)} pending {harness} handoff(s) lint clean"})
+    else:
+        checks.append({"status": "ok", "name": "handoff_lint", "detail": f"no pending {harness} handoffs"})
+
+    issue_count = sum(1 for item in checks if item.get("status") in {"fail", "warn"})
+    if issue_count:
+        if inbox_health is None or not inbox_path.exists():
+            next_command = f"brigade handoff draft --inbox {harness} --target . --title <title> --summary <summary> --content <content>"
+        elif not (inbox_health and inbox_health.watched):
+            next_command = "brigade handoff sources init --target . --force"
+        elif invalid:
+            next_command = f"brigade handoff lint {inbox_rel} --target ."
+        else:
+            next_command = "brigade handoff doctor --target ."
+    else:
+        next_command = f"brigade handoff list --target . --json"
+    return {
+        "target": str(target),
+        "harness": harness,
+        "supported": True,
+        "handoff_inbox": {
+            "path": str(inbox_path),
+            "relative_path": inbox_rel,
+            "exists": bool(inbox_health and inbox_health.exists),
+            "watched": bool(inbox_health and inbox_health.watched),
+            "pending": int(inbox_health.pending) if inbox_health else 0,
+            "processed": int(inbox_health.processed) if inbox_health else 0,
+            "gitignored": gitignored,
+        },
+        "checks": checks,
+        "issue_count": issue_count,
+        "ready": issue_count == 0,
+        "next_command": next_command,
+        "local_only_notes": [
+            "This check only verifies Brigade's repo-local handoff writer wiring.",
+            "It does not start Hermes, call a live Hermes API, or ingest handoffs into canonical memory.",
+        ],
+    }
+
+
+def _path_under(path: Path, root: Path) -> bool:
+    try:
+        path.expanduser().resolve().relative_to(root.expanduser().resolve())
+    except ValueError:
+        return False
+    return True
+
+
+def verify_harness(*, target: Path, harness: str, json_output: bool = False) -> int:
+    try:
+        payload = verify_harness_payload(target, harness=harness)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0 if payload["ready"] else 1
+    print(f"operator verify-harness: {payload['target']}")
+    print(f"harness: {payload['harness']}")
+    print(f"ready: {'yes' if payload['ready'] else 'no'}")
+    handoff_inbox = payload.get("handoff_inbox") if isinstance(payload.get("handoff_inbox"), dict) else None
+    if handoff_inbox:
+        print(f"handoff_inbox: {handoff_inbox.get('relative_path')}")
+    for item in payload["checks"]:
+        print(f"[{item.get('status')}] {item.get('name')}: {item.get('detail')}")
+    print(f"next: {payload['next_command']}")
     return 0 if payload["ready"] else 1
 
 

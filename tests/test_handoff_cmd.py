@@ -234,6 +234,36 @@ Drafts can create cards.
     assert "## Target document" not in text
 
 
+def test_handoff_draft_supports_hermes_writer_inbox(tmp_path, capsys):
+    assert handoff_cmd.sources_init(target=tmp_path, json_output=True) == 0
+    sources_payload = json.loads(capsys.readouterr().out)
+    assert ".hermes/memory-handoffs" in sources_payload["inboxes"]
+
+    assert handoff_cmd.draft(
+        target=tmp_path,
+        handoff_type="workflow",
+        title="Hermes handoff wiring",
+        summary="Hermes can write local Brigade handoff drafts.",
+        content="### Hermes handoff wiring\n\nHermes uses the shared Memory Handoff format.",
+        evidence=["commands run: brigade handoff draft --inbox hermes --target ."],
+        inbox="hermes",
+        json_output=True,
+    ) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    path = tmp_path / payload["path"]
+    assert ".hermes/memory-handoffs" in payload["path"]
+    assert payload["inbox"] == ".hermes/memory-handoffs"
+    assert payload["valid"] is True
+    assert path.is_file()
+
+    assert handoff_cmd.list_drafts(target=tmp_path, json_output=True) == 0
+    list_payload = json.loads(capsys.readouterr().out)
+    assert list_payload["counts"]["total"] == 1
+    assert list_payload["drafts"][0]["watched"] is True
+    assert list_payload["drafts"][0]["inbox"] == ".hermes/memory-handoffs"
+
+
 def test_handoff_draft_cli_dispatch(tmp_path, capsys):
     assert cli.main(
         [

@@ -1,0 +1,213 @@
+{
+  "elements": [
+    {
+      "id": "loop-title",
+      "type": "text",
+      "x": 70,
+      "y": 30,
+      "width": 620,
+      "height": 38,
+      "strokeColor": "#1f2937",
+      "text": "The Brigade loop stays local and reviewable",
+      "fontSize": 28
+    },
+    {
+      "id": "setup",
+      "type": "rectangle",
+      "x": 55,
+      "y": 135,
+      "width": 170,
+      "height": 86,
+      "strokeColor": "#2563eb",
+      "backgroundColor": "#dbeafe",
+      "fillStyle": "solid",
+      "roundness": {
+        "type": 3
+      },
+      "label": {
+        "text": "1. Set up\nrules, memory, tools",
+        "fontSize": 17,
+        "strokeColor": "#1f2937",
+        "textAlign": "center",
+        "verticalAlign": "middle"
+      }
+    },
+    {
+      "id": "work",
+      "type": "rectangle",
+      "x": 295,
+      "y": 135,
+      "width": 170,
+      "height": 86,
+      "strokeColor": "#16a34a",
+      "backgroundColor": "#dcfce7",
+      "fillStyle": "solid",
+      "roundness": {
+        "type": 3
+      },
+      "label": {
+        "text": "2. Work\nwith your agents",
+        "fontSize": 17,
+        "strokeColor": "#1f2937",
+        "textAlign": "center",
+        "verticalAlign": "middle"
+      }
+    },
+    {
+      "id": "review",
+      "type": "rectangle",
+      "x": 535,
+      "y": 135,
+      "width": 170,
+      "height": 86,
+      "strokeColor": "#d97706",
+      "backgroundColor": "#fef3c7",
+      "fillStyle": "solid",
+      "roundness": {
+        "type": 3
+      },
+      "label": {
+        "text": "3. Review\nbefore saving",
+        "fontSize": 17,
+        "strokeColor": "#1f2937",
+        "textAlign": "center",
+        "verticalAlign": "middle"
+      }
+    },
+    {
+      "id": "remember",
+      "type": "rectangle",
+      "x": 295,
+      "y": 310,
+      "width": 170,
+      "height": 86,
+      "strokeColor": "#a21caf",
+      "backgroundColor": "#fae8ff",
+      "fillStyle": "solid",
+      "roundness": {
+        "type": 3
+      },
+      "label": {
+        "text": "4. Remember\napproved notes only",
+        "fontSize": 17,
+        "strokeColor": "#1f2937",
+        "textAlign": "center",
+        "verticalAlign": "middle"
+      }
+    },
+    {
+      "id": "manual",
+      "type": "rectangle",
+      "x": 535,
+      "y": 310,
+      "width": 170,
+      "height": 86,
+      "strokeColor": "#dc2626",
+      "backgroundColor": "#fee2e2",
+      "fillStyle": "solid",
+      "roundness": {
+        "type": 3
+      },
+      "label": {
+        "text": "Publish?\nOnly with your yes",
+        "fontSize": 16,
+        "strokeColor": "#1f2937",
+        "textAlign": "center",
+        "verticalAlign": "middle"
+      }
+    },
+    {
+      "id": "setup-work",
+      "type": "arrow",
+      "x": 225,
+      "y": 178,
+      "width": 70,
+      "height": 0,
+      "strokeColor": "#475569",
+      "strokeWidth": 2,
+      "endArrowhead": "arrow"
+    },
+    {
+      "id": "work-review",
+      "type": "arrow",
+      "x": 465,
+      "y": 178,
+      "width": 70,
+      "height": 0,
+      "strokeColor": "#475569",
+      "strokeWidth": 2,
+      "endArrowhead": "arrow"
+    },
+    {
+      "id": "review-remember",
+      "type": "arrow",
+      "x": 590,
+      "y": 221,
+      "width": -125,
+      "height": 89,
+      "strokeColor": "#475569",
+      "strokeWidth": 2,
+      "label": {
+        "text": "handoffs",
+        "fontSize": 14,
+        "strokeColor": "#475569",
+        "textAlign": "center",
+        "verticalAlign": "middle"
+      },
+      "endArrowhead": "arrow"
+    },
+    {
+      "id": "remember-setup",
+      "type": "arrow",
+      "x": 295,
+      "y": 353,
+      "width": -155,
+      "height": -130,
+      "strokeColor": "#94a3b8",
+      "strokeWidth": 2,
+      "strokeStyle": "dashed",
+      "label": {
+        "text": "better next session",
+        "fontSize": 14,
+        "strokeColor": "#475569",
+        "textAlign": "center",
+        "verticalAlign": "middle"
+      },
+      "endArrowhead": "arrow"
+    },
+    {
+      "id": "review-manual",
+      "type": "arrow",
+      "x": 620,
+      "y": 221,
+      "width": 0,
+      "height": 89,
+      "strokeColor": "#dc2626",
+      "strokeWidth": 2,
+      "endArrowhead": "arrow"
+    },
+    {
+      "id": "note",
+      "type": "text",
+      "x": 125,
+      "y": 455,
+      "width": 520,
+      "height": 30,
+      "strokeColor": "#334155",
+      "text": "Everything stays local until you approve the next step.",
+      "fontSize": 18
+    }
+  ],
+  "appState": {
+    "viewBackgroundColor": "#ffffff",
+    "currentItemStrokeColor": "#1e1e1e",
+    "currentItemBackgroundColor": "transparent",
+    "currentItemFillStyle": "solid",
+    "currentItemStrokeWidth": 2,
+    "currentItemRoughness": 1,
+    "zoom": {
+      "value": 1
+    }
+  },
+  "version": 4
+}

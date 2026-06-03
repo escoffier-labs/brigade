@@ -130,6 +130,8 @@ def test_hermes_install_writes_experimental_fragments(tmp_target: Path):
     assert (fragments_dir / "workspace.harness.json").is_file()
     assert (fragments_dir / "memory-handoff.harness.json").is_file()
     assert (fragments_dir / "model-lanes.harness.json").is_file()
+    assert (tmp_target / ".hermes" / "memory-handoffs" / "TEMPLATE.md").is_file()
+    assert (tmp_target / ".hermes" / "memory-handoffs" / "processed").is_dir()
 
 
 def test_generic_install_writes_baseline_workspace(tmp_target: Path):
