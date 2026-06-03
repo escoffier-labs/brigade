@@ -1313,6 +1313,20 @@ def _build_parser() -> argparse.ArgumentParser:
         default=[],
         help="Metadata as key=value. May be repeated.",
     )
+    p_work_import_context = import_sub.add_parser("context", help="Inbox raw external context as untrusted data.")
+    p_work_import_context.add_argument("text", nargs="*", help="Raw context text.")
+    p_work_import_context.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
+    p_work_import_context.add_argument("--source", default="manual", help="Where the context came from.")
+    p_work_import_context.add_argument(
+        "--kind",
+        choices=["link", "transcript", "error", "issue", "note"],
+        default="note",
+        dest="context_kind",
+        help="Context kind.",
+    )
+    p_work_import_context.add_argument("--from-file", type=Path, default=None, help="Read context body from a file.")
+    p_work_import_context.add_argument("--max-chars", type=int, default=20000, help="Maximum characters of body to fence.")
+    p_work_import_context.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_work_import_list = import_sub.add_parser("list", help="List local work imports.")
     p_work_import_list.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
     p_work_import_list.add_argument("--all", action="store_true", help="Include promoted imports.")
@@ -3527,6 +3541,18 @@ def main(argv=None) -> int:
                     kind=args.kind,
                     source=args.source,
                     metadata=args.metadata,
+                )
+            if args.import_command == "context":
+                if not args.text and args.from_file is None:
+                    parser.error("work import context requires text or --from-file")
+                return work_cmd.import_context(
+                    target=args.target,
+                    text=" ".join(args.text) if args.text else "",
+                    source=args.source,
+                    context_kind=args.context_kind,
+                    from_file=args.from_file,
+                    max_chars=args.max_chars,
+                    json_output=args.json,
                 )
             if args.import_command == "list":
                 return work_cmd.import_list(

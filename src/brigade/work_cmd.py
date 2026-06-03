@@ -19,11 +19,13 @@ from . import dogfood_cmd
 from . import toml_compat as tomllib
 from .install import apply_gitignore
 from .selection import Selection
+from .untrusted import scan_untrusted, wrap_untrusted
 
 OK = "ok"
 WARN = "warn"
 FAIL = "fail"
-IMPORT_KINDS = ("task", "finding", "decision", "preference", "incident", "link", "command")
+IMPORT_KINDS = ("task", "finding", "decision", "preference", "incident", "link", "command", "context")
+CONTEXT_KINDS = ("link", "transcript", "error", "issue", "note")
 TASK_TYPES = ("task", "feature", "bug", "docs", "security", "workflow", "research", "chore")
 TASK_PRIORITIES = ("low", "normal", "high", "urgent")
 TASK_TEMPLATES: dict[str, dict[str, tuple[str, ...]]] = {
@@ -6736,6 +6738,73 @@ def import_add(
     print(f"kind: {item['kind']}")
     print(f"source: {item['source']}")
     print(f"text: {item['text']}")
+    return 0
+
+
+def import_context(
+    *,
+    target,
+    text,
+    source="manual",
+    context_kind="note",
+    from_file=None,
+    max_chars=20000,
+    json_output=False,
+) -> int:
+    target = Path(target).expanduser().resolve()
+    if not target.is_dir():
+        print(f"error: --target is not a directory: {target}", file=sys.stderr)
+        return 2
+    if context_kind not in CONTEXT_KINDS:
+        print(
+            f"error: --kind must be one of: {', '.join(CONTEXT_KINDS)}",
+            file=sys.stderr,
+        )
+        return 2
+
+    if from_file is not None:
+        body_path = Path(from_file).expanduser()
+        try:
+            raw = body_path.read_text()
+        except OSError as exc:
+            print(f"error: cannot read --from-file: {exc}", file=sys.stderr)
+            return 2
+    else:
+        raw = text
+
+    body = (raw or "").strip()
+    if not body:
+        print("error: context body is required", file=sys.stderr)
+        return 2
+
+    sig = scan_untrusted(body)
+    framed = wrap_untrusted(body, source_kind="tool-output", max_chars=max_chars)
+    metadata = {
+        "context_kind": context_kind,
+        "injection_flagged": sig.flagged,
+        "injection_count": sig.count,
+        "needs_review": sig.flagged,
+        "source_chars": len(body),
+        "truncated": len(body) > max_chars,
+    }
+    source_text = source.strip() or "manual"
+
+    imports = _read_imports(target)
+    item = _make_import(framed, kind="context", source=source_text, metadata=metadata)
+    imports.append(item)
+    _write_imports(target, imports)
+
+    if json_output:
+        print(json.dumps(item, indent=2, sort_keys=True))
+        return 0
+
+    print(f"import: {item['id']}")
+    print(f"status: {item['status']}")
+    print(f"kind: {item['kind']}")
+    print(f"source: {item['source']}")
+    print(f"context_kind: {context_kind}")
+    if sig.flagged:
+        print(f"needs_review: injection signal ({sig.count})")
     return 0
 
 
