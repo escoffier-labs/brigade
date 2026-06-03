@@ -34,6 +34,8 @@ HANDOFF_ACTIONS = (*CARD_ACTIONS, NO_CARD_ACTION)
 CARD_TARGET_PATTERN = re.compile(r"^[A-Za-z0-9._-]+\.md$")
 DOCUMENT_TARGETS = ("TOOLS.md", "USER.md")
 DOCUMENT_TARGET_PREFIXES = ("rules/", ".learnings/")
+DEFAULT_DRAFT_INBOX = _WRITER_INBOX_MAP["codex"]
+DEFAULT_DRAFT_DOCUMENT = ".learnings/LEARNINGS.md"
 DEFAULT_WARNING_PATTERNS = (
     "Warnings:",
     "SKIP ",
@@ -1215,6 +1217,183 @@ def _find_draft(target: Path, draft_id_or_path: str, sources: Path | None = None
     if len(candidates) > 1:
         return None, f"handoff draft id is ambiguous: {draft_id_or_path}"
     return candidates[0], None
+
+
+def _slugify(value: str) -> str:
+    slug = re.sub(r"[^A-Za-z0-9]+", "-", value.strip().lower()).strip("-")
+    slug = re.sub(r"-{2,}", "-", slug)
+    return slug[:48].strip("-") or "handoff"
+
+
+def _read_suggested_content(content: str | None, content_file: Path | None) -> str:
+    if content and content_file:
+        raise ValueError("pass --content or --content-file, not both")
+    if content is not None:
+        return content.strip()
+    if content_file is None:
+        raise ValueError("--content or --content-file is required")
+    try:
+        return content_file.expanduser().read_text(errors="replace").strip()
+    except OSError as exc:
+        raise ValueError(f"cannot read --content-file: {exc}") from exc
+
+
+def _draft_inbox_path(target: Path, inbox: str) -> tuple[Path, str]:
+    inbox = inbox.strip()
+    if not inbox:
+        inbox = DEFAULT_DRAFT_INBOX
+    inbox = _WRITER_INBOX_MAP.get(inbox, inbox)
+    path = Path(inbox).expanduser()
+    if not path.is_absolute():
+        path = target / path
+    return path.resolve(), inbox
+
+
+def _render_bullets(items: list[str]) -> str:
+    return "\n".join(f"- {item.strip()}" for item in items if item.strip())
+
+
+def _render_handoff_draft(
+    *,
+    handoff_type: str,
+    title: str,
+    summary: str,
+    facts: list[str],
+    evidence: list[str],
+    action: str,
+    target_card: str | None,
+    target_document: str | None,
+    suggested_content: str,
+) -> str:
+    parts = [
+        "# Memory Handoff",
+        "",
+        "## Type",
+        "",
+        handoff_type.strip(),
+        "",
+        "## Title",
+        "",
+        title.strip(),
+        "",
+        "## Summary",
+        "",
+        summary.strip(),
+    ]
+    if any(item.strip() for item in facts):
+        parts.extend(["", "## Durable facts", "", _render_bullets(facts)])
+    if any(item.strip() for item in evidence):
+        parts.extend(["", "## Evidence", "", _render_bullets(evidence)])
+    parts.extend(["", "## Recommended memory action", "", action])
+    if action in CARD_ACTIONS:
+        parts.extend(["", "## Target card", "", str(target_card or "").strip()])
+        parts.extend(["", "## Suggested card content", "", suggested_content.strip()])
+    else:
+        parts.extend(["", "## Target document", "", str(target_document or "").strip()])
+        parts.extend(["", "## Suggested document content", "", suggested_content.strip()])
+    return "\n".join(parts).rstrip() + "\n"
+
+
+def draft(
+    *,
+    target: Path,
+    title: str,
+    summary: str,
+    content: str | None = None,
+    content_file: Path | None = None,
+    handoff_type: str = "workflow",
+    action: str = NO_CARD_ACTION,
+    target_card: str | None = None,
+    target_document: str | None = DEFAULT_DRAFT_DOCUMENT,
+    fact: list[str] | None = None,
+    evidence: list[str] | None = None,
+    inbox: str = DEFAULT_DRAFT_INBOX,
+    draft_id: str | None = None,
+    force: bool = False,
+    json_output: bool = False,
+) -> int:
+    target = target.expanduser().resolve()
+    if not target.is_dir():
+        print(f"error: --target is not a directory: {target}", file=sys.stderr)
+        return 2
+    action = action.strip().casefold()
+    if action not in HANDOFF_ACTIONS:
+        print("error: --action must be one of: " + ", ".join(HANDOFF_ACTIONS), file=sys.stderr)
+        return 2
+    if not title.strip():
+        print("error: --title is required", file=sys.stderr)
+        return 2
+    if not summary.strip():
+        print("error: --summary is required", file=sys.stderr)
+        return 2
+    if action in CARD_ACTIONS:
+        if not target_card:
+            print("error: --target-card is required for card handoffs", file=sys.stderr)
+            return 2
+        target_document = None
+    else:
+        if not target_document:
+            print("error: --target-document is required for no-card handoffs", file=sys.stderr)
+            return 2
+        target_card = None
+    try:
+        suggested_content = _read_suggested_content(content, content_file)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    if not suggested_content:
+        print("error: suggested content is empty", file=sys.stderr)
+        return 2
+    inbox_path, inbox_label = _draft_inbox_path(target, inbox)
+    created_at = _iso_from_timestamp()
+    timestamp = time.strftime("%Y%m%d-%H%M%S", time.gmtime())
+    safe_id = _slugify(draft_id or title)
+    filename = f"{timestamp}-{safe_id}.md"
+    path = inbox_path / filename
+    if path.exists() and not force:
+        print(f"error: handoff draft already exists: {path}", file=sys.stderr)
+        return 2
+    text = _render_handoff_draft(
+        handoff_type=handoff_type,
+        title=title,
+        summary=summary,
+        facts=fact or [],
+        evidence=evidence or [],
+        action=action,
+        target_card=target_card,
+        target_document=target_document,
+        suggested_content=suggested_content,
+    )
+    inbox_path.mkdir(parents=True, exist_ok=True)
+    path.write_text(text)
+    lint_result = lint_file(path)
+    payload = {
+        "target": str(target),
+        "created_at": created_at,
+        "path": str(path),
+        "id": path.stem,
+        "inbox": inbox_label,
+        "action": action,
+        "target_card": target_card,
+        "target_document": target_document,
+        "lint": lint_result.as_dict(),
+        "valid": lint_result.valid,
+    }
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0 if lint_result.valid else 1
+    print(f"handoff draft: {path}")
+    print(f"id: {payload['id']}")
+    print(f"inbox: {inbox_label}")
+    print(f"action: {action}")
+    if target_card:
+        print(f"target_card: {target_card}")
+    if target_document:
+        print(f"target_document: {target_document}")
+    print(f"lint: {'ok' if lint_result.valid else 'fail'}")
+    for error in lint_result.errors:
+        print(f"error: {error}")
+    return 0 if lint_result.valid else 1
 
 
 def list_drafts(*, target: Path, sources: Path | None = None, json_output: bool = False, limit: int = 20) -> int:

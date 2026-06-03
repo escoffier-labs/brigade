@@ -315,7 +315,39 @@ def test_phase_ledger_closeout_range_and_deferred_state(tmp_path, capsys):
     assert payload["status"] == "deferred"
     assert payload["phase_ids"] == ["phase-240", "phase-241"]
     assert payload["deferred_phase_ids"] == ["phase-240", "phase-241"]
+    assert set(payload["phase_fingerprints"]) == {"phase-240", "phase-241"}
     assert payload["unresolved_issue_count"] >= 0
+
+
+def test_phase_ledger_range_closeout_clears_stale_completed_reviews(tmp_path, capsys):
+    assert cli.main(["work", "phases", "plan", "--target", str(tmp_path), "--range", "242-243", "--title", "Range", "--goal", "audit", "--json"]) == 0
+    capsys.readouterr()
+    for phase_id in ("phase-242", "phase-243"):
+        assert phases_cmd.complete(
+            target=tmp_path,
+            phase_id=phase_id,
+            status="pushed",
+            summary="Done",
+            files_changed=["file.py"],
+            tests_run=["pytest"],
+            commit_hash="abc123",
+            push_ref="main",
+            json_output=True,
+        ) == 0
+        completed = json.loads(capsys.readouterr().out)
+        completed["completed_at"] = (datetime.now(timezone.utc) - timedelta(hours=48)).isoformat()
+        path = tmp_path / ".brigade" / "work" / "phases" / "records" / f"{phase_id}.json"
+        path.write_text(json.dumps(completed) + "\n")
+
+    assert phases_cmd.doctor(target=tmp_path, json_output=True) == 0
+    stale = json.loads(capsys.readouterr().out)
+    assert any(check["name"] == "phase_stale_unreviewed_completed" for check in stale["checks"])
+
+    assert cli.main(["work", "phases", "closeout", "242-243", "--target", str(tmp_path), "--status", "reviewed", "--reason", "Reviewed range.", "--json"]) == 0
+    capsys.readouterr()
+    assert phases_cmd.doctor(target=tmp_path, json_output=True) == 0
+    reviewed = json.loads(capsys.readouterr().out)
+    assert not any(check["name"] == "phase_stale_unreviewed_completed" for check in reviewed["checks"])
 
 
 def test_phase_ledger_compare_detects_local_evidence_drift(tmp_path, capsys, monkeypatch):

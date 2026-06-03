@@ -36,6 +36,7 @@ Thumbs.db
 .brigade/
 .claude/
 .codex/
+.opencode/
 .openclaw/
 .solo-mise/
 
@@ -70,10 +71,10 @@ Thumbs.db
 # Managed by `brigade init`. Edit between the markers to customize.
 # Re-running `brigade init` replaces only the content between markers.
 
-# claude: handoffs are session-local and may contain private context.
-.claude/memory-handoffs/*
-!.claude/memory-handoffs/TEMPLATE.md
-!.claude/memory-handoffs/.gitkeep
+# codex: handoffs are session-local and may contain private context.
+.codex/memory-handoffs/*
+!.codex/memory-handoffs/TEMPLATE.md
+!.codex/memory-handoffs/.gitkeep
 
 # Daily session logs are machine-local raw context.
 memory/20[0-9][0-9]-[0-1][0-9]-[0-3][0-9].md
@@ -82,10 +83,28 @@ memory/20[0-9][0-9]-[0-1][0-9]-[0-3][0-9].md
 memory/handoff-inbox/
 
 # brigade local state (logs, scrub cache, dogfood runs, work sessions).
+.brigade/backups/
+.brigade/backups.toml
 .brigade/center/
+.brigade/context/
 .brigade/dogfood.toml
+.brigade/handoffs/
+.brigade/handoff-sources.json
+.brigade/learn/
+.brigade/projects.toml
+.brigade/release/
+.brigade/repos.toml
+.brigade/chat-surfaces.toml
+.brigade/memory-care.toml
+.brigade/scanners.toml
+.brigade/security.toml
+.brigade/tools.toml
 .brigade/logs/
 .brigade/runs/
 .brigade/scrub-cache/
+.brigade/scanners/
+.brigade/security/
+.brigade/tools/
+.brigade/chat-memory-sweeps/
 .brigade/work/
 # <<< brigade gitignore block <<<

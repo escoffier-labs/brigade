@@ -146,6 +146,31 @@ def _agentpantry_doctor(ctx: DoctorContext) -> List[CheckResult]:
     return [(status, name, detail)]
 
 
+def _agent_notify_doctor(ctx: DoctorContext) -> List[CheckResult]:
+    from . import notifications_cmd
+
+    name = "agent-notify (operator notifications)"
+    health = notifications_cmd.health(ctx.target)
+    channels = health.get("selected_channels") if isinstance(health.get("selected_channels"), list) else []
+    profile = health.get("profile") or "none"
+    if not health.get("configured"):
+        top = health.get("top_issue") if isinstance(health.get("top_issue"), dict) else {}
+        detail = top.get("detail") or "installed but unwired (no configured notification channels)"
+        return [(WARN, name, str(detail))]
+    status = OK if health.get("status") == "ok" else WARN
+    return [(status, name, f"profile={profile}, channels={len(channels)}, sends=false")]
+
+
+def _agent_notify_wire(ctx: DoctorContext) -> List[CheckResult]:
+    return [
+        (
+            MANUAL,
+            "agent-notify: wire",
+            "write ~/.config/agent-notify/config.toml with env-var names, set channel env vars, then `brigade notifications setup plan`",
+        )
+    ]
+
+
 def _tokenjuice_wire(ctx: DoctorContext) -> List[CheckResult]:
     # Wiring installs a host hook; which host depends on the workspace's harnesses.
     hosts = [h for h in ctx.harnesses if h in ("claude", "codex", "cursor")]
@@ -191,6 +216,12 @@ _TOOLS: Tuple[ManagedTool, ...] = (
         summary="browser session auth sync (source -> sink)",
         install_args=["go", "install", "github.com/escoffier-labs/agentpantry/cmd/agentpantry@latest"],
         wire=_noop_wire, doctor=_agentpantry_doctor,
+    ),
+    ManagedTool(
+        name="agent-notify", station="notifications", command="agent-notify",
+        summary="private operator notifications for agent events",
+        install_args=["go", "install", "github.com/solomonneas/agent-notify/cmd/agent-notify@latest"],
+        wire=_agent_notify_wire, doctor=_agent_notify_doctor,
     ),
 )
 

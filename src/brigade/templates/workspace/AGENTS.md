@@ -122,6 +122,31 @@ If the harness sends a heartbeat poll, do not just reply `HEARTBEAT_OK` every ti
 - Never mention AI tools, model vendors, or bot identities in commit messages.
 - Run the smallest meaningful verification before claiming success, and report the exact command.
 
+## Brigade Repo Loop
+
+When a repo is wired for Brigade internal dogfood, use the explicit local loop before substantial changes:
+
+```bash
+brigade operator guide
+brigade operator doctor --profile internal-dogfood --target .
+brigade operator status --profile internal-dogfood --target .
+brigade operator sync-tools --target .
+brigade daily status --target .
+brigade daily plan --target .
+```
+
+Use `brigade daily run --target .` only when the selected action is a safe bounded adapter. Otherwise do the selected setup or repair manually, then rerun `brigade daily status --target .` to confirm the signal moved.
+
+Onboard a repo with:
+
+```bash
+brigade operator init --profile internal-dogfood --target .
+brigade operator sync-tools --target .
+brigade operator doctor --profile internal-dogfood --target .
+```
+
+Keep `.brigade/` local and gitignored. Keep tracked cross-harness tool sources under `tools/`; `brigade operator sync-tools --target .` writes local ignored projections for installed harnesses. If the session changes Brigade usage, setup, readiness waivers, or repo workflow, write a Memory Handoff with `brigade handoff draft --title "..." --summary "..." --content "..."` and include the concrete commands and remaining manual steps. Brigade does not run automatically, start daemons, install hooks, send notifications, publish, push, tag, or mutate remotes.
+
 ## Goal Workflow
 
 When the user starts a `/goal` phase and asks for implementation, carry it through end to end when feasible: implement, verify, write any required Memory Handoff, commit, and push if the user has requested per-phase commits.

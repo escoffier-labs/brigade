@@ -46,8 +46,15 @@ PANTRY = Station(
     doctor=_doctor.pantry_station_checks,
     tools=("agentpantry",),
 )
+NOTIFICATIONS = Station(
+    name="notifications",
+    summary="operator notification wiring",
+    aliases=("notify",),
+    doctor=_doctor.notifications_station_checks,
+    tools=("agent-notify",),
+)
 
-_BUILTIN: Tuple[Station, ...] = (CORE, MEMORY, GUARD, TOKENS, SECURITY, PANTRY)
+_BUILTIN: Tuple[Station, ...] = (CORE, MEMORY, GUARD, TOKENS, SECURITY, PANTRY, NOTIFICATIONS)
 
 
 def all_stations() -> Tuple[Station, ...]:

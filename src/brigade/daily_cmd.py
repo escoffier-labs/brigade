@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from . import center_cmd, context_cmd, handoff_cmd, memory_cmd, phases_cmd, security_cmd, toml_compat as tomllib, tools_cmd, work_cmd
+from . import center_cmd, context_cmd, handoff_cmd, memory_cmd, notifications_cmd, phases_cmd, security_cmd, toml_compat as tomllib, tools_cmd, work_cmd
 
 SCHEMA_VERSION = 1
 RUN_STATUSES = {"reviewed", "deferred", "blocked", "archived"}
@@ -584,21 +584,53 @@ def _health_issue_candidates(target: Path) -> list[dict[str, Any]]:
     return candidates
 
 
+def _notification_candidates(target: Path) -> list[dict[str, Any]]:
+    health = notifications_cmd.health(target)
+    if int(health.get("issue_count") or 0) <= 0:
+        return []
+    top = health.get("top_issue") if isinstance(health.get("top_issue"), dict) else {}
+    command = str(health.get("suggested_next_command") or "brigade notifications setup plan")
+    if command.startswith("agent-notify "):
+        command = "brigade notifications setup plan"
+    return [
+        _candidate(
+            target=target,
+            action_type="review-notification-health",
+            source_subsystem="notifications",
+            source_local_id=str(top.get("name") or "agent-notify"),
+            safe_summary=str(top.get("detail") or "operator notifications need review"),
+            suggested_next_command=command,
+            score=40,
+            ranking_reasons=["operator notification health issue", "review setup before enabling outbound messages"],
+            approval_required=False,
+            risk_level="low",
+            evidence_refs=["~/.config/agent-notify/config.toml", "agent-notify environment variable names"],
+            source_fingerprint=_fingerprint({"subsystem": "notifications", "status": health.get("status"), "issue": top}),
+            metadata={"notification_health": health},
+        )
+    ]
+
+
 def _report_candidate(target: Path) -> list[dict[str, Any]]:
     health = center_cmd.report_health(target)
     top = health.get("top_issue") if isinstance(health.get("top_issue"), dict) else None
     if not top:
         return []
+    suggested_command = str(top.get("suggested_next_command") or "brigade center report build")
+    needs_build = suggested_command == "brigade center report build"
     return [
         _candidate(
             target=target,
-            action_type="build-operator-report",
+            action_type="build-operator-report" if needs_build else "review-operator-report",
             source_subsystem="center-report",
             source_local_id=str(top.get("name") or "report"),
             safe_summary=str(top.get("detail") or "operator report needs refresh"),
-            suggested_next_command="brigade center report build",
+            suggested_next_command=suggested_command,
             score=120,
-            ranking_reasons=["operator report health issue", "local report build is safe"],
+            ranking_reasons=[
+                "operator report health issue",
+                "local report build is safe" if needs_build else "review current report before more report builds",
+            ],
             approval_required=False,
             risk_level="low",
             evidence_refs=[".brigade/center/reports"],
@@ -642,6 +674,8 @@ def _phase_ledger_action_candidates(target: Path) -> list[dict[str, Any]]:
 
 def _phase_ledger_issue_candidates(target: Path) -> list[dict[str, Any]]:
     health = phases_cmd.health(target)
+    if _phase_ledger_issues_captured_by_report(health):
+        return []
     top = health.get("top_issue") if isinstance(health.get("top_issue"), dict) else None
     if not top:
         return []
@@ -668,6 +702,20 @@ def _phase_ledger_issue_candidates(target: Path) -> list[dict[str, Any]]:
             metadata={"issue_type": issue_type, "phase_id": top.get("phase_id")},
         )
     ]
+
+
+def _phase_ledger_issues_captured_by_report(phase_health: dict[str, Any]) -> bool:
+    issue_count = int(phase_health.get("issue_count") or 0)
+    if issue_count <= 0:
+        return False
+    latest_report = phase_health.get("latest_report") if isinstance(phase_health.get("latest_report"), dict) else {}
+    latest_compare = phase_health.get("latest_report_compare") if isinstance(phase_health.get("latest_report_compare"), dict) else {}
+    report_issue_count = latest_report.get("issue_count")
+    compare_issue_count = latest_compare.get("issue_count")
+    try:
+        return int(report_issue_count) == issue_count and int(compare_issue_count) == 0
+    except (TypeError, ValueError):
+        return False
 
 
 def _phase_session_candidates(target: Path) -> list[dict[str, Any]]:
@@ -769,6 +817,7 @@ def _all_candidates(target: Path) -> list[dict[str, Any]]:
         *_phase_ledger_action_candidates(target),
         *_phase_ledger_issue_candidates(target),
         *_health_issue_candidates(target),
+        *_notification_candidates(target),
         *_report_candidate(target),
     ]
     _apply_preferred_mode(candidates, str(config.get("preferred_mode") or "task-first"))
@@ -817,7 +866,9 @@ def _adapter_for(action: dict[str, Any] | None) -> str | None:
         "closeout-phase-session": "brigade work phases session closeout",
         "review-center-action": "review-only",
         "review-phase-action": "review-only",
+        "review-operator-report": "review-only",
         "review-health-issue": "review-only",
+        "review-notification-health": "review-only",
     }.get(str(action.get("action_type")), "unsupported")
 
 
@@ -1125,6 +1176,7 @@ def status_payload(target: Path) -> dict[str, Any]:
     handoffs = center.get("handoff_drafts") if isinstance(center.get("handoff_drafts"), dict) else {}
     memory = center.get("memory_care") if isinstance(center.get("memory_care"), dict) else {}
     security = center.get("security") if isinstance(center.get("security"), dict) else {}
+    notifications = center.get("notifications") if isinstance(center.get("notifications"), dict) else {}
     tools = center.get("tool_catalog") if isinstance(center.get("tool_catalog"), dict) else {}
     latest_report = center_cmd.latest_report(target)
     daily_health = health(target)
@@ -1151,6 +1203,8 @@ def status_payload(target: Path) -> dict[str, Any]:
         "pending_handoff_draft_count": (handoffs.get("counts") or {}).get("pending", 0) if isinstance(handoffs.get("counts"), dict) else int(handoffs.get("draft_count") or 0),
         "memory_care_issue_count": int(memory.get("issue_count") or 0),
         "security_issue_count": int(security.get("issue_count") or security.get("finding_count") or 0),
+        "notification_issue_count": int(notifications.get("issue_count") or 0),
+        "notifications": notifications,
         "tool_approval_count": int(((tools.get("call_queue") or {}) if isinstance(tools.get("call_queue"), dict) else {}).get("pending_count") or 0),
         "tool_checkpoint_count": int(((tools.get("checkpoints") or {}) if isinstance(tools.get("checkpoints"), dict) else {}).get("open_count") or 0),
         "latest_release_readiness": center.get("release_readiness"),
@@ -1174,6 +1228,9 @@ def status(*, target: Path, json_output: bool = False) -> int:
     print(f"pending_imports: {payload['pending_import_count']}")
     print(f"center_reviews: {payload['center_review_count']}")
     print(f"open_actions: {payload['open_daily_action_count']}")
+    notifications = payload.get("notifications") if isinstance(payload.get("notifications"), dict) else {}
+    if notifications:
+        print(f"notifications: {notifications.get('status')} configured={notifications.get('configured')}")
     phase_ledger = payload.get("phase_ledger") if isinstance(payload.get("phase_ledger"), dict) else {}
     if phase_ledger:
         print(f"phase_records: {phase_ledger.get('record_count', 0)}")
@@ -1960,7 +2017,7 @@ def health(target: Path) -> dict[str, Any]:
         checks.append({"status": "warn", "name": "daily_held_approval", "detail": str(held_approvals[0].get("approval_id"))})
     if rejected_approvals:
         checks.append({"status": "warn", "name": "daily_rejected_approval", "detail": str(rejected_approvals[0].get("approval_id"))})
-    if phase_health.get("issue_count"):
+    if phase_health.get("issue_count") and not _phase_ledger_issues_captured_by_report(phase_health):
         top_phase_issue = phase_health.get("top_issue") if isinstance(phase_health.get("top_issue"), dict) else {}
         checks.append({"status": "warn", "name": "phase_ledger_issue", "detail": top_phase_issue.get("detail") or "phase execution ledger needs review"})
     if isinstance(latest_phase_session, dict) and latest_phase_session.get("status") not in {"closed", "archived"}:

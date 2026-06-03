@@ -5140,7 +5140,7 @@ def _suggested_command(active: dict[str, Any] | None, next_text: object, source:
 
 
 def _brief_payload(target: Path, *, limit: int = 3) -> dict[str, Any]:
-    from . import center_cmd, chat_cmd, context_cmd, daily_cmd, handoff_cmd, learn_cmd, memory_cmd, pantry_cmd, phases_cmd, projects_cmd, repos_cmd, roadmap_cmd, security_cmd, tools_cmd
+    from . import center_cmd, chat_cmd, context_cmd, daily_cmd, handoff_cmd, learn_cmd, memory_cmd, notifications_cmd, pantry_cmd, phases_cmd, projects_cmd, repos_cmd, roadmap_cmd, security_cmd, tools_cmd
 
     target = target.expanduser().resolve()
     active = _active_session_info(target)
@@ -5168,6 +5168,7 @@ def _brief_payload(target: Path, *, limit: int = 3) -> dict[str, Any]:
     roadmap_health = roadmap_cmd.health(target)
     repo_health = repos_cmd.health(target)
     pantry_health = pantry_cmd.status_payload(target)
+    notification_health = notifications_cmd.health(target)
     context_health = context_cmd.health(target)
     projects_health = projects_cmd.health(target)
     learning_health = learn_cmd.health(target)
@@ -5284,6 +5285,7 @@ def _brief_payload(target: Path, *, limit: int = 3) -> dict[str, Any]:
             "release_train": repo_health.get("release_train"),
         },
         "pantry": pantry_health,
+        "notifications": notification_health,
         "context_packs": {
             "pack_count": context_health["pack_count"],
             "issue_count": context_health["issue_count"],
@@ -5797,6 +5799,12 @@ def brief(*, target: Path, limit: int = 3, json_output: bool = False) -> int:
     pantry = payload.get("pantry") if isinstance(payload.get("pantry"), dict) else {}
     if pantry:
         print(f"pantry: {pantry.get('summary')}")
+    notifications = payload.get("notifications") if isinstance(payload.get("notifications"), dict) else {}
+    if notifications:
+        print(f"notifications: {notifications.get('status')} configured={notifications.get('configured')}")
+        top_notification = notifications.get("top_issue") if isinstance(notifications.get("top_issue"), dict) else None
+        if top_notification:
+            print(f"notifications_top_issue: {top_notification.get('name')} {_short(str(top_notification.get('detail', '')))}")
 
     print(f"next_source: {payload['next_source']}")
     if payload.get("task_id"):

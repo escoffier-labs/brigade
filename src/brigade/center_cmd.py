@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from . import chat_cmd, context_cmd, handoff_cmd, learn_cmd, memory_cmd, pantry_cmd, phases_cmd, projects_cmd, release_cmd, repos_cmd, roadmap_cmd, security_cmd, tools_cmd, work_cmd
+from . import chat_cmd, context_cmd, handoff_cmd, learn_cmd, memory_cmd, notifications_cmd, pantry_cmd, phases_cmd, projects_cmd, release_cmd, repos_cmd, roadmap_cmd, security_cmd, tools_cmd, work_cmd
 
 SCHEMA_VERSION = 1
 SCHEMA_MANIFEST_VERSION = 1
@@ -924,6 +924,7 @@ def status_payload(target: Path) -> dict[str, Any]:
         "release_candidate": release_cmd._latest_candidate(target),
         "repo_fleet": repos_cmd.health(target),
         "pantry": pantry_cmd.status_payload(target),
+        "notifications": notifications_cmd.health(target),
         "roadmap": roadmap_cmd.health(target),
         "projects": projects_cmd.health(target),
         "security": security_cmd.health(target),
@@ -950,6 +951,9 @@ def status(*, target: Path, json_output: bool = False) -> int:
     pantry = payload.get("pantry") if isinstance(payload.get("pantry"), dict) else {}
     if pantry:
         print(f"pantry: {pantry.get('summary')}")
+    notifications = payload.get("notifications") if isinstance(payload.get("notifications"), dict) else {}
+    if notifications:
+        print(f"notifications: {notifications.get('status')} configured={notifications.get('configured')}")
     phase_ledger = payload.get("phase_ledger") if isinstance(payload.get("phase_ledger"), dict) else {}
     if phase_ledger:
         print(f"phase_records: {phase_ledger.get('record_count', 0)}")

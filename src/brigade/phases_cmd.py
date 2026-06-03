@@ -3323,8 +3323,18 @@ def _same_commit(expected: str, current: str) -> bool:
 
 def _phase_has_current_closeout(target: Path, phase_id: str, record: dict[str, Any]) -> bool:
     wanted = _source_fingerprint([record])
+    records_by_id = {str(item.get("phase_id")): item for item in _records(target)}
     for item in _read_closeouts(target):
-        if phase_id in (item.get("phase_ids") or []) and item.get("source_fingerprint") == wanted and item.get("status") in PHASE_CLOSEOUT_STATUSES:
+        if phase_id not in (item.get("phase_ids") or []) or item.get("status") not in PHASE_CLOSEOUT_STATUSES:
+            continue
+        if item.get("source_fingerprint") == wanted:
+            return True
+        phase_fingerprints = item.get("phase_fingerprints") if isinstance(item.get("phase_fingerprints"), dict) else {}
+        if phase_fingerprints.get(phase_id) == wanted:
+            return True
+        closeout_phase_ids = [str(value) for value in item.get("phase_ids") or []]
+        closeout_records = [records_by_id[value] for value in closeout_phase_ids if value in records_by_id]
+        if closeout_records and item.get("source_fingerprint") == _source_fingerprint(closeout_records):
             return True
     return False
 
@@ -3708,6 +3718,7 @@ def closeout(*, target: Path, selector: str, status: str = "reviewed", reason: s
         "unresolved_issue_count": len(selected_issues),
         "unresolved_issues": selected_issues,
         "deferred_phase_ids": deferred_phase_ids,
+        "phase_fingerprints": {str(record.get("phase_id")): _source_fingerprint([record]) for record in records if record.get("phase_id")},
         "source_fingerprint": fingerprint,
         "suggested_next_command": "brigade work phases doctor",
     }

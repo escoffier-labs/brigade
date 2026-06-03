@@ -81,6 +81,12 @@ def pantry_station_checks(ctx: DoctorContext) -> List[CheckResult]:
     return []
 
 
+def notifications_station_checks(ctx: DoctorContext) -> List[CheckResult]:
+    # The agent-notify managed tool carries this station's signal; Brigade
+    # does not send notifications or write hook config from doctor.
+    return []
+
+
 def security_station_checks(ctx: DoctorContext) -> List[CheckResult]:
     from . import dogfood_cmd, security_cmd
 

@@ -213,6 +213,22 @@ def _build_parser() -> argparse.ArgumentParser:
     p_pantry_service_plan.add_argument("--write", action="store_true", help="Write a local reviewed plan under .brigade/pantry/plans/.")
     p_pantry_service_plan.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
 
+    # notifications
+    p_notifications = sub.add_parser("notifications", help="Inspect and plan operator notification wiring.")
+    notifications_sub = p_notifications.add_subparsers(dest="notifications_command", metavar="<notifications-command>")
+    notifications_sub.required = True
+    p_notifications_status = notifications_sub.add_parser("status", help="Show agent-notify status.")
+    p_notifications_status.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_notifications_status.add_argument("--profile", default=None, help="agent-notify profile to inspect.")
+    p_notifications_status.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_notifications_setup = notifications_sub.add_parser("setup", help="Plan notification setup without applying it.")
+    notifications_setup_sub = p_notifications_setup.add_subparsers(dest="notifications_setup_command", metavar="<setup-command>")
+    notifications_setup_sub.required = True
+    p_notifications_setup_plan = notifications_setup_sub.add_parser("plan", help="Print reviewed hook snippets and setup commands.")
+    p_notifications_setup_plan.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_notifications_setup_plan.add_argument("--profile", default="operator", help="agent-notify profile to use in snippets.")
+    p_notifications_setup_plan.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+
     # budgets
     p_budgets = sub.add_parser("budgets", help="Inspect Brigade's canonical operator budgets.")
     budgets_sub = p_budgets.add_subparsers(dest="budgets_command", metavar="<budgets-command>")
@@ -331,14 +347,33 @@ def _build_parser() -> argparse.ArgumentParser:
     p_operator = sub.add_parser("operator", help="Plan and initialize safe local operator config.")
     operator_sub = p_operator.add_subparsers(dest="operator_command", metavar="<operator-command>")
     operator_sub.required = True
+    p_operator_guide = operator_sub.add_parser("guide", help="Print the repo-local Brigade operator workflow.")
+    p_operator_guide.add_argument("--profile", choices=["local-operator", "internal-dogfood"], default="internal-dogfood", help="Operator profile to describe.")
+    p_operator_guide.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_operator_plan = operator_sub.add_parser("plan", help="Plan local operator config bootstrap.")
     p_operator_plan.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_operator_plan.add_argument("--profile", choices=["local-operator", "internal-dogfood"], default="local-operator", help="Bootstrap profile to inspect.")
     p_operator_plan.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_operator_init = operator_sub.add_parser("init", help="Write missing gitignored local operator config defaults.")
     p_operator_init.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
+    p_operator_init.add_argument("--profile", choices=["local-operator", "internal-dogfood"], default="local-operator", help="Bootstrap profile to apply.")
     p_operator_init.add_argument("--force", action="store_true", help="Overwrite existing local config files.")
     p_operator_init.add_argument("--dry-run", action="store_true", help="Show planned writes without changing files.")
+    p_operator_init.add_argument("--waive-public-release", action="store_true", help="Write a local waiver for public release readiness when using an internal profile.")
     p_operator_init.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_operator_status = operator_sub.add_parser("status", help="Show repo and machine wiring for local operator use.")
+    p_operator_status.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_operator_status.add_argument("--profile", choices=["local-operator", "internal-dogfood"], default="internal-dogfood", help="Operator profile to inspect.")
+    p_operator_status.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_operator_doctor = operator_sub.add_parser("doctor", help="Print a compact local production readiness verdict.")
+    p_operator_doctor.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_operator_doctor.add_argument("--profile", choices=["local-operator", "internal-dogfood"], default="internal-dogfood", help="Operator profile to inspect.")
+    p_operator_doctor.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_operator_sync_tools = operator_sub.add_parser("sync-tools", help="Project tracked portable tool sources into local harness folders.")
+    p_operator_sync_tools.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
+    p_operator_sync_tools.add_argument("--dry-run", action="store_true", help="Plan projection writes without changing files.")
+    p_operator_sync_tools.add_argument("--force", action="store_true", help="Overwrite unmanaged or locally edited projection files.")
+    p_operator_sync_tools.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
 
     # runbook
     p_runbook = sub.add_parser("runbook", help="Plan, run, resume, and close out explicit local runbooks.")
@@ -387,7 +422,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p_dogfood.add_argument(
         "--native-read-only-sandbox",
         action="store_true",
-        help="Use Codex's native read-only sandbox instead of dogfood's default trusted-workspace danger-full-access setting.",
+        help="Use Codex's native read-only sandbox instead of the dogfood trusted-workspace default.",
     )
     p_dogfood.add_argument("--timeout-seconds", type=float, default=DEFAULT_TIMEOUT_SECONDS, help="Per-agent timeout.")
 
@@ -817,6 +852,22 @@ def _build_parser() -> argparse.ArgumentParser:
     p_handoff_lint.add_argument("paths", nargs="*", type=Path, help="Handoff files to validate. Defaults to pending inbox files.")
     p_handoff_lint.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
     p_handoff_lint.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_handoff_draft = handoff_sub.add_parser("draft", help="Write a linted Memory Handoff draft in Brigade style.")
+    p_handoff_draft.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
+    p_handoff_draft.add_argument("--inbox", default="codex", help="Writer inbox path or alias: claude, codex, opencode.")
+    p_handoff_draft.add_argument("--type", default="workflow", help="Handoff type, such as workflow, decision, setup, or bugfix.")
+    p_handoff_draft.add_argument("--title", required=True, help="Short handoff title.")
+    p_handoff_draft.add_argument("--summary", required=True, help="Short handoff summary.")
+    p_handoff_draft.add_argument("--fact", action="append", default=[], help="Durable fact bullet. May be repeated.")
+    p_handoff_draft.add_argument("--evidence", action="append", default=[], help="Evidence bullet. May be repeated.")
+    p_handoff_draft.add_argument("--action", choices=["create-card", "update-card", "no-card"], default="no-card", help="Recommended memory action.")
+    p_handoff_draft.add_argument("--target-card", default=None, help="Target card filename for card handoffs.")
+    p_handoff_draft.add_argument("--target-document", default=".learnings/LEARNINGS.md", help="Target document for no-card handoffs.")
+    p_handoff_draft.add_argument("--content", default=None, help="Suggested card or document content.")
+    p_handoff_draft.add_argument("--content-file", type=Path, default=None, help="Read suggested content from a file.")
+    p_handoff_draft.add_argument("--id", dest="draft_id", default=None, help="Stable id slug to use in the filename.")
+    p_handoff_draft.add_argument("--force", action="store_true", help="Overwrite an existing generated draft path.")
+    p_handoff_draft.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_handoff_list = handoff_sub.add_parser("list", help="List local Memory Handoff drafts.")
     p_handoff_list.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
     p_handoff_list.add_argument("--sources", type=Path, default=None, help="Override .brigade/handoff-sources.json.")
@@ -2652,6 +2703,18 @@ def main(argv=None) -> int:
             return 2
         parser.error(f"unknown pantry command: {args.pantry_command}")
         return 2
+    if cmd == "notifications":
+        from . import notifications_cmd
+
+        if args.notifications_command == "status":
+            return notifications_cmd.status(target=args.target, profile=args.profile, json_output=args.json)
+        if args.notifications_command == "setup":
+            if args.notifications_setup_command == "plan":
+                return notifications_cmd.setup_plan(target=args.target, profile=args.profile, json_output=args.json)
+            parser.error(f"unknown notifications setup command: {args.notifications_setup_command}")
+            return 2
+        parser.error(f"unknown notifications command: {args.notifications_command}")
+        return 2
     if cmd == "budgets":
         from . import budgets_cmd
 
@@ -2744,10 +2807,18 @@ def main(argv=None) -> int:
     if cmd == "operator":
         from . import operator_cmd
 
+        if args.operator_command == "guide":
+            return operator_cmd.guide(profile=args.profile, json_output=args.json)
         if args.operator_command == "plan":
-            return operator_cmd.plan(target=args.target, json_output=args.json)
+            return operator_cmd.plan(target=args.target, profile=args.profile, json_output=args.json)
         if args.operator_command == "init":
-            return operator_cmd.init(target=args.target, force=args.force, dry_run=args.dry_run, json_output=args.json)
+            return operator_cmd.init(target=args.target, profile=args.profile, force=args.force, dry_run=args.dry_run, waive_public_release=args.waive_public_release, json_output=args.json)
+        if args.operator_command == "status":
+            return operator_cmd.status(target=args.target, profile=args.profile, json_output=args.json)
+        if args.operator_command == "doctor":
+            return operator_cmd.doctor(target=args.target, profile=args.profile, json_output=args.json)
+        if args.operator_command == "sync-tools":
+            return operator_cmd.sync_tools(target=args.target, dry_run=args.dry_run, force=args.force, json_output=args.json)
         parser.error(f"unknown operator command: {args.operator_command}")
         return 2
     if cmd == "runbook":
@@ -3132,6 +3203,24 @@ def main(argv=None) -> int:
             return handoff_cmd.doctor(target=args.target, sources=args.sources, json_output=args.json)
         if args.handoff_command == "lint":
             return handoff_cmd.lint(target=args.target, paths=args.paths, json_output=args.json)
+        if args.handoff_command == "draft":
+            return handoff_cmd.draft(
+                target=args.target,
+                title=args.title,
+                summary=args.summary,
+                content=args.content,
+                content_file=args.content_file,
+                handoff_type=args.type,
+                action=args.action,
+                target_card=args.target_card,
+                target_document=args.target_document,
+                fact=args.fact,
+                evidence=args.evidence,
+                inbox=args.inbox,
+                draft_id=args.draft_id,
+                force=args.force,
+                json_output=args.json,
+            )
         if args.handoff_command == "list":
             return handoff_cmd.list_drafts(
                 target=args.target,

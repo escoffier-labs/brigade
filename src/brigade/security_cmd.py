@@ -111,10 +111,11 @@ ENV_ASSIGNMENT_RE = re.compile(r"(?i)\b[A-Z0-9_]*(TOKEN|SECRET|PASSWORD|API_KEY)
 REMOTE_SHELL_RE = re.compile(r"\b(curl|wget)\b[^\n|;]*(\||;)\s*(sh|bash)\b")
 DESTRUCTIVE_RE = re.compile(r"\b(rm\s+-rf|git\s+reset\s+--hard|git\s+clean\s+-fdx|chmod\s+777)\b")
 UNPINNED_NPX_RE = re.compile(r"\bnpx\s+(?:-y\s+)?([a-zA-Z0-9_.-]+)(?:\s|$)")
-ENV_DUMP_RE = re.compile(r"\b(env|printenv|set)\b.*(>\s*\S+|\|\s*(curl|nc|netcat|tee))")
+ENV_DUMP_RE = re.compile(r"(?:^|[;&|]\s*)(env|printenv|set)(?:\s|$)[^\n]*(>\s*\S+|\|\s*(curl|nc|netcat|tee)\b)")
 UNPINNED_ACTION_RE = re.compile(r"uses:\s*['\"]?([^@\s'\":]+/[^@\s'\"]+|docker://[^@\s'\"]+)['\"]?\s*$")
 PINNED_ACTION_RE = re.compile(r"uses:\s*['\"]?([^@\s'\"]+)@([^@\s'\"]+)")
 PYTHON_URL_DEP_RE = re.compile(r"(?i)(https?://|git\+https?://|git\+ssh://)")
+TOML_TABLE_RE = re.compile(r"^\[+([A-Za-z0-9_.-]+)\]+$")
 HTTP_MCP_RE = re.compile(r'"url"\s*:\s*"https?://')
 AUTO_APPROVE_RE = re.compile(r"(?i)(auto[_-]?approve|always[_-]?allow|allow[_-]?all)")
 MCP_SENSITIVE_ARG_RE = re.compile(
@@ -1307,7 +1308,7 @@ def _is_placeholder(value: str) -> bool:
 
 
 def _redact_secret_evidence(line: str) -> str:
-    if PRIVATE_KEY_RE.search(line):
+    if _contains_private_key_material(line):
         return PRIVATE_KEY_RE.sub("-----BEGIN REDACTED PRIVATE KEY-----", line)
 
     def redact_secret(match: re.Match[str]) -> str:
@@ -1323,6 +1324,10 @@ def _redact_secret_evidence(line: str) -> str:
         return f"{key}=[REDACTED]"
 
     return ENV_ASSIGNMENT_RE.sub(redact_env, redacted)
+
+
+def _contains_private_key_material(line: str) -> bool:
+    return bool(PRIVATE_KEY_RE.search(line) and "REDACTED PRIVATE KEY" not in line)
 
 
 def _template_relpath(target: Path, path: Path) -> str:
@@ -1373,7 +1378,7 @@ def template_privacy_payload(target: Path) -> dict[str, Any]:
             for line_number, line in enumerate(text.splitlines(), start=1):
                 if TEMPLATE_ALLOWLIST_RE.search(line):
                     continue
-                if SECRET_VALUE_RE.search(line) or ENV_ASSIGNMENT_RE.search(line) or PRIVATE_KEY_RE.search(line):
+                if SECRET_VALUE_RE.search(line) or ENV_ASSIGNMENT_RE.search(line) or _contains_private_key_material(line):
                     findings.append(_template_audit_finding(target=target, path=path, line_number=line_number, category="secret", title="Template contains secret-looking value", line=line))
                 elif TEMPLATE_PRIVATE_PATH_RE.search(line):
                     findings.append(_template_audit_finding(target=target, path=path, line_number=line_number, category="private-path", title="Template contains host-private path", line=line))
@@ -1724,11 +1729,16 @@ def _scan_github_actions(findings: list[dict[str, Any]], *, target: Path, path: 
 def _scan_python_project(findings: list[dict[str, Any]], *, target: Path, path: Path, text: str) -> None:
     if path.name not in {"pyproject.toml", "setup.cfg", "requirements.txt"}:
         return
+    current_section = ""
     for line_number, line in enumerate(text.splitlines(), start=1):
         stripped = line.strip()
         if not stripped or stripped.startswith("#"):
             continue
-        if PYTHON_URL_DEP_RE.search(stripped):
+        table_match = TOML_TABLE_RE.match(stripped) if path.name == "pyproject.toml" else None
+        if table_match:
+            current_section = table_match.group(1).lower()
+            continue
+        if PYTHON_URL_DEP_RE.search(stripped) and _python_url_dependency_candidate(path.name, current_section, stripped):
             _finding(
                 findings,
                 target=target,
@@ -1752,6 +1762,18 @@ def _scan_python_project(findings: list[dict[str, Any]], *, target: Path, path: 
                 evidence=stripped,
                 suggestion="Avoid legacy install-time dependency hooks and move dependencies into static project metadata.",
             )
+
+
+def _python_url_dependency_candidate(file_name: str, section: str, stripped: str) -> bool:
+    if file_name in {"requirements.txt", "setup.cfg"}:
+        return True
+    if file_name != "pyproject.toml":
+        return False
+    if section.endswith(".urls") or section == "project.urls":
+        return False
+    if "dependencies" in section or section in {"build-system", "project"}:
+        return True
+    return stripped.startswith(("dependencies", "requires"))
 
 
 def _iter_scan_files(target: Path) -> list[Path]:
@@ -1879,7 +1901,7 @@ def _scan_line(findings: list[dict[str, Any]], *, target: Path, path: Path, line
             evidence=_redact_secret_evidence(line),
             suggestion="Move the value into local environment or secret storage and commit only a placeholder.",
         )
-    if PRIVATE_KEY_RE.search(line) or (ENV_ASSIGNMENT_RE.search(line) and not _is_placeholder(line)):
+    if _contains_private_key_material(line) or (ENV_ASSIGNMENT_RE.search(line) and not _is_placeholder(line)):
         _finding(
             findings,
             target=target,

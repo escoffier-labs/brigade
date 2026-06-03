@@ -127,6 +127,7 @@ Brigade has grown from a bootstrap kit into a local control plane for agent work
 - Portable tool catalog: tool discovery, contracts, call planning, approval queues, explicit script and local MCP execution, run receipts, replay candidates, checkpoints, runtimes, host-local policy, parity, packs, sync, and projection health.
 - Shared skills: reviewed `SKILL.md` packs with metadata, provenance, linting, fingerprints, publish proposals, and one-command installation across Codex, Claude, OpenCode, Gemini, OpenClaw, Hermes, and MCP-resource targets.
 - Local producers: memory care, chat export sweeps, backup health, code review, context packs, project consolidation, learning candidates and replay, and security scans.
+- Operator notifications: optional `agent-notify` status and setup planning for private Discord, Telegram, or Signal notifications, with no sending from doctor/status flows.
 - Security and publish guards: content-guard integration, template audit, SARIF output, suppressions, accepted-risk closeouts, policy presets, prompt and instruction checks, MCP checks, supply-chain checks, and redacted reports.
 
 The common rule is deliberate friction: Brigade writes local receipts and review queues, but it does not start daemons, mutate remotes, edit canonical memory, run arbitrary commands, publish releases, or auto-promote findings without an explicit operator command.
@@ -406,10 +407,27 @@ Start-of-day commands:
 - `brigade roadmap commands` shows parser-derived command groups, writes `docs/command-inventory.md`, and can fail stale inventory checks for docs drift.
 - `brigade repos scan` inspects configured local repos for safe setup metadata, and `brigade repos import-issues` routes repo-fleet gaps into the work inbox.
 - `brigade chat sweep import-issues <surface-id>` converts a local chat export sweep into public-safe scanner inbox imports.
+- `brigade handoff draft --title "..." --summary "..." --content "..."` writes and lints a local Memory Handoff draft in the repo's expected section style.
 - `brigade tools doctor` inspects the local portable tool catalog and reports source, projection, schema, MCP, auth-field, and command-shape issues without invoking tools.
 - `brigade skills search "mcp security review"` searches reviewed reusable skill packs.
+- `brigade operator guide` prints the agent-facing Brigade startup sequence, onboarding command, handoff expectations, and boundaries.
 - `brigade operator plan` shows which gitignored local operator configs are missing before writing anything.
+- `brigade operator init --profile internal-dogfood` bootstraps the repo-local production dogfood path, including dogfood config and a read-only security evidence refresh.
+- `brigade operator sync-tools` projects tracked `tools/*.md` sources into local Claude, Codex, and OpenCode harness folders.
+- `brigade operator status --profile internal-dogfood` shows what is wired into the repo versus the source machine: local configs, gitignore state, Brigade/Codex paths, dogfood readiness, daily health, security evidence, notification config, and local readiness.
+- `brigade operator doctor --profile internal-dogfood` prints a compact ready/not-ready verdict, blocker count, next command, and local-only tracked-vs-generated notes.
+See [`docs/internal-dogfood.md`](docs/internal-dogfood.md) for the repo onboarding contract, daily agent loop, handoff expectations, and boundaries.
 - `brigade work next` prints only the next task. Add `--json` for wrappers.
+
+First run in a repo:
+
+```bash
+brigade operator init --profile internal-dogfood --target .
+brigade operator sync-tools --target .
+brigade operator doctor --profile internal-dogfood --target .
+brigade operator status --profile internal-dogfood --target .
+brigade daily status --target .
+```
 
 Task ledger commands:
 
@@ -567,6 +585,16 @@ Tool call execution is explicit through `brigade tools call run`, limited to app
 Replay creates a pending call from redacted receipt arguments and never recovers secret values or bypasses approval, runtime, or policy gates. Checkpoint resume is explicit through `brigade tools checkpoint resume` and never runs automatically after approval. Runtime start and stop are explicit through `brigade tools runtime`; `doctor`, `brief`, and `work run` never auto-start runtimes.
 
 Execution policy is host-local and gitignored; environment values come only from the current process and are not stored in calls, checkpoints, receipts, logs, imports, or docs. Brigade does not connect to remote MCP servers, fetch OpenAPI or GraphQL schemas, store auth, install schedulers, send approval notifications, or auto-sync harness configs from `doctor`, `brief`, or `work run`. Keep tokens, secrets, private URLs, and host-private paths out of public catalog templates.
+
+Operator notification commands:
+
+- `brigade add notifications` installs `agent-notify` when missing and reports manual wiring steps.
+- `brigade notifications status --json` inspects the local `agent-notify` binary, config file, selected profile, and referenced environment variables without sending.
+- `brigade notifications setup plan --profile operator` prints reviewed Codex and Claude Code hook snippets.
+- `brigade doctor` includes advisory `agent-notify` health under the notifications station.
+- `brigade center status`, `brigade work brief`, and `brigade daily status/plan` surface notification readiness as local advisory health.
+
+Brigade does not send notifications, edit harness hook files, run hook snippets, or store webhook URLs/tokens from these commands. Keep channel secrets in environment variables referenced by `~/.config/agent-notify/config.toml`.
 
 Shared skill registry commands:
 

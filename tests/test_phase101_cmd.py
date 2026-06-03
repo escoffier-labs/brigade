@@ -72,6 +72,40 @@ def test_daily_status_text_and_json(tmp_path, capsys):
     assert "daily status:" in capsys.readouterr().out
 
 
+def test_daily_report_candidate_uses_report_health_command(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        center_cmd,
+        "report_health",
+        lambda target: {
+            "top_issue": {
+                "name": "operator_report_missing",
+                "detail": "no local operator report has been built",
+                "suggested_next_command": "brigade center report build",
+            }
+        },
+    )
+    build = daily_cmd._report_candidate(tmp_path)[0]
+    assert build["action_type"] == "build-operator-report"
+    assert build["suggested_next_command"] == "brigade center report build"
+    assert daily_cmd._adapter_for(build) == "brigade center report build"
+
+    monkeypatch.setattr(
+        center_cmd,
+        "report_health",
+        lambda target: {
+            "top_issue": {
+                "name": "operator_report_unclosed",
+                "detail": "report-one has not been closed out",
+                "suggested_next_command": "brigade center report review report-one",
+            }
+        },
+    )
+    review = daily_cmd._report_candidate(tmp_path)[0]
+    assert review["action_type"] == "review-operator-report"
+    assert review["suggested_next_command"] == "brigade center report review report-one"
+    assert daily_cmd._adapter_for(review) == "review-only"
+
+
 def test_daily_init_schema_history_show_and_doctor(tmp_path, monkeypatch, capsys):
     _seed_ready_repo(tmp_path, capsys)
 
@@ -232,6 +266,31 @@ def test_daily_plan_and_run_handle_phase_ledger_actions(tmp_path, capsys):
     assert phases_cmd.actions_show(target=tmp_path, action_id=action_id, json_output=True) == 0
     action_payload = json.loads(capsys.readouterr().out)
     assert action_payload["status"] == "active"
+
+
+def test_daily_phase_issue_candidate_skips_current_reviewed_report_baseline(tmp_path, capsys):
+    _seed_ready_repo(tmp_path, capsys)
+    assert phases_cmd.plan(target=tmp_path, phase_id="phase-271", title="Daily phase", source_goal="audit", json_output=True) == 0
+    capsys.readouterr()
+    assert phases_cmd.complete(target=tmp_path, phase_id="phase-271", summary="No evidence", json_output=True) == 0
+    capsys.readouterr()
+
+    assert daily_cmd.plan(target=tmp_path, json_output=True) == 0
+    plan_payload = json.loads(capsys.readouterr().out)
+    assert "phase-ledger" in {item["source_subsystem"] for item in plan_payload["candidate_actions"]}
+
+    assert phases_cmd.report_build(target=tmp_path, json_output=True) == 0
+    report = json.loads(capsys.readouterr().out)
+    assert phases_cmd.report_closeout(target=tmp_path, report_id=report["report_id"], status="reviewed", reason="Baseline reviewed.", json_output=True) == 0
+    capsys.readouterr()
+
+    assert daily_cmd.plan(target=tmp_path, json_output=True) == 0
+    baselined = json.loads(capsys.readouterr().out)
+    assert "phase-ledger" not in {item["source_subsystem"] for item in baselined["candidate_actions"]}
+
+    assert daily_cmd.doctor(target=tmp_path, json_output=True) == 0
+    doctor_payload = json.loads(capsys.readouterr().out)
+    assert not any(check["name"] == "phase_ledger_issue" for check in doctor_payload["checks"])
 
 
 def test_daily_plan_includes_phase_checkpoint_candidates(tmp_path, capsys):

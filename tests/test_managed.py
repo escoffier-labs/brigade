@@ -14,7 +14,7 @@ def test_all_tools_declare_required_fields():
 
 def test_tools_attach_to_known_stations():
     stations = {t.station for t in managed.all_tools()}
-    assert stations <= {"memory", "guard", "tokens", "pantry"}
+    assert stations <= {"memory", "guard", "tokens", "pantry", "notifications"}
 
 
 def test_for_station_filters():

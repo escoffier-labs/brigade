@@ -496,3 +496,39 @@ def test_doctor_reports_absent_tool_as_manual(monkeypatch, tmp_target, capsys):
     # absent managed tools must not fail the run
     assert rc == 0
     assert "not installed" in out
+
+
+def test_doctor_includes_agent_notify_managed_tool(monkeypatch, tmp_target, capsys):
+    from brigade.install import install_selection
+    from brigade.selection import Selection
+    from brigade import managed, notifications_cmd
+
+    install_selection(tmp_target, Selection(depth="workspace", harnesses=["claude"], owner="claude", includes=[]))
+    config_path = tmp_target / ".config" / "agent-notify" / "config.toml"
+    config_path.parent.mkdir(parents=True)
+    config_path.write_text(
+        "\n".join(
+            [
+                "[channels.telegram-personal]",
+                'type = "telegram"',
+                'bot_token_env = "TEST_TELEGRAM_BOT_TOKEN"',
+                'chat_id_env = "TEST_TELEGRAM_CHAT_ID"',
+                "",
+                "[profiles.operator]",
+                'channels = ["telegram-personal"]',
+                "default = true",
+                "",
+            ]
+        )
+    )
+    monkeypatch.setattr(notifications_cmd, "CONFIG_PATH", config_path)
+    monkeypatch.setenv("TEST_TELEGRAM_BOT_TOKEN", "token")
+    monkeypatch.setenv("TEST_TELEGRAM_CHAT_ID", "chat")
+    monkeypatch.setattr(managed.proc, "which", lambda c: "/x/" + c if c == "agent-notify" else None)
+
+    rc = doctor_mod.run(target=tmp_target, harness="generic")
+    out = capsys.readouterr().out
+
+    assert rc == 0
+    assert "agent-notify" in out
+    assert "operator notifications" in out

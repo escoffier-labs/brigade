@@ -18,15 +18,16 @@ brigade roadmap commands --write
 - `brigade daily`: 26 command path(s)
 - `brigade doctor`: 1 command path(s)
 - `brigade dogfood`: 1 command path(s)
-- `brigade handoff`: 13 command path(s)
+- `brigade handoff`: 14 command path(s)
 - `brigade handoff-template`: 1 command path(s)
 - `brigade hermes-fragments`: 1 command path(s)
 - `brigade ingest`: 1 command path(s)
 - `brigade init`: 1 command path(s)
 - `brigade learn`: 10 command path(s)
 - `brigade memory`: 7 command path(s)
+- `brigade notifications`: 2 command path(s)
 - `brigade openclaw-fragments`: 1 command path(s)
-- `brigade operator`: 2 command path(s)
+- `brigade operator`: 6 command path(s)
 - `brigade pantry`: 3 command path(s)
 - `brigade projects`: 9 command path(s)
 - `brigade reconfigure`: 1 command path(s)
@@ -126,6 +127,7 @@ brigade roadmap commands --write
 - `brigade handoff archive`
 - `brigade handoff closeout`
 - `brigade handoff doctor`
+- `brigade handoff draft`
 - `brigade handoff import-issues`
 - `brigade handoff issues`
 - `brigade handoff lint`
@@ -157,9 +159,15 @@ brigade roadmap commands --write
 - `brigade memory care plan-fixes`
 - `brigade memory care scan`
 - `brigade memory care status`
+- `brigade notifications setup plan`
+- `brigade notifications status`
 - `brigade openclaw-fragments`
+- `brigade operator doctor`
+- `brigade operator guide`
 - `brigade operator init`
 - `brigade operator plan`
+- `brigade operator status`
+- `brigade operator sync-tools`
 - `brigade pantry service plan`
 - `brigade pantry setup plan`
 - `brigade pantry status`
