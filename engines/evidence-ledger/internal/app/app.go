@@ -253,7 +253,7 @@ func discoverSources() []map[string]any {
 		{"codex", filepath.Join(home, ".codex", "sessions"), "native-jsonl"},
 		{"openclaw", filepath.Join(home, ".openclaw", "agents"), "native-jsonl"},
 		{"claude", filepath.Join(home, ".claude", "projects"), "native-jsonl"},
-		{"hermes", filepath.Join(home, ".hermes"), "blocked-no-sample"},
+		{"hermes", filepath.Join(home, ".hermes", "sessions"), "agenttrail-supported"},
 		{"aicrawl", "", "adapter-contract-only"},
 	}
 	out := make([]map[string]any, 0, len(candidates))
@@ -263,7 +263,11 @@ func discoverSources() []map[string]any {
 		if c.root != "" {
 			if _, err := os.Stat(c.root); err == nil {
 				exists = true
-				if files, err := sources.ListJSONLFiles(c.root, sources.DefaultInclude); err == nil {
+				include := sources.DefaultInclude
+				if c.kind == "hermes" {
+					include = includeHermesSessionFile
+				}
+				if files, err := sources.ListJSONLFiles(c.root, include); err == nil {
 					count = len(files)
 				}
 			}
@@ -277,6 +281,20 @@ func discoverSources() []map[string]any {
 		})
 	}
 	return out
+}
+
+func includeHermesSessionFile(path string) bool {
+	name := strings.ToLower(filepath.Base(path))
+	if strings.Contains(name, "backup") || strings.Contains(name, ".bak") || strings.Contains(name, "deleted") {
+		return false
+	}
+	if strings.HasPrefix(name, "request_dump_") {
+		return false
+	}
+	if strings.HasPrefix(name, "session_") && strings.HasSuffix(name, ".json") {
+		return true
+	}
+	return strings.HasSuffix(name, ".jsonl") && strings.Contains(name, "trajectory")
 }
 
 func cmdScans(args []string, out, errw io.Writer) int {

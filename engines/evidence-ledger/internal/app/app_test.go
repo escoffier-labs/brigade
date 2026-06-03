@@ -160,6 +160,13 @@ func TestSourceDiscoveryDoesNotPrintTranscriptContent(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(path, "sample.jsonl"), []byte(`{"type":"event_msg","payload":{"message":"`+secret+`"}}`+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	hermesPath := filepath.Join(os.Getenv("HOME"), ".hermes", "sessions")
+	if err := os.MkdirAll(hermesPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(hermesPath, "session_demo.json"), []byte(`{"messages":[{"role":"user","content":"`+secret+`"}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	out := runOK(t, "sources", "discover", "--json")
 	if strings.Contains(out, secret) || strings.Contains(out, "event_msg") {
 		t.Fatalf("source discovery leaked content: %s", out)
@@ -171,7 +178,14 @@ func TestSourceDiscoveryDoesNotPrintTranscriptContent(t *testing.T) {
 	if len(discovered) == 0 {
 		t.Fatalf("expected discovery candidates")
 	}
+	foundHermes := false
 	for _, item := range discovered {
+		if item["source_kind"] == "hermes" {
+			foundHermes = true
+			if item["status"] != "agenttrail-supported" || item["count"].(float64) != 1 {
+				t.Fatalf("unexpected Hermes discovery row: %v", item)
+			}
+		}
 		for key := range item {
 			switch key {
 			case "source_kind", "root", "exists", "count", "status":
@@ -179,6 +193,9 @@ func TestSourceDiscoveryDoesNotPrintTranscriptContent(t *testing.T) {
 				t.Fatalf("unexpected discovery key %q in %v", key, item)
 			}
 		}
+	}
+	if !foundHermes {
+		t.Fatalf("expected Hermes discovery row: %v", discovered)
 	}
 }
 

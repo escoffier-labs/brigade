@@ -1,8 +1,15 @@
 # Hermes Adapter
 
-Hermes should be treated as an agent-session source family for Logspine, but native import is currently blocked on observed session samples.
+Hermes is an agent-session source family for Logspine through the AgentTrail external scanner.
 
-Local inspection found a `.hermes` directory with config and plugin files, but no readable Hermes JSONL session logs. Because Logspine tests must use fixtures and not private live transcripts, the native Hermes parser should wait for a redacted sample.
+AgentTrail supports local Hermes `session_*.json` snapshots and trajectory JSONL under `~/.hermes/sessions`. Logspine should import those through the shared adapter contract:
+
+```bash
+agenttrail hermes ~/.hermes/sessions --out - | spine import adapter -
+spine import agenttrail hermes ~/.hermes/sessions --json
+```
+
+Hermes `state.db` remains an observed storage surface, but Logspine does not parse it natively. Keep source-specific Hermes parsing in AgentTrail unless there is a strong reason to duplicate it.
 
 Expected adapter export shape:
 
@@ -11,8 +18,7 @@ Expected adapter export shape:
   "schema": "logspine.adapter.v1",
   "source": {
     "kind": "hermes",
-    "name": "Hermes",
-    "version": "unknown"
+    "name": "Hermes Sessions"
   },
   "collection": {
     "external_id": "hermes:session:<session-id>",
@@ -29,12 +35,14 @@ Expected adapter export shape:
       "harness": "hermes",
       "event_type": "<event-type>",
       "session_id": "<session-id>",
-      "run_id": "<run-id>",
-      "workspace_dir": "<workspace>"
+      "model": "<model>",
+      "platform": "<platform>",
+      "file_path": "<source-file>",
+      "ordinal": 1
     }
   },
   "actor": {
-    "external_id": "hermes:assistant",
+    "external_id": "hermes:assistant:assistant",
     "type": "assistant",
     "name": "assistant"
   },
@@ -43,15 +51,15 @@ Expected adapter export shape:
   "relations": [],
   "raw": {
     "format": "json",
-    "hash": "sha256:<raw-line-hash>",
-    "path": "<source-jsonl-path>",
+    "hash": "sha256:<raw-message-hash>",
+    "path": "<source-json-or-jsonl-path>",
     "ordinal": 1
   }
 }
 ```
 
-Native adapter unblock criteria:
+Native Logspine adapter criteria, if this is ever needed:
 
-- Provide a redacted Hermes session JSONL fixture.
+- Provide redacted Hermes session fixtures not already covered by AgentTrail.
 - Identify timestamp, session ID, actor role, event type, message/tool/artifact fields, and raw source references.
-- Confirm whether Hermes logs are JSONL, JSON arrays, SQLite, or another local format.
+- Justify duplicating AgentTrail behavior inside Logspine.

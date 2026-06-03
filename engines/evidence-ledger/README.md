@@ -90,6 +90,7 @@ agenttrail doctor --json
 agenttrail codex ~/.codex/sessions --dry-run --json
 agenttrail claude ~/.claude/projects --out - | spine import adapter -
 agenttrail openclaw ~/.openclaw/agents --out openclaw.adapter.jsonl
+agenttrail hermes ~/.hermes/sessions --out - | spine import adapter -
 spine import adapter openclaw.adapter.jsonl --json
 ```
 
@@ -100,6 +101,7 @@ spine import agenttrail codex ~/.codex/sessions --json
 spine import agenttrail claude ~/.claude/projects --json
 spine import agenttrail openclaw ~/.openclaw/agents --json
 spine import agenttrail opencode opencode-session.json --json
+spine import agenttrail hermes ~/.hermes/sessions --json
 ```
 
 The wrapper streams AgentTrail output through adapter ingest and records AgentTrail scan manifests from its summary output.
@@ -126,7 +128,7 @@ Discovery reports candidate roots and JSONL counts only:
 spine sources discover --json
 ```
 
-It checks Codex sessions, OpenClaw agents, Claude projects, Hermes status, and aicrawl status without printing private transcript content.
+It checks Codex sessions, OpenClaw agents, Claude projects, Hermes session files, and aicrawl status without printing private transcript content.
 
 ## Evidence
 

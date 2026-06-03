@@ -78,6 +78,7 @@ AgentTrail is a separate scanner/exporter for local agent session logs. It emits
 agenttrail codex ~/.codex/sessions --out - | spine import adapter -
 agenttrail claude ~/.claude/projects --out - | spine import adapter -
 agenttrail openclaw ~/.openclaw/agents --out - | spine import adapter -
+agenttrail hermes ~/.hermes/sessions --out - | spine import adapter -
 ```
 
 Or let Logspine run AgentTrail when the `agenttrail` binary is installed on `PATH`:
@@ -87,6 +88,7 @@ spine import agenttrail codex ~/.codex/sessions --json
 spine import agenttrail claude ~/.claude/projects --json
 spine import agenttrail openclaw ~/.openclaw/agents --json
 spine import agenttrail opencode opencode-session.json --json
+spine import agenttrail hermes ~/.hermes/sessions --json
 ```
 
 Use AgentTrail when source-specific harness parsing should live outside Logspine. Keep Logspine focused on ingest, normalized storage, FTS, scan manifests, relation resolution, and evidence output.
