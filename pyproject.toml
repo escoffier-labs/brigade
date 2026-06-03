@@ -10,7 +10,7 @@ readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
 authors = [{ name = "Solomon Neas", email = "srneas@gmail.com" }] # content-guard: allow email
-keywords = ["agents", "openclaw", "claude-code", "codex", "memory", "bootstrap", "brigade", "operator"]
+keywords = ["agents", "ai-agents", "agent-memory", "openclaw", "claude-code", "codex", "opencode", "memory", "bootstrap", "brigade", "operator", "local-first"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "License :: OSI Approved :: MIT License",
@@ -26,8 +26,12 @@ dev = ["pytest>=7"]
 research = ["playwright>=1.40"]
 
 [project.urls]
-Homepage = "https://github.com/escoffier-labs/brigade"
+Homepage = "https://brigade.solomonneas.dev"
+Repository = "https://github.com/escoffier-labs/brigade"
 Cookbook = "https://github.com/solomonneas/solos-cookbook"
+OpenClaw = "https://github.com/solomonneas/openclaw"
+ContentGuard = "https://github.com/solomonneas/content-guard"
+AgentPantry = "https://github.com/escoffier-labs/agentpantry"
 Issues = "https://github.com/escoffier-labs/brigade/issues"
 
 [project.scripts]

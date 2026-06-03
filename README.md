@@ -10,13 +10,14 @@
 
 <p align="center">
   <img src="https://img.shields.io/github/actions/workflow/status/escoffier-labs/brigade/ci.yml?branch=main&style=for-the-badge&label=ci" alt="CI status">
+  <img src="https://img.shields.io/pypi/v/brigade-cli?style=for-the-badge&label=pypi" alt="PyPI version">
   <img src="https://img.shields.io/badge/python-3.10%2B-blue?style=for-the-badge&logo=python&logoColor=white" alt="Python 3.10+">
   <img src="https://img.shields.io/badge/license-MIT-green?style=for-the-badge" alt="MIT license">
 </p>
 
 Brigade helps AI agent tools work from the same memory without turning that memory into a junk drawer.
 
-If you use OpenClaw, Hermes, Codex, Claude Code, OpenCode, or a mix of them, Brigade gives those tools a shared local pattern:
+If you use [OpenClaw](https://github.com/solomonneas/openclaw), Hermes, Codex, Claude Code, OpenCode, or a mix of them, Brigade gives those tools a shared local pattern:
 
 1. agents write handoff notes
 2. you review the notes
@@ -127,6 +128,28 @@ For safety:
 - keep notification sending opt-in
 - make risky actions visible as operator decisions
 
+## Ecosystem
+
+Brigade is the local operator layer. It integrates with nearby tools instead of trying to absorb all of them.
+
+![Brigade connects the local agent-tool fleet](docs/assets/brigade-ecosystem.svg)
+
+Memory and handoff tools:
+
+- [OpenClaw](https://github.com/solomonneas/openclaw): personal AI assistant and memory owner.
+- Hermes: local memory owner and handoff writer convention.
+- [memory-doctor](https://github.com/escoffier-labs/memory-doctor): focused maintenance CLI for Claude Code / OpenClaw memory.
+- [bootstrap-doctor](https://github.com/escoffier-labs/bootstrap-doctor): audits and trims oversized OpenClaw bootstrap files.
+
+Safety and operations tools:
+
+- [Content Guard](https://github.com/solomonneas/content-guard): policy-driven content scanning and publish checks.
+- [Agent Pantry](https://github.com/escoffier-labs/agentpantry): encrypted browser session, cookie, and secret sync for agent machines.
+- [agent-notify](https://github.com/solomonneas/agent-notify): optional notification hooks for long-running agent work.
+- [tokenjuice](https://github.com/solomonneas/tokenjuice): output compaction for terminal-heavy agent workflows.
+
+Brigade also has native local workflows for [repo fleet operations](docs/repo-fleet.md), [portable tool catalogs](docs/tool-catalog.md), [security scans](docs/security.md), and [handoff promotion](docs/handoff-promotion.md).
+
 ## What Brigade Is Not
 
 Brigade is not a hosted memory service, a daemon, or an automatic release bot.
@@ -205,6 +228,8 @@ The full technical walkthrough still exists; it is just not the README anymore.
 - [Handoff promotion](docs/handoff-promotion.md): how reviewed notes move toward memory.
 - [OpenClaw memory ingest checklist](docs/openclaw-memory-ingest-checklist.md): the review gate before handoffs become memory.
 - [Hermes handoffs](docs/hermes-handoffs.md): Hermes writer inbox setup.
+- [Repo fleet](docs/repo-fleet.md): local multi-repo health, actions, and release evidence.
+- [Tool catalog](docs/tool-catalog.md): portable tools, projections, approvals, and run receipts.
 - [Internal dogfood loop](docs/internal-dogfood.md): how this repo uses Brigade on itself.
 - [Command inventory](docs/command-inventory.md): every public CLI command.
 - [Roadmap](ROADMAP.md): current direction.

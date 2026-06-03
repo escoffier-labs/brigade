@@ -1,0 +1,240 @@
+{
+  "elements": [
+    {
+      "id": "title",
+      "type": "text",
+      "x": 70,
+      "y": 28,
+      "width": 680,
+      "height": 38,
+      "strokeColor": "#1f2937",
+      "text": "Brigade connects the local agent-tool fleet",
+      "fontSize": 28
+    },
+    {
+      "id": "brigade",
+      "type": "rectangle",
+      "x": 300,
+      "y": 145,
+      "width": 220,
+      "height": 96,
+      "strokeColor": "#2563eb",
+      "backgroundColor": "#dbeafe",
+      "fillStyle": "solid",
+      "roundness": {
+        "type": 3
+      },
+      "label": {
+        "text": "Brigade CLI\nlocal review + receipts",
+        "fontSize": 18,
+        "strokeColor": "#1f2937",
+        "textAlign": "center",
+        "verticalAlign": "middle"
+      }
+    },
+    {
+      "id": "memory",
+      "type": "rectangle",
+      "x": 72,
+      "y": 112,
+      "width": 188,
+      "height": 80,
+      "strokeColor": "#16a34a",
+      "backgroundColor": "#dcfce7",
+      "fillStyle": "solid",
+      "roundness": {
+        "type": 3
+      },
+      "label": {
+        "text": "OpenClaw / Hermes\nshared memory",
+        "fontSize": 17,
+        "strokeColor": "#1f2937",
+        "textAlign": "center",
+        "verticalAlign": "middle"
+      }
+    },
+    {
+      "id": "writers",
+      "type": "rectangle",
+      "x": 72,
+      "y": 235,
+      "width": 188,
+      "height": 94,
+      "strokeColor": "#16a34a",
+      "backgroundColor": "#dcfce7",
+      "fillStyle": "solid",
+      "roundness": {
+        "type": 3
+      },
+      "label": {
+        "text": "Codex / Claude Code\nOpenCode / Hermes",
+        "fontSize": 17,
+        "strokeColor": "#1f2937",
+        "textAlign": "center",
+        "verticalAlign": "middle"
+      }
+    },
+    {
+      "id": "guard",
+      "type": "rectangle",
+      "x": 562,
+      "y": 88,
+      "width": 190,
+      "height": 72,
+      "strokeColor": "#dc2626",
+      "backgroundColor": "#fee2e2",
+      "fillStyle": "solid",
+      "roundness": {
+        "type": 3
+      },
+      "label": {
+        "text": "Content Guard\npublish checks",
+        "fontSize": 17,
+        "strokeColor": "#1f2937",
+        "textAlign": "center",
+        "verticalAlign": "middle"
+      }
+    },
+    {
+      "id": "pantry",
+      "type": "rectangle",
+      "x": 562,
+      "y": 190,
+      "width": 190,
+      "height": 72,
+      "strokeColor": "#d97706",
+      "backgroundColor": "#fef3c7",
+      "fillStyle": "solid",
+      "roundness": {
+        "type": 3
+      },
+      "label": {
+        "text": "Agent Pantry\nbrowser/session sync",
+        "fontSize": 17,
+        "strokeColor": "#1f2937",
+        "textAlign": "center",
+        "verticalAlign": "middle"
+      }
+    },
+    {
+      "id": "notify",
+      "type": "rectangle",
+      "x": 562,
+      "y": 292,
+      "width": 190,
+      "height": 72,
+      "strokeColor": "#7c3aed",
+      "backgroundColor": "#ede9fe",
+      "fillStyle": "solid",
+      "roundness": {
+        "type": 3
+      },
+      "label": {
+        "text": "agent-notify\noptional alerts",
+        "fontSize": 17,
+        "strokeColor": "#1f2937",
+        "textAlign": "center",
+        "verticalAlign": "middle"
+      }
+    },
+    {
+      "id": "repo-fleet",
+      "type": "rectangle",
+      "x": 300,
+      "y": 330,
+      "width": 220,
+      "height": 76,
+      "strokeColor": "#0f766e",
+      "backgroundColor": "#ccfbf1",
+      "fillStyle": "solid",
+      "roundness": {
+        "type": 3
+      },
+      "label": {
+        "text": "Tool catalog + repo fleet\nreviewable local operations",
+        "fontSize": 16,
+        "strokeColor": "#1f2937",
+        "textAlign": "center",
+        "verticalAlign": "middle"
+      }
+    },
+    {
+      "id": "arrow-memory",
+      "type": "arrow",
+      "x": 260,
+      "y": 152,
+      "width": 40,
+      "height": 34,
+      "strokeColor": "#475569",
+      "strokeWidth": 2,
+      "endArrowhead": "arrow"
+    },
+    {
+      "id": "arrow-writers",
+      "type": "arrow",
+      "x": 260,
+      "y": 282,
+      "width": 40,
+      "height": -58,
+      "strokeColor": "#475569",
+      "strokeWidth": 2,
+      "endArrowhead": "arrow"
+    },
+    {
+      "id": "arrow-guard",
+      "type": "arrow",
+      "x": 520,
+      "y": 178,
+      "width": 42,
+      "height": -50,
+      "strokeColor": "#475569",
+      "strokeWidth": 2,
+      "endArrowhead": "arrow"
+    },
+    {
+      "id": "arrow-pantry",
+      "type": "arrow",
+      "x": 520,
+      "y": 206,
+      "width": 42,
+      "height": 20,
+      "strokeColor": "#475569",
+      "strokeWidth": 2,
+      "endArrowhead": "arrow"
+    },
+    {
+      "id": "arrow-notify",
+      "type": "arrow",
+      "x": 520,
+      "y": 232,
+      "width": 42,
+      "height": 96,
+      "strokeColor": "#475569",
+      "strokeWidth": 2,
+      "endArrowhead": "arrow"
+    },
+    {
+      "id": "arrow-fleet",
+      "type": "arrow",
+      "x": 410,
+      "y": 241,
+      "width": 0,
+      "height": 89,
+      "strokeColor": "#475569",
+      "strokeWidth": 2,
+      "endArrowhead": "arrow"
+    }
+  ],
+  "appState": {
+    "viewBackgroundColor": "#ffffff",
+    "currentItemStrokeColor": "#1e1e1e",
+    "currentItemBackgroundColor": "transparent",
+    "currentItemFillStyle": "solid",
+    "currentItemStrokeWidth": 2,
+    "currentItemRoughness": 1,
+    "zoom": {
+      "value": 1
+    }
+  },
+  "version": 2
+}

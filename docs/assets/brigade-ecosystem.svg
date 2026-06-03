@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="824" height="438" viewBox="0 0 824 438" role="img">
+  <defs>
+    <marker id="arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#475569"/>
+    </marker>
+  </defs>
+  <rect width="100%" height="100%" fill="#ffffff"/>
+  <text x="412" y="47" text-anchor="middle" dominant-baseline="middle" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="28" fill="#1f2937">Brigade connects the local agent-tool fleet</text>
+  <rect x="300" y="145" width="220" height="96" rx="12" fill="#dbeafe" stroke="#2563eb" stroke-width="2"/>
+  <text x="410" y="181" text-anchor="middle" dominant-baseline="middle" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="18" fill="#1f2937"><tspan x="410">Brigade CLI</tspan><tspan x="410" dy="24">local review + receipts</tspan></text>
+  <rect x="72" y="112" width="188" height="80" rx="12" fill="#dcfce7" stroke="#16a34a" stroke-width="2"/>
+  <text x="166" y="140" text-anchor="middle" dominant-baseline="middle" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="17" fill="#1f2937"><tspan x="166">OpenClaw / Hermes</tspan><tspan x="166" dy="23">shared memory</tspan></text>
+  <rect x="72" y="235" width="188" height="94" rx="12" fill="#dcfce7" stroke="#16a34a" stroke-width="2"/>
+  <text x="166" y="270" text-anchor="middle" dominant-baseline="middle" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="17" fill="#1f2937"><tspan x="166">Codex / Claude Code</tspan><tspan x="166" dy="23">OpenCode / Hermes</tspan></text>
+  <rect x="562" y="88" width="190" height="72" rx="12" fill="#fee2e2" stroke="#dc2626" stroke-width="2"/>
+  <text x="657" y="113" text-anchor="middle" dominant-baseline="middle" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="17" fill="#1f2937"><tspan x="657">Content Guard</tspan><tspan x="657" dy="23">publish checks</tspan></text>
+  <rect x="562" y="190" width="190" height="72" rx="12" fill="#fef3c7" stroke="#d97706" stroke-width="2"/>
+  <text x="657" y="215" text-anchor="middle" dominant-baseline="middle" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="17" fill="#1f2937"><tspan x="657">Agent Pantry</tspan><tspan x="657" dy="23">browser/session sync</tspan></text>
+  <rect x="562" y="292" width="190" height="72" rx="12" fill="#ede9fe" stroke="#7c3aed" stroke-width="2"/>
+  <text x="657" y="317" text-anchor="middle" dominant-baseline="middle" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="17" fill="#1f2937"><tspan x="657">agent-notify</tspan><tspan x="657" dy="23">optional alerts</tspan></text>
+  <rect x="300" y="330" width="220" height="76" rx="12" fill="#ccfbf1" stroke="#0f766e" stroke-width="2"/>
+  <text x="410" y="356" text-anchor="middle" dominant-baseline="middle" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="16" fill="#1f2937"><tspan x="410">Tool catalog + repo fleet</tspan><tspan x="410" dy="22">reviewable local operations</tspan></text>
+  <line x1="260" y1="152" x2="300" y2="186" stroke="#475569" stroke-width="2" marker-end="url(#arrowhead)"/>
+  <line x1="260" y1="282" x2="300" y2="224" stroke="#475569" stroke-width="2" marker-end="url(#arrowhead)"/>
+  <line x1="520" y1="178" x2="562" y2="128" stroke="#475569" stroke-width="2" marker-end="url(#arrowhead)"/>
+  <line x1="520" y1="206" x2="562" y2="226" stroke="#475569" stroke-width="2" marker-end="url(#arrowhead)"/>
+  <line x1="520" y1="232" x2="562" y2="328" stroke="#475569" stroke-width="2" marker-end="url(#arrowhead)"/>
+  <line x1="410" y1="241" x2="410" y2="330" stroke="#475569" stroke-width="2" marker-end="url(#arrowhead)"/>
+</svg>
