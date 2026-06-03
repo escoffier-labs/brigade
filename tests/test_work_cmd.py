@@ -7756,6 +7756,31 @@ def test_work_chat_sweep_flows_through_inbox_plan_promote_run_completion(tmp_pat
     ]
 
 
+def test_work_import_content_guard_creates_review_import(tmp_path, capsys, monkeypatch):
+    def fake_run_scan(scan_target, *, repo_target=None, policy="public-repo"):
+        assert scan_target == tmp_path.resolve()
+        assert repo_target == tmp_path.resolve()
+        assert policy == "public-repo"
+        return {
+            "available": True,
+            "status": "blocked",
+            "exit_code": 1,
+            "detail": "content-guard reported findings",
+            "stdout": "README.md:1 WARN private value",
+            "stderr": "",
+            "target": str(scan_target),
+            "policy": policy,
+        }
+
+    monkeypatch.setattr("brigade.scrub.run_scan", fake_run_scan)
+    assert work_cmd.import_content_guard(target=tmp_path, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["created"] == 1
+    assert payload["imports"][0]["source"] == "content-guard"
+    assert payload["imports"][0]["kind"] == "finding"
+    assert payload["imports"][0]["metadata"]["scanner_id"] == "content-guard"
+
+
 def test_work_import_triage_groups_pending_imports(tmp_path, monkeypatch, capsys):
     _init_git_repo(tmp_path)
     monkeypatch.setattr(

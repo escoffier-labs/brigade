@@ -45,7 +45,7 @@ brigade roadmap commands --write
 - `brigade status`: 1 command path(s)
 - `brigade tools`: 46 command path(s)
 - `brigade untrusted`: 2 command path(s)
-- `brigade work`: 137 command path(s)
+- `brigade work`: 138 command path(s)
 
 ## Commands
 
@@ -386,6 +386,7 @@ brigade roadmap commands --write
 - `brigade work end`
 - `brigade work import add`
 - `brigade work import chat-sweep`
+- `brigade work import content-guard`
 - `brigade work import context`
 - `brigade work import dismiss`
 - `brigade work import ingest`

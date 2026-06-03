@@ -15,6 +15,7 @@ OK = "ok"
 WARN = "warn"
 FAIL = "fail"
 
+from . import scrub
 from .selection import WRITER_INBOXES as _WRITER_INBOX_MAP
 
 WRITER_INBOXES = tuple(_WRITER_INBOX_MAP.values())
@@ -544,6 +545,8 @@ def lint(
     *,
     target: Path,
     paths: list[Path] | None = None,
+    content_guard: bool = False,
+    guard_policy: str = "personal",
     json_output: bool = False,
 ) -> int:
     target = target.expanduser().resolve()
@@ -551,11 +554,14 @@ def lint(
         print(f"error: --target is not a directory: {target}", file=sys.stderr)
         return 2
     results = lint_targets(target, paths=paths)
+    guard_results = [_guard_handoff_path(path, target=target, policy=guard_policy) for path in [result.path for result in results]] if content_guard else []
+    guard_ok = all(item.get("exit_code") == 0 for item in guard_results)
     payload = {
         "target": str(target),
         "count": len(results),
-        "valid": all(result.valid for result in results),
+        "valid": all(result.valid for result in results) and guard_ok,
         "results": [result.as_dict() for result in results],
+        "content_guard": guard_results,
     }
     if json_output:
         print(json.dumps(payload, indent=2, sort_keys=True))
@@ -570,7 +576,28 @@ def lint(
             print(f"  - {error}")
         for warning in result.warnings:
             print(f"  warning: {warning}")
+    if content_guard:
+        print(f"content_guard_policy: {guard_policy}")
+        for item in guard_results:
+            status = OK if item.get("exit_code") == 0 else FAIL
+            print(f"[{status}] content_guard: {item.get('path')} {item.get('detail')}")
     return 0 if payload["valid"] else 1
+
+
+def _guard_handoff_path(path: Path, *, target: Path, policy: str) -> dict[str, Any]:
+    result = scrub.run_scan(path, repo_target=target, policy=policy)
+    stdout_summary = _short(" ".join(str(result.get("stdout") or "").split()), 320)
+    stderr_summary = _short(" ".join(str(result.get("stderr") or "").split()), 320)
+    return {
+        "path": str(path),
+        "policy": policy,
+        "available": bool(result.get("available")),
+        "exit_code": result.get("exit_code"),
+        "status": result.get("status"),
+        "detail": result.get("detail"),
+        "stdout_summary": stdout_summary,
+        "stderr_summary": stderr_summary,
+    }
 
 
 def lint_targets(target: Path, paths: list[Path] | None = None) -> tuple[HandoffLintResult, ...]:
@@ -1310,6 +1337,8 @@ def draft(
     inbox: str = DEFAULT_DRAFT_INBOX,
     draft_id: str | None = None,
     force: bool = False,
+    guard: bool = False,
+    guard_policy: str = "personal",
     json_output: bool = False,
 ) -> int:
     target = target.expanduser().resolve()
@@ -1367,6 +1396,7 @@ def draft(
     inbox_path.mkdir(parents=True, exist_ok=True)
     path.write_text(text)
     lint_result = lint_file(path)
+    guard_result = _guard_handoff_path(path, target=target, policy=guard_policy) if guard else None
     payload = {
         "target": str(target),
         "created_at": created_at,
@@ -1377,11 +1407,12 @@ def draft(
         "target_card": target_card,
         "target_document": target_document,
         "lint": lint_result.as_dict(),
-        "valid": lint_result.valid,
+        "content_guard": guard_result,
+        "valid": lint_result.valid and (guard_result is None or guard_result.get("exit_code") == 0),
     }
     if json_output:
         print(json.dumps(payload, indent=2, sort_keys=True))
-        return 0 if lint_result.valid else 1
+        return 0 if payload["valid"] else 1
     print(f"handoff draft: {path}")
     print(f"id: {payload['id']}")
     print(f"inbox: {inbox_label}")
@@ -1391,9 +1422,14 @@ def draft(
     if target_document:
         print(f"target_document: {target_document}")
     print(f"lint: {'ok' if lint_result.valid else 'fail'}")
+    if guard_result is not None:
+        guard_ok = guard_result.get("exit_code") == 0
+        print(f"content_guard: {'ok' if guard_ok else 'fail'} ({guard_policy})")
+        if not guard_ok:
+            print(f"content_guard_detail: {guard_result.get('detail')}")
     for error in lint_result.errors:
         print(f"error: {error}")
-    return 0 if lint_result.valid else 1
+    return 0 if payload["valid"] else 1
 
 
 def list_drafts(*, target: Path, sources: Path | None = None, json_output: bool = False, limit: int = 20) -> int:

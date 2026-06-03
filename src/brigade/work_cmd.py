@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from . import dogfood_cmd
+from . import dogfood_cmd, scrub
 from . import toml_compat as tomllib
 from .install import apply_gitignore
 from .selection import Selection
@@ -7513,6 +7513,96 @@ def import_chat_sweep(
     for item in imported:
         print(f"- {item.get('id')} [{item.get('kind')}] {_short(str(item.get('text', '')))}")
     return 0
+
+
+def _content_guard_import_records(result: dict[str, Any]) -> list[dict[str, Any]]:
+    exit_code = int(result.get("exit_code") or 0)
+    if exit_code == 0:
+        return []
+    target = str(result.get("target") or "")
+    policy = str(result.get("policy") or "public-repo")
+    stdout_summary = _scanner_run_summary(str(result.get("stdout") or ""), limit=12)
+    stderr_summary = _scanner_run_summary(str(result.get("stderr") or ""), limit=8)
+    detail = str(result.get("detail") or "content-guard reported findings")
+    metadata = {
+        "scanner_id": "content-guard",
+        "scanner_source": "content-guard",
+        "policy": policy,
+        "scan_target": target,
+        "exit_code": exit_code,
+        "detail": detail,
+        "stdout_summary": stdout_summary,
+        "stderr_summary": stderr_summary,
+        "source_item_key": f"content-guard:{policy}:{target}",
+        "source_fingerprint": _stable_hash(
+            {
+                "policy": policy,
+                "target": target,
+                "exit_code": exit_code,
+                "stdout": stdout_summary,
+                "stderr": stderr_summary,
+            }
+        ),
+    }
+    return [
+        {
+            "text": f"Review Content Guard findings for {target} using policy {policy}: {detail}",
+            "kind": "finding",
+            "source": "content-guard",
+            "metadata": metadata,
+        }
+    ]
+
+
+def import_content_guard(
+    *,
+    target: Path,
+    scan_target: Path | None = None,
+    policy: str = "public-repo",
+    dry_run: bool = False,
+    json_output: bool = False,
+) -> int:
+    target = target.expanduser().resolve()
+    if not target.is_dir():
+        print(f"error: --target is not a directory: {target}", file=sys.stderr)
+        return 2
+    effective_scan_target = scan_target.expanduser().resolve() if scan_target is not None else target
+    result = scrub.run_scan(effective_scan_target, repo_target=target, policy=policy)
+    records = _content_guard_import_records(result)
+    imported, skipped, skipped_dismissed = _append_import_records(target, records, dry_run=dry_run)
+    output = {
+        "target": str(target),
+        "scan_target": str(effective_scan_target),
+        "policy": policy,
+        "dry_run": dry_run,
+        "scan": {
+            "available": result.get("available"),
+            "status": result.get("status"),
+            "exit_code": result.get("exit_code"),
+            "detail": result.get("detail"),
+            "stdout_summary": _scanner_run_summary(str(result.get("stdout") or ""), limit=12),
+            "stderr_summary": _scanner_run_summary(str(result.get("stderr") or ""), limit=8),
+        },
+        "imports_path": str(_imports_path(target)),
+        "created": len(imported),
+        "imported": len(imported),
+        "skipped": len(skipped),
+        "dismissed": len(skipped_dismissed),
+        "imports": imported,
+    }
+    if json_output:
+        print(json.dumps(output, indent=2, sort_keys=True))
+        return 0 if result.get("available") else 2
+    print(f"content-guard import: {effective_scan_target}")
+    print(f"policy: {policy}")
+    print(f"scan: {result.get('status')} ({result.get('detail')})")
+    print(f"imported: {len(imported)}")
+    print(f"skipped: {len(skipped)}")
+    if skipped_dismissed:
+        print(f"skipped_dismissed: {len(skipped_dismissed)}")
+    for item in imported:
+        print(f"- {item.get('id')} [{item.get('kind')}] {_short(str(item.get('text', '')))}")
+    return 0 if result.get("available") else 2
 
 
 def import_triage(

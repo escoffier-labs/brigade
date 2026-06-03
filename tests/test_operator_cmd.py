@@ -50,6 +50,15 @@ def test_operator_init_dry_run_does_not_write(tmp_path, capsys):
 
 def test_operator_internal_dogfood_init_and_status(tmp_path, capsys, monkeypatch):
     monkeypatch.setattr("shutil.which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(
+        "brigade.scrub.hook_status",
+        lambda target: {
+            "available": True,
+            "scanner_dir": "/tools/content-guard",
+            "policy": "public-repo",
+            "pre_push_hook_enabled": True,
+        },
+    )
 
     assert operator_cmd.init(target=tmp_path, profile="internal-dogfood", waive_public_release=True, json_output=True) == 0
     payload = json.loads(capsys.readouterr().out)
@@ -66,6 +75,8 @@ def test_operator_internal_dogfood_init_and_status(tmp_path, capsys, monkeypatch
     assert status["brigade"]["version"]
     assert status["repo"]["missing_config_count"] == 0
     assert status["security"]["issue_count"] == 0
+    assert status["content_guard"]["available"] is True
+    assert status["machine"]["content_guard_installed"] is True
 
 
 def test_operator_status_cli_dispatch(tmp_path, monkeypatch):
@@ -93,6 +104,7 @@ def test_operator_doctor_json_and_cli_dispatch(tmp_path, capsys, monkeypatch):
             "repo": {"missing_config_count": 0, "not_gitignored_count": 0},
             "security": {"issue_count": 0},
             "daily": {"issue_count": 0},
+            "content_guard": {"available": True, "pre_push_hook_enabled": True, "policy": "public-repo"},
         },
     )
     monkeypatch.setattr(
@@ -113,6 +125,7 @@ def test_operator_doctor_json_and_cli_dispatch(tmp_path, capsys, monkeypatch):
     assert payload["ready"] is True
     assert payload["blocking_issue_count"] == 0
     assert payload["next_command"] == "brigade center report build"
+    assert payload["content_guard"]["available"] is True
     assert any("tools/" in item for item in payload["tracked_vs_generated"])
 
     assert cli.main(["operator", "doctor", "--target", str(tmp_path), "--profile", "internal-dogfood"]) == 0

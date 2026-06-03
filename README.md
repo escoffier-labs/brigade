@@ -106,6 +106,7 @@ For memory:
 - install shared memory files, rules, and handoff templates
 - keep one canonical memory owner
 - lint handoff drafts before ingest
+- scan handoff drafts with Content Guard before they become durable memory
 - track which local inboxes the ingestor should watch
 - support OpenClaw, Hermes, Codex, Claude Code, and OpenCode conventions
 
@@ -119,6 +120,8 @@ For local work:
 
 For safety:
 
+- run Content Guard before push, release review, or handoff ingest
+- import Content Guard findings into the work inbox for review
 - keep generated state ignored by default
 - avoid publishing, pushing, or mutating remotes automatically
 - keep notification sending opt-in
@@ -175,11 +178,30 @@ brigade operator verify-harness --harness hermes --target .
 
 See [Hermes handoffs](docs/hermes-handoffs.md) for the current boundaries.
 
+## Content Guard
+
+Brigade handles the memory and operator workflow. Content Guard checks whether content is safe to publish or save.
+
+Use it at three points:
+
+- before memory ingest: `brigade handoff lint --content-guard`
+- before publishing: `brigade scrub --policy public-repo`
+- after findings appear: `brigade work import content-guard`
+
+Policy names are intentionally plain:
+
+- `personal`: local/internal working notes
+- `public-repo`: code and docs before push
+- `public-content`: stricter checks for blog, social, and site copy
+
+`brigade operator doctor` and `brigade operator status` show whether Content Guard is installed, which policy is expected, whether the pre-push hook is enabled, and the latest local scan summary when available.
+
 ## Where The Detailed Docs Went
 
 The full technical walkthrough still exists; it is just not the README anymore.
 
 - [Technical guide](docs/technical-guide.md): the detailed command walkthrough.
+- [Security and Content Guard](docs/security.md): scanner policies, handoff guards, and import flow.
 - [Handoff promotion](docs/handoff-promotion.md): how reviewed notes move toward memory.
 - [Hermes handoffs](docs/hermes-handoffs.md): Hermes writer inbox setup.
 - [Internal dogfood loop](docs/internal-dogfood.md): how this repo uses Brigade on itself.

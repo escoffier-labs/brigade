@@ -9,7 +9,7 @@ from io import StringIO
 from pathlib import Path
 from typing import Any
 
-from . import __version__, center_cmd, chat_cmd, daily_cmd, dogfood_cmd, handoff_cmd, memory_cmd, notifications_cmd, repos_cmd, security_cmd, tools_cmd, work_cmd
+from . import __version__, center_cmd, chat_cmd, daily_cmd, dogfood_cmd, handoff_cmd, memory_cmd, notifications_cmd, repos_cmd, scrub, security_cmd, tools_cmd, work_cmd
 
 PROFILES = {"local-operator", "internal-dogfood"}
 
@@ -279,6 +279,7 @@ def status_payload(target: Path, *, profile: str = "internal-dogfood") -> dict[s
     security_health = security_cmd.health(target)
     readiness = center_cmd._readiness_payload(target)
     notification_health = notifications_cmd.health(target)
+    content_guard_health = scrub.hook_status(target)
     dogfood_ready = dogfood_cmd.config_path(target).exists() and codex_path is not None
     issues = []
     if not dogfood_ready:
@@ -296,6 +297,8 @@ def status_payload(target: Path, *, profile: str = "internal-dogfood") -> dict[s
             "agent_notify_installed": notification_health.get("installed"),
             "agent_notify_configured": notification_health.get("configured"),
             "notification_config_path": notification_health.get("config_path"),
+            "content_guard_installed": content_guard_health.get("available"),
+            "content_guard_dir": content_guard_health.get("scanner_dir"),
         },
         "repo": {
             "configs": config_rows,
@@ -314,6 +317,7 @@ def status_payload(target: Path, *, profile: str = "internal-dogfood") -> dict[s
             "top_issue": security_health.get("top_issue"),
             "evidence": security_health.get("evidence"),
         },
+        "content_guard": content_guard_health,
         "readiness": {
             "status": readiness.get("status"),
             "blocker_count": readiness.get("blocker_count"),
@@ -344,6 +348,8 @@ def status(*, target: Path, profile: str = "internal-dogfood", json_output: bool
     print(f"repo_configs_missing: {payload['repo']['missing_config_count']}")
     print(f"repo_configs_not_gitignored: {payload['repo']['not_gitignored_count']}")
     print(f"security_issues: {payload['security']['issue_count']}")
+    content_guard = payload.get("content_guard") if isinstance(payload.get("content_guard"), dict) else {}
+    print(f"content_guard: {'installed' if content_guard.get('available') else 'missing'} hook={'enabled' if content_guard.get('pre_push_hook_enabled') else 'not-enabled'} policy={content_guard.get('policy')}")
     print(f"daily_issues: {payload['daily']['issue_count']}")
     print(f"readiness: {payload['readiness']['status']} blockers={payload['readiness']['blocker_count']} warnings={payload['readiness']['warning_count']}")
     top = payload.get("top_issue")
@@ -392,6 +398,7 @@ def doctor_payload(target: Path, *, profile: str = "internal-dogfood") -> dict[s
             "security_issue_count": (status.get("security") or {}).get("issue_count") if isinstance(status.get("security"), dict) else None,
             "daily_issue_count": (status.get("daily") or {}).get("issue_count") if isinstance(status.get("daily"), dict) else None,
         },
+        "content_guard": status.get("content_guard"),
         "tool_health": {
             "issue_count": tool_health.get("issue_count"),
             "tool_count": tool_health.get("tool_count"),
@@ -432,6 +439,14 @@ def doctor(*, target: Path, profile: str = "internal-dogfood", json_output: bool
         print("blockers:")
         for item in payload["blockers"]:
             print(f"- {item.get('name')}: {item.get('detail')}")
+    content_guard = payload.get("content_guard") if isinstance(payload.get("content_guard"), dict) else {}
+    if content_guard:
+        print(
+            "content_guard: "
+            f"{'installed' if content_guard.get('available') else 'missing'} "
+            f"hook={'enabled' if content_guard.get('pre_push_hook_enabled') else 'not-enabled'} "
+            f"policy={content_guard.get('policy')}"
+        )
     print("local_only:")
     for item in payload["local_only_notes"]:
         print(f"- {item}")

@@ -167,6 +167,57 @@ def test_handoff_lint_defaults_to_pending_inboxes(tmp_path, capsys):
     assert "TEMPLATE.md" not in out
 
 
+def test_handoff_lint_can_run_content_guard(tmp_path, capsys, monkeypatch):
+    path = tmp_path / "note.md"
+    path.write_text(NO_CARD_HANDOFF)
+
+    def fake_run_scan(scan_target, *, repo_target=None, policy="public-repo"):
+        assert scan_target == path.resolve()
+        assert repo_target == tmp_path.resolve()
+        assert policy == "personal"
+        return {
+            "available": True,
+            "status": "ok",
+            "exit_code": 0,
+            "detail": "clean",
+            "stdout": "",
+            "stderr": "",
+        }
+
+    monkeypatch.setattr("brigade.scrub.run_scan", fake_run_scan)
+    assert handoff_cmd.lint(target=tmp_path, paths=[path], content_guard=True, guard_policy="personal", json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["valid"] is True
+    assert payload["content_guard"][0]["exit_code"] == 0
+
+
+def test_handoff_draft_guard_blocks_on_content_guard_findings(tmp_path, capsys, monkeypatch):
+    def fake_run_scan(scan_target, *, repo_target=None, policy="public-repo"):
+        return {
+            "available": True,
+            "status": "blocked",
+            "exit_code": 1,
+            "detail": "content-guard reported findings",
+            "stdout": "finding in handoff",
+            "stderr": "",
+        }
+
+    monkeypatch.setattr("brigade.scrub.run_scan", fake_run_scan)
+    assert handoff_cmd.draft(
+        target=tmp_path,
+        handoff_type="workflow",
+        title="Guarded draft",
+        summary="Guarded drafts fail when Content Guard blocks.",
+        content="### Guarded draft\n\nDurable context.",
+        guard=True,
+        json_output=True,
+    ) == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["valid"] is False
+    assert payload["lint"]["valid"] is True
+    assert payload["content_guard"]["exit_code"] == 1
+
+
 def test_handoff_draft_writes_linted_no_card_style(tmp_path, capsys):
     assert handoff_cmd.draft(
         target=tmp_path,
@@ -1204,7 +1255,13 @@ def test_handoff_lint_cli(tmp_path, monkeypatch):
 
     path = tmp_path / "note.md"
     assert cli.main(["handoff", "lint", "--target", str(tmp_path), "--json", str(path)]) == 0
-    assert seen == {"target": tmp_path, "paths": [path], "json_output": True}
+    assert seen == {
+        "target": tmp_path,
+        "paths": [path],
+        "content_guard": False,
+        "guard_policy": "personal",
+        "json_output": True,
+    }
 
 
 def test_handoff_draft_review_cli(tmp_path, monkeypatch):

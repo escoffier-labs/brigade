@@ -66,6 +66,14 @@ Promoted imports preserve the local handoff path, target document, promotion tim
 - scanner provenance such as scanner id, run id, and sweep id
 - stale age and source coverage status
 
+Before ingesting into canonical memory, run:
+
+```bash
+brigade handoff lint --content-guard --guard-policy personal --target .
+```
+
+The intended memory-owner rule is: Brigade lint passes, Content Guard passes when configured, and the operator has reviewed the note. Only then should OpenClaw, Hermes, or another owner ingest the handoff into durable memory.
+
 `brigade handoff show <handoff-id-or-path>` prints the same detail for one draft. `brigade handoff archive <handoff-id-or-path>` moves one draft into `.brigade/handoffs/archive/` and appends a closeout record under `.brigade/handoffs/archive.jsonl`. `brigade handoff archive --all-reviewed` archives lint-valid drafts only, leaving invalid drafts in place for repair.
 
 The draft queue is review visibility only. Brigade does not run the canonical ingestor, route the draft into canonical memory, edit `MEMORY.md`, or mutate memory cards.

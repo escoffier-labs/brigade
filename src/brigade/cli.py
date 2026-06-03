@@ -855,6 +855,8 @@ def _build_parser() -> argparse.ArgumentParser:
     p_handoff_lint = handoff_sub.add_parser("lint", help="Validate pending or explicit memory handoff files.")
     p_handoff_lint.add_argument("paths", nargs="*", type=Path, help="Handoff files to validate. Defaults to pending inbox files.")
     p_handoff_lint.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_handoff_lint.add_argument("--content-guard", action="store_true", help="Also scan handoff files with content-guard.")
+    p_handoff_lint.add_argument("--guard-policy", default="personal", help="Content Guard policy name or path for --content-guard.")
     p_handoff_lint.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_handoff_draft = handoff_sub.add_parser("draft", help="Write a linted Memory Handoff draft in Brigade style.")
     p_handoff_draft.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
@@ -871,6 +873,8 @@ def _build_parser() -> argparse.ArgumentParser:
     p_handoff_draft.add_argument("--content-file", type=Path, default=None, help="Read suggested content from a file.")
     p_handoff_draft.add_argument("--id", dest="draft_id", default=None, help="Stable id slug to use in the filename.")
     p_handoff_draft.add_argument("--force", action="store_true", help="Overwrite an existing generated draft path.")
+    p_handoff_draft.add_argument("--guard", action="store_true", help="Scan the generated draft with content-guard before returning success.")
+    p_handoff_draft.add_argument("--guard-policy", default="personal", help="Content Guard policy name or path for --guard.")
     p_handoff_draft.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_handoff_list = handoff_sub.add_parser("list", help="List local Memory Handoff drafts.")
     p_handoff_list.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
@@ -1652,6 +1656,12 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p_work_import_chat_sweep.add_argument("--dry-run", action="store_true", help="Report without writing imports.")
     p_work_import_chat_sweep.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_work_import_content_guard = import_sub.add_parser("content-guard", help="Import Content Guard scan findings as reviewed work imports.")
+    p_work_import_content_guard.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
+    p_work_import_content_guard.add_argument("--scan-target", type=Path, default=None, help="Path to scan. Defaults to --target.")
+    p_work_import_content_guard.add_argument("--policy", default="public-repo", help="Content Guard policy name or path.")
+    p_work_import_content_guard.add_argument("--dry-run", action="store_true", help="Report without writing imports.")
+    p_work_import_content_guard.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_work_import_triage = import_sub.add_parser("triage", help="Group pending imports by source and kind.")
     p_work_import_triage.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
     p_work_import_triage.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
@@ -3208,7 +3218,7 @@ def main(argv=None) -> int:
         if args.handoff_command == "doctor":
             return handoff_cmd.doctor(target=args.target, sources=args.sources, json_output=args.json)
         if args.handoff_command == "lint":
-            return handoff_cmd.lint(target=args.target, paths=args.paths, json_output=args.json)
+            return handoff_cmd.lint(target=args.target, paths=args.paths, content_guard=args.content_guard, guard_policy=args.guard_policy, json_output=args.json)
         if args.handoff_command == "draft":
             return handoff_cmd.draft(
                 target=args.target,
@@ -3225,6 +3235,8 @@ def main(argv=None) -> int:
                 inbox=args.inbox,
                 draft_id=args.draft_id,
                 force=args.force,
+                guard=args.guard,
+                guard_policy=args.guard_policy,
                 json_output=args.json,
             )
         if args.handoff_command == "list":
@@ -4061,6 +4073,14 @@ def main(argv=None) -> int:
                 return work_cmd.import_chat_sweep(
                     target=args.target,
                     input_path=args.input_path,
+                    dry_run=args.dry_run,
+                    json_output=args.json,
+                )
+            if args.import_command == "content-guard":
+                return work_cmd.import_content_guard(
+                    target=args.target,
+                    scan_target=args.scan_target,
+                    policy=args.policy,
                     dry_run=args.dry_run,
                     json_output=args.json,
                 )
