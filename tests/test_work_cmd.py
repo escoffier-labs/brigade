@@ -1561,6 +1561,132 @@ def test_work_plans_unreadable_json_does_not_crash(tmp_path, capsys):
     assert entries[0]["status"] == "unreadable"
 
 
+def _accepted_plan_task_id(tmp_path, capsys, **add_kwargs):
+    task_id = _plan_task_id(tmp_path, capsys, **add_kwargs)
+    assert (
+        work_cmd.task_plan(target=tmp_path, task_id=task_id[:12], write=True, accept=True) == 0
+    )
+    capsys.readouterr()
+    return task_id
+
+
+def _assert_no_install_dirs(tmp_path, task_id):
+    # Brigade must never write into install locations during promote.
+    for rel in ("rules", "templates", "memory", "skills", ".claude/skills"):
+        assert not (tmp_path / rel).exists(), f"unexpected install dir created: {rel}"
+    proposals = work_cmd._plan_proposals_dir(tmp_path)
+    written = sorted(p.name for p in proposals.glob("*.md")) if proposals.is_dir() else []
+    assert written, "expected a proposal file under plan-proposals/"
+
+
+def test_plan_promote_accepted_writes_draft_proposal(tmp_path, capsys):
+    _init_git_repo(tmp_path)
+    task_id = _accepted_plan_task_id(tmp_path, capsys)
+
+    assert work_cmd.plan_promote(target=tmp_path, task_id=task_id[:12], as_kind="rule") == 0
+    out = capsys.readouterr().out
+    assert "wrote draft proposal:" in out
+    assert "move it into place yourself" in out
+
+    proposal = work_cmd._proposal_path(tmp_path, task_id, "rule")
+    assert proposal.name == f"{task_id}-rule.md"
+    assert proposal.is_file()
+    text = proposal.read_text()
+    assert text.startswith("# Draft rule:")
+    assert "DRAFT proposal generated from an accepted plan" in text
+    assert "## Acceptance checklist" in text
+    assert "- [ ] Plan is written" in text
+    assert "- [ ] Plan is reviewed" in text
+
+    _assert_no_install_dirs(tmp_path, task_id)
+
+
+def test_plan_promote_json_output(tmp_path, capsys):
+    _init_git_repo(tmp_path)
+    task_id = _accepted_plan_task_id(tmp_path, capsys)
+
+    assert (
+        work_cmd.plan_promote(
+            target=tmp_path, task_id=task_id[:12], as_kind="template", json_output=True
+        )
+        == 0
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["task_id"] == task_id
+    assert payload["as"] == "template"
+    assert payload["path"] == f".brigade/work/plan-proposals/{task_id}-template.md"
+
+
+def test_plan_promote_draft_plan_refused_and_writes_nothing(tmp_path, capsys):
+    _init_git_repo(tmp_path)
+    task_id = _plan_task_id(tmp_path, capsys)
+    assert work_cmd.task_plan(target=tmp_path, task_id=task_id[:12], write=True) == 0
+    capsys.readouterr()
+
+    assert work_cmd.plan_promote(target=tmp_path, task_id=task_id[:12], as_kind="rule") == 1
+    err = capsys.readouterr().err
+    assert "plan not accepted" in err
+    assert not work_cmd._proposal_path(tmp_path, task_id, "rule").exists()
+    assert not work_cmd._plan_proposals_dir(tmp_path).exists()
+
+
+def test_plan_promote_missing_plan_returns_1(tmp_path, capsys):
+    _init_git_repo(tmp_path)
+
+    assert work_cmd.plan_promote(target=tmp_path, task_id="nope", as_kind="rule") == 1
+    err = capsys.readouterr().err
+    assert "no plan artifact for task: nope" in err
+    assert not work_cmd._plan_proposals_dir(tmp_path).exists()
+
+
+def test_plan_promote_invalid_as_kind_exits_2(tmp_path, capsys):
+    _init_git_repo(tmp_path)
+    task_id = _accepted_plan_task_id(tmp_path, capsys)
+
+    assert work_cmd.plan_promote(target=tmp_path, task_id=task_id[:12], as_kind="bogus") == 2
+    err = capsys.readouterr().err
+    assert "as" in err.lower()
+    assert not work_cmd._plan_proposals_dir(tmp_path).exists()
+
+
+def test_plan_promote_is_idempotent(tmp_path, capsys):
+    _init_git_repo(tmp_path)
+    task_id = _accepted_plan_task_id(tmp_path, capsys)
+
+    assert work_cmd.plan_promote(target=tmp_path, task_id=task_id[:12], as_kind="skill") == 0
+    assert work_cmd.plan_promote(target=tmp_path, task_id=task_id[:12], as_kind="skill") == 0
+    capsys.readouterr()
+    proposals = work_cmd._plan_proposals_dir(tmp_path)
+    files = sorted(proposals.glob("*.md"))
+    assert len(files) == 1
+    assert files[0].name == f"{task_id}-skill.md"
+
+
+def test_plan_proposals_lists_and_empty(tmp_path, capsys):
+    _init_git_repo(tmp_path)
+    # empty case
+    assert work_cmd.plan_proposals(target=tmp_path) == 0
+    assert "no plan proposals" in capsys.readouterr().out
+    assert work_cmd.plan_proposals(target=tmp_path, json_output=True) == 0
+    assert json.loads(capsys.readouterr().out) == []
+
+    task_id = _accepted_plan_task_id(tmp_path, capsys)
+    assert work_cmd.plan_promote(target=tmp_path, task_id=task_id[:12], as_kind="rule") == 0
+    capsys.readouterr()
+
+    assert work_cmd.plan_proposals(target=tmp_path, json_output=True) == 0
+    entries = json.loads(capsys.readouterr().out)
+    assert len(entries) == 1
+    assert entries[0]["task_id"] == task_id
+    assert entries[0]["as"] == "rule"
+    assert entries[0]["path"] == f".brigade/work/plan-proposals/{task_id}-rule.md"
+
+    assert work_cmd.plan_proposals(target=tmp_path) == 0
+    text_out = capsys.readouterr().out
+    assert task_id in text_out
+    assert "rule" in text_out
+
+
 def test_meta_plan_write_creates_meta_artifacts_with_kind(tmp_path, capsys):
     _init_git_repo(tmp_path)
     task_id = _plan_task_id(tmp_path, capsys)

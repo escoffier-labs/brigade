@@ -768,6 +768,23 @@ def _build_parser() -> argparse.ArgumentParser:
     p_work_plans.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
     p_work_plans.add_argument("--limit", type=int, default=20, help="Maximum plan artifacts to list.")
     p_work_plans.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_work_plan_promote = work_sub.add_parser(
+        "plan-promote",
+        help="Promote an accepted plan to a local DRAFT proposal (never installs).",
+    )
+    p_work_plan_promote.add_argument("task_id", help="Task id or unique prefix.")
+    p_work_plan_promote.add_argument(
+        "--as",
+        dest="as_kind",
+        choices=["template", "rule", "skill"],
+        required=True,
+        help="Draft proposal kind to generate.",
+    )
+    p_work_plan_promote.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_work_plan_promote.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_work_plan_proposals = work_sub.add_parser("plan-proposals", help="List local draft plan proposals.")
+    p_work_plan_proposals.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_work_plan_proposals.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_work_sweep_show = work_sub.add_parser("sweep-show", help="Show one scanner sweep report.")
     p_work_sweep_show.add_argument("sweep_id", help="Sweep id or unique prefix.")
     p_work_sweep_show.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
@@ -3173,6 +3190,12 @@ def main(argv=None) -> int:
             return work_cmd.sweeps(target=args.target, limit=args.limit, json_output=args.json)
         if args.work_command == "plans":
             return work_cmd.plans(target=args.target, limit=args.limit, json_output=args.json)
+        if args.work_command == "plan-promote":
+            return work_cmd.plan_promote(
+                target=args.target, task_id=args.task_id, as_kind=args.as_kind, json_output=args.json
+            )
+        if args.work_command == "plan-proposals":
+            return work_cmd.plan_proposals(target=args.target, json_output=args.json)
         if args.work_command == "sweep-show":
             return work_cmd.sweep_show(target=args.target, sweep_id=args.sweep_id, json_output=args.json)
         if args.work_command == "sweep-review":

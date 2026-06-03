@@ -10157,6 +10157,147 @@ def plans(*, target: Path, json_output: bool = False, limit: int = 20) -> int:
     return 0
 
 
+_PROPOSAL_KINDS = ("template", "rule", "skill")
+
+
+def _plan_proposals_dir(target: Path) -> Path:
+    return _work_root(target) / "plan-proposals"
+
+
+def _proposal_path(target: Path, task_id: str, as_kind: str) -> Path:
+    return _plan_proposals_dir(target) / f"{task_id}-{as_kind}.md"
+
+
+def _render_proposal_md(receipt: dict[str, Any], as_kind: str) -> str:
+    def _bullets(items: Any) -> list[str]:
+        values = [str(item) for item in items] if isinstance(items, list) else []
+        if not values:
+            return ["_none recorded_"]
+        return [f"- {item}" for item in values]
+
+    def _checklist(items: Any) -> list[str]:
+        values = [str(item) for item in items] if isinstance(items, list) else []
+        if not values:
+            return ["_none recorded_"]
+        return [f"- [ ] {item}" for item in values]
+
+    title = str(receipt.get("title") or "")
+    acceptance = receipt.get("acceptance")
+    if title:
+        intent = title
+    elif isinstance(acceptance, list) and acceptance:
+        intent = str(acceptance[0])
+    else:
+        intent = "_none recorded_"
+
+    lines: list[str] = []
+    lines.append(f"# Draft {as_kind}: {title}")
+    lines.append("")
+    lines.append(
+        "> DRAFT proposal generated from an accepted plan. Review and move it into "
+        "place yourself; Brigade does not install it."
+    )
+    lines.append("")
+    lines.append(f"- **Source task:** {receipt.get('task_id', '')}")
+    lines.append(f"- **Generated at:** {_now().isoformat()}")
+    lines.append("")
+    lines.append("## Intent")
+    lines.append(intent)
+    lines.append("")
+    lines.append("## Acceptance checklist")
+    lines.extend(_checklist(acceptance))
+    lines.append("")
+    lines.append("## Steps")
+    lines.extend(_bullets(receipt.get("steps")))
+    lines.append("")
+    lines.append("## Assumptions")
+    lines.extend(_bullets(receipt.get("assumptions")))
+    lines.append("")
+    lines.append("## Risks")
+    lines.extend(_bullets(receipt.get("risks")))
+    lines.append("")
+    lines.append("## Next safe command")
+    lines.append(f"`{receipt.get('next_command', '')}`")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def plan_promote(*, target: Path, task_id: str, as_kind: str, json_output: bool = False) -> int:
+    target = target.expanduser().resolve()
+    if not target.is_dir():
+        print(f"error: --target is not a directory: {target}", file=sys.stderr)
+        return 2
+    if as_kind not in _PROPOSAL_KINDS:
+        print(
+            f"error: --as must be one of {', '.join(_PROPOSAL_KINDS)}: {as_kind}",
+            file=sys.stderr,
+        )
+        return 2
+    task, _ = _find_task(target, task_id)
+    lookup_id = str(task.get("id") or task_id) if task is not None else task_id
+    receipt = _read_plan_receipt(target, lookup_id, kind="plan")
+    if receipt is None:
+        print(f"error: no plan artifact for task: {task_id}", file=sys.stderr)
+        return 1
+    if receipt.get("status") != "accepted":
+        print(
+            "error: plan not accepted "
+            "(run: brigade work task plan {id} --write --accept)".format(id=task_id),
+            file=sys.stderr,
+        )
+        return 1
+    resolved_id = str(receipt.get("task_id") or task_id)
+    proposal_path = _proposal_path(target, resolved_id, as_kind)
+    _plan_proposals_dir(target).mkdir(parents=True, exist_ok=True)
+    proposal_path.write_text(_render_proposal_md(receipt, as_kind))
+    rel = _plan_rel_path(target, proposal_path)
+    if json_output:
+        print(json.dumps({"task_id": resolved_id, "as": as_kind, "path": rel}, indent=2, sort_keys=True))
+        return 0
+    print(f"wrote draft proposal: {rel}")
+    print("review then move it into place yourself (not installed)")
+    return 0
+
+
+def plan_proposals(*, target: Path, json_output: bool = False) -> int:
+    target = target.expanduser().resolve()
+    if not target.is_dir():
+        print(f"error: --target is not a directory: {target}", file=sys.stderr)
+        return 2
+    proposals_dir = _plan_proposals_dir(target)
+    entries: list[dict[str, Any]] = []
+    if proposals_dir.is_dir():
+        for md_path in proposals_dir.glob("*.md"):
+            stem = md_path.name[: -len(".md")]
+            task_id, _, as_kind = stem.rpartition("-")
+            if not task_id:
+                task_id, as_kind = stem, ""
+            try:
+                mtime = md_path.stat().st_mtime
+            except OSError:
+                mtime = 0.0
+            entries.append(
+                {
+                    "task_id": task_id,
+                    "as": as_kind,
+                    "path": _plan_rel_path(target, md_path),
+                    "_mtime": mtime,
+                }
+            )
+    entries.sort(key=lambda item: item.get("_mtime", 0.0), reverse=True)
+    for entry in entries:
+        entry.pop("_mtime", None)
+    if json_output:
+        print(json.dumps(entries, indent=2, sort_keys=True))
+        return 0
+    if not entries:
+        print("no plan proposals")
+        return 0
+    for entry in entries:
+        print(f"- {entry['task_id']} [{entry['as']}] {entry['path']}")
+    return 0
+
+
 def sweep_show(*, target: Path, sweep_id: str, json_output: bool = False) -> int:
     target = target.expanduser().resolve()
     if not target.is_dir():
