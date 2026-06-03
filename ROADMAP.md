@@ -38,6 +38,22 @@ Status: in progress.
 - `brigade work import add/list/show/promote` gives scanners and wrappers a stable local inbox for candidate work.
 - `brigade work phases` provides a gitignored execution ledger for long unattended multi-phase work, including no-silent-compression checks, completion evidence requirements, range status, review closeouts, compare checks, commit reconciliation, privacy scans, handoff drafts, goal scaffolds, action queues, evidence attachments, verification matrices, daily-driver candidates, report closeouts, report compare checks, AFK execution sessions, checkpoint-aware session next/resume recovery, wrapper-safe session protocol output, session self-audit, session risk summaries, session verification, privacy, and handoff rollups, session checkpoints, session checkpoint inspection, compare, archive checks, checkpoint issue imports, recovery notes and closeouts, checkpoint-aware daily candidates, daily checkpoint writes, session activity timelines, session progress summaries, session blocker imports, session gates, session reports with recovery evidence, session health schema manifests, daily session candidates, inbox issue routing, and release/operator evidence with session compare drift checks. Status: strengthened through phase 250 AFK hardening closeout.
 
+## Foundation: Plan-First Operator Loop
+
+> **In plain terms:** make the "think first, then build" habit explicit. Big tasks should produce a local plan before execution, deep work can start with a plan for making the plan, and raw links, transcripts, screenshots, or errors should enter as reviewable context instead of trusted instructions. The operator still chooses what moves forward; Brigade just keeps the plan, receipts, and resume points tidy.
+
+Status: proposed.
+
+Goal: make Brigade the provider-neutral plan, receipt, and review layer for agentic engineering workflows across Codex, Claude Code, OpenClaw, Hermes, and similar harnesses.
+
+- Treat `brigade work task plan <id>` as the visible planning step for non-trivial local tasks, with plan artifacts that capture source context, assumptions, acceptance criteria, risks, next safe command, and receipt paths.
+- Add a "plan for the plan" mode for deep work that writes a local meta-plan and stops before producing the final deliverable, so research synthesis, roadmap design, release planning, docs work, and memory-care repair plans do not skip the thinking step. Status: proposed.
+- Route raw context such as transcripts, article links, screenshots, terminal errors, chat exports, and issue text through the scanner/import inbox as untrusted local context before promotion into tasks, research runs, handoff drafts, or docs updates. Status: proposed extension of the scanner-ready inbox.
+- Feed `brigade research run` reports into task planning as opt-in current-context evidence, keeping trusted local corpora first and web findings quarantined as untrusted source material.
+- Surface plan state in `brigade work brief`, `brigade daily status`, operator reports, and release readiness so significant pending or completed work without a plan artifact is visible before review.
+- Let repeated accepted plans and completed runs become draft workflow templates, repo rules, or skills through reviewed local proposals, without auto-installing or editing canonical memory.
+- Preserve Brigade's deliberate friction: plan artifacts, imports, receipts, and review queues are local by default; publish, remote mutation, canonical memory edits, background daemons, and risky tool execution still require explicit operator commands.
+
 ## Foundation: Scanner-Ready Inbox
 
 > **In plain terms:** make it safe for automations to drop "here is some work" into Brigade. A scanner finds something, it lands in a private inbox, and it sits there until you review and promote it. The rest is validating, deduping, grouping, dismissing noise, and turning keepers into tasks or memory notes. No daemon, no auto-promotion: things only move when you run a command.
