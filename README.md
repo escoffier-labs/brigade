@@ -1,22 +1,11 @@
-# Brigade
+<p align="center">
+  <img src="docs/assets/brigade-social-preview.jpg" alt="Brigade" width="900">
+</p>
 
-**Shared memory for people using AI agent tools.**
-
-Brigade is for the normal version of agent work: you have OpenClaw, Codex, Claude Code, OpenCode, Hermes, or some mix of them, and you want them to remember useful things without stuffing every random session note into permanent memory.
-
-Brigade gives those tools a simple local routine:
-
-1. an agent writes a handoff note
-2. you review it
-3. the useful part becomes durable memory
-4. the next session starts smarter
-
-It runs on your machine and keeps you in control. No background service, no surprise publishing, no automatic memory rewrites.
-
-![One shared memory, many agent tools](docs/assets/brigade-memory-flow.svg)
+<h1 align="center">Brigade</h1>
 
 <p align="center">
-  <img src="docs/assets/brigade-social-preview.jpg" alt="Brigade" width="520">
+  <strong>Shared memory and local guardrails for people using AI agent tools.</strong>
 </p>
 
 <p align="center">
@@ -25,19 +14,32 @@ It runs on your machine and keeps you in control. No background service, no surp
   <img src="https://img.shields.io/badge/license-MIT-green?style=for-the-badge" alt="MIT license">
 </p>
 
-## Who This Is For
+Brigade helps AI agent tools work from the same memory without turning that memory into a junk drawer.
 
-Use Brigade if:
+If you use OpenClaw, Hermes, Codex, Claude Code, OpenCode, or a mix of them, Brigade gives those tools a shared local pattern:
 
-- you use OpenClaw as your main memory system
-- you use more than one agent tool in the same repo
-- you want Codex, Claude Code, OpenCode, or Hermes to leave memory notes
-- you want to review those notes before saving them
-- you want local proof of what agents did without sending it anywhere
+1. agents write handoff notes
+2. you review the notes
+3. useful notes become durable memory
+4. future sessions start with better context
 
-You do not need to understand the whole command surface to start. The detailed operator system is there when you need it, but the first use case is just shared memory handoffs.
+It is intentionally local. Brigade writes files and review queues on your machine. It does not run a background service, publish releases, push to GitHub, send notifications, or rewrite permanent memory unless you explicitly run the command that does it.
 
-## Start Here
+## Why This Exists
+
+Agent tools are getting good enough that people use more than one of them. That creates a boring but important problem: each tool learns a little bit, but the learning is scattered.
+
+Brigade gives the setup a home base.
+
+- OpenClaw or Hermes can be the main memory owner.
+- Codex, Claude Code, OpenCode, and Hermes can write handoff notes.
+- You can inspect and lint those notes before saving them.
+- Local receipts show what happened during work, scans, and reviews.
+- Risky actions stay manual.
+
+The goal is not to make a giant automation machine. The goal is to make agent memory understandable, reviewable, and portable across harnesses.
+
+## Start Small
 
 Install:
 
@@ -65,57 +67,129 @@ brigade handoff draft \
 Put the durable note here."
 ```
 
-Then review it before adding it to long-term memory.
+Then review the draft before adding it to long-term memory.
 
-## The Loop
+That is the simplest useful version of Brigade: shared handoffs, local review, durable memory.
+
+## How Memory Handoffs Work
+
+Each writer harness gets its own local inbox:
+
+- `.codex/memory-handoffs/`
+- `.claude/memory-handoffs/`
+- `.opencode/memory-handoffs/`
+- `.hermes/memory-handoffs/`
+
+The memory owner, usually OpenClaw or Hermes, can ingest reviewed handoffs into the permanent memory files. Brigade keeps the handoff format consistent so different tools can contribute without each one inventing its own note style.
+
+![One shared memory, many agent tools](docs/assets/brigade-memory-flow.svg)
+
+The important part is the review step. Brigade does not assume every agent note deserves to become permanent memory.
+
+## The Local Loop
+
+Brigade is built around a simple daily loop:
+
+1. set up the repo
+2. let agents work
+3. review what they produced
+4. save only the parts worth remembering
 
 ![The Brigade loop stays local and reviewable](docs/assets/brigade-local-loop.svg)
 
-Brigade’s job is to keep the loop boring and safe:
+This loop scales from one person using one repo to a more serious operator setup with scanner inboxes, work receipts, release checks, and repo-fleet summaries. You do not need all of that on day one.
 
-- agents can write notes
-- humans choose what gets saved
-- local files show what happened
-- risky actions stay manual
+## What Brigade Can Handle
 
-## What It Handles
+For memory:
 
-Brigade can set up and check:
+- install shared memory files, rules, and handoff templates
+- keep one canonical memory owner
+- lint handoff drafts before ingest
+- track which local inboxes the ingestor should watch
+- support OpenClaw, Hermes, Codex, Claude Code, and OpenCode conventions
 
-- shared memory files and rules
-- handoff inboxes for Codex, Claude Code, OpenCode, and Hermes
-- OpenClaw or Hermes as the main memory owner
-- local review queues and work receipts
-- optional scanner and release-readiness workflows
+For local work:
 
-Generated local state stays in ignored folders such as `.brigade/`, `.codex/`, `.claude/`, `.opencode/`, and `.hermes/`.
+- record work sessions and verification receipts
+- collect scanner findings into reviewable inboxes
+- keep release-readiness evidence local and explicit
+- project shared tool docs into harness-specific folders
+- summarize repo/operator state before a work session
 
-## What It Does Not Do
+For safety:
 
-Brigade does not:
+- keep generated state ignored by default
+- avoid publishing, pushing, or mutating remotes automatically
+- keep notification sending opt-in
+- make risky actions visible as operator decisions
+
+## What Brigade Is Not
+
+Brigade is not a hosted memory service, a daemon, or an automatic release bot.
+
+It does not:
 
 - run in the background
 - install schedulers
 - push to GitHub
-- publish releases
+- publish packages
 - send notifications by default
 - save every note automatically
+- replace the human review step
 
-That pause is intentional. Agent memory should be useful, not noisy.
+That pause is the point. Agent memory should be useful, not noisy.
 
-## Docs
+## For OpenClaw Users
+
+OpenClaw can be the memory owner. Brigade gives nearby tools a way to contribute reviewed notes back into that owner memory without forcing every tool to know OpenClaw internals.
+
+A typical setup is:
+
+```bash
+brigade init --target ./my-repo --depth repo --harnesses openclaw,codex,claude,opencode
+brigade handoff sources init --target ./my-repo
+brigade handoff doctor --target ./my-repo
+```
+
+Then writer tools leave handoffs in their own inboxes, and the memory owner ingests only what you approve.
+
+## For Hermes Users
+
+Hermes now has a first-class Brigade handoff inbox:
+
+```bash
+brigade handoff draft --target . --inbox hermes \
+  --title "Hermes note" \
+  --summary "Hermes can write a local Brigade handoff." \
+  --content "### Hermes note
+
+Durable context goes here."
+```
+
+Check the local wiring with:
+
+```bash
+brigade operator verify-harness --harness hermes --target .
+```
+
+See [Hermes handoffs](docs/hermes-handoffs.md) for the current boundaries.
+
+## Where The Detailed Docs Went
+
+The full technical walkthrough still exists; it is just not the README anymore.
 
 - [Technical guide](docs/technical-guide.md): the detailed command walkthrough.
-- [Hermes handoffs](docs/hermes-handoffs.md): Hermes writer inbox setup.
 - [Handoff promotion](docs/handoff-promotion.md): how reviewed notes move toward memory.
+- [Hermes handoffs](docs/hermes-handoffs.md): Hermes writer inbox setup.
 - [Internal dogfood loop](docs/internal-dogfood.md): how this repo uses Brigade on itself.
 - [Command inventory](docs/command-inventory.md): every public CLI command.
 - [Roadmap](ROADMAP.md): current direction.
 
 ## Tiny Glossary
 
-- **Agent tool**: OpenClaw, Hermes, Codex, Claude Code, OpenCode, or a similar program.
+- **Harness**: an agent tool such as OpenClaw, Hermes, Codex, Claude Code, or OpenCode.
 - **Handoff**: a note an agent writes for later review.
-- **Inbox**: the local folder where those notes wait.
-- **Memory owner**: the place that keeps the durable shared memory.
-- **Operator**: the human deciding what gets saved or run.
+- **Inbox**: the local folder where handoff notes wait.
+- **Memory owner**: the place that keeps durable shared memory.
+- **Operator**: the human deciding what gets saved, run, or published.
