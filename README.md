@@ -33,7 +33,7 @@ In a kitchen, that is chopped mirepoix, clean pans, labels, and a station that d
 For agents, it is the same idea: rules, memory, tools, handoff inboxes, publish guards, and boring verification already laid out before the session gets expensive.
 
 This package lays down a clean starting point for an agent workspace or a repo that needs durable memory handoffs, local work receipts, scanner inboxes, portable tool review, repo-fleet evidence, and release gates.
-It is meant for people running real tools, real docs, and real automation across OpenClaw, Claude Code, Codex, Hermes, or a similar harness.
+It is meant for people running real tools, real docs, and real automation across OpenClaw, Claude Code, Codex, OpenCode, Hermes, or a similar harness.
 
 The cookbook explains the why. This package gives you the kitchen.
 
@@ -43,7 +43,7 @@ This README is dense, and a handful of words carry most of the weight. Learn the
 
 | Word | What it actually means |
 |---|---|
-| **harness** | An AI agent program: Claude Code, Codex, OpenClaw, Hermes. |
+| **harness** | An AI agent program: Claude Code, Codex, OpenCode, OpenClaw, Hermes. |
 | **operator** | You, the human running the agents. |
 | **dogfood** | Brigade used on itself or another trusted repo. |
 | **handoff** | A memory note an agent writes to be saved long-term. |
@@ -805,12 +805,13 @@ brigade installs material on two independent axes:
 
 ## Picking your harnesses
 
-Four common combos:
+Common combos:
 
 - **Claude Code only:** `--harnesses claude`, the lightest setup, just one writer.
 - **Claude Code + OpenClaw:** `--harnesses claude,openclaw`, durable memory owner (OpenClaw) plus side writer (Claude Code).
 - **Claude Code + Codex + OpenClaw:** `--harnesses claude,codex,openclaw`, both writers feed into OpenClaw as the canonical owner.
 - **Codex + OpenClaw:** `--harnesses codex,openclaw`, Codex-first user with OpenClaw as the canonical store.
+- **OpenCode + OpenClaw:** `--harnesses opencode,openclaw`, OpenCode writes handoffs into `.opencode/memory-handoffs/` and OpenClaw owns the canonical memory.
 
 The canonical memory owner is picked automatically by priority (`openclaw > hermes > claude > codex > this-repo`). Override with `--owner`.
 
