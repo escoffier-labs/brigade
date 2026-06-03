@@ -6,7 +6,7 @@ mkdir -p "$bindir"
 
 install_tool() {
   repo="$1"
-  default_url="https://raw.githubusercontent.com/solomonneas/${repo}/master/install.sh"
+  default_url="https://raw.githubusercontent.com/solomonneas/${repo}/HEAD/install.sh"
   case "$repo" in
     logspine) url="${LOGSPINE_INSTALL_URL:-$default_url}" ;;
     agenttrail) url="${AGENTTRAIL_INSTALL_URL:-$default_url}" ;;

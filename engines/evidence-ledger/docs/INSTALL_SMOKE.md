@@ -13,9 +13,9 @@ export XDG_CACHE_HOME="$tmp_home/.cache"
 export BINDIR="$tmp_home/bin"
 export PATH="$BINDIR:$PATH"
 
-curl -fsSL https://raw.githubusercontent.com/solomonneas/logspine/master/install.sh | sh
-curl -fsSL https://raw.githubusercontent.com/solomonneas/agenttrail/master/install.sh | sh
-curl -fsSL https://raw.githubusercontent.com/solomonneas/sourceharvest/master/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/solomonneas/logspine/HEAD/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/solomonneas/agenttrail/HEAD/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/solomonneas/sourceharvest/HEAD/install.sh | sh
 
 spine version
 agenttrail version

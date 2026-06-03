@@ -28,7 +28,7 @@ go run ./cmd/spine --help
 Install from a release:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/solomonneas/logspine/master/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/solomonneas/logspine/HEAD/install.sh | sh
 ```
 
 For a first archive and agent integration path, see [docs/QUICKSTART.md](docs/QUICKSTART.md). For MCP client configuration, see [docs/MCP.md](docs/MCP.md). For roadmap and cookbook material, see [docs/ROADMAP.md](docs/ROADMAP.md), [docs/EXAMPLES.md](docs/EXAMPLES.md), and [docs/INSTALL_SMOKE.md](docs/INSTALL_SMOKE.md).

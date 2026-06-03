@@ -7,15 +7,15 @@ This path gets Logspine from a fresh install to a local evidence archive that ag
 Install Logspine:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/solomonneas/logspine/master/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/solomonneas/logspine/HEAD/install.sh | sh
 spine version
 ```
 
 Optional scanners:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/solomonneas/agenttrail/master/install.sh | sh
-curl -fsSL https://raw.githubusercontent.com/solomonneas/sourceharvest/master/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/solomonneas/agenttrail/HEAD/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/solomonneas/sourceharvest/HEAD/install.sh | sh
 ```
 
 `agenttrail` exports local agent-session logs. `sourceharvest` exports local files, Markdown, HTML, JSON, JSONL, and git history. Logspine imports both through the same `logspine.adapter.v1` contract.
