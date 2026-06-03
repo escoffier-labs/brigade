@@ -77,6 +77,7 @@ SKIP_PREFIXES = (
     (".brigade", "work"),
     (".claude", "memory-handoffs"),
     (".codex", "memory-handoffs"),
+    (".opencode", "memory-handoffs"),
 )
 
 TEXT_SUFFIXES = {
