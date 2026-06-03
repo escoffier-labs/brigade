@@ -79,6 +79,7 @@ agenttrail codex ~/.codex/sessions --out - | spine import adapter -
 agenttrail claude ~/.claude/projects --out - | spine import adapter -
 agenttrail openclaw ~/.openclaw/agents --out - | spine import adapter -
 agenttrail hermes ~/.hermes/sessions --out - | spine import adapter -
+agenttrail all --out - --redact paths,secrets | spine import adapter -
 ```
 
 Or let Logspine run AgentTrail when the `agenttrail` binary is installed on `PATH`:
@@ -93,4 +94,4 @@ spine import agenttrail hermes ~/.hermes/sessions --json
 
 Use AgentTrail when source-specific harness parsing should live outside Logspine. Keep Logspine focused on ingest, normalized storage, FTS, scan manifests, relation resolution, and evidence output.
 
-AgentTrail `discover`, `doctor`, `inspect`, and `--dry-run --json` modes report roots, structural keys, counts, records, and warnings without printing transcript content. Logspine's `import agenttrail` wrapper records AgentTrail scan manifests when AgentTrail writes summary output.
+AgentTrail `discover`, `doctor`, `doctor --live`, `inspect`, and `--dry-run --json` modes report roots, structural keys, counts, records, and warnings without printing transcript content. Logspine's `import agenttrail` wrapper records AgentTrail scan manifests when AgentTrail writes summary output. For `agenttrail all`, prefer piping to `spine import adapter -` so mixed-source records retain their individual `source.kind`.

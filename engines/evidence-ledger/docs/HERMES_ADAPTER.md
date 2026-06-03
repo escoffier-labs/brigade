@@ -7,6 +7,7 @@ AgentTrail supports local Hermes `session_*.json` snapshots and trajectory JSONL
 ```bash
 agenttrail hermes ~/.hermes/sessions --out - | spine import adapter -
 spine import agenttrail hermes ~/.hermes/sessions --json
+agenttrail all --out - --redact paths,secrets | spine import adapter -
 ```
 
 Hermes `state.db` remains an observed storage surface, but Logspine does not parse it natively. Keep source-specific Hermes parsing in AgentTrail unless there is a strong reason to duplicate it.

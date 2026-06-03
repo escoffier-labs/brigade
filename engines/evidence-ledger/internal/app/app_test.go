@@ -150,6 +150,56 @@ func TestImportAgentTrailWrapper(t *testing.T) {
 	}
 }
 
+func TestImportAgentTrailWrapperForSupportedSources(t *testing.T) {
+	withTempHome(t)
+	runOK(t, "init")
+	agenttrailDir := t.TempDir()
+	script := filepath.Join(agenttrailDir, "agenttrail")
+	body := `#!/bin/sh
+source="$1"
+summary=''
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = '--summary-out' ]; then shift; summary="$1"; fi
+  shift || true
+done
+case "$source" in
+  codex) text='Codex wrapper fixture adapter contract'; actor='assistant' ;;
+  claude) text='Claude wrapper fixture native import'; actor='assistant' ;;
+  openclaw) text='OpenClaw wrapper fixture normalized schema'; actor='assistant' ;;
+  opencode) text='OpenCode wrapper fixture sanitized export'; actor='assistant' ;;
+  hermes) text='Hermes wrapper fixture session snapshot'; actor='assistant' ;;
+  *) echo "unsupported source" >&2; exit 1 ;;
+esac
+if [ -n "$summary" ]; then
+  printf '{"source":"%s","records":1,"warnings":[],"files":[{"path":"%s.fixture","size":1,"mtime":"2026-06-03T00:00:00Z","content_hash":"sha256:test","records_generated":1,"warnings":0}]}' "$source" "$source" > "$summary"
+fi
+printf '{"schema":"logspine.adapter.v1","source":{"kind":"%s","name":"AgentTrail Fixture"},"collection":{"external_id":"%s:session:fixture","kind":"agent_session","name":"fixture"},"item":{"external_id":"%s:item:fixture","kind":"message","created_at":"2026-06-03T00:00:00Z","text":"%s","tags":["agent-session","%s"]},"actor":{"external_id":"%s:%s:fixture","type":"%s","name":"fixture"},"artifacts":[],"links":[],"relations":[],"raw":{"format":"json","hash":"sha256:test","path":"%s.fixture","ordinal":1}}\n' "$source" "$source" "$source" "$text" "$source" "$source" "$actor" "$actor" "$source"
+`
+	if err := os.WriteFile(script, []byte(body), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	oldPath := os.Getenv("PATH")
+	t.Setenv("PATH", agenttrailDir+string(os.PathListSeparator)+oldPath)
+	for _, source := range []string{"codex", "claude", "openclaw", "opencode", "hermes"} {
+		out := runJSON(t, "import", "agenttrail", source, "fixture", "--json")
+		if out["inserted_items"].(float64) != 1 {
+			t.Fatalf("%s inserted = %v, want 1: %v", source, out["inserted_items"], out)
+		}
+	}
+	status := runJSON(t, "status", "--json")
+	if status["items"].(float64) != 5 || status["sources"].(float64) != 5 {
+		t.Fatalf("status after wrapper imports = %v", status)
+	}
+	search := runJSON(t, "search", "wrapper fixture", "--json")
+	if len(search["results"].([]any)) != 5 {
+		t.Fatalf("search results = %v", search)
+	}
+	scans := runJSON(t, "scans", "list", "--json")
+	if len(scans["scans"].([]any)) != 5 {
+		t.Fatalf("scan rows = %v", scans)
+	}
+}
+
 func TestSourceDiscoveryDoesNotPrintTranscriptContent(t *testing.T) {
 	withTempHome(t)
 	secret := "PRIVATE_TRANSCRIPT_SHOULD_NOT_APPEAR"

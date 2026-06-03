@@ -87,7 +87,9 @@ AgentTrail is the separate local agent-session scanner/exporter. It keeps source
 ```bash
 agenttrail discover --json
 agenttrail doctor --json
+agenttrail doctor --live --json
 agenttrail codex ~/.codex/sessions --dry-run --json
+agenttrail all --out - --redact paths,secrets | spine import adapter -
 agenttrail claude ~/.claude/projects --out - | spine import adapter -
 agenttrail openclaw ~/.openclaw/agents --out openclaw.adapter.jsonl
 agenttrail hermes ~/.hermes/sessions --out - | spine import adapter -
@@ -104,7 +106,7 @@ spine import agenttrail opencode opencode-session.json --json
 spine import agenttrail hermes ~/.hermes/sessions --json
 ```
 
-The wrapper streams AgentTrail output through adapter ingest and records AgentTrail scan manifests from its summary output.
+The wrapper streams AgentTrail output through adapter ingest and records AgentTrail scan manifests from its summary output. For mixed-source imports, use `agenttrail all --out - | spine import adapter -`; each adapter record still carries its own `source.kind`.
 
 Logspine native adapters remain available for compatibility. Long term, source-specific agent-session parser ownership should live in AgentTrail while Logspine owns archive ingest, SQLite, FTS, relations, scan manifests, and evidence bundles.
 
