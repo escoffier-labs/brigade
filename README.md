@@ -412,7 +412,9 @@ Task ledger commands:
 - `brigade work task add "..." --template bugfix --acceptance "Regression test passes"` adds template acceptance criteria while preserving explicit acceptance criteria.
 - `brigade work task add --from-issue 42` imports a GitHub issue with `gh issue view` when `gh` is available, including acceptance criteria parsed from issue-body checkboxes or acceptance/test sections.
 - `brigade work task add --from-next` promotes the latest extracted dogfood next step.
-- `brigade work task plan <task-id>` shows the task metadata, acceptance checklist, template guidance, and suggested run command.
+- `brigade work task plan <task-id>` shows the task metadata, acceptance checklist, template guidance, and suggested run command. Add `--write` to persist a plan artifact (plan.md plus a JSON receipt under `.brigade/work/plans/`) capturing assumptions, acceptance, risks, steps, and the next safe command; `--meta` writes a plan-for-the-plan that stops before the deliverable; `--step` captures steps; and `--from-research <run-id>` attaches a research run report as quarantined untrusted-web evidence.
+- `brigade work plans` lists persisted plan artifacts.
+- `brigade work plan-promote <task-id> --as template|rule|skill` writes a local DRAFT proposal under `.brigade/work/plan-proposals/` from an accepted plan, and never installs templates, rules, or skills; `brigade work plan-proposals` lists them.
 - `brigade work task done <task-id>` closes queued work.
 
 Available task templates are `vertical-slice`, `bugfix`, `red-green-refactor`, `docs`, and `security-follow-up`.
@@ -422,6 +424,7 @@ Issue body text is not stored, and Brigade does not poll, sync, mutate, or refre
 Import inbox commands:
 
 - `brigade work import add "..."` creates a scanner-ready local import.
+- `brigade work import context` frames raw links, transcripts, or terminal errors as untrusted local context, flags prompt-injection signals for review, and always lands the result in the inbox.
 - `brigade work import validate imports.jsonl` checks scanner output against [`docs/import-schema.md`](docs/import-schema.md).
 - `brigade work import ingest imports.jsonl` ingests scanner output.
 - `brigade memory care scan` scans local memory cards for stale, expired, undersourced, contradictory, missing-index-link, orphaned, oversized, missing-frontmatter, missing-reviewed, and missing-freshness issues without editing memory.
