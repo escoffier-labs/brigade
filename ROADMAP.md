@@ -146,12 +146,13 @@ Goal: make skills shareable across harnesses while treating them like code: prov
 
 - Maintain a canonical local skill registry where each skill pack has `SKILL.md`, `skill.json` metadata, version, source, required tools, required MCP servers, supported harnesses, trust level, tests, and optional bundled assets or scripts. Status: started with `brigade skills import`, local registry fingerprints, lint checks, and injection-signal warnings.
 - Materialize one reviewed skill into multiple harness formats instead of maintaining separate prompt copies. Status: started with `brigade skills install <skill> --target codex|claude|opencode|gemini|openclaw|hermes|mcp|all`, installing Codex, Claude, OpenCode, Gemini `.agents/skills`, OpenClaw, Hermes, and MCP-resource folders with per-harness receipts.
-- Keep harness support adapter-based so future targets such as Antigravity, Pi, Cursor, and similar agent surfaces can be added without changing the registry contract. Status: started with `brigade skills adapters list/show`, built-in adapter metadata, and planned adapter entries.
+- Keep harness support adapter-based so future targets such as Antigravity, Pi, Cursor, and similar agent surfaces can be added without changing the registry contract. Status: started with `brigade skills adapters init/list/show`, built-in adapter metadata, local adapter overlay config, and planned adapter entries.
 - Search and lint skill packs before use. Status: started with `brigade skills search` and `brigade skills lint`.
 - Keep the Skills Over MCP direction as an explicit experimental contract. Status: started with `brigade skills serve-mcp`, which reports planned resources such as `skill://registry/{skill_id}/SKILL.md` and tools such as `search_skills`, `get_skill`, `install_skill`, `publish_skill`, `fork_skill`, and `lint_skill` without starting a server yet.
 - Publish through reviewed proposals instead of direct sharing. Status: started with `brigade skills publish <skill> --scope local|workspace|team|public`, writing local publish proposals that preserve fingerprint and review state.
 - Add an agent skill inbox for proposed new skills or improvements, then lint, diff, fingerprint, and review them before import. Status: started with `brigade skills inbox add/list/show/diff/accept/reject`.
-- Add compatibility and version views for Codex, Claude Code, Gemini, OpenClaw, and MCP-native installs, including diffs, changelog, source, and trust score. Status: planned.
+- Add compatibility and version views for Codex, Claude Code, Gemini, OpenClaw, and MCP-native installs, including diffs, changelog, source, and trust score. Status: started with `brigade skills compatibility`; version diffs, changelog, trust score, and richer install history remain planned.
+- Add rollback for installed skills. Status: started with rollback snapshots captured on forced reinstall and `brigade skills rollback <skill> --target <harness>`.
 
 ## Later Phase: Explicit Runbook Execution
 
@@ -161,7 +162,7 @@ Goal: provide a clear execution lane for approved multi-step workflows without t
 
 - Add a runbook contract with explicit shell steps, per-step cwd, timeouts, stdout/stderr logs, and JSON receipts. Status: started with `brigade runbook plan/run/resume/closeout`.
 - Keep runbook execution foreground-only and receipt-backed. Status: started with local receipts under `.brigade/runbooks/runs/`.
-- Add approval policy, allowed-command validation, dry-run rendering, retry from failed step, and import routing for failed runbooks. Status: planned.
+- Add approval policy, allowed-command validation, dry-run rendering, retry from failed step, and import routing for failed runbooks. Status: started with approval-required execution, destructive default-deny checks, optional `allowed_commands`, `run --dry-run`, and `run --resume <run-id>`; import routing remains planned.
 
 ## Later Phase: Context, Projects, And Learning
 

@@ -104,11 +104,52 @@ def test_skills_cli_inbox_and_adapters(tmp_path, capsys):
     shown = json.loads(capsys.readouterr().out)
     assert shown["proposal_id"] == proposal["proposal_id"]
 
-    assert cli.main(["skills", "adapters", "list", "--include-planned", "--json"]) == 0
+    assert cli.main(["skills", "adapters", "init", "--target", str(tmp_path), "--json"]) == 0
+    init_payload = json.loads(capsys.readouterr().out)
+    assert init_payload["adapter_count"] == 3
+
+    assert cli.main(["skills", "adapters", "list", "--target", str(tmp_path), "--include-planned", "--json"]) == 0
     adapters = json.loads(capsys.readouterr().out)
     ids = {item["id"] for item in adapters["adapters"]}
     assert {"codex", "cursor", "antigravity", "pi"} <= ids
 
-    assert cli.main(["skills", "adapters", "show", "cursor", "--json"]) == 0
+    assert cli.main(["skills", "adapters", "show", "cursor", "--target", str(tmp_path), "--json"]) == 0
     cursor = json.loads(capsys.readouterr().out)
     assert cursor["status"] == "planned"
+
+
+def test_skills_compatibility_reports_installed_and_planned_adapters(tmp_path, capsys):
+    source = _write_skill(tmp_path / "source")
+    assert skills_cmd.import_skill(target=tmp_path, source=source, json_output=True) == 0
+    capsys.readouterr()
+    assert skills_cmd.install(workspace=tmp_path, skill="security-review", harness="codex", json_output=True) == 0
+    capsys.readouterr()
+
+    assert skills_cmd.compatibility(target=tmp_path, skill="security-review", json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    by_id = {row["id"]: row for row in payload["adapters"]}
+    assert by_id["codex"]["installed"] is True
+    assert "adapter planned" in by_id["cursor"]["blockers"]
+
+
+def test_skills_rollback_restores_previous_install(tmp_path, capsys):
+    source = _write_skill(tmp_path / "source")
+    assert skills_cmd.import_skill(target=tmp_path, source=source, json_output=True) == 0
+    capsys.readouterr()
+    assert skills_cmd.install(workspace=tmp_path, skill="security-review", harness="claude", json_output=True) == 0
+    capsys.readouterr()
+    installed = tmp_path / ".claude" / "skills" / "security-review" / "SKILL.md"
+    installed.write_text("# Security Review\n\nchanged locally\n")
+
+    updated = _write_skill(tmp_path / "source2")
+    (updated / "SKILL.md").write_text("# Security Review\n\nnew version\n")
+    assert skills_cmd.import_skill(target=tmp_path, source=updated, force=True, json_output=True) == 0
+    capsys.readouterr()
+    assert skills_cmd.install(workspace=tmp_path, skill="security-review", harness="claude", force=True, json_output=True) == 0
+    capsys.readouterr()
+    assert "new version" in installed.read_text()
+
+    assert skills_cmd.rollback(workspace=tmp_path, skill="security-review", harness="claude", json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["target"] == "claude"
+    assert "changed locally" in installed.read_text()

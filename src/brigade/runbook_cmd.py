@@ -2,11 +2,23 @@
 from __future__ import annotations
 
 import json
+import re
+import shlex
 import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+DANGEROUS_PATTERNS = (
+    re.compile(r"\brm\s+-[^;\n]*[rf][^;\n]*[rf]"),
+    re.compile(r"\bgit\s+reset\s+--hard\b"),
+    re.compile(r"\bgit\s+checkout\s+--\b"),
+    re.compile(r"\bmkfs(?:\.\w+)?\b"),
+    re.compile(r"\bshutdown\b"),
+    re.compile(r"\breboot\b"),
+    re.compile(r":\s*\(\s*\)\s*\{"),
+)
 
 
 def _now() -> str:
@@ -26,6 +38,16 @@ def _write_json(path: Path, payload: dict[str, Any]) -> None:
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
 
 
+def _unique_run_dir(target: Path, run_id_base: str) -> tuple[str, Path]:
+    root = _runs_root(target)
+    for index in range(0, 100):
+        run_id = run_id_base if index == 0 else f"{run_id_base}-{index + 1}"
+        run_dir = root / run_id
+        if not run_dir.exists():
+            return run_id, run_dir
+    raise FileExistsError(f"could not allocate unique runbook run id for {run_id_base}")
+
+
 def _read_runbook(path: Path) -> tuple[dict[str, Any] | None, str | None]:
     try:
         payload = json.loads(path.read_text())
@@ -42,6 +64,40 @@ def _read_runbook(path: Path) -> tuple[dict[str, Any] | None, str | None]:
     return payload, None
 
 
+def _command_name(command: str) -> str:
+    try:
+        parts = shlex.split(command)
+    except ValueError:
+        return ""
+    return Path(parts[0]).name if parts else ""
+
+
+def _policy_for_step(payload: dict[str, Any], step: dict[str, Any]) -> dict[str, Any]:
+    command = str(step.get("run") or "")
+    allowed = payload.get("allowed_commands")
+    if allowed is None:
+        allowed = step.get("allowed_commands")
+    allowed_list = [str(item) for item in allowed] if isinstance(allowed, list) else []
+    command_name = _command_name(command)
+    failures: list[str] = []
+    warnings: list[str] = []
+    if any(pattern.search(command) for pattern in DANGEROUS_PATTERNS):
+        failures.append("command matches a destructive default-deny pattern")
+    if allowed_list and command_name not in allowed_list:
+        failures.append(f"command {command_name!r} is not in allowed_commands")
+    if not command_name:
+        failures.append("command could not be parsed")
+    if not allowed_list:
+        warnings.append("allowed_commands not configured; default destructive deny-list only")
+    return {
+        "command": command,
+        "command_name": command_name,
+        "allowed_commands": allowed_list,
+        "failures": failures,
+        "warnings": warnings,
+    }
+
+
 def _plan_payload(target: Path, runbook: Path) -> tuple[dict[str, Any] | None, str | None]:
     payload, error = _read_runbook(runbook)
     if payload is None:
@@ -53,14 +109,23 @@ def _plan_payload(target: Path, runbook: Path) -> tuple[dict[str, Any] | None, s
             "run": step["run"],
             "cwd": str(step.get("cwd") or target),
             "timeout_seconds": int(step.get("timeout_seconds") or payload.get("timeout_seconds") or 600),
+            "policy": _policy_for_step(payload, step),
         }
         for index, step in enumerate(payload["steps"], start=1)
+    ]
+    policy_failures = [
+        {"step": step["id"], "failures": step["policy"]["failures"]}
+        for step in steps
+        if step["policy"]["failures"]
     ]
     return {
         "target": str(target),
         "runbook_path": str(runbook),
         "runbook_id": str(payload.get("id") or runbook.stem),
         "description": str(payload.get("description") or ""),
+        "approved": bool(payload.get("approved")),
+        "policy_valid": not policy_failures,
+        "policy_failures": policy_failures,
         "step_count": len(steps),
         "steps": steps,
         "boundaries": [
@@ -87,43 +152,80 @@ def plan(*, target: Path, runbook: Path, json_output: bool = False) -> int:
     return 0
 
 
-def run(*, target: Path, runbook: Path, json_output: bool = False) -> int:
-    target = target.expanduser().resolve()
-    runbook = runbook.expanduser().resolve()
-    plan_payload, error = _plan_payload(target, runbook)
-    if plan_payload is None:
-        print(f"error: {error}", file=sys.stderr)
+def _execute_plan(
+    *,
+    target: Path,
+    runbook: Path,
+    plan_payload: dict[str, Any],
+    approved: bool,
+    dry_run: bool,
+    start_index: int = 1,
+    source_run_id: str | None = None,
+    json_output: bool = False,
+) -> int:
+    if not plan_payload["policy_valid"]:
+        if json_output:
+            print(json.dumps({"target": str(target), "status": "blocked", "policy_failures": plan_payload["policy_failures"]}, indent=2, sort_keys=True))
+        else:
+            print("error: runbook policy failed", file=sys.stderr)
         return 2
+    if not (approved or bool(plan_payload.get("approved"))):
+        if json_output:
+            print(json.dumps({"target": str(target), "status": "approval-required", "runbook_id": plan_payload["runbook_id"]}, indent=2, sort_keys=True))
+        else:
+            print("error: runbook execution requires --approved or approved=true in the runbook", file=sys.stderr)
+        return 1
+    steps = [step for step in plan_payload["steps"] if int(step["index"]) >= start_index]
+    if dry_run:
+        payload = {**plan_payload, "dry_run": True, "steps": steps}
+        if json_output:
+            print(json.dumps(payload, indent=2, sort_keys=True))
+        else:
+            print(f"runbook dry-run: {plan_payload['runbook_id']}")
+            for step in steps:
+                print(f"- {step['id']}: {step['run']}")
+        return 0
+    target = target.expanduser().resolve()
     started = _now()
-    run_id = f"{started[:19].replace(':', '').replace('-', '')}-{plan_payload['runbook_id']}"
-    run_dir = _runs_root(target) / run_id
+    run_id, run_dir = _unique_run_dir(target, f"{started[:19].replace(':', '').replace('-', '')}-{plan_payload['runbook_id']}")
     run_dir.mkdir(parents=True, exist_ok=False)
     results: list[dict[str, Any]] = []
     status = "completed"
-    for step in plan_payload["steps"]:
+    for step in steps:
         stdout_path = run_dir / f"{step['index']:02d}-{step['id']}.stdout.log"
         stderr_path = run_dir / f"{step['index']:02d}-{step['id']}.stderr.log"
-        completed = subprocess.run(
-            step["run"],
-            cwd=step["cwd"],
-            shell=True,
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=step["timeout_seconds"],
-            check=False,
-        )
-        stdout_path.write_text(completed.stdout)
-        stderr_path.write_text(completed.stderr)
+        try:
+            completed = subprocess.run(
+                step["run"],
+                cwd=step["cwd"],
+                shell=True,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=step["timeout_seconds"],
+                check=False,
+            )
+            stdout = completed.stdout
+            stderr = completed.stderr
+            exit_code = completed.returncode
+            timed_out = False
+        except subprocess.TimeoutExpired as exc:
+            stdout = exc.stdout if isinstance(exc.stdout, str) else ""
+            stderr = exc.stderr if isinstance(exc.stderr, str) else ""
+            exit_code = 124
+            timed_out = True
+        stdout_path.write_text(stdout)
+        stderr_path.write_text(stderr)
         row = {
             **step,
-            "exit_code": completed.returncode,
-            "status": "completed" if completed.returncode == 0 else "failed",
+            "exit_code": exit_code,
+            "timed_out": timed_out,
+            "status": "completed" if exit_code == 0 else "failed",
             "stdout_log_path": str(stdout_path),
             "stderr_log_path": str(stderr_path),
         }
         results.append(row)
-        if completed.returncode != 0:
+        if exit_code != 0:
             status = "failed"
             break
     receipt = {
@@ -134,6 +236,9 @@ def run(*, target: Path, runbook: Path, json_output: bool = False) -> int:
         "started_at": started,
         "completed_at": _now(),
         "status": status,
+        "approved": True,
+        "source_run_id": source_run_id,
+        "start_index": start_index,
         "steps": results,
         "receipt_path": str(run_dir / "receipt.json"),
     }
@@ -145,6 +250,16 @@ def run(*, target: Path, runbook: Path, json_output: bool = False) -> int:
     print(f"status: {status}")
     print(f"receipt: {receipt['receipt_path']}")
     return 0 if status == "completed" else 1
+
+
+def run(*, target: Path, runbook: Path, approved: bool = False, dry_run: bool = False, json_output: bool = False) -> int:
+    target = target.expanduser().resolve()
+    runbook = runbook.expanduser().resolve()
+    plan_payload, error = _plan_payload(target, runbook)
+    if plan_payload is None:
+        print(f"error: {error}", file=sys.stderr)
+        return 2
+    return _execute_plan(target=target, runbook=runbook, plan_payload=plan_payload, approved=approved, dry_run=dry_run, json_output=json_output)
 
 
 def _run_receipts(target: Path) -> list[dict[str, Any]]:
@@ -185,7 +300,7 @@ def resume(*, target: Path, run_id: str = "latest", json_output: bool = False) -
         "target": str(target),
         "run": receipt,
         "next": failed[0] if failed else None,
-        "suggested_command": f"brigade runbook plan {receipt.get('runbook_path')} --target {target}",
+        "suggested_command": f"brigade runbook run {receipt.get('runbook_path')} --target {target} --resume {receipt.get('run_id')} --approved",
     }
     if json_output:
         print(json.dumps(payload, indent=2, sort_keys=True))
@@ -195,6 +310,37 @@ def resume(*, target: Path, run_id: str = "latest", json_output: bool = False) -
     print(f"next: {payload['next'].get('id') if isinstance(payload['next'], dict) else 'none'}")
     print(f"suggested_command: {payload['suggested_command']}")
     return 0
+
+
+def retry(*, target: Path, run_id: str = "latest", approved: bool = False, dry_run: bool = False, json_output: bool = False) -> int:
+    target = target.expanduser().resolve()
+    receipt, error = _resolve_receipt(target, run_id)
+    if receipt is None:
+        print(f"error: {error}", file=sys.stderr)
+        return 2
+    failed = [step for step in receipt.get("steps", []) if isinstance(step, dict) and step.get("status") != "completed"]
+    if not failed:
+        if json_output:
+            print(json.dumps({"target": str(target), "status": "no-failed-step", "run_id": receipt.get("run_id")}, indent=2, sort_keys=True))
+        else:
+            print(f"runbook_retry: {receipt.get('run_id')}")
+            print("status: no-failed-step")
+        return 0
+    runbook = Path(str(receipt.get("runbook_path") or "")).expanduser().resolve()
+    plan_payload, plan_error = _plan_payload(target, runbook)
+    if plan_payload is None:
+        print(f"error: {plan_error}", file=sys.stderr)
+        return 2
+    return _execute_plan(
+        target=target,
+        runbook=runbook,
+        plan_payload=plan_payload,
+        approved=approved,
+        dry_run=dry_run,
+        start_index=int(failed[0].get("index") or 1),
+        source_run_id=str(receipt.get("run_id") or ""),
+        json_output=json_output,
+    )
 
 
 def closeout(*, target: Path, run_id: str = "latest", status: str = "reviewed", reason: str | None = None, json_output: bool = False) -> int:

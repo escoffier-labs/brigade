@@ -52,6 +52,14 @@ def _inbox_root(target: Path) -> Path:
     return target / ".brigade" / "skills" / "inbox"
 
 
+def _adapters_config_path(target: Path) -> Path:
+    return target / ".brigade" / "skills" / "adapters.json"
+
+
+def _rollback_root(target: Path, skill_id: str, harness: str) -> Path:
+    return target / ".brigade" / "skills" / "rollback" / _slug(skill_id) / harness
+
+
 def _skill_path(target: Path, skill_id: str) -> Path:
     return _registry_root(target) / _slug(skill_id)
 
@@ -280,8 +288,32 @@ def lint(*, target: Path, skill: str, json_output: bool = False) -> int:
 
 
 def _install_dir(workspace: Path, harness: str, skill_id: str) -> Path:
-    adapter = HARNESS_ADAPTERS[harness]
+    adapter = _adapter_map(workspace)[harness]
     return workspace / str(adapter["install_path"]).format(skill_id=skill_id)
+
+
+def _adapter_map(target: Path) -> dict[str, dict[str, Any]]:
+    adapters = {key: dict(value) for key, value in HARNESS_ADAPTERS.items()}
+    config = _read_json(_adapters_config_path(target))
+    overlay = config.get("adapters")
+    if isinstance(overlay, dict):
+        for adapter_id, value in overlay.items():
+            if not isinstance(value, dict):
+                continue
+            adapters[_slug(str(adapter_id))] = {
+                "status": str(value.get("status") or "local"),
+                "format": str(value.get("format") or "custom-skill"),
+                "install_path": value.get("install_path"),
+                "source": "local-config",
+            }
+    return adapters
+
+
+def _install_targets(workspace: Path) -> tuple[str, ...]:
+    return tuple(
+        key for key, value in _adapter_map(workspace).items()
+        if value.get("status") in {"built-in", "local"} and value.get("install_path")
+    )
 
 
 def install(
@@ -293,7 +325,8 @@ def install(
     json_output: bool = False,
 ) -> int:
     workspace = workspace.expanduser().resolve()
-    if harness not in INSTALL_TARGETS:
+    install_targets = _install_targets(workspace)
+    if harness not in (*install_targets, "all"):
         print(f"error: unknown skill install target: {harness}", file=sys.stderr)
         return 2
     lint_payload = _lint_payload(workspace, skill)
@@ -305,14 +338,18 @@ def install(
         return 1
     source_dir = Path(lint_payload["skill_dir"])
     skill_id = _slug(str(lint_payload["skill_id"]))
-    targets = HARNESS_TARGETS if harness == "all" else (harness,)
+    targets = install_targets if harness == "all" else (harness,)
     receipts: list[dict[str, Any]] = []
     for install_target in targets:
         dest = _install_dir(workspace, install_target, skill_id)
         if dest.exists() and not force:
             print(f"error: installed skill already exists: {dest}", file=sys.stderr)
             return 2
+        rollback_snapshot: str | None = None
         if dest.exists():
+            rollback_dir = _rollback_root(workspace, skill_id, install_target) / _now().replace(":", "").replace("+", "Z").replace(".", "-")
+            shutil.copytree(dest, rollback_dir)
+            rollback_snapshot = str(rollback_dir)
             shutil.rmtree(dest)
         dest.parent.mkdir(parents=True, exist_ok=True)
         shutil.copytree(source_dir, dest)
@@ -323,6 +360,7 @@ def install(
             "installed_dir": str(dest),
             "installed_at": _now(),
             "fingerprint": lint_payload.get("fingerprint"),
+            "rollback_snapshot": rollback_snapshot,
         }
         receipt_path = workspace / ".brigade" / "skills" / "installs" / f"{skill_id}-{install_target}.json"
         receipt_path.parent.mkdir(parents=True, exist_ok=True)
@@ -347,6 +385,43 @@ def install(
     for item in receipts:
         print(f"- {item['target']}: {item['installed_dir']}")
         print(f"  receipt: {item['receipt_path']}")
+    return 0
+
+
+def rollback(*, workspace: Path, skill: str, harness: str, json_output: bool = False) -> int:
+    workspace = workspace.expanduser().resolve()
+    skill_id = _slug(skill)
+    if harness not in _install_targets(workspace):
+        print(f"error: unknown skill install target: {harness}", file=sys.stderr)
+        return 2
+    root = _rollback_root(workspace, skill_id, harness)
+    snapshots = sorted([path for path in root.iterdir() if path.is_dir()], reverse=True) if root.is_dir() else []
+    if not snapshots:
+        print(f"error: no rollback snapshot for {skill_id} on {harness}", file=sys.stderr)
+        return 1
+    snapshot = snapshots[0]
+    dest = _install_dir(workspace, harness, skill_id)
+    if dest.exists():
+        shutil.rmtree(dest)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(snapshot, dest)
+    payload = {
+        "workspace": str(workspace),
+        "skill_id": skill_id,
+        "target": harness,
+        "snapshot": str(snapshot),
+        "installed_dir": str(dest),
+        "rolled_back_at": _now(),
+    }
+    receipt_path = workspace / ".brigade" / "skills" / "installs" / f"{skill_id}-{harness}-rollback.json"
+    _write_json(receipt_path, payload)
+    payload["receipt_path"] = str(receipt_path)
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+    print(f"skill_rollback: {skill_id}")
+    print(f"target: {harness}")
+    print(f"installed_dir: {dest}")
     return 0
 
 
@@ -397,13 +472,39 @@ def publish(*, target: Path, skill: str, scope: str, json_output: bool = False) 
     return 0
 
 
-def adapters_list(*, include_planned: bool = False, json_output: bool = False) -> int:
+def adapters_init(*, target: Path, force: bool = False, json_output: bool = False) -> int:
+    target = target.expanduser().resolve()
+    path = _adapters_config_path(target)
+    if path.exists() and not force:
+        print(f"error: skill adapter config already exists: {path}", file=sys.stderr)
+        return 2
+    payload = {
+        "description": "Local skill harness adapter overlay. install_path is relative to the workspace and may use {skill_id}.",
+        "adapters": {
+            "cursor": {"status": "planned", "format": "cursor-skill", "install_path": ".cursor/skills/{skill_id}"},
+            "antigravity": {"status": "planned", "format": "adapter-needed", "install_path": None},
+            "pi": {"status": "planned", "format": "adapter-needed", "install_path": None},
+        },
+    }
+    _write_json(path, payload)
+    output = {"target": str(target), "path": str(path), "adapter_count": len(payload["adapters"])}
+    if json_output:
+        print(json.dumps(output, indent=2, sort_keys=True))
+        return 0
+    print(f"skill_adapters_config: {path}")
+    print("next_command: brigade skills adapters list --include-planned")
+    return 0
+
+
+def adapters_list(*, target: Path = Path("."), include_planned: bool = False, json_output: bool = False) -> int:
+    target = target.expanduser().resolve()
+    adapter_map = _adapter_map(target)
     adapters = [
         {"id": adapter_id, **data}
-        for adapter_id, data in HARNESS_ADAPTERS.items()
-        if include_planned or data["status"] == "built-in"
+        for adapter_id, data in adapter_map.items()
+        if include_planned or data["status"] in {"built-in", "local"}
     ]
-    payload = {"adapters": adapters, "count": len(adapters), "include_planned": include_planned}
+    payload = {"target": str(target), "config_path": str(_adapters_config_path(target)), "adapters": adapters, "count": len(adapters), "include_planned": include_planned}
     if json_output:
         print(json.dumps(payload, indent=2, sort_keys=True))
         return 0
@@ -413,8 +514,9 @@ def adapters_list(*, include_planned: bool = False, json_output: bool = False) -
     return 0
 
 
-def adapters_show(*, adapter_id: str, json_output: bool = False) -> int:
-    adapter = HARNESS_ADAPTERS.get(adapter_id)
+def adapters_show(*, target: Path = Path("."), adapter_id: str, json_output: bool = False) -> int:
+    target = target.expanduser().resolve()
+    adapter = _adapter_map(target).get(adapter_id)
     if adapter is None:
         print(f"error: skill adapter not found: {adapter_id}", file=sys.stderr)
         return 2
@@ -427,6 +529,57 @@ def adapters_show(*, adapter_id: str, json_output: bool = False) -> int:
     print(f"format: {adapter['format']}")
     print(f"install_path: {adapter.get('install_path') or '(planned)'}")
     return 0
+
+
+def compatibility(*, target: Path, skill: str, json_output: bool = False) -> int:
+    target = target.expanduser().resolve()
+    lint_payload = _lint_payload(target, skill)
+    metadata = lint_payload.get("metadata") if isinstance(lint_payload.get("metadata"), dict) else {}
+    supported = metadata.get("supported_harnesses") if isinstance(metadata.get("supported_harnesses"), list) else []
+    skill_id = _slug(str(lint_payload.get("skill_id") or skill))
+    adapters = []
+    for adapter_id, adapter in _adapter_map(target).items():
+        install_path = adapter.get("install_path")
+        installed = False
+        installed_path = None
+        if install_path:
+            installed_path = str(target / str(install_path).format(skill_id=skill_id))
+            installed = Path(installed_path).is_dir()
+        supported_state = adapter_id in supported or not supported
+        blockers: list[str] = []
+        if adapter.get("status") == "planned":
+            blockers.append("adapter planned")
+        if not install_path:
+            blockers.append("install_path missing")
+        if not supported_state:
+            blockers.append("skill metadata does not list this harness")
+        adapters.append(
+            {
+                "id": adapter_id,
+                "status": adapter.get("status"),
+                "format": adapter.get("format"),
+                "supported": supported_state,
+                "installed": installed,
+                "installed_path": installed_path,
+                "blockers": blockers,
+            }
+        )
+    payload = {
+        "target": str(target),
+        "skill_id": skill_id,
+        "valid": bool(lint_payload.get("valid")),
+        "fingerprint": lint_payload.get("fingerprint"),
+        "adapters": adapters,
+    }
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0 if payload["valid"] else 1
+    print(f"skill compatibility: {skill_id}")
+    print(f"valid: {str(payload['valid']).lower()}")
+    for row in adapters:
+        blocked = f" blockers={len(row['blockers'])}" if row["blockers"] else ""
+        print(f"- {row['id']} [{row['status']}] supported={row['supported']} installed={row['installed']}{blocked}")
+    return 0 if payload["valid"] else 1
 
 
 def _proposal_path(target: Path, proposal_id: str) -> Path:

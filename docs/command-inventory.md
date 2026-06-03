@@ -40,7 +40,7 @@ brigade roadmap commands --write
 - `brigade runs`: 3 command path(s)
 - `brigade scrub`: 1 command path(s)
 - `brigade security`: 14 command path(s)
-- `brigade skills`: 14 command path(s)
+- `brigade skills`: 17 command path(s)
 - `brigade status`: 1 command path(s)
 - `brigade tools`: 46 command path(s)
 - `brigade untrusted`: 2 command path(s)
@@ -298,8 +298,10 @@ brigade roadmap commands --write
 - `brigade security suppress`
 - `brigade security template-audit`
 - `brigade security unsuppress`
+- `brigade skills adapters init`
 - `brigade skills adapters list`
 - `brigade skills adapters show`
+- `brigade skills compatibility`
 - `brigade skills import`
 - `brigade skills inbox accept`
 - `brigade skills inbox add`
@@ -310,6 +312,7 @@ brigade roadmap commands --write
 - `brigade skills install`
 - `brigade skills lint`
 - `brigade skills publish`
+- `brigade skills rollback`
 - `brigade skills search`
 - `brigade skills serve-mcp`
 - `brigade status`

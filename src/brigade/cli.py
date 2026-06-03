@@ -260,9 +260,18 @@ def _build_parser() -> argparse.ArgumentParser:
     p_skills_install = skills_sub.add_parser("install", help="Install a reviewed skill into one or all harnesses.")
     p_skills_install.add_argument("skill", help="Skill id, path, or directory.")
     p_skills_install.add_argument("--workspace", type=Path, default=Path("."), help="Workspace to update.")
-    p_skills_install.add_argument("--target", dest="install_target", choices=["codex", "claude", "opencode", "gemini", "openclaw", "hermes", "mcp", "all"], required=True, help="Harness target or all.")
+    p_skills_install.add_argument("--target", dest="install_target", required=True, help="Harness target or all.")
     p_skills_install.add_argument("--force", action="store_true", help="Overwrite an existing installed skill.")
     p_skills_install.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_skills_compat = skills_sub.add_parser("compatibility", help="Show skill compatibility across harness adapters.")
+    p_skills_compat.add_argument("skill", help="Skill id, path, or directory.")
+    p_skills_compat.add_argument("--target", "-t", type=Path, default=Path("."), help="Workspace registry to inspect.")
+    p_skills_compat.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_skills_rollback = skills_sub.add_parser("rollback", help="Rollback one installed skill target to the latest snapshot.")
+    p_skills_rollback.add_argument("skill", help="Skill id.")
+    p_skills_rollback.add_argument("--workspace", type=Path, default=Path("."), help="Workspace to update.")
+    p_skills_rollback.add_argument("--target", dest="install_target", required=True, help="Harness target to rollback.")
+    p_skills_rollback.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_skills_serve = skills_sub.add_parser("serve-mcp", help="Show the planned MCP skills server contract.")
     p_skills_serve.add_argument("--target", "-t", type=Path, default=Path("."), help="Workspace registry to inspect.")
     p_skills_serve.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
@@ -305,11 +314,17 @@ def _build_parser() -> argparse.ArgumentParser:
     p_skills_adapters = skills_sub.add_parser("adapters", help="Inspect skill harness adapters.")
     skills_adapters_sub = p_skills_adapters.add_subparsers(dest="skills_adapters_command", metavar="<skills-adapters-command>")
     skills_adapters_sub.required = True
+    p_skills_adapters_init = skills_adapters_sub.add_parser("init", help="Write local skill adapter overlay config.")
+    p_skills_adapters_init.add_argument("--target", "-t", type=Path, default=Path("."), help="Workspace to update.")
+    p_skills_adapters_init.add_argument("--force", action="store_true", help="Overwrite an existing adapter config.")
+    p_skills_adapters_init.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_skills_adapters_list = skills_adapters_sub.add_parser("list", help="List skill harness adapters.")
+    p_skills_adapters_list.add_argument("--target", "-t", type=Path, default=Path("."), help="Workspace to inspect.")
     p_skills_adapters_list.add_argument("--include-planned", action="store_true", help="Include planned future adapter targets.")
     p_skills_adapters_list.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_skills_adapters_show = skills_adapters_sub.add_parser("show", help="Show one skill harness adapter.")
     p_skills_adapters_show.add_argument("adapter_id", help="Adapter id.")
+    p_skills_adapters_show.add_argument("--target", "-t", type=Path, default=Path("."), help="Workspace to inspect.")
     p_skills_adapters_show.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
 
     # operator
@@ -334,8 +349,11 @@ def _build_parser() -> argparse.ArgumentParser:
     p_runbook_plan.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace command target.")
     p_runbook_plan.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_runbook_run = runbook_sub.add_parser("run", help="Run a reviewed runbook and write a receipt.")
-    p_runbook_run.add_argument("runbook", type=Path, help="Runbook JSON file.")
+    p_runbook_run.add_argument("runbook", nargs="?", type=Path, help="Runbook JSON file.")
     p_runbook_run.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace command target.")
+    p_runbook_run.add_argument("--approved", action="store_true", help="Approve this explicit runbook execution.")
+    p_runbook_run.add_argument("--dry-run", action="store_true", help="Validate and show steps without executing.")
+    p_runbook_run.add_argument("--resume", dest="resume_run_id", default=None, help="Retry from the first failed step of a previous run.")
     p_runbook_run.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_runbook_resume = runbook_sub.add_parser("resume", help="Show resume information for a runbook run.")
     p_runbook_resume.add_argument("run_id", nargs="?", default="latest", help="Run id, unique prefix, or latest.")
@@ -2682,6 +2700,10 @@ def main(argv=None) -> int:
                 force=args.force,
                 json_output=args.json,
             )
+        if args.skills_command == "compatibility":
+            return skills_cmd.compatibility(target=args.target, skill=args.skill, json_output=args.json)
+        if args.skills_command == "rollback":
+            return skills_cmd.rollback(workspace=args.workspace, skill=args.skill, harness=args.install_target, json_output=args.json)
         if args.skills_command == "serve-mcp":
             return skills_cmd.serve_mcp(target=args.target, json_output=args.json)
         if args.skills_command == "publish":
@@ -2709,10 +2731,12 @@ def main(argv=None) -> int:
             parser.error(f"unknown skills inbox command: {args.skills_inbox_command}")
             return 2
         if args.skills_command == "adapters":
+            if args.skills_adapters_command == "init":
+                return skills_cmd.adapters_init(target=args.target, force=args.force, json_output=args.json)
             if args.skills_adapters_command == "list":
-                return skills_cmd.adapters_list(include_planned=args.include_planned, json_output=args.json)
+                return skills_cmd.adapters_list(target=args.target, include_planned=args.include_planned, json_output=args.json)
             if args.skills_adapters_command == "show":
-                return skills_cmd.adapters_show(adapter_id=args.adapter_id, json_output=args.json)
+                return skills_cmd.adapters_show(target=args.target, adapter_id=args.adapter_id, json_output=args.json)
             parser.error(f"unknown skills adapters command: {args.skills_adapters_command}")
             return 2
         parser.error(f"unknown skills command: {args.skills_command}")
@@ -2732,7 +2756,12 @@ def main(argv=None) -> int:
         if args.runbook_command == "plan":
             return runbook_cmd.plan(target=args.target, runbook=args.runbook, json_output=args.json)
         if args.runbook_command == "run":
-            return runbook_cmd.run(target=args.target, runbook=args.runbook, json_output=args.json)
+            if args.resume_run_id:
+                return runbook_cmd.retry(target=args.target, run_id=args.resume_run_id, approved=args.approved, dry_run=args.dry_run, json_output=args.json)
+            if args.runbook is None:
+                parser.error("runbook run requires a runbook path unless --resume is used")
+                return 2
+            return runbook_cmd.run(target=args.target, runbook=args.runbook, approved=args.approved, dry_run=args.dry_run, json_output=args.json)
         if args.runbook_command == "resume":
             return runbook_cmd.resume(target=args.target, run_id=args.run_id, json_output=args.json)
         if args.runbook_command == "closeout":
