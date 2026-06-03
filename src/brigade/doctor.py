@@ -23,6 +23,7 @@ from .budgets import (
     MEMORY_CARE_SCAN_STALE_DAYS,
 )
 
+from .selection import WRITER_INBOXES
 from .station import DoctorContext
 
 
@@ -227,20 +228,13 @@ def _check_bootstrap_budgets(target: Path) -> List[CheckResult]:
     return results
 
 
-# Writer harness -> inbox-dir prefix. Only writer harnesses have an inbox.
-_WRITER_INBOXES = {
-    "claude": ".claude/memory-handoffs",
-    "codex": ".codex/memory-handoffs",
-}
-
-
 def _check_handoff_inboxes(
     target: Path, sel, selected_harnesses: List[str]
 ) -> List[CheckResult]:
     results: List[CheckResult] = []
     writers = selected_harnesses
     for h in writers:
-        rel = _WRITER_INBOXES.get(h)
+        rel = WRITER_INBOXES.get(h)
         if rel is None:
             continue  # reader harness, no inbox
         inbox = target / rel
@@ -366,7 +360,7 @@ def _check_orphan_inboxes(
     target: Path, selected_harnesses: List[str]
 ) -> List[CheckResult]:
     results: List[CheckResult] = []
-    for h, rel in _WRITER_INBOXES.items():
+    for h, rel in WRITER_INBOXES.items():
         if h in selected_harnesses:
             continue
         inbox = target / rel

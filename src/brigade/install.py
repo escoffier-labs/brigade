@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import List, Tuple
 
 from .config import Config, write_config
-from .selection import Selection
+from .selection import Selection, WRITER_INBOXES
 from .templates import (
     harness_memory_owner,
     is_text,
@@ -29,12 +29,6 @@ GITIGNORE_END = "# <<< brigade gitignore block <<<"
 LEGACY_GITIGNORE_BEGIN = "# >>> solo-mise gitignore block >>>"
 LEGACY_GITIGNORE_END = "# <<< solo-mise gitignore block <<<"
 
-# Writer harness -> inbox-dir prefix. Only writer harnesses have an inbox.
-_WRITER_INBOX = {
-    "claude": ".claude/memory-handoffs",
-    "codex": ".codex/memory-handoffs",
-}
-
 
 def build_gitignore_block(selection: Selection) -> str:
     lines = [
@@ -44,7 +38,7 @@ def build_gitignore_block(selection: Selection) -> str:
         "",
     ]
     for h in selection.harnesses:
-        inbox = _WRITER_INBOX.get(h)
+        inbox = WRITER_INBOXES.get(h)
         if inbox:
             lines.extend([
                 f"# {h}: handoffs are session-local and may contain private context.",
