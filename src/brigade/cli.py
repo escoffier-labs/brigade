@@ -764,6 +764,27 @@ def _build_parser() -> argparse.ArgumentParser:
     p_work_sweeps.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
     p_work_sweeps.add_argument("--limit", type=int, default=20, help="Maximum sweeps to list.")
     p_work_sweeps.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_work_plans = work_sub.add_parser("plans", help="List task plan artifacts.")
+    p_work_plans.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_work_plans.add_argument("--limit", type=int, default=20, help="Maximum plan artifacts to list.")
+    p_work_plans.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_work_plan_promote = work_sub.add_parser(
+        "plan-promote",
+        help="Promote an accepted plan to a local DRAFT proposal (never installs).",
+    )
+    p_work_plan_promote.add_argument("task_id", help="Task id or unique prefix.")
+    p_work_plan_promote.add_argument(
+        "--as",
+        dest="as_kind",
+        choices=["template", "rule", "skill"],
+        required=True,
+        help="Draft proposal kind to generate.",
+    )
+    p_work_plan_promote.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_work_plan_promote.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_work_plan_proposals = work_sub.add_parser("plan-proposals", help="List local draft plan proposals.")
+    p_work_plan_proposals.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_work_plan_proposals.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_work_sweep_show = work_sub.add_parser("sweep-show", help="Show one scanner sweep report.")
     p_work_sweep_show.add_argument("sweep_id", help="Sweep id or unique prefix.")
     p_work_sweep_show.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
@@ -1278,6 +1299,16 @@ def _build_parser() -> argparse.ArgumentParser:
     p_work_task_plan.add_argument("task_id", help="Task id or unique prefix.")
     p_work_task_plan.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
     p_work_task_plan.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_work_task_plan.add_argument("--write", action="store_true", help="Write or update the plan artifact (plan.md + JSON receipt).")
+    p_work_task_plan.add_argument("--assumption", dest="assumptions", action="append", default=[], help="Planning assumption. May be repeated.")
+    p_work_task_plan.add_argument("--risk", dest="risks", action="append", default=[], help="Planning risk. May be repeated.")
+    p_work_task_plan.add_argument("--source", dest="sources", action="append", default=[], help="Source context ref, link, or note. May be repeated.")
+    p_work_task_plan.add_argument("--next-command", dest="next_command", default=None, help="Next safe command to record in the plan.")
+    p_work_task_plan.add_argument("--title", default=None, help="Plan title (defaults to the task text).")
+    p_work_task_plan.add_argument("--accept", action="store_true", help="Mark the plan artifact accepted.")
+    p_work_task_plan.add_argument("--meta", action="store_true", help="Write the meta-plan (plan-for-the-plan) artifact.")
+    p_work_task_plan.add_argument("--step", dest="step", action="append", default=[], help="Planning step. May be repeated.")
+    p_work_task_plan.add_argument("--from-research", dest="from_research", metavar="RUN_ID", default=None, help="Attach a completed research run report as quarantined (untrusted-web) plan evidence.")
     p_work_task_done = task_sub.add_parser("done", help="Mark one work task done.")
     p_work_task_done.add_argument("task_id", help="Task id or unique prefix.")
     p_work_task_done.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
@@ -1300,6 +1331,20 @@ def _build_parser() -> argparse.ArgumentParser:
         default=[],
         help="Metadata as key=value. May be repeated.",
     )
+    p_work_import_context = import_sub.add_parser("context", help="Inbox raw external context as untrusted data.")
+    p_work_import_context.add_argument("text", nargs="*", help="Raw context text.")
+    p_work_import_context.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
+    p_work_import_context.add_argument("--source", default="manual", help="Where the context came from.")
+    p_work_import_context.add_argument(
+        "--kind",
+        choices=["link", "transcript", "error", "issue", "note"],
+        default="note",
+        dest="context_kind",
+        help="Context kind.",
+    )
+    p_work_import_context.add_argument("--from-file", type=Path, default=None, help="Read context body from a file.")
+    p_work_import_context.add_argument("--max-chars", type=int, default=20000, help="Maximum characters of body to fence.")
+    p_work_import_context.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_work_import_list = import_sub.add_parser("list", help="List local work imports.")
     p_work_import_list.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
     p_work_import_list.add_argument("--all", action="store_true", help="Include promoted imports.")
@@ -3143,6 +3188,14 @@ def main(argv=None) -> int:
             )
         if args.work_command == "sweeps":
             return work_cmd.sweeps(target=args.target, limit=args.limit, json_output=args.json)
+        if args.work_command == "plans":
+            return work_cmd.plans(target=args.target, limit=args.limit, json_output=args.json)
+        if args.work_command == "plan-promote":
+            return work_cmd.plan_promote(
+                target=args.target, task_id=args.task_id, as_kind=args.as_kind, json_output=args.json
+            )
+        if args.work_command == "plan-proposals":
+            return work_cmd.plan_proposals(target=args.target, json_output=args.json)
         if args.work_command == "sweep-show":
             return work_cmd.sweep_show(target=args.target, sweep_id=args.sweep_id, json_output=args.json)
         if args.work_command == "sweep-review":
@@ -3486,7 +3539,21 @@ def main(argv=None) -> int:
             if args.task_command == "show":
                 return work_cmd.task_show(target=args.target, task_id=args.task_id)
             if args.task_command == "plan":
-                return work_cmd.task_plan(target=args.target, task_id=args.task_id, json_output=args.json)
+                return work_cmd.task_plan(
+                    target=args.target,
+                    task_id=args.task_id,
+                    json_output=args.json,
+                    write=args.write,
+                    title=args.title,
+                    assumptions=args.assumptions,
+                    risks=args.risks,
+                    sources=args.sources,
+                    next_command=args.next_command,
+                    accept=args.accept,
+                    kind="meta" if args.meta else "plan",
+                    steps=args.step,
+                    from_research=args.from_research,
+                )
             if args.task_command == "done":
                 return work_cmd.task_done(target=args.target, task_id=args.task_id)
             parser.error(f"unknown task command: {args.task_command}")
@@ -3499,6 +3566,18 @@ def main(argv=None) -> int:
                     kind=args.kind,
                     source=args.source,
                     metadata=args.metadata,
+                )
+            if args.import_command == "context":
+                if not args.text and args.from_file is None:
+                    parser.error("work import context requires text or --from-file")
+                return work_cmd.import_context(
+                    target=args.target,
+                    text=" ".join(args.text) if args.text else "",
+                    source=args.source,
+                    context_kind=args.context_kind,
+                    from_file=args.from_file,
+                    max_chars=args.max_chars,
+                    json_output=args.json,
                 )
             if args.import_command == "list":
                 return work_cmd.import_list(
