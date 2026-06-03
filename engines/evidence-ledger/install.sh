@@ -31,8 +31,8 @@ else
 fi
 
 mkdir -p "$bindir"
-curl -fsSL "$url" -o "$tmp/spine"
+curl -fsSL "$url" -o "$tmp/$asset"
 curl -fsSL "$sums_url" -o "$tmp/checksums.txt"
 (cd "$tmp" && grep " ${asset}$" checksums.txt | sha256sum -c -)
-install -m 0755 "$tmp/spine" "$bindir/spine"
+install -m 0755 "$tmp/$asset" "$bindir/spine"
 "$bindir/spine" version
