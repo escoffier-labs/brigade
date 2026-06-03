@@ -1149,6 +1149,7 @@ def test_task_plan_write_creates_both_artifacts_with_full_schema(tmp_path, capsy
     receipt = json.loads(json_path.read_text())
     expected_keys = {
         "task_id",
+        "kind",
         "title",
         "status",
         "created_at",
@@ -1157,11 +1158,14 @@ def test_task_plan_write_creates_both_artifacts_with_full_schema(tmp_path, capsy
         "assumptions",
         "acceptance",
         "risks",
+        "steps",
         "next_command",
         "receipt_paths",
     }
     assert set(receipt.keys()) == expected_keys
     assert receipt["task_id"] == task_id
+    assert receipt["kind"] == "plan"
+    assert receipt["steps"] == []
     assert receipt["title"] == "Custom plan title"
     assert receipt["status"] == "draft"
     assert receipt["created_at"] == receipt["updated_at"]
@@ -1262,6 +1266,7 @@ def test_plan_md_has_title_sections_items_and_none_recorded(tmp_path, capsys):
     assert "## Assumptions" in md
     assert "## Acceptance criteria" in md
     assert "## Risks" in md
+    assert "## Steps" in md
     assert "## Next safe command" in md
     assert "## Receipts" in md
     assert "- issue #42" in md
@@ -1284,6 +1289,7 @@ def test_task_plan_read_view_shows_artifact_line_and_json(tmp_path, capsys):
     assert "suggested_command: brigade work run" in out
     assert "plan_artifact: draft" in out
     assert f".brigade/work/plans/{task_id}.plan.md" in out
+    assert "meta_artifact: none" in out
 
     assert work_cmd.task_plan(target=tmp_path, task_id=task_id[:12], json_output=True) == 0
     payload = json.loads(capsys.readouterr().out)
@@ -1291,6 +1297,7 @@ def test_task_plan_read_view_shows_artifact_line_and_json(tmp_path, capsys):
     assert payload["plan_artifact"]["status"] == "draft"
     assert payload["plan_artifact"]["path"] == f".brigade/work/plans/{task_id}.plan.md"
     assert payload["plan_artifact"]["updated_at"]
+    assert payload["meta_artifact"] is None
 
 
 def test_task_plan_read_view_without_artifact_is_null_and_unchanged(tmp_path, capsys):
@@ -1303,10 +1310,12 @@ def test_task_plan_read_view_without_artifact_is_null_and_unchanged(tmp_path, ca
     assert "  - Plan is reviewed" in out
     assert "suggested_command: brigade work run" in out
     assert "plan_artifact: none" in out
+    assert "meta_artifact: none" in out
 
     assert work_cmd.task_plan(target=tmp_path, task_id=task_id[:12], json_output=True) == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["plan_artifact"] is None
+    assert payload["meta_artifact"] is None
     assert payload["acceptance"] == ["Plan is written", "Plan is reviewed"]
 
 
@@ -1341,6 +1350,8 @@ def test_work_plans_lists_newest_first_and_empty(tmp_path, capsys):
     assert entries[0]["task_id"] == second
     assert entries[1]["task_id"] == first
     assert entries[0]["status"] == "accepted"
+    assert entries[0]["kind"] == "plan"
+    assert entries[1]["kind"] == "plan"
     assert entries[0]["path"] == f".brigade/work/plans/{second}.plan.md"
 
     assert work_cmd.plans(target=tmp_path) == 0
@@ -1361,6 +1372,194 @@ def test_work_plans_unreadable_json_does_not_crash(tmp_path, capsys):
     entries = json.loads(capsys.readouterr().out)
     assert len(entries) == 1
     assert entries[0]["status"] == "unreadable"
+
+
+def test_meta_plan_write_creates_meta_artifacts_with_kind(tmp_path, capsys):
+    _init_git_repo(tmp_path)
+    task_id = _plan_task_id(tmp_path, capsys)
+
+    assert (
+        work_cmd.task_plan(
+            target=tmp_path,
+            task_id=task_id[:12],
+            write=True,
+            kind="meta",
+            title="Research synthesis",
+        )
+        == 0
+    )
+    out = capsys.readouterr().out
+    assert "wrote plan:" in out
+
+    json_path, md_path = work_cmd._plan_paths(tmp_path, task_id, "meta")
+    assert json_path.name == f"{task_id}.meta.json"
+    assert md_path.name == f"{task_id}.meta.plan.md"
+    assert json_path.is_file()
+    assert md_path.is_file()
+
+    receipt = json.loads(json_path.read_text())
+    assert receipt["kind"] == "meta"
+    assert receipt["task_id"] == task_id
+    paths = receipt["receipt_paths"]
+    assert f".brigade/work/plans/{task_id}.meta.json" in paths
+    assert f".brigade/work/plans/{task_id}.meta.plan.md" in paths
+
+    # The plain plan artifact must not exist from a meta write.
+    plan_json, _ = work_cmd._plan_paths(tmp_path, task_id, "plan")
+    assert not plan_json.is_file()
+
+
+def test_meta_plan_md_has_banner_and_meta_title(tmp_path, capsys):
+    _init_git_repo(tmp_path)
+    task_id = _plan_task_id(tmp_path, capsys)
+    assert (
+        work_cmd.task_plan(
+            target=tmp_path,
+            task_id=task_id[:12],
+            write=True,
+            kind="meta",
+            title="Deep work",
+        )
+        == 0
+    )
+    capsys.readouterr()
+    _, md_path = work_cmd._plan_paths(tmp_path, task_id, "meta")
+    md = md_path.read_text()
+    assert md.startswith("# Meta-plan: Deep work")
+    assert "Do NOT jump to the deliverable" in md
+    assert f"brigade work task plan {task_id} --write" in md
+    assert "## Steps" in md
+
+
+def test_plan_steps_append_and_render(tmp_path, capsys):
+    _init_git_repo(tmp_path)
+    task_id = _plan_task_id(tmp_path, capsys)
+    assert (
+        work_cmd.task_plan(
+            target=tmp_path,
+            task_id=task_id[:12],
+            write=True,
+            kind="meta",
+            steps=["Gather sources"],
+        )
+        == 0
+    )
+    capsys.readouterr()
+    assert (
+        work_cmd.task_plan(
+            target=tmp_path,
+            task_id=task_id[:12],
+            write=True,
+            kind="meta",
+            steps=["Gather sources", "Outline the plan"],
+        )
+        == 0
+    )
+    capsys.readouterr()
+    json_path, md_path = work_cmd._plan_paths(tmp_path, task_id, "meta")
+    receipt = json.loads(json_path.read_text())
+    assert receipt["steps"] == ["Gather sources", "Outline the plan"]
+    md = md_path.read_text()
+    assert "## Steps" in md
+    assert "- Gather sources" in md
+    assert "- Outline the plan" in md
+
+
+def test_plan_and_meta_coexist_independently(tmp_path, capsys):
+    _init_git_repo(tmp_path)
+    task_id = _plan_task_id(tmp_path, capsys)
+    assert work_cmd.task_plan(target=tmp_path, task_id=task_id[:12], write=True) == 0
+    capsys.readouterr()
+    assert (
+        work_cmd.task_plan(target=tmp_path, task_id=task_id[:12], write=True, kind="meta", steps=["meta step"]) == 0
+    )
+    capsys.readouterr()
+
+    plan_json, _ = work_cmd._plan_paths(tmp_path, task_id, "plan")
+    meta_json, _ = work_cmd._plan_paths(tmp_path, task_id, "meta")
+    assert plan_json.is_file()
+    assert meta_json.is_file()
+    plan_receipt = json.loads(plan_json.read_text())
+    meta_receipt = json.loads(meta_json.read_text())
+    assert plan_receipt["kind"] == "plan"
+    assert plan_receipt["steps"] == []
+    assert meta_receipt["kind"] == "meta"
+    assert meta_receipt["steps"] == ["meta step"]
+
+
+def test_task_plan_read_view_shows_both_artifacts(tmp_path, capsys):
+    _init_git_repo(tmp_path)
+    task_id = _plan_task_id(tmp_path, capsys)
+    assert work_cmd.task_plan(target=tmp_path, task_id=task_id[:12], write=True) == 0
+    capsys.readouterr()
+    assert work_cmd.task_plan(target=tmp_path, task_id=task_id[:12], write=True, kind="meta") == 0
+    capsys.readouterr()
+
+    assert work_cmd.task_plan(target=tmp_path, task_id=task_id[:12]) == 0
+    out = capsys.readouterr().out
+    assert "plan_artifact: draft" in out
+    assert "meta_artifact: draft" in out
+    assert f".brigade/work/plans/{task_id}.meta.plan.md" in out
+
+    assert work_cmd.task_plan(target=tmp_path, task_id=task_id[:12], json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["plan_artifact"]["status"] == "draft"
+    assert payload["meta_artifact"]["status"] == "draft"
+    assert payload["meta_artifact"]["path"] == f".brigade/work/plans/{task_id}.meta.plan.md"
+
+
+def test_work_plans_lists_both_kinds(tmp_path, capsys):
+    _init_git_repo(tmp_path)
+    task_id = _plan_task_id(tmp_path, capsys, text="Coexisting kinds")
+    assert work_cmd.task_plan(target=tmp_path, task_id=task_id[:12], write=True) == 0
+    capsys.readouterr()
+    assert work_cmd.task_plan(target=tmp_path, task_id=task_id[:12], write=True, kind="meta") == 0
+    capsys.readouterr()
+
+    assert work_cmd.plans(target=tmp_path, json_output=True) == 0
+    entries = json.loads(capsys.readouterr().out)
+    assert len(entries) == 2
+    kinds = {entry["kind"] for entry in entries}
+    assert kinds == {"plan", "meta"}
+    for entry in entries:
+        assert entry["task_id"] == task_id
+
+    assert work_cmd.plans(target=tmp_path) == 0
+    text_out = capsys.readouterr().out
+    assert "[plan]" in text_out
+    assert "[meta]" in text_out
+
+
+def test_meta_plan_via_cli_flags(tmp_path, capsys):
+    _init_git_repo(tmp_path)
+    task_id = _plan_task_id(tmp_path, capsys)
+    assert (
+        cli.main(
+            [
+                "work",
+                "task",
+                "plan",
+                task_id[:12],
+                "--target",
+                str(tmp_path),
+                "--write",
+                "--meta",
+                "--step",
+                "First step",
+                "--step",
+                "Second step",
+            ]
+        )
+        == 0
+    )
+    capsys.readouterr()
+    json_path, md_path = work_cmd._plan_paths(tmp_path, task_id, "meta")
+    receipt = json.loads(json_path.read_text())
+    assert receipt["kind"] == "meta"
+    assert receipt["steps"] == ["First step", "Second step"]
+    md = md_path.read_text()
+    assert md.startswith("# Meta-plan:")
+    assert "- First step" in md
 
 
 def test_extract_issue_acceptance_from_sections_and_checkboxes():
@@ -9762,6 +9961,8 @@ def test_work_tasks_cli(tmp_path, monkeypatch):
                 "sources": [],
                 "next_command": None,
                 "accept": False,
+                "kind": "plan",
+                "steps": [],
             },
         ),
         ("done", {"target": tmp_path, "task_id": "abc123"}),

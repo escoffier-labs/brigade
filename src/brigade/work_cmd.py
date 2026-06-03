@@ -464,8 +464,10 @@ def _plans_dir(target: Path) -> Path:
     return _work_root(target) / "plans"
 
 
-def _plan_paths(target: Path, task_id: str) -> tuple[Path, Path]:
+def _plan_paths(target: Path, task_id: str, kind: str = "plan") -> tuple[Path, Path]:
     plans = _plans_dir(target)
+    if kind == "meta":
+        return plans / f"{task_id}.meta.json", plans / f"{task_id}.meta.plan.md"
     return plans / f"{task_id}.json", plans / f"{task_id}.plan.md"
 
 
@@ -6407,8 +6409,8 @@ def _append_dedupe(existing: list[str], additions: list[str] | None) -> list[str
     return result
 
 
-def _read_plan_receipt(target: Path, task_id: str) -> dict[str, Any] | None:
-    json_path, _ = _plan_paths(target, task_id)
+def _read_plan_receipt(target: Path, task_id: str, kind: str = "plan") -> dict[str, Any] | None:
+    json_path, _ = _plan_paths(target, task_id, kind)
     if not json_path.is_file():
         return None
     try:
@@ -6432,10 +6434,12 @@ def _build_plan_receipt(
     sources: list[str] | None,
     next_command: str | None,
     accept: bool,
+    kind: str = "plan",
+    steps: list[str] | None = None,
 ) -> dict[str, Any]:
     now = _now().isoformat()
     acceptance = _task_acceptance(task)
-    json_path, md_path = _plan_paths(target, task_id)
+    json_path, md_path = _plan_paths(target, task_id, kind)
     receipt_paths = [
         _plan_rel_path(target, _tasks_path(target)),
         _plan_rel_path(target, json_path),
@@ -6445,6 +6449,7 @@ def _build_plan_receipt(
         resolved_title = title if title is not None else str(task.get("text") or "")
         return {
             "task_id": task_id,
+            "kind": kind,
             "title": resolved_title,
             "status": "accepted" if accept else "draft",
             "created_at": now,
@@ -6453,6 +6458,7 @@ def _build_plan_receipt(
             "assumptions": _append_dedupe([], assumptions),
             "acceptance": acceptance,
             "risks": _append_dedupe([], risks),
+            "steps": _append_dedupe([], steps),
             "next_command": next_command if next_command is not None else "brigade work run",
             "receipt_paths": receipt_paths,
         }
@@ -6466,6 +6472,7 @@ def _build_plan_receipt(
     prior_status = existing.get("status") if existing.get("status") in ("draft", "accepted") else "draft"
     return {
         "task_id": task_id,
+        "kind": kind,
         "title": title if title is not None else prior_title,
         "status": "accepted" if accept else prior_status,
         "created_at": created_at,
@@ -6474,6 +6481,7 @@ def _build_plan_receipt(
         "assumptions": _append_dedupe(_as_list(existing.get("assumptions")), assumptions),
         "acceptance": acceptance,
         "risks": _append_dedupe(_as_list(existing.get("risks")), risks),
+        "steps": _append_dedupe(_as_list(existing.get("steps")), steps),
         "next_command": next_command if next_command is not None else prior_next,
         "receipt_paths": receipt_paths,
     }
@@ -6486,13 +6494,24 @@ def _render_plan_md(receipt: dict[str, Any]) -> str:
             return ["_none recorded_"]
         return [f"- {item}" for item in values]
 
+    kind = receipt.get("kind") if receipt.get("kind") in ("plan", "meta") else "plan"
+    task_id = receipt.get("task_id", "")
     lines: list[str] = []
-    lines.append(f"# Plan: {receipt.get('title', '')}")
+    if kind == "meta":
+        lines.append(f"# Meta-plan: {receipt.get('title', '')}")
+    else:
+        lines.append(f"# Plan: {receipt.get('title', '')}")
     lines.append("")
-    lines.append(f"- **Task:** {receipt.get('task_id', '')}")
+    lines.append(f"- **Task:** {task_id}")
     lines.append(f"- **Status:** {receipt.get('status', '')}")
     lines.append(f"- **Updated:** {receipt.get('updated_at', '')}")
     lines.append("")
+    if kind == "meta":
+        lines.append(
+            f"> Meta-plan: plan how to produce the full plan. Do NOT jump to the deliverable. "
+            f"Produce the full plan with `brigade work task plan {task_id} --write` next."
+        )
+        lines.append("")
     lines.append("## Source context")
     lines.extend(_bullets(receipt.get("source_context")))
     lines.append("")
@@ -6504,6 +6523,9 @@ def _render_plan_md(receipt: dict[str, Any]) -> str:
     lines.append("")
     lines.append("## Risks")
     lines.extend(_bullets(receipt.get("risks")))
+    lines.append("")
+    lines.append("## Steps")
+    lines.extend(_bullets(receipt.get("steps")))
     lines.append("")
     lines.append("## Next safe command")
     lines.append(f"`{receipt.get('next_command', '')}`")
@@ -6518,11 +6540,11 @@ def _render_plan_md(receipt: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def _plan_artifact_summary(target: Path, task_id: str) -> dict[str, Any] | None:
-    receipt = _read_plan_receipt(target, task_id)
+def _plan_artifact_summary(target: Path, task_id: str, kind: str = "plan") -> dict[str, Any] | None:
+    receipt = _read_plan_receipt(target, task_id, kind)
     if receipt is None:
         return None
-    _, md_path = _plan_paths(target, task_id)
+    _, md_path = _plan_paths(target, task_id, kind)
     return {
         "status": receipt.get("status"),
         "path": _plan_rel_path(target, md_path),
@@ -6541,6 +6563,8 @@ def _write_plan_artifact(
     next_command: str | None,
     accept: bool,
     json_output: bool,
+    kind: str = "plan",
+    steps: list[str] | None = None,
 ) -> int:
     target = target.expanduser().resolve()
     if not target.is_dir():
@@ -6551,7 +6575,7 @@ def _write_plan_artifact(
         print(f"error: task not found: {task_id}", file=sys.stderr)
         return 1
     resolved_id = str(task.get("id") or task_id)
-    existing = _read_plan_receipt(target, resolved_id)
+    existing = _read_plan_receipt(target, resolved_id, kind)
     receipt = _build_plan_receipt(
         target=target,
         task=task,
@@ -6563,8 +6587,10 @@ def _write_plan_artifact(
         sources=sources,
         next_command=next_command,
         accept=accept,
+        kind=kind,
+        steps=steps,
     )
-    json_path, md_path = _plan_paths(target, resolved_id)
+    json_path, md_path = _plan_paths(target, resolved_id, kind)
     _plans_dir(target).mkdir(parents=True, exist_ok=True)
     json_path.write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n")
     md_path.write_text(_render_plan_md(receipt))
@@ -6587,6 +6613,8 @@ def task_plan(
     sources: list[str] | None = None,
     next_command: str | None = None,
     accept: bool = False,
+    kind: str = "plan",
+    steps: list[str] | None = None,
 ) -> int:
     if write:
         return _write_plan_artifact(
@@ -6599,6 +6627,8 @@ def task_plan(
             next_command=next_command,
             accept=accept,
             json_output=json_output,
+            kind=kind,
+            steps=steps,
         )
     payload, rc = _task_plan_payload(target, task_id)
     if payload is None:
@@ -6606,7 +6636,9 @@ def task_plan(
     resolved_target = target.expanduser().resolve()
     resolved_id = str(payload.get("id") or task_id)
     artifact = _plan_artifact_summary(resolved_target, resolved_id)
+    meta_artifact = _plan_artifact_summary(resolved_target, resolved_id, kind="meta")
     payload["plan_artifact"] = artifact
+    payload["meta_artifact"] = meta_artifact
     if json_output:
         print(json.dumps(payload, indent=2, sort_keys=True))
         return 0
@@ -6643,6 +6675,10 @@ def task_plan(
         print("plan_artifact: none")
     else:
         print(f"plan_artifact: {artifact['status']} ({artifact['path']})")
+    if meta_artifact is None:
+        print("meta_artifact: none")
+    else:
+        print(f"meta_artifact: {meta_artifact['status']} ({meta_artifact['path']})")
     return 0
 
 
@@ -9930,8 +9966,14 @@ def plans(*, target: Path, json_output: bool = False, limit: int = 20) -> int:
     entries: list[dict[str, Any]] = []
     if plans_dir.is_dir():
         for json_path in plans_dir.glob("*.json"):
-            task_id = json_path.stem
-            _, md_path = _plan_paths(target, task_id)
+            name = json_path.name
+            if name.endswith(".meta.json"):
+                kind = "meta"
+                task_id = name[: -len(".meta.json")]
+            else:
+                kind = "plan"
+                task_id = name[: -len(".json")]
+            _, md_path = _plan_paths(target, task_id, kind)
             try:
                 data = json.loads(json_path.read_text())
             except (json.JSONDecodeError, OSError):
@@ -9940,6 +9982,7 @@ def plans(*, target: Path, json_output: bool = False, limit: int = 20) -> int:
                 entries.append(
                     {
                         "task_id": task_id,
+                        "kind": kind,
                         "status": "unreadable",
                         "updated_at": "",
                         "path": _plan_rel_path(target, md_path),
@@ -9949,6 +9992,7 @@ def plans(*, target: Path, json_output: bool = False, limit: int = 20) -> int:
             entries.append(
                 {
                     "task_id": str(data.get("task_id") or task_id),
+                    "kind": str(data.get("kind") or kind),
                     "status": str(data.get("status") or ""),
                     "updated_at": str(data.get("updated_at") or ""),
                     "path": _plan_rel_path(target, md_path),
@@ -9963,7 +10007,7 @@ def plans(*, target: Path, json_output: bool = False, limit: int = 20) -> int:
         print("no plan artifacts")
         return 0
     for entry in entries:
-        print(f"- {entry['task_id']} [{entry['status']}] {entry['updated_at']} {entry['path']}")
+        print(f"- {entry['task_id']} [{entry['kind']}] [{entry['status']}] {entry['updated_at']} {entry['path']}")
     return 0
 
 
