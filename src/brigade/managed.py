@@ -97,6 +97,36 @@ def _tokenjuice_doctor(ctx: DoctorContext) -> List[CheckResult]:
 # workspace doctor run.
 def _agentpantry_doctor(ctx: DoctorContext) -> List[CheckResult]:
     name = "agentpantry (session auth sync)"
+    r = proc.run(["agentpantry", "doctor", "--json"])
+    data = r.json()
+    if data is not None:
+        if isinstance(data, dict) and data.get("configured") is False:
+            return [(WARN, name, "installed but unwired (no config)")]
+        if not isinstance(data, dict):
+            return [(WARN, name, f"unexpected doctor output (exit {r.code})")]
+        role = data.get("role") or "?"
+        peer = data.get("peer") or "?"
+        surfaces = data.get("surfaces") or []
+        fail_count = int(data.get("fail_count") or 0)
+        warn_count = int(data.get("warn_count") or 0)
+        status = WARN if fail_count or warn_count else OK
+        parts = [
+            f"role={role}",
+            f"peer={peer}",
+            f"surfaces={','.join(str(s) for s in surfaces) or 'none'}",
+            f"checks={fail_count} fail/{warn_count} warn",
+        ]
+        checks = data.get("checks")
+        if isinstance(checks, list):
+            top = next((row for row in checks if isinstance(row, dict) and row.get("status") == "FAIL"), None)
+            if top is None:
+                top = next((row for row in checks if isinstance(row, dict) and row.get("status") == "WARN"), None)
+            if top is not None:
+                parts.append(f"top={top.get('name')}: {str(top.get('detail') or '')[:80]}")
+        return [(status, name, ", ".join(parts))]
+
+    # Older agentpantry builds only expose `status --json`; keep the original
+    # shallow advisory path so Brigade remains compatible with those installs.
     r = proc.run(["agentpantry", "status", "--json"])
     if r.code == 2:
         return [(WARN, name, "installed but unwired (no config)")]

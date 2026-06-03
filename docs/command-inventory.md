@@ -25,6 +25,7 @@ brigade roadmap commands --write
 - `brigade learn`: 10 command path(s)
 - `brigade memory`: 7 command path(s)
 - `brigade openclaw-fragments`: 1 command path(s)
+- `brigade pantry`: 3 command path(s)
 - `brigade projects`: 9 command path(s)
 - `brigade reconfigure`: 1 command path(s)
 - `brigade release`: 22 command path(s)
@@ -149,6 +150,9 @@ brigade roadmap commands --write
 - `brigade memory care scan`
 - `brigade memory care status`
 - `brigade openclaw-fragments`
+- `brigade pantry service plan`
+- `brigade pantry setup plan`
+- `brigade pantry status`
 - `brigade projects audit`
 - `brigade projects closeout`
 - `brigade projects closeout-show`
