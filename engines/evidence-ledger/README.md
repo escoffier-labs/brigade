@@ -9,8 +9,7 @@ Each source system is best at its native domain:
 - `discrawl`: Discord messages
 - `gitcrawl`: GitHub issues and pull requests
 - `notcrawl`: Notion pages
-- `aicrawl`: chat exports
-- agent session scanners: Codex, Claude, OpenClaw, and related logs
+- `agenttrail`: Codex, Claude, OpenClaw, OpenCode, Hermes, and related local session logs
 
 Logspine is the normalized evidence layer above those systems, not a replacement for them.
 
@@ -130,7 +129,7 @@ Discovery reports candidate roots and JSONL counts only:
 spine sources discover --json
 ```
 
-It checks Codex sessions, OpenClaw agents, Claude projects, Hermes session files, and aicrawl status without printing private transcript content.
+It checks Codex sessions, OpenClaw agents, Claude projects, and Hermes session files without printing private transcript content.
 
 ## Evidence
 
