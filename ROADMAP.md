@@ -210,7 +210,7 @@ Goal: prevent durable memory from silently rotting.
 Goal: keep the system usable by the original operator while making it adaptable by others.
 
 - Keep Codex-first defaults, with Claude Code, OpenCode, Hermes, OpenClaw, and generic harness paths supported through writer-specific inboxes.
-- Promote OpenCode to a first-class built-in handoff source. Today only `.claude/memory-handoffs/` and `.codex/memory-handoffs/` are hardcoded in the ingest, doctor, fleet sweep, and security scan source maps; OpenCode handoffs only flow through a manual `--handoff-inbox` flag. Add `.opencode/memory-handoffs/` to the same built-in source maps, ship a template scaffold, and cover it in handoff doctor source-coverage and the repo sweep so OpenCode handoffs route automatically. Status: proposed (next).
+- Promote OpenCode to a first-class built-in handoff source. Today only `.claude/memory-handoffs/` and `.codex/memory-handoffs/` are hardcoded in the ingest, doctor, fleet sweep, and security scan source maps; OpenCode handoffs only flow through a manual `--handoff-inbox` flag. Add `.opencode/memory-handoffs/` to the same built-in source maps, ship a template scaffold, and cover it in handoff doctor source-coverage and the repo sweep so OpenCode handoffs route automatically. Status: implemented with .opencode/memory-handoffs/ wired into install scaffolding, ingest, doctor, handoff doctor source coverage, the fleet sweep, the security skip-list, and the interactive selector, plus a template scaffold.
 - Make local paths configurable and gitignored.
 - Provide templates for fresh-start users without publishing private workspace state.
 - Keep public repo docs focused on patterns, commands, and safety contracts.

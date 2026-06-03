@@ -790,6 +790,7 @@ brigade installs material on two independent axes:
 |---|---|---|
 | `claude` | writer | `CLAUDE.md` + `.claude/memory-handoffs/` inbox |
 | `codex` | writer | `.codex/memory-handoffs/` inbox (AGENTS.md is in the baseline) |
+| `opencode` | writer | `.opencode/memory-handoffs/` inbox |
 | `openclaw` | reader | `.brigade/openclaw/` config fragments + cron stubs |
 | `hermes` | reader | `.brigade/hermes/` adapter fragments (experimental) |
 
