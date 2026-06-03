@@ -1,0 +1,5 @@
+bin/
+*.db
+*.db-shm
+*.db-wal
+exports/
