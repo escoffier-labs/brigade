@@ -12,7 +12,7 @@ Use it in three places:
 - `brigade handoff draft --guard --guard-policy personal ...` writes a draft and returns failure if Content Guard blocks it.
 - `brigade work import content-guard --policy public-repo` runs a scan and turns blocking findings into reviewable work imports.
 
-`brigade operator status` and `brigade operator doctor` report whether Content Guard is installed, the expected policy, the pre-push hook path, whether `core.hooksPath` enables it, and the latest local scan summary when available.
+`brigade operator status` and `brigade operator doctor` report whether Content Guard is installed, the expected policy, the active pre-push hook path, the hook mode, suggested repair commands, and the latest local scan summary when available.
 
 Policy guidance:
 

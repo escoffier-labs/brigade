@@ -8,6 +8,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from .templates import template_root
+
 
 def scanner_dir() -> Path:
     return Path(os.environ.get("CONTENT_GUARD_DIR", str(Path.home() / "repos" / "content-guard")))
@@ -25,21 +27,60 @@ def hook_status(target: Path, policy: str = "public-repo") -> dict[str, Any]:
     target = target.expanduser().resolve()
     hook = target / "hooks" / "pre-push"
     hooks_path = _git_config(target, "core.hooksPath")
+    git_hook = _git_pre_push_hook(target)
+    configured_hook = _configured_pre_push_hook(target, hooks_path)
+    active_hook = configured_hook if hooks_path else git_hook
+    managed_enabled = hooks_path == "hooks" and hook.is_file() and os.access(hook, os.X_OK)
+    active_enabled = active_hook is not None and active_hook.is_file() and os.access(active_hook, os.X_OK)
+    hook_enabled = managed_enabled or active_enabled
+    hook_mode = "not-enabled"
+    if hook_enabled and managed_enabled:
+        hook_mode = "managed-hooks-path"
+    elif hook_enabled and hooks_path:
+        hook_mode = "configured-hooks-path"
+    elif hook_enabled:
+        hook_mode = "git-hooks"
     try:
         resolved_policy = str(policy_path(target, policy))
     except ValueError as exc:
         resolved_policy = str(exc)
+    policy_exists = Path(resolved_policy).is_file()
+    checks: list[dict[str, str]] = []
+    suggestions: list[str] = []
+    if not available():
+        checks.append({"status": "warn", "name": "content_guard_missing", "detail": f"content-guard not found at {scanner_dir()}"})
+        suggestions.append("clone https://github.com/solomonneas/content-guard or set CONTENT_GUARD_DIR")
+    if not policy_exists:
+        checks.append({"status": "warn", "name": "content_guard_policy_missing", "detail": f"policy not found: {resolved_policy}"})
+        suggestions.append(f"brigade scrub --target . --policy {policy} --dry-run")
+    if not hook_enabled:
+        checks.append({"status": "warn", "name": "content_guard_hook_not_enabled", "detail": "no executable pre-push hook found in the active Git hooks path"})
+        if hook.is_file():
+            suggestions.append("git config core.hooksPath hooks")
+        else:
+            suggestions.append("brigade init --target . --force")
+    if not checks:
+        checks.append({"status": "ok", "name": "content_guard_ready", "detail": "content-guard policy and pre-push hook are available"})
     return {
         "available": available(),
         "scanner_dir": str(scanner_dir()),
         "policy": policy,
         "policy_path": resolved_policy,
-        "policy_exists": Path(resolved_policy).is_file(),
+        "policy_exists": policy_exists,
         "pre_push_hook_path": str(hook),
         "pre_push_hook_exists": hook.is_file(),
         "pre_push_hook_executable": os.access(hook, os.X_OK),
+        "configured_pre_push_hook_path": str(configured_hook) if configured_hook else None,
+        "configured_pre_push_hook_exists": configured_hook.is_file() if configured_hook else False,
+        "configured_pre_push_hook_executable": os.access(configured_hook, os.X_OK) if configured_hook else False,
+        "git_pre_push_hook_path": str(git_hook) if git_hook else None,
+        "git_pre_push_hook_exists": git_hook.is_file() if git_hook else False,
+        "git_pre_push_hook_executable": os.access(git_hook, os.X_OK) if git_hook else False,
         "hooks_path": hooks_path,
-        "pre_push_hook_enabled": hooks_path == "hooks",
+        "pre_push_hook_enabled": hook_enabled,
+        "pre_push_hook_mode": hook_mode,
+        "checks": checks,
+        "suggested_commands": list(dict.fromkeys(suggestions)),
         "last_scan": _last_scan_summary(target),
     }
 
@@ -57,6 +98,37 @@ def _git_config(target: Path, key: str) -> str | None:
         return None
     value = result.stdout.strip()
     return value or None
+
+
+def _git_pre_push_hook(target: Path) -> Path | None:
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(target), "rev-parse", "--git-dir"],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+        )
+    except OSError:
+        return None
+    if result.returncode != 0:
+        return None
+    value = result.stdout.strip()
+    if not value:
+        return None
+    git_dir = Path(value)
+    if not git_dir.is_absolute():
+        git_dir = target / git_dir
+    return git_dir / "hooks" / "pre-push"
+
+
+def _configured_pre_push_hook(target: Path, hooks_path: str | None) -> Path | None:
+    if not hooks_path:
+        return None
+    path = Path(hooks_path).expanduser()
+    if not path.is_absolute():
+        path = target / path
+    return path / "pre-push"
 
 
 def _last_scan_summary(target: Path) -> dict[str, Any] | None:
@@ -195,8 +267,8 @@ def _resolve_policy(target: Path, scanner_dir: Path, policy: str) -> Path:
       1. If `policy` looks like a path (contains `/` or `\\` or ends in `.json`),
          treat it as a literal file path and use it as-is.
       2. Otherwise, treat it as a basename and search the safe lookup chain:
-         `<target>/.brigade/policies/<policy>.json`, then
-         `<scanner_dir>/policies/<policy>.json`.
+         `<target>/.brigade/policies/<policy>.json`,
+         Brigade's packaged policies, then `<scanner_dir>/policies/<policy>.json`.
     """
     looks_like_path = "/" in policy or "\\" in policy or policy.endswith(".json")
     if looks_like_path:
@@ -209,6 +281,7 @@ def _resolve_policy(target: Path, scanner_dir: Path, policy: str) -> Path:
 
     candidates = [
         target / ".brigade" / "policies" / f"{safe}.json",
+        template_root() / "policies" / f"{safe}.json",
         scanner_dir / "policies" / f"{safe}.json",
     ]
     for c in candidates:

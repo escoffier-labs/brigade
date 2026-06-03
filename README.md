@@ -194,7 +194,7 @@ Policy names are intentionally plain:
 - `public-repo`: code and docs before push
 - `public-content`: stricter checks for blog, social, and site copy
 
-`brigade operator doctor` and `brigade operator status` show whether Content Guard is installed, which policy is expected, whether the pre-push hook is enabled, and the latest local scan summary when available.
+`brigade operator doctor` and `brigade operator status` show whether Content Guard is installed, which policy is expected, which pre-push hook is active, and the latest local scan summary when available.
 
 ## Where The Detailed Docs Went
 
@@ -203,6 +203,7 @@ The full technical walkthrough still exists; it is just not the README anymore.
 - [Technical guide](docs/technical-guide.md): the detailed command walkthrough.
 - [Security and Content Guard](docs/security.md): scanner policies, handoff guards, and import flow.
 - [Handoff promotion](docs/handoff-promotion.md): how reviewed notes move toward memory.
+- [OpenClaw memory ingest checklist](docs/openclaw-memory-ingest-checklist.md): the review gate before handoffs become memory.
 - [Hermes handoffs](docs/hermes-handoffs.md): Hermes writer inbox setup.
 - [Internal dogfood loop](docs/internal-dogfood.md): how this repo uses Brigade on itself.
 - [Command inventory](docs/command-inventory.md): every public CLI command.

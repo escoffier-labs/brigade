@@ -288,6 +288,16 @@ def status_payload(target: Path, *, profile: str = "internal-dogfood") -> dict[s
         issues.append({"status": "warn", "name": "security_health", "detail": str((security_health.get("top_issue") or {}).get("detail") or "security health issue")})
     if readiness.get("blocker_count"):
         issues.append({"status": "warn", "name": "operator_readiness_blocked", "detail": str((readiness.get("blockers") or [{}])[0].get("safe_summary") or "readiness blocker")})
+    for check in content_guard_health.get("checks") or []:
+        if isinstance(check, dict) and check.get("status") != "ok":
+            issues.append(
+                {
+                    "status": str(check.get("status") or "warn"),
+                    "name": str(check.get("name") or "content_guard"),
+                    "detail": str(check.get("detail") or "content guard needs attention"),
+                    "suggested_next_command": (content_guard_health.get("suggested_commands") or ["brigade operator status --profile internal-dogfood --target ."])[0],
+                }
+            )
     return {
         "target": str(target),
         "profile": profile,
@@ -349,7 +359,10 @@ def status(*, target: Path, profile: str = "internal-dogfood", json_output: bool
     print(f"repo_configs_not_gitignored: {payload['repo']['not_gitignored_count']}")
     print(f"security_issues: {payload['security']['issue_count']}")
     content_guard = payload.get("content_guard") if isinstance(payload.get("content_guard"), dict) else {}
-    print(f"content_guard: {'installed' if content_guard.get('available') else 'missing'} hook={'enabled' if content_guard.get('pre_push_hook_enabled') else 'not-enabled'} policy={content_guard.get('policy')}")
+    hook_label = content_guard.get("pre_push_hook_mode") or ("enabled" if content_guard.get("pre_push_hook_enabled") else "not-enabled")
+    print(f"content_guard: {'installed' if content_guard.get('available') else 'missing'} hook={hook_label} policy={content_guard.get('policy')}")
+    for command in content_guard.get("suggested_commands") or []:
+        print(f"content_guard_next: {command}")
     print(f"daily_issues: {payload['daily']['issue_count']}")
     print(f"readiness: {payload['readiness']['status']} blockers={payload['readiness']['blocker_count']} warnings={payload['readiness']['warning_count']}")
     top = payload.get("top_issue")
@@ -441,12 +454,15 @@ def doctor(*, target: Path, profile: str = "internal-dogfood", json_output: bool
             print(f"- {item.get('name')}: {item.get('detail')}")
     content_guard = payload.get("content_guard") if isinstance(payload.get("content_guard"), dict) else {}
     if content_guard:
+        hook_label = content_guard.get("pre_push_hook_mode") or ("enabled" if content_guard.get("pre_push_hook_enabled") else "not-enabled")
         print(
             "content_guard: "
             f"{'installed' if content_guard.get('available') else 'missing'} "
-            f"hook={'enabled' if content_guard.get('pre_push_hook_enabled') else 'not-enabled'} "
+            f"hook={hook_label} "
             f"policy={content_guard.get('policy')}"
         )
+        for command in content_guard.get("suggested_commands") or []:
+            print(f"content_guard_next: {command}")
     print("local_only:")
     for item in payload["local_only_notes"]:
         print(f"- {item}")

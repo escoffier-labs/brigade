@@ -3,6 +3,7 @@
   "description": "content-guard policies + scrub cache for users who publish blogs, social, or docs.",
   "files": [
     {"src": "policies/public-content.json", "dst": ".brigade/policies/public-content.json"},
+    {"src": "policies/personal.json", "dst": ".brigade/policies/personal.json"},
     {"src": "memory/cards/content-safety.md", "dst": "memory/cards/content-safety.md"}
   ],
   "dirs": [

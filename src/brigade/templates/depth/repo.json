@@ -9,7 +9,8 @@
     {"src": "workspace/rules/acceptance-driven-work.md", "dst": "rules/acceptance-driven-work.md"},
     {"src": "handoff/handoff-sources.example.json", "dst": ".brigade/handoff-sources.example.json"},
     {"src": "hooks/pre-push", "dst": "hooks/pre-push", "mode": "0755"},
-    {"src": "policies/public-repo.json", "dst": ".brigade/policies/public-repo.json"}
+    {"src": "policies/public-repo.json", "dst": ".brigade/policies/public-repo.json"},
+    {"src": "policies/personal.json", "dst": ".brigade/policies/personal.json"}
   ],
   "dirs": []
 }

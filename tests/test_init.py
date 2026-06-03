@@ -150,6 +150,7 @@ def test_publisher_include_writes_policies(tmp_target: Path):
     assert rc == 0
     assert (tmp_target / "hooks" / "pre-push").is_file()
     assert (tmp_target / ".brigade" / "policies" / "public-repo.json").is_file()
+    assert (tmp_target / ".brigade" / "policies" / "personal.json").is_file()
     assert (tmp_target / ".brigade" / "policies" / "public-content.json").is_file()
 
 

@@ -1,0 +1,28 @@
+{
+  "_comment": [
+    "Personal policy: for local working notes and memory handoffs before ingest.",
+    "It blocks secrets and attribution trailers, while warning on personal or infrastructure-like context.",
+    "Use via: brigade handoff lint --content-guard --guard-policy personal"
+  ],
+  "_brigade_version": "0.1.0",
+  "categories": {
+    "secret": "block",
+    "private-network": "warn",
+    "private-identity": "warn",
+    "attribution": "block",
+    "tooling": "warn"
+  },
+  "rules": {
+    "loopback-ipv4": "warn",
+    "localhost-port": "warn",
+    "private-ipv4": "warn",
+    "api-key": "block",
+    "oauth-token": "block",
+    "ssh-private-key": "block",
+    "claude-coauthor": "block",
+    "ai-attribution-trailer": "block",
+    "private-hostname": "warn",
+    "personal-email": "warn",
+    "internal-username": "warn"
+  }
+}

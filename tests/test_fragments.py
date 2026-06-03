@@ -58,6 +58,7 @@ def test_load_depth_repo():
     assert "INSTALL_FOR_AGENTS.md" in dsts
     assert "hooks/pre-push" in dsts
     assert ".brigade/policies/public-repo.json" in dsts
+    assert ".brigade/policies/personal.json" in dsts
     # depth baseline does NOT install harness-specific bridge files
     assert "CLAUDE.md" not in dsts
 
@@ -139,4 +140,5 @@ def test_load_include_publisher():
     assert m["id"] == "publisher"
     dsts = [f["dst"] for f in m["files"]]
     assert ".brigade/policies/public-content.json" in dsts
+    assert ".brigade/policies/personal.json" in dsts
     assert "memory/cards/content-safety.md" in dsts
