@@ -108,12 +108,45 @@ func TestImportWarningsForInvalidRecords(t *testing.T) {
 	}
 }
 
+func TestSourceDiscoveryDoesNotPrintTranscriptContent(t *testing.T) {
+	withTempHome(t)
+	secret := "PRIVATE_TRANSCRIPT_SHOULD_NOT_APPEAR"
+	path := filepath.Join(os.Getenv("HOME"), ".codex", "sessions", "2026", "06", "03")
+	if err := os.MkdirAll(path, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(path, "sample.jsonl"), []byte(`{"type":"event_msg","payload":{"message":"`+secret+`"}}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out := runOK(t, "sources", "discover", "--json")
+	if strings.Contains(out, secret) || strings.Contains(out, "event_msg") {
+		t.Fatalf("source discovery leaked content: %s", out)
+	}
+	var discovered []map[string]any
+	if err := json.Unmarshal([]byte(out), &discovered); err != nil {
+		t.Fatalf("invalid discovery json: %v", err)
+	}
+	if len(discovered) == 0 {
+		t.Fatalf("expected discovery candidates")
+	}
+	for _, item := range discovered {
+		for key := range item {
+			switch key {
+			case "source_kind", "root", "exists", "count", "status":
+			default:
+				t.Fatalf("unexpected discovery key %q in %v", key, item)
+			}
+		}
+	}
+}
+
 func TestNativeAdaptersImportAndEvidence(t *testing.T) {
 	withTempHome(t)
 	runOK(t, "init")
 
 	crawler := repoPath(t, "testdata/adapters/discrawl.fixture.jsonl")
 	codexFixture := repoPath(t, "testdata/harnesses/codex-session.fixture.jsonl")
+	claudeFixture := repoPath(t, "testdata/harnesses/claude-project.fixture.jsonl")
 	openclawFixture := repoPath(t, "testdata/harnesses/openclaw-session.fixture.jsonl")
 	trajectoryFixture := repoPath(t, "testdata/harnesses/openclaw-trajectory.fixture.jsonl")
 	malformedFixture := repoPath(t, "testdata/harnesses/malformed-unknown.fixture.jsonl")
@@ -132,6 +165,9 @@ func TestNativeAdaptersImportAndEvidence(t *testing.T) {
 			t.Fatalf("adapter schema = %v", rec["schema"])
 		}
 	}
+	if !strings.Contains(adapterJSONL, "exec_command") || !strings.Contains(adapterJSONL, "encrypted_content present") {
+		t.Fatalf("codex adapter did not include real response_item shapes: %s", adapterJSONL)
+	}
 
 	runOK(t, "import", "adapter", crawler, "--source", "discrawl")
 	codexImport := runJSON(t, "import", "codex", codexFixture, "--json")
@@ -142,14 +178,29 @@ func TestNativeAdaptersImportAndEvidence(t *testing.T) {
 	if openclawImport["inserted_items"].(float64) == 0 {
 		t.Fatalf("openclaw import inserted no items: %v", openclawImport)
 	}
+	claudeImport := runJSON(t, "import", "claude", claudeFixture, "--json")
+	if claudeImport["inserted_items"].(float64) == 0 {
+		t.Fatalf("claude import inserted no items: %v", claudeImport)
+	}
 	runOK(t, "import", "openclaw", trajectoryFixture, "--json")
 
 	before := runJSON(t, "status", "--json")
 	runOK(t, "import", "codex", codexFixture, "--json")
 	runOK(t, "import", "openclaw", openclawFixture, "--json")
+	runOK(t, "import", "claude", claudeFixture, "--json")
 	after := runJSON(t, "status", "--json")
 	if before["items"] != after["items"] {
 		t.Fatalf("reimport changed item count: before=%v after=%v", before["items"], after["items"])
+	}
+	scans := runJSON(t, "scans", "list", "--json")
+	scanItems := scans["scans"].([]any)
+	if len(scanItems) < 3 {
+		t.Fatalf("scan manifest too small: %v", scans)
+	}
+	firstScan := scanItems[0].(map[string]any)
+	shownScan := runJSON(t, "scans", "show", firstScan["id"].(string), "--json")
+	if shownScan["id"] != firstScan["id"] {
+		t.Fatalf("scan show mismatch: %v vs %v", shownScan, firstScan)
 	}
 
 	crawlerSearch := runJSON(t, "search", "adapter contract", "--source", "discrawl", "--json")
@@ -163,6 +214,41 @@ func TestNativeAdaptersImportAndEvidence(t *testing.T) {
 	openclawSearch := runJSON(t, "search", "normalized schema", "--source", "openclaw", "--json")
 	if len(openclawSearch["results"].([]any)) == 0 {
 		t.Fatalf("openclaw search returned no results")
+	}
+	claudeSearch := runJSON(t, "search", "Claude native import", "--source", "claude", "--json")
+	if len(claudeSearch["results"].([]any)) == 0 {
+		t.Fatalf("claude search returned no results")
+	}
+	commandSearch := runJSON(t, "search", "exec_command", "--source", "codex", "--kind", "command", "--json")
+	commandResults := commandSearch["results"].([]any)
+	if len(commandResults) == 0 {
+		t.Fatalf("codex function call command search returned no results")
+	}
+	commandID := commandResults[0].(map[string]any)["id"].(string)
+	commandShow := runJSON(t, "show", commandID, "--json")
+	commandMeta := commandShow["metadata"].(map[string]any)
+	if commandMeta["call_id"] != "call-123" || commandMeta["name"] != "exec_command" || commandMeta["payload_type"] != "function_call" {
+		t.Fatalf("codex call metadata not preserved: %v", commandMeta)
+	}
+	codexResult := runJSON(t, "search", "call-123", "--source", "codex", "--kind", "tool_call", "--json")
+	if len(codexResult["results"].([]any)) == 0 {
+		t.Fatalf("codex call result search returned no results: %v", codexResult)
+	}
+	codexResultID := codexResult["results"].([]any)[0].(map[string]any)["id"].(string)
+	codexResultShow := runJSON(t, "show", codexResultID, "--json")
+	codexRelations := codexResultShow["relations"].([]any)
+	if len(codexRelations) == 0 || codexRelations[0].(map[string]any)["target_item_id"] == nil {
+		t.Fatalf("codex call result relation was not resolved: %v", codexResultShow)
+	}
+	claudeTool := runJSON(t, "search", "evidence examples", "--source", "claude", "--kind", "tool_call", "--json")
+	if len(claudeTool["results"].([]any)) == 0 {
+		t.Fatalf("claude tool result search returned no results: %v", claudeTool)
+	}
+	claudeToolID := claudeTool["results"].([]any)[0].(map[string]any)["id"].(string)
+	claudeToolShow := runJSON(t, "show", claudeToolID, "--json")
+	claudeRelations := claudeToolShow["relations"].([]any)
+	if len(claudeRelations) == 0 || claudeRelations[0].(map[string]any)["target_item_id"] == nil {
+		t.Fatalf("claude tool result relation was not resolved: %v", claudeToolShow)
 	}
 
 	evidence := runJSON(t, "evidence", "adapter contract", "--json")
@@ -178,6 +264,13 @@ func TestNativeAdaptersImportAndEvidence(t *testing.T) {
 	if rawRef["path"] == "" || rawRef["hash"] == "" {
 		t.Fatalf("evidence missing raw refs: %v", first)
 	}
+	if _, ok := first["artifacts"].([]any); !ok {
+		t.Fatalf("evidence artifacts was not an array: %T %v", first["artifacts"], first["artifacts"])
+	}
+	projectEvidence := runJSON(t, "evidence", "Claude native import", "--project", "logspine", "--json")
+	if len(projectEvidence["results"].([]any)) == 0 {
+		t.Fatalf("project-filtered evidence returned no results: %v", projectEvidence)
+	}
 
 	dryRun := runJSON(t, "import", "codex", malformedFixture, "--dry-run", "--json")
 	if dryRun["generated_records"].(float64) == 0 {
@@ -185,6 +278,30 @@ func TestNativeAdaptersImportAndEvidence(t *testing.T) {
 	}
 	if len(dryRun["warnings"].([]any)) == 0 {
 		t.Fatalf("malformed fixture produced no warnings: %v", dryRun)
+	}
+	discovery := runJSONArray(t, "sources", "discover", "--json")
+	if len(discovery) == 0 {
+		t.Fatalf("source discovery returned no candidates: %v", discovery)
+	}
+}
+
+func TestDirectoryImportRecordsEachScannedFile(t *testing.T) {
+	withTempHome(t)
+	runOK(t, "init")
+	dir := t.TempDir()
+	copyFixture(t, repoPath(t, "testdata/harnesses/codex-session.fixture.jsonl"), filepath.Join(dir, "one.jsonl"))
+	copyFixture(t, repoPath(t, "testdata/harnesses/codex-session.fixture.jsonl"), filepath.Join(dir, "two.jsonl"))
+	runOK(t, "import", "codex", dir, "--json")
+	scans := runJSON(t, "scans", "list", "--source", "codex", "--json")
+	scanItems := scans["scans"].([]any)
+	if len(scanItems) != 2 {
+		t.Fatalf("scan rows = %d, want 2: %v", len(scanItems), scans)
+	}
+	for _, scan := range scanItems {
+		row := scan.(map[string]any)
+		if row["records_generated"].(float64) == 0 || row["content_hash"] == "" || row["generated_hash"] == "" {
+			t.Fatalf("incomplete scan row: %v", row)
+		}
 	}
 }
 
@@ -203,6 +320,16 @@ func runJSON(t *testing.T, args ...string) map[string]any {
 	var got map[string]any
 	if err := json.Unmarshal([]byte(out), &got); err != nil {
 		t.Fatalf("%v returned invalid json: %v\n%s", args, err, out)
+	}
+	return got
+}
+
+func runJSONArray(t *testing.T, args ...string) []any {
+	t.Helper()
+	out := runOK(t, args...)
+	var got []any
+	if err := json.Unmarshal([]byte(out), &got); err != nil {
+		t.Fatalf("%v returned invalid json array: %v\n%s", args, err, out)
 	}
 	return got
 }
@@ -240,4 +367,15 @@ func repoPath(t *testing.T, rel string) string {
 		t.Fatal("runtime.Caller failed")
 	}
 	return filepath.Join(filepath.Dir(file), "..", "..", rel)
+}
+
+func copyFixture(t *testing.T, from, to string) {
+	t.Helper()
+	data, err := os.ReadFile(from)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(to, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
 }

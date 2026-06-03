@@ -23,11 +23,21 @@ type Options struct {
 }
 
 type Result struct {
-	Records  int      `json:"records"`
-	Warnings []string `json:"warnings"`
+	Records  int        `json:"records"`
+	Warnings []string   `json:"warnings"`
+	Files    []FileScan `json:"files,omitempty"`
 }
 
 type Generator func(path string, opts Options, w io.Writer) (Result, error)
+
+type FileScan struct {
+	Path        string `json:"path"`
+	Size        int64  `json:"size"`
+	MTime       string `json:"mtime"`
+	ContentHash string `json:"content_hash"`
+	Records     int    `json:"records_generated"`
+	Warnings    int    `json:"warnings"`
+}
 
 type RawEvent struct {
 	Path    string
@@ -37,10 +47,23 @@ type RawEvent struct {
 }
 
 func WalkJSONL(root string, include func(string) bool, each func(RawEvent) error) error {
+	files, err := ListJSONLFiles(root, include)
+	if err != nil {
+		return err
+	}
+	for _, path := range files {
+		if err := scanJSONL(path, each); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func ListJSONLFiles(root string, include func(string) bool) ([]string, error) {
 	var files []string
 	info, err := os.Stat(root)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if !info.IsDir() {
 		if include(root) {
@@ -63,16 +86,11 @@ func WalkJSONL(root string, include func(string) bool, each func(RawEvent) error
 			}
 			return nil
 		}); err != nil {
-			return err
+			return nil, err
 		}
 	}
 	sort.Strings(files)
-	for _, path := range files {
-		if err := scanJSONL(path, each); err != nil {
-			return err
-		}
-	}
-	return nil
+	return files, nil
 }
 
 func scanJSONL(path string, each func(RawEvent) error) error {
@@ -116,6 +134,69 @@ func DefaultInclude(path string) bool {
 		return false
 	}
 	return true
+}
+
+type FileScanSet struct {
+	files map[string]*FileScan
+}
+
+func NewFileScanSet(root string, include func(string) bool) (*FileScanSet, error) {
+	paths, err := ListJSONLFiles(root, include)
+	if err != nil {
+		return nil, err
+	}
+	set := &FileScanSet{files: map[string]*FileScan{}}
+	for _, path := range paths {
+		info, err := os.Stat(path)
+		if err != nil {
+			return nil, err
+		}
+		hash, err := FileHash(path)
+		if err != nil {
+			return nil, err
+		}
+		set.files[path] = &FileScan{
+			Path:        path,
+			Size:        info.Size(),
+			MTime:       info.ModTime().UTC().Format(time.RFC3339Nano),
+			ContentHash: "sha256:" + hash,
+		}
+	}
+	return set, nil
+}
+
+func (s *FileScanSet) Record(path string) {
+	if scan := s.files[path]; scan != nil {
+		scan.Records++
+	}
+}
+
+func (s *FileScanSet) Warning(path string) {
+	if scan := s.files[path]; scan != nil {
+		scan.Warnings++
+	}
+}
+
+func (s *FileScanSet) List() []FileScan {
+	out := make([]FileScan, 0, len(s.files))
+	for _, scan := range s.files {
+		out = append(out, *scan)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Path < out[j].Path })
+	return out
+}
+
+func FileHash(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
 func WriteRecord(w io.Writer, rec adapter.Record) error {
@@ -209,7 +290,7 @@ func textFromAny(v any, depth int) string {
 		}
 		return strings.Join(parts, "\n")
 	case map[string]any:
-		for _, key := range []string{"text", "content", "message", "prompt", "output", "stdout", "stderr", "result", "summary", "reasoning", "title"} {
+		for _, key := range []string{"text", "content", "message", "prompt", "output", "stdout", "stderr", "result", "summary", "reasoning", "title", "arguments", "name", "call_id"} {
 			if s := textFromAny(t[key], depth+1); s != "" {
 				return s
 			}
@@ -256,10 +337,10 @@ func KeepTimestamp(ts string, since time.Time, hasSince bool) bool {
 func KindFromEvent(eventType, text string) string {
 	lower := strings.ToLower(eventType + " " + text)
 	switch {
+	case strings.Contains(lower, "shell") || strings.Contains(lower, "bash") || strings.Contains(lower, "exec_command") || strings.Contains(lower, "command"):
+		return "command"
 	case strings.Contains(lower, "tool") || strings.Contains(lower, "function_call"):
 		return "tool_call"
-	case strings.Contains(lower, "command") || strings.Contains(lower, "shell"):
-		return "command"
 	case strings.Contains(lower, "file") || strings.Contains(lower, "patch") || strings.Contains(lower, "edit"):
 		return "file_edit"
 	case strings.Contains(lower, "error") || strings.Contains(lower, "failed") || strings.Contains(lower, "exception"):
@@ -291,6 +372,8 @@ func ActorFromRole(sourceKind, role, eventType string) *adapter.Actor {
 	case "system", "":
 		if strings.Contains(strings.ToLower(eventType), "model") {
 			actorType, name = "assistant", "assistant"
+		} else if strings.Contains(strings.ToLower(eventType), "tool") || strings.Contains(strings.ToLower(eventType), "function") {
+			actorType, name = "tool", "tool"
 		}
 	default:
 		actorType, name = "agent", role

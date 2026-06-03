@@ -15,6 +15,10 @@ func Generate(path string, opts sources.Options, w io.Writer) (sources.Result, e
 	if err != nil {
 		return sources.Result{}, err
 	}
+	scans, err := sources.NewFileScanSet(path, sources.DefaultInclude)
+	if err != nil {
+		return sources.Result{}, err
+	}
 	var result sources.Result
 	err = sources.WalkJSONL(path, sources.DefaultInclude, func(ev sources.RawEvent) error {
 		if opts.Limit > 0 && result.Records >= opts.Limit {
@@ -22,11 +26,13 @@ func Generate(path string, opts sources.Options, w io.Writer) (sources.Result, e
 		}
 		if warning, _ := ev.Object["_warning"].(string); warning != "" {
 			result.Warnings = append(result.Warnings, fmt.Sprintf("%s:%d: %s", ev.Path, ev.Ordinal, warning))
+			scans.Warning(ev.Path)
 			return nil
 		}
 		rec, warning := normalize(ev)
 		if warning != "" {
 			result.Warnings = append(result.Warnings, warning)
+			scans.Warning(ev.Path)
 			return nil
 		}
 		if !sources.KeepTimestamp(rec.Item.CreatedAt, since, hasSince) {
@@ -36,8 +42,10 @@ func Generate(path string, opts sources.Options, w io.Writer) (sources.Result, e
 			return err
 		}
 		result.Records++
+		scans.Record(ev.Path)
 		return nil
 	})
+	result.Files = scans.List()
 	return result, err
 }
 
@@ -65,6 +73,9 @@ func normalize(ev sources.RawEvent) (adapter.Record, string) {
 		role = sources.String(data, "role", "actor")
 	}
 	text := openclawText(ev.Object, data)
+	if text == "" && (eventType == "model_change" || eventType == "thinking_level_change" || eventType == "custom") {
+		text = strings.TrimSpace(strings.Join(nonEmpty("OpenClaw", eventType, sources.String(ev.Object, "modelId"), sources.String(ev.Object, "thinkingLevel"), sources.String(ev.Object, "customType")), " "))
+	}
 	if text == "" && eventType != "session" && eventType != "session.started" && eventType != "session.ended" {
 		return adapter.Record{}, fmt.Sprintf("%s:%d: no searchable text for event type %q", ev.Path, ev.Ordinal, eventType)
 	}
@@ -78,6 +89,12 @@ func normalize(ev sources.RawEvent) (adapter.Record, string) {
 	kind := sources.KindFromEvent(eventType, text)
 	itemHash := sources.HashBytes([]byte(text))
 	externalID := "openclaw:" + sources.StableID(ev.Path, sessionID, runID, fmt.Sprint(ev.Ordinal), eventType, ts, itemHash)
+	if eventType == "session" || eventType == "session.started" {
+		externalID = "openclaw:session:" + sessionID
+	}
+	if eventType == "run.started" && runID != "" {
+		externalID = "openclaw:run:" + runID
+	}
 	meta := map[string]any{
 		"harness":       "openclaw",
 		"event_type":    eventType,
@@ -111,6 +128,18 @@ func normalize(ev sources.RawEvent) (adapter.Record, string) {
 	}
 	rec.Artifacts = append(rec.Artifacts, sources.ExtractArtifacts(externalID, ev.Object)...)
 	rec.Artifacts = append(rec.Artifacts, sources.ExtractArtifacts(externalID, data)...)
+	if externalID != "openclaw:session:"+sessionID {
+		rec.Relations = append(rec.Relations, adapter.Relation{
+			TargetExternalID: "openclaw:session:" + sessionID,
+			Type:             "belongs_to_session",
+		})
+	}
+	if runID != "" && externalID != "openclaw:run:"+runID {
+		rec.Relations = append(rec.Relations, adapter.Relation{
+			TargetExternalID: "openclaw:run:" + runID,
+			Type:             "belongs_to_run",
+		})
+	}
 	return rec, ""
 }
 
@@ -129,4 +158,15 @@ func openclawText(root map[string]any, data map[string]any) string {
 		}
 	}
 	return ""
+}
+
+func nonEmpty(parts ...string) []string {
+	var out []string
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part != "" {
+			out = append(out, part)
+		}
+	}
+	return out
 }

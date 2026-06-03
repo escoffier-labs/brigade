@@ -45,7 +45,10 @@ spine import adapter testdata/adapters/agent-session.fixture.jsonl --source code
 spine adapter codex testdata/harnesses/codex-session.fixture.jsonl --out -
 spine import codex testdata/harnesses/codex-session.fixture.jsonl --json
 spine import openclaw testdata/harnesses/openclaw-session.fixture.jsonl --json
+spine import claude testdata/harnesses/claude-project.fixture.jsonl --json
 spine status --json
+spine scans list --json
+spine sources discover --json
 spine search "adapter contract" --json
 spine evidence "adapter contract" --json
 spine show <returned-item-id> --json
@@ -63,17 +66,41 @@ Native adapter generators convert local session JSONL into `logspine.adapter.v1`
 ```bash
 spine adapter codex ~/.codex/sessions --out codex.adapter.jsonl --limit 100
 spine adapter openclaw ~/.openclaw/agents --out openclaw.adapter.jsonl --since 2026-06-01
+spine adapter claude ~/.claude/projects --out claude.adapter.jsonl --limit 100
 ```
 
-Native import commands reuse the adapter contract internally:
+Native import commands stream generated adapter records into the same adapter ingest path:
 
 ```bash
 spine import codex ~/.codex/sessions --json
 spine import openclaw ~/.openclaw/agents --json
+spine import claude ~/.claude/projects --json
 spine import codex testdata/harnesses/malformed-unknown.fixture.jsonl --dry-run --json
 ```
 
 The scanners accept a file or directory, walk JSONL files recursively, skip obvious backups and sidecars, preserve raw refs, and warn rather than crash on malformed or unknown events.
+
+## Scan Manifests
+
+Native imports record which local source files Logspine has seen without exposing transcript text:
+
+```bash
+spine scans list --json
+spine scans list --source codex --json
+spine scans show <id-or-path> --json
+```
+
+Manifest rows include source kind, path, size, mtime, content hash, generated adapter hash, first/last seen timestamps, last imported timestamp, generated record count, and warning count.
+
+## Source Discovery
+
+Discovery reports candidate roots and JSONL counts only:
+
+```bash
+spine sources discover --json
+```
+
+It checks Codex sessions, OpenClaw agents, Claude projects, Hermes status, and aicrawl status without printing private transcript content.
 
 ## Evidence
 
@@ -81,10 +108,21 @@ Brigade-facing evidence bundles are structured and explicitly untrusted:
 
 ```bash
 spine evidence "auth timeout" --source discrawl --limit 20 --json
+spine evidence "Claude native import" --project logspine --json
 spine evidence "adapter contract" --markdown
 ```
 
 Evidence output includes the query, filters, generated timestamp, result item IDs, snippets, source and collection context, actor context, raw refs, artifact refs, and warnings.
+
+## Relations
+
+Logspine resolves shallow relations during import when the target item already exists in the same source:
+
+- Codex function/tool call results link back to calls by `call_id`.
+- Claude `tool_result` records link back to `tool_use` records by `tool_use_id`.
+- OpenClaw session/run events preserve `belongs_to_session` and `belongs_to_run` relations when session or run identifiers are present.
+
+If a target is not present yet, Logspine preserves `target_external_id` for later inspection.
 
 ## Privacy
 

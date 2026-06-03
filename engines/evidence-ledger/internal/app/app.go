@@ -18,6 +18,7 @@ import (
 	"github.com/openclaw/logspine/internal/ingest"
 	"github.com/openclaw/logspine/internal/security"
 	"github.com/openclaw/logspine/internal/sources"
+	"github.com/openclaw/logspine/internal/sources/claude"
 	"github.com/openclaw/logspine/internal/sources/codex"
 	"github.com/openclaw/logspine/internal/sources/openclaw"
 )
@@ -34,6 +35,10 @@ func Run(args []string, out, errw io.Writer) int {
 		return cmdStatus(args[1:], out, errw)
 	case "doctor":
 		return cmdDoctor(args[1:], out, errw)
+	case "sources":
+		return cmdSources(args[1:], out, errw)
+	case "scans":
+		return cmdScans(args[1:], out, errw)
 	case "adapter":
 		return cmdAdapter(args[1:], out, errw)
 	case "import":
@@ -212,6 +217,150 @@ func cmdDoctor(args []string, out, errw io.Writer) int {
 	return 0
 }
 
+func cmdSources(args []string, out, errw io.Writer) int {
+	if len(args) == 0 || args[0] != "discover" {
+		return fatalf(errw, "usage: spine sources discover --json")
+	}
+	_, bools, rest, err := splitFlags(args[1:], nil, map[string]bool{"json": true})
+	if err != nil {
+		return fatalf(errw, "sources discover: %s", err)
+	}
+	if len(rest) != 0 {
+		return fatalf(errw, "usage: spine sources discover --json")
+	}
+	result := discoverSources()
+	if bools["json"] {
+		writeJSON(out, result)
+	} else {
+		for _, src := range result {
+			fmt.Fprintf(out, "%s %s count=%d status=%s\n", src["source_kind"], src["root"], src["count"], src["status"])
+		}
+	}
+	return 0
+}
+
+func discoverSources() []map[string]any {
+	home := os.Getenv("HOME")
+	candidates := []struct {
+		kind   string
+		root   string
+		status string
+	}{
+		{"codex", filepath.Join(home, ".codex", "sessions"), "native-jsonl"},
+		{"openclaw", filepath.Join(home, ".openclaw", "agents"), "native-jsonl"},
+		{"claude", filepath.Join(home, ".claude", "projects"), "native-jsonl"},
+		{"hermes", filepath.Join(home, ".hermes"), "blocked-no-sample"},
+		{"aicrawl", "", "adapter-contract-only"},
+	}
+	out := make([]map[string]any, 0, len(candidates))
+	for _, c := range candidates {
+		count := 0
+		exists := false
+		if c.root != "" {
+			if _, err := os.Stat(c.root); err == nil {
+				exists = true
+				if files, err := sources.ListJSONLFiles(c.root, sources.DefaultInclude); err == nil {
+					count = len(files)
+				}
+			}
+		}
+		out = append(out, map[string]any{
+			"source_kind": c.kind,
+			"root":        c.root,
+			"exists":      exists,
+			"count":       count,
+			"status":      c.status,
+		})
+	}
+	return out
+}
+
+func cmdScans(args []string, out, errw io.Writer) int {
+	if len(args) == 0 {
+		return fatalf(errw, "usage: spine scans list|show")
+	}
+	switch args[0] {
+	case "list":
+		return cmdScansList(args[1:], out, errw)
+	case "show":
+		return cmdScansShow(args[1:], out, errw)
+	default:
+		return fatalf(errw, "usage: spine scans list|show")
+	}
+}
+
+func cmdScansList(args []string, out, errw io.Writer) int {
+	values, bools, rest, err := splitFlags(args, map[string]bool{"source": true}, map[string]bool{"json": true})
+	if err != nil {
+		return fatalf(errw, "scans list: %s", err)
+	}
+	if len(rest) != 0 {
+		return fatalf(errw, "usage: spine scans list [--json] [--source KIND]")
+	}
+	db, _, err := openMigrated()
+	if err != nil {
+		return fatalf(errw, "scans list: %s", err)
+	}
+	defer db.Close()
+	sqlText := `select id, source_kind, path, size, mtime, content_hash, generated_hash, first_seen_at, last_seen_at, last_imported_at, records_generated, warnings from source_scans`
+	params := []any{}
+	if values["source"] != "" {
+		sqlText += ` where source_kind = ?`
+		params = append(params, values["source"])
+	}
+	sqlText += ` order by source_kind, path`
+	rows, err := db.Query(sqlText, params...)
+	if err != nil {
+		return fatalf(errw, "scans list: %s", err)
+	}
+	defer rows.Close()
+	items, err := rowsToMaps(rows)
+	if err != nil {
+		return fatalf(errw, "scans list: %s", err)
+	}
+	if bools["json"] {
+		writeJSON(out, map[string]any{"scans": items})
+	} else {
+		for _, item := range items {
+			fmt.Fprintf(out, "%s %s records=%v warnings=%v\n", item["source_kind"], item["path"], item["records_generated"], item["warnings"])
+		}
+	}
+	return 0
+}
+
+func cmdScansShow(args []string, out, errw io.Writer) int {
+	_, bools, rest, err := splitFlags(args, nil, map[string]bool{"json": true})
+	if err != nil {
+		return fatalf(errw, "scans show: %s", err)
+	}
+	if len(rest) != 1 {
+		return fatalf(errw, "usage: spine scans show <id-or-path> --json")
+	}
+	db, _, err := openMigrated()
+	if err != nil {
+		return fatalf(errw, "scans show: %s", err)
+	}
+	defer db.Close()
+	rows, err := db.Query(`select id, source_kind, path, size, mtime, content_hash, generated_hash, first_seen_at, last_seen_at, last_imported_at, records_generated, warnings from source_scans where id = ? or path = ? order by source_kind, path`, rest[0], rest[0])
+	if err != nil {
+		return fatalf(errw, "scans show: %s", err)
+	}
+	defer rows.Close()
+	items, err := rowsToMaps(rows)
+	if err != nil {
+		return fatalf(errw, "scans show: %s", err)
+	}
+	if len(items) == 0 {
+		return fatalf(errw, "scans show: not found")
+	}
+	if bools["json"] {
+		writeJSON(out, items[0])
+	} else {
+		fmt.Fprintf(out, "%s %s records=%v warnings=%v\n", items[0]["source_kind"], items[0]["path"], items[0]["records_generated"], items[0]["warnings"])
+	}
+	return 0
+}
+
 func checkPrivate(path string) bool {
 	info, err := os.Stat(path)
 	if err != nil {
@@ -222,7 +371,7 @@ func checkPrivate(path string) bool {
 
 func cmdImport(args []string, out, errw io.Writer) int {
 	if len(args) == 0 {
-		return fatalf(errw, "usage: spine import adapter|codex|openclaw <path>")
+		return fatalf(errw, "usage: spine import adapter|codex|openclaw|claude <path>")
 	}
 	switch args[0] {
 	case "adapter":
@@ -231,8 +380,10 @@ func cmdImport(args []string, out, errw io.Writer) int {
 		return cmdImportNative("codex", codex.Generate, args[1:], out, errw)
 	case "openclaw":
 		return cmdImportNative("openclaw", openclaw.Generate, args[1:], out, errw)
+	case "claude":
+		return cmdImportNative("claude", claude.Generate, args[1:], out, errw)
 	default:
-		return fatalf(errw, "usage: spine import adapter|codex|openclaw <path>")
+		return fatalf(errw, "usage: spine import adapter|codex|openclaw|claude <path>")
 	}
 }
 
@@ -263,15 +414,17 @@ func cmdImportAdapter(args []string, out, errw io.Writer) int {
 
 func cmdAdapter(args []string, out, errw io.Writer) int {
 	if len(args) == 0 {
-		return fatalf(errw, "usage: spine adapter codex|openclaw <path-or-dir> --out <file|->")
+		return fatalf(errw, "usage: spine adapter codex|openclaw|claude <path-or-dir> --out <file|->")
 	}
 	switch args[0] {
 	case "codex":
 		return cmdAdapterGenerate("codex", codex.Generate, args[1:], out, errw)
 	case "openclaw":
 		return cmdAdapterGenerate("openclaw", openclaw.Generate, args[1:], out, errw)
+	case "claude":
+		return cmdAdapterGenerate("claude", claude.Generate, args[1:], out, errw)
 	default:
-		return fatalf(errw, "usage: spine adapter codex|openclaw <path-or-dir> --out <file|->")
+		return fatalf(errw, "usage: spine adapter codex|openclaw|claude <path-or-dir> --out <file|->")
 	}
 }
 
@@ -325,23 +478,12 @@ func cmdImportNative(name string, generator sources.Generator, args []string, ou
 	if err != nil {
 		return fatalf(errw, "import %s: %s", name, err)
 	}
-	tmp, err := os.CreateTemp("", "logspine-"+name+"-*.jsonl")
-	if err != nil {
-		return fatalf(errw, "import %s: %s", name, err)
-	}
-	tmpPath := tmp.Name()
-	defer os.Remove(tmpPath)
-	_ = tmp.Chmod(security.PrivateFileMode)
-	generated, err := generator(rest[0], sources.Options{Limit: limit, Since: values["since"]}, tmp)
-	closeErr := tmp.Close()
-	if err == nil {
-		err = closeErr
-	}
-	if err != nil {
-		return fatalf(errw, "import %s: %s", name, err)
-	}
 	if bools["dry-run"] {
-		writeJSON(out, map[string]any{"source_kind": name, "dry_run": true, "generated_records": generated.Records, "warnings": generated.Warnings})
+		generated, err := generator(rest[0], sources.Options{Limit: limit, Since: values["since"]}, io.Discard)
+		if err != nil {
+			return fatalf(errw, "import %s: %s", name, err)
+		}
+		writeJSON(out, map[string]any{"source_kind": name, "dry_run": true, "generated_records": generated.Records, "warnings": generated.Warnings, "files": generated.Files})
 		return 0
 	}
 	db, _, err := openMigrated()
@@ -349,15 +491,37 @@ func cmdImportNative(name string, generator sources.Generator, args []string, ou
 		return fatalf(errw, "import %s: %s", name, err)
 	}
 	defer db.Close()
-	result, err := ingest.ImportAdapterFile(db, tmpPath, name)
+	pr, pw := io.Pipe()
+	type genResult struct {
+		result sources.Result
+		err    error
+	}
+	done := make(chan genResult, 1)
+	go func() {
+		generated, err := generator(rest[0], sources.Options{Limit: limit, Since: values["since"]}, pw)
+		if err != nil {
+			_ = pw.CloseWithError(err)
+		} else {
+			_ = pw.Close()
+		}
+		done <- genResult{result: generated, err: err}
+	}()
+	result, err := ingest.ImportAdapterReader(db, pr, rest[0], name)
+	generated := <-done
+	if err == nil && generated.err != nil {
+		err = generated.err
+	}
 	if err != nil {
 		return fatalf(errw, "import %s: %s", name, err)
 	}
-	result.Warnings = append(generated.Warnings, result.Warnings...)
+	result.Warnings = append(generated.result.Warnings, result.Warnings...)
+	if err := ingest.RecordSourceScans(db, name, result.SourceHash, generated.result.Files, true); err != nil {
+		return fatalf(errw, "import %s: %s", name, err)
+	}
 	if bools["json"] {
 		writeJSON(out, result)
 	} else {
-		fmt.Fprintf(out, "generated=%d imported=%d warnings=%d already_known=%v source=%s\n", generated.Records, result.Inserted, len(result.Warnings), result.AlreadyKnown, result.SourceKind)
+		fmt.Fprintf(out, "generated=%d imported=%d warnings=%d already_known=%v source=%s\n", generated.result.Records, result.Inserted, len(result.Warnings), result.AlreadyKnown, result.SourceKind)
 	}
 	return 0
 }
@@ -455,8 +619,8 @@ func search(db *sql.DB, opts SearchOpts) ([]SearchResult, error) {
 		params = append(params, opts.To)
 	}
 	if opts.Project != "" {
-		where = append(where, `exists(select 1 from item_metadata im where im.item_id = i.id and im.key in ('project','workspace','workspace_dir','cwd') and im.value = ?)`)
-		params = append(params, opts.Project)
+		where = append(where, `exists(select 1 from item_metadata im where im.item_id = i.id and im.key in ('project','workspace','workspace_dir','cwd') and (im.value = ? or im.value like ?))`)
+		params = append(params, opts.Project, "%"+opts.Project+"%")
 	}
 	if opts.Tags != "" {
 		for _, tag := range strings.Split(opts.Tags, ",") {
@@ -483,7 +647,7 @@ limit ?`
 		return nil, err
 	}
 	defer rows.Close()
-	var results []SearchResult
+	results := []SearchResult{}
 	for rows.Next() {
 		var r SearchResult
 		if err := rows.Scan(&r.ID, &r.SourceKind, &r.CollectionName, &r.CollectionKind, &r.Kind, &r.ActorType, &r.ActorName, &r.CreatedAt, &r.Snippet); err != nil {
@@ -525,12 +689,12 @@ func cmdShow(args []string, out, errw io.Writer) int {
 }
 
 func cmdEvidence(args []string, out, errw io.Writer) int {
-	values, bools, rest, err := splitFlags(args, map[string]bool{"source": true, "from": true, "to": true, "limit": true}, map[string]bool{"json": true, "markdown": true})
+	values, bools, rest, err := splitFlags(args, map[string]bool{"source": true, "from": true, "to": true, "limit": true, "project": true}, map[string]bool{"json": true, "markdown": true})
 	if err != nil {
 		return fatalf(errw, "evidence: %s", err)
 	}
 	if len(rest) < 1 {
-		return fatalf(errw, "usage: spine evidence <query> [--json] [--markdown] [--limit N] [--source KIND] [--from DATE] [--to DATE]")
+		return fatalf(errw, "usage: spine evidence <query> [--json] [--markdown] [--limit N] [--source KIND] [--project NAME] [--from DATE] [--to DATE]")
 	}
 	limit, err := parseLimit(values["limit"], 20)
 	if err != nil {
@@ -542,7 +706,7 @@ func cmdEvidence(args []string, out, errw io.Writer) int {
 		return fatalf(errw, "evidence: %s", err)
 	}
 	defer db.Close()
-	bundle, err := evidenceBundle(db, SearchOpts{Query: query, Source: values["source"], From: values["from"], To: values["to"], Limit: limit})
+	bundle, err := evidenceBundle(db, SearchOpts{Query: query, Source: values["source"], Project: values["project"], From: values["from"], To: values["to"], Limit: limit})
 	if err != nil {
 		return fatalf(errw, "evidence: %s", err)
 	}
@@ -587,7 +751,7 @@ where i.id = ?`, r.ID)
 	}
 	return map[string]any{
 		"query":             opts.Query,
-		"filters":           map[string]any{"source": opts.Source, "from": opts.From, "to": opts.To, "limit": opts.Limit},
+		"filters":           map[string]any{"source": opts.Source, "project": opts.Project, "from": opts.From, "to": opts.To, "limit": opts.Limit},
 		"generated_at":      time.Now().UTC().Format(time.RFC3339Nano),
 		"untrusted_context": true,
 		"results":           items,
@@ -646,11 +810,11 @@ where i.id = ?`, id)
 func queryMaps(db *sql.DB, sqlText string, args ...any) []map[string]any {
 	rows, err := db.Query(sqlText, args...)
 	if err != nil {
-		return nil
+		return []map[string]any{}
 	}
 	defer rows.Close()
 	cols, _ := rows.Columns()
-	var out []map[string]any
+	out := []map[string]any{}
 	for rows.Next() {
 		vals := make([]any, len(cols))
 		ptrs := make([]any, len(cols))

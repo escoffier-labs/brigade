@@ -174,6 +174,22 @@ create table if not exists item_metadata(
   primary key(item_id, key, value)
 );
 
+create table if not exists source_scans(
+  id text primary key,
+  source_kind text not null,
+  path text not null,
+  size integer not null,
+  mtime text not null,
+  content_hash text not null,
+  generated_hash text not null,
+  first_seen_at text not null,
+  last_seen_at text not null,
+  last_imported_at text,
+  records_generated integer not null default 0,
+  warnings integer not null default 0,
+  unique(source_kind, path)
+);
+
 create virtual table if not exists item_fts using fts5(
   item_id unindexed,
   source_kind unindexed,
@@ -188,4 +204,5 @@ create index if not exists idx_events_item on events(item_id);
 create index if not exists idx_artifacts_item on artifacts(item_id);
 create index if not exists idx_item_tags_tag on item_tags(tag);
 create index if not exists idx_item_metadata_key_value on item_metadata(key, value);
+create index if not exists idx_source_scans_kind on source_scans(source_kind, last_seen_at);
 `

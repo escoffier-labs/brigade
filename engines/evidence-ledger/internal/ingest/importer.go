@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/openclaw/logspine/internal/adapter"
+	"github.com/openclaw/logspine/internal/sources"
 	"github.com/openclaw/logspine/internal/textnorm"
 )
 
@@ -32,26 +33,17 @@ func ImportAdapterFile(db *sql.DB, path, sourceOverride string) (AdapterResult, 
 	if err != nil {
 		return AdapterResult{}, err
 	}
-	data, err := os.ReadFile(abs)
+	f, err := os.Open(abs)
 	if err != nil {
 		return AdapterResult{}, err
 	}
-	sourceHash := "sha256:" + hashBytes(data)
-	sourceKind := sourceOverride
-	if sourceKind == "" {
-		sourceKind = firstSourceKind(data)
-	}
-	importID := stableID("import", sourceKind, abs, sourceHash)
-	now := time.Now().UTC().Format(time.RFC3339Nano)
+	defer f.Close()
+	return ImportAdapterReader(db, f, abs, sourceOverride)
+}
 
-	var exists int
-	err = db.QueryRow("select count(*) from imports where source_kind = ? and source_hash = ? and completed_at is not null", sourceKind, sourceHash).Scan(&exists)
-	if err != nil {
-		return AdapterResult{}, err
-	}
-	if exists > 0 {
-		return AdapterResult{ImportID: importID, SourceKind: sourceKind, SourcePath: abs, SourceHash: sourceHash, AlreadyKnown: true}, nil
-	}
+func ImportAdapterReader(db *sql.DB, r io.Reader, sourcePath, sourceOverride string) (AdapterResult, error) {
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	sourceKind := sourceOverride
 
 	tx, err := db.Begin()
 	if err != nil {
@@ -59,16 +51,15 @@ func ImportAdapterFile(db *sql.DB, path, sourceOverride string) (AdapterResult, 
 	}
 	defer tx.Rollback()
 
-	if _, err := tx.Exec(`insert or ignore into imports(id, source_kind, source_path, source_hash, started_at) values(?,?,?,?,?)`, importID, sourceKind, abs, sourceHash, now); err != nil {
-		return AdapterResult{}, err
-	}
-
-	result := AdapterResult{ImportID: importID, SourceKind: sourceKind, SourcePath: abs, SourceHash: sourceHash}
-	scanner := bufio.NewScanner(strings.NewReader(string(data)))
+	result := AdapterResult{SourceKind: sourceKind, SourcePath: sourcePath}
+	h := sha256.New()
+	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 0, 64*1024), 10*1024*1024)
 	ordinal := int64(0)
 	for scanner.Scan() {
-		line := scanner.Bytes()
+		line := append([]byte(nil), scanner.Bytes()...)
+		_, _ = h.Write(line)
+		_, _ = h.Write([]byte("\n"))
 		ordinal++
 		if len(strings.TrimSpace(string(line))) == 0 {
 			continue
@@ -81,7 +72,11 @@ func ImportAdapterFile(db *sql.DB, path, sourceOverride string) (AdapterResult, 
 		if sourceOverride != "" {
 			rec.Source.Kind = sourceOverride
 		}
-		inserted, err := upsertRecord(tx, rec, abs, ordinal, line)
+		if sourceKind == "" && rec.Source.Kind != "" {
+			sourceKind = rec.Source.Kind
+			result.SourceKind = sourceKind
+		}
+		inserted, err := upsertRecord(tx, rec, sourcePath, ordinal, line)
 		if err != nil {
 			result.Warnings = append(result.Warnings, fmt.Sprintf("line %d: %s", ordinal, err))
 			continue
@@ -93,10 +88,34 @@ func ImportAdapterFile(db *sql.DB, path, sourceOverride string) (AdapterResult, 
 	if err := scanner.Err(); err != nil {
 		return AdapterResult{}, err
 	}
+	sourceHash := "sha256:" + hex.EncodeToString(h.Sum(nil))
+	if sourceKind == "" {
+		sourceKind = "adapter"
+		result.SourceKind = sourceKind
+	}
+	importID := stableID("import", sourceKind, sourcePath, sourceHash)
+	result.ImportID = importID
+	result.SourceHash = sourceHash
+
+	var exists int
+	err = db.QueryRow("select count(*) from imports where source_kind = ? and source_hash = ? and completed_at is not null", sourceKind, sourceHash).Scan(&exists)
+	if err != nil {
+		return AdapterResult{}, err
+	}
+	if exists > 0 {
+		result.AlreadyKnown = true
+		return result, tx.Rollback()
+	}
+	if _, err := tx.Exec(`insert or ignore into imports(id, source_kind, source_path, source_hash, started_at) values(?,?,?,?,?)`, importID, sourceKind, sourcePath, sourceHash, now); err != nil {
+		return AdapterResult{}, err
+	}
 	for i, warning := range result.Warnings {
 		if _, err := tx.Exec(`insert or replace into import_warnings(import_id, ordinal, warning) values(?,?,?)`, importID, i+1, warning); err != nil {
 			return AdapterResult{}, err
 		}
+	}
+	if err := resolveRelations(tx); err != nil {
+		return AdapterResult{}, err
 	}
 	if _, err := tx.Exec(`update imports set completed_at = ?, item_count = ?, warning_count = ? where id = ?`, now, result.Inserted, len(result.Warnings), importID); err != nil {
 		return AdapterResult{}, err
@@ -104,20 +123,52 @@ func ImportAdapterFile(db *sql.DB, path, sourceOverride string) (AdapterResult, 
 	return result, tx.Commit()
 }
 
-func firstSourceKind(data []byte) string {
-	scanner := bufio.NewScanner(strings.NewReader(string(data)))
-	scanner.Buffer(make([]byte, 0, 64*1024), 10*1024*1024)
-	for scanner.Scan() {
-		line := scanner.Bytes()
-		if len(strings.TrimSpace(string(line))) == 0 {
-			continue
-		}
-		rec, err := adapter.Parse(line)
-		if err == nil && rec.Source.Kind != "" {
-			return rec.Source.Kind
+func resolveRelations(tx *sql.Tx) error {
+	_, err := tx.Exec(`update relations
+set target_item_id = (
+  select target.id
+  from items source
+  join items target on target.source_id = source.source_id and target.external_id = relations.target_external_id
+  where source.id = relations.source_item_id
+  order by target.created_at, target.id
+  limit 1
+)
+where target_item_id is null
+  and target_external_id is not null
+  and target_external_id != ''
+  and exists (
+    select 1
+    from items source
+    join items target on target.source_id = source.source_id and target.external_id = relations.target_external_id
+    where source.id = relations.source_item_id
+  )`)
+	return err
+}
+
+func RecordSourceScans(db *sql.DB, sourceKind, generatedHash string, files []sources.FileScan, imported bool) error {
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	importedAt := any(nil)
+	if imported {
+		importedAt = now
+	}
+	for _, file := range files {
+		id := stableID("scan", sourceKind, file.Path)
+		_, err := db.Exec(`insert into source_scans(id, source_kind, path, size, mtime, content_hash, generated_hash, first_seen_at, last_seen_at, last_imported_at, records_generated, warnings)
+values(?,?,?,?,?,?,?,?,?,?,?,?)
+on conflict(source_kind, path) do update set
+  size=excluded.size,
+  mtime=excluded.mtime,
+  content_hash=excluded.content_hash,
+  generated_hash=excluded.generated_hash,
+  last_seen_at=excluded.last_seen_at,
+  last_imported_at=coalesce(excluded.last_imported_at, source_scans.last_imported_at),
+  records_generated=excluded.records_generated,
+  warnings=excluded.warnings`, id, sourceKind, file.Path, file.Size, file.MTime, file.ContentHash, generatedHash, now, now, importedAt, file.Records, file.Warnings)
+		if err != nil {
+			return err
 		}
 	}
-	return "adapter"
+	return nil
 }
 
 func upsertRecord(tx *sql.Tx, rec adapter.Record, sourcePath string, ordinal int64, raw []byte) (bool, error) {

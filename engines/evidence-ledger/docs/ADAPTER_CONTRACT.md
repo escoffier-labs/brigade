@@ -44,6 +44,7 @@ Logspine includes conservative native generators for local agent-session JSONL:
 ```bash
 spine adapter codex <path-or-dir> --out <file|->
 spine adapter openclaw <path-or-dir> --out <file|->
+spine adapter claude <path-or-dir> --out <file|->
 ```
 
 They emit the same `logspine.adapter.v1` JSONL contract as external tools. Native import commands generate adapter records and reuse the adapter import path internally:
@@ -51,6 +52,7 @@ They emit the same `logspine.adapter.v1` JSONL contract as external tools. Nativ
 ```bash
 spine import codex <path-or-dir> --json
 spine import openclaw <path-or-dir> --json
+spine import claude <path-or-dir> --json
 ```
 
 Scanner rules:
@@ -63,3 +65,7 @@ Scanner rules:
 - Use deterministic external IDs from file path, session ID, ordinal, event type, timestamp, and content hash.
 - Keep `item.text` searchable without dumping huge raw JSON blobs as text.
 - Store non-secret structure in `item.metadata`, including harness, event type, session ID, run ID, model, workspace or cwd, file path, and ordinal where available.
+- Stream generated adapter records into ingest during native imports.
+- Record source-file scan manifests with path, size, mtime, content hash, generated hash, record count, and warnings.
+
+Claude support targets `~/.claude/projects/**/*.jsonl` style project logs. The MVP scanner imports ordinary project session JSONL and does not special-case subagents yet; subagent lines are treated as normal agent-session evidence unless a future fixture shows a safer split.

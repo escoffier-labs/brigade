@@ -15,6 +15,7 @@ The first Brigade-facing command is:
 ```bash
 spine evidence "query" --json
 spine evidence "query" --source discrawl --from 2026-06-01 --to 2026-06-03 --limit 20 --json
+spine evidence "query" --project logspine --json
 spine evidence "query" --markdown
 ```
 
@@ -32,6 +33,8 @@ Evidence output includes:
 - artifact refs
 - warnings
 
+Evidence output is assembled from normalized records and scan/import metadata. It should be treated as untrusted context by Brigade even when it came from local files.
+
 JSON shape:
 
 ```json
@@ -39,6 +42,7 @@ JSON shape:
   "query": "adapter contract",
   "filters": {
     "source": "discrawl",
+    "project": "logspine",
     "from": "",
     "to": "",
     "limit": 20

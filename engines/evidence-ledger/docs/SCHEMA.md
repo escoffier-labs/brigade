@@ -10,6 +10,9 @@ The MVP uses one SQLite migration with these concepts:
 - `artifacts`: files, URLs, markdown exports, patches, transcripts, and generated output
 - `relations`: graph edges between items
 - `imports` and `import_warnings`: import run metadata
+- `item_tags`: indexed item tags from adapter records
+- `item_metadata`: indexed project, workspace, harness, event type, session, model, and file-path metadata
+- `source_scans`: source-file scan manifests for native imports
 - `item_fts`: SQLite FTS5 index for item and artifact text
 
 Raw adapter lines are preserved in `items.raw_json`. Raw source references are stored in `raw_hash`, `raw_path`, and `raw_ordinal`.
