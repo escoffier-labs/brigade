@@ -1,0 +1,43 @@
+# Roadmap
+
+Logspine is usable now as a local archive, search, and evidence layer for normalized source records.
+
+## Usable Now
+
+- Import `logspine.adapter.v1` JSONL from source-specific exporters.
+- Import native Codex, OpenClaw, and Claude session fixtures and local JSONL logs.
+- Import AgentTrail exports for agent-session harnesses.
+- Import SourceHarvest exports for Markdown, files, HTML, JSON, JSONL, and git history.
+- Search one SQLite archive across crawler records, local source exports, and agent-session logs.
+- Produce evidence bundles with `untrusted_context: true`, raw refs, snippets, actors, collections, artifacts, and warnings.
+- Serve local loopback HTTP and stdio MCP surfaces for agent consumption.
+- Track scan manifests so agents can see what source files Logspine has seen.
+
+## Easy To Recommend
+
+These are the next hardening steps before recommending Logspine broadly:
+
+- Keep release install smoke checks passing for Logspine, AgentTrail, and SourceHarvest.
+- Add more real redacted fixture shapes for each supported harness.
+- Improve relation stitching across imports when the target item appears after the source item.
+- Add archive compaction and retention commands for long-running local stores.
+- Add clearer diagnostics for missing external tools in wrapper imports.
+- Add a small query cookbook for common agent workflows.
+
+## Later
+
+- Optional MCP resources for stable evidence bundle references.
+- Optional read-only local API auth for multi-user hosts.
+- More SourceHarvest domain exporters as real local export shapes appear.
+- Native Hermes support only after real redacted samples exist.
+- Native support for any future harness only after observed samples exist.
+
+## Non-Goals
+
+- No GUI.
+- No hosted service requirement.
+- No macOS-only behavior.
+- No network calls from archive, import, search, evidence, MCP, or HTTP commands.
+- No parser parity chase with session-browser tools.
+- No imported text treated as instructions.
+
