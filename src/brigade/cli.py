@@ -271,6 +271,46 @@ def _build_parser() -> argparse.ArgumentParser:
     p_skills_publish.add_argument("--target", "-t", type=Path, default=Path("."), help="Workspace registry to inspect.")
     p_skills_publish.add_argument("--scope", choices=["local", "workspace", "team", "public"], required=True)
     p_skills_publish.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_skills_inbox = skills_sub.add_parser("inbox", help="Review agent-proposed skill packs before import.")
+    skills_inbox_sub = p_skills_inbox.add_subparsers(dest="skills_inbox_command", metavar="<skills-inbox-command>")
+    skills_inbox_sub.required = True
+    p_skills_inbox_add = skills_inbox_sub.add_parser("add", help="Add a proposed skill pack to the review inbox.")
+    p_skills_inbox_add.add_argument("source", type=Path, help="SKILL.md file or directory containing SKILL.md.")
+    p_skills_inbox_add.add_argument("--target", "-t", type=Path, default=Path("."), help="Workspace inbox to update.")
+    p_skills_inbox_add.add_argument("--id", dest="skill_id", default=None, help="Override proposed skill id.")
+    p_skills_inbox_add.add_argument("--summary", default=None, help="Short review summary.")
+    p_skills_inbox_add.add_argument("--force", action="store_true", help="Overwrite an existing generated proposal id.")
+    p_skills_inbox_add.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_skills_inbox_list = skills_inbox_sub.add_parser("list", help="List pending and reviewed skill proposals.")
+    p_skills_inbox_list.add_argument("--target", "-t", type=Path, default=Path("."), help="Workspace inbox to inspect.")
+    p_skills_inbox_list.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_skills_inbox_show = skills_inbox_sub.add_parser("show", help="Show one skill proposal.")
+    p_skills_inbox_show.add_argument("proposal_id", help="Proposal id or unique prefix.")
+    p_skills_inbox_show.add_argument("--target", "-t", type=Path, default=Path("."), help="Workspace inbox to inspect.")
+    p_skills_inbox_show.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_skills_inbox_diff = skills_inbox_sub.add_parser("diff", help="Diff one skill proposal against the current registry entry.")
+    p_skills_inbox_diff.add_argument("proposal_id", help="Proposal id or unique prefix.")
+    p_skills_inbox_diff.add_argument("--target", "-t", type=Path, default=Path("."), help="Workspace inbox to inspect.")
+    p_skills_inbox_diff.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_skills_inbox_accept = skills_inbox_sub.add_parser("accept", help="Accept one skill proposal into the registry.")
+    p_skills_inbox_accept.add_argument("proposal_id", help="Proposal id or unique prefix.")
+    p_skills_inbox_accept.add_argument("--target", "-t", type=Path, default=Path("."), help="Workspace registry to update.")
+    p_skills_inbox_accept.add_argument("--force", action="store_true", help="Overwrite an existing registry skill.")
+    p_skills_inbox_accept.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_skills_inbox_reject = skills_inbox_sub.add_parser("reject", help="Reject one skill proposal.")
+    p_skills_inbox_reject.add_argument("proposal_id", help="Proposal id or unique prefix.")
+    p_skills_inbox_reject.add_argument("--target", "-t", type=Path, default=Path("."), help="Workspace inbox to update.")
+    p_skills_inbox_reject.add_argument("--reason", required=True, help="Review reason.")
+    p_skills_inbox_reject.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_skills_adapters = skills_sub.add_parser("adapters", help="Inspect skill harness adapters.")
+    skills_adapters_sub = p_skills_adapters.add_subparsers(dest="skills_adapters_command", metavar="<skills-adapters-command>")
+    skills_adapters_sub.required = True
+    p_skills_adapters_list = skills_adapters_sub.add_parser("list", help="List skill harness adapters.")
+    p_skills_adapters_list.add_argument("--include-planned", action="store_true", help="Include planned future adapter targets.")
+    p_skills_adapters_list.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_skills_adapters_show = skills_adapters_sub.add_parser("show", help="Show one skill harness adapter.")
+    p_skills_adapters_show.add_argument("adapter_id", help="Adapter id.")
+    p_skills_adapters_show.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
 
     # operator
     p_operator = sub.add_parser("operator", help="Plan and initialize safe local operator config.")
@@ -284,6 +324,29 @@ def _build_parser() -> argparse.ArgumentParser:
     p_operator_init.add_argument("--force", action="store_true", help="Overwrite existing local config files.")
     p_operator_init.add_argument("--dry-run", action="store_true", help="Show planned writes without changing files.")
     p_operator_init.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+
+    # runbook
+    p_runbook = sub.add_parser("runbook", help="Plan, run, resume, and close out explicit local runbooks.")
+    runbook_sub = p_runbook.add_subparsers(dest="runbook_command", metavar="<runbook-command>")
+    runbook_sub.required = True
+    p_runbook_plan = runbook_sub.add_parser("plan", help="Inspect a runbook without executing it.")
+    p_runbook_plan.add_argument("runbook", type=Path, help="Runbook JSON file.")
+    p_runbook_plan.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace command target.")
+    p_runbook_plan.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_runbook_run = runbook_sub.add_parser("run", help="Run a reviewed runbook and write a receipt.")
+    p_runbook_run.add_argument("runbook", type=Path, help="Runbook JSON file.")
+    p_runbook_run.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace command target.")
+    p_runbook_run.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_runbook_resume = runbook_sub.add_parser("resume", help="Show resume information for a runbook run.")
+    p_runbook_resume.add_argument("run_id", nargs="?", default="latest", help="Run id, unique prefix, or latest.")
+    p_runbook_resume.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_runbook_resume.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_runbook_closeout = runbook_sub.add_parser("closeout", help="Mark a runbook run reviewed or deferred.")
+    p_runbook_closeout.add_argument("run_id", nargs="?", default="latest", help="Run id, unique prefix, or latest.")
+    p_runbook_closeout.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
+    p_runbook_closeout.add_argument("--status", choices=["reviewed", "deferred", "blocked", "archived"], default="reviewed")
+    p_runbook_closeout.add_argument("--reason", default=None, help="Closeout reason.")
+    p_runbook_closeout.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
 
     # dogfood
     p_dogfood = sub.add_parser("dogfood", help="Run a safe Codex-only Brigade dogfood review.")
@@ -2623,6 +2686,35 @@ def main(argv=None) -> int:
             return skills_cmd.serve_mcp(target=args.target, json_output=args.json)
         if args.skills_command == "publish":
             return skills_cmd.publish(target=args.target, skill=args.skill, scope=args.scope, json_output=args.json)
+        if args.skills_command == "inbox":
+            if args.skills_inbox_command == "add":
+                return skills_cmd.inbox_add(
+                    target=args.target,
+                    source=args.source,
+                    skill_id=args.skill_id,
+                    summary=args.summary,
+                    force=args.force,
+                    json_output=args.json,
+                )
+            if args.skills_inbox_command == "list":
+                return skills_cmd.inbox_list(target=args.target, json_output=args.json)
+            if args.skills_inbox_command == "show":
+                return skills_cmd.inbox_show(target=args.target, proposal_id=args.proposal_id, json_output=args.json)
+            if args.skills_inbox_command == "diff":
+                return skills_cmd.inbox_diff(target=args.target, proposal_id=args.proposal_id, json_output=args.json)
+            if args.skills_inbox_command == "accept":
+                return skills_cmd.inbox_accept(target=args.target, proposal_id=args.proposal_id, force=args.force, json_output=args.json)
+            if args.skills_inbox_command == "reject":
+                return skills_cmd.inbox_reject(target=args.target, proposal_id=args.proposal_id, reason=args.reason, json_output=args.json)
+            parser.error(f"unknown skills inbox command: {args.skills_inbox_command}")
+            return 2
+        if args.skills_command == "adapters":
+            if args.skills_adapters_command == "list":
+                return skills_cmd.adapters_list(include_planned=args.include_planned, json_output=args.json)
+            if args.skills_adapters_command == "show":
+                return skills_cmd.adapters_show(adapter_id=args.adapter_id, json_output=args.json)
+            parser.error(f"unknown skills adapters command: {args.skills_adapters_command}")
+            return 2
         parser.error(f"unknown skills command: {args.skills_command}")
         return 2
     if cmd == "operator":
@@ -2633,6 +2725,19 @@ def main(argv=None) -> int:
         if args.operator_command == "init":
             return operator_cmd.init(target=args.target, force=args.force, dry_run=args.dry_run, json_output=args.json)
         parser.error(f"unknown operator command: {args.operator_command}")
+        return 2
+    if cmd == "runbook":
+        from . import runbook_cmd
+
+        if args.runbook_command == "plan":
+            return runbook_cmd.plan(target=args.target, runbook=args.runbook, json_output=args.json)
+        if args.runbook_command == "run":
+            return runbook_cmd.run(target=args.target, runbook=args.runbook, json_output=args.json)
+        if args.runbook_command == "resume":
+            return runbook_cmd.resume(target=args.target, run_id=args.run_id, json_output=args.json)
+        if args.runbook_command == "closeout":
+            return runbook_cmd.closeout(target=args.target, run_id=args.run_id, status=args.status, reason=args.reason, json_output=args.json)
+        parser.error(f"unknown runbook command: {args.runbook_command}")
         return 2
     if cmd == "dogfood":
         from . import dogfood_cmd

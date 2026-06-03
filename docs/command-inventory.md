@@ -36,10 +36,11 @@ brigade roadmap commands --write
 - `brigade roadmap`: 3 command path(s)
 - `brigade roster`: 2 command path(s)
 - `brigade run`: 1 command path(s)
+- `brigade runbook`: 4 command path(s)
 - `brigade runs`: 3 command path(s)
 - `brigade scrub`: 1 command path(s)
 - `brigade security`: 14 command path(s)
-- `brigade skills`: 6 command path(s)
+- `brigade skills`: 14 command path(s)
 - `brigade status`: 1 command path(s)
 - `brigade tools`: 46 command path(s)
 - `brigade untrusted`: 2 command path(s)
@@ -275,6 +276,10 @@ brigade roadmap commands --write
 - `brigade roster doctor`
 - `brigade roster init`
 - `brigade run`
+- `brigade runbook closeout`
+- `brigade runbook plan`
+- `brigade runbook resume`
+- `brigade runbook run`
 - `brigade runs latest`
 - `brigade runs list`
 - `brigade runs show`
@@ -293,7 +298,15 @@ brigade roadmap commands --write
 - `brigade security suppress`
 - `brigade security template-audit`
 - `brigade security unsuppress`
+- `brigade skills adapters list`
+- `brigade skills adapters show`
 - `brigade skills import`
+- `brigade skills inbox accept`
+- `brigade skills inbox add`
+- `brigade skills inbox diff`
+- `brigade skills inbox list`
+- `brigade skills inbox reject`
+- `brigade skills inbox show`
 - `brigade skills install`
 - `brigade skills lint`
 - `brigade skills publish`

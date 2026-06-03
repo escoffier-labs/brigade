@@ -575,11 +575,22 @@ Shared skill registry commands:
 - `brigade skills search "mcp security review"` searches approved local registry metadata.
 - `brigade skills install security-review --target codex`, `--target claude`, `--target opencode`, `--target gemini`, `--target openclaw`, `--target hermes`, or `--target mcp` materializes one reviewed skill into a specific harness shape.
 - `brigade skills install security-review --target all` installs the same reviewed skill into Codex, Claude, OpenCode, Gemini `.agents/skills`, OpenClaw, Hermes, and MCP-resource folders, writing per-harness receipts.
+- `brigade skills inbox add ./some-skill`, `list`, `show`, `diff`, `accept`, and `reject` keep agent-proposed skills in review before they enter the registry.
+- `brigade skills adapters list --include-planned` shows built-in and planned harness adapters, including Antigravity, Pi, and Cursor as planned adapter targets.
 - `brigade skills serve-mcp` reports the planned MCP skills server resources and tools without starting a server.
 - `brigade skills publish security-review --scope workspace` writes a reviewed publish proposal instead of pushing a prompt pack directly.
 
 Skills are treated like code: provenance, linting, compatibility, fingerprints, tests, review, and rollback come before installation or sharing. Agent-proposed skills should land as proposals or imports for review, not as automatic startup prompt text.
 Harness support is intended to stay adapter-based. The current built-ins cover Codex, Claude, OpenCode, Gemini, OpenClaw, Hermes, and MCP resources, and future adapters can add Antigravity, Pi, Cursor, or similar agent surfaces without changing the skill registry contract.
+
+Explicit runbook commands:
+
+- `brigade runbook plan runbook.json` validates a reviewed local runbook file and prints the exact steps without executing them.
+- `brigade runbook run runbook.json` runs foreground shell steps, then writes stdout logs, stderr logs, and a receipt under `.brigade/runbooks/runs/`.
+- `brigade runbook resume latest` shows the latest runbook receipt and the next failed step, if any.
+- `brigade runbook closeout latest --status reviewed --reason "..."` records operator review for the runbook run.
+
+Runbooks are the first explicit execution lane for multi-step local workflows. Status, doctor, brief, and center views still do not execute runbooks automatically.
 
 Backup health commands:
 

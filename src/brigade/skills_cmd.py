@@ -7,6 +7,7 @@ reviewed packs into harness-specific folders.
 from __future__ import annotations
 
 import hashlib
+import difflib
 import json
 import re
 import shutil
@@ -17,7 +18,19 @@ from typing import Any
 
 from .untrusted import scan_untrusted
 
-HARNESS_TARGETS = ("codex", "claude", "opencode", "gemini", "openclaw", "hermes", "mcp")
+HARNESS_ADAPTERS: dict[str, dict[str, Any]] = {
+    "codex": {"status": "built-in", "format": "codex-skill", "install_path": ".codex/skills/{skill_id}"},
+    "claude": {"status": "built-in", "format": "claude-skill", "install_path": ".claude/skills/{skill_id}"},
+    "opencode": {"status": "built-in", "format": "opencode-skill", "install_path": ".opencode/skills/{skill_id}"},
+    "gemini": {"status": "built-in", "format": "gemini-agent-skill", "install_path": ".agents/skills/{skill_id}"},
+    "openclaw": {"status": "built-in", "format": "openclaw-skill", "install_path": ".openclaw/skills/{skill_id}"},
+    "hermes": {"status": "built-in", "format": "hermes-skill", "install_path": ".hermes/skills/{skill_id}"},
+    "mcp": {"status": "built-in", "format": "mcp-resource", "install_path": ".brigade/skills/mcp-resources/{skill_id}"},
+    "antigravity": {"status": "planned", "format": "adapter-needed", "install_path": None},
+    "pi": {"status": "planned", "format": "adapter-needed", "install_path": None},
+    "cursor": {"status": "planned", "format": "adapter-needed", "install_path": None},
+}
+HARNESS_TARGETS = tuple(key for key, value in HARNESS_ADAPTERS.items() if value["status"] == "built-in")
 INSTALL_TARGETS = (*HARNESS_TARGETS, "all")
 TRUST_LEVELS = ("unreviewed", "workspace", "team", "public")
 
@@ -33,6 +46,10 @@ def _slug(value: str) -> str:
 
 def _registry_root(target: Path) -> Path:
     return target / ".brigade" / "skills" / "registry"
+
+
+def _inbox_root(target: Path) -> Path:
+    return target / ".brigade" / "skills" / "inbox"
 
 
 def _skill_path(target: Path, skill_id: str) -> Path:
@@ -55,6 +72,11 @@ def _read_json(path: Path) -> dict[str, Any]:
     return data if isinstance(data, dict) else {}
 
 
+def _write_json(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+
+
 def _fingerprint(skill_dir: Path) -> str:
     digest = hashlib.sha256()
     for path in sorted(p for p in skill_dir.rglob("*") if p.is_file()):
@@ -66,6 +88,60 @@ def _fingerprint(skill_dir: Path) -> str:
         digest.update(path.read_bytes())
         digest.update(b"\0")
     return digest.hexdigest()
+
+
+def _source_skill_dir(source: Path) -> tuple[Path | None, str | None]:
+    source = source.expanduser().resolve()
+    if not source.exists():
+        return None, f"source not found: {source}"
+    source_dir = source if source.is_dir() else source.parent
+    source_skill_md = source_dir / "SKILL.md" if source.is_dir() else source
+    if source_skill_md.name != "SKILL.md" or not source_skill_md.is_file():
+        return None, "skill source must be a SKILL.md file or a directory containing SKILL.md"
+    return source_dir, None
+
+
+def _copy_skill_source(source_dir: Path, dest: Path) -> None:
+    if dest.exists():
+        shutil.rmtree(dest)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(source_dir, dest)
+
+
+def _registry_import_payload(
+    *,
+    target: Path,
+    source: Path,
+    skill_id: str | None,
+    force: bool,
+) -> tuple[dict[str, Any] | None, str | None, int]:
+    source_dir, error = _source_skill_dir(source)
+    if source_dir is None:
+        return None, error, 2
+    incoming_metadata = _read_json(source_dir / "skill.json")
+    resolved_id = _slug(skill_id or str(incoming_metadata.get("id") or source_dir.name))
+    dest = _skill_path(target, resolved_id)
+    if dest.exists() and not force:
+        return None, f"skill already exists: {dest}", 2
+    _copy_skill_source(source_dir, dest)
+    metadata = dict(incoming_metadata)
+    metadata.update(
+        {
+            "id": resolved_id,
+            "version": str(metadata.get("version") or "0.1.0"),
+            "source": str(source),
+            "imported_at": _now(),
+            "trust_level": str(metadata.get("trust_level") or "unreviewed"),
+            "required_tools": metadata.get("required_tools") if isinstance(metadata.get("required_tools"), list) else [],
+            "required_mcp_servers": metadata.get("required_mcp_servers") if isinstance(metadata.get("required_mcp_servers"), list) else [],
+            "supported_harnesses": metadata.get("supported_harnesses") if isinstance(metadata.get("supported_harnesses"), list) else list(HARNESS_TARGETS),
+            "tests": metadata.get("tests") if isinstance(metadata.get("tests"), list) else [],
+        }
+    )
+    metadata["fingerprint"] = _fingerprint(dest)
+    _write_json(_metadata_path(dest), metadata)
+    lint_payload = _lint_payload(target, resolved_id)
+    return {"target": str(target), "skill_id": resolved_id, "skill_dir": str(dest), "lint": lint_payload}, None, 0 if lint_payload["valid"] else 1
 
 
 def _load_skill(target: Path, skill_or_path: str) -> tuple[Path, dict[str, Any]]:
@@ -170,57 +246,22 @@ def import_skill(
 ) -> int:
     target = target.expanduser().resolve()
     source = source.expanduser().resolve()
-    if not source.exists():
-        print(f"error: source not found: {source}", file=sys.stderr)
-        return 2
-    source_dir = source if source.is_dir() else source.parent
-    source_skill_md = source_dir / "SKILL.md" if source.is_dir() else source
-    if source_skill_md.name != "SKILL.md" or not source_skill_md.is_file():
-        print("error: skill import source must be a SKILL.md file or a directory containing SKILL.md", file=sys.stderr)
-        return 2
-    incoming_metadata = _read_json(source_dir / "skill.json")
-    resolved_id = _slug(skill_id or str(incoming_metadata.get("id") or source_dir.name))
-    dest = _skill_path(target, resolved_id)
-    if dest.exists() and not force:
-        print(f"error: skill already exists: {dest}", file=sys.stderr)
-        return 2
-    if dest.exists():
-        shutil.rmtree(dest)
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    if source.is_dir():
-        shutil.copytree(source_dir, dest)
-    else:
-        dest.mkdir(parents=True)
-        shutil.copy2(source_skill_md, dest / "SKILL.md")
-    metadata = dict(incoming_metadata)
-    metadata.update(
-        {
-            "id": resolved_id,
-            "version": str(metadata.get("version") or "0.1.0"),
-            "source": str(source),
-            "imported_at": _now(),
-            "trust_level": str(metadata.get("trust_level") or "unreviewed"),
-            "required_tools": metadata.get("required_tools") if isinstance(metadata.get("required_tools"), list) else [],
-            "required_mcp_servers": metadata.get("required_mcp_servers") if isinstance(metadata.get("required_mcp_servers"), list) else [],
-            "supported_harnesses": metadata.get("supported_harnesses") if isinstance(metadata.get("supported_harnesses"), list) else list(HARNESS_TARGETS),
-            "tests": metadata.get("tests") if isinstance(metadata.get("tests"), list) else [],
-        }
-    )
-    metadata["fingerprint"] = _fingerprint(dest)
-    _metadata_path(dest).write_text(json.dumps(metadata, indent=2, sort_keys=True) + "\n")
-    lint_payload = _lint_payload(target, resolved_id)
-    payload = {"target": str(target), "skill_id": resolved_id, "skill_dir": str(dest), "lint": lint_payload}
+    payload, error, rc = _registry_import_payload(target=target, source=source, skill_id=skill_id, force=force)
+    if payload is None:
+        print(f"error: {error}", file=sys.stderr)
+        return rc
+    lint_payload = payload["lint"]
     if json_output:
         print(json.dumps(payload, indent=2, sort_keys=True))
-        return 0 if lint_payload["valid"] else 1
-    print(f"skill_import: {resolved_id}")
-    print(f"skill_dir: {dest}")
-    print(f"fingerprint: {metadata['fingerprint']}")
+        return rc
+    print(f"skill_import: {payload['skill_id']}")
+    print(f"skill_dir: {payload['skill_dir']}")
+    print(f"fingerprint: {lint_payload.get('fingerprint')}")
     for warning in lint_payload["warnings"]:
         print(f"warning: {warning}")
     for error in lint_payload["errors"]:
         print(f"error: {error}")
-    return 0 if lint_payload["valid"] else 1
+    return rc
 
 
 def lint(*, target: Path, skill: str, json_output: bool = False) -> int:
@@ -239,19 +280,8 @@ def lint(*, target: Path, skill: str, json_output: bool = False) -> int:
 
 
 def _install_dir(workspace: Path, harness: str, skill_id: str) -> Path:
-    if harness == "codex":
-        return workspace / ".codex" / "skills" / skill_id
-    if harness == "claude":
-        return workspace / ".claude" / "skills" / skill_id
-    if harness == "opencode":
-        return workspace / ".opencode" / "skills" / skill_id
-    if harness == "gemini":
-        return workspace / ".agents" / "skills" / skill_id
-    if harness == "openclaw":
-        return workspace / ".openclaw" / "skills" / skill_id
-    if harness == "hermes":
-        return workspace / ".hermes" / "skills" / skill_id
-    return workspace / ".brigade" / "skills" / "mcp-resources" / skill_id
+    adapter = HARNESS_ADAPTERS[harness]
+    return workspace / str(adapter["install_path"]).format(skill_id=skill_id)
 
 
 def install(
@@ -296,7 +326,7 @@ def install(
         }
         receipt_path = workspace / ".brigade" / "skills" / "installs" / f"{skill_id}-{install_target}.json"
         receipt_path.parent.mkdir(parents=True, exist_ok=True)
-        receipt_path.write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n")
+        _write_json(receipt_path, receipt)
         receipt["receipt_path"] = str(receipt_path)
         receipts.append(receipt)
     receipt = {
@@ -355,7 +385,7 @@ def publish(*, target: Path, skill: str, scope: str, json_output: bool = False) 
     }
     out = target / ".brigade" / "skills" / "publish-proposals" / f"{_slug(str(lint_payload['skill_id']))}-{scope}.json"
     out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+    _write_json(out, payload)
     payload["proposal_path"] = str(out)
     if json_output:
         print(json.dumps(payload, indent=2, sort_keys=True))
@@ -364,4 +394,214 @@ def publish(*, target: Path, skill: str, scope: str, json_output: bool = False) 
     print(f"scope: {scope}")
     print(f"status: {payload['status']}")
     print(f"proposal: {out}")
+    return 0
+
+
+def adapters_list(*, include_planned: bool = False, json_output: bool = False) -> int:
+    adapters = [
+        {"id": adapter_id, **data}
+        for adapter_id, data in HARNESS_ADAPTERS.items()
+        if include_planned or data["status"] == "built-in"
+    ]
+    payload = {"adapters": adapters, "count": len(adapters), "include_planned": include_planned}
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+    print("skill adapters:")
+    for item in adapters:
+        print(f"- {item['id']} [{item['status']}] {item['format']} {item.get('install_path') or '(planned)'}")
+    return 0
+
+
+def adapters_show(*, adapter_id: str, json_output: bool = False) -> int:
+    adapter = HARNESS_ADAPTERS.get(adapter_id)
+    if adapter is None:
+        print(f"error: skill adapter not found: {adapter_id}", file=sys.stderr)
+        return 2
+    payload = {"id": adapter_id, **adapter}
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+    print(f"skill adapter: {adapter_id}")
+    print(f"status: {adapter['status']}")
+    print(f"format: {adapter['format']}")
+    print(f"install_path: {adapter.get('install_path') or '(planned)'}")
+    return 0
+
+
+def _proposal_path(target: Path, proposal_id: str) -> Path:
+    return _inbox_root(target) / _slug(proposal_id)
+
+
+def _proposal_meta_path(path: Path) -> Path:
+    return path / "proposal.json"
+
+
+def _proposal_skill_path(path: Path) -> Path:
+    return path / "skill"
+
+
+def _read_proposal(path: Path) -> dict[str, Any]:
+    payload = _read_json(_proposal_meta_path(path))
+    payload.setdefault("proposal_id", path.name)
+    payload.setdefault("path", str(path))
+    return payload
+
+
+def _proposal_paths(target: Path) -> list[Path]:
+    root = _inbox_root(target)
+    if not root.is_dir():
+        return []
+    return sorted([path for path in root.iterdir() if path.is_dir()], key=lambda p: p.name)
+
+
+def _resolve_proposal(target: Path, proposal_id: str) -> tuple[Path | None, dict[str, Any] | None, str | None]:
+    matches = [path for path in _proposal_paths(target) if path.name.startswith(_slug(proposal_id))]
+    if not matches:
+        return None, None, f"skill proposal not found: {proposal_id}"
+    if len(matches) > 1:
+        return None, None, f"skill proposal id is ambiguous: {proposal_id}"
+    return matches[0], _read_proposal(matches[0]), None
+
+
+def inbox_add(
+    *,
+    target: Path,
+    source: Path,
+    skill_id: str | None = None,
+    summary: str | None = None,
+    force: bool = False,
+    json_output: bool = False,
+) -> int:
+    target = target.expanduser().resolve()
+    source_dir, error = _source_skill_dir(source)
+    if source_dir is None:
+        print(f"error: {error}", file=sys.stderr)
+        return 2
+    metadata = _read_json(source_dir / "skill.json")
+    resolved_skill_id = _slug(skill_id or str(metadata.get("id") or source_dir.name))
+    created = _now()
+    proposal_id = f"{created[:19].replace(':', '').replace('-', '')}-{resolved_skill_id}"
+    proposal_dir = _proposal_path(target, proposal_id)
+    if proposal_dir.exists() and not force:
+        print(f"error: skill proposal already exists: {proposal_dir}", file=sys.stderr)
+        return 2
+    skill_dest = _proposal_skill_path(proposal_dir)
+    _copy_skill_source(source_dir, skill_dest)
+    lint_payload = _lint_payload(target, str(skill_dest))
+    proposal = {
+        "proposal_id": proposal_dir.name,
+        "skill_id": resolved_skill_id,
+        "status": "pending",
+        "summary": summary or "",
+        "source": str(source.expanduser().resolve()),
+        "created_at": created,
+        "path": str(proposal_dir),
+        "skill_path": str(skill_dest),
+        "fingerprint": _fingerprint(skill_dest),
+        "lint": lint_payload,
+    }
+    _write_json(_proposal_meta_path(proposal_dir), proposal)
+    if json_output:
+        print(json.dumps(proposal, indent=2, sort_keys=True))
+        return 0 if lint_payload["valid"] else 1
+    print(f"skill_proposal: {proposal['proposal_id']}")
+    print(f"skill_id: {resolved_skill_id}")
+    print(f"status: pending")
+    return 0 if lint_payload["valid"] else 1
+
+
+def inbox_list(*, target: Path, json_output: bool = False) -> int:
+    target = target.expanduser().resolve()
+    proposals = [_read_proposal(path) for path in _proposal_paths(target)]
+    payload = {"target": str(target), "proposal_count": len(proposals), "proposals": proposals}
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+    print(f"skill inbox: {target}")
+    for proposal in proposals:
+        print(f"- {proposal.get('proposal_id')} [{proposal.get('status')}] {proposal.get('skill_id')}")
+    if not proposals:
+        print("no skill proposals")
+    return 0
+
+
+def inbox_show(*, target: Path, proposal_id: str, json_output: bool = False) -> int:
+    target = target.expanduser().resolve()
+    _, proposal, error = _resolve_proposal(target, proposal_id)
+    if proposal is None:
+        print(f"error: {error}", file=sys.stderr)
+        return 2
+    if json_output:
+        print(json.dumps(proposal, indent=2, sort_keys=True))
+        return 0
+    print(f"skill proposal: {proposal.get('proposal_id')}")
+    print(f"skill_id: {proposal.get('skill_id')}")
+    print(f"status: {proposal.get('status')}")
+    print(f"fingerprint: {proposal.get('fingerprint')}")
+    return 0
+
+
+def inbox_diff(*, target: Path, proposal_id: str, json_output: bool = False) -> int:
+    target = target.expanduser().resolve()
+    path, proposal, error = _resolve_proposal(target, proposal_id)
+    if path is None or proposal is None:
+        print(f"error: {error}", file=sys.stderr)
+        return 2
+    proposed = _proposal_skill_path(path) / "SKILL.md"
+    existing = _skill_path(target, str(proposal.get("skill_id") or path.name)) / "SKILL.md"
+    before = existing.read_text(errors="replace").splitlines() if existing.is_file() else []
+    after = proposed.read_text(errors="replace").splitlines() if proposed.is_file() else []
+    diff = list(difflib.unified_diff(before, after, fromfile=str(existing), tofile=str(proposed), lineterm=""))
+    payload = {"target": str(target), "proposal_id": proposal.get("proposal_id"), "skill_id": proposal.get("skill_id"), "diff": diff}
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+    print("\n".join(diff) if diff else "no diff")
+    return 0
+
+
+def inbox_accept(*, target: Path, proposal_id: str, force: bool = False, json_output: bool = False) -> int:
+    target = target.expanduser().resolve()
+    path, proposal, error = _resolve_proposal(target, proposal_id)
+    if path is None or proposal is None:
+        print(f"error: {error}", file=sys.stderr)
+        return 2
+    if proposal.get("status") != "pending" and not force:
+        print(f"error: skill proposal is not pending: {proposal.get('status')}", file=sys.stderr)
+        return 2
+    payload, import_error, rc = _registry_import_payload(
+        target=target,
+        source=_proposal_skill_path(path),
+        skill_id=str(proposal.get("skill_id") or path.name),
+        force=force,
+    )
+    if payload is None:
+        print(f"error: {import_error}", file=sys.stderr)
+        return rc
+    proposal.update({"status": "accepted", "accepted_at": _now(), "registry": payload})
+    _write_json(_proposal_meta_path(path), proposal)
+    if json_output:
+        print(json.dumps(proposal, indent=2, sort_keys=True))
+        return rc
+    print(f"skill_proposal: {proposal.get('proposal_id')}")
+    print("status: accepted")
+    print(f"skill_id: {proposal.get('skill_id')}")
+    return rc
+
+
+def inbox_reject(*, target: Path, proposal_id: str, reason: str, json_output: bool = False) -> int:
+    target = target.expanduser().resolve()
+    path, proposal, error = _resolve_proposal(target, proposal_id)
+    if path is None or proposal is None:
+        print(f"error: {error}", file=sys.stderr)
+        return 2
+    proposal.update({"status": "rejected", "rejected_at": _now(), "reason": reason})
+    _write_json(_proposal_meta_path(path), proposal)
+    if json_output:
+        print(json.dumps(proposal, indent=2, sort_keys=True))
+        return 0
+    print(f"skill_proposal: {proposal.get('proposal_id')}")
+    print("status: rejected")
+    print(f"reason: {reason}")
     return 0

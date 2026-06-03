@@ -1,0 +1,222 @@
+"""Explicit runbook execution with local receipts."""
+from __future__ import annotations
+
+import json
+import subprocess
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _runbooks_root(target: Path) -> Path:
+    return target / ".brigade" / "runbooks"
+
+
+def _runs_root(target: Path) -> Path:
+    return _runbooks_root(target) / "runs"
+
+
+def _write_json(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+
+
+def _read_runbook(path: Path) -> tuple[dict[str, Any] | None, str | None]:
+    try:
+        payload = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        return None, f"invalid runbook JSON: {exc}"
+    if not isinstance(payload, dict):
+        return None, "runbook must be a JSON object"
+    steps = payload.get("steps")
+    if not isinstance(steps, list) or not steps:
+        return None, "runbook.steps must be a non-empty list"
+    for index, step in enumerate(steps, start=1):
+        if not isinstance(step, dict) or not isinstance(step.get("run"), str) or not step["run"].strip():
+            return None, f"runbook step {index} must contain a non-empty run string"
+    return payload, None
+
+
+def _plan_payload(target: Path, runbook: Path) -> tuple[dict[str, Any] | None, str | None]:
+    payload, error = _read_runbook(runbook)
+    if payload is None:
+        return None, error
+    steps = [
+        {
+            "index": index,
+            "id": str(step.get("id") or f"step-{index}"),
+            "run": step["run"],
+            "cwd": str(step.get("cwd") or target),
+            "timeout_seconds": int(step.get("timeout_seconds") or payload.get("timeout_seconds") or 600),
+        }
+        for index, step in enumerate(payload["steps"], start=1)
+    ]
+    return {
+        "target": str(target),
+        "runbook_path": str(runbook),
+        "runbook_id": str(payload.get("id") or runbook.stem),
+        "description": str(payload.get("description") or ""),
+        "step_count": len(steps),
+        "steps": steps,
+        "boundaries": [
+            "Runs only when the operator calls brigade runbook run.",
+            "Executes foreground shell commands from the reviewed runbook file.",
+            "Writes stdout, stderr, and JSON receipts under .brigade/runbooks/runs/.",
+        ],
+    }, None
+
+
+def plan(*, target: Path, runbook: Path, json_output: bool = False) -> int:
+    target = target.expanduser().resolve()
+    runbook = runbook.expanduser().resolve()
+    payload, error = _plan_payload(target, runbook)
+    if payload is None:
+        print(f"error: {error}", file=sys.stderr)
+        return 2
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+    print(f"runbook plan: {payload['runbook_id']}")
+    for step in payload["steps"]:
+        print(f"- {step['id']}: {step['run']}")
+    return 0
+
+
+def run(*, target: Path, runbook: Path, json_output: bool = False) -> int:
+    target = target.expanduser().resolve()
+    runbook = runbook.expanduser().resolve()
+    plan_payload, error = _plan_payload(target, runbook)
+    if plan_payload is None:
+        print(f"error: {error}", file=sys.stderr)
+        return 2
+    started = _now()
+    run_id = f"{started[:19].replace(':', '').replace('-', '')}-{plan_payload['runbook_id']}"
+    run_dir = _runs_root(target) / run_id
+    run_dir.mkdir(parents=True, exist_ok=False)
+    results: list[dict[str, Any]] = []
+    status = "completed"
+    for step in plan_payload["steps"]:
+        stdout_path = run_dir / f"{step['index']:02d}-{step['id']}.stdout.log"
+        stderr_path = run_dir / f"{step['index']:02d}-{step['id']}.stderr.log"
+        completed = subprocess.run(
+            step["run"],
+            cwd=step["cwd"],
+            shell=True,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=step["timeout_seconds"],
+            check=False,
+        )
+        stdout_path.write_text(completed.stdout)
+        stderr_path.write_text(completed.stderr)
+        row = {
+            **step,
+            "exit_code": completed.returncode,
+            "status": "completed" if completed.returncode == 0 else "failed",
+            "stdout_log_path": str(stdout_path),
+            "stderr_log_path": str(stderr_path),
+        }
+        results.append(row)
+        if completed.returncode != 0:
+            status = "failed"
+            break
+    receipt = {
+        "run_id": run_id,
+        "runbook_id": plan_payload["runbook_id"],
+        "target": str(target),
+        "runbook_path": str(runbook),
+        "started_at": started,
+        "completed_at": _now(),
+        "status": status,
+        "steps": results,
+        "receipt_path": str(run_dir / "receipt.json"),
+    }
+    _write_json(run_dir / "receipt.json", receipt)
+    if json_output:
+        print(json.dumps(receipt, indent=2, sort_keys=True))
+        return 0 if status == "completed" else 1
+    print(f"runbook_run: {run_id}")
+    print(f"status: {status}")
+    print(f"receipt: {receipt['receipt_path']}")
+    return 0 if status == "completed" else 1
+
+
+def _run_receipts(target: Path) -> list[dict[str, Any]]:
+    root = _runs_root(target)
+    receipts: list[dict[str, Any]] = []
+    if not root.is_dir():
+        return receipts
+    for path in sorted(root.glob("*/receipt.json")):
+        try:
+            payload = json.loads(path.read_text())
+        except (OSError, json.JSONDecodeError):
+            continue
+        if isinstance(payload, dict):
+            receipts.append(payload)
+    return sorted(receipts, key=lambda item: str(item.get("started_at") or ""), reverse=True)
+
+
+def _resolve_receipt(target: Path, run_id: str) -> tuple[dict[str, Any] | None, str | None]:
+    receipts = _run_receipts(target)
+    if run_id == "latest":
+        return (receipts[0], None) if receipts else (None, "no runbook runs found")
+    matches = [receipt for receipt in receipts if str(receipt.get("run_id") or "").startswith(run_id)]
+    if not matches:
+        return None, f"runbook run not found: {run_id}"
+    if len(matches) > 1:
+        return None, f"runbook run id is ambiguous: {run_id}"
+    return matches[0], None
+
+
+def resume(*, target: Path, run_id: str = "latest", json_output: bool = False) -> int:
+    target = target.expanduser().resolve()
+    receipt, error = _resolve_receipt(target, run_id)
+    if receipt is None:
+        print(f"error: {error}", file=sys.stderr)
+        return 2
+    failed = [step for step in receipt.get("steps", []) if isinstance(step, dict) and step.get("status") != "completed"]
+    payload = {
+        "target": str(target),
+        "run": receipt,
+        "next": failed[0] if failed else None,
+        "suggested_command": f"brigade runbook plan {receipt.get('runbook_path')} --target {target}",
+    }
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+    print(f"runbook_resume: {receipt.get('run_id')}")
+    print(f"status: {receipt.get('status')}")
+    print(f"next: {payload['next'].get('id') if isinstance(payload['next'], dict) else 'none'}")
+    print(f"suggested_command: {payload['suggested_command']}")
+    return 0
+
+
+def closeout(*, target: Path, run_id: str = "latest", status: str = "reviewed", reason: str | None = None, json_output: bool = False) -> int:
+    target = target.expanduser().resolve()
+    receipt, error = _resolve_receipt(target, run_id)
+    if receipt is None:
+        print(f"error: {error}", file=sys.stderr)
+        return 2
+    closeout_payload = {
+        "run_id": receipt.get("run_id"),
+        "runbook_id": receipt.get("runbook_id"),
+        "status": status,
+        "reason": reason or "",
+        "created_at": _now(),
+    }
+    closeout_path = _runs_root(target) / str(receipt.get("run_id")) / "closeout.json"
+    _write_json(closeout_path, closeout_payload)
+    closeout_payload["closeout_path"] = str(closeout_path)
+    if json_output:
+        print(json.dumps(closeout_payload, indent=2, sort_keys=True))
+        return 0
+    print(f"runbook_closeout: {receipt.get('run_id')}")
+    print(f"status: {status}")
+    print(f"closeout: {closeout_path}")
+    return 0
