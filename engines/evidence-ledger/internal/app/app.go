@@ -27,7 +27,7 @@ import (
 
 var stdin io.Reader = os.Stdin
 
-const Version = "0.1.1"
+const Version = "0.1.2"
 
 func Run(args []string, out, errw io.Writer) int {
 	if len(args) == 0 || args[0] == "--help" || args[0] == "-h" || args[0] == "help" {
