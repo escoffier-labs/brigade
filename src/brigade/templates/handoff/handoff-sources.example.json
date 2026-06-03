@@ -20,7 +20,8 @@
       "root": ".",
       "inboxes": [
         ".claude/memory-handoffs",
-        ".codex/memory-handoffs"
+        ".codex/memory-handoffs",
+        ".opencode/memory-handoffs"
       ]
     }
   ]

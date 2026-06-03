@@ -15,7 +15,7 @@ from typing import Any
 from uuid import uuid4
 
 from .install import apply_gitignore
-from .selection import Selection
+from .selection import Selection, WRITER_INBOXES
 from . import toml_compat as tomllib, work_cmd
 
 OK = "ok"
@@ -666,7 +666,7 @@ def _repo_summary(entry: RepoEntry) -> dict[str, Any]:
     has_claude = (repo / "CLAUDE.md").is_file() or (repo / ".claude" / "CLAUDE.md").is_file()
     handoff_inboxes = [
         inbox
-        for inbox in (".claude/memory-handoffs", ".codex/memory-handoffs")
+        for inbox in WRITER_INBOXES.values()
         if (repo / inbox).is_dir()
     ]
     handoff_pending, handoff_backlog_oldest_days = _handoff_backlog(repo)

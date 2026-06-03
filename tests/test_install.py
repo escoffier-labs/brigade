@@ -81,6 +81,19 @@ def test_install_selection_writes_config(tmp_path):
     assert cfg.selection.includes == ["publisher"]
 
 
+def test_opencode_install_creates_inbox_and_gitignore(tmp_path):
+    from brigade.install import install_selection, build_gitignore_block
+    from brigade.selection import Selection
+    sel = Selection(depth="repo", harnesses=["opencode"], owner="opencode", includes=[])
+    rc = install_selection(tmp_path, sel)
+    assert rc == 0
+    assert (tmp_path / ".opencode" / "memory-handoffs" / "TEMPLATE.md").is_file()
+    assert (tmp_path / ".opencode" / "memory-handoffs" / "processed").is_dir()
+    block = build_gitignore_block(sel)
+    assert ".opencode/memory-handoffs/*" in block
+    assert "!.opencode/memory-handoffs/TEMPLATE.md" in block
+
+
 def test_install_selection_refuses_overwrite_without_force(tmp_path):
     sel = Selection(depth="repo", harnesses=["claude"], owner="claude", includes=[])
     install_selection(tmp_path, sel)

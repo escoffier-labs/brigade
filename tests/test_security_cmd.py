@@ -761,3 +761,12 @@ def test_security_init_cli(tmp_path, monkeypatch):
     monkeypatch.setattr(security_cmd, "init", fake_init)
     assert cli.main(["security", "init", "--target", str(tmp_path), "--force"]) == 0
     assert seen == {"target": tmp_path, "force": True}
+
+
+def test_skip_prefixes_cover_all_writer_inboxes():
+    from brigade.security_cmd import SKIP_PREFIXES
+    from brigade.selection import WRITER_INBOXES
+
+    for rel in WRITER_INBOXES.values():
+        parts = tuple(rel.split("/"))
+        assert parts in SKIP_PREFIXES, f"{rel} not skipped by security scan"

@@ -1,0 +1,11 @@
+{
+  "id": "opencode",
+  "role": "writer",
+  "description": "OpenCode handoff inbox. (AGENTS.md is in the depth baseline; no separate bridge file today.)",
+  "files": [
+    {"src": "opencode/memory-handoffs/TEMPLATE.md", "dst": ".opencode/memory-handoffs/TEMPLATE.md"}
+  ],
+  "dirs": [
+    ".opencode/memory-handoffs/processed"
+  ]
+}

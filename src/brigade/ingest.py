@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Dict, List
 
 from . import budgets
+from .selection import WRITER_INBOXES
 from .untrusted import scan_untrusted
 
 SECTION_RE = re.compile(r"^##\s+(?P<name>.+?)\s*$", re.MULTILINE)
@@ -28,12 +29,6 @@ SAFE_SPECIAL_TARGETS = {
     ".learnings/LEARNINGS.md",
     ".learnings/ERRORS.md",
     ".learnings/FEATURE_REQUESTS.md",
-}
-
-# Writer harness id -> inbox dir (mirror of install._WRITER_INBOX).
-_WRITER_INBOXES = {
-    "claude": ".claude/memory-handoffs",
-    "codex": ".codex/memory-handoffs",
 }
 
 # Recognized handoff sections. Any section name outside this set is a signal
@@ -77,7 +72,7 @@ def _resolve_inbox_paths(target: Path) -> list[Path]:
         return [legacy] if legacy.is_dir() else []
     paths: list[Path] = []
     for h in sorted(cfg.selection.harnesses):
-        rel = _WRITER_INBOXES.get(h)
+        rel = WRITER_INBOXES.get(h)
         if rel and (target / rel).is_dir():
             paths.append(target / rel)
     return paths

@@ -71,12 +71,17 @@ SKIP_DIRS = {
     "node_modules",
 }
 
+# The `*/memory-handoffs` entries must stay in sync with
+# selection.WRITER_INBOXES (untrusted handoff content is skipped by the scanner
+# so it is not flagged as repo-author injection). test_skip_prefixes_cover_all_
+# writer_inboxes guards this hand-maintained literal against drift.
 SKIP_PREFIXES = (
     (".brigade", "runs"),
     (".brigade", "security"),
     (".brigade", "work"),
     (".claude", "memory-handoffs"),
     (".codex", "memory-handoffs"),
+    (".opencode", "memory-handoffs"),
 )
 
 TEXT_SUFFIXES = {

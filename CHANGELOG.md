@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- First-class OpenCode handoff support: `.opencode/memory-handoffs/` is now a built-in writer inbox (install scaffolding, ingest, doctor, handoff doctor source coverage, fleet sweep, security skip-list, and the interactive selector), so OpenCode handoffs ingest without a manual `--handoff-inbox` flag. The writer-inbox map is now centralized in `brigade.selection.WRITER_INBOXES`.
 - Shared untrusted-context policy helper (`brigade.untrusted`): `wrap_untrusted` frames external content as data-not-instructions with a content-derived fence, and `scan_untrusted` reports injection signals. Adopted in the research extractor, and handoff ingest now routes injection-flagged content to the review inbox instead of auto-filing it into a card or document.
 - New `research` command group: local-first iterative deep research grounded in a
   trusted local corpus, with an opt-in, quarantined web tier (Playwright, no API
