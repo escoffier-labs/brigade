@@ -25,6 +25,12 @@ You can also run commands with:
 go run ./cmd/spine --help
 ```
 
+Install from a release:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/solomonneas/logspine/master/install.sh | sh
+```
+
 ## Runtime Paths
 
 Logspine uses XDG paths when present:
@@ -75,6 +81,8 @@ spine import codex ~/.codex/sessions --json
 spine import openclaw ~/.openclaw/agents --json
 spine import claude ~/.claude/projects --json
 spine import codex testdata/harnesses/malformed-unknown.fixture.jsonl --dry-run --json
+spine import discovered --json
+spine watch once --json
 ```
 
 The scanners accept a file or directory, walk JSONL files recursively, skip obvious backups and sidecars, preserve raw refs, and warn rather than crash on malformed or unknown events.
@@ -109,6 +117,17 @@ The wrapper streams AgentTrail output through adapter ingest and records AgentTr
 
 Logspine native adapters remain available for compatibility. Long term, source-specific agent-session parser ownership should live in AgentTrail while Logspine owns archive ingest, SQLite, FTS, relations, scan manifests, and evidence bundles.
 
+## External SourceHarvest Scanner
+
+SourceHarvest is the separate local source-system exporter for non-harness records such as notes, generic JSONL exports, and future domain harvesters:
+
+```bash
+sourceharvest jsonl export.jsonl --source notes --collection notes:local --out - | spine import adapter -
+sourceharvest markdown ./notes --source notes --collection notes:local --out - | spine import adapter -
+```
+
+Use AgentTrail for agent-session logs. Use SourceHarvest for other local source-system exports. Logspine remains the archive, search, relation, and evidence layer for both.
+
 ## Scan Manifests
 
 Native imports record which local source files Logspine has seen without exposing transcript text:
@@ -117,6 +136,8 @@ Native imports record which local source files Logspine has seen without exposin
 spine scans list --json
 spine scans list --source codex --json
 spine scans show <id-or-path> --json
+spine scans diff <path> --json
+spine scans changed --source codex --json
 ```
 
 Manifest rows include source kind, path, size, mtime, content hash, generated adapter hash, first/last seen timestamps, last imported timestamp, generated record count, and warning count.
@@ -131,6 +152,23 @@ spine sources discover --json
 
 It checks Codex sessions, OpenClaw agents, Claude projects, and Hermes session files without printing private transcript content.
 
+## Local API and MCP
+
+The local HTTP API binds to loopback only by default:
+
+```bash
+spine serve --addr 127.0.0.1:8765
+curl "http://127.0.0.1:8765/search?q=auth+timeout"
+curl "http://127.0.0.1:8765/items/<item-id>"
+curl -X POST http://127.0.0.1:8765/evidence -d '{"query":"auth timeout","limit":10}'
+```
+
+The stdio MCP server exposes `search_evidence`, `show_item`, `create_evidence_bundle`, and `list_sources`:
+
+```bash
+spine mcp
+```
+
 ## Evidence
 
 Brigade-facing evidence bundles are structured and explicitly untrusted:
@@ -138,10 +176,11 @@ Brigade-facing evidence bundles are structured and explicitly untrusted:
 ```bash
 spine evidence "auth timeout" --source discrawl --limit 20 --json
 spine evidence "Claude native import" --project logspine --json
+spine evidence "adapter contract" --include-related --json
 spine evidence "adapter contract" --markdown
 ```
 
-Evidence output includes the query, filters, generated timestamp, result item IDs, snippets, source and collection context, actor context, raw refs, artifact refs, and warnings.
+Evidence output includes the query, filters, generated timestamp, result item IDs, snippets, source and collection context, actor context, raw refs, artifact refs, source grouping, optional related items, and warnings.
 
 ## Relations
 
@@ -155,4 +194,4 @@ If a target is not present yet, Logspine preserves `target_external_id` for late
 
 ## Privacy
 
-Logspine does not make network calls for init, adapter generation, import, search, evidence, show, export, status, SQL inspection, or doctor. Imported text is stored locally and treated as untrusted evidence, not executable instructions.
+Logspine does not make network calls for init, adapter generation, import, search, evidence, show, export, status, SQL inspection, MCP, HTTP serving, or doctor. Imported text is stored locally and treated as untrusted evidence, not executable instructions.

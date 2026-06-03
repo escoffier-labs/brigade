@@ -53,6 +53,8 @@ They emit the same `logspine.adapter.v1` JSONL contract as external tools. Nativ
 spine import codex <path-or-dir> --json
 spine import openclaw <path-or-dir> --json
 spine import claude <path-or-dir> --json
+spine import discovered --json
+spine watch once --json
 ```
 
 Scanner rules:
@@ -95,3 +97,10 @@ spine import agenttrail hermes ~/.hermes/sessions --json
 Use AgentTrail when source-specific harness parsing should live outside Logspine. Keep Logspine focused on ingest, normalized storage, FTS, scan manifests, relation resolution, and evidence output.
 
 AgentTrail `discover`, `doctor`, `doctor --live`, `inspect`, and `--dry-run --json` modes report roots, structural keys, counts, records, and warnings without printing transcript content. Logspine's `import agenttrail` wrapper records AgentTrail scan manifests when AgentTrail writes summary output. For `agenttrail all`, prefer piping to `spine import adapter -` so mixed-source records retain their individual `source.kind`.
+
+Scan manifests can be compared without reading transcript content into output:
+
+```bash
+spine scans diff <path> --json
+spine scans changed --json
+```

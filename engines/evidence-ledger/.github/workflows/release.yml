@@ -1,0 +1,42 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+      - name: Build
+        run: |
+          mkdir -p dist
+          for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64; do
+            goos="${target%/*}"
+            goarch="${target#*/}"
+            suffix=""
+            if [ "$goos" = "windows" ]; then suffix=".exe"; fi
+            GOOS="$goos" GOARCH="$goarch" go build -o "dist/spine-${goos}-${goarch}${suffix}" ./cmd/spine
+          done
+          (cd dist && sha256sum * > checksums.txt)
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/* --generate-notes
+      - name: Verify published install assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p verify
+          gh release download "$GITHUB_REF_NAME" --pattern spine-linux-amd64 --pattern checksums.txt --dir verify
+          (cd verify && sha256sum -c checksums.txt --ignore-missing)
+          chmod +x verify/spine-linux-amd64
+          ./verify/spine-linux-amd64 version

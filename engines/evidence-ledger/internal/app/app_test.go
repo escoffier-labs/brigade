@@ -3,6 +3,8 @@ package app
 import (
 	"bytes"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -411,6 +413,103 @@ func TestDirectoryImportRecordsEachScannedFile(t *testing.T) {
 		if row["records_generated"].(float64) == 0 || row["content_hash"] == "" || row["generated_hash"] == "" {
 			t.Fatalf("incomplete scan row: %v", row)
 		}
+	}
+	firstPath := scanItems[0].(map[string]any)["path"].(string)
+	diff := runJSON(t, "scans", "diff", firstPath, "--json")
+	if diff["changed"] != false || diff["status"] != "unchanged" {
+		t.Fatalf("initial scan diff = %v", diff)
+	}
+	f, err := os.OpenFile(firstPath, os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString("\n"); err != nil {
+		_ = f.Close()
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	changed := runJSON(t, "scans", "changed", "--source", "codex", "--json")
+	if len(changed["changed"].([]any)) == 0 {
+		t.Fatalf("changed scan was not detected: %v", changed)
+	}
+}
+
+func TestImportDiscoveredAndWatchOnce(t *testing.T) {
+	withTempHome(t)
+	runOK(t, "init")
+	root := filepath.Join(os.Getenv("HOME"), ".codex", "sessions", "2026", "06", "03")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	copyFixture(t, repoPath(t, "testdata/harnesses/codex-session.fixture.jsonl"), filepath.Join(root, "codex.jsonl"))
+	out := runJSON(t, "import", "discovered", "--json")
+	if out["inserted_items"].(float64) == 0 {
+		t.Fatalf("discovered import inserted no items: %v", out)
+	}
+	again := runJSON(t, "watch", "once", "--json")
+	if again["inserted_items"].(float64) != 0 {
+		t.Fatalf("watch once was not idempotent: %v", again)
+	}
+	scans := runJSON(t, "scans", "list", "--source", "codex", "--json")
+	if len(scans["scans"].([]any)) != 1 {
+		t.Fatalf("expected discovered scan manifest: %v", scans)
+	}
+}
+
+func TestHTTPAPIAndMCPTools(t *testing.T) {
+	withTempHome(t)
+	runOK(t, "init")
+	runOK(t, "import", "adapter", repoPath(t, "testdata/adapters/discrawl.fixture.jsonl"), "--source", "discrawl")
+
+	handler := newHTTPHandler()
+	req := httptest.NewRequest(http.MethodGet, "/search?q=adapter+contract&source=discrawl", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("search http status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var searchBody map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &searchBody); err != nil {
+		t.Fatalf("bad search body: %v", err)
+	}
+	results := searchBody["results"].([]any)
+	if len(results) == 0 {
+		t.Fatalf("http search returned no results: %v", searchBody)
+	}
+	id := results[0].(map[string]any)["id"].(string)
+
+	req = httptest.NewRequest(http.MethodGet, "/items/"+id, nil)
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("show http status=%d body=%s", rec.Code, rec.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/evidence", strings.NewReader(`{"query":"adapter contract","source":"discrawl","limit":5}`))
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("evidence http status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var evidence map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &evidence); err != nil {
+		t.Fatalf("bad evidence body: %v", err)
+	}
+	if evidence["untrusted_context"] != true || len(evidence["grouped_by_source"].(map[string]any)) == 0 {
+		t.Fatalf("bad evidence body: %v", evidence)
+	}
+
+	params := json.RawMessage(`{"name":"create_evidence_bundle","arguments":{"query":"adapter contract","source":"discrawl","limit":5}}`)
+	resp := handleMCPRequest(mcpRequest{JSONRPC: "2.0", ID: float64(1), Method: "tools/call", Params: params})
+	if resp.Error != nil {
+		t.Fatalf("mcp error: %#v", resp.Error)
+	}
+	result := resp.Result.(map[string]any)
+	content := result["content"].([]map[string]any)
+	if !strings.Contains(content[0]["text"].(string), `"untrusted_context":true`) {
+		t.Fatalf("mcp content missing evidence bundle: %v", content)
 	}
 }
 
