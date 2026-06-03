@@ -1110,6 +1110,259 @@ def test_work_task_add_template_preserves_explicit_acceptance_and_plan(tmp_path,
     assert "The login redirect works in the browser smoke test." in out
 
 
+def _plan_task_id(tmp_path, capsys, **add_kwargs):
+    add_kwargs.setdefault("text", "Build the planner")
+    add_kwargs.setdefault("task_type", "feature")
+    add_kwargs.setdefault("acceptance", ["Plan is written", "Plan is reviewed"])
+    assert work_cmd.task_add(target=tmp_path, **add_kwargs) == 0
+    out = capsys.readouterr().out
+    return out.split("task: ", 1)[1].splitlines()[0]
+
+
+def test_task_plan_write_creates_both_artifacts_with_full_schema(tmp_path, capsys):
+    _init_git_repo(tmp_path)
+    task_id = _plan_task_id(tmp_path, capsys)
+
+    assert (
+        work_cmd.task_plan(
+            target=tmp_path,
+            task_id=task_id[:12],
+            write=True,
+            assumptions=["API is stable"],
+            risks=["rate limits"],
+            sources=["issue #42"],
+            next_command="brigade work run",
+            title="Custom plan title",
+        )
+        == 0
+    )
+    out = capsys.readouterr().out
+    assert "wrote plan:" in out
+    assert "status: draft" in out
+
+    json_path, md_path = work_cmd._plan_paths(tmp_path, task_id)
+    assert json_path.is_file()
+    assert md_path.is_file()
+    assert json_path.name == f"{task_id}.json"
+    assert md_path.name == f"{task_id}.plan.md"
+
+    receipt = json.loads(json_path.read_text())
+    expected_keys = {
+        "task_id",
+        "title",
+        "status",
+        "created_at",
+        "updated_at",
+        "source_context",
+        "assumptions",
+        "acceptance",
+        "risks",
+        "next_command",
+        "receipt_paths",
+    }
+    assert set(receipt.keys()) == expected_keys
+    assert receipt["task_id"] == task_id
+    assert receipt["title"] == "Custom plan title"
+    assert receipt["status"] == "draft"
+    assert receipt["created_at"] == receipt["updated_at"]
+    assert receipt["assumptions"] == ["API is stable"]
+    assert receipt["risks"] == ["rate limits"]
+    assert receipt["source_context"] == ["issue #42"]
+    assert receipt["acceptance"] == ["Plan is written", "Plan is reviewed"]
+    assert receipt["next_command"] == "brigade work run"
+    paths = receipt["receipt_paths"]
+    assert ".brigade/work/tasks.json" in paths
+    assert f".brigade/work/plans/{task_id}.json" in paths
+    assert f".brigade/work/plans/{task_id}.plan.md" in paths
+
+
+def test_task_plan_write_defaults_title_to_task_text(tmp_path, capsys):
+    _init_git_repo(tmp_path)
+    task_id = _plan_task_id(tmp_path, capsys, text="Implement the loop")
+
+    assert work_cmd.task_plan(target=tmp_path, task_id=task_id[:12], write=True) == 0
+    capsys.readouterr()
+    json_path, _ = work_cmd._plan_paths(tmp_path, task_id)
+    receipt = json.loads(json_path.read_text())
+    assert receipt["title"] == "Implement the loop"
+    assert receipt["next_command"] == "brigade work run"
+
+
+def test_task_plan_write_second_appends_dedupes_preserves_created(tmp_path, capsys):
+    _init_git_repo(tmp_path)
+    task_id = _plan_task_id(tmp_path, capsys)
+
+    assert (
+        work_cmd.task_plan(
+            target=tmp_path,
+            task_id=task_id[:12],
+            write=True,
+            assumptions=["API is stable"],
+            risks=["rate limits"],
+            sources=["issue #42"],
+        )
+        == 0
+    )
+    capsys.readouterr()
+    json_path, _ = work_cmd._plan_paths(tmp_path, task_id)
+    first = json.loads(json_path.read_text())
+    first_created = first["created_at"]
+
+    assert (
+        work_cmd.task_plan(
+            target=tmp_path,
+            task_id=task_id[:12],
+            write=True,
+            assumptions=["API is stable", "DB is migrated"],
+            risks=["rate limits"],
+            sources=["issue #99"],
+            accept=True,
+        )
+        == 0
+    )
+    capsys.readouterr()
+    second = json.loads(json_path.read_text())
+    assert second["created_at"] == first_created
+    assert second["updated_at"] >= first_created
+    assert second["assumptions"] == ["API is stable", "DB is migrated"]
+    assert second["risks"] == ["rate limits"]
+    assert second["source_context"] == ["issue #42", "issue #99"]
+    assert second["status"] == "accepted"
+
+
+def test_task_plan_write_rerenders_acceptance_from_task(tmp_path, capsys):
+    _init_git_repo(tmp_path)
+    task_id = _plan_task_id(tmp_path, capsys, acceptance=["Only criterion"])
+    assert work_cmd.task_plan(target=tmp_path, task_id=task_id[:12], write=True) == 0
+    capsys.readouterr()
+    json_path, _ = work_cmd._plan_paths(tmp_path, task_id)
+    receipt = json.loads(json_path.read_text())
+    assert receipt["acceptance"] == ["Only criterion"]
+
+
+def test_plan_md_has_title_sections_items_and_none_recorded(tmp_path, capsys):
+    _init_git_repo(tmp_path)
+    task_id = _plan_task_id(tmp_path, capsys)
+    assert (
+        work_cmd.task_plan(
+            target=tmp_path,
+            task_id=task_id[:12],
+            write=True,
+            assumptions=["API is stable"],
+            sources=["issue #42"],
+            title="Readable Plan",
+        )
+        == 0
+    )
+    capsys.readouterr()
+    _, md_path = work_cmd._plan_paths(tmp_path, task_id)
+    md = md_path.read_text()
+    assert "# Plan: Readable Plan" in md
+    assert "## Source context" in md
+    assert "## Assumptions" in md
+    assert "## Acceptance criteria" in md
+    assert "## Risks" in md
+    assert "## Next safe command" in md
+    assert "## Receipts" in md
+    assert "- issue #42" in md
+    assert "- API is stable" in md
+    assert "- Plan is written" in md
+    assert "`brigade work run`" in md
+    # Risks empty -> none recorded marker present
+    assert "_none recorded_" in md
+
+
+def test_task_plan_read_view_shows_artifact_line_and_json(tmp_path, capsys):
+    _init_git_repo(tmp_path)
+    task_id = _plan_task_id(tmp_path, capsys)
+    assert work_cmd.task_plan(target=tmp_path, task_id=task_id[:12], write=True) == 0
+    capsys.readouterr()
+
+    assert work_cmd.task_plan(target=tmp_path, task_id=task_id[:12]) == 0
+    out = capsys.readouterr().out
+    assert "  - Plan is written" in out
+    assert "suggested_command: brigade work run" in out
+    assert "plan_artifact: draft" in out
+    assert f".brigade/work/plans/{task_id}.plan.md" in out
+
+    assert work_cmd.task_plan(target=tmp_path, task_id=task_id[:12], json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["plan_artifact"] is not None
+    assert payload["plan_artifact"]["status"] == "draft"
+    assert payload["plan_artifact"]["path"] == f".brigade/work/plans/{task_id}.plan.md"
+    assert payload["plan_artifact"]["updated_at"]
+
+
+def test_task_plan_read_view_without_artifact_is_null_and_unchanged(tmp_path, capsys):
+    _init_git_repo(tmp_path)
+    task_id = _plan_task_id(tmp_path, capsys)
+
+    assert work_cmd.task_plan(target=tmp_path, task_id=task_id[:12]) == 0
+    out = capsys.readouterr().out
+    assert "  - Plan is written" in out
+    assert "  - Plan is reviewed" in out
+    assert "suggested_command: brigade work run" in out
+    assert "plan_artifact: none" in out
+
+    assert work_cmd.task_plan(target=tmp_path, task_id=task_id[:12], json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["plan_artifact"] is None
+    assert payload["acceptance"] == ["Plan is written", "Plan is reviewed"]
+
+
+def test_task_plan_write_unknown_task_exits_1(tmp_path, capsys):
+    _init_git_repo(tmp_path)
+    assert work_cmd.task_plan(target=tmp_path, task_id="nope", write=True) == 1
+    err = capsys.readouterr().err
+    assert "task not found" in err
+
+
+def test_work_plans_lists_newest_first_and_empty(tmp_path, capsys):
+    _init_git_repo(tmp_path)
+    # empty case
+    assert work_cmd.plans(target=tmp_path) == 0
+    assert "no plan artifacts" in capsys.readouterr().out
+    assert work_cmd.plans(target=tmp_path, json_output=True) == 0
+    assert json.loads(capsys.readouterr().out) == []
+
+    first = _plan_task_id(tmp_path, capsys, text="First task")
+    assert work_cmd.task_plan(target=tmp_path, task_id=first, write=True) == 0
+    capsys.readouterr()
+    import time as _time
+
+    _time.sleep(0.01)
+    second = _plan_task_id(tmp_path, capsys, text="Second task")
+    assert work_cmd.task_plan(target=tmp_path, task_id=second, write=True, accept=True) == 0
+    capsys.readouterr()
+
+    assert work_cmd.plans(target=tmp_path, json_output=True) == 0
+    entries = json.loads(capsys.readouterr().out)
+    assert len(entries) == 2
+    assert entries[0]["task_id"] == second
+    assert entries[1]["task_id"] == first
+    assert entries[0]["status"] == "accepted"
+    assert entries[0]["path"] == f".brigade/work/plans/{second}.plan.md"
+
+    assert work_cmd.plans(target=tmp_path) == 0
+    text_out = capsys.readouterr().out
+    assert second in text_out
+    assert first in text_out
+
+
+def test_work_plans_unreadable_json_does_not_crash(tmp_path, capsys):
+    _init_git_repo(tmp_path)
+    task_id = _plan_task_id(tmp_path, capsys)
+    assert work_cmd.task_plan(target=tmp_path, task_id=task_id[:12], write=True) == 0
+    capsys.readouterr()
+    json_path, _ = work_cmd._plan_paths(tmp_path, task_id)
+    json_path.write_text("{not valid json")
+
+    assert work_cmd.plans(target=tmp_path, json_output=True) == 0
+    entries = json.loads(capsys.readouterr().out)
+    assert len(entries) == 1
+    assert entries[0]["status"] == "unreadable"
+
+
 def test_extract_issue_acceptance_from_sections_and_checkboxes():
     body = """
 ## Context
@@ -9496,7 +9749,21 @@ def test_work_tasks_cli(tmp_path, monkeypatch):
             },
         ),
         ("show", {"target": tmp_path, "task_id": "abc123"}),
-        ("plan", {"target": tmp_path, "task_id": "abc123", "json_output": True}),
+        (
+            "plan",
+            {
+                "target": tmp_path,
+                "task_id": "abc123",
+                "json_output": True,
+                "write": False,
+                "title": None,
+                "assumptions": [],
+                "risks": [],
+                "sources": [],
+                "next_command": None,
+                "accept": False,
+            },
+        ),
         ("done", {"target": tmp_path, "task_id": "abc123"}),
     ]
 

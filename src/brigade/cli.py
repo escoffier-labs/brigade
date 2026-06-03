@@ -764,6 +764,10 @@ def _build_parser() -> argparse.ArgumentParser:
     p_work_sweeps.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
     p_work_sweeps.add_argument("--limit", type=int, default=20, help="Maximum sweeps to list.")
     p_work_sweeps.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_work_plans = work_sub.add_parser("plans", help="List task plan artifacts.")
+    p_work_plans.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_work_plans.add_argument("--limit", type=int, default=20, help="Maximum plan artifacts to list.")
+    p_work_plans.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_work_sweep_show = work_sub.add_parser("sweep-show", help="Show one scanner sweep report.")
     p_work_sweep_show.add_argument("sweep_id", help="Sweep id or unique prefix.")
     p_work_sweep_show.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
@@ -1278,6 +1282,13 @@ def _build_parser() -> argparse.ArgumentParser:
     p_work_task_plan.add_argument("task_id", help="Task id or unique prefix.")
     p_work_task_plan.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
     p_work_task_plan.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_work_task_plan.add_argument("--write", action="store_true", help="Write or update the plan artifact (plan.md + JSON receipt).")
+    p_work_task_plan.add_argument("--assumption", dest="assumptions", action="append", default=[], help="Planning assumption. May be repeated.")
+    p_work_task_plan.add_argument("--risk", dest="risks", action="append", default=[], help="Planning risk. May be repeated.")
+    p_work_task_plan.add_argument("--source", dest="sources", action="append", default=[], help="Source context ref, link, or note. May be repeated.")
+    p_work_task_plan.add_argument("--next-command", dest="next_command", default=None, help="Next safe command to record in the plan.")
+    p_work_task_plan.add_argument("--title", default=None, help="Plan title (defaults to the task text).")
+    p_work_task_plan.add_argument("--accept", action="store_true", help="Mark the plan artifact accepted.")
     p_work_task_done = task_sub.add_parser("done", help="Mark one work task done.")
     p_work_task_done.add_argument("task_id", help="Task id or unique prefix.")
     p_work_task_done.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
@@ -3143,6 +3154,8 @@ def main(argv=None) -> int:
             )
         if args.work_command == "sweeps":
             return work_cmd.sweeps(target=args.target, limit=args.limit, json_output=args.json)
+        if args.work_command == "plans":
+            return work_cmd.plans(target=args.target, limit=args.limit, json_output=args.json)
         if args.work_command == "sweep-show":
             return work_cmd.sweep_show(target=args.target, sweep_id=args.sweep_id, json_output=args.json)
         if args.work_command == "sweep-review":
@@ -3486,7 +3499,18 @@ def main(argv=None) -> int:
             if args.task_command == "show":
                 return work_cmd.task_show(target=args.target, task_id=args.task_id)
             if args.task_command == "plan":
-                return work_cmd.task_plan(target=args.target, task_id=args.task_id, json_output=args.json)
+                return work_cmd.task_plan(
+                    target=args.target,
+                    task_id=args.task_id,
+                    json_output=args.json,
+                    write=args.write,
+                    title=args.title,
+                    assumptions=args.assumptions,
+                    risks=args.risks,
+                    sources=args.sources,
+                    next_command=args.next_command,
+                    accept=args.accept,
+                )
             if args.task_command == "done":
                 return work_cmd.task_done(target=args.target, task_id=args.task_id)
             parser.error(f"unknown task command: {args.task_command}")

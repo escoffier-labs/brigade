@@ -460,6 +460,15 @@ def _tasks_path(target: Path) -> Path:
     return _work_root(target) / "tasks.json"
 
 
+def _plans_dir(target: Path) -> Path:
+    return _work_root(target) / "plans"
+
+
+def _plan_paths(target: Path, task_id: str) -> tuple[Path, Path]:
+    plans = _plans_dir(target)
+    return plans / f"{task_id}.json", plans / f"{task_id}.plan.md"
+
+
 def _imports_path(target: Path) -> Path:
     return _work_root(target) / "imports" / "inbox.jsonl"
 
@@ -6379,10 +6388,225 @@ def task_show(*, target: Path, task_id: str) -> int:
     return 0
 
 
-def task_plan(*, target: Path, task_id: str, json_output: bool = False) -> int:
+def _plan_rel_path(target: Path, path: Path) -> str:
+    try:
+        return str(path.relative_to(target))
+    except ValueError:
+        return str(path)
+
+
+def _append_dedupe(existing: list[str], additions: list[str] | None) -> list[str]:
+    result: list[str] = []
+    seen: set[str] = set()
+    for value in list(existing) + list(additions or []):
+        text = str(value)
+        if text in seen:
+            continue
+        seen.add(text)
+        result.append(text)
+    return result
+
+
+def _read_plan_receipt(target: Path, task_id: str) -> dict[str, Any] | None:
+    json_path, _ = _plan_paths(target, task_id)
+    if not json_path.is_file():
+        return None
+    try:
+        data = json.loads(json_path.read_text())
+    except (json.JSONDecodeError, OSError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    return data
+
+
+def _build_plan_receipt(
+    *,
+    target: Path,
+    task: dict[str, Any],
+    task_id: str,
+    existing: dict[str, Any] | None,
+    title: str | None,
+    assumptions: list[str] | None,
+    risks: list[str] | None,
+    sources: list[str] | None,
+    next_command: str | None,
+    accept: bool,
+) -> dict[str, Any]:
+    now = _now().isoformat()
+    acceptance = _task_acceptance(task)
+    json_path, md_path = _plan_paths(target, task_id)
+    receipt_paths = [
+        _plan_rel_path(target, _tasks_path(target)),
+        _plan_rel_path(target, json_path),
+        _plan_rel_path(target, md_path),
+    ]
+    if existing is None:
+        resolved_title = title if title is not None else str(task.get("text") or "")
+        return {
+            "task_id": task_id,
+            "title": resolved_title,
+            "status": "accepted" if accept else "draft",
+            "created_at": now,
+            "updated_at": now,
+            "source_context": _append_dedupe([], sources),
+            "assumptions": _append_dedupe([], assumptions),
+            "acceptance": acceptance,
+            "risks": _append_dedupe([], risks),
+            "next_command": next_command if next_command is not None else "brigade work run",
+            "receipt_paths": receipt_paths,
+        }
+
+    def _as_list(value: Any) -> list[str]:
+        return [str(item) for item in value] if isinstance(value, list) else []
+
+    created_at = existing.get("created_at") if isinstance(existing.get("created_at"), str) else now
+    prior_title = existing.get("title") if isinstance(existing.get("title"), str) else str(task.get("text") or "")
+    prior_next = existing.get("next_command") if isinstance(existing.get("next_command"), str) else "brigade work run"
+    prior_status = existing.get("status") if existing.get("status") in ("draft", "accepted") else "draft"
+    return {
+        "task_id": task_id,
+        "title": title if title is not None else prior_title,
+        "status": "accepted" if accept else prior_status,
+        "created_at": created_at,
+        "updated_at": now,
+        "source_context": _append_dedupe(_as_list(existing.get("source_context")), sources),
+        "assumptions": _append_dedupe(_as_list(existing.get("assumptions")), assumptions),
+        "acceptance": acceptance,
+        "risks": _append_dedupe(_as_list(existing.get("risks")), risks),
+        "next_command": next_command if next_command is not None else prior_next,
+        "receipt_paths": receipt_paths,
+    }
+
+
+def _render_plan_md(receipt: dict[str, Any]) -> str:
+    def _bullets(items: Any) -> list[str]:
+        values = [str(item) for item in items] if isinstance(items, list) else []
+        if not values:
+            return ["_none recorded_"]
+        return [f"- {item}" for item in values]
+
+    lines: list[str] = []
+    lines.append(f"# Plan: {receipt.get('title', '')}")
+    lines.append("")
+    lines.append(f"- **Task:** {receipt.get('task_id', '')}")
+    lines.append(f"- **Status:** {receipt.get('status', '')}")
+    lines.append(f"- **Updated:** {receipt.get('updated_at', '')}")
+    lines.append("")
+    lines.append("## Source context")
+    lines.extend(_bullets(receipt.get("source_context")))
+    lines.append("")
+    lines.append("## Assumptions")
+    lines.extend(_bullets(receipt.get("assumptions")))
+    lines.append("")
+    lines.append("## Acceptance criteria")
+    lines.extend(_bullets(receipt.get("acceptance")))
+    lines.append("")
+    lines.append("## Risks")
+    lines.extend(_bullets(receipt.get("risks")))
+    lines.append("")
+    lines.append("## Next safe command")
+    lines.append(f"`{receipt.get('next_command', '')}`")
+    lines.append("")
+    lines.append("## Receipts")
+    paths = receipt.get("receipt_paths")
+    if isinstance(paths, list) and paths:
+        lines.extend(f"- {item}" for item in paths)
+    else:
+        lines.append("_none recorded_")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _plan_artifact_summary(target: Path, task_id: str) -> dict[str, Any] | None:
+    receipt = _read_plan_receipt(target, task_id)
+    if receipt is None:
+        return None
+    _, md_path = _plan_paths(target, task_id)
+    return {
+        "status": receipt.get("status"),
+        "path": _plan_rel_path(target, md_path),
+        "updated_at": receipt.get("updated_at"),
+    }
+
+
+def _write_plan_artifact(
+    *,
+    target: Path,
+    task_id: str,
+    title: str | None,
+    assumptions: list[str] | None,
+    risks: list[str] | None,
+    sources: list[str] | None,
+    next_command: str | None,
+    accept: bool,
+    json_output: bool,
+) -> int:
+    target = target.expanduser().resolve()
+    if not target.is_dir():
+        print(f"error: --target is not a directory: {target}", file=sys.stderr)
+        return 2
+    task, _ = _find_task(target, task_id)
+    if task is None:
+        print(f"error: task not found: {task_id}", file=sys.stderr)
+        return 1
+    resolved_id = str(task.get("id") or task_id)
+    existing = _read_plan_receipt(target, resolved_id)
+    receipt = _build_plan_receipt(
+        target=target,
+        task=task,
+        task_id=resolved_id,
+        existing=existing,
+        title=title,
+        assumptions=assumptions,
+        risks=risks,
+        sources=sources,
+        next_command=next_command,
+        accept=accept,
+    )
+    json_path, md_path = _plan_paths(target, resolved_id)
+    _plans_dir(target).mkdir(parents=True, exist_ok=True)
+    json_path.write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n")
+    md_path.write_text(_render_plan_md(receipt))
+    if json_output:
+        print(json.dumps(receipt, indent=2, sort_keys=True))
+        return 0
+    print(f"wrote plan: {_plan_rel_path(target, md_path)}  status: {receipt['status']}")
+    return 0
+
+
+def task_plan(
+    *,
+    target: Path,
+    task_id: str,
+    json_output: bool = False,
+    write: bool = False,
+    title: str | None = None,
+    assumptions: list[str] | None = None,
+    risks: list[str] | None = None,
+    sources: list[str] | None = None,
+    next_command: str | None = None,
+    accept: bool = False,
+) -> int:
+    if write:
+        return _write_plan_artifact(
+            target=target,
+            task_id=task_id,
+            title=title,
+            assumptions=assumptions,
+            risks=risks,
+            sources=sources,
+            next_command=next_command,
+            accept=accept,
+            json_output=json_output,
+        )
     payload, rc = _task_plan_payload(target, task_id)
     if payload is None:
         return rc
+    resolved_target = target.expanduser().resolve()
+    resolved_id = str(payload.get("id") or task_id)
+    artifact = _plan_artifact_summary(resolved_target, resolved_id)
+    payload["plan_artifact"] = artifact
     if json_output:
         print(json.dumps(payload, indent=2, sort_keys=True))
         return 0
@@ -6415,6 +6639,10 @@ def task_plan(*, target: Path, task_id: str, json_output: bool = False) -> int:
     else:
         print("  missing")
     print(f"suggested_command: {payload['suggested_command']}")
+    if artifact is None:
+        print("plan_artifact: none")
+    else:
+        print(f"plan_artifact: {artifact['status']} ({artifact['path']})")
     return 0
 
 
@@ -9690,6 +9918,52 @@ def sweeps(*, target: Path, json_output: bool = False, limit: int = 20) -> int:
         return 0
     for report in reports:
         print(f"- {report.get('sweep_id')} [{report.get('status')}] runs={len(report.get('scanner_run_ids') or [])} {report.get('started_at')}")
+    return 0
+
+
+def plans(*, target: Path, json_output: bool = False, limit: int = 20) -> int:
+    target = target.expanduser().resolve()
+    if not target.is_dir():
+        print(f"error: --target is not a directory: {target}", file=sys.stderr)
+        return 2
+    plans_dir = _plans_dir(target)
+    entries: list[dict[str, Any]] = []
+    if plans_dir.is_dir():
+        for json_path in plans_dir.glob("*.json"):
+            task_id = json_path.stem
+            _, md_path = _plan_paths(target, task_id)
+            try:
+                data = json.loads(json_path.read_text())
+            except (json.JSONDecodeError, OSError):
+                data = None
+            if not isinstance(data, dict):
+                entries.append(
+                    {
+                        "task_id": task_id,
+                        "status": "unreadable",
+                        "updated_at": "",
+                        "path": _plan_rel_path(target, md_path),
+                    }
+                )
+                continue
+            entries.append(
+                {
+                    "task_id": str(data.get("task_id") or task_id),
+                    "status": str(data.get("status") or ""),
+                    "updated_at": str(data.get("updated_at") or ""),
+                    "path": _plan_rel_path(target, md_path),
+                }
+            )
+    entries.sort(key=lambda item: (item.get("updated_at") or "", item.get("task_id") or ""), reverse=True)
+    entries = entries[:limit]
+    if json_output:
+        print(json.dumps(entries, indent=2, sort_keys=True))
+        return 0
+    if not entries:
+        print("no plan artifacts")
+        return 0
+    for entry in entries:
+        print(f"- {entry['task_id']} [{entry['status']}] {entry['updated_at']} {entry['path']}")
     return 0
 
 
