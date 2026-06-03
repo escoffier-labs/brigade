@@ -840,8 +840,10 @@ brigade add pantry   # agentpantry
 
 `pantry` (alias `larder`) is the agent session auth sync station.
 `brigade add pantry` installs agentpantry via `go install github.com/escoffier-labs/agentpantry/cmd/agentpantry@latest`.
-`brigade doctor` and `brigade status` health-check it by shelling out to `agentpantry status --json`.
-Like the memory satellites, agentpantry inspects host-global state, so its checks are advisory and never FAIL a workspace run: an unwired install (exit 2, no config) is a `WARN`, a missing pre-shared key is a `WARN`, otherwise `OK`.
+`brigade doctor` health-checks it by shelling out to `agentpantry doctor --json` with a compatibility fallback to `agentpantry status --json`.
+Like the memory satellites, agentpantry inspects host-global state, so its checks are advisory and never FAIL a workspace run: an unwired install (exit 2, no config) is a `WARN`, and setup problems are surfaced as advisory pantry health.
+Use `brigade pantry status` for a pantry-specific status readout, `brigade pantry setup plan --role source|sink` to preview or write a reviewed setup plan, and `brigade pantry service plan --role source|sink` to preview or write service setup steps.
+These plan commands do not generate or copy PSKs, start services, or mutate browser, GitHub, OpenClaw, or other auth files.
 
 Security commands:
 
@@ -901,6 +903,7 @@ The current managed tools:
 | `memory` | `bootstrap-doctor` | bootstrap-file size and limit audit |
 | `guard` | `content-guard` | policy-driven content scanning |
 | `tokens` | `tokenjuice` | output compaction via host hooks |
+| `pantry` | `agentpantry` | browser session and secret sync for agent hosts |
 
 `brigade doctor` folds installed tools into its report and surfaces each tool's own health.
 A missing optional tool is not a failure.
