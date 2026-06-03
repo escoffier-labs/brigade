@@ -1275,3 +1275,15 @@ def test_doctor_checks_no_backlog_warn_for_fresh_pending(tmp_path):
         c for c in checks if c[1] == "handoff_backlog" and c[0] == handoff_cmd.WARN
     ]
     assert not backlog_warns, "fresh pending handoff should not trip the stale backlog warning"
+
+
+def test_handoff_writer_inboxes_include_opencode():
+    from brigade import handoff_cmd
+    assert ".opencode/memory-handoffs" in handoff_cmd.WRITER_INBOXES
+
+
+def test_handoff_sources_example_lists_opencode():
+    import json
+    from brigade.templates import template_root
+    data = json.loads((template_root() / "handoff" / "handoff-sources.example.json").read_text())
+    assert ".opencode/memory-handoffs" in data["sources"][0]["inboxes"]

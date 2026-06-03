@@ -15,7 +15,9 @@ OK = "ok"
 WARN = "warn"
 FAIL = "fail"
 
-WRITER_INBOXES = (".claude/memory-handoffs", ".codex/memory-handoffs")
+from .selection import WRITER_INBOXES as _WRITER_INBOX_MAP
+
+WRITER_INBOXES = tuple(_WRITER_INBOX_MAP.values())
 IGNORED_HANDOFF_NAMES = {"TEMPLATE.md"}
 DEFAULT_STALE_AFTER_MINUTES = 90
 HANDOFF_DRAFT_STALE_HOURS = 72
