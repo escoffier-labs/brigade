@@ -1291,6 +1291,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p_work_task_plan.add_argument("--accept", action="store_true", help="Mark the plan artifact accepted.")
     p_work_task_plan.add_argument("--meta", action="store_true", help="Write the meta-plan (plan-for-the-plan) artifact.")
     p_work_task_plan.add_argument("--step", dest="step", action="append", default=[], help="Planning step. May be repeated.")
+    p_work_task_plan.add_argument("--from-research", dest="from_research", metavar="RUN_ID", default=None, help="Attach a completed research run report as quarantined (untrusted-web) plan evidence.")
     p_work_task_done = task_sub.add_parser("done", help="Mark one work task done.")
     p_work_task_done.add_argument("task_id", help="Task id or unique prefix.")
     p_work_task_done.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
@@ -3528,6 +3529,7 @@ def main(argv=None) -> int:
                     accept=args.accept,
                     kind="meta" if args.meta else "plan",
                     steps=args.step,
+                    from_research=args.from_research,
                 )
             if args.task_command == "done":
                 return work_cmd.task_done(target=args.target, task_id=args.task_id)

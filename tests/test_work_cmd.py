@@ -1161,6 +1161,7 @@ def test_task_plan_write_creates_both_artifacts_with_full_schema(tmp_path, capsy
         "steps",
         "next_command",
         "receipt_paths",
+        "research_runs",
     }
     assert set(receipt.keys()) == expected_keys
     assert receipt["task_id"] == task_id
@@ -1324,6 +1325,122 @@ def test_task_plan_write_unknown_task_exits_1(tmp_path, capsys):
     assert work_cmd.task_plan(target=tmp_path, task_id="nope", write=True) == 1
     err = capsys.readouterr().err
     assert "task not found" in err
+
+
+def _make_research_run(tmp_path, run_id="r1", question="q"):
+    from brigade.research import registry
+
+    registry.create_run(tmp_path, question=question, run_id=run_id, caps={})
+    registry.finish_run(
+        tmp_path,
+        run_id,
+        status="done",
+        stats={},
+        artifacts={"report_md": "report.md"},
+    )
+    (registry.run_dir(tmp_path, run_id) / "report.md").write_text("# report\n")
+    return run_id
+
+
+def test_task_plan_write_from_research_records_entry_and_quarantined_source(tmp_path, capsys):
+    _init_git_repo(tmp_path)
+    task_id = _plan_task_id(tmp_path, capsys)
+    _make_research_run(tmp_path, run_id="r1", question="what is the loop")
+
+    assert (
+        work_cmd.task_plan(
+            target=tmp_path,
+            task_id=task_id[:12],
+            write=True,
+            from_research="r1",
+        )
+        == 0
+    )
+    capsys.readouterr()
+    json_path, _ = work_cmd._plan_paths(tmp_path, task_id)
+    receipt = json.loads(json_path.read_text())
+    runs = receipt["research_runs"]
+    assert len(runs) == 1
+    assert runs[0]["run_id"] == "r1"
+    assert runs[0]["question"] == "what is the loop"
+    assert runs[0]["report_path"].endswith("report.md")
+    assert any(
+        "research:r1 (untrusted-web)" in line for line in receipt["source_context"]
+    )
+
+
+def test_task_plan_write_from_research_renders_quarantined_section(tmp_path, capsys):
+    _init_git_repo(tmp_path)
+    task_id = _plan_task_id(tmp_path, capsys)
+    _make_research_run(tmp_path, run_id="r1", question="what is the loop")
+
+    assert (
+        work_cmd.task_plan(
+            target=tmp_path,
+            task_id=task_id[:12],
+            write=True,
+            from_research="r1",
+        )
+        == 0
+    )
+    capsys.readouterr()
+    _, md_path = work_cmd._plan_paths(tmp_path, task_id)
+    md = md_path.read_text()
+    assert "## Research evidence (quarantined)" in md
+    assert md.index("## Research evidence (quarantined)") < md.index("## Receipts")
+    assert "untrusted source material" in md
+    assert "r1" in md
+    assert "what is the loop" in md
+
+
+def test_task_plan_write_from_research_unknown_returns_1_and_writes_nothing(tmp_path, capsys):
+    _init_git_repo(tmp_path)
+    task_id = _plan_task_id(tmp_path, capsys)
+
+    assert (
+        work_cmd.task_plan(
+            target=tmp_path,
+            task_id=task_id[:12],
+            write=True,
+            from_research="nope",
+        )
+        == 1
+    )
+    err = capsys.readouterr().err
+    assert "research run not found: nope" in err
+    json_path, _ = work_cmd._plan_paths(tmp_path, task_id)
+    assert not json_path.is_file()
+
+
+def test_task_plan_write_without_research_has_empty_runs_and_no_section(tmp_path, capsys):
+    _init_git_repo(tmp_path)
+    task_id = _plan_task_id(tmp_path, capsys)
+
+    assert work_cmd.task_plan(target=tmp_path, task_id=task_id[:12], write=True) == 0
+    capsys.readouterr()
+    json_path, md_path = work_cmd._plan_paths(tmp_path, task_id)
+    receipt = json.loads(json_path.read_text())
+    assert receipt["research_runs"] == []
+    assert "## Research evidence (quarantined)" not in md_path.read_text()
+
+
+def test_task_plan_write_from_research_dedupes_same_run(tmp_path, capsys):
+    _init_git_repo(tmp_path)
+    task_id = _plan_task_id(tmp_path, capsys)
+    _make_research_run(tmp_path, run_id="r1", question="what is the loop")
+
+    assert (
+        work_cmd.task_plan(target=tmp_path, task_id=task_id[:12], write=True, from_research="r1")
+        == 0
+    )
+    assert (
+        work_cmd.task_plan(target=tmp_path, task_id=task_id[:12], write=True, from_research="r1")
+        == 0
+    )
+    capsys.readouterr()
+    json_path, _ = work_cmd._plan_paths(tmp_path, task_id)
+    receipt = json.loads(json_path.read_text())
+    assert [r["run_id"] for r in receipt["research_runs"]] == ["r1"]
 
 
 def test_work_plans_lists_newest_first_and_empty(tmp_path, capsys):
@@ -9963,6 +10080,7 @@ def test_work_tasks_cli(tmp_path, monkeypatch):
                 "accept": False,
                 "kind": "plan",
                 "steps": [],
+                "from_research": None,
             },
         ),
         ("done", {"target": tmp_path, "task_id": "abc123"}),
