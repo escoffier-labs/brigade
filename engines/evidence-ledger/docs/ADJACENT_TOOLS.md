@@ -38,6 +38,12 @@ The intended split is:
 - AgentTrail owns source-specific local harness parsing and privacy-conscious export.
 - Logspine owns adapter ingest, normalized SQLite storage, FTS, relations, scan manifests, search, show, and evidence bundles.
 
+When installed on `PATH`, AgentTrail can be used through:
+
+```bash
+spine import agenttrail codex ~/.codex/sessions --json
+```
+
 Logspine may keep native adapters as compatibility wrappers, but it should not become the long-term home for every harness parser.
 
 The minimum proof remains:

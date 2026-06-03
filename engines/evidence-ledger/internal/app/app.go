@@ -1,6 +1,7 @@
 package app
 
 import (
+	"bytes"
 	"database/sql"
 	"encoding/csv"
 	"encoding/json"
@@ -8,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -373,11 +375,13 @@ func checkPrivate(path string) bool {
 
 func cmdImport(args []string, out, errw io.Writer) int {
 	if len(args) == 0 {
-		return fatalf(errw, "usage: spine import adapter|codex|openclaw|claude <path>")
+		return fatalf(errw, "usage: spine import adapter|agenttrail|codex|openclaw|claude <path>")
 	}
 	switch args[0] {
 	case "adapter":
 		return cmdImportAdapter(args[1:], out, errw)
+	case "agenttrail":
+		return cmdImportAgentTrail(args[1:], out, errw)
 	case "codex":
 		return cmdImportNative("codex", codex.Generate, args[1:], out, errw)
 	case "openclaw":
@@ -385,7 +389,7 @@ func cmdImport(args []string, out, errw io.Writer) int {
 	case "claude":
 		return cmdImportNative("claude", claude.Generate, args[1:], out, errw)
 	default:
-		return fatalf(errw, "usage: spine import adapter|codex|openclaw|claude <path>")
+		return fatalf(errw, "usage: spine import adapter|agenttrail|codex|openclaw|claude <path>")
 	}
 }
 
@@ -415,6 +419,107 @@ func cmdImportAdapter(args []string, out, errw io.Writer) int {
 		writeJSON(out, result)
 	} else {
 		fmt.Fprintf(out, "imported=%d warnings=%d already_known=%v source=%s\n", result.Inserted, len(result.Warnings), result.AlreadyKnown, result.SourceKind)
+	}
+	return 0
+}
+
+type agentTrailSummary struct {
+	Source   string             `json:"source"`
+	Records  int                `json:"records"`
+	Warnings []string           `json:"warnings"`
+	Files    []sources.FileScan `json:"files"`
+}
+
+func cmdImportAgentTrail(args []string, out, errw io.Writer) int {
+	values, bools, rest, err := splitFlags(args, map[string]bool{"limit": true, "since": true, "redact": true}, map[string]bool{"json": true, "dry-run": true})
+	if err != nil {
+		return fatalf(errw, "import agenttrail: %s", err)
+	}
+	if len(rest) != 2 {
+		return fatalf(errw, "usage: spine import agenttrail <source> <path-or-session-id> [--json] [--dry-run] [--limit N] [--since DATE] [--redact LIST]")
+	}
+	sourceKind, sourcePath := rest[0], rest[1]
+	if bools["dry-run"] {
+		cmdArgs := []string{sourceKind, sourcePath, "--dry-run", "--json"}
+		if values["limit"] != "" {
+			cmdArgs = append(cmdArgs, "--limit", values["limit"])
+		}
+		if values["since"] != "" {
+			cmdArgs = append(cmdArgs, "--since", values["since"])
+		}
+		if values["redact"] != "" {
+			cmdArgs = append(cmdArgs, "--redact", values["redact"])
+		}
+		cmd := exec.Command("agenttrail", cmdArgs...)
+		var stderr bytes.Buffer
+		cmd.Stderr = &stderr
+		b, err := cmd.Output()
+		if err != nil {
+			return fatalf(errw, "import agenttrail: %s", strings.TrimSpace(stderr.String()))
+		}
+		if bools["json"] {
+			_, _ = out.Write(b)
+		} else {
+			var summary agentTrailSummary
+			_ = json.Unmarshal(b, &summary)
+			fmt.Fprintf(out, "source=%s generated=%d warnings=%d\n", sourceKind, summary.Records, len(summary.Warnings))
+		}
+		return 0
+	}
+	db, _, err := openMigrated()
+	if err != nil {
+		return fatalf(errw, "import agenttrail: %s", err)
+	}
+	defer db.Close()
+	summaryFile, err := os.CreateTemp("", "logspine-agenttrail-*.json")
+	if err != nil {
+		return fatalf(errw, "import agenttrail: %s", err)
+	}
+	summaryPath := summaryFile.Name()
+	_ = summaryFile.Close()
+	defer os.Remove(summaryPath)
+	cmdArgs := []string{sourceKind, sourcePath, "--out", "-", "--summary-out", summaryPath}
+	if values["limit"] != "" {
+		cmdArgs = append(cmdArgs, "--limit", values["limit"])
+	}
+	if values["since"] != "" {
+		cmdArgs = append(cmdArgs, "--since", values["since"])
+	}
+	if values["redact"] != "" {
+		cmdArgs = append(cmdArgs, "--redact", values["redact"])
+	}
+	cmd := exec.Command("agenttrail", cmdArgs...)
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return fatalf(errw, "import agenttrail: %s", err)
+	}
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Start(); err != nil {
+		return fatalf(errw, "import agenttrail: %s", err)
+	}
+	result, importErr := ingest.ImportAdapterReader(db, stdout, "agenttrail://"+sourceKind+"/"+sourcePath, sourceKind)
+	waitErr := cmd.Wait()
+	if importErr != nil {
+		return fatalf(errw, "import agenttrail: %s", importErr)
+	}
+	if waitErr != nil {
+		return fatalf(errw, "import agenttrail: %s", strings.TrimSpace(stderr.String()))
+	}
+	var summary agentTrailSummary
+	if b, err := os.ReadFile(summaryPath); err == nil {
+		_ = json.Unmarshal(b, &summary)
+	}
+	result.Warnings = append(summary.Warnings, result.Warnings...)
+	if len(summary.Files) > 0 {
+		if err := ingest.RecordSourceScans(db, sourceKind, result.SourceHash, summary.Files, true); err != nil {
+			return fatalf(errw, "import agenttrail: %s", err)
+		}
+	}
+	if bools["json"] {
+		writeJSON(out, result)
+	} else {
+		fmt.Fprintf(out, "generated=%d imported=%d warnings=%d already_known=%v source=%s\n", summary.Records, result.Inserted, len(result.Warnings), result.AlreadyKnown, result.SourceKind)
 	}
 	return 0
 }

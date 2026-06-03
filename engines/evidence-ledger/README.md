@@ -93,6 +93,17 @@ agenttrail openclaw ~/.openclaw/agents --out openclaw.adapter.jsonl
 spine import adapter openclaw.adapter.jsonl --json
 ```
 
+When `agenttrail` is installed on `PATH`, Logspine can run it directly:
+
+```bash
+spine import agenttrail codex ~/.codex/sessions --json
+spine import agenttrail claude ~/.claude/projects --json
+spine import agenttrail openclaw ~/.openclaw/agents --json
+spine import agenttrail opencode opencode-session.json --json
+```
+
+The wrapper streams AgentTrail output through adapter ingest and records AgentTrail scan manifests from its summary output.
+
 Logspine native adapters remain available for compatibility. Long term, source-specific agent-session parser ownership should live in AgentTrail while Logspine owns archive ingest, SQLite, FTS, relations, scan manifests, and evidence bundles.
 
 ## Scan Manifests

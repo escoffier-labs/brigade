@@ -128,6 +128,28 @@ func TestImportAdapterFromStdin(t *testing.T) {
 	}
 }
 
+func TestImportAgentTrailWrapper(t *testing.T) {
+	withTempHome(t)
+	runOK(t, "init")
+	agenttrailDir := t.TempDir()
+	fixture := repoPath(t, "testdata/adapters/agent-session.fixture.jsonl")
+	script := filepath.Join(agenttrailDir, "agenttrail")
+	body := "#!/bin/sh\nsummary=''\nwhile [ \"$#\" -gt 0 ]; do\n  if [ \"$1\" = '--summary-out' ]; then shift; summary=\"$1\"; fi\n  shift || true\ndone\nif [ -n \"$summary\" ]; then\n  printf '{\"source\":\"codex\",\"records\":2,\"warnings\":[],\"files\":[{\"path\":\"fixture.jsonl\",\"size\":1,\"mtime\":\"2026-06-03T00:00:00Z\",\"content_hash\":\"sha256:test\",\"records_generated\":2,\"warnings\":0}]}' > \"$summary\"\nfi\ncat " + shellQuote(fixture) + "\n"
+	if err := os.WriteFile(script, []byte(body), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	oldPath := os.Getenv("PATH")
+	t.Setenv("PATH", agenttrailDir+string(os.PathListSeparator)+oldPath)
+	out := runJSON(t, "import", "agenttrail", "codex", "fixture", "--json")
+	if out["inserted_items"].(float64) != 2 {
+		t.Fatalf("inserted = %v, want 2: %v", out["inserted_items"], out)
+	}
+	scans := runJSON(t, "scans", "list", "--source", "codex", "--json")
+	if len(scans["scans"].([]any)) != 1 {
+		t.Fatalf("expected scan manifest from agenttrail summary: %v", scans)
+	}
+}
+
 func TestSourceDiscoveryDoesNotPrintTranscriptContent(t *testing.T) {
 	withTempHome(t)
 	secret := "PRIVATE_TRANSCRIPT_SHOULD_NOT_APPEAR"
@@ -398,4 +420,8 @@ func copyFixture(t *testing.T, from, to string) {
 	if err := os.WriteFile(to, data, 0o600); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
 }
