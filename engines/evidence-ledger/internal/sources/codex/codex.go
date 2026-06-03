@@ -80,7 +80,7 @@ func normalize(ev sources.RawEvent) (adapter.Record, string) {
 	if text == "" && payloadType != "" {
 		text = strings.TrimSpace(strings.Join(nonEmpty("Codex", eventType, payloadType, name, callID), " "))
 	}
-	if text == "" && eventType != "session_meta" && eventType != "turn_context" {
+	if text == "" && eventType != "session_meta" && eventType != "turn_context" && eventType != "compacted" {
 		return adapter.Record{}, fmt.Sprintf("%s:%d: no searchable text for event type %q", ev.Path, ev.Ordinal, eventType)
 	}
 	if text == "" {

@@ -23,6 +23,8 @@ import (
 	"github.com/openclaw/logspine/internal/sources/openclaw"
 )
 
+var stdin io.Reader = os.Stdin
+
 func Run(args []string, out, errw io.Writer) int {
 	if len(args) == 0 || args[0] == "--help" || args[0] == "-h" || args[0] == "help" {
 		usage(out)
@@ -400,7 +402,12 @@ func cmdImportAdapter(args []string, out, errw io.Writer) int {
 		return fatalf(errw, "import: %s", err)
 	}
 	defer db.Close()
-	result, err := ingest.ImportAdapterFile(db, rest[0], values["source"])
+	var result ingest.AdapterResult
+	if rest[0] == "-" {
+		result, err = ingest.ImportAdapterReader(db, stdin, "stdin://adapter", values["source"])
+	} else {
+		result, err = ingest.ImportAdapterFile(db, rest[0], values["source"])
+	}
 	if err != nil {
 		return fatalf(errw, "import: %s", err)
 	}

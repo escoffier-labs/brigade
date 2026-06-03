@@ -108,6 +108,26 @@ func TestImportWarningsForInvalidRecords(t *testing.T) {
 	}
 }
 
+func TestImportAdapterFromStdin(t *testing.T) {
+	withTempHome(t)
+	runOK(t, "init")
+	jsonl, err := os.ReadFile(repoPath(t, "testdata/adapters/discrawl.fixture.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldStdin := stdin
+	stdin = bytes.NewReader(jsonl)
+	t.Cleanup(func() { stdin = oldStdin })
+	out := runJSON(t, "import", "adapter", "-", "--source", "discrawl", "--json")
+	if out["inserted_items"].(float64) != 2 {
+		t.Fatalf("inserted = %v, want 2: %v", out["inserted_items"], out)
+	}
+	status := runJSON(t, "status", "--json")
+	if status["items"].(float64) != 2 {
+		t.Fatalf("items after stdin import = %v, want 2", status["items"])
+	}
+}
+
 func TestSourceDiscoveryDoesNotPrintTranscriptContent(t *testing.T) {
 	withTempHome(t)
 	secret := "PRIVATE_TRANSCRIPT_SHOULD_NOT_APPEAR"

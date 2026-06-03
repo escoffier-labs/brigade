@@ -69,3 +69,17 @@ Scanner rules:
 - Record source-file scan manifests with path, size, mtime, content hash, generated hash, record count, and warnings.
 
 Claude support targets `~/.claude/projects/**/*.jsonl` style project logs. The MVP scanner imports ordinary project session JSONL and does not special-case subagents yet; subagent lines are treated as normal agent-session evidence unless a future fixture shows a safer split.
+
+## AgentTrail External Scanner
+
+AgentTrail is a separate scanner/exporter for local agent session logs. It emits this same `logspine.adapter.v1` JSONL contract and can be piped directly into adapter ingest:
+
+```bash
+agenttrail codex ~/.codex/sessions --out - | spine import adapter -
+agenttrail claude ~/.claude/projects --out - | spine import adapter -
+agenttrail openclaw ~/.openclaw/agents --out - | spine import adapter -
+```
+
+Use AgentTrail when source-specific harness parsing should live outside Logspine. Keep Logspine focused on ingest, normalized storage, FTS, scan manifests, relation resolution, and evidence output.
+
+AgentTrail `discover`, `doctor`, and `--dry-run --json` modes report roots, counts, records, and warnings without printing transcript content.

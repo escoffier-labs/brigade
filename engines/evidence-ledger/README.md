@@ -80,6 +80,21 @@ spine import codex testdata/harnesses/malformed-unknown.fixture.jsonl --dry-run 
 
 The scanners accept a file or directory, walk JSONL files recursively, skip obvious backups and sidecars, preserve raw refs, and warn rather than crash on malformed or unknown events.
 
+## External AgentTrail Scanner
+
+AgentTrail is the separate local agent-session scanner/exporter. It keeps source-specific harness parsing outside Logspine and emits the same `logspine.adapter.v1` JSONL contract:
+
+```bash
+agenttrail discover --json
+agenttrail doctor --json
+agenttrail codex ~/.codex/sessions --dry-run --json
+agenttrail claude ~/.claude/projects --out - | spine import adapter -
+agenttrail openclaw ~/.openclaw/agents --out openclaw.adapter.jsonl
+spine import adapter openclaw.adapter.jsonl --json
+```
+
+Logspine native adapters remain available for compatibility. Long term, source-specific agent-session parser ownership should live in AgentTrail while Logspine owns archive ingest, SQLite, FTS, relations, scan manifests, and evidence bundles.
+
 ## Scan Manifests
 
 Native imports record which local source files Logspine has seen without exposing transcript text:
