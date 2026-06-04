@@ -228,24 +228,38 @@ func TestImportSourceHarvestWrapper(t *testing.T) {
 	sourceharvestDir := t.TempDir()
 	script := filepath.Join(sourceharvestDir, "sourceharvest")
 	body := `#!/bin/sh
-printf '{"schema":"logspine.adapter.v1","source":{"kind":"notes","name":"SourceHarvest Fixture"},"collection":{"external_id":"notes:local","kind":"notes","name":"notes"},"item":{"external_id":"notes:item:fixture","kind":"note","created_at":"2026-06-03T00:00:00Z","text":"SourceHarvest wrapper fixture evidence","tags":["notes"]},"actor":{"external_id":"notes:system:fixture","type":"system","name":"fixture"},"artifacts":[],"links":[],"relations":[],"raw":{"format":"json","hash":"sha256:test","path":"notes.fixture","ordinal":1}}\n'
+mode="$1"
+path="$2"
+text="SourceHarvest $mode wrapper fixture evidence"
+printf '{"schema":"logspine.adapter.v1","source":{"kind":"notes","name":"SourceHarvest Fixture"},"collection":{"external_id":"notes:%s","kind":"notes","name":"notes"},"item":{"external_id":"notes:item:%s","kind":"note","created_at":"2026-06-03T00:00:00Z","text":"%s","tags":["notes","%s"]},"actor":{"external_id":"notes:system:%s","type":"system","name":"fixture"},"artifacts":[],"links":[],"relations":[],"raw":{"format":"json","hash":"sha256:test","path":"notes-%s.fixture","ordinal":1}}\n' "$mode" "$mode" "$text" "$mode" "$mode" "$mode"
+printf '{"source":"notes","path":"%s","records":1,"files":1,"warnings":[],"generated_at":"2026-06-03T00:00:00Z"}\n' "$path" >&2
 `
 	if err := os.WriteFile(script, []byte(body), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	oldPath := os.Getenv("PATH")
 	t.Setenv("PATH", sourceharvestDir+string(os.PathListSeparator)+oldPath)
-	dry := runJSON(t, "import", "sourceharvest", "markdown", "fixture", "--source", "notes", "--collection", "notes:local", "--dry-run", "--json")
+	fixturePath := filepath.Join(t.TempDir(), "sourceharvest.txt")
+	if err := os.WriteFile(fixturePath, []byte("sourceharvest fixture"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dry := runJSON(t, "import", "sourceharvest", "markdown", fixturePath, "--source", "notes", "--collection", "notes:local", "--dry-run", "--json")
 	if dry["generated_records"].(float64) != 1 {
 		t.Fatalf("dry-run generated = %v, want 1: %v", dry["generated_records"], dry)
 	}
-	out := runJSON(t, "import", "sourceharvest", "markdown", "fixture", "--source", "notes", "--collection", "notes:local", "--json")
-	if out["inserted_items"].(float64) != 1 {
-		t.Fatalf("inserted = %v, want 1: %v", out["inserted_items"], out)
+	for _, mode := range []string{"markdown", "html", "gitlog", "json"} {
+		out := runJSON(t, "import", "sourceharvest", mode, fixturePath, "--source", "notes", "--collection", "notes:"+mode, "--json")
+		if out["inserted_items"].(float64) != 1 {
+			t.Fatalf("%s inserted = %v, want 1: %v", mode, out["inserted_items"], out)
+		}
 	}
-	search := runJSON(t, "search", "SourceHarvest wrapper", "--json")
-	if len(search["results"].([]any)) != 1 {
+	search := runJSON(t, "search", "wrapper fixture", "--source", "notes", "--json")
+	if len(search["results"].([]any)) != 4 {
 		t.Fatalf("sourceharvest wrapper search failed: %v", search)
+	}
+	scans := runJSON(t, "scans", "list", "--source", "notes", "--json")
+	if len(scans["scans"].([]any)) != 1 {
+		t.Fatalf("expected sourceharvest scan manifest: %v", scans)
 	}
 }
 
@@ -558,6 +572,73 @@ func TestArchiveOperations(t *testing.T) {
 	if compact["ok"] != true || compact["after_size_bytes"].(float64) == 0 {
 		t.Fatalf("bad compact result: %v", compact)
 	}
+
+	doctor := runJSON(t, "doctor", "--archive", "--json")
+	if doctor["ok"] != true {
+		t.Fatalf("doctor --archive not ok: %v", doctor)
+	}
+
+	explained := runJSON(t, "explain", "adapter contract", "--source", "codex", "--json")
+	if explained["untrusted_context"] != true || explained["result_count"].(float64) == 0 {
+		t.Fatalf("bad explain result: %v", explained)
+	}
+
+	evidence := runJSON(t, "evidence", "adapter contract", "--source", "codex", "--json")
+	if evidence["id"] == "" || !strings.HasPrefix(evidence["resource_uri"].(string), "logspine://evidence/") {
+		t.Fatalf("evidence missing stable reference: %v", evidence)
+	}
+	shown := runJSON(t, "evidence", "show", evidence["id"].(string), "--json")
+	if shown["id"] != evidence["id"] {
+		t.Fatalf("evidence show mismatch: %v vs %v", shown, evidence)
+	}
+	listed := runJSON(t, "evidence", "list", "--json")
+	if len(listed["bundles"].([]any)) == 0 {
+		t.Fatalf("evidence list empty: %v", listed)
+	}
+
+	params := json.RawMessage(`{"name":"show_evidence_bundle","arguments":{"id":"` + evidence["id"].(string) + `"}}`)
+	resp := handleMCPRequest(mcpRequest{JSONRPC: "2.0", ID: float64(7), Method: "tools/call", Params: params})
+	if resp.Error != nil {
+		t.Fatalf("mcp show_evidence_bundle error: %#v", resp.Error)
+	}
+
+	db, _, err = openMigrated()
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.Exec(`update imports set completed_at = '2001-01-01T00:00:00Z'`)
+	if err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	_, err = db.Exec(`insert or ignore into import_warnings(import_id, ordinal, warning) select id, 99, 'old warning' from imports limit 1`)
+	if err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	pruneDry := runJSON(t, "prune", "imports", "--before", "2002-01-01", "--dry-run", "--json")
+	if pruneDry["matched_imports"].(float64) == 0 || pruneDry["dry_run"] != true {
+		t.Fatalf("bad prune imports dry-run: %v", pruneDry)
+	}
+	pruneImports := runJSON(t, "prune", "imports", "--before", "2002-01-01", "--json")
+	if pruneImports["deleted_imports"].(float64) == 0 {
+		t.Fatalf("bad prune imports: %v", pruneImports)
+	}
+
+	dir := t.TempDir()
+	scanFile := filepath.Join(dir, "gone.jsonl")
+	copyFixture(t, repoPath(t, "testdata/harnesses/codex-session.fixture.jsonl"), scanFile)
+	runOK(t, "import", "codex", scanFile, "--json")
+	if err := os.Remove(scanFile); err != nil {
+		t.Fatal(err)
+	}
+	pruneScans := runJSON(t, "prune", "scans", "--missing", "--json")
+	if pruneScans["deleted_scans"].(float64) == 0 {
+		t.Fatalf("bad prune scans: %v", pruneScans)
+	}
 }
 
 func TestImportDiscoveredAndWatchOnce(t *testing.T) {
@@ -638,6 +719,9 @@ func TestHTTPAPIAndMCPTools(t *testing.T) {
 	if evidence["untrusted_context"] != true || len(evidence["grouped_by_source"].(map[string]any)) == 0 {
 		t.Fatalf("bad evidence body: %v", evidence)
 	}
+	if evidence["id"] == "" || evidence["resource_uri"] == "" {
+		t.Fatalf("http evidence missing stable reference: %v", evidence)
+	}
 	firstEvidence := evidence["results"].([]any)[0].(map[string]any)
 	if firstEvidence["score"] == "" {
 		t.Fatalf("evidence missing score: %v", firstEvidence)
@@ -652,6 +736,9 @@ func TestHTTPAPIAndMCPTools(t *testing.T) {
 	content := result["content"].([]map[string]any)
 	if !strings.Contains(content[0]["text"].(string), `"untrusted_context":true`) {
 		t.Fatalf("mcp content missing evidence bundle: %v", content)
+	}
+	if !strings.Contains(content[0]["text"].(string), `"resource_uri":"logspine://evidence/`) {
+		t.Fatalf("mcp content missing evidence resource uri: %v", content)
 	}
 }
 

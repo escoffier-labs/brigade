@@ -173,6 +173,10 @@ func handleEvidence(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	if err := saveEvidenceBundle(bundle); err != nil {
+		httpError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	httpJSON(w, bundle)
 }
 

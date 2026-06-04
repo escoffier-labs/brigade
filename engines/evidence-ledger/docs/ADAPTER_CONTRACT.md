@@ -119,3 +119,5 @@ spine import sourceharvest html ./site-export --source docs --collection docs:ht
 spine import sourceharvest gitlog . --source gitlog --collection repo:logspine --json
 spine import sourceharvest json export.json --source export --collection export:records --records-path records --json
 ```
+
+The wrapper requests SourceHarvest's summary JSON internally, streams adapter JSONL through normal ingest, and records a lightweight scan manifest when the summary path can be statted locally. The manifest contains path, size, mtime, content hash for regular files or summary hash for directories, generated adapter hash, record count, and warning count. It does not contain harvested text.

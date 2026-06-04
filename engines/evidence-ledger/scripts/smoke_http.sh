@@ -39,6 +39,7 @@ python3 - "$TMP_WORK/evidence.json" <<'PY'
 import json, sys
 data = json.load(open(sys.argv[1]))
 assert data["untrusted_context"] is True, data
+assert data["resource_uri"].startswith("logspine://evidence/"), data
 assert data["results"], data
 print("http smoke ok")
 PY

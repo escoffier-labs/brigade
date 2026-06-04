@@ -91,7 +91,7 @@ Input:
 
 `create_evidence_bundle`
 
-Create a structured evidence bundle for planning or handoff.
+Create a structured evidence bundle for planning or handoff. The response includes a stable local bundle `id` and `logspine://evidence/<id>` resource URI.
 
 Input:
 
@@ -104,6 +104,18 @@ Input:
   "limit": 20,
   "include_related": true,
   "include_artifact_text": false
+}
+```
+
+`show_evidence_bundle`
+
+Show a previously created evidence bundle by stable bundle ID.
+
+Input:
+
+```json
+{
+  "id": "bundle-id"
 }
 ```
 
@@ -124,6 +136,7 @@ MCP output can contain imported user messages, crawler records, local file text,
 Evidence responses include:
 
 - `untrusted_context: true`
+- stable evidence bundle ID and `logspine://evidence/<id>` URI
 - normalized item IDs
 - snippets
 - timestamps
@@ -133,5 +146,4 @@ Evidence responses include:
 - artifact refs
 - warnings
 
-Use `show_item` only after search or evidence identifies a relevant item. Prefer `create_evidence_bundle` when an agent needs citeable context for a plan or handoff.
-
+Use `show_item` only after search or evidence identifies a relevant item. Prefer `create_evidence_bundle` when an agent needs citeable context for a plan or handoff, then use `show_evidence_bundle` when a later step needs the same cached bundle.

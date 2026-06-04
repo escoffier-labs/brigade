@@ -83,6 +83,9 @@ spine sources discover --json
 spine stats --json
 spine relations backfill --json
 spine compact --json
+spine doctor --archive --json
+spine prune imports --before 2026-01-01 --dry-run --json
+spine prune scans --missing --dry-run --json
 ```
 
 `sources discover` reports candidate roots, counts, and status only. It does not print transcript content.
@@ -95,9 +98,11 @@ spine show <item-id> --json
 spine evidence "auth timeout" --project ops-deck --json
 spine evidence "auth timeout" --include-related --json
 spine evidence "auth timeout" --markdown
+spine evidence show <bundle-id> --json
+spine explain "auth timeout" --project ops-deck --json
 ```
 
-Evidence bundles include provenance, raw refs, source and collection context, actors, snippets, artifacts, warnings, and `untrusted_context: true`.
+Evidence bundles include a stable bundle ID, `logspine://evidence/<id>` URI, provenance, raw refs, source and collection context, actors, snippets, artifacts, warnings, and `untrusted_context: true`.
 
 ## Agent Access
 

@@ -31,7 +31,7 @@ Install from a release:
 curl -fsSL https://raw.githubusercontent.com/solomonneas/logspine/HEAD/install.sh | sh
 ```
 
-For a first archive and agent integration path, see [docs/QUICKSTART.md](docs/QUICKSTART.md). For MCP client configuration, see [docs/MCP.md](docs/MCP.md). For roadmap and cookbook material, see [docs/ROADMAP.md](docs/ROADMAP.md), [docs/EXAMPLES.md](docs/EXAMPLES.md), [docs/QUERY_COOKBOOK.md](docs/QUERY_COOKBOOK.md), [docs/LIVE_DRY_RUN_CHECKLIST.md](docs/LIVE_DRY_RUN_CHECKLIST.md), and [docs/INSTALL_SMOKE.md](docs/INSTALL_SMOKE.md).
+For a first archive and agent integration path, see [docs/QUICKSTART.md](docs/QUICKSTART.md). For MCP client configuration, see [docs/MCP.md](docs/MCP.md). For roadmap and cookbook material, see [docs/ROADMAP.md](docs/ROADMAP.md), [docs/EXAMPLES.md](docs/EXAMPLES.md), [docs/QUERY_COOKBOOK.md](docs/QUERY_COOKBOOK.md), [docs/AGENTTRAIL_PARITY.md](docs/AGENTTRAIL_PARITY.md), [docs/LIVE_DRY_RUN_CHECKLIST.md](docs/LIVE_DRY_RUN_CHECKLIST.md), and [docs/INSTALL_SMOKE.md](docs/INSTALL_SMOKE.md).
 
 ## Runtime Paths
 
@@ -60,14 +60,18 @@ spine scans list --json
 spine sources discover --json
 spine search "adapter contract" --json
 spine evidence "adapter contract" --json
+spine evidence show <bundle-id> --json
+spine explain "adapter contract" --json
 spine show <returned-item-id> --json
 spine export markdown --out /tmp/logspine-md
 spine relations backfill --json
 spine stats --json
 spine compact --json
+spine prune imports --before 2026-01-01 --dry-run --json
 spine sql "select count(*) as items from items" --json
 spine doctor --json
 spine doctor --mcp --json
+spine doctor --archive --json
 ```
 
 Re-running the same imports is idempotent and does not increase item counts.
@@ -171,9 +175,14 @@ Archive maintenance commands are local-only:
 spine stats --json
 spine relations backfill --json
 spine compact --json
+spine prune imports --before 2026-01-01 --dry-run --json
+spine prune scans --missing --dry-run --json
+spine doctor --archive --json
 ```
 
-`stats` summarizes archive contents by source, item kind, actor type, collection kind, and recent imports. `relations backfill` resolves stored `target_external_id` values after later imports add the target item. `compact` checkpoints, analyzes, vacuums, and optimizes the SQLite archive.
+`stats` summarizes archive contents by source, item kind, actor type, collection kind, and recent imports. `relations backfill` resolves stored `target_external_id` values after later imports add the target item. `compact` checkpoints, analyzes, vacuums, and optimizes the SQLite archive. `prune imports` removes old import metadata and warning rows only. `prune scans --missing` removes scan manifest rows for files no longer present. Neither prune command deletes normalized evidence items.
+
+`doctor --archive` checks SQLite quick-check status, foreign keys, orphan rows, unresolved relations, FTS coverage, and missing scan paths. It reports counts and status only, not transcript content.
 
 ## Source Discovery
 
@@ -196,7 +205,7 @@ curl "http://127.0.0.1:8765/items/<item-id>"
 curl -X POST http://127.0.0.1:8765/evidence -d '{"query":"auth timeout","limit":10}'
 ```
 
-The stdio MCP server exposes `search_evidence`, `show_item`, `create_evidence_bundle`, and `list_sources`:
+The stdio MCP server exposes `search_evidence`, `show_item`, `create_evidence_bundle`, `show_evidence_bundle`, and `list_sources`:
 
 ```bash
 spine mcp
@@ -221,9 +230,14 @@ spine evidence "Claude native import" --project logspine --json
 spine evidence "adapter contract" --include-related --json
 spine evidence "adapter contract" --include-artifact-text --json
 spine evidence "adapter contract" --markdown
+spine evidence show <bundle-id> --json
+spine evidence list --json
+spine explain "adapter contract" --source codex --json
 ```
 
-Evidence output includes the query, filters, generated timestamp, result item IDs, snippets, FTS scores, source and collection context, actor context, raw refs, artifact refs, source grouping, optional related items, optional artifact text, and warnings. Evidence results dedupe repeated content hashes.
+Evidence output includes a stable bundle `id`, a `logspine://evidence/<id>` resource URI, the query, filters, generated timestamp, result item IDs, snippets, FTS scores, source and collection context, actor context, raw refs, artifact refs, source grouping, optional related items, optional artifact text, and warnings. Evidence results dedupe repeated content hashes. Generated bundles are cached under Logspine's private cache directory and can be shown later with `spine evidence show`.
+
+`explain` uses the same FTS path as `search` and reports the quoted FTS query, filters, result count, source and item-kind counts, and top result IDs/snippets.
 
 ## Relations
 

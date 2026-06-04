@@ -24,8 +24,8 @@ Each source system is best at its native domain:
 - `discrawl`: Discord messages
 - `gitcrawl`: GitHub issues and pull requests
 - `notcrawl`: Notion pages
-- `aicrawl`: chat exports
-- agent session scanners: Codex, Claude, OpenClaw, and related logs
+- `agenttrail`: Codex, Claude, OpenClaw, OpenCode, Hermes, and related local session logs
+- `sourceharvest`: local files, Markdown, HTML, JSON, JSONL, and git history
 
 ## Boundary
 

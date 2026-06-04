@@ -27,8 +27,18 @@ fi
 "$SPINE" relations backfill --json >"$TMP_WORK/relations.json"
 "$SPINE" stats --json >"$TMP_WORK/stats.json"
 "$SPINE" compact --json >"$TMP_WORK/compact.json"
+"$SPINE" doctor --archive --json >"$TMP_WORK/doctor-archive.json"
+"$SPINE" prune imports --before 2000-01-01 --dry-run --json >"$TMP_WORK/prune-imports.json"
+"$SPINE" prune scans --missing --dry-run --json >"$TMP_WORK/prune-scans.json"
 "$SPINE" search "Hermes snapshots" --source hermes --json >"$TMP_WORK/search-hermes.json"
 "$SPINE" evidence "Hermes snapshots" --source hermes --json >"$TMP_WORK/evidence-hermes.json"
+"$SPINE" explain "Hermes snapshots" --source hermes --json >"$TMP_WORK/explain-hermes.json"
+bundle_id="$(python3 - "$TMP_WORK/evidence-hermes.json" <<'PY'
+import json, sys
+print(json.load(open(sys.argv[1]))["id"])
+PY
+)"
+"$SPINE" evidence show "$bundle_id" --json >"$TMP_WORK/evidence-show.json"
 
 python3 - "$TMP_WORK" <<'PY'
 import json
@@ -53,13 +63,26 @@ compact = load("compact.json")
 assert compact["ok"] is True, compact
 assert compact["after_size_bytes"] > 0, compact
 
+doctor_archive = load("doctor-archive.json")
+assert doctor_archive["ok"] is True, doctor_archive
+
+assert load("prune-imports.json")["dry_run"] is True
+assert load("prune-scans.json")["dry_run"] is True
+
 search = load("search-hermes.json")
 assert len(search["results"]) >= 1, search
 
 evidence = load("evidence-hermes.json")
 assert evidence["untrusted_context"] is True, evidence
+assert evidence["resource_uri"].startswith("logspine://evidence/"), evidence
 assert len(evidence["results"]) >= 1, evidence
 assert isinstance(evidence["results"][0]["artifacts"], list), evidence
+
+evidence_show = load("evidence-show.json")
+assert evidence_show["id"] == evidence["id"], evidence_show
+
+explain = load("explain-hermes.json")
+assert explain["result_count"] >= 1, explain
 
 print("archive smoke ok")
 PY

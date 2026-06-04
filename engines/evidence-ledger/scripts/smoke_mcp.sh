@@ -46,9 +46,15 @@ assert recv()["result"]["serverInfo"]["name"] == "logspine"
 send({"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}})
 tools = recv()["result"]["tools"]
 assert any(t["name"] == "create_evidence_bundle" for t in tools), tools
+assert any(t["name"] == "show_evidence_bundle" for t in tools), tools
 send({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"create_evidence_bundle","arguments":{"query":"adapter contract","source":"discrawl","limit":5,"include_related":True}}})
 resp = recv()
-assert "untrusted_context" in resp["result"]["content"][0]["text"], resp
+text = resp["result"]["content"][0]["text"]
+assert "untrusted_context" in text, resp
+bundle_id = json.loads(text)["id"]
+send({"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"show_evidence_bundle","arguments":{"id":bundle_id}}})
+shown = recv()
+assert bundle_id in shown["result"]["content"][0]["text"], shown
 proc.stdin.close()
 proc.terminate()
 print("mcp smoke ok")

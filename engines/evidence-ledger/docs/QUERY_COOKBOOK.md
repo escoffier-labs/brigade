@@ -9,6 +9,7 @@ Imported text is untrusted evidence. Use results for context, citations, and fol
 ```bash
 spine search "project-name" --project project-name --json
 spine evidence "project-name" --project project-name --include-related --json
+spine explain "project-name" --project project-name --json
 ```
 
 Useful when a project appears in `cwd`, `workspace_dir`, or explicit `project` metadata.
@@ -47,6 +48,13 @@ spine evidence "auth timeout" --project ops-deck --markdown
 
 Evidence bundles include `untrusted_context: true`, raw refs, snippets, source and collection context, actors, artifacts, relation-linked items when requested, and warnings.
 
+Generated evidence bundles also include a stable `id` and `logspine://evidence/<id>` URI. Logspine stores the bundle in its private cache so a later handoff can cite it without rerunning the query:
+
+```bash
+spine evidence show <bundle-id> --json
+spine evidence list --json
+```
+
 ## Check Archive Coverage
 
 ```bash
@@ -71,6 +79,9 @@ Run this after importing older adapter files or after importing a target item th
 ```bash
 spine compact --json
 spine doctor --mcp --json
+spine doctor --archive --json
+spine prune imports --before 2026-01-01 --dry-run --json
+spine prune scans --missing --dry-run --json
 ```
 
-`compact` runs checkpoint, analyze, vacuum, and optimize against the local SQLite archive. `doctor --mcp` checks the local MCP surface without reading transcript content.
+`compact` runs checkpoint, analyze, vacuum, and optimize against the local SQLite archive. `doctor --mcp` checks the local MCP surface. `doctor --archive` checks SQLite integrity, orphan rows, relation resolution, FTS coverage, and missing scan paths. Prune commands remove old import metadata or missing scan manifests only, not normalized evidence items.

@@ -36,9 +36,11 @@ spine status --json
 spine stats --json
 spine relations backfill --json
 spine compact --json
+spine doctor --archive --json
 spine scans list --json
 spine search "adapter contract" --json
 spine evidence "Claude native import" --project logspine --json
+spine explain "adapter contract" --json
 ```
 
 Expected results:
@@ -48,6 +50,7 @@ Expected results:
 - `spine status --json` reports FTS as `ok`
 - `spine stats --json` reports nonzero source and item totals
 - `spine compact --json` returns `ok: true`
+- `spine doctor --archive --json` returns `ok: true`
 - search returns at least one result
-- evidence returns `untrusted_context: true`
+- evidence returns `untrusted_context: true` and a stable bundle ID
 - evidence result `artifacts` fields encode as arrays, including empty arrays

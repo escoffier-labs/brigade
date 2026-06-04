@@ -19,6 +19,8 @@ spine evidence "query" --project logspine --json
 spine evidence "query" --include-related --json
 spine evidence "query" --include-artifact-text --json
 spine evidence "query" --markdown
+spine evidence show <bundle-id> --json
+spine explain "query" --project logspine --json
 ```
 
 Local services can use the same evidence shape through HTTP or MCP:
@@ -28,13 +30,16 @@ spine serve --addr 127.0.0.1:8765
 spine mcp
 ```
 
-HTTP exposes `GET /search?q=...`, `GET /items/<id>`, and `POST /evidence`. MCP exposes `search_evidence`, `show_item`, `create_evidence_bundle`, and `list_sources`. Both surfaces return untrusted evidence only.
+HTTP exposes `GET /search?q=...`, `GET /items/<id>`, and `POST /evidence`. MCP exposes `search_evidence`, `show_item`, `create_evidence_bundle`, `show_evidence_bundle`, and `list_sources`. Both surfaces return untrusted evidence only.
 
 Use `spine doctor --mcp --json` to validate the MCP protocol surface without printing transcript content. See [MCP.md](MCP.md) for client configuration.
+
+Use `spine doctor --archive --json` before larger handoffs to validate SQLite integrity, relation resolution, FTS coverage, and scan manifest health without printing transcript content.
 
 Evidence output includes:
 
 - query used
+- stable evidence bundle ID and `logspine://evidence/<id>` URI
 - source filters
 - item IDs
 - snippets
@@ -52,6 +57,8 @@ JSON shape:
 
 ```json
 {
+  "id": "bundle-id",
+  "resource_uri": "logspine://evidence/bundle-id",
   "query": "adapter contract",
   "filters": {
     "source": "discrawl",
