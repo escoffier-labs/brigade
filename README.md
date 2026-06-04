@@ -237,6 +237,11 @@ Hermes now has a first-class Brigade handoff inbox:
 ![Hermes is a local handoff writer inbox](docs/assets/hermes-handoff-flow.svg)
 
 ```bash
+brigade init --target . --depth workspace --harnesses hermes
+brigade handoff sources init --target . --force
+```
+
+```bash
 brigade handoff draft --target . --inbox hermes \
   --title "Hermes note" \
   --summary "Hermes can write a local Brigade handoff." \
@@ -249,6 +254,7 @@ Check the local wiring with:
 
 ```bash
 brigade operator verify-harness --harness hermes --target .
+brigade handoff list --target .
 ```
 
 See [Hermes handoffs](docs/hermes-handoffs.md) for the current boundaries.

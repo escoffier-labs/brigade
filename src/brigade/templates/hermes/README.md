@@ -1,6 +1,6 @@
-# Hermes Adapter (Experimental)
+# Hermes Adapter
 
-`brigade` supports Hermes through the same harness contract as OpenClaw. This adapter is **experimental** until it has been validated against a real Hermes install.
+`brigade` supports Hermes as a local Memory Handoff writer. Runtime validation against live Hermes installs is still experimental, but the repo-local handoff contract is stable and tested by Brigade.
 
 ## What this gives you
 
@@ -9,9 +9,30 @@
 - `model-lanes.harness.json` - suggested model alias names
 - `.hermes/memory-handoffs/TEMPLATE.md` - the local handoff writer template
 
+## Smoke test
+
+```bash
+brigade handoff sources init --target . --force
+brigade handoff draft --target . --inbox hermes \
+  --title "Hermes smoke handoff" \
+  --summary "Hermes can write a local Brigade Memory Handoff." \
+  --content "### Hermes smoke handoff
+
+Hermes uses the shared Brigade handoff format."
+brigade operator verify-harness --harness hermes --target .
+brigade handoff list --target .
+```
+
+When a Hermes draft has been reviewed and ingested by the memory owner, record that local outcome with:
+
+```bash
+brigade handoff receipt record --target . --owner hermes --run-id hermes-manual-001 <draft-id>
+brigade handoff archive --target . <draft-id> --reason "reviewed"
+```
+
 ## What it does not do yet
 
-- Validate against the live Hermes config schema
+- Validate against every live Hermes config schema
 - Generate Hermes-specific plugin entries
 - Ingest handoffs into canonical memory automatically
 

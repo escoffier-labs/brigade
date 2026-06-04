@@ -602,12 +602,15 @@ def _format_schedule(schedule) -> str:
 
 
 def _check_hermes(target: Path) -> List[CheckResult]:
+    from . import dogfood_cmd
+
     results: List[CheckResult] = []
     fragments_dir = target / ".brigade" / "hermes"
     expected = [
         "workspace.harness.json",
         "memory-handoff.harness.json",
         "model-lanes.harness.json",
+        "README.md",
     ]
     for name in expected:
         path = fragments_dir / name
@@ -615,10 +618,64 @@ def _check_hermes(target: Path) -> List[CheckResult]:
             results.append((OK, f"hermes: {name}", str(path)))
         else:
             results.append((WARN, f"hermes: {name}", f"missing at {path}; run `brigade hermes-fragments`"))
+    inbox_rel = WRITER_INBOXES["hermes"]
+    processed_rel = f"{inbox_rel}/processed"
+    workspace_payload, workspace_error = _read_json_object(fragments_dir / "workspace.harness.json")
+    if workspace_payload is not None:
+        workspace = workspace_payload.get("workspace", {})
+        if not isinstance(workspace, dict):
+            workspace = {}
+        handoff_inbox = workspace.get("handoff_inbox")
+        if handoff_inbox == inbox_rel:
+            results.append((OK, "hermes: workspace handoff inbox", inbox_rel))
+        else:
+            results.append((FAIL, "hermes: workspace handoff inbox", f"expected {inbox_rel}, found {handoff_inbox!r}"))
+    elif workspace_error:
+        results.append((FAIL, "hermes: workspace.harness.json", workspace_error))
+
+    handoff_payload, handoff_error = _read_json_object(fragments_dir / "memory-handoff.harness.json")
+    if handoff_payload is not None:
+        handoff = handoff_payload.get("memory_handoff", {})
+        if not isinstance(handoff, dict):
+            handoff = {}
+        configured_inbox = handoff.get("inbox_dir")
+        configured_processed = handoff.get("processed_dir")
+        if configured_inbox == inbox_rel:
+            results.append((OK, "hermes: memory handoff inbox", inbox_rel))
+        else:
+            results.append((FAIL, "hermes: memory handoff inbox", f"expected {inbox_rel}, found {configured_inbox!r}"))
+        if configured_processed == processed_rel:
+            results.append((OK, "hermes: processed handoff inbox", processed_rel))
+        else:
+            results.append((FAIL, "hermes: processed handoff inbox", f"expected {processed_rel}, found {configured_processed!r}"))
+    elif handoff_error:
+        results.append((FAIL, "hermes: memory-handoff.harness.json", handoff_error))
+
+    inbox_path = target / inbox_rel
+    gitignore_probe = inbox_path / ".brigade-ignore-probe"
+    gitignored = dogfood_cmd._check_git_ignored(target, gitignore_probe)
+    if gitignored == "no":
+        results.append((FAIL, "hermes: handoff inbox ignored", f"{inbox_rel} is not ignored by git"))
+    elif gitignored in {"yes", "unknown"}:
+        results.append((OK, "hermes: handoff inbox ignored", f"gitignore status: {gitignored}"))
+    else:
+        results.append((WARN, "hermes: handoff inbox ignored", f"gitignore status: {gitignored}"))
     results.append(
-        (MANUAL, "hermes: install validation", "Hermes adapter is experimental; validate against your install")
+        (MANUAL, "hermes: runtime validation", "Hermes adapter runtime validation is experimental; validate against your live Hermes install")
     )
     return results
+
+
+def _read_json_object(path: Path) -> tuple[dict | None, str | None]:
+    if not path.is_file():
+        return None, None
+    try:
+        payload = json.loads(path.read_text())
+    except json.JSONDecodeError as exc:
+        return None, f"invalid JSON: {exc}"
+    if not isinstance(payload, dict):
+        return None, "expected JSON object"
+    return payload, None
 
 
 def _report(checks: List[CheckResult]) -> int:

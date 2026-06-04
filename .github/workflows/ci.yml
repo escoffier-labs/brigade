@@ -76,6 +76,8 @@ jobs:
             flags: "--depth workspace --harnesses claude,openclaw"
           - name: "workspace+codex+openclaw"
             flags: "--depth workspace --harnesses codex,openclaw"
+          - name: "workspace+hermes"
+            flags: "--depth workspace --harnesses hermes"
           - name: "kitchen-sink"
             flags: "--depth workspace --harnesses claude,codex,openclaw,hermes"
           - name: "workspace+none"
@@ -98,3 +100,22 @@ jobs:
           git init -q -b main "$target"
           solo-mise init --target "$target" ${{ matrix.combo.flags }}
           solo-mise doctor --target "$target"
+          case "${{ matrix.combo.flags }}" in
+            *hermes*)
+              test -f "$target/.hermes/memory-handoffs/TEMPLATE.md"
+              test -d "$target/.hermes/memory-handoffs/processed"
+              test -f "$target/.brigade/hermes/workspace.harness.json"
+              test -f "$target/.brigade/hermes/memory-handoff.harness.json"
+              grep -q '"handoff_inbox": ".hermes/memory-handoffs"' "$target/.brigade/hermes/workspace.harness.json"
+              grep -q '"inbox_dir": ".hermes/memory-handoffs"' "$target/.brigade/hermes/memory-handoff.harness.json"
+              ! grep -R '.claude/memory-handoffs' "$target/.brigade/hermes"
+              solo-mise handoff sources init --target "$target" --force
+              solo-mise handoff draft --target "$target" --inbox hermes \
+                --title "Hermes CI smoke" \
+                --summary "Hermes can write a local Brigade handoff." \
+                --content "### Hermes CI smoke
+
+          The Hermes inbox follows the shared Brigade handoff contract."
+              solo-mise operator verify-harness --harness hermes --target "$target"
+              ;;
+          esac

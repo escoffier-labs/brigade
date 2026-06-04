@@ -25,6 +25,6 @@
       "INSTALL_FOR_AGENTS.md"
     ],
     "memory_owner": "hermes",
-    "handoff_inbox": ".claude/memory-handoffs"
+    "handoff_inbox": ".hermes/memory-handoffs"
   }
 }

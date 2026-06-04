@@ -195,7 +195,13 @@ def test_doctor_hermes_flags_experimental(tmp_target: Path, capsys):
     rc = doctor_mod.run(target=tmp_target, harness="hermes")
     out = capsys.readouterr().out
     assert "hermes:" in out
-    assert "experimental" in out or "Hermes adapter" in out
+    assert "hermes: workspace handoff inbox" in out
+    assert "hermes: memory handoff inbox" in out
+    assert "hermes: processed handoff inbox" in out
+    assert ".hermes/memory-handoffs" in out
+    assert ".claude/memory-handoffs" not in (tmp_target / ".brigade" / "hermes" / "workspace.harness.json").read_text()
+    assert ".claude/memory-handoffs" not in (tmp_target / ".brigade" / "hermes" / "memory-handoff.harness.json").read_text()
+    assert "hermes: runtime validation" in out
     assert rc == 0
 
 

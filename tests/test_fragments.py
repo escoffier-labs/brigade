@@ -42,6 +42,12 @@ def test_hermes_fragments(tmp_path: Path):
         assert (out / name).is_file()
     data = json.loads((out / "workspace.harness.json").read_text())
     assert data.get("_brigade_status") == "experimental"
+    assert data["workspace"]["handoff_inbox"] == ".hermes/memory-handoffs"
+    handoff = json.loads((out / "memory-handoff.harness.json").read_text())
+    assert handoff["memory_handoff"]["inbox_dir"] == ".hermes/memory-handoffs"
+    assert handoff["memory_handoff"]["processed_dir"] == ".hermes/memory-handoffs/processed"
+    rendered = json.dumps({"workspace": data, "handoff": handoff})
+    assert ".claude/memory-handoffs" not in rendered
 
 
 def test_unknown_harness_errors(tmp_path: Path):
@@ -119,7 +125,7 @@ def test_load_harness_openclaw():
 def test_load_harness_hermes():
     m = load_harness_manifest("hermes")
     assert m["id"] == "hermes"
-    assert m.get("role") == "reader"
+    assert m.get("role") == "writer"
 
 
 def test_codex_template_file_exists():

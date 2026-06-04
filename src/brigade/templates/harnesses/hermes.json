@@ -1,7 +1,7 @@
 {
   "id": "hermes",
-  "role": "reader",
-  "description": "Hermes adapter fragments + doctor checks. Experimental.",
+  "role": "writer",
+  "description": "Hermes adapter fragments, handoff inbox, and doctor checks. Experimental runtime validation.",
   "files": [
     {"src": "hermes/workspace.harness.json", "dst": ".brigade/hermes/workspace.harness.json"},
     {"src": "hermes/memory-handoff.harness.json", "dst": ".brigade/hermes/memory-handoff.harness.json"},

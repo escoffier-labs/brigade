@@ -8,8 +8,8 @@
   "_brigade_version": "0.1.0",
   "_brigade_status": "experimental",
   "memory_handoff": {
-    "inbox_dir": ".claude/memory-handoffs",
-    "processed_dir": ".claude/memory-handoffs/processed",
+    "inbox_dir": ".hermes/memory-handoffs",
+    "processed_dir": ".hermes/memory-handoffs/processed",
     "review_inbox": "memory/handoff-inbox",
     "routing_targets": {
       "cards": "memory/cards",

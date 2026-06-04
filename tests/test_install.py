@@ -94,6 +94,29 @@ def test_opencode_install_creates_inbox_and_gitignore(tmp_path):
     assert "!.opencode/memory-handoffs/TEMPLATE.md" in block
 
 
+def test_hermes_install_creates_adapter_inbox_and_gitignore(tmp_path):
+    import json
+
+    from brigade.install import build_gitignore_block, install_selection
+    from brigade.selection import Selection
+
+    sel = Selection(depth="workspace", harnesses=["hermes"], owner="hermes", includes=[])
+    rc = install_selection(tmp_path, sel)
+    assert rc == 0
+    assert (tmp_path / ".hermes" / "memory-handoffs" / "TEMPLATE.md").is_file()
+    assert (tmp_path / ".hermes" / "memory-handoffs" / "processed").is_dir()
+    assert (tmp_path / ".brigade" / "hermes" / "README.md").is_file()
+    workspace = json.loads((tmp_path / ".brigade" / "hermes" / "workspace.harness.json").read_text())
+    handoff = json.loads((tmp_path / ".brigade" / "hermes" / "memory-handoff.harness.json").read_text())
+    assert workspace["workspace"]["handoff_inbox"] == ".hermes/memory-handoffs"
+    assert handoff["memory_handoff"]["inbox_dir"] == ".hermes/memory-handoffs"
+    assert handoff["memory_handoff"]["processed_dir"] == ".hermes/memory-handoffs/processed"
+    assert ".claude/memory-handoffs" not in json.dumps({"workspace": workspace, "handoff": handoff})
+    block = build_gitignore_block(sel)
+    assert ".hermes/memory-handoffs/*" in block
+    assert "!.hermes/memory-handoffs/TEMPLATE.md" in block
+
+
 def test_install_selection_refuses_overwrite_without_force(tmp_path):
     sel = Selection(depth="repo", harnesses=["claude"], owner="claude", includes=[])
     install_selection(tmp_path, sel)

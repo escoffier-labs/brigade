@@ -315,6 +315,57 @@ def test_handoff_draft_supports_hermes_writer_inbox(tmp_path, capsys):
     assert list_payload["drafts"][0]["inbox"] == ".hermes/memory-handoffs"
 
 
+def test_hermes_handoff_smoke_receipt_show_and_archive(tmp_path, capsys):
+    assert handoff_cmd.sources_init(target=tmp_path, json_output=True) == 0
+    capsys.readouterr()
+    assert handoff_cmd.draft(
+        target=tmp_path,
+        handoff_type="workflow",
+        title="Hermes production smoke",
+        summary="Hermes users can create a reviewable local Brigade handoff.",
+        content="### Hermes production smoke\n\nThe Hermes inbox follows the shared Brigade handoff contract.",
+        evidence=["commands run: brigade handoff draft --inbox hermes --target ."],
+        inbox="hermes",
+        json_output=True,
+    ) == 0
+    draft_payload = json.loads(capsys.readouterr().out)
+    draft_path = tmp_path / draft_payload["path"]
+    draft_id = draft_path.stem
+
+    assert handoff_cmd.receipt_record(
+        target=tmp_path,
+        draft_ids=[draft_id],
+        owner="hermes",
+        run_id="hermes-smoke-run",
+        safe_summary="Hermes handoff smoke was reviewed and ingested.",
+        json_output=True,
+    ) == 0
+    receipt_payload = json.loads(capsys.readouterr().out)
+    assert receipt_payload["owner"] == "hermes"
+    assert receipt_payload["run"]["processed_handoff_paths"] == [str(draft_path.resolve())]
+
+    assert handoff_cmd.show_draft(target=tmp_path, draft_id=draft_id, json_output=True) == 0
+    show_payload = json.loads(capsys.readouterr().out)
+    assert show_payload["draft"]["inbox"] == ".hermes/memory-handoffs"
+    assert show_payload["draft"]["ingestion_status"] == "ingested"
+    assert show_payload["draft"]["ingest_run_id"] == "hermes-smoke-run"
+
+    assert handoff_cmd.archive_draft(
+        target=tmp_path,
+        draft_id=draft_id,
+        reason="Hermes smoke reviewed",
+        json_output=True,
+    ) == 0
+    archive_payload = json.loads(capsys.readouterr().out)
+    assert archive_payload["archived"] == 1
+    record = archive_payload["records"][0]
+    assert ".hermes/memory-handoffs" in record["path"]
+    assert record["ingestion_status"] == "ingested"
+    assert record["ingest_run_id"] == "hermes-smoke-run"
+    assert not draft_path.exists()
+    assert (tmp_path / record["archive_path"]).exists()
+
+
 def test_handoff_draft_cli_dispatch(tmp_path, capsys):
     assert cli.main(
         [
