@@ -5,7 +5,7 @@ Logspine is usable now as a local archive, search, and evidence layer for normal
 ## Usable Now
 
 - Import `logspine.adapter.v1` JSONL from source-specific exporters.
-- Import native Codex, OpenClaw, and Claude session fixtures and local JSONL logs.
+- Import native Codex, OpenClaw, Claude, and Hermes session fixtures and local logs.
 - Import AgentTrail exports for agent-session harnesses.
 - Import SourceHarvest exports for Markdown, files, HTML, JSON, JSONL, and git history.
 - Search one SQLite archive across crawler records, local source exports, and agent-session logs.
@@ -19,10 +19,8 @@ These are the next hardening steps before recommending Logspine broadly:
 
 - Keep release install smoke checks passing for Logspine, AgentTrail, and SourceHarvest.
 - Add more real redacted fixture shapes for each supported harness.
-- Improve relation stitching across imports when the target item appears after the source item.
-- Add archive compaction and retention commands for long-running local stores.
 - Add clearer diagnostics for missing external tools in wrapper imports.
-- Add a small query cookbook for common agent workflows.
+- Add retention commands for long-running local stores.
 
 ## Later
 

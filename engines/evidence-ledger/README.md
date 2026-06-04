@@ -31,7 +31,7 @@ Install from a release:
 curl -fsSL https://raw.githubusercontent.com/solomonneas/logspine/HEAD/install.sh | sh
 ```
 
-For a first archive and agent integration path, see [docs/QUICKSTART.md](docs/QUICKSTART.md). For MCP client configuration, see [docs/MCP.md](docs/MCP.md). For roadmap and cookbook material, see [docs/ROADMAP.md](docs/ROADMAP.md), [docs/EXAMPLES.md](docs/EXAMPLES.md), and [docs/INSTALL_SMOKE.md](docs/INSTALL_SMOKE.md).
+For a first archive and agent integration path, see [docs/QUICKSTART.md](docs/QUICKSTART.md). For MCP client configuration, see [docs/MCP.md](docs/MCP.md). For roadmap and cookbook material, see [docs/ROADMAP.md](docs/ROADMAP.md), [docs/EXAMPLES.md](docs/EXAMPLES.md), [docs/QUERY_COOKBOOK.md](docs/QUERY_COOKBOOK.md), [docs/LIVE_DRY_RUN_CHECKLIST.md](docs/LIVE_DRY_RUN_CHECKLIST.md), and [docs/INSTALL_SMOKE.md](docs/INSTALL_SMOKE.md).
 
 ## Runtime Paths
 
@@ -62,6 +62,9 @@ spine search "adapter contract" --json
 spine evidence "adapter contract" --json
 spine show <returned-item-id> --json
 spine export markdown --out /tmp/logspine-md
+spine relations backfill --json
+spine stats --json
+spine compact --json
 spine sql "select count(*) as items from items" --json
 spine doctor --json
 spine doctor --mcp --json
@@ -71,7 +74,7 @@ Re-running the same imports is idempotent and does not increase item counts.
 
 ## Native Session Adapters
 
-Native adapter generators convert local session JSONL into `logspine.adapter.v1` records:
+Native adapter generators convert local session JSON and JSONL into `logspine.adapter.v1` records:
 
 ```bash
 spine adapter codex ~/.codex/sessions --out codex.adapter.jsonl --limit 100
@@ -160,9 +163,21 @@ spine scans changed --source codex --json
 
 Manifest rows include source kind, path, size, mtime, content hash, generated adapter hash, first/last seen timestamps, last imported timestamp, generated record count, and warning count.
 
+## Archive Operations
+
+Archive maintenance commands are local-only:
+
+```bash
+spine stats --json
+spine relations backfill --json
+spine compact --json
+```
+
+`stats` summarizes archive contents by source, item kind, actor type, collection kind, and recent imports. `relations backfill` resolves stored `target_external_id` values after later imports add the target item. `compact` checkpoints, analyzes, vacuums, and optimizes the SQLite archive.
+
 ## Source Discovery
 
-Discovery reports candidate roots and JSONL counts only:
+Discovery reports candidate roots and supported file counts only:
 
 ```bash
 spine sources discover --json

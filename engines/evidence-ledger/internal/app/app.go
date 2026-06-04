@@ -28,7 +28,7 @@ import (
 
 var stdin io.Reader = os.Stdin
 
-const Version = "0.1.3"
+const Version = "0.1.4"
 
 func Run(args []string, out, errw io.Writer) int {
 	if len(args) == 0 || args[0] == "--help" || args[0] == "-h" || args[0] == "help" {
@@ -67,6 +67,12 @@ func Run(args []string, out, errw io.Writer) int {
 		return cmdEvidence(args[1:], out, errw)
 	case "export":
 		return cmdExport(args[1:], out, errw)
+	case "relations":
+		return cmdRelations(args[1:], out, errw)
+	case "stats":
+		return cmdStats(args[1:], out, errw)
+	case "compact":
+		return cmdCompact(args[1:], out, errw)
 	case "sql":
 		return cmdSQL(args[1:], out, errw)
 	default:
@@ -75,7 +81,7 @@ func Run(args []string, out, errw io.Writer) int {
 }
 
 func usage(w io.Writer) {
-	fmt.Fprintln(w, "spine version | init | status | sources discover | scans | serve | mcp | watch | adapter | import | search | show | evidence | export markdown | sql | doctor")
+	fmt.Fprintln(w, "spine version | init | status | sources discover | scans | serve | mcp | watch | adapter | import | search | show | evidence | export markdown | relations | stats | compact | sql | doctor")
 }
 
 func openMigrated() (*sql.DB, Paths, error) {
@@ -1257,6 +1263,178 @@ func safeName(s string) string {
 		return "export"
 	}
 	return s
+}
+
+func cmdRelations(args []string, out, errw io.Writer) int {
+	if len(args) == 0 {
+		return fatalf(errw, "usage: spine relations backfill [--json]")
+	}
+	switch args[0] {
+	case "backfill":
+		return cmdRelationsBackfill(args[1:], out, errw)
+	default:
+		return fatalf(errw, "usage: spine relations backfill [--json]")
+	}
+}
+
+func cmdRelationsBackfill(args []string, out, errw io.Writer) int {
+	_, bools, rest, err := splitFlags(args, nil, map[string]bool{"json": true})
+	if err != nil {
+		return fatalf(errw, "relations backfill: %s", err)
+	}
+	if len(rest) != 0 {
+		return fatalf(errw, "usage: spine relations backfill [--json]")
+	}
+	db, _, err := openMigrated()
+	if err != nil {
+		return fatalf(errw, "relations backfill: %s", err)
+	}
+	defer db.Close()
+	before := unresolvedRelationCount(db)
+	resolved, err := ingest.BackfillRelations(db)
+	if err != nil {
+		return fatalf(errw, "relations backfill: %s", err)
+	}
+	after := unresolvedRelationCount(db)
+	result := map[string]any{"ok": true, "resolved": resolved, "unresolved_before": before, "unresolved_after": after}
+	if bools["json"] {
+		writeJSON(out, result)
+	} else {
+		fmt.Fprintf(out, "resolved=%d unresolved_before=%d unresolved_after=%d\n", resolved, before, after)
+	}
+	return 0
+}
+
+func unresolvedRelationCount(db *sql.DB) int64 {
+	var n int64
+	_ = db.QueryRow(`select count(*) from relations where target_item_id is null and coalesce(target_external_id,'') != ''`).Scan(&n)
+	return n
+}
+
+func cmdStats(args []string, out, errw io.Writer) int {
+	_, bools, rest, err := splitFlags(args, nil, map[string]bool{"json": true})
+	if err != nil {
+		return fatalf(errw, "stats: %s", err)
+	}
+	if len(rest) != 0 {
+		return fatalf(errw, "usage: spine stats [--json]")
+	}
+	db, paths, err := openMigrated()
+	if err != nil {
+		return fatalf(errw, "stats: %s", err)
+	}
+	defer db.Close()
+	stats := archiveStats(db, paths)
+	if bools["json"] {
+		writeJSON(out, stats)
+	} else {
+		totals := stats["totals"].(map[string]any)
+		fmt.Fprintf(out, "sources=%v collections=%v items=%v artifacts=%v relations=%v unresolved_relations=%v db=%s\n",
+			totals["sources"], totals["collections"], totals["items"], totals["artifacts"], totals["relations"], totals["unresolved_relations"], paths.DBPath)
+	}
+	return 0
+}
+
+func archiveStats(db *sql.DB, paths Paths) map[string]any {
+	return map[string]any{
+		"generated_at":        time.Now().UTC().Format(time.RFC3339Nano),
+		"db_path":             paths.DBPath,
+		"db_size_bytes":       fileSize(paths.DBPath),
+		"totals":              archiveTotals(db),
+		"by_source":           queryMaps(db, `select s.kind as source_kind, count(i.id) as items from sources s left join items i on i.source_id = s.id group by s.kind order by s.kind`),
+		"by_item_kind":        queryMaps(db, `select kind, count(*) as items from items group by kind order by items desc, kind`),
+		"by_actor_type":       queryMaps(db, `select coalesce(a.type,'') as actor_type, count(i.id) as items from items i left join actors a on a.id = i.actor_id group by coalesce(a.type,'') order by items desc, actor_type`),
+		"by_collection_kind":  queryMaps(db, `select c.kind as collection_kind, count(i.id) as items from collections c left join items i on i.collection_id = c.id group by c.kind order by items desc, collection_kind`),
+		"by_day":              queryMaps(db, `select substr(coalesce(created_at,''),1,10) as day, count(*) as items from items group by day order by day desc limit 60`),
+		"recent_imports":      queryMaps(db, `select source_kind, source_path, source_hash, completed_at, item_count, warning_count from imports order by completed_at desc limit 10`),
+		"scan_manifest_total": scalarInt(db, `select count(*) from source_scans`),
+	}
+}
+
+func archiveTotals(db *sql.DB) map[string]any {
+	return map[string]any{
+		"sources":               scalarInt(db, `select count(*) from sources`),
+		"collections":           scalarInt(db, `select count(*) from collections`),
+		"actors":                scalarInt(db, `select count(*) from actors`),
+		"items":                 scalarInt(db, `select count(*) from items`),
+		"events":                scalarInt(db, `select count(*) from events`),
+		"artifacts":             scalarInt(db, `select count(*) from artifacts`),
+		"relations":             scalarInt(db, `select count(*) from relations`),
+		"unresolved_relations":  unresolvedRelationCount(db),
+		"imports":               scalarInt(db, `select count(*) from imports`),
+		"warnings":              scalarInt(db, `select count(*) from import_warnings`),
+		"source_scan_manifests": scalarInt(db, `select count(*) from source_scans`),
+	}
+}
+
+func cmdCompact(args []string, out, errw io.Writer) int {
+	_, bools, rest, err := splitFlags(args, nil, map[string]bool{"json": true})
+	if err != nil {
+		return fatalf(errw, "compact: %s", err)
+	}
+	if len(rest) != 0 {
+		return fatalf(errw, "usage: spine compact [--json]")
+	}
+	db, paths, err := openMigrated()
+	if err != nil {
+		return fatalf(errw, "compact: %s", err)
+	}
+	defer db.Close()
+	beforeSize := fileSize(paths.DBPath)
+	beforePages := dbPageStats(db)
+	if _, err := db.Exec(`pragma wal_checkpoint(truncate)`); err != nil {
+		return fatalf(errw, "compact: %s", err)
+	}
+	if _, err := db.Exec(`analyze`); err != nil {
+		return fatalf(errw, "compact: %s", err)
+	}
+	if _, err := db.Exec(`vacuum`); err != nil {
+		return fatalf(errw, "compact: %s", err)
+	}
+	_, _ = db.Exec(`pragma optimize`)
+	afterSize := fileSize(paths.DBPath)
+	afterPages := dbPageStats(db)
+	result := map[string]any{
+		"ok":                    true,
+		"db_path":               paths.DBPath,
+		"before_size_bytes":     beforeSize,
+		"after_size_bytes":      afterSize,
+		"reclaimed_bytes":       beforeSize - afterSize,
+		"before_page_stats":     beforePages,
+		"after_page_stats":      afterPages,
+		"operations":            []string{"wal_checkpoint", "analyze", "vacuum", "optimize"},
+		"untrusted_context":     false,
+		"generated_at":          time.Now().UTC().Format(time.RFC3339Nano),
+		"private_runtime_paths": true,
+	}
+	if bools["json"] {
+		writeJSON(out, result)
+	} else {
+		fmt.Fprintf(out, "before=%d after=%d reclaimed=%d db=%s\n", beforeSize, afterSize, beforeSize-afterSize, paths.DBPath)
+	}
+	return 0
+}
+
+func dbPageStats(db *sql.DB) map[string]any {
+	return map[string]any{
+		"page_count":     scalarInt(db, `pragma page_count`),
+		"page_size":      scalarInt(db, `pragma page_size`),
+		"freelist_count": scalarInt(db, `pragma freelist_count`),
+	}
+}
+
+func scalarInt(db *sql.DB, query string, args ...any) int64 {
+	var n int64
+	_ = db.QueryRow(query, args...).Scan(&n)
+	return n
+}
+
+func fileSize(path string) int64 {
+	info, err := os.Stat(path)
+	if err != nil {
+		return 0
+	}
+	return info.Size()
 }
 
 func cmdSQL(args []string, out, errw io.Writer) int {

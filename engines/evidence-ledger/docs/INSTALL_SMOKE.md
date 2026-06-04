@@ -33,6 +33,9 @@ spine import hermes "$repo/testdata/harnesses/session_hermes-demo.fixture.json" 
 spine import hermes "$repo/testdata/harnesses/hermes-trajectory.fixture.jsonl" --json
 
 spine status --json
+spine stats --json
+spine relations backfill --json
+spine compact --json
 spine scans list --json
 spine search "adapter contract" --json
 spine evidence "Claude native import" --project logspine --json
@@ -43,6 +46,8 @@ Expected results:
 - release binaries install with checksum verification
 - `spine doctor --mcp --json` returns `ok: true`
 - `spine status --json` reports FTS as `ok`
+- `spine stats --json` reports nonzero source and item totals
+- `spine compact --json` returns `ok: true`
 - search returns at least one result
 - evidence returns `untrusted_context: true`
 - evidence result `artifacts` fields encode as arrays, including empty arrays

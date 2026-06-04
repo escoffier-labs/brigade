@@ -80,6 +80,9 @@ spine status --json
 spine scans list --json
 spine scans changed --json
 spine sources discover --json
+spine stats --json
+spine relations backfill --json
+spine compact --json
 ```
 
 `sources discover` reports candidate roots, counts, and status only. It does not print transcript content.

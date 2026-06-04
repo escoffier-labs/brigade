@@ -114,7 +114,7 @@ func ImportAdapterReader(db *sql.DB, r io.Reader, sourcePath, sourceOverride str
 			return AdapterResult{}, err
 		}
 	}
-	if err := resolveRelations(tx); err != nil {
+	if _, err := resolveRelations(tx); err != nil {
 		return AdapterResult{}, err
 	}
 	if _, err := tx.Exec(`update imports set completed_at = ?, item_count = ?, warning_count = ? where id = ?`, now, result.Inserted, len(result.Warnings), importID); err != nil {
@@ -123,8 +123,24 @@ func ImportAdapterReader(db *sql.DB, r io.Reader, sourcePath, sourceOverride str
 	return result, tx.Commit()
 }
 
-func resolveRelations(tx *sql.Tx) error {
-	_, err := tx.Exec(`update relations
+func BackfillRelations(db *sql.DB) (int64, error) {
+	tx, err := db.Begin()
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	n, err := resolveRelations(tx)
+	if err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return n, nil
+}
+
+func resolveRelations(tx *sql.Tx) (int64, error) {
+	res, err := tx.Exec(`update relations
 set target_item_id = (
   select target.id
   from items source
@@ -142,7 +158,11 @@ where target_item_id is null
     join items target on target.source_id = source.source_id and target.external_id = relations.target_external_id
     where source.id = relations.source_item_id
   )`)
-	return err
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
 }
 
 func RecordSourceScans(db *sql.DB, sourceKind, generatedHash string, files []sources.FileScan, imported bool) error {

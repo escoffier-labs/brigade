@@ -29,7 +29,7 @@ Each source system is best at its native domain:
 
 ## Boundary
 
-Agent session scanning is in scope for Logspine, but the MVP starts with generic normalized adapter fixtures and conservative native JSONL generators rather than perfect per-harness parsers.
+Agent session scanning is in scope for Logspine, but the MVP starts with generic normalized adapter fixtures and conservative native JSON/JSONL generators rather than perfect per-harness parsers.
 
 AgentTrail is the sibling tool for portable local agent-session export. It scans agent harness logs such as Codex, Claude project logs, and OpenClaw sessions, then emits `logspine.adapter.v1` JSONL.
 

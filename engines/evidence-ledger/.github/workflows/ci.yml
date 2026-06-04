@@ -15,3 +15,6 @@ jobs:
           go-version: stable
       - run: go test ./...
       - run: go build -o bin/spine ./cmd/spine
+      - run: scripts/smoke_archive.sh
+      - run: scripts/smoke_mcp.sh
+      - run: scripts/smoke_http.sh

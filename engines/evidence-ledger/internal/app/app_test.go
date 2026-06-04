@@ -517,6 +517,49 @@ func TestDirectoryImportRecordsEachScannedFile(t *testing.T) {
 	}
 }
 
+func TestArchiveOperations(t *testing.T) {
+	withTempHome(t)
+	runOK(t, "init")
+	runOK(t, "import", "codex", repoPath(t, "testdata/harnesses/codex-session.fixture.jsonl"), "--json")
+	runOK(t, "import", "claude", repoPath(t, "testdata/harnesses/claude-project.fixture.jsonl"), "--json")
+
+	stats := runJSON(t, "stats", "--json")
+	totals := stats["totals"].(map[string]any)
+	if totals["items"].(float64) == 0 || totals["sources"].(float64) == 0 {
+		t.Fatalf("bad stats totals: %v", stats)
+	}
+	if len(stats["by_source"].([]any)) == 0 || len(stats["by_item_kind"].([]any)) == 0 {
+		t.Fatalf("stats missing groups: %v", stats)
+	}
+
+	db, _, err := openMigrated()
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := db.Exec(`update relations set target_item_id = null where coalesce(target_external_id,'') != ''`)
+	if err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	n, _ := res.RowsAffected()
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if n == 0 {
+		t.Fatalf("fixture imports produced no relations to backfill")
+	}
+
+	backfill := runJSON(t, "relations", "backfill", "--json")
+	if backfill["resolved"].(float64) == 0 || backfill["unresolved_after"].(float64) != 0 {
+		t.Fatalf("bad relation backfill result: %v", backfill)
+	}
+
+	compact := runJSON(t, "compact", "--json")
+	if compact["ok"] != true || compact["after_size_bytes"].(float64) == 0 {
+		t.Fatalf("bad compact result: %v", compact)
+	}
+}
+
 func TestImportDiscoveredAndWatchOnce(t *testing.T) {
 	withTempHome(t)
 	runOK(t, "init")
