@@ -148,7 +148,55 @@ Safety and operations tools:
 - [agent-notify](https://github.com/solomonneas/agent-notify): optional notification hooks for long-running agent work.
 - [tokenjuice](https://github.com/solomonneas/tokenjuice): output compaction for terminal-heavy agent workflows.
 
-Brigade also has native local workflows for [repo fleet operations](docs/repo-fleet.md), [portable tool catalogs](docs/tool-catalog.md), [security scans](docs/security.md), and [handoff promotion](docs/handoff-promotion.md).
+Brigade also has native local workflows for [repo fleet operations](docs/repo-fleet.md), [portable tool catalogs](docs/tool-catalog.md), [security scans](docs/security.md), and [handoff promotion](docs/handoff-promotion.md). The highlights are below.
+
+## Repo Fleet
+
+`brigade repos` watches a configured set of local repositories and turns their state into reviewable evidence: health scans, sweeps, reports, fleet actions, and release trains.
+
+![Repo fleet turns local evidence into reviewed actions](docs/assets/repo-fleet-flow.svg)
+
+- Repos live in a gitignored `.brigade/repos.toml`. Nothing is cloned, pushed, or mutated remotely.
+- `brigade repos scan` and `brigade repos sweep` collect local health evidence.
+- Reports become fleet actions you start, finish, defer, or dispatch by hand.
+- Release trains gather readiness evidence and checklists without publishing anything.
+
+Full command list in [Repo fleet](docs/repo-fleet.md).
+
+## Tool Catalog
+
+`brigade tools` describes local callable tools, slash commands, skills, scripts, and MCP configs across harnesses, then gates execution behind an approval queue.
+
+![Tool catalog separates discovery, projection, and execution](docs/assets/tool-catalog-flow.svg)
+
+- Discovery is read-only: `list`, `search`, `describe`, `contracts`.
+- Projections write reviewed harness-specific tool docs. There is no auto-sync.
+- Script calls move through plan, queue, approve, run, with run receipts and replay.
+- Runtimes are supervised explicitly. Brigade never auto-starts MCP servers or stores auth.
+
+Details in [Tool catalog](docs/tool-catalog.md).
+
+## Handoff Promotion
+
+Reviewed scanner imports can be promoted into memory handoff drafts instead of being retyped by hand.
+
+![Reviewed imports promote into memory handoff drafts](docs/assets/handoff-promotion-flow.svg)
+
+- Works for durable non-task imports: decisions, preferences, links, commands, findings, incidents.
+- `brigade work import plan-handoff` previews the target and blockers, `promote-handoff` writes the draft and lints it.
+- Drafts land in the normal handoff inbox. Canonical memory is never edited directly.
+- Raw private chat fields are rejected and secret-looking values are redacted before the draft is written.
+
+See [Handoff promotion](docs/handoff-promotion.md).
+
+## Agent Pantry
+
+The `pantry` station (alias `larder`) wires [Agent Pantry](https://github.com/escoffier-labs/agentpantry) into the same operator workflow: encrypted browser session, cookie, and secret sync between agent machines.
+
+- `brigade add pantry` installs agentpantry.
+- `brigade pantry status` gives a pantry-specific health readout.
+- `brigade pantry setup plan --role source|sink` previews or writes a reviewed setup plan.
+- Pantry checks are advisory. An unwired install warns but never fails a workspace run.
 
 ## What Brigade Is Not
 
@@ -170,6 +218,8 @@ That pause is the point. Agent memory should be useful, not noisy.
 
 OpenClaw can be the memory owner. Brigade gives nearby tools a way to contribute reviewed notes back into that owner memory without forcing every tool to know OpenClaw internals.
 
+![Memory ingest stays outside Brigade until receipts return](docs/assets/openclaw-ingest-flow.svg)
+
 A typical setup is:
 
 ```bash
@@ -183,6 +233,8 @@ Then writer tools leave handoffs in their own inboxes, and the memory owner inge
 ## For Hermes Users
 
 Hermes now has a first-class Brigade handoff inbox:
+
+![Hermes is a local handoff writer inbox](docs/assets/hermes-handoff-flow.svg)
 
 ```bash
 brigade handoff draft --target . --inbox hermes \
@@ -205,6 +257,8 @@ See [Hermes handoffs](docs/hermes-handoffs.md) for the current boundaries.
 
 Brigade handles the memory and operator workflow. Content Guard checks whether content is safe to publish or save.
 
+![Security scans become reviewable local work](docs/assets/security-flow.svg)
+
 Use it at three points:
 
 - before memory ingest: `brigade handoff lint --content-guard`
@@ -218,6 +272,8 @@ Policy names are intentionally plain:
 - `public-content`: stricter checks for blog, social, and site copy
 
 `brigade operator doctor` and `brigade operator status` show whether Content Guard is installed, which policy is expected, which pre-push hook is active, and the latest local scan summary when available.
+
+Brigade also ships a read-only local security scanner. `brigade security scan` produces redacted findings you can review, suppress with a reason, or import into the work inbox. See [Security and Content Guard](docs/security.md).
 
 ## Where The Detailed Docs Went
 
