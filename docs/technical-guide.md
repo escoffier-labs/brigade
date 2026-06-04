@@ -115,6 +115,7 @@ See [`ROADMAP.md`](../ROADMAP.md) for the daily-driver, scanner inbox, chat-surf
 The production-hardening queue for the daily operator system is tracked in [`docs/phase-115-164-plan.md`](phase-115-164-plan.md).
 
 Long unattended phase work is audited through the local phase execution ledger described in [`docs/phase-execution-ledger.md`](phase-execution-ledger.md). Future multi-phase work is not complete unless each phase has ledger evidence or an explicit deferral.
+The next simplification review is scoped in [`docs/simplification-audit-plan.md`](simplification-audit-plan.md); run that audit before applying any automated code simplifier to Brigade.
 Phase ledger closeouts let an operator mark completed phase evidence as reviewed, deferred, blocked, or archived, and stale unreviewed completed phases surface in doctor output.
 
 Phase execution sessions group a declared AFK range into one local record with current phase, status, commit and test counts, report references, closeout state, and the next recommended command.
@@ -898,7 +899,8 @@ Security commands:
 - `brigade security scan --import-findings` writes the local evidence bundle and turns unsuppressed findings into deduped `security-scan` work imports with safe metadata.
 - `brigade security findings` lists the latest reviewable findings, and `brigade security show <finding-id>` inspects one finding.
 - Security guardrails distinguish repo guidance, skills, slash commands, subagents, and tool wrappers, with template confidence for public examples and runtime confidence for active workspace files.
-- `brigade security doctor` reports config, evidence, public template privacy, suppression, and open-finding health in text or JSON.
+- Harness wiring checks cover repo-local agent JSON across `.brigade/`, `.claude/`, `.codex/`, `.opencode/`, `.openclaw/`, `.hermes/`, and Brigade templates, including path escapes, host-private paths, insecure or private URLs, and shell-like command fields.
+- `brigade security doctor` reports config, evidence, public template privacy, harness wiring, suppression, and open-finding health in text or JSON.
 - `brigade security closeout --accept-risk` records reviewed accepted risk with policy-pack blocker and warning counts for release evidence.
 - `brigade security enrich --target .` enriches an existing report and writes enrichment artifacts.
 - `brigade security review` inspects the latest evidence bundle, including enrichment when present.
@@ -919,6 +921,7 @@ The scanner covers:
 - prompt-injection style instructions
 - MCP configs, including remote transports, auto-approval, unpinned `npx`, and shell metacharacters
 - MCP sensitive surfaces, including env values, broad file args, high-risk local commands, large server sets, and missing timeouts
+- agent harness wiring JSON, including path traversal, host-private absolute paths, broad filesystem roots, insecure or private-looking URLs, remote shell bootstrap commands, and shell metacharacters
 
 Enrichment is explicit and post-scan.
 The default `local` provider only summarizes extracted indicators offline.

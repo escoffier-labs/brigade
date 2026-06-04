@@ -193,8 +193,8 @@ Baseline coverage targets:
 
 Brigade-specific additions:
 
-- Scan Claude Code, Codex, OpenCode, Gemini, Hermes, OpenClaw, VS Code, Zed, dmux, and generic repo-local agent harness surfaces with explicit runtime-confidence labels.
-- Understand Brigade installs: `.brigade/`, `.codex/`, `.claude/`, memory handoff inboxes, roster files, dogfood configs, run artifacts, work imports, memory-care decay files, and public template folders.
+- Scan Claude Code, Codex, OpenCode, Gemini, Hermes, OpenClaw, VS Code, Zed, dmux, and generic repo-local agent harness surfaces with explicit runtime-confidence labels. Status: started with cross-harness JSON wiring checks for `.brigade/`, `.claude/`, `.codex/`, `.opencode/`, `.openclaw/`, `.hermes/`, and Brigade templates, including path escapes, host-private paths, broad roots, private or insecure URLs, and shell-like command fields.
+- Understand Brigade installs: `.brigade/`, `.codex/`, `.claude/`, memory handoff inboxes, roster files, dogfood configs, run artifacts, work imports, memory-care decay files, and public template folders. Status: started with security scan and doctor summaries for harness wiring, template privacy, local evidence, suppressions, and open findings.
 - Treat public-template findings differently from active runtime findings so docs and starter templates do not score like live credentials or enabled tools.
 - Integrate with `brigade doctor` as a security station and with `brigade work import` so findings can become reviewable local tasks instead of only console output. Status: started with doctor checks, work brief and work doctor checks, `--import-findings`, source `security-scan` imports, dedupe, and dismissed-import protection.
 - Provide safe auto-fix only for narrow cases such as replacing obvious hardcoded sample secrets, tightening generated allow-list examples, or adding missing ignore rules. Status: started with `brigade security fix` for local artifact directory, managed `.gitignore` hygiene, `brigade security template-audit` for public template and docs privacy checks, and parser-derived command inventory checks through `brigade roadmap commands --write` and `--check`.

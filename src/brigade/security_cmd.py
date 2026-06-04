@@ -143,6 +143,27 @@ TEMPLATE_ALLOWLIST_RE = re.compile(
     r"(example[.](com|org|net|invalid)|local" r"host|127[.]0[.]0[.]1|0[.]0[.]0[.]0|<[^>]+>|\{\{[^}]+\}\}|\$\{?[A-Z_][A-Z0-9_]*(?::-[^}]*)?\}?)",
     re.IGNORECASE,
 )
+HARNESS_ROOTS = {".brigade", ".claude", ".codex", ".opencode", ".openclaw", ".hermes"}
+HARNESS_PATH_KEYS = {
+    "bootstrap_files",
+    "cache_path",
+    "document_targets_allowed",
+    "dst",
+    "handoff_inbox",
+    "inbox",
+    "inboxes",
+    "inbox_dir",
+    "last_run_log",
+    "path",
+    "processed_dir",
+    "review_inbox",
+    "root",
+    "routing_targets",
+    "src",
+}
+HARNESS_COMMAND_KEYS = {"args", "command", "commands", "script", "scripts"}
+HARNESS_URL_KEYS = {"baseUrl", "endpoint", "host", "misp_url", "url"}
+HARNESS_ALLOWED_URL_RE = re.compile(r"https?://(?:example[.](?:com|org|net|invalid)|localhost|127[.]0[.]0[.]1|0[.]0[.]0[.]0)(?::\d+)?(?:[/?#][^\s]*)?$", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -1399,6 +1420,38 @@ def template_privacy_payload(target: Path) -> dict[str, Any]:
     }
 
 
+def harness_wiring_payload(target: Path) -> dict[str, Any]:
+    target = target.expanduser().resolve()
+    findings: list[dict[str, Any]] = []
+    scanned_files: list[str] = []
+    for path in _iter_scan_files(target):
+        if not _is_harness_wiring_document(path, target):
+            continue
+        try:
+            text = path.read_text(errors="replace")
+        except OSError:
+            continue
+        scanned_files.append(str(path.relative_to(target)))
+        _scan_harness_wiring_document(findings, target=target, path=path, text=text)
+    findings = _filter_findings(
+        findings,
+        enabled_checks=SECURITY_CHECKS,
+        include_paths=(),
+        exclude_paths=(),
+        severity_threshold="low",
+    )
+    findings.sort(key=lambda item: (str(item.get("path") or ""), int(item.get("line") or 0), str(item.get("id") or "")))
+    return {
+        "target": str(target),
+        "scanned_files": scanned_files,
+        "scanned_file_count": len(scanned_files),
+        "finding_count": len(findings),
+        "findings": findings,
+        "status": "warn" if findings else "ok",
+        "top_finding": findings[0] if findings else None,
+    }
+
+
 def template_audit(*, target: Path, json_output: bool = False) -> int:
     target = target.expanduser().resolve()
     payload = template_privacy_payload(target)
@@ -1578,6 +1631,225 @@ def _scan_mcp_document(findings: list[dict[str, Any]], *, target: Path, path: Pa
                 evidence=f"{server_name}: timeout unset",
                 suggestion="Set an explicit MCP startup or request timeout so hung servers fail predictably.",
             )
+
+
+def _is_harness_wiring_document(path: Path, target: Path) -> bool:
+    rel = path.relative_to(target)
+    parts = rel.parts
+    if path.suffix.lower() != ".json":
+        return False
+    if parts and parts[0] == ".brigade":
+        return path.name == "handoff-sources.json" or (len(parts) >= 2 and parts[1] in {"hermes", "openclaw"})
+    if parts and parts[0] in HARNESS_ROOTS:
+        return True
+    if len(parts) >= 4 and parts[0] == "src" and parts[1] == "brigade" and parts[2] == "templates":
+        return True
+    if parts and parts[0] == "templates":
+        return True
+    return False
+
+
+def _scan_harness_wiring_document(findings: list[dict[str, Any]], *, target: Path, path: Path, text: str) -> None:
+    if not _is_harness_wiring_document(path, target):
+        return
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        return
+    _scan_harness_value(findings, target=target, path=path, text=text, value=data, key_path=())
+
+
+def _scan_harness_value(
+    findings: list[dict[str, Any]],
+    *,
+    target: Path,
+    path: Path,
+    text: str,
+    value: object,
+    key_path: tuple[str, ...],
+) -> None:
+    if isinstance(value, dict):
+        for key, child in value.items():
+            if not isinstance(key, str):
+                continue
+            if key.startswith("_"):
+                continue
+            _scan_harness_value(findings, target=target, path=path, text=text, value=child, key_path=key_path + (key,))
+    elif isinstance(value, list):
+        for index, child in enumerate(value):
+            _scan_harness_value(findings, target=target, path=path, text=text, value=child, key_path=key_path + (str(index),))
+    elif isinstance(value, str):
+        _scan_harness_string(findings, target=target, path=path, text=text, value=value, key_path=key_path)
+
+
+def _scan_harness_string(
+    findings: list[dict[str, Any]],
+    *,
+    target: Path,
+    path: Path,
+    text: str,
+    value: str,
+    key_path: tuple[str, ...],
+) -> None:
+    if _is_placeholder(value):
+        return
+    key = _harness_semantic_key(key_path)
+    if key in HARNESS_PATH_KEYS:
+        _scan_harness_path_value(findings, target=target, path=path, text=text, value=value, key_path=key_path)
+    if key in HARNESS_COMMAND_KEYS:
+        _scan_harness_command_value(findings, target=target, path=path, text=text, value=value, key_path=key_path)
+    if key in HARNESS_URL_KEYS or value.startswith(("http://", "https://")):
+        _scan_harness_url_value(findings, target=target, path=path, text=text, value=value, key_path=key_path)
+
+
+def _harness_semantic_key(key_path: tuple[str, ...]) -> str:
+    for key in reversed(key_path):
+        if key.isdigit():
+            continue
+        return key
+    return ""
+
+
+def _harness_evidence(key_path: tuple[str, ...], value: str) -> str:
+    return f"{'.'.join(key_path)}: {value}"
+
+
+def _harness_line_number(text: str, value: str, key_path: tuple[str, ...]) -> int:
+    if value:
+        line = _line_number_for(text, json.dumps(value))
+        if line != 1:
+            return line
+        line = _line_number_for(text, value)
+        if line != 1:
+            return line
+    key = _harness_semantic_key(key_path)
+    return _line_number_for(text, json.dumps(key) if key else "")
+
+
+def _scan_harness_path_value(
+    findings: list[dict[str, Any]],
+    *,
+    target: Path,
+    path: Path,
+    text: str,
+    value: str,
+    key_path: tuple[str, ...],
+) -> None:
+    if value.startswith(("http://", "https://")):
+        return
+    normalized = value.replace("\\", "/")
+    parts = [part for part in normalized.split("/") if part]
+    line_number = _harness_line_number(text, value, key_path)
+    evidence = _harness_evidence(key_path, value)
+    if value in {"~", "$HOME", "/", "/home", "/Users"}:
+        _finding(
+            findings,
+            target=target,
+            path=path,
+            line=line_number,
+            severity="medium",
+            category="permissions",
+            title="Harness wiring uses broad filesystem path",
+            evidence=evidence,
+            suggestion="Scope agent and harness paths to explicit repo-local directories or reviewed config files.",
+        )
+    if Path(value).is_absolute() or TEMPLATE_PRIVATE_PATH_RE.search(value):
+        _finding(
+            findings,
+            target=target,
+            path=path,
+            line=line_number,
+            severity="high",
+            category="permissions",
+            title="Harness wiring contains host-private absolute path",
+            evidence=evidence,
+            suggestion="Use repo-relative paths, placeholders, or environment variables instead of host-private absolute paths.",
+        )
+    if ".." in parts:
+        _finding(
+            findings,
+            target=target,
+            path=path,
+            line=line_number,
+            severity="high",
+            category="permissions",
+            title="Harness wiring path escapes target",
+            evidence=evidence,
+            suggestion="Remove '..' path traversal from harness wiring and keep generated paths under the target workspace.",
+        )
+
+
+def _scan_harness_command_value(
+    findings: list[dict[str, Any]],
+    *,
+    target: Path,
+    path: Path,
+    text: str,
+    value: str,
+    key_path: tuple[str, ...],
+) -> None:
+    if REMOTE_SHELL_RE.search(value):
+        _finding(
+            findings,
+            target=target,
+            path=path,
+            line=_harness_line_number(text, value, key_path),
+            severity="high",
+            category="automation",
+            title="Harness wiring pipes remote content into shell",
+            evidence=_harness_evidence(key_path, value),
+            suggestion="Replace remote shell bootstrap commands with checked-in, pinned, and reviewed setup steps.",
+        )
+    elif MCP_SHELL_META_RE.search(value):
+        _finding(
+            findings,
+            target=target,
+            path=path,
+            line=_harness_line_number(text, value, key_path),
+            severity="medium",
+            category="automation",
+            title="Harness wiring command contains shell metacharacter",
+            evidence=_harness_evidence(key_path, value),
+            suggestion="Pass structured arguments through harness config instead of shell-expanded command strings.",
+        )
+
+
+def _scan_harness_url_value(
+    findings: list[dict[str, Any]],
+    *,
+    target: Path,
+    path: Path,
+    text: str,
+    value: str,
+    key_path: tuple[str, ...],
+) -> None:
+    if not value.startswith(("http://", "https://")):
+        return
+    if HARNESS_ALLOWED_URL_RE.match(value):
+        return
+    parsed = urlparse(value)
+    category = "supply-chain"
+    title = "Harness wiring references remote URL"
+    severity = "medium"
+    suggestion = "Keep remote harness endpoints explicit, reviewed, and documented; prefer local or placeholder URLs in public templates."
+    if parsed.scheme == "http" and parsed.hostname not in {"localhost", "127.0.0.1", "0.0.0.0"}:
+        severity = "high"
+        title = "Harness wiring references insecure remote URL"
+        suggestion = "Use HTTPS for remote harness endpoints or replace the URL with a placeholder."
+    if TEMPLATE_PRIVATE_URL_RE.search(value):
+        title = "Harness wiring contains private-looking URL"
+        suggestion = "Replace private hostnames with placeholders before committing harness wiring."
+    _finding(
+        findings,
+        target=target,
+        path=path,
+        line=_harness_line_number(text, value, key_path),
+        severity=severity,
+        category=category,
+        title=title,
+        evidence=_harness_evidence(key_path, value),
+        suggestion=suggestion,
+    )
 
 
 def _first_npx_package(args: list[object]) -> str | None:
@@ -2101,6 +2373,7 @@ def scan_target(
         for line_number, line in enumerate(text.splitlines(), start=1):
             _scan_line(findings, target=target, path=path, line_number=line_number, line=line)
         _scan_mcp_document(findings, target=target, path=path, text=text)
+        _scan_harness_wiring_document(findings, target=target, path=path, text=text)
         _scan_package_json(findings, target=target, path=path, text=text)
         _scan_github_actions(findings, target=target, path=path, text=text)
         _scan_python_project(findings, target=target, path=path, text=text)
@@ -2450,6 +2723,12 @@ def health(target: Path) -> dict[str, Any]:
         checks.append({"status": "warn", "name": "security_template_privacy", "detail": f"{template_audit_payload['finding_count']} public template privacy finding(s), top={top_template.get('path')}:{top_template.get('line')}"})
     else:
         checks.append({"status": "ok", "name": "security_template_privacy", "detail": f"{template_audit_payload['scanned_file_count']} public file(s) checked"})
+    harness_wiring = harness_wiring_payload(target)
+    if harness_wiring["finding_count"]:
+        top_harness = harness_wiring["top_finding"] if isinstance(harness_wiring.get("top_finding"), dict) else {}
+        checks.append({"status": "warn", "name": "security_harness_wiring", "detail": f"{harness_wiring['finding_count']} harness wiring finding(s), top={top_harness.get('path')}:{top_harness.get('line')}"})
+    else:
+        checks.append({"status": "ok", "name": "security_harness_wiring", "detail": f"{harness_wiring['scanned_file_count']} harness wiring file(s) checked"})
     try:
         suppression = suppression_health(target)
     except ValueError as exc:
@@ -2490,6 +2769,7 @@ def health(target: Path) -> dict[str, Any]:
         "checks": checks,
         "evidence": bundle,
         "template_privacy": template_audit_payload,
+        "harness_wiring": harness_wiring,
         "latest_closeout": closeouts[0] if closeouts else None,
     }
 
