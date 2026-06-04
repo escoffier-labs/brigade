@@ -29,7 +29,7 @@ These are the next hardening steps before recommending Logspine broadly:
 - Optional MCP resources for stable evidence bundle references.
 - Optional read-only local API auth for multi-user hosts.
 - More SourceHarvest domain exporters as real local export shapes appear.
-- Native Hermes support only after real redacted samples exist.
+- Direct Hermes `state.db` support only after real redacted samples and a stable schema need exist.
 - Native support for any future harness only after observed samples exist.
 
 ## Non-Goals
@@ -40,4 +40,3 @@ These are the next hardening steps before recommending Logspine broadly:
 - No network calls from archive, import, search, evidence, MCP, or HTTP commands.
 - No parser parity chase with session-browser tools.
 - No imported text treated as instructions.
-

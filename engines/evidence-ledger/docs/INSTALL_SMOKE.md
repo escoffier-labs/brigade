@@ -29,6 +29,8 @@ spine import adapter "$repo/testdata/adapters/discrawl.fixture.jsonl" --source d
 spine import codex "$repo/testdata/harnesses/codex-session.fixture.jsonl" --json
 spine import openclaw "$repo/testdata/harnesses/openclaw-session.fixture.jsonl" --json
 spine import claude "$repo/testdata/harnesses/claude-project.fixture.jsonl" --json
+spine import hermes "$repo/testdata/harnesses/session_hermes-demo.fixture.json" --json
+spine import hermes "$repo/testdata/harnesses/hermes-trajectory.fixture.jsonl" --json
 
 spine status --json
 spine scans list --json
@@ -44,4 +46,3 @@ Expected results:
 - search returns at least one result
 - evidence returns `untrusted_context: true`
 - evidence result `artifacts` fields encode as arrays, including empty arrays
-

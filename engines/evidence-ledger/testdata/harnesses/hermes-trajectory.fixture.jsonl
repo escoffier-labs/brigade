@@ -1,0 +1,1 @@
+{"conversations":[{"from":"human","value":"Harvest Hermes trajectory records without exposing private logs."},{"from":"gpt","value":"The Hermes trajectory adapter emits normalized evidence records."}],"timestamp":"2026-06-03T20:10:00","model":"qwen3-coder","completed":true}

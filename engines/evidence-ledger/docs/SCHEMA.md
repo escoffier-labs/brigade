@@ -2,7 +2,7 @@
 
 The MVP uses one SQLite migration with these concepts:
 
-- `sources`: source tools such as `discrawl`, `codex`, or `aicrawl`
+- `sources`: source tools such as `discrawl`, `codex`, `hermes`, or `sourceharvest`
 - `collections`: bounded containers such as channels, exports, sessions, and repos
 - `actors`: humans, assistants, agents, tools, bots, and systems
 - `items`: atomic records such as messages, decisions, tool calls, errors, and notes

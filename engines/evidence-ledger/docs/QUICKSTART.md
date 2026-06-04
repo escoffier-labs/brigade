@@ -38,6 +38,7 @@ Native imports:
 spine import codex ~/.codex/sessions --json
 spine import openclaw ~/.openclaw/agents --json
 spine import claude ~/.claude/projects --json
+spine import hermes ~/.hermes/sessions --json
 ```
 
 AgentTrail imports:
@@ -111,4 +112,3 @@ scripts/smoke_mcp.sh
 ```
 
 See [MCP.md](MCP.md) for configuration examples and tool details.
-

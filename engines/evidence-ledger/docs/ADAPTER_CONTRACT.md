@@ -39,12 +39,13 @@ If a source lacks stable IDs, adapters should create deterministic external IDs 
 
 ## Native Adapter Generators
 
-Logspine includes conservative native generators for local agent-session JSONL:
+Logspine includes conservative native generators for local agent-session JSON and JSONL:
 
 ```bash
 spine adapter codex <path-or-dir> --out <file|->
 spine adapter openclaw <path-or-dir> --out <file|->
 spine adapter claude <path-or-dir> --out <file|->
+spine adapter hermes <path-or-dir> --out <file|->
 ```
 
 They emit the same `logspine.adapter.v1` JSONL contract as external tools. Native import commands generate adapter records and reuse the adapter import path internally:
@@ -53,6 +54,7 @@ They emit the same `logspine.adapter.v1` JSONL contract as external tools. Nativ
 spine import codex <path-or-dir> --json
 spine import openclaw <path-or-dir> --json
 spine import claude <path-or-dir> --json
+spine import hermes <path-or-dir> --json
 spine import discovered --json
 spine watch once --json
 spine watch once --if-changed --json
@@ -61,7 +63,7 @@ spine watch once --if-changed --json
 Scanner rules:
 
 - Accept a file or directory.
-- Walk recursively for relevant `.jsonl` files.
+- Walk recursively for relevant `.jsonl` files and source-specific JSON files such as Hermes `session_*.json` snapshots.
 - Skip obvious backups, deleted files, `skills-prompts`, and sidecar metadata.
 - Preserve raw refs with `raw.format=json`, `raw.path`, `raw.ordinal`, and `raw.hash`.
 - Never crash on unknown event shapes. Emit warnings and keep going.
@@ -72,6 +74,8 @@ Scanner rules:
 - Record source-file scan manifests with path, size, mtime, content hash, generated hash, record count, and warnings.
 
 Claude support targets `~/.claude/projects/**/*.jsonl` style project logs. The MVP scanner imports ordinary project session JSONL and does not special-case subagents yet; subagent lines are treated as normal agent-session evidence unless a future fixture shows a safer split.
+
+Hermes support targets `~/.hermes/sessions/session_*.json` snapshots and trajectory JSONL. Logspine does not parse Hermes `state.db` directly.
 
 ## AgentTrail External Scanner
 
@@ -95,7 +99,7 @@ spine import agenttrail opencode opencode-session.json --json
 spine import agenttrail hermes ~/.hermes/sessions --json
 ```
 
-Use AgentTrail when source-specific harness parsing should live outside Logspine. Keep Logspine focused on ingest, normalized storage, FTS, scan manifests, relation resolution, and evidence output.
+Use AgentTrail when source-specific harness parsing should live outside Logspine or when exporting OpenCode. Logspine also has native parsers for Codex, Claude, OpenClaw, and Hermes snapshot or trajectory files. Keep Logspine focused on ingest, normalized storage, FTS, scan manifests, relation resolution, and evidence output.
 
 AgentTrail `discover`, `doctor`, `doctor --live`, `inspect`, and `--dry-run --json` modes report roots, structural keys, counts, records, and warnings without printing transcript content. Logspine's `import agenttrail` wrapper records AgentTrail scan manifests when AgentTrail writes summary output. For `agenttrail all`, prefer piping to `spine import adapter -` so mixed-source records retain their individual `source.kind`.
 

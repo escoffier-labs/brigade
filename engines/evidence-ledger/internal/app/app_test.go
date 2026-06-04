@@ -281,7 +281,7 @@ func TestSourceDiscoveryDoesNotPrintTranscriptContent(t *testing.T) {
 	for _, item := range discovered {
 		if item["source_kind"] == "hermes" {
 			foundHermes = true
-			if item["status"] != "agenttrail-supported" || item["count"].(float64) != 1 {
+			if item["status"] != "native-json" || item["count"].(float64) != 1 {
 				t.Fatalf("unexpected Hermes discovery row: %v", item)
 			}
 		}
@@ -307,6 +307,8 @@ func TestNativeAdaptersImportAndEvidence(t *testing.T) {
 	claudeFixture := repoPath(t, "testdata/harnesses/claude-project.fixture.jsonl")
 	openclawFixture := repoPath(t, "testdata/harnesses/openclaw-session.fixture.jsonl")
 	trajectoryFixture := repoPath(t, "testdata/harnesses/openclaw-trajectory.fixture.jsonl")
+	hermesSnapshotFixture := repoPath(t, "testdata/harnesses/session_hermes-demo.fixture.json")
+	hermesTrajectoryFixture := repoPath(t, "testdata/harnesses/hermes-trajectory.fixture.jsonl")
 	malformedFixture := repoPath(t, "testdata/harnesses/malformed-unknown.fixture.jsonl")
 
 	adapterJSONL := runOK(t, "adapter", "codex", codexFixture, "--out", "-")
@@ -326,6 +328,10 @@ func TestNativeAdaptersImportAndEvidence(t *testing.T) {
 	if !strings.Contains(adapterJSONL, "exec_command") || !strings.Contains(adapterJSONL, "encrypted_content present") {
 		t.Fatalf("codex adapter did not include real response_item shapes: %s", adapterJSONL)
 	}
+	hermesAdapterJSONL := runOK(t, "adapter", "hermes", hermesSnapshotFixture, "--out", "-")
+	if !strings.Contains(hermesAdapterJSONL, "logspine.adapter.v1") || !strings.Contains(hermesAdapterJSONL, "Hermes snapshots") {
+		t.Fatalf("hermes adapter did not emit expected records: %s", hermesAdapterJSONL)
+	}
 
 	runOK(t, "import", "adapter", crawler, "--source", "discrawl")
 	codexImport := runJSON(t, "import", "codex", codexFixture, "--json")
@@ -341,11 +347,21 @@ func TestNativeAdaptersImportAndEvidence(t *testing.T) {
 		t.Fatalf("claude import inserted no items: %v", claudeImport)
 	}
 	runOK(t, "import", "openclaw", trajectoryFixture, "--json")
+	hermesSnapshotImport := runJSON(t, "import", "hermes", hermesSnapshotFixture, "--json")
+	if hermesSnapshotImport["inserted_items"].(float64) == 0 {
+		t.Fatalf("hermes snapshot import inserted no items: %v", hermesSnapshotImport)
+	}
+	hermesTrajectoryImport := runJSON(t, "import", "hermes", hermesTrajectoryFixture, "--json")
+	if hermesTrajectoryImport["inserted_items"].(float64) == 0 {
+		t.Fatalf("hermes trajectory import inserted no items: %v", hermesTrajectoryImport)
+	}
 
 	before := runJSON(t, "status", "--json")
 	runOK(t, "import", "codex", codexFixture, "--json")
 	runOK(t, "import", "openclaw", openclawFixture, "--json")
 	runOK(t, "import", "claude", claudeFixture, "--json")
+	runOK(t, "import", "hermes", hermesSnapshotFixture, "--json")
+	runOK(t, "import", "hermes", hermesTrajectoryFixture, "--json")
 	after := runJSON(t, "status", "--json")
 	if before["items"] != after["items"] {
 		t.Fatalf("reimport changed item count: before=%v after=%v", before["items"], after["items"])
@@ -377,6 +393,14 @@ func TestNativeAdaptersImportAndEvidence(t *testing.T) {
 	if len(claudeSearch["results"].([]any)) == 0 {
 		t.Fatalf("claude search returned no results")
 	}
+	hermesSearch := runJSON(t, "search", "Hermes snapshots", "--source", "hermes", "--json")
+	if len(hermesSearch["results"].([]any)) == 0 {
+		t.Fatalf("hermes snapshot search returned no results")
+	}
+	hermesTrajectorySearch := runJSON(t, "search", "trajectory adapter", "--source", "hermes", "--json")
+	if len(hermesTrajectorySearch["results"].([]any)) == 0 {
+		t.Fatalf("hermes trajectory search returned no results")
+	}
 	commandSearch := runJSON(t, "search", "exec_command", "--source", "codex", "--kind", "command", "--json")
 	commandResults := commandSearch["results"].([]any)
 	if len(commandResults) == 0 {
@@ -407,6 +431,16 @@ func TestNativeAdaptersImportAndEvidence(t *testing.T) {
 	claudeRelations := claudeToolShow["relations"].([]any)
 	if len(claudeRelations) == 0 || claudeRelations[0].(map[string]any)["target_item_id"] == nil {
 		t.Fatalf("claude tool result relation was not resolved: %v", claudeToolShow)
+	}
+	hermesToolResult := runJSON(t, "search", "adapter smoke completed", "--source", "hermes", "--kind", "tool_call", "--json")
+	if len(hermesToolResult["results"].([]any)) == 0 {
+		t.Fatalf("hermes tool result search returned no results: %v", hermesToolResult)
+	}
+	hermesToolID := hermesToolResult["results"].([]any)[0].(map[string]any)["id"].(string)
+	hermesToolShow := runJSON(t, "show", hermesToolID, "--json")
+	hermesRelations := hermesToolShow["relations"].([]any)
+	if len(hermesRelations) == 0 || hermesRelations[0].(map[string]any)["target_item_id"] == nil {
+		t.Fatalf("hermes tool result relation was not resolved: %v", hermesToolShow)
 	}
 
 	evidence := runJSON(t, "evidence", "adapter contract", "--json")
@@ -491,6 +525,11 @@ func TestImportDiscoveredAndWatchOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 	copyFixture(t, repoPath(t, "testdata/harnesses/codex-session.fixture.jsonl"), filepath.Join(root, "codex.jsonl"))
+	hermesRoot := filepath.Join(os.Getenv("HOME"), ".hermes", "sessions")
+	if err := os.MkdirAll(hermesRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	copyFixture(t, repoPath(t, "testdata/harnesses/session_hermes-demo.fixture.json"), filepath.Join(hermesRoot, "session_hermes-demo.json"))
 	out := runJSON(t, "import", "discovered", "--json")
 	if out["inserted_items"].(float64) == 0 {
 		t.Fatalf("discovered import inserted no items: %v", out)
@@ -502,6 +541,10 @@ func TestImportDiscoveredAndWatchOnce(t *testing.T) {
 	scans := runJSON(t, "scans", "list", "--source", "codex", "--json")
 	if len(scans["scans"].([]any)) != 1 {
 		t.Fatalf("expected discovered scan manifest: %v", scans)
+	}
+	hermesScans := runJSON(t, "scans", "list", "--source", "hermes", "--json")
+	if len(hermesScans["scans"].([]any)) != 1 {
+		t.Fatalf("expected Hermes discovered scan manifest: %v", hermesScans)
 	}
 	skipped := runJSON(t, "watch", "once", "--if-changed", "--json")
 	if skipped["skipped"] != true {

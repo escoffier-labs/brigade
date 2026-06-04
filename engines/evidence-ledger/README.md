@@ -50,9 +50,11 @@ spine init
 spine import adapter testdata/adapters/discrawl.fixture.jsonl --source discrawl
 spine import adapter testdata/adapters/agent-session.fixture.jsonl --source codex
 spine adapter codex testdata/harnesses/codex-session.fixture.jsonl --out -
+spine adapter hermes testdata/harnesses/session_hermes-demo.fixture.json --out -
 spine import codex testdata/harnesses/codex-session.fixture.jsonl --json
 spine import openclaw testdata/harnesses/openclaw-session.fixture.jsonl --json
 spine import claude testdata/harnesses/claude-project.fixture.jsonl --json
+spine import hermes testdata/harnesses/session_hermes-demo.fixture.json --json
 spine status --json
 spine scans list --json
 spine sources discover --json
@@ -75,6 +77,7 @@ Native adapter generators convert local session JSONL into `logspine.adapter.v1`
 spine adapter codex ~/.codex/sessions --out codex.adapter.jsonl --limit 100
 spine adapter openclaw ~/.openclaw/agents --out openclaw.adapter.jsonl --since 2026-06-01
 spine adapter claude ~/.claude/projects --out claude.adapter.jsonl --limit 100
+spine adapter hermes ~/.hermes/sessions --out hermes.adapter.jsonl --limit 100
 ```
 
 Native import commands stream generated adapter records into the same adapter ingest path:
@@ -83,13 +86,14 @@ Native import commands stream generated adapter records into the same adapter in
 spine import codex ~/.codex/sessions --json
 spine import openclaw ~/.openclaw/agents --json
 spine import claude ~/.claude/projects --json
+spine import hermes ~/.hermes/sessions --json
 spine import codex testdata/harnesses/malformed-unknown.fixture.jsonl --dry-run --json
 spine import discovered --json
 spine watch once --json
 spine watch once --if-changed --json
 ```
 
-The scanners accept a file or directory, walk JSONL files recursively, skip obvious backups and sidecars, preserve raw refs, and warn rather than crash on malformed or unknown events.
+The scanners accept a file or directory, walk relevant JSON and JSONL files recursively, skip obvious backups and sidecars, preserve raw refs, and warn rather than crash on malformed or unknown events. Hermes native support covers `session_*.json` snapshots and trajectory JSONL under `~/.hermes/sessions`; Hermes `state.db` is not parsed directly.
 
 ## External AgentTrail Scanner
 

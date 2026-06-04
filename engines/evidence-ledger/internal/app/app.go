@@ -22,12 +22,13 @@ import (
 	"github.com/openclaw/logspine/internal/sources"
 	"github.com/openclaw/logspine/internal/sources/claude"
 	"github.com/openclaw/logspine/internal/sources/codex"
+	"github.com/openclaw/logspine/internal/sources/hermes"
 	"github.com/openclaw/logspine/internal/sources/openclaw"
 )
 
 var stdin io.Reader = os.Stdin
 
-const Version = "0.1.2"
+const Version = "0.1.3"
 
 func Run(args []string, out, errw io.Writer) int {
 	if len(args) == 0 || args[0] == "--help" || args[0] == "-h" || args[0] == "help" {
@@ -270,7 +271,7 @@ func discoverSources() []map[string]any {
 		{"codex", filepath.Join(home, ".codex", "sessions"), "native-jsonl"},
 		{"openclaw", filepath.Join(home, ".openclaw", "agents"), "native-jsonl"},
 		{"claude", filepath.Join(home, ".claude", "projects"), "native-jsonl"},
-		{"hermes", filepath.Join(home, ".hermes", "sessions"), "agenttrail-supported"},
+		{"hermes", filepath.Join(home, ".hermes", "sessions"), "native-json"},
 	}
 	out := make([]map[string]any, 0, len(candidates))
 	for _, c := range candidates {
@@ -281,7 +282,7 @@ func discoverSources() []map[string]any {
 				exists = true
 				include := sources.DefaultInclude
 				if c.kind == "hermes" {
-					include = includeHermesSessionFile
+					include = hermes.Include
 				}
 				if files, err := sources.ListJSONLFiles(c.root, include); err == nil {
 					count = len(files)
@@ -297,20 +298,6 @@ func discoverSources() []map[string]any {
 		})
 	}
 	return out
-}
-
-func includeHermesSessionFile(path string) bool {
-	name := strings.ToLower(filepath.Base(path))
-	if strings.Contains(name, "backup") || strings.Contains(name, ".bak") || strings.Contains(name, "deleted") {
-		return false
-	}
-	if strings.HasPrefix(name, "request_dump_") {
-		return false
-	}
-	if strings.HasPrefix(name, "session_") && strings.HasSuffix(name, ".json") {
-		return true
-	}
-	return strings.HasSuffix(name, ".jsonl") && strings.Contains(name, "trajectory")
 }
 
 func cmdScans(args []string, out, errw io.Writer) int {
@@ -547,7 +534,7 @@ func checkPrivate(path string) bool {
 
 func cmdImport(args []string, out, errw io.Writer) int {
 	if len(args) == 0 {
-		return fatalf(errw, "usage: spine import adapter|agenttrail|codex|openclaw|claude <path>")
+		return fatalf(errw, "usage: spine import adapter|agenttrail|codex|openclaw|claude|hermes <path>")
 	}
 	switch args[0] {
 	case "adapter":
@@ -564,8 +551,10 @@ func cmdImport(args []string, out, errw io.Writer) int {
 		return cmdImportNative("openclaw", openclaw.Generate, args[1:], out, errw)
 	case "claude":
 		return cmdImportNative("claude", claude.Generate, args[1:], out, errw)
+	case "hermes":
+		return cmdImportNative("hermes", hermes.Generate, args[1:], out, errw)
 	default:
-		return fatalf(errw, "usage: spine import adapter|discovered|agenttrail|sourceharvest|codex|openclaw|claude <path>")
+		return fatalf(errw, "usage: spine import adapter|discovered|agenttrail|sourceharvest|codex|openclaw|claude|hermes <path>")
 	}
 }
 
@@ -714,7 +703,7 @@ func runAgentTrailImport(db *sql.DB, sourceKind, sourcePath string, values map[s
 
 func cmdAdapter(args []string, out, errw io.Writer) int {
 	if len(args) == 0 {
-		return fatalf(errw, "usage: spine adapter codex|openclaw|claude <path-or-dir> --out <file|->")
+		return fatalf(errw, "usage: spine adapter codex|openclaw|claude|hermes <path-or-dir> --out <file|->")
 	}
 	switch args[0] {
 	case "codex":
@@ -723,8 +712,10 @@ func cmdAdapter(args []string, out, errw io.Writer) int {
 		return cmdAdapterGenerate("openclaw", openclaw.Generate, args[1:], out, errw)
 	case "claude":
 		return cmdAdapterGenerate("claude", claude.Generate, args[1:], out, errw)
+	case "hermes":
+		return cmdAdapterGenerate("hermes", hermes.Generate, args[1:], out, errw)
 	default:
-		return fatalf(errw, "usage: spine adapter codex|openclaw|claude <path-or-dir> --out <file|->")
+		return fatalf(errw, "usage: spine adapter codex|openclaw|claude|hermes <path-or-dir> --out <file|->")
 	}
 }
 

@@ -1,0 +1,37 @@
+{
+  "session_id": "hermes-demo",
+  "model": "qwen3-coder",
+  "platform": "cli",
+  "session_start": "2026-06-03T20:00:00",
+  "last_updated": "2026-06-03T20:02:00",
+  "message_count": 3,
+  "messages": [
+    {
+      "role": "user",
+      "content": "Create a Hermes adapter fixture for Logspine evidence."
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "text",
+          "text": "Hermes snapshots can be normalized into agent-session records."
+        },
+        {
+          "type": "tool_call",
+          "name": "shell",
+          "id": "hermes-tool-1",
+          "input": {
+            "cmd": "agenttrail hermes ~/.hermes/sessions --out -"
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "tool_call_id": "hermes-tool-1",
+      "name": "shell",
+      "content": "Hermes adapter smoke completed."
+    }
+  ]
+}

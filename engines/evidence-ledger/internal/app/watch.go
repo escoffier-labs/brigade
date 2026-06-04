@@ -18,6 +18,7 @@ import (
 	"github.com/openclaw/logspine/internal/sources"
 	"github.com/openclaw/logspine/internal/sources/claude"
 	"github.com/openclaw/logspine/internal/sources/codex"
+	"github.com/openclaw/logspine/internal/sources/hermes"
 	"github.com/openclaw/logspine/internal/sources/openclaw"
 )
 
@@ -333,6 +334,6 @@ func discoveredRoots() []discoveredRoot {
 		{Kind: "codex", Root: filepath.Join(home, ".codex", "sessions"), Generator: codex.Generate},
 		{Kind: "openclaw", Root: filepath.Join(home, ".openclaw", "agents"), Generator: openclaw.Generate},
 		{Kind: "claude", Root: filepath.Join(home, ".claude", "projects"), Generator: claude.Generate},
-		{Kind: "hermes", Root: filepath.Join(home, ".hermes", "sessions"), External: true},
+		{Kind: "hermes", Root: filepath.Join(home, ".hermes", "sessions"), Generator: hermes.Generate},
 	}
 }
