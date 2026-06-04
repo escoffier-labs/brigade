@@ -603,77 +603,24 @@ def verify_harness_payload(target: Path, *, harness: str) -> dict[str, Any]:
 
 
 def _hermes_adapter_checks(target: Path, inbox_rel: str) -> list[dict[str, Any]]:
-    fragments_dir = target / ".brigade" / "hermes"
-    expected = [
-        "workspace.harness.json",
-        "memory-handoff.harness.json",
-        "model-lanes.harness.json",
-        "README.md",
-    ]
-    checks: list[dict[str, Any]] = []
-    for name in expected:
-        path = fragments_dir / name
-        if path.is_file():
-            checks.append({"status": "ok", "name": f"hermes_adapter_{name}", "detail": str(path)})
-        else:
-            checks.append(
-                {
-                    "status": "warn",
-                    "name": f"hermes_adapter_{name}",
-                    "detail": f"missing at {path}; run `brigade hermes-fragments --out .brigade/hermes`",
-                }
-            )
+    from .hermes_adapter import inspect_hermes_adapter
 
-    processed_rel = f"{inbox_rel}/processed"
-    workspace_payload, workspace_error = _read_json_object(fragments_dir / "workspace.harness.json")
-    if workspace_payload is not None:
-        workspace = workspace_payload.get("workspace", {})
-        if not isinstance(workspace, dict):
-            workspace = {}
-        handoff_inbox = workspace.get("handoff_inbox")
-        if handoff_inbox == inbox_rel:
-            checks.append({"status": "ok", "name": "hermes_adapter_workspace_handoff_inbox", "detail": inbox_rel})
-        else:
-            checks.append(
-                {
-                    "status": "fail",
-                    "name": "hermes_adapter_workspace_handoff_inbox",
-                    "detail": f"expected {inbox_rel}, found {handoff_inbox!r}",
-                }
-            )
-    elif workspace_error:
-        checks.append({"status": "fail", "name": "hermes_adapter_workspace_json", "detail": workspace_error})
+    return [_operator_hermes_result(item) for item in inspect_hermes_adapter(target, inbox_rel)]
 
-    handoff_payload, handoff_error = _read_json_object(fragments_dir / "memory-handoff.harness.json")
-    if handoff_payload is not None:
-        handoff = handoff_payload.get("memory_handoff", {})
-        if not isinstance(handoff, dict):
-            handoff = {}
-        configured_inbox = handoff.get("inbox_dir")
-        configured_processed = handoff.get("processed_dir")
-        if configured_inbox == inbox_rel:
-            checks.append({"status": "ok", "name": "hermes_adapter_memory_handoff_inbox", "detail": inbox_rel})
-        else:
-            checks.append(
-                {
-                    "status": "fail",
-                    "name": "hermes_adapter_memory_handoff_inbox",
-                    "detail": f"expected {inbox_rel}, found {configured_inbox!r}",
-                }
-            )
-        if configured_processed == processed_rel:
-            checks.append({"status": "ok", "name": "hermes_adapter_processed_handoff_inbox", "detail": processed_rel})
-        else:
-            checks.append(
-                {
-                    "status": "fail",
-                    "name": "hermes_adapter_processed_handoff_inbox",
-                    "detail": f"expected {processed_rel}, found {configured_processed!r}",
-                }
-            )
-    elif handoff_error:
-        checks.append({"status": "fail", "name": "hermes_adapter_memory_handoff_json", "detail": handoff_error})
-    return checks
+
+def _operator_hermes_result(item: dict[str, Any]) -> dict[str, Any]:
+    result_id = item.get("id")
+    if result_id == "fragment":
+        name = f"hermes_adapter_{item.get('fragment')}"
+    else:
+        name = {
+            "workspace_handoff_inbox": "hermes_adapter_workspace_handoff_inbox",
+            "workspace_json": "hermes_adapter_workspace_json",
+            "memory_handoff_inbox": "hermes_adapter_memory_handoff_inbox",
+            "processed_handoff_inbox": "hermes_adapter_processed_handoff_inbox",
+            "memory_handoff_json": "hermes_adapter_memory_handoff_json",
+        }.get(str(result_id), f"hermes_adapter_{result_id}")
+    return {"status": item.get("status", "warn"), "name": name, "detail": str(item.get("detail", ""))}
 
 
 def _path_under(path: Path, root: Path) -> bool:
@@ -682,18 +629,6 @@ def _path_under(path: Path, root: Path) -> bool:
     except ValueError:
         return False
     return True
-
-
-def _read_json_object(path: Path) -> tuple[dict[str, Any] | None, str | None]:
-    if not path.is_file():
-        return None, None
-    try:
-        payload = json.loads(path.read_text())
-    except json.JSONDecodeError as exc:
-        return None, f"invalid JSON: {exc}"
-    if not isinstance(payload, dict):
-        return None, "expected JSON object"
-    return payload, None
 
 
 def verify_harness(*, target: Path, harness: str, json_output: bool = False) -> int:
