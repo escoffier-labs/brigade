@@ -13,11 +13,11 @@ brigade handoff lint --content-guard --guard-policy personal --target .
 
 Requirements before ingest:
 
-- Brigade lint passes.
-- Content Guard passes with the `personal` policy.
-- The operator has reviewed the handoff.
-- The target memory card or document is explicit.
-- Raw transcripts, tokens, host-private paths, and private identifiers are absent or redacted.
+- Brigade lint is available before ingest, and lint-failing drafts stay review items.
+- Content Guard is run with the `personal` policy when configured.
+- The target memory card or document is explicit for anything the ingester files.
+- Ambiguous, risky, malformed, or private-looking drafts are skipped or routed for operator review instead of being trusted automatically.
+- Raw transcripts, tokens, host-private paths, and private identifiers are absent or redacted before durable memory is written.
 
 ## Inspect A Draft
 
@@ -35,9 +35,9 @@ Review:
 
 ## Ingest Boundary
 
-Brigade does not write canonical memory. OpenClaw, Hermes, or another memory owner performs the actual ingest after review.
+Brigade does not write canonical memory. OpenClaw, Hermes, or another memory owner performs the actual ingest as an explicit operator-approved action. Safe targeted handoffs may be filed by the ingester; skipped, failed, malformed, warning, or ambiguous outcomes remain review work.
 
-Treat every file under `.claude/memory-handoffs/`, `.codex/memory-handoffs/`, `.opencode/memory-handoffs/`, and `.hermes/memory-handoffs/` as pending review until it has an ingestion receipt or manual archive record.
+Treat every file under `.claude/memory-handoffs/`, `.codex/memory-handoffs/`, `.opencode/memory-handoffs/`, and `.hermes/memory-handoffs/` as pending ingest or review until it has an ingestion receipt or manual archive record.
 
 ## Reconcile Receipts
 
@@ -98,7 +98,7 @@ Archive only after the handoff is either ingested, intentionally skipped, or rep
 brigade handoff list --target .
 brigade handoff lint --content-guard --guard-policy personal --target .
 brigade handoff show <handoff-id-or-path> --target .
-# memory owner ingests outside Brigade
+# memory owner ingests outside Brigade, then review skipped or flagged outcomes
 brigade handoff reconcile --target .
 brigade handoff archive <handoff-id-or-path> --target .
 ```

@@ -74,7 +74,7 @@ Before ingesting into canonical memory, run:
 brigade handoff lint --content-guard --guard-policy personal --target .
 ```
 
-The intended memory-owner rule is: Brigade lint passes, Content Guard passes when configured, and the operator has reviewed the note. Only then should OpenClaw, Hermes, or another owner ingest the handoff into durable memory.
+The intended memory-owner rule is: Brigade lint is available, Content Guard runs when configured, and the ingester files only safe targeted handoffs. Ambiguous, risky, malformed, or failed handoffs should stay pending for operator review instead of being trusted automatically.
 
 For the short operational checklist, see [OpenClaw Memory Ingest Checklist](openclaw-memory-ingest-checklist.md).
 

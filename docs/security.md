@@ -23,7 +23,7 @@ Policy guidance:
 - `public-content`: stricter checks for blog, social, site copy, and other user-facing content.
 - `strict`: high-sensitivity review where false positives are acceptable.
 
-The memory-owner boundary is: ingest only handoffs that pass Brigade lint, Content Guard when configured, and human review. OpenClaw or Hermes should treat raw handoff inbox files as pending review, not permanent memory.
+The memory-owner boundary is: ingest only handoffs that pass Brigade lint, Content Guard when configured, and have an explicit safe route. OpenClaw or Hermes should leave ambiguous, risky, malformed, or failed inbox files pending for operator review instead of treating raw handoffs as permanent memory.
 
 ## Local Config
 

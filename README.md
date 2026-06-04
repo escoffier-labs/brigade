@@ -2,10 +2,10 @@
   <img src="docs/assets/brigade-social-preview.jpg" alt="Brigade" width="900">
 </p>
 
-<h1 align="center">Brigade</h1>
+<h1 align="center">Brigade CLI</h1>
 
 <p align="center">
-  <strong>Shared memory and local guardrails for people using AI agent tools.</strong>
+  <strong>AI agent memory, handoffs, and local guardrails for Codex, Claude Code, OpenCode, Hermes, and OpenClaw.</strong>
 </p>
 
 <p align="center">
@@ -15,16 +15,27 @@
   <img src="https://img.shields.io/badge/license-MIT-green?style=for-the-badge" alt="MIT license">
 </p>
 
+Brigade is a local-first operator CLI for AI agent workspaces. The public GitHub repo is [`escoffier-labs/brigade`](https://github.com/escoffier-labs/brigade), the PyPI package is [`brigade-cli`](https://pypi.org/project/brigade-cli/), and the command is `brigade`.
+
 Brigade helps AI agent tools work from the same memory without turning that memory into a junk drawer.
 
 If you use [OpenClaw](https://github.com/solomonneas/openclaw), Hermes, Codex, Claude Code, OpenCode, or a mix of them, Brigade gives those tools a shared local pattern:
 
 1. agents write handoff notes
-2. you review the notes
-3. useful notes become durable memory
-4. future sessions start with better context
+2. the memory ingester scans, lints, and routes them
+3. safe targeted notes become durable memory
+4. ambiguous or risky notes wait for review
+5. future sessions start with better context
 
 It is intentionally local. Brigade writes files and review queues on your machine. It does not run a background service, publish releases, push to GitHub, send notifications, or rewrite permanent memory unless you explicitly run the command that does it.
+
+## Project Identity
+
+- GitHub: [`escoffier-labs/brigade`](https://github.com/escoffier-labs/brigade)
+- Website: [`brigade.solomonneas.dev`](https://brigade.solomonneas.dev)
+- PyPI package: [`brigade-cli`](https://pypi.org/project/brigade-cli/)
+- CLI command: `brigade`
+- Core search terms: AI agent memory, agent handoffs, Codex memory, Claude Code memory, OpenCode handoffs, local-first agent workflow, AGENTS.md, agent guardrails
 
 ## Why This Exists
 
@@ -68,7 +79,7 @@ brigade handoff draft \
 Put the durable note here."
 ```
 
-Then review the draft before adding it to long-term memory.
+Then run your memory owner's ingester. Safe targeted notes can be filed into long-term memory; ambiguous or risky notes stay visible for review.
 
 That is the simplest useful version of Brigade: shared handoffs, local review, durable memory.
 
@@ -81,11 +92,11 @@ Each writer harness gets its own local inbox:
 - `.opencode/memory-handoffs/`
 - `.hermes/memory-handoffs/`
 
-The memory owner, usually OpenClaw or Hermes, can ingest reviewed handoffs into the permanent memory files. Brigade keeps the handoff format consistent so different tools can contribute without each one inventing its own note style.
+The memory owner, usually OpenClaw or Hermes, can ingest handoffs into the permanent memory files. Brigade keeps the handoff format consistent so different tools can contribute without each one inventing its own note style.
 
 ![One shared memory, many agent tools](docs/assets/brigade-memory-flow.svg)
 
-The important part is the review step. Brigade does not assume every agent note deserves to become permanent memory.
+The important part is the boundary. The ingester should be conservative: safe card handoffs can become cards, targeted updates can append to the right file, and ambiguous material should be kicked back for review instead of trusted automatically.
 
 ## The Local Loop
 
@@ -93,8 +104,9 @@ Brigade is built around a simple daily loop:
 
 1. set up the repo
 2. let agents work
-3. review what they produced
-4. save only the parts worth remembering
+3. run the memory ingester
+4. review anything skipped, flagged, or ambiguous
+5. save only the parts worth remembering
 
 ![The Brigade loop stays local and reviewable](docs/assets/brigade-local-loop.svg)
 
@@ -109,6 +121,7 @@ For memory:
 - lint handoff drafts before ingest
 - scan handoff drafts with Content Guard before they become durable memory
 - track which local inboxes the ingestor should watch
+- reconcile ingester receipts so skipped, failed, routed, and promoted notes stay visible
 - support OpenClaw, Hermes, Codex, Claude Code, and OpenCode conventions
 
 For local work:
@@ -210,13 +223,14 @@ It does not:
 - publish packages
 - send notifications by default
 - save every note automatically
-- replace the human review step
+- turn memory ingest into a silent background process
+- skip review for ambiguous, risky, or failed notes
 
 That pause is the point. Agent memory should be useful, not noisy.
 
 ## For OpenClaw Users
 
-OpenClaw can be the memory owner. Brigade gives nearby tools a way to contribute reviewed notes back into that owner memory without forcing every tool to know OpenClaw internals.
+OpenClaw can be the memory owner. Brigade gives nearby tools a way to contribute checked handoffs back into that owner memory without forcing every tool to know OpenClaw internals.
 
 ![Memory ingest stays outside Brigade until receipts return](docs/assets/openclaw-ingest-flow.svg)
 
@@ -228,7 +242,7 @@ brigade handoff sources init --target ./my-repo
 brigade handoff doctor --target ./my-repo
 ```
 
-Then writer tools leave handoffs in their own inboxes, and the memory owner ingests only what you approve.
+Then writer tools leave handoffs in their own inboxes, and the memory owner ingests the safe targeted notes while Brigade keeps receipts for promoted, routed, skipped, failed, malformed, and warning outcomes.
 
 ## For Hermes Users
 
@@ -289,8 +303,8 @@ The full technical walkthrough still exists; it is just not the README anymore.
 
 - [Technical guide](docs/technical-guide.md): the detailed command walkthrough.
 - [Security and Content Guard](docs/security.md): scanner policies, handoff guards, and import flow.
-- [Handoff promotion](docs/handoff-promotion.md): how reviewed notes move toward memory.
-- [OpenClaw memory ingest checklist](docs/openclaw-memory-ingest-checklist.md): the review gate before handoffs become memory.
+- [Handoff promotion](docs/handoff-promotion.md): how notes move toward memory.
+- [OpenClaw memory ingest checklist](docs/openclaw-memory-ingest-checklist.md): the ingest boundary and receipt checks for handoffs.
 - [Hermes handoffs](docs/hermes-handoffs.md): Hermes writer inbox setup.
 - [Repo fleet](docs/repo-fleet.md): local multi-repo health, actions, and release evidence.
 - [Tool catalog](docs/tool-catalog.md): portable tools, projections, approvals, and run receipts.

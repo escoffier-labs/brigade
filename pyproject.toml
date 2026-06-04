@@ -5,12 +5,12 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "brigade-cli"
 version = "0.8.0"
-description = "Run your agent brigade: an operator-system CLI that bootstraps, checks, and operates agent workspaces across harnesses."
+description = "AI agent memory, handoffs, and local guardrails for Codex, Claude Code, OpenCode, Hermes, and OpenClaw."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
 authors = [{ name = "Solomon Neas", email = "srneas@gmail.com" }] # content-guard: allow email
-keywords = ["agents", "ai-agents", "agent-memory", "openclaw", "claude-code", "codex", "opencode", "memory", "bootstrap", "brigade", "operator", "local-first"]
+keywords = ["agents", "ai-agents", "agent-memory", "agent-handoffs", "ai-memory", "openclaw", "claude-code", "codex", "opencode", "memory", "bootstrap", "brigade", "brigade-cli", "operator", "local-first", "guardrails", "agents-md"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "License :: OSI Approved :: MIT License",
