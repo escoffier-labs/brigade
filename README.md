@@ -257,6 +257,8 @@ brigade operator verify-harness --harness hermes --target .
 brigade handoff list --target .
 ```
 
+The verifier checks both the `.hermes/memory-handoffs/` writer inbox and the `.brigade/hermes/` adapter fragments.
+
 See [Hermes handoffs](docs/hermes-handoffs.md) for the current boundaries.
 
 ## Content Guard

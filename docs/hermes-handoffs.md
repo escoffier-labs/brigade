@@ -54,8 +54,12 @@ Expected ready state:
 
 - `.hermes/memory-handoffs/` exists
 - `.hermes/memory-handoffs/` is gitignored
+- `.brigade/hermes/` includes the Hermes adapter fragments
+- Hermes adapter fragments point at `.hermes/memory-handoffs/`
 - `.brigade/handoff-sources.json` watches `.hermes/memory-handoffs/`
 - pending Hermes drafts pass `brigade handoff lint`
+
+`operator verify-harness --harness hermes` checks both the writer inbox and the repo-local adapter fragments. If those fragments are missing or point at another inbox, it reports a repair command before declaring the harness ready.
 
 After a memory owner reviews and ingests a Hermes draft, record the outcome locally:
 

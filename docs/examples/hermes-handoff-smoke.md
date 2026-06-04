@@ -31,4 +31,6 @@ Expected local paths:
 - `.brigade/hermes/memory-handoff.harness.json`
 - `.brigade/handoff-sources.json`
 
+The verifier checks that the Hermes adapter fragments point at `.hermes/memory-handoffs/`, not another harness inbox.
+
 Brigade does not start Hermes, call a Hermes API, or ingest memory automatically. The example verifies the repo-local handoff contract Hermes users depend on.
