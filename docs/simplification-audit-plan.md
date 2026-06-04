@@ -2,6 +2,8 @@
 
 This is the next-phase scope for checking whether Brigade has overlapping tools, duplicated commands, or workflows that can be safely collapsed.
 
+The first audit result is captured in [`docs/simplification-audit-report.md`](simplification-audit-report.md).
+
 ## Goal
 
 Reduce command and implementation overlap without weakening Brigade's operator, memory, security, release, or harness contracts.
