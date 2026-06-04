@@ -202,6 +202,8 @@ def test_operator_doctor_blocks_on_tool_projection_health(tmp_path, capsys, monk
 
 
 def test_operator_verify_harness_hermes_after_handoff_init_and_draft(tmp_path, capsys):
+    assert cli.main(["init", "--target", str(tmp_path), "--depth", "workspace", "--harnesses", "hermes"]) == 0
+    capsys.readouterr()
     assert cli.main(["handoff", "sources", "init", "--target", str(tmp_path), "--json"]) == 0
     capsys.readouterr()
     assert cli.main(
@@ -228,7 +230,30 @@ def test_operator_verify_harness_hermes_after_handoff_init_and_draft(tmp_path, c
     assert payload["ready"] is True
     assert payload["handoff_inbox"]["relative_path"] == ".hermes/memory-handoffs"
     assert payload["handoff_inbox"]["watched"] is True
+    assert any(row["name"] == "hermes_adapter_workspace_handoff_inbox" and row["status"] == "ok" for row in payload["checks"])
     assert any(row["name"] == "handoff_lint" and row["status"] == "ok" for row in payload["checks"])
+
+
+def test_operator_verify_harness_hermes_fails_broken_adapter_inbox(tmp_path, capsys):
+    assert cli.main(["init", "--target", str(tmp_path), "--depth", "workspace", "--harnesses", "hermes"]) == 0
+    capsys.readouterr()
+    assert cli.main(["handoff", "sources", "init", "--target", str(tmp_path), "--json"]) == 0
+    capsys.readouterr()
+    workspace_path = tmp_path / ".brigade" / "hermes" / "workspace.harness.json"
+    workspace = json.loads(workspace_path.read_text())
+    workspace["workspace"]["handoff_inbox"] = ".claude/memory-handoffs"
+    workspace_path.write_text(json.dumps(workspace))
+
+    assert operator_cmd.verify_harness(target=tmp_path, harness="hermes", json_output=True) == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ready"] is False
+    assert payload["next_command"] == "brigade hermes-fragments --out .brigade/hermes"
+    assert any(
+        row["name"] == "hermes_adapter_workspace_handoff_inbox"
+        and row["status"] == "fail"
+        and ".claude/memory-handoffs" in row["detail"]
+        for row in payload["checks"]
+    )
 
 
 def test_operator_verify_harness_cli_dispatch(tmp_path, monkeypatch):
