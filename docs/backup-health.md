@@ -21,6 +21,8 @@ brigade work backup init
 ```bash
 brigade work backup status
 brigade work backup status --json
+brigade work backup contract
+brigade work backup contract --destination nas --json
 brigade work backup doctor
 brigade work backup doctor --json
 brigade work backup import-issues
@@ -29,7 +31,7 @@ brigade work backup closeout
 brigade work backup closeout --json
 ```
 
-`status` summarizes configured destinations. It reports active issue count, raw issue count, quieted reviewed or deferred issue count, restore rehearsal issue count, and a compact safe operator summary. `doctor` checks local backup summary files for stale snapshots, failed or stale checks, failed or stale prunes, missing summaries, overdue or failed restore rehearsals, and unsafe private fields. `import-issues` writes active risks into the local work inbox with source `backup-health`. `closeout` writes a local review receipt keyed by backup issue fingerprints, so unchanged reviewed risks stop making the daily brief noisy while changed fingerprints resurface.
+`status` summarizes configured destinations. It reports active issue count, raw issue count, quieted reviewed or deferred issue count, restore rehearsal issue count, and a compact safe operator summary. `contract` prints the JSON producer contract for all configured destinations, or one destination with `--destination`. `doctor` checks local backup summary files for stale snapshots, failed or stale checks, failed or stale prunes, missing summaries, overdue or failed restore rehearsals, and unsafe private fields. `import-issues` writes active risks into the local work inbox with source `backup-health`. `closeout` writes a local review receipt keyed by backup issue fingerprints, so unchanged reviewed risks stop making the daily brief noisy while changed fingerprints resurface.
 
 ## Config Shape
 
@@ -85,6 +87,12 @@ Fields:
 
 ## Summary JSON
 
+External jobs write one local JSON object per destination. Use the contract command when wiring a producer:
+
+```bash
+brigade work backup contract --destination nas --json
+```
+
 Minimal safe summary:
 
 ```json
@@ -103,6 +111,14 @@ Minimal safe summary:
 ```
 
 Accepted successful results include `ok`, `success`, `passed`, and `pass`.
+
+Producer rules:
+
+- Write to the destination's configured `summary_path` after each backup run or scheduled health check.
+- Use ISO-8601 timestamps with timezone offsets for all timestamp fields.
+- Keep `destination_label`, `summary`, `evidence_path`, and `command_label` safe for logs and public docs.
+- Store raw backup logs elsewhere. The summary should point to safe evidence, not copy private command output.
+- Do not include hostnames, mount paths, repository paths, webhook URLs, channel ids, tokens, passwords, or backup secrets.
 
 ## Closeout And Release Evidence
 

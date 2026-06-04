@@ -20,21 +20,21 @@ brigade roadmap commands --write
 - `brigade daily`: 26 command path(s)
 - `brigade doctor`: 1 command path(s)
 - `brigade dogfood`: 1 command path(s)
-- `brigade handoff`: 14 command path(s)
+- `brigade handoff`: 16 command path(s)
 - `brigade handoff-template`: 1 command path(s)
 - `brigade hermes-fragments`: 1 command path(s)
 - `brigade ingest`: 1 command path(s)
 - `brigade init`: 1 command path(s)
 - `brigade learn`: 10 command path(s)
 - `brigade memory`: 7 command path(s)
-- `brigade notifications`: 2 command path(s)
+- `brigade notifications`: 4 command path(s)
 - `brigade openclaw-fragments`: 1 command path(s)
 - `brigade operator`: 7 command path(s)
 - `brigade pantry`: 3 command path(s)
 - `brigade projects`: 9 command path(s)
 - `brigade reconfigure`: 1 command path(s)
 - `brigade release`: 22 command path(s)
-- `brigade repos`: 69 command path(s)
+- `brigade repos`: 70 command path(s)
 - `brigade research`: 6 command path(s)
 - `brigade roadmap`: 3 command path(s)
 - `brigade roster`: 2 command path(s)
@@ -47,7 +47,7 @@ brigade roadmap commands --write
 - `brigade status`: 1 command path(s)
 - `brigade tools`: 46 command path(s)
 - `brigade untrusted`: 2 command path(s)
-- `brigade work`: 138 command path(s)
+- `brigade work`: 139 command path(s)
 
 ## Commands
 
@@ -134,6 +134,8 @@ brigade roadmap commands --write
 - `brigade handoff issues`
 - `brigade handoff lint`
 - `brigade handoff list`
+- `brigade handoff receipt plan`
+- `brigade handoff receipt record`
 - `brigade handoff reconcile`
 - `brigade handoff run-show`
 - `brigade handoff runs`
@@ -161,6 +163,8 @@ brigade roadmap commands --write
 - `brigade memory care plan-fixes`
 - `brigade memory care scan`
 - `brigade memory care status`
+- `brigade notifications event plan`
+- `brigade notifications event record`
 - `brigade notifications setup plan`
 - `brigade notifications status`
 - `brigade openclaw-fragments`
@@ -219,6 +223,7 @@ brigade roadmap commands --write
 - `brigade repos actions start`
 - `brigade repos discover plan`
 - `brigade repos doctor`
+- `brigade repos first-run plan`
 - `brigade repos health-commands`
 - `brigade repos import-issues`
 - `brigade repos ingest`
@@ -377,6 +382,7 @@ brigade roadmap commands --write
 - `brigade untrusted wrap`
 - `brigade work acceptance`
 - `brigade work backup closeout`
+- `brigade work backup contract`
 - `brigade work backup doctor`
 - `brigade work backup import-issues`
 - `brigade work backup init`

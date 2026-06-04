@@ -147,6 +147,19 @@ BACKUP_DEFAULTS = (
         "enabled": True,
     },
 )
+BACKUP_SUMMARY_REQUIRED_FIELDS = (
+    "destination_label",
+    "latest_snapshot_at",
+    "latest_check_at",
+    "latest_check_result",
+    "latest_prune_at",
+    "latest_prune_result",
+    "latest_restore_rehearsal_at",
+    "latest_restore_rehearsal_result",
+    "summary",
+    "evidence_path",
+)
+BACKUP_SUMMARY_ACCEPTED_SUCCESS_RESULTS = ("ok", "success", "passed", "pass")
 SCANNER_CONFIG_REL_PATH = ".brigade/scanners.toml"
 SCANNER_OUTPUT_STALE_HOURS = 48
 SCANNER_RUN_STALE_HOURS = 48
@@ -2154,7 +2167,116 @@ def _backup_summary_unsafe_fields(payload: object, prefix: str = "") -> list[str
 def _backup_result_ok(value: object) -> bool:
     if not isinstance(value, str):
         return False
-    return value.strip().casefold() in {"ok", "success", "passed", "pass"}
+    return value.strip().casefold() in BACKUP_SUMMARY_ACCEPTED_SUCCESS_RESULTS
+
+
+def _backup_summary_example(destination: dict[str, Any]) -> dict[str, str]:
+    destination_id = str(destination.get("id") or "backup").strip() or "backup"
+    label = f"{destination_id.upper()} backup" if len(destination_id) <= 4 else f"{destination_id.title()} backup"
+    evidence_name = f"{destination_id}-evidence.json"
+    return {
+        "destination_label": label,
+        "latest_snapshot_at": "2026-05-30T06:00:00+00:00",
+        "latest_check_at": "2026-05-30T07:00:00+00:00",
+        "latest_check_result": "ok",
+        "latest_prune_at": "2026-05-30T07:30:00+00:00",
+        "latest_prune_result": "ok",
+        "latest_restore_rehearsal_at": "2026-05-01T12:00:00+00:00",
+        "latest_restore_rehearsal_result": "ok",
+        "summary": f"{label} is current.",
+        "evidence_path": f".brigade/backups/{evidence_name}",
+    }
+
+
+def _backup_contract_destination(target: Path, destination: dict[str, Any]) -> dict[str, Any]:
+    summary_path = _backup_summary_path(target, destination)
+    return {
+        "id": destination.get("id"),
+        "kind": destination.get("kind"),
+        "enabled": destination.get("enabled", True),
+        "command_label": destination.get("command_label"),
+        "summary_path": str(summary_path),
+        "summary_path_config": destination.get("summary_path"),
+        "required_fields": list(BACKUP_SUMMARY_REQUIRED_FIELDS),
+        "timestamp_fields": [
+            "latest_snapshot_at",
+            "latest_check_at",
+            "latest_prune_at",
+            "latest_restore_rehearsal_at",
+        ],
+        "result_fields": [
+            "latest_check_result",
+            "latest_prune_result",
+            "latest_restore_rehearsal_result",
+        ],
+        "accepted_success_results": list(BACKUP_SUMMARY_ACCEPTED_SUCCESS_RESULTS),
+        "staleness_thresholds": {
+            "snapshot_stale_hours": destination.get("snapshot_stale_hours"),
+            "check_stale_hours": destination.get("check_stale_hours"),
+            "prune_stale_hours": destination.get("prune_stale_hours"),
+            "restore_rehearsal_stale_days": destination.get("restore_rehearsal_stale_days"),
+        },
+        "example_summary": _backup_summary_example(destination),
+        "producer_contract": [
+            "Write one JSON object to summary_path after each backup run or scheduled health check.",
+            "Use ISO-8601 timestamps with timezone offsets for all timestamp fields.",
+            "Use one accepted success result for passing check, prune, and restore rehearsal fields.",
+            "Keep destination_label, summary, evidence_path, and command_label safe for logs and public docs.",
+            "Do not include hostnames, mount paths, repository paths, webhook URLs, tokens, passwords, or raw command output.",
+        ],
+    }
+
+
+def _backup_contract_payload(target: Path, destination_id: str | None = None) -> tuple[dict[str, Any], int]:
+    target = target.expanduser().resolve()
+    destinations, errors = _load_backup_config(target)
+    config_loaded = not errors
+    if not destinations and errors and not _backup_config_path(target).is_file():
+        destinations = [dict(item) for item in BACKUP_DEFAULTS]
+    selected = destinations
+    if destination_id:
+        wanted = destination_id.strip()
+        selected = [destination for destination in destinations if destination.get("id") == wanted]
+        if not selected:
+            payload = {
+                "schema_version": 1,
+                "schema": {"name": "backup-summary-producer-contract", "version": 1},
+                "target": str(target),
+                "config_path": str(_backup_config_path(target)),
+                "config_loaded": config_loaded,
+                "config_errors": errors,
+                "destination": wanted,
+                "destination_count": 0,
+                "destinations": [],
+                "would_write": False,
+                "manual_only": True,
+                "errors": [f"backup destination not found: {wanted}"],
+            }
+            return payload, 1
+    payload = {
+        "schema_version": 1,
+        "schema": {"name": "backup-summary-producer-contract", "version": 1},
+        "target": str(target),
+        "config_path": str(_backup_config_path(target)),
+        "config_loaded": config_loaded,
+        "config_errors": errors,
+        "destination_count": len(selected),
+        "destinations": [_backup_contract_destination(target, destination) for destination in selected],
+        "required_fields": list(BACKUP_SUMMARY_REQUIRED_FIELDS),
+        "accepted_success_results": list(BACKUP_SUMMARY_ACCEPTED_SUCCESS_RESULTS),
+        "would_write": False,
+        "manual_only": True,
+        "privacy": {
+            "safe_for_public_docs": True,
+            "forbidden_field_names": sorted(BACKUP_UNSAFE_FIELDS),
+            "forbidden_field_name_tokens": ["password", "secret", "token", "webhook"],
+            "notes": [
+                "The summary JSON is local evidence for Brigade health checks, not a backup log archive.",
+                "Store raw backup logs outside tracked docs and keep only safe evidence paths in summaries.",
+            ],
+        },
+    }
+    return payload, 0 if config_loaded or not _backup_config_path(target).is_file() else 1
 
 
 def _backup_age_hours(value: object, now: datetime) -> float | None:
@@ -8808,6 +8930,34 @@ def backup_init(*, target: Path, force: bool = False, update_gitignore: bool = T
         print("gitignore: skipped")
     print("next_command: brigade work backup status")
     return 0
+
+
+def backup_contract(*, target: Path, destination_id: str | None = None, json_output: bool = False) -> int:
+    target = target.expanduser().resolve()
+    if not target.is_dir():
+        print(f"error: --target is not a directory: {target}", file=sys.stderr)
+        return 2
+    payload, rc = _backup_contract_payload(target, destination_id=destination_id)
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return rc
+    print(f"work backup contract: {target}")
+    print(f"config_path: {payload['config_path']}")
+    print(f"config_loaded: {payload['config_loaded']}")
+    if payload.get("config_errors"):
+        for error in payload["config_errors"]:
+            print(f"config_warning: {error}")
+    for error in payload.get("errors", []):
+        print(f"error: {error}", file=sys.stderr)
+    print(f"destinations: {payload['destination_count']}")
+    for destination in payload.get("destinations", []):
+        print(f"- {destination.get('id')} [{destination.get('kind')}]")
+        print(f"  summary_path: {destination.get('summary_path')}")
+        print(f"  command_label: {destination.get('command_label')}")
+        print(f"  required_fields: {', '.join(destination.get('required_fields', []))}")
+        print(f"  accepted_success_results: {', '.join(destination.get('accepted_success_results', []))}")
+    print("would_write: false")
+    return rc
 
 
 def backup_status(*, target: Path, json_output: bool = False) -> int:

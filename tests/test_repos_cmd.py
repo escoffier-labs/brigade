@@ -49,6 +49,36 @@ def test_repos_init_list_show_scan_doctor_json(tmp_path, capsys):
     assert any(check["phase"] in {145, 147, 148} for check in daily_use["checks"])
 
 
+def test_repos_first_run_plan_guides_empty_fleet(tmp_path, capsys):
+    _init_git_repo(tmp_path)
+
+    assert repos_cmd.first_run_plan(target=tmp_path, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["manual_only"] is True
+    assert payload["would_write"] is False
+    assert payload["would_run_commands"] is False
+    assert payload["ready"] is False
+    assert payload["next_step"]["id"] == "config"
+    commands = [step["command"] for step in payload["steps"]]
+    assert "brigade repos init --target ." in commands
+    assert "brigade repos sweep run --target ." in commands
+    assert "brigade repos report build --target ." in commands
+    assert "brigade repos release build --target ." in commands
+    assert payload["privacy"]["safe_labels_only"] is True
+
+
+def test_repos_first_run_cli_dispatch(tmp_path, monkeypatch):
+    seen = {}
+
+    def fake_first_run_plan(**kwargs):
+        seen.update(kwargs)
+        return 0
+
+    monkeypatch.setattr(repos_cmd, "first_run_plan", fake_first_run_plan)
+    assert cli.main(["repos", "first-run", "plan", "--target", str(tmp_path), "--json"]) == 0
+    assert seen == {"target": tmp_path, "json_output": True}
+
+
 def test_repos_claude_fallback_detection_does_not_copy_contents(tmp_path, capsys):
     _init_git_repo(tmp_path)
     (tmp_path / "CLAUDE.md").write_text("private setup detail should stay local\n")

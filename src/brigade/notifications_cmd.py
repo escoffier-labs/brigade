@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from pathlib import Path
 from typing import Any
 
@@ -15,10 +16,33 @@ CHANNEL_ENVS = {
 }
 
 CONFIG_PATH = Path.home() / ".config" / "agent-notify" / "config.toml"
+EVENT_TYPES = (
+    "ci-green",
+    "ci-failed",
+    "handoff-waiting",
+    "handoff-ingested",
+    "release-ready",
+    "operator-alert",
+)
 
 
 def _json(data: dict[str, Any]) -> None:
     print(json.dumps(data, indent=2, sort_keys=True))
+
+
+def _events_root(target: Path) -> Path:
+    return target / ".brigade" / "notifications" / "events"
+
+
+def _safe_id(value: str) -> str:
+    import re
+
+    slug = re.sub(r"[^A-Za-z0-9._-]+", "-", value.strip().lower()).strip("-")
+    return slug or "event"
+
+
+def _now() -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime())
 
 
 def _profile_args(profile: str | None) -> list[str]:
@@ -212,7 +236,7 @@ def _status_payload(profile: str | None = None) -> dict[str, Any]:
 
 
 def health(target: Path, profile: str | None = None) -> dict[str, Any]:
-    del target
+    target = target.expanduser().resolve()
     payload = _status_payload(profile)
     checks = _checks_from_status(payload)
     issue_checks = [check for check in checks if str(check.get("status") or "").lower() not in {"ok", "manual"}]
@@ -238,6 +262,39 @@ def health(target: Path, profile: str | None = None) -> dict[str, Any]:
         "sends_notifications": False,
         "writes_hook_config": False,
         "stores_secrets": False,
+        "latest_event": _latest_event_summary(target),
+    }
+
+
+def _event_receipts(target: Path) -> list[dict[str, Any]]:
+    root = _events_root(target)
+    if not root.is_dir():
+        return []
+    receipts: list[dict[str, Any]] = []
+    for path in sorted(root.glob("*.json")):
+        try:
+            data = json.loads(path.read_text())
+        except (OSError, json.JSONDecodeError):
+            continue
+        if isinstance(data, dict):
+            data.setdefault("path", str(path))
+            receipts.append(data)
+    receipts.sort(key=lambda item: str(item.get("created_at") or item.get("event_id") or ""), reverse=True)
+    return receipts
+
+
+def _latest_event_summary(target: Path) -> dict[str, Any] | None:
+    receipts = _event_receipts(target)
+    if not receipts:
+        return None
+    latest = receipts[0]
+    return {
+        "event_id": latest.get("event_id"),
+        "event_type": latest.get("event_type"),
+        "created_at": latest.get("created_at"),
+        "sent": latest.get("sent"),
+        "send_exit_code": latest.get("send_exit_code"),
+        "path": latest.get("path"),
     }
 
 
@@ -301,3 +358,153 @@ def setup_plan(*, target: Path, profile: str = "operator", json_output: bool = F
     print("Claude Code ~/.claude/settings.json:")
     print(payload["snippets"]["claude_code_settings_json"])
     return 0
+
+
+def _event_payload(
+    target: Path,
+    *,
+    event_type: str,
+    title: str,
+    message: str,
+    level: str,
+    profile: str | None,
+    source: str | None,
+    send: bool,
+) -> dict[str, Any]:
+    created_at = _now()
+    event_id = f"{created_at.replace(':', '').replace('+00:00', 'Z')}-{_safe_id(event_type)}"
+    argv = [
+        "agent-notify",
+        "--hook",
+        "brigade-event",
+        "--event",
+        event_type,
+        "--level",
+        level,
+        "--title",
+        title,
+        "--message",
+        message,
+    ]
+    if profile:
+        argv.extend(["--profile", profile])
+    if source:
+        argv.extend(["--source", source])
+    health_payload = health(target, profile=profile)
+    return {
+        "target": str(target),
+        "event_id": event_id,
+        "event_type": event_type,
+        "level": level,
+        "title": title,
+        "message": message,
+        "source": source,
+        "profile": profile,
+        "created_at": created_at,
+        "planned_argv": argv,
+        "send_requested": send,
+        "configured": bool(health_payload.get("configured")),
+        "installed": bool(health_payload.get("installed")),
+        "selected_channels": health_payload.get("selected_channels") or [],
+        "sends_notifications": bool(send),
+        "writes_hook_config": False,
+        "stores_secrets": False,
+    }
+
+
+def event_plan(
+    *,
+    target: Path,
+    event_type: str,
+    title: str,
+    message: str,
+    level: str = "info",
+    profile: str | None = None,
+    source: str | None = None,
+    json_output: bool = False,
+) -> int:
+    target = target.expanduser().resolve()
+    if not target.is_dir():
+        print(f"error: --target is not a directory: {target}")
+        return 2
+    payload = _event_payload(
+        target,
+        event_type=event_type,
+        title=title,
+        message=message,
+        level=level,
+        profile=profile,
+        source=source,
+        send=False,
+    )
+    payload["would_write"] = False
+    payload["receipt_path"] = str(_events_root(target) / f"{payload['event_id']}.json")
+    if json_output:
+        _json(payload)
+        return 0
+    print("notifications event plan")
+    print(f"event_id: {payload['event_id']}")
+    print(f"event_type: {event_type}")
+    print(f"configured: {payload['configured']}")
+    print(f"would_write: false")
+    print(f"receipt: {payload['receipt_path']}")
+    print("planned_argv: " + " ".join(payload["planned_argv"]))
+    return 0
+
+
+def event_record(
+    *,
+    target: Path,
+    event_type: str,
+    title: str,
+    message: str,
+    level: str = "info",
+    profile: str | None = None,
+    source: str | None = None,
+    send: bool = False,
+    json_output: bool = False,
+) -> int:
+    target = target.expanduser().resolve()
+    if not target.is_dir():
+        print(f"error: --target is not a directory: {target}")
+        return 2
+    payload = _event_payload(
+        target,
+        event_type=event_type,
+        title=title,
+        message=message,
+        level=level,
+        profile=profile,
+        source=source,
+        send=send,
+    )
+    result = None
+    if send:
+        if not payload["installed"] or not payload["configured"]:
+            payload["sent"] = False
+            payload["send_exit_code"] = 1
+            payload["send_error"] = "agent-notify is not installed or configured"
+        else:
+            result = proc.run(payload["planned_argv"], timeout=30.0, cwd=target)
+            payload["sent"] = result.code == 0
+            payload["send_exit_code"] = result.code
+            payload["stdout_summary"] = " ".join(result.stdout.split())[:400]
+            payload["stderr_summary"] = " ".join(result.stderr.split())[:400]
+    else:
+        payload["sent"] = False
+        payload["send_exit_code"] = None
+    path = _events_root(target) / f"{payload['event_id']}.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload["path"] = str(path)
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+    if json_output:
+        _json(payload)
+        return 0 if not send or payload["sent"] else 1
+    print("notifications event record")
+    print(f"event_id: {payload['event_id']}")
+    print(f"event_type: {event_type}")
+    print(f"receipt: {path}")
+    print(f"sent: {payload['sent']}")
+    if send:
+        print(f"send_exit_code: {payload['send_exit_code']}")
+    return 0 if not send or payload["sent"] else 1

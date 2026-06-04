@@ -423,6 +423,105 @@ def test_handoff_runs_list_show_and_draft_ingestion_status(tmp_path, capsys):
     assert "ingest_run_id: run-one" in out
 
 
+def test_handoff_receipt_plan_and_record_external_ingest(tmp_path, capsys):
+    hermes_inbox = tmp_path / ".hermes" / "memory-handoffs"
+    hermes_inbox.mkdir(parents=True)
+    draft_path = hermes_inbox / "hermes-reviewed.md"
+    draft_path.write_text(NO_CARD_HANDOFF)
+
+    assert handoff_cmd.receipt_plan(
+        target=tmp_path,
+        draft_ids=["hermes-reviewed"],
+        owner="OpenClaw",
+        run_id="openclaw-manual-one",
+        json_output=True,
+    ) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["would_write"] is False
+    assert payload["owner"] == "openclaw"
+    assert payload["run"]["run_id"] == "openclaw-manual-one"
+    assert payload["run"]["processed_handoff_paths"] == [str(draft_path.resolve())]
+    assert payload["run"]["routed_document_targets"][0]["target"] == ".learnings/LEARNINGS.md"
+    assert not (tmp_path / ".brigade" / "handoffs" / "ingest-runs" / "openclaw-manual-one.json").exists()
+
+    assert handoff_cmd.receipt_record(
+        target=tmp_path,
+        draft_ids=["hermes-reviewed"],
+        owner="OpenClaw",
+        run_id="openclaw-manual-one",
+        safe_summary="OpenClaw ingested one reviewed Hermes handoff.",
+        json_output=True,
+    ) == 0
+    payload = json.loads(capsys.readouterr().out)
+    receipt_path = tmp_path / payload["receipt_path"]
+    assert receipt_path.exists()
+    assert payload["written"] is True
+    receipt = json.loads(receipt_path.read_text())
+    assert receipt["owner"] == "openclaw"
+    assert receipt["safe_summary"] == "OpenClaw ingested one reviewed Hermes handoff."
+
+    assert handoff_cmd.list_drafts(target=tmp_path, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["drafts"][0]["ingestion_status"] == "ingested"
+    assert payload["drafts"][0]["ingest_run_id"] == "openclaw-manual-one"
+
+
+def test_handoff_receipt_record_skipped_and_failed_statuses(tmp_path, capsys):
+    inbox = tmp_path / ".codex" / "memory-handoffs"
+    inbox.mkdir(parents=True)
+    skipped = inbox / "skipped.md"
+    failed = inbox / "failed.md"
+    skipped.write_text(NO_CARD_HANDOFF)
+    failed.write_text(NO_CARD_HANDOFF)
+
+    assert handoff_cmd.receipt_record(
+        target=tmp_path,
+        draft_ids=["skipped"],
+        status="skipped",
+        run_id="skip-run",
+        json_output=True,
+    ) == 0
+    assert handoff_cmd.receipt_record(
+        target=tmp_path,
+        draft_ids=["failed"],
+        status="failed",
+        run_id="fail-run",
+        json_output=True,
+    ) == 0
+    capsys.readouterr()
+
+    assert handoff_cmd.list_drafts(target=tmp_path, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    statuses = {draft["id"]: draft["ingestion_status"] for draft in payload["drafts"]}
+    assert statuses["skipped"] == "skipped"
+    assert statuses["failed"] == "failed"
+
+
+def test_handoff_receipt_cli_dispatch_records_receipt(tmp_path, capsys):
+    inbox = tmp_path / ".hermes" / "memory-handoffs"
+    inbox.mkdir(parents=True)
+    (inbox / "cli-reviewed.md").write_text(NO_CARD_HANDOFF)
+
+    assert cli.main(
+        [
+            "handoff",
+            "receipt",
+            "record",
+            "--target",
+            str(tmp_path),
+            "--owner",
+            "hermes",
+            "--run-id",
+            "hermes-cli-run",
+            "--json",
+            "cli-reviewed",
+        ]
+    ) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["owner"] == "hermes"
+    assert (tmp_path / payload["receipt_path"]).exists()
+
+
 def test_handoff_reconcile_parses_ingestor_log_into_receipt(tmp_path, capsys):
     inbox = tmp_path / ".codex" / "memory-handoffs"
     inbox.mkdir(parents=True)

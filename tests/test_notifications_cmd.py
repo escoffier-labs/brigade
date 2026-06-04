@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 
+from brigade import cli
 from brigade import notifications_cmd
 from brigade import center_cmd
 from brigade import daily_cmd
@@ -104,3 +105,92 @@ def test_notifications_surface_in_center_work_and_daily(monkeypatch, tmp_target,
         item["source_subsystem"] == "notifications"
         for item in plan_payload["candidate_actions"]
     )
+
+
+def test_notifications_event_record_writes_local_receipt_without_sending(monkeypatch, tmp_target, capsys):
+    tmp_target.mkdir()
+    monkeypatch.setattr(notifications_cmd.proc, "which", lambda cmd: "/usr/bin/agent-notify")
+
+    rc = notifications_cmd.event_record(
+        target=tmp_target,
+        event_type="handoff-waiting",
+        title="Handoff waiting",
+        message="Two reviewed handoffs are waiting for ingest.",
+        source="handoff",
+        json_output=True,
+    )
+    payload = json.loads(capsys.readouterr().out)
+
+    assert rc == 0
+    assert payload["sent"] is False
+    assert payload["send_requested"] is False
+    assert payload["sends_notifications"] is False
+    assert payload["writes_hook_config"] is False
+    assert payload["stores_secrets"] is False
+    receipt = tmp_target / payload["path"]
+    assert receipt.exists()
+    assert "agent-notify" in payload["planned_argv"][0]
+
+    health = notifications_cmd.health(tmp_target)
+    assert health["latest_event"]["event_type"] == "handoff-waiting"
+
+
+def test_notifications_event_record_can_explicitly_send(monkeypatch, tmp_target, capsys):
+    tmp_target.mkdir()
+    config_path = tmp_target / ".config" / "agent-notify" / "config.toml"
+    config_path.parent.mkdir(parents=True)
+    config_path.write_text(
+        "\n".join(
+            [
+                "[channels.discord-main]",
+                'type = "discord"',
+                'webhook_url_env = "TEST_DISCORD_WEBHOOK_URL"',
+                "",
+                "[profiles.operator]",
+                'channels = ["discord-main"]',
+                "default = true",
+                "",
+            ]
+        )
+    )
+    seen = {}
+
+    def fake_run(args, timeout=30.0, env=None, cwd=None):
+        seen["args"] = args
+        seen["cwd"] = cwd
+        return notifications_cmd.proc.Result(code=0, stdout="sent", stderr="")
+
+    monkeypatch.setattr(notifications_cmd, "CONFIG_PATH", config_path)
+    monkeypatch.setattr(notifications_cmd.proc, "which", lambda cmd: "/usr/bin/agent-notify")
+    monkeypatch.setattr(notifications_cmd.proc, "run", fake_run)
+    monkeypatch.setenv("TEST_DISCORD_WEBHOOK_URL", "https://example.invalid/hook")
+
+    assert cli.main(
+        [
+            "notifications",
+            "event",
+            "record",
+            "--target",
+            str(tmp_target),
+            "--type",
+            "ci-green",
+            "--title",
+            "CI green",
+            "--message",
+            "Brigade CI passed.",
+            "--level",
+            "success",
+            "--profile",
+            "operator",
+            "--source",
+            "ci",
+            "--send",
+            "--json",
+        ]
+    ) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["sent"] is True
+    assert payload["send_exit_code"] == 0
+    assert "--hook" in seen["args"]
+    assert "brigade-event" in seen["args"]
+    assert seen["cwd"] == tmp_target.resolve()

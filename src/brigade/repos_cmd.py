@@ -5099,6 +5099,138 @@ def daily_use_health(target: Path) -> dict[str, Any]:
     }
 
 
+def first_run_payload(target: Path) -> dict[str, Any]:
+    target = target.expanduser().resolve()
+    data = health(target)
+    config_loaded = bool(data.get("repo_count"))
+    report = data.get("report") if isinstance(data.get("report"), dict) else {}
+    sweep = data.get("sweep") if isinstance(data.get("sweep"), dict) else {}
+    release_train = data.get("release_train") if isinstance(data.get("release_train"), dict) else {}
+    latest_report_value = report.get("latest") if isinstance(report.get("latest"), dict) else None
+    latest_sweep_value = sweep.get("latest") if isinstance(sweep.get("latest"), dict) else None
+    latest_train = release_train.get("latest") if isinstance(release_train.get("latest"), dict) else None
+
+    def step(step_id: str, label: str, command: str, ready: bool, detail: str) -> dict[str, Any]:
+        return {
+            "id": step_id,
+            "label": label,
+            "command": command,
+            "ready": ready,
+            "status": OK if ready else WARN,
+            "detail": detail,
+        }
+
+    train_id = str(latest_train.get("train_id") or "") if latest_train else ""
+    release_report_ready = bool(
+        latest_train
+        and train_id
+        and (_release_trains_root(target) / train_id / "RELEASE_TRAIN_REPORT.json").is_file()
+        and (_release_trains_root(target) / train_id / "RELEASE_TRAIN_MATRIX.json").is_file()
+    )
+    steps = [
+        step(
+            "config",
+            "Create local repo fleet config",
+            "brigade repos init --target .",
+            config_loaded,
+            "repo fleet config exists" if config_loaded else "missing .brigade/repos.toml",
+        ),
+        step(
+            "scan",
+            "Inspect configured repos",
+            "brigade repos scan --target .",
+            config_loaded and int(data.get("repo_count") or 0) > 0,
+            f"{data.get('repo_count') or 0} configured repo(s)",
+        ),
+        step(
+            "sweep",
+            "Run a read-only fleet sweep",
+            "brigade repos sweep run --target .",
+            latest_sweep_value is not None,
+            f"latest sweep {latest_sweep_value.get('sweep_id')}" if latest_sweep_value else "no sweep receipt yet",
+        ),
+        step(
+            "sweep-closeout",
+            "Review and close out the fleet sweep",
+            "brigade repos sweep closeout latest --target .",
+            latest_sweep_value is not None and isinstance(latest_sweep_value.get("closeout"), dict),
+            "latest sweep has closeout" if latest_sweep_value and isinstance(latest_sweep_value.get("closeout"), dict) else "sweep still needs review closeout",
+        ),
+        step(
+            "report",
+            "Build a fleet report",
+            "brigade repos report build --target .",
+            latest_report_value is not None,
+            f"latest report {latest_report_value.get('report_id')}" if latest_report_value else "no fleet report yet",
+        ),
+        step(
+            "report-closeout",
+            "Review and close out the fleet report",
+            "brigade repos report closeout latest --target .",
+            latest_report_value is not None and isinstance(latest_report_value.get("closeout"), dict),
+            "latest report has closeout" if latest_report_value and isinstance(latest_report_value.get("closeout"), dict) else "report still needs review closeout",
+        ),
+        step(
+            "release-train",
+            "Build a release train bundle",
+            "brigade repos release build --target .",
+            latest_train is not None,
+            f"latest train {latest_train.get('train_id')}" if latest_train else "no release train yet",
+        ),
+        step(
+            "release-report",
+            "Build release report and matrix",
+            "brigade repos release report latest --target . && brigade repos release matrix latest --target .",
+            release_report_ready,
+            "release report and matrix are present" if release_report_ready else "release report and matrix are not both present",
+        ),
+        step(
+            "ready",
+            "Check the manual release gate",
+            "brigade repos release ready latest --target .",
+            latest_train is not None and not release_train.get("top_issue"),
+            "release train has no fleet health issue" if latest_train and not release_train.get("top_issue") else "release train still has review work",
+        ),
+    ]
+    next_step = next((item for item in steps if not item["ready"]), None)
+    return {
+        "schema_version": 1,
+        "schema": {"name": "repo-fleet-first-run-plan", "version": 1},
+        "target": str(target),
+        "manual_only": True,
+        "would_write": False,
+        "would_run_commands": False,
+        "repo_count": data.get("repo_count") or 0,
+        "ready": next_step is None,
+        "step_count": len(steps),
+        "remaining_step_count": len([item for item in steps if not item["ready"]]),
+        "next_step": next_step,
+        "steps": steps,
+        "privacy": {
+            "safe_labels_only": True,
+            "stores_raw_repo_paths": False,
+            "stores_raw_logs": False,
+        },
+    }
+
+
+def first_run_plan(*, target: Path, json_output: bool = False) -> int:
+    payload = first_run_payload(target)
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+    print(f"repo fleet first-run plan: {payload['target']}")
+    print(f"ready: {'yes' if payload['ready'] else 'no'}")
+    print(f"remaining_steps: {payload['remaining_step_count']}")
+    next_step = payload.get("next_step") if isinstance(payload.get("next_step"), dict) else None
+    if next_step:
+        print(f"next: {next_step.get('command')}")
+    for item in payload["steps"]:
+        marker = "ok" if item["ready"] else "todo"
+        print(f"- [{marker}] {item['id']}: {item['command']}")
+    return 0
+
+
 def report_health(target: Path) -> dict[str, Any]:
     target = target.expanduser().resolve()
     latest = latest_report(target)

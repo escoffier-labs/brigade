@@ -228,6 +228,22 @@ def _build_parser() -> argparse.ArgumentParser:
     p_notifications_setup_plan.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
     p_notifications_setup_plan.add_argument("--profile", default="operator", help="agent-notify profile to use in snippets.")
     p_notifications_setup_plan.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_notifications_event = notifications_sub.add_parser("event", help="Plan or record explicit operator notification events.")
+    notifications_event_sub = p_notifications_event.add_subparsers(dest="notifications_event_command", metavar="<event-command>")
+    notifications_event_sub.required = True
+    notification_event_types = ("ci-green", "ci-failed", "handoff-waiting", "handoff-ingested", "release-ready", "operator-alert")
+    for event_command in ("plan", "record"):
+        p_event = notifications_event_sub.add_parser(event_command, help=f"{event_command.title()} an explicit notification event.")
+        p_event.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+        p_event.add_argument("--type", choices=notification_event_types, required=True, help="Notification event type.")
+        p_event.add_argument("--title", required=True, help="Safe notification title.")
+        p_event.add_argument("--message", required=True, help="Safe notification message.")
+        p_event.add_argument("--level", choices=["info", "success", "warning", "error"], default="info", help="Safe event level.")
+        p_event.add_argument("--profile", default=None, help="agent-notify profile to use.")
+        p_event.add_argument("--source", default=None, help="Safe source label, such as ci or handoff.")
+        if event_command == "record":
+            p_event.add_argument("--send", action="store_true", help="Also invoke agent-notify explicitly.")
+        p_event.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
 
     # budgets
     p_budgets = sub.add_parser("budgets", help="Inspect Brigade's canonical operator budgets.")
@@ -581,6 +597,12 @@ def _build_parser() -> argparse.ArgumentParser:
     p_repos_import.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
     p_repos_import.add_argument("--dry-run", action="store_true", help="Show counts without writing imports.")
     p_repos_import.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_repos_first_run = repos_sub.add_parser("first-run", help="Plan the first repo-fleet production evidence run.")
+    repos_first_run_sub = p_repos_first_run.add_subparsers(dest="repos_first_run_command", metavar="<repos-first-run-command>")
+    repos_first_run_sub.required = True
+    p_repos_first_run_plan = repos_first_run_sub.add_parser("plan", help="Show the manual first-run repo-fleet sequence.")
+    p_repos_first_run_plan.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_repos_first_run_plan.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_repos_ingest = repos_sub.add_parser("ingest", help="Ingest every fleet repo's handoffs into the canonical owner.")
     p_repos_ingest.add_argument("--target", "-t", type=Path, default=Path("."), help="Canonical memory owner (where the fleet config lives).")
     p_repos_ingest.add_argument("--apply", action="store_true", help="Write changes. Default is a dry run.")
@@ -909,6 +931,32 @@ def _build_parser() -> argparse.ArgumentParser:
     p_handoff_run_show.add_argument("run_id", help="Run id or unique prefix.")
     p_handoff_run_show.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
     p_handoff_run_show.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_handoff_receipt = handoff_sub.add_parser("receipt", help="Plan or record external handoff ingestion receipts.")
+    handoff_receipt_sub = p_handoff_receipt.add_subparsers(dest="handoff_receipt_command", metavar="<handoff-receipt-command>")
+    handoff_receipt_sub.required = True
+    p_handoff_receipt_plan = handoff_receipt_sub.add_parser("plan", help="Preview a normalized external handoff ingest receipt.")
+    p_handoff_receipt_plan.add_argument("draft_ids", nargs="*", help="Draft ids, filenames, paths, or unique prefixes.")
+    p_handoff_receipt_plan.add_argument("--all-reviewed", action="store_true", help="Include all lint-valid reviewed drafts.")
+    p_handoff_receipt_plan.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_handoff_receipt_plan.add_argument("--sources", type=Path, default=None, help="Override .brigade/handoff-sources.json.")
+    p_handoff_receipt_plan.add_argument("--status", choices=["ingested", "skipped", "failed"], default="ingested", help="Outcome to record for selected drafts.")
+    p_handoff_receipt_plan.add_argument("--owner", default="external", help="Safe memory owner label, such as openclaw or hermes.")
+    p_handoff_receipt_plan.add_argument("--run-id", default=None, help="Explicit receipt run id.")
+    p_handoff_receipt_plan.add_argument("--safe-summary", default=None, help="Safe receipt summary.")
+    p_handoff_receipt_plan.add_argument("--log-path", default=None, help="Optional local log path label.")
+    p_handoff_receipt_plan.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_handoff_receipt_record = handoff_receipt_sub.add_parser("record", help="Write a normalized external handoff ingest receipt.")
+    p_handoff_receipt_record.add_argument("draft_ids", nargs="*", help="Draft ids, filenames, paths, or unique prefixes.")
+    p_handoff_receipt_record.add_argument("--all-reviewed", action="store_true", help="Include all lint-valid reviewed drafts.")
+    p_handoff_receipt_record.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
+    p_handoff_receipt_record.add_argument("--sources", type=Path, default=None, help="Override .brigade/handoff-sources.json.")
+    p_handoff_receipt_record.add_argument("--status", choices=["ingested", "skipped", "failed"], default="ingested", help="Outcome to record for selected drafts.")
+    p_handoff_receipt_record.add_argument("--owner", default="external", help="Safe memory owner label, such as openclaw or hermes.")
+    p_handoff_receipt_record.add_argument("--run-id", default=None, help="Explicit receipt run id.")
+    p_handoff_receipt_record.add_argument("--safe-summary", default=None, help="Safe receipt summary.")
+    p_handoff_receipt_record.add_argument("--log-path", default=None, help="Optional local log path label.")
+    p_handoff_receipt_record.add_argument("--force", action="store_true", help="Overwrite an existing receipt with the same run id.")
+    p_handoff_receipt_record.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_handoff_reconcile = handoff_sub.add_parser("reconcile", help="Normalize the configured handoff ingestor latest-run log.")
     p_handoff_reconcile.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
     p_handoff_reconcile.add_argument("--sources", type=Path, default=None, help="Override .brigade/handoff-sources.json.")
@@ -1085,6 +1133,10 @@ def _build_parser() -> argparse.ArgumentParser:
     p_work_backup_init.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
     p_work_backup_init.add_argument("--force", action="store_true", help="Overwrite an existing backup config.")
     p_work_backup_init.add_argument("--no-gitignore", action="store_true", help="Do not update the target .gitignore.")
+    p_work_backup_contract = backup_sub.add_parser("contract", help="Show the backup summary producer JSON contract.")
+    p_work_backup_contract.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_work_backup_contract.add_argument("--destination", help="Limit the contract to one destination id.")
+    p_work_backup_contract.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_work_backup_status = backup_sub.add_parser("status", help="Show local backup health status.")
     p_work_backup_status.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
     p_work_backup_status.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
@@ -2727,6 +2779,32 @@ def main(argv=None) -> int:
                 return notifications_cmd.setup_plan(target=args.target, profile=args.profile, json_output=args.json)
             parser.error(f"unknown notifications setup command: {args.notifications_setup_command}")
             return 2
+        if args.notifications_command == "event":
+            if args.notifications_event_command == "plan":
+                return notifications_cmd.event_plan(
+                    target=args.target,
+                    event_type=args.type,
+                    title=args.title,
+                    message=args.message,
+                    level=args.level,
+                    profile=args.profile,
+                    source=args.source,
+                    json_output=args.json,
+                )
+            if args.notifications_event_command == "record":
+                return notifications_cmd.event_record(
+                    target=args.target,
+                    event_type=args.type,
+                    title=args.title,
+                    message=args.message,
+                    level=args.level,
+                    profile=args.profile,
+                    source=args.source,
+                    send=args.send,
+                    json_output=args.json,
+                )
+            parser.error(f"unknown notifications event command: {args.notifications_event_command}")
+            return 2
         parser.error(f"unknown notifications command: {args.notifications_command}")
         return 2
     if cmd == "budgets":
@@ -2999,6 +3077,11 @@ def main(argv=None) -> int:
             return repos_cmd.doctor(target=args.target, json_output=args.json)
         if args.repos_command == "import-issues":
             return repos_cmd.import_issues(target=args.target, dry_run=args.dry_run, json_output=args.json)
+        if args.repos_command == "first-run":
+            if args.repos_first_run_command == "plan":
+                return repos_cmd.first_run_plan(target=args.target, json_output=args.json)
+            parser.error(f"unknown repos first-run command: {args.repos_first_run_command}")
+            return 2
         if args.repos_command == "ingest":
             return repos_cmd.ingest_fleet(
                 target=args.target,
@@ -3276,6 +3359,36 @@ def main(argv=None) -> int:
             return handoff_cmd.runs(target=args.target, json_output=args.json, limit=args.limit)
         if args.handoff_command == "run-show":
             return handoff_cmd.run_show(target=args.target, run_id=args.run_id, json_output=args.json)
+        if args.handoff_command == "receipt":
+            if args.handoff_receipt_command == "plan":
+                return handoff_cmd.receipt_plan(
+                    target=args.target,
+                    draft_ids=args.draft_ids,
+                    all_reviewed=args.all_reviewed,
+                    sources=args.sources,
+                    status=args.status,
+                    owner=args.owner,
+                    run_id=args.run_id,
+                    safe_summary=args.safe_summary,
+                    log_path=args.log_path,
+                    json_output=args.json,
+                )
+            if args.handoff_receipt_command == "record":
+                return handoff_cmd.receipt_record(
+                    target=args.target,
+                    draft_ids=args.draft_ids,
+                    all_reviewed=args.all_reviewed,
+                    sources=args.sources,
+                    status=args.status,
+                    owner=args.owner,
+                    run_id=args.run_id,
+                    safe_summary=args.safe_summary,
+                    log_path=args.log_path,
+                    force=args.force,
+                    json_output=args.json,
+                )
+            parser.error(f"unknown handoff receipt command: {args.handoff_receipt_command}")
+            return 2
         if args.handoff_command == "reconcile":
             return handoff_cmd.reconcile(target=args.target, sources=args.sources, json_output=args.json)
         if args.handoff_command == "issues":
@@ -3682,6 +3795,12 @@ def main(argv=None) -> int:
                     target=args.target,
                     force=args.force,
                     update_gitignore=not args.no_gitignore,
+                )
+            if args.backup_command == "contract":
+                return work_cmd.backup_contract(
+                    target=args.target,
+                    destination_id=args.destination,
+                    json_output=args.json,
                 )
             if args.backup_command == "status":
                 return work_cmd.backup_status(target=args.target, json_output=args.json)

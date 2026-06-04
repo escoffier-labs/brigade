@@ -4875,6 +4875,37 @@ def test_work_backup_init_status_doctor_and_json(tmp_path, monkeypatch, capsys):
     assert "backup_issues: 0" in out
 
 
+def test_work_backup_contract_reports_summary_producer_shape(tmp_path, monkeypatch, capsys):
+    _init_git_repo(tmp_path)
+    monkeypatch.setattr(dogfood_cmd, "_check_git_ignored", lambda repo, path: "yes")
+
+    assert work_cmd.backup_contract(target=tmp_path, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["schema"]["name"] == "backup-summary-producer-contract"
+    assert payload["config_loaded"] is False
+    assert payload["destination_count"] == 2
+    assert payload["would_write"] is False
+    assert payload["manual_only"] is True
+    assert "latest_snapshot_at" in payload["required_fields"]
+    assert "ok" in payload["accepted_success_results"]
+
+    assert work_cmd.backup_init(target=tmp_path) == 0
+    capsys.readouterr()
+    assert work_cmd.backup_contract(target=tmp_path, destination_id="nas", json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["config_loaded"] is True
+    assert payload["destination_count"] == 1
+    destination = payload["destinations"][0]
+    assert destination["id"] == "nas"
+    assert destination["summary_path"].endswith(".brigade/backups/nas-summary.json")
+    assert destination["example_summary"]["latest_check_result"] == "ok"
+    assert "hostname" in payload["privacy"]["forbidden_field_names"]
+
+    assert work_cmd.backup_contract(target=tmp_path, destination_id="missing", json_output=True) == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["errors"] == ["backup destination not found: missing"]
+
+
 def test_work_backup_doctor_warns_for_backup_health_issues(tmp_path, monkeypatch, capsys):
     _init_git_repo(tmp_path)
     monkeypatch.setattr(
@@ -9829,6 +9860,10 @@ def test_work_backup_cli(tmp_path, monkeypatch):
         seen.append(("status", kwargs))
         return 0
 
+    def fake_backup_contract(**kwargs):
+        seen.append(("contract", kwargs))
+        return 0
+
     def fake_backup_doctor(**kwargs):
         seen.append(("doctor", kwargs))
         return 0
@@ -9838,16 +9873,19 @@ def test_work_backup_cli(tmp_path, monkeypatch):
         return 0
 
     monkeypatch.setattr(work_cmd, "backup_init", fake_backup_init)
+    monkeypatch.setattr(work_cmd, "backup_contract", fake_backup_contract)
     monkeypatch.setattr(work_cmd, "backup_status", fake_backup_status)
     monkeypatch.setattr(work_cmd, "backup_doctor", fake_backup_doctor)
     monkeypatch.setattr(work_cmd, "backup_import_issues", fake_backup_import_issues)
 
     assert cli.main(["work", "backup", "init", "--target", str(tmp_path), "--force", "--no-gitignore"]) == 0
+    assert cli.main(["work", "backup", "contract", "--target", str(tmp_path), "--destination", "nas", "--json"]) == 0
     assert cli.main(["work", "backup", "status", "--target", str(tmp_path), "--json"]) == 0
     assert cli.main(["work", "backup", "doctor", "--target", str(tmp_path), "--json"]) == 0
     assert cli.main(["work", "backup", "import-issues", "--target", str(tmp_path), "--json"]) == 0
     assert seen == [
         ("init", {"target": tmp_path, "force": True, "update_gitignore": False}),
+        ("contract", {"target": tmp_path, "destination_id": "nas", "json_output": True}),
         ("status", {"target": tmp_path, "json_output": True}),
         ("doctor", {"target": tmp_path, "json_output": True}),
         ("import-issues", {"target": tmp_path, "json_output": True}),
