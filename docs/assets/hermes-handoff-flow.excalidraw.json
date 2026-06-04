@@ -1,0 +1,218 @@
+{
+  "type": "excalidraw",
+  "version": 2,
+  "source": "https://github.com/escoffier-labs/brigade",
+  "elements": [
+    {
+      "id": "title",
+      "type": "text",
+      "x": 40,
+      "y": 24,
+      "width": 920,
+      "height": 38,
+      "strokeColor": "#1f2937",
+      "text": "Hermes is a local handoff writer inbox",
+      "fontSize": 28
+    },
+    {
+      "id": "init",
+      "type": "rectangle",
+      "x": 45,
+      "y": 130,
+      "width": 180,
+      "height": 90,
+      "strokeColor": "#2563eb",
+      "backgroundColor": "#dbeafe",
+      "fillStyle": "solid",
+      "roundness": {
+        "type": 3
+      },
+      "label": {
+        "text": "Operator init\nprofile + sources",
+        "fontSize": 16,
+        "strokeColor": "#1f2937",
+        "textAlign": "center",
+        "verticalAlign": "middle"
+      }
+    },
+    {
+      "id": "inbox",
+      "type": "rectangle",
+      "x": 285,
+      "y": 130,
+      "width": 180,
+      "height": 90,
+      "strokeColor": "#d97706",
+      "backgroundColor": "#fef3c7",
+      "fillStyle": "solid",
+      "roundness": {
+        "type": 3
+      },
+      "label": {
+        "text": ".hermes/\nmemory-handoffs/",
+        "fontSize": 16,
+        "strokeColor": "#1f2937",
+        "textAlign": "center",
+        "verticalAlign": "middle"
+      }
+    },
+    {
+      "id": "draft",
+      "type": "rectangle",
+      "x": 525,
+      "y": 130,
+      "width": 180,
+      "height": 90,
+      "strokeColor": "#16a34a",
+      "backgroundColor": "#dcfce7",
+      "fillStyle": "solid",
+      "roundness": {
+        "type": 3
+      },
+      "label": {
+        "text": "Hermes draft\nshared Markdown schema",
+        "fontSize": 16,
+        "strokeColor": "#1f2937",
+        "textAlign": "center",
+        "verticalAlign": "middle"
+      }
+    },
+    {
+      "id": "verify",
+      "type": "rectangle",
+      "x": 765,
+      "y": 120,
+      "width": 180,
+      "height": 110,
+      "strokeColor": "#7c3aed",
+      "backgroundColor": "#ede9fe",
+      "fillStyle": "solid",
+      "roundness": {
+        "type": 3
+      },
+      "label": {
+        "text": "Verify wiring\nlist + doctor\ngitignore check",
+        "fontSize": 16,
+        "strokeColor": "#1f2937",
+        "textAlign": "center",
+        "verticalAlign": "middle"
+      }
+    },
+    {
+      "id": "owner",
+      "type": "rectangle",
+      "x": 525,
+      "y": 295,
+      "width": 180,
+      "height": 70,
+      "strokeColor": "#475569",
+      "backgroundColor": "#f1f5f9",
+      "fillStyle": "solid",
+      "roundness": {
+        "type": 3
+      },
+      "label": {
+        "text": "Ingest later\noutside Brigade",
+        "fontSize": 16,
+        "strokeColor": "#1f2937",
+        "textAlign": "center",
+        "verticalAlign": "middle"
+      }
+    },
+    {
+      "id": "arrow-1-init-inbox",
+      "type": "arrow",
+      "x": 225,
+      "y": 175.0,
+      "width": 60,
+      "height": 0.0,
+      "strokeColor": "#475569",
+      "strokeWidth": 2,
+      "endArrowhead": "arrow",
+      "label": {
+        "text": "create/watch",
+        "fontSize": 13,
+        "strokeColor": "#64748b",
+        "textAlign": "center",
+        "verticalAlign": "middle"
+      }
+    },
+    {
+      "id": "arrow-2-inbox-draft",
+      "type": "arrow",
+      "x": 465,
+      "y": 175.0,
+      "width": 60,
+      "height": 0.0,
+      "strokeColor": "#475569",
+      "strokeWidth": 2,
+      "endArrowhead": "arrow",
+      "label": {
+        "text": "writer drops note",
+        "fontSize": 13,
+        "strokeColor": "#64748b",
+        "textAlign": "center",
+        "verticalAlign": "middle"
+      }
+    },
+    {
+      "id": "arrow-3-draft-verify",
+      "type": "arrow",
+      "x": 705,
+      "y": 175.0,
+      "width": 60,
+      "height": 0.0,
+      "strokeColor": "#475569",
+      "strokeWidth": 2,
+      "endArrowhead": "arrow",
+      "label": {
+        "text": "lint status",
+        "fontSize": 13,
+        "strokeColor": "#64748b",
+        "textAlign": "center",
+        "verticalAlign": "middle"
+      }
+    },
+    {
+      "id": "arrow-4-verify-owner",
+      "type": "arrow",
+      "x": 765,
+      "y": 175.0,
+      "width": -60,
+      "height": 155.0,
+      "strokeColor": "#475569",
+      "strokeWidth": 2,
+      "endArrowhead": "arrow",
+      "label": {
+        "text": "ready signal",
+        "fontSize": 13,
+        "strokeColor": "#64748b",
+        "textAlign": "center",
+        "verticalAlign": "middle"
+      }
+    },
+    {
+      "id": "arrow-5-owner-inbox",
+      "type": "arrow",
+      "x": 525,
+      "y": 330.0,
+      "width": -60,
+      "height": -155.0,
+      "strokeColor": "#475569",
+      "strokeWidth": 2,
+      "endArrowhead": "arrow",
+      "strokeStyle": "dashed",
+      "label": {
+        "text": "receipts reconcile",
+        "fontSize": 13,
+        "strokeColor": "#64748b",
+        "textAlign": "center",
+        "verticalAlign": "middle"
+      }
+    }
+  ],
+  "appState": {
+    "viewBackgroundColor": "#ffffff"
+  },
+  "files": {}
+}

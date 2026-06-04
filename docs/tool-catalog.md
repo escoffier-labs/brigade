@@ -2,6 +2,8 @@
 
 `brigade tools` describes local callable tools, slash commands, skills, superpowers, scripts, and MCP configs across agent harnesses. It inspects local files, reports health, can explicitly write reviewed harness projection files, and can explicitly supervise local runtimes for approved script calls. It does not start MCP servers, auto-sync harness configs, fetch schemas, store auth, install schedulers, or auto-start runtimes.
 
+![Tool catalog separates discovery, projection, and execution](assets/tool-catalog-flow.svg)
+
 The local config is gitignored:
 
 ```text

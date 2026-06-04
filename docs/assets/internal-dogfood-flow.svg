@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1080" height="430" viewBox="0 0 1080 430" role="img">
+<defs><marker id="arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto"><polygon points="0 0, 10 3.5, 0 7" fill="#475569"/></marker></defs>
+<rect width="100%" height="100%" fill="#ffffff"/>
+<text x="540.0" y="42.0" text-anchor="middle" dominant-baseline="middle" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="28" fill="#1f2937"><tspan x="540.0" dy="0.0">Internal dogfood is repo wiring plus an explicit daily loop</tspan></text>
+<line x1="225.0" y1="175.0" x2="285.0" y2="175.0" stroke="#475569" stroke-width="2" marker-end="url(#arrowhead)"/>
+<text x="255.0" y="163.0" text-anchor="middle" dominant-baseline="middle" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="13" fill="#64748b"><tspan x="255.0" dy="0.0">repo wiring</tspan></text>
+<line x1="465.0" y1="175.0" x2="525.0" y2="175.0" stroke="#475569" stroke-width="2" marker-end="url(#arrowhead)"/>
+<text x="495.0" y="163.0" text-anchor="middle" dominant-baseline="middle" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="13" fill="#64748b"><tspan x="495.0" dy="0.0">verify</tspan></text>
+<line x1="705.0" y1="175.0" x2="765.0" y2="175.0" stroke="#475569" stroke-width="2" marker-end="url(#arrowhead)"/>
+<text x="735.0" y="163.0" text-anchor="middle" dominant-baseline="middle" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="13" fill="#64748b"><tspan x="735.0" dy="0.0">next command</tspan></text>
+<line x1="765.0" y1="175.0" x2="705.0" y2="335.0" stroke="#475569" stroke-width="2" marker-end="url(#arrowhead)"/>
+<text x="735.0" y="243.0" text-anchor="middle" dominant-baseline="middle" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="13" fill="#64748b"><tspan x="735.0" dy="0.0">changed guidance</tspan></text>
+<line x1="860.0" y1="225.0" x2="860.0" y2="300.0" stroke="#475569" stroke-width="2" marker-end="url(#arrowhead)"/>
+<text x="860.0" y="250.5" text-anchor="middle" dominant-baseline="middle" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="13" fill="#64748b"><tspan x="860.0" dy="0.0">proof</tspan></text>
+<line x1="615.0" y1="300.0" x2="615.0" y2="215.0" stroke="#475569" stroke-width="2" marker-end="url(#arrowhead)" stroke-dasharray="8 7"/>
+<text x="615.0" y="245.5" text-anchor="middle" dominant-baseline="middle" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="13" fill="#64748b"><tspan x="615.0" dy="0.0">future sessions</tspan></text>
+<rect x="45" y="135" width="180" height="80" rx="12" fill="#dbeafe" stroke="#2563eb" stroke-width="2"/>
+<text x="135.0" y="164.8" text-anchor="middle" dominant-baseline="middle" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="16" fill="#1f2937"><tspan x="135.0" dy="0.0">Operator init</tspan><tspan x="135.0" dy="20.5">local profile config</tspan></text>
+<rect x="285" y="135" width="180" height="80" rx="12" fill="#dcfce7" stroke="#16a34a" stroke-width="2"/>
+<text x="375.0" y="164.8" text-anchor="middle" dominant-baseline="middle" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="16" fill="#1f2937"><tspan x="375.0" dy="0.0">Sync tools</tspan><tspan x="375.0" dy="20.5">project local harness files</tspan></text>
+<rect x="525" y="135" width="180" height="80" rx="12" fill="#fef3c7" stroke="#d97706" stroke-width="2"/>
+<text x="615.0" y="164.8" text-anchor="middle" dominant-baseline="middle" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="16" fill="#1f2937"><tspan x="615.0" dy="0.0">Doctor / status</tspan><tspan x="615.0" dy="20.5">ready signals</tspan></text>
+<rect x="765" y="125" width="190" height="100" rx="12" fill="#ede9fe" stroke="#7c3aed" stroke-width="2"/>
+<text x="860.0" y="164.8" text-anchor="middle" dominant-baseline="middle" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="16" fill="#1f2937"><tspan x="860.0" dy="0.0">Daily loop</tspan><tspan x="860.0" dy="20.5">plan, run, closeout</tspan></text>
+<rect x="525" y="300" width="180" height="70" rx="12" fill="#cffafe" stroke="#0891b2" stroke-width="2"/>
+<text x="615.0" y="324.8" text-anchor="middle" dominant-baseline="middle" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="16" fill="#1f2937"><tspan x="615.0" dy="0.0">Handoff draft</tspan><tspan x="615.0" dy="20.5">durable workflow changes</tspan></text>
+<rect x="765" y="300" width="190" height="70" rx="12" fill="#f1f5f9" stroke="#475569" stroke-width="2"/>
+<text x="860.0" y="324.8" text-anchor="middle" dominant-baseline="middle" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="16" fill="#1f2937"><tspan x="860.0" dy="0.0">Local evidence</tspan><tspan x="860.0" dy="20.5">reports, scans, waivers</tspan></text>
+</svg>

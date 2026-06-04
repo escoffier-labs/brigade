@@ -1,0 +1,218 @@
+{
+  "type": "excalidraw",
+  "version": 2,
+  "source": "https://github.com/escoffier-labs/brigade",
+  "elements": [
+    {
+      "id": "title",
+      "type": "text",
+      "x": 40,
+      "y": 24,
+      "width": 880,
+      "height": 38,
+      "strokeColor": "#1f2937",
+      "text": "Command inventory is generated from the CLI parser",
+      "fontSize": 28
+    },
+    {
+      "id": "parser",
+      "type": "rectangle",
+      "x": 55,
+      "y": 135,
+      "width": 180,
+      "height": 80,
+      "strokeColor": "#2563eb",
+      "backgroundColor": "#dbeafe",
+      "fillStyle": "solid",
+      "roundness": {
+        "type": 3
+      },
+      "label": {
+        "text": "CLI parser\nsource of truth",
+        "fontSize": 16,
+        "strokeColor": "#1f2937",
+        "textAlign": "center",
+        "verticalAlign": "middle"
+      }
+    },
+    {
+      "id": "payload",
+      "type": "rectangle",
+      "x": 295,
+      "y": 135,
+      "width": 180,
+      "height": 80,
+      "strokeColor": "#d97706",
+      "backgroundColor": "#fef3c7",
+      "fillStyle": "solid",
+      "roundness": {
+        "type": 3
+      },
+      "label": {
+        "text": "Command payload\ngroups + paths",
+        "fontSize": 16,
+        "strokeColor": "#1f2937",
+        "textAlign": "center",
+        "verticalAlign": "middle"
+      }
+    },
+    {
+      "id": "doc",
+      "type": "rectangle",
+      "x": 535,
+      "y": 135,
+      "width": 180,
+      "height": 80,
+      "strokeColor": "#16a34a",
+      "backgroundColor": "#dcfce7",
+      "fillStyle": "solid",
+      "roundness": {
+        "type": 3
+      },
+      "label": {
+        "text": "Generated doc\ncommand-inventory.md",
+        "fontSize": 16,
+        "strokeColor": "#1f2937",
+        "textAlign": "center",
+        "verticalAlign": "middle"
+      }
+    },
+    {
+      "id": "check",
+      "type": "rectangle",
+      "x": 775,
+      "y": 135,
+      "width": 140,
+      "height": 80,
+      "strokeColor": "#7c3aed",
+      "backgroundColor": "#ede9fe",
+      "fillStyle": "solid",
+      "roundness": {
+        "type": 3
+      },
+      "label": {
+        "text": "Check mode\nCI drift gate",
+        "fontSize": 16,
+        "strokeColor": "#1f2937",
+        "textAlign": "center",
+        "verticalAlign": "middle"
+      }
+    },
+    {
+      "id": "reader",
+      "type": "rectangle",
+      "x": 535,
+      "y": 295,
+      "width": 180,
+      "height": 60,
+      "strokeColor": "#475569",
+      "backgroundColor": "#f1f5f9",
+      "fillStyle": "solid",
+      "roundness": {
+        "type": 3
+      },
+      "label": {
+        "text": "Reader reference\nscan command surface",
+        "fontSize": 16,
+        "strokeColor": "#1f2937",
+        "textAlign": "center",
+        "verticalAlign": "middle"
+      }
+    },
+    {
+      "id": "arrow-1-parser-payload",
+      "type": "arrow",
+      "x": 235,
+      "y": 175.0,
+      "width": 60,
+      "height": 0.0,
+      "strokeColor": "#475569",
+      "strokeWidth": 2,
+      "endArrowhead": "arrow",
+      "label": {
+        "text": "parse",
+        "fontSize": 13,
+        "strokeColor": "#64748b",
+        "textAlign": "center",
+        "verticalAlign": "middle"
+      }
+    },
+    {
+      "id": "arrow-2-payload-doc",
+      "type": "arrow",
+      "x": 475,
+      "y": 175.0,
+      "width": 60,
+      "height": 0.0,
+      "strokeColor": "#475569",
+      "strokeWidth": 2,
+      "endArrowhead": "arrow",
+      "label": {
+        "text": "--write",
+        "fontSize": 13,
+        "strokeColor": "#64748b",
+        "textAlign": "center",
+        "verticalAlign": "middle"
+      }
+    },
+    {
+      "id": "arrow-3-doc-check",
+      "type": "arrow",
+      "x": 715,
+      "y": 175.0,
+      "width": 60,
+      "height": 0.0,
+      "strokeColor": "#475569",
+      "strokeWidth": 2,
+      "endArrowhead": "arrow",
+      "label": {
+        "text": "--check",
+        "fontSize": 13,
+        "strokeColor": "#64748b",
+        "textAlign": "center",
+        "verticalAlign": "middle"
+      }
+    },
+    {
+      "id": "arrow-4-doc-reader",
+      "type": "arrow",
+      "x": 625.0,
+      "y": 215,
+      "width": 0.0,
+      "height": 80,
+      "strokeColor": "#475569",
+      "strokeWidth": 2,
+      "endArrowhead": "arrow",
+      "label": {
+        "text": "browse",
+        "fontSize": 13,
+        "strokeColor": "#64748b",
+        "textAlign": "center",
+        "verticalAlign": "middle"
+      }
+    },
+    {
+      "id": "arrow-5-check-payload",
+      "type": "arrow",
+      "x": 775,
+      "y": 175.0,
+      "width": -300,
+      "height": 0.0,
+      "strokeColor": "#475569",
+      "strokeWidth": 2,
+      "endArrowhead": "arrow",
+      "strokeStyle": "dashed",
+      "label": {
+        "text": "stale if parser changes",
+        "fontSize": 13,
+        "strokeColor": "#64748b",
+        "textAlign": "center",
+        "verticalAlign": "middle"
+      }
+    }
+  ],
+  "appState": {
+    "viewBackgroundColor": "#ffffff"
+  },
+  "files": {}
+}

@@ -2,6 +2,8 @@
 
 Use this checklist when Brigade handoffs are ready to become durable memory through OpenClaw or another memory owner.
 
+![Memory ingest stays outside Brigade until receipts return](assets/openclaw-ingest-flow.svg)
+
 ## Review Queue
 
 ```bash

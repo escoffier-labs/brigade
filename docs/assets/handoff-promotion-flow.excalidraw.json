@@ -1,0 +1,256 @@
+{
+  "type": "excalidraw",
+  "version": 2,
+  "source": "https://github.com/escoffier-labs/brigade",
+  "elements": [
+    {
+      "id": "title",
+      "type": "text",
+      "x": 40,
+      "y": 24,
+      "width": 980,
+      "height": 38,
+      "strokeColor": "#1f2937",
+      "text": "Reviewed imports promote into memory handoff drafts",
+      "fontSize": 28
+    },
+    {
+      "id": "import",
+      "type": "rectangle",
+      "x": 45,
+      "y": 130,
+      "width": 180,
+      "height": 90,
+      "strokeColor": "#475569",
+      "backgroundColor": "#f1f5f9",
+      "fillStyle": "solid",
+      "roundness": {
+        "type": 3
+      },
+      "label": {
+        "text": "Durable import\ndecision, link, finding",
+        "fontSize": 16,
+        "strokeColor": "#1f2937",
+        "textAlign": "center",
+        "verticalAlign": "middle"
+      }
+    },
+    {
+      "id": "plan",
+      "type": "rectangle",
+      "x": 285,
+      "y": 130,
+      "width": 170,
+      "height": 90,
+      "strokeColor": "#2563eb",
+      "backgroundColor": "#dbeafe",
+      "fillStyle": "solid",
+      "roundness": {
+        "type": 3
+      },
+      "label": {
+        "text": "Plan handoff\ntarget + blockers",
+        "fontSize": 16,
+        "strokeColor": "#1f2937",
+        "textAlign": "center",
+        "verticalAlign": "middle"
+      }
+    },
+    {
+      "id": "draft",
+      "type": "rectangle",
+      "x": 515,
+      "y": 130,
+      "width": 180,
+      "height": 90,
+      "strokeColor": "#d97706",
+      "backgroundColor": "#fef3c7",
+      "fillStyle": "solid",
+      "roundness": {
+        "type": 3
+      },
+      "label": {
+        "text": "Local draft\nignored handoff inbox",
+        "fontSize": 16,
+        "strokeColor": "#1f2937",
+        "textAlign": "center",
+        "verticalAlign": "middle"
+      }
+    },
+    {
+      "id": "lint",
+      "type": "rectangle",
+      "x": 755,
+      "y": 120,
+      "width": 200,
+      "height": 110,
+      "strokeColor": "#7c3aed",
+      "backgroundColor": "#ede9fe",
+      "fillStyle": "solid",
+      "roundness": {
+        "type": 3
+      },
+      "label": {
+        "text": "Lint + guard\nprivacy redaction\nsection style",
+        "fontSize": 16,
+        "strokeColor": "#1f2937",
+        "textAlign": "center",
+        "verticalAlign": "middle"
+      }
+    },
+    {
+      "id": "review",
+      "type": "rectangle",
+      "x": 515,
+      "y": 300,
+      "width": 180,
+      "height": 70,
+      "strokeColor": "#16a34a",
+      "backgroundColor": "#dcfce7",
+      "fillStyle": "solid",
+      "roundness": {
+        "type": 3
+      },
+      "label": {
+        "text": "Operator review\nready for owner",
+        "fontSize": 16,
+        "strokeColor": "#1f2937",
+        "textAlign": "center",
+        "verticalAlign": "middle"
+      }
+    },
+    {
+      "id": "receipt",
+      "type": "rectangle",
+      "x": 755,
+      "y": 300,
+      "width": 200,
+      "height": 70,
+      "strokeColor": "#475569",
+      "backgroundColor": "#f1f5f9",
+      "fillStyle": "solid",
+      "roundness": {
+        "type": 3
+      },
+      "label": {
+        "text": "Promotion receipt\npath + fingerprint",
+        "fontSize": 16,
+        "strokeColor": "#1f2937",
+        "textAlign": "center",
+        "verticalAlign": "middle"
+      }
+    },
+    {
+      "id": "arrow-1-import-plan",
+      "type": "arrow",
+      "x": 225,
+      "y": 175.0,
+      "width": 60,
+      "height": 0.0,
+      "strokeColor": "#475569",
+      "strokeWidth": 2,
+      "endArrowhead": "arrow",
+      "label": {
+        "text": "preview",
+        "fontSize": 13,
+        "strokeColor": "#64748b",
+        "textAlign": "center",
+        "verticalAlign": "middle"
+      }
+    },
+    {
+      "id": "arrow-2-plan-draft",
+      "type": "arrow",
+      "x": 455,
+      "y": 175.0,
+      "width": 60,
+      "height": 0.0,
+      "strokeColor": "#475569",
+      "strokeWidth": 2,
+      "endArrowhead": "arrow",
+      "label": {
+        "text": "promote",
+        "fontSize": 13,
+        "strokeColor": "#64748b",
+        "textAlign": "center",
+        "verticalAlign": "middle"
+      }
+    },
+    {
+      "id": "arrow-3-draft-lint",
+      "type": "arrow",
+      "x": 695,
+      "y": 175.0,
+      "width": 60,
+      "height": 0.0,
+      "strokeColor": "#475569",
+      "strokeWidth": 2,
+      "endArrowhead": "arrow",
+      "label": {
+        "text": "validate",
+        "fontSize": 13,
+        "strokeColor": "#64748b",
+        "textAlign": "center",
+        "verticalAlign": "middle"
+      }
+    },
+    {
+      "id": "arrow-4-lint-review",
+      "type": "arrow",
+      "x": 755,
+      "y": 175.0,
+      "width": -60,
+      "height": 160.0,
+      "strokeColor": "#475569",
+      "strokeWidth": 2,
+      "endArrowhead": "arrow",
+      "label": {
+        "text": "passes",
+        "fontSize": 13,
+        "strokeColor": "#64748b",
+        "textAlign": "center",
+        "verticalAlign": "middle"
+      }
+    },
+    {
+      "id": "arrow-5-lint-receipt",
+      "type": "arrow",
+      "x": 855.0,
+      "y": 230,
+      "width": 0.0,
+      "height": 70,
+      "strokeColor": "#475569",
+      "strokeWidth": 2,
+      "endArrowhead": "arrow",
+      "label": {
+        "text": "record",
+        "fontSize": 13,
+        "strokeColor": "#64748b",
+        "textAlign": "center",
+        "verticalAlign": "middle"
+      }
+    },
+    {
+      "id": "arrow-6-review-receipt",
+      "type": "arrow",
+      "x": 695,
+      "y": 335.0,
+      "width": 60,
+      "height": 0.0,
+      "strokeColor": "#475569",
+      "strokeWidth": 2,
+      "endArrowhead": "arrow",
+      "label": {
+        "text": "archive later",
+        "fontSize": 13,
+        "strokeColor": "#64748b",
+        "textAlign": "center",
+        "verticalAlign": "middle"
+      }
+    }
+  ],
+  "appState": {
+    "viewBackgroundColor": "#ffffff"
+  },
+  "files": {}
+}

@@ -1,0 +1,218 @@
+{
+  "type": "excalidraw",
+  "version": 2,
+  "source": "https://github.com/escoffier-labs/brigade",
+  "elements": [
+    {
+      "id": "title",
+      "type": "text",
+      "x": 40,
+      "y": 24,
+      "width": 1040,
+      "height": 38,
+      "strokeColor": "#1f2937",
+      "text": "Brigade keeps agents local and reviewable",
+      "fontSize": 28
+    },
+    {
+      "id": "writers",
+      "type": "rectangle",
+      "x": 40,
+      "y": 130,
+      "width": 190,
+      "height": 90,
+      "strokeColor": "#16a34a",
+      "backgroundColor": "#dcfce7",
+      "fillStyle": "solid",
+      "roundness": {
+        "type": 3
+      },
+      "label": {
+        "text": "Writer harnesses\nCodex / Claude\nOpenCode / Hermes",
+        "fontSize": 16,
+        "strokeColor": "#1f2937",
+        "textAlign": "center",
+        "verticalAlign": "middle"
+      }
+    },
+    {
+      "id": "inboxes",
+      "type": "rectangle",
+      "x": 290,
+      "y": 130,
+      "width": 190,
+      "height": 90,
+      "strokeColor": "#d97706",
+      "backgroundColor": "#fef3c7",
+      "fillStyle": "solid",
+      "roundness": {
+        "type": 3
+      },
+      "label": {
+        "text": "Handoff inboxes\nignored local drafts",
+        "fontSize": 16,
+        "strokeColor": "#1f2937",
+        "textAlign": "center",
+        "verticalAlign": "middle"
+      }
+    },
+    {
+      "id": "review",
+      "type": "rectangle",
+      "x": 540,
+      "y": 120,
+      "width": 210,
+      "height": 110,
+      "strokeColor": "#2563eb",
+      "backgroundColor": "#dbeafe",
+      "fillStyle": "solid",
+      "roundness": {
+        "type": 3
+      },
+      "label": {
+        "text": "Review gates\nlint + Content Guard\noperator approval",
+        "fontSize": 16,
+        "strokeColor": "#1f2937",
+        "textAlign": "center",
+        "verticalAlign": "middle"
+      }
+    },
+    {
+      "id": "owner",
+      "type": "rectangle",
+      "x": 820,
+      "y": 130,
+      "width": 220,
+      "height": 90,
+      "strokeColor": "#7c3aed",
+      "backgroundColor": "#ede9fe",
+      "fillStyle": "solid",
+      "roundness": {
+        "type": 3
+      },
+      "label": {
+        "text": "Memory owner\nOpenClaw / Hermes\nthis repo",
+        "fontSize": 16,
+        "strokeColor": "#1f2937",
+        "textAlign": "center",
+        "verticalAlign": "middle"
+      }
+    },
+    {
+      "id": "receipts",
+      "type": "rectangle",
+      "x": 540,
+      "y": 300,
+      "width": 210,
+      "height": 80,
+      "strokeColor": "#475569",
+      "backgroundColor": "#f1f5f9",
+      "fillStyle": "solid",
+      "roundness": {
+        "type": 3
+      },
+      "label": {
+        "text": "Local receipts\nruns, closeouts, audits",
+        "fontSize": 16,
+        "strokeColor": "#1f2937",
+        "textAlign": "center",
+        "verticalAlign": "middle"
+      }
+    },
+    {
+      "id": "arrow-1-writers-inboxes",
+      "type": "arrow",
+      "x": 230,
+      "y": 175.0,
+      "width": 60,
+      "height": 0.0,
+      "strokeColor": "#475569",
+      "strokeWidth": 2,
+      "endArrowhead": "arrow",
+      "label": {
+        "text": "drafts",
+        "fontSize": 13,
+        "strokeColor": "#64748b",
+        "textAlign": "center",
+        "verticalAlign": "middle"
+      }
+    },
+    {
+      "id": "arrow-2-inboxes-review",
+      "type": "arrow",
+      "x": 480,
+      "y": 175.0,
+      "width": 60,
+      "height": 0.0,
+      "strokeColor": "#475569",
+      "strokeWidth": 2,
+      "endArrowhead": "arrow",
+      "label": {
+        "text": "pending review",
+        "fontSize": 13,
+        "strokeColor": "#64748b",
+        "textAlign": "center",
+        "verticalAlign": "middle"
+      }
+    },
+    {
+      "id": "arrow-3-review-owner",
+      "type": "arrow",
+      "x": 750,
+      "y": 175.0,
+      "width": 70,
+      "height": 0.0,
+      "strokeColor": "#475569",
+      "strokeWidth": 2,
+      "endArrowhead": "arrow",
+      "label": {
+        "text": "approved memory",
+        "fontSize": 13,
+        "strokeColor": "#64748b",
+        "textAlign": "center",
+        "verticalAlign": "middle"
+      }
+    },
+    {
+      "id": "arrow-4-review-receipts",
+      "type": "arrow",
+      "x": 645.0,
+      "y": 230,
+      "width": 0.0,
+      "height": 70,
+      "strokeColor": "#475569",
+      "strokeWidth": 2,
+      "endArrowhead": "arrow",
+      "label": {
+        "text": "evidence",
+        "fontSize": 13,
+        "strokeColor": "#64748b",
+        "textAlign": "center",
+        "verticalAlign": "middle"
+      }
+    },
+    {
+      "id": "arrow-5-owner-receipts",
+      "type": "arrow",
+      "x": 820,
+      "y": 175.0,
+      "width": -70,
+      "height": 165.0,
+      "strokeColor": "#475569",
+      "strokeWidth": 2,
+      "endArrowhead": "arrow",
+      "strokeStyle": "dashed",
+      "label": {
+        "text": "ingest status",
+        "fontSize": 13,
+        "strokeColor": "#64748b",
+        "textAlign": "center",
+        "verticalAlign": "middle"
+      }
+    }
+  ],
+  "appState": {
+    "viewBackgroundColor": "#ffffff"
+  },
+  "files": {}
+}

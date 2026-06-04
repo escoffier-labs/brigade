@@ -1,0 +1,257 @@
+{
+  "type": "excalidraw",
+  "version": 2,
+  "source": "https://github.com/escoffier-labs/brigade",
+  "elements": [
+    {
+      "id": "title",
+      "type": "text",
+      "x": 40,
+      "y": 24,
+      "width": 1000,
+      "height": 38,
+      "strokeColor": "#1f2937",
+      "text": "Internal dogfood is repo wiring plus an explicit daily loop",
+      "fontSize": 28
+    },
+    {
+      "id": "init",
+      "type": "rectangle",
+      "x": 45,
+      "y": 135,
+      "width": 180,
+      "height": 80,
+      "strokeColor": "#2563eb",
+      "backgroundColor": "#dbeafe",
+      "fillStyle": "solid",
+      "roundness": {
+        "type": 3
+      },
+      "label": {
+        "text": "Operator init\nlocal profile config",
+        "fontSize": 16,
+        "strokeColor": "#1f2937",
+        "textAlign": "center",
+        "verticalAlign": "middle"
+      }
+    },
+    {
+      "id": "sync",
+      "type": "rectangle",
+      "x": 285,
+      "y": 135,
+      "width": 180,
+      "height": 80,
+      "strokeColor": "#16a34a",
+      "backgroundColor": "#dcfce7",
+      "fillStyle": "solid",
+      "roundness": {
+        "type": 3
+      },
+      "label": {
+        "text": "Sync tools\nproject local harness files",
+        "fontSize": 16,
+        "strokeColor": "#1f2937",
+        "textAlign": "center",
+        "verticalAlign": "middle"
+      }
+    },
+    {
+      "id": "doctor",
+      "type": "rectangle",
+      "x": 525,
+      "y": 135,
+      "width": 180,
+      "height": 80,
+      "strokeColor": "#d97706",
+      "backgroundColor": "#fef3c7",
+      "fillStyle": "solid",
+      "roundness": {
+        "type": 3
+      },
+      "label": {
+        "text": "Doctor / status\nready signals",
+        "fontSize": 16,
+        "strokeColor": "#1f2937",
+        "textAlign": "center",
+        "verticalAlign": "middle"
+      }
+    },
+    {
+      "id": "daily",
+      "type": "rectangle",
+      "x": 765,
+      "y": 125,
+      "width": 190,
+      "height": 100,
+      "strokeColor": "#7c3aed",
+      "backgroundColor": "#ede9fe",
+      "fillStyle": "solid",
+      "roundness": {
+        "type": 3
+      },
+      "label": {
+        "text": "Daily loop\nplan, run, closeout",
+        "fontSize": 16,
+        "strokeColor": "#1f2937",
+        "textAlign": "center",
+        "verticalAlign": "middle"
+      }
+    },
+    {
+      "id": "handoff",
+      "type": "rectangle",
+      "x": 525,
+      "y": 300,
+      "width": 180,
+      "height": 70,
+      "strokeColor": "#0891b2",
+      "backgroundColor": "#cffafe",
+      "fillStyle": "solid",
+      "roundness": {
+        "type": 3
+      },
+      "label": {
+        "text": "Handoff draft\ndurable workflow changes",
+        "fontSize": 16,
+        "strokeColor": "#1f2937",
+        "textAlign": "center",
+        "verticalAlign": "middle"
+      }
+    },
+    {
+      "id": "receipts",
+      "type": "rectangle",
+      "x": 765,
+      "y": 300,
+      "width": 190,
+      "height": 70,
+      "strokeColor": "#475569",
+      "backgroundColor": "#f1f5f9",
+      "fillStyle": "solid",
+      "roundness": {
+        "type": 3
+      },
+      "label": {
+        "text": "Local evidence\nreports, scans, waivers",
+        "fontSize": 16,
+        "strokeColor": "#1f2937",
+        "textAlign": "center",
+        "verticalAlign": "middle"
+      }
+    },
+    {
+      "id": "arrow-1-init-sync",
+      "type": "arrow",
+      "x": 225,
+      "y": 175.0,
+      "width": 60,
+      "height": 0.0,
+      "strokeColor": "#475569",
+      "strokeWidth": 2,
+      "endArrowhead": "arrow",
+      "label": {
+        "text": "repo wiring",
+        "fontSize": 13,
+        "strokeColor": "#64748b",
+        "textAlign": "center",
+        "verticalAlign": "middle"
+      }
+    },
+    {
+      "id": "arrow-2-sync-doctor",
+      "type": "arrow",
+      "x": 465,
+      "y": 175.0,
+      "width": 60,
+      "height": 0.0,
+      "strokeColor": "#475569",
+      "strokeWidth": 2,
+      "endArrowhead": "arrow",
+      "label": {
+        "text": "verify",
+        "fontSize": 13,
+        "strokeColor": "#64748b",
+        "textAlign": "center",
+        "verticalAlign": "middle"
+      }
+    },
+    {
+      "id": "arrow-3-doctor-daily",
+      "type": "arrow",
+      "x": 705,
+      "y": 175.0,
+      "width": 60,
+      "height": 0.0,
+      "strokeColor": "#475569",
+      "strokeWidth": 2,
+      "endArrowhead": "arrow",
+      "label": {
+        "text": "next command",
+        "fontSize": 13,
+        "strokeColor": "#64748b",
+        "textAlign": "center",
+        "verticalAlign": "middle"
+      }
+    },
+    {
+      "id": "arrow-4-daily-handoff",
+      "type": "arrow",
+      "x": 765,
+      "y": 175.0,
+      "width": -60,
+      "height": 160.0,
+      "strokeColor": "#475569",
+      "strokeWidth": 2,
+      "endArrowhead": "arrow",
+      "label": {
+        "text": "changed guidance",
+        "fontSize": 13,
+        "strokeColor": "#64748b",
+        "textAlign": "center",
+        "verticalAlign": "middle"
+      }
+    },
+    {
+      "id": "arrow-5-daily-receipts",
+      "type": "arrow",
+      "x": 860.0,
+      "y": 225,
+      "width": 0.0,
+      "height": 75,
+      "strokeColor": "#475569",
+      "strokeWidth": 2,
+      "endArrowhead": "arrow",
+      "label": {
+        "text": "proof",
+        "fontSize": 13,
+        "strokeColor": "#64748b",
+        "textAlign": "center",
+        "verticalAlign": "middle"
+      }
+    },
+    {
+      "id": "arrow-6-handoff-doctor",
+      "type": "arrow",
+      "x": 615.0,
+      "y": 300,
+      "width": 0.0,
+      "height": -85,
+      "strokeColor": "#475569",
+      "strokeWidth": 2,
+      "endArrowhead": "arrow",
+      "strokeStyle": "dashed",
+      "label": {
+        "text": "future sessions",
+        "fontSize": 13,
+        "strokeColor": "#64748b",
+        "textAlign": "center",
+        "verticalAlign": "middle"
+      }
+    }
+  ],
+  "appState": {
+    "viewBackgroundColor": "#ffffff"
+  },
+  "files": {}
+}

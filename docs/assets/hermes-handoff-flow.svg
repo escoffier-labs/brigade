@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="410" viewBox="0 0 1000 410" role="img">
+<defs><marker id="arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto"><polygon points="0 0, 10 3.5, 0 7" fill="#475569"/></marker></defs>
+<rect width="100%" height="100%" fill="#ffffff"/>
+<text x="500.0" y="42.0" text-anchor="middle" dominant-baseline="middle" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="28" fill="#1f2937"><tspan x="500.0" dy="0.0">Hermes is a local handoff writer inbox</tspan></text>
+<line x1="225.0" y1="175.0" x2="285.0" y2="175.0" stroke="#475569" stroke-width="2" marker-end="url(#arrowhead)"/>
+<text x="255.0" y="163.0" text-anchor="middle" dominant-baseline="middle" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="13" fill="#64748b"><tspan x="255.0" dy="0.0">create/watch</tspan></text>
+<line x1="465.0" y1="175.0" x2="525.0" y2="175.0" stroke="#475569" stroke-width="2" marker-end="url(#arrowhead)"/>
+<text x="495.0" y="163.0" text-anchor="middle" dominant-baseline="middle" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="13" fill="#64748b"><tspan x="495.0" dy="0.0">writer drops note</tspan></text>
+<line x1="705.0" y1="175.0" x2="765.0" y2="175.0" stroke="#475569" stroke-width="2" marker-end="url(#arrowhead)"/>
+<text x="735.0" y="163.0" text-anchor="middle" dominant-baseline="middle" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="13" fill="#64748b"><tspan x="735.0" dy="0.0">lint status</tspan></text>
+<line x1="765.0" y1="175.0" x2="705.0" y2="330.0" stroke="#475569" stroke-width="2" marker-end="url(#arrowhead)"/>
+<text x="735.0" y="240.5" text-anchor="middle" dominant-baseline="middle" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="13" fill="#64748b"><tspan x="735.0" dy="0.0">ready signal</tspan></text>
+<line x1="525.0" y1="330.0" x2="465.0" y2="175.0" stroke="#475569" stroke-width="2" marker-end="url(#arrowhead)" stroke-dasharray="8 7"/>
+<text x="495.0" y="240.5" text-anchor="middle" dominant-baseline="middle" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="13" fill="#64748b"><tspan x="495.0" dy="0.0">receipts reconcile</tspan></text>
+<rect x="45" y="130" width="180" height="90" rx="12" fill="#dbeafe" stroke="#2563eb" stroke-width="2"/>
+<text x="135.0" y="164.8" text-anchor="middle" dominant-baseline="middle" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="16" fill="#1f2937"><tspan x="135.0" dy="0.0">Operator init</tspan><tspan x="135.0" dy="20.5">profile + sources</tspan></text>
+<rect x="285" y="130" width="180" height="90" rx="12" fill="#fef3c7" stroke="#d97706" stroke-width="2"/>
+<text x="375.0" y="164.8" text-anchor="middle" dominant-baseline="middle" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="16" fill="#1f2937"><tspan x="375.0" dy="0.0">.hermes/</tspan><tspan x="375.0" dy="20.5">memory-handoffs/</tspan></text>
+<rect x="525" y="130" width="180" height="90" rx="12" fill="#dcfce7" stroke="#16a34a" stroke-width="2"/>
+<text x="615.0" y="164.8" text-anchor="middle" dominant-baseline="middle" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="16" fill="#1f2937"><tspan x="615.0" dy="0.0">Hermes draft</tspan><tspan x="615.0" dy="20.5">shared Markdown schema</tspan></text>
+<rect x="765" y="120" width="180" height="110" rx="12" fill="#ede9fe" stroke="#7c3aed" stroke-width="2"/>
+<text x="855.0" y="154.5" text-anchor="middle" dominant-baseline="middle" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="16" fill="#1f2937"><tspan x="855.0" dy="0.0">Verify wiring</tspan><tspan x="855.0" dy="20.5">list + doctor</tspan><tspan x="855.0" dy="20.5">gitignore check</tspan></text>
+<rect x="525" y="295" width="180" height="70" rx="12" fill="#f1f5f9" stroke="#475569" stroke-width="2"/>
+<text x="615.0" y="319.8" text-anchor="middle" dominant-baseline="middle" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="16" fill="#1f2937"><tspan x="615.0" dy="0.0">Ingest later</tspan><tspan x="615.0" dy="20.5">outside Brigade</tspan></text>
+</svg>

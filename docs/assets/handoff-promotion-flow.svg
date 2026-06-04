@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1060" height="430" viewBox="0 0 1060 430" role="img">
+<defs><marker id="arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto"><polygon points="0 0, 10 3.5, 0 7" fill="#475569"/></marker></defs>
+<rect width="100%" height="100%" fill="#ffffff"/>
+<text x="530.0" y="42.0" text-anchor="middle" dominant-baseline="middle" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="28" fill="#1f2937"><tspan x="530.0" dy="0.0">Reviewed imports promote into memory handoff drafts</tspan></text>
+<line x1="225.0" y1="175.0" x2="285.0" y2="175.0" stroke="#475569" stroke-width="2" marker-end="url(#arrowhead)"/>
+<text x="255.0" y="163.0" text-anchor="middle" dominant-baseline="middle" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="13" fill="#64748b"><tspan x="255.0" dy="0.0">preview</tspan></text>
+<line x1="455.0" y1="175.0" x2="515.0" y2="175.0" stroke="#475569" stroke-width="2" marker-end="url(#arrowhead)"/>
+<text x="485.0" y="163.0" text-anchor="middle" dominant-baseline="middle" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="13" fill="#64748b"><tspan x="485.0" dy="0.0">promote</tspan></text>
+<line x1="695.0" y1="175.0" x2="755.0" y2="175.0" stroke="#475569" stroke-width="2" marker-end="url(#arrowhead)"/>
+<text x="725.0" y="163.0" text-anchor="middle" dominant-baseline="middle" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="13" fill="#64748b"><tspan x="725.0" dy="0.0">validate</tspan></text>
+<line x1="755.0" y1="175.0" x2="695.0" y2="335.0" stroke="#475569" stroke-width="2" marker-end="url(#arrowhead)"/>
+<text x="725.0" y="243.0" text-anchor="middle" dominant-baseline="middle" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="13" fill="#64748b"><tspan x="725.0" dy="0.0">passes</tspan></text>
+<line x1="855.0" y1="230.0" x2="855.0" y2="300.0" stroke="#475569" stroke-width="2" marker-end="url(#arrowhead)"/>
+<text x="855.0" y="253.0" text-anchor="middle" dominant-baseline="middle" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="13" fill="#64748b"><tspan x="855.0" dy="0.0">record</tspan></text>
+<line x1="695.0" y1="335.0" x2="755.0" y2="335.0" stroke="#475569" stroke-width="2" marker-end="url(#arrowhead)"/>
+<text x="725.0" y="323.0" text-anchor="middle" dominant-baseline="middle" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="13" fill="#64748b"><tspan x="725.0" dy="0.0">archive later</tspan></text>
+<rect x="45" y="130" width="180" height="90" rx="12" fill="#f1f5f9" stroke="#475569" stroke-width="2"/>
+<text x="135.0" y="164.8" text-anchor="middle" dominant-baseline="middle" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="16" fill="#1f2937"><tspan x="135.0" dy="0.0">Durable import</tspan><tspan x="135.0" dy="20.5">decision, link, finding</tspan></text>
+<rect x="285" y="130" width="170" height="90" rx="12" fill="#dbeafe" stroke="#2563eb" stroke-width="2"/>
+<text x="370.0" y="164.8" text-anchor="middle" dominant-baseline="middle" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="16" fill="#1f2937"><tspan x="370.0" dy="0.0">Plan handoff</tspan><tspan x="370.0" dy="20.5">target + blockers</tspan></text>
+<rect x="515" y="130" width="180" height="90" rx="12" fill="#fef3c7" stroke="#d97706" stroke-width="2"/>
+<text x="605.0" y="164.8" text-anchor="middle" dominant-baseline="middle" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="16" fill="#1f2937"><tspan x="605.0" dy="0.0">Local draft</tspan><tspan x="605.0" dy="20.5">ignored handoff inbox</tspan></text>
+<rect x="755" y="120" width="200" height="110" rx="12" fill="#ede9fe" stroke="#7c3aed" stroke-width="2"/>
+<text x="855.0" y="154.5" text-anchor="middle" dominant-baseline="middle" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="16" fill="#1f2937"><tspan x="855.0" dy="0.0">Lint + guard</tspan><tspan x="855.0" dy="20.5">privacy redaction</tspan><tspan x="855.0" dy="20.5">section style</tspan></text>
+<rect x="515" y="300" width="180" height="70" rx="12" fill="#dcfce7" stroke="#16a34a" stroke-width="2"/>
+<text x="605.0" y="324.8" text-anchor="middle" dominant-baseline="middle" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="16" fill="#1f2937"><tspan x="605.0" dy="0.0">Operator review</tspan><tspan x="605.0" dy="20.5">ready for owner</tspan></text>
+<rect x="755" y="300" width="200" height="70" rx="12" fill="#f1f5f9" stroke="#475569" stroke-width="2"/>
+<text x="855.0" y="324.8" text-anchor="middle" dominant-baseline="middle" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="16" fill="#1f2937"><tspan x="855.0" dy="0.0">Promotion receipt</tspan><tspan x="855.0" dy="20.5">path + fingerprint</tspan></text>
+</svg>

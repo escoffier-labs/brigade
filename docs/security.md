@@ -2,6 +2,8 @@
 
 Brigade includes a read-only local security scanner for agent workspaces. It is designed to produce redacted findings that can be reviewed, suppressed, or imported into the local work inbox.
 
+![Security scans become reviewable local work](assets/security-flow.svg)
+
 ## Content Guard
 
 Content Guard is Brigade's publish and memory-safety scanner. Brigade shells out to the local scanner instead of importing it as a library, so the boundary stays explicit.

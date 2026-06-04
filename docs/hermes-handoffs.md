@@ -3,6 +3,8 @@
 Brigade treats Hermes as a local Memory Handoff writer through `.hermes/memory-handoffs/`.
 The inbox uses the same Markdown handoff schema as Claude Code, Codex, and OpenCode.
 
+![Hermes is a local handoff writer inbox](assets/hermes-handoff-flow.svg)
+
 ## Local Setup
 
 ```bash

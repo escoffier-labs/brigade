@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1180" height="460" viewBox="0 0 1180 460" role="img">
+<defs><marker id="arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto"><polygon points="0 0, 10 3.5, 0 7" fill="#475569"/></marker></defs>
+<rect width="100%" height="100%" fill="#ffffff"/>
+<text x="590.0" y="42.0" text-anchor="middle" dominant-baseline="middle" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="28" fill="#1f2937"><tspan x="590.0" dy="0.0">Repo fleet turns local evidence into reviewed actions</tspan></text>
+<line x1="210.0" y1="180.0" x2="260.0" y2="180.0" stroke="#475569" stroke-width="2" marker-end="url(#arrowhead)"/>
+<text x="235.0" y="168.0" text-anchor="middle" dominant-baseline="middle" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="13" fill="#64748b"><tspan x="235.0" dy="0.0">configured repos</tspan></text>
+<line x1="430.0" y1="180.0" x2="480.0" y2="180.0" stroke="#475569" stroke-width="2" marker-end="url(#arrowhead)"/>
+<text x="455.0" y="168.0" text-anchor="middle" dominant-baseline="middle" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="13" fill="#64748b"><tspan x="455.0" dy="0.0">safe summaries</tspan></text>
+<line x1="660.0" y1="180.0" x2="720.0" y2="180.0" stroke="#475569" stroke-width="2" marker-end="url(#arrowhead)"/>
+<text x="690.0" y="168.0" text-anchor="middle" dominant-baseline="middle" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="13" fill="#64748b"><tspan x="690.0" dy="0.0">build after closeout</tspan></text>
+<line x1="910.0" y1="180.0" x2="960.0" y2="180.0" stroke="#475569" stroke-width="2" marker-end="url(#arrowhead)"/>
+<text x="935.0" y="168.0" text-anchor="middle" dominant-baseline="middle" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="13" fill="#64748b"><tspan x="935.0" dy="0.0">operator applies</tspan></text>
+<line x1="960.0" y1="180.0" x2="910.0" y2="350.0" stroke="#475569" stroke-width="2" marker-end="url(#arrowhead)"/>
+<text x="935.0" y="253.0" text-anchor="middle" dominant-baseline="middle" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="13" fill="#64748b"><tspan x="935.0" dy="0.0">target work moves</tspan></text>
+<line x1="910.0" y1="350.0" x2="960.0" y2="350.0" stroke="#475569" stroke-width="2" marker-end="url(#arrowhead)"/>
+<text x="935.0" y="338.0" text-anchor="middle" dominant-baseline="middle" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="13" fill="#64748b"><tspan x="935.0" dy="0.0">evidence</tspan></text>
+<line x1="960.0" y1="350.0" x2="910.0" y2="180.0" stroke="#475569" stroke-width="2" marker-end="url(#arrowhead)" stroke-dasharray="8 7"/>
+<text x="935.0" y="253.0" text-anchor="middle" dominant-baseline="middle" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="13" fill="#64748b"><tspan x="935.0" dy="0.0">new release actions</tspan></text>
+<rect x="40" y="140" width="170" height="80" rx="12" fill="#f1f5f9" stroke="#475569" stroke-width="2"/>
+<text x="125.0" y="169.8" text-anchor="middle" dominant-baseline="middle" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="16" fill="#1f2937"><tspan x="125.0" dy="0.0">repos.toml</tspan><tspan x="125.0" dy="20.5">safe labels + roots</tspan></text>
+<rect x="260" y="140" width="170" height="80" rx="12" fill="#dbeafe" stroke="#2563eb" stroke-width="2"/>
+<text x="345.0" y="169.8" text-anchor="middle" dominant-baseline="middle" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="16" fill="#1f2937"><tspan x="345.0" dy="0.0">Sweep / scan</tspan><tspan x="345.0" dy="20.5">read-only refresh</tspan></text>
+<rect x="480" y="140" width="180" height="80" rx="12" fill="#fef3c7" stroke="#d97706" stroke-width="2"/>
+<text x="570.0" y="169.8" text-anchor="middle" dominant-baseline="middle" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="16" fill="#1f2937"><tspan x="570.0" dy="0.0">Fleet report</tspan><tspan x="570.0" dy="20.5">blockers + warnings</tspan></text>
+<rect x="720" y="130" width="190" height="100" rx="12" fill="#ede9fe" stroke="#7c3aed" stroke-width="2"/>
+<text x="815.0" y="169.8" text-anchor="middle" dominant-baseline="middle" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="16" fill="#1f2937"><tspan x="815.0" dy="0.0">Action queue</tspan><tspan x="815.0" dy="20.5">reviewed or deferred</tspan></text>
+<rect x="960" y="140" width="170" height="80" rx="12" fill="#dcfce7" stroke="#16a34a" stroke-width="2"/>
+<text x="1045.0" y="169.8" text-anchor="middle" dominant-baseline="middle" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="16" fill="#1f2937"><tspan x="1045.0" dy="0.0">Dispatch</tspan><tspan x="1045.0" dy="20.5">target repo import</tspan></text>
+<rect x="720" y="310" width="190" height="80" rx="12" fill="#cffafe" stroke="#0891b2" stroke-width="2"/>
+<text x="815.0" y="339.8" text-anchor="middle" dominant-baseline="middle" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="16" fill="#1f2937"><tspan x="815.0" dy="0.0">Reconcile</tspan><tspan x="815.0" dy="20.5">target status + receipts</tspan></text>
+<rect x="960" y="310" width="170" height="80" rx="12" fill="#f1f5f9" stroke="#475569" stroke-width="2"/>
+<text x="1045.0" y="339.8" text-anchor="middle" dominant-baseline="middle" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="16" fill="#1f2937"><tspan x="1045.0" dy="0.0">Release train</tspan><tspan x="1045.0" dy="20.5">manual evidence gate</tspan></text>
+</svg>

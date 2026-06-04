@@ -69,35 +69,7 @@ One memory owner stays canonical.
 That is typically OpenClaw or Hermes when present, otherwise `this-repo`.
 Writer harnesses drop handoffs into their own inboxes, and the ingester scans all of them.
 
-```mermaid
-flowchart TB
-    CC["<b>Claude Code</b>"]
-    CX["<b>Codex</b>"]
-    OC["<b>OpenCode</b>"]
-    CCI[".claude/memory-handoffs/"]
-    CXI[".codex/memory-handoffs/"]
-    OCI[".opencode/memory-handoffs/"]
-    CC --> CCI
-    CX --> CXI
-    OC --> OCI
-
-    ING(["<b>brigade ingest</b>"])
-    CCI --> ING
-    CXI --> ING
-    OCI --> ING
-
-    OUT["memory/cards/*.md · TOOLS.md · USER.md<br/>rules/*.md · .learnings/*.md"]
-    ING --> OUT
-
-    classDef harness fill:#e0f2fe,stroke:#0284c7,color:#075985;
-    classDef inbox fill:#f1f5f9,stroke:#94a3b8,color:#334155;
-    classDef ingest fill:#fef3c7,stroke:#d97706,color:#92400e;
-    classDef store fill:#dcfce7,stroke:#16a34a,color:#166534;
-    class CC,CX,OC harness;
-    class CCI,CXI,OCI inbox;
-    class ING ingest;
-    class OUT store;
-```
+![Brigade keeps agents local and reviewable](assets/technical-guide-design.svg)
 
 The ingester is intentionally conservative.
 Safe card handoffs become cards.

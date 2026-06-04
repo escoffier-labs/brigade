@@ -2,6 +2,8 @@
 
 `brigade repos` inspects configured local repositories from gitignored `.brigade/repos.toml`. It is a local operator workflow for safe labels, readiness checks, report bundles, and reviewed fleet actions.
 
+![Repo fleet turns local evidence into reviewed actions](assets/repo-fleet-flow.svg)
+
 Commands:
 
 ```bash

@@ -2,6 +2,8 @@
 
 This file is generated from the Brigade CLI parser.
 
+![Command inventory is generated from the CLI parser](assets/command-inventory-flow.svg)
+
 Regenerate with:
 
 ```bash

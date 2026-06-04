@@ -2,6 +2,8 @@
 
 `brigade work import promote-handoff` turns a reviewed durable scanner import into a local Memory Handoff draft. It is for non-task imports that should become durable knowledge after review, not for work execution.
 
+![Reviewed imports promote into memory handoff drafts](assets/handoff-promotion-flow.svg)
+
 ## Commands
 
 ```bash

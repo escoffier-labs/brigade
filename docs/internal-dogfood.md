@@ -4,6 +4,8 @@ Brigade is repo-wired first and machine-aware second.
 
 The repo wiring lives under `.brigade/` and is intentionally gitignored. It stores local config, receipts, scans, reports, queues, readiness waivers, and run artifacts for one repo. The machine wiring is limited to installed commands and user-level optional tools such as `brigade`, `codex`, and `agent-notify`.
 
+![Internal dogfood is repo wiring plus an explicit daily loop](assets/internal-dogfood-flow.svg)
+
 ## Onboard a Repo
 
 Use the internal dogfood profile when a repo should participate in the local production loop:
