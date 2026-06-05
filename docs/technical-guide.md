@@ -340,15 +340,29 @@ Use `--output-dir <path>` to pick the artifact directory, or `--no-artifacts` fo
 
 `brigade research run "<question>"` drives an iterative research loop (gather, read, extract, synthesize) and turns the answer into durable, cited memory instead of a throwaway reply.
 It grounds in your trusted local sources first, for example a class corpus or a project's notes, so the operator's own data and trusted material stay local.
-The web tier is opt-in with `--web` and is treated as untrusted: fetched pages are quarantined as data, never instructions, and rendered in a separate, labeled section of the report.
+Configured CLI sources can add local tool output when `research.toml` declares a `[[source]]` adapter.
+The browser/web tier is opt-in with `--web` and is treated as untrusted: fetched pages are quarantined as data, never instructions, and rendered in a separate, labeled section of the report.
 
 The loop uses the cloud `researcher` model from your `.brigade/roster.toml`; Brigade never runs a model locally.
 Each run persists under `.brigade/research/`, is cancellable and resumable so a long run survives interruption, and emits two artifacts: a self-contained HTML report and a memory handoff that flows into the usual ingest pipeline.
+Run manifests record the corpus, source globs, configured CLI routes, web provider, and caps so `brigade research resume` keeps the original route instead of quietly falling back to an empty run.
 
 ```bash
 brigade research run "summarize the key themes" --corpus cs101
 brigade research run "latest on X" --web
+brigade research sources list
+brigade research sources doctor
 brigade research show <run-id>
+```
+
+CLI source adapters are foreground commands. Brigade substitutes `{query}`, captures stdout and stderr, and labels the extracted findings as configured CLI evidence:
+
+```toml
+[[source]]
+id = "local-search"
+type = "cli"
+command = ["my-search-tool", "--json", "{query}"]
+timeout = 60
 ```
 
 The web tier needs the optional browser dependency, installed once:

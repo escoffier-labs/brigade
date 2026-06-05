@@ -19,6 +19,14 @@ Brigade is a local-first operator CLI for AI agent workspaces. The public GitHub
 
 Brigade helps AI agent tools work from the same memory without turning that memory into a junk drawer.
 
+## Mise En Place
+
+Mise en place, pronounced "Meez", means everything is in its place before the work starts.
+
+In a kitchen, that is the chef's first job: prep the station, label the ingredients, sharpen the tools, and make sure service does not depend on hunting for basics mid-rush. For agents, it is the same job: rules, memory, handoff inboxes, tools, guards, receipts, and verification paths set up before the session gets expensive.
+
+This is the most important part of Brigade. The chef owns the station, and every agent working in it should leave the setup clearer, safer, and easier for the next agent to use.
+
 ## Current Status
 
 Brigade is usable now for real first-run workflows. The tested path is installing the CLI, running `operator quickstart` in a repo, checking `operator doctor --profile local-operator`, writing memory handoffs, projecting portable skills and tools, and using the local security scanner.

@@ -1,12 +1,14 @@
 # src/brigade/research_cmd.py
 from __future__ import annotations
 import json as _json
+import shutil
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from .research import registry, config as rconfig
 from .research.types import Caps
 from .research.engine import DeepResearcher
 from .research.sources import local as localsrc
+from .research.sources import cli as clisrc
 from .research import report as reportmod, handoff as handoffmod
 
 def _resolve_backend(target: Path):
@@ -22,6 +24,49 @@ def _resolve_sources(target: Path, corpus: Optional[str], sources: List[str]) ->
         paths += cfg.corpus_paths(corpus)
     return paths
 
+def _safe_source_adapters(adapters: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    safe: List[Dict[str, Any]] = []
+    for item in adapters:
+        adapter_type = str(item.get("type") or "").strip().lower()
+        if not adapter_type:
+            continue
+        command = clisrc._command_parts(item.get("command") or item.get("argv"))
+        safe_item: Dict[str, Any] = {
+            "id": str(item.get("id") or item.get("name") or adapter_type).strip(),
+            "type": adapter_type,
+            "enabled": item.get("enabled", True) is not False,
+            "trust": str(item.get("trust") or ("cli" if adapter_type == "cli" else adapter_type)),
+        }
+        if command:
+            safe_item["command"] = Path(command[0]).name
+            safe_item["accepts_query"] = any("{query}" in part for part in command)
+        if item.get("cwd"):
+            safe_item["cwd"] = str(item.get("cwd"))
+        safe.append(safe_item)
+    return safe
+
+def _manifest(*, target: Path, cfg: rconfig.ResearchConfig, corpus: Optional[str],
+              sources: List[str], paths: List[str], web: bool, provider: Optional[str],
+              cli_providers: List[Any]) -> Dict[str, Any]:
+    web_provider = str(provider or cfg.search_settings().get("research_search_provider") or "playwright").strip()
+    routes = [
+        {"id": "local", "type": "local", "enabled": bool(paths), "trust": "local"},
+        {"id": "configured-cli", "type": "cli", "enabled": bool(cli_providers), "trust": "cli"},
+        {"id": web_provider, "type": "browser" if web_provider in {"playwright", "browser", ""} else "web",
+         "enabled": bool(web), "trust": "browser" if web_provider in {"playwright", "browser", ""} else "web"},
+    ]
+    return {
+        "target": str(target),
+        "corpus": corpus,
+        "sources": list(sources),
+        "local_paths": list(paths),
+        "web_enabled": bool(web),
+        "provider": web_provider,
+        "source_adapters": _safe_source_adapters(cfg.source_adapters()),
+        "cli_sources": [getattr(provider, "source_id", "cli-source") for provider in cli_providers],
+        "routes": routes,
+    }
+
 def run(*, target: Path, question: str, sources: List[str], web: bool,
         overrides: Dict[str, Any], corpus: Optional[str] = None,
         provider: Optional[str] = None, run_id: Optional[str] = None) -> str:
@@ -29,11 +74,15 @@ def run(*, target: Path, question: str, sources: List[str], web: bool,
     caps_kwargs = {**cfg.caps_overrides(), **{k: v for k, v in overrides.items() if v is not None}}
     caps = Caps.build(**caps_kwargs)
     run_id = run_id or _new_run_id(question)
+    paths = _resolve_sources(target, corpus, sources)
+    cli_providers = clisrc.build_providers(cfg.source_adapters(), target=target)
+    manifest = _manifest(target=target, cfg=cfg, corpus=corpus, sources=sources,
+                         paths=paths, web=web, provider=provider,
+                         cli_providers=cli_providers)
     registry.create_run(target, question=question, run_id=run_id,
-                        caps=caps.__dict__.copy())
+                        caps=caps.__dict__.copy(), manifest=manifest)
     blockers: List[str] = []
 
-    paths = _resolve_sources(target, corpus, sources)
     index = localsrc.build_index(paths) if paths else None
 
     web_provider = None
@@ -59,6 +108,7 @@ def run(*, target: Path, question: str, sources: List[str], web: bool,
 
     eng = DeepResearcher(
         llm=backend, local_index=index, web=web_provider, caps=caps,
+        external_sources=cli_providers,
         on_checkpoint=lambda cp: registry.save_checkpoint(target, run_id, cp),
         on_event=lambda phase, d: registry.append_event(target, run_id, {"phase": phase, **d}),
     )
@@ -90,8 +140,22 @@ def resume(*, target: Path, run_id: str, overrides: Dict[str, Any]) -> str:
     if not rec:
         raise SystemExit(f"no such run: {run_id}")
     registry.set_status(target, run_id, "running")
-    return run(target=target, question=rec["question"], sources=[], web=False,
-               overrides={**overrides, "_resume": True}, run_id=run_id)
+    manifest = rec.get("manifest") if isinstance(rec.get("manifest"), dict) else {}
+    restored_overrides: Dict[str, Any] = {}
+    if isinstance(rec.get("caps"), dict):
+        restored_overrides.update(rec["caps"])
+    restored_overrides.update({k: v for k, v in overrides.items() if v is not None})
+    restored_overrides["_resume"] = True
+    return run(
+        target=target,
+        question=rec["question"],
+        sources=list(manifest.get("sources") or []),
+        web=bool(manifest.get("web_enabled")),
+        corpus=manifest.get("corpus") if isinstance(manifest.get("corpus"), str) else None,
+        provider=manifest.get("provider") if isinstance(manifest.get("provider"), str) else None,
+        overrides=restored_overrides,
+        run_id=run_id,
+    )
 
 def cancel(*, target: Path, run_id: str) -> None:
     registry.set_status(target, run_id, "cancelled")
@@ -100,6 +164,69 @@ def _new_run_id(question: str) -> str:
     # Caller passes run_id in tests for determinism; production stamps the time.
     from datetime import datetime, timezone
     return datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S-") + registry.slug(question)
+
+def sources_payload(*, target: Path) -> Dict[str, Any]:
+    cfg = rconfig.load(target)
+    adapters = cfg.source_adapters()
+    settings = cfg.search_settings()
+    routes: List[Dict[str, Any]] = [
+        {
+            "id": "local",
+            "type": "local",
+            "status": "ok",
+            "detail": "local corpus paths and --source globs are available",
+            "trust": "local",
+        }
+    ]
+
+    web_provider = str(settings.get("research_search_provider") or "playwright").strip()
+    browser_ok = False
+    try:
+        from .research.sources import web as webmod
+        browser_ok = webmod._import_playwright() is not None
+    except Exception:
+        browser_ok = False
+    routes.append({
+        "id": "playwright",
+        "type": "browser",
+        "status": "ok" if browser_ok else "warn",
+        "detail": "available for --web browser search" if browser_ok else "install brigade[research] and chromium for --web browser search",
+        "trust": "browser",
+    })
+    if web_provider == "searxng" or settings.get("searxng_url"):
+        routes.append({
+            "id": "searxng",
+            "type": "web",
+            "status": "ok" if settings.get("searxng_url") else "fail",
+            "detail": "configured web search endpoint" if settings.get("searxng_url") else "missing search.searxng_url",
+            "trust": "web",
+        })
+
+    for raw, item in zip(adapters, _safe_source_adapters(adapters)):
+        if item.get("type") != "cli":
+            routes.append({**item, "status": "warn", "detail": "unsupported research source adapter type"})
+            continue
+        if item.get("enabled") is False:
+            routes.append({**item, "status": "warn", "detail": "configured but disabled"})
+            continue
+        command = clisrc._command_parts(raw.get("command") or raw.get("argv"))
+        executable = command[0] if command else ""
+        executable_path = Path(executable).expanduser()
+        if "/" in executable and not executable_path.is_absolute():
+            executable_path = target / executable_path
+        exists = bool(executable) and (executable_path.exists() if "/" in executable else shutil.which(executable) is not None)
+        routes.append({
+            **item,
+            "status": "ok" if exists else "fail",
+            "detail": "configured CLI source ready" if exists else "configured CLI executable not found",
+        })
+
+    statuses = [route["status"] for route in routes]
+    return {
+        "target": str(target),
+        "status": "fail" if "fail" in statuses else ("warn" if "warn" in statuses else "ok"),
+        "routes": routes,
+    }
 
 
 # --- CLI presentation helpers (return process exit codes) ---
@@ -193,3 +320,26 @@ def cli_open(*, target: Path, run_id: str, json_output: bool = False) -> int:
         return 0
     print(str(path))
     return 0
+
+
+def cli_sources_list(*, target: Path, json_output: bool = False) -> int:
+    payload = sources_payload(target=target)
+    if json_output:
+        print(_json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+    print(f"research sources: {target}")
+    for route in payload["routes"]:
+        print(f"- [{route.get('status')}] {route.get('type')}:{route.get('id')} ({route.get('trust')}) - {route.get('detail')}")
+    return 0
+
+
+def cli_sources_doctor(*, target: Path, json_output: bool = False) -> int:
+    payload = sources_payload(target=target)
+    if json_output:
+        print(_json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        print(f"research sources doctor: {target}")
+        print(f"status: {payload['status']}")
+        for route in payload["routes"]:
+            print(f"- [{route.get('status')}] {route.get('type')}:{route.get('id')} - {route.get('detail')}")
+    return 1 if payload["status"] == "fail" else 0

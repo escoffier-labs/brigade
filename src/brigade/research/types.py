@@ -2,7 +2,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field, asdict
 from typing import Any, Dict, List, Literal, Protocol
 
-Trust = Literal["local", "web"]
+Trust = Literal["local", "web", "cli", "browser"]
 Status = Literal["running", "done", "cancelled", "error"]
 
 @dataclass

@@ -35,7 +35,7 @@ brigade roadmap commands --write
 - `brigade reconfigure`: 1 command path(s)
 - `brigade release`: 22 command path(s)
 - `brigade repos`: 70 command path(s)
-- `brigade research`: 6 command path(s)
+- `brigade research`: 8 command path(s)
 - `brigade roadmap`: 4 command path(s)
 - `brigade roster`: 2 command path(s)
 - `brigade run`: 1 command path(s)
@@ -290,6 +290,8 @@ brigade roadmap commands --write
 - `brigade research resume`
 - `brigade research run`
 - `brigade research show`
+- `brigade research sources doctor`
+- `brigade research sources list`
 - `brigade roadmap archive`
 - `brigade roadmap audit`
 - `brigade roadmap commands`

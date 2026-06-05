@@ -2,6 +2,7 @@
 from __future__ import annotations
 import json, re
 from pathlib import Path
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 def _root(target: Path) -> Path:
@@ -23,12 +24,18 @@ def _read_json(path: Path) -> Optional[Dict[str, Any]]:
         return None
     return json.loads(path.read_text())
 
-def create_run(target: Path, *, question: str, run_id: str, caps: Dict[str, Any]) -> str:
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+def create_run(target: Path, *, question: str, run_id: str, caps: Dict[str, Any], manifest: Optional[Dict[str, Any]] = None) -> str:
     d = _dir(target, run_id)
     d.mkdir(parents=True, exist_ok=True)
+    existing = _read_json(d / "run.json") or {}
+    now = _now()
     _write_json(d / "run.json", {
         "run_id": run_id, "question": question, "status": "running",
-        "caps": caps, "stats": {}, "artifacts": {}, "blockers": [],
+        "created_at": existing.get("created_at") or now, "updated_at": now,
+        "caps": caps, "manifest": manifest or {}, "stats": {}, "artifacts": {}, "blockers": [],
     })
     return run_id
 
@@ -50,6 +57,7 @@ def list_runs(target: Path) -> List[Dict[str, Any]]:
 def _update(target: Path, run_id: str, **fields: Any) -> None:
     p = _dir(target, run_id) / "run.json"
     rec = _read_json(p) or {}
+    fields.setdefault("updated_at", _now())
     rec.update(fields)
     _write_json(p, rec)
 
@@ -59,7 +67,7 @@ def set_status(target: Path, run_id: str, status: str) -> None:
 def finish_run(target: Path, run_id: str, *, status: str, stats: Dict[str, Any],
                artifacts: Dict[str, Any], blockers: Optional[List[str]] = None) -> None:
     _update(target, run_id, status=status, stats=stats, artifacts=artifacts,
-            blockers=blockers or [])
+            blockers=blockers or [], completed_at=_now())
 
 def save_checkpoint(target: Path, run_id: str, cp: Dict[str, Any]) -> None:
     _write_json(_dir(target, run_id) / "checkpoint.json", cp)

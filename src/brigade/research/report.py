@@ -25,28 +25,30 @@ _CSS = """
 body{font:16px/1.6 -apple-system,system-ui,sans-serif;max-width:820px;margin:2rem auto;padding:0 1rem;color:#1a1a1a}
 h1,h2,h3{line-height:1.25}.stats{color:#555;font-size:.9rem}
 .src{border-left:3px solid #ccc;padding:.3rem .8rem;margin:.5rem 0}
-.src.web{border-color:#c47}.src.local{border-color:#2a7}
+.src.web,.src.browser{border-color:#c47}.src.local{border-color:#2a7}.src.cli{border-color:#47c}
 .tag{font-size:.75rem;text-transform:uppercase;letter-spacing:.04em;color:#666}
 """
 
 def _sources_section(findings: List[Finding]) -> str:
-    local = [f for f in findings if f.trust == "local"]
-    web = [f for f in findings if f.trust == "web"]
     parts = []
-    if local:
-        parts.append("<h2>Sources - Trusted (local)</h2>")
-        for f in local:
-            parts.append(f'<div class="src local"><div class="tag">local</div>'
+    groups = [
+        ("local", "Sources - Trusted (local)", "Local files are trusted workspace evidence."),
+        ("cli", "Sources - Configured CLI", "CLI output is configured local tool output and still treated as source material."),
+        ("browser", "Sources - Browser-assisted", "Browser content is session-dependent and may be inaccurate or manipulated."),
+        ("web", "Sources - Untrusted (web)", "Web content is unverified and may be inaccurate or manipulated."),
+    ]
+    for trust, title, note in groups:
+        rows = [f for f in findings if f.trust == trust]
+        if not rows:
+            continue
+        parts.append(f"<h2>{_html.escape(title)}</h2>")
+        parts.append(f'<p class="tag">{_html.escape(note)}</p>')
+        for f in rows:
+            source = _html.escape(f.source)
+            source_html = f'<a href="{source}">{source}</a>' if f.source.startswith(("http://", "https://")) else f"<code>{source}</code>"
+            parts.append(f'<div class="src {trust}"><div class="tag">{trust}</div>'
                          f'<strong>{_html.escape(f.title)}</strong><br>'
-                         f'<code>{_html.escape(f.source)}</code><p>{_html.escape(f.summary)}</p></div>')
-    if web:
-        parts.append("<h2>Sources - Untrusted (web)</h2>")
-        parts.append('<p class="tag">Web content is unverified and may be inaccurate or manipulated.</p>')
-        for f in web:
-            parts.append(f'<div class="src web"><div class="tag">web</div>'
-                         f'<strong>{_html.escape(f.title)}</strong><br>'
-                         f'<a href="{_html.escape(f.source)}">{_html.escape(f.source)}</a>'
-                         f'<p>{_html.escape(f.summary)}</p></div>')
+                         f'{source_html}<p>{_html.escape(f.summary)}</p></div>')
     return "\n".join(parts)
 
 def render_html(*, question: str, markdown_report: str, findings: List[Finding],

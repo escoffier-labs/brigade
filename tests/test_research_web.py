@@ -27,3 +27,4 @@ def test_playwright_search_parses_results(monkeypatch):
 def test_provider_factory_default_is_playwright():
     prov = web.build_provider(None, {})
     assert isinstance(prov, web.PlaywrightProvider)
+    assert prov.trust == "browser"

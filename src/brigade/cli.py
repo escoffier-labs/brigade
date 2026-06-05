@@ -2090,6 +2090,15 @@ def _build_parser() -> argparse.ArgumentParser:
     p_research_open.add_argument("run_id", help="Run id.")
     p_research_open.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
     p_research_open.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_research_sources = research_sub.add_parser("sources", help="Inspect configured research source routes.")
+    research_sources_sub = p_research_sources.add_subparsers(dest="research_sources_command", metavar="<sources-command>")
+    research_sources_sub.required = True
+    p_research_sources_list = research_sources_sub.add_parser("list", help="List configured research source routes.")
+    p_research_sources_list.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_research_sources_list.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_research_sources_doctor = research_sources_sub.add_parser("doctor", help="Check configured research source routes.")
+    p_research_sources_doctor.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_research_sources_doctor.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
 
     # center
     p_center = sub.add_parser("center", help="Read local operator-center summaries.")
@@ -3698,6 +3707,13 @@ def main(argv=None) -> int:
             return research_cmd.cli_resume(target=args.target, run_id=args.run_id, overrides=overrides, json_output=args.json)
         if args.research_command == "open":
             return research_cmd.cli_open(target=args.target, run_id=args.run_id, json_output=args.json)
+        if args.research_command == "sources":
+            if args.research_sources_command == "list":
+                return research_cmd.cli_sources_list(target=args.target, json_output=args.json)
+            if args.research_sources_command == "doctor":
+                return research_cmd.cli_sources_doctor(target=args.target, json_output=args.json)
+            parser.error(f"unknown research sources command: {args.research_sources_command}")
+            return 2
         parser.error(f"unknown research command: {args.research_command}")
         return 2
     if cmd == "center":

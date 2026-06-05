@@ -15,7 +15,7 @@ Return ONLY a JSON object:
   "evidence": "the most relevant quoted snippet(s)"}}
 """
 
-_TRUST_KIND = {"local": "retrieved-doc", "web": "web"}
+_TRUST_KIND = {"local": "retrieved-doc", "web": "web", "cli": "tool-output", "browser": "web"}
 
 _LOW = ("does not contain", "no relevant", "not relevant", "irrelevant",
         "no information", "cannot find", "n/a")

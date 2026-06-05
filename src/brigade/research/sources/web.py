@@ -30,6 +30,7 @@ def _with_page(fn: Callable[[Any], Any]) -> Any:
 class PlaywrightProvider:
     """Zero-API web tier: drives a headless browser to search and read pages."""
     SEARCH_URL = "https://duckduckgo.com/html/?q={q}"
+    trust = "browser"
 
     def search(self, query: str, limit: int) -> List[Dict[str, str]]:
         url = self.SEARCH_URL.format(q=quote_plus(query))
@@ -54,6 +55,8 @@ class PlaywrightProvider:
             return {"success": False, "content": "", "title": "", "error": str(e)}
 
 class SearxngProvider:
+    trust = "web"
+
     def __init__(self, base_url: str) -> None:
         self.base_url = base_url.rstrip("/")
     def search(self, query: str, limit: int) -> List[Dict[str, str]]:

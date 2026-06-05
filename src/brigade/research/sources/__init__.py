@@ -1,1 +1,1 @@
-"""Source tiers for research: trusted local, untrusted web."""
+"""Source tiers for research: trusted local, configured CLI, browser, and web."""

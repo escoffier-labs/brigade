@@ -22,6 +22,13 @@ class StubIndex:
         return [{"source": "/n/a.md", "title": "a.md",
                  "text": "photosynthesis text", "trust": "local"}]
 
+class StubBrowser:
+    trust = "browser"
+    def search(self, query, limit):
+        return [{"url": "https://example.test/page", "title": "Example"}]
+    def fetch(self, url):
+        return {"success": True, "content": "browser page about photosynthesis", "title": "Example"}
+
 def test_local_only_run_produces_report_and_findings():
     eng = DeepResearcher(llm=StubLlm(), local_index=StubIndex(), web=None,
                          caps=Caps.build(max_rounds=2, min_rounds=1, max_time=30))
@@ -44,3 +51,9 @@ def test_checkpoint_callback_invoked():
                          on_checkpoint=lambda cp: seen.append(cp))
     eng.research("q")
     assert seen and "round" in seen[-1]
+
+def test_browser_provider_trust_is_preserved():
+    eng = DeepResearcher(llm=StubLlm(), local_index=None, web=StubBrowser(),
+                         caps=Caps.build(max_rounds=1, min_rounds=1, max_time=30))
+    result = eng.research("how do plants make energy?")
+    assert any(f.trust == "browser" for f in result.findings)

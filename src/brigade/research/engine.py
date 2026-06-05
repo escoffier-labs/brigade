@@ -44,6 +44,7 @@ class DeepResearcher:
     local_index: Any
     web: Any                                   # SearchProvider or None
     caps: Caps
+    external_sources: List[Any] = field(default_factory=list)
     on_checkpoint: Optional[Callable[[Dict[str, Any]], None]] = None
     on_event: Optional[Callable[[str, Dict[str, Any]], None]] = None
     _cancelled: bool = field(default=False, init=False)
@@ -147,20 +148,30 @@ class DeepResearcher:
                     results.append(f)
         # untrusted web (opt-in: web provider supplied)
         if self.web is not None:
-            for r in self.web.search(query, self.caps.max_urls_per_round):
-                url = r.get("url", "")
-                if not url or url in seen_u:
-                    continue
-                seen_u.add(url)
-                page = self.web.fetch(url)
-                if not page.get("success") or not page.get("content"):
-                    continue
-                f = _extract.extract_finding(self.llm, goal=goal, source=url,
-                                             title=r.get("title", ""), content=page["content"],
-                                             trust="web",
-                                             max_content_chars=self.caps.max_content_chars)
-                if f:
-                    results.append(f)
+            results += self._gather_provider(self.web, query, goal, seen_u, default_trust=getattr(self.web, "trust", "web"))
+        for provider in self.external_sources:
+            results += self._gather_provider(provider, query, goal, seen_u, default_trust=getattr(provider, "trust", "cli"))
+        return results
+
+    def _gather_provider(self, provider: Any, query: str, goal: str, seen_u: set, *, default_trust: str) -> List[Finding]:
+        results: List[Finding] = []
+        for r in provider.search(query, self.caps.max_urls_per_round):
+            url = r.get("url", "")
+            if not url or url in seen_u:
+                continue
+            seen_u.add(url)
+            page = provider.fetch(url)
+            if not page.get("success") or not page.get("content"):
+                continue
+            trust = str(r.get("trust") or getattr(provider, "trust", default_trust))
+            if trust not in {"web", "cli", "browser", "local"}:
+                trust = default_trust
+            f = _extract.extract_finding(self.llm, goal=goal, source=url,
+                                         title=r.get("title", ""), content=page["content"],
+                                         trust=trust,  # type: ignore[arg-type]
+                                         max_content_chars=self.caps.max_content_chars)
+            if f:
+                results.append(f)
         return results
 
     def _synthesize(self, q: str, findings: List[Finding], report: str) -> str:

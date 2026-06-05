@@ -18,6 +18,11 @@ class ResearchConfig:
         return dict(self._data.get("caps", {}))
     def search_settings(self) -> Dict[str, Any]:
         return dict(self._data.get("search", {}))
+    def source_adapters(self) -> List[Dict[str, Any]]:
+        adapters = self._data.get("source", [])
+        if not isinstance(adapters, list):
+            return []
+        return [dict(item) for item in adapters if isinstance(item, dict)]
 
 def load(target: Path) -> ResearchConfig:
     p = target / ".brigade" / "research.toml"
