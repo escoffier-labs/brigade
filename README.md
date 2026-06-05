@@ -41,7 +41,7 @@ For multiple agent surfaces:
 brigade operator quickstart --target ./my-repo --harnesses codex,claude,opencode
 ```
 
-If you use [OpenClaw](https://github.com/solomonneas/openclaw), Hermes, Codex, Claude Code, OpenCode, or a mix of them, Brigade gives those tools a shared local pattern:
+If you use [OpenClaw](https://github.com/solomonneas/openclaw), [Hermes](https://github.com/NousResearch/hermes-agent), [Codex](https://github.com/openai/codex), Claude Code, [OpenCode](https://github.com/opencode-ai/opencode), or a mix of them, Brigade gives those tools a shared local pattern:
 
 1. agents write handoff notes
 2. the memory ingester scans, lints, and routes them

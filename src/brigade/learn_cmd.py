@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from . import work_cmd
+from .untrusted import PROMPT_INJECTION_RE, scan_untrusted
 
 OK = "ok"
 WARN = "warn"
@@ -65,15 +66,33 @@ def _read_json(path: Path) -> dict[str, Any] | None:
 
 
 def _redact_text(value: str) -> str:
-    rendered = re.sub(r"(?i)\b(token|secret|password|api[_-]?key)=\S+", lambda match: f"{match.group(1)}=<redacted>", value)
+    rendered = re.sub(
+        r"(?i)\b([A-Z0-9_]*(?:token|secret|password|api[_-]?key)[A-Z0-9_]*)\s*[:=]\s*['\"]?[^'\"\s]+",
+        lambda match: f"{match.group(1)}=<redacted>",
+        value,
+    )
     rendered = re.sub(r"(?i)\b(bearer)\s+[A-Za-z0-9._~+/=-]+", "bearer <redacted>", rendered)
     rendered = re.sub(r"https?://[^\s]+", "<redacted-url>", rendered)
     return rendered
 
 
+def _safe_learning_text(value: Any, *, limit: int | None = None) -> str:
+    rendered = _redact_text(str(value or ""))
+    rendered = PROMPT_INJECTION_RE.sub("<prompt-injection-marker>", rendered)
+    rendered = " ".join(rendered.split())
+    if limit is not None:
+        return _short(rendered, limit)
+    return rendered
+
+
+def _learning_text_had_guard_signal(value: Any) -> bool:
+    text = str(value or "")
+    return _redact_text(text) != text or scan_untrusted(text).flagged
+
+
 def _safe_payload(value: Any) -> Any:
     if isinstance(value, str):
-        return _redact_text(value)
+        return _safe_learning_text(value)
     if isinstance(value, dict):
         safe: dict[str, Any] = {}
         for key, item in value.items():
@@ -155,7 +174,7 @@ def _import_learning_summary(item: dict[str, Any]) -> str:
     for key in ("safe_summary", "safe_detail", "evidence_summary"):
         value = metadata.get(key)
         if isinstance(value, str) and value.strip():
-            return value.strip()
+            return _safe_learning_text(value)
     source = str(item.get("source") or "producer")
     kind = str(item.get("kind") or "import")
     return f"{source} {kind} import requires review"
@@ -195,6 +214,12 @@ def _raw_candidates(target: Path) -> list[dict[str, Any]]:
                     candidate_metadata[key] = _safe_payload(metadata.get(key))
             if item.get("template") and "template" not in candidate_metadata:
                 candidate_metadata["template"] = item.get("template")
+            guarded_input = any(
+                _learning_text_had_guard_signal(metadata.get(key))
+                for key in ("safe_summary", "safe_detail", "evidence_summary", "response_options", "remediation_hint")
+            )
+            if guarded_input:
+                candidate_metadata["guarded_input"] = True
             results.append(
                 _candidate(
                     import_id,
@@ -346,25 +371,35 @@ def _skill_candidate_from_group(target: Path, key: str, items: list[dict[str, An
     first_metadata = first.get("metadata") if isinstance(first.get("metadata"), dict) else {}
     subsystem = str(first.get("subsystem") or "learning")
     candidate_id = f"skill-{work_cmd._stable_hash({'key': key, 'subsystem': subsystem})[:12]}"
-    summary = _short(str(first.get("safe_summary") or "repeatable learning pattern"))
-    skill_id = _slug(f"{subsystem}-{summary}")[:64]
+    summary = _safe_learning_text(first.get("safe_summary") or "repeatable learning pattern", limit=160)
+    skill_id = _slug(f"{subsystem}-{summary}")[:64].strip("._-") or "learning-skill"
     evidence = [
         {
             "candidate_id": item.get("id"),
             "subsystem": item.get("subsystem"),
-            "safe_summary": item.get("safe_summary"),
+            "safe_summary": _safe_learning_text(item.get("safe_summary") or "learning evidence", limit=180),
             "source_fingerprint": item.get("source_fingerprint"),
         }
         for item in items
     ]
     response_options: list[str] = []
+    guarded_input = any(
+        bool((item.get("metadata") if isinstance(item.get("metadata"), dict) else {}).get("guarded_input"))
+        or _learning_text_had_guard_signal(item.get("safe_summary"))
+        for item in items
+    )
     for item in items:
         metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
         for option in metadata.get("response_options") or []:
-            if isinstance(option, str) and option not in response_options:
-                response_options.append(option)
+            if isinstance(option, str):
+                guarded_input = guarded_input or _learning_text_had_guard_signal(option)
+                safe_option = _safe_learning_text(option, limit=220)
+                if safe_option and safe_option not in response_options:
+                    response_options.append(safe_option)
     review_risk = "high" if any(str(item.get("severity") or "").lower() in {"high", "critical"} for item in items) else "normal"
     if subsystem == "security-scan" or first_metadata.get("category") == "secrets":
+        review_risk = "high"
+    if guarded_input and review_risk == "normal":
         review_risk = "high"
     payload = {
         "id": candidate_id,
@@ -382,6 +417,7 @@ def _skill_candidate_from_group(target: Path, key: str, items: list[dict[str, An
         "suggested_next_command": f"brigade learn propose-skill {candidate_id} --target {target}",
         "manual_only": True,
         "auto_install": False,
+        "guarded_input": guarded_input,
     }
     return payload
 
@@ -453,21 +489,23 @@ def _resolve_skill_candidate(target: Path, candidate_id: str, *, min_count: int,
 
 
 def _render_skill_candidate_markdown(candidate: dict[str, Any]) -> str:
-    skill_id = str(candidate.get("suggested_skill_id") or "learning-skill")
-    title = str(candidate.get("suggested_title") or skill_id)
-    summary = str(candidate.get("safe_summary") or "Repeatable learning pattern.")
+    skill_id = _slug(str(candidate.get("suggested_skill_id") or "learning-skill"))
+    title = _safe_learning_text(candidate.get("suggested_title") or skill_id, limit=120)
+    summary = _safe_learning_text(candidate.get("safe_summary") or "Repeatable learning pattern.", limit=220)
     evidence = candidate.get("evidence") if isinstance(candidate.get("evidence"), list) else []
     evidence_lines = "\n".join(
-        f"- {item.get('subsystem')}:{item.get('candidate_id')} - {_short(str(item.get('safe_summary') or 'learning evidence'), 120)}"
+        f"- {_safe_learning_text(item.get('subsystem') or 'learning', limit=48)}:{_safe_learning_text(item.get('candidate_id') or 'candidate', limit=80)} - {_safe_learning_text(item.get('safe_summary') or 'learning evidence', limit=120)}"
         for item in evidence[:10]
         if isinstance(item, dict)
     )
     if not evidence_lines:
         evidence_lines = "- No linked evidence."
     response_options = candidate.get("response_options") if isinstance(candidate.get("response_options"), list) else []
-    response_lines = "\n".join(f"- {option}" for option in response_options[:10] if isinstance(option, str))
+    response_lines = "\n".join(f"- {_safe_learning_text(option, limit=220)}" for option in response_options[:10] if isinstance(option, str))
     if not response_lines:
         response_lines = "- Choose and document the response path during review."
+    grouping_reason = _safe_learning_text(candidate.get("grouping_reason") or "Repeated learning evidence.", limit=220)
+    review_risk = _safe_learning_text(candidate.get("review_risk") or "normal", limit=40)
     return "\n".join(
         [
             "---",
@@ -490,8 +528,9 @@ def _render_skill_candidate_markdown(candidate: dict[str, Any]) -> str:
             "5. Record a Memory Handoff or learning closeout when the workflow teaches a durable lesson.",
             "",
             "## Review Context",
-            f"- Grouping reason: {candidate.get('grouping_reason') or 'Repeated learning evidence.'}",
-            f"- Review risk: {candidate.get('review_risk') or 'normal'}",
+            f"- Grouping reason: {grouping_reason}",
+            f"- Review risk: {review_risk}",
+            f"- Guarded input: {'yes' if candidate.get('guarded_input') else 'no'}",
             "",
             "## Response Options",
             response_lines,
@@ -510,7 +549,7 @@ def _render_skill_candidate_markdown(candidate: dict[str, Any]) -> str:
 
 
 def _write_skill_candidate_source(target: Path, candidate: dict[str, Any], *, force: bool) -> Path:
-    skill_id = str(candidate.get("suggested_skill_id") or candidate.get("id") or "learning-skill")
+    skill_id = _slug(str(candidate.get("suggested_skill_id") or candidate.get("id") or "learning-skill"))
     root = _skill_workshop_root(target) / str(candidate.get("id")) / "skill"
     if root.exists() and not force:
         raise FileExistsError(root)
@@ -523,8 +562,8 @@ def _write_skill_candidate_source(target: Path, candidate: dict[str, Any], *, fo
     (root / "SKILL.md").write_text(_render_skill_candidate_markdown(candidate))
     metadata = {
         "id": skill_id,
-        "title": candidate.get("suggested_title") or skill_id,
-        "description": candidate.get("safe_summary"),
+        "title": _safe_learning_text(candidate.get("suggested_title") or skill_id, limit=120),
+        "description": _safe_learning_text(candidate.get("safe_summary") or "", limit=240),
         "version": "0.1.0",
         "trust_level": "unreviewed",
         "required_tools": [],
@@ -536,6 +575,7 @@ def _write_skill_candidate_source(target: Path, candidate: dict[str, Any], *, fo
         "learning_pattern_key": candidate.get("pattern_key"),
         "learning_source_fingerprint": candidate.get("source_fingerprint"),
         "evidence_count": candidate.get("occurrence_count"),
+        "guarded_input": bool(candidate.get("guarded_input")),
     }
     _write_json(root / "skill.json", metadata)
     return root
