@@ -1,0 +1,68 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1120" height="560" viewBox="0 0 1120 560" role="img" aria-labelledby="title desc">
+  <title id="title">Logspine stack map</title>
+  <desc id="desc">Flowchart showing AgentTrail and SourceHarvest feeding Logspine, with crawler tools flowing through SourceHarvest.</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#334155"/>
+    </marker>
+    <style>
+      text { font-family: DejaVu Sans, Arial, Helvetica, sans-serif; letter-spacing: 0; }
+      .title { font-weight: 700; font-size: 28px; fill: #0f172a; }
+      .label { font-weight: 700; font-size: 16px; fill: #0f172a; }
+      .small { font-weight: 400; font-size: 13px; fill: #334155; }
+      .box { stroke: #334155; stroke-width: 2; rx: 10; }
+      .source { fill: #e0f2fe; }
+      .adapter { fill: #fef3c7; }
+      .contract { fill: #dcfce7; }
+      .logspine { fill: #ede9fe; }
+      .line { stroke: #334155; stroke-width: 2.5; fill: none; marker-end: url(#arrow); }
+      .dash { stroke: #64748b; stroke-width: 2; stroke-dasharray: 6 6; fill: none; marker-end: url(#arrow); }
+    </style>
+  </defs>
+
+  <rect width="1120" height="560" fill="#ffffff"/>
+  <text x="48" y="52" class="title">Logspine Stack Map</text>
+
+  <rect x="48" y="90" width="244" height="126" class="box source"/>
+  <text x="170" y="124" text-anchor="middle" class="label">Agent Sessions</text>
+  <text x="170" y="150" text-anchor="middle" class="small">Codex, Claude, OpenClaw,</text>
+  <text x="170" y="170" text-anchor="middle" class="small">OpenCode, Hermes</text>
+  <text x="170" y="196" text-anchor="middle" class="small">local harness logs</text>
+
+  <rect x="48" y="286" width="244" height="168" class="box source"/>
+  <text x="170" y="320" text-anchor="middle" class="label">Crawler Archives</text>
+  <text x="170" y="346" text-anchor="middle" class="small">discrawl, gitcrawl, graincrawl,</text>
+  <text x="170" y="366" text-anchor="middle" class="small">notcrawl, slacrawl, telecrawl</text>
+  <text x="170" y="392" text-anchor="middle" class="small">local DBs, snapshots,</text>
+  <text x="170" y="412" text-anchor="middle" class="small">and source exports</text>
+
+  <rect x="378" y="96" width="214" height="114" class="box adapter"/>
+  <text x="485" y="130" text-anchor="middle" class="label">AgentTrail</text>
+  <text x="485" y="156" text-anchor="middle" class="small">agent-session exporter</text>
+  <text x="485" y="178" text-anchor="middle" class="small">no archive behavior</text>
+
+  <rect x="378" y="310" width="214" height="114" class="box adapter"/>
+  <text x="485" y="344" text-anchor="middle" class="label">SourceHarvest</text>
+  <text x="485" y="370" text-anchor="middle" class="small">source-system exporter</text>
+  <text x="485" y="392" text-anchor="middle" class="small">crawler adapters live here</text>
+
+  <rect x="670" y="204" width="174" height="96" class="box contract"/>
+  <text x="757" y="238" text-anchor="middle" class="label">Shared Contract</text>
+  <text x="757" y="262" text-anchor="middle" class="small">logspine.adapter.v1</text>
+  <text x="757" y="282" text-anchor="middle" class="small">portable JSONL</text>
+
+  <rect x="926" y="142" width="146" height="218" class="box logspine"/>
+  <text x="999" y="178" text-anchor="middle" class="label">Logspine</text>
+  <text x="999" y="214" text-anchor="middle" class="small">archive</text>
+  <text x="999" y="246" text-anchor="middle" class="small">dedupe</text>
+  <text x="999" y="278" text-anchor="middle" class="small">index</text>
+  <text x="999" y="310" text-anchor="middle" class="small">search</text>
+  <text x="999" y="342" text-anchor="middle" class="small">evidence</text>
+
+  <path d="M 292 153 L 378 153" class="line"/>
+  <path d="M 292 370 L 378 367" class="line"/>
+  <path d="M 592 153 L 670 238" class="line"/>
+  <path d="M 592 367 L 670 268" class="line"/>
+  <path d="M 844 252 L 926 252" class="line"/>
+  <path d="M 170 216 L 170 286" class="dash"/>
+</svg>

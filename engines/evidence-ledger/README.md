@@ -6,12 +6,39 @@ The MVP is a local-first CLI named `spine`. It imports `logspine.adapter.v1` JSO
 
 Each source system is best at its native domain:
 
+- [AgentTrail](https://github.com/solomonneas/agenttrail): Codex, Claude, OpenClaw, OpenCode, Hermes, and related local session logs
+- [SourceHarvest](https://github.com/solomonneas/sourceharvest): local files, notes, generic exports, git history, and future crawler adapter exports
 - `discrawl`: Discord messages
 - `gitcrawl`: GitHub issues and pull requests
-- `notcrawl`: Notion pages
-- `agenttrail`: Codex, Claude, OpenClaw, OpenCode, Hermes, and related local session logs
+- `graincrawl`: Granola notes and transcripts
+- `notcrawl`: Notion pages and databases
+- `slacrawl`: Slack messages and threads
+- `telecrawl`: Telegram Desktop archive data
 
 Logspine is the normalized evidence layer above those systems, not a replacement for them.
+
+## How It Works
+
+![Logspine flow](docs/logspine-how-it-works.svg)
+
+Editable Excalidraw source: [docs/logspine-flowcharts.excalidraw](docs/logspine-flowcharts.excalidraw)
+
+Logspine follows one ingest path:
+
+1. Receive `logspine.adapter.v1` JSONL from a file, stdin, AgentTrail, SourceHarvest, or a native compatibility adapter.
+2. Parse and validate each adapter record.
+3. Store normalized sources, collections, items, actors, artifacts, raw refs, tags, imports, warnings, and scan manifests in SQLite.
+4. Deduplicate repeat records and preserve raw payload references for audit.
+5. Maintain FTS5 search indexes and shallow relations.
+6. Serve search, show, explain, export, HTTP, MCP, and evidence-bundle workflows from the local archive.
+
+## Stack Map
+
+![Logspine stack map](docs/logspine-stack-map.svg)
+
+AgentTrail owns local agent-session scanning. SourceHarvest owns non-agent local source export normalization. Logspine owns archive ingest, SQLite, FTS, relations, scan manifests, reader APIs, and evidence bundles.
+
+Crawler tools keep their native sync/query behavior. Their local exports, snapshots, or databases should flow through SourceHarvest before entering Logspine.
 
 ## Build
 
@@ -134,7 +161,7 @@ Logspine native adapters remain available for compatibility. Long term, source-s
 
 ## External SourceHarvest Scanner
 
-SourceHarvest is the separate local source-system exporter for non-harness records such as notes, generic JSONL exports, and future domain harvesters:
+SourceHarvest is the separate local source-system exporter for non-harness records such as notes, generic JSONL exports, local crawler outputs, and future domain harvesters:
 
 ```bash
 sourceharvest jsonl export.jsonl --source notes --collection notes:local --out - | spine import adapter -
@@ -152,6 +179,13 @@ spine import sourceharvest json export.json --source export --collection export:
 ```
 
 Use AgentTrail for agent-session logs. Use SourceHarvest for other local source-system exports. Logspine remains the archive, search, relation, and evidence layer for both.
+
+Planned crawler adapter imports should keep this shape once SourceHarvest has real schema-backed adapters:
+
+```bash
+spine import sourceharvest discrawl ~/.local/share/discrawl/discrawl.db --json
+spine import sourceharvest telecrawl ~/.local/share/telecrawl/telecrawl.db --json
+```
 
 ## Scan Manifests
 
