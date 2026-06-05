@@ -19,6 +19,8 @@ brigade tools init
 ## Commands
 
 ```bash
+brigade tools defaults
+brigade tools defaults --json
 brigade tools list
 brigade tools list --json
 brigade tools show simplify
@@ -58,6 +60,10 @@ brigade tools policy show
 brigade tools policy doctor
 brigade tools parity status
 brigade tools parity closeout
+brigade tools pack build
+brigade tools pack import <pack-dir>
+brigade tools pack list
+brigade tools pack show latest
 brigade tools plan
 brigade tools plan simplify
 brigade tools apply simplify --dry-run
@@ -68,7 +74,7 @@ brigade tools doctor --json
 brigade tools import-issues
 ```
 
-`list`, `show`, and `search` inspect configured entries. `describe` and `contracts` inspect schema-backed call contracts. `call plan` validates arguments and returns a safe call plan without executing anything. `call queue` stores a plan for local review, and `call approve`, `reject`, and `hold` update review status only. `call run` explicitly executes approved script calls and writes local receipts. `run list`, `show`, and `latest` inspect receipts, and `run replay` queues a pending replay candidate without executing it. `checkpoint` commands review and explicitly resume local pause records. `runtime` commands explicitly manage local runtimes. `policy` commands inspect host-local execution gates and env label bindings. `parity status` and `parity closeout` review projection parity without writing projections. `plan` previews projection writes without touching files. `apply` is the only command that writes projections, and it requires either one tool id or `--all`. `doctor` reports catalog health issues. `import-issues` writes those issues into the normal work import inbox as `tool-catalog` task imports with stable source fingerprints.
+`defaults` merges the current Brigade built-in portable tools into the local catalog without deleting custom entries. `list`, `show`, and `search` inspect configured entries. `describe` and `contracts` inspect schema-backed call contracts. `call plan` validates arguments and returns a safe call plan without executing anything. `call queue` stores a plan for local review, and `call approve`, `reject`, and `hold` update review status only. `call run` explicitly executes approved script calls and writes local receipts. `run list`, `show`, and `latest` inspect receipts, and `run replay` queues a pending replay candidate without executing it. `checkpoint` commands review and explicitly resume local pause records. `runtime` commands explicitly manage local runtimes. `policy` commands inspect host-local execution gates and env label bindings. `parity status` and `parity closeout` review projection parity without writing projections. `plan` previews projection writes without touching files. `apply` is the only command that writes projections, and it requires either one tool id or `--all`. `doctor` reports catalog health issues. `import-issues` writes those issues into the normal work import inbox as `tool-catalog` task imports with stable source fingerprints.
 
 ## Config Shape
 
@@ -136,6 +142,12 @@ Fields:
 - `fingerprint`: optional source fingerprint when the source file is generated elsewhere.
 
 Supported harness labels are local conventions. Brigade recognizes Claude Code, Codex, OpenCode, Hermes, OpenClaw, MCP, and scripts through the labels `claude`, `codex`, `opencode`, `hermes`, `openclaw`, `mcp`, and `scripts`.
+
+## Built-In Defaults
+
+`brigade tools defaults --target <repo>` merges the built-in `simplify`, `superpowers`, `frontend`, and `antislop` entries into `.brigade/tools.toml`. Existing custom entries are preserved. If a custom entry reuses a built-in id while pointing at a different `source_path`, Brigade reports a conflict instead of overwriting it; pass `--force` only when replacing that entry with the built-in definition is intentional.
+
+`brigade operator sync-tools --target <repo>` runs this defaults merge before projection apply, so a repo with an older local catalog can pick up newly shipped built-ins on another machine. Generated projections stay local and gitignored; reviewed source files such as `tools/*.md` and the local catalog are the portable source of truth.
 
 ## Runtime Supervisor
 
@@ -418,7 +430,7 @@ Projection apply is local and explicit. Call planning, call approval review, run
 
 ## Tool Packs And Sync Plans
 
-`brigade tools pack build` writes a local portable tool pack under `.brigade/tools/packs/`. Packs summarize configured tools, projection status, contracts, policy, runtime state, call approvals, run history, replay candidates, checkpoints, and current catalog issues. `pack list`, `pack show`, and `pack archive` inspect or move those local packs.
+`brigade tools pack build` writes a local portable tool pack under `.brigade/tools/packs/`. Packs summarize configured tools, projection status, contracts, policy, runtime state, call approvals, run history, replay candidates, checkpoints, and current catalog issues. They also include an importable `portable-tools.toml` plus repo-relative source files when available. `pack list`, `pack show`, and `pack archive` inspect or move those local packs. `pack import <pack-dir>` merges packed catalog entries into another repo and copies packed source files, but it does not apply harness projections.
 
 `brigade tools sync plan` is a wrapper-facing view of the existing projection plan. `brigade tools sync apply` is dry-run by default, and with no arguments it previews all configured tools. Use `--write --all` or `--write <tool-id>` for an explicit write, and use `--force` only when intentionally using the underlying managed projection overwrite behavior. Sync does not delete projections and does not run automatically from doctor, brief, work run, or release commands.
 

@@ -221,6 +221,25 @@ def test_gitignore_block_no_inbox_section_for_readers_only():
     assert "memory-handoffs" not in block
 
 
+def test_gitignore_block_includes_generated_tool_projection_roots():
+    from brigade.install import build_gitignore_block
+    sel = Selection(depth="repo", harnesses=["codex"], owner="codex", includes=[])
+    block = build_gitignore_block(sel)
+    for pattern in (
+        ".claude/commands/",
+        ".codex/skills/",
+        ".opencode/commands/",
+        ".opencode/superpowers/",
+        ".hermes/commands/",
+        ".hermes/superpowers/",
+        ".openclaw/commands/",
+        ".openclaw/superpowers/",
+        ".mcp/",
+        "scripts/*.md",
+    ):
+        assert pattern in block
+
+
 def test_install_writes_gitignore_block(tmp_path):
     from brigade.install import install_selection
     sel = Selection(depth="repo", harnesses=["claude", "codex"], owner="claude", includes=[])

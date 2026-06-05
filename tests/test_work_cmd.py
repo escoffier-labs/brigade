@@ -2531,12 +2531,14 @@ def test_tools_init_list_show_search_doctor_and_json(tmp_path, monkeypatch, caps
     out = capsys.readouterr().out
     config = tmp_path / ".brigade" / "tools.toml"
     assert f"tools_config: {config}" in out
-    assert "tools: 2" in out
+    assert "tools: 4" in out
     assert ".brigade/tools.toml" in (tmp_path / ".gitignore").read_text()
 
-    (tmp_path / "tools").mkdir()
+    (tmp_path / "tools").mkdir(exist_ok=True)
     (tmp_path / "tools" / "simplify.md").write_text("Simplify command\n")
     (tmp_path / "tools" / "superpowers.md").write_text("Superpowers\n")
+    (tmp_path / "tools" / "frontend.md").write_text("Frontend\n")
+    (tmp_path / "tools" / "antislop.md").write_text("Anti-Slop\n")
     (tmp_path / ".claude" / "commands").mkdir(parents=True)
     (tmp_path / ".claude" / "commands" / "simplify.md").write_text("Simplify command\n")
     (tmp_path / ".claude" / "commands" / "superpowers.md").write_text("Superpowers\n")
@@ -2556,7 +2558,7 @@ def test_tools_init_list_show_search_doctor_and_json(tmp_path, monkeypatch, caps
     assert tools_cmd.list_tools(target=tmp_path, json_output=True) == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["valid"] is True
-    assert payload["tool_count"] == 2
+    assert payload["tool_count"] == 4
 
     assert tools_cmd.show(target=tmp_path, tool_id="simplify") == 0
     out = capsys.readouterr().out
@@ -2573,6 +2575,98 @@ def test_tools_init_list_show_search_doctor_and_json(tmp_path, monkeypatch, caps
     out = capsys.readouterr().out
     assert "[ok] tool_config:" in out
     assert "[ok] tool_catalog: no issues" in out
+
+
+def test_tools_defaults_merges_builtins_and_preserves_custom_tools(tmp_path, monkeypatch, capsys):
+    _init_git_repo(tmp_path)
+    monkeypatch.setattr(dogfood_cmd, "_check_git_ignored", lambda repo, path: "yes")
+    tools_dir = tmp_path / "tools"
+    tools_dir.mkdir()
+    for name in ("simplify", "superpowers", "frontend", "antislop", "custom"):
+        (tools_dir / f"{name}.md").write_text(f"# {name}\n")
+    config = tmp_path / ".brigade" / "tools.toml"
+    config.parent.mkdir()
+    config.write_text(
+        """
+[[tool]]
+id = "simplify"
+name = "Simplify"
+family = "slash-command"
+enabled = true
+description = "old"
+source_path = "tools/simplify.md"
+supported_harnesses = ["claude"]
+projections = { claude = ".claude/commands/simplify.md" }
+
+[[tool]]
+id = "custom"
+name = "Custom"
+family = "skill"
+enabled = true
+description = "custom tool"
+source_path = "tools/custom.md"
+supported_harnesses = ["claude"]
+projections = { claude = ".claude/commands/custom.md" }
+"""
+    )
+
+    assert tools_cmd.defaults(target=tmp_path, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["updated"] == ["simplify"]
+    assert set(payload["added"]) == {"superpowers", "frontend", "antislop"}
+    assert payload["conflicts"] == []
+
+    assert tools_cmd.list_tools(target=tmp_path, json_output=True) == 0
+    listed = json.loads(capsys.readouterr().out)
+    assert {tool["id"] for tool in listed["tools"]} == {"simplify", "superpowers", "frontend", "antislop", "custom"}
+    by_id = {tool["id"]: tool for tool in listed["tools"]}
+    assert by_id["simplify"]["projection_coverage"]["codex"] == "missing"
+    assert by_id["custom"]["projection_coverage"]["claude"] == "missing"
+
+    text = config.read_text()
+    assert 'id = "custom"' in text
+    assert 'id = "frontend"' in text
+
+
+def test_tools_defaults_creates_missing_builtin_source_files(tmp_path, capsys):
+    _init_git_repo(tmp_path)
+    assert tools_cmd.defaults(target=tmp_path, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["source_created_count"] == 4
+    assert (tmp_path / "tools" / "simplify.md").is_file()
+    assert (tmp_path / "tools" / "superpowers.md").is_file()
+    assert (tmp_path / "tools" / "frontend.md").is_file()
+    assert (tmp_path / "tools" / "antislop.md").is_file()
+
+    assert tools_cmd.doctor(target=tmp_path, json_output=True) == 0
+    doctor = json.loads(capsys.readouterr().out)
+    assert doctor["issue_count"] == 28
+    assert {issue["issue_type"] for issue in doctor["issues"]} == {"missing_projection"}
+
+
+def test_tools_defaults_reports_conflicting_builtin_id(tmp_path, capsys):
+    _init_git_repo(tmp_path)
+    (tmp_path / ".brigade").mkdir()
+    config = tmp_path / ".brigade" / "tools.toml"
+    config.write_text(
+        """
+[[tool]]
+id = "frontend"
+name = "Other Frontend"
+family = "skill"
+enabled = true
+description = "custom"
+source_path = "tools/private-frontend.md"
+supported_harnesses = []
+projections = {}
+"""
+    )
+
+    assert tools_cmd.defaults(target=tmp_path, json_output=True) == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["valid"] is False
+    assert payload["conflicts"][0]["tool_id"] == "frontend"
+    assert "private-frontend" in config.read_text()
 
 
 def test_tools_catalog_covers_portable_families_and_mcp_discovery(tmp_path, capsys):
@@ -2890,6 +2984,19 @@ projections = { claude = ".claude/commands/simplify.md", codex = ".codex/skills/
     assert metadata["harness"] == "claude"
     assert metadata["source_fingerprint"]
     assert metadata["projection_fingerprint"] == tools_cmd._text_hash(body)
+    codex_projection = tmp_path / ".codex" / "skills" / "simplify" / "SKILL.md"
+    codex_text = codex_projection.read_text()
+    assert codex_text.startswith("---\n")
+    assert '# brigade-tool-projection: {"family":"slash-command"' in codex_text
+    assert 'name: "simplify"' in codex_text
+    assert 'description: "Portable simplify command."' in codex_text
+    codex_metadata, codex_body = tools_cmd._read_projection(codex_projection)
+    assert codex_metadata["tool_id"] == "simplify"
+    assert codex_metadata["harness"] == "codex"
+    assert codex_body.startswith("---\n")
+    assert "# brigade-tool-projection:" not in codex_body
+    assert "Simplify the current task." in codex_body
+    assert codex_metadata["projection_fingerprint"] == tools_cmd._text_hash(codex_body)
 
     assert tools_cmd.plan(target=tmp_path, json_output=True) == 0
     payload = json.loads(capsys.readouterr().out)
@@ -2990,6 +3097,47 @@ projections = { mcp = ".mcp/mcp-local.md" }
     mcp_projection = (tmp_path / ".mcp" / "mcp-local.md").read_text()
     assert "Managed Brigade MCP projection stub." in mcp_projection
     assert "does not start MCP servers" in mcp_projection
+
+
+def test_tools_pack_build_and_import_copies_catalog_sources(tmp_path, capsys):
+    _init_git_repo(tmp_path)
+    source = tmp_path / "tools" / "custom.md"
+    source.parent.mkdir()
+    source.write_text("Use the custom reviewed workflow.\n")
+    config = tmp_path / ".brigade" / "tools.toml"
+    config.parent.mkdir()
+    config.write_text(
+        """
+[[tool]]
+id = "custom-review"
+name = "Custom Review"
+family = "slash-command"
+enabled = true
+description = "Custom portable review workflow."
+source_path = "tools/custom.md"
+supported_harnesses = ["claude"]
+projections = { claude = ".claude/commands/custom-review.md" }
+"""
+    )
+
+    assert tools_cmd.pack_build(target=tmp_path, json_output=True) == 0
+    pack = json.loads(capsys.readouterr().out)
+    pack_path = tmp_path / ".brigade" / "tools" / "packs" / pack["pack_id"]
+    assert (pack_path / "portable-tools.toml").is_file()
+    assert (pack_path / "source-files" / "tools" / "custom.md").is_file()
+    assert pack["portable_catalog"]["source_files"][0]["packed"] is True
+
+    other = tmp_path / "other"
+    other.mkdir()
+    assert tools_cmd.pack_import(target=other, pack=pack_path, json_output=True) == 0
+    imported = json.loads(capsys.readouterr().out)
+    assert imported["imported_count"] == 1
+    assert (other / "tools" / "custom.md").read_text() == "Use the custom reviewed workflow.\n"
+    assert "custom-review" in (other / ".brigade" / "tools.toml").read_text()
+
+    assert tools_cmd.plan(target=other, tool_id="custom-review", json_output=True) == 0
+    plan = json.loads(capsys.readouterr().out)
+    assert plan["counts"]["missing"] == 1
 
 
 def test_tools_apply_refuses_unmanaged_projection_unless_forced(tmp_path, capsys):
@@ -10019,6 +10167,10 @@ def test_tools_cli(tmp_path, monkeypatch):
         seen.append(("runtime-doctor", kwargs))
         return 0
 
+    def fake_defaults(**kwargs):
+        seen.append(("defaults", kwargs))
+        return 0
+
     def fake_policy_init(**kwargs):
         seen.append(("policy-init", kwargs))
         return 0
@@ -10086,6 +10238,7 @@ def test_tools_cli(tmp_path, monkeypatch):
     monkeypatch.setattr(tools_cmd, "runtime_stop", fake_runtime_stop)
     monkeypatch.setattr(tools_cmd, "runtime_restart", fake_runtime_restart)
     monkeypatch.setattr(tools_cmd, "runtime_doctor", fake_runtime_doctor)
+    monkeypatch.setattr(tools_cmd, "defaults", fake_defaults)
     monkeypatch.setattr(tools_cmd, "policy_init", fake_policy_init)
     monkeypatch.setattr(tools_cmd, "policy_show", fake_policy_show)
     monkeypatch.setattr(tools_cmd, "policy_doctor", fake_policy_doctor)
@@ -10097,6 +10250,7 @@ def test_tools_cli(tmp_path, monkeypatch):
     monkeypatch.setattr(tools_cmd, "parity_closeout", fake_parity_closeout)
 
     assert cli.main(["tools", "init", "--target", str(tmp_path), "--force", "--no-gitignore"]) == 0
+    assert cli.main(["tools", "defaults", "--target", str(tmp_path), "--dry-run", "--force", "--no-gitignore", "--json"]) == 0
     assert cli.main(["tools", "list", "--target", str(tmp_path), "--json"]) == 0
     assert cli.main(["tools", "show", "simplify", "--target", str(tmp_path), "--json"]) == 0
     assert cli.main(["tools", "describe", "simplify", "--target", str(tmp_path), "--json"]) == 0
@@ -10140,6 +10294,16 @@ def test_tools_cli(tmp_path, monkeypatch):
     assert cli.main(["tools", "import-issues", "--target", str(tmp_path), "--json"]) == 0
     assert seen == [
         ("init", {"target": tmp_path, "force": True, "update_gitignore": False}),
+        (
+            "defaults",
+            {
+                "target": tmp_path,
+                "dry_run": True,
+                "force": True,
+                "update_gitignore": False,
+                "json_output": True,
+            },
+        ),
         ("list", {"target": tmp_path, "json_output": True}),
         ("show", {"target": tmp_path, "tool_id": "simplify", "json_output": True}),
         ("describe", {"target": tmp_path, "tool_id": "simplify", "json_output": True}),

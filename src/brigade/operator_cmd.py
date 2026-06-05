@@ -440,7 +440,7 @@ def doctor_payload(target: Path, *, profile: str = "internal-dogfood") -> dict[s
         ],
         "tracked_vs_generated": [
             "Track reviewed cross-harness source docs under tools/.",
-            "Generated harness projections and handoff inboxes under .claude/, .codex/, .opencode/, and .hermes/ are local ignored state.",
+            "Generated harness projections and handoff inboxes under .claude/, .codex/, .opencode/, .hermes/, .openclaw/, .mcp/, and scripts/ are local ignored state.",
             "Run brigade operator sync-tools --target . after changing tracked tool sources.",
         ],
     }
@@ -657,6 +657,46 @@ def sync_tools(*, target: Path, dry_run: bool = False, force: bool = False, json
     if not target.is_dir():
         print(f"error: --target is not a directory: {target}", file=sys.stderr)
         return 2
+    defaults_output = StringIO()
+    with redirect_stdout(defaults_output):
+        defaults_rc = tools_cmd.defaults(
+            target=target,
+            dry_run=dry_run,
+            force=force,
+            update_gitignore=True,
+            json_output=True,
+        )
+    try:
+        defaults_payload = json.loads(defaults_output.getvalue() or "{}")
+    except json.JSONDecodeError:
+        defaults_payload = {
+            "valid": False,
+            "errors": ["tools defaults returned invalid JSON"],
+            "output": defaults_output.getvalue().strip().splitlines(),
+        }
+        defaults_rc = 1
+    if defaults_rc != 0:
+        payload = {
+            "target": str(target),
+            "dry_run": dry_run,
+            "force": force,
+            "defaults": defaults_payload,
+            "apply": {"applied_count": 0, "skipped_count": 0, "conflict_count": 0},
+            "tool_health": {"valid": False, "tool_count": None, "issue_count": None, "top_issue": None, "sync_plan": None},
+            "projection_paths": [],
+            "status": "warn",
+        }
+        if json_output:
+            print(json.dumps(payload, indent=2, sort_keys=True))
+            return 1
+        print(f"operator sync-tools: {target}")
+        print("defaults: failed")
+        for error in defaults_payload.get("errors") or []:
+            print(f"error: {error}")
+        for conflict in defaults_payload.get("conflicts") or []:
+            if isinstance(conflict, dict):
+                print(f"- conflict: {conflict.get('tool_id')} {conflict.get('detail')}")
+        return 1
     output = StringIO()
     with redirect_stdout(output):
         rc = tools_cmd.apply(target=target, all_tools=True, dry_run=dry_run, force=force, json_output=True)
@@ -675,6 +715,7 @@ def sync_tools(*, target: Path, dry_run: bool = False, force: bool = False, json
         "target": str(target),
         "dry_run": dry_run,
         "force": force,
+        "defaults": defaults_payload,
         "apply": apply_payload,
         "tool_health": {
             "valid": tool_health.get("valid"),
@@ -696,6 +737,8 @@ def sync_tools(*, target: Path, dry_run: bool = False, force: bool = False, json
     print(f"operator sync-tools: {target}")
     print(f"dry_run: {dry_run}")
     print(f"force: {force}")
+    print(f"defaults_added: {len(defaults_payload.get('added') or [])}")
+    print(f"defaults_updated: {len(defaults_payload.get('updated') or [])}")
     print(f"applied: {apply_payload.get('applied_count', 0)}")
     print(f"skipped: {apply_payload.get('skipped_count', 0)}")
     print(f"conflicts: {apply_payload.get('conflict_count', 0)}")

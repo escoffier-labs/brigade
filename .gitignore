@@ -37,7 +37,9 @@ Thumbs.db
 .claude/
 .codex/
 .opencode/
+.hermes/
 .openclaw/
+.mcp/
 .solo-mise/
 
 # Source-repo dogfood workspace files. Public templates live under
@@ -76,11 +78,6 @@ Thumbs.db
 !.codex/memory-handoffs/TEMPLATE.md
 !.codex/memory-handoffs/.gitkeep
 
-# hermes: handoffs are session-local and may contain private context.
-.hermes/memory-handoffs/*
-!.hermes/memory-handoffs/TEMPLATE.md
-!.hermes/memory-handoffs/.gitkeep
-
 # Daily session logs are machine-local raw context.
 memory/20[0-9][0-9]-[0-1][0-9]-[0-3][0-9].md
 
@@ -112,4 +109,17 @@ memory/handoff-inbox/
 .brigade/tools/
 .brigade/chat-memory-sweeps/
 .brigade/work/
+
+# Generated tool projections are local harness state.
+.claude/commands/
+.codex/skills/
+.opencode/commands/
+.opencode/superpowers/
+.hermes/commands/
+.hermes/superpowers/
+.openclaw/commands/
+.openclaw/superpowers/
+.mcp/
+scripts/*.md
 # <<< brigade gitignore block <<<
+

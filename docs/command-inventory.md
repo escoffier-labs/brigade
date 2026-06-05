@@ -43,9 +43,9 @@ brigade roadmap commands --write
 - `brigade runs`: 3 command path(s)
 - `brigade scrub`: 1 command path(s)
 - `brigade security`: 14 command path(s)
-- `brigade skills`: 17 command path(s)
+- `brigade skills`: 26 command path(s)
 - `brigade status`: 1 command path(s)
-- `brigade tools`: 46 command path(s)
+- `brigade tools`: 48 command path(s)
 - `brigade untrusted`: 2 command path(s)
 - `brigade work`: 139 command path(s)
 
@@ -318,7 +318,11 @@ brigade roadmap commands --write
 - `brigade skills adapters list`
 - `brigade skills adapters show`
 - `brigade skills compatibility`
+- `brigade skills diff`
+- `brigade skills doctor`
+- `brigade skills history`
 - `brigade skills import`
+- `brigade skills import-issues`
 - `brigade skills inbox accept`
 - `brigade skills inbox add`
 - `brigade skills inbox diff`
@@ -327,6 +331,11 @@ brigade roadmap commands --write
 - `brigade skills inbox show`
 - `brigade skills install`
 - `brigade skills lint`
+- `brigade skills pack archive`
+- `brigade skills pack build`
+- `brigade skills pack import`
+- `brigade skills pack list`
+- `brigade skills pack show`
 - `brigade skills publish`
 - `brigade skills rollback`
 - `brigade skills search`
@@ -347,6 +356,7 @@ brigade roadmap commands --write
 - `brigade tools checkpoint resume`
 - `brigade tools checkpoint show`
 - `brigade tools contracts`
+- `brigade tools defaults`
 - `brigade tools describe`
 - `brigade tools doctor`
 - `brigade tools import-issues`
@@ -354,6 +364,7 @@ brigade roadmap commands --write
 - `brigade tools list`
 - `brigade tools pack archive`
 - `brigade tools pack build`
+- `brigade tools pack import`
 - `brigade tools pack list`
 - `brigade tools pack show`
 - `brigade tools parity closeout`

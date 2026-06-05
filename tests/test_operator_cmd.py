@@ -285,25 +285,76 @@ def test_operator_sync_tools_projects_tracked_sources(tmp_path, capsys):
     tools_dir.mkdir()
     (tools_dir / "simplify.md").write_text("# Simplify\n\nSummarize clearly.\n")
     (tools_dir / "superpowers.md").write_text("# Superpowers\n\nShare capabilities across harnesses.\n")
+    (tools_dir / "frontend.md").write_text("# Frontend\n\nBuild usable interfaces.\n")
+    (tools_dir / "antislop.md").write_text("# Anti-Slop\n\nRemove vague unfinished work.\n")
 
     assert cli.main(["operator", "init", "--target", str(tmp_path), "--json"]) == 0
     capsys.readouterr()
     assert cli.main(["operator", "sync-tools", "--target", str(tmp_path), "--dry-run", "--json"]) == 0
     dry_run = json.loads(capsys.readouterr().out)
     assert dry_run["dry_run"] is True
-    assert dry_run["apply"]["applied_count"] == 5
+    assert dry_run["apply"]["applied_count"] == 28
     assert not (tmp_path / ".claude" / "commands" / "simplify.md").exists()
 
     assert cli.main(["operator", "sync-tools", "--target", str(tmp_path), "--json"]) == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["status"] == "ok"
-    assert payload["apply"]["applied_count"] == 5
+    assert payload["apply"]["applied_count"] == 28
     assert payload["tool_health"]["issue_count"] == 0
     assert (tmp_path / ".claude" / "commands" / "simplify.md").is_file()
     assert (tmp_path / ".claude" / "commands" / "superpowers.md").is_file()
     assert (tmp_path / ".codex" / "skills" / "simplify" / "SKILL.md").is_file()
     assert (tmp_path / ".codex" / "skills" / "superpowers" / "SKILL.md").is_file()
+    assert (tmp_path / ".opencode" / "commands" / "simplify.md").is_file()
     assert (tmp_path / ".opencode" / "superpowers" / "superpowers.md").is_file()
+    assert (tmp_path / ".hermes" / "commands" / "simplify.md").is_file()
+    assert (tmp_path / ".hermes" / "superpowers" / "superpowers.md").is_file()
+    assert (tmp_path / ".openclaw" / "commands" / "simplify.md").is_file()
+    assert (tmp_path / ".openclaw" / "superpowers" / "superpowers.md").is_file()
+    assert (tmp_path / ".mcp" / "simplify.md").is_file()
+    assert (tmp_path / ".mcp" / "superpowers.md").is_file()
+    assert (tmp_path / ".claude" / "commands" / "frontend.md").is_file()
+    assert (tmp_path / ".codex" / "skills" / "frontend" / "SKILL.md").is_file()
+    assert (tmp_path / ".opencode" / "commands" / "frontend.md").is_file()
+    assert (tmp_path / ".mcp" / "frontend.md").is_file()
+    assert (tmp_path / ".claude" / "commands" / "antislop.md").is_file()
+    assert (tmp_path / ".codex" / "skills" / "antislop" / "SKILL.md").is_file()
+    assert (tmp_path / ".opencode" / "commands" / "antislop.md").is_file()
+    assert (tmp_path / ".mcp" / "antislop.md").is_file()
+    assert (tmp_path / "scripts" / "simplify.md").is_file()
+    assert (tmp_path / "scripts" / "superpowers.md").is_file()
+    assert (tmp_path / "scripts" / "frontend.md").is_file()
+    assert (tmp_path / "scripts" / "antislop.md").is_file()
+
+
+def test_operator_sync_tools_merges_current_builtins_for_stale_catalog(tmp_path, capsys):
+    tools_dir = tmp_path / "tools"
+    tools_dir.mkdir()
+    for name in ("simplify", "superpowers", "frontend", "antislop"):
+        (tools_dir / f"{name}.md").write_text(f"# {name}\n")
+    config = tmp_path / ".brigade" / "tools.toml"
+    config.parent.mkdir()
+    config.write_text(
+        """
+[[tool]]
+id = "simplify"
+name = "Simplify"
+family = "slash-command"
+enabled = true
+description = "old"
+source_path = "tools/simplify.md"
+supported_harnesses = ["claude"]
+projections = { claude = ".claude/commands/simplify.md" }
+"""
+    )
+
+    assert cli.main(["operator", "sync-tools", "--target", str(tmp_path), "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["defaults"]["updated"] == ["simplify"]
+    assert set(payload["defaults"]["added"]) == {"superpowers", "frontend", "antislop"}
+    assert payload["apply"]["applied_count"] == 28
+    assert (tmp_path / ".codex" / "skills" / "frontend" / "SKILL.md").is_file()
+    assert (tmp_path / ".codex" / "skills" / "antislop" / "SKILL.md").is_file()
 
 
 def test_internal_dogfood_fresh_repo_onboarding_loop(tmp_path, capsys, monkeypatch):
@@ -314,6 +365,8 @@ def test_internal_dogfood_fresh_repo_onboarding_loop(tmp_path, capsys, monkeypat
     tools_dir.mkdir()
     (tools_dir / "simplify.md").write_text("# Simplify\n\nSummarize clearly.\n")
     (tools_dir / "superpowers.md").write_text("# Superpowers\n\nShare capabilities across harnesses.\n")
+    (tools_dir / "frontend.md").write_text("# Frontend\n\nBuild usable interfaces.\n")
+    (tools_dir / "antislop.md").write_text("# Anti-Slop\n\nRemove vague unfinished work.\n")
 
     assert cli.main(["roadmap", "commands", "--target", str(tmp_path), "--write", "--json"]) == 0
     capsys.readouterr()
@@ -324,7 +377,7 @@ def test_internal_dogfood_fresh_repo_onboarding_loop(tmp_path, capsys, monkeypat
     assert cli.main(["operator", "sync-tools", "--target", str(tmp_path), "--json"]) == 0
     sync_payload = json.loads(capsys.readouterr().out)
     assert sync_payload["status"] == "ok"
-    assert sync_payload["apply"]["applied_count"] == 5
+    assert sync_payload["apply"]["applied_count"] == 28
 
     assert cli.main(["operator", "status", "--profile", "internal-dogfood", "--target", str(tmp_path), "--json"]) == 0
     status = json.loads(capsys.readouterr().out)

@@ -56,10 +56,15 @@ DEFAULT_TOOLS = (
         "enabled": True,
         "description": "Portable simplify command placeholder.",
         "source_path": "tools/simplify.md",
-        "supported_harnesses": ["claude", "codex"],
+        "supported_harnesses": ["claude", "codex", "opencode", "hermes", "openclaw", "mcp", "scripts"],
         "projections": {
             "claude": ".claude/commands/simplify.md",
             "codex": ".codex/skills/simplify/SKILL.md",
+            "opencode": ".opencode/commands/simplify.md",
+            "hermes": ".hermes/commands/simplify.md",
+            "openclaw": ".openclaw/commands/simplify.md",
+            "mcp": ".mcp/simplify.md",
+            "scripts": "scripts/simplify.md",
         },
     },
     {
@@ -69,14 +74,210 @@ DEFAULT_TOOLS = (
         "enabled": True,
         "description": "Portable superpowers placeholder.",
         "source_path": "tools/superpowers.md",
-        "supported_harnesses": ["claude", "codex", "opencode"],
+        "supported_harnesses": ["claude", "codex", "opencode", "hermes", "openclaw", "mcp", "scripts"],
         "projections": {
             "claude": ".claude/commands/superpowers.md",
             "codex": ".codex/skills/superpowers/SKILL.md",
             "opencode": ".opencode/superpowers/superpowers.md",
+            "hermes": ".hermes/superpowers/superpowers.md",
+            "openclaw": ".openclaw/superpowers/superpowers.md",
+            "mcp": ".mcp/superpowers.md",
+            "scripts": "scripts/superpowers.md",
+        },
+    },
+    {
+        "id": "frontend",
+        "name": "Frontend",
+        "family": "skill",
+        "enabled": True,
+        "description": "Frontend implementation and visual quality workflow.",
+        "source_path": "tools/frontend.md",
+        "supported_harnesses": ["claude", "codex", "opencode", "hermes", "openclaw", "mcp", "scripts"],
+        "projections": {
+            "claude": ".claude/commands/frontend.md",
+            "codex": ".codex/skills/frontend/SKILL.md",
+            "opencode": ".opencode/commands/frontend.md",
+            "hermes": ".hermes/commands/frontend.md",
+            "openclaw": ".openclaw/commands/frontend.md",
+            "mcp": ".mcp/frontend.md",
+            "scripts": "scripts/frontend.md",
+        },
+    },
+    {
+        "id": "antislop",
+        "name": "Anti-Slop",
+        "family": "skill",
+        "enabled": True,
+        "description": "Quality review workflow for removing vague or unfinished work.",
+        "source_path": "tools/antislop.md",
+        "supported_harnesses": ["claude", "codex", "opencode", "hermes", "openclaw", "mcp", "scripts"],
+        "projections": {
+            "claude": ".claude/commands/antislop.md",
+            "codex": ".codex/skills/antislop/SKILL.md",
+            "opencode": ".opencode/commands/antislop.md",
+            "hermes": ".hermes/commands/antislop.md",
+            "openclaw": ".openclaw/commands/antislop.md",
+            "mcp": ".mcp/antislop.md",
+            "scripts": "scripts/antislop.md",
         },
     },
 )
+DEFAULT_TOOL_SOURCE_TEXTS = {
+    "simplify": """# Simplify
+
+Use this cross-harness tool source when a repo needs a concise explanation, cleanup plan, or smaller version of a complex artifact.
+
+## Intent
+
+Turn dense local context into a clear, actionable summary without changing files, running commands, or hiding important uncertainty.
+
+## Use When
+
+- A plan, issue, design note, or handoff is too broad to act on.
+- A user asks for a shorter version of existing local material.
+- A harness needs the same simplification behavior projected into its native command or skill format.
+
+## Procedure
+
+1. Identify the source material and the target audience.
+2. Preserve concrete facts, commands, file paths, blockers, and decisions.
+3. Remove repetition, speculation, and incidental implementation detail.
+4. Keep unresolved questions explicit.
+5. End with the next concrete action when one is known.
+
+## Boundaries
+
+- Do not invent missing facts.
+- Do not remove safety, privacy, approval, or verification requirements.
+- Do not edit source files unless the user explicitly asks.
+- Do not run commands only to simplify text.
+
+## Output Shape
+
+Prefer:
+
+- one short answer-first paragraph
+- a short list of material facts or decisions
+- a final next action when useful
+""",
+    "superpowers": """# Superpowers
+
+Use this cross-harness tool source to expose repo-reviewed workflows, skills, and repeatable operating patterns to any agent harness.
+
+## Intent
+
+Make higher-level capabilities discoverable across Claude, Codex, OpenCode, OpenClaw, Hermes, scripts, MCP adapters, and future harnesses without treating any one harness as canonical.
+
+## Use When
+
+- A repo has a reviewed workflow that should be reused by more than one harness.
+- A command, skill, checklist, or operating pattern needs a single source document before projection.
+- Agents need to know which local capability to use before starting work.
+
+## Procedure
+
+1. Start from the tracked source document in `tools/`.
+2. Project only reviewed content into harness-specific locations.
+3. Keep generated projections local unless the repo intentionally tracks them.
+4. Re-run the relevant Brigade health check after changing source or projections.
+5. Write a handoff when the available cross-harness capability changes in a durable way.
+
+## Boundaries
+
+- Do not auto-install harness plugins or skills.
+- Do not overwrite harness-specific files without an explicit command.
+- Do not store secrets, private host paths, tokens, or user-specific credentials in shared source docs.
+- Do not use projections to bypass repo guidance, approvals, or safety rules.
+
+## Useful Commands
+
+```bash
+brigade tools doctor --target .
+brigade tools list --target .
+brigade tools plan --target .
+```
+
+Use `brigade tools apply` only when the operator explicitly wants reviewed projections written.
+""",
+    "frontend": """# Frontend
+
+Use this cross-harness tool source when implementing, reviewing, or polishing a user-facing frontend.
+
+## Intent
+
+Build interfaces that are usable, coherent, responsive, and visually appropriate for the product context instead of generic demo screens.
+
+## Use When
+
+- A task changes a web, mobile, dashboard, game, or interactive UI.
+- A feature needs layout, components, interaction states, or responsive behavior.
+- A frontend should be checked for visual quality before handoff.
+
+## Procedure
+
+1. Read the existing app structure, design system, routes, and component patterns before inventing new UI.
+2. Identify the primary user workflow and make the first screen useful for that workflow.
+3. Use established local components, icons, spacing, colors, and state patterns where they exist.
+4. Build complete controls and states: loading, empty, error, active, disabled, hover, focus, and mobile layouts when relevant.
+5. Keep text fitted to its containers and check for overlap at common desktop and mobile sizes.
+6. Verify with the smallest meaningful browser or screenshot check when the app can run locally.
+
+## Boundaries
+
+- Do not create a landing page when the user asked for an app, tool, game, or workflow screen.
+- Do not add decorative gradients, blobs, cards, or large hero sections unless they serve the product.
+- Do not introduce new UI dependencies unless the task explicitly requires them or the repo already uses them.
+- Do not leave placeholder controls, fake actions, or unreachable states when the user expects a working experience.
+
+## Output Shape
+
+Prefer:
+
+- the implemented UI change
+- the verification command or browser check
+- any remaining responsive or asset caveat
+""",
+    "antislop": """# Anti-Slop
+
+Use this cross-harness tool source to remove vague, low-quality, performative, or unfinished work before handoff.
+
+## Intent
+
+Force the work to become specific, testable, and useful. Replace generic filler with concrete behavior, evidence, and clear next actions.
+
+## Use When
+
+- An answer, plan, UI, document, or code change feels generic or padded.
+- A task claims success without enough verification.
+- A workflow has placeholders, fake completeness, weak assumptions, or unexplained tradeoffs.
+- A user asks for sharper, less sloppy, or more production-ready work.
+
+## Procedure
+
+1. Name the actual goal in one sentence.
+2. Remove decorative text, vague praise, generic best practices, and unsupported certainty.
+3. Check whether every claim is backed by a file, command, source, screenshot, test, or explicit assumption.
+4. Replace placeholders with working behavior, or label the blocker and the exact missing input.
+5. Prefer root-cause fixes over cosmetic patches.
+6. Run the smallest meaningful verification step before saying the work is done.
+7. Report only the changes, evidence, caveats, and next action that matter.
+
+## Boundaries
+
+- Do not use anti-slop as an excuse to broaden scope.
+- Do not rewrite user intent into a different task.
+- Do not hide uncertainty, skipped verification, or known gaps.
+- Do not make prose terse at the cost of losing required technical detail.
+
+## Output Shape
+
+Prefer:
+
+- concise answer first
+- concrete evidence or verification
+- explicit caveats only when they affect the user
+""",
+}
 DEFAULT_RUNTIMES = (
     {
         "id": "local-helper",
@@ -194,19 +395,109 @@ def _format_inline_table(values: dict[str, str]) -> str:
     return "{ " + rendered + " }"
 
 
-def _format_tools_toml(tools: tuple[dict[str, Any], ...] = DEFAULT_TOOLS) -> str:
+def _format_toml_key(key: str) -> str:
+    if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_-]*", key):
+        return key
+    return json.dumps(key)
+
+
+def _format_toml_object(value: object) -> str:
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return f"{value:g}"
+    if isinstance(value, list):
+        return "[" + ", ".join(_format_toml_object(item) for item in value) + "]"
+    if isinstance(value, dict):
+        rendered = ", ".join(f"{_format_toml_key(str(key))} = {_format_toml_object(item)}" for key, item in value.items())
+        return "{ " + rendered + " }"
+    return json.dumps(str(value))
+
+
+def _format_tool_entries(entries: list[dict[str, Any]]) -> str:
     lines = [
         "# Local portable tool and skill catalog. Brigade inspects this file but does not sync projections.",
         "",
     ]
-    for tool in tools:
+    preferred = [
+        "id",
+        "name",
+        "family",
+        "enabled",
+        "description",
+        "source_path",
+        "manifest_path",
+        "schema_path",
+        "command",
+        "auth_label",
+        "health_path",
+        "fingerprint",
+        "input_schema_path",
+        "output_schema_path",
+        "examples_path",
+        "approval_mode",
+        "cwd",
+        "runtime_id",
+        "runtime_health_path",
+        "mcp_server_id",
+        "mcp_tool_name",
+        "requires_runtime",
+        "timeout",
+        "permissions",
+        "effects",
+        "env_labels",
+        "supported_harnesses",
+        "projections",
+        "projection_fingerprints",
+        "argument_template",
+    ]
+    for entry in entries:
         lines.append("[[tool]]")
-        for key in ("id", "name", "family", "enabled", "description", "source_path"):
-            lines.append(f"{key} = {dogfood_cmd._format_toml_value(tool[key])}")
-        lines.append(f"supported_harnesses = {_format_inline_list(list(tool['supported_harnesses']))}")
-        lines.append(f"projections = {_format_inline_table(dict(tool['projections']))}")
+        keys = [key for key in preferred if key in entry]
+        keys.extend(sorted(key for key in entry if key not in set(preferred)))
+        for key in keys:
+            if key == "raw":
+                continue
+            lines.append(f"{_format_toml_key(key)} = {_format_toml_object(entry[key])}")
         lines.append("")
     return "\n".join(lines)
+
+
+def _format_tools_toml(tools: tuple[dict[str, Any], ...] = DEFAULT_TOOLS) -> str:
+    return _format_tool_entries([dict(tool) for tool in tools])
+
+
+def _default_tool_source_text(tool_id: str) -> str | None:
+    source_path = Path(__file__).resolve().parents[2] / "tools" / f"{tool_id}.md"
+    if source_path.is_file():
+        return source_path.read_text(errors="replace")
+    return DEFAULT_TOOL_SOURCE_TEXTS.get(tool_id)
+
+
+def _ensure_default_tool_sources(target: Path, *, dry_run: bool = False) -> list[dict[str, Any]]:
+    results: list[dict[str, Any]] = []
+    for tool in DEFAULT_TOOLS:
+        tool_id = str(tool.get("id") or "")
+        source_path = tool.get("source_path")
+        if not tool_id or not isinstance(source_path, str) or not source_path.strip():
+            continue
+        rel = Path(source_path)
+        if rel.is_absolute() or ".." in rel.parts:
+            results.append({"tool_id": tool_id, "source_path": source_path, "action": "skip", "detail": "source path is not repo-relative"})
+            continue
+        dest = target / rel
+        if dest.exists():
+            results.append({"tool_id": tool_id, "source_path": source_path, "path": str(dest), "action": "skip", "detail": "source exists"})
+            continue
+        text = _default_tool_source_text(tool_id)
+        if text is None:
+            results.append({"tool_id": tool_id, "source_path": source_path, "path": str(dest), "action": "missing", "detail": "built-in source text unavailable"})
+            continue
+        results.append({"tool_id": tool_id, "source_path": source_path, "path": str(dest), "action": "create" if not dry_run else "would_create"})
+        if not dry_run:
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_text(text if text.endswith("\n") else text + "\n")
+    return results
 
 
 def _format_runtimes_toml(runtimes: tuple[dict[str, Any], ...] = DEFAULT_RUNTIMES) -> str:
@@ -1345,6 +1636,21 @@ def _managed_header(metadata: dict[str, Any]) -> str:
     return f"<!-- {PROJECTION_MARKER} {rendered} -->"
 
 
+def _managed_yaml_comment(metadata: dict[str, Any]) -> str:
+    rendered = json.dumps(metadata, sort_keys=True, separators=(",", ":"))
+    return f"# {PROJECTION_MARKER} {rendered}"
+
+
+def _parse_projection_metadata(raw: str) -> dict[str, Any] | None:
+    try:
+        metadata = json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(metadata, dict):
+        return None
+    return metadata
+
+
 def _read_projection(path: Path) -> tuple[dict[str, Any] | None, str | None]:
     try:
         text = path.read_text()
@@ -1356,13 +1662,23 @@ def _read_projection(path: Path) -> tuple[dict[str, Any] | None, str | None]:
     first = lines[0].strip()
     prefix = f"<!-- {PROJECTION_MARKER} "
     if not first.startswith(prefix) or not first.endswith(" -->"):
+        if first != "---":
+            return None, text
+        yaml_prefix = f"# {PROJECTION_MARKER} "
+        for index, line in enumerate(lines[1:], start=1):
+            stripped = line.strip()
+            if stripped == "---":
+                break
+            if not stripped.startswith(yaml_prefix):
+                continue
+            metadata = _parse_projection_metadata(stripped[len(yaml_prefix) :])
+            if metadata is None:
+                return None, text
+            body = "".join(lines[:index] + lines[index + 1 :])
+            return metadata, body
         return None, text
-    raw = first[len(prefix) : -len(" -->")]
-    try:
-        metadata = json.loads(raw)
-    except json.JSONDecodeError:
-        return None, text
-    if not isinstance(metadata, dict):
+    metadata = _parse_projection_metadata(first[len(prefix) : -len(" -->")])
+    if metadata is None:
         return None, text
     return metadata, "".join(lines[1:])
 
@@ -1430,6 +1746,52 @@ def _render_projection_body(tool: dict[str, Any], harness: str, source_text: str
     return "\n".join(lines) + "\n"
 
 
+def _yaml_string(value: str) -> str:
+    return json.dumps(" ".join(value.split()))
+
+
+def _codex_skill_frontmatter(tool: dict[str, Any]) -> str:
+    tool_id = str(tool.get("id") or "brigade-tool")
+    description = str(tool.get("description") or f"Use this Brigade-managed skill for {tool_id}.")
+    return "\n".join(
+        [
+            "---",
+            f"name: {_yaml_string(tool_id)}",
+            f"description: {_yaml_string(description)}",
+            "---",
+            "",
+        ]
+    )
+
+
+def _is_codex_skill_projection(tool: dict[str, Any], harness: str, projection_path: Path | None) -> bool:
+    if harness != "codex" or projection_path is None:
+        return False
+    if projection_path.name != "SKILL.md":
+        return False
+    family = str(tool.get("family") or "")
+    return family in {"slash-command", "skill", "superpower"}
+
+
+def _projection_managed_body(tool: dict[str, Any], harness: str, projection_path: Path | None, body: str) -> str:
+    if _is_codex_skill_projection(tool, harness, projection_path) and not body.startswith("---\n"):
+        return _codex_skill_frontmatter(tool) + body
+    return body
+
+
+def _render_managed_projection(
+    metadata: dict[str, Any],
+    tool: dict[str, Any],
+    harness: str,
+    projection_path: Path | None,
+    managed_body: str,
+) -> str:
+    if _is_codex_skill_projection(tool, harness, projection_path) and managed_body.startswith("---\n"):
+        lines = managed_body.splitlines(keepends=True)
+        return lines[0] + _managed_yaml_comment(metadata) + "\n" + "".join(lines[1:])
+    return _managed_header(metadata) + "\n" + managed_body
+
+
 def _projection_item(
     target: Path,
     tool: dict[str, Any],
@@ -1466,7 +1828,8 @@ def _projection_item(
         return item
     source_fingerprint = _text_hash(source_text)
     body = _render_projection_body(tool, harness, source_text, _relative_path(target, source_path))
-    projection_fingerprint = _text_hash(body)
+    managed_body = _projection_managed_body(tool, harness, projection_path, body)
+    projection_fingerprint = _text_hash(managed_body)
     item.update(
         {
             "source_fingerprint": source_fingerprint,
@@ -1482,7 +1845,7 @@ def _projection_item(
         "projection_fingerprint": projection_fingerprint,
         "generated_at": generated_at.isoformat(),
     }
-    rendered = _managed_header(metadata) + "\n" + body
+    rendered = _render_managed_projection(metadata, tool, harness, projection_path, managed_body)
     item["rendered"] = rendered
     if not projection_path.exists():
         item.update({"status": "missing", "action": "create", "detail": "projection will be created"})
@@ -3650,8 +4013,10 @@ def init(*, target: Path, force: bool = False, update_gitignore: bool = True) ->
         return 2
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(_format_tools_toml())
+    source_results = _ensure_default_tool_sources(target)
     print(f"tools_config: {path}")
     print(f"tools: {len(DEFAULT_TOOLS)}")
+    print(f"sources: {sum(1 for item in source_results if item['action'] == 'create')}")
     if update_gitignore:
         result = apply_gitignore(target, Selection("repo", ["codex"], "codex"))
         print(f"gitignore: {result}")
@@ -3659,6 +4024,136 @@ def init(*, target: Path, force: bool = False, update_gitignore: bool = True) ->
         print("gitignore: skipped")
     print("next_command: brigade tools list")
     return 0
+
+
+def _read_tool_entries(path: Path) -> tuple[list[dict[str, Any]], list[str]]:
+    if not path.is_file():
+        return [], []
+    if tomllib is None:
+        return [], ["tool catalog requires Python tomllib support"]
+    try:
+        payload = tomllib.loads(path.read_text())
+    except (OSError, tomllib.TOMLDecodeError) as exc:  # type: ignore[union-attr]
+        return [], [f"invalid tool catalog config: {exc}"]
+    values = payload.get("tool")
+    if values is None:
+        return [], []
+    if not isinstance(values, list) or any(not isinstance(item, dict) for item in values):
+        return [], ["tool catalog must contain [[tool]] table entries"]
+    return [dict(item) for item in values], []
+
+
+def defaults(*, target: Path, dry_run: bool = False, force: bool = False, update_gitignore: bool = True, json_output: bool = False) -> int:
+    target = target.expanduser().resolve()
+    if not target.is_dir():
+        print(f"error: --target is not a directory: {target}", file=sys.stderr)
+        return 2
+    path = config_path(target)
+    entries, errors = _read_tool_entries(path)
+    if errors:
+        payload = {
+            "target": str(target),
+            "config_path": str(path),
+            "valid": False,
+            "errors": errors,
+            "dry_run": dry_run,
+            "force": force,
+            "created": False,
+            "added": [],
+            "updated": [],
+            "skipped": [],
+            "conflicts": [],
+        }
+        if json_output:
+            print(json.dumps(payload, indent=2, sort_keys=True))
+        else:
+            for error in errors:
+                print(f"error: {error}", file=sys.stderr)
+        return 1
+    existing_by_id = {
+        str(entry.get("id")): index
+        for index, entry in enumerate(entries)
+        if isinstance(entry.get("id"), str) and str(entry.get("id")).strip()
+    }
+    defaults_by_id = {str(tool["id"]): dict(tool) for tool in DEFAULT_TOOLS}
+    added: list[str] = []
+    updated: list[str] = []
+    skipped: list[str] = []
+    conflicts: list[dict[str, str]] = []
+    merged = [dict(entry) for entry in entries]
+    for tool_id, default_entry in defaults_by_id.items():
+        if tool_id not in existing_by_id:
+            merged.append(dict(default_entry))
+            added.append(tool_id)
+            continue
+        index = existing_by_id[tool_id]
+        existing = merged[index]
+        existing_source = str(existing.get("source_path") or "")
+        default_source = str(default_entry.get("source_path") or "")
+        if force or existing_source == default_source:
+            if existing == default_entry:
+                skipped.append(tool_id)
+            else:
+                merged[index] = dict(default_entry)
+                updated.append(tool_id)
+            continue
+        conflicts.append(
+            {
+                "tool_id": tool_id,
+                "existing_source_path": existing_source,
+                "default_source_path": default_source,
+                "detail": "existing tool id uses a different source_path",
+            }
+        )
+    created = not path.exists()
+    if not dry_run and not conflicts:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(_format_tool_entries(merged))
+    source_results = _ensure_default_tool_sources(target, dry_run=dry_run or bool(conflicts))
+    gitignore_result = "skipped"
+    if update_gitignore and not dry_run and not conflicts:
+        gitignore_result = apply_gitignore(target, Selection("repo", ["codex"], "codex"))
+    payload = {
+        "target": str(target),
+        "config_path": str(path),
+        "valid": not conflicts,
+        "errors": [],
+        "dry_run": dry_run,
+        "force": force,
+        "created": created,
+        "added": added,
+        "updated": updated,
+        "skipped": skipped,
+        "conflicts": conflicts,
+        "sources": source_results,
+        "source_created_count": len([item for item in source_results if item.get("action") == "create"]),
+        "source_skipped_count": len([item for item in source_results if item.get("action") == "skip"]),
+        "tool_count": len(merged),
+        "default_count": len(defaults_by_id),
+        "gitignore": gitignore_result,
+        "next_command": "brigade tools apply --target . --all",
+    }
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0 if payload["valid"] else 1
+    print(f"tools defaults: {target}")
+    print(f"config_path: {path}")
+    print(f"dry_run: {dry_run}")
+    print(f"created: {'yes' if created else 'no'}")
+    print(f"added: {len(added)}")
+    print(f"updated: {len(updated)}")
+    print(f"skipped: {len(skipped)}")
+    print(f"conflicts: {len(conflicts)}")
+    print(f"sources_created: {payload['source_created_count']}")
+    print(f"gitignore: {gitignore_result}")
+    for tool_id in added:
+        print(f"- added: {tool_id}")
+    for tool_id in updated:
+        print(f"- updated: {tool_id}")
+    for conflict in conflicts:
+        print(f"- conflict: {conflict['tool_id']} {conflict['detail']}")
+    print(f"next_command: {payload['next_command']}")
+    return 0 if payload["valid"] else 1
 
 
 def runtime_init(*, target: Path, force: bool = False) -> int:
@@ -4708,12 +5203,36 @@ def pack_build(*, target: Path, json_output: bool = False) -> int:
     payload = _tool_pack_payload(target)
     payload.update({"pack_id": pack_id, "status": "built"})
     pack_dir = _packs_root(target) / pack_id
+    entries, entry_errors = _read_tool_entries(config_path(target))
+    source_files: list[dict[str, Any]] = []
+    source_root = pack_dir / "source-files"
+    for entry in entries:
+        source_path = entry.get("source_path")
+        if not isinstance(source_path, str) or not source_path.strip():
+            continue
+        source = _as_path(target, source_path)
+        if source is None or not source.is_file():
+            source_files.append({"tool_id": entry.get("id"), "source_path": source_path, "packed": False, "reason": "source missing"})
+            continue
+        rel = Path(source_path)
+        if rel.is_absolute() or ".." in rel.parts:
+            source_files.append({"tool_id": entry.get("id"), "source_path": source_path, "packed": False, "reason": "source path is not repo-relative"})
+            continue
+        dest = source_root / rel
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, dest)
+        source_files.append({"tool_id": entry.get("id"), "source_path": source_path, "packed": True, "pack_path": str(dest.relative_to(pack_dir))})
+    portable_catalog = {"entries": entries, "entry_errors": entry_errors, "source_files": source_files}
+    payload["portable_catalog"] = portable_catalog
+    if entries:
+        (pack_dir / "portable-tools.toml").write_text(_format_tool_entries(entries))
     _write_json(pack_dir / "tool-pack.json", payload)
     (pack_dir / "TOOL_PACK.md").write_text(
         f"# Tool Pack {pack_id}\n\n"
         f"- tools: {payload['tool_count']}\n"
         f"- issues: {payload['issue_count']}\n"
         f"- projections: {len(payload['projections'])}\n"
+        f"- import: brigade tools pack import {pack_dir}\n"
     )
     payload["path"] = str(pack_dir)
     if json_output:
@@ -4847,6 +5366,97 @@ def pack_archive(*, target: Path, pack_id: str, json_output: bool = False) -> in
         return 0
     print(f"archived: {pack.get('pack_id')}")
     print(f"path: {destination}")
+    return 0
+
+
+def pack_import(*, target: Path, pack: Path, force: bool = False, json_output: bool = False) -> int:
+    target = target.expanduser().resolve()
+    pack = pack.expanduser().resolve()
+    manifest, manifest_error = _read_json(pack / "tool-pack.json")
+    if manifest_error is not None or not isinstance(manifest, dict):
+        print(f"error: not a tool pack: {pack}", file=sys.stderr)
+        return 2
+    portable_catalog = manifest.get("portable_catalog") if isinstance(manifest.get("portable_catalog"), dict) else {}
+    entries = portable_catalog.get("entries") if isinstance(portable_catalog.get("entries"), list) else []
+    entries = [dict(entry) for entry in entries if isinstance(entry, dict)]
+    if not entries and (pack / "portable-tools.toml").is_file():
+        entries, _ = _read_tool_entries(pack / "portable-tools.toml")
+    current_entries, errors = _read_tool_entries(config_path(target))
+    conflicts: list[dict[str, Any]] = []
+    copied_sources: list[dict[str, Any]] = []
+    skipped_existing: list[dict[str, Any]] = []
+    existing_by_id = {str(entry.get("id")): entry for entry in current_entries if entry.get("id")}
+    for entry in entries:
+        tool_id = str(entry.get("id") or "")
+        if not tool_id:
+            conflicts.append({"tool_id": "", "reason": "packed entry missing id"})
+            continue
+        existing_entry = existing_by_id.get(tool_id)
+        if existing_entry is not None and not force and _stable_hash(existing_entry) != _stable_hash(entry):
+            conflicts.append({"tool_id": tool_id, "reason": "tool id already exists with different definition", "existing_source_path": existing_entry.get("source_path")})
+        source_path = entry.get("source_path")
+        if isinstance(source_path, str) and source_path.strip():
+            rel = Path(source_path)
+            if rel.is_absolute() or ".." in rel.parts:
+                conflicts.append({"tool_id": tool_id, "reason": "source path is not repo-relative", "source_path": source_path})
+                continue
+            packed_source = pack / "source-files" / rel
+            target_source = target / rel
+            if packed_source.is_file() and target_source.is_file() and packed_source.read_bytes() != target_source.read_bytes() and not force:
+                conflicts.append({"tool_id": tool_id, "reason": "source file already exists with different content", "source_path": source_path})
+    if errors:
+        conflicts.append({"tool_id": None, "reason": "existing catalog errors", "errors": errors})
+    if conflicts:
+        payload = {"target": str(target), "pack": str(pack), "valid": False, "imported": [], "copied_sources": copied_sources, "skipped_existing": skipped_existing, "conflicts": conflicts}
+        if json_output:
+            print(json.dumps(payload, indent=2, sort_keys=True))
+            return 1
+        for conflict in conflicts:
+            print(f"conflict: {conflict.get('tool_id')} {conflict.get('reason')}")
+        return 1
+    merged_by_id = {str(entry.get("id")): dict(entry) for entry in current_entries if entry.get("id")}
+    imported: list[dict[str, Any]] = []
+    for entry in entries:
+        tool_id = str(entry.get("id") or "")
+        if not tool_id:
+            continue
+        source_path = entry.get("source_path")
+        if isinstance(source_path, str) and source_path.strip():
+            rel = Path(source_path)
+            packed_source = pack / "source-files" / rel
+            target_source = target / rel
+            if packed_source.is_file():
+                target_source.parent.mkdir(parents=True, exist_ok=True)
+                if force or not target_source.exists() or packed_source.read_bytes() == target_source.read_bytes():
+                    shutil.copy2(packed_source, target_source)
+                    copied_sources.append({"tool_id": tool_id, "source_path": source_path, "target_path": str(target_source)})
+        if tool_id in existing_by_id and not force:
+            skipped_existing.append({"tool_id": tool_id, "reason": "identical entry already exists", "source_path": entry.get("source_path")})
+            continue
+        merged_by_id[tool_id] = dict(entry)
+        imported.append({"tool_id": tool_id, "source_path": entry.get("source_path")})
+    config_path(target).parent.mkdir(parents=True, exist_ok=True)
+    config_path(target).write_text(_format_tool_entries(list(merged_by_id.values())))
+    result = apply_gitignore(target, Selection("repo", ["codex"], "codex"))
+    payload = {
+        "target": str(target),
+        "pack": str(pack),
+        "pack_id": manifest.get("pack_id"),
+        "valid": True,
+        "imported_count": len(imported),
+        "imported": imported,
+        "copied_sources": copied_sources,
+        "skipped_existing": skipped_existing,
+        "skipped_existing_count": len(skipped_existing),
+        "gitignore": result,
+        "next_command": "brigade tools plan --target .",
+    }
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+    print(f"tool_pack_import: {manifest.get('pack_id') or pack.name}")
+    print(f"imported: {len(imported)}")
+    print("next_command: brigade tools plan --target .")
     return 0
 
 
