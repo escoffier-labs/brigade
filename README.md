@@ -33,6 +33,7 @@ It is intentionally local. Brigade writes files and review queues on your machin
 
 - GitHub: [`escoffier-labs/brigade`](https://github.com/escoffier-labs/brigade)
 - Website: [`brigade.solomonneas.dev`](https://brigade.solomonneas.dev)
+- Cookbook: [`solomonneas/solos-cookbook`](https://github.com/solomonneas/solos-cookbook), the real-world multi-agent stack Brigade grew out of
 - PyPI package: [`brigade-cli`](https://pypi.org/project/brigade-cli/)
 - CLI command: `brigade`
 - Core search terms: AI agent memory, agent handoffs, Codex memory, Claude Code memory, OpenCode handoffs, local-first agent workflow, AGENTS.md, agent guardrails
@@ -178,7 +179,7 @@ Full command list in [Repo fleet](docs/repo-fleet.md).
 
 ## Tool Catalog
 
-`brigade tools` describes local callable tools, slash commands, skills, scripts, and MCP configs across harnesses, then gates execution behind an approval queue.
+`brigade tools` describes local callable tools, slash commands, skills, scripts, and MCP configs across harnesses, then gates execution behind an approval queue. `brigade tools defaults` refreshes built-in portable tool entries while preserving custom repo tools.
 
 ![Tool catalog separates discovery, projection, and execution](docs/assets/tool-catalog-flow.svg)
 
