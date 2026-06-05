@@ -3,6 +3,7 @@ package app
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
@@ -58,7 +59,9 @@ func cmdImportSourceHarvest(args []string, out, errw io.Writer) int {
 		return fatalf(errw, "import sourceharvest: %s", err)
 	}
 	defer db.Close()
-	cmd := exec.Command("sourceharvest", passArgs...)
+	ctx, cancel := context.WithTimeout(context.Background(), externalScannerTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "sourceharvest", passArgs...)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return fatalf(errw, "import sourceharvest: %s", err)
@@ -70,6 +73,9 @@ func cmdImportSourceHarvest(args []string, out, errw io.Writer) int {
 	}
 	result, importErr := ingest.ImportAdapterReader(db, stdout, "sourceharvest://"+strings.Join(passArgs, " "), "")
 	waitErr := cmd.Wait()
+	if ctx.Err() == context.DeadlineExceeded {
+		return fatalf(errw, "import sourceharvest: timed out after %s", externalScannerTimeout)
+	}
 	if importErr != nil {
 		return fatalf(errw, "import sourceharvest: %s", importErr)
 	}
@@ -100,7 +106,9 @@ func cmdImportSourceHarvest(args []string, out, errw io.Writer) int {
 }
 
 func dryRunSourceHarvest(args []string) (int, []string, error) {
-	cmd := exec.Command("sourceharvest", args...)
+	ctx, cancel := context.WithTimeout(context.Background(), externalScannerTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "sourceharvest", args...)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return 0, nil, err
@@ -126,9 +134,15 @@ func dryRunSourceHarvest(args []string) (int, []string, error) {
 		records++
 	}
 	if err := scanner.Err(); err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			return records, warnings, fmt.Errorf("sourceharvest timed out after %s", externalScannerTimeout)
+		}
 		return 0, nil, err
 	}
 	if err := cmd.Wait(); err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			return records, warnings, fmt.Errorf("sourceharvest timed out after %s", externalScannerTimeout)
+		}
 		msg := strings.TrimSpace(stderr.String())
 		if msg == "" {
 			msg = err.Error()

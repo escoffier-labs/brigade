@@ -150,6 +150,38 @@ func TestImportAdapterFromStdin(t *testing.T) {
 	}
 }
 
+func TestAdapterExportFilesArePrivateAndAtomic(t *testing.T) {
+	withTempHome(t)
+	fixture := repoPath(t, "testdata/harnesses/codex-session.fixture.jsonl")
+	dir := t.TempDir()
+	outPath := filepath.Join(dir, "codex.adapter.jsonl")
+
+	runOK(t, "adapter", "codex", fixture, "--out", outPath, "--json")
+	assertPrivate(t, outPath)
+
+	if err := os.WriteFile(outPath, []byte("original\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	code, stdout, stderr := run("adapter", "codex", filepath.Join(dir, "missing"), "--out", outPath)
+	if code == 0 {
+		t.Fatalf("expected failure, stdout=%s stderr=%s", stdout, stderr)
+	}
+	b, err := os.ReadFile(outPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(b) != "original\n" {
+		t.Fatalf("output was replaced on failure: %q", string(b))
+	}
+	matches, err := filepath.Glob(filepath.Join(dir, ".codex.adapter.jsonl.tmp-*"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(matches) != 0 {
+		t.Fatalf("temp files left behind: %v", matches)
+	}
+}
+
 func TestImportAgentTrailWrapper(t *testing.T) {
 	withTempHome(t)
 	runOK(t, "init")

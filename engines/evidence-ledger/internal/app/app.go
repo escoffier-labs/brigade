@@ -2,6 +2,7 @@ package app
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/csv"
@@ -31,6 +32,8 @@ import (
 var stdin io.Reader = os.Stdin
 
 const Version = "0.1.5"
+
+const externalScannerTimeout = 30 * time.Minute
 
 func Run(args []string, out, errw io.Writer) int {
 	if len(args) == 0 || args[0] == "--help" || args[0] == "-h" || args[0] == "help" {
@@ -117,7 +120,7 @@ func cmdInit(args []string, out, errw io.Writer) int {
 	}
 	if _, err := os.Stat(paths.ConfigPath); errors.Is(err, os.ErrNotExist) {
 		body := fmt.Sprintf("db_path = %q\ncache_dir = %q\n", paths.DBPath, paths.CacheDir)
-		if err := os.WriteFile(paths.ConfigPath, []byte(body), security.PrivateFileMode); err != nil {
+		if err := security.WritePrivateFileAtomic(paths.ConfigPath, []byte(body)); err != nil {
 			return fatalf(errw, "init: %s", err)
 		}
 	}
@@ -679,11 +682,16 @@ func cmdImportAgentTrail(args []string, out, errw io.Writer) int {
 		if values["redact"] != "" {
 			cmdArgs = append(cmdArgs, "--redact", values["redact"])
 		}
-		cmd := exec.Command("agenttrail", cmdArgs...)
+		ctx, cancel := context.WithTimeout(context.Background(), externalScannerTimeout)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, "agenttrail", cmdArgs...)
 		var stderr bytes.Buffer
 		cmd.Stderr = &stderr
 		b, err := cmd.Output()
 		if err != nil {
+			if ctx.Err() == context.DeadlineExceeded {
+				return fatalf(errw, "import agenttrail: timed out after %s", externalScannerTimeout)
+			}
 			return fatalf(errw, "import agenttrail: %s", strings.TrimSpace(stderr.String()))
 		}
 		if bools["json"] {
@@ -730,7 +738,9 @@ func runAgentTrailImport(db *sql.DB, sourceKind, sourcePath string, values map[s
 	if values["redact"] != "" {
 		cmdArgs = append(cmdArgs, "--redact", values["redact"])
 	}
-	cmd := exec.Command("agenttrail", cmdArgs...)
+	ctx, cancel := context.WithTimeout(context.Background(), externalScannerTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "agenttrail", cmdArgs...)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return ingest.AdapterResult{}, agentTrailSummary{}, err
@@ -742,6 +752,9 @@ func runAgentTrailImport(db *sql.DB, sourceKind, sourcePath string, values map[s
 	}
 	result, importErr := ingest.ImportAdapterReader(db, stdout, "agenttrail://"+sourceKind+"/"+sourcePath, sourceKind)
 	waitErr := cmd.Wait()
+	if ctx.Err() == context.DeadlineExceeded {
+		return ingest.AdapterResult{}, agentTrailSummary{}, fmt.Errorf("agenttrail timed out after %s", externalScannerTimeout)
+	}
 	if importErr != nil {
 		return ingest.AdapterResult{}, agentTrailSummary{}, importErr
 	}
@@ -796,21 +809,23 @@ func cmdAdapterGenerate(name string, generator sources.Generator, args []string,
 		return fatalf(errw, "adapter %s: %s", name, err)
 	}
 	var w io.Writer = out
-	var f *os.File
+	var output *security.AtomicFile
+	defer func() { _ = output.Abort() }()
 	if values["out"] != "-" {
-		if err := security.EnsurePrivateParent(values["out"]); err != nil {
-			return fatalf(errw, "adapter %s: %s", name, err)
-		}
-		f, err = os.OpenFile(values["out"], os.O_CREATE|os.O_TRUNC|os.O_WRONLY, security.PrivateFileMode)
+		output, err = security.CreateAtomicFile(values["out"])
 		if err != nil {
 			return fatalf(errw, "adapter %s: %s", name, err)
 		}
-		defer f.Close()
-		w = f
+		w = output.File
 	}
 	result, err := generator(rest[0], sources.Options{Limit: limit, Since: values["since"]}, w)
 	if err != nil {
 		return fatalf(errw, "adapter %s: %s", name, err)
+	}
+	if output != nil {
+		if err := output.Commit(); err != nil {
+			return fatalf(errw, "adapter %s: %s", name, err)
+		}
 	}
 	if bools["json"] && values["out"] != "-" {
 		writeJSON(out, result)
@@ -1312,10 +1327,10 @@ func saveEvidenceBundle(bundle map[string]any) error {
 	if err != nil {
 		return err
 	}
-	if err := os.WriteFile(path, append(b, '\n'), security.PrivateFileMode); err != nil {
+	if err := security.WritePrivateFileAtomic(path, append(b, '\n')); err != nil {
 		return err
 	}
-	return security.ChmodPrivateFile(path)
+	return nil
 }
 
 func loadEvidenceBundle(id string) (map[string]any, error) {
@@ -1526,7 +1541,7 @@ order by s.kind, c.name, i.created_at, i.id`)
 				fmt.Fprintf(&b, "Summary: %s\n\n", r.summary)
 			}
 		}
-		if err := os.WriteFile(path, []byte(b.String()), security.PrivateFileMode); err != nil {
+		if err := security.WritePrivateFileAtomic(path, []byte(b.String())); err != nil {
 			return count, err
 		}
 		count++
