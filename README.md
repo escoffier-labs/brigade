@@ -29,6 +29,10 @@ If you use [OpenClaw](https://github.com/solomonneas/openclaw), Hermes, Codex, C
 
 It is intentionally local. Brigade writes files and review queues on your machine. It does not run a background service, publish releases, push to GitHub, send notifications, or rewrite permanent memory unless you explicitly run the command that does it.
 
+> Brigade was extracted from the [**solos-cookbook**](https://github.com/solomonneas/solos-cookbook), a documented 24/7 multi-agent stack running in production. If you want the full picture of how Brigade fits into a real setup, start there, and a star helps other people find it.
+>
+> [![Star the cookbook](https://img.shields.io/github/stars/solomonneas/solos-cookbook?style=social&label=Star%20solos-cookbook)](https://github.com/solomonneas/solos-cookbook)
+
 ## Project Identity
 
 - GitHub: [`escoffier-labs/brigade`](https://github.com/escoffier-labs/brigade)
