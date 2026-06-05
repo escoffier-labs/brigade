@@ -40,6 +40,31 @@ def test_security_scan_finds_agent_workspace_risks(tmp_path, capsys):
     assert "abcd1234" not in secret_findings[0]["evidence"]
 
 
+def test_security_scan_surfaces_plaintext_passwords_and_session_chat_secrets(tmp_path, capsys):
+    (tmp_path / "settings.ini").write_text("db_password = CorrectHorseBattery\n")
+    session_dir = tmp_path / ".codex" / "sessions"
+    session_dir.mkdir(parents=True)
+    (session_dir / "session-1.jsonl").write_text(
+        '{"role":"user","content":"the API key is service_api_key=abcd1234abcd1234abcd1234"}\n'
+    )
+
+    assert security_cmd.scan(target=tmp_path, fail_on="none", json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    titles = {finding["title"] for finding in payload["findings"]}
+    assert "Plaintext password" in titles
+    assert "Session chat contains exposed credential" in titles
+    password = next(finding for finding in payload["findings"] if finding["title"] == "Plaintext password")
+    chat = next(finding for finding in payload["findings"] if finding["title"] == "Session chat contains exposed credential")
+    assert "[REDACTED]" in password["evidence"]
+    assert "CorrectHorseBattery" not in password["evidence"]
+    assert chat["surface"] == "session-chat"
+    assert chat["confidence"] == "runtime"
+    assert any(option.startswith("move_to_env:") for option in chat["response_options"])
+    assert any(option.startswith("scrub_session_chat:") for option in chat["response_options"])
+    assert any(option.startswith("keepass_review:") for option in chat["response_options"])
+    assert "abcd1234" not in json.dumps(payload)
+
+
 def test_security_scan_avoids_source_false_positives(tmp_path):
     (tmp_path / "module.py").write_text(
         "\n".join(
@@ -611,6 +636,8 @@ def test_security_scan_can_import_findings(tmp_path, capsys):
     assert imports[0]["metadata"]["source_fingerprint"]
     assert imports[0]["metadata"]["rule_id"]
     assert imports[0]["metadata"]["safe_detail"]
+    assert imports[0]["metadata"]["response_options"]
+    assert any(option.startswith("keepass_review:") for option in imports[0]["metadata"]["response_options"])
     assert imports[0]["metadata"]["local_evidence_path"].endswith("security-report.json")
     assert imports[0]["metadata"]["category"] == "secrets"
     assert imports[0]["metadata"]["fingerprint"]

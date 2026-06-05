@@ -107,6 +107,9 @@ TEXT_SUFFIXES = {
 SECRET_VALUE_RE = re.compile(
     r"(?i)\b(api[_-]?key|secret|token|password|passwd|pwd)\b\s*[:=]\s*['\"]?([A-Za-z0-9_./+=:-]{16,})"
 )
+PLAINTEXT_PASSWORD_RE = re.compile(
+    r"(?i)\b[A-Za-z0-9_-]*(password|passwd|pwd|passphrase)[A-Za-z0-9_-]*\b\s*[:=]\s*['\"]?([^'\"\s#]{8,})"
+)
 PRIVATE_KEY_RE = re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----")
 ENV_ASSIGNMENT_RE = re.compile(r"(?i)\b[A-Z0-9_]*(TOKEN|SECRET|PASSWORD|API_KEY)\s*=\s*[A-Za-z0-9_./+=:-]{16,}")
 REMOTE_SHELL_RE = re.compile(r"\b(curl|wget)\b[^\n|;]*(\||;)\s*(sh|bash)\b")
@@ -164,6 +167,16 @@ HARNESS_PATH_KEYS = {
 HARNESS_COMMAND_KEYS = {"args", "command", "commands", "script", "scripts"}
 HARNESS_URL_KEYS = {"baseUrl", "endpoint", "host", "misp_url", "url"}
 HARNESS_ALLOWED_URL_RE = re.compile(r"https?://(?:example[.](?:com|org|net|invalid)|localhost|127[.]0[.]0[.]1|0[.]0[.]0[.]0)(?::\d+)?(?:[/?#][^\s]*)?$", re.IGNORECASE)
+SESSION_CHAT_PARTS = {
+    "chat",
+    "chats",
+    "conversation",
+    "conversations",
+    "session",
+    "sessions",
+    "transcript",
+    "transcripts",
+}
 
 
 @dataclass(frozen=True)
@@ -704,6 +717,8 @@ def review(*, target: Path, output_dir: Path | None = None, json_output: bool = 
         if finding.get("reason"):
             print(f"  reason: {finding['reason']}")
         print(f"  suggestion: {finding.get('suggestion')}")
+        for option in finding.get("response_options") or []:
+            print(f"  response_option: {option}")
     if enrichment is not None:
         print("enrichment:")
         print(f"- provider: {enrichment.get('provider')}")
@@ -789,6 +804,8 @@ def show(*, target: Path, finding_id: str, output_dir: Path | None = None, json_
     print(f"title: {finding.get('title')}")
     print(f"safe_excerpt: {finding.get('safe_excerpt') or finding.get('evidence')}")
     print(f"remediation: {finding.get('remediation_hint') or finding.get('suggestion')}")
+    for option in finding.get("response_options") or []:
+        print(f"response_option: {option}")
     if finding.get("reason"):
         print(f"reason: {finding['reason']}")
     return 0
@@ -1337,6 +1354,7 @@ def _redact_secret_evidence(line: str) -> str:
         return match.group(0).replace(match.group(2), "[REDACTED]")
 
     redacted = SECRET_VALUE_RE.sub(redact_secret, line)
+    redacted = PLAINTEXT_PASSWORD_RE.sub(redact_secret, redacted)
 
     def redact_env(match: re.Match[str]) -> str:
         text = match.group(0)
@@ -2074,6 +2092,8 @@ def _iter_scan_files(target: Path) -> list[Path]:
 def _surface_for(path: Path, target: Path) -> str:
     rel = path.relative_to(target)
     parts = rel.parts
+    if _is_session_chat_path(path, target):
+        return "session-chat"
     if "skills" in parts and path.name == "SKILL.md":
         return "skill"
     if "commands" in parts and path.suffix.lower() == ".md":
@@ -2110,6 +2130,8 @@ def _surface_for(path: Path, target: Path) -> str:
 def _confidence_for(path: Path, target: Path) -> str:
     rel = path.relative_to(target)
     parts = rel.parts
+    if _is_session_chat_path(path, target):
+        return "runtime"
     if parts and parts[0] == "src" and "templates" in parts:
         return "template"
     if parts and parts[0] in {".brigade", ".claude", ".codex", "hooks", "scripts"}:
@@ -2117,6 +2139,32 @@ def _confidence_for(path: Path, target: Path) -> str:
     if path.name in {"AGENTS.md", "CLAUDE.md", "SAFETY_RULES.md", "INSTALL_FOR_AGENTS.md"}:
         return "runtime"
     return "repo"
+
+
+def _is_session_chat_path(path: Path, target: Path) -> bool:
+    try:
+        rel = path.relative_to(target)
+    except ValueError:
+        rel = path
+    parts = {part.lower() for part in rel.parts}
+    if parts & SESSION_CHAT_PARTS:
+        return True
+    name = path.name.lower()
+    return any(token in name for token in ("chat", "conversation", "session", "transcript"))
+
+
+def _secret_response_options(path: Path, target: Path) -> list[str]:
+    options = [
+        "move_to_env: Store active app secrets in a gitignored .env file or environment variable, then commit only a placeholder.",
+        "scrub_or_rotate: Remove the unredacted value from tracked files and rotate the credential if it was committed, shared, or exposed.",
+        "keepass_review: Show the redacted finding to the operator so they can save the real value in KeePass before deciding what to remove.",
+    ]
+    if _is_session_chat_path(path, target):
+        options.insert(
+            1,
+            "scrub_session_chat: Redact, archive, or delete the session/chat transcript before sharing or syncing the workspace.",
+        )
+    return options
 
 
 def _fingerprint(*, category: str, title: str, rel_path: Path, line: int, evidence: str) -> str:
@@ -2135,6 +2183,7 @@ def _finding(
     title: str,
     evidence: str,
     suggestion: str,
+    response_options: list[str] | None = None,
 ) -> None:
     rel = path.relative_to(target)
     safe_excerpt = _short(evidence)
@@ -2156,6 +2205,7 @@ def _finding(
             "safe_excerpt": safe_excerpt,
             "suggestion": suggestion,
             "remediation_hint": suggestion,
+            "response_options": response_options or [],
         }
     )
 
@@ -2170,6 +2220,10 @@ def _is_security_scanner_literal(path: Path, line: str) -> bool:
         "require_escalated",
         "npx package",
         "Environment dump or exfiltration pattern",
+        "Plaintext password",
+        "Possible hardcoded credential",
+        "Possible sensitive secret material",
+        "Session chat contains exposed credential",
     )
     if any(token in stripped for token in scanner_tokens):
         return True
@@ -2186,7 +2240,9 @@ def _scan_line(findings: list[dict[str, Any]], *, target: Path, path: Path, line
     if _is_security_scanner_literal(path, line):
         return
     secret_match = SECRET_VALUE_RE.search(line)
-    if secret_match and not _is_placeholder(secret_match.group(2)):
+    password_match = PLAINTEXT_PASSWORD_RE.search(line)
+    password_emitted = bool(password_match and not _is_placeholder(password_match.group(2)))
+    if password_emitted:
         _finding(
             findings,
             target=target,
@@ -2194,11 +2250,13 @@ def _scan_line(findings: list[dict[str, Any]], *, target: Path, path: Path, line
             line=line_number,
             severity="high",
             category="secrets",
-            title="Possible hardcoded credential",
+            title="Plaintext password",
             evidence=_redact_secret_evidence(line),
-            suggestion="Move the value into local environment or secret storage and commit only a placeholder.",
+            suggestion="Move the password into local secret storage or a gitignored environment file, then scrub the raw value from shared files.",
+            response_options=_secret_response_options(path, target),
         )
-    if _contains_private_key_material(line) or (ENV_ASSIGNMENT_RE.search(line) and not _is_placeholder(line)):
+    if secret_match and not password_emitted and not _is_placeholder(secret_match.group(2)):
+        session_chat = _is_session_chat_path(path, target)
         _finding(
             findings,
             target=target,
@@ -2206,9 +2264,32 @@ def _scan_line(findings: list[dict[str, Any]], *, target: Path, path: Path, line
             line=line_number,
             severity="high",
             category="secrets",
-            title="Possible sensitive secret material",
+            title="Session chat contains exposed credential" if session_chat else "Possible hardcoded credential",
             evidence=_redact_secret_evidence(line),
-            suggestion="Remove secret material from the repo and rotate the credential if it was real.",
+            suggestion=(
+                "Redact or archive the session transcript, rotate the credential if real, and move active use to .env, environment variables, or KeePass."
+                if session_chat
+                else "Move the value into local environment or secret storage and commit only a placeholder."
+            ),
+            response_options=_secret_response_options(path, target),
+        )
+    if _contains_private_key_material(line) or (ENV_ASSIGNMENT_RE.search(line) and not password_emitted and not _is_placeholder(line)):
+        session_chat = _is_session_chat_path(path, target)
+        _finding(
+            findings,
+            target=target,
+            path=path,
+            line=line_number,
+            severity="high",
+            category="secrets",
+            title="Session chat contains exposed credential" if session_chat else "Possible sensitive secret material",
+            evidence=_redact_secret_evidence(line),
+            suggestion=(
+                "Redact or archive the session transcript, rotate the credential if real, and move active use to .env, environment variables, or KeePass."
+                if session_chat
+                else "Remove secret material from the repo and rotate the credential if it was real."
+            ),
+            response_options=_secret_response_options(path, target),
         )
     if "danger-full-access" in line or "sandbox_permissions" in line and "require_escalated" in line:
         _finding(
@@ -2257,6 +2338,7 @@ def _scan_line(findings: list[dict[str, Any]], *, target: Path, path: Path, line
             title="Environment dump or exfiltration pattern",
             evidence=_redact_secret_evidence(line),
             suggestion="Avoid dumping environment variables near file redirection or network commands.",
+            response_options=_secret_response_options(path, target),
         )
     npx_match = UNPINNED_NPX_RE.search(line)
     if npx_match and "@" not in npx_match.group(1):
@@ -2440,6 +2522,9 @@ def _import_findings(
             f"`brigade security findings` no longer reports {finding.get('id')}.",
             "The mitigation or suppression reason is documented without exposing secret values.",
         ]
+        response_options = finding.get("response_options")
+        if isinstance(response_options, list) and response_options:
+            acceptance.append("The chosen response path is recorded, such as .env storage, scrub/rotate, KeePass review, transcript redaction, or accepted local risk.")
         records.append(
             {
                 "text": f"Review security finding [{severity}] {category} in {path}:{line}: {title}",
@@ -2472,6 +2557,7 @@ def _import_findings(
                     "confidence": finding.get("confidence"),
                     "safe_detail": finding.get("safe_excerpt") or finding.get("evidence"),
                     "remediation_hint": finding.get("remediation_hint") or finding.get("suggestion"),
+                    "response_options": response_options if isinstance(response_options, list) else [],
                     "local_evidence_path": str(evidence_path) if evidence_path is not None else None,
                 },
             }
@@ -2513,20 +2599,25 @@ def _render_markdown_report(report: dict[str, Any]) -> str:
     if not report["findings"]:
         lines.append("No unsuppressed findings.")
     for finding in report["findings"]:
+        finding_lines = [
+            f"### {finding['id']} - {finding['title']}",
+            "",
+            f"- fingerprint: `{finding['fingerprint']}`",
+            f"- severity: `{finding['severity']}`",
+            f"- category: `{finding['category']}`",
+            f"- path: `{finding['path']}:{finding['line']}`",
+            f"- surface: `{finding['surface']}`",
+            f"- confidence: `{finding['confidence']}`",
+            f"- evidence: `{finding['evidence']}`",
+            f"- suggestion: {finding['suggestion']}",
+        ]
+        response_options = finding.get("response_options") or []
+        if response_options:
+            finding_lines.append("- response_options:")
+            finding_lines.extend(f"  - {item}" for item in response_options)
+        finding_lines.append("")
         lines.extend(
-            [
-                f"### {finding['id']} - {finding['title']}",
-                "",
-                f"- fingerprint: `{finding['fingerprint']}`",
-                f"- severity: `{finding['severity']}`",
-                f"- category: `{finding['category']}`",
-                f"- path: `{finding['path']}:{finding['line']}`",
-                f"- surface: `{finding['surface']}`",
-                f"- confidence: `{finding['confidence']}`",
-                f"- evidence: `{finding['evidence']}`",
-                f"- suggestion: {finding['suggestion']}",
-                "",
-            ]
+            finding_lines
         )
     return "\n".join(lines).rstrip() + "\n"
 
@@ -2588,6 +2679,7 @@ def _sarif_report(report: dict[str, Any]) -> dict[str, Any]:
                     "surface": finding.get("surface"),
                     "safe_excerpt": finding.get("safe_excerpt") or finding.get("evidence"),
                     "remediation_hint": finding.get("remediation_hint") or finding.get("suggestion"),
+                    "response_options": finding.get("response_options") or [],
                 },
             }
         )
@@ -2966,6 +3058,8 @@ def scan(
             print(f"  fingerprint: {finding['fingerprint']}")
             print(f"  evidence: {finding['evidence']}")
             print(f"  suggestion: {finding['suggestion']}")
+            for option in finding.get("response_options") or []:
+                print(f"  response_option: {option}")
 
     return 1 if _should_fail(report["findings"], effective.fail_on) else 0
 

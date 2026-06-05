@@ -436,6 +436,13 @@ def _build_parser() -> argparse.ArgumentParser:
     p_operator_sync_tools.add_argument("--dry-run", action="store_true", help="Plan projection writes without changing files.")
     p_operator_sync_tools.add_argument("--force", action="store_true", help="Overwrite unmanaged or locally edited projection files.")
     p_operator_sync_tools.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_operator_bootstrap_portable = operator_sub.add_parser("bootstrap-portable", help="Import optional portable packs and sync tools across local harnesses.")
+    p_operator_bootstrap_portable.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
+    p_operator_bootstrap_portable.add_argument("--tool-pack", type=Path, default=None, help="Optional `brigade tools pack build` directory to import first.")
+    p_operator_bootstrap_portable.add_argument("--skill-pack", type=Path, default=None, help="Optional `brigade skills pack build` directory to import first.")
+    p_operator_bootstrap_portable.add_argument("--dry-run", action="store_true", help="Plan projection writes without changing files.")
+    p_operator_bootstrap_portable.add_argument("--force", action="store_true", help="Overwrite conflicting imported entries or projection files.")
+    p_operator_bootstrap_portable.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
 
     # runbook
     p_runbook = sub.add_parser("runbook", help="Plan, run, resume, and close out explicit local runbooks.")
@@ -2993,6 +3000,8 @@ def main(argv=None) -> int:
             return operator_cmd.verify_harness(target=args.target, harness=args.harness, json_output=args.json)
         if args.operator_command == "sync-tools":
             return operator_cmd.sync_tools(target=args.target, dry_run=args.dry_run, force=args.force, json_output=args.json)
+        if args.operator_command == "bootstrap-portable":
+            return operator_cmd.bootstrap_portable(target=args.target, tool_pack=args.tool_pack, skill_pack=args.skill_pack, dry_run=args.dry_run, force=args.force, json_output=args.json)
         parser.error(f"unknown operator command: {args.operator_command}")
         return 2
     if cmd == "runbook":

@@ -9,7 +9,7 @@ from io import StringIO
 from pathlib import Path
 from typing import Any
 
-from . import __version__, center_cmd, chat_cmd, daily_cmd, dogfood_cmd, handoff_cmd, memory_cmd, notifications_cmd, repos_cmd, scrub, security_cmd, tools_cmd, work_cmd
+from . import __version__, center_cmd, chat_cmd, daily_cmd, dogfood_cmd, handoff_cmd, memory_cmd, notifications_cmd, repos_cmd, scrub, security_cmd, skills_cmd, tools_cmd, work_cmd
 
 PROFILES = {"local-operator", "internal-dogfood"}
 
@@ -754,3 +754,89 @@ def sync_tools(*, target: Path, dry_run: bool = False, force: bool = False, json
     if isinstance(top, dict):
         print(f"top_issue: {top.get('tool_id')}/{top.get('issue_type')}: {top.get('detail')}")
     return 0 if payload["status"] == "ok" else 1
+
+
+def _capture_json_call(func, **kwargs: Any) -> tuple[int, dict[str, Any]]:
+    output = StringIO()
+    with redirect_stdout(output):
+        rc = func(**kwargs, json_output=True)
+    try:
+        payload = json.loads(output.getvalue() or "{}")
+    except json.JSONDecodeError:
+        payload = {
+            "valid": False,
+            "errors": [f"{getattr(func, '__name__', 'command')} returned invalid JSON"],
+            "output": output.getvalue().strip().splitlines(),
+        }
+        rc = 1
+    return rc, payload
+
+
+def bootstrap_portable(
+    *,
+    target: Path,
+    tool_pack: Path | None = None,
+    skill_pack: Path | None = None,
+    dry_run: bool = False,
+    force: bool = False,
+    json_output: bool = False,
+) -> int:
+    target = target.expanduser().resolve()
+    if not target.is_dir():
+        print(f"error: --target is not a directory: {target}", file=sys.stderr)
+        return 2
+    steps: list[dict[str, Any]] = []
+    if tool_pack is not None:
+        if dry_run:
+            steps.append({"id": "tools-pack-import", "status": "skipped", "reason": "dry-run", "pack": str(tool_pack)})
+        else:
+            rc, payload = _capture_json_call(tools_cmd.pack_import, target=target, pack=tool_pack, force=force)
+            steps.append({"id": "tools-pack-import", "status": "ok" if rc == 0 else "error", "return_code": rc, "pack": str(tool_pack), "payload": payload})
+    if skill_pack is not None:
+        if dry_run:
+            steps.append({"id": "skills-pack-import", "status": "skipped", "reason": "dry-run", "pack": str(skill_pack)})
+        else:
+            rc, payload = _capture_json_call(skills_cmd.pack_import, target=target, pack=skill_pack, force=force)
+            steps.append({"id": "skills-pack-import", "status": "ok" if rc == 0 else "error", "return_code": rc, "pack": str(skill_pack), "payload": payload})
+
+    sync_rc, sync_payload = _capture_json_call(sync_tools, target=target, dry_run=dry_run, force=force)
+    sync_status = "ok" if sync_rc == 0 else "error"
+    if dry_run and isinstance(sync_payload.get("defaults"), dict) and sync_payload["defaults"].get("valid"):
+        sync_rc = 0
+        sync_status = "planned"
+    steps.append({"id": "operator-sync-tools", "status": sync_status, "return_code": sync_rc, "payload": sync_payload})
+    if not dry_run:
+        tools_rc, tools_payload = _capture_json_call(tools_cmd.doctor, target=target)
+        steps.append({"id": "tools-doctor", "status": "ok" if tools_rc == 0 else "error", "return_code": tools_rc, "payload": tools_payload})
+        skills_rc, skills_payload = _capture_json_call(skills_cmd.doctor, target=target)
+        steps.append({"id": "skills-doctor", "status": "ok" if skills_rc == 0 else "error", "return_code": skills_rc, "payload": skills_payload})
+
+    ok = all(step.get("return_code", 0) == 0 for step in steps if step.get("status") != "skipped")
+    payload = {
+        "target": str(target),
+        "dry_run": dry_run,
+        "force": force,
+        "tool_pack": str(tool_pack) if tool_pack is not None else None,
+        "skill_pack": str(skill_pack) if skill_pack is not None else None,
+        "steps": steps,
+        "status": "ok" if ok else "warn",
+        "next_commands": [
+            "brigade tools list --target .",
+            "brigade skills doctor --target .",
+            "brigade security scan --target . --output-dir .brigade/security/latest",
+        ],
+    }
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0 if ok else 1
+    print(f"operator bootstrap-portable: {target}")
+    print(f"dry_run: {dry_run}")
+    print(f"force: {force}")
+    for step in steps:
+        print(f"[{step['status']}] {step['id']}")
+    print(f"status: {payload['status']}")
+    if ok:
+        print("next:")
+        for command in payload["next_commands"]:
+            print(f"- {command}")
+    return 0 if ok else 1

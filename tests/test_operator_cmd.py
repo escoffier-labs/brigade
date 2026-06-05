@@ -280,6 +280,53 @@ def test_operator_sync_tools_cli_dispatch(tmp_path, monkeypatch):
     assert seen == {"target": tmp_path, "dry_run": True, "force": True, "json_output": True}
 
 
+def test_operator_bootstrap_portable_cli_dispatch(tmp_path, monkeypatch):
+    seen = {}
+
+    def fake_bootstrap_portable(**kwargs):
+        seen.update(kwargs)
+        return 0
+
+    monkeypatch.setattr(operator_cmd, "bootstrap_portable", fake_bootstrap_portable)
+    assert (
+        cli.main(
+            [
+                "operator",
+                "bootstrap-portable",
+                "--target",
+                str(tmp_path),
+                "--tool-pack",
+                str(tmp_path / "tool-pack"),
+                "--skill-pack",
+                str(tmp_path / "skill-pack"),
+                "--dry-run",
+                "--force",
+                "--json",
+            ]
+        )
+        == 0
+    )
+    assert seen == {
+        "target": tmp_path,
+        "tool_pack": tmp_path / "tool-pack",
+        "skill_pack": tmp_path / "skill-pack",
+        "dry_run": True,
+        "force": True,
+        "json_output": True,
+    }
+
+
+def test_operator_bootstrap_portable_syncs_builtins(tmp_path, capsys):
+    assert cli.main(["operator", "bootstrap-portable", "--target", str(tmp_path), "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == "ok"
+    assert [step["id"] for step in payload["steps"]] == ["operator-sync-tools", "tools-doctor", "skills-doctor"]
+    assert payload["steps"][0]["payload"]["status"] == "ok"
+    assert (tmp_path / ".claude" / "commands" / "simplify.md").is_file()
+    assert (tmp_path / ".codex" / "skills" / "frontend" / "SKILL.md").is_file()
+    assert (tmp_path / "tools" / "antislop.md").is_file()
+
+
 def test_operator_sync_tools_projects_tracked_sources(tmp_path, capsys):
     tools_dir = tmp_path / "tools"
     tools_dir.mkdir()

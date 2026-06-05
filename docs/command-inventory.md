@@ -29,7 +29,7 @@ brigade roadmap commands --write
 - `brigade memory`: 7 command path(s)
 - `brigade notifications`: 4 command path(s)
 - `brigade openclaw-fragments`: 1 command path(s)
-- `brigade operator`: 7 command path(s)
+- `brigade operator`: 8 command path(s)
 - `brigade pantry`: 3 command path(s)
 - `brigade projects`: 9 command path(s)
 - `brigade reconfigure`: 1 command path(s)
@@ -168,6 +168,7 @@ brigade roadmap commands --write
 - `brigade notifications setup plan`
 - `brigade notifications status`
 - `brigade openclaw-fragments`
+- `brigade operator bootstrap-portable`
 - `brigade operator doctor`
 - `brigade operator guide`
 - `brigade operator init`

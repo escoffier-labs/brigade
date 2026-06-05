@@ -56,7 +56,9 @@ brigade security unsuppress <finding-id-or-fingerprint>
 brigade security doctor
 ```
 
-Findings include stable `id`, `fingerprint`, `rule_id`, `severity`, `category`, `path`, `line`, `safe_excerpt`, and `remediation_hint` fields. Secret-looking values are redacted before JSON reports, Markdown reports, SARIF, work imports, docs, or session artifacts are written.
+Findings include stable `id`, `fingerprint`, `rule_id`, `severity`, `category`, `path`, `line`, `safe_excerpt`, `remediation_hint`, and optional `response_options` fields. Secret-looking values are redacted before JSON reports, Markdown reports, SARIF, work imports, docs, or session artifacts are written.
+
+Secret findings include a small response playbook. Typical options are moving active credentials into a gitignored `.env` file or environment variable, scrubbing tracked files and rotating exposed values, showing the redacted finding to the operator so they can preserve the real value in KeePass before deciding, and redacting or archiving chat/session transcripts when a session log contains an exposed key.
 
 Security scans write `security-report.sarif` next to the JSON and Markdown reports. `brigade security sarif` can regenerate that SARIF file from an existing local evidence bundle without rescanning.
 
@@ -65,6 +67,8 @@ Security scans write `security-report.sarif` next to the JSON and Markdown repor
 Harness wiring checks inspect repo-local agent configuration JSON under `.brigade/`, `.claude/`, `.codex/`, `.opencode/`, `.openclaw/`, `.hermes/`, and Brigade template folders. They flag path traversal, host-private absolute paths, broad filesystem roots, insecure or private-looking remote URLs, remote shell bootstrap commands, and shell metacharacters in command fields. `brigade security scan` includes those findings in normal reports, and `brigade security doctor` summarizes harness wiring health even before a fresh report bundle exists.
 
 Guardrail surfaces distinguish repo guidance, Claude command files, Codex skills, subagents, and tool wrappers. Public template findings keep `confidence: template`, while active workspace guidance and wrapper files report runtime confidence.
+
+Session and chat transcript paths such as `.codex/sessions/`, `.claude/chats/`, or transcript folders are classified as `surface: session-chat`. API keys, tokens, passwords, private keys, and plaintext password assignments found there are reported as high-severity secret findings with transcript-specific scrub guidance.
 
 Security closeouts include policy-pack evidence: policy name, fail threshold, template inclusion, blocker count, warning count, and whether open findings were accepted as local risk. Release readiness and release candidates include the latest closeout.
 
@@ -80,6 +84,7 @@ Imported records preserve safe metadata:
 - path and line
 - safe detail
 - remediation hint
+- response options
 - local evidence path
 - stable source key and fingerprint
 
