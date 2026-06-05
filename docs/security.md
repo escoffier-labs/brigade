@@ -60,6 +60,16 @@ Findings include stable `id`, `fingerprint`, `rule_id`, `severity`, `category`, 
 
 Secret findings include a small response playbook. Typical options are moving active credentials into a gitignored `.env` file or environment variable, scrubbing tracked files and rotating exposed values, showing the redacted finding to the operator so they can preserve the real value in KeePass before deciding, and redacting or archiving chat/session transcripts when a session log contains an exposed key.
 
+First response checklist for a likely real credential:
+
+1. Treat the redacted finding as sensitive until reviewed. Do not paste raw scan output into an issue, chat, or committed doc.
+2. Show the redacted finding id, path, rule, and response options to the operator.
+3. If the value is still needed, move active use to a gitignored `.env` file, shell environment variable, or other local secret store.
+4. If the real value is not already safely stored, let the operator save it in KeePass before deleting or rotating it.
+5. Scrub tracked files, session logs, and chat transcripts that contain the raw value.
+6. Rotate the credential if it was committed, shared, synced, pasted into a session transcript, or exposed to another user.
+7. Record the chosen response as a suppression, accepted-risk closeout, or promoted work item without storing the secret value.
+
 Security scans write `security-report.sarif` next to the JSON and Markdown reports. `brigade security sarif` can regenerate that SARIF file from an existing local evidence bundle without rescanning.
 
 `brigade security template-audit` is a focused public artifact audit. It scans `src/brigade/templates`, `templates`, and `docs` for private paths, private-looking URLs, and secret-looking values, while allowing placeholders, reserved example domains, loopback examples, template variables, and environment labels. The audit is read-only and its summary is included in `brigade security doctor` and release readiness evidence.

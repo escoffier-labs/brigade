@@ -113,6 +113,42 @@ def test_operator_status_content_guard_missing_unconfigured_is_nonblocking(tmp_p
     assert payload["content_guard"]["checks"][0]["name"] == "content_guard_missing"
 
 
+def test_operator_status_generated_content_guard_hook_unconfigured_is_nonblocking(tmp_path, capsys, monkeypatch):
+    monkeypatch.setattr("shutil.which", lambda name: f"/usr/bin/{name}")
+    (tmp_path / ".brigade").mkdir()
+    (tmp_path / ".brigade" / "dogfood.toml").write_text("[dogfood]\n")
+    monkeypatch.setattr("brigade.daily_cmd.health", lambda target: {"issue_count": 0, "top_issue": None, "latest_plan": None, "latest_run": None})
+    monkeypatch.setattr("brigade.security_cmd.health", lambda target: {"issue_count": 0, "top_issue": None, "evidence": None})
+    monkeypatch.setattr("brigade.center_cmd._readiness_payload", lambda target: {"status": "ready", "blocker_count": 0, "warning_count": 0, "waived_count": 0, "blockers": []})
+    monkeypatch.setattr("brigade.notifications_cmd.health", lambda target: {"installed": False, "configured": False, "config_path": None})
+    monkeypatch.setattr(
+        "brigade.scrub.hook_status",
+        lambda target: {
+            "available": False,
+            "scanner_dir": "/missing/content-guard",
+            "policy": "public-repo",
+            "pre_push_hook_enabled": False,
+            "pre_push_hook_exists": True,
+            "configured_pre_push_hook_exists": False,
+            "git_pre_push_hook_exists": False,
+            "hooks_path": None,
+            "checks": [
+                {"status": "warn", "name": "content_guard_missing", "detail": "content-guard not found"},
+                {"status": "warn", "name": "content_guard_hook_not_enabled", "detail": "no executable pre-push hook found"},
+            ],
+            "suggested_commands": ["clone content-guard", "git config core.hooksPath hooks"],
+        },
+    )
+    monkeypatch.setattr("brigade.daily_cmd.status_payload", lambda target: {"daily_health": {"issue_count": 0}, "next_recommended_command": "brigade daily plan"})
+    monkeypatch.setattr("brigade.tools_cmd.health", lambda target: {"issue_count": 0, "tool_count": 4, "top_issue": None})
+
+    assert operator_cmd.doctor(target=tmp_path, profile="local-operator", json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ready"] is True
+    assert payload["blocking_issue_count"] == 0
+    assert payload["content_guard"]["pre_push_hook_exists"] is True
+
+
 def test_operator_status_cli_dispatch(tmp_path, monkeypatch):
     seen = {}
 
