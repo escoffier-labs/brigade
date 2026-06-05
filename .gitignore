@@ -43,8 +43,8 @@ Thumbs.db
 .solo-mise/
 
 # Source-repo dogfood workspace files. Public templates live under
-# src/brigade/templates/ instead.
-/AGENTS.md
+# src/brigade/templates/ instead. Root AGENTS.md is tracked so external
+# agents can install and adapt Brigade from repository-native guidance.
 /CLAUDE.md
 /HEARTBEAT.md
 /IDENTITY.md
@@ -122,4 +122,3 @@ memory/handoff-inbox/
 .mcp/
 scripts/*.md
 # <<< brigade gitignore block <<<
-
