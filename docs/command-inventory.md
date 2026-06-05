@@ -25,7 +25,7 @@ brigade roadmap commands --write
 - `brigade hermes-fragments`: 1 command path(s)
 - `brigade ingest`: 1 command path(s)
 - `brigade init`: 1 command path(s)
-- `brigade learn`: 10 command path(s)
+- `brigade learn`: 12 command path(s)
 - `brigade memory`: 7 command path(s)
 - `brigade notifications`: 4 command path(s)
 - `brigade openclaw-fragments`: 1 command path(s)
@@ -152,10 +152,12 @@ brigade roadmap commands --write
 - `brigade learn doctor`
 - `brigade learn import-issues`
 - `brigade learn plan`
+- `brigade learn propose-skill`
 - `brigade learn replay compare`
 - `brigade learn replay export`
 - `brigade learn replay list`
 - `brigade learn replay show`
+- `brigade learn skill-candidates`
 - `brigade memory care closeout`
 - `brigade memory care doctor`
 - `brigade memory care import-issues`

@@ -1991,6 +1991,16 @@ def _build_parser() -> argparse.ArgumentParser:
     p_learn_import.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
     p_learn_import.add_argument("--dry-run", action="store_true", help="Report without writing imports.")
     p_learn_import.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_learn_skill_candidates = learn_sub.add_parser("skill-candidates", help="Find repeatable learning patterns that could become reviewed skills.")
+    p_learn_skill_candidates.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_learn_skill_candidates.add_argument("--min-count", type=int, default=2, help="Minimum repeated evidence count required.")
+    p_learn_skill_candidates.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_learn_propose_skill = learn_sub.add_parser("propose-skill", help="Write a reviewed skill proposal from a learning skill candidate.")
+    p_learn_propose_skill.add_argument("candidate_id", help="Learning skill candidate id or unique prefix.")
+    p_learn_propose_skill.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
+    p_learn_propose_skill.add_argument("--min-count", type=int, default=2, help="Minimum repeated evidence count required.")
+    p_learn_propose_skill.add_argument("--force", action="store_true", help="Refresh an existing generated skill source.")
+    p_learn_propose_skill.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_learn_closeout = learn_sub.add_parser("closeout", help="Close out a learning candidate as accepted, dismissed, archived, or deferred.")
     p_learn_closeout.add_argument("candidate_id", help="Learning candidate id.")
     p_learn_closeout.add_argument("--subsystem", default=None, help="Disambiguate by subsystem.")
@@ -3609,6 +3619,10 @@ def main(argv=None) -> int:
             return learn_cmd.doctor(target=args.target, json_output=args.json)
         if args.learn_command == "import-issues":
             return learn_cmd.import_issues(target=args.target, dry_run=args.dry_run, json_output=args.json)
+        if args.learn_command == "skill-candidates":
+            return learn_cmd.skill_candidates(target=args.target, min_count=args.min_count, json_output=args.json)
+        if args.learn_command == "propose-skill":
+            return learn_cmd.propose_skill(target=args.target, candidate_id=args.candidate_id, min_count=args.min_count, force=args.force, json_output=args.json)
         if args.learn_command == "closeout":
             return learn_cmd.closeout(target=args.target, candidate_id=args.candidate_id, subsystem=args.subsystem, status=args.status, reason=args.reason, json_output=args.json)
         if args.learn_command == "closeouts":

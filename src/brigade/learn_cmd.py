@@ -4,7 +4,9 @@ from __future__ import annotations
 import json
 import re
 import sys
+from contextlib import redirect_stdout
 from datetime import datetime, timezone
+from io import StringIO
 from pathlib import Path
 from typing import Any
 
@@ -39,6 +41,10 @@ def _replays_root(target: Path) -> Path:
 
 def _replay_compares_root(target: Path) -> Path:
     return _learning_root(target) / "replay-compares"
+
+
+def _skill_workshop_root(target: Path) -> Path:
+    return _learning_root(target) / "skill-workshop"
 
 
 def _closeouts_root(target: Path) -> Path:
@@ -80,6 +86,18 @@ def _safe_payload(value: Any) -> Any:
     if isinstance(value, list):
         return [_safe_payload(item) for item in value]
     return value
+
+
+def _slug(value: str) -> str:
+    slug = re.sub(r"[^a-z0-9._-]+", "-", value.strip().lower()).strip("-")
+    return slug or "skill"
+
+
+def _short(value: str, limit: int = 160) -> str:
+    rendered = " ".join(str(value).split())
+    if len(rendered) <= limit:
+        return rendered
+    return rendered[: limit - 3].rstrip() + "..."
 
 
 def _candidate(candidate_id: str, subsystem: str, status: str, summary: str, command: str, *, severity: str | None = None, metadata: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -285,6 +303,250 @@ def import_issues(*, target: Path, dry_run: bool = False, json_output: bool = Fa
     print(f"skipped: {len(skipped)}")
     print(f"dismissed: {len(dismissed)}")
     return 0
+
+
+def _skill_pattern_key(item: dict[str, Any]) -> str:
+    metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+    for key in ("rule_id", "issue_type", "template", "subsystem"):
+        value = metadata.get(key) if key != "subsystem" else item.get("subsystem")
+        if isinstance(value, str) and value.strip():
+            return f"{key}:{_slug(value)}"
+    summary = str(item.get("safe_summary") or "")
+    summary = re.sub(r"\b[0-9a-f]{8,}\b", "<id>", summary, flags=re.IGNORECASE)
+    summary = re.sub(r"\b\d+\b", "<n>", summary)
+    return f"summary:{_slug(summary)[:80]}"
+
+
+def _skill_candidate_from_group(target: Path, key: str, items: list[dict[str, Any]]) -> dict[str, Any]:
+    first = items[0]
+    subsystem = str(first.get("subsystem") or "learning")
+    candidate_id = f"skill-{work_cmd._stable_hash({'key': key, 'subsystem': subsystem})[:12]}"
+    summary = _short(str(first.get("safe_summary") or "repeatable learning pattern"))
+    skill_id = _slug(f"{subsystem}-{summary}")[:64]
+    evidence = [
+        {
+            "candidate_id": item.get("id"),
+            "subsystem": item.get("subsystem"),
+            "safe_summary": item.get("safe_summary"),
+            "source_fingerprint": item.get("source_fingerprint"),
+        }
+        for item in items
+    ]
+    payload = {
+        "id": candidate_id,
+        "pattern_key": key,
+        "subsystem": subsystem,
+        "occurrence_count": len(items),
+        "safe_summary": f"Repeatable {subsystem} pattern: {summary}",
+        "suggested_skill_id": skill_id,
+        "suggested_title": " ".join(part.capitalize() for part in skill_id.replace("_", "-").split("-")[:8]),
+        "evidence": evidence,
+        "source_fingerprint": work_cmd._stable_hash({"pattern_key": key, "evidence": evidence}),
+        "suggested_next_command": f"brigade learn propose-skill {candidate_id} --target {target}",
+        "manual_only": True,
+        "auto_install": False,
+    }
+    return payload
+
+
+def skill_candidates_payload(target: Path, *, min_count: int = 2) -> dict[str, Any]:
+    target = target.expanduser().resolve()
+    minimum = max(1, int(min_count))
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for item in candidates(target):
+        groups.setdefault(_skill_pattern_key(item), []).append(item)
+    skill_candidates = [
+        _skill_candidate_from_group(target, key, items)
+        for key, items in sorted(groups.items())
+        if len(items) >= minimum
+    ]
+    skill_candidates.sort(key=lambda item: (-int(item.get("occurrence_count") or 0), str(item.get("id") or "")))
+    return {
+        "target": str(target),
+        "min_count": minimum,
+        "candidate_count": len(skill_candidates),
+        "candidates": skill_candidates,
+        "manual_only": True,
+        "auto_install": False,
+        "next_command": "brigade learn propose-skill <candidate-id>",
+    }
+
+
+def skill_candidates(*, target: Path, min_count: int = 2, json_output: bool = False) -> int:
+    if min_count < 1:
+        print("error: --min-count must be at least 1", file=sys.stderr)
+        return 2
+    payload = skill_candidates_payload(target, min_count=min_count)
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+    print(f"learn skill-candidates: {payload['target']}")
+    print(f"min_count: {payload['min_count']}")
+    print(f"candidates: {payload['candidate_count']}")
+    for item in payload["candidates"][:20]:
+        print(f"- {item['id']} x{item['occurrence_count']} {item['suggested_skill_id']}: {item['safe_summary']}")
+    return 0
+
+
+def _resolve_skill_candidate(target: Path, candidate_id: str, *, min_count: int) -> tuple[dict[str, Any] | None, str | None]:
+    payload = skill_candidates_payload(target, min_count=min_count)
+    needle = candidate_id.strip()
+    matches = [
+        item
+        for item in payload["candidates"]
+        if needle
+        and (
+            str(item.get("id") or "") == needle
+            or str(item.get("id") or "").startswith(needle)
+        )
+    ]
+    if not matches:
+        return None, f"skill candidate not found: {candidate_id}"
+    if len(matches) > 1:
+        return None, f"skill candidate id is ambiguous: {candidate_id}"
+    return matches[0], None
+
+
+def _render_skill_candidate_markdown(candidate: dict[str, Any]) -> str:
+    skill_id = str(candidate.get("suggested_skill_id") or "learning-skill")
+    title = str(candidate.get("suggested_title") or skill_id)
+    summary = str(candidate.get("safe_summary") or "Repeatable learning pattern.")
+    evidence = candidate.get("evidence") if isinstance(candidate.get("evidence"), list) else []
+    evidence_lines = "\n".join(
+        f"- {item.get('subsystem')}:{item.get('candidate_id')} - {_short(str(item.get('safe_summary') or 'learning evidence'), 120)}"
+        for item in evidence[:10]
+        if isinstance(item, dict)
+    )
+    if not evidence_lines:
+        evidence_lines = "- No linked evidence."
+    return "\n".join(
+        [
+            "---",
+            f"name: {json.dumps(skill_id)}",
+            f"description: {json.dumps('Use for repeatable Brigade learning pattern: ' + _short(summary, 140))}",
+            "---",
+            "",
+            f"# {title}",
+            "",
+            "## Use When",
+            f"- The workspace shows this repeatable pattern: {summary}",
+            "- The operator wants a reviewed workflow instead of another one-off fix.",
+            "- The relevant evidence has been reviewed in Brigade before using this skill.",
+            "",
+            "## Workflow",
+            "1. Inspect the linked Brigade evidence and confirm the pattern still applies.",
+            "2. State the concrete problem, affected subsystem, and expected safe outcome.",
+            "3. Apply the smallest repeatable workflow that resolves the pattern.",
+            "4. Run the smallest meaningful verification step.",
+            "5. Record a Memory Handoff or learning closeout when the workflow teaches a durable lesson.",
+            "",
+            "## Evidence To Review",
+            evidence_lines,
+            "",
+            "## Boundaries",
+            "- Do not install or modify skills automatically.",
+            "- Do not edit canonical memory directly.",
+            "- Do not copy private evidence values into public docs or prompts.",
+            "- Treat this generated skill as unreviewed until the skills inbox accepts it.",
+            "",
+        ]
+    )
+
+
+def _write_skill_candidate_source(target: Path, candidate: dict[str, Any], *, force: bool) -> Path:
+    skill_id = str(candidate.get("suggested_skill_id") or candidate.get("id") or "learning-skill")
+    root = _skill_workshop_root(target) / str(candidate.get("id")) / "skill"
+    if root.exists() and not force:
+        raise FileExistsError(root)
+    if root.exists():
+        for path in sorted([p for p in root.rglob("*") if p.is_file()], reverse=True):
+            path.unlink()
+        for path in sorted([p for p in root.rglob("*") if p.is_dir()], reverse=True):
+            path.rmdir()
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "SKILL.md").write_text(_render_skill_candidate_markdown(candidate))
+    metadata = {
+        "id": skill_id,
+        "title": candidate.get("suggested_title") or skill_id,
+        "description": candidate.get("safe_summary"),
+        "version": "0.1.0",
+        "trust_level": "unreviewed",
+        "required_tools": [],
+        "required_mcp_servers": [],
+        "supported_harnesses": ["codex", "claude", "opencode", "gemini", "openclaw", "hermes", "mcp"],
+        "tests": [],
+        "source": "brigade-learn-skill-candidate",
+        "learning_candidate_id": candidate.get("id"),
+        "learning_pattern_key": candidate.get("pattern_key"),
+        "learning_source_fingerprint": candidate.get("source_fingerprint"),
+        "evidence_count": candidate.get("occurrence_count"),
+    }
+    _write_json(root / "skill.json", metadata)
+    return root
+
+
+def propose_skill(
+    *,
+    target: Path,
+    candidate_id: str,
+    min_count: int = 2,
+    force: bool = False,
+    json_output: bool = False,
+) -> int:
+    if min_count < 1:
+        print("error: --min-count must be at least 1", file=sys.stderr)
+        return 2
+    target = target.expanduser().resolve()
+    if not target.is_dir():
+        print(f"error: --target is not a directory: {target}", file=sys.stderr)
+        return 2
+    candidate, error = _resolve_skill_candidate(target, candidate_id, min_count=min_count)
+    if candidate is None:
+        print(f"error: {error}", file=sys.stderr)
+        return 2
+    try:
+        skill_source = _write_skill_candidate_source(target, candidate, force=force)
+    except FileExistsError as exc:
+        print(f"error: generated skill source already exists: {exc.args[0]} (use --force to refresh)", file=sys.stderr)
+        return 2
+    from . import skills_cmd
+
+    output = StringIO()
+    with redirect_stdout(output):
+        rc = skills_cmd.inbox_add(
+            target=target,
+            source=skill_source,
+            skill_id=str(candidate.get("suggested_skill_id") or ""),
+            summary=str(candidate.get("safe_summary") or ""),
+            force=force,
+            json_output=True,
+        )
+    try:
+        proposal = json.loads(output.getvalue() or "{}")
+    except json.JSONDecodeError:
+        proposal = {"error": "skills inbox add returned invalid JSON", "output": output.getvalue().strip().splitlines()}
+        rc = 1
+    payload = {
+        "target": str(target),
+        "candidate": candidate,
+        "skill_source": str(skill_source),
+        "proposal": proposal,
+        "manual_only": True,
+        "auto_install": False,
+        "next_commands": [
+            f"brigade skills inbox show {proposal.get('proposal_id', '<proposal-id>')} --target {target}",
+            f"brigade skills inbox diff {proposal.get('proposal_id', '<proposal-id>')} --target {target}",
+            f"brigade skills inbox accept {proposal.get('proposal_id', '<proposal-id>')} --target {target}",
+        ],
+    }
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return rc
+    print(f"learn propose-skill: {candidate.get('id')}")
+    print(f"skill_source: {skill_source}")
+    print(f"proposal: {proposal.get('proposal_id')}")
+    print("status: pending review")
+    return rc
 
 
 def closeout(*, target: Path, candidate_id: str, status: str, reason: str, subsystem: str | None = None, json_output: bool = False) -> int:

@@ -417,6 +417,7 @@ Task ledger commands:
 - `brigade work task plan <task-id>` shows the task metadata, acceptance checklist, template guidance, and suggested run command. Add `--write` to persist a plan artifact (plan.md plus a JSON receipt under `.brigade/work/plans/`) capturing assumptions, acceptance, risks, steps, and the next safe command; `--meta` writes a plan-for-the-plan that stops before the deliverable; `--step` captures steps; and `--from-research <run-id>` attaches a research run report as quarantined untrusted-web evidence.
 - `brigade work plans` lists persisted plan artifacts.
 - `brigade work plan-promote <task-id> --as template|rule|skill` writes a local DRAFT proposal under `.brigade/work/plan-proposals/` from an accepted plan, and never installs templates, rules, or skills; `brigade work plan-proposals` lists them.
+- `brigade learn skill-candidates` detects repeated local learning evidence that may deserve a reusable skill, and `brigade learn propose-skill <candidate-id>` writes an unreviewed generated skill source plus a normal `.brigade/skills/inbox/` proposal. It does not import, accept, install, or publish the skill.
 - `brigade work task done <task-id>` closes queued work.
 
 Available task templates are `vertical-slice`, `bugfix`, `red-green-refactor`, `docs`, and `security-follow-up`.
@@ -592,6 +593,7 @@ Shared skill registry commands:
 - `brigade skills diff security-review --harness codex` compares the currently installed harness file against the current rendered registry version.
 - `brigade skills rollback security-review --target claude` restores the latest rollback snapshot captured before a forced reinstall.
 - `brigade skills inbox add ./some-skill`, `list`, `show`, `diff`, `accept`, and `reject` keep agent-proposed skills in review before they enter the registry.
+- Skill proposals created by `brigade learn propose-skill` use the same inbox. They remain unreviewed until accepted and are never installed automatically.
 - `brigade skills adapters init` writes a local adapter overlay config under `.brigade/skills/adapters.json`.
 - `brigade skills adapters list --include-planned` shows built-in and planned harness adapters, including Antigravity, Pi, and Cursor as planned adapter targets.
 - `brigade skills serve-mcp` reports a read-only local MCP skill resource contract and registered registry resources without starting a long-running server.

@@ -19,6 +19,8 @@ Brigade is a local-first operator CLI for AI agent workspaces. The public GitHub
 
 Brigade helps AI agent tools work from the same memory without turning that memory into a junk drawer.
 
+Brigade is still in the early stages and is being actively fleshed out. If you hit a broken workflow, confusing command, missing adapter, or setup issue, open a GitHub issue in [`escoffier-labs/brigade`](https://github.com/escoffier-labs/brigade/issues) and I will get it addressed as soon as I can.
+
 If you use [OpenClaw](https://github.com/solomonneas/openclaw), Hermes, Codex, Claude Code, OpenCode, or a mix of them, Brigade gives those tools a shared local pattern:
 
 1. agents write handoff notes

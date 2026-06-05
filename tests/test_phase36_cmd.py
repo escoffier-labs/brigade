@@ -12,6 +12,7 @@ from brigade import memory_cmd
 from brigade import projects_cmd
 from brigade import release_cmd
 from brigade import security_cmd
+from brigade import skills_cmd
 from brigade import tools_cmd
 from brigade import work_cmd
 
@@ -436,6 +437,93 @@ def test_learning_closeouts_quiet_sources_and_changed_fingerprints(tmp_path, cap
     release = json.loads(capsys.readouterr().out)
     assert release["evidence"]["learning"]["quieted_candidate_count"] == 3
     assert release["evidence"]["learning"]["changed_fingerprint_count"] == 1
+
+
+def test_learning_skill_candidates_create_reviewed_skill_proposals(tmp_path, capsys):
+    imports = tmp_path / ".brigade" / "work" / "imports" / "inbox.jsonl"
+    imports.parent.mkdir(parents=True)
+    records = [
+        {
+            "id": "security-one",
+            "text": "Review security finding one",
+            "kind": "incident",
+            "source": "security-scan",
+            "status": "pending",
+            "priority": "high",
+            "metadata": {
+                "safe_summary": "Plaintext password repeats in session transcript exports",
+                "rule_id": "secrets.plaintext-password",
+                "source_fingerprint": "security-one-fp",
+            },
+            "created_at": "2026-06-05T12:00:00+00:00",
+        },
+        {
+            "id": "security-two",
+            "text": "Review security finding two",
+            "kind": "incident",
+            "source": "security-scan",
+            "status": "pending",
+            "priority": "high",
+            "metadata": {
+                "safe_summary": "Plaintext password repeats in chat transcript exports",
+                "rule_id": "secrets.plaintext-password",
+                "source_fingerprint": "security-two-fp",
+            },
+            "created_at": "2026-06-05T12:01:00+00:00",
+        },
+        {
+            "id": "tool-one",
+            "text": "Review unrelated tool finding",
+            "kind": "task",
+            "source": "tool-catalog",
+            "status": "pending",
+            "priority": "normal",
+            "metadata": {
+                "safe_summary": "One-off tool wrapper warning",
+                "issue_type": "wrapper-warning",
+                "source_fingerprint": "tool-one-fp",
+            },
+            "created_at": "2026-06-05T12:02:00+00:00",
+        },
+    ]
+    imports.write_text("".join(json.dumps(record, sort_keys=True) + "\n" for record in records))
+
+    assert learn_cmd.skill_candidates(target=tmp_path, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["candidate_count"] == 1
+    candidate = payload["candidates"][0]
+    assert candidate["occurrence_count"] == 2
+    assert candidate["manual_only"] is True
+    assert candidate["auto_install"] is False
+    assert candidate["suggested_skill_id"].startswith("security-scan-")
+
+    assert cli.main(["learn", "skill-candidates", "--target", str(tmp_path), "--json"]) == 0
+    assert json.loads(capsys.readouterr().out)["candidate_count"] == 1
+
+    assert learn_cmd.propose_skill(target=tmp_path, candidate_id=candidate["id"], json_output=True) == 0
+    proposal_payload = json.loads(capsys.readouterr().out)
+    assert proposal_payload["manual_only"] is True
+    assert proposal_payload["auto_install"] is False
+    proposal = proposal_payload["proposal"]
+    assert proposal["status"] == "pending"
+    assert proposal["skill_id"] == candidate["suggested_skill_id"]
+    skill_source = Path(proposal_payload["skill_source"])
+    assert (skill_source / "SKILL.md").is_file()
+    assert (skill_source / "skill.json").is_file()
+    assert "Plaintext password" in (skill_source / "SKILL.md").read_text()
+    assert proposal["lint"]["valid"] is True
+
+    assert skills_cmd.inbox_show(target=tmp_path, proposal_id=proposal["proposal_id"], json_output=True) == 0
+    inbox_item = json.loads(capsys.readouterr().out)
+    assert inbox_item["status"] == "pending"
+    assert skills_cmd.inbox_accept(target=tmp_path, proposal_id=proposal["proposal_id"], json_output=True) == 0
+    accepted = json.loads(capsys.readouterr().out)
+    assert accepted["status"] == "accepted"
+    registry_skill = tmp_path / ".brigade" / "skills" / "registry" / candidate["suggested_skill_id"]
+    assert (registry_skill / "SKILL.md").is_file()
+    metadata = json.loads((registry_skill / "skill.json").read_text())
+    assert metadata["trust_level"] == "unreviewed"
+    assert metadata["learning_candidate_id"] == candidate["id"]
 
 
 def test_learning_replay_export_compare_redaction_release_and_center(tmp_path, capsys):
