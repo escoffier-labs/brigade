@@ -256,7 +256,7 @@ Goal: keep the system usable by the original operator while making it adaptable 
 - Promote OpenCode to a first-class built-in handoff source. Today only `.claude/memory-handoffs/` and `.codex/memory-handoffs/` are hardcoded in the ingest, doctor, fleet sweep, and security scan source maps; OpenCode handoffs only flow through a manual `--handoff-inbox` flag. Add `.opencode/memory-handoffs/` to the same built-in source maps, ship a template scaffold, and cover it in handoff doctor source-coverage and the repo sweep so OpenCode handoffs route automatically. Status: implemented with .opencode/memory-handoffs/ wired into install scaffolding, ingest, doctor, handoff doctor source coverage, the fleet sweep, the security skip-list, and the interactive selector, plus a template scaffold.
 - Make local paths configurable and gitignored.
 - Provide templates for fresh-start users without publishing private workspace state.
-- Give new users a one-command local bootstrap. Status: implemented with `brigade operator quickstart`, which runs template install, local operator config, portable tool and skill bootstrap, selected harness verification, and next-command guidance, with dry-run support and no remote mutation.
+- Give new users a one-command local bootstrap. Status: implemented with `brigade operator quickstart`, which runs template install, local operator config, portable tool and skill bootstrap, selected harness verification, and next-command guidance, with dry-run support, a compact JSON issue report, a public troubleshooting guide, and no remote mutation.
 - Keep public repo docs focused on patterns, commands, and safety contracts.
 - Leave release, tag, push-to-main, and production-impacting actions behind explicit approval gates.
 

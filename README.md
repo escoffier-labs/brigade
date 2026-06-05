@@ -75,6 +75,8 @@ brigade operator doctor --target ./my-repo --profile local-operator
 
 Use `--dry-run` first if you want to preview the local files Brigade will write. To wire more than one agent surface, pass a comma-separated list such as `--harnesses codex,claude,opencode`.
 
+For a fuller first-run walkthrough and troubleshooting checklist, see [`docs/new-user-quickstart.md`](docs/new-user-quickstart.md).
+
 Write a handoff note:
 
 ```bash

@@ -43,8 +43,8 @@ body:
   - type: input
     id: version
     attributes:
-      label: solo-mise version
-      placeholder: solo-mise 0.2.0
+      label: Brigade version
+      placeholder: brigade 0.8.0
     validations:
       required: true
   - type: checkboxes

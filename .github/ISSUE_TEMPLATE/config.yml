@@ -2,7 +2,7 @@ blank_issues_enabled: false
 contact_links:
   - name: Cookbook (longer-form guidance + worked examples)
     url: https://github.com/solomonneas/solos-cookbook
-    about: solo-mise is the kit. The cookbook is the why. Browse there for guidance and patterns rather than filing an issue here.
+    about: Brigade is the kit. The cookbook is the why. Browse there for guidance and patterns rather than filing an issue here.
   - name: Security report
-    url: https://github.com/solomonneas/solo-mise/security/policy
+    url: https://github.com/escoffier-labs/brigade/security/policy
     about: Do not file security issues publicly. See SECURITY.md.

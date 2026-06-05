@@ -1,5 +1,5 @@
 name: Bug report
-description: Something is broken in solo-mise itself (CLI, doctor, ingester, scrub).
+description: Something is broken in Brigade itself, such as the CLI, doctor, ingester, scrub, scanner, or docs.
 labels: ["bug"]
 body:
   - type: textarea
@@ -8,16 +8,16 @@ body:
       label: What happened
       description: What did you run, and what did you expect versus what you got?
       placeholder: |
-        I ran `solo-mise init --target ./foo --profile workspace` and got X.
+        I ran `brigade operator quickstart --target ./foo --harnesses codex` and got X.
         I expected Y.
     validations:
       required: true
   - type: input
     id: version
     attributes:
-      label: solo-mise version
-      description: Output of `solo-mise --version`.
-      placeholder: solo-mise 0.2.0
+      label: Brigade version
+      description: Output of `brigade --version`.
+      placeholder: brigade 0.8.0
     validations:
       required: true
   - type: input

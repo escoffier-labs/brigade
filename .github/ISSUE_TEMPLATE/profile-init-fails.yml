@@ -1,6 +1,6 @@
-name: Profile init or doctor fails
-description: A specific profile fails to init cleanly or doctor reports failures on a fresh install.
-labels: ["bug", "profile"]
+name: Init or doctor fails
+description: A specific Brigade init, quickstart, or doctor flow fails on a fresh install.
+labels: ["bug", "setup"]
 body:
   - type: dropdown
     id: profile
@@ -13,6 +13,7 @@ body:
         - hermes
         - generic
         - publisher
+        - quickstart
     validations:
       required: true
   - type: textarea
@@ -23,8 +24,8 @@ body:
       render: shell
       placeholder: |
         rm -rf /tmp/sm && mkdir -p /tmp/sm && git init -q /tmp/sm
-        solo-mise init --target /tmp/sm --profile workspace
-        solo-mise doctor --target /tmp/sm
+        brigade operator quickstart --target /tmp/brigade-smoke --harnesses codex
+        brigade operator doctor --target /tmp/brigade-smoke --profile local-operator
     validations:
       required: true
   - type: textarea
@@ -38,8 +39,8 @@ body:
   - type: input
     id: version
     attributes:
-      label: solo-mise version
-      placeholder: solo-mise 0.2.0
+      label: Brigade version
+      placeholder: brigade 0.8.0
     validations:
       required: true
   - type: textarea

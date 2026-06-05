@@ -408,7 +408,7 @@ brigade operator status --profile internal-dogfood --target .
 brigade daily status --target .
 ```
 
-`brigade operator quickstart` is the first-user path. It runs the repo template install, writes local operator config, imports built-in portable tools and skills, projects harness files, verifies handoff writer inboxes for selected harnesses, and prints the next commands. It is local-only: no daemons, hooks, publishing, pushing, tagging, or remote mutation.
+`brigade operator quickstart` is the first-user path. It runs the repo template install, writes local operator config, imports built-in portable tools and skills, projects harness files, verifies handoff writer inboxes for selected harnesses, and prints the next commands. It is local-only: no daemons, hooks, publishing, pushing, tagging, or remote mutation. JSON output includes a compact `issue_report` object that users can review, redact, and paste into the GitHub quickstart issue form.
 
 Task ledger commands:
 

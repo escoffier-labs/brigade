@@ -31,7 +31,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          path: solo-mise
+          path: brigade
       - uses: actions/checkout@v4
         with:
           repository: solomonneas/content-guard
@@ -42,7 +42,7 @@ jobs:
           python-version: "3.12"
       - name: Scan
         run: |
-          cd solo-mise
+          cd brigade
           PYTHONPATH=../content-guard/src python -m content_guard scan . \
             --policy ../content-guard/policies/public-repo.json
 
@@ -93,13 +93,13 @@ jobs:
         run: |
           python -m pip install --upgrade pip pipx
           pipx install .
-          solo-mise --version
+          brigade --version
       - name: Init + doctor
         run: |
           target="$(mktemp -d)"
           git init -q -b main "$target"
-          solo-mise init --target "$target" ${{ matrix.combo.flags }}
-          solo-mise doctor --target "$target"
+          brigade init --target "$target" ${{ matrix.combo.flags }}
+          brigade doctor --target "$target"
           case "${{ matrix.combo.flags }}" in
             *hermes*)
               test -f "$target/.hermes/memory-handoffs/TEMPLATE.md"
@@ -109,13 +109,35 @@ jobs:
               grep -q '"handoff_inbox": ".hermes/memory-handoffs"' "$target/.brigade/hermes/workspace.harness.json"
               grep -q '"inbox_dir": ".hermes/memory-handoffs"' "$target/.brigade/hermes/memory-handoff.harness.json"
               ! grep -R '.claude/memory-handoffs' "$target/.brigade/hermes"
-              solo-mise handoff sources init --target "$target" --force
-              solo-mise handoff draft --target "$target" --inbox hermes \
+              brigade handoff sources init --target "$target" --force
+              brigade handoff draft --target "$target" --inbox hermes \
                 --title "Hermes CI smoke" \
                 --summary "Hermes can write a local Brigade handoff." \
                 --content "### Hermes CI smoke
 
           The Hermes inbox follows the shared Brigade handoff contract."
-              solo-mise operator verify-harness --harness hermes --target "$target"
+              brigade operator verify-harness --harness hermes --target "$target"
               ;;
           esac
+
+  quickstart-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: pipx install
+        run: |
+          python -m pip install --upgrade pip pipx
+          pipx install .
+          brigade --version
+      - name: Quickstart
+        run: |
+          target="$(mktemp -d)"
+          git init -q -b main "$target"
+          brigade operator quickstart --target "$target" --harnesses codex --json
+          brigade operator doctor --target "$target" --profile local-operator --json
+          test -f "$target/.brigade/config.json"
+          test -d "$target/.codex/memory-handoffs"
+          test -f "$target/.codex/skills/frontend/SKILL.md"

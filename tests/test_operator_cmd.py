@@ -335,12 +335,23 @@ def test_operator_quickstart_prepares_new_user_workspace(tmp_path, capsys):
     assert [step["id"] for step in payload["steps"]][:3] == ["brigade-init", "operator-init", "portable-bootstrap"]
     assert any(step["id"] == "verify-codex" for step in payload["steps"])
     assert any(step["id"] == "verify-opencode" for step in payload["steps"])
+    assert payload["issue_report"]["brigade_version"]
+    assert payload["issue_report"]["status"] == "ok"
+    assert payload["issue_report"]["github_issue_url"].endswith("/issues/new/choose")
     assert (tmp_path / ".brigade" / "config.json").is_file()
     assert (tmp_path / ".brigade" / "daily.toml").is_file()
+    assert (tmp_path / ".brigade" / "reviews.toml").is_file()
+    gitignore = (tmp_path / ".gitignore").read_text()
+    assert ".brigade/daily.toml" in gitignore
+    assert ".brigade/reviews.toml" in gitignore
     assert (tmp_path / ".codex" / "memory-handoffs").is_dir()
     assert (tmp_path / ".opencode" / "memory-handoffs").is_dir()
     assert (tmp_path / ".codex" / "skills" / "frontend" / "SKILL.md").is_file()
     assert (tmp_path / "tools" / "antislop.md").is_file()
+
+    assert cli.main(["operator", "doctor", "--target", str(tmp_path), "--profile", "local-operator", "--json"]) == 0
+    doctor = json.loads(capsys.readouterr().out)
+    assert doctor["ready"] is True
 
 
 def test_operator_quickstart_dry_run_does_not_write(tmp_path, capsys):
@@ -348,6 +359,7 @@ def test_operator_quickstart_dry_run_does_not_write(tmp_path, capsys):
     payload = json.loads(capsys.readouterr().out)
     assert payload["dry_run"] is True
     assert payload["status"] == "ok"
+    assert payload["issue_report"]["dry_run"] is True
     assert any(step["status"] == "planned" for step in payload["steps"])
     assert not (tmp_path / ".brigade").exists()
     assert not (tmp_path / ".codex").exists()

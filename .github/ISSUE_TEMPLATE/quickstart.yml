@@ -1,0 +1,86 @@
+name: Quickstart setup problem
+description: Brigade quickstart, portable tools, skill setup, or harness wiring did not work for a new user.
+labels: ["bug", "quickstart", "setup"]
+body:
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What did you run, and what did you expect versus what happened?
+      placeholder: |
+        I ran `brigade operator quickstart --target ./my-repo --harnesses codex`.
+        I expected the Codex handoff inbox and portable skills to be created, but ...
+    validations:
+      required: true
+  - type: textarea
+    id: commands
+    attributes:
+      label: Exact commands
+      description: Paste the exact commands you ran. Prefer a temporary test repo if possible.
+      render: shell
+      placeholder: |
+        python3 -m pipx install brigade-cli
+        mkdir -p /tmp/brigade-smoke
+        brigade operator quickstart --target /tmp/brigade-smoke --harnesses codex --json
+        brigade operator doctor --target /tmp/brigade-smoke --profile local-operator
+    validations:
+      required: true
+  - type: textarea
+    id: issue-report
+    attributes:
+      label: Quickstart issue_report JSON
+      description: Run quickstart with `--json` and paste the `issue_report` object. Review it first and do not include secrets or private paths.
+      render: json
+    validations:
+      required: false
+  - type: input
+    id: version
+    attributes:
+      label: Brigade version
+      description: Output of `brigade --version`.
+      placeholder: brigade 0.8.0
+    validations:
+      required: true
+  - type: input
+    id: install-method
+    attributes:
+      label: Install method
+      placeholder: pipx, uv tool, pip, source checkout, distro package, etc.
+    validations:
+      required: true
+  - type: input
+    id: harnesses
+    attributes:
+      label: Harnesses selected
+      placeholder: codex, claude, opencode, openclaw, hermes, none
+    validations:
+      required: true
+  - type: input
+    id: python
+    attributes:
+      label: Python version
+      placeholder: 3.12.3
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: OS
+      placeholder: Ubuntu 24.04, macOS 14.5, Windows WSL, etc.
+    validations:
+      required: true
+  - type: textarea
+    id: output
+    attributes:
+      label: Command output
+      description: Paste relevant stdout and stderr. Redact personal paths, hostnames, tokens, account ids, and private repo names.
+      render: shell
+    validations:
+      required: false
+  - type: checkboxes
+    id: scrub
+    attributes:
+      label: Pre-flight
+      options:
+        - label: I have scrubbed tokens, private hostnames, private repo names, and personal paths from this report.
+          required: true

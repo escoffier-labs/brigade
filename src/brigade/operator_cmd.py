@@ -284,11 +284,13 @@ def status_payload(target: Path, *, profile: str = "internal-dogfood") -> dict[s
     content_guard_health = scrub.hook_status(target)
     dogfood_ready = dogfood_cmd.config_path(target).exists() and codex_path is not None
     issues = []
-    if not dogfood_ready:
+    if profile == "internal-dogfood" and not dogfood_ready:
         issues.append({"status": "warn", "name": "dogfood_not_ready", "detail": "dogfood config or codex binary missing"})
-    if security_health.get("issue_count"):
+    security_top_issue = security_health.get("top_issue") if isinstance(security_health.get("top_issue"), dict) else {}
+    security_missing_evidence = security_top_issue.get("name") == "security_evidence" and str(security_top_issue.get("detail") or "") == "missing"
+    if security_health.get("issue_count") and (profile == "internal-dogfood" or not security_missing_evidence):
         issues.append({"status": "warn", "name": "security_health", "detail": str((security_health.get("top_issue") or {}).get("detail") or "security health issue")})
-    if readiness.get("blocker_count"):
+    if profile == "internal-dogfood" and readiness.get("blocker_count"):
         issues.append({"status": "warn", "name": "operator_readiness_blocked", "detail": str((readiness.get("blockers") or [{}])[0].get("safe_summary") or "readiness blocker")})
     content_guard_configured = bool(
         content_guard_health.get("available")
@@ -841,6 +843,7 @@ def quickstart(
             "next_commands": [f"brigade init --target {target} --depth {depth} --harnesses {','.join(selected_harnesses) or 'none'} --force"],
             "local_only_notes": _quickstart_local_notes(),
         }
+        payload["issue_report"] = _quickstart_issue_report(payload)
         if json_output:
             print(json.dumps(payload, indent=2, sort_keys=True))
             return 1
@@ -889,6 +892,7 @@ def quickstart(
         "next_commands": _quickstart_next_commands(selected_harnesses, dry_run=dry_run),
         "local_only_notes": _quickstart_local_notes(),
     }
+    payload["issue_report"] = _quickstart_issue_report(payload)
     if json_output:
         print(json.dumps(payload, indent=2, sort_keys=True))
         return 0 if ok else 1
@@ -917,6 +921,42 @@ def _quickstart_local_notes() -> list[str]:
     ]
 
 
+def _quickstart_issue_report(payload: dict[str, Any]) -> dict[str, Any]:
+    steps = payload.get("steps") if isinstance(payload.get("steps"), list) else []
+    step_summaries = []
+    for step in steps:
+        if not isinstance(step, dict):
+            continue
+        item = {
+            "id": step.get("id"),
+            "status": step.get("status"),
+            "return_code": step.get("return_code"),
+        }
+        payload_obj = step.get("payload")
+        if isinstance(payload_obj, dict):
+            item["payload_status"] = payload_obj.get("status") or payload_obj.get("ready")
+            top_issue = payload_obj.get("top_issue")
+            if isinstance(top_issue, dict):
+                item["top_issue"] = {
+                    "name": top_issue.get("name"),
+                    "detail": top_issue.get("detail"),
+                }
+        step_summaries.append(item)
+    return {
+        "brigade_version": __version__,
+        "status": payload.get("status"),
+        "depth": payload.get("depth"),
+        "harnesses": payload.get("harnesses"),
+        "owner": payload.get("owner"),
+        "dry_run": payload.get("dry_run"),
+        "force": payload.get("force"),
+        "steps": step_summaries,
+        "next_commands": payload.get("next_commands") or [],
+        "github_issue_url": "https://github.com/escoffier-labs/brigade/issues/new/choose",
+        "privacy_note": "Review before sharing. Do not paste tokens, private hostnames, or unredacted absolute paths.",
+    }
+
+
 def _print_quickstart(payload: dict[str, Any]) -> None:
     print(f"operator quickstart: {payload['target']}")
     print(f"depth: {payload['depth']}")
@@ -929,6 +969,7 @@ def _print_quickstart(payload: dict[str, Any]) -> None:
     print("next:")
     for command in payload["next_commands"]:
         print(f"- {command}")
+    print("issues: https://github.com/escoffier-labs/brigade/issues/new/choose")
 
 
 def bootstrap_portable(
