@@ -90,6 +90,17 @@ Imported records preserve safe metadata:
 
 Repeated scans dedupe equivalent pending findings. Dismissed imports stay dismissed until the finding materially changes.
 
+Repeated security imports can become reviewed skill proposals through the learning loop:
+
+```bash
+brigade security scan --target . --import-findings
+brigade learn skill-candidates --source security-scan
+brigade learn propose-skill <candidate-id> --dry-run
+brigade learn propose-skill <candidate-id>
+```
+
+This is useful when the same security problem keeps recurring, for example API keys in session or chat transcripts. The generated skill proposal preserves redacted response options such as `.env` storage, scrub or rotate, KeePass review, and transcript redaction, but it still lands in the skill inbox for review and is never installed automatically.
+
 ## Boundaries
 
 The scanner is local and read-only. It does not call external SaaS scanners, perform network scanning, store secrets, start a daemon, schedule scans, mutate GitHub issues, or remediate findings automatically.

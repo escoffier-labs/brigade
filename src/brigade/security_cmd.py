@@ -2537,6 +2537,7 @@ def _import_findings(
                 "metadata": {
                     "finding_id": finding.get("id"),
                     "rule_id": finding.get("rule_id"),
+                    "issue_type": category,
                     "fingerprint": finding.get("fingerprint"),
                     "source_item_key": f"security-scan:{finding.get('fingerprint')}",
                     "source_fingerprint": work_cmd._stable_hash(
@@ -2551,6 +2552,7 @@ def _import_findings(
                     ),
                     "severity": severity,
                     "category": category,
+                    "safe_summary": f"[{severity}] {category}: {title} on {finding.get('surface') or 'repo'}",
                     "path": path,
                     "line": line,
                     "surface": finding.get("surface"),

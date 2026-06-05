@@ -453,6 +453,9 @@ def test_learning_skill_candidates_create_reviewed_skill_proposals(tmp_path, cap
             "metadata": {
                 "safe_summary": "Plaintext password repeats in session transcript exports",
                 "rule_id": "secrets.plaintext-password",
+                "category": "secrets",
+                "surface": "session-chat",
+                "response_options": ["move_to_env: Store active app secrets in a gitignored .env file."],
                 "source_fingerprint": "security-one-fp",
             },
             "created_at": "2026-06-05T12:00:00+00:00",
@@ -467,6 +470,9 @@ def test_learning_skill_candidates_create_reviewed_skill_proposals(tmp_path, cap
             "metadata": {
                 "safe_summary": "Plaintext password repeats in chat transcript exports",
                 "rule_id": "secrets.plaintext-password",
+                "category": "secrets",
+                "surface": "session-chat",
+                "response_options": ["scrub_session_chat: Redact the transcript before sharing."],
                 "source_fingerprint": "security-two-fp",
             },
             "created_at": "2026-06-05T12:01:00+00:00",
@@ -488,22 +494,36 @@ def test_learning_skill_candidates_create_reviewed_skill_proposals(tmp_path, cap
     ]
     imports.write_text("".join(json.dumps(record, sort_keys=True) + "\n" for record in records))
 
-    assert learn_cmd.skill_candidates(target=tmp_path, json_output=True) == 0
+    assert learn_cmd.skill_candidates(target=tmp_path, source="security-scan", json_output=True) == 0
     payload = json.loads(capsys.readouterr().out)
+    assert payload["source"] == "security-scan"
     assert payload["candidate_count"] == 1
     candidate = payload["candidates"][0]
     assert candidate["occurrence_count"] == 2
     assert candidate["manual_only"] is True
     assert candidate["auto_install"] is False
+    assert candidate["pattern_key"] == "rule_id:secrets.plaintext-password"
+    assert candidate["review_risk"] == "high"
+    assert "share rule_id:secrets.plaintext-password" in candidate["grouping_reason"]
+    assert len(candidate["response_options"]) == 2
     assert candidate["suggested_skill_id"].startswith("security-scan-")
 
-    assert cli.main(["learn", "skill-candidates", "--target", str(tmp_path), "--json"]) == 0
+    assert cli.main(["learn", "skill-candidates", "--target", str(tmp_path), "--source", "security-scan", "--json"]) == 0
     assert json.loads(capsys.readouterr().out)["candidate_count"] == 1
+
+    assert learn_cmd.propose_skill(target=tmp_path, candidate_id=candidate["id"], source="security-scan", dry_run=True, json_output=True) == 0
+    dry_run = json.loads(capsys.readouterr().out)
+    assert dry_run["dry_run"] is True
+    assert dry_run["proposal"]["status"] == "planned"
+    assert dry_run["would_write"]
+    assert not (tmp_path / ".brigade" / "learn" / "skill-workshop").exists()
 
     assert learn_cmd.propose_skill(target=tmp_path, candidate_id=candidate["id"], json_output=True) == 0
     proposal_payload = json.loads(capsys.readouterr().out)
+    assert proposal_payload["dry_run"] is False
     assert proposal_payload["manual_only"] is True
     assert proposal_payload["auto_install"] is False
+    assert proposal_payload["diff_preview"]
     proposal = proposal_payload["proposal"]
     assert proposal["status"] == "pending"
     assert proposal["skill_id"] == candidate["suggested_skill_id"]

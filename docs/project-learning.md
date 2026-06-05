@@ -60,7 +60,8 @@ Commands:
 brigade learn plan
 brigade learn doctor
 brigade learn import-issues
-brigade learn skill-candidates
+brigade learn skill-candidates --source security-scan
+brigade learn propose-skill <candidate-id> --dry-run
 brigade learn propose-skill <candidate-id>
 brigade learn closeout <candidate-id> --status accepted-risk --reason "reviewed"
 brigade learn closeouts
@@ -80,7 +81,7 @@ Every candidate should end in one reviewed path:
 
 Learning closeouts support `accepted-risk`, `dismissed`, `archived`, and `deferred`. Unchanged closed-out candidates stop making the learning queue noisy, while changed source fingerprints reappear in `learn plan`, `learn doctor`, and `learn import-issues`.
 
-`brigade learn skill-candidates` groups repeated learning evidence into reviewed skill candidates. `brigade learn propose-skill <candidate-id>` writes a generated skill source under `.brigade/learn/skill-workshop/` and submits it to `.brigade/skills/inbox/` using the normal skill proposal flow. The proposal is never installed automatically; review it with `brigade skills inbox show`, `diff`, `accept`, or `reject`.
+`brigade learn skill-candidates` groups repeated learning evidence into reviewed skill candidates. Use `--source security-scan` to focus on repeated security findings such as exposed credentials in session transcripts. Candidates explain why evidence was grouped, carry review risk, preserve redacted response options, and stay manual-only. `brigade learn propose-skill <candidate-id> --dry-run` previews generated source and planned inbox writes. Without `--dry-run`, it writes source under `.brigade/learn/skill-workshop/` and submits it to `.brigade/skills/inbox/` using the normal skill proposal flow. The proposal is never installed automatically; review it with `brigade skills inbox show`, `diff`, `accept`, or `reject`.
 
 Learning replay receipts store safe before/after summaries under `.brigade/learn/replays/`. `brigade learn replay compare` writes a compare receipt under `.brigade/learn/replay-compares/`, reports improved, unchanged, regressed, or unknown outcomes, and surfaces regressions in release evidence and operator-center reviews.
 

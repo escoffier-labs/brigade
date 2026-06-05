@@ -10,6 +10,8 @@ from pathlib import Path
 from typing import Any
 
 from . import __version__, center_cmd, chat_cmd, daily_cmd, dogfood_cmd, handoff_cmd, memory_cmd, notifications_cmd, repos_cmd, scrub, security_cmd, skills_cmd, tools_cmd, work_cmd
+from .install import install_selection
+from .selection import KNOWN_HARNESSES, WRITER_INBOXES, Selection, resolve_owner
 
 PROFILES = {"local-operator", "internal-dogfood"}
 
@@ -770,6 +772,163 @@ def _capture_json_call(func, **kwargs: Any) -> tuple[int, dict[str, Any]]:
         }
         rc = 1
     return rc, payload
+
+
+def _capture_text_call(func, **kwargs: Any) -> tuple[int, list[str]]:
+    output = StringIO()
+    with redirect_stdout(output):
+        rc = func(**kwargs)
+    return rc, output.getvalue().strip().splitlines()
+
+
+def _parse_harnesses(value: str | None) -> list[str]:
+    if value is None or not value.strip():
+        return ["codex"]
+    if value.strip() == "none":
+        return []
+    harnesses = [item.strip() for item in value.split(",") if item.strip()]
+    unknown = [item for item in harnesses if item not in KNOWN_HARNESSES]
+    if unknown:
+        raise ValueError(f"unknown harness: {', '.join(unknown)}")
+    return list(dict.fromkeys(harnesses))
+
+
+def quickstart(
+    *,
+    target: Path,
+    depth: str = "repo",
+    harnesses: str | None = "codex",
+    owner: str | None = None,
+    tool_pack: Path | None = None,
+    skill_pack: Path | None = None,
+    dry_run: bool = False,
+    force: bool = False,
+    json_output: bool = False,
+) -> int:
+    target = target.expanduser().resolve()
+    if depth not in {"repo", "workspace"}:
+        print("error: --depth must be repo or workspace", file=sys.stderr)
+        return 2
+    try:
+        selected_harnesses = _parse_harnesses(harnesses)
+        memory_owner = resolve_owner(selected_harnesses, override=owner)
+        selection = Selection(depth=depth, harnesses=selected_harnesses, owner=memory_owner, includes=[])
+        selection.validate()
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+    steps: list[dict[str, Any]] = []
+    install_rc, install_output = _capture_text_call(
+        install_selection,
+        target=target,
+        selection=selection,
+        force=force,
+        dry_run=dry_run,
+        allow_home=False,
+    )
+    steps.append({"id": "brigade-init", "status": "ok" if install_rc == 0 else "error", "return_code": install_rc, "output": install_output})
+    if install_rc != 0:
+        payload = {
+            "target": str(target),
+            "depth": depth,
+            "harnesses": selected_harnesses,
+            "owner": memory_owner,
+            "dry_run": dry_run,
+            "force": force,
+            "steps": steps,
+            "status": "blocked",
+            "next_commands": [f"brigade init --target {target} --depth {depth} --harnesses {','.join(selected_harnesses) or 'none'} --force"],
+            "local_only_notes": _quickstart_local_notes(),
+        }
+        if json_output:
+            print(json.dumps(payload, indent=2, sort_keys=True))
+            return 1
+        _print_quickstart(payload)
+        return 1
+
+    init_rc, init_payload = _capture_json_call(init, target=target, profile="local-operator", force=force, dry_run=dry_run)
+    init_status = "planned" if dry_run and init_rc == 0 else "ok" if init_rc == 0 else "error"
+    steps.append({"id": "operator-init", "status": init_status, "return_code": init_rc, "payload": init_payload})
+
+    portable_rc, portable_payload = _capture_json_call(
+        bootstrap_portable,
+        target=target,
+        tool_pack=tool_pack,
+        skill_pack=skill_pack,
+        dry_run=dry_run,
+        force=force,
+    )
+    portable_status = "planned" if dry_run and portable_rc == 0 else "ok" if portable_rc == 0 else "error"
+    steps.append({"id": "portable-bootstrap", "status": portable_status, "return_code": portable_rc, "payload": portable_payload})
+
+    if dry_run:
+        for harness in selected_harnesses:
+            if harness in WRITER_INBOXES:
+                steps.append({"id": f"verify-{harness}", "status": "planned", "return_code": 0, "next_command": f"brigade operator verify-harness --harness {harness} --target {target}"})
+    else:
+        for harness in selected_harnesses:
+            if harness not in WRITER_INBOXES:
+                steps.append({"id": f"verify-{harness}", "status": "skipped", "reason": "no Brigade handoff writer inbox for this harness"})
+                continue
+            verify_rc, verify_payload = _capture_json_call(verify_harness, target=target, harness=harness)
+            steps.append({"id": f"verify-{harness}", "status": "ok" if verify_rc == 0 else "warn", "return_code": verify_rc, "payload": verify_payload})
+
+    ok = all(step.get("return_code", 0) == 0 for step in steps if step.get("status") not in {"skipped", "planned"})
+    if dry_run:
+        ok = install_rc == 0 and init_rc == 0 and portable_rc == 0
+    payload = {
+        "target": str(target),
+        "depth": depth,
+        "harnesses": selected_harnesses,
+        "owner": memory_owner,
+        "dry_run": dry_run,
+        "force": force,
+        "steps": steps,
+        "status": "ok" if ok else "warn",
+        "next_commands": _quickstart_next_commands(selected_harnesses, dry_run=dry_run),
+        "local_only_notes": _quickstart_local_notes(),
+    }
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0 if ok else 1
+    _print_quickstart(payload)
+    return 0 if ok else 1
+
+
+def _quickstart_next_commands(harnesses: list[str], *, dry_run: bool) -> list[str]:
+    if dry_run:
+        return ["rerun without --dry-run after reviewing planned writes"]
+    commands = [
+        "brigade operator doctor --target . --profile local-operator",
+        "brigade tools list --target .",
+        "brigade skills doctor --target .",
+        "brigade security scan --target . --output-dir .brigade/security/latest",
+    ]
+    commands.extend(f"brigade operator verify-harness --target . --harness {harness}" for harness in harnesses if harness in WRITER_INBOXES)
+    return commands
+
+
+def _quickstart_local_notes() -> list[str]:
+    return [
+        ".brigade/ stores local config, receipts, scans, reports, waivers, and run artifacts.",
+        "Generated harness projections and handoff inboxes are local ignored state.",
+        "Brigade does not start daemons, install hooks, publish, push, tag, or mutate remotes from quickstart.",
+    ]
+
+
+def _print_quickstart(payload: dict[str, Any]) -> None:
+    print(f"operator quickstart: {payload['target']}")
+    print(f"depth: {payload['depth']}")
+    print(f"harnesses: {','.join(payload['harnesses']) or 'none'}")
+    print(f"owner: {payload['owner']}")
+    print(f"dry_run: {payload['dry_run']}")
+    for step in payload["steps"]:
+        print(f"[{step.get('status')}] {step.get('id')}")
+    print(f"status: {payload['status']}")
+    print("next:")
+    for command in payload["next_commands"]:
+        print(f"- {command}")
 
 
 def bootstrap_portable(

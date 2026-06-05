@@ -1,6 +1,7 @@
 import json
 
 from brigade import cli
+from brigade import learn_cmd
 from brigade import release_cmd
 from brigade import security_cmd
 from brigade import work_cmd
@@ -640,6 +641,8 @@ def test_security_scan_can_import_findings(tmp_path, capsys):
     assert any(option.startswith("keepass_review:") for option in imports[0]["metadata"]["response_options"])
     assert imports[0]["metadata"]["local_evidence_path"].endswith("security-report.json")
     assert imports[0]["metadata"]["category"] == "secrets"
+    assert imports[0]["metadata"]["issue_type"] == "secrets"
+    assert imports[0]["metadata"]["safe_summary"].startswith("[high] secrets:")
     assert imports[0]["metadata"]["fingerprint"]
     report_text = (tmp_path / ".brigade" / "security" / "latest" / "security-report.json").read_text()
     assert "abcd1234" not in report_text
@@ -653,6 +656,23 @@ def test_security_scan_can_import_findings(tmp_path, capsys):
     pending = [json.loads(line) for line in imports_path.read_text().splitlines()]
     import_id = pending[0]["id"]
     assert work_cmd.import_dismiss(target=tmp_path, import_id=import_id, reason="accepted risk") == 0
+
+
+def test_security_scan_imports_feed_learning_skill_candidates(tmp_path, capsys):
+    sessions = tmp_path / ".codex" / "sessions"
+    sessions.mkdir(parents=True)
+    (sessions / "session-1.jsonl").write_text('{"content":"service_api_key=abcd1234abcd1234abcd1234"}\n')
+    (sessions / "session-2.jsonl").write_text('{"content":"service_token=efgh1234efgh1234efgh1234"}\n')
+
+    assert security_cmd.scan(target=tmp_path, fail_on="none", import_findings=True) == 0
+    capsys.readouterr()
+    assert learn_cmd.skill_candidates(target=tmp_path, source="security-scan", json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["candidate_count"] == 1
+    candidate = payload["candidates"][0]
+    assert candidate["pattern_key"] == "rule_id:secrets.session-chat-contains-exposed-credential"
+    assert candidate["review_risk"] == "high"
+    assert any(option.startswith("scrub_session_chat:") for option in candidate["response_options"])
     capsys.readouterr()
     assert security_cmd.scan(target=tmp_path, import_findings=True) == 0
     assert "imported_findings: 0" in capsys.readouterr().out

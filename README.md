@@ -69,9 +69,11 @@ pipx install brigade-cli
 Set up a repo:
 
 ```bash
-brigade init --target ./my-repo --depth repo --harnesses openclaw,codex
-brigade doctor --target ./my-repo
+brigade operator quickstart --target ./my-repo --harnesses codex
+brigade operator doctor --target ./my-repo --profile local-operator
 ```
+
+Use `--dry-run` first if you want to preview the local files Brigade will write. To wire more than one agent surface, pass a comma-separated list such as `--harnesses codex,claude,opencode`.
 
 Write a handoff note:
 

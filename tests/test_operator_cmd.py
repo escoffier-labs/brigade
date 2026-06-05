@@ -327,6 +327,32 @@ def test_operator_bootstrap_portable_syncs_builtins(tmp_path, capsys):
     assert (tmp_path / "tools" / "antislop.md").is_file()
 
 
+def test_operator_quickstart_prepares_new_user_workspace(tmp_path, capsys):
+    assert cli.main(["operator", "quickstart", "--target", str(tmp_path), "--harnesses", "codex,opencode", "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == "ok"
+    assert payload["owner"] == "codex"
+    assert [step["id"] for step in payload["steps"]][:3] == ["brigade-init", "operator-init", "portable-bootstrap"]
+    assert any(step["id"] == "verify-codex" for step in payload["steps"])
+    assert any(step["id"] == "verify-opencode" for step in payload["steps"])
+    assert (tmp_path / ".brigade" / "config.json").is_file()
+    assert (tmp_path / ".brigade" / "daily.toml").is_file()
+    assert (tmp_path / ".codex" / "memory-handoffs").is_dir()
+    assert (tmp_path / ".opencode" / "memory-handoffs").is_dir()
+    assert (tmp_path / ".codex" / "skills" / "frontend" / "SKILL.md").is_file()
+    assert (tmp_path / "tools" / "antislop.md").is_file()
+
+
+def test_operator_quickstart_dry_run_does_not_write(tmp_path, capsys):
+    assert cli.main(["operator", "quickstart", "--target", str(tmp_path), "--harnesses", "codex,claude", "--dry-run", "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["dry_run"] is True
+    assert payload["status"] == "ok"
+    assert any(step["status"] == "planned" for step in payload["steps"])
+    assert not (tmp_path / ".brigade").exists()
+    assert not (tmp_path / ".codex").exists()
+
+
 def test_operator_sync_tools_projects_tracked_sources(tmp_path, capsys):
     tools_dir = tmp_path / "tools"
     tools_dir.mkdir()

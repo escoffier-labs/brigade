@@ -436,6 +436,16 @@ def _build_parser() -> argparse.ArgumentParser:
     p_operator_sync_tools.add_argument("--dry-run", action="store_true", help="Plan projection writes without changing files.")
     p_operator_sync_tools.add_argument("--force", action="store_true", help="Overwrite unmanaged or locally edited projection files.")
     p_operator_sync_tools.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_operator_quickstart = operator_sub.add_parser("quickstart", help="Prepare a new user workspace with Brigade configs, portable tools, and harness checks.")
+    p_operator_quickstart.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
+    p_operator_quickstart.add_argument("--depth", choices=["repo", "workspace"], default="repo", help="Install depth for Brigade bootstrap files.")
+    p_operator_quickstart.add_argument("--harnesses", default="codex", help="Comma-separated harness ids, or none.")
+    p_operator_quickstart.add_argument("--owner", default=None, help="Override the canonical memory owner.")
+    p_operator_quickstart.add_argument("--tool-pack", type=Path, default=None, help="Optional `brigade tools pack build` directory to import.")
+    p_operator_quickstart.add_argument("--skill-pack", type=Path, default=None, help="Optional `brigade skills pack build` directory to import.")
+    p_operator_quickstart.add_argument("--dry-run", action="store_true", help="Plan writes without changing files.")
+    p_operator_quickstart.add_argument("--force", action="store_true", help="Overwrite existing generated local setup files when supported.")
+    p_operator_quickstart.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_operator_bootstrap_portable = operator_sub.add_parser("bootstrap-portable", help="Import optional portable packs and sync tools across local harnesses.")
     p_operator_bootstrap_portable.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
     p_operator_bootstrap_portable.add_argument("--tool-pack", type=Path, default=None, help="Optional `brigade tools pack build` directory to import first.")
@@ -1994,11 +2004,14 @@ def _build_parser() -> argparse.ArgumentParser:
     p_learn_skill_candidates = learn_sub.add_parser("skill-candidates", help="Find repeatable learning patterns that could become reviewed skills.")
     p_learn_skill_candidates.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
     p_learn_skill_candidates.add_argument("--min-count", type=int, default=2, help="Minimum repeated evidence count required.")
+    p_learn_skill_candidates.add_argument("--source", default=None, help="Only include candidates from one learning source, such as security-scan.")
     p_learn_skill_candidates.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_learn_propose_skill = learn_sub.add_parser("propose-skill", help="Write a reviewed skill proposal from a learning skill candidate.")
     p_learn_propose_skill.add_argument("candidate_id", help="Learning skill candidate id or unique prefix.")
     p_learn_propose_skill.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
     p_learn_propose_skill.add_argument("--min-count", type=int, default=2, help="Minimum repeated evidence count required.")
+    p_learn_propose_skill.add_argument("--source", default=None, help="Resolve the candidate within one learning source, such as security-scan.")
+    p_learn_propose_skill.add_argument("--dry-run", action="store_true", help="Preview generated skill source and inbox proposal without writing.")
     p_learn_propose_skill.add_argument("--force", action="store_true", help="Refresh an existing generated skill source.")
     p_learn_propose_skill.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_learn_closeout = learn_sub.add_parser("closeout", help="Close out a learning candidate as accepted, dismissed, archived, or deferred.")
@@ -3010,6 +3023,18 @@ def main(argv=None) -> int:
             return operator_cmd.verify_harness(target=args.target, harness=args.harness, json_output=args.json)
         if args.operator_command == "sync-tools":
             return operator_cmd.sync_tools(target=args.target, dry_run=args.dry_run, force=args.force, json_output=args.json)
+        if args.operator_command == "quickstart":
+            return operator_cmd.quickstart(
+                target=args.target,
+                depth=args.depth,
+                harnesses=args.harnesses,
+                owner=args.owner,
+                tool_pack=args.tool_pack,
+                skill_pack=args.skill_pack,
+                dry_run=args.dry_run,
+                force=args.force,
+                json_output=args.json,
+            )
         if args.operator_command == "bootstrap-portable":
             return operator_cmd.bootstrap_portable(target=args.target, tool_pack=args.tool_pack, skill_pack=args.skill_pack, dry_run=args.dry_run, force=args.force, json_output=args.json)
         parser.error(f"unknown operator command: {args.operator_command}")
@@ -3620,9 +3645,9 @@ def main(argv=None) -> int:
         if args.learn_command == "import-issues":
             return learn_cmd.import_issues(target=args.target, dry_run=args.dry_run, json_output=args.json)
         if args.learn_command == "skill-candidates":
-            return learn_cmd.skill_candidates(target=args.target, min_count=args.min_count, json_output=args.json)
+            return learn_cmd.skill_candidates(target=args.target, min_count=args.min_count, source=args.source, json_output=args.json)
         if args.learn_command == "propose-skill":
-            return learn_cmd.propose_skill(target=args.target, candidate_id=args.candidate_id, min_count=args.min_count, force=args.force, json_output=args.json)
+            return learn_cmd.propose_skill(target=args.target, candidate_id=args.candidate_id, min_count=args.min_count, source=args.source, dry_run=args.dry_run, force=args.force, json_output=args.json)
         if args.learn_command == "closeout":
             return learn_cmd.closeout(target=args.target, candidate_id=args.candidate_id, subsystem=args.subsystem, status=args.status, reason=args.reason, json_output=args.json)
         if args.learn_command == "closeouts":

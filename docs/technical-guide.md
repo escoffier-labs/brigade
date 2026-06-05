@@ -399,12 +399,16 @@ See [`docs/internal-dogfood.md`](internal-dogfood.md) for the repo onboarding co
 First run in a repo:
 
 ```bash
+brigade operator quickstart --target . --harnesses codex
+brigade operator quickstart --target . --harnesses codex,claude,opencode --dry-run
 brigade operator init --profile internal-dogfood --target .
 brigade operator sync-tools --target .
 brigade operator doctor --profile internal-dogfood --target .
 brigade operator status --profile internal-dogfood --target .
 brigade daily status --target .
 ```
+
+`brigade operator quickstart` is the first-user path. It runs the repo template install, writes local operator config, imports built-in portable tools and skills, projects harness files, verifies handoff writer inboxes for selected harnesses, and prints the next commands. It is local-only: no daemons, hooks, publishing, pushing, tagging, or remote mutation.
 
 Task ledger commands:
 
@@ -417,7 +421,7 @@ Task ledger commands:
 - `brigade work task plan <task-id>` shows the task metadata, acceptance checklist, template guidance, and suggested run command. Add `--write` to persist a plan artifact (plan.md plus a JSON receipt under `.brigade/work/plans/`) capturing assumptions, acceptance, risks, steps, and the next safe command; `--meta` writes a plan-for-the-plan that stops before the deliverable; `--step` captures steps; and `--from-research <run-id>` attaches a research run report as quarantined untrusted-web evidence.
 - `brigade work plans` lists persisted plan artifacts.
 - `brigade work plan-promote <task-id> --as template|rule|skill` writes a local DRAFT proposal under `.brigade/work/plan-proposals/` from an accepted plan, and never installs templates, rules, or skills; `brigade work plan-proposals` lists them.
-- `brigade learn skill-candidates` detects repeated local learning evidence that may deserve a reusable skill, and `brigade learn propose-skill <candidate-id>` writes an unreviewed generated skill source plus a normal `.brigade/skills/inbox/` proposal. It does not import, accept, install, or publish the skill.
+- `brigade learn skill-candidates --source security-scan` detects repeated local learning evidence that may deserve a reusable skill, and `brigade learn propose-skill <candidate-id> --dry-run` previews the generated source before writing. Without `--dry-run`, `propose-skill` writes an unreviewed generated skill source plus a normal `.brigade/skills/inbox/` proposal. It does not import, accept, install, or publish the skill.
 - `brigade work task done <task-id>` closes queued work.
 
 Available task templates are `vertical-slice`, `bugfix`, `red-green-refactor`, `docs`, and `security-follow-up`.
