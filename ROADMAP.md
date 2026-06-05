@@ -23,6 +23,50 @@ A few words show up everywhere:
 
 The one rule behind all of it: Brigade writes local files and queues, but it never publishes, edits canonical memory, runs background daemons, or touches remote servers on its own. Everything waits for an explicit command.
 
+## Roadmap At A Glance
+
+```mermaid
+flowchart TB
+    FOUNDATION["<b>Foundation cleared</b><br/>quickstart · audit · command inventory · archive"]
+
+    subgraph BASE [" base layer "]
+        SETUP["portable setup<br/>operator quickstart"]
+        MEMORY["memory handoffs<br/>lint · source coverage · receipts"]
+        GUARDS["local guardrails<br/>security scan · Content Guard"]
+    end
+
+    subgraph WORK [" daily operator loop "]
+        PLAN["plan-first tasks"]
+        INBOX["scanner-ready inbox"]
+        CLOSEOUT["verify · review · closeout"]
+    end
+
+    subgraph SCALE [" scale-out evidence "]
+        FLEET["repo fleet"]
+        RELEASE["release readiness<br/>candidates · smoke · waivers"]
+        CENTER["operator center<br/>reports · actions · daily driver"]
+    end
+
+    subgraph NEXT [" next real roadmap "]
+        UI["workspace UI<br/>views over CLI JSON"]
+        RESEARCH["deep research lane"]
+        RETRIEVAL["optional local memory retrieval"]
+        APPLY["explicit apply surfaces<br/>no silent sync"]
+    end
+
+    FOUNDATION --> BASE --> WORK --> SCALE --> NEXT
+
+    classDef done fill:#ecfdf5,stroke:#059669,color:#064e3b;
+    classDef base fill:#eff6ff,stroke:#2563eb,color:#1e3a8a;
+    classDef work fill:#fff7ed,stroke:#ea580c,color:#7c2d12;
+    classDef next fill:#f5f3ff,stroke:#7c3aed,color:#4c1d95;
+    class FOUNDATION done;
+    class SETUP,MEMORY,GUARDS base;
+    class PLAN,INBOX,CLOSEOUT work;
+    class FLEET,RELEASE,CENTER work;
+    class UI,RESEARCH,RETRIEVAL,APPLY next;
+```
+
 ## Foundation: Daily Driver
 
 > **In plain terms:** the everyday loop. `brigade work brief` each morning shows what is up, `brigade work run` does a chunk of work and auto-saves its artifacts and a memory note, and there is a private local to-do list that never gets committed. The long run-on bullet below is just the full feature list for long unattended runs; it boils down to "log every step in checkpoints so you can see what happened and resume if it crashes."
@@ -304,6 +348,8 @@ The workspace on top of the bones:
 
 > **In plain terms:** not new features, this is the polish and cleanup backlog: tighten audits, fix documentation drift, add privacy regression tests, finish closeouts. The actual checklist lives in the linked plan file.
 
-Status: active.
+Status: foundation queue cleared.
 
-The detailed working queue for phases 61-100 lives in [`docs/phase-61-100-plan.md`](docs/phase-61-100-plan.md). The queue focuses on roadmap audit precision, deferred-item ownership, command documentation contracts, cross-producer provenance, privacy regression coverage, chat export hardening, backup and tool closeouts, context and learning receipts, security report compatibility, issue/TDD repair imports, memory and handoff hardening, release evidence schemas, operator-center schemas, fleet release reports, CI platform warnings, install smoke receipts, public template privacy, and a final local operator readiness closeout.
+The detailed working queue for phases 61-100 lives in [`docs/phase-61-100-plan.md`](docs/phase-61-100-plan.md). That queue now serves as completion evidence for the foundation hardening pass: roadmap audit precision, deferred-item ownership, command documentation contracts, cross-producer provenance, privacy regression coverage, chat export hardening, backup and tool closeouts, context and learning receipts, security report compatibility, issue/TDD repair imports, memory and handoff hardening, release evidence schemas, operator-center schemas, fleet release reports, CI platform warnings, install smoke receipts, public template privacy, and local operator readiness closeout.
+
+Closed roadmap items move to [`docs/roadmap-archive.md`](docs/roadmap-archive.md) so this file stays focused on current direction.

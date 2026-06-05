@@ -43,6 +43,7 @@ DOC_COMMAND_TOP_LEVELS = {
     "work",
 }
 COMMAND_INVENTORY_RELATIVE_PATH = Path("docs") / "command-inventory.md"
+ROADMAP_ARCHIVE_RELATIVE_PATH = Path("docs") / "roadmap-archive.md"
 
 PATTERN_FAMILIES: tuple[dict[str, Any], ...] = (
     {
@@ -171,16 +172,18 @@ DECISION_RECORDS: tuple[dict[str, Any], ...] = (
     },
 )
 
-DEFERRED_ROADMAP_ITEMS: tuple[dict[str, Any], ...] = (
+ACTIVE_ROADMAP_QUEUE_ITEMS: tuple[dict[str, Any], ...] = ()
+
+ARCHIVED_ROADMAP_ITEMS: tuple[dict[str, Any], ...] = (
     {
         "id": "deeper-roadmap-ownership-modeling",
         "title": "Deeper roadmap ownership modeling",
         "subsystem": "roadmap",
         "owner": "roadmap",
         "source_section": "Roadmap State Audit And Closure Map",
-        "deferred_reason": "Earlier roadmap audit work prioritized command visibility, JSON output, tests, and daily-loop health before richer ownership state.",
-        "suggested_phase": 62,
-        "status": "active",
+        "closed_phase": 62,
+        "archive_reason": "Closed for the completion-hardening queue with explicit deferred ownership records; richer roadmap workflow state belongs in the next roadmap.",
+        "status": "carried-forward",
     },
     {
         "id": "private-pattern-source-aliases",
@@ -188,29 +191,9 @@ DEFERRED_ROADMAP_ITEMS: tuple[dict[str, Any], ...] = (
         "subsystem": "roadmap",
         "owner": "roadmap",
         "source_section": "Inspiration Pattern Registry",
-        "deferred_reason": "Exact reference source names belong only in gitignored host-local config, while public docs should expose neutral pattern families.",
-        "suggested_phase": 62,
-        "status": "active",
-    },
-    {
-        "id": "cross-producer-provenance-audit",
-        "title": "Cross-producer provenance audits across historical sources",
-        "subsystem": "work-inbox",
-        "owner": "work",
-        "source_section": "Scanner And Inbox Closure",
-        "deferred_reason": "The scanner closeout phase tightened the common path first and left historical compatibility backfill for a focused pass.",
-        "suggested_phase": 64,
-        "status": "planned",
-    },
-    {
-        "id": "expanded-chat-export-parsers",
-        "title": "Expanded chat export provider aliases and parser fixtures",
-        "subsystem": "chat-surfaces",
-        "owner": "chat",
-        "source_section": "Chat Surface Export Completion",
-        "deferred_reason": "The no-live-API boundary kept the first implementation focused on local export contracts and privacy gates.",
-        "suggested_phase": 66,
-        "status": "planned",
+        "closed_phase": 62,
+        "archive_reason": "Closed for public hardening by keeping exact private reference names out of public docs and using neutral pattern families.",
+        "status": "implemented",
     },
     {
         "id": "outbound-backup-status-messages",
@@ -218,19 +201,9 @@ DEFERRED_ROADMAP_ITEMS: tuple[dict[str, Any], ...] = (
         "subsystem": "backup-health",
         "owner": "backup",
         "source_section": "Backup And Recovery Closure",
-        "deferred_reason": "Outbound notifications require product-specific surfaces and remain outside the local read-only operator loop.",
-        "suggested_phase": None,
+        "closed_phase": None,
+        "archive_reason": "Closed as out of scope for the local read-only operator loop; outbound notification behavior belongs behind an explicit future surface.",
         "status": "out-of-scope",
-    },
-    {
-        "id": "tool-projection-parity-closeout",
-        "title": "Separate tool projection parity closeout receipt",
-        "subsystem": "tool-catalog",
-        "owner": "tools",
-        "source_section": "Shared Tool Catalog Completion",
-        "deferred_reason": "Projection state is represented in packs and sync plans first, while closeout state needs a focused compatibility pass.",
-        "suggested_phase": 68,
-        "status": "planned",
     },
     {
         "id": "context-harness-destination-writes",
@@ -238,39 +211,9 @@ DEFERRED_ROADMAP_ITEMS: tuple[dict[str, Any], ...] = (
         "subsystem": "context",
         "owner": "context",
         "source_section": "Context Engineering Packs",
-        "deferred_reason": "Context sync planning remains read-only until a future explicit context apply command exists.",
-        "suggested_phase": 70,
-        "status": "planned",
-    },
-    {
-        "id": "learning-accepted-risk-quieting",
-        "title": "Rich accepted-risk quieting across learning sources",
-        "subsystem": "learning",
-        "owner": "learn",
-        "source_section": "Self-Learning Loop Closure",
-        "deferred_reason": "Candidate import routing exists first, while source-specific quieting policies remain subsystem-owned.",
-        "suggested_phase": 74,
-        "status": "planned",
-    },
-    {
-        "id": "security-sarif-output",
-        "title": "Dependency-free security SARIF output",
-        "subsystem": "security",
-        "owner": "security",
-        "source_section": "Security Plugin Closure",
-        "deferred_reason": "JSON and Markdown evidence bundles exist, and SARIF needs a focused schema compatibility pass without new dependencies.",
-        "suggested_phase": 76,
-        "status": "planned",
-    },
-    {
-        "id": "stale-issue-repair-imports",
-        "title": "Stale active issue repair imports",
-        "subsystem": "work",
-        "owner": "work",
-        "source_section": "Issue And TDD Loop Closure",
-        "deferred_reason": "Closed in phase 80 with local repair imports for stale or unreadable issue-backed task context.",
-        "suggested_phase": 80,
-        "status": "implemented",
+        "closed_phase": 70,
+        "archive_reason": "Closed for the foundation by shipping read-only sync plans and receipts; destination writes require a future explicit apply command.",
+        "status": "carried-forward",
     },
     {
         "id": "repo-shareable-workflow-rule-templates",
@@ -278,8 +221,68 @@ DEFERRED_ROADMAP_ITEMS: tuple[dict[str, Any], ...] = (
         "subsystem": "install",
         "owner": "templates",
         "source_section": "Issue And TDD Loop Closure",
-        "deferred_reason": "Closed in phase 79 with public-safe repo templates and work doctor visibility.",
-        "suggested_phase": 79,
+        "closed_phase": 79,
+        "archive_reason": "Closed with public-safe repo templates and work doctor visibility.",
+        "status": "implemented",
+    },
+    {
+        "id": "stale-issue-repair-imports",
+        "title": "Stale active issue repair imports",
+        "subsystem": "work",
+        "owner": "work",
+        "source_section": "Issue And TDD Loop Closure",
+        "closed_phase": 80,
+        "archive_reason": "Closed with local repair imports for stale or unreadable issue-backed task context.",
+        "status": "implemented",
+    },
+    {
+        "id": "cross-producer-provenance-audit",
+        "title": "Cross-producer provenance audits across historical sources",
+        "subsystem": "work-inbox",
+        "owner": "work",
+        "source_section": "Scanner And Inbox Closure",
+        "closed_phase": 64,
+        "archive_reason": "Closed with work import provenance checks and inbox doctor provenance contract warnings.",
+        "status": "implemented",
+    },
+    {
+        "id": "expanded-chat-export-parsers",
+        "title": "Expanded chat export provider aliases and parser fixtures",
+        "subsystem": "chat-surfaces",
+        "owner": "chat",
+        "source_section": "Chat Surface Export Completion",
+        "closed_phase": 66,
+        "archive_reason": "Closed with provider alias normalization, starter surfaces, JSONL fixtures, sweep review, task promotion, and handoff promotion.",
+        "status": "implemented",
+    },
+    {
+        "id": "tool-projection-parity-closeout",
+        "title": "Separate tool projection parity closeout receipt",
+        "subsystem": "tool-catalog",
+        "owner": "tools",
+        "source_section": "Shared Tool Catalog Completion",
+        "closed_phase": 68,
+        "archive_reason": "Closed with tools parity status and closeout receipts, doctor and brief integration, and changed-fingerprint resurfacing.",
+        "status": "implemented",
+    },
+    {
+        "id": "learning-accepted-risk-quieting",
+        "title": "Rich accepted-risk quieting across learning sources",
+        "subsystem": "learning",
+        "owner": "learn",
+        "source_section": "Self-Learning Loop Closure",
+        "closed_phase": 74,
+        "archive_reason": "Closed with learning closeout records for accepted-risk, dismissed, archived, and deferred outcomes.",
+        "status": "implemented",
+    },
+    {
+        "id": "security-sarif-output",
+        "title": "Dependency-free security SARIF output",
+        "subsystem": "security",
+        "owner": "security",
+        "source_section": "Security Plugin Closure",
+        "closed_phase": 76,
+        "archive_reason": "Closed with dependency-free SARIF 2.1.0 output in security scan bundles and `brigade security sarif` regeneration.",
         "status": "implemented",
     },
     {
@@ -288,9 +291,9 @@ DEFERRED_ROADMAP_ITEMS: tuple[dict[str, Any], ...] = (
         "subsystem": "memory-care",
         "owner": "memory",
         "source_section": "Memory And Handoff Closure",
-        "deferred_reason": "Memory-care closeouts record review state first, with mutation-free repair planning left for a focused pass.",
-        "suggested_phase": 83,
-        "status": "planned",
+        "closed_phase": 83,
+        "archive_reason": "Closed with mutation-free `brigade memory care plan-fixes` planning and blocked-plan reporting.",
+        "status": "implemented",
     },
     {
         "id": "recursive-repo-root-discovery",
@@ -298,9 +301,9 @@ DEFERRED_ROADMAP_ITEMS: tuple[dict[str, Any], ...] = (
         "subsystem": "repo-fleet",
         "owner": "repos",
         "source_section": "Repository Fleet Readiness",
-        "deferred_reason": "Explicit repo config avoids accidentally exposing private repo names or paths; discovery needs a dry-run privacy-safe plan.",
-        "suggested_phase": 91,
-        "status": "planned",
+        "closed_phase": 93,
+        "archive_reason": "Closed with dry-run `brigade repos discover plan`, configured-root parsing, safe candidate labels, include/exclude/max-depth handling, and path redaction.",
+        "status": "implemented",
     },
 )
 
@@ -416,7 +419,7 @@ def _section_stale_checks(sections: list[dict[str, Any]]) -> list[dict[str, Any]
 
 def _commands_from_text(text: str) -> set[str]:
     commands: set[str] = set()
-    command_re = re.compile(r"\bbrigade\b(?P<tail>[^\n`]*)")
+    command_re = re.compile(r"\bbrigade\b(?P<tail>\s+[^\n`]*)")
 
     def add_command(raw_command: str, *, require_known_head: bool = False) -> None:
         match = command_re.search(raw_command)
@@ -498,8 +501,12 @@ def _normalize_documented_command(command: str, known_prefixes: set[str]) -> str
     return command
 
 
-def _deferred_items() -> list[dict[str, Any]]:
-    return [dict(item) for item in DEFERRED_ROADMAP_ITEMS]
+def _active_queue_items() -> list[dict[str, Any]]:
+    return [dict(item) for item in ACTIVE_ROADMAP_QUEUE_ITEMS]
+
+
+def _archived_items() -> list[dict[str, Any]]:
+    return [dict(item) for item in ARCHIVED_ROADMAP_ITEMS]
 
 
 def _deferred_item_checks(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -568,7 +575,8 @@ def audit_payload(target: Path) -> dict[str, Any]:
     )
     if inventory_check:
         checks.append(dict(inventory_check))
-    deferred_items = _deferred_items()
+    deferred_items = _active_queue_items()
+    archived_items = _archived_items()
     checks.extend(_deferred_item_checks(deferred_items))
     issues = [check for check in checks if check.get("status") != OK]
     return {
@@ -576,6 +584,11 @@ def audit_payload(target: Path) -> dict[str, Any]:
         "roadmap": roadmap,
         "deferred_items": deferred_items,
         "deferred_item_count": len(deferred_items),
+        "active_queue_items": deferred_items,
+        "active_queue_item_count": len(deferred_items),
+        "archived_items": archived_items,
+        "archived_item_count": len(archived_items),
+        "archive_path": str(target / ROADMAP_ARCHIVE_RELATIVE_PATH),
         "documented_commands": documented,
         "normalized_documented_commands": normalized_documented,
         "cli_commands": cli_commands,
@@ -706,6 +719,58 @@ def patterns(*, target: Path, json_output: bool = False) -> int:
     return 0
 
 
+def archive_payload(target: Path) -> dict[str, Any]:
+    target = target.expanduser().resolve()
+    items = _archived_items()
+    checks = [
+        {
+            "status": OK if (target / ROADMAP_ARCHIVE_RELATIVE_PATH).is_file() else WARN,
+            "name": "roadmap_archive_doc_exists",
+            "detail": ROADMAP_ARCHIVE_RELATIVE_PATH.as_posix()
+            if (target / ROADMAP_ARCHIVE_RELATIVE_PATH).is_file()
+            else f"{ROADMAP_ARCHIVE_RELATIVE_PATH.as_posix()} missing",
+        },
+    ]
+    missing_reason = [item["id"] for item in items if not item.get("archive_reason")]
+    checks.append(
+        {
+            "status": WARN if missing_reason else OK,
+            "name": "roadmap_archive_missing_reason",
+            "detail": f"{len(missing_reason)} archived item(s) missing reason" if missing_reason else "none",
+            "items": missing_reason,
+        }
+    )
+    issues = [check for check in checks if check["status"] != OK]
+    return {
+        "target": str(target),
+        "archive_path": str(target / ROADMAP_ARCHIVE_RELATIVE_PATH),
+        "archive_relative_path": ROADMAP_ARCHIVE_RELATIVE_PATH.as_posix(),
+        "archived_items": items,
+        "archived_item_count": len(items),
+        "checks": checks,
+        "issues": issues,
+        "issue_count": len(issues),
+        "top_issue": issues[0] if issues else None,
+    }
+
+
+def archive(*, target: Path, json_output: bool = False) -> int:
+    payload = archive_payload(target)
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+    print(f"roadmap archive: {payload['target']}")
+    print(f"archive: {payload['archive_relative_path']}")
+    print(f"archived_items: {payload['archived_item_count']}")
+    for item in payload["archived_items"]:
+        phase = item.get("closed_phase") or "n/a"
+        print(f"- {item['id']} [{item['status']}] phase={phase}: {item['title']}")
+    for check in payload["checks"]:
+        if check["status"] != OK:
+            print(f"[{check['status']}] {check['name']}: {check['detail']}")
+    return 0
+
+
 def command_contract_payload(target: Path) -> dict[str, Any]:
     target = target.expanduser().resolve()
     documented = _documented_brigade_commands(target)
@@ -830,10 +895,12 @@ def health(target: Path) -> dict[str, Any]:
     audit_data = audit_payload(target)
     pattern_data = patterns_payload(target)
     command_data = command_contract_payload(target)
+    archive_data = archive_payload(target)
     checks = [
         *audit_data.get("issues", []),
         *pattern_data.get("issues", []),
         *command_data.get("issues", []),
+        *archive_data.get("issues", []),
     ]
     return {
         "target": str(target.expanduser().resolve()),
@@ -848,6 +915,11 @@ def health(target: Path) -> dict[str, Any]:
         "commands": {
             "issue_count": command_data["issue_count"],
             "top_issue": command_data["top_issue"],
+        },
+        "archive": {
+            "issue_count": archive_data["issue_count"],
+            "top_issue": archive_data["top_issue"],
+            "archived_item_count": archive_data["archived_item_count"],
         },
         "checks": checks,
         "issue_count": len(checks),

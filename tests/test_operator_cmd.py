@@ -378,6 +378,7 @@ def test_operator_quickstart_prepares_new_user_workspace(tmp_path, capsys):
     assert (tmp_path / ".brigade" / "daily.toml").is_file()
     assert (tmp_path / ".brigade" / "reviews.toml").is_file()
     gitignore = (tmp_path / ".gitignore").read_text()
+    assert ".brigade/" in gitignore
     assert ".brigade/daily.toml" in gitignore
     assert ".brigade/reviews.toml" in gitignore
     assert (tmp_path / ".codex" / "memory-handoffs").is_dir()

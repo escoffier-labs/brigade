@@ -23,7 +23,7 @@ Brigade helps AI agent tools work from the same memory without turning that memo
 
 Brigade is usable now for real first-run workflows. The tested path is installing the CLI, running `operator quickstart` in a repo, checking `operator doctor --profile local-operator`, writing memory handoffs, projecting portable skills and tools, and using the local security scanner.
 
-It is still early-stage and being actively fleshed out. Expect sharp edges around advanced workflows, new harness adapters, repo-fleet evidence, and release-candidate evidence. If you hit a broken workflow, confusing command, missing adapter, or setup issue, open a GitHub issue in [`escoffier-labs/brigade`](https://github.com/escoffier-labs/brigade/issues) and I will get it addressed as soon as I can.
+It is still early-stage and being actively fleshed out. The current focus is hardening the first-run path, roadmap and command drift checks, daily operator loop, and local evidence closeouts. Expect sharp edges around advanced workflows, new harness adapters, repo-fleet evidence, and release-candidate evidence. If you hit a broken workflow, confusing command, missing adapter, or setup issue, open a GitHub issue in [`escoffier-labs/brigade`](https://github.com/escoffier-labs/brigade/issues) and I will get it addressed as soon as I can.
 
 Want an agent to set this up for you? Point it at this repository. The root [`AGENTS.md`](AGENTS.md) tells agents how to install Brigade, verify with doctor, adapt your existing homegrown workflow instead of replacing it, keep local generated folders out of commits, and stop before any remote or destructive action. The fuller walkthrough is in [`docs/agent-assisted-setup.md`](docs/agent-assisted-setup.md).
 
@@ -50,6 +50,49 @@ If you use [OpenClaw](https://github.com/solomonneas/openclaw), Hermes, Codex, C
 5. future sessions start with better context
 
 It is intentionally local. Brigade writes files and review queues on your machine. It does not run a background service, publish releases, push to GitHub, send notifications, or rewrite permanent memory unless you explicitly run the command that does it.
+
+## Stack At A Glance
+
+```mermaid
+flowchart TB
+    OWNER["<b>OpenClaw / Hermes</b><br/><i>canonical memory owner</i>"]
+    MEMORY["<b>Durable memory</b><br/>MEMORY.md · cards · project context"]
+    BRIGADE["<b>Brigade CLI</b><br/><i>local wiring · receipts · review queues</i>"]
+    STATE["<b>.brigade/</b><br/>local config · scans · reports · closeouts"]
+
+    OWNER -->|maintains| MEMORY
+    BRIGADE -->|records| STATE
+    BRIGADE -->|prepares reviewed handoffs for| OWNER
+
+    subgraph WRITERS [" writer harnesses "]
+        CODEX["<b>Codex CLI</b><br/>handoff writer"]
+        CLAUDE["<b>Claude Code</b><br/>handoff writer"]
+        OPEN["<b>OpenCode</b><br/>handoff writer"]
+        HERMES["<b>Hermes</b><br/>writer or owner"]
+    end
+
+    CODEX & CLAUDE & OPEN & HERMES == handoff drafts ==> BRIGADE
+    MEMORY -. context .-> CODEX & CLAUDE & OPEN & HERMES
+
+    subgraph LOCAL [" local operator lanes "]
+        WORK["work sessions<br/>tasks · plans · verification"]
+        SCAN["scanners<br/>security · chat · repo health"]
+        RELEASE["release evidence<br/>candidates · smoke · waivers"]
+    end
+
+    BRIGADE --> WORK
+    BRIGADE --> SCAN
+    BRIGADE --> RELEASE
+
+    classDef owner fill:#ef4444,stroke:#b91c1c,color:#fff;
+    classDef brigade fill:#2563eb,stroke:#1d4ed8,color:#fff;
+    classDef state fill:#fff7ed,stroke:#ea580c,color:#7c2d12;
+    classDef lane fill:#f1f5f9,stroke:#94a3b8,color:#334155;
+    class OWNER owner;
+    class BRIGADE brigade;
+    class MEMORY,STATE state;
+    class WORK,SCAN,RELEASE,CODEX,CLAUDE,OPEN,HERMES lane;
+```
 
 > Brigade was extracted from the [**solos-cookbook**](https://github.com/solomonneas/solos-cookbook), a documented 24/7 multi-agent stack running in production. If you want the full picture of how Brigade fits into a real setup, start there, and a star helps other people find it.
 >
@@ -125,7 +168,31 @@ Each writer harness gets its own local inbox:
 
 The memory owner, usually OpenClaw or Hermes, can ingest handoffs into the permanent memory files. Brigade keeps the handoff format consistent so different tools can contribute without each one inventing its own note style.
 
-![One shared memory, many agent tools](docs/assets/brigade-memory-flow.svg)
+```mermaid
+flowchart LR
+    subgraph WRITERS [" writer inboxes "]
+        C[".codex/memory-handoffs/"]
+        CL[".claude/memory-handoffs/"]
+        O[".opencode/memory-handoffs/"]
+        H[".hermes/memory-handoffs/"]
+    end
+
+    DRAFT["Brigade handoff draft<br/>lint · guard · route"]
+    REVIEW["operator review<br/>safe · ambiguous · risky"]
+    OWNER["OpenClaw / Hermes<br/>memory owner"]
+    MEM["durable memory<br/>cards · docs · learnings"]
+
+    C & CL & O & H --> DRAFT --> REVIEW
+    REVIEW -->|safe targeted note| OWNER --> MEM
+    REVIEW -->|needs judgment| INBOX["review inbox"]
+
+    classDef local fill:#eff6ff,stroke:#2563eb,color:#1e3a8a;
+    classDef review fill:#fff7ed,stroke:#ea580c,color:#7c2d12;
+    classDef memory fill:#ecfdf5,stroke:#059669,color:#064e3b;
+    class C,CL,O,H,DRAFT local;
+    class REVIEW,INBOX review;
+    class OWNER,MEM memory;
+```
 
 The important part is the boundary. The ingester should be conservative: safe card handoffs can become cards, targeted updates can append to the right file, and ambiguous material should be kicked back for review instead of trusted automatically.
 
@@ -139,7 +206,27 @@ Brigade is built around a simple daily loop:
 4. review anything skipped, flagged, or ambiguous
 5. save only the parts worth remembering
 
-![The Brigade loop stays local and reviewable](docs/assets/brigade-local-loop.svg)
+```mermaid
+flowchart LR
+    SETUP["quickstart<br/>local files"]
+    WORK["agents work<br/>sessions & tasks"]
+    HANDOFF["handoffs<br/>draft & lint"]
+    REVIEW["operator review<br/>promote or defer"]
+    MEMORY["durable memory<br/>only what is worth keeping"]
+    RECEIPTS["receipts<br/>what happened"]
+
+    SETUP --> WORK --> HANDOFF --> REVIEW --> MEMORY
+    WORK --> RECEIPTS
+    REVIEW --> RECEIPTS
+    RECEIPTS -. better context .-> WORK
+
+    classDef step fill:#f1f5f9,stroke:#64748b,color:#334155;
+    classDef gate fill:#fff7ed,stroke:#ea580c,color:#7c2d12;
+    classDef memory fill:#ecfdf5,stroke:#059669,color:#064e3b;
+    class SETUP,WORK,HANDOFF,RECEIPTS step;
+    class REVIEW gate;
+    class MEMORY memory;
+```
 
 This loop scales from one person using one repo to a more serious operator setup with scanner inboxes, work receipts, release checks, and repo-fleet summaries. You do not need all of that on day one.
 
@@ -176,7 +263,40 @@ For safety:
 
 Brigade is the local operator layer. It integrates with nearby tools instead of trying to absorb all of them.
 
-![Brigade connects the local agent-tool fleet](docs/assets/brigade-ecosystem.svg)
+```mermaid
+flowchart TB
+    BRIGADE["Brigade<br/>local operator layer"]
+
+    subgraph MEMORY [" memory and handoffs "]
+        OPENCLAW["OpenClaw"]
+        HERMES["Hermes"]
+        MDOCTOR["memory-doctor"]
+        BDOCTOR["bootstrap-doctor"]
+    end
+
+    subgraph SAFETY [" safety and operations "]
+        GUARD["Content Guard"]
+        PANTRY["Agent Pantry"]
+        NOTIFY["agent-notify"]
+        TOKEN["tokenjuice"]
+    end
+
+    subgraph NATIVE [" native Brigade stations "]
+        REPOS["repo fleet"]
+        TOOLS["tool catalog"]
+        SECURITY["security scan"]
+        HANDOFFS["handoff promotion"]
+    end
+
+    BRIGADE --> MEMORY
+    BRIGADE --> SAFETY
+    BRIGADE --> NATIVE
+
+    classDef core fill:#2563eb,stroke:#1d4ed8,color:#fff;
+    classDef group fill:#f8fafc,stroke:#94a3b8,color:#334155;
+    class BRIGADE core;
+    class OPENCLAW,HERMES,MDOCTOR,BDOCTOR,GUARD,PANTRY,NOTIFY,TOKEN,REPOS,TOOLS,SECURITY,HANDOFFS group;
+```
 
 Memory and handoff tools:
 
@@ -198,7 +318,22 @@ Brigade also has native local workflows for [repo fleet operations](docs/repo-fl
 
 `brigade repos` watches a configured set of local repositories and turns their state into reviewable evidence: health scans, sweeps, reports, fleet actions, and release trains.
 
-![Repo fleet turns local evidence into reviewed actions](docs/assets/repo-fleet-flow.svg)
+```mermaid
+flowchart LR
+    CONFIG[".brigade/repos.toml<br/>configured local repos"]
+    SCAN["repos scan / sweep<br/>safe metadata only"]
+    REPORT["fleet report<br/>health evidence"]
+    ACTIONS["reviewed actions<br/>start · done · defer"]
+    RELEASE["release train<br/>manual checklist"]
+
+    CONFIG --> SCAN --> REPORT --> ACTIONS --> RELEASE
+    RELEASE -. no publish step .-> MANUAL["operator publishes manually"]
+
+    classDef local fill:#eff6ff,stroke:#2563eb,color:#1e3a8a;
+    classDef review fill:#fff7ed,stroke:#ea580c,color:#7c2d12;
+    class CONFIG,SCAN,REPORT local;
+    class ACTIONS,RELEASE,MANUAL review;
+```
 
 - Repos live in a gitignored `.brigade/repos.toml`. Nothing is cloned, pushed, or mutated remotely.
 - `brigade repos scan` and `brigade repos sweep` collect local health evidence.
@@ -211,7 +346,25 @@ Full command list in [Repo fleet](docs/repo-fleet.md).
 
 `brigade tools` describes local callable tools, slash commands, skills, scripts, and MCP configs across harnesses, then gates execution behind an approval queue. `brigade tools defaults` refreshes built-in portable tool entries while preserving custom repo tools.
 
-![Tool catalog separates discovery, projection, and execution](docs/assets/tool-catalog-flow.svg)
+```mermaid
+flowchart LR
+    SOURCE["tools/<br/>tracked portable sources"]
+    CATALOG[".brigade/tools.toml<br/>catalog"]
+    PROJECT["sync-tools<br/>harness projections"]
+    APPROVAL["call plan / queue<br/>operator approval"]
+    RUN["run receipt<br/>logs · replay · checkpoints"]
+
+    SOURCE --> CATALOG --> PROJECT
+    CATALOG --> APPROVAL --> RUN
+    PROJECT -. local generated .-> HARNESSES[".codex · .claude<br/>.opencode · .mcp"]
+
+    classDef source fill:#ecfdf5,stroke:#059669,color:#064e3b;
+    classDef local fill:#eff6ff,stroke:#2563eb,color:#1e3a8a;
+    classDef gate fill:#fff7ed,stroke:#ea580c,color:#7c2d12;
+    class SOURCE source;
+    class CATALOG,PROJECT,HARNESSES local;
+    class APPROVAL,RUN gate;
+```
 
 - Discovery is read-only: `list`, `search`, `describe`, `contracts`.
 - Projections write reviewed harness-specific tool docs. There is no auto-sync.
@@ -224,7 +377,25 @@ Details in [Tool catalog](docs/tool-catalog.md).
 
 Reviewed scanner imports can be promoted into memory handoff drafts instead of being retyped by hand.
 
-![Reviewed imports promote into memory handoff drafts](docs/assets/handoff-promotion-flow.svg)
+```mermaid
+flowchart LR
+    IMPORT["work import<br/>decision · finding · command · incident"]
+    PLAN["plan-handoff<br/>preview target & blockers"]
+    PROMOTE["promote-handoff<br/>write draft"]
+    LINT["handoff lint<br/>format · route · guard"]
+    DRAFT["memory-handoffs/<br/>reviewed draft"]
+    OWNER["memory owner ingest<br/>outside Brigade"]
+
+    IMPORT --> PLAN --> PROMOTE --> LINT --> DRAFT --> OWNER
+    LINT -->|blocked| REPAIR["repair import"]
+
+    classDef import fill:#eff6ff,stroke:#2563eb,color:#1e3a8a;
+    classDef gate fill:#fff7ed,stroke:#ea580c,color:#7c2d12;
+    classDef memory fill:#ecfdf5,stroke:#059669,color:#064e3b;
+    class IMPORT,PLAN,PROMOTE import;
+    class LINT,REPAIR gate;
+    class DRAFT,OWNER memory;
+```
 
 - Works for durable non-task imports: decisions, preferences, links, commands, findings, incidents.
 - `brigade work import plan-handoff` previews the target and blockers, `promote-handoff` writes the draft and lints it.
@@ -263,7 +434,24 @@ That pause is the point. Agent memory should be useful, not noisy.
 
 OpenClaw can be the memory owner. Brigade gives nearby tools a way to contribute checked handoffs back into that owner memory without forcing every tool to know OpenClaw internals.
 
-![Memory ingest stays outside Brigade until receipts return](docs/assets/openclaw-ingest-flow.svg)
+```mermaid
+flowchart LR
+    WRITERS["Codex · Claude · OpenCode<br/>writer inboxes"]
+    BRIGADE["Brigade<br/>draft · lint · source coverage"]
+    OPENCLAW["OpenClaw<br/>memory owner"]
+    MEMORY["canonical memory"]
+    RECEIPTS["ingest receipts<br/>promoted · skipped · failed"]
+
+    WRITERS --> BRIGADE --> OPENCLAW --> MEMORY
+    OPENCLAW --> RECEIPTS --> BRIGADE
+
+    classDef brigade fill:#2563eb,stroke:#1d4ed8,color:#fff;
+    classDef owner fill:#ef4444,stroke:#b91c1c,color:#fff;
+    classDef local fill:#f1f5f9,stroke:#94a3b8,color:#334155;
+    class BRIGADE brigade;
+    class OPENCLAW owner;
+    class WRITERS,MEMORY,RECEIPTS local;
+```
 
 A typical setup is:
 
@@ -279,7 +467,25 @@ Then writer tools leave handoffs in their own inboxes, and the memory owner inge
 
 Hermes now has a first-class Brigade handoff inbox:
 
-![Hermes is a local handoff writer inbox](docs/assets/hermes-handoff-flow.svg)
+```mermaid
+flowchart LR
+    HERMES["Hermes"]
+    INBOX[".hermes/memory-handoffs/"]
+    FRAGMENTS[".brigade/hermes/<br/>adapter fragments"]
+    VERIFY["operator verify-harness"]
+    HANDOFFS["handoff list / lint"]
+
+    HERMES --> INBOX
+    HERMES --> FRAGMENTS
+    INBOX --> VERIFY
+    FRAGMENTS --> VERIFY
+    VERIFY --> HANDOFFS
+
+    classDef hermes fill:#7c3aed,stroke:#5b21b6,color:#fff;
+    classDef local fill:#f1f5f9,stroke:#94a3b8,color:#334155;
+    class HERMES hermes;
+    class INBOX,FRAGMENTS,VERIFY,HANDOFFS local;
+```
 
 ```bash
 brigade init --target . --depth workspace --harnesses hermes
@@ -310,7 +516,26 @@ See [Hermes handoffs](docs/hermes-handoffs.md) for the current boundaries.
 
 Brigade handles the memory and operator workflow. Content Guard checks whether content is safe to publish or save.
 
-![Security scans become reviewable local work](docs/assets/security-flow.svg)
+```mermaid
+flowchart LR
+    SCAN["security scan<br/>redacted findings"]
+    BUNDLE[".brigade/security/latest<br/>JSON · Markdown · SARIF"]
+    REVIEW["review / suppress<br/>accepted risk with reason"]
+    IMPORT["work import<br/>security follow-up"]
+    RELEASE["release readiness<br/>local blocker evidence"]
+
+    SCAN --> BUNDLE --> REVIEW
+    BUNDLE --> IMPORT
+    REVIEW --> RELEASE
+    IMPORT --> RELEASE
+
+    classDef scan fill:#fee2e2,stroke:#dc2626,color:#7f1d1d;
+    classDef local fill:#f1f5f9,stroke:#94a3b8,color:#334155;
+    classDef review fill:#fff7ed,stroke:#ea580c,color:#7c2d12;
+    class SCAN scan;
+    class BUNDLE,IMPORT,RELEASE local;
+    class REVIEW review;
+```
 
 Use it at three points:
 
@@ -342,6 +567,7 @@ The full technical walkthrough still exists; it is just not the README anymore.
 - [Internal dogfood loop](docs/internal-dogfood.md): how this repo uses Brigade on itself.
 - [Command inventory](docs/command-inventory.md): every public CLI command.
 - [Roadmap](ROADMAP.md): current direction.
+- [Roadmap archive](docs/roadmap-archive.md): completed or intentionally closed roadmap items.
 
 ## Tiny Glossary
 

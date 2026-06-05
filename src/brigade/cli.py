@@ -624,6 +624,9 @@ def _build_parser() -> argparse.ArgumentParser:
     p_roadmap_patterns = roadmap_sub.add_parser("patterns", help="Show neutral inspiration pattern coverage.")
     p_roadmap_patterns.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
     p_roadmap_patterns.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_roadmap_archive = roadmap_sub.add_parser("archive", help="Show archived roadmap items that left the active queue.")
+    p_roadmap_archive.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_roadmap_archive.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_roadmap_commands = roadmap_sub.add_parser("commands", help="Show parser-derived command documentation coverage.")
     p_roadmap_commands.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
     p_roadmap_commands.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
@@ -3177,6 +3180,8 @@ def main(argv=None) -> int:
             return roadmap_cmd.audit(target=args.target, json_output=args.json, import_issues=args.import_issues)
         if args.roadmap_command == "patterns":
             return roadmap_cmd.patterns(target=args.target, json_output=args.json)
+        if args.roadmap_command == "archive":
+            return roadmap_cmd.archive(target=args.target, json_output=args.json)
         if args.roadmap_command == "commands":
             return roadmap_cmd.commands(target=args.target, json_output=args.json, write_inventory=args.write, check_inventory=args.check)
         parser.error(f"unknown roadmap command: {args.roadmap_command}")

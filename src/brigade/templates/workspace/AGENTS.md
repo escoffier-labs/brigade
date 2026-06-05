@@ -65,9 +65,9 @@ When the user corrects you: if you are the memory owner, save a card to `memory/
 
 ## Safety
 
-- Do not exfiltrate private data.
+- Keep private data local unless the user explicitly asks otherwise.
 - Do not run destructive commands without asking.
-- Prefer recoverable deletes (`trash`) over `rm -rf`.
+- Prefer recoverable deletes (`trash`) over permanent recursive deletion.
 - When in doubt, ask.
 
 **Safe to do freely:** read, explore, organize local files, and do normal workspace work.

@@ -121,7 +121,7 @@ If you have access to remote hosts, virtualization, or shared infrastructure, tr
 
 - Destroy or stop VMs / containers.
 - Modify network config on running containers.
-- `rm -rf` inside production.
+- Recursive force-deletion inside production.
 - Change firewall, DNS, or routing rules.
 
 **Safe to do freely on shared infra:**
