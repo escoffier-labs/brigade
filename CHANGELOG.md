@@ -31,8 +31,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - New `pantry` station (alias `larder`) and the `agentpantry` managed tool. `brigade add pantry` installs agentpantry via `go install`, and `brigade doctor`/`brigade status` health-check it by shelling out to `agentpantry status --json`. Like the memory satellites, agentpantry inspects host-global state, so its checks are advisory and never FAIL a workspace run: an unwired install (no config) is a `WARN`, a missing pre-shared key is a `WARN`, otherwise `OK`.
 
 ### Fixed
+- Removed an unsafe temp-directory cleanup example from the init failure issue template and contributor smoke-test docs, replacing it with `mktemp -d` fresh target setup.
+- The security scanner no longer reports its own plaintext-password detector variable names as findings while scanning Brigade source.
 - Corrected the stale `github.com/solomonneas/...` install URLs for the `memory-doctor` and `bootstrap-doctor` managed tools to their actual `escoffier-labs` org, so `brigade add memory` installs from the right repos.
 - Dedupe guard in `brigade ingest` document routing. A `no-card` route whose content (or its first meaningful line/anchor) is already present in the target document is now sent to the review inbox instead of being appended again, matching the canonical pipeline and preventing duplicate content on re-routed handoffs.
+
+### Documentation
+- Refreshed contributor setup guidance for Brigade naming, current source paths, quickstart issue reports, and intended GitHub label taxonomy for public support triage.
+- Added expected quickstart and operator doctor output to the new-user quickstart guide.
 
 
 ## [0.8.0] - 2026-06-01

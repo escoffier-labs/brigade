@@ -106,6 +106,9 @@ def test_security_scan_ignores_own_detector_literals():
         '                suggestion="Pin npx package versions or move execution behind a reviewed lockfile.",',
         '    if "danger-full-access" in line or "sandbox_permissions" in line and "require_escalated" in line:',
         '                title="Environment dump or exfiltration pattern",',
+        "PLAINTEXT_PASSWORD_RE = re.compile(",
+        "    password_match = PLAINTEXT_PASSWORD_RE.search(line)",
+        "    password_emitted = bool(password_match and not _is_placeholder(password_match.group(2)))",
     ]
 
     for index, line in enumerate(lines, start=1):

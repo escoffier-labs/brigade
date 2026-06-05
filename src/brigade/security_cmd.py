@@ -2219,6 +2219,7 @@ def _is_security_scanner_literal(path: Path, line: str) -> bool:
         "sandbox_permissions",
         "require_escalated",
         "npx package",
+        "PLAINTEXT_PASSWORD_RE",
         "Environment dump or exfiltration pattern",
         "Plaintext password",
         "Possible hardcoded credential",
@@ -2228,6 +2229,8 @@ def _is_security_scanner_literal(path: Path, line: str) -> bool:
     if any(token in stripped for token in scanner_tokens):
         return True
     if stripped.startswith("suggestion=") or stripped.startswith("title="):
+        return True
+    if stripped.startswith(("password_match =", "password_emitted =")):
         return True
     return stripped.startswith("if ") and (
         '"danger-full-access"' in stripped

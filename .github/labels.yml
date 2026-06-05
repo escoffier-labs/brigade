@@ -1,0 +1,25 @@
+labels:
+  - name: quickstart
+    color: "0E8A16"
+    description: First-run setup, operator quickstart, or install smoke reports.
+  - name: setup
+    color: "5319E7"
+    description: Environment, install, configuration, or local wiring issue.
+  - name: harness
+    color: "1D76DB"
+    description: Codex, Claude Code, OpenCode, Hermes, OpenClaw, or adapter-specific behavior.
+  - name: docs
+    color: "0075CA"
+    description: Documentation, examples, templates, or onboarding improvements.
+  - name: security-scan
+    color: "D93F0B"
+    description: Security scanner findings, false positives, suppressions, or remediation guidance.
+  - name: ingester
+    color: "BFDADC"
+    description: Memory handoff lint, routing, review inbox, or canonical ingest behavior.
+  - name: release-readiness
+    color: "FBCA04"
+    description: Release doctor, smoke evidence, candidate bundles, or public readiness gates.
+  - name: good first issue
+    color: "7057FF"
+    description: Small, well-scoped issue suitable for a new contributor.

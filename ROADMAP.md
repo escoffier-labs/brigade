@@ -29,6 +29,12 @@ The one rule behind all of it: Brigade writes local files and queues, but it nev
 
 Status: in progress.
 
+Current public-readiness focus:
+
+- Keep first-run setup usable for new operators: quickstart docs now show expected output, issue forms collect reproducible commands, and setup labels are documented for triage. Status: strengthened.
+- Keep release evidence explicit and local: install-smoke matrix receipts, work verification receipts, security evidence, and operator doctor output are intended to remain reviewable before any manual publish step. Status: strengthened.
+- Keep public examples privacy-safe and non-destructive: docs and templates should use fresh temporary targets, redacted issue reports, and no cleanup commands that can expand to an unsafe path. Status: strengthened.
+
 - Local dogfood defaults live in gitignored `.brigade/dogfood.toml`.
 - `brigade work bootstrap` prepares a repo for the daily loop.
 - `brigade work brief` is the start-of-day entrypoint.

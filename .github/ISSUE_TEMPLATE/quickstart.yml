@@ -20,9 +20,10 @@ body:
       render: shell
       placeholder: |
         python3 -m pipx install brigade-cli
-        mkdir -p /tmp/brigade-smoke
-        brigade operator quickstart --target /tmp/brigade-smoke --harnesses codex --json
-        brigade operator doctor --target /tmp/brigade-smoke --profile local-operator
+        target="$(mktemp -d)"
+        git init -q -b main "$target"
+        brigade operator quickstart --target "$target" --harnesses codex --json
+        brigade operator doctor --target "$target" --profile local-operator
     validations:
       required: true
   - type: textarea

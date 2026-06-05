@@ -30,6 +30,22 @@ brigade operator quickstart --target ./my-repo --harnesses codex
 brigade operator doctor --target ./my-repo --profile local-operator
 ```
 
+Expected shape:
+
+```text
+quickstart: ok
+operator doctor: ready yes
+blocking issues: 0
+```
+
+For a machine-readable first-run report:
+
+```bash
+brigade operator quickstart --target ./my-repo --harnesses codex --json
+```
+
+In a healthy run, the JSON has `status: "ok"` and `issue_report.status: "ok"`.
+
 Quickstart runs these local-only steps:
 
 - installs Brigade repo templates

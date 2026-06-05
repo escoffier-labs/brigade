@@ -23,9 +23,10 @@ body:
       description: We want to reproduce the failure verbatim.
       render: shell
       placeholder: |
-        rm -rf /tmp/sm && mkdir -p /tmp/sm && git init -q /tmp/sm
-        brigade operator quickstart --target /tmp/brigade-smoke --harnesses codex
-        brigade operator doctor --target /tmp/brigade-smoke --profile local-operator
+        target="$(mktemp -d)"
+        git init -q -b main "$target"
+        brigade operator quickstart --target "$target" --harnesses codex
+        brigade operator doctor --target "$target" --profile local-operator
     validations:
       required: true
   - type: textarea
