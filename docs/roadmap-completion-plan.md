@@ -881,6 +881,37 @@ Phase 115-164 status:
 - `daily hardening closeout` writes local reviewed, deferred, blocked, or archived closeout receipts under `.brigade/daily/hardening/`.
 - Deferred: automatic hardening repair. Reason: this tranche keeps hardening explicit, local, and reviewable through imports and closeouts instead of applying fixes.
 
+### 16. Deep Research Lane And Harness Handoff Expansion
+
+Deliverable: make deep research useful across local research sources and writer harnesses without turning Brigade into a live browser/chat automation product.
+
+Implementation scope:
+
+- Keep the source order local-first: trusted local files and configured CLI lanes first, browser/web only when explicitly enabled.
+- Add stable research source contracts for configured CLI lanes, including Antigravity through an operator-provided `agy` wrapper or non-interactive command.
+- Add harness-targeted research handoff export so a completed research run can write a linted Memory Handoff into `.codex/memory-handoffs/`, `.claude/memory-handoffs/`, `.opencode/memory-handoffs/`, `.hermes/memory-handoffs/`, or another configured writer inbox.
+- Add `--handoff-inbox` or equivalent explicit export controls to avoid silently choosing the wrong memory owner or writer surface.
+- Add a research handoff doctor that checks destination inbox coverage, handoff lintability, route provenance, and stale run/handoff drift.
+- Preserve run manifests in exported handoffs: corpus, source globs, CLI lane ids, browser/web provider, trust labels, caps, and resume state.
+- Add per-harness templates only where the destination needs different local paths or metadata; keep the core handoff body format shared.
+- Let research handoffs feed the existing handoff list/show/lint/archive and work import promotion flows instead of creating a parallel memory pipeline.
+- Surface research handoff status in work brief, center reviews, and release readiness only as local evidence.
+- Keep raw web pages, raw browser output, raw CLI output, and private local paths out of committed docs and public reports.
+
+Acceptance:
+
+- Tests cover research handoff export to Codex, Claude, OpenCode, Hermes, and a configured custom inbox.
+- Tests cover lint-valid no-card handoffs with no level-2 headings in suggested document content.
+- Tests cover missing inbox, stale run artifact, unsupported harness, and mismatched manifest warnings.
+- Tests cover Antigravity as a configured CLI lane without requiring the `agy` binary in CI.
+- Tests prove research handoff export does not ingest memory, edit memory cards, run browser automation, start a daemon, or mutate remotes.
+- Docs show the CLI-first source model, explicit browser/web route, Antigravity wrapper pattern, and cross-harness handoff export path.
+
+Current status:
+
+- Started with persisted research run manifests, faithful resume, configured CLI source adapters, browser/web trust separation, Antigravity as a named CLI lane, source doctor/list commands, and lintable no-card research handoffs under the run artifact directory.
+- Next chunk: implement explicit research handoff export into selected harness inboxes and surface that exported handoff state in existing handoff/review commands.
+
 ## Suggested Execution Order
 
 1. Roadmap audit, inspiration pattern registry, and repo-fleet readiness.
@@ -895,6 +926,7 @@ Phase 115-164 status:
 10. Issue/TDD and acceptance rollups.
 11. Memory/handoff closeout.
 12. Release candidate final integration.
+13. Deep research handoff export across writer harnesses.
 
 This order starts by making the remaining work visible, then closes noisy daily-loop surfaces, then adds final release integration.
 

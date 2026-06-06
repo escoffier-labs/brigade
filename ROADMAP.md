@@ -322,6 +322,9 @@ Goal: turn open-ended research questions into durable, cited memory instead of o
 - Emit two artifacts per run: a self-contained visual HTML report and a structured memory handoff, so research output flows straight into the existing ingest -> cards/`.learnings` pipeline and becomes durable, cited memory. Status: implemented with a dependency-free HTML report and a memory handoff that separate trusted-local from untrusted-web provenance.
 - Treat every fetched source as untrusted context (see prompt-injection hardening below); web content and tool output are data, not instructions. Status: implemented with an opt-in (`--web`) web tier that is quarantined and labeled untrusted in the report and handoff.
 - Bound cost explicitly: per-run search count and per-page content caps, surfaced in the run receipt, with no silent truncation. Status: implemented with configurable round, time, URL, and content caps recorded in the run stats.
+- Keep the research source model CLI-first where possible. Status: started with persisted run manifests, faithful resume, configured CLI source adapters, `research sources list/doctor`, browser/web trust separation, and Antigravity as a named CLI lane through an operator-provided `agy` wrapper or non-interactive command.
+- Export completed research runs into selected writer harness inboxes, including Codex, Claude Code, OpenCode, Hermes, and custom configured inboxes, as linted Memory Handoffs. Status: planned next; export must be explicit and must not ingest memory, edit cards, run browser automation, start daemons, or mutate remotes.
+- Surface research handoff drift in existing review loops. Status: planned next; research handoff export should preserve route manifests, source trust labels, caps, and run ids, then show stale or missing exports through handoff/review surfaces instead of creating a parallel memory pipeline.
 
 ## Later Phase: Operator Capabilities Beyond The CLI
 
