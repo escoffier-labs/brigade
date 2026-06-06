@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-repo="solomonneas/logspine"
+repo="escoffier-labs/logspine"
 version="${LOGSPINE_VERSION:-latest}"
 bindir="${BINDIR:-$HOME/.local/bin}"
 

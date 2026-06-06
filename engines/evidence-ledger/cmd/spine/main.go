@@ -3,7 +3,7 @@ package main
 import (
 	"os"
 
-	"github.com/openclaw/logspine/internal/app"
+	"github.com/escoffier-labs/logspine/internal/app"
 )
 
 func main() {

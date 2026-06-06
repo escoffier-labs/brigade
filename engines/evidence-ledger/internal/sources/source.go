@@ -14,7 +14,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/openclaw/logspine/internal/adapter"
+	"github.com/escoffier-labs/logspine/internal/adapter"
 )
 
 type Options struct {

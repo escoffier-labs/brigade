@@ -19,14 +19,14 @@ import (
 	"strings"
 	"time"
 
-	"github.com/openclaw/logspine/internal/archive"
-	"github.com/openclaw/logspine/internal/ingest"
-	"github.com/openclaw/logspine/internal/security"
-	"github.com/openclaw/logspine/internal/sources"
-	"github.com/openclaw/logspine/internal/sources/claude"
-	"github.com/openclaw/logspine/internal/sources/codex"
-	"github.com/openclaw/logspine/internal/sources/hermes"
-	"github.com/openclaw/logspine/internal/sources/openclaw"
+	"github.com/escoffier-labs/logspine/internal/archive"
+	"github.com/escoffier-labs/logspine/internal/ingest"
+	"github.com/escoffier-labs/logspine/internal/security"
+	"github.com/escoffier-labs/logspine/internal/sources"
+	"github.com/escoffier-labs/logspine/internal/sources/claude"
+	"github.com/escoffier-labs/logspine/internal/sources/codex"
+	"github.com/escoffier-labs/logspine/internal/sources/hermes"
+	"github.com/escoffier-labs/logspine/internal/sources/openclaw"
 )
 
 var stdin io.Reader = os.Stdin
@@ -601,15 +601,15 @@ func checkPrivate(path string) bool {
 
 func cmdImport(args []string, out, errw io.Writer) int {
 	if len(args) == 0 {
-		return fatalf(errw, "usage: spine import adapter|agenttrail|codex|openclaw|claude|hermes <path>")
+		return fatalf(errw, "usage: spine import adapter|stationtrail|codex|openclaw|claude|hermes <path>")
 	}
 	switch args[0] {
 	case "adapter":
 		return cmdImportAdapter(args[1:], out, errw)
 	case "discovered":
 		return cmdImportDiscovered(args[1:], out, errw)
-	case "agenttrail":
-		return cmdImportAgentTrail(args[1:], out, errw)
+	case "stationtrail":
+		return cmdImportStationTrail(args[1:], out, errw)
 	case "sourceharvest":
 		return cmdImportSourceHarvest(args[1:], out, errw)
 	case "codex":
@@ -621,7 +621,7 @@ func cmdImport(args []string, out, errw io.Writer) int {
 	case "hermes":
 		return cmdImportNative("hermes", hermes.Generate, args[1:], out, errw)
 	default:
-		return fatalf(errw, "usage: spine import adapter|discovered|agenttrail|sourceharvest|codex|openclaw|claude|hermes <path>")
+		return fatalf(errw, "usage: spine import adapter|discovered|stationtrail|sourceharvest|codex|openclaw|claude|hermes <path>")
 	}
 }
 
@@ -655,20 +655,20 @@ func cmdImportAdapter(args []string, out, errw io.Writer) int {
 	return 0
 }
 
-type agentTrailSummary struct {
+type stationTrailSummary struct {
 	Source   string             `json:"source"`
 	Records  int                `json:"records"`
 	Warnings []string           `json:"warnings"`
 	Files    []sources.FileScan `json:"files"`
 }
 
-func cmdImportAgentTrail(args []string, out, errw io.Writer) int {
+func cmdImportStationTrail(args []string, out, errw io.Writer) int {
 	values, bools, rest, err := splitFlags(args, map[string]bool{"limit": true, "since": true, "redact": true}, map[string]bool{"json": true, "dry-run": true})
 	if err != nil {
-		return fatalf(errw, "import agenttrail: %s", err)
+		return fatalf(errw, "import stationtrail: %s", err)
 	}
 	if len(rest) != 2 {
-		return fatalf(errw, "usage: spine import agenttrail <source> <path-or-session-id> [--json] [--dry-run] [--limit N] [--since DATE] [--redact LIST]")
+		return fatalf(errw, "usage: spine import stationtrail <source> <path-or-session-id> [--json] [--dry-run] [--limit N] [--since DATE] [--redact LIST]")
 	}
 	sourceKind, sourcePath := rest[0], rest[1]
 	if bools["dry-run"] {
@@ -684,20 +684,20 @@ func cmdImportAgentTrail(args []string, out, errw io.Writer) int {
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), externalScannerTimeout)
 		defer cancel()
-		cmd := exec.CommandContext(ctx, "agenttrail", cmdArgs...)
+		cmd := exec.CommandContext(ctx, "stationtrail", cmdArgs...)
 		var stderr bytes.Buffer
 		cmd.Stderr = &stderr
 		b, err := cmd.Output()
 		if err != nil {
 			if ctx.Err() == context.DeadlineExceeded {
-				return fatalf(errw, "import agenttrail: timed out after %s", externalScannerTimeout)
+				return fatalf(errw, "import stationtrail: timed out after %s", externalScannerTimeout)
 			}
-			return fatalf(errw, "import agenttrail: %s", strings.TrimSpace(stderr.String()))
+			return fatalf(errw, "import stationtrail: %s", strings.TrimSpace(stderr.String()))
 		}
 		if bools["json"] {
 			_, _ = out.Write(b)
 		} else {
-			var summary agentTrailSummary
+			var summary stationTrailSummary
 			_ = json.Unmarshal(b, &summary)
 			fmt.Fprintf(out, "source=%s generated=%d warnings=%d\n", sourceKind, summary.Records, len(summary.Warnings))
 		}
@@ -705,12 +705,12 @@ func cmdImportAgentTrail(args []string, out, errw io.Writer) int {
 	}
 	db, _, err := openMigrated()
 	if err != nil {
-		return fatalf(errw, "import agenttrail: %s", err)
+		return fatalf(errw, "import stationtrail: %s", err)
 	}
 	defer db.Close()
-	result, summary, err := runAgentTrailImport(db, sourceKind, sourcePath, values)
+	result, summary, err := runStationTrailImport(db, sourceKind, sourcePath, values)
 	if err != nil {
-		return fatalf(errw, "import agenttrail: %s", err)
+		return fatalf(errw, "import stationtrail: %s", err)
 	}
 	if bools["json"] {
 		writeJSON(out, result)
@@ -720,10 +720,10 @@ func cmdImportAgentTrail(args []string, out, errw io.Writer) int {
 	return 0
 }
 
-func runAgentTrailImport(db *sql.DB, sourceKind, sourcePath string, values map[string]string) (ingest.AdapterResult, agentTrailSummary, error) {
-	summaryFile, err := os.CreateTemp("", "logspine-agenttrail-*.json")
+func runStationTrailImport(db *sql.DB, sourceKind, sourcePath string, values map[string]string) (ingest.AdapterResult, stationTrailSummary, error) {
+	summaryFile, err := os.CreateTemp("", "logspine-stationtrail-*.json")
 	if err != nil {
-		return ingest.AdapterResult{}, agentTrailSummary{}, err
+		return ingest.AdapterResult{}, stationTrailSummary{}, err
 	}
 	summaryPath := summaryFile.Name()
 	_ = summaryFile.Close()
@@ -740,39 +740,39 @@ func runAgentTrailImport(db *sql.DB, sourceKind, sourcePath string, values map[s
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), externalScannerTimeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "agenttrail", cmdArgs...)
+	cmd := exec.CommandContext(ctx, "stationtrail", cmdArgs...)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		return ingest.AdapterResult{}, agentTrailSummary{}, err
+		return ingest.AdapterResult{}, stationTrailSummary{}, err
 	}
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Start(); err != nil {
-		return ingest.AdapterResult{}, agentTrailSummary{}, err
+		return ingest.AdapterResult{}, stationTrailSummary{}, err
 	}
-	result, importErr := ingest.ImportAdapterReader(db, stdout, "agenttrail://"+sourceKind+"/"+sourcePath, sourceKind)
+	result, importErr := ingest.ImportAdapterReader(db, stdout, "stationtrail://"+sourceKind+"/"+sourcePath, sourceKind)
 	waitErr := cmd.Wait()
 	if ctx.Err() == context.DeadlineExceeded {
-		return ingest.AdapterResult{}, agentTrailSummary{}, fmt.Errorf("agenttrail timed out after %s", externalScannerTimeout)
+		return ingest.AdapterResult{}, stationTrailSummary{}, fmt.Errorf("stationtrail timed out after %s", externalScannerTimeout)
 	}
 	if importErr != nil {
-		return ingest.AdapterResult{}, agentTrailSummary{}, importErr
+		return ingest.AdapterResult{}, stationTrailSummary{}, importErr
 	}
 	if waitErr != nil {
 		msg := strings.TrimSpace(stderr.String())
 		if msg == "" {
 			msg = waitErr.Error()
 		}
-		return ingest.AdapterResult{}, agentTrailSummary{}, errors.New(msg)
+		return ingest.AdapterResult{}, stationTrailSummary{}, errors.New(msg)
 	}
-	var summary agentTrailSummary
+	var summary stationTrailSummary
 	if b, err := os.ReadFile(summaryPath); err == nil {
 		_ = json.Unmarshal(b, &summary)
 	}
 	result.Warnings = append(summary.Warnings, result.Warnings...)
 	if len(summary.Files) > 0 {
 		if err := ingest.RecordSourceScans(db, sourceKind, result.SourceHash, summary.Files, true); err != nil {
-			return ingest.AdapterResult{}, agentTrailSummary{}, err
+			return ingest.AdapterResult{}, stationTrailSummary{}, err
 		}
 	}
 	return result, summary, nil

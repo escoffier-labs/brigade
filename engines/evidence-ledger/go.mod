@@ -1,4 +1,4 @@
-module github.com/openclaw/logspine
+module github.com/escoffier-labs/logspine
 
 go 1.22
 

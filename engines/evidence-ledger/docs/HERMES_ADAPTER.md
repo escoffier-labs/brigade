@@ -9,12 +9,12 @@ spine adapter hermes ~/.hermes/sessions --out -
 spine import hermes ~/.hermes/sessions --json
 ```
 
-AgentTrail can still export the same records through the shared adapter contract:
+StationTrail can still export the same records through the shared adapter contract:
 
 ```bash
-agenttrail hermes ~/.hermes/sessions --out - | spine import adapter -
-spine import agenttrail hermes ~/.hermes/sessions --json
-agenttrail all --out - --redact paths,secrets | spine import adapter -
+stationtrail hermes ~/.hermes/sessions --out - | spine import adapter -
+spine import stationtrail hermes ~/.hermes/sessions --json
+stationtrail all --out - --redact paths,secrets | spine import adapter -
 ```
 
 Hermes `state.db` remains an observed storage surface, but Logspine does not parse it directly. Native support is intentionally limited to readable snapshot and trajectory files with stable JSON shapes.

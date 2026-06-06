@@ -2,22 +2,22 @@
 
 Use this checklist before importing private local session logs. The commands report roots, counts, structural status, and warnings without printing transcript text.
 
-## AgentTrail
+## StationTrail
 
 ```bash
-agenttrail discover --json
-agenttrail doctor --json
-agenttrail doctor --live --json
-agenttrail codex ~/.codex/sessions --dry-run --json
-agenttrail claude ~/.claude/projects --dry-run --json
-agenttrail openclaw ~/.openclaw/agents --dry-run --json
-agenttrail hermes ~/.hermes/sessions --dry-run --json
+stationtrail discover --json
+stationtrail doctor --json
+stationtrail doctor --live --json
+stationtrail codex ~/.codex/sessions --dry-run --json
+stationtrail claude ~/.claude/projects --dry-run --json
+stationtrail openclaw ~/.openclaw/agents --dry-run --json
+stationtrail hermes ~/.hermes/sessions --dry-run --json
 ```
 
 For OpenCode, use an explicit sanitized export path or session ID:
 
 ```bash
-agenttrail opencode <export-json|dir|session-id> --dry-run --json
+stationtrail opencode <export-json|dir|session-id> --dry-run --json
 ```
 
 ## Logspine Native Scanners

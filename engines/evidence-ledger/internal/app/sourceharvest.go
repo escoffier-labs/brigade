@@ -16,9 +16,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/openclaw/logspine/internal/adapter"
-	"github.com/openclaw/logspine/internal/ingest"
-	"github.com/openclaw/logspine/internal/sources"
+	"github.com/escoffier-labs/logspine/internal/adapter"
+	"github.com/escoffier-labs/logspine/internal/ingest"
+	"github.com/escoffier-labs/logspine/internal/sources"
 )
 
 type sourceHarvestSummary struct {

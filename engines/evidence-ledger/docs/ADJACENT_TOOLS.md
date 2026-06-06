@@ -24,24 +24,24 @@ Each source system is best at its native domain:
 - `discrawl`: Discord messages
 - `gitcrawl`: GitHub issues and pull requests
 - `notcrawl`: Notion pages
-- `agenttrail`: Codex, Claude, OpenClaw, OpenCode, Hermes, and related local session logs
+- `stationtrail`: Codex, Claude, OpenClaw, OpenCode, Hermes, and related local session logs
 - `sourceharvest`: local files, Markdown, HTML, JSON, JSONL, and git history
 
 ## Boundary
 
 Agent session scanning is in scope for Logspine, but the MVP starts with generic normalized adapter fixtures and conservative native JSON/JSONL generators rather than perfect per-harness parsers.
 
-AgentTrail is the sibling tool for portable local agent-session export. It scans agent harness logs such as Codex, Claude project logs, and OpenClaw sessions, then emits `logspine.adapter.v1` JSONL.
+StationTrail is the sibling tool for portable local agent-session export. It scans agent harness logs such as Codex, Claude project logs, and OpenClaw sessions, then emits `logspine.adapter.v1` JSONL.
 
 The intended split is:
 
-- AgentTrail owns source-specific local harness parsing and privacy-conscious export.
+- StationTrail owns source-specific local harness parsing and privacy-conscious export.
 - Logspine owns adapter ingest, normalized SQLite storage, FTS, relations, scan manifests, search, show, and evidence bundles.
 
-When installed on `PATH`, AgentTrail can be used through:
+When installed on `PATH`, StationTrail can be used through:
 
 ```bash
-spine import agenttrail codex ~/.codex/sessions --json
+spine import stationtrail codex ~/.codex/sessions --json
 ```
 
 Logspine may keep native adapters as compatibility wrappers, but it should not become the long-term home for every harness parser.

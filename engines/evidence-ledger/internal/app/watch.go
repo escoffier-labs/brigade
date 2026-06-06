@@ -15,11 +15,11 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/openclaw/logspine/internal/sources"
-	"github.com/openclaw/logspine/internal/sources/claude"
-	"github.com/openclaw/logspine/internal/sources/codex"
-	"github.com/openclaw/logspine/internal/sources/hermes"
-	"github.com/openclaw/logspine/internal/sources/openclaw"
+	"github.com/escoffier-labs/logspine/internal/sources"
+	"github.com/escoffier-labs/logspine/internal/sources/claude"
+	"github.com/escoffier-labs/logspine/internal/sources/codex"
+	"github.com/escoffier-labs/logspine/internal/sources/hermes"
+	"github.com/escoffier-labs/logspine/internal/sources/openclaw"
 )
 
 type discoveredRoot struct {
@@ -243,7 +243,7 @@ func cmdImportDiscovered(args []string, out, errw io.Writer) int {
 func importDiscoveredRoot(db *sql.DB, root discoveredRoot, values map[string]string, limit int, dryRun bool) discoveredImportRow {
 	row := discoveredImportRow{SourceKind: root.Kind, Root: root.Root, Mode: "native", DryRun: dryRun, Warnings: []string{}}
 	if root.External {
-		row.Mode = "agenttrail"
+		row.Mode = "stationtrail"
 	}
 	if _, err := os.Stat(root.Root); err != nil {
 		row.Skipped = true
@@ -251,13 +251,13 @@ func importDiscoveredRoot(db *sql.DB, root discoveredRoot, values map[string]str
 		return row
 	}
 	if root.External {
-		if _, err := exec.LookPath("agenttrail"); err != nil {
+		if _, err := exec.LookPath("stationtrail"); err != nil {
 			row.Skipped = true
-			row.Reason = "agenttrail not on PATH"
+			row.Reason = "stationtrail not on PATH"
 			return row
 		}
 		if dryRun {
-			summary, err := dryRunAgentTrail(root.Kind, root.Root, values)
+			summary, err := dryRunStationTrail(root.Kind, root.Root, values)
 			if err != nil {
 				row.Warnings = append(row.Warnings, err.Error())
 				return row
@@ -266,7 +266,7 @@ func importDiscoveredRoot(db *sql.DB, root discoveredRoot, values map[string]str
 			row.Warnings = append(row.Warnings, summary.Warnings...)
 			return row
 		}
-		result, summary, err := runAgentTrailImport(db, root.Kind, root.Root, values)
+		result, summary, err := runStationTrailImport(db, root.Kind, root.Root, values)
 		if err != nil {
 			row.Warnings = append(row.Warnings, err.Error())
 			return row
@@ -299,7 +299,7 @@ func importDiscoveredRoot(db *sql.DB, root discoveredRoot, values map[string]str
 	return row
 }
 
-func dryRunAgentTrail(sourceKind, root string, values map[string]string) (agentTrailSummary, error) {
+func dryRunStationTrail(sourceKind, root string, values map[string]string) (stationTrailSummary, error) {
 	cmdArgs := []string{sourceKind, root, "--dry-run", "--json"}
 	if values["limit"] != "" {
 		cmdArgs = append(cmdArgs, "--limit", values["limit"])
@@ -310,7 +310,7 @@ func dryRunAgentTrail(sourceKind, root string, values map[string]string) (agentT
 	if values["redact"] != "" {
 		cmdArgs = append(cmdArgs, "--redact", values["redact"])
 	}
-	cmd := exec.Command("agenttrail", cmdArgs...)
+	cmd := exec.Command("stationtrail", cmdArgs...)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	b, err := cmd.Output()
@@ -319,11 +319,11 @@ func dryRunAgentTrail(sourceKind, root string, values map[string]string) (agentT
 		if msg == "" {
 			msg = err.Error()
 		}
-		return agentTrailSummary{}, fmt.Errorf("%s", msg)
+		return stationTrailSummary{}, fmt.Errorf("%s", msg)
 	}
-	var summary agentTrailSummary
+	var summary stationTrailSummary
 	if err := json.Unmarshal(b, &summary); err != nil {
-		return agentTrailSummary{}, err
+		return stationTrailSummary{}, err
 	}
 	return summary, nil
 }

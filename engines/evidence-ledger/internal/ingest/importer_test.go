@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/openclaw/logspine/internal/archive"
+	"github.com/escoffier-labs/logspine/internal/archive"
 )
 
 func TestImportAdapterReaderIdempotent(t *testing.T) {

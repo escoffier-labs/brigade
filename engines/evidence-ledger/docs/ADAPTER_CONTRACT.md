@@ -77,31 +77,31 @@ Claude support targets `~/.claude/projects/**/*.jsonl` style project logs. The M
 
 Hermes support targets `~/.hermes/sessions/session_*.json` snapshots and trajectory JSONL. Logspine does not parse Hermes `state.db` directly.
 
-## AgentTrail External Scanner
+## StationTrail External Scanner
 
-AgentTrail is a separate scanner/exporter for local agent session logs. It emits this same `logspine.adapter.v1` JSONL contract and can be piped directly into adapter ingest:
-
-```bash
-agenttrail codex ~/.codex/sessions --out - | spine import adapter -
-agenttrail claude ~/.claude/projects --out - | spine import adapter -
-agenttrail openclaw ~/.openclaw/agents --out - | spine import adapter -
-agenttrail hermes ~/.hermes/sessions --out - | spine import adapter -
-agenttrail all --out - --redact paths,secrets | spine import adapter -
-```
-
-Or let Logspine run AgentTrail when the `agenttrail` binary is installed on `PATH`:
+StationTrail is a separate scanner/exporter for local agent session logs. It emits this same `logspine.adapter.v1` JSONL contract and can be piped directly into adapter ingest:
 
 ```bash
-spine import agenttrail codex ~/.codex/sessions --json
-spine import agenttrail claude ~/.claude/projects --json
-spine import agenttrail openclaw ~/.openclaw/agents --json
-spine import agenttrail opencode opencode-session.json --json
-spine import agenttrail hermes ~/.hermes/sessions --json
+stationtrail codex ~/.codex/sessions --out - | spine import adapter -
+stationtrail claude ~/.claude/projects --out - | spine import adapter -
+stationtrail openclaw ~/.openclaw/agents --out - | spine import adapter -
+stationtrail hermes ~/.hermes/sessions --out - | spine import adapter -
+stationtrail all --out - --redact paths,secrets | spine import adapter -
 ```
 
-Use AgentTrail when source-specific harness parsing should live outside Logspine or when exporting OpenCode. Logspine also has native parsers for Codex, Claude, OpenClaw, and Hermes snapshot or trajectory files. Keep Logspine focused on ingest, normalized storage, FTS, scan manifests, relation resolution, and evidence output.
+Or let Logspine run StationTrail when the `stationtrail` binary is installed on `PATH`:
 
-AgentTrail `discover`, `doctor`, `doctor --live`, `inspect`, and `--dry-run --json` modes report roots, structural keys, counts, records, and warnings without printing transcript content. Logspine's `import agenttrail` wrapper records AgentTrail scan manifests when AgentTrail writes summary output. For `agenttrail all`, prefer piping to `spine import adapter -` so mixed-source records retain their individual `source.kind`.
+```bash
+spine import stationtrail codex ~/.codex/sessions --json
+spine import stationtrail claude ~/.claude/projects --json
+spine import stationtrail openclaw ~/.openclaw/agents --json
+spine import stationtrail opencode opencode-session.json --json
+spine import stationtrail hermes ~/.hermes/sessions --json
+```
+
+Use StationTrail when source-specific harness parsing should live outside Logspine or when exporting OpenCode. Logspine also has native parsers for Codex, Claude, OpenClaw, and Hermes snapshot or trajectory files. Keep Logspine focused on ingest, normalized storage, FTS, scan manifests, relation resolution, and evidence output.
+
+StationTrail `discover`, `doctor`, `doctor --live`, `inspect`, and `--dry-run --json` modes report roots, structural keys, counts, records, and warnings without printing transcript content. Logspine's `import stationtrail` wrapper records StationTrail scan manifests when StationTrail writes summary output. For `stationtrail all`, prefer piping to `spine import adapter -` so mixed-source records retain their individual `source.kind`.
 
 Scan manifests can be compared without reading transcript content into output:
 

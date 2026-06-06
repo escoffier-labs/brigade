@@ -182,33 +182,33 @@ func TestAdapterExportFilesArePrivateAndAtomic(t *testing.T) {
 	}
 }
 
-func TestImportAgentTrailWrapper(t *testing.T) {
+func TestImportStationTrailWrapper(t *testing.T) {
 	withTempHome(t)
 	runOK(t, "init")
-	agenttrailDir := t.TempDir()
+	stationtrailDir := t.TempDir()
 	fixture := repoPath(t, "testdata/adapters/agent-session.fixture.jsonl")
-	script := filepath.Join(agenttrailDir, "agenttrail")
+	script := filepath.Join(stationtrailDir, "stationtrail")
 	body := "#!/bin/sh\nsummary=''\nwhile [ \"$#\" -gt 0 ]; do\n  if [ \"$1\" = '--summary-out' ]; then shift; summary=\"$1\"; fi\n  shift || true\ndone\nif [ -n \"$summary\" ]; then\n  printf '{\"source\":\"codex\",\"records\":2,\"warnings\":[],\"files\":[{\"path\":\"fixture.jsonl\",\"size\":1,\"mtime\":\"2026-06-03T00:00:00Z\",\"content_hash\":\"sha256:test\",\"records_generated\":2,\"warnings\":0}]}' > \"$summary\"\nfi\ncat " + shellQuote(fixture) + "\n"
 	if err := os.WriteFile(script, []byte(body), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	oldPath := os.Getenv("PATH")
-	t.Setenv("PATH", agenttrailDir+string(os.PathListSeparator)+oldPath)
-	out := runJSON(t, "import", "agenttrail", "codex", "fixture", "--json")
+	t.Setenv("PATH", stationtrailDir+string(os.PathListSeparator)+oldPath)
+	out := runJSON(t, "import", "stationtrail", "codex", "fixture", "--json")
 	if out["inserted_items"].(float64) != 2 {
 		t.Fatalf("inserted = %v, want 2: %v", out["inserted_items"], out)
 	}
 	scans := runJSON(t, "scans", "list", "--source", "codex", "--json")
 	if len(scans["scans"].([]any)) != 1 {
-		t.Fatalf("expected scan manifest from agenttrail summary: %v", scans)
+		t.Fatalf("expected scan manifest from stationtrail summary: %v", scans)
 	}
 }
 
-func TestImportAgentTrailWrapperForSupportedSources(t *testing.T) {
+func TestImportStationTrailWrapperForSupportedSources(t *testing.T) {
 	withTempHome(t)
 	runOK(t, "init")
-	agenttrailDir := t.TempDir()
-	script := filepath.Join(agenttrailDir, "agenttrail")
+	stationtrailDir := t.TempDir()
+	script := filepath.Join(stationtrailDir, "stationtrail")
 	body := `#!/bin/sh
 source="$1"
 summary=''
@@ -227,15 +227,15 @@ esac
 if [ -n "$summary" ]; then
   printf '{"source":"%s","records":1,"warnings":[],"files":[{"path":"%s.fixture","size":1,"mtime":"2026-06-03T00:00:00Z","content_hash":"sha256:test","records_generated":1,"warnings":0}]}' "$source" "$source" > "$summary"
 fi
-printf '{"schema":"logspine.adapter.v1","source":{"kind":"%s","name":"AgentTrail Fixture"},"collection":{"external_id":"%s:session:fixture","kind":"agent_session","name":"fixture"},"item":{"external_id":"%s:item:fixture","kind":"message","created_at":"2026-06-03T00:00:00Z","text":"%s","tags":["agent-session","%s"]},"actor":{"external_id":"%s:%s:fixture","type":"%s","name":"fixture"},"artifacts":[],"links":[],"relations":[],"raw":{"format":"json","hash":"sha256:test","path":"%s.fixture","ordinal":1}}\n' "$source" "$source" "$source" "$text" "$source" "$source" "$actor" "$actor" "$source"
+printf '{"schema":"logspine.adapter.v1","source":{"kind":"%s","name":"StationTrail Fixture"},"collection":{"external_id":"%s:session:fixture","kind":"agent_session","name":"fixture"},"item":{"external_id":"%s:item:fixture","kind":"message","created_at":"2026-06-03T00:00:00Z","text":"%s","tags":["agent-session","%s"]},"actor":{"external_id":"%s:%s:fixture","type":"%s","name":"fixture"},"artifacts":[],"links":[],"relations":[],"raw":{"format":"json","hash":"sha256:test","path":"%s.fixture","ordinal":1}}\n' "$source" "$source" "$source" "$text" "$source" "$source" "$actor" "$actor" "$source"
 `
 	if err := os.WriteFile(script, []byte(body), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	oldPath := os.Getenv("PATH")
-	t.Setenv("PATH", agenttrailDir+string(os.PathListSeparator)+oldPath)
+	t.Setenv("PATH", stationtrailDir+string(os.PathListSeparator)+oldPath)
 	for _, source := range []string{"codex", "claude", "openclaw", "opencode", "hermes"} {
-		out := runJSON(t, "import", "agenttrail", source, "fixture", "--json")
+		out := runJSON(t, "import", "stationtrail", source, "fixture", "--json")
 		if out["inserted_items"].(float64) != 1 {
 			t.Fatalf("%s inserted = %v, want 1: %v", source, out["inserted_items"], out)
 		}

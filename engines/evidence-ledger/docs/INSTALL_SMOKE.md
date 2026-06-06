@@ -1,6 +1,6 @@
 # Install Smoke
 
-This smoke proves the public release installers can install Logspine, AgentTrail, and SourceHarvest, then import fixture-only data into a temporary local archive.
+This smoke proves the public release installers can install Logspine, StationTrail, and SourceHarvest, then import fixture-only data into a temporary local archive.
 
 It does not import private session logs.
 
@@ -13,12 +13,12 @@ export XDG_CACHE_HOME="$tmp_home/.cache"
 export BINDIR="$tmp_home/bin"
 export PATH="$BINDIR:$PATH"
 
-curl -fsSL https://raw.githubusercontent.com/solomonneas/logspine/HEAD/install.sh | sh
-curl -fsSL https://raw.githubusercontent.com/solomonneas/agenttrail/HEAD/install.sh | sh
-curl -fsSL https://raw.githubusercontent.com/solomonneas/sourceharvest/HEAD/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/escoffier-labs/logspine/HEAD/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/escoffier-labs/stationtrail/HEAD/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/escoffier-labs/sourceharvest/HEAD/install.sh | sh
 
 spine version
-agenttrail version
+stationtrail version
 sourceharvest version
 
 spine init

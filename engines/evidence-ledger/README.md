@@ -6,8 +6,8 @@ The MVP is a local-first CLI named `spine`. It imports `logspine.adapter.v1` JSO
 
 Each source system is best at its native domain:
 
-- [AgentTrail](https://github.com/solomonneas/agenttrail): Codex, Claude, OpenClaw, OpenCode, Hermes, and related local session logs
-- [SourceHarvest](https://github.com/solomonneas/sourceharvest): local files, notes, generic exports, git history, and future crawler adapter exports
+- [StationTrail](https://github.com/escoffier-labs/stationtrail): Codex, Claude, OpenClaw, OpenCode, Hermes, and related local session logs
+- [SourceHarvest](https://github.com/escoffier-labs/sourceharvest): local files, notes, generic exports, git history, and future crawler adapter exports
 - `discrawl`: Discord messages
 - `gitcrawl`: GitHub issues and pull requests
 - `graincrawl`: Granola notes and transcripts
@@ -24,12 +24,12 @@ flowchart TB
     ADAPTER["<b>Adapter JSONL</b><br/>file, stdin, wrappers"]
 
     subgraph SOURCES [" source exporters "]
-        AGENTTRAIL["<b>AgentTrail</b><br/>agent-session logs"]
+        STATIONTRAIL["<b>StationTrail</b><br/>agent-session logs"]
         SOURCEHARVEST["<b>SourceHarvest</b><br/>files, notes, exports, git"]
         NATIVE["<b>Native adapters</b><br/>Codex, OpenClaw, Claude, Hermes"]
     end
 
-    AGENTTRAIL & SOURCEHARVEST & NATIVE --> ADAPTER
+    STATIONTRAIL & SOURCEHARVEST & NATIVE --> ADAPTER
 
     subgraph INGEST [" ingest path "]
         PARSE["<b>Parse and validate</b><br/>logspine.adapter.v1"]
@@ -64,7 +64,7 @@ flowchart TB
     classDef archive fill:#2563eb,stroke:#1d4ed8,color:#fff;
     classDef surface fill:#f1f5f9,stroke:#94a3b8,color:#334155;
     classDef guard fill:#fff7ed,stroke:#ea580c,color:#7c2d12;
-    class AGENTTRAIL,SOURCEHARVEST,NATIVE,ADAPTER source;
+    class STATIONTRAIL,SOURCEHARVEST,NATIVE,ADAPTER source;
     class PARSE,NORMALIZE,DEDUPE,INDEX process;
     class ARCHIVE archive;
     class SEARCH,EXPORT,API,MAINTAIN surface;
@@ -73,7 +73,7 @@ flowchart TB
 
 Logspine follows one ingest path:
 
-1. Receive `logspine.adapter.v1` JSONL from a file, stdin, AgentTrail, SourceHarvest, or a native compatibility adapter.
+1. Receive `logspine.adapter.v1` JSONL from a file, stdin, StationTrail, SourceHarvest, or a native compatibility adapter.
 2. Parse and validate each adapter record.
 3. Store normalized sources, collections, items, actors, artifacts, raw refs, tags, imports, warnings, and scan manifests in SQLite.
 4. Deduplicate repeat records and preserve raw payload references for audit.
@@ -89,7 +89,7 @@ flowchart TB
     LOGSPINE -->|owns| SQLITE
 
     subgraph AGENTS [" agent-session scanners "]
-        AGENTTRAIL["<b>AgentTrail</b><br/>Codex, Claude, OpenClaw, OpenCode, Hermes"]
+        STATIONTRAIL["<b>StationTrail</b><br/>Codex, Claude, OpenClaw, OpenCode, Hermes"]
         COMPAT["<b>Compatibility adapters</b><br/>native Logspine imports"]
     end
 
@@ -107,7 +107,7 @@ flowchart TB
         TELECRAWL["telecrawl"]
     end
 
-    AGENTTRAIL & COMPAT == adapter JSONL ==> LOGSPINE
+    STATIONTRAIL & COMPAT == adapter JSONL ==> LOGSPINE
     SOURCEHARVEST & GENERIC == adapter JSONL ==> LOGSPINE
     DISCRAWL & GITCRAWL & GRAINCRAWL & NOTCRAWL & SLACRAWL & TELECRAWL -. exports or snapshots .-> SOURCEHARVEST
 
@@ -130,12 +130,12 @@ flowchart TB
     classDef reader fill:#f1f5f9,stroke:#94a3b8,color:#334155;
     class LOGSPINE core;
     class SQLITE archive;
-    class AGENTTRAIL,COMPAT,SOURCEHARVEST,GENERIC source;
+    class STATIONTRAIL,COMPAT,SOURCEHARVEST,GENERIC source;
     class DISCRAWL,GITCRAWL,GRAINCRAWL,NOTCRAWL,SLACRAWL,TELECRAWL crawler;
     class CLI,EVIDENCE,MCP,OPS reader;
 ```
 
-AgentTrail owns local agent-session scanning. SourceHarvest owns non-agent local source export normalization. Logspine owns archive ingest, SQLite, FTS, relations, scan manifests, reader APIs, and evidence bundles.
+StationTrail owns local agent-session scanning. SourceHarvest owns non-agent local source export normalization. Logspine owns archive ingest, SQLite, FTS, relations, scan manifests, reader APIs, and evidence bundles.
 
 Crawler tools keep their native sync/query behavior. Their local exports, snapshots, or databases should flow through SourceHarvest before entering Logspine.
 
@@ -154,10 +154,10 @@ go run ./cmd/spine --help
 Install from a release:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/solomonneas/logspine/HEAD/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/escoffier-labs/logspine/HEAD/install.sh | sh
 ```
 
-For a first archive and agent integration path, see [docs/QUICKSTART.md](docs/QUICKSTART.md). For MCP client configuration, see [docs/MCP.md](docs/MCP.md). For roadmap and cookbook material, see [docs/ROADMAP.md](docs/ROADMAP.md), [docs/EXAMPLES.md](docs/EXAMPLES.md), [docs/QUERY_COOKBOOK.md](docs/QUERY_COOKBOOK.md), [docs/AGENTTRAIL_PARITY.md](docs/AGENTTRAIL_PARITY.md), [docs/LIVE_DRY_RUN_CHECKLIST.md](docs/LIVE_DRY_RUN_CHECKLIST.md), and [docs/INSTALL_SMOKE.md](docs/INSTALL_SMOKE.md).
+For a first archive and agent integration path, see [docs/QUICKSTART.md](docs/QUICKSTART.md). For MCP client configuration, see [docs/MCP.md](docs/MCP.md). For roadmap and cookbook material, see [docs/ROADMAP.md](docs/ROADMAP.md), [docs/EXAMPLES.md](docs/EXAMPLES.md), [docs/QUERY_COOKBOOK.md](docs/QUERY_COOKBOOK.md), [docs/STATIONTRAIL_PARITY.md](docs/STATIONTRAIL_PARITY.md), [docs/LIVE_DRY_RUN_CHECKLIST.md](docs/LIVE_DRY_RUN_CHECKLIST.md), and [docs/INSTALL_SMOKE.md](docs/INSTALL_SMOKE.md).
 
 ## Runtime Paths
 
@@ -228,35 +228,35 @@ spine watch once --if-changed --json
 
 The scanners accept a file or directory, walk relevant JSON and JSONL files recursively, skip obvious backups and sidecars, preserve raw refs, and warn rather than crash on malformed or unknown events. Hermes native support covers `session_*.json` snapshots and trajectory JSONL under `~/.hermes/sessions`; Hermes `state.db` is not parsed directly.
 
-## External AgentTrail Scanner
+## External StationTrail Scanner
 
-AgentTrail is the separate local agent-session scanner/exporter. It keeps source-specific harness parsing outside Logspine and emits the same `logspine.adapter.v1` JSONL contract:
+StationTrail is the separate local agent-session scanner/exporter. It keeps source-specific harness parsing outside Logspine and emits the same `logspine.adapter.v1` JSONL contract:
 
 ```bash
-agenttrail discover --json
-agenttrail doctor --json
-agenttrail doctor --live --json
-agenttrail codex ~/.codex/sessions --dry-run --json
-agenttrail all --out - --redact paths,secrets | spine import adapter -
-agenttrail claude ~/.claude/projects --out - | spine import adapter -
-agenttrail openclaw ~/.openclaw/agents --out openclaw.adapter.jsonl
-agenttrail hermes ~/.hermes/sessions --out - | spine import adapter -
+stationtrail discover --json
+stationtrail doctor --json
+stationtrail doctor --live --json
+stationtrail codex ~/.codex/sessions --dry-run --json
+stationtrail all --out - --redact paths,secrets | spine import adapter -
+stationtrail claude ~/.claude/projects --out - | spine import adapter -
+stationtrail openclaw ~/.openclaw/agents --out openclaw.adapter.jsonl
+stationtrail hermes ~/.hermes/sessions --out - | spine import adapter -
 spine import adapter openclaw.adapter.jsonl --json
 ```
 
-When `agenttrail` is installed on `PATH`, Logspine can run it directly:
+When `stationtrail` is installed on `PATH`, Logspine can run it directly:
 
 ```bash
-spine import agenttrail codex ~/.codex/sessions --json
-spine import agenttrail claude ~/.claude/projects --json
-spine import agenttrail openclaw ~/.openclaw/agents --json
-spine import agenttrail opencode opencode-session.json --json
-spine import agenttrail hermes ~/.hermes/sessions --json
+spine import stationtrail codex ~/.codex/sessions --json
+spine import stationtrail claude ~/.claude/projects --json
+spine import stationtrail openclaw ~/.openclaw/agents --json
+spine import stationtrail opencode opencode-session.json --json
+spine import stationtrail hermes ~/.hermes/sessions --json
 ```
 
-The wrapper streams AgentTrail output through adapter ingest and records AgentTrail scan manifests from its summary output. For mixed-source imports, use `agenttrail all --out - | spine import adapter -`; each adapter record still carries its own `source.kind`.
+The wrapper streams StationTrail output through adapter ingest and records StationTrail scan manifests from its summary output. For mixed-source imports, use `stationtrail all --out - | spine import adapter -`; each adapter record still carries its own `source.kind`.
 
-Logspine native adapters remain available for compatibility. Long term, source-specific agent-session parser ownership should live in AgentTrail while Logspine owns archive ingest, SQLite, FTS, relations, scan manifests, and evidence bundles.
+Logspine native adapters remain available for compatibility. Long term, source-specific agent-session parser ownership should live in StationTrail while Logspine owns archive ingest, SQLite, FTS, relations, scan manifests, and evidence bundles.
 
 ## External SourceHarvest Scanner
 
@@ -277,7 +277,7 @@ spine import sourceharvest gitlog . --source gitlog --collection repo:logspine -
 spine import sourceharvest json export.json --source export --collection export:records --records-path records --json
 ```
 
-Use AgentTrail for agent-session logs. Use SourceHarvest for other local source-system exports. Logspine remains the archive, search, relation, and evidence layer for both.
+Use StationTrail for agent-session logs. Use SourceHarvest for other local source-system exports. Logspine remains the archive, search, relation, and evidence layer for both.
 
 Planned crawler adapter imports should keep this shape once SourceHarvest has real schema-backed adapters:
 

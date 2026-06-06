@@ -7,18 +7,18 @@ This path gets Logspine from a fresh install to a local evidence archive that ag
 Install Logspine:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/solomonneas/logspine/HEAD/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/escoffier-labs/logspine/HEAD/install.sh | sh
 spine version
 ```
 
 Optional scanners:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/solomonneas/agenttrail/HEAD/install.sh | sh
-curl -fsSL https://raw.githubusercontent.com/solomonneas/sourceharvest/HEAD/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/escoffier-labs/stationtrail/HEAD/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/escoffier-labs/sourceharvest/HEAD/install.sh | sh
 ```
 
-`agenttrail` exports local agent-session logs. `sourceharvest` exports local files, Markdown, HTML, JSON, JSONL, and git history. Logspine imports both through the same `logspine.adapter.v1` contract.
+`stationtrail` exports local agent-session logs. `sourceharvest` exports local files, Markdown, HTML, JSON, JSONL, and git history. Logspine imports both through the same `logspine.adapter.v1` contract.
 
 ## Initialize
 
@@ -41,17 +41,17 @@ spine import claude ~/.claude/projects --json
 spine import hermes ~/.hermes/sessions --json
 ```
 
-AgentTrail imports:
+StationTrail imports:
 
 ```bash
-agenttrail all --out - --redact paths,secrets | spine import adapter - --json
-spine import agenttrail codex ~/.codex/sessions --json
-spine import agenttrail claude ~/.claude/projects --json
-spine import agenttrail openclaw ~/.openclaw/agents --json
-spine import agenttrail hermes ~/.hermes/sessions --json
+stationtrail all --out - --redact paths,secrets | spine import adapter - --json
+spine import stationtrail codex ~/.codex/sessions --json
+spine import stationtrail claude ~/.claude/projects --json
+spine import stationtrail openclaw ~/.openclaw/agents --json
+spine import stationtrail hermes ~/.hermes/sessions --json
 ```
 
-Use `agenttrail all --out - | spine import adapter -` for mixed-source imports because each adapter record carries its own `source.kind`.
+Use `stationtrail all --out - | spine import adapter -` for mixed-source imports because each adapter record carries its own `source.kind`.
 
 ## Import Local Sources
 

@@ -22,7 +22,7 @@
           "name": "shell",
           "id": "hermes-tool-1",
           "input": {
-            "cmd": "agenttrail hermes ~/.hermes/sessions --out -"
+            "cmd": "stationtrail hermes ~/.hermes/sessions --out -"
           }
         }
       ]
