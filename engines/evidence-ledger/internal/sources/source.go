@@ -14,7 +14,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/escoffier-labs/logspine/internal/adapter"
+	"github.com/escoffier-labs/miseledger/internal/adapter"
 )
 
 type Options struct {

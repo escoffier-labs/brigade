@@ -16,9 +16,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/escoffier-labs/logspine/internal/adapter"
-	"github.com/escoffier-labs/logspine/internal/ingest"
-	"github.com/escoffier-labs/logspine/internal/sources"
+	"github.com/escoffier-labs/miseledger/internal/adapter"
+	"github.com/escoffier-labs/miseledger/internal/ingest"
+	"github.com/escoffier-labs/miseledger/internal/sources"
 )
 
 type sourceHarvestSummary struct {
@@ -32,7 +32,7 @@ type sourceHarvestSummary struct {
 
 func cmdImportSourceHarvest(args []string, out, errw io.Writer) int {
 	if len(args) < 2 {
-		return fatalf(errw, "usage: spine import sourceharvest <jsonl|markdown|files|html|gitlog|json> <sourceharvest-args> [--json] [--dry-run]")
+		return fatalf(errw, "usage: miseledger import sourceharvest <jsonl|markdown|files|html|gitlog|json> <sourceharvest-args> [--json] [--dry-run]")
 	}
 	asJSON, dryRun, passArgs := splitWrapperFlags(args)
 	if !hasFlag(passArgs, "out") {

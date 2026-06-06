@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/escoffier-labs/logspine/internal/security"
+	"github.com/escoffier-labs/miseledger/internal/security"
 	_ "modernc.org/sqlite"
 )
 

@@ -4,11 +4,11 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/escoffier-labs/logspine/internal/archive"
+	"github.com/escoffier-labs/miseledger/internal/archive"
 )
 
 func TestImportAdapterReaderIdempotent(t *testing.T) {
-	db, err := archive.Open(t.TempDir() + "/logspine.db")
+	db, err := archive.Open(t.TempDir() + "/miseledger.db")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -16,7 +16,7 @@ func TestImportAdapterReaderIdempotent(t *testing.T) {
 	if err := archive.Migrate(db); err != nil {
 		t.Fatal(err)
 	}
-	jsonl := `{"schema":"logspine.adapter.v1","source":{"kind":"reader-test","name":"Reader Test"},"collection":{"external_id":"reader:collection","kind":"agent_session","name":"reader"},"item":{"external_id":"reader:item:1","kind":"message","created_at":"2026-06-03T00:00:00Z","text":"streaming adapter reader import","tags":["reader"]},"actor":{"external_id":"reader:actor","type":"human","name":"reader"},"artifacts":[],"links":[],"relations":[],"raw":{"format":"json","path":"reader.jsonl","ordinal":1}}` + "\n"
+	jsonl := `{"schema":"miseledger.adapter.v1","source":{"kind":"reader-test","name":"Reader Test"},"collection":{"external_id":"reader:collection","kind":"agent_session","name":"reader"},"item":{"external_id":"reader:item:1","kind":"message","created_at":"2026-06-03T00:00:00Z","text":"streaming adapter reader import","tags":["reader"]},"actor":{"external_id":"reader:actor","type":"human","name":"reader"},"artifacts":[],"links":[],"relations":[],"raw":{"format":"json","path":"reader.jsonl","ordinal":1}}` + "\n"
 	first, err := ImportAdapterReader(db, strings.NewReader(jsonl), "reader://fixture", "reader-test")
 	if err != nil {
 		t.Fatal(err)

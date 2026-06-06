@@ -11,19 +11,19 @@ export XDG_CONFIG_HOME="$TMP_HOME/.config"
 export XDG_DATA_HOME="$TMP_HOME/.local/share"
 export XDG_CACHE_HOME="$TMP_HOME/.cache"
 
-SPINE="${SPINE:-$ROOT/bin/spine}"
-if [ ! -x "$SPINE" ]; then
-  (cd "$ROOT" && go build -o bin/spine ./cmd/spine)
+MISELEDGER="${MISELEDGER:-$ROOT/bin/miseledger}"
+if [ ! -x "$MISELEDGER" ]; then
+  (cd "$ROOT" && go build -o bin/miseledger ./cmd/miseledger)
 fi
 
-"$SPINE" init >/dev/null
-"$SPINE" import adapter "$ROOT/testdata/adapters/discrawl.fixture.jsonl" --source discrawl --json >/dev/null
+"$MISELEDGER" init >/dev/null
+"$MISELEDGER" import adapter "$ROOT/testdata/adapters/discrawl.fixture.jsonl" --source discrawl --json >/dev/null
 
-python3 - "$SPINE" >"$TMP_WORK/mcp.out" <<'PY'
+python3 - "$MISELEDGER" >"$TMP_WORK/mcp.out" <<'PY'
 import json, subprocess, sys
 
-spine = sys.argv[1]
-proc = subprocess.Popen([spine, "mcp"], stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+miseledger = sys.argv[1]
+proc = subprocess.Popen([miseledger, "mcp"], stdin=subprocess.PIPE, stdout=subprocess.PIPE)
 
 def send(obj):
     payload = json.dumps(obj).encode()
@@ -42,7 +42,7 @@ def recv():
     return json.loads(proc.stdout.read(length))
 
 send({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}})
-assert recv()["result"]["serverInfo"]["name"] == "logspine"
+assert recv()["result"]["serverInfo"]["name"] == "miseledger"
 send({"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}})
 tools = recv()["result"]["tools"]
 assert any(t["name"] == "create_evidence_bundle" for t in tools), tools

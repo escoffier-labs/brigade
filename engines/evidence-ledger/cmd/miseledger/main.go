@@ -3,7 +3,7 @@ package main
 import (
 	"os"
 
-	"github.com/escoffier-labs/logspine/internal/app"
+	"github.com/escoffier-labs/miseledger/internal/app"
 )
 
 func main() {

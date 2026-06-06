@@ -26,11 +26,11 @@ func ResolvePaths() Paths {
 	if cacheHome == "" {
 		cacheHome = filepath.Join(home, ".cache")
 	}
-	dataDir := filepath.Join(dataHome, "logspine")
+	dataDir := filepath.Join(dataHome, "miseledger")
 	return Paths{
-		ConfigPath: filepath.Join(configHome, "logspine", "config.toml"),
+		ConfigPath: filepath.Join(configHome, "miseledger", "config.toml"),
 		DataDir:    dataDir,
-		DBPath:     filepath.Join(dataDir, "logspine.db"),
-		CacheDir:   filepath.Join(cacheHome, "logspine"),
+		DBPath:     filepath.Join(dataDir, "miseledger.db"),
+		CacheDir:   filepath.Join(cacheHome, "miseledger"),
 	}
 }

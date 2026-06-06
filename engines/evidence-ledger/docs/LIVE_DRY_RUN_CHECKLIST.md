@@ -20,15 +20,15 @@ For OpenCode, use an explicit sanitized export path or session ID:
 stationtrail opencode <export-json|dir|session-id> --dry-run --json
 ```
 
-## Logspine Native Scanners
+## MiseLedger Native Scanners
 
 ```bash
-spine sources discover --json
-spine import codex ~/.codex/sessions --dry-run --json
-spine import claude ~/.claude/projects --dry-run --json
-spine import openclaw ~/.openclaw/agents --dry-run --json
-spine import hermes ~/.hermes/sessions --dry-run --json
-spine import discovered --dry-run --json
+miseledger sources discover --json
+miseledger import codex ~/.codex/sessions --dry-run --json
+miseledger import claude ~/.claude/projects --dry-run --json
+miseledger import openclaw ~/.openclaw/agents --dry-run --json
+miseledger import hermes ~/.hermes/sessions --dry-run --json
+miseledger import discovered --dry-run --json
 ```
 
 Expected output:
@@ -45,11 +45,11 @@ Do not paste private transcript content into issues or docs. If parser work need
 After dry-runs look sane:
 
 ```bash
-spine import discovered --json
-spine stats --json
-spine relations backfill --json
-spine evidence "known safe fixture phrase" --json
+miseledger import discovered --json
+miseledger stats --json
+miseledger relations backfill --json
+miseledger evidence "known safe fixture phrase" --json
 ```
 
-Use `spine scans list --json` to confirm what files were seen. Use `spine scans changed --json` before scheduled or repeated imports.
+Use `miseledger scans list --json` to confirm what files were seen. Use `miseledger scans changed --json` before scheduled or repeated imports.
 

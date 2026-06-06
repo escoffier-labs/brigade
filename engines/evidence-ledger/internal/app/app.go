@@ -19,14 +19,14 @@ import (
 	"strings"
 	"time"
 
-	"github.com/escoffier-labs/logspine/internal/archive"
-	"github.com/escoffier-labs/logspine/internal/ingest"
-	"github.com/escoffier-labs/logspine/internal/security"
-	"github.com/escoffier-labs/logspine/internal/sources"
-	"github.com/escoffier-labs/logspine/internal/sources/claude"
-	"github.com/escoffier-labs/logspine/internal/sources/codex"
-	"github.com/escoffier-labs/logspine/internal/sources/hermes"
-	"github.com/escoffier-labs/logspine/internal/sources/openclaw"
+	"github.com/escoffier-labs/miseledger/internal/archive"
+	"github.com/escoffier-labs/miseledger/internal/ingest"
+	"github.com/escoffier-labs/miseledger/internal/security"
+	"github.com/escoffier-labs/miseledger/internal/sources"
+	"github.com/escoffier-labs/miseledger/internal/sources/claude"
+	"github.com/escoffier-labs/miseledger/internal/sources/codex"
+	"github.com/escoffier-labs/miseledger/internal/sources/hermes"
+	"github.com/escoffier-labs/miseledger/internal/sources/openclaw"
 )
 
 var stdin io.Reader = os.Stdin
@@ -42,7 +42,7 @@ func Run(args []string, out, errw io.Writer) int {
 	}
 	switch args[0] {
 	case "version":
-		fmt.Fprintf(out, "spine %s\n", Version)
+		fmt.Fprintf(out, "miseledger %s\n", Version)
 		return 0
 	case "init":
 		return cmdInit(args[1:], out, errw)
@@ -90,7 +90,7 @@ func Run(args []string, out, errw io.Writer) int {
 }
 
 func usage(w io.Writer) {
-	fmt.Fprintln(w, "spine version | init | status | sources discover | scans | serve | mcp | watch | adapter | import | search | show | evidence | explain | export markdown | relations | stats | compact | prune | sql | doctor")
+	fmt.Fprintln(w, "miseledger version | init | status | sources discover | scans | serve | mcp | watch | adapter | import | search | show | evidence | explain | export markdown | relations | stats | compact | prune | sql | doctor")
 }
 
 func openMigrated() (*sql.DB, Paths, error) {
@@ -143,7 +143,7 @@ func cmdStatus(args []string, out, errw io.Writer) int {
 		return fatalf(errw, "status: %s", err)
 	}
 	if len(rest) != 0 {
-		return fatalf(errw, "usage: spine status [--json]")
+		return fatalf(errw, "usage: miseledger status [--json]")
 	}
 	asJSON := bools["json"]
 	db, paths, err := openMigrated()
@@ -210,7 +210,7 @@ func cmdDoctor(args []string, out, errw io.Writer) int {
 		return fatalf(errw, "doctor: %s", err)
 	}
 	if len(rest) != 0 {
-		return fatalf(errw, "usage: spine doctor [--json] [--mcp] [--archive]")
+		return fatalf(errw, "usage: miseledger doctor [--json] [--mcp] [--archive]")
 	}
 	asJSON := bools["json"]
 	checkMCP := bools["mcp"]
@@ -308,14 +308,14 @@ func firstMapValue(m map[string]any) any {
 
 func cmdSources(args []string, out, errw io.Writer) int {
 	if len(args) == 0 || args[0] != "discover" {
-		return fatalf(errw, "usage: spine sources discover --json")
+		return fatalf(errw, "usage: miseledger sources discover --json")
 	}
 	_, bools, rest, err := splitFlags(args[1:], nil, map[string]bool{"json": true})
 	if err != nil {
 		return fatalf(errw, "sources discover: %s", err)
 	}
 	if len(rest) != 0 {
-		return fatalf(errw, "usage: spine sources discover --json")
+		return fatalf(errw, "usage: miseledger sources discover --json")
 	}
 	result := discoverSources()
 	if bools["json"] {
@@ -369,7 +369,7 @@ func discoverSources() []map[string]any {
 
 func cmdScans(args []string, out, errw io.Writer) int {
 	if len(args) == 0 {
-		return fatalf(errw, "usage: spine scans list|show")
+		return fatalf(errw, "usage: miseledger scans list|show")
 	}
 	switch args[0] {
 	case "list":
@@ -381,7 +381,7 @@ func cmdScans(args []string, out, errw io.Writer) int {
 	case "changed":
 		return cmdScansChanged(args[1:], out, errw)
 	default:
-		return fatalf(errw, "usage: spine scans list|show|diff|changed")
+		return fatalf(errw, "usage: miseledger scans list|show|diff|changed")
 	}
 }
 
@@ -391,7 +391,7 @@ func cmdScansList(args []string, out, errw io.Writer) int {
 		return fatalf(errw, "scans list: %s", err)
 	}
 	if len(rest) != 0 {
-		return fatalf(errw, "usage: spine scans list [--json] [--source KIND]")
+		return fatalf(errw, "usage: miseledger scans list [--json] [--source KIND]")
 	}
 	db, _, err := openMigrated()
 	if err != nil {
@@ -430,7 +430,7 @@ func cmdScansShow(args []string, out, errw io.Writer) int {
 		return fatalf(errw, "scans show: %s", err)
 	}
 	if len(rest) != 1 {
-		return fatalf(errw, "usage: spine scans show <id-or-path> --json")
+		return fatalf(errw, "usage: miseledger scans show <id-or-path> --json")
 	}
 	db, _, err := openMigrated()
 	if err != nil {
@@ -463,7 +463,7 @@ func cmdScansDiff(args []string, out, errw io.Writer) int {
 		return fatalf(errw, "scans diff: %s", err)
 	}
 	if len(rest) != 1 {
-		return fatalf(errw, "usage: spine scans diff <path> --json")
+		return fatalf(errw, "usage: miseledger scans diff <path> --json")
 	}
 	db, _, err := openMigrated()
 	if err != nil {
@@ -488,7 +488,7 @@ func cmdScansChanged(args []string, out, errw io.Writer) int {
 		return fatalf(errw, "scans changed: %s", err)
 	}
 	if len(rest) != 0 {
-		return fatalf(errw, "usage: spine scans changed [--json] [--source KIND]")
+		return fatalf(errw, "usage: miseledger scans changed [--json] [--source KIND]")
 	}
 	db, _, err := openMigrated()
 	if err != nil {
@@ -601,7 +601,7 @@ func checkPrivate(path string) bool {
 
 func cmdImport(args []string, out, errw io.Writer) int {
 	if len(args) == 0 {
-		return fatalf(errw, "usage: spine import adapter|stationtrail|codex|openclaw|claude|hermes <path>")
+		return fatalf(errw, "usage: miseledger import adapter|stationtrail|codex|openclaw|claude|hermes <path>")
 	}
 	switch args[0] {
 	case "adapter":
@@ -621,7 +621,7 @@ func cmdImport(args []string, out, errw io.Writer) int {
 	case "hermes":
 		return cmdImportNative("hermes", hermes.Generate, args[1:], out, errw)
 	default:
-		return fatalf(errw, "usage: spine import adapter|discovered|stationtrail|sourceharvest|codex|openclaw|claude|hermes <path>")
+		return fatalf(errw, "usage: miseledger import adapter|discovered|stationtrail|sourceharvest|codex|openclaw|claude|hermes <path>")
 	}
 }
 
@@ -631,7 +631,7 @@ func cmdImportAdapter(args []string, out, errw io.Writer) int {
 		return fatalf(errw, "import: %s", err)
 	}
 	if len(rest) != 1 {
-		return fatalf(errw, "usage: spine import adapter <path> --source <kind>")
+		return fatalf(errw, "usage: miseledger import adapter <path> --source <kind>")
 	}
 	db, _, err := openMigrated()
 	if err != nil {
@@ -668,7 +668,7 @@ func cmdImportStationTrail(args []string, out, errw io.Writer) int {
 		return fatalf(errw, "import stationtrail: %s", err)
 	}
 	if len(rest) != 2 {
-		return fatalf(errw, "usage: spine import stationtrail <source> <path-or-session-id> [--json] [--dry-run] [--limit N] [--since DATE] [--redact LIST]")
+		return fatalf(errw, "usage: miseledger import stationtrail <source> <path-or-session-id> [--json] [--dry-run] [--limit N] [--since DATE] [--redact LIST]")
 	}
 	sourceKind, sourcePath := rest[0], rest[1]
 	if bools["dry-run"] {
@@ -721,7 +721,7 @@ func cmdImportStationTrail(args []string, out, errw io.Writer) int {
 }
 
 func runStationTrailImport(db *sql.DB, sourceKind, sourcePath string, values map[string]string) (ingest.AdapterResult, stationTrailSummary, error) {
-	summaryFile, err := os.CreateTemp("", "logspine-stationtrail-*.json")
+	summaryFile, err := os.CreateTemp("", "miseledger-stationtrail-*.json")
 	if err != nil {
 		return ingest.AdapterResult{}, stationTrailSummary{}, err
 	}
@@ -780,7 +780,7 @@ func runStationTrailImport(db *sql.DB, sourceKind, sourcePath string, values map
 
 func cmdAdapter(args []string, out, errw io.Writer) int {
 	if len(args) == 0 {
-		return fatalf(errw, "usage: spine adapter codex|openclaw|claude|hermes <path-or-dir> --out <file|->")
+		return fatalf(errw, "usage: miseledger adapter codex|openclaw|claude|hermes <path-or-dir> --out <file|->")
 	}
 	switch args[0] {
 	case "codex":
@@ -792,7 +792,7 @@ func cmdAdapter(args []string, out, errw io.Writer) int {
 	case "hermes":
 		return cmdAdapterGenerate("hermes", hermes.Generate, args[1:], out, errw)
 	default:
-		return fatalf(errw, "usage: spine adapter codex|openclaw|claude|hermes <path-or-dir> --out <file|->")
+		return fatalf(errw, "usage: miseledger adapter codex|openclaw|claude|hermes <path-or-dir> --out <file|->")
 	}
 }
 
@@ -802,7 +802,7 @@ func cmdAdapterGenerate(name string, generator sources.Generator, args []string,
 		return fatalf(errw, "adapter %s: %s", name, err)
 	}
 	if len(rest) != 1 || values["out"] == "" {
-		return fatalf(errw, "usage: spine adapter %s <path-or-dir> --out <file|-> [--limit N] [--since DATE] [--json]", name)
+		return fatalf(errw, "usage: miseledger adapter %s <path-or-dir> --out <file|-> [--limit N] [--since DATE] [--json]", name)
 	}
 	limit, err := parseLimit(values["limit"], 0)
 	if err != nil {
@@ -842,7 +842,7 @@ func cmdImportNative(name string, generator sources.Generator, args []string, ou
 		return fatalf(errw, "import %s: %s", name, err)
 	}
 	if len(rest) != 1 {
-		return fatalf(errw, "usage: spine import %s <path-or-dir> [--json] [--dry-run] [--limit N] [--since DATE]", name)
+		return fatalf(errw, "usage: miseledger import %s <path-or-dir> [--json] [--dry-run] [--limit N] [--since DATE]", name)
 	}
 	limit, err := parseLimit(values["limit"], 0)
 	if err != nil {
@@ -923,7 +923,7 @@ func cmdSearch(args []string, out, errw io.Writer) int {
 		return fatalf(errw, "search: %s", err)
 	}
 	if len(rest) < 1 {
-		return fatalf(errw, "usage: spine search <query>")
+		return fatalf(errw, "usage: miseledger search <query>")
 	}
 	limit := 20
 	if values["limit"] != "" {
@@ -1053,7 +1053,7 @@ func cmdExplain(args []string, out, errw io.Writer) int {
 		return fatalf(errw, "explain: %s", err)
 	}
 	if len(rest) < 1 {
-		return fatalf(errw, "usage: spine explain <query> [--json] [--limit N] [--source KIND] [--collection ID] [--kind KIND] [--actor-type TYPE] [--project NAME] [--tags LIST] [--from DATE] [--to DATE]")
+		return fatalf(errw, "usage: miseledger explain <query> [--json] [--limit N] [--source KIND] [--collection ID] [--kind KIND] [--actor-type TYPE] [--project NAME] [--tags LIST] [--from DATE] [--to DATE]")
 	}
 	limit, err := parseLimit(values["limit"], 20)
 	if err != nil {
@@ -1120,7 +1120,7 @@ func cmdShow(args []string, out, errw io.Writer) int {
 		return fatalf(errw, "show: %s", err)
 	}
 	if len(rest) != 1 {
-		return fatalf(errw, "usage: spine show <item-id>")
+		return fatalf(errw, "usage: miseledger show <item-id>")
 	}
 	db, _, err := openMigrated()
 	if err != nil {
@@ -1153,7 +1153,7 @@ func cmdEvidence(args []string, out, errw io.Writer) int {
 		return fatalf(errw, "evidence: %s", err)
 	}
 	if len(rest) < 1 {
-		return fatalf(errw, "usage: spine evidence <query>|show <bundle-id>|list [--json] [--markdown] [--include-related] [--include-artifact-text] [--limit N] [--source KIND] [--project NAME] [--from DATE] [--to DATE]")
+		return fatalf(errw, "usage: miseledger evidence <query>|show <bundle-id>|list [--json] [--markdown] [--include-related] [--include-artifact-text] [--limit N] [--source KIND] [--project NAME] [--from DATE] [--to DATE]")
 	}
 	limit, err := parseLimit(values["limit"], 20)
 	if err != nil {
@@ -1186,7 +1186,7 @@ func cmdEvidenceShow(args []string, out, errw io.Writer) int {
 		return fatalf(errw, "evidence show: %s", err)
 	}
 	if len(rest) != 1 {
-		return fatalf(errw, "usage: spine evidence show <bundle-id> [--json] [--markdown]")
+		return fatalf(errw, "usage: miseledger evidence show <bundle-id> [--json] [--markdown]")
 	}
 	bundle, err := loadEvidenceBundle(rest[0])
 	if err != nil {
@@ -1206,7 +1206,7 @@ func cmdEvidenceList(args []string, out, errw io.Writer) int {
 		return fatalf(errw, "evidence list: %s", err)
 	}
 	if len(rest) != 0 {
-		return fatalf(errw, "usage: spine evidence list [--json]")
+		return fatalf(errw, "usage: miseledger evidence list [--json]")
 	}
 	bundles, err := listEvidenceBundles()
 	if err != nil {
@@ -1278,7 +1278,7 @@ where i.id = ?`, r.ID)
 	id := evidenceBundleID(opts, items)
 	return map[string]any{
 		"id":                id,
-		"resource_uri":      "logspine://evidence/" + id,
+		"resource_uri":      "miseledger://evidence/" + id,
 		"query":             opts.Query,
 		"filters":           map[string]any{"source": opts.Source, "project": opts.Project, "from": opts.From, "to": opts.To, "limit": opts.Limit, "include_related": opts.IncludeRelated, "include_artifact_text": opts.IncludeArtifactText},
 		"generated_at":      time.Now().UTC().Format(time.RFC3339Nano),
@@ -1398,7 +1398,7 @@ limit 20`, itemID, itemID)
 }
 
 func writeEvidenceMarkdown(w io.Writer, bundle map[string]any) {
-	fmt.Fprintf(w, "# Logspine Evidence\n\n")
+	fmt.Fprintf(w, "# MiseLedger Evidence\n\n")
 	fmt.Fprintf(w, "- Query: %s\n", bundle["query"])
 	fmt.Fprintf(w, "- Generated: %s\n", bundle["generated_at"])
 	fmt.Fprintf(w, "- Untrusted context: true\n\n")
@@ -1478,14 +1478,14 @@ func queryMaps(db *sql.DB, sqlText string, args ...any) []map[string]any {
 
 func cmdExport(args []string, out, errw io.Writer) int {
 	if len(args) == 0 || args[0] != "markdown" {
-		return fatalf(errw, "usage: spine export markdown --out <dir>")
+		return fatalf(errw, "usage: miseledger export markdown --out <dir>")
 	}
 	values, _, rest, err := splitFlags(args[1:], map[string]bool{"out": true}, nil)
 	if err != nil {
 		return fatalf(errw, "export: %s", err)
 	}
 	if len(rest) != 0 || values["out"] == "" {
-		return fatalf(errw, "usage: spine export markdown --out <dir>")
+		return fatalf(errw, "usage: miseledger export markdown --out <dir>")
 	}
 	db, _, err := openMigrated()
 	if err != nil {
@@ -1561,13 +1561,13 @@ func safeName(s string) string {
 
 func cmdRelations(args []string, out, errw io.Writer) int {
 	if len(args) == 0 {
-		return fatalf(errw, "usage: spine relations backfill [--json]")
+		return fatalf(errw, "usage: miseledger relations backfill [--json]")
 	}
 	switch args[0] {
 	case "backfill":
 		return cmdRelationsBackfill(args[1:], out, errw)
 	default:
-		return fatalf(errw, "usage: spine relations backfill [--json]")
+		return fatalf(errw, "usage: miseledger relations backfill [--json]")
 	}
 }
 
@@ -1577,7 +1577,7 @@ func cmdRelationsBackfill(args []string, out, errw io.Writer) int {
 		return fatalf(errw, "relations backfill: %s", err)
 	}
 	if len(rest) != 0 {
-		return fatalf(errw, "usage: spine relations backfill [--json]")
+		return fatalf(errw, "usage: miseledger relations backfill [--json]")
 	}
 	db, _, err := openMigrated()
 	if err != nil {
@@ -1611,7 +1611,7 @@ func cmdStats(args []string, out, errw io.Writer) int {
 		return fatalf(errw, "stats: %s", err)
 	}
 	if len(rest) != 0 {
-		return fatalf(errw, "usage: spine stats [--json]")
+		return fatalf(errw, "usage: miseledger stats [--json]")
 	}
 	db, paths, err := openMigrated()
 	if err != nil {
@@ -1667,7 +1667,7 @@ func cmdCompact(args []string, out, errw io.Writer) int {
 		return fatalf(errw, "compact: %s", err)
 	}
 	if len(rest) != 0 {
-		return fatalf(errw, "usage: spine compact [--json]")
+		return fatalf(errw, "usage: miseledger compact [--json]")
 	}
 	db, paths, err := openMigrated()
 	if err != nil {
@@ -1711,7 +1711,7 @@ func cmdCompact(args []string, out, errw io.Writer) int {
 
 func cmdPrune(args []string, out, errw io.Writer) int {
 	if len(args) == 0 {
-		return fatalf(errw, "usage: spine prune imports|scans")
+		return fatalf(errw, "usage: miseledger prune imports|scans")
 	}
 	switch args[0] {
 	case "imports":
@@ -1719,7 +1719,7 @@ func cmdPrune(args []string, out, errw io.Writer) int {
 	case "scans":
 		return cmdPruneScans(args[1:], out, errw)
 	default:
-		return fatalf(errw, "usage: spine prune imports|scans")
+		return fatalf(errw, "usage: miseledger prune imports|scans")
 	}
 }
 
@@ -1729,7 +1729,7 @@ func cmdPruneImports(args []string, out, errw io.Writer) int {
 		return fatalf(errw, "prune imports: %s", err)
 	}
 	if len(rest) != 0 || values["before"] == "" {
-		return fatalf(errw, "usage: spine prune imports --before DATE [--json] [--dry-run]")
+		return fatalf(errw, "usage: miseledger prune imports --before DATE [--json] [--dry-run]")
 	}
 	before, err := normalizeDateTime(values["before"])
 	if err != nil {
@@ -1783,7 +1783,7 @@ func cmdPruneScans(args []string, out, errw io.Writer) int {
 		return fatalf(errw, "prune scans: %s", err)
 	}
 	if len(rest) != 0 || !bools["missing"] {
-		return fatalf(errw, "usage: spine prune scans --missing [--json] [--dry-run]")
+		return fatalf(errw, "usage: miseledger prune scans --missing [--json] [--dry-run]")
 	}
 	db, _, err := openMigrated()
 	if err != nil {
@@ -1867,7 +1867,7 @@ func cmdSQL(args []string, out, errw io.Writer) int {
 		return fatalf(errw, "sql: %s", err)
 	}
 	if len(rest) != 1 {
-		return fatalf(errw, "usage: spine sql <select> [--json]")
+		return fatalf(errw, "usage: miseledger sql <select> [--json]")
 	}
 	query := rest[0]
 	if err := validateReadOnlySQL(query); err != nil {

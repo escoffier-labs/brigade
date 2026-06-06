@@ -15,11 +15,11 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/escoffier-labs/logspine/internal/sources"
-	"github.com/escoffier-labs/logspine/internal/sources/claude"
-	"github.com/escoffier-labs/logspine/internal/sources/codex"
-	"github.com/escoffier-labs/logspine/internal/sources/hermes"
-	"github.com/escoffier-labs/logspine/internal/sources/openclaw"
+	"github.com/escoffier-labs/miseledger/internal/sources"
+	"github.com/escoffier-labs/miseledger/internal/sources/claude"
+	"github.com/escoffier-labs/miseledger/internal/sources/codex"
+	"github.com/escoffier-labs/miseledger/internal/sources/hermes"
+	"github.com/escoffier-labs/miseledger/internal/sources/openclaw"
 )
 
 type discoveredRoot struct {
@@ -44,7 +44,7 @@ type discoveredImportRow struct {
 
 func cmdWatch(args []string, out, errw io.Writer) int {
 	if len(args) == 0 {
-		return fatalf(errw, "usage: spine watch once|daemon [--json] [--interval DURATION]")
+		return fatalf(errw, "usage: miseledger watch once|daemon [--json] [--interval DURATION]")
 	}
 	switch args[0] {
 	case "once":
@@ -69,7 +69,7 @@ func cmdWatch(args []string, out, errw io.Writer) int {
 			return fatalf(errw, "watch daemon: %s", err)
 		}
 		if len(rest) != 0 {
-			return fatalf(errw, "usage: spine watch daemon [--interval DURATION] [--max-runs N] [--if-changed] [--json] [--dry-run] [--limit N] [--since DATE] [--redact LIST]")
+			return fatalf(errw, "usage: miseledger watch daemon [--interval DURATION] [--max-runs N] [--if-changed] [--json] [--dry-run] [--limit N] [--since DATE] [--redact LIST]")
 		}
 		interval := time.Minute
 		if values["interval"] != "" {
@@ -115,7 +115,7 @@ func cmdWatch(args []string, out, errw io.Writer) int {
 			}
 		}
 	default:
-		return fatalf(errw, "usage: spine watch once|daemon")
+		return fatalf(errw, "usage: miseledger watch once|daemon")
 	}
 }
 
@@ -125,7 +125,7 @@ func parseWatchOnceArgs(args []string) (bool, []string, error) {
 		return false, nil, err
 	}
 	if len(rest) != 0 {
-		return false, nil, fmt.Errorf("usage: spine watch once [--if-changed] [--json] [--dry-run] [--limit N] [--since DATE] [--redact LIST]")
+		return false, nil, fmt.Errorf("usage: miseledger watch once [--if-changed] [--json] [--dry-run] [--limit N] [--since DATE] [--redact LIST]")
 	}
 	return bools["if-changed"], stripBoolFlag(args, "if-changed"), nil
 }
@@ -194,7 +194,7 @@ func cmdImportDiscovered(args []string, out, errw io.Writer) int {
 		return fatalf(errw, "import discovered: %s", err)
 	}
 	if len(rest) != 0 {
-		return fatalf(errw, "usage: spine import discovered [--json] [--dry-run] [--limit N] [--since DATE] [--redact LIST]")
+		return fatalf(errw, "usage: miseledger import discovered [--json] [--dry-run] [--limit N] [--since DATE] [--redact LIST]")
 	}
 	limit, err := parseLimit(values["limit"], 0)
 	if err != nil {

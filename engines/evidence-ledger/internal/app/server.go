@@ -17,7 +17,7 @@ func cmdServe(args []string, out, errw io.Writer) int {
 		return fatalf(errw, "serve: %s", err)
 	}
 	if len(rest) != 0 {
-		return fatalf(errw, "usage: spine serve [--addr 127.0.0.1:8765] [--json]")
+		return fatalf(errw, "usage: miseledger serve [--addr 127.0.0.1:8765] [--json]")
 	}
 	addr := values["addr"]
 	if addr == "" {

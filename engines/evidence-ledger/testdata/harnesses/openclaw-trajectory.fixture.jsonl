@@ -1,4 +1,4 @@
-{"type":"session.started","ts":"2026-06-03T17:00:00Z","sessionId":"trajectory-demo","runId":"run-1","workspaceDir":"/workspace/logspine","data":{"model":"gpt-5"}}
-{"type":"prompt.submitted","ts":"2026-06-03T17:01:00Z","sessionId":"trajectory-demo","runId":"run-1","workspaceDir":"/workspace/logspine","data":{"role":"human","prompt":"Build the Brigade evidence bundle output."}}
-{"type":"context.compiled","ts":"2026-06-03T17:02:00Z","sessionId":"trajectory-demo","runId":"run-1","workspaceDir":"/workspace/logspine","data":{"summary":"Context includes Discrawl fixture and Codex fixture records."}}
-{"type":"model.completed","ts":"2026-06-03T17:03:00Z","sessionId":"trajectory-demo","runId":"run-1","workspaceDir":"/workspace/logspine","data":{"role":"assistant","output":"Evidence bundle generated with untrusted_context true."}}
+{"type":"session.started","ts":"2026-06-03T17:00:00Z","sessionId":"trajectory-demo","runId":"run-1","workspaceDir":"/workspace/miseledger","data":{"model":"gpt-5"}}
+{"type":"prompt.submitted","ts":"2026-06-03T17:01:00Z","sessionId":"trajectory-demo","runId":"run-1","workspaceDir":"/workspace/miseledger","data":{"role":"human","prompt":"Build the Brigade evidence bundle output."}}
+{"type":"context.compiled","ts":"2026-06-03T17:02:00Z","sessionId":"trajectory-demo","runId":"run-1","workspaceDir":"/workspace/miseledger","data":{"summary":"Context includes Discrawl fixture and Codex fixture records."}}
+{"type":"model.completed","ts":"2026-06-03T17:03:00Z","sessionId":"trajectory-demo","runId":"run-1","workspaceDir":"/workspace/miseledger","data":{"role":"assistant","output":"Evidence bundle generated with untrusted_context true."}}

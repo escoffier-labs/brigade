@@ -8,7 +8,7 @@
   "messages": [
     {
       "role": "user",
-      "content": "Create a Hermes adapter fixture for Logspine evidence."
+      "content": "Create a Hermes adapter fixture for MiseLedger evidence."
     },
     {
       "role": "assistant",

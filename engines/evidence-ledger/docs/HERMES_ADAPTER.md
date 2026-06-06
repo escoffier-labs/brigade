@@ -1,29 +1,29 @@
 # Hermes Adapter
 
-Hermes is an agent-session source family for Logspine.
+Hermes is an agent-session source family for MiseLedger.
 
-Logspine natively supports local Hermes `session_*.json` snapshots and trajectory JSONL under `~/.hermes/sessions`:
+MiseLedger natively supports local Hermes `session_*.json` snapshots and trajectory JSONL under `~/.hermes/sessions`:
 
 ```bash
-spine adapter hermes ~/.hermes/sessions --out -
-spine import hermes ~/.hermes/sessions --json
+miseledger adapter hermes ~/.hermes/sessions --out -
+miseledger import hermes ~/.hermes/sessions --json
 ```
 
 StationTrail can still export the same records through the shared adapter contract:
 
 ```bash
-stationtrail hermes ~/.hermes/sessions --out - | spine import adapter -
-spine import stationtrail hermes ~/.hermes/sessions --json
-stationtrail all --out - --redact paths,secrets | spine import adapter -
+stationtrail hermes ~/.hermes/sessions --out - | miseledger import adapter -
+miseledger import stationtrail hermes ~/.hermes/sessions --json
+stationtrail all --out - --redact paths,secrets | miseledger import adapter -
 ```
 
-Hermes `state.db` remains an observed storage surface, but Logspine does not parse it directly. Native support is intentionally limited to readable snapshot and trajectory files with stable JSON shapes.
+Hermes `state.db` remains an observed storage surface, but MiseLedger does not parse it directly. Native support is intentionally limited to readable snapshot and trajectory files with stable JSON shapes.
 
 Expected adapter export shape:
 
 ```json
 {
-  "schema": "logspine.adapter.v1",
+  "schema": "miseledger.adapter.v1",
   "source": {
     "kind": "hermes",
     "name": "Hermes Sessions"
@@ -70,4 +70,4 @@ Direct `state.db` adapter criteria, if this is ever needed:
 
 - Provide redacted Hermes SQLite samples.
 - Identify timestamp, session ID, actor role, event type, message/tool/artifact fields, and raw source references.
-- Justify coupling Logspine to that SQLite storage surface.
+- Justify coupling MiseLedger to that SQLite storage surface.

@@ -1,12 +1,12 @@
-# Logspine Adapter Contract
+# MiseLedger Adapter Contract
 
-`logspine.adapter.v1` is a JSONL contract for source tools that want to feed Logspine without knowing the database schema.
+`miseledger.adapter.v1` is a JSONL contract for source tools that want to feed MiseLedger without knowing the database schema.
 
 Each line is one JSON object. Unknown fields are tolerated and preserved in `items.raw_json`.
 
 Required fields:
 
-- `schema`: must be `logspine.adapter.v1`
+- `schema`: must be `miseledger.adapter.v1`
 - `source.kind`
 - `collection.external_id`
 - `collection.kind`
@@ -26,7 +26,7 @@ Recommended fields:
 Example:
 
 ```json
-{"schema":"logspine.adapter.v1","source":{"kind":"discrawl","name":"Discrawl","version":"0.6.0"},"collection":{"external_id":"discord:guild:demo/channel:ai-crawl","kind":"discord_channel","name":"#ai-crawl"},"item":{"external_id":"discord:message:1","kind":"message","created_at":"2026-06-03T12:39:06-04:00","text":"adapter contract example","summary":null,"tags":["logspine"]},"actor":{"external_id":"discord:user:demo","type":"human","name":"Demo User"},"artifacts":[],"links":[],"relations":[],"raw":{"format":"json","hash":"sha256:<hash>","path":"raw/discrawl/ai-crawl.jsonl","ordinal":1}}
+{"schema":"miseledger.adapter.v1","source":{"kind":"discrawl","name":"Discrawl","version":"0.6.0"},"collection":{"external_id":"discord:guild:demo/channel:ai-crawl","kind":"discord_channel","name":"#ai-crawl"},"item":{"external_id":"discord:message:1","kind":"message","created_at":"2026-06-03T12:39:06-04:00","text":"adapter contract example","summary":null,"tags":["miseledger"]},"actor":{"external_id":"discord:user:demo","type":"human","name":"Demo User"},"artifacts":[],"links":[],"relations":[],"raw":{"format":"json","hash":"sha256:<hash>","path":"raw/discrawl/ai-crawl.jsonl","ordinal":1}}
 ```
 
 Identity boundary:
@@ -39,25 +39,25 @@ If a source lacks stable IDs, adapters should create deterministic external IDs 
 
 ## Native Adapter Generators
 
-Logspine includes conservative native generators for local agent-session JSON and JSONL:
+MiseLedger includes conservative native generators for local agent-session JSON and JSONL:
 
 ```bash
-spine adapter codex <path-or-dir> --out <file|->
-spine adapter openclaw <path-or-dir> --out <file|->
-spine adapter claude <path-or-dir> --out <file|->
-spine adapter hermes <path-or-dir> --out <file|->
+miseledger adapter codex <path-or-dir> --out <file|->
+miseledger adapter openclaw <path-or-dir> --out <file|->
+miseledger adapter claude <path-or-dir> --out <file|->
+miseledger adapter hermes <path-or-dir> --out <file|->
 ```
 
-They emit the same `logspine.adapter.v1` JSONL contract as external tools. Native import commands generate adapter records and reuse the adapter import path internally:
+They emit the same `miseledger.adapter.v1` JSONL contract as external tools. Native import commands generate adapter records and reuse the adapter import path internally:
 
 ```bash
-spine import codex <path-or-dir> --json
-spine import openclaw <path-or-dir> --json
-spine import claude <path-or-dir> --json
-spine import hermes <path-or-dir> --json
-spine import discovered --json
-spine watch once --json
-spine watch once --if-changed --json
+miseledger import codex <path-or-dir> --json
+miseledger import openclaw <path-or-dir> --json
+miseledger import claude <path-or-dir> --json
+miseledger import hermes <path-or-dir> --json
+miseledger import discovered --json
+miseledger watch once --json
+miseledger watch once --if-changed --json
 ```
 
 Scanner rules:
@@ -75,49 +75,49 @@ Scanner rules:
 
 Claude support targets `~/.claude/projects/**/*.jsonl` style project logs. The MVP scanner imports ordinary project session JSONL and does not special-case subagents yet; subagent lines are treated as normal agent-session evidence unless a future fixture shows a safer split.
 
-Hermes support targets `~/.hermes/sessions/session_*.json` snapshots and trajectory JSONL. Logspine does not parse Hermes `state.db` directly.
+Hermes support targets `~/.hermes/sessions/session_*.json` snapshots and trajectory JSONL. MiseLedger does not parse Hermes `state.db` directly.
 
 ## StationTrail External Scanner
 
-StationTrail is a separate scanner/exporter for local agent session logs. It emits this same `logspine.adapter.v1` JSONL contract and can be piped directly into adapter ingest:
+StationTrail is a separate scanner/exporter for local agent session logs. It emits this same `miseledger.adapter.v1` JSONL contract and can be piped directly into adapter ingest:
 
 ```bash
-stationtrail codex ~/.codex/sessions --out - | spine import adapter -
-stationtrail claude ~/.claude/projects --out - | spine import adapter -
-stationtrail openclaw ~/.openclaw/agents --out - | spine import adapter -
-stationtrail hermes ~/.hermes/sessions --out - | spine import adapter -
-stationtrail all --out - --redact paths,secrets | spine import adapter -
+stationtrail codex ~/.codex/sessions --out - | miseledger import adapter -
+stationtrail claude ~/.claude/projects --out - | miseledger import adapter -
+stationtrail openclaw ~/.openclaw/agents --out - | miseledger import adapter -
+stationtrail hermes ~/.hermes/sessions --out - | miseledger import adapter -
+stationtrail all --out - --redact paths,secrets | miseledger import adapter -
 ```
 
-Or let Logspine run StationTrail when the `stationtrail` binary is installed on `PATH`:
+Or let MiseLedger run StationTrail when the `stationtrail` binary is installed on `PATH`:
 
 ```bash
-spine import stationtrail codex ~/.codex/sessions --json
-spine import stationtrail claude ~/.claude/projects --json
-spine import stationtrail openclaw ~/.openclaw/agents --json
-spine import stationtrail opencode opencode-session.json --json
-spine import stationtrail hermes ~/.hermes/sessions --json
+miseledger import stationtrail codex ~/.codex/sessions --json
+miseledger import stationtrail claude ~/.claude/projects --json
+miseledger import stationtrail openclaw ~/.openclaw/agents --json
+miseledger import stationtrail opencode opencode-session.json --json
+miseledger import stationtrail hermes ~/.hermes/sessions --json
 ```
 
-Use StationTrail when source-specific harness parsing should live outside Logspine or when exporting OpenCode. Logspine also has native parsers for Codex, Claude, OpenClaw, and Hermes snapshot or trajectory files. Keep Logspine focused on ingest, normalized storage, FTS, scan manifests, relation resolution, and evidence output.
+Use StationTrail when source-specific harness parsing should live outside MiseLedger or when exporting OpenCode. MiseLedger also has native parsers for Codex, Claude, OpenClaw, and Hermes snapshot or trajectory files. Keep MiseLedger focused on ingest, normalized storage, FTS, scan manifests, relation resolution, and evidence output.
 
-StationTrail `discover`, `doctor`, `doctor --live`, `inspect`, and `--dry-run --json` modes report roots, structural keys, counts, records, and warnings without printing transcript content. Logspine's `import stationtrail` wrapper records StationTrail scan manifests when StationTrail writes summary output. For `stationtrail all`, prefer piping to `spine import adapter -` so mixed-source records retain their individual `source.kind`.
+StationTrail `discover`, `doctor`, `doctor --live`, `inspect`, and `--dry-run --json` modes report roots, structural keys, counts, records, and warnings without printing transcript content. MiseLedger's `import stationtrail` wrapper records StationTrail scan manifests when StationTrail writes summary output. For `stationtrail all`, prefer piping to `miseledger import adapter -` so mixed-source records retain their individual `source.kind`.
 
 Scan manifests can be compared without reading transcript content into output:
 
 ```bash
-spine scans diff <path> --json
-spine scans changed --json
+miseledger scans diff <path> --json
+miseledger scans changed --json
 ```
 
-SourceHarvest can be wrapped directly by Logspine when the `sourceharvest` binary is installed on `PATH`:
+SourceHarvest can be wrapped directly by MiseLedger when the `sourceharvest` binary is installed on `PATH`:
 
 ```bash
-spine import sourceharvest markdown ./notes --source notes --collection notes:local --json
-spine import sourceharvest files ./notes --source notes --collection notes:files --glob "*.md,*.txt" --json
-spine import sourceharvest html ./site-export --source docs --collection docs:html --json
-spine import sourceharvest gitlog . --source gitlog --collection repo:logspine --json
-spine import sourceharvest json export.json --source export --collection export:records --records-path records --json
+miseledger import sourceharvest markdown ./notes --source notes --collection notes:local --json
+miseledger import sourceharvest files ./notes --source notes --collection notes:files --glob "*.md,*.txt" --json
+miseledger import sourceharvest html ./site-export --source docs --collection docs:html --json
+miseledger import sourceharvest gitlog . --source gitlog --collection repo:miseledger --json
+miseledger import sourceharvest json export.json --source export --collection export:records --records-path records --json
 ```
 
 The wrapper requests SourceHarvest's summary JSON internally, streams adapter JSONL through normal ingest, and records a lightweight scan manifest when the summary path can be statted locally. The manifest contains path, size, mtime, content hash for regular files or summary hash for directories, generated adapter hash, record count, and warning count. It does not contain harvested text.

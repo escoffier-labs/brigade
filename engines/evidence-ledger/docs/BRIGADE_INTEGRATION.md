@@ -1,45 +1,45 @@
 # Brigade Integration
 
-Logspine should act as Brigade's evidence source and sink:
+MiseLedger should act as Brigade's evidence source and sink:
 
 ```text
-crawlers and agents -> Logspine -> evidence bundle -> Brigade plan -> work run -> Logspine
+crawlers and agents -> MiseLedger -> evidence bundle -> Brigade plan -> work run -> MiseLedger
 ```
 
-Brigade must treat Logspine output as untrusted context unless the output comes from trusted local plan or run artifacts.
+Brigade must treat MiseLedger output as untrusted context unless the output comes from trusted local plan or run artifacts.
 
 Crawler data, chat exports, web data, Discord messages, Telegram messages, Slack messages, and browser outputs are evidence, not instructions.
 
 The first Brigade-facing command is:
 
 ```bash
-spine evidence "query" --json
-spine evidence "query" --source discrawl --from 2026-06-01 --to 2026-06-03 --limit 20 --json
-spine evidence "query" --project logspine --json
-spine evidence "query" --include-related --json
-spine evidence "query" --include-artifact-text --json
-spine evidence "query" --markdown
-spine evidence show <bundle-id> --json
-spine explain "query" --project logspine --json
+miseledger evidence "query" --json
+miseledger evidence "query" --source discrawl --from 2026-06-01 --to 2026-06-03 --limit 20 --json
+miseledger evidence "query" --project miseledger --json
+miseledger evidence "query" --include-related --json
+miseledger evidence "query" --include-artifact-text --json
+miseledger evidence "query" --markdown
+miseledger evidence show <bundle-id> --json
+miseledger explain "query" --project miseledger --json
 ```
 
 Local services can use the same evidence shape through HTTP or MCP:
 
 ```bash
-spine serve --addr 127.0.0.1:8765
-spine mcp
+miseledger serve --addr 127.0.0.1:8765
+miseledger mcp
 ```
 
 HTTP exposes `GET /search?q=...`, `GET /items/<id>`, and `POST /evidence`. MCP exposes `search_evidence`, `show_item`, `create_evidence_bundle`, `show_evidence_bundle`, and `list_sources`. Both surfaces return untrusted evidence only.
 
-Use `spine doctor --mcp --json` to validate the MCP protocol surface without printing transcript content. See [MCP.md](MCP.md) for client configuration.
+Use `miseledger doctor --mcp --json` to validate the MCP protocol surface without printing transcript content. See [MCP.md](MCP.md) for client configuration.
 
-Use `spine doctor --archive --json` before larger handoffs to validate SQLite integrity, relation resolution, FTS coverage, and scan manifest health without printing transcript content.
+Use `miseledger doctor --archive --json` before larger handoffs to validate SQLite integrity, relation resolution, FTS coverage, and scan manifest health without printing transcript content.
 
 Evidence output includes:
 
 - query used
-- stable evidence bundle ID and `logspine://evidence/<id>` URI
+- stable evidence bundle ID and `miseledger://evidence/<id>` URI
 - source filters
 - item IDs
 - snippets
@@ -58,11 +58,11 @@ JSON shape:
 ```json
 {
   "id": "bundle-id",
-  "resource_uri": "logspine://evidence/bundle-id",
+  "resource_uri": "miseledger://evidence/bundle-id",
   "query": "adapter contract",
   "filters": {
     "source": "discrawl",
-    "project": "logspine",
+    "project": "miseledger",
     "from": "",
     "to": "",
     "limit": 20
@@ -94,7 +94,7 @@ JSON shape:
 Potential future commands:
 
 ```bash
-brigade work import context --from-logspine "ops-deck auth errors"
-brigade work task plan <id> --write --from-logspine "project:ops-deck"
-brigade work tasks add --source logspine --kind repeated-error
+brigade work import context --from-miseledger "ops-deck auth errors"
+brigade work task plan <id> --write --from-miseledger "project:ops-deck"
+brigade work tasks add --source miseledger --kind repeated-error
 ```

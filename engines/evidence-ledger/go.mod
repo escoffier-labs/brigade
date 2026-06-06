@@ -1,4 +1,4 @@
-module github.com/escoffier-labs/logspine
+module github.com/escoffier-labs/miseledger
 
 go 1.22
 

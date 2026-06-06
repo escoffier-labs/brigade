@@ -1,6 +1,6 @@
 # Adjacent Tools
 
-Logspine should learn from adjacent tools without copying their product shape.
+MiseLedger should learn from adjacent tools without copying their product shape.
 
 ## Agent Sessions
 
@@ -10,14 +10,14 @@ Agent Sessions is adjacent, not a blocker and not a target to clone.
 
 Agent Sessions is a macOS-first session browser and cockpit for many AI coding tools. Its public README describes a native Mac app for Codex, Claude, OpenCode, Cursor, GitHub Copilot CLI, Pi, Gemini CLI, Hermes, and OpenClaw histories. It focuses on browsing local session folders, transcript inspection, image browsing, saved-session recovery, resume commands, live Agent Cockpit behavior, rate or usage visibility, and macOS terminal integrations.
 
-Logspine is different:
+MiseLedger is different:
 
-- Logspine is a portable CLI, server, and MCP-friendly normalized memory layer.
-- Logspine spans crawler archives and agent sessions.
-- Logspine's first product surface is the `spine` CLI and durable SQLite archive.
-- Logspine's adapter boundary is `logspine.adapter.v1` JSONL.
-- Logspine normalizes source, collection, actor, item, event, artifact, and relation concepts across heterogeneous sources.
-- Logspine is intended to become Brigade's evidence source and sink, where imported data is untrusted evidence rather than instructions.
+- MiseLedger is a portable CLI, server, and MCP-friendly normalized memory layer.
+- MiseLedger spans crawler archives and agent sessions.
+- MiseLedger's first product surface is the `miseledger` CLI and durable SQLite archive.
+- MiseLedger's adapter boundary is `miseledger.adapter.v1` JSONL.
+- MiseLedger normalizes source, collection, actor, item, event, artifact, and relation concepts across heterogeneous sources.
+- MiseLedger is intended to become Brigade's evidence source and sink, where imported data is untrusted evidence rather than instructions.
 
 Each source system is best at its native domain:
 
@@ -29,22 +29,22 @@ Each source system is best at its native domain:
 
 ## Boundary
 
-Agent session scanning is in scope for Logspine, but the MVP starts with generic normalized adapter fixtures and conservative native JSON/JSONL generators rather than perfect per-harness parsers.
+Agent session scanning is in scope for MiseLedger, but the MVP starts with generic normalized adapter fixtures and conservative native JSON/JSONL generators rather than perfect per-harness parsers.
 
-StationTrail is the sibling tool for portable local agent-session export. It scans agent harness logs such as Codex, Claude project logs, and OpenClaw sessions, then emits `logspine.adapter.v1` JSONL.
+StationTrail is the sibling tool for portable local agent-session export. It scans agent harness logs such as Codex, Claude project logs, and OpenClaw sessions, then emits `miseledger.adapter.v1` JSONL.
 
 The intended split is:
 
 - StationTrail owns source-specific local harness parsing and privacy-conscious export.
-- Logspine owns adapter ingest, normalized SQLite storage, FTS, relations, scan manifests, search, show, and evidence bundles.
+- MiseLedger owns adapter ingest, normalized SQLite storage, FTS, relations, scan manifests, search, show, and evidence bundles.
 
 When installed on `PATH`, StationTrail can be used through:
 
 ```bash
-spine import stationtrail codex ~/.codex/sessions --json
+miseledger import stationtrail codex ~/.codex/sessions --json
 ```
 
-Logspine may keep native adapters as compatibility wrappers, but it should not become the long-term home for every harness parser.
+MiseLedger may keep native adapters as compatibility wrappers, but it should not become the long-term home for every harness parser.
 
 The minimum proof remains:
 
@@ -56,7 +56,7 @@ The minimum proof remains:
 
 ## Non-goals
 
-Do not turn Logspine into a worse Agent Sessions clone.
+Do not turn MiseLedger into a worse Agent Sessions clone.
 
 Do not build for this MVP:
 

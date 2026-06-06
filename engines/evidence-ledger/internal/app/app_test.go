@@ -120,7 +120,7 @@ func TestImportWarningsForInvalidRecords(t *testing.T) {
 	withTempHome(t)
 	runOK(t, "init")
 	bad := filepath.Join(t.TempDir(), "bad.jsonl")
-	if err := os.WriteFile(bad, []byte(`{"schema":"logspine.adapter.v1","source":{"kind":"discrawl"},"item":{"external_id":"x","kind":"message"}}`+"\n"), 0o600); err != nil {
+	if err := os.WriteFile(bad, []byte(`{"schema":"miseledger.adapter.v1","source":{"kind":"discrawl"},"item":{"external_id":"x","kind":"message"}}`+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	out := runJSON(t, "import", "adapter", bad, "--source", "discrawl", "--json")
@@ -227,7 +227,7 @@ esac
 if [ -n "$summary" ]; then
   printf '{"source":"%s","records":1,"warnings":[],"files":[{"path":"%s.fixture","size":1,"mtime":"2026-06-03T00:00:00Z","content_hash":"sha256:test","records_generated":1,"warnings":0}]}' "$source" "$source" > "$summary"
 fi
-printf '{"schema":"logspine.adapter.v1","source":{"kind":"%s","name":"StationTrail Fixture"},"collection":{"external_id":"%s:session:fixture","kind":"agent_session","name":"fixture"},"item":{"external_id":"%s:item:fixture","kind":"message","created_at":"2026-06-03T00:00:00Z","text":"%s","tags":["agent-session","%s"]},"actor":{"external_id":"%s:%s:fixture","type":"%s","name":"fixture"},"artifacts":[],"links":[],"relations":[],"raw":{"format":"json","hash":"sha256:test","path":"%s.fixture","ordinal":1}}\n' "$source" "$source" "$source" "$text" "$source" "$source" "$actor" "$actor" "$source"
+printf '{"schema":"miseledger.adapter.v1","source":{"kind":"%s","name":"StationTrail Fixture"},"collection":{"external_id":"%s:session:fixture","kind":"agent_session","name":"fixture"},"item":{"external_id":"%s:item:fixture","kind":"message","created_at":"2026-06-03T00:00:00Z","text":"%s","tags":["agent-session","%s"]},"actor":{"external_id":"%s:%s:fixture","type":"%s","name":"fixture"},"artifacts":[],"links":[],"relations":[],"raw":{"format":"json","hash":"sha256:test","path":"%s.fixture","ordinal":1}}\n' "$source" "$source" "$source" "$text" "$source" "$source" "$actor" "$actor" "$source"
 `
 	if err := os.WriteFile(script, []byte(body), 0o700); err != nil {
 		t.Fatal(err)
@@ -263,7 +263,7 @@ func TestImportSourceHarvestWrapper(t *testing.T) {
 mode="$1"
 path="$2"
 text="SourceHarvest $mode wrapper fixture evidence"
-printf '{"schema":"logspine.adapter.v1","source":{"kind":"notes","name":"SourceHarvest Fixture"},"collection":{"external_id":"notes:%s","kind":"notes","name":"notes"},"item":{"external_id":"notes:item:%s","kind":"note","created_at":"2026-06-03T00:00:00Z","text":"%s","tags":["notes","%s"]},"actor":{"external_id":"notes:system:%s","type":"system","name":"fixture"},"artifacts":[],"links":[],"relations":[],"raw":{"format":"json","hash":"sha256:test","path":"notes-%s.fixture","ordinal":1}}\n' "$mode" "$mode" "$text" "$mode" "$mode" "$mode"
+printf '{"schema":"miseledger.adapter.v1","source":{"kind":"notes","name":"SourceHarvest Fixture"},"collection":{"external_id":"notes:%s","kind":"notes","name":"notes"},"item":{"external_id":"notes:item:%s","kind":"note","created_at":"2026-06-03T00:00:00Z","text":"%s","tags":["notes","%s"]},"actor":{"external_id":"notes:system:%s","type":"system","name":"fixture"},"artifacts":[],"links":[],"relations":[],"raw":{"format":"json","hash":"sha256:test","path":"notes-%s.fixture","ordinal":1}}\n' "$mode" "$mode" "$text" "$mode" "$mode" "$mode"
 printf '{"source":"notes","path":"%s","records":1,"files":1,"warnings":[],"generated_at":"2026-06-03T00:00:00Z"}\n' "$path" >&2
 `
 	if err := os.WriteFile(script, []byte(body), 0o700); err != nil {
@@ -367,7 +367,7 @@ func TestNativeAdaptersImportAndEvidence(t *testing.T) {
 		if err := json.Unmarshal([]byte(line), &rec); err != nil {
 			t.Fatalf("adapter emitted invalid json: %v\n%s", err, line)
 		}
-		if rec["schema"] != "logspine.adapter.v1" {
+		if rec["schema"] != "miseledger.adapter.v1" {
 			t.Fatalf("adapter schema = %v", rec["schema"])
 		}
 	}
@@ -375,7 +375,7 @@ func TestNativeAdaptersImportAndEvidence(t *testing.T) {
 		t.Fatalf("codex adapter did not include real response_item shapes: %s", adapterJSONL)
 	}
 	hermesAdapterJSONL := runOK(t, "adapter", "hermes", hermesSnapshotFixture, "--out", "-")
-	if !strings.Contains(hermesAdapterJSONL, "logspine.adapter.v1") || !strings.Contains(hermesAdapterJSONL, "Hermes snapshots") {
+	if !strings.Contains(hermesAdapterJSONL, "miseledger.adapter.v1") || !strings.Contains(hermesAdapterJSONL, "Hermes snapshots") {
 		t.Fatalf("hermes adapter did not emit expected records: %s", hermesAdapterJSONL)
 	}
 
@@ -505,7 +505,7 @@ func TestNativeAdaptersImportAndEvidence(t *testing.T) {
 	if _, ok := first["artifacts"].([]any); !ok {
 		t.Fatalf("evidence artifacts was not an array: %T %v", first["artifacts"], first["artifacts"])
 	}
-	projectEvidence := runJSON(t, "evidence", "Claude native import", "--project", "logspine", "--json")
+	projectEvidence := runJSON(t, "evidence", "Claude native import", "--project", "miseledger", "--json")
 	if len(projectEvidence["results"].([]any)) == 0 {
 		t.Fatalf("project-filtered evidence returned no results: %v", projectEvidence)
 	}
@@ -616,7 +616,7 @@ func TestArchiveOperations(t *testing.T) {
 	}
 
 	evidence := runJSON(t, "evidence", "adapter contract", "--source", "codex", "--json")
-	if evidence["id"] == "" || !strings.HasPrefix(evidence["resource_uri"].(string), "logspine://evidence/") {
+	if evidence["id"] == "" || !strings.HasPrefix(evidence["resource_uri"].(string), "miseledger://evidence/") {
 		t.Fatalf("evidence missing stable reference: %v", evidence)
 	}
 	shown := runJSON(t, "evidence", "show", evidence["id"].(string), "--json")
@@ -769,7 +769,7 @@ func TestHTTPAPIAndMCPTools(t *testing.T) {
 	if !strings.Contains(content[0]["text"].(string), `"untrusted_context":true`) {
 		t.Fatalf("mcp content missing evidence bundle: %v", content)
 	}
-	if !strings.Contains(content[0]["text"].(string), `"resource_uri":"logspine://evidence/`) {
+	if !strings.Contains(content[0]["text"].(string), `"resource_uri":"miseledger://evidence/`) {
 		t.Fatalf("mcp content missing evidence resource uri: %v", content)
 	}
 }

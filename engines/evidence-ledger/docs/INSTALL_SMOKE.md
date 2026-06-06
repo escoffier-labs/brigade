@@ -1,6 +1,6 @@
 # Install Smoke
 
-This smoke proves the public release installers can install Logspine, StationTrail, and SourceHarvest, then import fixture-only data into a temporary local archive.
+This smoke proves the public release installers can install MiseLedger, StationTrail, and SourceHarvest, then import fixture-only data into a temporary local archive.
 
 It does not import private session logs.
 
@@ -13,44 +13,44 @@ export XDG_CACHE_HOME="$tmp_home/.cache"
 export BINDIR="$tmp_home/bin"
 export PATH="$BINDIR:$PATH"
 
-curl -fsSL https://raw.githubusercontent.com/escoffier-labs/logspine/HEAD/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/escoffier-labs/miseledger/HEAD/install.sh | sh
 curl -fsSL https://raw.githubusercontent.com/escoffier-labs/stationtrail/HEAD/install.sh | sh
 curl -fsSL https://raw.githubusercontent.com/escoffier-labs/sourceharvest/HEAD/install.sh | sh
 
-spine version
+miseledger version
 stationtrail version
 sourceharvest version
 
-spine init
-spine doctor --mcp --json
+miseledger init
+miseledger doctor --mcp --json
 
-repo=/path/to/logspine
-spine import adapter "$repo/testdata/adapters/discrawl.fixture.jsonl" --source discrawl --json
-spine import codex "$repo/testdata/harnesses/codex-session.fixture.jsonl" --json
-spine import openclaw "$repo/testdata/harnesses/openclaw-session.fixture.jsonl" --json
-spine import claude "$repo/testdata/harnesses/claude-project.fixture.jsonl" --json
-spine import hermes "$repo/testdata/harnesses/session_hermes-demo.fixture.json" --json
-spine import hermes "$repo/testdata/harnesses/hermes-trajectory.fixture.jsonl" --json
+repo=/path/to/miseledger
+miseledger import adapter "$repo/testdata/adapters/discrawl.fixture.jsonl" --source discrawl --json
+miseledger import codex "$repo/testdata/harnesses/codex-session.fixture.jsonl" --json
+miseledger import openclaw "$repo/testdata/harnesses/openclaw-session.fixture.jsonl" --json
+miseledger import claude "$repo/testdata/harnesses/claude-project.fixture.jsonl" --json
+miseledger import hermes "$repo/testdata/harnesses/session_hermes-demo.fixture.json" --json
+miseledger import hermes "$repo/testdata/harnesses/hermes-trajectory.fixture.jsonl" --json
 
-spine status --json
-spine stats --json
-spine relations backfill --json
-spine compact --json
-spine doctor --archive --json
-spine scans list --json
-spine search "adapter contract" --json
-spine evidence "Claude native import" --project logspine --json
-spine explain "adapter contract" --json
+miseledger status --json
+miseledger stats --json
+miseledger relations backfill --json
+miseledger compact --json
+miseledger doctor --archive --json
+miseledger scans list --json
+miseledger search "adapter contract" --json
+miseledger evidence "Claude native import" --project miseledger --json
+miseledger explain "adapter contract" --json
 ```
 
 Expected results:
 
 - release binaries install with checksum verification
-- `spine doctor --mcp --json` returns `ok: true`
-- `spine status --json` reports FTS as `ok`
-- `spine stats --json` reports nonzero source and item totals
-- `spine compact --json` returns `ok: true`
-- `spine doctor --archive --json` returns `ok: true`
+- `miseledger doctor --mcp --json` returns `ok: true`
+- `miseledger status --json` reports FTS as `ok`
+- `miseledger stats --json` reports nonzero source and item totals
+- `miseledger compact --json` returns `ok: true`
+- `miseledger doctor --archive --json` returns `ok: true`
 - search returns at least one result
 - evidence returns `untrusted_context: true` and a stable bundle ID
 - evidence result `artifacts` fields encode as arrays, including empty arrays

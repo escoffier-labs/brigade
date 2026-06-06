@@ -11,34 +11,34 @@ export XDG_CONFIG_HOME="$TMP_HOME/.config"
 export XDG_DATA_HOME="$TMP_HOME/.local/share"
 export XDG_CACHE_HOME="$TMP_HOME/.cache"
 
-SPINE="${SPINE:-$ROOT/bin/spine}"
-if [ ! -x "$SPINE" ]; then
-  (cd "$ROOT" && go build -o bin/spine ./cmd/spine)
+MISELEDGER="${MISELEDGER:-$ROOT/bin/miseledger}"
+if [ ! -x "$MISELEDGER" ]; then
+  (cd "$ROOT" && go build -o bin/miseledger ./cmd/miseledger)
 fi
 
-"$SPINE" init >/dev/null
-"$SPINE" doctor --mcp --json >"$TMP_WORK/doctor.json"
-"$SPINE" import adapter "$ROOT/testdata/adapters/discrawl.fixture.jsonl" --source discrawl --json >"$TMP_WORK/import-discrawl.json"
-"$SPINE" import codex "$ROOT/testdata/harnesses/codex-session.fixture.jsonl" --json >"$TMP_WORK/import-codex.json"
-"$SPINE" import openclaw "$ROOT/testdata/harnesses/openclaw-session.fixture.jsonl" --json >"$TMP_WORK/import-openclaw.json"
-"$SPINE" import claude "$ROOT/testdata/harnesses/claude-project.fixture.jsonl" --json >"$TMP_WORK/import-claude.json"
-"$SPINE" import hermes "$ROOT/testdata/harnesses/session_hermes-demo.fixture.json" --json >"$TMP_WORK/import-hermes-snapshot.json"
-"$SPINE" import hermes "$ROOT/testdata/harnesses/hermes-trajectory.fixture.jsonl" --json >"$TMP_WORK/import-hermes-trajectory.json"
-"$SPINE" relations backfill --json >"$TMP_WORK/relations.json"
-"$SPINE" stats --json >"$TMP_WORK/stats.json"
-"$SPINE" compact --json >"$TMP_WORK/compact.json"
-"$SPINE" doctor --archive --json >"$TMP_WORK/doctor-archive.json"
-"$SPINE" prune imports --before 2000-01-01 --dry-run --json >"$TMP_WORK/prune-imports.json"
-"$SPINE" prune scans --missing --dry-run --json >"$TMP_WORK/prune-scans.json"
-"$SPINE" search "Hermes snapshots" --source hermes --json >"$TMP_WORK/search-hermes.json"
-"$SPINE" evidence "Hermes snapshots" --source hermes --json >"$TMP_WORK/evidence-hermes.json"
-"$SPINE" explain "Hermes snapshots" --source hermes --json >"$TMP_WORK/explain-hermes.json"
+"$MISELEDGER" init >/dev/null
+"$MISELEDGER" doctor --mcp --json >"$TMP_WORK/doctor.json"
+"$MISELEDGER" import adapter "$ROOT/testdata/adapters/discrawl.fixture.jsonl" --source discrawl --json >"$TMP_WORK/import-discrawl.json"
+"$MISELEDGER" import codex "$ROOT/testdata/harnesses/codex-session.fixture.jsonl" --json >"$TMP_WORK/import-codex.json"
+"$MISELEDGER" import openclaw "$ROOT/testdata/harnesses/openclaw-session.fixture.jsonl" --json >"$TMP_WORK/import-openclaw.json"
+"$MISELEDGER" import claude "$ROOT/testdata/harnesses/claude-project.fixture.jsonl" --json >"$TMP_WORK/import-claude.json"
+"$MISELEDGER" import hermes "$ROOT/testdata/harnesses/session_hermes-demo.fixture.json" --json >"$TMP_WORK/import-hermes-snapshot.json"
+"$MISELEDGER" import hermes "$ROOT/testdata/harnesses/hermes-trajectory.fixture.jsonl" --json >"$TMP_WORK/import-hermes-trajectory.json"
+"$MISELEDGER" relations backfill --json >"$TMP_WORK/relations.json"
+"$MISELEDGER" stats --json >"$TMP_WORK/stats.json"
+"$MISELEDGER" compact --json >"$TMP_WORK/compact.json"
+"$MISELEDGER" doctor --archive --json >"$TMP_WORK/doctor-archive.json"
+"$MISELEDGER" prune imports --before 2000-01-01 --dry-run --json >"$TMP_WORK/prune-imports.json"
+"$MISELEDGER" prune scans --missing --dry-run --json >"$TMP_WORK/prune-scans.json"
+"$MISELEDGER" search "Hermes snapshots" --source hermes --json >"$TMP_WORK/search-hermes.json"
+"$MISELEDGER" evidence "Hermes snapshots" --source hermes --json >"$TMP_WORK/evidence-hermes.json"
+"$MISELEDGER" explain "Hermes snapshots" --source hermes --json >"$TMP_WORK/explain-hermes.json"
 bundle_id="$(python3 - "$TMP_WORK/evidence-hermes.json" <<'PY'
 import json, sys
 print(json.load(open(sys.argv[1]))["id"])
 PY
 )"
-"$SPINE" evidence show "$bundle_id" --json >"$TMP_WORK/evidence-show.json"
+"$MISELEDGER" evidence show "$bundle_id" --json >"$TMP_WORK/evidence-show.json"
 
 python3 - "$TMP_WORK" <<'PY'
 import json
@@ -74,7 +74,7 @@ assert len(search["results"]) >= 1, search
 
 evidence = load("evidence-hermes.json")
 assert evidence["untrusted_context"] is True, evidence
-assert evidence["resource_uri"].startswith("logspine://evidence/"), evidence
+assert evidence["resource_uri"].startswith("miseledger://evidence/"), evidence
 assert len(evidence["results"]) >= 1, evidence
 assert isinstance(evidence["results"][0]["artifacts"], list), evidence
 

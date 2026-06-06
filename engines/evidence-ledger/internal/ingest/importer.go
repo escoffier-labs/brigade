@@ -13,9 +13,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/escoffier-labs/logspine/internal/adapter"
-	"github.com/escoffier-labs/logspine/internal/sources"
-	"github.com/escoffier-labs/logspine/internal/textnorm"
+	"github.com/escoffier-labs/miseledger/internal/adapter"
+	"github.com/escoffier-labs/miseledger/internal/sources"
+	"github.com/escoffier-labs/miseledger/internal/textnorm"
 )
 
 type AdapterResult struct {

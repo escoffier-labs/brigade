@@ -1,14 +1,14 @@
 # aicrawl Adapter
 
-`aicrawl` remains a source family for Logspine, not a dependency.
+`aicrawl` remains a source family for MiseLedger, not a dependency.
 
-No local aicrawl JSONL export shape was available beyond the existing `logspine.adapter.v1` fixture in `testdata/adapters/aicrawl.fixture.jsonl`. Native import should wait for a real redacted aicrawl export sample rather than guessing a schema.
+No local aicrawl JSONL export shape was available beyond the existing `miseledger.adapter.v1` fixture in `testdata/adapters/aicrawl.fixture.jsonl`. Native import should wait for a real redacted aicrawl export sample rather than guessing a schema.
 
 Expected adapter export shape:
 
 ```json
 {
-  "schema": "logspine.adapter.v1",
+  "schema": "miseledger.adapter.v1",
   "source": {
     "kind": "aicrawl",
     "name": "aicrawl",

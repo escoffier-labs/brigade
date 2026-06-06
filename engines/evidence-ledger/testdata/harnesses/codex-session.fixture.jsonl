@@ -1,7 +1,7 @@
-{"type":"session_meta","timestamp":"2026-06-03T15:00:00Z","payload":{"session_id":"codex-demo","cwd":"/workspace/logspine","model":"gpt-5"}}
+{"type":"session_meta","timestamp":"2026-06-03T15:00:00Z","payload":{"session_id":"codex-demo","cwd":"/workspace/miseledger","model":"gpt-5"}}
 {"type":"event_msg","timestamp":"2026-06-03T15:00:30Z","payload":{"session_id":"codex-demo","type":"task_started","turn_id":"turn-1","model_context_window":200000}}
 {"type":"event_msg","timestamp":"2026-06-03T15:01:00Z","payload":{"session_id":"codex-demo","role":"user","message":"Please connect the adapter contract to Brigade evidence bundle output."}}
-{"type":"response_item","timestamp":"2026-06-03T15:02:00Z","payload":{"session_id":"codex-demo","role":"assistant","item":{"type":"message","content":[{"type":"output_text","text":"The adapter contract should produce normalized agent-session evidence for Logspine search."}]}}}
+{"type":"response_item","timestamp":"2026-06-03T15:02:00Z","payload":{"session_id":"codex-demo","role":"assistant","item":{"type":"message","content":[{"type":"output_text","text":"The adapter contract should produce normalized agent-session evidence for MiseLedger search."}]}}}
 {"type":"response_item","timestamp":"2026-06-03T15:03:00Z","payload":{"session_id":"codex-demo","type":"function_call_output","role":"tool","call_id":"call-123","item":{"type":"function_call_output","output":"go test ./... passed for native codex importer"}}}
 {"type":"response_item","timestamp":"2026-06-03T15:04:00Z","payload":{"session_id":"codex-demo","type":"function_call","name":"exec_command","call_id":"call-123","arguments":"{\"cmd\":\"go test ./...\"}"}}
 {"type":"response_item","timestamp":"2026-06-03T15:05:00Z","payload":{"session_id":"codex-demo","type":"message","role":"assistant","summary":[{"text":"Codex summarized parser hardening for response item tool calls."}]}}

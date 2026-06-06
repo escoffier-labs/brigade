@@ -11,16 +11,16 @@ export XDG_CONFIG_HOME="$TMP_HOME/.config"
 export XDG_DATA_HOME="$TMP_HOME/.local/share"
 export XDG_CACHE_HOME="$TMP_HOME/.cache"
 
-SPINE="${SPINE:-$ROOT/bin/spine}"
-if [ ! -x "$SPINE" ]; then
-  (cd "$ROOT" && go build -o bin/spine ./cmd/spine)
+MISELEDGER="${MISELEDGER:-$ROOT/bin/miseledger}"
+if [ ! -x "$MISELEDGER" ]; then
+  (cd "$ROOT" && go build -o bin/miseledger ./cmd/miseledger)
 fi
 
-"$SPINE" init >/dev/null
-"$SPINE" import adapter "$ROOT/testdata/adapters/discrawl.fixture.jsonl" --source discrawl --json >/dev/null
+"$MISELEDGER" init >/dev/null
+"$MISELEDGER" import adapter "$ROOT/testdata/adapters/discrawl.fixture.jsonl" --source discrawl --json >/dev/null
 
 addr="127.0.0.1:18765"
-"$SPINE" serve --addr "$addr" >"$TMP_WORK/server.log" 2>"$TMP_WORK/server.err" &
+"$MISELEDGER" serve --addr "$addr" >"$TMP_WORK/server.log" 2>"$TMP_WORK/server.err" &
 server_pid="$!"
 sleep 1
 
@@ -39,7 +39,7 @@ python3 - "$TMP_WORK/evidence.json" <<'PY'
 import json, sys
 data = json.load(open(sys.argv[1]))
 assert data["untrusted_context"] is True, data
-assert data["resource_uri"].startswith("logspine://evidence/"), data
+assert data["resource_uri"].startswith("miseledger://evidence/"), data
 assert data["results"], data
 print("http smoke ok")
 PY

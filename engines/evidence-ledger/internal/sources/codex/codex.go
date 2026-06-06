@@ -7,8 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/escoffier-labs/logspine/internal/adapter"
-	"github.com/escoffier-labs/logspine/internal/sources"
+	"github.com/escoffier-labs/miseledger/internal/adapter"
+	"github.com/escoffier-labs/miseledger/internal/sources"
 )
 
 func Generate(path string, opts sources.Options, w io.Writer) (sources.Result, error) {

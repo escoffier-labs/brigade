@@ -6,7 +6,7 @@ import (
 	"fmt"
 )
 
-const SchemaV1 = "logspine.adapter.v1"
+const SchemaV1 = "miseledger.adapter.v1"
 
 type Record struct {
 	Schema     string          `json:"schema"`

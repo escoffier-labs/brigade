@@ -1,19 +1,19 @@
 # StationTrail Boundary
 
-StationTrail and Logspine are intended to work together, not compete for the same product surface.
+StationTrail and MiseLedger are intended to work together, not compete for the same product surface.
 
-StationTrail owns local harness export. Logspine owns durable archive ingest, SQLite storage, FTS, relations, scan manifests, evidence bundles, HTTP, and MCP.
+StationTrail owns local harness export. MiseLedger owns durable archive ingest, SQLite storage, FTS, relations, scan manifests, evidence bundles, HTTP, and MCP.
 
 ## Support Matrix
 
-| Source | StationTrail | Logspine native | Recommended path |
+| Source | StationTrail | MiseLedger native | Recommended path |
 | --- | --- | --- | --- |
-| Codex sessions | yes | yes | Use StationTrail for scanner parity, use native Logspine for compatibility and fixture smoke. |
-| Claude project logs | yes | yes | Use StationTrail for scanner parity, use native Logspine for compatibility and fixture smoke. |
-| OpenClaw sessions and trajectories | yes | yes | Use StationTrail for scanner parity, use native Logspine for compatibility and fixture smoke. |
-| OpenCode sessions | yes | no | Export with StationTrail and import adapter JSONL into Logspine. |
-| Hermes sessions | yes | yes | Use either path for snapshots and trajectory JSONL. Logspine does not parse Hermes `state.db` directly. |
-| Future harnesses | preferred owner | sample-gated | Add parser support to StationTrail first unless Logspine needs a minimal compatibility adapter. |
+| Codex sessions | yes | yes | Use StationTrail for scanner parity, use native MiseLedger for compatibility and fixture smoke. |
+| Claude project logs | yes | yes | Use StationTrail for scanner parity, use native MiseLedger for compatibility and fixture smoke. |
+| OpenClaw sessions and trajectories | yes | yes | Use StationTrail for scanner parity, use native MiseLedger for compatibility and fixture smoke. |
+| OpenCode sessions | yes | no | Export with StationTrail and import adapter JSONL into MiseLedger. |
+| Hermes sessions | yes | yes | Use either path for snapshots and trajectory JSONL. MiseLedger does not parse Hermes `state.db` directly. |
+| Future harnesses | preferred owner | sample-gated | Add parser support to StationTrail first unless MiseLedger needs a minimal compatibility adapter. |
 
 ## Practical Split
 
@@ -26,9 +26,9 @@ Use StationTrail when the task is:
 - export OpenCode or future harness logs
 - keep parser-specific logic out of the archive layer
 
-Use Logspine when the task is:
+Use MiseLedger when the task is:
 
-- import `logspine.adapter.v1` JSONL
+- import `miseledger.adapter.v1` JSONL
 - track scan manifests
 - search across crawlers, local source exports, and agent sessions
 - show normalized items
@@ -39,26 +39,26 @@ Use Logspine when the task is:
 
 ## Commands
 
-StationTrail to Logspine:
+StationTrail to MiseLedger:
 
 ```bash
-stationtrail all --out - --redact paths,secrets | spine import adapter - --json
-stationtrail opencode ./session.jsonl --out - | spine import adapter - --json
-spine import stationtrail codex ~/.codex/sessions --json
-spine import stationtrail claude ~/.claude/projects --json
-spine import stationtrail openclaw ~/.openclaw/agents --json
-spine import stationtrail hermes ~/.hermes/sessions --json
+stationtrail all --out - --redact paths,secrets | miseledger import adapter - --json
+stationtrail opencode ./session.jsonl --out - | miseledger import adapter - --json
+miseledger import stationtrail codex ~/.codex/sessions --json
+miseledger import stationtrail claude ~/.claude/projects --json
+miseledger import stationtrail openclaw ~/.openclaw/agents --json
+miseledger import stationtrail hermes ~/.hermes/sessions --json
 ```
 
-Logspine compatibility adapters:
+MiseLedger compatibility adapters:
 
 ```bash
-spine import codex ~/.codex/sessions --json
-spine import claude ~/.claude/projects --json
-spine import openclaw ~/.openclaw/agents --json
-spine import hermes ~/.hermes/sessions --json
+miseledger import codex ~/.codex/sessions --json
+miseledger import claude ~/.claude/projects --json
+miseledger import openclaw ~/.openclaw/agents --json
+miseledger import hermes ~/.hermes/sessions --json
 ```
 
 ## Non-Goals
 
-Logspine should not chase session browser parity, resume workflows, GUI features, or every harness parser. It should keep native parsers conservative and sample-gated, while StationTrail can evolve as the dedicated harness exporter.
+MiseLedger should not chase session browser parity, resume workflows, GUI features, or every harness parser. It should keep native parsers conservative and sample-gated, while StationTrail can evolve as the dedicated harness exporter.
