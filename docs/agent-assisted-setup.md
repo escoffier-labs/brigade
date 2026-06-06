@@ -2,9 +2,9 @@
 
 You can point an agent at the Brigade repository and ask it to install Brigade for you. The root `AGENTS.md` contains the direct instructions an agent should follow, so users should not need to paste a long prompt.
 
-Brigade is designed to help users adapt an existing homegrown agent setup, not replace it wholesale. Keep the user's current memory owner, repo layout, harness choices, and local habits unless Brigade needs a small compatibility file or handoff inbox to make the workflow portable.
+Brigade is designed to help users adapt an existing homegrown agent setup, not replace it wholesale. Keep the user's current memory owner, workspace or repo layout, harness choices, and local habits unless Brigade needs a small compatibility file or handoff inbox to make the workflow portable.
 
-The agent should treat Brigade setup as local workspace wiring, not as a release, deploy, or remote mutation.
+The agent should treat Brigade setup as local workspace wiring, not as a release, deploy, or remote mutation. Local-first means local data on the operator-controlled machine first, before any external service; that machine can be a laptop, workstation, or VPS.
 
 ## Agent Entry Point
 
@@ -15,13 +15,21 @@ If an agent has access to this repository, it should start by reading:
 - `docs/new-user-quickstart.md`
 - `docs/agent-assisted-setup.md`
 
-Then it should work inside the target repo and run:
+Then it should work inside the target repo or operator workspace and run:
 
 ```bash
 pipx install brigade-cli
 brigade --version
 brigade operator quickstart --target . --harnesses codex --dry-run
 brigade operator quickstart --target . --harnesses codex
+brigade operator doctor --target . --profile local-operator
+```
+
+For an OpenClaw or Hermes workspace instead of a code repo, use workspace depth:
+
+```bash
+brigade operator quickstart --target . --depth workspace --harnesses openclaw,hermes --owner openclaw --dry-run
+brigade operator quickstart --target . --depth workspace --harnesses openclaw,hermes --owner openclaw
 brigade operator doctor --target . --profile local-operator
 ```
 
@@ -33,14 +41,14 @@ The agent should:
 - run quickstart in dry-run mode first
 - apply quickstart only after the dry-run looks reasonable
 - run `operator doctor` and report the exact result
-- explain which files are shareable and which are local-only
+- explain which files are shareable or durable and which are local-only
 - preserve the user's existing memory layout and agent conventions where possible
 - suggest Brigade compatibility wiring instead of moving or renaming personal systems
 - stop and ask before remote changes, destructive commands, new services, schedulers, or commits
 
 The agent should not:
 
-- treat `.brigade/` as public repo content
+- treat `.brigade/` as public repo or portable workspace content
 - paste raw scanner output that may contain secrets
 - rewrite permanent memory files unless the user asked for that exact edit
 - force the user into Brigade's example layout when they already have a working setup
@@ -54,7 +62,7 @@ When adapting an existing setup, the agent should:
 
 - inventory current files such as `AGENTS.md`, `CLAUDE.md`, `MEMORY.md`, `TOOLS.md`, `.codex/`, `.claude/`, `.opencode/`, `.hermes/`, and `.openclaw/`
 - identify the memory owner before changing memory rules
-- keep repo-shareable source files separate from generated local projections
+- keep repo-shareable or durable workspace files separate from generated local projections
 - use `brigade operator quickstart --dry-run` to preview compatibility files
 - run `brigade operator doctor` after setup and report what remains manual
 - leave existing working conventions intact unless the user approves a migration
@@ -70,6 +78,7 @@ brigade operator quickstart --target . --harnesses codex
 brigade operator quickstart --target . --harnesses claude
 brigade operator quickstart --target . --harnesses opencode
 brigade operator quickstart --target . --harnesses codex,claude,opencode
+brigade operator quickstart --target . --depth workspace --harnesses openclaw,hermes --owner openclaw
 ```
 
 OpenClaw and Hermes can act as memory owners or writer surfaces depending on the user's setup. If the agent is unsure, it should start with the harness the user is currently using and report the next command needed to add another surface later.

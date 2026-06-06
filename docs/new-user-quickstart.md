@@ -1,6 +1,8 @@
 # New User Quickstart
 
-Brigade is local-first. The first run should create local config, handoff inboxes, and portable tool or skill projections without starting services or touching remotes.
+Brigade is local-first. Local-first means local data on the operator-controlled machine first, before any external service; that machine can be a laptop, workstation, or VPS. The first run should create local config, handoff inboxes, and portable tool or skill projections without starting services or touching remotes.
+
+The target can be a code repo, an OpenClaw or Hermes memory workspace, a VPS operator directory, or another local workspace you control. Repo installs are common, but they are not the only supported shape.
 
 ## Install
 
@@ -17,6 +19,12 @@ Run the quickstart in dry-run mode first:
 brigade operator quickstart --target ./my-repo --harnesses codex --dry-run
 ```
 
+For an OpenClaw or Hermes workspace, use workspace depth:
+
+```bash
+brigade operator quickstart --target ~/agent-workspace --depth workspace --harnesses openclaw,hermes --owner openclaw --dry-run
+```
+
 Use a comma-separated harness list if you use more than one agent surface:
 
 ```bash
@@ -28,6 +36,13 @@ brigade operator quickstart --target ./my-repo --harnesses codex,claude,opencode
 ```bash
 brigade operator quickstart --target ./my-repo --harnesses codex
 brigade operator doctor --target ./my-repo --profile local-operator
+```
+
+Or apply an agent workspace setup:
+
+```bash
+brigade operator quickstart --target ~/agent-workspace --depth workspace --harnesses openclaw,hermes --owner openclaw
+brigade operator doctor --target ~/agent-workspace --profile local-operator
 ```
 
 Expected shape:
@@ -48,7 +63,7 @@ In a healthy run, the JSON has `status: "ok"` and `issue_report.status: "ok"`.
 
 Quickstart runs these local-only steps:
 
-- installs Brigade repo templates
+- installs Brigade repo or workspace templates
 - writes host-local `.brigade/` operator config
 - imports built-in portable tools and skills
 - projects harness-specific files such as Codex skills or Claude command docs
@@ -59,7 +74,9 @@ It does not start daemons, install hooks, publish, push, tag, or mutate remotes.
 
 ## What To Commit
 
-Commit repo-shareable source files only. Keep generated and local state ignored.
+If the target is a git repo, commit repo-shareable source files only. Keep generated and local state ignored.
+
+If the target is an operator workspace outside a git repo, treat the same split as a portability rule: durable memory and reviewed rules may be worth backing up or syncing, while `.brigade/` and harness projections are host-local state.
 
 Usually safe to commit:
 

@@ -10,17 +10,25 @@ Read these files first:
 2. `docs/new-user-quickstart.md`
 3. `docs/agent-assisted-setup.md`
 
-Brigade is local-first workspace wiring. It should help the user adapt their existing memory, handoff, and agent workflow instead of replacing it with someone else's exact layout.
+Brigade is local-first workspace wiring. Local-first means local data on the operator-controlled machine first, before any external service; that machine can be a laptop, workstation, or VPS. Brigade should help the user adapt their existing memory, handoff, and agent workflow instead of replacing it with someone else's exact layout.
 
 ## Installing Brigade For A User
 
-When the user wants Brigade installed in a target repo, work in that target repo and run:
+When the user wants Brigade installed in a target repo or operator workspace, work in that target directory and run:
 
 ```bash
 pipx install brigade-cli
 brigade --version
 brigade operator quickstart --target . --harnesses codex --dry-run
 brigade operator quickstart --target . --harnesses codex
+brigade operator doctor --target . --profile local-operator
+```
+
+For an OpenClaw or Hermes workspace rather than a code repo, prefer workspace depth:
+
+```bash
+brigade operator quickstart --target . --depth workspace --harnesses openclaw,hermes --owner openclaw --dry-run
+brigade operator quickstart --target . --depth workspace --harnesses openclaw,hermes --owner openclaw
 brigade operator doctor --target . --profile local-operator
 ```
 
@@ -34,7 +42,7 @@ If you are unsure which harnesses the user uses, start with the current harness 
 
 ## Adapting Existing Setups
 
-Before changing files, inspect the target repo for existing setup:
+Before changing files, inspect the target directory for existing setup:
 
 - `AGENTS.md`
 - `CLAUDE.md`
@@ -49,7 +57,7 @@ Before changing files, inspect the target repo for existing setup:
 
 Preserve the user's existing memory owner, conventions, repo layout, and tool-specific docs when possible. Prefer adding compatibility wiring such as handoff inboxes, shared instruction files, portable tool sources, or scanner config.
 
-Do not force the user into Brigade's example layout when they already have a working homegrown setup.
+Do not force the user into Brigade's example layout when they already have a working homegrown setup. Do not assume the target must be a git repo; an OpenClaw/Hermes memory workspace or VPS operator directory is also a valid target.
 
 ## Local And Shareable Files
 

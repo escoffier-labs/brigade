@@ -862,7 +862,7 @@ Live runs invoke authenticated model CLIs and may consume whatever quota or subs
 
 ## Two axes: depth + harnesses
 
-brigade installs material on two independent axes:
+Brigade installs material into a target directory on two independent axes. The target can be a code repo, an agent memory workspace, a VPS operator directory, or another operator-controlled workspace. Local-first means local data on that machine first, before any external service.
 
 **Depth, how much shared baseline you want:**
 
@@ -879,7 +879,7 @@ brigade installs material on two independent axes:
 | `codex` | writer | `.codex/memory-handoffs/` inbox (AGENTS.md is in the baseline) |
 | `opencode` | writer | `.opencode/memory-handoffs/` inbox |
 | `openclaw` | reader | `.brigade/openclaw/` config fragments + cron stubs |
-| `hermes` | reader | `.brigade/hermes/` adapter fragments (experimental) |
+| `hermes` | writer or owner | `.brigade/hermes/` adapter fragments + `.hermes/memory-handoffs/` inbox (experimental) |
 
 **Includes, optional add-ons:**
 
@@ -896,6 +896,7 @@ Common combos:
 - **Claude Code + Codex + OpenClaw:** `--harnesses claude,codex,openclaw`, both writers feed into OpenClaw as the canonical owner.
 - **Codex + OpenClaw:** `--harnesses codex,openclaw`, Codex-first user with OpenClaw as the canonical store.
 - **OpenCode + OpenClaw:** `--harnesses opencode,openclaw`, OpenCode writes handoffs into `.opencode/memory-handoffs/` and OpenClaw owns the canonical memory.
+- **OpenClaw + Hermes workspace:** `--depth workspace --harnesses openclaw,hermes --owner openclaw`, no code repo required.
 
 The canonical memory owner is picked automatically by priority (`openclaw > hermes > claude > codex > this-repo`). Override with `--owner`.
 

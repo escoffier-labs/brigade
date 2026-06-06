@@ -15,7 +15,7 @@
   <img src="https://img.shields.io/badge/license-MIT-green?style=for-the-badge" alt="MIT license">
 </p>
 
-Brigade is a local-first operator CLI for AI agent workspaces. The public GitHub repo is [`escoffier-labs/brigade`](https://github.com/escoffier-labs/brigade), the PyPI package is [`brigade-cli`](https://pypi.org/project/brigade-cli/), and the command is `brigade`.
+Brigade is a local-first operator CLI for AI agent workspaces. Local-first means local data on the operator-controlled machine first, before any external service; that machine can be a laptop, workstation, or VPS. The public GitHub repo is [`escoffier-labs/brigade`](https://github.com/escoffier-labs/brigade), the PyPI package is [`brigade-cli`](https://pypi.org/project/brigade-cli/), and the command is `brigade`.
 
 Brigade helps AI agent tools work from the same memory without turning that memory into a junk drawer.
 
@@ -29,7 +29,7 @@ This is the most important part of Brigade. The chef owns the station, and every
 
 ## Current Status
 
-Brigade is usable now for real first-run workflows. The tested path is installing the CLI, running `operator quickstart` in a repo, checking `operator doctor --profile local-operator`, writing memory handoffs, projecting portable skills and tools, and using the local security scanner.
+Brigade is usable now for real first-run workflows. The tested path is installing the CLI, running `operator quickstart` in a repo or operator workspace, checking `operator doctor --profile local-operator`, writing memory handoffs, projecting portable skills and tools, and using the local security scanner.
 
 It is still early-stage and being actively fleshed out. The current focus is hardening the first-run path, roadmap and command drift checks, daily operator loop, and local evidence closeouts. Expect sharp edges around advanced workflows, new harness adapters, repo-fleet evidence, and release-candidate evidence. If you hit a broken workflow, confusing command, missing adapter, or setup issue, open a GitHub issue in [`escoffier-labs/brigade`](https://github.com/escoffier-labs/brigade/issues) and I will get it addressed as soon as I can.
 
@@ -41,6 +41,14 @@ Good first install:
 pipx install brigade-cli
 brigade operator quickstart --target ./my-repo --harnesses codex
 brigade operator doctor --target ./my-repo --profile local-operator
+```
+
+For an OpenClaw or Hermes workspace instead of a code repo:
+
+```bash
+mkdir -p ~/agent-workspace
+brigade operator quickstart --target ~/agent-workspace --depth workspace --harnesses openclaw,hermes --owner openclaw
+brigade operator doctor --target ~/agent-workspace --profile local-operator
 ```
 
 For multiple agent surfaces:
@@ -57,7 +65,7 @@ If you use [OpenClaw](https://github.com/solomonneas/openclaw), [Hermes](https:/
 4. ambiguous or risky notes wait for review
 5. future sessions start with better context
 
-It is intentionally local. Brigade writes files and review queues on your machine. It does not run a background service, publish releases, push to GitHub, send notifications, or rewrite permanent memory unless you explicitly run the command that does it.
+It is intentionally local. Brigade writes files and review queues on the operator-controlled machine. It does not run a background service, publish releases, push to GitHub, send notifications, or rewrite permanent memory unless you explicitly run the command that does it.
 
 ## Stack At A Glance
 
@@ -144,6 +152,13 @@ brigade operator quickstart --target ./my-repo --harnesses codex
 brigade operator doctor --target ./my-repo --profile local-operator
 ```
 
+Set up an agent workspace:
+
+```bash
+brigade operator quickstart --target ~/agent-workspace --depth workspace --harnesses openclaw,hermes --owner openclaw
+brigade operator doctor --target ~/agent-workspace --profile local-operator
+```
+
 Use `--dry-run` first if you want to preview the local files Brigade will write. To wire more than one agent surface, pass a comma-separated list such as `--harnesses codex,claude,opencode`.
 
 For a fuller first-run walkthrough and troubleshooting checklist, see [`docs/new-user-quickstart.md`](docs/new-user-quickstart.md). If quickstart fails, use the Quickstart setup problem issue form and include the redacted `issue_report` from `brigade operator quickstart --json`.
@@ -208,7 +223,7 @@ The important part is the boundary. The ingester should be conservative: safe ca
 
 Brigade is built around a simple daily loop:
 
-1. set up the repo
+1. set up the repo or operator workspace
 2. let agents work
 3. run the memory ingester
 4. review anything skipped, flagged, or ambiguous
@@ -236,7 +251,7 @@ flowchart LR
     class MEMORY memory;
 ```
 
-This loop scales from one person using one repo to a more serious operator setup with scanner inboxes, work receipts, release checks, and repo-fleet summaries. You do not need all of that on day one.
+This loop scales from one person using one repo or OpenClaw/Hermes workspace to a more serious operator setup with scanner inboxes, work receipts, release checks, and repo-fleet summaries. You do not need all of that on day one.
 
 ## What Brigade Can Handle
 
@@ -461,12 +476,20 @@ flowchart LR
     class WRITERS,MEMORY,RECEIPTS local;
 ```
 
-A typical setup is:
+A repo-adjacent setup is:
 
 ```bash
 brigade init --target ./my-repo --depth repo --harnesses openclaw,codex,claude,opencode
 brigade handoff sources init --target ./my-repo
 brigade handoff doctor --target ./my-repo
+```
+
+An OpenClaw workspace setup does not need to be inside a code repo:
+
+```bash
+brigade init --target ~/agent-workspace --depth workspace --harnesses openclaw,hermes --owner openclaw
+brigade handoff sources init --target ~/agent-workspace
+brigade handoff doctor --target ~/agent-workspace
 ```
 
 Then writer tools leave handoffs in their own inboxes, and the memory owner ingests the safe targeted notes while Brigade keeps receipts for promoted, routed, skipped, failed, malformed, and warning outcomes.
