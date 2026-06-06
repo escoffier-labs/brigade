@@ -19,9 +19,57 @@ Logspine is the normalized evidence layer above those systems, not a replacement
 
 ## How It Works
 
-![Logspine flow](docs/logspine-how-it-works.svg)
+```mermaid
+flowchart TB
+    ADAPTER["<b>Adapter JSONL</b><br/>file, stdin, wrappers"]
 
-Editable Excalidraw source: [docs/logspine-flowcharts.excalidraw](docs/logspine-flowcharts.excalidraw)
+    subgraph SOURCES [" source exporters "]
+        AGENTTRAIL["<b>AgentTrail</b><br/>agent-session logs"]
+        SOURCEHARVEST["<b>SourceHarvest</b><br/>files, notes, exports, git"]
+        NATIVE["<b>Native adapters</b><br/>Codex, OpenClaw, Claude, Hermes"]
+    end
+
+    AGENTTRAIL & SOURCEHARVEST & NATIVE --> ADAPTER
+
+    subgraph INGEST [" ingest path "]
+        PARSE["<b>Parse and validate</b><br/>logspine.adapter.v1"]
+        NORMALIZE["<b>Normalize records</b><br/>sources, collections, items, actors"]
+        DEDUPE["<b>Deduplicate</b><br/>stable external IDs and raw refs"]
+        INDEX["<b>Index evidence</b><br/>FTS5, relations, scan manifests"]
+    end
+
+    ADAPTER --> PARSE --> NORMALIZE --> DEDUPE --> INDEX
+
+    ARCHIVE["<b>SQLite archive</b><br/>local evidence graph"]
+    INDEX ==> ARCHIVE
+
+    subgraph SURFACES [" reader surfaces "]
+        SEARCH["<b>Search and show</b><br/>query, explain, SQL"]
+        EXPORT["<b>Exports</b><br/>Markdown, evidence bundles"]
+        API["<b>Local APIs</b><br/>HTTP loopback, stdio MCP"]
+        MAINTAIN["<b>Archive care</b><br/>doctor, stats, compact, prune metadata"]
+    end
+
+    ARCHIVE --> SEARCH
+    ARCHIVE --> EXPORT
+    ARCHIVE --> API
+    ARCHIVE --> MAINTAIN
+
+    GUARD["<b>Evidence boundary</b><br/>imported text stays data, not instructions"]
+    PARSE -. rejects malformed records .-> GUARD
+    EXPORT -. marks untrusted context .-> GUARD
+
+    classDef source fill:#eff6ff,stroke:#2563eb,color:#1e3a8a;
+    classDef process fill:#ecfdf5,stroke:#059669,color:#064e3b;
+    classDef archive fill:#2563eb,stroke:#1d4ed8,color:#fff;
+    classDef surface fill:#f1f5f9,stroke:#94a3b8,color:#334155;
+    classDef guard fill:#fff7ed,stroke:#ea580c,color:#7c2d12;
+    class AGENTTRAIL,SOURCEHARVEST,NATIVE,ADAPTER source;
+    class PARSE,NORMALIZE,DEDUPE,INDEX process;
+    class ARCHIVE archive;
+    class SEARCH,EXPORT,API,MAINTAIN surface;
+    class GUARD guard;
+```
 
 Logspine follows one ingest path:
 
@@ -34,7 +82,58 @@ Logspine follows one ingest path:
 
 ## Stack Map
 
-![Logspine stack map](docs/logspine-stack-map.svg)
+```mermaid
+flowchart TB
+    LOGSPINE["<b>Logspine</b><br/><i>archive, search, evidence layer</i>"]
+    SQLITE["<b>SQLite archive</b><br/>normalized records, FTS, relations, raw refs"]
+    LOGSPINE -->|owns| SQLITE
+
+    subgraph AGENTS [" agent-session scanners "]
+        AGENTTRAIL["<b>AgentTrail</b><br/>Codex, Claude, OpenClaw, OpenCode, Hermes"]
+        COMPAT["<b>Compatibility adapters</b><br/>native Logspine imports"]
+    end
+
+    subgraph LOCAL [" local source exporters "]
+        SOURCEHARVEST["<b>SourceHarvest</b><br/>Markdown, files, HTML, JSON, git history"]
+        GENERIC["<b>Generic adapter records</b><br/>normalized source exports"]
+    end
+
+    subgraph CRAWLERS [" crawler tools "]
+        DISCRAWL["discrawl"]
+        GITCRAWL["gitcrawl"]
+        GRAINCRAWL["graincrawl"]
+        NOTCRAWL["notcrawl"]
+        SLACRAWL["slacrawl"]
+        TELECRAWL["telecrawl"]
+    end
+
+    AGENTTRAIL & COMPAT == adapter JSONL ==> LOGSPINE
+    SOURCEHARVEST & GENERIC == adapter JSONL ==> LOGSPINE
+    DISCRAWL & GITCRAWL & GRAINCRAWL & NOTCRAWL & SLACRAWL & TELECRAWL -. exports or snapshots .-> SOURCEHARVEST
+
+    subgraph READERS [" reader workflows "]
+        CLI["<b>spine CLI</b><br/>search, show, explain, export"]
+        EVIDENCE["<b>Evidence bundles</b><br/>Brigade-ready context"]
+        MCP["<b>Agent readers</b><br/>HTTP loopback, stdio MCP"]
+        OPS["<b>Archive operations</b><br/>doctor, stats, compact"]
+    end
+
+    SQLITE --> CLI
+    SQLITE --> EVIDENCE
+    SQLITE --> MCP
+    SQLITE --> OPS
+
+    classDef core fill:#2563eb,stroke:#1d4ed8,color:#fff;
+    classDef archive fill:#fff7ed,stroke:#ea580c,color:#7c2d12;
+    classDef source fill:#eff6ff,stroke:#2563eb,color:#1e3a8a;
+    classDef crawler fill:#ecfdf5,stroke:#059669,color:#064e3b;
+    classDef reader fill:#f1f5f9,stroke:#94a3b8,color:#334155;
+    class LOGSPINE core;
+    class SQLITE archive;
+    class AGENTTRAIL,COMPAT,SOURCEHARVEST,GENERIC source;
+    class DISCRAWL,GITCRAWL,GRAINCRAWL,NOTCRAWL,SLACRAWL,TELECRAWL crawler;
+    class CLI,EVIDENCE,MCP,OPS reader;
+```
 
 AgentTrail owns local agent-session scanning. SourceHarvest owns non-agent local source export normalization. Logspine owns archive ingest, SQLite, FTS, relations, scan manifests, reader APIs, and evidence bundles.
 
