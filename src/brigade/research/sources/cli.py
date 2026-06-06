@@ -7,6 +7,8 @@ import subprocess
 from pathlib import Path
 from typing import Any, Dict, List
 
+CLI_SOURCE_TYPES = {"cli", "antigravity"}
+
 
 class CliSourceProvider:
     """Configured foreground CLI research source.
@@ -16,12 +18,13 @@ class CliSourceProvider:
     the normal research extractor as untrusted tool output.
     """
 
-    def __init__(self, *, source_id: str, command: list[str], cwd: Path, timeout: int = 120, trust: str = "cli") -> None:
+    def __init__(self, *, source_id: str, command: list[str], cwd: Path, timeout: int = 120, trust: str = "cli", source_type: str = "cli") -> None:
         self.source_id = source_id
         self.command = command
         self.cwd = cwd
         self.timeout = timeout
         self.trust = trust if trust in {"cli", "browser", "web"} else "cli"
+        self.source_type = source_type if source_type in CLI_SOURCE_TYPES else "cli"
         self._cache: dict[str, dict[str, str]] = {}
 
     def _argv(self, query: str) -> list[str]:
@@ -73,9 +76,10 @@ def build_providers(adapters: list[dict[str, Any]], *, target: Path) -> list[Cli
     for item in adapters:
         if item.get("enabled", True) is False:
             continue
-        if str(item.get("type") or "").strip().lower() != "cli":
+        source_type = str(item.get("type") or "").strip().lower()
+        if source_type not in CLI_SOURCE_TYPES:
             continue
-        source_id = str(item.get("id") or item.get("name") or "cli-source").strip()
+        source_id = str(item.get("id") or item.get("name") or ("antigravity" if source_type == "antigravity" else "cli-source")).strip()
         command = _command_parts(item.get("command") or item.get("argv"))
         if not source_id or not command:
             continue
@@ -92,6 +96,7 @@ def build_providers(adapters: list[dict[str, Any]], *, target: Path) -> list[Cli
                 cwd=cwd,
                 timeout=timeout_int,
                 trust=str(item.get("trust") or "cli"),
+                source_type=source_type,
             )
         )
     return providers

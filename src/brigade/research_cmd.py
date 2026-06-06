@@ -35,7 +35,7 @@ def _safe_source_adapters(adapters: List[Dict[str, Any]]) -> List[Dict[str, Any]
             "id": str(item.get("id") or item.get("name") or adapter_type).strip(),
             "type": adapter_type,
             "enabled": item.get("enabled", True) is not False,
-            "trust": str(item.get("trust") or ("cli" if adapter_type == "cli" else adapter_type)),
+            "trust": str(item.get("trust") or ("cli" if adapter_type in clisrc.CLI_SOURCE_TYPES else adapter_type)),
         }
         if command:
             safe_item["command"] = Path(command[0]).name
@@ -63,7 +63,13 @@ def _manifest(*, target: Path, cfg: rconfig.ResearchConfig, corpus: Optional[str
         "web_enabled": bool(web),
         "provider": web_provider,
         "source_adapters": _safe_source_adapters(cfg.source_adapters()),
-        "cli_sources": [getattr(provider, "source_id", "cli-source") for provider in cli_providers],
+        "cli_sources": [
+            {
+                "id": getattr(provider, "source_id", "cli-source"),
+                "type": getattr(provider, "source_type", "cli"),
+            }
+            for provider in cli_providers
+        ],
         "routes": routes,
     }
 
@@ -203,7 +209,7 @@ def sources_payload(*, target: Path) -> Dict[str, Any]:
         })
 
     for raw, item in zip(adapters, _safe_source_adapters(adapters)):
-        if item.get("type") != "cli":
+        if item.get("type") not in clisrc.CLI_SOURCE_TYPES:
             routes.append({**item, "status": "warn", "detail": "unsupported research source adapter type"})
             continue
         if item.get("enabled") is False:
@@ -215,10 +221,13 @@ def sources_payload(*, target: Path) -> Dict[str, Any]:
         if "/" in executable and not executable_path.is_absolute():
             executable_path = target / executable_path
         exists = bool(executable) and (executable_path.exists() if "/" in executable else shutil.which(executable) is not None)
+        detail = "configured CLI source ready" if exists else "configured CLI executable not found"
+        if item.get("type") == "antigravity" and not command:
+            detail = "missing Antigravity CLI command; configure command or argv for agy"
         routes.append({
             **item,
             "status": "ok" if exists else "fail",
-            "detail": "configured CLI source ready" if exists else "configured CLI executable not found",
+            "detail": detail,
         })
 
     statuses = [route["status"] for route in routes]

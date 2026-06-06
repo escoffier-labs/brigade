@@ -75,7 +75,7 @@ def test_run_persists_research_manifest(tmp_path: Path, monkeypatch):
     assert manifest["corpus"] == "plants"
     assert manifest["sources"] == [str(tmp_path / "*.md")]
     assert manifest["web_enabled"] is False
-    assert manifest["cli_sources"] == ["local-cli"]
+    assert manifest["cli_sources"] == [{"id": "local-cli", "type": "cli"}]
     assert manifest["source_adapters"][0]["command"] == Path(sys.executable).name
 
 
@@ -148,3 +148,33 @@ def test_sources_payload_reports_configured_cli_source(tmp_path: Path):
     assert route["status"] == "ok"
     assert route["type"] == "cli"
     assert route["accepts_query"] is True
+
+
+def test_antigravity_source_adapter_is_cli_lane(tmp_path: Path):
+    (tmp_path / ".brigade").mkdir()
+    (tmp_path / ".brigade" / "research.toml").write_text(
+        "[[source]]\n"
+        'id = "antigravity"\n'
+        'type = "antigravity"\n'
+        f'command = ["{sys.executable}", "-c", "print(\'agy research\')", "{{query}}"]\n'
+    )
+
+    payload = research_cmd.sources_payload(target=tmp_path)
+    route = next(route for route in payload["routes"] if route["id"] == "antigravity")
+    assert route["status"] == "ok"
+    assert route["type"] == "antigravity"
+    assert route["trust"] == "cli"
+
+
+def test_antigravity_source_without_command_reports_actionable_failure(tmp_path: Path):
+    (tmp_path / ".brigade").mkdir()
+    (tmp_path / ".brigade" / "research.toml").write_text(
+        "[[source]]\n"
+        'id = "antigravity"\n'
+        'type = "antigravity"\n'
+    )
+
+    payload = research_cmd.sources_payload(target=tmp_path)
+    route = next(route for route in payload["routes"] if route["id"] == "antigravity")
+    assert route["status"] == "fail"
+    assert "agy" in route["detail"]

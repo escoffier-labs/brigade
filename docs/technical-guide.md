@@ -365,6 +365,16 @@ command = ["my-search-tool", "--json", "{query}"]
 timeout = 60
 ```
 
+Antigravity is supported as a named CLI lane. The Antigravity CLI binary is `agy`; because it is an interactive TUI by default, configure the exact non-interactive command or local wrapper you want Brigade to call:
+
+```toml
+[[source]]
+id = "antigravity"
+type = "antigravity"
+command = ["agy-research-wrapper", "{query}"]
+timeout = 180
+```
+
 The web tier needs the optional browser dependency, installed once:
 
 ```bash
