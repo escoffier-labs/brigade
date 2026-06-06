@@ -429,7 +429,7 @@ See [Handoff promotion](docs/handoff-promotion.md).
 
 ## Agent Pantry
 
-The `pantry` station (alias `larder`) wires [Agent Pantry](https://github.com/escoffier-labs/agentpantry) into the same operator workflow: encrypted browser session, cookie, and secret sync between agent machines.
+The `pantry` station (alias `larder`) wires [Agent Pantry](https://github.com/escoffier-labs/agentpantry) into the same operator workflow: encrypted browser session, cookie, and secret sync between agent machines. The pantry is where the chef stores the cookies and the secret recipes.
 
 - `brigade add pantry` installs agentpantry.
 - `brigade pantry status` gives a pantry-specific health readout.
