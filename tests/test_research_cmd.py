@@ -1,8 +1,10 @@
 # tests/test_research_cmd.py
 from pathlib import Path
+import json
 import sys
 
 from brigade import research_cmd
+from brigade import work_cmd
 from brigade.research import registry
 
 
@@ -178,3 +180,132 @@ def test_antigravity_source_without_command_reports_actionable_failure(tmp_path:
     route = next(route for route in payload["routes"] if route["id"] == "antigravity")
     assert route["status"] == "fail"
     assert "agy" in route["detail"]
+
+
+def _finished_research_run(tmp_path: Path, monkeypatch, run_id: str = "20260602-120010-export") -> str:
+    (tmp_path / "a.md").write_text("photosynthesis converts light to energy in plants")
+    monkeypatch.setattr(research_cmd, "_resolve_backend", lambda target: StubLlm())
+    return research_cmd.run(
+        target=tmp_path,
+        question="how do plants make energy?",
+        sources=[str(tmp_path / "*.md")],
+        web=False,
+        overrides={"max_rounds": 1, "min_rounds": 1, "max_time": 30},
+        run_id=run_id,
+    )
+
+
+def test_export_handoff_to_codex_inbox_records_linted_receipt(tmp_path: Path, monkeypatch):
+    rid = _finished_research_run(tmp_path, monkeypatch)
+    inbox = tmp_path / ".codex" / "memory-handoffs"
+    inbox.mkdir(parents=True)
+
+    payload = research_cmd.export_handoff(target=tmp_path, run_id=rid, inbox="codex")
+
+    assert payload["status"] == "exported"
+    out_path = Path(payload["path"])
+    assert out_path.exists()
+    text = out_path.read_text()
+    assert f"- research_run_id: {rid}" in text
+    assert "research_source_fingerprint" in text
+    assert payload["lint"]["valid"] is True
+    rec = registry.show_run(tmp_path, rid)
+    assert rec["handoff_exports"][0]["path"] == str(out_path)
+    status = research_cmd.handoff_status_payload(target=tmp_path)
+    assert status["issue_count"] == 0
+    assert status["runs"][0]["status"] == "exported"
+
+
+def test_export_handoff_to_custom_inbox_records_custom_destination(tmp_path: Path, monkeypatch):
+    rid = _finished_research_run(tmp_path, monkeypatch, run_id="20260602-120011-custom")
+    inbox = tmp_path / "handoffs" / "custom"
+    inbox.mkdir(parents=True)
+
+    payload = research_cmd.export_handoff(target=tmp_path, run_id=rid, handoff_inbox=inbox)
+
+    assert payload["status"] == "exported"
+    assert payload["inbox"] == "custom"
+    assert Path(payload["path"]).parent == inbox
+
+
+def test_export_handoff_missing_inbox_blocks_without_writing(tmp_path: Path, monkeypatch):
+    rid = _finished_research_run(tmp_path, monkeypatch, run_id="20260602-120012-missing")
+
+    payload = research_cmd.export_handoff(target=tmp_path, run_id=rid, inbox="claude")
+
+    assert payload["status"] == "blocked"
+    assert any("handoff inbox missing" in blocker for blocker in payload["blockers"])
+    assert not (tmp_path / ".claude").exists()
+    rec = registry.show_run(tmp_path, rid)
+    assert rec.get("handoff_exports") is None
+
+
+def test_handoff_status_reports_stale_export_when_run_artifact_changes(tmp_path: Path, monkeypatch):
+    rid = _finished_research_run(tmp_path, monkeypatch, run_id="20260602-120013-stale")
+    inbox = tmp_path / ".opencode" / "memory-handoffs"
+    inbox.mkdir(parents=True)
+    research_cmd.export_handoff(target=tmp_path, run_id=rid, inbox="opencode")
+    handoff_artifact = registry.run_dir(tmp_path, rid) / "handoff.md"
+    handoff_artifact.write_text(handoff_artifact.read_text() + "\n\nAdditional finding.\n")
+
+    status = research_cmd.handoff_status_payload(target=tmp_path)
+
+    assert status["issue_count"] == 1
+    assert status["top_issue"]["status"] == "stale-export"
+    assert status["top_issue"]["suggested_next_command"] == f"brigade research export-handoff {rid} --inbox codex"
+
+
+def test_research_handoffs_doctor_reports_missing_export(tmp_path: Path, monkeypatch, capsys):
+    rid = _finished_research_run(tmp_path, monkeypatch, run_id="20260602-120014-doctor")
+
+    assert research_cmd.cli_handoffs_doctor(target=tmp_path) == 1
+    out = capsys.readouterr().out
+    assert "research handoffs doctor:" in out
+    assert f"[warn] {rid}: missing-export" in out
+    assert f"brigade research export-handoff {rid} --inbox codex" in out
+
+
+def test_research_handoffs_import_issues_creates_fingerprinted_work_import(tmp_path: Path, monkeypatch, capsys):
+    rid = _finished_research_run(tmp_path, monkeypatch, run_id="20260602-120015-import")
+
+    assert research_cmd.cli_handoffs_import_issues(target=tmp_path, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["candidate_count"] == 1
+    assert payload["imported"] == 1
+    item = work_cmd._pending_imports(tmp_path)[0]
+    metadata = item["metadata"]
+    assert item["source"] == "research-handoff"
+    assert item["kind"] == "research"
+    assert metadata["research_run_id"] == rid
+    assert metadata["source_item_key"] == f"research-handoff:{rid}:missing-export"
+    assert metadata["source_fingerprint"]
+    assert item["acceptance"]
+
+    assert research_cmd.cli_handoffs_import_issues(target=tmp_path, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["imported"] == 0
+    assert payload["skipped"] == 1
+
+
+def test_research_handoffs_import_respects_dismissed_until_changed(tmp_path: Path, monkeypatch, capsys):
+    rid = _finished_research_run(tmp_path, monkeypatch, run_id="20260602-120016-dismiss")
+    research_cmd.cli_handoffs_import_issues(target=tmp_path, json_output=True)
+    capsys.readouterr()
+    item = work_cmd._pending_imports(tmp_path)[0]
+    assert work_cmd.import_dismiss(target=tmp_path, import_id=item["id"], reason="not durable") == 0
+    capsys.readouterr()
+
+    assert research_cmd.cli_handoffs_import_issues(target=tmp_path, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["imported"] == 0
+    assert payload["dismissed"] == 1
+
+    handoff_artifact = registry.run_dir(tmp_path, rid) / "handoff.md"
+    handoff_artifact.write_text(handoff_artifact.read_text() + "\n\nChanged source.\n")
+    assert research_cmd.cli_handoffs_import_issues(target=tmp_path, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["imported"] == 1
+    imports = work_cmd._read_imports(tmp_path)
+    assert len(imports) == 2
+    assert imports[-1]["metadata"]["source_fingerprint"] != item["metadata"]["source_fingerprint"]

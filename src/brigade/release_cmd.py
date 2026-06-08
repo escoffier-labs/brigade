@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from . import context_cmd, handoff_cmd, learn_cmd, memory_cmd, phases_cmd, projects_cmd, repos_cmd, roadmap_cmd, security_cmd, tools_cmd, work_cmd
+from . import context_cmd, handoff_cmd, learn_cmd, memory_cmd, phases_cmd, projects_cmd, repos_cmd, research_cmd, roadmap_cmd, security_cmd, tools_cmd, work_cmd
 from .selection import KNOWN_HARNESSES
 
 OK = "ok"
@@ -890,6 +890,7 @@ def _evidence(target: Path, *, base_ref: str | None) -> dict[str, Any]:
     sweep = work_cmd._scanner_sweep_health(target)
     review = work_cmd._review_health(target)
     handoffs = handoff_cmd.draft_queue_payload(target)
+    research_handoffs = research_cmd.health(target)
     context_health = context_cmd.health(target)
     learning_health = learn_cmd.health(target)
     projects_health = projects_cmd.health(target)
@@ -946,6 +947,11 @@ def _evidence(target: Path, *, base_ref: str | None) -> dict[str, Any]:
             "top_issue": handoffs.get("top_issue"),
             "latest_ingest_run": handoffs.get("latest_ingest_run"),
             "latest_closeout": _latest_closeout_json(target / ".brigade" / "handoffs" / "closeouts"),
+        },
+        "research_handoffs": {
+            "run_count": research_handoffs.get("run_count"),
+            "issue_count": research_handoffs.get("issue_count"),
+            "top_issue": research_handoffs.get("top_issue"),
         },
         "backup": {
             "valid": backup_health.get("valid"),
@@ -1176,6 +1182,10 @@ def _assess(evidence: dict[str, Any], checks: list[dict[str, Any]], docs_warning
     handoffs = evidence.get("handoff_drafts") if isinstance(evidence.get("handoff_drafts"), dict) else {}
     if int(handoffs.get("issue_count") or 0) > 0:
         blockers.append(f"handoff draft queue has issue(s): {handoffs.get('issue_count')}")
+    research_handoffs = evidence.get("research_handoffs") if isinstance(evidence.get("research_handoffs"), dict) else {}
+    if int(research_handoffs.get("issue_count") or 0) > 0:
+        top_research = research_handoffs.get("top_issue") if isinstance(research_handoffs.get("top_issue"), dict) else {}
+        warnings.append(f"research handoff export issue(s): {top_research.get('run_id') or research_handoffs.get('issue_count')}")
     operator_report = evidence.get("operator_report") if isinstance(evidence.get("operator_report"), dict) else {}
     if int(operator_report.get("issue_count") or 0) > 0:
         top_report = operator_report.get("top_issue") if isinstance(operator_report.get("top_issue"), dict) else {}

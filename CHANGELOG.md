@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Operator adoption migration rollup: `brigade operator migration status/doctor/import-issues/consolidate` summarizes redacted adoption progress across operator config, external surfaces, review receipts, pending imports, and pending tasks, then lets current migration rollups supersede tiny record-level follow-ups without exposing raw scheduler or process details.
+- Redacted operator surface registry: `brigade operator surfaces capture/list/doctor/review/reviews/import-issues` captures shell crontab, OpenClaw cron, and PM2 coverage as counts, status totals, ordinal labels, review decisions, and fingerprints under `.brigade/operator/surfaces/`, omitting raw cron lines, job names, process names, command paths, host details, and environment values.
+- Existing-operator adoption loop: `brigade operator adopt plan/capture/import-issues` inventories guidance files, harness roots, handoff inboxes, local state folders, and count-level external scheduler/process surfaces before changing a homegrown operator workspace.
+- Research handoff export: `brigade research export-handoff`, `brigade research handoffs doctor`, and `brigade research handoffs import-issues` route completed research runs into selected writer harness inboxes as linted Memory Handoffs, track export fingerprints, and surface missing or stale exports without ingesting memory.
 - Operator notification visibility: new `brigade notifications status` and `brigade notifications setup plan` commands inspect optional `agent-notify` wiring and print reviewed Codex/Claude hook snippets without sending messages, editing hook files, or storing channel secrets. Notification health now appears in `brigade doctor`, `brigade center status`, `brigade work brief`, and `brigade daily status/plan` as an advisory setup item.
 - Internal dogfood bootstrap: `brigade operator init --profile internal-dogfood` writes repo-local production dogfood config defaults and refreshes read-only security evidence, while `brigade operator status --profile internal-dogfood` reports machine-vs-repo wiring, gitignore state, dogfood readiness, daily health, security evidence, notification config, and local readiness.
 - Internal dogfood guidance: `brigade operator guide`, `docs/internal-dogfood.md`, and the workspace `AGENTS.md` template now document the explicit Brigade loop, repo onboarding command, handoff expectations, and no-daemon/no-remote-mutation boundaries.
@@ -31,6 +35,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - New `pantry` station (alias `larder`) and the `agentpantry` managed tool. `brigade add pantry` installs agentpantry via `go install`, and `brigade doctor`/`brigade status` health-check it by shelling out to `agentpantry status --json`. Like the memory satellites, agentpantry inspects host-global state, so its checks are advisory and never FAIL a workspace run: an unwired install (no config) is a `WARN`, a missing pre-shared key is a `WARN`, otherwise `OK`.
 
 ### Fixed
+- `brigade daily status` now uses a lightweight daily center snapshot and bounded status sections so slow readiness subsystems report warnings instead of hanging the daily loop.
+- Operator migration imports now supersede stale rollup imports when a source fingerprint changes, preventing older replacement batches from staying ahead of current rollups in the daily queue.
 - `brigade operator doctor --profile local-operator` no longer treats a generated but unenabled Content Guard hook as a blocking issue in fresh quickstart installs. Missing Content Guard remains visible as advisory setup state.
 - Removed an unsafe temp-directory cleanup example from the init failure issue template and contributor smoke-test docs, replacing it with `mktemp -d` fresh target setup.
 - The security scanner no longer reports its own plaintext-password detector variable names as findings while scanning Brigade source.
@@ -38,6 +44,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Dedupe guard in `brigade ingest` document routing. A `no-card` route whose content (or its first meaningful line/anchor) is already present in the target document is now sent to the review inbox instead of being appended again, matching the canonical pipeline and preventing duplicate content on re-routed handoffs.
 
 ### Documentation
+- Documented the existing-operator adoption path, migration rollup, redacted surface reviews, and security scanner first-response workflow in the README, quickstart, technical guide, and agent-assisted setup guide.
 - Added a first-response checklist for likely real credential findings, covering redacted review, `.env` or environment storage, KeePass preservation, transcript scrubbing, rotation, and closeout.
 - Refreshed contributor setup guidance for Brigade naming, current source paths, quickstart issue reports, and intended GitHub label taxonomy for public support triage.
 - Added expected quickstart and operator doctor output to the new-user quickstart guide.

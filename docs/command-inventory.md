@@ -29,13 +29,13 @@ brigade roadmap commands --write
 - `brigade memory`: 7 command path(s)
 - `brigade notifications`: 4 command path(s)
 - `brigade openclaw-fragments`: 1 command path(s)
-- `brigade operator`: 9 command path(s)
+- `brigade operator`: 22 command path(s)
 - `brigade pantry`: 3 command path(s)
 - `brigade projects`: 9 command path(s)
 - `brigade reconfigure`: 1 command path(s)
 - `brigade release`: 22 command path(s)
 - `brigade repos`: 70 command path(s)
-- `brigade research`: 8 command path(s)
+- `brigade research`: 11 command path(s)
 - `brigade roadmap`: 4 command path(s)
 - `brigade roster`: 2 command path(s)
 - `brigade run`: 1 command path(s)
@@ -170,13 +170,26 @@ brigade roadmap commands --write
 - `brigade notifications setup plan`
 - `brigade notifications status`
 - `brigade openclaw-fragments`
+- `brigade operator adopt capture`
+- `brigade operator adopt import-issues`
+- `brigade operator adopt plan`
 - `brigade operator bootstrap-portable`
 - `brigade operator doctor`
 - `brigade operator guide`
 - `brigade operator init`
+- `brigade operator migration consolidate`
+- `brigade operator migration doctor`
+- `brigade operator migration import-issues`
+- `brigade operator migration status`
 - `brigade operator plan`
 - `brigade operator quickstart`
 - `brigade operator status`
+- `brigade operator surfaces capture`
+- `brigade operator surfaces doctor`
+- `brigade operator surfaces import-issues`
+- `brigade operator surfaces list`
+- `brigade operator surfaces review`
+- `brigade operator surfaces reviews`
 - `brigade operator sync-tools`
 - `brigade operator verify-harness`
 - `brigade pantry service plan`
@@ -285,6 +298,9 @@ brigade roadmap commands --write
 - `brigade repos sweep runs`
 - `brigade repos sweep show`
 - `brigade research cancel`
+- `brigade research export-handoff`
+- `brigade research handoffs doctor`
+- `brigade research handoffs import-issues`
 - `brigade research list`
 - `brigade research open`
 - `brigade research resume`

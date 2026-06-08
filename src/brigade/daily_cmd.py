@@ -2,10 +2,14 @@
 from __future__ import annotations
 
 import json
+import os
 import re
+import signal
 import shutil
 import subprocess
 import sys
+import threading
+import time
 from contextlib import redirect_stdout
 from collections import Counter
 from datetime import datetime, timedelta, timezone
@@ -38,6 +42,13 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "stale_plan_threshold_hours": 12,
     "stale_run_threshold_hours": 12,
 }
+DEFAULT_STATUS_SECTION_TIMEOUT_SECONDS = 8
+
+
+class _DailyStatusSectionTimeout(Exception):
+    def __init__(self, label: str):
+        super().__init__(label)
+        self.label = label
 
 
 def _now() -> datetime:
@@ -346,6 +357,59 @@ def _slug(value: object) -> str:
     return text[:80] or "item"
 
 
+def _status_section_timeout_seconds() -> int:
+    raw = os.environ.get("BRIGADE_DAILY_STATUS_SECTION_TIMEOUT")
+    if raw:
+        try:
+            return max(1, int(raw))
+        except ValueError:
+            return DEFAULT_STATUS_SECTION_TIMEOUT_SECONDS
+    return DEFAULT_STATUS_SECTION_TIMEOUT_SECONDS
+
+
+def _status_section_check(label: str, status: str, detail: str, elapsed_ms: int) -> dict[str, Any]:
+    return {
+        "status": status,
+        "name": f"daily_status_section:{label}",
+        "detail": detail,
+        "elapsed_ms": elapsed_ms,
+    }
+
+
+def _bounded_status_call(label: str, func, fallback: Any, *, timeout_seconds: int | None = None) -> tuple[Any, dict[str, Any]]:
+    timeout = timeout_seconds or _status_section_timeout_seconds()
+    start = time.monotonic()
+    use_alarm = threading.current_thread() is threading.main_thread() and hasattr(signal, "SIGALRM")
+    previous_handler = None
+    previous_timer = None
+    if use_alarm:
+        previous_handler = signal.getsignal(signal.SIGALRM)
+        previous_timer = signal.getitimer(signal.ITIMER_REAL)
+
+        def _raise_timeout(_signum, _frame):
+            raise _DailyStatusSectionTimeout(label)
+
+        signal.signal(signal.SIGALRM, _raise_timeout)
+        signal.setitimer(signal.ITIMER_REAL, timeout)
+    try:
+        result = func()
+        elapsed = int((time.monotonic() - start) * 1000)
+        return result, _status_section_check(label, "ok", "completed", elapsed)
+    except _DailyStatusSectionTimeout:
+        elapsed = int((time.monotonic() - start) * 1000)
+        return fallback, _status_section_check(label, "warn", f"timed out after {timeout}s", elapsed)
+    except Exception as exc:
+        elapsed = int((time.monotonic() - start) * 1000)
+        return fallback, _status_section_check(label, "warn", _safe_text(Path("."), f"{type(exc).__name__}: {exc}"), elapsed)
+    finally:
+        if use_alarm:
+            signal.setitimer(signal.ITIMER_REAL, 0)
+            if previous_handler is not None:
+                signal.signal(signal.SIGALRM, previous_handler)
+            if previous_timer is not None and previous_timer[0] > 0:
+                signal.setitimer(signal.ITIMER_REAL, previous_timer[0], previous_timer[1])
+
+
 def _priority_score(priority: object) -> int:
     value = str(priority or "normal").casefold()
     return {"urgent": 45, "high": 35, "normal": 20, "low": 5}.get(value, 20)
@@ -523,7 +587,7 @@ def _center_action_candidates(target: Path) -> list[dict[str, Any]]:
 
 
 def _readiness_candidates(target: Path) -> list[dict[str, Any]]:
-    readiness = center_cmd._readiness_payload(target)
+    readiness = _daily_readiness_payload(target)
     candidates: list[dict[str, Any]] = []
     for finding in readiness.get("blockers", []):
         finding_id = str(finding.get("finding_id") or "")
@@ -547,12 +611,112 @@ def _readiness_candidates(target: Path) -> list[dict[str, Any]]:
     return candidates
 
 
+def _daily_readiness_finding(subsystem: str, name: str, severity: str, summary: str, command: str, *, status: str = "warn") -> dict[str, Any]:
+    fingerprint = _fingerprint({"subsystem": subsystem, "name": name, "severity": severity, "summary": summary})
+    return {
+        "finding_id": f"daily-readiness-{fingerprint}",
+        "subsystem": subsystem,
+        "name": name,
+        "status": status,
+        "severity": severity,
+        "safe_summary": summary,
+        "suggested_next_command": command,
+        "source_fingerprint": fingerprint,
+    }
+
+
+def _daily_readiness_payload(target: Path) -> dict[str, Any]:
+    from . import release_cmd
+
+    status_data = _daily_center_status_payload(target)
+    findings: list[dict[str, Any]] = []
+    pending_tasks = int(status_data.get("pending_task_count") or 0)
+    pending_imports = int(status_data.get("pending_import_count") or 0)
+    review_count = int(status_data.get("review_queue_count") or 0)
+    if pending_tasks:
+        findings.append(_daily_readiness_finding("work", "pending_tasks", "warning", f"{pending_tasks} pending task(s)", "brigade work tasks"))
+    if pending_imports:
+        findings.append(_daily_readiness_finding("work", "pending_imports", "blocker", f"{pending_imports} pending import(s)", "brigade work inbox", status="blocked"))
+    if review_count:
+        findings.append(_daily_readiness_finding("center", "pending_reviews", "warning", f"{review_count} pending review item(s)", "brigade center reviews"))
+    release = release_cmd._latest_release_receipt(target)
+    if not release:
+        findings.append(_daily_readiness_finding("release", "missing_release_readiness", "blocker", "release readiness receipt is missing", "brigade release run", status="blocked"))
+    elif release.get("ready") is False or release.get("status") in {"blocked", "failed"}:
+        run_id = str(release.get("run_id") or "latest")
+        findings.append(_daily_readiness_finding("release", "blocked_release_readiness", "blocker", "release readiness is blocked", f"brigade release show {run_id}", status="blocked"))
+    for subsystem, command in (
+        ("memory_care", "brigade memory care doctor"),
+        ("security", "brigade security doctor"),
+        ("notifications", "brigade notifications setup plan"),
+        ("action_queue", "brigade center actions doctor"),
+    ):
+        health = status_data.get(subsystem)
+        if not isinstance(health, dict):
+            continue
+        issue_count = int(health.get("issue_count") or health.get("open_count") or 0)
+        top = health.get("top_issue") if isinstance(health.get("top_issue"), dict) else None
+        if issue_count <= 0 and not top:
+            continue
+        detail = str((top or {}).get("detail") or (top or {}).get("safe_summary") or f"{subsystem} has unresolved health issue(s)")
+        findings.append(_daily_readiness_finding(subsystem, str((top or {}).get("name") or "health"), "warning", _safe_text(target, detail), command))
+    blockers = [finding for finding in findings if finding.get("severity") == "blocker"]
+    warnings = [finding for finding in findings if finding.get("severity") != "blocker"]
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "schema": {"name": "daily-readiness", "version": SCHEMA_VERSION},
+        "target": str(target),
+        "created_at": _now().isoformat(),
+        "ready": not blockers,
+        "status": "ready" if not blockers else "blocked",
+        "finding_count": len(findings),
+        "blocker_count": len(blockers),
+        "warning_count": len(warnings),
+        "waived_count": 0,
+        "findings": findings,
+        "blockers": blockers,
+        "warnings": warnings,
+        "waivers": [],
+        "source_fingerprint": _fingerprint({"findings": findings}),
+    }
+
+
+def _handoff_ingest_candidates(target: Path) -> list[dict[str, Any]]:
+    found = handoff_cmd.collect_issues(target)
+    if not found:
+        return []
+    counts = Counter(issue.category for issue in found)
+    category = sorted(counts.items(), key=lambda item: (-item[1], item[0]))[0][0]
+    top = next((issue for issue in found if issue.category == category), found[0])
+    return [
+        _candidate(
+            target=target,
+            action_type="import-handoff-issues",
+            source_subsystem="handoff-ingest",
+            source_local_id=category,
+            safe_summary=f"{len(found)} handoff ingest issue(s); top category {category}: {top.text}",
+            suggested_next_command="brigade handoff import-issues --target .",
+            score=205,
+            ranking_reasons=["handoff ingest issue", "route through work inbox before touching canonical memory"],
+            approval_required=False,
+            risk_level="low",
+            acceptance=[
+                "Handoff ingest issues are imported into the work inbox or explicitly deferred.",
+                "OpenClaw remains the canonical memory owner; no canonical memory files are edited by this daily action.",
+            ],
+            evidence_refs=[str(handoff_cmd.default_sources_path(target)), ".brigade/handoffs/ingest-runs"],
+            source_fingerprint=_fingerprint({"categories": dict(counts), "top_issue": top.as_dict()}),
+            metadata={"issue_count": len(found), "by_category": dict(counts), "top_issue_id": top.id},
+        )
+    ]
+
+
 def _health_issue_candidates(target: Path) -> list[dict[str, Any]]:
     candidates: list[dict[str, Any]] = []
     health_sources = [
-        ("handoff", center_cmd.status_payload(target).get("handoff_drafts"), "brigade handoff doctor", 150),
+        ("handoff", handoff_cmd.draft_queue_payload(target), "brigade handoff doctor", 150),
         ("memory-care", memory_cmd.health(target), "brigade memory care doctor", 140),
-        ("security", security_cmd.health(target), "brigade security doctor", 135),
+        ("security", _daily_security_health(target), "brigade security doctor", 135),
         ("tools", tools_cmd.health(target), "brigade tools doctor", 130),
     ]
     for subsystem, health, command, base_score in health_sources:
@@ -806,20 +970,28 @@ def _phase_session_candidates(target: Path) -> list[dict[str, Any]]:
     return candidates
 
 
-def _all_candidates(target: Path) -> list[dict[str, Any]]:
+def _all_candidates(target: Path, diagnostics: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
     config, _ = _load_config(target)
-    candidates = [
-        *_pending_task_candidates(target),
-        *_pending_import_candidates(target),
-        *_center_action_candidates(target),
-        *_readiness_candidates(target),
-        *_phase_session_candidates(target),
-        *_phase_ledger_action_candidates(target),
-        *_phase_ledger_issue_candidates(target),
-        *_health_issue_candidates(target),
-        *_notification_candidates(target),
-        *_report_candidate(target),
+    candidates: list[dict[str, Any]] = []
+    sections = [
+        ("pending-tasks", _pending_task_candidates),
+        ("pending-imports", _pending_import_candidates),
+        ("center-actions", _center_action_candidates),
+        ("readiness", _readiness_candidates),
+        ("handoff-ingest", _handoff_ingest_candidates),
+        ("phase-session", _phase_session_candidates),
+        ("phase-ledger-actions", _phase_ledger_action_candidates),
+        ("phase-ledger-issues", _phase_ledger_issue_candidates),
+        ("health-issues", _health_issue_candidates),
+        ("notifications", _notification_candidates),
+        ("operator-report", _report_candidate),
     ]
+    for label, builder in sections:
+        result, check = _bounded_status_call(label, lambda builder=builder: builder(target), [])
+        if diagnostics is not None:
+            diagnostics.append(check)
+        if isinstance(result, list):
+            candidates.extend(item for item in result if isinstance(item, dict))
     _apply_preferred_mode(candidates, str(config.get("preferred_mode") or "task-first"))
     candidates.sort(key=lambda item: (int(item.get("score") or 0), str(item.get("action_id") or "")), reverse=True)
     return candidates
@@ -858,6 +1030,7 @@ def _adapter_for(action: dict[str, Any] | None) -> str | None:
         "promote-import": "brigade work import promote",
         "start-center-action": "brigade center actions start",
         "import-readiness-issues": "brigade center readiness import-issues",
+        "import-handoff-issues": "brigade handoff import-issues",
         "build-operator-report": "brigade center report build",
         "start-phase-action": "brigade work phases actions start",
         "build-phase-report": "brigade work phases report build",
@@ -1051,6 +1224,7 @@ def _current_action_for_approval(target: Path, approval: dict[str, Any]) -> dict
         "promote-import": _pending_import_candidates,
         "start-center-action": _center_action_candidates,
         "import-readiness-issues": _readiness_candidates,
+        "import-handoff-issues": _handoff_ingest_candidates,
         "build-operator-report": _report_candidate,
     }
     builder = candidate_builders.get(action_type)
@@ -1166,29 +1340,114 @@ def _age_hours(value: object) -> float | None:
     return (_now() - parsed).total_seconds() / 3600
 
 
+def _daily_center_status_payload(target: Path) -> dict[str, Any]:
+    active = work_cmd._active_session_info(target)
+    pending_tasks = work_cmd._pending_tasks(target)
+    pending_imports = work_cmd._pending_imports(target)
+    action_queue = center_cmd.actions_health(target)
+    review_queue_count = len(pending_imports) + int(action_queue.get("open_count") or 0)
+    handoffs = handoff_cmd.draft_queue_payload(target)
+    memory = memory_cmd.health(target)
+    security = _daily_security_health(target)
+    notifications = notifications_cmd.health(target)
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "schema": {"name": "daily-center-status", "version": SCHEMA_VERSION},
+        "target": str(target),
+        "active_session": active,
+        "pending_task_count": len(pending_tasks),
+        "pending_import_count": len(pending_imports),
+        "review_queue_count": review_queue_count,
+        "action_queue": action_queue,
+        "handoff_drafts": handoffs,
+        "memory_care": memory,
+        "security": security,
+        "notifications": notifications,
+        "tool_catalog": {},
+        "release_readiness": None,
+    }
+
+
+def _daily_security_health(target: Path) -> dict[str, Any]:
+    checks: list[dict[str, Any]] = []
+    config_exists = security_cmd.config_path(target).is_file()
+    if config_exists:
+        checks.append({"status": "ok", "name": "security_config", "detail": str(security_cmd.config_path(target))})
+    else:
+        checks.append({"status": "warn", "name": "security_config", "detail": "missing"})
+    bundle = security_cmd.inspect_evidence_bundle(security_cmd.default_artifacts_dir(target))
+    if bundle.get("ready"):
+        checks.append({"status": "ok", "name": "security_evidence", "detail": f"findings={bundle.get('finding_count')}"})
+    else:
+        checks.append({"status": "warn", "name": "security_evidence", "detail": str(bundle.get("reason"))})
+    issues = [item for item in checks if item.get("status") != "ok"]
+    top_finding = None
+    if bundle.get("ready") and int(bundle.get("finding_count") or 0) > 0:
+        top_finding = {"id": "latest", "title": "latest security scan has findings", "severity": "unknown", "status": "warn"}
+        checks.append({"status": "warn", "name": "security_open_findings", "detail": f"{bundle.get('finding_count')} finding(s) in latest evidence"})
+        issues = [item for item in checks if item.get("status") != "ok"]
+    return {
+        "target": str(target),
+        "config_path": str(security_cmd.config_path(target)),
+        "valid": not any(item.get("status") == "fail" for item in checks),
+        "issue_count": len(issues),
+        "top_issue": issues[0] if issues else None,
+        "top_finding": top_finding,
+        "checks": checks,
+        "evidence": bundle,
+        "daily_lightweight": True,
+    }
+
+
 def status_payload(target: Path) -> dict[str, Any]:
     target = target.expanduser().resolve()
-    center = center_cmd.status_payload(target)
-    readiness = center_cmd._readiness_payload(target)
+    status_section_checks: list[dict[str, Any]] = []
+    center, check = _bounded_status_call("center-status", lambda: _daily_center_status_payload(target), {})
+    status_section_checks.append(check)
+    readiness, check = _bounded_status_call("center-readiness", lambda: _daily_readiness_payload(target), {"blockers": []})
+    status_section_checks.append(check)
     config, config_checks = _load_config(target)
-    candidates = _all_candidates(target)
+    candidates = _all_candidates(target, diagnostics=status_section_checks)
     selected = _selected(candidates)
     handoffs = center.get("handoff_drafts") if isinstance(center.get("handoff_drafts"), dict) else {}
     memory = center.get("memory_care") if isinstance(center.get("memory_care"), dict) else {}
     security = center.get("security") if isinstance(center.get("security"), dict) else {}
     notifications = center.get("notifications") if isinstance(center.get("notifications"), dict) else {}
     tools = center.get("tool_catalog") if isinstance(center.get("tool_catalog"), dict) else {}
-    latest_report = center_cmd.latest_report(target)
-    daily_health = health(target)
-    phase_health = phases_cmd.health(target)
-    latest_phase_session = phases_cmd._latest_session(target)
+    latest_report, check = _bounded_status_call("latest-operator-report", lambda: center_cmd.latest_report(target), None)
+    status_section_checks.append(check)
+    daily_health_fallback = {
+        "schema_version": SCHEMA_VERSION,
+        "config_path": str(_config_path(target)),
+        "run_count": 0,
+        "plan_count": 0,
+        "latest_run": None,
+        "latest_plan": None,
+        "approvals": {},
+        "telemetry": {},
+        "phase_ledger": {},
+        "phase_session": None,
+        "checks": [],
+        "issue_count": 0,
+        "top_issue": None,
+    }
+    daily_health, check = _bounded_status_call("daily-health", lambda: health(target), daily_health_fallback)
+    status_section_checks.append(check)
+    phase_health, check = _bounded_status_call("phase-health", lambda: phases_cmd.health(target), {})
+    status_section_checks.append(check)
+    latest_phase_session, check = _bounded_status_call("latest-phase-session", lambda: phases_cmd._latest_session(target), None)
+    status_section_checks.append(check)
     approvals = daily_health.get("approvals") if isinstance(daily_health.get("approvals"), dict) else {}
+    status_section_issues = [item for item in status_section_checks if item.get("status") != "ok"]
     return {
         "schema_version": SCHEMA_VERSION,
         "schema": _schema("daily-status"),
         "target": str(target),
         "config": config,
         "config_checks": config_checks,
+        "status_section_checks": status_section_checks,
+        "status_section_issue_count": len(status_section_issues),
+        "top_status_section_issue": status_section_issues[0] if status_section_issues else None,
         "daily_health": daily_health,
         "phase_ledger": phase_health,
         "phase_session": phases_cmd._session_summary(latest_phase_session) if isinstance(latest_phase_session, dict) else None,
@@ -1231,6 +1490,11 @@ def status(*, target: Path, json_output: bool = False) -> int:
     notifications = payload.get("notifications") if isinstance(payload.get("notifications"), dict) else {}
     if notifications:
         print(f"notifications: {notifications.get('status')} configured={notifications.get('configured')}")
+    if payload.get("status_section_issue_count"):
+        print(f"status_section_issues: {payload['status_section_issue_count']}")
+        top = payload.get("top_status_section_issue")
+        if isinstance(top, dict):
+            print(f"top_status_section_issue: {top.get('name')} {top.get('detail')}")
     phase_ledger = payload.get("phase_ledger") if isinstance(payload.get("phase_ledger"), dict) else {}
     if phase_ledger:
         print(f"phase_records: {phase_ledger.get('record_count', 0)}")
@@ -1654,6 +1918,11 @@ def run(
             rc = center_cmd.readiness_import_issues(target=target)
         receipt["commands_invoked"].append({"command": "brigade center readiness import-issues", "exit_code": rc})
         receipt["adapter_result"]["commands_invoked"].append({"command": "brigade center readiness import-issues", "exit_code": rc})
+    elif action_type == "import-handoff-issues":
+        with redirect_stdout(StringIO()):
+            rc = handoff_cmd.import_issues(target=target)
+        receipt["commands_invoked"].append({"command": "brigade handoff import-issues", "exit_code": rc})
+        receipt["adapter_result"]["commands_invoked"].append({"command": "brigade handoff import-issues", "exit_code": rc})
     elif action_type == "build-operator-report":
         with redirect_stdout(StringIO()):
             rc = center_cmd.report_build(target=target)

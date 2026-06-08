@@ -1,4 +1,5 @@
 import json
+import time
 from pathlib import Path
 
 from brigade import center_cmd, cli, daily_cmd, handoff_cmd, phases_cmd, release_cmd, repos_cmd, work_cmd
@@ -70,6 +71,42 @@ def test_daily_status_text_and_json(tmp_path, capsys):
 
     assert cli.main(["daily", "status", "--target", str(tmp_path)]) == 0
     assert "daily status:" in capsys.readouterr().out
+
+
+def test_daily_status_timeout_degrades_slow_candidate_section(tmp_path, capsys, monkeypatch):
+    _seed_ready_repo(tmp_path, capsys)
+    monkeypatch.setenv("BRIGADE_DAILY_STATUS_SECTION_TIMEOUT", "1")
+
+    def slow_pending_tasks(target):
+        time.sleep(3)
+        return []
+
+    monkeypatch.setattr(daily_cmd, "_pending_task_candidates", slow_pending_tasks)
+
+    assert daily_cmd.status(target=tmp_path, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    checks = payload["status_section_checks"]
+    pending_tasks = next(check for check in checks if check["name"] == "daily_status_section:pending-tasks")
+    assert pending_tasks["status"] == "warn"
+    assert "timed out" in pending_tasks["detail"]
+    assert payload["status_section_issue_count"] >= 1
+
+
+def test_daily_status_uses_lightweight_center_snapshot(tmp_path, capsys, monkeypatch):
+    _seed_ready_repo(tmp_path, capsys)
+    monkeypatch.setenv("BRIGADE_DAILY_STATUS_SECTION_TIMEOUT", "1")
+
+    def slow_center_status(target):
+        time.sleep(3)
+        return {}
+
+    monkeypatch.setattr(center_cmd, "status_payload", slow_center_status)
+
+    assert daily_cmd.status(target=tmp_path, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    center_status = next(check for check in payload["status_section_checks"] if check["name"] == "daily_status_section:center-status")
+    assert center_status["status"] == "ok"
+    assert "daily_status_section:center-readiness" in {check["name"] for check in payload["status_section_checks"]}
 
 
 def test_daily_report_candidate_uses_report_health_command(tmp_path, monkeypatch):
@@ -370,6 +407,7 @@ def test_daily_plan_includes_handoff_memory_and_security_issues(tmp_path, capsys
     payload = json.loads(capsys.readouterr().out)
     subsystems = {item["source_subsystem"] for item in payload["candidate_actions"]}
     assert {"handoff", "memory-care", "security"} <= subsystems
+    assert "handoff-ingest" in subsystems
 
 
 def test_daily_run_refuses_approval_required_import_and_promotes_when_approved(tmp_path, capsys):
@@ -686,10 +724,14 @@ def test_daily_run_safe_adapters_and_json_cleanliness(tmp_path, monkeypatch, cap
     monkeypatch.setattr(center_cmd, "report_build", lambda **kwargs: print("noisy report") or 0)
     run_one(_daily_action("build-operator-report", source_subsystem="center-report", source_local_id="report"))
 
+    monkeypatch.setattr(handoff_cmd, "import_issues", lambda **kwargs: print("noisy handoff import") or 0)
+    run_one(_daily_action("import-handoff-issues", source_subsystem="handoff-ingest", source_local_id="handoff"))
+
     assert calls == [
         "brigade center actions start action-safe",
         "brigade center readiness import-issues",
         "brigade center report build",
+        "brigade handoff import-issues",
     ]
 
 

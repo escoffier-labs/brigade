@@ -412,6 +412,68 @@ def _build_parser() -> argparse.ArgumentParser:
     p_operator_plan.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
     p_operator_plan.add_argument("--profile", choices=["local-operator", "internal-dogfood"], default="local-operator", help="Bootstrap profile to inspect.")
     p_operator_plan.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_operator_adopt = operator_sub.add_parser("adopt", help="Inspect an existing operator workspace before Brigade adoption.")
+    operator_adopt_sub = p_operator_adopt.add_subparsers(dest="operator_adopt_command", metavar="<operator-adopt-command>")
+    operator_adopt_sub.required = True
+    p_operator_adopt_plan = operator_adopt_sub.add_parser("plan", help="Build a privacy-preserving read-only adoption plan.")
+    p_operator_adopt_plan.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_operator_adopt_plan.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_operator_adopt_capture = operator_adopt_sub.add_parser("capture", help="Write a redacted local adoption snapshot.")
+    p_operator_adopt_capture.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
+    p_operator_adopt_capture.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_operator_adopt_import = operator_adopt_sub.add_parser("import-issues", help="Import adoption gaps into the work inbox.")
+    p_operator_adopt_import.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
+    p_operator_adopt_import.add_argument("--dry-run", action="store_true", help="Report without writing imports.")
+    p_operator_adopt_import.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_operator_migration = operator_sub.add_parser("migration", help="Summarize operator adoption and external-surface replacement progress.")
+    operator_migration_sub = p_operator_migration.add_subparsers(dest="operator_migration_command", metavar="<operator-migration-command>")
+    operator_migration_sub.required = True
+    p_operator_migration_status = operator_migration_sub.add_parser("status", help="Show redacted operator migration progress.")
+    p_operator_migration_status.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_operator_migration_status.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_operator_migration_doctor = operator_migration_sub.add_parser("doctor", help="Check whether Brigade can drive operator migration work.")
+    p_operator_migration_doctor.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_operator_migration_doctor.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_operator_migration_import = operator_migration_sub.add_parser("import-issues", help="Import operator migration rollup gaps into the work inbox.")
+    p_operator_migration_import.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
+    p_operator_migration_import.add_argument("--dry-run", action="store_true", help="Report without writing imports.")
+    p_operator_migration_import.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_operator_migration_consolidate = operator_migration_sub.add_parser("consolidate", help="Dismiss tiny operator-surface-review imports superseded by a migration rollup.")
+    p_operator_migration_consolidate.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
+    p_operator_migration_consolidate.add_argument("--surface", default=None, help="Optional surface id to consolidate.")
+    p_operator_migration_consolidate.add_argument("--review-status", default=None, help="Optional review status to consolidate.")
+    p_operator_migration_consolidate.add_argument("--reason", default="superseded-by-migration-rollup", help="Short safe dismissal reason.")
+    p_operator_migration_consolidate.add_argument("--dry-run", action="store_true", help="Report without dismissing imports.")
+    p_operator_migration_consolidate.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_operator_surfaces = operator_sub.add_parser("surfaces", help="Capture and review redacted external scheduler/process surfaces.")
+    operator_surfaces_sub = p_operator_surfaces.add_subparsers(dest="operator_surfaces_command", metavar="<operator-surfaces-command>")
+    operator_surfaces_sub.required = True
+    p_operator_surfaces_capture = operator_surfaces_sub.add_parser("capture", help="Write a redacted local operator surface snapshot.")
+    p_operator_surfaces_capture.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
+    p_operator_surfaces_capture.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_operator_surfaces_list = operator_surfaces_sub.add_parser("list", help="List the latest redacted operator surface records.")
+    p_operator_surfaces_list.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_operator_surfaces_list.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_operator_surfaces_doctor = operator_surfaces_sub.add_parser("doctor", help="Check redacted operator surface capture freshness.")
+    p_operator_surfaces_doctor.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_operator_surfaces_doctor.add_argument("--surface", default=None, help="Optional surface id to check, such as shell_crontab.")
+    p_operator_surfaces_doctor.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_operator_surfaces_review = operator_surfaces_sub.add_parser("review", help="Record a redacted operator surface ownership decision.")
+    p_operator_surfaces_review.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
+    p_operator_surfaces_review.add_argument("--surface", required=True, help="Surface id to review, such as shell_crontab.")
+    p_operator_surfaces_review.add_argument("--status", required=True, choices=["brigade-runbook-candidate", "external-ok", "needs-owner", "retire-candidate"], help="Review decision.")
+    p_operator_surfaces_review.add_argument("--all", dest="all_records", action="store_true", help="Review every current record for the surface.")
+    p_operator_surfaces_review.add_argument("--record", dest="record_labels", action="append", default=[], help="Review one redacted record label. Repeat for multiple records.")
+    p_operator_surfaces_review.add_argument("--reason", default="operator-review", help="Short safe reason code. Do not include paths or secrets.")
+    p_operator_surfaces_review.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_operator_surfaces_reviews = operator_surfaces_sub.add_parser("reviews", help="Summarize redacted operator surface review state.")
+    p_operator_surfaces_reviews.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_operator_surfaces_reviews.add_argument("--surface", default=None, help="Optional surface id to list.")
+    p_operator_surfaces_reviews.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_operator_surfaces_import = operator_surfaces_sub.add_parser("import-issues", help="Import surface coverage follow-ups into the work inbox.")
+    p_operator_surfaces_import.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
+    p_operator_surfaces_import.add_argument("--dry-run", action="store_true", help="Report without writing imports.")
+    p_operator_surfaces_import.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_operator_init = operator_sub.add_parser("init", help="Write missing gitignored local operator config defaults.")
     p_operator_init.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
     p_operator_init.add_argument("--profile", choices=["local-operator", "internal-dogfood"], default="local-operator", help="Bootstrap profile to apply.")
@@ -2076,6 +2138,13 @@ def _build_parser() -> argparse.ArgumentParser:
     p_research_show.add_argument("run_id", help="Run id.")
     p_research_show.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
     p_research_show.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_research_export = research_sub.add_parser("export-handoff", help="Export a completed research run as a linted Memory Handoff.")
+    p_research_export.add_argument("run_id", help="Run id.")
+    p_research_export.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
+    p_research_export.add_argument("--inbox", choices=("codex", "claude", "opencode", "hermes"), default=None, help="Writer harness inbox to export into.")
+    p_research_export.add_argument("--handoff-inbox", type=Path, default=None, help="Explicit handoff inbox path for a custom writer.")
+    p_research_export.add_argument("--force", action="store_true", help="Replace an existing exported handoff at the same path.")
+    p_research_export.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_research_cancel = research_sub.add_parser("cancel", help="Cancel a local research run.")
     p_research_cancel.add_argument("run_id", help="Run id.")
     p_research_cancel.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
@@ -2099,6 +2168,16 @@ def _build_parser() -> argparse.ArgumentParser:
     p_research_sources_doctor = research_sources_sub.add_parser("doctor", help="Check configured research source routes.")
     p_research_sources_doctor.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
     p_research_sources_doctor.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_research_handoffs = research_sub.add_parser("handoffs", help="Inspect and route research handoff export health.")
+    research_handoffs_sub = p_research_handoffs.add_subparsers(dest="research_handoffs_command", metavar="<handoffs-command>")
+    research_handoffs_sub.required = True
+    p_research_handoffs_doctor = research_handoffs_sub.add_parser("doctor", help="Check research handoff export health.")
+    p_research_handoffs_doctor.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_research_handoffs_doctor.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_research_handoffs_import = research_handoffs_sub.add_parser("import-issues", help="Import research handoff export issues into the work inbox.")
+    p_research_handoffs_import.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
+    p_research_handoffs_import.add_argument("--dry-run", action="store_true", help="Preview imports without writing.")
+    p_research_handoffs_import.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
 
     # center
     p_center = sub.add_parser("center", help="Read local operator-center summaries.")
@@ -3025,6 +3104,56 @@ def main(argv=None) -> int:
             return operator_cmd.guide(profile=args.profile, json_output=args.json)
         if args.operator_command == "plan":
             return operator_cmd.plan(target=args.target, profile=args.profile, json_output=args.json)
+        if args.operator_command == "adopt":
+            if args.operator_adopt_command == "plan":
+                return operator_cmd.adoption_plan(target=args.target, json_output=args.json)
+            if args.operator_adopt_command == "capture":
+                return operator_cmd.adoption_capture(target=args.target, json_output=args.json)
+            if args.operator_adopt_command == "import-issues":
+                return operator_cmd.adoption_import_issues(target=args.target, dry_run=args.dry_run, json_output=args.json)
+            parser.error(f"unknown operator adopt command: {args.operator_adopt_command}")
+            return 2
+        if args.operator_command == "migration":
+            if args.operator_migration_command == "status":
+                return operator_cmd.migration_status(target=args.target, json_output=args.json)
+            if args.operator_migration_command == "doctor":
+                return operator_cmd.migration_doctor(target=args.target, json_output=args.json)
+            if args.operator_migration_command == "import-issues":
+                return operator_cmd.migration_import_issues(target=args.target, dry_run=args.dry_run, json_output=args.json)
+            if args.operator_migration_command == "consolidate":
+                return operator_cmd.migration_consolidate(
+                    target=args.target,
+                    surface=args.surface,
+                    review_status=args.review_status,
+                    reason=args.reason,
+                    dry_run=args.dry_run,
+                    json_output=args.json,
+                )
+            parser.error(f"unknown operator migration command: {args.operator_migration_command}")
+            return 2
+        if args.operator_command == "surfaces":
+            if args.operator_surfaces_command == "capture":
+                return operator_cmd.surfaces_capture(target=args.target, json_output=args.json)
+            if args.operator_surfaces_command == "list":
+                return operator_cmd.surfaces_list(target=args.target, json_output=args.json)
+            if args.operator_surfaces_command == "doctor":
+                return operator_cmd.surfaces_doctor(target=args.target, surface=args.surface, json_output=args.json)
+            if args.operator_surfaces_command == "review":
+                return operator_cmd.surfaces_review(
+                    target=args.target,
+                    surface=args.surface,
+                    status=args.status,
+                    all_records=args.all_records,
+                    record_labels=args.record_labels,
+                    reason=args.reason,
+                    json_output=args.json,
+                )
+            if args.operator_surfaces_command == "reviews":
+                return operator_cmd.surfaces_reviews(target=args.target, surface=args.surface, json_output=args.json)
+            if args.operator_surfaces_command == "import-issues":
+                return operator_cmd.surfaces_import_issues(target=args.target, dry_run=args.dry_run, json_output=args.json)
+            parser.error(f"unknown operator surfaces command: {args.operator_surfaces_command}")
+            return 2
         if args.operator_command == "init":
             return operator_cmd.init(target=args.target, profile=args.profile, force=args.force, dry_run=args.dry_run, waive_public_release=args.waive_public_release, json_output=args.json)
         if args.operator_command == "status":
@@ -3700,6 +3829,15 @@ def main(argv=None) -> int:
             return research_cmd.cli_list(target=args.target, json_output=args.json)
         if args.research_command == "show":
             return research_cmd.cli_show(target=args.target, run_id=args.run_id, json_output=args.json)
+        if args.research_command == "export-handoff":
+            return research_cmd.cli_export_handoff(
+                target=args.target,
+                run_id=args.run_id,
+                inbox=args.inbox,
+                handoff_inbox=args.handoff_inbox,
+                force=args.force,
+                json_output=args.json,
+            )
         if args.research_command == "cancel":
             return research_cmd.cli_cancel(target=args.target, run_id=args.run_id, json_output=args.json)
         if args.research_command == "resume":
@@ -3713,6 +3851,13 @@ def main(argv=None) -> int:
             if args.research_sources_command == "doctor":
                 return research_cmd.cli_sources_doctor(target=args.target, json_output=args.json)
             parser.error(f"unknown research sources command: {args.research_sources_command}")
+            return 2
+        if args.research_command == "handoffs":
+            if args.research_handoffs_command == "doctor":
+                return research_cmd.cli_handoffs_doctor(target=args.target, json_output=args.json)
+            if args.research_handoffs_command == "import-issues":
+                return research_cmd.cli_handoffs_import_issues(target=args.target, dry_run=args.dry_run, json_output=args.json)
+            parser.error(f"unknown research handoffs command: {args.research_handoffs_command}")
             return 2
         parser.error(f"unknown research command: {args.research_command}")
         return 2

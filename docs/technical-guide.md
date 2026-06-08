@@ -346,6 +346,7 @@ The browser/web tier is opt-in with `--web` and is treated as untrusted: fetched
 The loop uses the cloud `researcher` model from your `.brigade/roster.toml`; Brigade never runs a model locally.
 Each run persists under `.brigade/research/`, is cancellable and resumable so a long run survives interruption, and emits two artifacts: a self-contained HTML report and a memory handoff that flows into the usual ingest pipeline.
 Run manifests record the corpus, source globs, configured CLI routes, web provider, and caps so `brigade research resume` keeps the original route instead of quietly falling back to an empty run.
+Exporting the handoff is explicit. `brigade research export-handoff <run-id> --inbox codex` copies the completed run's linted handoff into a selected writer inbox such as Codex, Claude Code, OpenCode, or Hermes. Use `--handoff-inbox <path>` for a custom writer. Brigade records the export fingerprint on the run and surfaces missing, stale, or missing-path exports in `research show`, `work brief`, `center reviews`, and release readiness evidence. `brigade research handoffs doctor` gives a focused export-health check, and `brigade research handoffs import-issues` routes export repairs into the normal work inbox with stable source fingerprints.
 
 ```bash
 brigade research run "summarize the key themes" --corpus cs101
@@ -353,6 +354,9 @@ brigade research run "latest on X" --web
 brigade research sources list
 brigade research sources doctor
 brigade research show <run-id>
+brigade research export-handoff <run-id> --inbox codex
+brigade research handoffs doctor
+brigade research handoffs import-issues
 ```
 
 CLI source adapters are foreground commands. Brigade substitutes `{query}`, captures stdout and stderr, and labels the extracted findings as configured CLI evidence:
@@ -413,6 +417,11 @@ Start-of-day commands:
 - `brigade skills search "mcp security review"` searches reviewed reusable skill packs.
 - `brigade operator guide` prints the agent-facing Brigade startup sequence, onboarding command, handoff expectations, and boundaries.
 - `brigade operator plan` shows which gitignored local operator configs are missing before writing anything.
+- `brigade operator adopt plan` builds a read-only adoption plan for an existing homegrown operator workspace. It reports guidance files, harness roots, handoff inboxes, local state directories, shell crontab counts, OpenClaw cron counts, and PM2 process counts without including raw scheduler lines, job names, process names, command paths, or environment values.
+- `brigade operator adopt capture` writes that redacted adoption snapshot under `.brigade/operator/adoption/` as local evidence.
+- `brigade operator adopt import-issues` converts adoption gaps into `operator-adoption` work imports with stable source fingerprints so the migration appears in `work brief` and the daily loop.
+- `brigade operator migration status/doctor/import-issues/consolidate` rolls adoption status, redacted surface review state, pending operator imports, and pending operator tasks into one replacement-progress view without exposing raw scheduler or process details. Consolidation dismisses tiny `operator-surface-review` imports only when a pending `operator-migration` rollup import exists.
+- `brigade operator surfaces capture/list/doctor/review/reviews/import-issues` keeps a separate redacted registry for external scheduler and process coverage under `.brigade/operator/surfaces/`. It records count totals, status totals, ordinal labels, review decisions, and fingerprints for shell crontab, OpenClaw cron, and PM2, without storing raw scheduler lines, job names, process names, command paths, host details, or environment values.
 - `brigade operator init --profile internal-dogfood` bootstraps the repo-local production dogfood path, including dogfood config and a read-only security evidence refresh.
 - `brigade operator sync-tools` projects tracked `tools/*.md` sources into local Claude, Codex, and OpenCode harness folders.
 - `brigade operator status --profile internal-dogfood` shows what is wired into the repo versus the source machine: local configs, gitignore state, Brigade/Codex paths, dogfood readiness, daily health, security evidence, notification config, and local readiness.
@@ -425,6 +434,17 @@ First run in a repo:
 ```bash
 brigade operator quickstart --target . --harnesses codex
 brigade operator quickstart --target . --harnesses codex,claude,opencode --dry-run
+brigade operator adopt plan --target . --json
+brigade operator adopt capture --target . --json
+brigade operator adopt import-issues --target . --json
+brigade operator migration status --target . --json
+brigade operator migration doctor --target . --json
+brigade operator migration consolidate --target . --surface shell_crontab --review-status needs-owner
+brigade operator surfaces capture --target . --json
+brigade operator surfaces doctor --target . --json
+brigade operator surfaces review --target . --surface shell_crontab --status external-ok --all --reason reviewed-external-ownership
+brigade operator surfaces reviews --target . --json
+brigade operator surfaces import-issues --target . --json
 brigade operator init --profile internal-dogfood --target .
 brigade operator sync-tools --target .
 brigade operator doctor --profile internal-dogfood --target .
@@ -666,10 +686,10 @@ brigade daily run --json
 brigade daily closeout --json
 ```
 
-`brigade daily status` summarizes the current operating state and prints the next recommended command.
+`brigade daily status` summarizes the current operating state and prints the next recommended command. It uses a lightweight daily center snapshot instead of the full operator-center rollup. Status sections are also bounded; if a subsystem is slow, the JSON includes `status_section_checks`, `status_section_issue_count`, and `top_status_section_issue` instead of hanging the whole daily loop.
 `brigade daily plan` ranks local candidate actions by urgency, safety, acceptance coverage, provenance, and usefulness, then chooses exactly one recommended action. It includes ranked candidates, selection reasons, rejection reasons, safety blockers, approval blockers, stale evidence blockers, and quality blockers. It writes no state unless `--record` is passed.
 `brigade daily review` previews the selected action, selected adapter, risk, evidence references, acceptance criteria, config blockers, approval boundary, existing approval request, context pack intent, and likely next command.
-`brigade daily run` executes at most one safe local step, such as running a pending accepted task, promoting an approved import, building a context pack, building an operator report, or importing readiness issues. It refuses approval-required actions unless `--approved` or `--approval <approval-id>` is passed, respects local `.brigade/daily.toml` adapter settings, writes a local receipt under `.brigade/daily/runs/`, and records a normalized adapter result shape.
+`brigade daily run` executes at most one safe local step, such as running a pending accepted task, promoting an approved import, building a context pack, building an operator report, importing readiness issues, or importing handoff ingest issues into the work inbox. It refuses approval-required actions unless `--approved` or `--approval <approval-id>` is passed, respects local `.brigade/daily.toml` adapter settings, writes a local receipt under `.brigade/daily/runs/`, and records a normalized adapter result shape.
 `brigade daily closeout` marks the latest daily run reviewed, deferred, blocked, or archived and can write a Memory Handoff draft without editing canonical memory. Closeout records verification expectations, latest verification, changed-file summary, work closeout state, review closeout state, handoff state, and release-readiness impact.
 `brigade daily init` writes conservative local defaults to `.brigade/daily.toml`. `brigade daily history`, `show`, `doctor`, `schema`, `protocol`, and `telemetry` inspect local daily receipts, health, wrapper-facing JSON contracts, external-agent protocol steps, and local dogfood metrics.
 

@@ -5262,7 +5262,7 @@ def _suggested_command(active: dict[str, Any] | None, next_text: object, source:
 
 
 def _brief_payload(target: Path, *, limit: int = 3) -> dict[str, Any]:
-    from . import center_cmd, chat_cmd, context_cmd, daily_cmd, handoff_cmd, learn_cmd, memory_cmd, notifications_cmd, pantry_cmd, phases_cmd, projects_cmd, repos_cmd, roadmap_cmd, security_cmd, tools_cmd
+    from . import center_cmd, chat_cmd, context_cmd, daily_cmd, handoff_cmd, learn_cmd, memory_cmd, notifications_cmd, pantry_cmd, phases_cmd, projects_cmd, repos_cmd, research_cmd, roadmap_cmd, security_cmd, tools_cmd
 
     target = target.expanduser().resolve()
     active = _active_session_info(target)
@@ -5294,6 +5294,7 @@ def _brief_payload(target: Path, *, limit: int = 3) -> dict[str, Any]:
     context_health = context_cmd.health(target)
     projects_health = projects_cmd.health(target)
     learning_health = learn_cmd.health(target)
+    research_health = research_cmd.health(target)
     center_report_health = center_cmd.report_health(target)
     center_actions_health = center_cmd.actions_health(target)
     daily_health = daily_cmd.health(target)
@@ -5423,6 +5424,11 @@ def _brief_payload(target: Path, *, limit: int = 3) -> dict[str, Any]:
             "candidate_count": learning_health["candidate_count"],
             "issue_count": learning_health["issue_count"],
             "top_issue": learning_health["top_issue"],
+        },
+        "research_handoffs": {
+            "run_count": research_health["run_count"],
+            "issue_count": research_health["issue_count"],
+            "top_issue": research_health["top_issue"],
         },
         "operator_report": {
             "issue_count": center_report_health["issue_count"],
@@ -6252,6 +6258,15 @@ def brief(*, target: Path, limit: int = 3, json_output: bool = False) -> int:
         top_learning = learning.get("top_issue") if isinstance(learning.get("top_issue"), dict) else None
         if top_learning:
             print(f"learning_top_issue: {top_learning.get('name')} {_short(str(top_learning.get('detail', '')))}")
+
+    research_handoffs = payload.get("research_handoffs") if isinstance(payload.get("research_handoffs"), dict) else {}
+    if research_handoffs:
+        print(f"research_handoffs: {_count_status(research_handoffs.get('issue_count'))}")
+        top_research = research_handoffs.get("top_issue") if isinstance(research_handoffs.get("top_issue"), dict) else None
+        if top_research:
+            print(f"research_handoff_top_issue: {top_research.get('run_id')} {top_research.get('status')}")
+            if top_research.get("suggested_next_command"):
+                print(f"research_handoff_command: {top_research.get('suggested_next_command')}")
 
     operator_report = payload.get("operator_report") if isinstance(payload.get("operator_report"), dict) else {}
     if operator_report:

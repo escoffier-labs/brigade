@@ -160,6 +160,9 @@ def test_report_compare_detects_changed_head_missing_receipts_new_activity_and_r
     assert "operator_report_newer_activity" in names
     assert "newer_verification" in names
     assert "operator_report_review_queue_changed" in names
+    missing = next(issue for issue in compare["issues"] if issue["name"] == "operator_report_missing_receipt")
+    assert missing["detail"] == "missing receipt reference: .brigade/missing/receipt.json"
+    assert str(tmp_path) not in missing["detail"]
 
 
 def test_report_diff_records_changed_queue_blockers_and_activity(tmp_path, capsys):

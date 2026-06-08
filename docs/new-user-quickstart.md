@@ -31,6 +31,24 @@ Use a comma-separated harness list if you use more than one agent surface:
 brigade operator quickstart --target ./my-repo --harnesses codex,claude,opencode --dry-run
 ```
 
+If the target already has a homegrown operator setup with scripts, handoff folders, crons, or process managers, inspect it first:
+
+```bash
+brigade operator adopt plan --target ~/agent-workspace --json
+brigade operator adopt capture --target ~/agent-workspace --json
+brigade operator adopt import-issues --target ~/agent-workspace --json
+brigade operator migration status --target ~/agent-workspace --json
+brigade operator migration doctor --target ~/agent-workspace --json
+brigade operator migration consolidate --target ~/agent-workspace --surface shell_crontab --review-status needs-owner
+brigade operator surfaces capture --target ~/agent-workspace --json
+brigade operator surfaces doctor --target ~/agent-workspace --json
+brigade operator surfaces review --target ~/agent-workspace --surface shell_crontab --status external-ok --all --reason reviewed-external-ownership
+brigade operator surfaces reviews --target ~/agent-workspace --json
+brigade operator surfaces import-issues --target ~/agent-workspace --json
+```
+
+The adoption plan is read-only. Capture writes a redacted local snapshot under `.brigade/operator/adoption/`, and import-issues routes the migration gaps into the work inbox. The migration commands roll adoption state, surface reviews, and pending migration work into one replacement-progress view; consolidate lets that rollup supersede tiny record-level imports. The surfaces commands keep redacted scheduler and process coverage under `.brigade/operator/surfaces/`, with count totals, status totals, ordinal labels, review decisions, and fingerprints. External schedulers and process managers are never stored with raw crontab lines, job names, process names, command paths, host details, or environment values.
+
 ## Apply The Setup
 
 ```bash

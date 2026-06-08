@@ -61,6 +61,9 @@ def _update(target: Path, run_id: str, **fields: Any) -> None:
     rec.update(fields)
     _write_json(p, rec)
 
+def update_run(target: Path, run_id: str, **fields: Any) -> None:
+    _update(target, run_id, **fields)
+
 def set_status(target: Path, run_id: str, status: str) -> None:
     _update(target, run_id, status=status)
 

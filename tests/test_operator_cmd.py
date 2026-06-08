@@ -2,7 +2,43 @@ from __future__ import annotations
 
 import json
 
-from brigade import cli, operator_cmd
+from brigade import cli, operator_cmd, work_cmd
+
+
+def _fake_surface_run(argv, timeout=8):
+    if argv == ["crontab", "-l"]:
+        return {
+            "ok": True,
+            "stdout": "*/5 * * * * brigade-example-task --secret-path /example/private\n# example comment\n",
+            "error": None,
+        }
+    if argv == ["openclaw", "--no-color", "cron", "status", "--json"]:
+        return {"ok": True, "stdout": json.dumps({"enabled": True, "job_count": 2}), "error": None}
+    if argv == ["openclaw", "--no-color", "cron", "list", "--json"]:
+        return {
+            "ok": True,
+            "stdout": json.dumps(
+                {
+                    "jobs": [
+                        {"name": "example-backup", "command": "backup --to /example/private", "status": "ok"},
+                        {"name": "example-ingest", "command": "ingest --from /example/private", "status": "idle"},
+                    ]
+                }
+            ),
+            "error": None,
+        }
+    if argv == ["pm2", "jlist"]:
+        return {
+            "ok": True,
+            "stdout": json.dumps(
+                [
+                    {"name": "example-service", "pm2_env": {"status": "online", "EXAMPLE_ENV": "abc"}},
+                    {"name": "example-api", "pm2_env": {"status": "stopped", "pm_exec_path": "/example/private/api.js"}},
+                ]
+            ),
+            "error": None,
+        }
+    return {"ok": False, "stdout": "", "error": "command not found"}
 
 
 def test_operator_plan_lists_safe_local_configs(tmp_path, capsys):
@@ -23,6 +59,647 @@ def test_operator_internal_dogfood_plan_includes_dogfood(tmp_path, capsys):
     assert "dogfood" in ids
     assert payload["profile"] == "internal-dogfood"
     assert any("security evidence" in boundary for boundary in payload["boundaries"])
+
+
+def test_operator_adoption_plan_summarizes_existing_workspace_without_raw_surface_details(tmp_path, capsys, monkeypatch):
+    (tmp_path / "AGENTS.md").write_text("Use the private operator workflow.\n")
+    (tmp_path / "MEMORY.md").write_text("Private memory index.\n")
+    (tmp_path / ".claude" / "memory-handoffs").mkdir(parents=True)
+    (tmp_path / "scripts").mkdir()
+    (tmp_path / "logs").mkdir()
+
+    def fake_run(argv, timeout=8):
+        if argv == ["crontab", "-l"]:
+            return {
+                "ok": True,
+                "stdout": "*/5 * * * * brigade-example-task\n# example comment\n",
+                "error": None,
+            }
+        if argv == ["openclaw", "--no-color", "cron", "status", "--json"]:
+            return {"ok": True, "stdout": json.dumps({"enabled": True, "job_count": 9}), "error": None}
+        if argv == ["openclaw", "--no-color", "cron", "list", "--json"]:
+            return {
+                "ok": True,
+                "stdout": json.dumps(
+                    {
+                        "jobs": [
+                            {"name": "example-backup", "status": "ok"},
+                            {"name": "example-ingest", "status": "idle"},
+                        ]
+                    }
+                ),
+                "error": None,
+            }
+        if argv == ["pm2", "jlist"]:
+            return {
+                "ok": True,
+                "stdout": json.dumps(
+                    [
+                        {"name": "example-service", "pm2_env": {"status": "online"}},
+                        {"name": "example-api", "pm2_env": {"status": "stopped"}},
+                    ]
+                ),
+                "error": None,
+            }
+        return {"ok": False, "stdout": "", "error": "command not found"}
+
+    monkeypatch.setattr(operator_cmd, "_run_read_only_command", fake_run)
+
+    assert operator_cmd.adoption_plan(target=tmp_path, json_output=True) == 0
+    payload_text = capsys.readouterr().out
+    payload = json.loads(payload_text)
+    assert payload["status"] == "needs-adoption"
+    assert payload["privacy"]["raw_crontab_lines_included"] is False
+    assert payload["surfaces"]["shell_crontab"]["active_count"] == 1
+    assert payload["surfaces"]["openclaw_cron"]["count"] == 2
+    assert payload["surfaces"]["openclaw_cron"]["status_counts"] == {"idle": 1, "ok": 1}
+    assert payload["surfaces"]["pm2"]["status_counts"] == {"online": 1, "stopped": 1}
+    assert payload["workspace"]["harnesses"]["handoff_inbox_count"] == 1
+    assert "brigade_operator_config_missing" in {issue["name"] for issue in payload["issues"]}
+    assert "operator_surfaces_unmodeled" in {issue["name"] for issue in payload["issues"]}
+    assert "example-service" not in payload_text
+    assert "example-api" not in payload_text
+    assert "brigade-example-task" not in payload_text
+
+
+def test_operator_adoption_plan_text_output_omits_raw_surface_details(tmp_path, capsys, monkeypatch):
+    def fake_run(argv, timeout=8):
+        if argv == ["crontab", "-l"]:
+            return {"ok": True, "stdout": "* * * * * brigade-example-task\n", "error": None}
+        return {"ok": False, "stdout": "", "error": "command not found"}
+
+    monkeypatch.setattr(operator_cmd, "_run_read_only_command", fake_run)
+
+    assert operator_cmd.adoption_plan(target=tmp_path, json_output=False) == 0
+    out = capsys.readouterr().out
+    assert "operator adoption plan:" in out
+    assert "shell_crontab_active: 1" in out
+    assert "brigade-example-task" not in out
+    assert "raw scheduler and process details are omitted" in out
+
+
+def test_operator_adoption_plan_managed_workspace_without_external_surfaces(tmp_path, capsys, monkeypatch):
+    (tmp_path / ".brigade").mkdir()
+    (tmp_path / ".brigade" / "config.json").write_text("{}\n")
+
+    monkeypatch.setattr(operator_cmd, "_run_read_only_command", lambda argv, timeout=8: {"ok": False, "stdout": "", "error": "command not found"})
+
+    assert operator_cmd.adoption_plan(target=tmp_path, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == "managed"
+    assert payload["issue_count"] == 0
+    assert payload["suggested_next_commands"] == ["brigade operator doctor --target . --profile local-operator"]
+
+
+def test_operator_adoption_capture_writes_redacted_snapshot(tmp_path, capsys, monkeypatch):
+    (tmp_path / ".claude" / "memory-handoffs").mkdir(parents=True)
+
+    def fake_run(argv, timeout=8):
+        if argv == ["crontab", "-l"]:
+            return {"ok": True, "stdout": "* * * * * brigade-example-task\n", "error": None}
+        return {"ok": False, "stdout": "", "error": "command not found"}
+
+    monkeypatch.setattr(operator_cmd, "_run_read_only_command", fake_run)
+
+    assert operator_cmd.adoption_capture(target=tmp_path, json_output=True) == 0
+    result = json.loads(capsys.readouterr().out)
+    latest_path = tmp_path / ".brigade" / "operator" / "adoption" / "latest.json"
+    assert result["capture_path"] == str(latest_path)
+    assert latest_path.is_file()
+    snapshot = json.loads(latest_path.read_text())
+    assert snapshot["status"] == "needs-adoption"
+    assert snapshot["surfaces"]["shell_crontab"]["active_count"] == 1
+    assert snapshot["privacy"]["raw_crontab_lines_included"] is False
+    assert "brigade-example-task" not in latest_path.read_text()
+
+    assert operator_cmd.adoption_plan(target=tmp_path, json_output=True) == 0
+    plan_after_capture = json.loads(capsys.readouterr().out)
+    assert plan_after_capture["status"] == "needs-adoption"
+    assert "brigade_operator_config_missing" in {issue["name"] for issue in plan_after_capture["issues"]}
+
+
+def test_operator_adoption_import_issues_uses_work_inbox_and_dedupes(tmp_path, capsys, monkeypatch):
+    (tmp_path / "AGENTS.md").write_text("Use existing workflow.\n")
+    (tmp_path / ".claude" / "memory-handoffs").mkdir(parents=True)
+
+    def fake_run(argv, timeout=8):
+        if argv == ["crontab", "-l"]:
+            return {"ok": True, "stdout": "* * * * * brigade-example-task\n", "error": None}
+        if argv == ["pm2", "jlist"]:
+            return {"ok": True, "stdout": json.dumps([{"name": "example-service", "pm2_env": {"status": "online"}}]), "error": None}
+        return {"ok": False, "stdout": "", "error": "command not found"}
+
+    monkeypatch.setattr(operator_cmd, "_run_read_only_command", fake_run)
+
+    assert operator_cmd.adoption_capture(target=tmp_path, json_output=True) == 0
+    capsys.readouterr()
+    assert operator_cmd.adoption_import_issues(target=tmp_path, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["source"] == "operator-adoption"
+    assert payload["candidate_count"] >= 3
+    assert payload["imported"] == payload["candidate_count"]
+    imports = work_cmd._read_imports(tmp_path)
+    assert len(imports) == payload["candidate_count"]
+    assert {item["source"] for item in imports} == {"operator-adoption"}
+    assert all((item.get("metadata") or {}).get("source_fingerprint") for item in imports)
+    assert all("example-service" not in json.dumps(item) for item in imports)
+    assert all("brigade-example-task" not in json.dumps(item) for item in imports)
+
+    assert operator_cmd.adoption_import_issues(target=tmp_path, json_output=True) == 0
+    second = json.loads(capsys.readouterr().out)
+    assert second["imported"] == 0
+    assert second["skipped"] == payload["candidate_count"]
+
+
+def test_operator_migration_status_rolls_up_adoption_surfaces_reviews_and_work(tmp_path, capsys, monkeypatch):
+    (tmp_path / ".brigade").mkdir()
+    (tmp_path / ".brigade" / "config.json").write_text("{}\n")
+    monkeypatch.setattr(operator_cmd, "_run_read_only_command", _fake_surface_run)
+
+    assert operator_cmd.surfaces_capture(target=tmp_path, json_output=True) == 0
+    capsys.readouterr()
+    assert operator_cmd.surfaces_review(
+        target=tmp_path,
+        surface="shell_crontab",
+        status="needs-owner",
+        all_records=True,
+        reason="needs-owner-before-migration",
+        json_output=True,
+    ) == 0
+    capsys.readouterr()
+    assert operator_cmd.surfaces_import_issues(target=tmp_path, json_output=True) == 0
+    capsys.readouterr()
+
+    assert operator_cmd.migration_status(target=tmp_path, json_output=True) == 0
+    payload_text = capsys.readouterr().out
+    payload = json.loads(payload_text)
+    assert payload["status"] == "in-progress"
+    assert payload["ready"] is False
+    assert payload["surfaces"]["record_count"] == 5
+    assert payload["surfaces"]["reviewed_count"] == 1
+    assert payload["surfaces"]["unreviewed_count"] == 4
+    assert payload["work"]["pending_import_count"] == 4
+    gap_names = {gap["name"] for gap in payload["gaps"]["items"]}
+    assert {"surface_reviews_missing", "operator_migration_imports_pending", "surface_records_need_owner"} <= gap_names
+    assert payload["gaps"]["blocking_count"] == 0
+    assert payload["gaps"]["remaining_count"] >= 3
+    assert "brigade-example-task" not in payload_text
+    assert "example-service" not in payload_text
+    assert "/example/private" not in payload_text
+
+    assert operator_cmd.migration_doctor(target=tmp_path, json_output=True) == 0
+    doctor = json.loads(capsys.readouterr().out)
+    assert doctor["status"] == "in-progress"
+    assert doctor["blocking_issue_count"] == 0
+    assert doctor["remaining_issue_count"] >= 3
+
+
+def test_operator_migration_doctor_blocks_without_operator_config_or_capture(tmp_path, capsys, monkeypatch):
+    monkeypatch.setattr(operator_cmd, "_run_read_only_command", _fake_surface_run)
+
+    assert operator_cmd.migration_doctor(target=tmp_path, json_output=True) == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ready"] is False
+    assert payload["blocking_issue_count"] >= 2
+    assert {issue["name"] for issue in payload["issues"]} >= {"operator_config_not_adopted", "surface_capture_missing"}
+
+
+def test_operator_migration_import_issues_dedupes(tmp_path, capsys, monkeypatch):
+    monkeypatch.setattr(operator_cmd, "_run_read_only_command", _fake_surface_run)
+
+    assert operator_cmd.migration_import_issues(target=tmp_path, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["source"] == "operator-migration"
+    assert payload["candidate_count"] >= 2
+    assert payload["imported"] == payload["candidate_count"]
+    imports = work_cmd._read_imports(tmp_path)
+    assert {item["source"] for item in imports} == {"operator-migration"}
+    assert all((item.get("metadata") or {}).get("source_fingerprint") for item in imports)
+
+    assert operator_cmd.migration_import_issues(target=tmp_path, json_output=True) == 0
+    second = json.loads(capsys.readouterr().out)
+    assert second["imported"] == 0
+    assert second["skipped"] == payload["candidate_count"]
+
+
+def test_operator_migration_import_issues_supersedes_changed_rollups(tmp_path, capsys, monkeypatch):
+    (tmp_path / ".brigade").mkdir()
+    (tmp_path / ".brigade" / "config.json").write_text("{}\n")
+    monkeypatch.setattr(operator_cmd, "_run_read_only_command", _fake_surface_run)
+    assert operator_cmd.surfaces_capture(target=tmp_path, json_output=True) == 0
+    capsys.readouterr()
+    assert operator_cmd.surfaces_review(
+        target=tmp_path,
+        surface="shell_crontab",
+        status="needs-owner",
+        all_records=True,
+        reason="needs-owner-before-migration",
+        json_output=True,
+    ) == 0
+    capsys.readouterr()
+    assert operator_cmd.migration_import_issues(target=tmp_path, json_output=True) == 0
+    first = json.loads(capsys.readouterr().out)
+    first_ids = [item["id"] for item in first["imports"]]
+    assert first_ids
+
+    assert operator_cmd.surfaces_review(
+        target=tmp_path,
+        surface="pm2",
+        status="needs-owner",
+        all_records=True,
+        reason="needs-owner-before-migration",
+        json_output=True,
+    ) == 0
+    capsys.readouterr()
+    assert operator_cmd.migration_import_issues(target=tmp_path, json_output=True) == 0
+    second = json.loads(capsys.readouterr().out)
+    assert second["superseded"] >= 1
+    imports = work_cmd._read_imports(tmp_path)
+    superseded = [item for item in imports if item.get("id") in second["superseded_import_ids"]]
+    assert superseded
+    assert all(item["status"] == "dismissed" for item in superseded)
+    assert all(item["dismiss_reason"] == "superseded-by-current-migration-rollup" for item in superseded)
+
+
+def test_operator_migration_import_issues_supersedes_stale_source_imports(tmp_path, capsys, monkeypatch):
+    (tmp_path / ".brigade").mkdir()
+    (tmp_path / ".brigade" / "config.json").write_text("{}\n")
+    monkeypatch.setattr(operator_cmd, "_run_read_only_command", _fake_surface_run)
+
+    assert operator_cmd.surfaces_capture(target=tmp_path, json_output=True) == 0
+    capsys.readouterr()
+    assert operator_cmd.surfaces_review(
+        target=tmp_path,
+        surface="shell_crontab",
+        status="needs-owner",
+        all_records=True,
+        reason="needs-owner-before-migration",
+        json_output=True,
+    ) == 0
+    capsys.readouterr()
+
+    imports = [
+        work_cmd._make_import(
+            "Route old adoption gap.",
+            kind="task",
+            source="operator-adoption",
+            metadata={"source_item_key": "operator-adoption:stale_gap"},
+        ),
+        work_cmd._make_import(
+            "Route current adoption gap.",
+            kind="task",
+            source="operator-adoption",
+            metadata={"source_item_key": "operator-adoption:external_surfaces_present"},
+        ),
+        work_cmd._make_import(
+            "Review shell crontab surface.",
+            kind="task",
+            source="operator-surface",
+            metadata={"surface": "shell_crontab", "source_item_key": "operator-surface:shell_crontab"},
+        ),
+        work_cmd._make_import(
+            "Review pm2 surface.",
+            kind="task",
+            source="operator-surface",
+            metadata={"surface": "pm2", "source_item_key": "operator-surface:pm2"},
+        ),
+    ]
+    work_cmd._write_imports(tmp_path, imports)
+
+    assert operator_cmd.migration_import_issues(target=tmp_path, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["superseded_source_imports"] == 2
+
+    by_text = {item["text"]: item for item in work_cmd._read_imports(tmp_path)}
+    stale_adoption = by_text["Route old adoption gap."]
+    reviewed_surface = by_text["Review shell crontab surface."]
+    current_adoption = by_text["Route current adoption gap."]
+    unreviewed_surface = by_text["Review pm2 surface."]
+
+    assert stale_adoption["status"] == "dismissed"
+    assert stale_adoption["dismiss_reason"] == "superseded-by-current-migration-status"
+    assert (stale_adoption.get("metadata") or {}).get("superseded_by_source") == "operator-migration"
+    assert reviewed_surface["status"] == "dismissed"
+    assert reviewed_surface["dismiss_reason"] == "superseded-by-reviewed-surface-rollup"
+    assert (reviewed_surface.get("metadata") or {}).get("superseded_by_source") == "operator-migration"
+    assert current_adoption["status"] == "pending"
+    assert unreviewed_surface["status"] == "pending"
+
+
+def test_operator_migration_consolidate_dismisses_tiny_surface_review_imports(tmp_path, capsys, monkeypatch):
+    (tmp_path / ".brigade").mkdir()
+    (tmp_path / ".brigade" / "config.json").write_text("{}\n")
+    monkeypatch.setattr(operator_cmd, "_run_read_only_command", _fake_surface_run)
+    assert operator_cmd.surfaces_capture(target=tmp_path, json_output=True) == 0
+    capsys.readouterr()
+    assert operator_cmd.surfaces_review(
+        target=tmp_path,
+        surface="shell_crontab",
+        status="needs-owner",
+        all_records=True,
+        reason="needs-owner-before-migration",
+        json_output=True,
+    ) == 0
+    capsys.readouterr()
+    assert operator_cmd.surfaces_import_issues(target=tmp_path, json_output=True) == 0
+    capsys.readouterr()
+    assert operator_cmd.migration_import_issues(target=tmp_path, json_output=True) == 0
+    capsys.readouterr()
+
+    assert operator_cmd.migration_consolidate(target=tmp_path, surface="shell_crontab", review_status="needs-owner", dry_run=True, json_output=True) == 0
+    dry_run = json.loads(capsys.readouterr().out)
+    assert dry_run["candidate_count"] == 1
+    assert dry_run["dismissed"] == 0
+
+    assert operator_cmd.migration_consolidate(target=tmp_path, surface="shell_crontab", review_status="needs-owner", json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["candidate_count"] == 1
+    assert payload["dismissed"] == 1
+    imports = work_cmd._read_imports(tmp_path)
+    dismissed = [
+        item for item in imports
+        if item.get("source") == "operator-surface-review" and item.get("status") == "dismissed"
+    ]
+    assert len(dismissed) == 1
+    assert dismissed[0]["dismiss_reason"] == "superseded-by-migration-rollup"
+    assert (dismissed[0].get("metadata") or {}).get("superseded_by_source") == "operator-migration"
+
+
+def test_operator_migration_consolidate_requires_rollup_import(tmp_path, capsys):
+    assert operator_cmd.migration_consolidate(target=tmp_path, json_output=True) == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["blocked"] is True
+    assert payload["rollup_import_count"] == 0
+
+
+def test_operator_surfaces_capture_lists_and_doctors_redacted_records(tmp_path, capsys, monkeypatch):
+    monkeypatch.setattr(operator_cmd, "_run_read_only_command", _fake_surface_run)
+
+    assert operator_cmd.surfaces_capture(target=tmp_path, json_output=True) == 0
+    result = json.loads(capsys.readouterr().out)
+    latest_path = tmp_path / ".brigade" / "operator" / "surfaces" / "latest.json"
+    assert result["capture_path"] == str(latest_path)
+    assert result["record_count"] == 5
+    assert result["surface_count"] == 5
+    assert result["privacy"]["raw_crontab_lines_included"] is False
+    assert latest_path.is_file()
+    snapshot_text = latest_path.read_text()
+    snapshot = json.loads(snapshot_text)
+    assert snapshot["surfaces"]["shell_crontab"]["active_count"] == 1
+    assert snapshot["surfaces"]["openclaw_cron"]["status_counts"] == {"idle": 1, "ok": 1}
+    assert snapshot["surfaces"]["pm2"]["status_counts"] == {"online": 1, "stopped": 1}
+    assert [record["record_label"] for record in snapshot["records"]] == [
+        "shell-crontab-001",
+        "openclaw-cron-001",
+        "openclaw-cron-002",
+        "pm2-001",
+        "pm2-002",
+    ]
+    assert all(record["raw_included"] is False for record in snapshot["records"])
+    assert all(record["command_included"] is False for record in snapshot["records"])
+    assert all(record["env_included"] is False for record in snapshot["records"])
+    assert "example-service" not in snapshot_text
+    assert "example-api" not in snapshot_text
+    assert "example-backup" not in snapshot_text
+    assert "brigade-example-task" not in snapshot_text
+    assert "/example/private" not in snapshot_text
+
+    assert operator_cmd.surfaces_list(target=tmp_path, json_output=True) == 0
+    listed = json.loads(capsys.readouterr().out)
+    assert listed["status"] == "captured"
+    assert listed["record_count"] == 5
+    assert listed["records"][0]["record_label"] == "shell-crontab-001"
+
+    assert operator_cmd.surfaces_doctor(target=tmp_path, json_output=True) == 1
+    doctor = json.loads(capsys.readouterr().out)
+    assert doctor["ready"] is False
+    assert any(issue["name"] == "surface_reviews_missing" for issue in doctor["issues"])
+    assert "example-service" not in json.dumps(doctor)
+
+    assert operator_cmd.surfaces_review(
+        target=tmp_path,
+        surface="shell_crontab",
+        status="external-ok",
+        all_records=True,
+        reason="reviewed-external-ownership",
+        json_output=True,
+    ) == 0
+    review = json.loads(capsys.readouterr().out)
+    assert review["reviewed_count"] == 1
+    assert (tmp_path / ".brigade" / "operator" / "surfaces" / "reviews").is_dir()
+    assert operator_cmd.surfaces_doctor(target=tmp_path, surface="shell_crontab", json_output=True) == 0
+    shell_doctor = json.loads(capsys.readouterr().out)
+    assert shell_doctor["ready"] is True
+    assert shell_doctor["surface_filter"] == "shell_crontab"
+    assert shell_doctor["review_summary"]["reviewed_count"] == 1
+    assert shell_doctor["next_command"] == "brigade operator surfaces import-issues --target . --json"
+
+    assert operator_cmd.surfaces_reviews(target=tmp_path, surface="shell_crontab", json_output=True) == 0
+    reviews = json.loads(capsys.readouterr().out)
+    assert reviews["reviewed_count"] == 1
+    assert reviews["unreviewed_count"] == 0
+    assert reviews["surfaces"][0]["status_counts"] == {"external-ok": 1}
+
+
+def test_operator_surfaces_doctor_warns_when_capture_missing(tmp_path, capsys, monkeypatch):
+    monkeypatch.setattr(operator_cmd, "_run_read_only_command", _fake_surface_run)
+
+    assert operator_cmd.surfaces_doctor(target=tmp_path, json_output=True) == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ready"] is False
+    assert payload["issues"][0]["name"] == "surfaces_capture_missing"
+    assert payload["next_command"] == "brigade operator surfaces capture --target . --json"
+
+
+def test_operator_surfaces_import_issues_uses_work_inbox_and_dedupes(tmp_path, capsys, monkeypatch):
+    monkeypatch.setattr(operator_cmd, "_run_read_only_command", _fake_surface_run)
+
+    assert operator_cmd.surfaces_capture(target=tmp_path, json_output=True) == 0
+    capsys.readouterr()
+    assert operator_cmd.surfaces_import_issues(target=tmp_path, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["source"] == "operator-surface"
+    assert payload["candidate_count"] == 3
+    assert payload["imported"] == 3
+    imports = work_cmd._read_imports(tmp_path)
+    assert len(imports) == 3
+    assert {item["source"] for item in imports} == {"operator-surface"}
+    assert {(item.get("metadata") or {}).get("surface") for item in imports} == {"shell_crontab", "openclaw_cron", "pm2"}
+    assert all((item.get("metadata") or {}).get("source_fingerprint") for item in imports)
+    rendered = json.dumps(imports)
+    assert "example-service" not in rendered
+    assert "example-api" not in rendered
+    assert "example-backup" not in rendered
+    assert "brigade-example-task" not in rendered
+    assert "/example/private" not in rendered
+
+    assert operator_cmd.surfaces_import_issues(target=tmp_path, json_output=True) == 0
+    second = json.loads(capsys.readouterr().out)
+    assert second["imported"] == 0
+    assert second["skipped"] == 3
+
+
+def test_operator_surfaces_review_rejects_secret_like_reason(tmp_path, capsys, monkeypatch):
+    monkeypatch.setattr(operator_cmd, "_run_read_only_command", _fake_surface_run)
+    assert operator_cmd.surfaces_capture(target=tmp_path, json_output=True) == 0
+    capsys.readouterr()
+
+    assert operator_cmd.surfaces_review(
+        target=tmp_path,
+        surface="shell_crontab",
+        status="external-ok",
+        all_records=True,
+        # content-guard: allow api-key-assignment
+        reason="token=REDACTED_EXAMPLE_VALUE",
+        json_output=True,
+    ) == 2
+    assert "secret-looking" in capsys.readouterr().err
+
+
+def test_operator_surfaces_review_imports_actionable_records(tmp_path, capsys, monkeypatch):
+    monkeypatch.setattr(operator_cmd, "_run_read_only_command", _fake_surface_run)
+    assert operator_cmd.surfaces_capture(target=tmp_path, json_output=True) == 0
+    capsys.readouterr()
+    assert operator_cmd.surfaces_review(
+        target=tmp_path,
+        surface="shell_crontab",
+        status="brigade-runbook-candidate",
+        all_records=True,
+        reason="candidate-for-runbook",
+        json_output=True,
+    ) == 0
+    capsys.readouterr()
+
+    assert operator_cmd.surfaces_import_issues(target=tmp_path, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["candidate_count"] == 4
+    imports = work_cmd._read_imports(tmp_path)
+    assert any(item["source"] == "operator-surface-review" for item in imports)
+    review_import = next(item for item in imports if item["source"] == "operator-surface-review")
+    assert (review_import.get("metadata") or {}).get("record_label") == "shell-crontab-001"
+    assert (review_import.get("metadata") or {}).get("review_status") == "brigade-runbook-candidate"
+    assert "brigade-example-task" not in json.dumps(imports)
+
+
+def test_operator_surfaces_cli_dispatch(tmp_path, monkeypatch):
+    seen = {}
+
+    def fake_capture(**kwargs):
+        seen["capture"] = kwargs
+        return 0
+
+    def fake_list(**kwargs):
+        seen["list"] = kwargs
+        return 0
+
+    def fake_doctor(**kwargs):
+        seen["doctor"] = kwargs
+        return 0
+
+    def fake_review(**kwargs):
+        seen["review"] = kwargs
+        return 0
+
+    def fake_reviews(**kwargs):
+        seen["reviews"] = kwargs
+        return 0
+
+    def fake_import_issues(**kwargs):
+        seen["import"] = kwargs
+        return 0
+
+    monkeypatch.setattr(operator_cmd, "surfaces_capture", fake_capture)
+    monkeypatch.setattr(operator_cmd, "surfaces_list", fake_list)
+    monkeypatch.setattr(operator_cmd, "surfaces_doctor", fake_doctor)
+    monkeypatch.setattr(operator_cmd, "surfaces_review", fake_review)
+    monkeypatch.setattr(operator_cmd, "surfaces_reviews", fake_reviews)
+    monkeypatch.setattr(operator_cmd, "surfaces_import_issues", fake_import_issues)
+    assert cli.main(["operator", "surfaces", "capture", "--target", str(tmp_path), "--json"]) == 0
+    assert cli.main(["operator", "surfaces", "list", "--target", str(tmp_path), "--json"]) == 0
+    assert cli.main(["operator", "surfaces", "doctor", "--target", str(tmp_path), "--surface", "shell_crontab", "--json"]) == 0
+    assert cli.main(["operator", "surfaces", "review", "--target", str(tmp_path), "--surface", "shell_crontab", "--status", "external-ok", "--all", "--reason", "reviewed", "--json"]) == 0
+    assert cli.main(["operator", "surfaces", "reviews", "--target", str(tmp_path), "--surface", "shell_crontab", "--json"]) == 0
+    assert cli.main(["operator", "surfaces", "import-issues", "--target", str(tmp_path), "--dry-run", "--json"]) == 0
+    assert seen["capture"] == {"target": tmp_path, "json_output": True}
+    assert seen["list"] == {"target": tmp_path, "json_output": True}
+    assert seen["doctor"] == {"target": tmp_path, "surface": "shell_crontab", "json_output": True}
+    assert seen["review"] == {
+        "target": tmp_path,
+        "surface": "shell_crontab",
+        "status": "external-ok",
+        "all_records": True,
+        "record_labels": [],
+        "reason": "reviewed",
+        "json_output": True,
+    }
+    assert seen["reviews"] == {"target": tmp_path, "surface": "shell_crontab", "json_output": True}
+    assert seen["import"] == {"target": tmp_path, "dry_run": True, "json_output": True}
+
+
+def test_operator_adopt_cli_dispatch(tmp_path, monkeypatch):
+    seen = {}
+
+    def fake_adoption_plan(**kwargs):
+        seen["plan"] = kwargs
+        return 0
+
+    def fake_adoption_capture(**kwargs):
+        seen["capture"] = kwargs
+        return 0
+
+    def fake_adoption_import_issues(**kwargs):
+        seen["import"] = kwargs
+        return 0
+
+    monkeypatch.setattr(operator_cmd, "adoption_plan", fake_adoption_plan)
+    monkeypatch.setattr(operator_cmd, "adoption_capture", fake_adoption_capture)
+    monkeypatch.setattr(operator_cmd, "adoption_import_issues", fake_adoption_import_issues)
+    assert cli.main(["operator", "adopt", "plan", "--target", str(tmp_path), "--json"]) == 0
+    assert cli.main(["operator", "adopt", "capture", "--target", str(tmp_path), "--json"]) == 0
+    assert cli.main(["operator", "adopt", "import-issues", "--target", str(tmp_path), "--dry-run", "--json"]) == 0
+    assert seen["plan"] == {"target": tmp_path, "json_output": True}
+    assert seen["capture"] == {"target": tmp_path, "json_output": True}
+    assert seen["import"] == {"target": tmp_path, "dry_run": True, "json_output": True}
+
+
+def test_operator_migration_cli_dispatch(tmp_path, monkeypatch):
+    seen = {}
+
+    def fake_status(**kwargs):
+        seen["status"] = kwargs
+        return 0
+
+    def fake_doctor(**kwargs):
+        seen["doctor"] = kwargs
+        return 0
+
+    def fake_import_issues(**kwargs):
+        seen["import"] = kwargs
+        return 0
+
+    def fake_consolidate(**kwargs):
+        seen["consolidate"] = kwargs
+        return 0
+
+    monkeypatch.setattr(operator_cmd, "migration_status", fake_status)
+    monkeypatch.setattr(operator_cmd, "migration_doctor", fake_doctor)
+    monkeypatch.setattr(operator_cmd, "migration_import_issues", fake_import_issues)
+    monkeypatch.setattr(operator_cmd, "migration_consolidate", fake_consolidate)
+    assert cli.main(["operator", "migration", "status", "--target", str(tmp_path), "--json"]) == 0
+    assert cli.main(["operator", "migration", "doctor", "--target", str(tmp_path), "--json"]) == 0
+    assert cli.main(["operator", "migration", "import-issues", "--target", str(tmp_path), "--dry-run", "--json"]) == 0
+    assert cli.main(["operator", "migration", "consolidate", "--target", str(tmp_path), "--surface", "shell_crontab", "--review-status", "needs-owner", "--reason", "superseded", "--dry-run", "--json"]) == 0
+    assert seen["status"] == {"target": tmp_path, "json_output": True}
+    assert seen["doctor"] == {"target": tmp_path, "json_output": True}
+    assert seen["import"] == {"target": tmp_path, "dry_run": True, "json_output": True}
+    assert seen["consolidate"] == {
+        "target": tmp_path,
+        "surface": "shell_crontab",
+        "review_status": "needs-owner",
+        "reason": "superseded",
+        "dry_run": True,
+        "json_output": True,
+    }
 
 
 def test_operator_guide_json_and_cli_dispatch(capsys):

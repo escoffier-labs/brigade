@@ -1,7 +1,9 @@
 # src/brigade/research_cmd.py
 from __future__ import annotations
+import hashlib
 import json as _json
 import shutil
+import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from .research import registry, config as rconfig
@@ -10,6 +12,7 @@ from .research.engine import DeepResearcher
 from .research.sources import local as localsrc
 from .research.sources import cli as clisrc
 from .research import report as reportmod, handoff as handoffmod
+from .selection import WRITER_INBOXES
 
 def _resolve_backend(target: Path):
     from . import roster as roster_mod
@@ -166,6 +169,354 @@ def resume(*, target: Path, run_id: str, overrides: Dict[str, Any]) -> str:
 def cancel(*, target: Path, run_id: str) -> None:
     registry.set_status(target, run_id, "cancelled")
 
+
+def _now() -> str:
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _fingerprint_text(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _fingerprint_json(value: Any) -> str:
+    return hashlib.sha256(_json.dumps(value, sort_keys=True, default=str).encode("utf-8")).hexdigest()
+
+
+def _safe_filename(value: str) -> str:
+    slug = re.sub(r"[^a-z0-9._-]+", "-", value.lower()).strip("-")
+    return slug[:96] or "research-handoff"
+
+
+def _resolve_handoff_destination(
+    target: Path,
+    *,
+    inbox: str | None = None,
+    handoff_inbox: Path | None = None,
+) -> tuple[Path | None, str | None, list[str]]:
+    blockers: list[str] = []
+    if inbox and handoff_inbox is not None:
+        blockers.append("choose either --inbox or --handoff-inbox, not both")
+        return None, None, blockers
+    if inbox:
+        inbox_key = inbox.strip().lower()
+        inbox_rel = WRITER_INBOXES.get(inbox_key)
+        if inbox_rel is None:
+            blockers.append(f"unsupported writer inbox: {inbox}")
+            return None, inbox_key, blockers
+        return target / inbox_rel, inbox_key, blockers
+    if handoff_inbox is not None:
+        path = handoff_inbox.expanduser()
+        if not path.is_absolute():
+            path = target / path
+        return path, "custom", blockers
+    blockers.append("missing export destination; pass --inbox or --handoff-inbox")
+    return None, None, blockers
+
+
+def _run_handoff_path(target: Path, rec: dict[str, Any]) -> Path | None:
+    run_id = str(rec.get("run_id") or "")
+    rel = rec.get("artifacts", {}).get("handoff") if isinstance(rec.get("artifacts"), dict) else None
+    if not run_id or not isinstance(rel, str) or not rel:
+        return None
+    return registry.run_dir(target, run_id) / rel
+
+
+def _export_source_payload(target: Path, rec: dict[str, Any], handoff_text: str) -> dict[str, Any]:
+    return {
+        "run_id": rec.get("run_id"),
+        "status": rec.get("status"),
+        "question": rec.get("question"),
+        "caps": rec.get("caps") if isinstance(rec.get("caps"), dict) else {},
+        "manifest": rec.get("manifest") if isinstance(rec.get("manifest"), dict) else {},
+        "stats": rec.get("stats") if isinstance(rec.get("stats"), dict) else {},
+        "handoff_artifact_fingerprint": _fingerprint_text(handoff_text),
+    }
+
+
+def _format_manifest_evidence(rec: dict[str, Any], source_fingerprint: str) -> list[str]:
+    manifest = rec.get("manifest") if isinstance(rec.get("manifest"), dict) else {}
+    caps = rec.get("caps") if isinstance(rec.get("caps"), dict) else {}
+    routes = manifest.get("routes") if isinstance(manifest.get("routes"), list) else []
+    route_labels = []
+    for route in routes:
+        if not isinstance(route, dict):
+            continue
+        route_labels.append(
+            f"{route.get('id') or route.get('type')}:{route.get('trust')} enabled={bool(route.get('enabled'))}"
+        )
+    return [
+        f"- research_run_id: {rec.get('run_id')}",
+        f"- research_status: {rec.get('status')}",
+        f"- research_source_fingerprint: {source_fingerprint}",
+        f"- research_corpus: {manifest.get('corpus') or ''}",
+        f"- research_web_enabled: {bool(manifest.get('web_enabled'))}",
+        f"- research_provider: {manifest.get('provider') or ''}",
+        f"- research_routes: {', '.join(route_labels) if route_labels else 'none'}",
+        f"- research_caps: {_json.dumps(caps, sort_keys=True)}",
+    ]
+
+
+def _augment_handoff_for_export(handoff_text: str, rec: dict[str, Any], source_fingerprint: str) -> str:
+    marker = "## Recommended memory action"
+    evidence = _format_manifest_evidence(rec, source_fingerprint)
+    if marker not in handoff_text:
+        return handoff_text.rstrip() + "\n\n## Evidence\n\n" + "\n".join(evidence) + "\n"
+    before, after = handoff_text.split(marker, 1)
+    if "## Evidence" in before:
+        before = before.rstrip() + "\n" + "\n".join(evidence) + "\n\n"
+    else:
+        before = before.rstrip() + "\n\n## Evidence\n\n" + "\n".join(evidence) + "\n\n"
+    return before + marker + after
+
+
+def export_handoff(
+    *,
+    target: Path,
+    run_id: str,
+    inbox: str | None = None,
+    handoff_inbox: Path | None = None,
+    force: bool = False,
+) -> dict[str, Any]:
+    target = target.expanduser().resolve()
+    rec = registry.show_run(target, run_id)
+    blockers: list[str] = []
+    if rec is None:
+        return {"status": "blocked", "run_id": run_id, "blockers": [f"research run not found: {run_id}"]}
+    if rec.get("status") != "done":
+        blockers.append(f"research run is not complete: {rec.get('status')}")
+    artifact_path = _run_handoff_path(target, rec)
+    if artifact_path is None:
+        blockers.append("research run has no handoff artifact")
+        handoff_text = ""
+    elif not artifact_path.exists():
+        blockers.append(f"handoff artifact missing: {artifact_path}")
+        handoff_text = ""
+    else:
+        handoff_text = artifact_path.read_text(errors="replace")
+    destination, inbox_label, destination_blockers = _resolve_handoff_destination(target, inbox=inbox, handoff_inbox=handoff_inbox)
+    blockers.extend(destination_blockers)
+    if destination is not None and not destination.exists():
+        blockers.append(f"handoff inbox missing: {destination}")
+    if destination is not None and destination.exists() and not destination.is_dir():
+        blockers.append(f"handoff inbox is not a directory: {destination}")
+    if blockers:
+        return {
+            "status": "blocked",
+            "run_id": run_id,
+            "destination": str(destination) if destination else None,
+            "inbox": inbox_label,
+            "blockers": blockers,
+        }
+
+    assert destination is not None
+    source_payload = _export_source_payload(target, rec, handoff_text)
+    source_fingerprint = _fingerprint_json(source_payload)
+    export_text = _augment_handoff_for_export(handoff_text, rec, source_fingerprint)
+    filename = f"{_safe_filename(run_id)}-research-handoff.md"
+    out_path = destination / filename
+    if out_path.exists() and out_path.read_text(errors="replace") != export_text and not force:
+        return {
+            "status": "blocked",
+            "run_id": run_id,
+            "destination": str(destination),
+            "path": str(out_path),
+            "inbox": inbox_label,
+            "blockers": ["export path already exists with different content; pass --force to replace"],
+        }
+    out_path.write_text(export_text)
+
+    from . import handoff_cmd
+    lint_result = handoff_cmd.lint_file(out_path)
+    if not lint_result.valid:
+        try:
+            out_path.unlink()
+        except OSError:
+            pass
+        return {
+            "status": "blocked",
+            "run_id": run_id,
+            "destination": str(destination),
+            "path": str(out_path),
+            "inbox": inbox_label,
+            "blockers": list(lint_result.errors),
+        }
+
+    export = {
+        "export_id": f"{_safe_filename(run_id)}-{inbox_label or 'custom'}",
+        "run_id": run_id,
+        "created_at": _now(),
+        "inbox": inbox_label,
+        "destination": str(destination),
+        "path": str(out_path),
+        "artifact_path": str(artifact_path),
+        "source_fingerprint": source_fingerprint,
+        "manifest_fingerprint": _fingerprint_json(rec.get("manifest") if isinstance(rec.get("manifest"), dict) else {}),
+        "handoff_artifact_fingerprint": source_payload["handoff_artifact_fingerprint"],
+        "lint": lint_result.as_dict(),
+        "status": "exported",
+    }
+    exports = [item for item in rec.get("handoff_exports", []) if isinstance(item, dict)]
+    replaced = False
+    for index, item in enumerate(exports):
+        if item.get("path") == str(out_path):
+            exports[index] = export
+            replaced = True
+            break
+    if not replaced:
+        exports.append(export)
+    registry.update_run(target, run_id, handoff_exports=exports)
+    return export
+
+
+def handoff_status_payload(*, target: Path) -> dict[str, Any]:
+    target = target.expanduser().resolve()
+    runs = registry.list_runs(target)
+    items: list[dict[str, Any]] = []
+    for rec in runs:
+        run_id = str(rec.get("run_id") or "")
+        if rec.get("status") != "done":
+            continue
+        artifact_path = _run_handoff_path(target, rec)
+        if artifact_path is None:
+            status = "missing-artifact"
+            fingerprint = None
+        elif not artifact_path.exists():
+            status = "missing-artifact"
+            fingerprint = None
+        else:
+            text = artifact_path.read_text(errors="replace")
+            fingerprint = _fingerprint_json(_export_source_payload(target, rec, text))
+            exports = [item for item in rec.get("handoff_exports", []) if isinstance(item, dict)]
+            if not exports:
+                status = "missing-export"
+            elif any(not Path(str(item.get("path") or "")).exists() for item in exports):
+                status = "missing-export-path"
+            elif any(item.get("source_fingerprint") != fingerprint for item in exports):
+                status = "stale-export"
+            else:
+                status = "exported"
+        exports = [item for item in rec.get("handoff_exports", []) if isinstance(item, dict)]
+        items.append(
+            {
+                "run_id": run_id,
+                "question": rec.get("question"),
+                "status": status,
+                "export_count": len(exports),
+                "exports": exports,
+                "source_fingerprint": fingerprint,
+                "suggested_next_command": (
+                    f"brigade research export-handoff {run_id} --inbox codex"
+                    if status in {"missing-export", "stale-export", "missing-export-path"}
+                    else None
+                ),
+            }
+        )
+    issue_items = [item for item in items if item.get("status") != "exported"]
+    return {
+        "target": str(target),
+        "run_count": len(items),
+        "issue_count": len(issue_items),
+        "top_issue": issue_items[0] if issue_items else None,
+        "runs": items,
+    }
+
+
+def health(target: Path) -> dict[str, Any]:
+    return handoff_status_payload(target=target)
+
+
+def _handoff_issue_record(item: dict[str, Any]) -> dict[str, Any]:
+    run_id = str(item.get("run_id") or "unknown")
+    status = str(item.get("status") or "unknown")
+    question = str(item.get("question") or "research run")
+    command = str(item.get("suggested_next_command") or f"brigade research show {run_id}")
+    fingerprint = str(item.get("source_fingerprint") or _fingerprint_json(item))
+    detail_by_status = {
+        "missing-export": "completed research run has not been exported into a writer handoff inbox",
+        "missing-export-path": "research handoff export path is missing",
+        "stale-export": "research handoff export is stale compared with the run artifact",
+        "missing-artifact": "completed research run is missing its handoff artifact",
+    }
+    detail = detail_by_status.get(status, "research handoff export needs review")
+    return {
+        "text": f"Research handoff export issue for {run_id}: {detail}",
+        "kind": "research",
+        "source": "research-handoff",
+        "type": "docs",
+        "priority": "normal",
+        "acceptance": [
+            f"Review research run {run_id} and confirm whether its handoff should be exported.",
+            f"Run `{command}` or document why the research handoff should remain unexported.",
+            "Confirm `brigade research handoffs doctor` no longer reports this issue or the issue is intentionally dismissed.",
+        ],
+        "metadata": {
+            "research_run_id": run_id,
+            "research_question": question,
+            "research_handoff_status": status,
+            "source_item_key": f"research-handoff:{run_id}:{status}",
+            "source_fingerprint": fingerprint,
+            "suggested_next_command": command,
+            "export_count": item.get("export_count"),
+        },
+    }
+
+
+def _handoff_issue_records(target: Path) -> list[dict[str, Any]]:
+    payload = handoff_status_payload(target=target)
+    records: list[dict[str, Any]] = []
+    for item in payload.get("runs", []):
+        if isinstance(item, dict) and item.get("status") != "exported":
+            records.append(_handoff_issue_record(item))
+    return records
+
+
+def cli_handoffs_doctor(*, target: Path, json_output: bool = False) -> int:
+    payload = handoff_status_payload(target=target)
+    if json_output:
+        print(_json.dumps(payload, indent=2, sort_keys=True))
+        return 0 if payload["issue_count"] == 0 else 1
+    print(f"research handoffs doctor: {target}")
+    print(f"runs: {payload['run_count']}")
+    print(f"issues: {payload['issue_count']}")
+    for item in payload.get("runs", []):
+        if not isinstance(item, dict):
+            continue
+        status = item.get("status")
+        marker = "ok" if status == "exported" else "warn"
+        print(f"[{marker}] {item.get('run_id')}: {status} exports={item.get('export_count')}")
+        if item.get("suggested_next_command"):
+            print(f"  command: {item.get('suggested_next_command')}")
+    return 0 if payload["issue_count"] == 0 else 1
+
+
+def cli_handoffs_import_issues(*, target: Path, dry_run: bool = False, json_output: bool = False) -> int:
+    target = target.expanduser().resolve()
+    records = _handoff_issue_records(target)
+    from . import work_cmd
+    imported, skipped, skipped_dismissed = work_cmd._append_import_records(target, records, dry_run=dry_run)
+    payload = {
+        "target": str(target),
+        "source": "research-handoff",
+        "dry_run": dry_run,
+        "candidate_count": len(records),
+        "imported": len(imported),
+        "skipped": len(skipped),
+        "dismissed": len(skipped_dismissed),
+        "imports": imported,
+    }
+    if json_output:
+        print(_json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+    print(f"research handoff issues: {target}")
+    print(f"candidates: {len(records)}")
+    print(f"imported: {len(imported)}")
+    print(f"skipped: {len(skipped)}")
+    print(f"dismissed: {len(skipped_dismissed)}")
+    if records and not imported:
+        print("status: no new imports")
+    return 0
+
 def _new_run_id(question: str) -> str:
     # Caller passes run_id in tests for determinism; production stamps the time.
     from datetime import datetime, timezone
@@ -262,8 +613,15 @@ def cli_list(*, target: Path, json_output: bool = False) -> int:
         print(_json.dumps(runs, indent=2, sort_keys=True))
         return 0
     print(f"research runs: {target}")
+    status_by_run = {
+        item.get("run_id"): item
+        for item in handoff_status_payload(target=target).get("runs", [])
+        if isinstance(item, dict)
+    }
     for r in runs:
-        print(f"- {r.get('run_id')} [{r.get('status')}] {r.get('question')}")
+        handoff_state = status_by_run.get(r.get("run_id"))
+        suffix = f" handoff={handoff_state.get('status')}" if isinstance(handoff_state, dict) else ""
+        print(f"- {r.get('run_id')} [{r.get('status')}] {r.get('question')}{suffix}")
     return 0
 
 
@@ -281,8 +639,52 @@ def cli_show(*, target: Path, run_id: str, json_output: bool = False) -> int:
     artifacts = rec.get("artifacts", {})
     for name, rel in artifacts.items():
         print(f"{name}: {registry.run_dir(target, run_id) / rel}")
+    handoff_state = next(
+        (
+            item
+            for item in handoff_status_payload(target=target).get("runs", [])
+            if isinstance(item, dict) and item.get("run_id") == run_id
+        ),
+        None,
+    )
+    if handoff_state:
+        print(f"handoff_export_status: {handoff_state.get('status')}")
+        print(f"handoff_export_count: {handoff_state.get('export_count')}")
+        if handoff_state.get("suggested_next_command"):
+            print(f"handoff_export_command: {handoff_state.get('suggested_next_command')}")
     for b in rec.get("blockers", []):
         print(f"blocker: {b}")
+    return 0
+
+
+def cli_export_handoff(
+    *,
+    target: Path,
+    run_id: str,
+    inbox: str | None,
+    handoff_inbox: Path | None,
+    force: bool = False,
+    json_output: bool = False,
+) -> int:
+    payload = export_handoff(
+        target=target,
+        run_id=run_id,
+        inbox=inbox,
+        handoff_inbox=handoff_inbox,
+        force=force,
+    )
+    if json_output:
+        print(_json.dumps(payload, indent=2, sort_keys=True))
+        return 0 if payload.get("status") == "exported" else 1
+    if payload.get("status") != "exported":
+        print(f"research handoff export blocked: {run_id}")
+        for blocker in payload.get("blockers", []):
+            print(f"blocker: {blocker}")
+        return 1
+    print(f"research handoff exported: {run_id}")
+    print(f"inbox: {payload.get('inbox')}")
+    print(f"path: {payload.get('path')}")
+    print(f"source_fingerprint: {payload.get('source_fingerprint')}")
     return 0
 
 

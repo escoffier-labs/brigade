@@ -60,6 +60,11 @@ Many users already have a personal version of this workflow: memory files, agent
 
 When adapting an existing setup, the agent should:
 
+- run `brigade operator adopt plan --target . --json` before changing files when the target may already have scripts, handoff folders, crons, or process managers
+- run `brigade operator adopt capture --target . --json` after reviewing the plan if the user wants Brigade to keep a local redacted adoption receipt
+- run `brigade operator adopt import-issues --target . --json` to route migration gaps into the work inbox instead of tracking them only in chat
+- run `brigade operator migration status --target . --json`, `brigade operator migration doctor --target . --json`, and `brigade operator migration consolidate --target . --surface shell_crontab --review-status needs-owner` to see whether Brigade can drive the remaining replacement work from redacted local evidence and avoid tiny record-level task slices once a rollup exists
+- run `brigade operator surfaces capture --target . --json`, `brigade operator surfaces doctor --target . --json`, `brigade operator surfaces review --target . --surface shell_crontab --status external-ok --all --reason reviewed-external-ownership`, and `brigade operator surfaces import-issues --target . --json` when external scheduler or process coverage should be tracked as redacted local evidence
 - inventory current files such as `AGENTS.md`, `CLAUDE.md`, `MEMORY.md`, `TOOLS.md`, `.codex/`, `.claude/`, `.opencode/`, `.hermes/`, and `.openclaw/`
 - identify the memory owner before changing memory rules
 - keep repo-shareable or durable workspace files separate from generated local projections
@@ -67,7 +72,7 @@ When adapting an existing setup, the agent should:
 - run `brigade operator doctor` after setup and report what remains manual
 - leave existing working conventions intact unless the user approves a migration
 
-Good adaptation usually means adding a handoff inbox, a shared instruction file, portable tool sources, or scanner config. It should not mean flattening the user's system into someone else's exact directory tree.
+Good adaptation usually means adding a handoff inbox, a shared instruction file, portable tool sources, scanner config, or a redacted surface registry. It should not mean flattening the user's system into someone else's exact directory tree. Do not paste raw scheduler lines, job names, process names, private paths, hostnames, or environment values into public docs or issues.
 
 ## Harness Selection
 

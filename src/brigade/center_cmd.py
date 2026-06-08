@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from . import chat_cmd, context_cmd, handoff_cmd, learn_cmd, memory_cmd, notifications_cmd, pantry_cmd, phases_cmd, projects_cmd, release_cmd, repos_cmd, roadmap_cmd, security_cmd, tools_cmd, work_cmd
+from . import chat_cmd, context_cmd, handoff_cmd, learn_cmd, memory_cmd, notifications_cmd, pantry_cmd, phases_cmd, projects_cmd, release_cmd, repos_cmd, research_cmd, roadmap_cmd, security_cmd, tools_cmd, work_cmd
 
 SCHEMA_VERSION = 1
 SCHEMA_MANIFEST_VERSION = 1
@@ -70,6 +70,25 @@ def _parse_time(value: object) -> datetime | None:
         return datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError:
         return None
+
+
+def _path_label(target: Path, value: str) -> str:
+    path = Path(value).expanduser()
+    try:
+        return str(path.resolve().relative_to(target.resolve()))
+    except (OSError, ValueError):
+        return path.name or "external-path"
+
+
+def _receipt_reference_exists(target: Path, value: str) -> bool:
+    path = Path(value).expanduser()
+    if path.exists():
+        return True
+    processed = path.parent / "processed" / path.name
+    if processed.exists():
+        return True
+    archive_root = target / ".brigade" / "handoffs" / "archive"
+    return any(archive_root.glob(f"*/{path.name}"))
 
 
 def _schema(name: str) -> dict[str, Any]:
@@ -793,6 +812,11 @@ def _reviews(target: Path) -> list[dict[str, Any]]:
         if isinstance(draft, dict) and draft.get("status") in {None, "pending", "failed", "invalid"}:
             draft_id = str(draft.get("id") or Path(str(draft.get("path") or "handoff")).stem)
             items.append(_item("handoff-draft", draft_id, str(draft.get("status") or "pending"), str(draft.get("title") or draft.get("target_document") or "handoff draft"), f"brigade handoff show {draft_id}", severity=draft.get("severity") if isinstance(draft.get("severity"), str) else None, updated_at=draft.get("modified_at") if isinstance(draft.get("modified_at"), str) else None, path=draft.get("path") if isinstance(draft.get("path"), str) else None))
+    research_handoffs = research_cmd.health(target)
+    for issue in research_handoffs.get("runs", [])[:20]:
+        if isinstance(issue, dict) and issue.get("status") != "exported":
+            run_id = str(issue.get("run_id") or "")
+            items.append(_item("research-handoff", run_id, str(issue.get("status") or "warn"), str(issue.get("question") or "research handoff export"), str(issue.get("suggested_next_command") or f"brigade research show {run_id}"), severity="medium"))
     tool_health = tools_cmd.health(target)
     for bucket, command in (
         ("call_queue", "brigade tools call list"),
@@ -919,6 +943,7 @@ def status_payload(target: Path) -> dict[str, Any]:
         "backup": work_cmd._backup_health(target),
         "tool_catalog": tools_cmd.health(target),
         "learning": learn_cmd.health(target),
+        "research_handoffs": research_cmd.health(target),
         "context": context_cmd.health(target),
         "release_readiness": release_cmd._latest_release_receipt(target),
         "release_candidate": release_cmd._latest_candidate(target),
@@ -1773,8 +1798,8 @@ def report_health(target: Path) -> dict[str, Any]:
     if git.get("head") and current_head and git.get("head") != current_head:
         checks.append({"status": "warn", "name": "operator_report_head_changed", "detail": f"{latest.get('report_id')} head changed", "suggested_next_command": "brigade center report build"})
     for ref in latest.get("receipt_references") if isinstance(latest.get("receipt_references"), list) else []:
-        if isinstance(ref, str) and ref and not Path(ref).exists():
-            checks.append({"status": "warn", "name": "operator_report_missing_receipt", "detail": ref, "suggested_next_command": f"brigade center report show {latest.get('report_id')}"})
+        if isinstance(ref, str) and ref and not _receipt_reference_exists(target, ref):
+            checks.append({"status": "warn", "name": "operator_report_missing_receipt", "detail": f"missing receipt reference: {_path_label(target, ref)}", "suggested_next_command": f"brigade center report show {latest.get('report_id')}"})
             break
     latest_activity = [item for item in _activity(target) if item.get("subsystem") != "center-report-diff"]
     report_activity = latest.get("activity") if isinstance(latest.get("activity"), list) else []
@@ -1982,9 +2007,10 @@ def _is_blocker_item(item: dict[str, Any]) -> bool:
 def _missing_receipt_refs(report: dict[str, Any]) -> list[dict[str, Any]]:
     report_id = str(report.get("report_id") or "unknown")
     stale: list[dict[str, Any]] = []
+    target = Path(str(report.get("target") or ".")).expanduser().resolve()
     for ref in report.get("receipt_references") if isinstance(report.get("receipt_references"), list) else []:
-        if isinstance(ref, str) and ref and not Path(ref).exists():
-            stale.append({"report_id": report_id, "path": ref})
+        if isinstance(ref, str) and ref and not _receipt_reference_exists(target, ref):
+            stale.append({"report_id": report_id, "path": _path_label(target, ref)})
     return stale
 
 
@@ -2127,8 +2153,8 @@ def report_compare(*, target: Path, report_id: str = "latest", json_output: bool
     if report_git.get("head") and current_head and report_git.get("head") != current_head:
         issues.append({"status": "warn", "name": "operator_report_head_changed", "detail": "current HEAD differs from report HEAD"})
     for ref in report.get("receipt_references") if isinstance(report.get("receipt_references"), list) else []:
-        if isinstance(ref, str) and ref and not Path(ref).exists():
-            issues.append({"status": "warn", "name": "operator_report_missing_receipt", "detail": ref})
+        if isinstance(ref, str) and ref and not _receipt_reference_exists(target, ref):
+            issues.append({"status": "warn", "name": "operator_report_missing_receipt", "detail": f"missing receipt reference: {_path_label(target, ref)}"})
             break
     current_activity = _activity(target)
     report_activity = report.get("activity") if isinstance(report.get("activity"), list) else []

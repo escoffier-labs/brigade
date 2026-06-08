@@ -205,6 +205,47 @@ def test_center_report_health_detects_stale_missing_receipt_and_changed_head(tmp
     assert "operator_report_stale" in names
     assert "operator_report_missing_receipt" in names
     assert "operator_report_head_changed" in names
+    missing = next(check for check in health["checks"] if check["name"] == "operator_report_missing_receipt")
+    assert missing["detail"] == "missing receipt reference: .brigade/missing/receipt.json"
+    assert str(tmp_path) not in missing["detail"]
+
+
+def test_center_report_health_accepts_processed_handoff_receipt(tmp_path, capsys):
+    _init_git(tmp_path)
+    _seed_task_and_import(tmp_path)
+    assert center_cmd.report_build(target=tmp_path, json_output=True) == 0
+    report = json.loads(capsys.readouterr().out)
+    evidence = Path(report["path"]) / "CENTER_EVIDENCE.json"
+    handoff_path = tmp_path / ".claude" / "memory-handoffs" / "example.md"
+    processed_path = handoff_path.parent / "processed" / handoff_path.name
+    processed_path.parent.mkdir(parents=True)
+    processed_path.write_text("# Memory Handoff\n")
+    payload = json.loads(evidence.read_text())
+    payload["receipt_references"] = [str(handoff_path)]
+    evidence.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+
+    health = center_cmd.report_health(tmp_path)
+    names = {check["name"] for check in health["checks"]}
+    assert "operator_report_missing_receipt" not in names
+
+
+def test_center_report_health_accepts_archived_handoff_receipt(tmp_path, capsys):
+    _init_git(tmp_path)
+    _seed_task_and_import(tmp_path)
+    assert center_cmd.report_build(target=tmp_path, json_output=True) == 0
+    report = json.loads(capsys.readouterr().out)
+    evidence = Path(report["path"]) / "CENTER_EVIDENCE.json"
+    handoff_path = tmp_path / ".hermes" / "memory-handoffs" / "example.md"
+    archived_path = tmp_path / ".brigade" / "handoffs" / "archive" / "2026-06-08" / handoff_path.name
+    archived_path.parent.mkdir(parents=True)
+    archived_path.write_text("# Memory Handoff\n")
+    payload = json.loads(evidence.read_text())
+    payload["receipt_references"] = [str(handoff_path)]
+    evidence.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+
+    health = center_cmd.report_health(tmp_path)
+    names = {check["name"] for check in health["checks"]}
+    assert "operator_report_missing_receipt" not in names
 
 
 def test_center_report_integrates_with_work_and_release(tmp_path, monkeypatch, capsys):

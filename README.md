@@ -161,6 +161,24 @@ brigade operator doctor --target ~/agent-workspace --profile local-operator
 
 Use `--dry-run` first if you want to preview the local files Brigade will write. To wire more than one agent surface, pass a comma-separated list such as `--harnesses codex,claude,opencode`.
 
+If you already have a homegrown setup with scripts, handoff folders, crons, or process managers, use the adoption loop before changing it:
+
+```bash
+brigade operator adopt plan --target ~/agent-workspace --json
+brigade operator adopt capture --target ~/agent-workspace --json
+brigade operator adopt import-issues --target ~/agent-workspace --json
+brigade operator migration status --target ~/agent-workspace --json
+brigade operator migration doctor --target ~/agent-workspace --json
+brigade operator migration consolidate --target ~/agent-workspace --surface shell_crontab --review-status needs-owner
+brigade operator surfaces capture --target ~/agent-workspace --json
+brigade operator surfaces doctor --target ~/agent-workspace --json
+brigade operator surfaces review --target ~/agent-workspace --surface shell_crontab --status external-ok --all --reason reviewed-external-ownership
+brigade operator surfaces reviews --target ~/agent-workspace --json
+brigade operator surfaces import-issues --target ~/agent-workspace --json
+```
+
+`adopt plan` is read-only. `adopt capture` writes a redacted local snapshot under `.brigade/operator/adoption/`. `adopt import-issues` routes adoption gaps into the normal work inbox so the migration shows up in `work brief` and the daily loop. `operator migration status/doctor/import-issues/consolidate` rolls adoption state, surface review state, and pending migration work into one replacement-progress view, then lets a reviewed rollup supersede tiny record-level imports. `operator surfaces capture/list/doctor/review/reviews/import-issues` keeps a separate redacted registry for shell crontab, OpenClaw cron, and PM2 coverage under `.brigade/operator/surfaces/`. Scheduler and process surfaces are reported as counts, status totals, ordinal labels, review decisions, and fingerprints, not raw scheduler lines, job names, process names, command paths, host details, or environment values.
+
 For a fuller first-run walkthrough and troubleshooting checklist, see [`docs/new-user-quickstart.md`](docs/new-user-quickstart.md). If quickstart fails, use the Quickstart setup problem issue form and include the redacted `issue_report` from `brigade operator quickstart --json`.
 
 Write a handoff note:
@@ -218,6 +236,58 @@ flowchart LR
 ```
 
 The important part is the boundary. The ingester should be conservative: safe card handoffs can become cards, targeted updates can append to the right file, and ambiguous material should be kicked back for review instead of trusted automatically.
+
+### Card Promotion And MEMORY.md
+
+Long-term memory has two layers. Knowledge cards under `memory/cards/` hold the detail: YAML frontmatter (`topic`, `category`, `tags`, `created`, `updated`) plus the durable facts. `MEMORY.md` is the index: one line per card, loaded at session start, never holding card content itself. When the ingester promotes a handoff, it creates or updates the card first, then adds or refreshes the one-line index entry. No-card handoffs append to the right document instead. Brigade records the receipt for every outcome but never edits `MEMORY.md` or cards itself; the memory owner does the writing.
+
+```mermaid
+flowchart LR
+    HANDOFF["reviewed handoff<br/>create-card · update-card · no-card"]
+    INGEST["memory ingester<br/>lint · guard · route"]
+    CARD["memory/cards/&lt;name&gt;.md<br/>frontmatter + durable facts"]
+    INDEX["MEMORY.md<br/>one-line index entry per card"]
+    DOCS["TOOLS.md · USER.md<br/>rules/ · .learnings/"]
+    RECEIPT["ingest receipt<br/>promoted · routed · skipped · failed"]
+
+    HANDOFF --> INGEST
+    INGEST -->|create-card / update-card| CARD --> INDEX
+    INGEST -->|no-card| DOCS
+    INGEST --> RECEIPT
+
+    classDef local fill:#eff6ff,stroke:#2563eb,color:#1e3a8a;
+    classDef memory fill:#ecfdf5,stroke:#059669,color:#064e3b;
+    classDef step fill:#f1f5f9,stroke:#64748b,color:#334155;
+    class HANDOFF,INGEST,RECEIPT local;
+    class CARD,INDEX,DOCS memory;
+```
+
+### Keeping Cards Fresh
+
+Memory degrades. Cards go stale, lose their backing evidence, or get superseded. `brigade memory care scan` is a read-only sweep over the card roots that checks freshness metadata (`reviewed`, `fresh_until`, confidence, evidence) and flags stale, expired, undersourced, contradictory, orphaned, and oversized cards. Flagged cards land in a refresh queue that routes into the work inbox, so a card that needs review shows up in the daily plan instead of rotting quietly. Brigade never edits or deletes a card automatically: the operator either refreshes it with a new reviewed date or archives it and drops the index entry.
+
+```mermaid
+flowchart LR
+    CARDS["memory cards<br/>reviewed · fresh_until<br/>confidence · evidence"]
+    SCAN["memory care scan<br/>read-only"]
+    ISSUES["issues<br/>stale · expired · undersourced<br/>contradictory · orphaned · oversized"]
+    QUEUE["refresh queue"]
+    INBOX["work inbox<br/>daily plan candidates"]
+    OPERATOR["operator review"]
+    REFRESH["card refreshed<br/>reviewed date updated"]
+    ARCHIVE["card archived<br/>index entry removed"]
+
+    CARDS --> SCAN --> ISSUES --> QUEUE --> INBOX --> OPERATOR
+    OPERATOR -->|still true| REFRESH -. fresh again .-> CARDS
+    OPERATOR -->|no longer true| ARCHIVE
+
+    classDef memory fill:#ecfdf5,stroke:#059669,color:#064e3b;
+    classDef step fill:#f1f5f9,stroke:#64748b,color:#334155;
+    classDef gate fill:#fff7ed,stroke:#ea580c,color:#7c2d12;
+    class CARDS,REFRESH memory;
+    class SCAN,ISSUES,QUEUE,INBOX step;
+    class OPERATOR,ARCHIVE gate;
+```
 
 ## The Local Loop
 
@@ -426,6 +496,41 @@ flowchart LR
 - Raw private chat fields are rejected and secret-looking values are redacted before the draft is written.
 
 See [Handoff promotion](docs/handoff-promotion.md).
+
+## Deep Research
+
+`brigade research` turns a research question into a local report and a reviewed Memory Handoff. Trusted local files and configured CLI lanes are used first; browser or web sources are opt-in with `--web` and labeled as untrusted source material.
+
+```mermaid
+flowchart LR
+    QUESTION["research question"]
+    RUN["research run<br/>local-first · resumable"]
+    REPORT["report.html<br/>report.md"]
+    EXPORT["export-handoff<br/>explicit writer inbox"]
+    DRAFT["memory-handoffs/<br/>linted draft"]
+    MEMORY["memory owner ingest<br/>cards or learnings"]
+
+    QUESTION --> RUN --> REPORT
+    RUN --> EXPORT --> DRAFT --> MEMORY
+    EXPORT -. drift visible .-> REVIEW["work brief<br/>center reviews<br/>release evidence"]
+
+    classDef local fill:#eff6ff,stroke:#2563eb,color:#1e3a8a;
+    classDef review fill:#fff7ed,stroke:#ea580c,color:#7c2d12;
+    classDef memory fill:#ecfdf5,stroke:#059669,color:#064e3b;
+    class QUESTION,RUN,REPORT local;
+    class EXPORT,REVIEW review;
+    class DRAFT,MEMORY memory;
+```
+
+```bash
+brigade research run "what should we remember about this topic?" --corpus docs
+brigade research export-handoff <run-id> --inbox codex
+brigade research handoffs doctor
+brigade research handoffs import-issues
+brigade research show <run-id>
+```
+
+Exports are explicit and receipt-backed. Brigade records the source fingerprint for the handoff artifact, then warns when a completed research run has no export, a missing export path, or a stale export after the run artifact changes. The doctor is read-only; import routing creates reviewable work inbox items instead of exporting or ingesting memory automatically.
 
 ## Agent Pantry
 

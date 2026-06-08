@@ -909,8 +909,8 @@ Acceptance:
 
 Current status:
 
-- Started with persisted research run manifests, faithful resume, configured CLI source adapters, browser/web trust separation, Antigravity as a named CLI lane, source doctor/list commands, and lintable no-card research handoffs under the run artifact directory.
-- Next chunk: implement explicit research handoff export into selected harness inboxes and surface that exported handoff state in existing handoff/review commands.
+- Strengthened with persisted research run manifests, faithful resume, configured CLI source adapters, browser/web trust separation, Antigravity as a named CLI lane, source doctor/list commands, lintable no-card research handoffs under the run artifact directory, explicit `brigade research export-handoff` into selected writer inboxes or custom inboxes, export fingerprints, focused `brigade research handoffs doctor`, repair import routing through `brigade research handoffs import-issues`, and research handoff drift visibility in research show/list, work brief, center reviews, and release readiness evidence.
+- Next chunk: keep research handoff repair inside the normal work inbox and handoff draft path unless repeated operator use proves a separate queue is needed.
 
 ## Suggested Execution Order
 
