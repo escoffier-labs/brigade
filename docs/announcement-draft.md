@@ -56,7 +56,7 @@ Agent setups become real infrastructure quickly. Once multiple tools, memories, 
 
 Brigade is the local layer for that.
 
-The current dogfood path is simple: Brigade is being used to adapt an existing operator workspace into Brigade-managed evidence. It discovered external scheduler/process surfaces, captured 57 redacted records, reviewed every record with zero stale reviews, kept 36 records externally owned, marked 14 as Brigade runbook migration candidates, marked 7 as retirement-review candidates, and routed the actionable follow-ups into the daily loop.
+The current dogfood path is simple: Brigade is being used to adapt an existing operator workspace into Brigade-managed evidence. It discovered external scheduler/process surfaces, captured 57 redacted records, reviewed every record with zero stale reviews, kept 36 records externally owned, marked 14 as Brigade runbook migration candidates, marked 7 as retirement-review candidates, routed the actionable follow-ups, and closed the batch with local redacted replacement evidence.
 
 If your setup is already messy because it is real, Brigade is meant for you.
 
