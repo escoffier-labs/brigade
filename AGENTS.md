@@ -35,7 +35,7 @@ brigade operator doctor --target . --profile local-operator
 If the user uses more than one harness, use a comma-separated list:
 
 ```bash
-brigade operator quickstart --target . --harnesses codex,claude,opencode,antigravity
+brigade operator quickstart --target . --harnesses codex,claude,opencode,antigravity,pi
 ```
 
 If you are unsure which harnesses the user uses, start with the current harness and explain how to add more later.
@@ -52,6 +52,7 @@ Before changing files, inspect the target directory for existing setup:
 - `.claude/`
 - `.opencode/`
 - `.antigravity/`
+- `.pi/`
 - `.hermes/`
 - `.openclaw/`
 - `.mcp/`
@@ -77,6 +78,7 @@ Usually local-only:
 - `.claude/`
 - `.opencode/`
 - `.antigravity/`
+- `.pi/`
 - `.hermes/`
 - `.openclaw/`
 - `.mcp/`

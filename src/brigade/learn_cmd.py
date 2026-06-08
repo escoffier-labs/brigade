@@ -568,7 +568,7 @@ def _write_skill_candidate_source(target: Path, candidate: dict[str, Any], *, fo
         "trust_level": "unreviewed",
         "required_tools": [],
         "required_mcp_servers": [],
-        "supported_harnesses": ["codex", "claude", "opencode", "antigravity", "openclaw", "hermes", "mcp"],
+        "supported_harnesses": ["codex", "claude", "opencode", "antigravity", "pi", "openclaw", "hermes", "mcp"],
         "tests": [],
         "source": "brigade-learn-skill-candidate",
         "learning_candidate_id": candidate.get("id"),

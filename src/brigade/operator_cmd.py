@@ -2389,7 +2389,7 @@ def doctor_payload(target: Path, *, profile: str = "internal-dogfood") -> dict[s
         ],
         "tracked_vs_generated": [
             "Track reviewed cross-harness source docs under tools/.",
-            "Generated harness projections and handoff inboxes under .claude/, .codex/, .opencode/, .antigravity/, .hermes/, .openclaw/, .mcp/, and scripts/ are local ignored state.",
+            "Generated harness projections and handoff inboxes under .claude/, .codex/, .opencode/, .antigravity/, .pi/, .hermes/, .openclaw/, .mcp/, and scripts/ are local ignored state.",
             "Run brigade operator sync-tools --target . after changing tracked tool sources.",
         ],
     }
@@ -2470,7 +2470,7 @@ def verify_harness_payload(target: Path, *, harness: str) -> dict[str, Any]:
             "checks": checks,
             "issue_count": 1,
             "ready": False,
-            "next_command": "choose a writer harness: claude, codex, opencode, antigravity, hermes",
+            "next_command": "choose a writer harness: claude, codex, opencode, antigravity, pi, hermes",
         }
 
     health = handoff_cmd.inspect(target)

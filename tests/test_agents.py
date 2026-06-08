@@ -8,6 +8,7 @@ def test_build_argv_for_known_clis():
     assert agents.build_argv("codex", "hi") == ["codex", "exec", "hi"]
     assert agents.build_argv("opencode", "hi") == ["opencode", "run", "hi"]
     assert agents.build_argv("antigravity", "hi") == ["agy", "--print", "hi"]
+    assert agents.build_argv("pi", "hi") == ["pi", "-p", "hi"]
     assert agents.build_argv("ollama:llama3.3", "hi") == ["ollama", "run", "llama3.3", "hi"]
 
 
@@ -22,6 +23,7 @@ def test_build_argv_for_read_only_codex():
     assert agents.build_argv("claude", "hi", read_only=True) == ["claude", "-p", "hi"]
     assert agents.build_argv("opencode", "hi", read_only=True) == ["opencode", "run", "hi"]
     assert agents.build_argv("antigravity", "hi", read_only=True) == ["agy", "--sandbox", "--print", "hi"]
+    assert agents.build_argv("pi", "hi", read_only=True) == ["pi", "--tools", "read,grep,find,ls", "-p", "hi"]
     assert agents.build_argv("ollama:llama3.3", "hi", read_only=True) == [
         "ollama",
         "run",
@@ -57,6 +59,7 @@ def test_command_for_returns_binary():
     assert agents.command_for("codex") == "codex"
     assert agents.command_for("opencode") == "opencode"
     assert agents.command_for("antigravity") == "agy"
+    assert agents.command_for("pi") == "pi"
     assert agents.command_for("ollama:llama3.3") == "ollama"
 
 
@@ -65,6 +68,7 @@ def test_is_known():
     assert agents.is_known("codex")
     assert agents.is_known("opencode")
     assert agents.is_known("antigravity")
+    assert agents.is_known("pi")
     assert agents.is_known("ollama:anything")
     assert not agents.is_known("bogus")
 

@@ -51,7 +51,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p_init.add_argument(
         "--harnesses",
         default=None,
-        help="Comma-separated harness ids: claude, codex, opencode, antigravity, openclaw, hermes. "
+        help="Comma-separated harness ids: claude, codex, opencode, antigravity, pi, openclaw, hermes. "
              "Pass 'none' for a generic install with no harness-specific files.",
     )
     p_init.add_argument(
@@ -491,7 +491,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p_operator_doctor.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_operator_verify_harness = operator_sub.add_parser("verify-harness", help="Verify repo-local wiring for one harness.")
     p_operator_verify_harness.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
-    p_operator_verify_harness.add_argument("--harness", choices=["claude", "codex", "opencode", "antigravity", "openclaw", "hermes"], required=True, help="Harness id to verify.")
+    p_operator_verify_harness.add_argument("--harness", choices=["claude", "codex", "opencode", "antigravity", "pi", "openclaw", "hermes"], required=True, help="Harness id to verify.")
     p_operator_verify_harness.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_operator_sync_tools = operator_sub.add_parser("sync-tools", help="Project tracked portable tool sources into local harness folders.")
     p_operator_sync_tools.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
@@ -554,7 +554,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p_dogfood.add_argument(
         "--agent-cli",
         default=None,
-        help="Agent CLI for dogfood runs: codex, claude, opencode, antigravity, or ollama:<model>.",
+        help="Agent CLI for dogfood runs: codex, claude, opencode, antigravity, pi, or ollama:<model>.",
     )
     p_dogfood.add_argument(
         "--handoff-inbox",
@@ -1011,7 +1011,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p_handoff_lint.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_handoff_draft = handoff_sub.add_parser("draft", help="Write a linted Memory Handoff draft in Brigade style.")
     p_handoff_draft.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
-    p_handoff_draft.add_argument("--inbox", default="codex", help="Writer inbox path or alias: claude, codex, opencode, antigravity, hermes.")
+    p_handoff_draft.add_argument("--inbox", default="codex", help="Writer inbox path or alias: claude, codex, opencode, antigravity, pi, hermes.")
     p_handoff_draft.add_argument("--type", default="workflow", help="Handoff type, such as workflow, decision, setup, or bugfix.")
     p_handoff_draft.add_argument("--title", required=True, help="Short handoff title.")
     p_handoff_draft.add_argument("--summary", required=True, help="Short handoff summary.")
@@ -2146,7 +2146,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p_research_export = research_sub.add_parser("export-handoff", help="Export a completed research run as a linted Memory Handoff.")
     p_research_export.add_argument("run_id", help="Run id.")
     p_research_export.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
-    p_research_export.add_argument("--inbox", choices=("codex", "claude", "opencode", "antigravity", "hermes"), default=None, help="Writer harness inbox to export into.")
+    p_research_export.add_argument("--inbox", choices=("codex", "claude", "opencode", "antigravity", "pi", "hermes"), default=None, help="Writer harness inbox to export into.")
     p_research_export.add_argument("--handoff-inbox", type=Path, default=None, help="Explicit handoff inbox path for a custom writer.")
     p_research_export.add_argument("--force", action="store_true", help="Replace an existing exported handoff at the same path.")
     p_research_export.add_argument("--json", action="store_true", help="Print machine-readable JSON.")

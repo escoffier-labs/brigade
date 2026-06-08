@@ -107,6 +107,19 @@ def test_antigravity_install_creates_inbox_and_gitignore(tmp_path):
     assert "!.antigravity/memory-handoffs/TEMPLATE.md" in block
 
 
+def test_pi_install_creates_inbox_and_gitignore(tmp_path):
+    from brigade.install import install_selection, build_gitignore_block
+    from brigade.selection import Selection
+    sel = Selection(depth="repo", harnesses=["pi"], owner="pi", includes=[])
+    rc = install_selection(tmp_path, sel)
+    assert rc == 0
+    assert (tmp_path / ".pi" / "memory-handoffs" / "TEMPLATE.md").is_file()
+    assert (tmp_path / ".pi" / "memory-handoffs" / "processed").is_dir()
+    block = build_gitignore_block(sel)
+    assert ".pi/memory-handoffs/*" in block
+    assert "!.pi/memory-handoffs/TEMPLATE.md" in block
+
+
 def test_hermes_install_creates_adapter_inbox_and_gitignore(tmp_path):
     import json
 

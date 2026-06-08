@@ -1,0 +1,11 @@
+{
+  "id": "pi",
+  "role": "writer",
+  "description": "Pi handoff inbox. (AGENTS.md is in the depth baseline; no separate bridge file today.)",
+  "files": [
+    {"src": "pi/memory-handoffs/TEMPLATE.md", "dst": ".pi/memory-handoffs/TEMPLATE.md"}
+  ],
+  "dirs": [
+    ".pi/memory-handoffs/processed"
+  ]
+}

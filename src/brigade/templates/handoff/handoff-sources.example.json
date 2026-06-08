@@ -23,6 +23,7 @@
         ".codex/memory-handoffs",
         ".opencode/memory-handoffs",
         ".antigravity/memory-handoffs",
+        ".pi/memory-handoffs",
         ".hermes/memory-handoffs"
       ]
     }

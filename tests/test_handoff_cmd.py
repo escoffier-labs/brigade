@@ -1393,6 +1393,7 @@ def test_handoff_sources_init_writes_all_writer_inboxes(tmp_path, capsys):
     assert ".codex/memory-handoffs" in data["sources"][0]["inboxes"]
     assert ".opencode/memory-handoffs" in data["sources"][0]["inboxes"]
     assert ".antigravity/memory-handoffs" in data["sources"][0]["inboxes"]
+    assert ".pi/memory-handoffs" in data["sources"][0]["inboxes"]
     assert ".hermes/memory-handoffs" in data["sources"][0]["inboxes"]
 
 
@@ -1653,6 +1654,7 @@ def test_handoff_writer_inboxes_include_supported_writer_harnesses():
     from brigade import handoff_cmd
     assert ".opencode/memory-handoffs" in handoff_cmd.WRITER_INBOXES
     assert ".antigravity/memory-handoffs" in handoff_cmd.WRITER_INBOXES
+    assert ".pi/memory-handoffs" in handoff_cmd.WRITER_INBOXES
     assert ".hermes/memory-handoffs" in handoff_cmd.WRITER_INBOXES
 
 
@@ -1662,6 +1664,7 @@ def test_handoff_sources_example_lists_supported_writer_harnesses():
     data = json.loads((template_root() / "handoff" / "handoff-sources.example.json").read_text())
     assert ".opencode/memory-handoffs" in data["sources"][0]["inboxes"]
     assert ".antigravity/memory-handoffs" in data["sources"][0]["inboxes"]
+    assert ".pi/memory-handoffs" in data["sources"][0]["inboxes"]
     assert ".hermes/memory-handoffs" in data["sources"][0]["inboxes"]
 
 

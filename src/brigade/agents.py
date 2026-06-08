@@ -36,11 +36,18 @@ def _antigravity_argv(prompt: str, read_only: bool, sandbox: str | None) -> List
     return ["agy", "--print", prompt]
 
 
+def _pi_argv(prompt: str, read_only: bool, sandbox: str | None) -> List[str]:
+    if read_only or sandbox == "read-only":
+        return ["pi", "--tools", "read,grep,find,ls", "-p", prompt]
+    return ["pi", "-p", prompt]
+
+
 _ADAPTERS: dict[str, Callable[[str, bool, str | None], List[str]]] = {
     "claude": _claude_argv,
     "codex": _codex_argv,
     "opencode": _opencode_argv,
     "antigravity": _antigravity_argv,
+    "pi": _pi_argv,
 }
 
 
@@ -77,7 +84,7 @@ def build_argv(
 
     builder = _ADAPTERS.get(cli_ref)
     if builder is None:
-        raise ValueError(f"unknown agent cli: {cli_ref!r} (known: claude, codex, opencode, antigravity, ollama:<model>)")
+        raise ValueError(f"unknown agent cli: {cli_ref!r} (known: claude, codex, opencode, antigravity, pi, ollama:<model>)")
     return builder(prompt, read_only, sandbox)
 
 

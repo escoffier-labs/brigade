@@ -27,11 +27,11 @@ HARNESS_ADAPTERS: dict[str, dict[str, Any]] = {
     "claude": {"status": "built-in", "format": "claude-skill", "install_path": ".claude/skills/{skill_id}"},
     "opencode": {"status": "built-in", "format": "opencode-skill", "install_path": ".opencode/skills/{skill_id}"},
     "antigravity": {"status": "built-in", "format": "antigravity-skill", "install_path": ".antigravity/skills/{skill_id}"},
+    "pi": {"status": "built-in", "format": "pi-skill", "install_path": ".pi/skills/{skill_id}"},
     "openclaw": {"status": "built-in", "format": "openclaw-skill", "install_path": ".openclaw/skills/{skill_id}"},
     "hermes": {"status": "built-in", "format": "hermes-skill", "install_path": ".hermes/skills/{skill_id}"},
     "mcp": {"status": "built-in", "format": "mcp-resource", "install_path": ".brigade/skills/mcp-resources/{skill_id}"},
     "gemini": {"status": "deprecated", "format": "adapter-deprecated", "install_path": None},
-    "pi": {"status": "planned", "format": "adapter-needed", "install_path": None},
     "cursor": {"status": "planned", "format": "adapter-needed", "install_path": None},
 }
 HARNESS_TARGETS = tuple(key for key, value in HARNESS_ADAPTERS.items() if value["status"] == "built-in")
@@ -1253,7 +1253,6 @@ def adapters_init(*, target: Path, force: bool = False, json_output: bool = Fals
         "description": "Local skill harness adapter overlay. install_path is relative to the workspace and may use {skill_id}.",
         "adapters": {
             "cursor": {"status": "planned", "format": "cursor-skill", "install_path": ".cursor/skills/{skill_id}"},
-            "pi": {"status": "planned", "format": "adapter-needed", "install_path": None},
         },
     }
     _write_json(path, payload)
