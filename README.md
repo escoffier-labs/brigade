@@ -15,11 +15,13 @@
   <img src="https://img.shields.io/badge/license-MIT-green?style=for-the-badge" alt="MIT license">
 </p>
 
-You run more than one AI coding agent. Each one learns something useful, then forgets it the moment the session closes, and none of them can read what the others figured out. The knowledge scatters across tools and dies there.
+Your agents run loops. Brigade keeps the receipts.
 
-**Brigade is a local-first operator CLI that gives Codex, Claude Code, OpenCode, Antigravity, Hermes, and OpenClaw one shared, reviewable memory.** Agents write handoff notes as they work. Brigade lints them, guards them, and routes them. You decide what is worth keeping, and only then does it become durable memory. Nothing is published, pushed, or saved behind your back, and the shared memory never decays into a junk drawer.
+Harness agents ship smart models with empty heads. Every session they wake up knowing nothing about your machine, your rules, or what they learned yesterday, and whatever each one figures out scatters across tools and dies there.
 
-It runs entirely on the operator-controlled machine first, before any external service, whether that machine is a laptop, workstation, or VPS. The GitHub repo is [`escoffier-labs/brigade`](https://github.com/escoffier-labs/brigade), the PyPI package is [`brigade-cli`](https://pypi.org/project/brigade-cli/), and the command is `brigade`.
+**Brigade is a local control plane for agent memory, work, tools, research, review, and release.** Writer agents like Codex, Claude Code, OpenCode, and Antigravity leave handoff notes as they work. A memory owner like OpenClaw or Hermes ingests the ones worth keeping. Brigade lints, guards, and routes everything in between, and every consequential action lands a receipt in a plain file you can grep, diff, and prune. Nothing is published, pushed, or saved behind your back, and the shared memory never decays into a junk drawer.
+
+It runs on the operator-controlled machine first, before any external service, whether that machine is a laptop, workstation, or VPS: local by default, loud about the exceptions. The GitHub repo is [`escoffier-labs/brigade`](https://github.com/escoffier-labs/brigade), the PyPI package is [`brigade-cli`](https://pypi.org/project/brigade-cli/), and the command is `brigade`.
 
 ## Current Status
 
