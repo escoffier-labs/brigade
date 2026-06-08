@@ -179,12 +179,12 @@ def test_dogfood_init_defaults_handoff_inbox_to_codex_writer(tmp_path):
 
 
 def test_dogfood_init_defaults_handoff_inbox_to_selected_writer(tmp_path):
-    assert dogfood_cmd.init(target=tmp_path, agent_cli="opencode") == 0
+    assert dogfood_cmd.init(target=tmp_path, agent_cli="antigravity") == 0
 
     loaded = dogfood_cmd.load_config(tmp_path)
     assert loaded is not None
-    assert loaded.agent_cli == "opencode"
-    assert loaded.handoff_inbox == tmp_path / ".opencode" / "memory-handoffs"
+    assert loaded.agent_cli == "antigravity"
+    assert loaded.handoff_inbox == tmp_path / ".antigravity" / "memory-handoffs"
 
 
 def test_dogfood_init_refuses_existing_without_force(tmp_path, capsys):
@@ -305,10 +305,10 @@ def test_dogfood_run_can_override_agent_cli(tmp_path, monkeypatch):
     monkeypatch.setattr(aboyeur, "run", fake_run)
     monkeypatch.setattr(runs_cmd, "show", lambda run_dir: 0)
 
-    assert dogfood_cmd.run(None, target=tmp_path, agent_cli="opencode") == 0
-    assert seen["roster"].allow_models == ("opencode",)
-    assert {agent.cli for agent in seen["roster"].agents.values()} == {"opencode"}
-    assert seen["handoff_inbox"] == tmp_path / ".opencode" / "memory-handoffs"
+    assert dogfood_cmd.run(None, target=tmp_path, agent_cli="antigravity") == 0
+    assert seen["roster"].allow_models == ("antigravity",)
+    assert {agent.cli for agent in seen["roster"].agents.values()} == {"antigravity"}
+    assert seen["handoff_inbox"] == tmp_path / ".antigravity" / "memory-handoffs"
 
 
 def test_dogfood_rejects_unknown_agent_cli(tmp_path, capsys):

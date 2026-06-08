@@ -232,6 +232,8 @@ def test_gitignore_block_includes_generated_tool_projection_roots():
         ".codex/skills/",
         ".opencode/commands/",
         ".opencode/superpowers/",
+        ".antigravity/commands/",
+        ".antigravity/superpowers/",
         ".hermes/commands/",
         ".hermes/superpowers/",
         ".openclaw/commands/",

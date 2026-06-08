@@ -20,7 +20,7 @@ def _write_skill(root, name="security-review"):
                 "version": "0.1.0",
                 "required_tools": ["git"],
                 "required_mcp_servers": ["github"],
-                "supported_harnesses": ["codex", "claude", "opencode", "gemini", "openclaw", "hermes", "mcp"],
+                "supported_harnesses": ["codex", "claude", "opencode", "antigravity", "openclaw", "hermes", "mcp"],
                 "trust_level": "workspace",
                 "tests": ["brigade skills lint security-review"],
             }
@@ -43,7 +43,7 @@ def test_skills_import_lint_search_and_install_all(tmp_path, capsys):
 
     assert skills_cmd.install(workspace=tmp_path, skill="security-review", harness="all", json_output=True) == 0
     install = json.loads(capsys.readouterr().out)
-    assert install["receipt"]["targets"] == ["codex", "claude", "opencode", "gemini", "openclaw", "hermes", "mcp"]
+    assert install["receipt"]["targets"] == ["codex", "claude", "opencode", "antigravity", "openclaw", "hermes", "mcp"]
     codex_skill = tmp_path / ".codex" / "skills" / "security-review" / "SKILL.md"
     assert codex_skill.is_file()
     codex_text = codex_skill.read_text()
@@ -52,7 +52,8 @@ def test_skills_import_lint_search_and_install_all(tmp_path, capsys):
     assert "# Security Review" in codex_text
     assert (tmp_path / ".claude" / "skills" / "security-review" / "SKILL.md").is_file()
     assert (tmp_path / ".opencode" / "skills" / "security-review" / "SKILL.md").is_file()
-    assert (tmp_path / ".agents" / "skills" / "security-review" / "SKILL.md").is_file()
+    assert (tmp_path / ".antigravity" / "skills" / "security-review" / "SKILL.md").is_file()
+    assert not (tmp_path / ".agents" / "skills" / "security-review" / "SKILL.md").exists()
     assert (tmp_path / ".openclaw" / "skills" / "security-review" / "SKILL.md").is_file()
     assert (tmp_path / ".hermes" / "skills" / "security-review" / "SKILL.md").is_file()
     assert (tmp_path / ".brigade" / "skills" / "mcp-resources" / "security-review" / "SKILL.md").is_file()
@@ -124,12 +125,14 @@ def test_skills_cli_inbox_and_adapters(tmp_path, capsys):
 
     assert cli.main(["skills", "adapters", "init", "--target", str(tmp_path), "--json"]) == 0
     init_payload = json.loads(capsys.readouterr().out)
-    assert init_payload["adapter_count"] == 3
+    assert init_payload["adapter_count"] == 2
 
     assert cli.main(["skills", "adapters", "list", "--target", str(tmp_path), "--include-planned", "--json"]) == 0
     adapters = json.loads(capsys.readouterr().out)
     ids = {item["id"] for item in adapters["adapters"]}
     assert {"codex", "cursor", "antigravity", "pi"} <= ids
+    antigravity = next(item for item in adapters["adapters"] if item["id"] == "antigravity")
+    assert antigravity["status"] == "built-in"
 
     assert cli.main(["skills", "adapters", "show", "cursor", "--target", str(tmp_path), "--json"]) == 0
     cursor = json.loads(capsys.readouterr().out)

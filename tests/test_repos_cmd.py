@@ -290,3 +290,12 @@ def test_repo_summary_counts_opencode_inbox(tmp_path):
     entry = repos_cmd.RepoEntry(repo_id="r1", label="R1", path=tmp_path)
     summary = repos_cmd._repo_summary(entry)
     assert ".opencode/memory-handoffs" in summary["handoff_inboxes"]
+
+
+def test_repo_summary_counts_antigravity_inbox(tmp_path):
+    from brigade import repos_cmd
+
+    (tmp_path / ".antigravity" / "memory-handoffs").mkdir(parents=True)
+    entry = repos_cmd.RepoEntry(repo_id="r1", label="R1", path=tmp_path)
+    summary = repos_cmd._repo_summary(entry)
+    assert ".antigravity/memory-handoffs" in summary["handoff_inboxes"]

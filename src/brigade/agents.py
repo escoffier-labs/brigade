@@ -30,15 +30,17 @@ def _opencode_argv(prompt: str, read_only: bool, sandbox: str | None) -> List[st
     return ["opencode", "run", prompt]
 
 
-def _gemini_argv(prompt: str, read_only: bool, sandbox: str | None) -> List[str]:
-    return ["gemini", "--prompt", prompt]
+def _antigravity_argv(prompt: str, read_only: bool, sandbox: str | None) -> List[str]:
+    if read_only or sandbox == "read-only":
+        return ["agy", "--sandbox", "--print", prompt]
+    return ["agy", "--print", prompt]
 
 
 _ADAPTERS: dict[str, Callable[[str, bool, str | None], List[str]]] = {
     "claude": _claude_argv,
     "codex": _codex_argv,
-    "gemini": _gemini_argv,
     "opencode": _opencode_argv,
+    "antigravity": _antigravity_argv,
 }
 
 
@@ -56,6 +58,8 @@ def is_known(cli_ref: str) -> bool:
 def command_for(cli_ref: str) -> str:
     if cli_ref.startswith(_OLLAMA_PREFIX):
         return "ollama"
+    if cli_ref == "antigravity":
+        return "agy"
     return cli_ref
 
 
@@ -73,7 +77,7 @@ def build_argv(
 
     builder = _ADAPTERS.get(cli_ref)
     if builder is None:
-        raise ValueError(f"unknown agent cli: {cli_ref!r} (known: claude, codex, gemini, opencode, ollama:<model>)")
+        raise ValueError(f"unknown agent cli: {cli_ref!r} (known: claude, codex, opencode, antigravity, ollama:<model>)")
     return builder(prompt, read_only, sandbox)
 
 

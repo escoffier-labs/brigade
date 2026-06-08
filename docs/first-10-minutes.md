@@ -46,7 +46,7 @@ brigade operator quickstart --target . --harnesses codex --dry-run
 For multiple writer surfaces:
 
 ```bash
-brigade operator quickstart --target . --harnesses codex,claude,opencode --dry-run
+brigade operator quickstart --target . --harnesses codex,claude,opencode,antigravity --dry-run
 ```
 
 For an OpenClaw or Hermes workspace:
@@ -110,6 +110,7 @@ Usually local-only:
 - `.codex/`
 - `.claude/`
 - `.opencode/`
+- `.antigravity/`
 - `.hermes/`
 - `.openclaw/`
 - `.mcp/`

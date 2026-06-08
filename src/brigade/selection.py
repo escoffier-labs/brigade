@@ -6,13 +6,14 @@ from typing import List, Optional
 
 
 KNOWN_DEPTHS = ("repo", "workspace")
-KNOWN_HARNESSES = ("claude", "codex", "opencode", "openclaw", "hermes")
+KNOWN_HARNESSES = ("claude", "codex", "opencode", "antigravity", "openclaw", "hermes")
 # Writer harness id -> repo-relative handoff inbox dir. Single source of truth;
 # install, ingest, doctor, the fleet sweep, and the handoff doctor consume this.
 WRITER_INBOXES = {
     "claude": ".claude/memory-handoffs",
     "codex": ".codex/memory-handoffs",
     "opencode": ".opencode/memory-handoffs",
+    "antigravity": ".antigravity/memory-handoffs",
     "hermes": ".hermes/memory-handoffs",
 }
 KNOWN_INCLUDES = ("publisher",)

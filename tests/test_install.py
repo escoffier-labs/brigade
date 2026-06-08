@@ -94,6 +94,19 @@ def test_opencode_install_creates_inbox_and_gitignore(tmp_path):
     assert "!.opencode/memory-handoffs/TEMPLATE.md" in block
 
 
+def test_antigravity_install_creates_inbox_and_gitignore(tmp_path):
+    from brigade.install import install_selection, build_gitignore_block
+    from brigade.selection import Selection
+    sel = Selection(depth="repo", harnesses=["antigravity"], owner="antigravity", includes=[])
+    rc = install_selection(tmp_path, sel)
+    assert rc == 0
+    assert (tmp_path / ".antigravity" / "memory-handoffs" / "TEMPLATE.md").is_file()
+    assert (tmp_path / ".antigravity" / "memory-handoffs" / "processed").is_dir()
+    block = build_gitignore_block(sel)
+    assert ".antigravity/memory-handoffs/*" in block
+    assert "!.antigravity/memory-handoffs/TEMPLATE.md" in block
+
+
 def test_hermes_install_creates_adapter_inbox_and_gitignore(tmp_path):
     import json
 

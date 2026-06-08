@@ -1,0 +1,11 @@
+{
+  "id": "antigravity",
+  "role": "writer",
+  "description": "Antigravity handoff inbox. (AGENTS.md is in the depth baseline; no separate bridge file today.)",
+  "files": [
+    {"src": "antigravity/memory-handoffs/TEMPLATE.md", "dst": ".antigravity/memory-handoffs/TEMPLATE.md"}
+  ],
+  "dirs": [
+    ".antigravity/memory-handoffs/processed"
+  ]
+}

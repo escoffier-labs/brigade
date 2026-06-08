@@ -62,6 +62,7 @@ Usually local-only:
 - `.codex/`
 - `.claude/`
 - `.opencode/`
+- `.antigravity/`
 - `.hermes/`
 - `.openclaw/`
 - `.mcp/`

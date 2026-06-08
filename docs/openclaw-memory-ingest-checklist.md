@@ -37,7 +37,7 @@ Review:
 
 Brigade does not write canonical memory. OpenClaw, Hermes, or another memory owner performs the actual ingest as an explicit operator-approved action. Safe targeted handoffs may be filed by the ingester; skipped, failed, malformed, warning, or ambiguous outcomes remain review work.
 
-Treat every file under `.claude/memory-handoffs/`, `.codex/memory-handoffs/`, `.opencode/memory-handoffs/`, and `.hermes/memory-handoffs/` as pending ingest or review until it has an ingestion receipt or manual archive record.
+Treat every file under `.claude/memory-handoffs/`, `.codex/memory-handoffs/`, `.opencode/memory-handoffs/`, `.antigravity/memory-handoffs/`, and `.hermes/memory-handoffs/` as pending ingest or review until it has an ingestion receipt or manual archive record.
 
 ## Reconcile Receipts
 
@@ -65,7 +65,7 @@ The normalized receipt shape is:
   "started_at": "2026-06-03T21:00:00Z",
   "completed_at": "2026-06-03T21:00:12Z",
   "source_root": ".",
-  "inbox_paths": [".claude/memory-handoffs", ".codex/memory-handoffs", ".opencode/memory-handoffs", ".hermes/memory-handoffs"],
+  "inbox_paths": [".claude/memory-handoffs", ".codex/memory-handoffs", ".opencode/memory-handoffs", ".antigravity/memory-handoffs", ".hermes/memory-handoffs"],
   "processed_handoff_paths": [".hermes/memory-handoffs/20260603-210000-hermes-note.md"],
   "promoted_card_targets": [],
   "routed_document_targets": [{"handoff_path": ".hermes/memory-handoffs/20260603-210000-hermes-note.md", "target": ".learnings/LEARNINGS.md"}],

@@ -325,6 +325,36 @@ def test_opencode_handoff_is_ingested(tmp_target: Path):
     assert (inbox / "processed" / "2026-06-02-1200-opencode.md").is_file()
 
 
+def test_antigravity_handoff_is_ingested(tmp_target: Path):
+    from brigade.install import install_selection
+    from brigade.selection import Selection
+    install_selection(tmp_target, Selection(depth="workspace", harnesses=["antigravity"], owner="antigravity", includes=[]))
+    inbox = tmp_target / ".antigravity" / "memory-handoffs"
+    _write_handoff(
+        inbox,
+        "2026-06-08-1200-antigravity.md",
+        """\
+        # Memory Handoff
+
+        ## Recommended memory action
+        create-card
+
+        ## Target card
+        antigravity-test.md
+
+        ## Suggested card content
+        ---
+        topic: antigravity-test
+        ---
+        body line
+        """,
+    )
+    rc = ingest_mod.run(target=tmp_target, dry_run=False, promote_cards=True, route_documents=True)
+    assert rc == 0
+    assert (tmp_target / "memory" / "cards" / "antigravity-test.md").is_file()
+    assert (inbox / "processed" / "2026-06-08-1200-antigravity.md").is_file()
+
+
 def test_no_card_route_to_bootstrap_file_over_budget_goes_to_inbox(tmp_target: Path):
     """A route that would push a bootstrap file past its budget must inbox, not append."""
     from brigade import budgets

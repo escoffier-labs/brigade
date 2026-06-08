@@ -269,13 +269,13 @@ Drafts can create cards.
         action="create-card",
         target_card="handoff-draft.md",
         content=card_content,
-        inbox="opencode",
+        inbox="antigravity",
         json_output=True,
     ) == 0
 
     payload = json.loads(capsys.readouterr().out)
     path = tmp_path / payload["path"]
-    assert ".opencode/memory-handoffs" in payload["path"]
+    assert ".antigravity/memory-handoffs" in payload["path"]
     assert payload["action"] == "create-card"
     assert payload["target_card"] == "handoff-draft.md"
     assert payload["target_document"] is None
@@ -1392,6 +1392,7 @@ def test_handoff_sources_init_writes_all_writer_inboxes(tmp_path, capsys):
     assert ".claude/memory-handoffs" in data["sources"][0]["inboxes"]
     assert ".codex/memory-handoffs" in data["sources"][0]["inboxes"]
     assert ".opencode/memory-handoffs" in data["sources"][0]["inboxes"]
+    assert ".antigravity/memory-handoffs" in data["sources"][0]["inboxes"]
     assert ".hermes/memory-handoffs" in data["sources"][0]["inboxes"]
 
 
@@ -1648,17 +1649,19 @@ def test_doctor_checks_no_backlog_warn_for_fresh_pending(tmp_path):
     assert not backlog_warns, "fresh pending handoff should not trip the stale backlog warning"
 
 
-def test_handoff_writer_inboxes_include_opencode():
+def test_handoff_writer_inboxes_include_supported_writer_harnesses():
     from brigade import handoff_cmd
     assert ".opencode/memory-handoffs" in handoff_cmd.WRITER_INBOXES
+    assert ".antigravity/memory-handoffs" in handoff_cmd.WRITER_INBOXES
     assert ".hermes/memory-handoffs" in handoff_cmd.WRITER_INBOXES
 
 
-def test_handoff_sources_example_lists_opencode():
+def test_handoff_sources_example_lists_supported_writer_harnesses():
     import json
     from brigade.templates import template_root
     data = json.loads((template_root() / "handoff" / "handoff-sources.example.json").read_text())
     assert ".opencode/memory-handoffs" in data["sources"][0]["inboxes"]
+    assert ".antigravity/memory-handoffs" in data["sources"][0]["inboxes"]
     assert ".hermes/memory-handoffs" in data["sources"][0]["inboxes"]
 
 

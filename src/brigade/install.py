@@ -88,6 +88,8 @@ def build_gitignore_block(selection: Selection) -> str:
         ".codex/skills/",
         ".opencode/commands/",
         ".opencode/superpowers/",
+        ".antigravity/commands/",
+        ".antigravity/superpowers/",
         ".hermes/commands/",
         ".hermes/superpowers/",
         ".openclaw/commands/",

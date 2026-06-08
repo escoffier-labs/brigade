@@ -53,6 +53,7 @@ If a session changes how Brigade should be used in this repo, write that durable
 - Codex dogfood runs default to `.codex/memory-handoffs/`.
 - Claude Code uses `.claude/memory-handoffs/`.
 - OpenCode uses `.opencode/memory-handoffs/`.
+- Antigravity uses `.antigravity/memory-handoffs/`.
 - Hermes uses `.hermes/memory-handoffs/`.
 
 Prefer the writer command so the draft matches Brigade's expected section style and lints before handoff:

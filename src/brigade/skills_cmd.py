@@ -26,11 +26,11 @@ HARNESS_ADAPTERS: dict[str, dict[str, Any]] = {
     "codex": {"status": "built-in", "format": "codex-skill", "install_path": ".codex/skills/{skill_id}"},
     "claude": {"status": "built-in", "format": "claude-skill", "install_path": ".claude/skills/{skill_id}"},
     "opencode": {"status": "built-in", "format": "opencode-skill", "install_path": ".opencode/skills/{skill_id}"},
-    "gemini": {"status": "built-in", "format": "gemini-agent-skill", "install_path": ".agents/skills/{skill_id}"},
+    "antigravity": {"status": "built-in", "format": "antigravity-skill", "install_path": ".antigravity/skills/{skill_id}"},
     "openclaw": {"status": "built-in", "format": "openclaw-skill", "install_path": ".openclaw/skills/{skill_id}"},
     "hermes": {"status": "built-in", "format": "hermes-skill", "install_path": ".hermes/skills/{skill_id}"},
     "mcp": {"status": "built-in", "format": "mcp-resource", "install_path": ".brigade/skills/mcp-resources/{skill_id}"},
-    "antigravity": {"status": "planned", "format": "adapter-needed", "install_path": None},
+    "gemini": {"status": "deprecated", "format": "adapter-deprecated", "install_path": None},
     "pi": {"status": "planned", "format": "adapter-needed", "install_path": None},
     "cursor": {"status": "planned", "format": "adapter-needed", "install_path": None},
 }
@@ -1253,7 +1253,6 @@ def adapters_init(*, target: Path, force: bool = False, json_output: bool = Fals
         "description": "Local skill harness adapter overlay. install_path is relative to the workspace and may use {skill_id}.",
         "adapters": {
             "cursor": {"status": "planned", "format": "cursor-skill", "install_path": ".cursor/skills/{skill_id}"},
-            "antigravity": {"status": "planned", "format": "adapter-needed", "install_path": None},
             "pi": {"status": "planned", "format": "adapter-needed", "install_path": None},
         },
     }

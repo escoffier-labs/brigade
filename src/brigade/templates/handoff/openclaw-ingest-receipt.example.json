@@ -8,6 +8,7 @@
     ".claude/memory-handoffs",
     ".codex/memory-handoffs",
     ".opencode/memory-handoffs",
+    ".antigravity/memory-handoffs",
     ".hermes/memory-handoffs"
   ],
   "processed_handoff_paths": [
