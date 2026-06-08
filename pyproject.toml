@@ -26,7 +26,7 @@ dev = ["pytest>=7"]
 research = ["playwright>=1.40"]
 
 [project.urls]
-Homepage = "https://brigade.solomonneas.dev"
+Homepage = "https://brigade.tools"
 Repository = "https://github.com/escoffier-labs/brigade"
 Cookbook = "https://github.com/solomonneas/solos-cookbook"
 OpenClaw = "https://github.com/solomonneas/openclaw"

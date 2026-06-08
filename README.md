@@ -117,7 +117,7 @@ flowchart TB
 ## Project Identity
 
 - GitHub: [`escoffier-labs/brigade`](https://github.com/escoffier-labs/brigade)
-- Website: [`brigade.solomonneas.dev`](https://brigade.solomonneas.dev)
+- Website: [`brigade.tools`](https://brigade.tools)
 - Cookbook: [`solomonneas/solos-cookbook`](https://github.com/solomonneas/solos-cookbook), the real-world multi-agent stack Brigade grew out of
 - PyPI package: [`brigade-cli`](https://pypi.org/project/brigade-cli/)
 - CLI command: `brigade`
