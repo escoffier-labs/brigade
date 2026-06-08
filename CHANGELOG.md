@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-06-08
+
 ### Added
 - Operator adoption migration rollup: `brigade operator migration status/doctor/import-issues/consolidate` summarizes redacted adoption progress across operator config, external surfaces, review receipts, pending imports, and pending tasks, then lets current migration rollups supersede tiny record-level follow-ups without exposing raw scheduler or process details.
 - Redacted operator surface registry: `brigade operator surfaces capture/list/doctor/review/reviews/import-issues` captures shell crontab, OpenClaw cron, and PM2 coverage as counts, status totals, ordinal labels, review decisions, and fingerprints under `.brigade/operator/surfaces/`, omitting raw cron lines, job names, process names, command paths, host details, and environment values.
@@ -445,7 +447,9 @@ Initial release.
 - OpenClaw adapter fragments and harness-aware doctor checks.
 - Experimental Hermes adapter fragments.
 
-[Unreleased]: https://github.com/escoffier-labs/brigade/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/escoffier-labs/brigade/compare/v0.8.1...HEAD
+[0.8.1]: https://github.com/escoffier-labs/brigade/compare/v0.8.0...v0.8.1
+[0.8.0]: https://github.com/escoffier-labs/brigade/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/escoffier-labs/brigade/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/escoffier-labs/brigade/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/escoffier-labs/brigade/compare/v0.4.0...v0.5.0
