@@ -2209,7 +2209,7 @@ def doctor(*, target: Path, sources: Path | None = None, json_output: bool = Fal
     return 1 if health.failures else 0
 
 
-def sources_init(*, target: Path, force: bool = False, json_output: bool = False) -> int:
+def sources_init(*, target: Path, force: bool = False, inboxes: list[str] | None = None, json_output: bool = False) -> int:
     target = target.expanduser().resolve()
     if not target.is_dir():
         print(f"error: --target is not a directory: {target}", file=sys.stderr)
@@ -2218,6 +2218,7 @@ def sources_init(*, target: Path, force: bool = False, json_output: bool = False
     if path.exists() and not force:
         print(f"error: handoff source config already exists: {path}", file=sys.stderr)
         return 2
+    inbox_values = list(inboxes) if inboxes is not None else list(WRITER_INBOXES)
     payload = {
         "_description": "Local handoff source coverage. Relative roots resolve from this repo or workspace target.",
         "canonical_owner": "openclaw",
@@ -2229,7 +2230,7 @@ def sources_init(*, target: Path, force: bool = False, json_output: bool = False
         "sources": [
             {
                 "root": ".",
-                "inboxes": list(WRITER_INBOXES),
+                "inboxes": inbox_values,
             }
         ],
     }
@@ -2239,13 +2240,13 @@ def sources_init(*, target: Path, force: bool = False, json_output: bool = False
         "target": str(target),
         "path": str(path),
         "written": True,
-        "inboxes": list(WRITER_INBOXES),
+        "inboxes": inbox_values,
     }
     if json_output:
         print(json.dumps(output, indent=2, sort_keys=True))
         return 0
     print(f"handoff_sources: {path}")
-    print(f"inboxes: {', '.join(WRITER_INBOXES)}")
+    print(f"inboxes: {', '.join(inbox_values) if inbox_values else '(none)'}")
     print("next_command: brigade handoff doctor")
     return 0
 

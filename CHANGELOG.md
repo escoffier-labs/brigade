@@ -35,6 +35,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - New `pantry` station (alias `larder`) and the `agentpantry` managed tool. `brigade add pantry` installs agentpantry via `go install`, and `brigade doctor`/`brigade status` health-check it by shelling out to `agentpantry status --json`. Like the memory satellites, agentpantry inspects host-global state, so its checks are advisory and never FAIL a workspace run: an unwired install (no config) is a `WARN`, a missing pre-shared key is a `WARN`, otherwise `OK`.
 
 ### Fixed
+- `brigade operator quickstart` now scopes `.brigade/handoff-sources.json` to the selected writer harnesses and writes an initial local handoff-ingest latest-run log, so a fresh one-harness setup does not warn about unwired side harnesses or a missing ingestor log.
+- `brigade operator doctor --profile local-operator` no longer points brand-new local setups at release-readiness import work as the primary next command when the only readiness item is a missing release receipt.
 - `brigade daily status` now uses a lightweight daily center snapshot and bounded status sections so slow readiness subsystems report warnings instead of hanging the daily loop.
 - Operator migration imports now supersede stale rollup imports when a source fingerprint changes, preventing older replacement batches from staying ahead of current rollups in the daily queue.
 - `brigade operator doctor --profile local-operator` no longer treats a generated but unenabled Content Guard hook as a blocking issue in fresh quickstart installs. Missing Content Guard remains visible as advisory setup state.

@@ -1395,6 +1395,25 @@ def test_handoff_sources_init_writes_all_writer_inboxes(tmp_path, capsys):
     assert ".hermes/memory-handoffs" in data["sources"][0]["inboxes"]
 
 
+def test_handoff_sources_init_accepts_scoped_inboxes(tmp_path, capsys):
+    inboxes = [".codex/memory-handoffs"]
+    assert handoff_cmd.sources_init(target=tmp_path, inboxes=inboxes, json_output=True) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    data = json.loads((tmp_path / ".brigade" / "handoff-sources.json").read_text())
+    assert payload["inboxes"] == inboxes
+    assert data["sources"][0]["inboxes"] == inboxes
+
+
+def test_handoff_sources_init_preserves_explicit_empty_inboxes(tmp_path, capsys):
+    assert handoff_cmd.sources_init(target=tmp_path, inboxes=[], json_output=True) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    data = json.loads((tmp_path / ".brigade" / "handoff-sources.json").read_text())
+    assert payload["inboxes"] == []
+    assert data["sources"][0]["inboxes"] == []
+
+
 def test_handoff_lint_cli(tmp_path, monkeypatch):
     seen = {}
 

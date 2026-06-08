@@ -1060,12 +1060,20 @@ def test_operator_quickstart_prepares_new_user_workspace(tmp_path, capsys):
     assert ".brigade/reviews.toml" in gitignore
     assert (tmp_path / ".codex" / "memory-handoffs").is_dir()
     assert (tmp_path / ".opencode" / "memory-handoffs").is_dir()
+    sources = json.loads((tmp_path / ".brigade" / "handoff-sources.json").read_text())
+    assert sources["sources"][0]["inboxes"] == [".codex/memory-handoffs", ".opencode/memory-handoffs"]
+    assert (tmp_path / ".brigade" / "handoff-ingest" / "latest.log").is_file()
     assert (tmp_path / ".codex" / "skills" / "frontend" / "SKILL.md").is_file()
     assert (tmp_path / "tools" / "antislop.md").is_file()
 
     assert cli.main(["operator", "doctor", "--target", str(tmp_path), "--profile", "local-operator", "--json"]) == 0
     doctor = json.loads(capsys.readouterr().out)
     assert doctor["ready"] is True
+    assert doctor["next_command"] == "brigade daily plan --target ."
+
+    assert cli.main(["handoff", "doctor", "--target", str(tmp_path), "--json"]) == 0
+    handoff_doctor = json.loads(capsys.readouterr().out)
+    assert handoff_doctor["warnings"] == []
 
 
 def test_operator_quickstart_dry_run_does_not_write(tmp_path, capsys):

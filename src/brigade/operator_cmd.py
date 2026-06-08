@@ -75,10 +75,10 @@ def guide(*, profile: str = "internal-dogfood", json_output: bool = False) -> in
     return 0
 
 
-def _steps(target: Path, *, profile: str = "local-operator") -> list[dict[str, Any]]:
+def _steps(target: Path, *, profile: str = "local-operator", handoff_inboxes: list[str] | None = None) -> list[dict[str, Any]]:
     steps = [
         {"id": "daily", "path": daily_cmd._config_path(target), "command": daily_cmd.init, "kwargs": {}},
-        {"id": "handoff-sources", "path": handoff_cmd.default_sources_path(target), "command": handoff_cmd.sources_init, "kwargs": {}},
+        {"id": "handoff-sources", "path": handoff_cmd.default_sources_path(target), "command": handoff_cmd.sources_init, "kwargs": {"inboxes": handoff_inboxes} if handoff_inboxes is not None else {}},
         {"id": "work-backup", "path": work_cmd._backup_config_path(target), "command": work_cmd.backup_init, "kwargs": {"update_gitignore": False}},
         {"id": "work-scanners", "path": work_cmd._scanner_config_path(target), "command": work_cmd.scanners_init, "kwargs": {"update_gitignore": False}},
         {"id": "work-review", "path": work_cmd._review_config_path(target), "command": work_cmd.review_init, "kwargs": {"update_gitignore": False}},
@@ -99,11 +99,11 @@ def _validate_profile(profile: str) -> str:
     return profile
 
 
-def plan_payload(target: Path, *, profile: str = "local-operator") -> dict[str, Any]:
+def plan_payload(target: Path, *, profile: str = "local-operator", handoff_inboxes: list[str] | None = None) -> dict[str, Any]:
     target = target.expanduser().resolve()
     profile = _validate_profile(profile)
     steps = []
-    for step in _steps(target, profile=profile):
+    for step in _steps(target, profile=profile, handoff_inboxes=handoff_inboxes):
         path = step["path"]
         steps.append(
             {
@@ -2067,6 +2067,7 @@ def init(
     *,
     target: Path,
     profile: str = "local-operator",
+    handoff_inboxes: list[str] | None = None,
     force: bool = False,
     dry_run: bool = False,
     waive_public_release: bool = False,
@@ -2082,7 +2083,7 @@ def init(
         print(f"error: {exc}", file=sys.stderr)
         return 2
     if dry_run:
-        payload = plan_payload(target, profile=profile)
+        payload = plan_payload(target, profile=profile, handoff_inboxes=handoff_inboxes)
         payload["dry_run"] = True
         payload["waive_public_release"] = waive_public_release
         if json_output:
@@ -2095,7 +2096,7 @@ def init(
         return 0
 
     results: list[dict[str, Any]] = []
-    for step in _steps(target, profile=profile):
+    for step in _steps(target, profile=profile, handoff_inboxes=handoff_inboxes):
         path = step["path"]
         if path.exists() and not force:
             results.append({"id": step["id"], "path": str(path), "status": "skipped", "reason": "already exists"})
@@ -2140,6 +2141,7 @@ def _bootstrap_ok(results: list[dict[str, Any]], post_actions: list[dict[str, An
 
 def _post_init_actions(target: Path, *, profile: str, waive_public_release: bool) -> list[dict[str, Any]]:
     actions: list[dict[str, Any]] = []
+    actions.append(_ensure_initial_handoff_ingest_log(target))
     if profile == "internal-dogfood":
         output = StringIO()
         with redirect_stdout(output):
@@ -2156,6 +2158,18 @@ def _post_init_actions(target: Path, *, profile: str, waive_public_release: bool
     if waive_public_release:
         actions.append(_waive_public_release_readiness(target))
     return actions
+
+
+def _ensure_initial_handoff_ingest_log(target: Path) -> dict[str, Any]:
+    path = target / ".brigade" / "handoff-ingest" / "latest.log"
+    if path.exists():
+        return {"id": "handoff-ingest-log", "status": "skipped", "path": str(path), "reason": "already exists"}
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("bootstrap: no handoff ingest runs yet\n")
+    except OSError as exc:
+        return {"id": "handoff-ingest-log", "status": "error", "path": str(path), "return_code": 1, "detail": str(exc)}
+    return {"id": "handoff-ingest-log", "status": "written", "path": str(path), "return_code": 0}
 
 
 def _waive_public_release_readiness(target: Path) -> dict[str, Any]:
@@ -2333,7 +2347,7 @@ def doctor_payload(target: Path, *, profile: str = "internal-dogfood") -> dict[s
         first = blockers[0]
         next_command = str(first.get("suggested_next_command") or "brigade operator status --profile internal-dogfood --target .")
     else:
-        next_command = str(daily_status.get("next_recommended_command") or "brigade daily plan --target .")
+        next_command = _operator_doctor_next_command(profile, daily_status)
     return {
         "target": status["target"],
         "profile": profile,
@@ -2370,6 +2384,19 @@ def doctor_payload(target: Path, *, profile: str = "internal-dogfood") -> dict[s
             "Run brigade operator sync-tools --target . after changing tracked tool sources.",
         ],
     }
+
+
+def _operator_doctor_next_command(profile: str, daily_status: dict[str, Any]) -> str:
+    command = str(daily_status.get("next_recommended_command") or "brigade daily plan --target .")
+    selected = daily_status.get("selected_action") if isinstance(daily_status.get("selected_action"), dict) else {}
+    if (
+        profile == "local-operator"
+        and selected.get("source_subsystem") == "center-readiness"
+        and selected.get("action_type") == "import-readiness-issues"
+        and selected.get("safe_summary") == "release readiness receipt is missing"
+    ):
+        return "brigade daily plan --target ."
+    return command
 
 
 def doctor(*, target: Path, profile: str = "internal-dogfood", json_output: bool = False) -> int:
@@ -2772,7 +2799,8 @@ def quickstart(
         _print_quickstart(payload)
         return 1
 
-    init_rc, init_payload = _capture_json_call(init, target=target, profile="local-operator", force=force, dry_run=dry_run)
+    selected_inboxes = [WRITER_INBOXES[harness] for harness in selected_harnesses if harness in WRITER_INBOXES]
+    init_rc, init_payload = _capture_json_call(init, target=target, profile="local-operator", handoff_inboxes=selected_inboxes, force=force, dry_run=dry_run)
     init_status = "planned" if dry_run and init_rc == 0 else "ok" if init_rc == 0 else "error"
     steps.append({"id": "operator-init", "status": init_status, "return_code": init_rc, "payload": init_payload})
 

@@ -83,6 +83,7 @@ Quickstart runs these local-only steps:
 
 - installs Brigade repo or workspace templates
 - writes host-local `.brigade/` operator config
+- scopes handoff source coverage to the selected writer harnesses and writes a local bootstrap handoff-ingest latest-run log
 - imports built-in portable tools and skills
 - projects harness-specific files such as Codex skills or Claude command docs
 - verifies selected handoff writer inboxes

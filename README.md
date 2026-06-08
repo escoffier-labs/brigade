@@ -31,6 +31,8 @@ This is the most important part of Brigade. The chef owns the station, and every
 
 Brigade is usable now for real first-run workflows. The tested path is installing the CLI, running `operator quickstart` in a repo or operator workspace, checking `operator doctor --profile local-operator`, writing memory handoffs, projecting portable skills and tools, and using the local security scanner.
 
+Quickstart keeps the first run scoped to the harnesses you select: a `--harnesses codex` setup watches the Codex handoff inbox, writes a local bootstrap handoff-ingest log, and leaves unwired side harnesses quiet until you add them.
+
 It is still early-stage and being actively fleshed out. The current focus is hardening the first-run path, roadmap and command drift checks, daily operator loop, and local evidence closeouts. Expect sharp edges around advanced workflows, new harness adapters, repo-fleet evidence, and release-candidate evidence. If you hit a broken workflow, confusing command, missing adapter, or setup issue, open a GitHub issue in [`escoffier-labs/brigade`](https://github.com/escoffier-labs/brigade/issues) and I will get it addressed as soon as I can.
 
 Want an agent to set this up for you? Point it at this repository. The root [`AGENTS.md`](AGENTS.md) tells agents how to install Brigade, verify with doctor, adapt your existing homegrown workflow instead of replacing it, keep local generated folders out of commits, and stop before any remote or destructive action. The fuller walkthrough is in [`docs/agent-assisted-setup.md`](docs/agent-assisted-setup.md).
