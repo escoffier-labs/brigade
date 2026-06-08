@@ -105,7 +105,7 @@ argument_template = { path = "{path}", mode = "--mode={mode}" }
 runtime_id = "local-helper"
 requires_runtime = false
 runtime_health_path = ".brigade/tools/runtime/local-helper.json"
-supported_harnesses = ["claude", "codex", "opencode", "antigravity", "pi"]
+supported_harnesses = ["claude", "codex", "opencode", "antigravity", "pi", "cursor"]
 projections = { claude = ".claude/commands/simplify.md", codex = ".codex/skills/simplify/SKILL.md" }
 health_path = ".brigade/tools/simplify-health.json"
 fingerprint = "source-fingerprint"
@@ -141,7 +141,7 @@ Fields:
 - `health_path`: optional local health summary file used for stale-health checks.
 - `fingerprint`: optional source fingerprint when the source file is generated elsewhere.
 
-Supported harness labels are local conventions. Brigade recognizes Claude Code, Codex, OpenCode, Antigravity, Pi, Hermes, OpenClaw, MCP, and scripts through the labels `claude`, `codex`, `opencode`, `antigravity`, `pi`, `hermes`, `openclaw`, `mcp`, and `scripts`.
+Supported harness labels are local conventions. Brigade recognizes Claude Code, Codex, OpenCode, Antigravity, Pi, Cursor, Hermes, OpenClaw, MCP, and scripts through the labels `claude`, `codex`, `opencode`, `antigravity`, `pi`, `cursor`, `hermes`, `openclaw`, `mcp`, and `scripts`.
 
 ## Built-In Defaults
 

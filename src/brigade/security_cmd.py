@@ -84,6 +84,7 @@ SKIP_PREFIXES = (
     (".opencode", "memory-handoffs"),
     (".antigravity", "memory-handoffs"),
     (".pi", "memory-handoffs"),
+    (".cursor", "memory-handoffs"),
     (".hermes", "memory-handoffs"),
 )
 
@@ -148,7 +149,7 @@ TEMPLATE_ALLOWLIST_RE = re.compile(
     r"(example[.](com|org|net|invalid)|local" r"host|127[.]0[.]0[.]1|0[.]0[.]0[.]0|<[^>]+>|\{\{[^}]+\}\}|\$\{?[A-Z_][A-Z0-9_]*(?::-[^}]*)?\}?)",
     re.IGNORECASE,
 )
-HARNESS_ROOTS = {".brigade", ".claude", ".codex", ".opencode", ".antigravity", ".pi", ".openclaw", ".hermes"}
+HARNESS_ROOTS = {".brigade", ".claude", ".codex", ".opencode", ".antigravity", ".pi", ".cursor", ".openclaw", ".hermes"}
 HARNESS_PATH_KEYS = {
     "bootstrap_files",
     "cache_path",

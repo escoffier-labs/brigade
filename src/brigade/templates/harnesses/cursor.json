@@ -1,0 +1,11 @@
+{
+  "id": "cursor",
+  "role": "writer",
+  "description": "Cursor handoff inbox. (AGENTS.md is in the depth baseline; Cursor CLI also reads .cursor/rules/.)",
+  "files": [
+    {"src": "cursor/memory-handoffs/TEMPLATE.md", "dst": ".cursor/memory-handoffs/TEMPLATE.md"}
+  ],
+  "dirs": [
+    ".cursor/memory-handoffs/processed"
+  ]
+}

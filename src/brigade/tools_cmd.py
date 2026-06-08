@@ -37,7 +37,7 @@ CALL_STALE_HOURS = 72
 CALL_RUNNING_STALE_HOURS = 2
 PROJECTION_MARKER = "brigade-tool-projection:"
 FAMILIES = ("skill", "slash-command", "superpower", "mcp", "openapi", "graphql", "script", "custom")
-KNOWN_HARNESSES = ("claude", "codex", "opencode", "antigravity", "pi", "hermes", "openclaw", "mcp", "scripts")
+KNOWN_HARNESSES = ("claude", "codex", "opencode", "antigravity", "pi", "cursor", "hermes", "openclaw", "mcp", "scripts")
 PARITY_ISSUE_TYPES = {"parity_gap", "missing_projection", "stale_projection", "conflicted_projection", "unmanaged_projection"}
 APPROVAL_MODES = ("never", "on-request", "always")
 SCHEMA_TYPES = ("object", "array", "string", "number", "integer", "boolean", "null")
@@ -56,13 +56,14 @@ DEFAULT_TOOLS = (
         "enabled": True,
         "description": "Portable simplify command placeholder.",
         "source_path": "tools/simplify.md",
-        "supported_harnesses": ["claude", "codex", "opencode", "antigravity", "pi", "hermes", "openclaw", "mcp", "scripts"],
+        "supported_harnesses": ["claude", "codex", "opencode", "antigravity", "pi", "cursor", "hermes", "openclaw", "mcp", "scripts"],
         "projections": {
             "claude": ".claude/commands/simplify.md",
             "codex": ".codex/skills/simplify/SKILL.md",
             "opencode": ".opencode/commands/simplify.md",
             "antigravity": ".antigravity/commands/simplify.md",
             "pi": ".pi/commands/simplify.md",
+            "cursor": ".cursor/rules/simplify.md",
             "hermes": ".hermes/commands/simplify.md",
             "openclaw": ".openclaw/commands/simplify.md",
             "mcp": ".mcp/simplify.md",
@@ -76,13 +77,14 @@ DEFAULT_TOOLS = (
         "enabled": True,
         "description": "Portable superpowers placeholder.",
         "source_path": "tools/superpowers.md",
-        "supported_harnesses": ["claude", "codex", "opencode", "antigravity", "pi", "hermes", "openclaw", "mcp", "scripts"],
+        "supported_harnesses": ["claude", "codex", "opencode", "antigravity", "pi", "cursor", "hermes", "openclaw", "mcp", "scripts"],
         "projections": {
             "claude": ".claude/commands/superpowers.md",
             "codex": ".codex/skills/superpowers/SKILL.md",
             "opencode": ".opencode/superpowers/superpowers.md",
             "antigravity": ".antigravity/superpowers/superpowers.md",
             "pi": ".pi/superpowers/superpowers.md",
+            "cursor": ".cursor/rules/superpowers.md",
             "hermes": ".hermes/superpowers/superpowers.md",
             "openclaw": ".openclaw/superpowers/superpowers.md",
             "mcp": ".mcp/superpowers.md",
@@ -96,13 +98,14 @@ DEFAULT_TOOLS = (
         "enabled": True,
         "description": "Frontend implementation and visual quality workflow.",
         "source_path": "tools/frontend.md",
-        "supported_harnesses": ["claude", "codex", "opencode", "antigravity", "pi", "hermes", "openclaw", "mcp", "scripts"],
+        "supported_harnesses": ["claude", "codex", "opencode", "antigravity", "pi", "cursor", "hermes", "openclaw", "mcp", "scripts"],
         "projections": {
             "claude": ".claude/commands/frontend.md",
             "codex": ".codex/skills/frontend/SKILL.md",
             "opencode": ".opencode/commands/frontend.md",
             "antigravity": ".antigravity/commands/frontend.md",
             "pi": ".pi/commands/frontend.md",
+            "cursor": ".cursor/rules/frontend.md",
             "hermes": ".hermes/commands/frontend.md",
             "openclaw": ".openclaw/commands/frontend.md",
             "mcp": ".mcp/frontend.md",
@@ -116,13 +119,14 @@ DEFAULT_TOOLS = (
         "enabled": True,
         "description": "Quality review workflow for removing vague or unfinished work.",
         "source_path": "tools/antislop.md",
-        "supported_harnesses": ["claude", "codex", "opencode", "antigravity", "pi", "hermes", "openclaw", "mcp", "scripts"],
+        "supported_harnesses": ["claude", "codex", "opencode", "antigravity", "pi", "cursor", "hermes", "openclaw", "mcp", "scripts"],
         "projections": {
             "claude": ".claude/commands/antislop.md",
             "codex": ".codex/skills/antislop/SKILL.md",
             "opencode": ".opencode/commands/antislop.md",
             "antigravity": ".antigravity/commands/antislop.md",
             "pi": ".pi/commands/antislop.md",
+            "cursor": ".cursor/rules/antislop.md",
             "hermes": ".hermes/commands/antislop.md",
             "openclaw": ".openclaw/commands/antislop.md",
             "mcp": ".mcp/antislop.md",

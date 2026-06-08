@@ -5,7 +5,7 @@
 <h1 align="center">Brigade CLI</h1>
 
 <p align="center">
-  <strong>AI agent memory, handoffs, and local guardrails for Codex, Claude Code, OpenCode, Antigravity, Pi, Hermes, and OpenClaw.</strong>
+  <strong>AI agent memory, handoffs, and local guardrails for Codex, Claude Code, OpenCode, Antigravity, Pi, Cursor, Hermes, and OpenClaw.</strong>
 </p>
 
 <p align="center">
@@ -19,7 +19,7 @@ Your agents run loops. Brigade keeps the receipts.
 
 Harness agents ship smart models with empty heads. Every session they wake up knowing nothing about your machine, your rules, or what they learned yesterday, and whatever each one figures out scatters across tools and dies there.
 
-**Brigade is a local control plane for agent memory, work, tools, research, review, and release.** Writer agents like Codex, Claude Code, OpenCode, Antigravity, and Pi leave handoff notes as they work. A memory owner like OpenClaw or Hermes ingests the ones worth keeping. Brigade lints, guards, and routes everything in between, and every consequential action lands a receipt in a plain file you can grep, diff, and prune. Nothing is published, pushed, or saved behind your back, and the shared memory never decays into a junk drawer.
+**Brigade is a local control plane for agent memory, work, tools, research, review, and release.** Writer agents like Codex, Claude Code, OpenCode, Antigravity, Pi, and Cursor leave handoff notes as they work. A memory owner like OpenClaw or Hermes ingests the ones worth keeping. Brigade lints, guards, and routes everything in between, and every consequential action lands a receipt in a plain file you can grep, diff, and prune. Nothing is published, pushed, or saved behind your back, and the shared memory never decays into a junk drawer.
 
 It runs on the operator-controlled machine first, before any external service, whether that machine is a laptop, workstation, or VPS: local by default, loud about the exceptions. The GitHub repo is [`escoffier-labs/brigade`](https://github.com/escoffier-labs/brigade), the PyPI package is [`brigade-cli`](https://pypi.org/project/brigade-cli/), and the command is `brigade`.
 
@@ -54,10 +54,10 @@ brigade operator doctor --target ~/agent-workspace --profile local-operator
 For multiple agent surfaces:
 
 ```bash
-brigade operator quickstart --target ./my-repo --harnesses codex,claude,opencode,antigravity,pi
+brigade operator quickstart --target ./my-repo --harnesses codex,claude,opencode,antigravity,pi,cursor
 ```
 
-If you use [OpenClaw](https://github.com/solomonneas/openclaw), [Hermes](https://github.com/NousResearch/hermes-agent), [Codex](https://github.com/openai/codex), Claude Code, [OpenCode](https://github.com/opencode-ai/opencode), Antigravity, Pi, or a mix of them, Brigade gives those tools a shared local pattern:
+If you use [OpenClaw](https://github.com/solomonneas/openclaw), [Hermes](https://github.com/NousResearch/hermes-agent), [Codex](https://github.com/openai/codex), Claude Code, [OpenCode](https://github.com/opencode-ai/opencode), Antigravity, Pi, Cursor, or a mix of them, Brigade gives those tools a shared local pattern:
 
 1. agents write handoff notes
 2. the memory ingester scans, lints, and routes them
@@ -130,7 +130,7 @@ Agent tools are getting good enough that people use more than one of them. That 
 Brigade gives the setup a home base.
 
 - OpenClaw or Hermes can be the main memory owner.
-- Codex, Claude Code, OpenCode, Antigravity, Pi, and Hermes can write handoff notes.
+- Codex, Claude Code, OpenCode, Antigravity, Pi, Cursor, and Hermes can write handoff notes.
 - You can inspect and lint those notes before saving them.
 - Local receipts show what happened during work, scans, and reviews.
 - Risky actions stay manual.
@@ -167,7 +167,7 @@ brigade operator quickstart --target ~/agent-workspace --depth workspace --harne
 brigade operator doctor --target ~/agent-workspace --profile local-operator
 ```
 
-Use `--dry-run` first if you want to preview the local files Brigade will write. To wire more than one agent surface, pass a comma-separated list such as `--harnesses codex,claude,opencode,antigravity,pi`.
+Use `--dry-run` first if you want to preview the local files Brigade will write. To wire more than one agent surface, pass a comma-separated list such as `--harnesses codex,claude,opencode,antigravity,pi,cursor`.
 
 If you already have a homegrown setup with scripts, handoff folders, crons, or process managers, use the adoption loop before changing it:
 
@@ -215,6 +215,7 @@ Each writer harness gets its own local inbox:
 - `.opencode/memory-handoffs/`
 - `.antigravity/memory-handoffs/`
 - `.pi/memory-handoffs/`
+- `.cursor/memory-handoffs/`
 - `.hermes/memory-handoffs/`
 
 The memory owner, usually OpenClaw or Hermes, can ingest handoffs into the permanent memory files. Brigade keeps the handoff format consistent so different tools can contribute without each one inventing its own note style.
@@ -227,6 +228,7 @@ flowchart LR
         O[".opencode/memory-handoffs/"]
         A[".antigravity/memory-handoffs/"]
         P[".pi/memory-handoffs/"]
+        CU[".cursor/memory-handoffs/"]
         H[".hermes/memory-handoffs/"]
     end
 
@@ -345,7 +347,7 @@ For memory:
 - scan handoff drafts with Content Guard before they become durable memory
 - track which local inboxes the ingestor should watch
 - reconcile ingester receipts so skipped, failed, routed, and promoted notes stay visible
-- support OpenClaw, Hermes, Codex, Claude Code, OpenCode, Antigravity, and Pi conventions
+- support OpenClaw, Hermes, Codex, Claude Code, OpenCode, Antigravity, Pi, and Cursor conventions
 
 For local work:
 
@@ -461,7 +463,7 @@ flowchart LR
 
     SOURCE --> CATALOG --> PROJECT
     CATALOG --> APPROVAL --> RUN
-    PROJECT -. local generated .-> HARNESSES[".codex · .claude<br/>.opencode · .antigravity · .pi · .mcp"]
+    PROJECT -. local generated .-> HARNESSES[".codex · .claude<br/>.opencode · .antigravity · .pi · .cursor · .mcp"]
 
     classDef source fill:#ecfdf5,stroke:#059669,color:#064e3b;
     classDef local fill:#eff6ff,stroke:#2563eb,color:#1e3a8a;
@@ -576,7 +578,7 @@ OpenClaw can be the memory owner. Brigade gives nearby tools a way to contribute
 
 ```mermaid
 flowchart LR
-    WRITERS["Codex · Claude · OpenCode<br/>Antigravity · Pi writer inboxes"]
+    WRITERS["Codex · Claude · OpenCode<br/>Antigravity · Pi · Cursor writer inboxes"]
     BRIGADE["Brigade<br/>draft · lint · source coverage"]
     OPENCLAW["OpenClaw<br/>memory owner"]
     MEMORY["canonical memory"]
@@ -596,7 +598,7 @@ flowchart LR
 A repo-adjacent setup is:
 
 ```bash
-brigade init --target ./my-repo --depth repo --harnesses openclaw,codex,claude,opencode,antigravity,pi
+brigade init --target ./my-repo --depth repo --harnesses openclaw,codex,claude,opencode,antigravity,pi,cursor
 brigade handoff sources init --target ./my-repo
 brigade handoff doctor --target ./my-repo
 ```
@@ -719,7 +721,7 @@ The full technical walkthrough still exists; it is just not the README anymore.
 
 ## Tiny Glossary
 
-- **Harness**: an agent tool such as OpenClaw, Hermes, Codex, Claude Code, OpenCode, Antigravity, or Pi.
+- **Harness**: an agent tool such as OpenClaw, Hermes, Codex, Claude Code, OpenCode, Antigravity, Pi, or Cursor.
 - **Handoff**: a note an agent writes for later review.
 - **Inbox**: the local folder where handoff notes wait.
 - **Memory owner**: the place that keeps durable shared memory.

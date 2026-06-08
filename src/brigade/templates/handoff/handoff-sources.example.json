@@ -24,6 +24,7 @@
         ".opencode/memory-handoffs",
         ".antigravity/memory-handoffs",
         ".pi/memory-handoffs",
+        ".cursor/memory-handoffs",
         ".hermes/memory-handoffs"
       ]
     }

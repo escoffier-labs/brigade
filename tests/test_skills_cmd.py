@@ -20,7 +20,7 @@ def _write_skill(root, name="security-review"):
                 "version": "0.1.0",
                 "required_tools": ["git"],
                 "required_mcp_servers": ["github"],
-                "supported_harnesses": ["codex", "claude", "opencode", "antigravity", "pi", "openclaw", "hermes", "mcp"],
+                "supported_harnesses": ["codex", "claude", "opencode", "antigravity", "pi", "cursor", "openclaw", "hermes", "mcp"],
                 "trust_level": "workspace",
                 "tests": ["brigade skills lint security-review"],
             }
@@ -43,7 +43,7 @@ def test_skills_import_lint_search_and_install_all(tmp_path, capsys):
 
     assert skills_cmd.install(workspace=tmp_path, skill="security-review", harness="all", json_output=True) == 0
     install = json.loads(capsys.readouterr().out)
-    assert install["receipt"]["targets"] == ["codex", "claude", "opencode", "antigravity", "pi", "openclaw", "hermes", "mcp"]
+    assert install["receipt"]["targets"] == ["codex", "claude", "opencode", "antigravity", "pi", "cursor", "openclaw", "hermes", "mcp"]
     codex_skill = tmp_path / ".codex" / "skills" / "security-review" / "SKILL.md"
     assert codex_skill.is_file()
     codex_text = codex_skill.read_text()
@@ -54,6 +54,7 @@ def test_skills_import_lint_search_and_install_all(tmp_path, capsys):
     assert (tmp_path / ".opencode" / "skills" / "security-review" / "SKILL.md").is_file()
     assert (tmp_path / ".antigravity" / "skills" / "security-review" / "SKILL.md").is_file()
     assert (tmp_path / ".pi" / "skills" / "security-review" / "SKILL.md").is_file()
+    assert (tmp_path / ".cursor" / "skills" / "security-review" / "SKILL.md").is_file()
     assert not (tmp_path / ".agents" / "skills" / "security-review" / "SKILL.md").exists()
     assert (tmp_path / ".openclaw" / "skills" / "security-review" / "SKILL.md").is_file()
     assert (tmp_path / ".hermes" / "skills" / "security-review" / "SKILL.md").is_file()
@@ -126,7 +127,7 @@ def test_skills_cli_inbox_and_adapters(tmp_path, capsys):
 
     assert cli.main(["skills", "adapters", "init", "--target", str(tmp_path), "--json"]) == 0
     init_payload = json.loads(capsys.readouterr().out)
-    assert init_payload["adapter_count"] == 1
+    assert init_payload["adapter_count"] == 0
 
     assert cli.main(["skills", "adapters", "list", "--target", str(tmp_path), "--include-planned", "--json"]) == 0
     adapters = json.loads(capsys.readouterr().out)
@@ -136,10 +137,12 @@ def test_skills_cli_inbox_and_adapters(tmp_path, capsys):
     assert antigravity["status"] == "built-in"
     pi = next(item for item in adapters["adapters"] if item["id"] == "pi")
     assert pi["status"] == "built-in"
+    cursor = next(item for item in adapters["adapters"] if item["id"] == "cursor")
+    assert cursor["status"] == "built-in"
 
     assert cli.main(["skills", "adapters", "show", "cursor", "--target", str(tmp_path), "--json"]) == 0
     cursor = json.loads(capsys.readouterr().out)
-    assert cursor["status"] == "planned"
+    assert cursor["status"] == "built-in"
 
 
 def test_skills_compatibility_reports_installed_and_planned_adapters(tmp_path, capsys):
@@ -159,7 +162,8 @@ def test_skills_compatibility_reports_installed_and_planned_adapters(tmp_path, c
     assert by_id["codex"]["install_history_count"] == 1
     assert payload["trust_score"]["score"] > 0
     assert payload["changelog"]["present"] is True
-    assert "adapter planned" in by_id["cursor"]["blockers"]
+    assert "adapter planned" not in by_id["cursor"]["blockers"]
+    assert by_id["cursor"]["render_valid"] is True
 
 
 def test_skills_lint_can_validate_harness_rendering(tmp_path, capsys):
@@ -173,9 +177,10 @@ def test_skills_lint_can_validate_harness_rendering(tmp_path, capsys):
     assert payload["render_errors"] == []
     assert payload["valid"] is True
 
-    assert skills_cmd.lint(target=tmp_path, skill="security-review", harness="cursor", json_output=True) == 1
+    assert skills_cmd.lint(target=tmp_path, skill="security-review", harness="cursor", json_output=True) == 0
     payload = json.loads(capsys.readouterr().out)
-    assert "harness adapter is planned: cursor" in payload["errors"]
+    assert payload["valid"] is True
+    assert payload["render_errors"] == []
 
 
 def test_skills_doctor_and_import_issues_surface_registry_health(tmp_path, capsys):

@@ -64,6 +64,7 @@ Usually local-only:
 - `.opencode/`
 - `.antigravity/`
 - `.pi/`
+- `.cursor/`
 - `.hermes/`
 - `.openclaw/`
 - `.mcp/`

@@ -92,6 +92,8 @@ def build_gitignore_block(selection: Selection) -> str:
         ".antigravity/superpowers/",
         ".pi/commands/",
         ".pi/superpowers/",
+        ".cursor/rules/",
+        ".cursor/skills/",
         ".hermes/commands/",
         ".hermes/superpowers/",
         ".openclaw/commands/",

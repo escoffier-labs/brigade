@@ -65,7 +65,7 @@ When adapting an existing setup, the agent should:
 - run `brigade operator adopt import-issues --target . --json` to route migration gaps into the work inbox instead of tracking them only in chat
 - run `brigade operator migration status --target . --json`, `brigade operator migration doctor --target . --json`, and `brigade operator migration consolidate --target . --surface shell_crontab --review-status needs-owner` to see whether Brigade can drive the remaining replacement work from redacted local evidence and avoid tiny record-level task slices once a rollup exists
 - run `brigade operator surfaces capture --target . --json`, `brigade operator surfaces doctor --target . --json`, `brigade operator surfaces review --target . --surface shell_crontab --status external-ok --all --reason reviewed-external-ownership`, and `brigade operator surfaces import-issues --target . --json` when external scheduler or process coverage should be tracked as redacted local evidence
-- inventory current files such as `AGENTS.md`, `CLAUDE.md`, `MEMORY.md`, `TOOLS.md`, `.codex/`, `.claude/`, `.opencode/`, `.antigravity/`, `.pi/`, `.hermes/`, and `.openclaw/`
+- inventory current files such as `AGENTS.md`, `CLAUDE.md`, `MEMORY.md`, `TOOLS.md`, `.codex/`, `.claude/`, `.opencode/`, `.antigravity/`, `.pi/`, `.cursor/`, `.hermes/`, and `.openclaw/`
 - identify the memory owner before changing memory rules
 - keep repo-shareable or durable workspace files separate from generated local projections
 - use `brigade operator quickstart --dry-run` to preview compatibility files
@@ -84,7 +84,8 @@ brigade operator quickstart --target . --harnesses claude
 brigade operator quickstart --target . --harnesses opencode
 brigade operator quickstart --target . --harnesses antigravity
 brigade operator quickstart --target . --harnesses pi
-brigade operator quickstart --target . --harnesses codex,claude,opencode,antigravity,pi
+brigade operator quickstart --target . --harnesses cursor
+brigade operator quickstart --target . --harnesses codex,claude,opencode,antigravity,pi,cursor
 brigade operator quickstart --target . --depth workspace --harnesses openclaw,hermes --owner openclaw
 ```
 

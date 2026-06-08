@@ -11,7 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added a first-10-minutes guide and compact support response templates for install, quickstart, doctor, commit-scope, homegrown setup, and security questions after launch.
 
 ### Added
-- Dogfood runs can now use configured `--agent-cli` adapters for Claude Code, Codex, OpenCode, Antigravity through `agy --print`, Pi through `pi -p`, or `ollama:<model>` instead of being hardwired to Codex.
+- Dogfood runs can now use configured `--agent-cli` adapters for Claude Code, Codex, OpenCode, Antigravity through `agy --print`, Pi through `pi -p`, Cursor through `cursor-agent -p`, or `ollama:<model>` instead of being hardwired to Codex.
 
 ## [0.8.1] - 2026-06-08
 

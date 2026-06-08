@@ -30,7 +30,7 @@ brigade operator quickstart --target ~/agent-workspace --depth workspace --harne
 Use a comma-separated harness list if you use more than one agent surface:
 
 ```bash
-brigade operator quickstart --target ./my-repo --harnesses codex,claude,opencode,antigravity,pi --dry-run
+brigade operator quickstart --target ./my-repo --harnesses codex,claude,opencode,antigravity,pi,cursor --dry-run
 ```
 
 If the target already has a homegrown operator setup with scripts, handoff folders, crons, or process managers, inspect it first:
@@ -115,6 +115,7 @@ Usually local-only:
 - `.opencode/`
 - `.antigravity/`
 - `.pi/`
+- `.cursor/`
 - `.hermes/`
 - `.openclaw/`
 - `.mcp/`

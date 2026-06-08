@@ -55,6 +55,7 @@ If a session changes how Brigade should be used in this repo, write that durable
 - OpenCode uses `.opencode/memory-handoffs/`.
 - Antigravity uses `.antigravity/memory-handoffs/`.
 - Pi uses `.pi/memory-handoffs/`.
+- Cursor uses `.cursor/memory-handoffs/`.
 - Hermes uses `.hermes/memory-handoffs/`.
 
 Prefer the writer command so the draft matches Brigade's expected section style and lints before handoff:

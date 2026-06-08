@@ -21,7 +21,7 @@ class NonInteractiveError(Exception):
     """Raised when prompt_for_selection() runs without a TTY."""
 
 
-_HARNESS_ORDER = ["claude", "codex", "opencode", "antigravity", "pi", "openclaw", "hermes"]
+_HARNESS_ORDER = ["claude", "codex", "opencode", "antigravity", "pi", "cursor", "openclaw", "hermes"]
 _DEPTH_ORDER = ["repo", "workspace"]
 _INCLUDE_ORDER = ["publisher"]
 
@@ -31,6 +31,7 @@ _HARNESS_LABELS = {
     "opencode": "OpenCode",
     "antigravity": "Antigravity",
     "pi": "Pi",
+    "cursor": "Cursor",
     "openclaw": "OpenClaw",
     "hermes": "Hermes (experimental)",
 }

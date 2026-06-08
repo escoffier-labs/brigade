@@ -385,6 +385,36 @@ def test_pi_handoff_is_ingested(tmp_target: Path):
     assert (inbox / "processed" / "2026-06-08-1215-pi.md").is_file()
 
 
+def test_cursor_handoff_is_ingested(tmp_target: Path):
+    from brigade.install import install_selection
+    from brigade.selection import Selection
+    install_selection(tmp_target, Selection(depth="workspace", harnesses=["cursor"], owner="cursor", includes=[]))
+    inbox = tmp_target / ".cursor" / "memory-handoffs"
+    _write_handoff(
+        inbox,
+        "2026-06-08-1230-cursor.md",
+        """\
+        # Memory Handoff
+
+        ## Recommended memory action
+        create-card
+
+        ## Target card
+        cursor-test.md
+
+        ## Suggested card content
+        ---
+        topic: cursor-test
+        ---
+        body line
+        """,
+    )
+    rc = ingest_mod.run(target=tmp_target, dry_run=False, promote_cards=True, route_documents=True)
+    assert rc == 0
+    assert (tmp_target / "memory" / "cards" / "cursor-test.md").is_file()
+    assert (inbox / "processed" / "2026-06-08-1230-cursor.md").is_file()
+
+
 def test_no_card_route_to_bootstrap_file_over_budget_goes_to_inbox(tmp_target: Path):
     """A route that would push a bootstrap file past its budget must inbox, not append."""
     from brigade import budgets

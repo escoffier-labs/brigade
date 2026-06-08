@@ -42,12 +42,19 @@ def _pi_argv(prompt: str, read_only: bool, sandbox: str | None) -> List[str]:
     return ["pi", "-p", prompt]
 
 
+def _cursor_argv(prompt: str, read_only: bool, sandbox: str | None) -> List[str]:
+    if read_only or sandbox == "read-only":
+        return ["cursor-agent", "-p", "--mode", "plan", "--output-format", "text", prompt]
+    return ["cursor-agent", "-p", "--output-format", "text", prompt]
+
+
 _ADAPTERS: dict[str, Callable[[str, bool, str | None], List[str]]] = {
     "claude": _claude_argv,
     "codex": _codex_argv,
     "opencode": _opencode_argv,
     "antigravity": _antigravity_argv,
     "pi": _pi_argv,
+    "cursor": _cursor_argv,
 }
 
 
@@ -67,6 +74,8 @@ def command_for(cli_ref: str) -> str:
         return "ollama"
     if cli_ref == "antigravity":
         return "agy"
+    if cli_ref == "cursor":
+        return "cursor-agent"
     return cli_ref
 
 
@@ -84,7 +93,7 @@ def build_argv(
 
     builder = _ADAPTERS.get(cli_ref)
     if builder is None:
-        raise ValueError(f"unknown agent cli: {cli_ref!r} (known: claude, codex, opencode, antigravity, pi, ollama:<model>)")
+        raise ValueError(f"unknown agent cli: {cli_ref!r} (known: claude, codex, opencode, antigravity, pi, cursor, ollama:<model>)")
     return builder(prompt, read_only, sandbox)
 
 

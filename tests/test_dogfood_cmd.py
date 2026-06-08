@@ -196,6 +196,15 @@ def test_dogfood_init_defaults_handoff_inbox_to_pi_writer(tmp_path):
     assert loaded.handoff_inbox == tmp_path / ".pi" / "memory-handoffs"
 
 
+def test_dogfood_init_defaults_handoff_inbox_to_cursor_writer(tmp_path):
+    assert dogfood_cmd.init(target=tmp_path, agent_cli="cursor") == 0
+
+    loaded = dogfood_cmd.load_config(tmp_path)
+    assert loaded is not None
+    assert loaded.agent_cli == "cursor"
+    assert loaded.handoff_inbox == tmp_path / ".cursor" / "memory-handoffs"
+
+
 def test_dogfood_init_refuses_existing_without_force(tmp_path, capsys):
     assert dogfood_cmd.init(target=tmp_path) == 0
     assert dogfood_cmd.init(target=tmp_path) == 2
