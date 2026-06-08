@@ -4,6 +4,8 @@ Brigade is local-first. Local-first means local data on the operator-controlled 
 
 The target can be a code repo, an OpenClaw or Hermes memory workspace, a VPS operator directory, or another local workspace you control. Repo installs are common, but they are not the only supported shape.
 
+For the shortest path, see [`first-10-minutes.md`](first-10-minutes.md). This page keeps the fuller setup and troubleshooting detail.
+
 ## Install
 
 ```bash

@@ -37,6 +37,8 @@ It is still early-stage and being actively fleshed out. The current focus is har
 
 Want an agent to set this up for you? Point it at this repository. The root [`AGENTS.md`](AGENTS.md) tells agents how to install Brigade, verify with doctor, adapt your existing homegrown workflow instead of replacing it, keep local generated folders out of commits, and stop before any remote or destructive action. The fuller walkthrough is in [`docs/agent-assisted-setup.md`](docs/agent-assisted-setup.md).
 
+New here? Start with [`docs/first-10-minutes.md`](docs/first-10-minutes.md). Maintainers can use [`docs/support-response-templates.md`](docs/support-response-templates.md) for quick first replies to install, quickstart, doctor, commit-scope, and security questions.
+
 Good first install:
 
 ```bash
@@ -181,7 +183,7 @@ brigade operator surfaces import-issues --target ~/agent-workspace --json
 
 `adopt plan` is read-only. `adopt capture` writes a redacted local snapshot under `.brigade/operator/adoption/`. `adopt import-issues` routes adoption gaps into the normal work inbox so the migration shows up in `work brief` and the daily loop. `operator migration status/doctor/import-issues/consolidate` rolls adoption state, surface review state, and pending migration work into one replacement-progress view, then lets a reviewed rollup supersede tiny record-level imports. `operator surfaces capture/list/doctor/review/reviews/import-issues` keeps a separate redacted registry for shell crontab, OpenClaw cron, and PM2 coverage under `.brigade/operator/surfaces/`. Scheduler and process surfaces are reported as counts, status totals, ordinal labels, review decisions, and fingerprints, not raw scheduler lines, job names, process names, command paths, host details, or environment values.
 
-For a fuller first-run walkthrough and troubleshooting checklist, see [`docs/new-user-quickstart.md`](docs/new-user-quickstart.md). If quickstart fails, use the Quickstart setup problem issue form and include the redacted `issue_report` from `brigade operator quickstart --json`.
+For a fuller first-run walkthrough and troubleshooting checklist, see [`docs/new-user-quickstart.md`](docs/new-user-quickstart.md). For the shortest path, use [`docs/first-10-minutes.md`](docs/first-10-minutes.md). If quickstart fails, use the Quickstart setup problem issue form and include the redacted `issue_report` from `brigade operator quickstart --json`.
 
 Write a handoff note:
 

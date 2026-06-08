@@ -17,7 +17,7 @@ body:
     attributes:
       label: Brigade version
       description: Output of `brigade --version`.
-      placeholder: brigade 0.8.0
+      placeholder: brigade 0.8.1
     validations:
       required: true
   - type: input

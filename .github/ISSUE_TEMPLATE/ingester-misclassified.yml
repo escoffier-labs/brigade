@@ -44,7 +44,7 @@ body:
     id: version
     attributes:
       label: Brigade version
-      placeholder: brigade 0.8.0
+      placeholder: brigade 0.8.1
     validations:
       required: true
   - type: checkboxes

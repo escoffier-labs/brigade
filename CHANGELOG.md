@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Documentation
+- Added a first-10-minutes guide and compact support response templates for install, quickstart, doctor, commit-scope, homegrown setup, and security questions after launch.
+
 ## [0.8.1] - 2026-06-08
 
 ### Added
