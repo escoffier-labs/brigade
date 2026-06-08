@@ -282,6 +282,22 @@ def test_operator_migration_import_issues_dedupes(tmp_path, capsys, monkeypatch)
     assert second["skipped"] == payload["candidate_count"]
 
 
+def test_operator_migration_status_counts_promoted_rollup_tasks(tmp_path, capsys, monkeypatch):
+    monkeypatch.setattr(operator_cmd, "_run_read_only_command", _fake_surface_run)
+
+    assert operator_cmd.migration_import_issues(target=tmp_path, json_output=True) == 0
+    imported = json.loads(capsys.readouterr().out)
+    rollup = next(item for item in imported["imports"] if item["source"] == "operator-migration")
+
+    assert work_cmd.import_promote(target=tmp_path, import_id=rollup["id"]) == 0
+    capsys.readouterr()
+
+    assert operator_cmd.migration_status(target=tmp_path, json_output=True) == 0
+    status = json.loads(capsys.readouterr().out)
+    assert status["work"]["pending_task_count"] == 1
+    assert status["work"]["pending_tasks_by_source"] == {"import:operator-migration": 1}
+
+
 def test_operator_migration_import_issues_supersedes_changed_rollups(tmp_path, capsys, monkeypatch):
     (tmp_path / ".brigade").mkdir()
     (tmp_path / ".brigade" / "config.json").write_text("{}\n")

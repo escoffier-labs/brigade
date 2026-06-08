@@ -543,7 +543,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p_runbook_closeout.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
 
     # dogfood
-    p_dogfood = sub.add_parser("dogfood", help="Run a safe Codex-only Brigade dogfood review.")
+    p_dogfood = sub.add_parser("dogfood", help="Run a safe Brigade dogfood review with a configured agent CLI.")
     p_dogfood.add_argument(
         "dogfood_args",
         nargs="*",
@@ -551,6 +551,11 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p_dogfood.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
     p_dogfood.add_argument("--output-dir", type=Path, default=None, help="Directory for run artifacts.")
+    p_dogfood.add_argument(
+        "--agent-cli",
+        default=None,
+        help="Agent CLI for dogfood runs: codex, claude, opencode, gemini, or ollama:<model>.",
+    )
     p_dogfood.add_argument(
         "--handoff-inbox",
         type=Path,
@@ -3210,6 +3215,7 @@ def main(argv=None) -> int:
                 target=args.target,
                 artifacts_dir=args.output_dir,
                 handoff_inbox=args.handoff_inbox,
+                agent_cli=args.agent_cli or dogfood_cmd.DEFAULT_AGENT_CLI,
                 force=args.force,
                 handoff=not args.no_handoff,
                 inspect=not args.no_inspect,
@@ -3238,6 +3244,7 @@ def main(argv=None) -> int:
             output_dir=args.output_dir,
             handoff=not args.no_handoff,
             handoff_inbox=args.handoff_inbox,
+            agent_cli=args.agent_cli,
             inspect=not args.no_inspect,
             native_read_only_sandbox=args.native_read_only_sandbox,
             timeout_seconds=args.timeout_seconds,

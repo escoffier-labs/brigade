@@ -285,13 +285,13 @@ For `codex` agents, `--read-only` also passes `codex exec --sandbox read-only`.
 Other adapters receive the prompt policy only.
 
 The `cli` values are adapters for installed command-line tools:
-`codex`, `claude`, and `ollama:<model>`. Brigade shells out to those tools and keeps no provider keys.
+`codex`, `claude`, `opencode`, `gemini`, and `ollama:<model>`. Brigade shells out to those tools and keeps no provider keys.
 Run `brigade roster doctor` to validate roster syntax and check which CLIs are on `PATH`.
 
 ### Dogfood
 
 `brigade dogfood` is the shortcut for using Brigade on itself or another trusted repo.
-It uses a built-in Codex-only roster, read-only prompt policy, normal run artifacts, a default Memory Handoff, and an artifact summary.
+It uses a built-in read-only roster, normal run artifacts, a default Memory Handoff, and an artifact summary.
 
 Set it up once:
 
@@ -300,7 +300,8 @@ brigade dogfood init --target /path/to/repo
 ```
 
 That writes local defaults to `.brigade/dogfood.toml`, which is gitignored because it stores machine-local paths and preferences.
-New dogfood configs default handoffs to `.codex/memory-handoffs/` because the dogfood roster is Codex-driven.
+New dogfood configs default to `agent_cli = "codex"` and handoffs under `.codex/memory-handoffs/`.
+Use `--agent-cli claude`, `--agent-cli opencode`, `--agent-cli gemini`, or `--agent-cli ollama:<model>` to run dogfood through another installed CLI. Writer CLIs with known inboxes, such as Claude Code and OpenCode, default handoffs to their own memory-handoff folders when selected.
 Pass `--handoff-inbox` if your memory owner ingests a different path.
 
 Daily commands:

@@ -26,9 +26,19 @@ def _codex_argv(prompt: str, read_only: bool, sandbox: str | None) -> List[str]:
     return ["codex", "exec", prompt]
 
 
+def _opencode_argv(prompt: str, read_only: bool, sandbox: str | None) -> List[str]:
+    return ["opencode", "run", prompt]
+
+
+def _gemini_argv(prompt: str, read_only: bool, sandbox: str | None) -> List[str]:
+    return ["gemini", "--prompt", prompt]
+
+
 _ADAPTERS: dict[str, Callable[[str, bool, str | None], List[str]]] = {
     "claude": _claude_argv,
     "codex": _codex_argv,
+    "gemini": _gemini_argv,
+    "opencode": _opencode_argv,
 }
 
 
@@ -63,7 +73,7 @@ def build_argv(
 
     builder = _ADAPTERS.get(cli_ref)
     if builder is None:
-        raise ValueError(f"unknown agent cli: {cli_ref!r} (known: claude, codex, ollama:<model>)")
+        raise ValueError(f"unknown agent cli: {cli_ref!r} (known: claude, codex, gemini, opencode, ollama:<model>)")
     return builder(prompt, read_only, sandbox)
 
 

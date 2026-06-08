@@ -1791,7 +1791,16 @@ def _operator_migration_import_summary(target: Path) -> dict[str, Any]:
 
 
 def _operator_migration_task_summary(target: Path) -> dict[str, Any]:
-    sources = {"operator-adoption", "operator-surface", "operator-surface-review", "operator-migration"}
+    sources = {
+        "operator-adoption",
+        "operator-surface",
+        "operator-surface-review",
+        "operator-migration",
+        "import:operator-adoption",
+        "import:operator-surface",
+        "import:operator-surface-review",
+        "import:operator-migration",
+    }
     try:
         ledger = work_cmd._read_task_ledger(target)
     except Exception:

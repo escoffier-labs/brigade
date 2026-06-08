@@ -6,6 +6,8 @@ from brigade import agents
 def test_build_argv_for_known_clis():
     assert agents.build_argv("claude", "hi") == ["claude", "-p", "hi"]
     assert agents.build_argv("codex", "hi") == ["codex", "exec", "hi"]
+    assert agents.build_argv("gemini", "hi") == ["gemini", "--prompt", "hi"]
+    assert agents.build_argv("opencode", "hi") == ["opencode", "run", "hi"]
     assert agents.build_argv("ollama:llama3.3", "hi") == ["ollama", "run", "llama3.3", "hi"]
 
 
@@ -18,6 +20,8 @@ def test_build_argv_for_read_only_codex():
         "hi",
     ]
     assert agents.build_argv("claude", "hi", read_only=True) == ["claude", "-p", "hi"]
+    assert agents.build_argv("gemini", "hi", read_only=True) == ["gemini", "--prompt", "hi"]
+    assert agents.build_argv("opencode", "hi", read_only=True) == ["opencode", "run", "hi"]
     assert agents.build_argv("ollama:llama3.3", "hi", read_only=True) == [
         "ollama",
         "run",
@@ -51,12 +55,16 @@ def test_build_argv_unknown_raises():
 def test_command_for_returns_binary():
     assert agents.command_for("claude") == "claude"
     assert agents.command_for("codex") == "codex"
+    assert agents.command_for("gemini") == "gemini"
+    assert agents.command_for("opencode") == "opencode"
     assert agents.command_for("ollama:llama3.3") == "ollama"
 
 
 def test_is_known():
     assert agents.is_known("claude")
     assert agents.is_known("codex")
+    assert agents.is_known("gemini")
+    assert agents.is_known("opencode")
     assert agents.is_known("ollama:anything")
     assert not agents.is_known("bogus")
 

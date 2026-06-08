@@ -8,6 +8,7 @@ from pathlib import Path
 
 from brigade import cli
 from brigade import chat_cmd
+from brigade import center_cmd
 from brigade import dogfood_cmd
 from brigade import release_cmd
 from brigade import repos_cmd
@@ -960,6 +961,78 @@ def test_work_brief_json_reports_recent_sessions(tmp_path, monkeypatch, capsys):
     assert payload["dogfood"]["next_source"] == "final"
     assert payload["next"] == "Build JSON brief."
     assert payload["suggested_command"] == 'brigade work end --note "..." --handoff'
+
+
+def test_work_brief_json_compacts_heavy_report_and_fleet_health(tmp_path, monkeypatch, capsys):
+    _init_git_repo(tmp_path)
+    dogfood_cmd.init(target=tmp_path)
+    capsys.readouterr()
+    monkeypatch.setattr(work_cmd.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(
+        center_cmd,
+        "report_health",
+        lambda target: {
+            "issue_count": 0,
+            "top_issue": None,
+            "latest": {
+                "report_id": "operator-report-1",
+                "created_at": "2026-06-08T12:00:00+00:00",
+                "activity": [{"id": f"activity-{index}", "safe_summary": "large"} for index in range(100)],
+                "reviews": [{"id": "review-1"}],
+            },
+            "latest_diff": {
+                "report_id": "report-diff-1",
+                "status": "unchanged",
+                "activity": [{"id": "diff-activity"}],
+            },
+        },
+    )
+    monkeypatch.setattr(
+        repos_cmd,
+        "health",
+        lambda target: {
+            "config_path": str(tmp_path / ".brigade" / "repos.toml"),
+            "repo_count": 20,
+            "issue_count": 0,
+            "top_issue": None,
+            "report": {"issue_count": 0, "latest": {"report_id": "fleet-report-1", "repos": [{"id": "repo"}]}},
+            "actions": {"open_count": 1, "top_action": {"id": "action-1", "safe_summary": "dispatch"}},
+            "sweep": {
+                "issue_count": 0,
+                "latest": {"sweep_id": "sweep-1", "repos": [{"id": f"repo-{index}"} for index in range(50)]},
+            },
+            "release_train": {
+                "issue_count": 0,
+                "latest": {
+                    "train_id": "train-1",
+                    "status": "reviewed",
+                    "repos": [{"repo_id": f"repo-{index}", "details": "large"} for index in range(50)],
+                    "suggested_next_commands": ["brigade release doctor"],
+                },
+                "actions": {"open_count": 2, "top_action": {"id": "release-action-1", "safe_summary": "release"}},
+                "evidence": {"record_count": 3, "top_issue": None},
+            },
+        },
+    )
+
+    assert work_cmd.brief(target=tmp_path, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+
+    latest_report = payload["operator_report"]["latest"]
+    assert latest_report["report_id"] == "operator-report-1"
+    assert latest_report["activity_count"] == 100
+    assert latest_report["review_count"] == 1
+    assert "activity" not in latest_report
+    assert "reviews" not in latest_report
+
+    latest_train = payload["repo_fleet"]["release_train"]["latest"]
+    assert latest_train["train_id"] == "train-1"
+    assert latest_train["repo_count"] == 50
+    assert "repos" not in latest_train
+    latest_sweep = payload["repo_fleet"]["sweep"]["latest"]
+    assert latest_sweep["sweep_id"] == "sweep-1"
+    assert latest_sweep["repo_count"] == 50
+    assert "repos" not in latest_sweep
 
 
 def test_work_task_ledger_add_list_show_and_done(tmp_path, monkeypatch, capsys):

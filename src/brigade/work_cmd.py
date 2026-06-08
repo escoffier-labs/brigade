@@ -5261,6 +5261,156 @@ def _suggested_command(active: dict[str, Any] | None, next_text: object, source:
     return "brigade work run"
 
 
+def _pick_fields(payload: object, fields: list[str]) -> dict[str, Any] | None:
+    if not isinstance(payload, dict):
+        return None
+    compact: dict[str, Any] = {}
+    for field in fields:
+        if field not in payload:
+            continue
+        value = payload.get(field)
+        if isinstance(value, str | int | float | bool | type(None)):
+            compact[field] = value
+    return compact
+
+
+def _compact_top(payload: object) -> dict[str, Any] | None:
+    return _pick_fields(
+        payload,
+        [
+            "status",
+            "name",
+            "detail",
+            "issue_type",
+            "id",
+            "local_id",
+            "priority",
+            "severity",
+            "safe_summary",
+            "suggested_next_command",
+            "suggested_command",
+        ],
+    )
+
+
+def _compact_operator_report_latest(payload: object) -> dict[str, Any] | None:
+    compact = _pick_fields(
+        payload,
+        [
+            "report_id",
+            "id",
+            "created_at",
+            "status",
+            "review_status",
+            "blocker_count",
+            "warning_count",
+            "fingerprint",
+        ],
+    )
+    if compact is None:
+        return None
+    activity = payload.get("activity") if isinstance(payload, dict) else None
+    if isinstance(activity, list):
+        compact["activity_count"] = len(activity)
+    reviews = payload.get("reviews") if isinstance(payload, dict) else None
+    if isinstance(reviews, list):
+        compact["review_count"] = len(reviews)
+    return compact
+
+
+def _compact_repo_fleet_latest(payload: object) -> dict[str, Any] | None:
+    compact = _pick_fields(
+        payload,
+        [
+            "sweep_id",
+            "train_id",
+            "report_id",
+            "path_label",
+            "status",
+            "created_at",
+            "started_at",
+            "completed_at",
+            "repo_count",
+            "failed_count",
+            "warning_count",
+            "blocker_count",
+            "open_count",
+            "action_count",
+            "classification_counts",
+            "suggested_next_commands",
+        ],
+    )
+    if compact is None:
+        return None
+    repos = payload.get("repos") if isinstance(payload, dict) else None
+    if isinstance(repos, list):
+        compact["repo_count"] = compact.get("repo_count", len(repos))
+    commands = payload.get("commands") if isinstance(payload, dict) else None
+    if isinstance(commands, list):
+        compact["command_count"] = len(commands)
+    closeout = payload.get("closeout") if isinstance(payload, dict) else None
+    if isinstance(closeout, dict):
+        compact["closeout"] = _pick_fields(closeout, ["status", "reviewed_at", "blocker_count", "warning_count"])
+    return compact
+
+
+def _compact_health_section(payload: object) -> dict[str, Any] | None:
+    if not isinstance(payload, dict):
+        return None
+    compact: dict[str, Any] = {}
+    for key in (
+        "config_path",
+        "repo_count",
+        "report_count",
+        "action_count",
+        "open_count",
+        "issue_count",
+        "due_count",
+        "suggested_command",
+        "suggested_next_command",
+    ):
+        if key in payload:
+            compact[key] = payload[key]
+    if "top_issue" in payload:
+        compact["top_issue"] = _compact_top(payload.get("top_issue"))
+    if "top_action" in payload:
+        compact["top_action"] = _compact_top(payload.get("top_action"))
+    if "counts" in payload:
+        compact["counts"] = payload.get("counts")
+    if "checks" in payload and isinstance(payload.get("checks"), list):
+        compact["checks"] = payload["checks"][:5]
+        compact["check_count"] = len(payload["checks"])
+    if "latest" in payload:
+        compact["latest"] = _compact_repo_fleet_latest(payload.get("latest"))
+    if "review" in payload and isinstance(payload.get("review"), dict):
+        review = payload["review"]
+        compact["review"] = {
+            "issue_count": review.get("issue_count", 0),
+            "top_issue": _compact_top(review.get("top_issue")),
+            "top_pending_import": _import_summary(review.get("top_pending_import")) if review.get("top_pending_import") else None,
+        }
+    return compact
+
+
+def _compact_repo_fleet_health(payload: dict[str, Any]) -> dict[str, Any]:
+    release_train = payload.get("release_train") if isinstance(payload.get("release_train"), dict) else {}
+    compact_release = _compact_health_section(release_train) or {}
+    if isinstance(release_train.get("actions"), dict):
+        compact_release["actions"] = _compact_health_section(release_train.get("actions"))
+    if isinstance(release_train.get("evidence"), dict):
+        compact_release["evidence"] = _compact_health_section(release_train.get("evidence"))
+    return {
+        "config_path": payload["config_path"],
+        "repo_count": payload["repo_count"],
+        "issue_count": payload["issue_count"],
+        "top_issue": payload["top_issue"],
+        "report": _compact_health_section(payload.get("report")),
+        "actions": _compact_health_section(payload.get("actions")),
+        "sweep": _compact_health_section(payload.get("sweep")),
+        "release_train": compact_release,
+    }
+
+
 def _brief_payload(target: Path, *, limit: int = 3) -> dict[str, Any]:
     from . import center_cmd, chat_cmd, context_cmd, daily_cmd, handoff_cmd, learn_cmd, memory_cmd, notifications_cmd, pantry_cmd, phases_cmd, projects_cmd, repos_cmd, research_cmd, roadmap_cmd, security_cmd, tools_cmd
 
@@ -5398,14 +5548,7 @@ def _brief_payload(target: Path, *, limit: int = 3) -> dict[str, Any]:
             "patterns": roadmap_health["patterns"],
         },
         "repo_fleet": {
-            "config_path": repo_health["config_path"],
-            "repo_count": repo_health["repo_count"],
-            "issue_count": repo_health["issue_count"],
-            "top_issue": repo_health["top_issue"],
-                "report": repo_health.get("report"),
-                "actions": repo_health.get("actions"),
-                "sweep": repo_health.get("sweep"),
-            "release_train": repo_health.get("release_train"),
+            **_compact_repo_fleet_health(repo_health),
         },
         "pantry": pantry_health,
         "notifications": notification_health,
@@ -5433,8 +5576,8 @@ def _brief_payload(target: Path, *, limit: int = 3) -> dict[str, Any]:
         "operator_report": {
             "issue_count": center_report_health["issue_count"],
             "top_issue": center_report_health["top_issue"],
-            "latest": center_report_health["latest"],
-            "latest_diff": center_report_health.get("latest_diff"),
+            "latest": _compact_operator_report_latest(center_report_health["latest"]),
+            "latest_diff": _compact_repo_fleet_latest(center_report_health.get("latest_diff")),
         },
         "operator_actions": {
             "actions_path": center_actions_health["actions_path"],

@@ -12,12 +12,15 @@ from pathlib import Path
 from typing import Any
 
 from . import aboyeur
+from . import agents
 from . import runs_cmd
 from .roster import Agent, Roster
+from .selection import WRITER_INBOXES
 
 DEFAULT_TASK = "Review this repo and recommend the next implementation slice."
 DEFAULT_TIMEOUT_SECONDS = 600.0
 CONFIG_REL_PATH = ".brigade/dogfood.toml"
+DEFAULT_AGENT_CLI = "codex"
 DEFAULT_HANDOFF_INBOX_REL_PATH = ".codex/memory-handoffs"
 NEXT_LABELS = (
     "next practical slice",
@@ -32,6 +35,7 @@ NEXT_LABELS = (
 class DogfoodConfig:
     target: Path | None = None
     artifacts_dir: Path | None = None
+    agent_cli: str = DEFAULT_AGENT_CLI
     handoff: bool = True
     handoff_inbox: Path | None = None
     inspect: bool = True
@@ -39,25 +43,25 @@ class DogfoodConfig:
     timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS
 
 
-def _dogfood_roster(timeout_seconds: float) -> Roster:
+def _dogfood_roster(timeout_seconds: float, agent_cli: str = DEFAULT_AGENT_CLI) -> Roster:
     return Roster(
         orchestrator="chef",
         agents={
             "chef": Agent(
                 "chef",
-                "codex",
+                agent_cli,
                 "Plan one small read-only review task and synthesize a concise final answer.",
                 timeout_seconds=timeout_seconds,
             ),
             "reviewer": Agent(
                 "reviewer",
-                "codex",
+                agent_cli,
                 "Inspect the target repo in read-only mode and recommend the next practical implementation slice.",
                 timeout_seconds=timeout_seconds,
             ),
         },
         max_workers=1,
-        allow_models=("codex",),
+        allow_models=(agent_cli,),
         timeout_seconds=timeout_seconds,
     )
 
@@ -122,12 +126,21 @@ def _as_positive_float(value: object, field: str) -> float:
     raise ValueError(f"{field} must be a positive number")
 
 
+def _as_agent_cli(value: object, field: str = "agent_cli") -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{field} must be a non-empty string")
+    cli_ref = value.strip()
+    if not agents.is_known(cli_ref):
+        raise ValueError(f"{field} is unknown: {cli_ref!r}")
+    return cli_ref
+
+
 def config_path(target: Path) -> Path:
     return target / CONFIG_REL_PATH
 
 
-def default_handoff_inbox(target: Path) -> Path:
-    return target / DEFAULT_HANDOFF_INBOX_REL_PATH
+def default_handoff_inbox(target: Path, agent_cli: str = DEFAULT_AGENT_CLI) -> Path:
+    return target / WRITER_INBOXES.get(agent_cli, DEFAULT_HANDOFF_INBOX_REL_PATH)
 
 
 def load_config(target: Path) -> DogfoodConfig | None:
@@ -140,6 +153,7 @@ def load_config(target: Path) -> DogfoodConfig | None:
     return DogfoodConfig(
         target=_as_path(data.get("target"), "target", target),
         artifacts_dir=_as_path(data.get("artifacts_dir"), "artifacts_dir", target),
+        agent_cli=_as_agent_cli(data.get("agent_cli", DEFAULT_AGENT_CLI)),
         handoff=_as_bool(data.get("handoff", True), "handoff"),
         handoff_inbox=_as_path(data.get("handoff_inbox"), "handoff_inbox", target),
         inspect=_as_bool(data.get("inspect", True), "inspect"),
@@ -351,17 +365,19 @@ def status(*, target: Path) -> int:
     effective_target = cfg.target if cfg and cfg.target is not None else target
     effective_target = effective_target.expanduser().resolve()
     artifacts_dir = cfg.artifacts_dir if cfg and cfg.artifacts_dir is not None else effective_target / ".brigade" / "runs"
+    agent_cli = cfg.agent_cli if cfg else DEFAULT_AGENT_CLI
     handoff = cfg.handoff if cfg else True
     handoff_inbox = (
         cfg.handoff_inbox
         if cfg and cfg.handoff_inbox is not None
-        else default_handoff_inbox(effective_target)
+        else default_handoff_inbox(effective_target, agent_cli)
     )
     inspect = cfg.inspect if cfg else True
     native = cfg.native_read_only_sandbox if cfg else False
     timeout = cfg.timeout_seconds if cfg else DEFAULT_TIMEOUT_SECONDS
 
-    codex_path = shutil.which("codex")
+    agent_command = agents.command_for(agent_cli)
+    agent_path = shutil.which(agent_command)
     brigade_path = shutil.which("brigade")
     blockers: list[str] = []
     warnings: list[str] = []
@@ -369,8 +385,8 @@ def status(*, target: Path) -> int:
         warnings.append(f"config missing: run `brigade dogfood init --target {target}`")
     if not effective_target.is_dir():
         blockers.append(f"configured target is not a directory: {effective_target}")
-    if codex_path is None:
-        blockers.append("codex CLI not found on PATH")
+    if agent_path is None:
+        blockers.append(f"{agent_command} CLI not found on PATH")
     if brigade_path is None:
         warnings.append("brigade CLI not found on PATH; use the venv command or install the package")
 
@@ -379,6 +395,7 @@ def status(*, target: Path) -> int:
     _setting_line("config", path if path.exists() else f"{path} (missing)")
     _setting_line("target", effective_target)
     _setting_line("artifacts_dir", artifacts_dir)
+    _setting_line("agent_cli", agent_cli)
     _setting_line("handoff", "enabled" if handoff else "disabled")
     if handoff:
         _setting_line("handoff_inbox", handoff_inbox)
@@ -388,7 +405,7 @@ def status(*, target: Path) -> int:
         "native read-only" if native else "prompt read-only + trusted-workspace execution",
     )
     _setting_line("timeout_seconds", f"{timeout:g}")
-    _setting_line("codex", codex_path or "missing")
+    _setting_line(agent_command, agent_path or "missing")
     _setting_line("brigade", brigade_path or "missing")
     _setting_line("config_ignored", _check_git_ignored(effective_target, path))
     _setting_line("artifacts_ignored", _check_git_ignored(effective_target, artifacts_dir))
@@ -422,6 +439,7 @@ def init(
     target: Path,
     artifacts_dir: Path | None = None,
     handoff_inbox: Path | None = None,
+    agent_cli: str = DEFAULT_AGENT_CLI,
     force: bool = False,
     handoff: bool = True,
     inspect: bool = True,
@@ -430,6 +448,11 @@ def init(
 ) -> int:
     if timeout_seconds <= 0:
         print("error: --timeout-seconds must be positive", file=sys.stderr)
+        return 2
+    try:
+        chosen_agent_cli = _as_agent_cli(agent_cli)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
         return 2
 
     target = target.expanduser().resolve()
@@ -444,11 +467,12 @@ def init(
 
     chosen_artifacts_dir = artifacts_dir.expanduser() if artifacts_dir is not None else target / ".brigade" / "runs"
     chosen_handoff_inbox = (
-        handoff_inbox.expanduser() if handoff_inbox is not None else default_handoff_inbox(target)
+        handoff_inbox.expanduser() if handoff_inbox is not None else default_handoff_inbox(target, chosen_agent_cli)
     )
     payload = {
         "target": str(target),
         "artifacts_dir": str(chosen_artifacts_dir),
+        "agent_cli": chosen_agent_cli,
         "handoff": handoff,
         "handoff_inbox": str(chosen_handoff_inbox),
         "inspect": inspect,
@@ -469,6 +493,7 @@ def run(
     output_dir: Path | None = None,
     handoff: bool = True,
     handoff_inbox: Path | None = None,
+    agent_cli: str | None = None,
     inspect: bool = True,
     native_read_only_sandbox: bool = False,
     timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
@@ -493,6 +518,13 @@ def run(
     effective_inspect = cfg.inspect if cfg else inspect
     effective_native = cfg.native_read_only_sandbox if cfg else native_read_only_sandbox
     effective_timeout = cfg.timeout_seconds if cfg else timeout_seconds
+    effective_agent_cli = cfg.agent_cli if cfg else DEFAULT_AGENT_CLI
+    if agent_cli is not None:
+        try:
+            effective_agent_cli = _as_agent_cli(agent_cli)
+        except ValueError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
     if timeout_seconds != DEFAULT_TIMEOUT_SECONDS:
         effective_timeout = timeout_seconds
     if timeout_seconds <= 0 or effective_timeout <= 0:
@@ -514,18 +546,18 @@ def run(
             if handoff_inbox is not None
             else cfg.handoff_inbox
             if cfg and cfg.handoff_inbox is not None
-            else default_handoff_inbox(effective_target)
+            else default_handoff_inbox(effective_target, effective_agent_cli)
         )
 
     rc = aboyeur.run(
         task or DEFAULT_TASK,
-        _dogfood_roster(effective_timeout),
+        _dogfood_roster(effective_timeout, effective_agent_cli),
         show_plan=True,
         cwd=effective_target,
         output_dir=chosen_output_dir,
         handoff_inbox=chosen_handoff_inbox,
         read_only=True,
-        sandbox="read-only" if effective_native else "danger-full-access",
+        sandbox="read-only" if effective_native else None,
     )
     if chosen_output_dir.is_dir():
         _write_summary(chosen_output_dir)
