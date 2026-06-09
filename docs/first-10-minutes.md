@@ -9,11 +9,7 @@ pipx install brigade-cli
 brigade --version
 ```
 
-Expected:
-
-```text
-brigade 0.8.1
-```
+Expected: `brigade X.Y.Z` matching the [latest release](https://pypi.org/project/brigade-cli/).
 
 If `pipx` is missing, install it with your OS package manager or Python packaging tool, then rerun the command above. Brigade requires Python 3.10 or newer.
 
@@ -82,15 +78,14 @@ brigade security scan --target . --output-dir .brigade/security/latest
 brigade security doctor --target .
 ```
 
-Healthy first-run shape:
+Healthy first-run shape (the key lines to look for):
 
 ```text
-operator doctor: ready yes
-blocking issues: 0
-handoff doctor: no warnings
-security scan: findings 0
-security doctor: issues 0
+ready: yes
+blocking_issues: 0
 ```
+
+from `operator doctor`, every `handoff doctor` line prefixed `[ok]`, `findings: 0` from the security scan, and every `security doctor` line `[ok]`. The doctors print one line per check, so expect a couple dozen `[ok]` lines rather than a one-line summary.
 
 `operator doctor` may suggest `brigade daily plan --target .` as the next command. That is normal. It means setup is ready and Brigade can now show the local daily loop.
 
@@ -98,11 +93,14 @@ security doctor: issues 0
 
 Usually safe to commit after review:
 
-- `AGENTS.md`
+- `AGENTS.md`, `CLAUDE.md`, `INSTALL_FOR_AGENTS.md`, `SAFETY_RULES.md`
 - `MEMORY.md` and reviewed memory cards if this repo owns memory
 - `rules/`
 - `tools/`
+- `hooks/` (the pre-push content-guard hook; activate it with `git config core.hooksPath hooks`)
 - public docs
+
+Inbox folders stay local except each inbox's `TEMPLATE.md`, which is deliberately un-ignored so the handoff format travels with the repo. A `?? .codex/` in `git status` is just that template.
 
 Usually local-only:
 

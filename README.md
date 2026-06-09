@@ -75,14 +75,15 @@ For an OpenClaw or Hermes workspace instead of a code repo:
 brigade operator quickstart --target ~/agent-workspace --depth workspace --harnesses openclaw,hermes --owner openclaw
 ```
 
-Use `--dry-run` first to preview every file Brigade would write. Pass more harnesses as a comma-separated list. Quickstart only wires the harnesses you select and leaves the rest alone.
+Use `--dry-run` first to preview the planned steps without writing anything; `brigade init --target ./my-repo --harnesses codex --dry-run` shows the full file-by-file list. Pass more harnesses as a comma-separated list. Quickstart only wires the harnesses you select and leaves the rest alone.
 
 Write a handoff and check the wiring:
 
 ```bash
 brigade handoff draft --target ./my-repo --inbox codex \
   --title "What changed" \
-  --summary "Short note future agents should know."
+  --summary "Short note future agents should know." \
+  --content "The durable note itself goes here."
 brigade handoff lint --target ./my-repo
 brigade handoff doctor --target ./my-repo
 ```

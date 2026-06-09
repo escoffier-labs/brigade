@@ -4094,7 +4094,7 @@ def init(*, target: Path, force: bool = False, update_gitignore: bool = True) ->
     print(f"tools: {len(DEFAULT_TOOLS)}")
     print(f"sources: {sum(1 for item in source_results if item['action'] == 'create')}")
     if update_gitignore:
-        result = apply_gitignore(target, Selection("repo", ["codex"], "codex"))
+        result = apply_gitignore(target, _gitignore_selection(target))
         print(f"gitignore: {result}")
     else:
         print("gitignore: skipped")
@@ -4141,6 +4141,21 @@ def _projection_scope(target: Path) -> set[str] | None:
         scope.add(owner)
     scope.add("scripts")
     return scope
+
+
+def _gitignore_selection(target: Path) -> Selection:
+    """Use the workspace's configured selection for gitignore rewrites.
+
+    Re-applying the managed gitignore block with a narrower selection than the
+    install drops inbox entries for the other selected harnesses.
+    """
+    try:
+        config = load_brigade_config(target)
+    except Exception:
+        config = None
+    if config is not None and config.selection.harnesses:
+        return config.selection
+    return Selection("repo", ["codex"], "codex")
 
 
 def _scoped_default_tool(tool: dict[str, Any], scope: set[str] | None) -> dict[str, Any]:
@@ -4222,7 +4237,7 @@ def defaults(*, target: Path, dry_run: bool = False, force: bool = False, update
     source_results = _ensure_default_tool_sources(target, dry_run=dry_run or bool(conflicts))
     gitignore_result = "skipped"
     if update_gitignore and not dry_run and not conflicts:
-        gitignore_result = apply_gitignore(target, Selection("repo", ["codex"], "codex"))
+        gitignore_result = apply_gitignore(target, _gitignore_selection(target))
     payload = {
         "target": str(target),
         "config_path": str(path),
@@ -5548,7 +5563,7 @@ def pack_import(*, target: Path, pack: Path, force: bool = False, json_output: b
         imported.append({"tool_id": tool_id, "source_path": entry.get("source_path")})
     config_path(target).parent.mkdir(parents=True, exist_ok=True)
     config_path(target).write_text(_format_tool_entries(list(merged_by_id.values())))
-    result = apply_gitignore(target, Selection("repo", ["codex"], "codex"))
+    result = apply_gitignore(target, _gitignore_selection(target))
     payload = {
         "target": str(target),
         "pack": str(pack),

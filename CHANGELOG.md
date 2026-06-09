@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- `brigade tools defaults`, `tools init`, and `tools pack import` no longer rewrite the managed `.gitignore` block with a hardcoded codex-only selection, which was silently dropping the other selected harnesses' handoff-inbox ignore entries (found by a cold-start test: a codex+claude quickstart left `.claude/memory-handoffs/` commit-prone).
+- `operator quickstart --dry-run` now reports every step as `planned` instead of printing `[ok] brigade-init` for a step it did not run, and `brigade init --dry-run` marks files that already exist as refused-without-force instead of implying it would overwrite them.
+- `brigade handoff draft` now states clearly when a draft was written but failed lint, with the kept path and next step; the `--content/--content-file` help text now says one of them is required; and the README handoff example includes `--content` so it works verbatim.
+- `docs/first-10-minutes.md` no longer pins an old version string, describes the doctors' real per-check output shape, and documents everything quickstart actually writes (bridge files, safety rules, the inactive pre-push hook, and the deliberately un-ignored inbox templates).
+
 ### Changed
 - `brigade --help` now opens with a short start-here block and lists commands in five groups (core memory loop, daily operator loop, stations and tools, review/security/research, wiring and advanced) instead of one flat 36-command dump. Subcommand help screens are unchanged, every command stays functional and listed, and `docs/command-inventory.md` is unaffected.
 

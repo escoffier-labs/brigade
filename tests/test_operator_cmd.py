@@ -1251,3 +1251,11 @@ def test_operator_quickstart_scopes_projections_to_selected_harnesses(tmp_path, 
     assert (tmp_path / "scripts" / "simplify.md").is_file()
     for unselected in (".claude", ".qwen", ".adal", ".antigravity", ".cursor", ".mcp"):
         assert not (tmp_path / unselected).exists(), f"{unselected} should not be created"
+
+
+def test_operator_quickstart_gitignore_covers_all_selected_inboxes(tmp_path, capsys):
+    assert cli.main(["operator", "quickstart", "--target", str(tmp_path), "--harnesses", "codex,claude", "--json"]) == 0
+    capsys.readouterr()
+    gitignore = (tmp_path / ".gitignore").read_text()
+    assert ".codex/memory-handoffs/*" in gitignore
+    assert ".claude/memory-handoffs/*" in gitignore

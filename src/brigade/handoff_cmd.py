@@ -1437,6 +1437,8 @@ def draft(
             print(f"content_guard_detail: {guard_result.get('detail')}")
     for error in lint_result.errors:
         print(f"error: {error}")
+    if not lint_result.valid:
+        print(f"note: invalid draft kept at {path}; repair or delete it, then rerun `brigade handoff lint`.")
     return 0 if payload["valid"] else 1
 
 

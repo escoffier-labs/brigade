@@ -2787,7 +2787,8 @@ def quickstart(
         dry_run=dry_run,
         allow_home=False,
     )
-    steps.append({"id": "brigade-init", "status": "ok" if install_rc == 0 else "error", "return_code": install_rc, "output": install_output})
+    install_status = "planned" if dry_run and install_rc == 0 else "ok" if install_rc == 0 else "error"
+    steps.append({"id": "brigade-init", "status": install_status, "return_code": install_rc, "output": install_output})
     if install_rc != 0:
         payload = {
             "target": str(target),

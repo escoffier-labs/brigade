@@ -247,7 +247,11 @@ def install_selection(
         for d in dirs:
             print(f"  dir   {target / d}")
         for entry in files:
-            print(f"  file  {target / entry['dst']}")
+            dst = target / entry["dst"]
+            if dst.exists():
+                print(f"  file  {dst} (exists; refused without --force)")
+            else:
+                print(f"  file  {dst}")
         return 0
 
     target.mkdir(parents=True, exist_ok=True)
