@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-06-09
+
 ### Fixed
 - `brigade tools defaults`, `tools init`, and `tools pack import` no longer rewrite the managed `.gitignore` block with a hardcoded codex-only selection, which was silently dropping the other selected harnesses' handoff-inbox ignore entries (found by a cold-start test: a codex+claude quickstart left `.claude/memory-handoffs/` commit-prone).
 - `operator quickstart --dry-run` now reports every step as `planned` instead of printing `[ok] brigade-init` for a step it did not run, and `brigade init --dry-run` marks files that already exist as refused-without-force instead of implying it would overwrite them.
