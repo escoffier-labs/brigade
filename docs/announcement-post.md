@@ -1,85 +1,57 @@
-# Brigade Announcement Post
+# Brigade Announcement Posts
 
-## Long Version
+Channel-ready text, rewritten 2026-06-09 in the README's voice. The origin story is the hook; lead with it, not the feature list. Numbers below are real and public-safe. Update version numbers before posting.
 
-Brigade is a local-first operator CLI for agent workspaces.
+## Show HN
 
-It is for people who already have a real, homegrown agent setup: memory handoffs, repo instructions, local tools, shell scripts, scheduled jobs, security scans, and a daily loop that grew out of actual work.
+**Title:** Show HN: Brigade - local memory, handoffs, and guardrails for AI coding agents
 
-Brigade does not try to replace that with a hosted control plane. It helps you make the setup explicit, reviewable, portable, and safer to adapt.
+**Body:**
 
-What works now:
+I run an always-on agent (OpenClaw) next to daily Codex and Claude Code sessions, and I have since January. Every one of those tools wakes up empty. Whatever a session learned about my machine, my rules, or yesterday's dead ends scattered across tool-specific folders and died there.
 
-- first-run setup for repo and workspace targets
-- cross-harness memory handoff folders for Codex, Claude Code, OpenCode, Hermes, and OpenClaw-style workspaces
-- a daily driver that picks one safe local action at a time
-- redacted adoption snapshots for existing setups
-- redacted external surface tracking for shell crontab, OpenClaw cron, and PM2
-- migration rollups that keep replacement work batched instead of scattered across tiny tasks
-- local security scans for plaintext passwords, API keys, tokens, private keys, risky harness wiring, and prompt-injection patterns
-- research handoff export for turning completed local research runs into reviewed Memory Handoff drafts
-- release/readiness evidence that stays local until the operator chooses to publish
+So I hand-rolled fixes, one incident at a time: a slim memory index pointing at small markdown cards, a handoff note format every harness could write, an ingest cron that filed the good notes into durable memory every 30 minutes, staleness checks so old facts stopped being trusted forever.
 
-The dogfood path is real: Brigade was used to adapt an existing operator workspace into Brigade-managed evidence. It discovered external scheduler/process surfaces, captured 57 redacted records, reviewed every record with zero stale reviews, kept 36 records externally owned, marked 14 as Brigade runbook migration candidates, marked 7 as retirement-review candidates, routed the actionable follow-ups, and closed the batch with local redacted replacement evidence.
+Two incidents shaped the design. A nightly job that auto-promoted session fragments quietly bloated my memory index to 41KB, past the 12KB bootstrap budget, so every session started with truncated memory and nobody noticed for weeks. Auto-promotion died that day; everything goes through review now. Later I found 195 handoff notes sitting unread across 35 repos because the ingester had a hardcoded three-repo allowlist and nothing warned about the coverage gap. Silence is the failure mode. Every part of Brigade that lints, warns, or writes a receipt exists because something once failed quietly.
 
-It does not start daemons, install schedulers, push to GitHub, publish releases, ingest memory, rotate credentials, or mutate remotes unless you explicitly run the command that does it. It also does not store raw scheduler lines, process names, job names, command paths, environment values, host details, or secrets in public docs.
+That system now runs ~500 memory cards across six months of daily multi-agent work. Brigade is it packaged as one installable CLI: agents write handoff notes into local inboxes, Brigade lints and scans them (including prompt-injection signals), safe notes get filed into durable memory by one canonical owner, ambiguous ones wait for review, and every consequential action lands a receipt in a plain file you can grep.
 
-Install:
+Deliberate non-features: no daemon, no server, no hosted anything, no auto-publish, no silent memory writes. Your memory is markdown in your repo, readable without Brigade.
 
-```bash
-pipx install brigade-cli
-brigade --version
-```
+It supports 15+ writer harnesses (Codex, Claude Code, OpenCode, Cursor, Aider, Goose, Copilot CLI, ...) with one shared note format, and it has an adoption path that inventories an existing homegrown setup read-only before changing anything. I cut my own production workspace over to it this week using that path.
 
-Start with a repo:
+Install: `pipx install brigade-cli` - then `brigade operator quickstart --target ./my-repo --harnesses codex`
 
-```bash
-brigade operator quickstart --target ./my-repo --harnesses codex --dry-run
-brigade operator quickstart --target ./my-repo --harnesses codex
-brigade operator doctor --target ./my-repo --profile local-operator
-```
+Repo: https://github.com/escoffier-labs/brigade
+Site: https://brigade.tools
+The full production stack it came from: https://github.com/solomonneas/solos-cookbook
 
-Start with an existing operator workspace:
+MIT, Python stdlib only, no runtime dependencies. Early-stage; I fix reported issues fast.
 
-```bash
-brigade operator adopt plan --target ~/agent-workspace --json
-brigade operator adopt capture --target ~/agent-workspace --json
-brigade operator migration status --target ~/agent-workspace --json
-brigade operator surfaces capture --target ~/agent-workspace --json
-brigade operator surfaces reviews --target ~/agent-workspace --json
-```
+## Reddit (r/LocalLLaMA, r/ClaudeAI, Codex communities)
 
-If your setup is already messy because it is real, Brigade is meant for you.
+**Title:** I packaged six months of hand-rolled agent-memory infrastructure into one CLI (local-only, no daemon, markdown memory)
 
-Project: https://github.com/escoffier-labs/brigade
+**Body:**
 
-Website: https://brigade.tools
+If you run more than one coding agent you know the problem: each tool learns a little, and the learning is scattered and dies. I ran OpenClaw + Codex + Claude Code daily since January and hand-rolled the fixes: slim memory index, atomic memory cards, a handoff note format every tool writes, a 30-minute ingest cron, staleness scanning.
 
-## Short Version
+The two incidents that taught me the rules: an auto-promotion job bloated my always-loaded memory index to 41KB (12KB budget) and every session silently started with truncated memory; and 195 handoff notes sat unread for weeks because the ingester's repo allowlist was hardcoded and nothing warned. Review gates and loud coverage checks are not features, they are scar tissue.
 
-Brigade is a local-first operator CLI for agent workspaces.
+Brigade is that setup as one `pipx install brigade-cli`. Agents (Codex, Claude Code, OpenCode, Cursor, Aider, Goose, Copilot CLI, and more) write handoff notes to local inboxes; Brigade lints them, scans them for secrets and prompt-injection signals, routes safe ones to durable memory via one canonical owner, and queues the rest for your review. Everything is plain markdown and JSON receipts in your repo. No daemon, no server, no telemetry, nothing leaves your machine.
 
-It helps turn a real homegrown agent setup, memory handoffs, repo instructions, local tools, scheduled jobs, security scans, and daily work loops, into something explicit, reviewable, portable, and safer to adapt.
+There is also an adoption path for people who already have a homegrown setup: it inventories your crons, scripts, and inboxes read-only and produces a migration plan instead of stomping on what works. I used exactly that path to cut my own production workspace over this week.
 
-The current dogfood run captured 57 redacted external scheduler/process records, reviewed every one, kept 36 externally owned, marked 14 as Brigade runbook migration candidates, marked 7 as retirement-review candidates, and closed the replacement batch without exposing raw scheduler lines, job names, process names, command paths, environment values, host details, or secrets.
+Repo: https://github.com/escoffier-labs/brigade - MIT, stdlib-only Python. Early-stage, feedback and issues very welcome.
 
-Install:
+## Short version (social / Discord)
 
-```bash
-pipx install brigade-cli
-brigade operator quickstart --target ./my-repo --harnesses codex --dry-run
-```
+Six months of hand-rolled agent-memory infrastructure (OpenClaw + Codex + Claude Code), packaged as one CLI. Agents write handoff notes, Brigade lints and guards them, the good ones become durable markdown memory, everything else waits for review. Local-only, no daemon, receipts for everything. `pipx install brigade-cli` - https://brigade.tools
 
-Project: https://github.com/escoffier-labs/brigade
+## Posting checklist
 
-Website: https://brigade.tools
-
-## Launch Checklist
-
-- Public repo release readiness: ready
-- Release blockers: 0
-- Release warnings: 0
-- Pre-push Content Guard: passed
-- Replacement migration doctor: ready
-- Pending replacement imports: 0
-- Pending replacement tasks: 0
+- [ ] Update version references if newer than 0.9.1
+- [ ] Confirm `pipx install brigade-cli` works from a clean machine
+- [ ] Run `brigade scrub --policy public-content` over this file before posting
+- [ ] Post HN morning US time midweek; Reddit separately, not the same day
+- [ ] Watch the repo issues; the README promises fast responses
