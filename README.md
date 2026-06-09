@@ -84,11 +84,12 @@ flowchart TB
         CODEX["<b>Codex CLI</b><br/>handoff writer"]
         CLAUDE["<b>Claude Code</b><br/>handoff writer"]
         OPEN["<b>OpenCode</b><br/>handoff writer"]
+        MORE["<b>more CLI writers</b><br/>Antigravity · Pi · Cursor<br/>Aider · Goose · Continue<br/>Copilot · Qwen · Kimi · AdaL · OpenHands"]
         HERMES["<b>Hermes</b><br/>writer or owner"]
     end
 
-    CODEX & CLAUDE & OPEN & HERMES == handoff drafts ==> BRIGADE
-    MEMORY -. context .-> CODEX & CLAUDE & OPEN & HERMES
+    CODEX & CLAUDE & OPEN & MORE & HERMES == handoff drafts ==> BRIGADE
+    MEMORY -. context .-> CODEX & CLAUDE & OPEN & MORE & HERMES
 
     subgraph LOCAL [" local operator lanes "]
         WORK["work sessions<br/>tasks · plans · verification"]
@@ -107,7 +108,7 @@ flowchart TB
     class OWNER owner;
     class BRIGADE brigade;
     class MEMORY,STATE state;
-    class WORK,SCAN,RELEASE,CODEX,CLAUDE,OPEN,HERMES lane;
+    class WORK,SCAN,RELEASE,CODEX,CLAUDE,OPEN,MORE,HERMES lane;
 ```
 
 > Brigade was extracted from the [**solos-cookbook**](https://github.com/solomonneas/solos-cookbook), a documented 24/7 multi-agent stack running in production. If you want the full picture of how Brigade fits into a real setup, start there, and a star helps other people find it.
@@ -208,23 +209,27 @@ That is the simplest useful version of Brigade: shared handoffs, local review, d
 
 ## How Memory Handoffs Work
 
-Each writer harness gets its own local inbox:
+Each writer harness gets its own local inbox. Use `brigade handoff draft --inbox <id>` to write to the matching inbox, or select the harness with `brigade operator quickstart --harnesses ...`.
 
-- `.codex/memory-handoffs/`
-- `.claude/memory-handoffs/`
-- `.opencode/memory-handoffs/`
-- `.antigravity/memory-handoffs/`
-- `.pi/memory-handoffs/`
-- `.cursor/memory-handoffs/`
-- `.aider/memory-handoffs/`
-- `.goose/memory-handoffs/`
-- `.continue/memory-handoffs/`
-- `.copilot/memory-handoffs/`
-- `.qwen/memory-handoffs/`
-- `.kimi/memory-handoffs/`
-- `.adal/memory-handoffs/`
-- `.openhands/memory-handoffs/`
-- `.hermes/memory-handoffs/`
+| Writer | `--inbox` / harness id | Local inbox | Brigade support |
+|---|---|---|---|
+| Codex CLI | `codex` | `.codex/memory-handoffs/` | handoff template, ingest source, dogfood adapter, tools, skills |
+| Claude Code | `claude` | `.claude/memory-handoffs/` | handoff template, ingest source, tools, skills |
+| OpenCode | `opencode` | `.opencode/memory-handoffs/` | handoff template, ingest source, dogfood adapter, tools, skills |
+| Antigravity | `antigravity` | `.antigravity/memory-handoffs/` | handoff template, ingest source, dogfood adapter, tools, skills |
+| Pi | `pi` | `.pi/memory-handoffs/` | handoff template, ingest source, dogfood adapter, tools, skills |
+| Cursor | `cursor` | `.cursor/memory-handoffs/` | handoff template, ingest source, dogfood adapter, rules, skills |
+| Aider | `aider` | `.aider/memory-handoffs/` | handoff template, ingest source, dogfood adapter, tools, skills |
+| Goose | `goose` | `.goose/memory-handoffs/` | handoff template, ingest source, dogfood adapter, tools, skills |
+| Continue | `continue` | `.continue/memory-handoffs/` | handoff template, ingest source, dogfood adapter, rules, skills |
+| GitHub Copilot CLI | `copilot` | `.copilot/memory-handoffs/` | handoff template, ingest source, dogfood adapter, instructions, skills |
+| Qwen Code | `qwen` | `.qwen/memory-handoffs/` | handoff template, ingest source, dogfood adapter, tools, skills |
+| Kimi Code | `kimi` | `.kimi/memory-handoffs/` | handoff template, ingest source, dogfood adapter, tools, skills |
+| AdaL | `adal` | `.adal/memory-handoffs/` | handoff template, ingest source, dogfood adapter, tools, skills |
+| OpenHands | `openhands` | `.openhands/memory-handoffs/` | handoff template, ingest source, dogfood adapter, instructions, skills |
+| Hermes | `hermes` | `.hermes/memory-handoffs/` | handoff template, ingest source, owner adapter fragments |
+
+OpenClaw is usually the canonical memory owner rather than a writer inbox. Add it with `--harnesses openclaw,...` when the workspace should own durable memory.
 
 The memory owner, usually OpenClaw or Hermes, can ingest handoffs into the permanent memory files. Brigade keeps the handoff format consistent so different tools can contribute without each one inventing its own note style.
 
