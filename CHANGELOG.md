@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- `brigade --help` now opens with a short start-here block and lists commands in five groups (core memory loop, daily operator loop, stations and tools, review/security/research, wiring and advanced) instead of one flat 36-command dump. Subcommand help screens are unchanged, every command stays functional and listed, and `docs/command-inventory.md` is unaffected.
+
 ## [0.8.2] - 2026-06-09
 
 ### Fixed
