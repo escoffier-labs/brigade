@@ -176,3 +176,36 @@ def test_install_selection_refuses_overwrite_without_force(tmp_path):
     install_selection(tmp_path, sel)
     code = install_selection(tmp_path, sel)
     assert code == 3  # matches existing init refuse-overwrite exit code
+
+
+def test_install_renders_selected_writer_inboxes_in_agent_docs(tmp_path):
+    sel = Selection(depth="repo", harnesses=["codex"], owner="codex", includes=[])
+    assert install_selection(tmp_path, sel) == 0
+    agents = (tmp_path / "AGENTS.md").read_text()
+    assert ".codex/memory-handoffs/" in agents
+    assert ".claude/memory-handoffs" not in agents
+    assert "~/.openclaw/workspace" not in agents
+    install_doc = (tmp_path / "INSTALL_FOR_AGENTS.md").read_text()
+    assert ".codex/memory-handoffs/" in install_doc
+    assert ".claude/memory-handoffs" not in install_doc
+
+
+def test_install_renders_all_selected_writer_inboxes(tmp_path):
+    sel = Selection(depth="repo", harnesses=["claude", "codex"], owner="claude", includes=[])
+    assert install_selection(tmp_path, sel) == 0
+    agents = (tmp_path / "AGENTS.md").read_text()
+    assert ".claude/memory-handoffs/" in agents
+    assert ".codex/memory-handoffs/" in agents
+    assert "~/.openclaw/workspace" not in agents
+
+
+def test_install_workspace_owner_without_writer_inbox_uses_writer_harness(tmp_path):
+    sel = Selection(depth="workspace", harnesses=["openclaw", "hermes"], owner="openclaw", includes=[])
+    assert install_selection(tmp_path, sel) == 0
+    agents = (tmp_path / "AGENTS.md").read_text()
+    assert ".hermes/memory-handoffs/" in agents
+    assert ".claude/memory-handoffs" not in agents
+    card = (tmp_path / "memory" / "cards" / "handoff-flow.md").read_text()
+    assert ".hermes/memory-handoffs/" in card
+    assert ".claude/memory-handoffs" not in card
+    assert "{{" not in card

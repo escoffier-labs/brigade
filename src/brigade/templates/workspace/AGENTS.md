@@ -16,7 +16,7 @@ For tiny read-only commands, do the command directly and avoid loading unrelated
 
 ## Memory Owner
 
-The configured memory owner is **{{memory_owner_name}}**. Side harnesses may keep local session context, but durable knowledge must be written as a Memory Handoff in `.claude/memory-handoffs/`. The memory owner ingests those handoffs into canonical durable memory. Full contract: `memory/cards/memory-architecture.md` and `memory/cards/handoff-flow.md`.
+The configured memory owner is **{{memory_owner_name}}**. Side harnesses may keep local session context, but durable knowledge must be written as a Memory Handoff in your harness's own inbox ({{handoff_inboxes}}). The memory owner ingests those handoffs into canonical durable memory. Full contract: `memory/cards/memory-architecture.md` and `memory/cards/handoff-flow.md`.
 
 If you are not the memory owner, do not edit `MEMORY.md`, `memory/cards/`, `USER.md`, `TOOLS.md`, `SAFETY_RULES.md`, `rules/`, or `.learnings/` as canonical memory unless the user explicitly asks for that file edit. Do not create a second canonical memory system.
 
@@ -55,7 +55,7 @@ If you learned it, write it down. If it changed, update the file only when you o
 
 If a session discovers durable knowledge - architecture decisions, workflow changes, non-obvious fixes, setup gotchas, security findings, reusable commands, durable research, or user preferences - create a handoff at the end of the task.
 
-Write the handoff to `.claude/memory-handoffs/<YYYY-MM-DD-HHMM>-<slug>.md` using the format in `.claude/memory-handoffs/TEMPLATE.md`. If that template is missing, use `~/.openclaw/workspace/docs/claude-code-memory-handoff.md`.
+Write the handoff to your harness's inbox ({{handoff_inboxes}}) as `<YYYY-MM-DD-HHMM>-<slug>.md` using the format in that inbox's `TEMPLATE.md`. If the template is missing, run `brigade handoff-template` to print it.
 
 Do not wait to be reminded. Do not edit canonical memory directly unless this is the memory owner.
 

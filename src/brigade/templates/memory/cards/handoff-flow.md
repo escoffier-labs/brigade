@@ -6,16 +6,16 @@ tags: [memory, handoff, ingester, claude-code, codex]
 
 # Memory Handoff Flow
 
-Claude Code, Codex, and other side harnesses write Memory Handoffs to `.claude/memory-handoffs/`. A conservative ingester parses them and routes durable knowledge into canonical memory.
+Side harnesses write Memory Handoffs to their own writer inbox ({{handoff_inboxes}}). A conservative ingester parses them and routes durable knowledge into canonical memory.
 
 ## End-to-end
 
 1. Side harness finishes a substantial task.
 2. Closeout rule fires: "did this session produce durable knowledge?"
-3. If yes, the harness writes `.claude/memory-handoffs/<YYYY-MM-DD-HHMM>-<slug>.md` using `TEMPLATE.md`.
+3. If yes, the harness writes `{{handoff_inbox}}<YYYY-MM-DD-HHMM>-<slug>.md` using `TEMPLATE.md`.
 4. The ingester (run by the memory owner) parses each handoff.
 5. Handoffs route to: a memory card, an appendable document, or the review inbox.
-6. Processed handoffs move to `.claude/memory-handoffs/processed/`.
+6. Processed handoffs move to the inbox's `processed/` folder.
 
 ## Multiple Workspaces
 
@@ -45,7 +45,7 @@ The harness must be told to write handoffs without prompting. Put this in the ha
 
 ```text
 At the end of any substantial task, check whether the session produced durable
-knowledge. If yes, create a Memory Handoff in `.claude/memory-handoffs/`
+knowledge. If yes, create a Memory Handoff in `{{handoff_inbox}}`
 using the standard format. Do this without waiting to be reminded.
 ```
 
@@ -53,7 +53,7 @@ using the standard format. Do this without waiting to be reminded.
 
 ```bash
 # Handoffs being produced
-find . -path "*/.claude/memory-handoffs/*.md" -not -path "*/processed/*" -mtime -7
+find . -path "*/memory-handoffs/*.md" -not -path "*/processed/*" -mtime -7
 
 # Ingest run
 brigade ingest --target . --dry-run

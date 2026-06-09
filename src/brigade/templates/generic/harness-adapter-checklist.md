@@ -16,7 +16,7 @@ Use this when wiring a new harness into the `brigade` contract.
 
 ## 3. Handoff inbox
 
-- [ ] Create `.claude/memory-handoffs/` in every repo the harness works in.
+- [ ] Create the harness's own `.<harness>/memory-handoffs/` inbox in every repo it works in.
 - [ ] Drop the closeout instruction into the harness's instruction file.
 - [ ] Test by running a small task and looking for an emitted handoff.
 
@@ -44,7 +44,7 @@ Use this when wiring a new harness into the `brigade` contract.
 ls AGENTS.md CLAUDE.md
 
 # Handoff infrastructure in place
-ls .claude/memory-handoffs/TEMPLATE.md
+ls .<harness>/memory-handoffs/TEMPLATE.md
 ls memory/cards/
 
 # Ingest loop alive (after writing a sample handoff)

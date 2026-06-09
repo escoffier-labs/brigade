@@ -264,10 +264,18 @@ def install_selection(
         (target / d).mkdir(parents=True, exist_ok=True)
 
     owner_label = harness_memory_owner(selection.owner, selection.owner)
+    writer_inboxes = [WRITER_INBOXES[h] for h in selection.harnesses if h in WRITER_INBOXES]
+    owner_inbox = WRITER_INBOXES.get(selection.owner)
+    if owner_inbox:
+        writer_inboxes = [owner_inbox] + [p for p in writer_inboxes if p != owner_inbox]
+    if not writer_inboxes:
+        writer_inboxes = [WRITER_INBOXES["claude"]]
     context = {
         "memory_owner": selection.owner,
         "memory_owner_name": owner_label,
         "harness": selection.owner,
+        "handoff_inbox": f"{writer_inboxes[0]}/",
+        "handoff_inboxes": ", ".join(f"`{p}/`" for p in writer_inboxes),
     }
 
     root = template_root()

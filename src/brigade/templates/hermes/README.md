@@ -38,7 +38,7 @@ brigade handoff archive --target . <draft-id> --reason "reviewed"
 
 ## Contributing
 
-If you run Hermes and have working config, open an issue at <https://github.com/solomonneas/brigade/issues> with:
+If you run Hermes and have working config, open an issue at <https://github.com/escoffier-labs/brigade/issues> with:
 
 - the file Hermes loads as its primary bootstrap file
 - the path where Hermes expects memory handoffs (if any)

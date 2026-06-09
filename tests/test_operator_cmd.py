@@ -1224,3 +1224,30 @@ def test_internal_dogfood_fresh_repo_onboarding_loop(tmp_path, capsys, monkeypat
     assert cli.main(["daily", "status", "--target", str(tmp_path), "--json"]) == 0
     daily_status = json.loads(capsys.readouterr().out)
     assert daily_status["daily_health"]["issue_count"] == 0
+
+
+def test_tools_defaults_scopes_projections_to_configured_selection(tmp_path, capsys):
+    from brigade.install import install_selection
+    from brigade.selection import Selection
+
+    install_selection(tmp_path, Selection(depth="repo", harnesses=["codex"], owner="codex", includes=[]))
+    capsys.readouterr()
+    assert cli.main(["tools", "defaults", "--target", str(tmp_path), "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["valid"] is True
+    toml_text = (tmp_path / ".brigade" / "tools.toml").read_text()
+    assert ".codex/" in toml_text
+    assert "scripts/" in toml_text
+    assert ".qwen/" not in toml_text
+    assert ".adal/" not in toml_text
+    assert ".mcp/" not in toml_text
+
+
+def test_operator_quickstart_scopes_projections_to_selected_harnesses(tmp_path, capsys):
+    assert cli.main(["operator", "quickstart", "--target", str(tmp_path), "--harnesses", "codex", "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == "ok"
+    assert (tmp_path / ".codex" / "skills" / "simplify" / "SKILL.md").is_file()
+    assert (tmp_path / "scripts" / "simplify.md").is_file()
+    for unselected in (".claude", ".qwen", ".adal", ".antigravity", ".cursor", ".mcp"):
+        assert not (tmp_path / unselected).exists(), f"{unselected} should not be created"

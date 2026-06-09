@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- Quickstart and `brigade tools defaults` now scope built-in tool projections to the workspace's selected harnesses plus the neutral `scripts/` folder, so a `--harnesses codex` setup no longer writes folders for every supported harness.
+- The workspace `AGENTS.md`, `INSTALL_FOR_AGENTS.md`, and `handoff-flow` card templates now render the selected writer handoff inboxes instead of hardcoding `.claude/memory-handoffs/`, and the missing-template fallback now points at `brigade handoff-template` instead of a host-private path.
+- The Hermes adapter README now opens issues against the correct repository.
+
 ### Documentation
 - Added a first-10-minutes guide and compact support response templates for install, quickstart, doctor, commit-scope, homegrown setup, and security questions after launch.
 

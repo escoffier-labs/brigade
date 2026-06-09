@@ -18,6 +18,7 @@ from typing import Any
 
 from . import dogfood_cmd
 from . import toml_compat as tomllib
+from .config import load_config as load_brigade_config
 from .install import apply_gitignore
 from .selection import Selection
 
@@ -4118,6 +4119,39 @@ def _read_tool_entries(path: Path) -> tuple[list[dict[str, Any]], list[str]]:
     return [dict(item) for item in values], []
 
 
+def _projection_scope(target: Path) -> set[str] | None:
+    """Return the projection targets wired for this workspace, or None for all.
+
+    A workspace with a Brigade selection (`.brigade/config.json`) only gets
+    default projections for its selected harnesses plus the neutral `scripts`
+    folder. Without a selection, defaults stay unscoped.
+    """
+    try:
+        config = load_brigade_config(target)
+    except Exception:
+        return None
+    if config is None:
+        return None
+    harnesses = [h for h in (config.selection.harnesses or []) if isinstance(h, str) and h.strip()]
+    if not harnesses:
+        return None
+    scope = set(harnesses)
+    owner = str(config.selection.owner or "").strip()
+    if owner:
+        scope.add(owner)
+    scope.add("scripts")
+    return scope
+
+
+def _scoped_default_tool(tool: dict[str, Any], scope: set[str] | None) -> dict[str, Any]:
+    entry = dict(tool)
+    if scope is None:
+        return entry
+    entry["supported_harnesses"] = [h for h in entry.get("supported_harnesses", []) if h in scope]
+    entry["projections"] = {h: p for h, p in (entry.get("projections") or {}).items() if h in scope}
+    return entry
+
+
 def defaults(*, target: Path, dry_run: bool = False, force: bool = False, update_gitignore: bool = True, json_output: bool = False) -> int:
     target = target.expanduser().resolve()
     if not target.is_dir():
@@ -4150,7 +4184,8 @@ def defaults(*, target: Path, dry_run: bool = False, force: bool = False, update
         for index, entry in enumerate(entries)
         if isinstance(entry.get("id"), str) and str(entry.get("id")).strip()
     }
-    defaults_by_id = {str(tool["id"]): dict(tool) for tool in DEFAULT_TOOLS}
+    projection_scope = _projection_scope(target)
+    defaults_by_id = {str(tool["id"]): _scoped_default_tool(tool, projection_scope) for tool in DEFAULT_TOOLS}
     added: list[str] = []
     updated: list[str] = []
     skipped: list[str] = []
@@ -4205,6 +4240,7 @@ def defaults(*, target: Path, dry_run: bool = False, force: bool = False, update
         "source_skipped_count": len([item for item in source_results if item.get("action") == "skip"]),
         "tool_count": len(merged),
         "default_count": len(defaults_by_id),
+        "projection_scope": sorted(projection_scope) if projection_scope is not None else None,
         "gitignore": gitignore_result,
         "next_command": "brigade tools apply --target . --all",
     }

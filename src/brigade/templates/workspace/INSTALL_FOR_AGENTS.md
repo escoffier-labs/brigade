@@ -14,7 +14,7 @@ You have just entered a `brigade` workspace. Here is how to operate.
 
 ## Memory contract
 
-The canonical memory owner here is **{{memory_owner_name}}**. If you produce durable knowledge during this session - architecture decisions, workflow changes, root causes, gotchas, security findings, reusable commands - write a Memory Handoff in `.claude/memory-handoffs/` using `TEMPLATE.md` before you finish.
+The canonical memory owner here is **{{memory_owner_name}}**. If you produce durable knowledge during this session - architecture decisions, workflow changes, root causes, gotchas, security findings, reusable commands - write a Memory Handoff in your harness's inbox ({{handoff_inboxes}}) using its `TEMPLATE.md` before you finish.
 
 Do not edit `memory/cards/*.md`, `TOOLS.md`, `USER.md`, `rules/*.md`, or `.learnings/*.md` directly unless the user explicitly asks. The ingester routes handoffs into those files.
 
@@ -47,7 +47,7 @@ Some harnesses load a generated `llms.txt` or `llms-full.txt` instead of every b
 ```bash
 git status --short
 find . -maxdepth 2 -name AGENTS.md -o -name CLAUDE.md -o -name SOUL.md
-ls .claude/memory-handoffs/ 2>/dev/null
+ls {{handoff_inbox}} 2>/dev/null
 brigade doctor --target . --harness <openclaw|hermes|generic>
 ```
 
