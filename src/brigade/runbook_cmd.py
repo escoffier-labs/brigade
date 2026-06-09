@@ -40,11 +40,15 @@ def _write_json(path: Path, payload: dict[str, Any]) -> None:
 
 def _unique_run_dir(target: Path, run_id_base: str) -> tuple[str, Path]:
     root = _runs_root(target)
+    root.mkdir(parents=True, exist_ok=True)
     for index in range(0, 100):
         run_id = run_id_base if index == 0 else f"{run_id_base}-{index + 1}"
         run_dir = root / run_id
-        if not run_dir.exists():
-            return run_id, run_dir
+        try:
+            run_dir.mkdir(exist_ok=False)
+        except FileExistsError:
+            continue
+        return run_id, run_dir
     raise FileExistsError(f"could not allocate unique runbook run id for {run_id_base}")
 
 
@@ -188,7 +192,6 @@ def _execute_plan(
     target = target.expanduser().resolve()
     started = _now()
     run_id, run_dir = _unique_run_dir(target, f"{started[:19].replace(':', '').replace('-', '')}-{plan_payload['runbook_id']}")
-    run_dir.mkdir(parents=True, exist_ok=False)
     results: list[dict[str, Any]] = []
     status = "completed"
     for step in steps:

@@ -523,7 +523,21 @@ def lint(*, target: Path, skill: str, harness: str | None = None, json_output: b
 
 def _install_dir(workspace: Path, harness: str, skill_id: str) -> Path:
     adapter = _adapter_map(workspace)[harness]
-    return workspace / str(adapter["install_path"]).format(skill_id=skill_id)
+    install_dir = workspace / str(adapter["install_path"]).format(skill_id=skill_id)
+    workspace_resolved = workspace.resolve()
+    resolved = install_dir.resolve()
+    if ".." in install_dir.parts or resolved == workspace_resolved or not resolved.is_relative_to(workspace_resolved):
+        raise ValueError(f"skill install path escapes workspace: {install_dir}")
+    return install_dir
+
+
+def _safe_install_path(value: object) -> str | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    path = Path(value.strip())
+    if path.is_absolute() or ".." in path.parts:
+        return None
+    return value.strip()
 
 
 def _adapter_map(target: Path) -> dict[str, dict[str, Any]]:
@@ -537,7 +551,7 @@ def _adapter_map(target: Path) -> dict[str, dict[str, Any]]:
             adapters[_slug(str(adapter_id))] = {
                 "status": str(value.get("status") or "local"),
                 "format": str(value.get("format") or "custom-skill"),
-                "install_path": value.get("install_path"),
+                "install_path": _safe_install_path(value.get("install_path")),
                 "source": "local-config",
             }
     return adapters

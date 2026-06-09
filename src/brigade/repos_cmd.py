@@ -1347,6 +1347,11 @@ def _run_sweep_command(entry: RepoEntry, command: SweepCommand, sweep_dir: Path)
         timed_out = True
         stdout = exc.stdout if isinstance(exc.stdout, str) else ""
         stderr = exc.stderr if isinstance(exc.stderr, str) else ""
+    except OSError as exc:
+        exit_code = None
+        timed_out = False
+        stdout = ""
+        stderr = f"failed to run sweep command: {exc}"
     completed = _now()
     (command_dir / "stdout.log").write_text(stdout)
     (command_dir / "stderr.log").write_text(stderr)

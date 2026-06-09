@@ -449,6 +449,15 @@ def _as_path(target: Path, value: object) -> Path | None:
     return path if path.is_absolute() else target / path
 
 
+def _path_within_target(target: Path, path: Path) -> bool:
+    try:
+        resolved = path.resolve()
+        target_resolved = target.resolve()
+    except OSError:
+        return False
+    return resolved != target_resolved and resolved.is_relative_to(target_resolved)
+
+
 def _format_inline_list(values: list[str]) -> str:
     return "[" + ", ".join(dogfood_cmd._format_toml_value(value) for value in values) + "]"
 
@@ -1880,6 +1889,9 @@ def _projection_item(
     }
     if projection_path is None:
         item.update({"status": "missing", "action": "skip", "detail": f"missing projection target for {harness}"})
+        return item
+    if not _path_within_target(target, projection_path):
+        item.update({"status": "invalid", "action": "skip", "detail": f"projection path escapes target: {projection_value}"})
         return item
     if source_path is None or not source_path.is_file():
         item.update({"status": "missing_source", "action": "skip", "detail": f"missing source: {source_path}"})
