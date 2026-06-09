@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.1] - 2026-06-09
+
+### Fixed
+- `brigade security scan` now screens pending handoff notes for prompt-injection signals as a dedicated `handoff-injection` check with a `handoff-inbox` surface. Inboxes were previously skipped entirely so note content was not attributed to the repo author, which also meant a malicious pending note scanned clean; it now reuses the same untrusted-context signal the ingest gate uses. `processed/` and `TEMPLATE.md` stay excluded.
+- `brigade memory care scan` writes its state under `.brigade/memory-care/decay/` instead of inside the user's `memory/cards/` tree. Explicit `output_path` configs are honored unchanged, and readers (import-issues, status, doctor) fall back to the legacy `memory/cards/decay/` location when it still holds the latest scan.
+
 ## [0.9.0] - 2026-06-09
 
 ### Fixed

@@ -16,7 +16,8 @@ from urllib import request as urlrequest
 from urllib.parse import urlparse
 
 from . import work_cmd
-from .untrusted import PROMPT_INJECTION_RE
+from .selection import WRITER_INBOXES
+from .untrusted import PROMPT_INJECTION_RE, scan_untrusted
 
 SEVERITY_ORDER = {
     "info": 0,
@@ -52,6 +53,7 @@ SCAN_PROFILES = {
 }
 SECURITY_CHECKS = (
     "automation",
+    "handoff-injection",
     "mcp",
     "permissions",
     "prompt-injection",
@@ -2123,6 +2125,8 @@ def _surface_for(path: Path, target: Path) -> str:
     parts = rel.parts
     if _is_session_chat_path(path, target):
         return "session-chat"
+    if "memory-handoffs" in parts:
+        return "handoff-inbox"
     if "skills" in parts and path.name == "SKILL.md":
         return "skill"
     if "commands" in parts and path.suffix.lower() == ".md":
@@ -2463,6 +2467,44 @@ def _filter_findings(
     return selected
 
 
+def _scan_handoff_inboxes(findings: list[dict[str, Any]], *, target: Path) -> list[str]:
+    """Screen pending handoff notes for injection signals.
+
+    Handoff inboxes are excluded from the line scanner via SKIP_PREFIXES so
+    untrusted note content is not attributed to the repo author. This pass
+    reports the same content through the untrusted-context lens instead:
+    a pending note carrying injection-style instructions should be reviewed
+    before any ingester reads it. `processed/` and TEMPLATE.md are skipped.
+    """
+    scanned: list[str] = []
+    for inbox_rel in sorted(set(WRITER_INBOXES.values())):
+        inbox = target / inbox_rel
+        if not inbox.is_dir():
+            continue
+        for path in sorted(inbox.glob("*.md")):
+            if path.name == "TEMPLATE.md":
+                continue
+            try:
+                text = path.read_text(errors="replace")
+            except OSError:
+                continue
+            scanned.append(str(path.relative_to(target)))
+            signal = scan_untrusted(text)
+            if signal.flagged:
+                _finding(
+                    findings,
+                    target=target,
+                    path=path,
+                    line=1,
+                    severity="medium",
+                    category="handoff-injection",
+                    title="Pending handoff carries prompt-injection signals",
+                    evidence=signal.markers[0] if signal.markers else "injection signal",
+                    suggestion="Review this handoff before ingest; do not let an ingester auto-promote it.",
+                )
+    return scanned
+
+
 def scan_target(
     target: Path,
     *,
@@ -2476,6 +2518,7 @@ def scan_target(
     target = target.expanduser().resolve()
     findings: list[dict[str, Any]] = []
     scanned_files: list[str] = []
+    scanned_files.extend(_scan_handoff_inboxes(findings, target=target))
     for path in _iter_scan_files(target):
         if not include_templates and _confidence_for(path, target) == "template":
             continue

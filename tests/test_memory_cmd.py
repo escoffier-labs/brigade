@@ -147,7 +147,7 @@ def test_memory_care_status_explains_freshness_metadata(tmp_path, monkeypatch, c
     assert payload["metadata"]["reviewed_dates"] == {"present": 3, "missing": 1, "stale": 1}
     assert payload["metadata"]["freshness_dates"] == {"present": 3, "missing": 1, "expired": 1}
     assert payload["metadata"]["evidence"] == {"present": 3, "missing": 1}
-    queue = json.loads((tmp_path / "memory" / "cards" / "decay" / "refresh-queue.json").read_text())
+    queue = json.loads((tmp_path / ".brigade" / "memory-care" / "decay" / "refresh-queue.json").read_text())
     queued_types = {card["issue_type"] for card in queue["cards"]}
     assert "missing-reviewed" in queued_types
     assert "missing-freshness" in queued_types
@@ -351,3 +351,36 @@ def test_memory_care_cli(tmp_path, monkeypatch):
         ("doctor", {"target": tmp_path, "json_output": True}),
         ("import", {"target": tmp_path, "dry_run": True, "json_output": True}),
     ]
+
+
+def test_memory_care_scan_default_output_lives_under_brigade_state(tmp_path, capsys):
+    cards = tmp_path / "memory" / "cards"
+    cards.mkdir(parents=True)
+    (cards / "old.md").write_text(
+        "---\ntopic: old\ncategory: system\ntags: [a]\nreviewed: 2020-01-01\n---\n\nOld fact.\n"
+    )
+    (tmp_path / "MEMORY.md").write_text("- [old](memory/cards/old.md)\n")
+
+    assert memory_cmd.scan(target=tmp_path, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert ".brigade/memory-care/decay" in payload["scan_path"]
+    assert (tmp_path / ".brigade" / "memory-care" / "decay" / "scan-latest.json").is_file()
+    assert not (tmp_path / "memory" / "cards" / "decay").exists()
+
+
+def test_memory_care_readers_fall_back_to_legacy_decay_dir(tmp_path, capsys):
+    legacy = tmp_path / "memory" / "cards" / "decay"
+    legacy.mkdir(parents=True)
+    legacy_queue = {
+        "version": 1,
+        "scan_date": "2026-06-01",
+        "generated_at": "2026-06-01T00:00:00+00:00",
+        "source": "memory-care",
+        "cards": [],
+    }
+    (legacy / "refresh-queue.json").write_text(json.dumps(legacy_queue))
+    (legacy / "scan-latest.json").write_text(json.dumps({"scan_date": "2026-06-01", "generated_at": "2026-06-01T00:00:00+00:00", "issues": []}))
+
+    rc = memory_cmd.import_issues(target=tmp_path, dry_run=True, json_output=True)
+    out = capsys.readouterr()
+    assert rc == 0, out.err

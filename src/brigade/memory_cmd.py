@@ -16,7 +16,10 @@ from .install import apply_gitignore
 from .selection import Selection
 
 CONFIG_REL_PATH = ".brigade/memory-care.toml"
-DEFAULT_OUTPUT_PATH = "memory/cards/decay"
+DEFAULT_OUTPUT_PATH = ".brigade/memory-care/decay"
+# Pre-0.9.1 scans wrote into the user's card tree. Readers fall back to this
+# location when the default is in effect and no new-style output exists yet.
+LEGACY_OUTPUT_PATH = "memory/cards/decay"
 CHECKS = (
     "stale",
     "expired",
@@ -56,12 +59,27 @@ def _output_dir(target: Path, config: MemoryCareConfig) -> Path:
     return target.expanduser().resolve() / config.output_path
 
 
+def _read_output_dir(target: Path, config: MemoryCareConfig) -> Path:
+    """Resolve the output dir for readers, honoring the legacy location.
+
+    Scans write to `config.output_path`. When the default path is in effect
+    and has no scan output yet, fall back to the pre-0.9.1 location so
+    existing workspaces keep their queue continuity.
+    """
+    output = _output_dir(target, config)
+    if config.output_path == DEFAULT_OUTPUT_PATH and not (output / "scan-latest.json").is_file():
+        legacy = target.expanduser().resolve() / LEGACY_OUTPUT_PATH
+        if (legacy / "scan-latest.json").is_file() or (legacy / "refresh-queue.json").is_file():
+            return legacy
+    return output
+
+
 def _scan_path(target: Path, config: MemoryCareConfig) -> Path:
-    return _output_dir(target, config) / "scan-latest.json"
+    return _read_output_dir(target, config) / "scan-latest.json"
 
 
 def _queue_path(target: Path, config: MemoryCareConfig) -> Path:
-    return _output_dir(target, config) / "refresh-queue.json"
+    return _read_output_dir(target, config) / "refresh-queue.json"
 
 
 def _today() -> date:
@@ -197,7 +215,7 @@ def init(*, target: Path, force: bool = False, update_gitignore: bool = True) ->
     if update_gitignore:
         apply_gitignore(target, Selection(depth="repo", harnesses=[], owner="this-repo", includes=[]))
     print(f"memory_care_config: {path}")
-    print("output_path: memory/cards/decay")
+    print(f"output_path: {DEFAULT_OUTPUT_PATH}")
     print("next_command: brigade memory care scan")
     return 0
 

@@ -2,9 +2,9 @@
   "_brigade_version": "0.9.0",
   "_description": "Example config for a local memory-care scanner. Brigade does not run this scanner for you; it validates the output with `brigade doctor`.",
   "cards_glob": "memory/cards/*.md",
-  "decay_dir": "memory/cards/decay",
-  "scan_output": "memory/cards/decay/scan-latest.json",
-  "refresh_queue": "memory/cards/decay/refresh-queue.json",
+  "decay_dir": ".brigade/memory-care/decay",
+  "scan_output": ".brigade/memory-care/decay/scan-latest.json",
+  "refresh_queue": ".brigade/memory-care/decay/refresh-queue.json",
   "stale_after_days": 7,
   "schedule": "quiet-hours",
   "doctor_command": "brigade doctor --target ."

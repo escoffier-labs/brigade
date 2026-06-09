@@ -383,8 +383,11 @@ def _check_orphan_inboxes(
 
 
 def _check_memory_care(target: Path) -> List[CheckResult]:
+    from . import memory_cmd
+
     results: List[CheckResult] = []
-    decay_dir = target / "memory" / "cards" / "decay"
+    config = memory_cmd.load_config(target) or memory_cmd.MemoryCareConfig()
+    decay_dir = memory_cmd._read_output_dir(target, config)
     scan = decay_dir / "scan-latest.json"
     queue = decay_dir / "refresh-queue.json"
 
