@@ -1,5 +1,5 @@
 {
-  "_brigade_version": "0.1.0",
+  "_brigade_version": "0.8.2",
   "_description": "Example output contract for a nightly chat/session memory sweep. Keep raw chat transcripts in crawler archives; this file contains summaries and local source locators only.",
   "generated_at": "2026-05-26T22:09:00-04:00",
   "window": {

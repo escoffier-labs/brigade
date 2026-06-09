@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.2] - 2026-06-09
+
 ### Fixed
 - Quickstart and `brigade tools defaults` now scope built-in tool projections to the workspace's selected harnesses plus the neutral `scripts/` folder, so a `--harnesses codex` setup no longer writes folders for every supported harness.
 - The workspace `AGENTS.md`, `INSTALL_FOR_AGENTS.md`, and `handoff-flow` card templates now render the selected writer handoff inboxes instead of hardcoding `.claude/memory-handoffs/`, and the missing-template fallback now points at `brigade handoff-template` instead of a host-private path.
