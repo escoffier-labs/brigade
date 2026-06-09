@@ -1,0 +1,11 @@
+{
+  "id": "adal",
+  "role": "writer",
+  "description": "AdaL handoff inbox. (AGENTS.md is in the depth baseline; portable tools can project into .adal/commands/.)",
+  "files": [
+    {"src": "adal/memory-handoffs/TEMPLATE.md", "dst": ".adal/memory-handoffs/TEMPLATE.md"}
+  ],
+  "dirs": [
+    ".adal/memory-handoffs/processed"
+  ]
+}

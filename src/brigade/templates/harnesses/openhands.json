@@ -1,0 +1,11 @@
+{
+  "id": "openhands",
+  "role": "writer",
+  "description": "OpenHands handoff inbox. (AGENTS.md is in the depth baseline; portable tools can project into .openhands/instructions/.)",
+  "files": [
+    {"src": "openhands/memory-handoffs/TEMPLATE.md", "dst": ".openhands/memory-handoffs/TEMPLATE.md"}
+  ],
+  "dirs": [
+    ".openhands/memory-handoffs/processed"
+  ]
+}

@@ -11,6 +11,14 @@
     ".antigravity/memory-handoffs",
     ".pi/memory-handoffs",
     ".cursor/memory-handoffs",
+    ".aider/memory-handoffs",
+    ".goose/memory-handoffs",
+    ".continue/memory-handoffs",
+    ".copilot/memory-handoffs",
+    ".qwen/memory-handoffs",
+    ".kimi/memory-handoffs",
+    ".adal/memory-handoffs",
+    ".openhands/memory-handoffs",
     ".hermes/memory-handoffs"
   ],
   "processed_handoff_paths": [

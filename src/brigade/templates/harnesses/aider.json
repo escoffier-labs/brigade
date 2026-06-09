@@ -1,0 +1,11 @@
+{
+  "id": "aider",
+  "role": "writer",
+  "description": "Aider handoff inbox. (AGENTS.md is in the depth baseline; portable tools can project into .aider/commands/.)",
+  "files": [
+    {"src": "aider/memory-handoffs/TEMPLATE.md", "dst": ".aider/memory-handoffs/TEMPLATE.md"}
+  ],
+  "dirs": [
+    ".aider/memory-handoffs/processed"
+  ]
+}

@@ -56,6 +56,14 @@ If a session changes how Brigade should be used in this repo, write that durable
 - Antigravity uses `.antigravity/memory-handoffs/`.
 - Pi uses `.pi/memory-handoffs/`.
 - Cursor uses `.cursor/memory-handoffs/`.
+- Aider uses `.aider/memory-handoffs/`.
+- Goose uses `.goose/memory-handoffs/`.
+- Continue uses `.continue/memory-handoffs/`.
+- GitHub Copilot CLI uses `.copilot/memory-handoffs/`.
+- Qwen Code uses `.qwen/memory-handoffs/`.
+- Kimi Code uses `.kimi/memory-handoffs/`.
+- AdaL uses `.adal/memory-handoffs/`.
+- OpenHands uses `.openhands/memory-handoffs/`.
 - Hermes uses `.hermes/memory-handoffs/`.
 
 Prefer the writer command so the draft matches Brigade's expected section style and lints before handoff:

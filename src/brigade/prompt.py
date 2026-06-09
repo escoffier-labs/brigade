@@ -21,7 +21,24 @@ class NonInteractiveError(Exception):
     """Raised when prompt_for_selection() runs without a TTY."""
 
 
-_HARNESS_ORDER = ["claude", "codex", "opencode", "antigravity", "pi", "cursor", "openclaw", "hermes"]
+_HARNESS_ORDER = [
+    "claude",
+    "codex",
+    "opencode",
+    "antigravity",
+    "pi",
+    "cursor",
+    "aider",
+    "goose",
+    "continue",
+    "copilot",
+    "qwen",
+    "kimi",
+    "adal",
+    "openhands",
+    "openclaw",
+    "hermes",
+]
 _DEPTH_ORDER = ["repo", "workspace"]
 _INCLUDE_ORDER = ["publisher"]
 
@@ -32,6 +49,14 @@ _HARNESS_LABELS = {
     "antigravity": "Antigravity",
     "pi": "Pi",
     "cursor": "Cursor",
+    "aider": "Aider",
+    "goose": "Goose",
+    "continue": "Continue",
+    "copilot": "GitHub Copilot CLI",
+    "qwen": "Qwen Code",
+    "kimi": "Kimi Code",
+    "adal": "AdaL",
+    "openhands": "OpenHands",
     "openclaw": "OpenClaw",
     "hermes": "Hermes (experimental)",
 }

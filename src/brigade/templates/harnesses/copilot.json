@@ -1,0 +1,11 @@
+{
+  "id": "copilot",
+  "role": "writer",
+  "description": "GitHub Copilot CLI handoff inbox. (AGENTS.md is in the depth baseline; portable tools can project into .copilot/instructions/.)",
+  "files": [
+    {"src": "copilot/memory-handoffs/TEMPLATE.md", "dst": ".copilot/memory-handoffs/TEMPLATE.md"}
+  ],
+  "dirs": [
+    ".copilot/memory-handoffs/processed"
+  ]
+}

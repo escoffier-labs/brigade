@@ -34,6 +34,14 @@ def test_cursor_is_a_known_harness():
     assert WRITER_INBOXES["cursor"] == ".cursor/memory-handoffs"
 
 
+def test_expanded_cli_harnesses_are_known_writers():
+    from brigade.selection import KNOWN_HARNESSES, WRITER_INBOXES
+
+    for harness in ("aider", "goose", "continue", "copilot", "qwen", "kimi", "adal", "openhands"):
+        assert harness in KNOWN_HARNESSES
+        assert WRITER_INBOXES[harness] == f".{harness}/memory-handoffs"
+
+
 def test_writer_inboxes_cover_known_writers():
     from brigade.selection import WRITER_INBOXES
     assert WRITER_INBOXES["claude"] == ".claude/memory-handoffs"
@@ -41,6 +49,14 @@ def test_writer_inboxes_cover_known_writers():
     assert WRITER_INBOXES["antigravity"] == ".antigravity/memory-handoffs"
     assert WRITER_INBOXES["pi"] == ".pi/memory-handoffs"
     assert WRITER_INBOXES["cursor"] == ".cursor/memory-handoffs"
+    assert WRITER_INBOXES["aider"] == ".aider/memory-handoffs"
+    assert WRITER_INBOXES["goose"] == ".goose/memory-handoffs"
+    assert WRITER_INBOXES["continue"] == ".continue/memory-handoffs"
+    assert WRITER_INBOXES["copilot"] == ".copilot/memory-handoffs"
+    assert WRITER_INBOXES["qwen"] == ".qwen/memory-handoffs"
+    assert WRITER_INBOXES["kimi"] == ".kimi/memory-handoffs"
+    assert WRITER_INBOXES["adal"] == ".adal/memory-handoffs"
+    assert WRITER_INBOXES["openhands"] == ".openhands/memory-handoffs"
     assert WRITER_INBOXES["hermes"] == ".hermes/memory-handoffs"
 
 
@@ -106,6 +122,23 @@ def test_selection_validate_accepts_this_repo_owner_with_empty_harnesses():
 
 
 def test_known_constants():
-    assert set(KNOWN_HARNESSES) == {"claude", "codex", "opencode", "antigravity", "pi", "cursor", "openclaw", "hermes"}
+    assert set(KNOWN_HARNESSES) == {
+        "claude",
+        "codex",
+        "opencode",
+        "antigravity",
+        "pi",
+        "cursor",
+        "aider",
+        "goose",
+        "continue",
+        "copilot",
+        "qwen",
+        "kimi",
+        "adal",
+        "openhands",
+        "openclaw",
+        "hermes",
+    }
     assert set(KNOWN_DEPTHS) == {"repo", "workspace"}
     assert set(KNOWN_INCLUDES) == {"publisher"}

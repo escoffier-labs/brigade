@@ -1,0 +1,11 @@
+{
+  "id": "continue",
+  "role": "writer",
+  "description": "Continue handoff inbox. (AGENTS.md is in the depth baseline; portable tools can project into .continue/rules/.)",
+  "files": [
+    {"src": "continue/memory-handoffs/TEMPLATE.md", "dst": ".continue/memory-handoffs/TEMPLATE.md"}
+  ],
+  "dirs": [
+    ".continue/memory-handoffs/processed"
+  ]
+}

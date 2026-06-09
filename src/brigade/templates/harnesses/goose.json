@@ -1,0 +1,11 @@
+{
+  "id": "goose",
+  "role": "writer",
+  "description": "Goose handoff inbox. (AGENTS.md is in the depth baseline; portable tools can project into .goose/commands/.)",
+  "files": [
+    {"src": "goose/memory-handoffs/TEMPLATE.md", "dst": ".goose/memory-handoffs/TEMPLATE.md"}
+  ],
+  "dirs": [
+    ".goose/memory-handoffs/processed"
+  ]
+}

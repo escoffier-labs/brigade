@@ -133,6 +133,21 @@ def test_cursor_install_creates_inbox_and_gitignore(tmp_path):
     assert "!.cursor/memory-handoffs/TEMPLATE.md" in block
 
 
+@pytest.mark.parametrize("harness", ["aider", "goose", "continue", "copilot", "qwen", "kimi", "adal", "openhands"])
+def test_expanded_cli_harness_install_creates_inbox_and_gitignore(tmp_path, harness):
+    from brigade.install import install_selection, build_gitignore_block
+    from brigade.selection import Selection
+
+    sel = Selection(depth="repo", harnesses=[harness], owner=harness, includes=[])
+    rc = install_selection(tmp_path, sel)
+    assert rc == 0
+    assert (tmp_path / f".{harness}" / "memory-handoffs" / "TEMPLATE.md").is_file()
+    assert (tmp_path / f".{harness}" / "memory-handoffs" / "processed").is_dir()
+    block = build_gitignore_block(sel)
+    assert f".{harness}/memory-handoffs/*" in block
+    assert f"!.{harness}/memory-handoffs/TEMPLATE.md" in block
+
+
 def test_hermes_install_creates_adapter_inbox_and_gitignore(tmp_path):
     import json
 

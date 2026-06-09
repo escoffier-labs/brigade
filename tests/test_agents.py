@@ -10,6 +10,14 @@ def test_build_argv_for_known_clis():
     assert agents.build_argv("antigravity", "hi") == ["agy", "--print", "hi"]
     assert agents.build_argv("pi", "hi") == ["pi", "-p", "hi"]
     assert agents.build_argv("cursor", "hi") == ["cursor-agent", "-p", "--output-format", "text", "hi"]
+    assert agents.build_argv("aider", "hi") == ["aider", "--yes", "--no-auto-commits", "--message", "hi"]
+    assert agents.build_argv("goose", "hi") == ["goose", "run", "--no-session", "-t", "hi"]
+    assert agents.build_argv("continue", "hi") == ["cn", "-p", "hi"]
+    assert agents.build_argv("copilot", "hi") == ["copilot", "-p", "hi"]
+    assert agents.build_argv("qwen", "hi") == ["qwen", "-p", "hi", "--approval-mode", "yolo"]
+    assert agents.build_argv("kimi", "hi") == ["kimi", "--print", "-p", "hi", "--final-message-only"]
+    assert agents.build_argv("adal", "hi") == ["adal", "-q", "hi"]
+    assert agents.build_argv("openhands", "hi") == ["openhands", "--headless", "-t", "hi"]
     assert agents.build_argv("ollama:llama3.3", "hi") == ["ollama", "run", "llama3.3", "hi"]
 
 
@@ -26,6 +34,14 @@ def test_build_argv_for_read_only_codex():
     assert agents.build_argv("antigravity", "hi", read_only=True) == ["agy", "--sandbox", "--print", "hi"]
     assert agents.build_argv("pi", "hi", read_only=True) == ["pi", "--tools", "read,grep,find,ls", "-p", "hi"]
     assert agents.build_argv("cursor", "hi", read_only=True) == ["cursor-agent", "-p", "--mode", "plan", "--output-format", "text", "hi"]
+    assert agents.build_argv("aider", "hi", read_only=True) == ["aider", "--no-auto-commits", "--dry-run", "--message", "hi"]
+    assert agents.build_argv("continue", "hi", read_only=True) == ["cn", "-p", "hi", "--readonly"]
+    assert agents.build_argv("qwen", "hi", read_only=True) == ["qwen", "-p", "hi", "--approval-mode", "plan"]
+    assert agents.build_argv("kimi", "hi", read_only=True) == ["kimi", "--plan", "--print", "-p", "hi", "--final-message-only"]
+    assert agents.build_argv("goose", "hi", read_only=True)[-1].startswith("Read-only planning run.")
+    assert agents.build_argv("copilot", "hi", read_only=True)[-1].startswith("Read-only planning run.")
+    assert agents.build_argv("adal", "hi", read_only=True)[-1].startswith("Read-only planning run.")
+    assert agents.build_argv("openhands", "hi", read_only=True)[-1].startswith("Read-only planning run.")
     assert agents.build_argv("ollama:llama3.3", "hi", read_only=True) == [
         "ollama",
         "run",
@@ -63,6 +79,14 @@ def test_command_for_returns_binary():
     assert agents.command_for("antigravity") == "agy"
     assert agents.command_for("pi") == "pi"
     assert agents.command_for("cursor") == "cursor-agent"
+    assert agents.command_for("aider") == "aider"
+    assert agents.command_for("goose") == "goose"
+    assert agents.command_for("continue") == "cn"
+    assert agents.command_for("copilot") == "copilot"
+    assert agents.command_for("qwen") == "qwen"
+    assert agents.command_for("kimi") == "kimi"
+    assert agents.command_for("adal") == "adal"
+    assert agents.command_for("openhands") == "openhands"
     assert agents.command_for("ollama:llama3.3") == "ollama"
 
 
@@ -73,6 +97,14 @@ def test_is_known():
     assert agents.is_known("antigravity")
     assert agents.is_known("pi")
     assert agents.is_known("cursor")
+    assert agents.is_known("aider")
+    assert agents.is_known("goose")
+    assert agents.is_known("continue")
+    assert agents.is_known("copilot")
+    assert agents.is_known("qwen")
+    assert agents.is_known("kimi")
+    assert agents.is_known("adal")
+    assert agents.is_known("openhands")
     assert agents.is_known("ollama:anything")
     assert not agents.is_known("bogus")
 

@@ -1,0 +1,11 @@
+{
+  "id": "qwen",
+  "role": "writer",
+  "description": "Qwen Code handoff inbox. (AGENTS.md is in the depth baseline; portable tools can project into .qwen/commands/.)",
+  "files": [
+    {"src": "qwen/memory-handoffs/TEMPLATE.md", "dst": ".qwen/memory-handoffs/TEMPLATE.md"}
+  ],
+  "dirs": [
+    ".qwen/memory-handoffs/processed"
+  ]
+}

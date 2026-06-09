@@ -1,0 +1,11 @@
+{
+  "id": "kimi",
+  "role": "writer",
+  "description": "Kimi Code handoff inbox. (AGENTS.md is in the depth baseline; portable tools can project into .kimi/commands/.)",
+  "files": [
+    {"src": "kimi/memory-handoffs/TEMPLATE.md", "dst": ".kimi/memory-handoffs/TEMPLATE.md"}
+  ],
+  "dirs": [
+    ".kimi/memory-handoffs/processed"
+  ]
+}

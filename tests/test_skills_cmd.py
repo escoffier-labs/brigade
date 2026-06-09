@@ -43,7 +43,25 @@ def test_skills_import_lint_search_and_install_all(tmp_path, capsys):
 
     assert skills_cmd.install(workspace=tmp_path, skill="security-review", harness="all", json_output=True) == 0
     install = json.loads(capsys.readouterr().out)
-    assert install["receipt"]["targets"] == ["codex", "claude", "opencode", "antigravity", "pi", "cursor", "openclaw", "hermes", "mcp"]
+    assert install["receipt"]["targets"] == [
+        "codex",
+        "claude",
+        "opencode",
+        "antigravity",
+        "pi",
+        "cursor",
+        "aider",
+        "goose",
+        "continue",
+        "copilot",
+        "qwen",
+        "kimi",
+        "adal",
+        "openhands",
+        "openclaw",
+        "hermes",
+        "mcp",
+    ]
     codex_skill = tmp_path / ".codex" / "skills" / "security-review" / "SKILL.md"
     assert codex_skill.is_file()
     codex_text = codex_skill.read_text()

@@ -92,7 +92,7 @@ The TokenJuice starter card documents Claude Code's PreToolUse wrapper path, Cod
 Brigade has grown from a bootstrap kit into a local control plane for agent work. The current public surface includes:
 
 - Bootstrap and memory layout: sanitized `AGENTS.md`, safety, tool, identity, user, memory, rule, handoff, and harness files with a canonical memory-owner model.
-- Multi-harness handoffs: `.claude/memory-handoffs/`, `.codex/memory-handoffs/`, `.opencode/memory-handoffs/`, `.antigravity/memory-handoffs/`, `.pi/memory-handoffs/`, `.cursor/memory-handoffs/`, source coverage checks, linting, reconciliation receipts, issue imports, sync repair, and archive closeouts.
+- Multi-harness handoffs: `.claude/memory-handoffs/`, `.codex/memory-handoffs/`, `.opencode/memory-handoffs/`, `.antigravity/memory-handoffs/`, `.pi/memory-handoffs/`, `.cursor/memory-handoffs/`, `.aider/memory-handoffs/`, `.goose/memory-handoffs/`, `.continue/memory-handoffs/`, `.copilot/memory-handoffs/`, `.qwen/memory-handoffs/`, `.kimi/memory-handoffs/`, `.adal/memory-handoffs/`, `.openhands/memory-handoffs/`, source coverage checks, linting, reconciliation receipts, issue imports, sync repair, and archive closeouts.
 - Work loop: dogfood runs, work sessions, task ledgers, issue imports, acceptance criteria, verification receipts, review closeouts, sweep closeouts, and work closeout receipts.
 - Scanner inbox: explicit local scanner registry, scanner runs, scanner sweeps, import validation, provenance checks, dedupe, dismiss-until-changed behavior, handoff promotion, and inbox hygiene.
 - Daily driver: `brigade daily status/plan/review/run/closeout` plus approvals, resume, repair, unblock, protocol, telemetry, and hardening audits for one bounded local action at a time.
@@ -101,7 +101,7 @@ Brigade has grown from a bootstrap kit into a local control plane for agent work
 - Repo fleet: local repo discovery plans, repo health scans, fleet sweeps, reports, actions, action dispatch, context packs, release trains, train evidence, waivers, manifests, audits, and ready gates.
 - AFK phase ledger: phase records, reports, closeouts, compares, action queues, sessions, checkpoints, recovery notes, risk, verification, privacy, handoff, progress, protocol, audit, gate, and release evidence.
 - Portable tool catalog: tool discovery, contracts, call planning, approval queues, explicit script and local MCP execution, run receipts, replay candidates, checkpoints, runtimes, host-local policy, parity, packs, sync, and projection health.
-- Shared skills: reviewed `SKILL.md` packs with metadata, provenance, linting, fingerprints, trust score, changelog, install history, diffs, portable packs, publish proposals, and one-command installation across Codex, Claude, OpenCode, Antigravity, Pi, Cursor, OpenClaw, Hermes, and MCP-resource targets.
+- Shared skills: reviewed `SKILL.md` packs with metadata, provenance, linting, fingerprints, trust score, changelog, install history, diffs, portable packs, publish proposals, and one-command installation across Codex, Claude, OpenCode, Antigravity, Pi, Cursor, Aider, Goose, Continue, GitHub Copilot CLI, Qwen Code, Kimi Code, AdaL, OpenHands, OpenClaw, Hermes, and MCP-resource targets.
 - Local producers: memory care, chat export sweeps, backup health, code review, context packs, project consolidation, learning candidates and replay, and security scans.
 - Operator notifications: optional `agent-notify` status and setup planning for private Discord, Telegram, or Signal notifications, with no sending from doctor/status flows.
 - Security and publish guards: content-guard integration, template audit, SARIF output, suppressions, accepted-risk closeouts, policy presets, prompt and instruction checks, MCP checks, supply-chain checks, and redacted reports.
@@ -208,7 +208,7 @@ brigade init --target ./repo --harnesses none           # generic install
 
 Once installed, `brigade doctor` verifies the wiring and `brigade status` reports over the station registry.
 For machines that ingest handoffs from multiple repos, copy `.brigade/handoff-sources.example.json` to `.brigade/handoff-sources.json` and list the repo roots and writer inboxes the canonical ingestor scans.
-`brigade handoff doctor` reports pending `.claude/memory-handoffs/`, `.codex/memory-handoffs/`, `.opencode/memory-handoffs/`, `.antigravity/memory-handoffs/`, `.pi/memory-handoffs/`, and `.cursor/memory-handoffs/` files that are not covered by that local source list.
+`brigade handoff doctor` reports pending `.claude/memory-handoffs/`, `.codex/memory-handoffs/`, `.opencode/memory-handoffs/`, `.antigravity/memory-handoffs/`, `.pi/memory-handoffs/`, `.cursor/memory-handoffs/`, `.aider/memory-handoffs/`, `.goose/memory-handoffs/`, `.continue/memory-handoffs/`, `.copilot/memory-handoffs/`, `.qwen/memory-handoffs/`, `.kimi/memory-handoffs/`, `.adal/memory-handoffs/`, and `.openhands/memory-handoffs/` files that are not covered by that local source list.
 Run `brigade handoff lint` before ingesting pending handoffs when you want to catch action/target mismatches early.
 If your ingestor writes a latest-run log, set `ingestor.last_run_log` in that local config so the doctor can warn on stale runs, skipped or malformed handoffs, failed ingests, unreachable sources, and warning summaries hidden behind no-reply cron output.
 Use `brigade handoff issues` to group those warnings with repair guidance, then `brigade handoff sync-issues` to import new issues and close stale local handoff tasks/imports once the latest scan no longer reports them. Handoff source coverage issues carry stable source keys and fingerprints, so dismissed uncovered-inbox repairs stay dismissed until the pending coverage state changes.
@@ -348,7 +348,7 @@ The browser/web tier is opt-in with `--web` and is treated as untrusted: fetched
 The loop uses the cloud `researcher` model from your `.brigade/roster.toml`; Brigade never runs a model locally.
 Each run persists under `.brigade/research/`, is cancellable and resumable so a long run survives interruption, and emits two artifacts: a self-contained HTML report and a memory handoff that flows into the usual ingest pipeline.
 Run manifests record the corpus, source globs, configured CLI routes, web provider, and caps so `brigade research resume` keeps the original route instead of quietly falling back to an empty run.
-Exporting the handoff is explicit. `brigade research export-handoff <run-id> --inbox codex` copies the completed run's linted handoff into a selected writer inbox such as Codex, Claude Code, OpenCode, Antigravity, Pi, Cursor, or Hermes. Use `--handoff-inbox <path>` for a custom writer. Brigade records the export fingerprint on the run and surfaces missing, stale, or missing-path exports in `research show`, `work brief`, `center reviews`, and release readiness evidence. `brigade research handoffs doctor` gives a focused export-health check, and `brigade research handoffs import-issues` routes export repairs into the normal work inbox with stable source fingerprints.
+Exporting the handoff is explicit. `brigade research export-handoff <run-id> --inbox codex` copies the completed run's linted handoff into a selected writer inbox such as Codex, Claude Code, OpenCode, Antigravity, Pi, Cursor, Aider, Goose, Continue, GitHub Copilot CLI, Qwen Code, Kimi Code, AdaL, OpenHands, or Hermes. Use `--handoff-inbox <path>` for a custom writer. Brigade records the export fingerprint on the run and surfaces missing, stale, or missing-path exports in `research show`, `work brief`, `center reviews`, and release readiness evidence. `brigade research handoffs doctor` gives a focused export-health check, and `brigade research handoffs import-issues` routes export repairs into the normal work inbox with stable source fingerprints.
 
 ```bash
 brigade research run "summarize the key themes" --corpus cs101
@@ -435,7 +435,7 @@ First run in a repo:
 
 ```bash
 brigade operator quickstart --target . --harnesses codex
-brigade operator quickstart --target . --harnesses codex,claude,opencode,antigravity,pi,cursor --dry-run
+brigade operator quickstart --target . --harnesses codex,claude,opencode,antigravity,pi,cursor,aider,goose,continue,copilot,qwen,kimi,adal,openhands --dry-run
 brigade operator adopt plan --target . --json
 brigade operator adopt capture --target . --json
 brigade operator adopt import-issues --target . --json
@@ -508,7 +508,7 @@ For handoff-ingest issues, prefer `brigade handoff sync-issues` over repeated ra
 
 Handoff draft queue commands:
 
-- `brigade handoff list` lists local Memory Handoff drafts from `.claude/memory-handoffs/`, `.codex/memory-handoffs/`, `.opencode/memory-handoffs/`, `.antigravity/memory-handoffs/`, `.pi/memory-handoffs/`, `.cursor/memory-handoffs/`, and configured source inboxes.
+- `brigade handoff list` lists local Memory Handoff drafts from `.claude/memory-handoffs/`, `.codex/memory-handoffs/`, `.opencode/memory-handoffs/`, `.antigravity/memory-handoffs/`, `.pi/memory-handoffs/`, `.cursor/memory-handoffs/`, `.aider/memory-handoffs/`, `.goose/memory-handoffs/`, `.continue/memory-handoffs/`, `.copilot/memory-handoffs/`, `.qwen/memory-handoffs/`, `.kimi/memory-handoffs/`, `.adal/memory-handoffs/`, `.openhands/memory-handoffs/`, and configured source inboxes.
 - `brigade handoff show <handoff-id-or-path>` shows lint status, target card or document, source import id, source fingerprint, scanner provenance, and stale age.
 - `brigade handoff archive <handoff-id-or-path>` moves one reviewed draft into `.brigade/handoffs/archive/` and records closeout metadata in `.brigade/handoffs/archive.jsonl`.
 - `brigade handoff archive --all-reviewed` archives lint-valid drafts only. It does not run the canonical ingestor or edit memory.
@@ -636,8 +636,8 @@ Shared skill registry commands:
 - `brigade skills doctor` checks registry health, including lint errors, injection warnings, unreviewed trust, missing tests, missing changelog, and installed drift.
 - `brigade skills import-issues` routes skill registry health findings into the reviewed work import inbox as `source: skill-registry`.
 - `brigade skills search "mcp security review"` searches approved local registry metadata.
-- `brigade skills install security-review --target codex`, `--target claude`, `--target opencode`, `--target antigravity`, `--target pi`, `--target cursor`, `--target openclaw`, `--target hermes`, or `--target mcp` materializes one reviewed skill into a specific harness shape.
-- `brigade skills install security-review --target all` installs the same reviewed skill into Codex, Claude, OpenCode, Antigravity `.antigravity/skills`, Pi `.pi/skills`, Cursor `.cursor/skills`, OpenClaw, Hermes, and MCP-resource folders, writing per-harness receipts. Built-in adapters normalize target-specific output, for example adding Codex `SKILL.md` frontmatter when the portable source does not already have it.
+- `brigade skills install security-review --target codex`, `--target claude`, `--target opencode`, `--target antigravity`, `--target pi`, `--target cursor`, `--target aider`, `--target goose`, `--target continue`, `--target copilot`, `--target qwen`, `--target kimi`, `--target adal`, `--target openhands`, `--target openclaw`, `--target hermes`, or `--target mcp` materializes one reviewed skill into a specific harness shape.
+- `brigade skills install security-review --target all` installs the same reviewed skill into Codex, Claude, OpenCode, Antigravity `.antigravity/skills`, Pi `.pi/skills`, Cursor `.cursor/skills`, Aider `.aider/skills`, Goose `.goose/skills`, Continue `.continue/skills`, GitHub Copilot CLI `.copilot/skills`, Qwen Code `.qwen/skills`, Kimi Code `.kimi/skills`, AdaL `.adal/skills`, OpenHands `.openhands/skills`, OpenClaw, Hermes, and MCP-resource folders, writing per-harness receipts. Built-in adapters normalize target-specific output, for example adding Codex `SKILL.md` frontmatter when the portable source does not already have it.
 - `brigade skills compatibility security-review` reports supported, installed, planned, and blocked harness targets for a skill, plus version drift, source/render fingerprints, install history counts, trust score, and changelog status.
 - `brigade skills history security-review --harness codex` lists local install receipts for one skill and harness from `.brigade/skills/installs/history.jsonl`.
 - `brigade skills diff security-review --harness codex` compares the currently installed harness file against the current rendered registry version.
@@ -903,6 +903,14 @@ Brigade installs material into a target directory on two independent axes. The t
 | `antigravity` | writer | `.antigravity/memory-handoffs/` inbox |
 | `pi` | writer | `.pi/memory-handoffs/` inbox |
 | `cursor` | writer | `.cursor/memory-handoffs/` inbox |
+| `aider` | writer | `.aider/memory-handoffs/` inbox |
+| `goose` | writer | `.goose/memory-handoffs/` inbox |
+| `continue` | writer | `.continue/memory-handoffs/` inbox |
+| `copilot` | writer | `.copilot/memory-handoffs/` inbox |
+| `qwen` | writer | `.qwen/memory-handoffs/` inbox |
+| `kimi` | writer | `.kimi/memory-handoffs/` inbox |
+| `adal` | writer | `.adal/memory-handoffs/` inbox |
+| `openhands` | writer | `.openhands/memory-handoffs/` inbox |
 | `openclaw` | reader | `.brigade/openclaw/` config fragments + cron stubs |
 | `hermes` | writer or owner | `.brigade/hermes/` adapter fragments + `.hermes/memory-handoffs/` inbox (experimental) |
 
@@ -924,6 +932,14 @@ Common combos:
 - **Antigravity + OpenClaw:** `--harnesses antigravity,openclaw`, Antigravity writes handoffs into `.antigravity/memory-handoffs/` and OpenClaw owns the canonical memory.
 - **Pi + OpenClaw:** `--harnesses pi,openclaw`, Pi writes handoffs into `.pi/memory-handoffs/` and OpenClaw owns the canonical memory.
 - **Cursor + OpenClaw:** `--harnesses cursor,openclaw`, Cursor writes handoffs into `.cursor/memory-handoffs/` and OpenClaw owns the canonical memory.
+- **Aider + OpenClaw:** `--harnesses aider,openclaw`, Aider writes handoffs into `.aider/memory-handoffs/` and OpenClaw owns the canonical memory.
+- **Goose + OpenClaw:** `--harnesses goose,openclaw`, Goose writes handoffs into `.goose/memory-handoffs/` and OpenClaw owns the canonical memory.
+- **Continue + OpenClaw:** `--harnesses continue,openclaw`, Continue writes handoffs into `.continue/memory-handoffs/` and OpenClaw owns the canonical memory.
+- **GitHub Copilot CLI + OpenClaw:** `--harnesses copilot,openclaw`, Copilot writes handoffs into `.copilot/memory-handoffs/` and OpenClaw owns the canonical memory.
+- **Qwen Code + OpenClaw:** `--harnesses qwen,openclaw`, Qwen Code writes handoffs into `.qwen/memory-handoffs/` and OpenClaw owns the canonical memory.
+- **Kimi Code + OpenClaw:** `--harnesses kimi,openclaw`, Kimi Code writes handoffs into `.kimi/memory-handoffs/` and OpenClaw owns the canonical memory.
+- **AdaL + OpenClaw:** `--harnesses adal,openclaw`, AdaL writes handoffs into `.adal/memory-handoffs/` and OpenClaw owns the canonical memory.
+- **OpenHands + OpenClaw:** `--harnesses openhands,openclaw`, OpenHands writes handoffs into `.openhands/memory-handoffs/` and OpenClaw owns the canonical memory.
 - **OpenClaw + Hermes workspace:** `--depth workspace --harnesses openclaw,hermes --owner openclaw`, no code repo required.
 
 The canonical memory owner is picked automatically by priority (`openclaw > hermes > claude > codex > this-repo`). Override with `--owner`.
@@ -973,7 +989,7 @@ Security commands:
 - `brigade security findings` lists the latest reviewable findings, and `brigade security show <finding-id>` inspects one finding.
 - Security guardrails distinguish repo guidance, skills, slash commands, subagents, and tool wrappers, with template confidence for public examples and runtime confidence for active workspace files.
 - Session and chat transcript paths are reported as `surface: session-chat` when exposed API keys, tokens, passwords, or private keys are found.
-- Harness wiring checks cover repo-local agent JSON across `.brigade/`, `.claude/`, `.codex/`, `.opencode/`, `.antigravity/`, `.pi/`, `.cursor/`, `.openclaw/`, `.hermes/`, and Brigade templates, including path escapes, host-private paths, insecure or private URLs, and shell-like command fields.
+- Harness wiring checks cover repo-local agent JSON across `.brigade/`, `.claude/`, `.codex/`, `.opencode/`, `.antigravity/`, `.pi/`, `.cursor/`, `.aider/`, `.goose/`, `.continue/`, `.copilot/`, `.qwen/`, `.kimi/`, `.adal/`, `.openhands/`, `.openclaw/`, `.hermes/`, and Brigade templates, including path escapes, host-private paths, insecure or private URLs, and shell-like command fields.
 - `brigade security doctor` reports config, evidence, public template privacy, harness wiring, suppression, and open-finding health in text or JSON.
 - `brigade security closeout --accept-risk` records reviewed accepted risk with policy-pack blocker and warning counts for release evidence.
 - `brigade security enrich --target .` enriches an existing report and writes enrichment artifacts.
