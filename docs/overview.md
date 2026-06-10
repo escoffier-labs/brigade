@@ -333,6 +333,7 @@ flowchart TB
         PANTRY["Agent Pantry"]
         NOTIFY["agent-notify"]
         TOKEN["tokenjuice"]
+        SEARCH["code-search"]
     end
 
     subgraph NATIVE [" native Brigade stations "]
@@ -349,7 +350,7 @@ flowchart TB
     classDef core fill:#2563eb,stroke:#1d4ed8,color:#fff;
     classDef group fill:#f8fafc,stroke:#94a3b8,color:#334155;
     class BRIGADE core;
-    class OPENCLAW,HERMES,MDOCTOR,BDOCTOR,GUARD,PANTRY,NOTIFY,TOKEN,REPOS,TOOLS,SECURITY,HANDOFFS group;
+    class OPENCLAW,HERMES,MDOCTOR,BDOCTOR,GUARD,PANTRY,NOTIFY,TOKEN,SEARCH,REPOS,TOOLS,SECURITY,HANDOFFS group;
 ```
 
 Memory and handoff tools:
@@ -371,6 +372,11 @@ Evidence ledger tools:
 - [MiseLedger](https://github.com/escoffier-labs/miseledger): local-first evidence ledger that imports `miseledger.adapter.v1` JSONL into SQLite, searches with FTS5, and emits Brigade-ready evidence bundles.
 - [StationTrail](https://github.com/escoffier-labs/stationtrail): agent-session log exporter that normalizes Codex, Claude, OpenClaw, OpenCode, and Hermes sessions into adapter JSONL for MiseLedger.
 - [SourceHarvest](https://github.com/escoffier-labs/sourceharvest): source-system record exporter that normalizes notes, files, git history, and generic exports into adapter JSONL for MiseLedger.
+
+Search and context tools:
+
+- [code-search-api](https://github.com/escoffier-labs/code-search-api): local semantic code-search service backed by SQLite and Ollama embeddings.
+- [code-search-mcp](https://github.com/escoffier-labs/code-search-mcp): read-only MCP bridge for a running code-search-api service. The GitHub repo lives under Escoffier Labs; the npm package remains `@solomonneas/code-search-mcp`.
 
 Brigade also has native local workflows for [repo fleet operations](repo-fleet.md), [portable tool catalogs](tool-catalog.md), [security scans](security.md), and [handoff promotion](handoff-promotion.md). The highlights are below.
 

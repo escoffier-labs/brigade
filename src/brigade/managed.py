@@ -6,6 +6,10 @@ never as a hard failure.
 """
 from __future__ import annotations
 
+import json
+import os
+import urllib.error
+import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, List, Optional, Tuple
@@ -89,6 +93,40 @@ def _tokenjuice_doctor(ctx: DoctorContext) -> List[CheckResult]:
     status = data.get("status", "unknown")
     mapping = {"ok": OK, "warn": WARN, "disabled": MANUAL, "broken": FAIL}
     return [(mapping.get(status, WARN), "tokenjuice", f"hook status: {status}")]
+
+
+def _code_search_url() -> str:
+    return os.environ.get("CODE_SEARCH_API_URL", "http://localhost:5204").rstrip("/")
+
+
+def _code_search_api_doctor(ctx: DoctorContext) -> List[CheckResult]:
+    name = "code-search-api (local search service)"
+    url = f"{_code_search_url()}/api/health"
+    request = urllib.request.Request(url)
+    api_key = os.environ.get("CODE_SEARCH_API_KEY")
+    if api_key:
+        request.add_header("X-API-Key", api_key)
+    try:
+        with urllib.request.urlopen(request, timeout=2.0) as response:
+            payload = response.read().decode("utf-8", errors="replace")
+    except (OSError, urllib.error.URLError) as exc:
+        return [(WARN, name, f"installed; service health unavailable at {url} ({exc})")]
+    try:
+        data = json.loads(payload)
+    except json.JSONDecodeError:
+        return [(WARN, name, "installed; service returned non-JSON health")]
+    if not isinstance(data, dict):
+        return [(WARN, name, "installed; service returned unexpected health payload")]
+    status = OK if data.get("status") == "ok" else WARN
+    chunks = data.get("chunks", 0)
+    embedded = data.get("embedded", 0)
+    summarized = data.get("summarized", 0)
+    version = data.get("version") or "?"
+    return [(status, name, f"version={version}, chunks={chunks}, embedded={embedded}, summarized={summarized}")]
+
+
+def _code_search_mcp_doctor(ctx: DoctorContext) -> List[CheckResult]:
+    return [(OK, "code-search-mcp (MCP bridge)", "installed; configure MCP clients with CODE_SEARCH_API_URL and optional CODE_SEARCH_API_KEY")]
 
 
 # agentpantry keeps the agent's machine authenticated by syncing browser sessions
@@ -258,6 +296,18 @@ _TOOLS: Tuple[ManagedTool, ...] = (
         summary="output compaction via host hooks",
         install_args=["npm", "install", "-g", "tokenjuice"],
         wire=_tokenjuice_wire, doctor=_tokenjuice_doctor,
+    ),
+    ManagedTool(
+        name="code-search-api", station="search", command="code-search-api",
+        summary="local semantic code search service with SQLite and Ollama embeddings",
+        install_args=["pipx", "install", "git+https://github.com/escoffier-labs/code-search-api"],
+        wire=_noop_wire, doctor=_code_search_api_doctor,
+    ),
+    ManagedTool(
+        name="code-search-mcp", station="search", command="code-search-mcp",
+        summary="read-only MCP bridge for a running code-search-api service",
+        install_args=["npm", "install", "-g", "@solomonneas/code-search-mcp"],
+        wire=_noop_wire, doctor=_code_search_mcp_doctor,
     ),
     ManagedTool(
         name="agentpantry", station="pantry", command="agentpantry",

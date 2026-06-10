@@ -33,6 +33,13 @@ TOKENS = Station(
     doctor=_doctor.tokens_station_checks,
     tools=("tokenjuice",),
 )
+SEARCH = Station(
+    name="search",
+    summary="local semantic code search",
+    aliases=("code-search",),
+    doctor=_doctor.search_station_checks,
+    tools=("code-search-api", "code-search-mcp"),
+)
 SECURITY = Station(
     name="security",
     summary="agent workspace security scanning",
@@ -62,7 +69,7 @@ EVIDENCE = Station(
     tools=("miseledger", "stationtrail", "sourceharvest"),
 )
 
-_BUILTIN: Tuple[Station, ...] = (CORE, MEMORY, GUARD, TOKENS, SECURITY, PANTRY, NOTIFICATIONS, EVIDENCE)
+_BUILTIN: Tuple[Station, ...] = (CORE, MEMORY, GUARD, TOKENS, SEARCH, SECURITY, PANTRY, NOTIFICATIONS, EVIDENCE)
 
 
 def all_stations() -> Tuple[Station, ...]:
