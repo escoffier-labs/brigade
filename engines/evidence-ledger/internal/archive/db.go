@@ -15,11 +15,21 @@ func Open(path string) (*sql.DB, error) {
 	if err := security.EnsurePrivateParent(path); err != nil {
 		return nil, err
 	}
-	db, err := sql.Open("sqlite", path)
+	// Pragmas go in the DSN so every pooled connection gets them. A plain
+	// Exec only configures whichever connection served it: foreign_keys was
+	// silently off for the rest of the pool, and with no busy_timeout any
+	// cross-connection or cross-process lock contention failed instantly
+	// with SQLITE_BUSY. WAL lets readers (stats, search, a second CLI
+	// invocation) coexist with a long-running import.
+	dsn := "file:" + path +
+		"?_pragma=busy_timeout(10000)" +
+		"&_pragma=journal_mode(WAL)" +
+		"&_pragma=foreign_keys(1)"
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, err
 	}
-	if _, err := db.Exec("PRAGMA foreign_keys = ON"); err != nil {
+	if err := db.Ping(); err != nil {
 		_ = db.Close()
 		return nil, err
 	}

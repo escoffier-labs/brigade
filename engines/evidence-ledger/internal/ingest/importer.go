@@ -97,8 +97,11 @@ func ImportAdapterReader(db *sql.DB, r io.Reader, sourcePath, sourceOverride str
 	result.ImportID = importID
 	result.SourceHash = sourceHash
 
+	// Read through the open transaction, not the pool: a second pooled
+	// connection cannot read while a spilled write transaction holds the
+	// exclusive lock, which fails large imports with SQLITE_BUSY.
 	var exists int
-	err = db.QueryRow("select count(*) from imports where source_kind = ? and source_hash = ? and completed_at is not null", sourceKind, sourceHash).Scan(&exists)
+	err = tx.QueryRow("select count(*) from imports where source_kind = ? and source_hash = ? and completed_at is not null", sourceKind, sourceHash).Scan(&exists)
 	if err != nil {
 		return AdapterResult{}, err
 	}

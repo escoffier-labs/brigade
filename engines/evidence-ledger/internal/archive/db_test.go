@@ -87,3 +87,36 @@ func TestUserVersionOnFreshDB(t *testing.T) {
 		t.Fatalf("fresh db user_version = %d, want 0 before migrate", v)
 	}
 }
+
+func TestOpenAppliesPragmasToAllConnections(t *testing.T) {
+	db, err := Open(t.TempDir() + "/miseledger.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	// Exercise more than one pooled connection; DSN pragmas must hold on all
+	// of them, unlike the old per-connection Exec.
+	for i := 0; i < 4; i++ {
+		var mode string
+		if err := db.QueryRow("PRAGMA journal_mode").Scan(&mode); err != nil {
+			t.Fatal(err)
+		}
+		if mode != "wal" {
+			t.Fatalf("journal_mode = %q, want wal", mode)
+		}
+		var timeout int
+		if err := db.QueryRow("PRAGMA busy_timeout").Scan(&timeout); err != nil {
+			t.Fatal(err)
+		}
+		if timeout != 10000 {
+			t.Fatalf("busy_timeout = %d, want 10000", timeout)
+		}
+		var fk int
+		if err := db.QueryRow("PRAGMA foreign_keys").Scan(&fk); err != nil {
+			t.Fatal(err)
+		}
+		if fk != 1 {
+			t.Fatalf("foreign_keys = %d, want 1", fk)
+		}
+	}
+}
