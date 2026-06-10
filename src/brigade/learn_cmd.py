@@ -20,12 +20,37 @@ LEARNING_IMPORT_SOURCES = {
     "backup-health",
     "code-review",
     "handoff-ingest",
+    "learnings-import",
     "memory-care",
     "repo-fleet-release",
     "scanner-health",
     "security-scan",
     "tool-catalog",
 }
+
+# Importer for the structured `.learnings/` markdown log format that some
+# operator workflows already keep on disk. Each entry is a level-two heading
+# carrying a typed id (ERR/LRN/FEAT), followed by labelled fields and prose
+# sections. The importer reads those entries and proposes one local work-import
+# per entry so historical logs are not stranded. It never edits the log files
+# and never writes canonical memory.
+LEARNINGS_IMPORT_SOURCE = "learnings-import"
+LEARNINGS_DEFAULT_FILES = (
+    ".learnings/ERRORS.md",
+    ".learnings/LEARNINGS.md",
+    ".learnings/FEATURE_REQUESTS.md",
+)
+# Maps the typed id prefix to the proposed work-import kind. ERR entries are
+# failures (incident), LRN entries are durable findings, FEAT entries are
+# actionable feature work.
+LEARNINGS_ENTRY_KINDS = {
+    "ERR": "incident",
+    "LRN": "finding",
+    "FEAT": "task",
+}
+LEARNINGS_PROMOTED_STATUSES = {"promoted", "resolved"}
+_LEARNINGS_HEADING_RE = re.compile(r"^##\s+\[?(?P<id>(?P<prefix>ERR|LRN|FEAT)-\d{8}-\d+)\]?\s*[:\-]?\s*(?P<title>.*?)\s*$")
+_LEARNINGS_FIELD_RE = re.compile(r"^\*\*(?P<key>[A-Za-z][A-Za-z _-]*)\*\*\s*:\s*(?P<value>.*?)\s*$")
 
 
 def _learning_root(target: Path) -> Path:
@@ -182,6 +207,8 @@ def _raw_candidates(target: Path) -> list[dict[str, Any]]:
                 "issue_type",
                 "template",
                 "category",
+                "area",
+                "entry_prefix",
                 "severity",
                 "surface",
                 "confidence",
@@ -336,8 +363,182 @@ def import_issues(*, target: Path, dry_run: bool = False, json_output: bool = Fa
     return 0
 
 
+def _parse_learnings_entries(text: str, *, source_file: str) -> list[dict[str, Any]]:
+    """Parse structured `.learnings/` markdown entries into safe dictionaries.
+
+    Each entry is a level-two heading carrying a typed id such as
+    ``ERR-20260311-001``, optional ``**Label**: value`` fields, and free-form
+    prose sections. Fields and prose are redacted and prompt-injection-guarded
+    before they leave this function.
+    """
+    entries: list[dict[str, Any]] = []
+    current: dict[str, Any] | None = None
+    body_lines: list[str] = []
+
+    def _flush() -> None:
+        if current is None:
+            return
+        body = "\n".join(body_lines).strip()
+        current["safe_detail"] = _safe_learning_text(body, limit=600) if body else ""
+        entries.append(current)
+
+    for raw_line in text.splitlines():
+        heading = _LEARNINGS_HEADING_RE.match(raw_line)
+        if heading:
+            _flush()
+            body_lines = []
+            current = {
+                "entry_id": heading.group("id"),
+                "prefix": heading.group("prefix"),
+                "title": _safe_learning_text(heading.group("title") or "", limit=160),
+                "fields": {},
+                "source_file": source_file,
+            }
+            continue
+        if current is None:
+            continue
+        field = _LEARNINGS_FIELD_RE.match(raw_line)
+        if field:
+            key = field.group("key").strip().lower().replace(" ", "_")
+            current["fields"][key] = _safe_learning_text(field.group("value"), limit=120)
+            continue
+        body_lines.append(raw_line)
+    _flush()
+    return entries
+
+
+def _learnings_record(entry: dict[str, Any]) -> dict[str, Any]:
+    prefix = str(entry.get("prefix") or "")
+    kind = LEARNINGS_ENTRY_KINDS.get(prefix, "finding")
+    fields = entry.get("fields") if isinstance(entry.get("fields"), dict) else {}
+    entry_id = str(entry.get("entry_id") or "")
+    title = str(entry.get("title") or "").strip()
+    summary = title or _short(str(entry.get("safe_detail") or "logged learning entry"), 120)
+    area = fields.get("area")
+    status = str(fields.get("status") or "").strip().lower()
+    metadata: dict[str, Any] = {
+        "entry_id": entry_id,
+        "entry_prefix": prefix,
+        "source_file": entry.get("source_file"),
+        "safe_summary": summary,
+        "source_item_key": f"{LEARNINGS_IMPORT_SOURCE}:{entry_id}",
+    }
+    if isinstance(entry.get("safe_detail"), str) and entry["safe_detail"]:
+        metadata["safe_detail"] = entry["safe_detail"]
+    for key in ("priority", "status", "area", "logged"):
+        value = fields.get(key)
+        if isinstance(value, str) and value.strip():
+            metadata[key] = value.strip()
+    if status in LEARNINGS_PROMOTED_STATUSES:
+        metadata["log_status"] = status
+    record: dict[str, Any] = {
+        "text": f"Review .learnings entry {entry_id}: {summary}",
+        "kind": kind,
+        "source": LEARNINGS_IMPORT_SOURCE,
+        "metadata": metadata,
+    }
+    if kind == "task":
+        record["type"] = "feature"
+        record["template"] = "vertical-slice"
+        record["acceptance"] = [
+            "The logged entry is routed to a task, handoff, suppression, accepted risk, archive, or dismissal.",
+            "No canonical memory, source, policy, or log file is edited automatically.",
+        ]
+        priority = (fields.get("priority") or "").strip().lower()
+        if priority in {"low", "high"}:
+            record["priority"] = priority
+        elif priority == "critical":
+            record["priority"] = "urgent"
+        elif priority == "medium":
+            record["priority"] = "normal"
+    fingerprint_basis = {
+        "entry_id": entry_id,
+        "title": title,
+        "kind": kind,
+        "priority": fields.get("priority"),
+        "status": fields.get("status"),
+        "area": area,
+        "detail": metadata.get("safe_detail"),
+    }
+    metadata["source_fingerprint"] = work_cmd._stable_hash(fingerprint_basis)
+    return record
+
+
+def _resolve_learnings_files(target: Path, files: list[str] | None) -> list[Path]:
+    names = files if files else list(LEARNINGS_DEFAULT_FILES)
+    resolved: list[Path] = []
+    for name in names:
+        candidate = (target / name).expanduser().resolve()
+        if candidate.is_file():
+            resolved.append(candidate)
+    return resolved
+
+
+def import_learnings(
+    *,
+    target: Path,
+    files: list[str] | None = None,
+    dry_run: bool = False,
+    json_output: bool = False,
+) -> int:
+    target = target.expanduser().resolve()
+    if not target.is_dir():
+        print(f"error: --target is not a directory: {target}", file=sys.stderr)
+        return 2
+    paths = _resolve_learnings_files(target, files)
+    records: list[dict[str, Any]] = []
+    parsed_entries = 0
+    scanned_files: list[str] = []
+    for path in paths:
+        try:
+            text = path.read_text()
+        except OSError as exc:
+            print(f"error: cannot read learnings file: {exc}", file=sys.stderr)
+            return 2
+        try:
+            rel = str(path.relative_to(target))
+        except ValueError:
+            rel = path.name
+        scanned_files.append(rel)
+        for entry in _parse_learnings_entries(text, source_file=rel):
+            parsed_entries += 1
+            records.append(_learnings_record(entry))
+    imported, skipped, dismissed = work_cmd._append_import_records(target, records, dry_run=dry_run)
+    output = {
+        "target": str(target),
+        "imports_path": str(work_cmd._imports_path(target)),
+        "scanned_files": scanned_files,
+        "parsed_entries": parsed_entries,
+        "dry_run": dry_run,
+        "created": len(imported),
+        "skipped": len(skipped),
+        "dismissed": len(dismissed),
+        "imports": imported,
+    }
+    if json_output:
+        print(json.dumps(output, indent=2, sort_keys=True))
+        return 0
+    print(f"learnings_import: {target}")
+    print(f"scanned_files: {len(scanned_files)}")
+    print(f"parsed_entries: {parsed_entries}")
+    print(f"created: {len(imported)}")
+    print(f"skipped: {len(skipped)}")
+    print(f"dismissed: {len(dismissed)}")
+    for item in imported:
+        print(f"- {item.get('id')} {_short(str(item.get('text', '')))}")
+    return 0
+
+
 def _skill_pattern_key(item: dict[str, Any]) -> str:
     metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+    # Imported .learnings entries group by their typed prefix and logged area so
+    # repeated failures or learnings in the same area cluster into one
+    # promote-candidate.
+    if str(item.get("subsystem") or "") == "learnings-import":
+        prefix = metadata.get("entry_prefix")
+        area = metadata.get("area")
+        if isinstance(prefix, str) and prefix.strip() and isinstance(area, str) and area.strip():
+            return f"learnings:{_slug(prefix)}:{_slug(area)}"
     for key in ("rule_id", "issue_type", "template", "subsystem"):
         value = metadata.get(key) if key != "subsystem" else item.get("subsystem")
         if isinstance(value, str) and value.strip():

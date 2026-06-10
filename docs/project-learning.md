@@ -60,6 +60,8 @@ Commands:
 brigade learn plan
 brigade learn doctor
 brigade learn import-issues
+brigade learn import-learnings
+brigade learn import-learnings --file .learnings/ERRORS.md --dry-run
 brigade learn skill-candidates --source security-scan
 brigade learn propose-skill <candidate-id> --dry-run
 brigade learn propose-skill <candidate-id>
@@ -71,6 +73,8 @@ brigade learn replay list
 brigade learn replay show latest
 brigade learn replay compare latest
 ```
+
+`brigade learn import-learnings` reads structured `.learnings/` markdown logs that some operator workflows already keep on disk and proposes one local work-import per logged entry. Each entry is a level-two heading carrying a typed id such as `ERR-20260311-001`, `LRN-20260311-001`, or `FEAT-20260311-001`, with optional `**Priority**`, `**Status**`, and `**Area**` fields and free-form prose. `ERR` entries become `incident` imports, `LRN` entries become `finding` imports, and `FEAT` entries become `feature` task imports. By default the importer scans `.learnings/ERRORS.md`, `.learnings/LEARNINGS.md`, and `.learnings/FEATURE_REQUESTS.md`; pass `--file` to override. Entry text, fields, and prose are redacted and prompt-injection-guarded before they become imports, and the importer never edits the log files or canonical memory. Imported entries flow through `learn plan`, `learn doctor`, and `learn skill-candidates`, so repeated entries that share a logged area surface as one reviewed promote-candidate. The capture-and-promote loop is a well-known community pattern; see pskoett/self-improving-agent for one origin.
 
 Every candidate should end in one reviewed path:
 
