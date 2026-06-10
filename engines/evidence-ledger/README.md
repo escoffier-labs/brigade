@@ -1,5 +1,12 @@
 # MiseLedger
 
+<p>
+  <a href="https://github.com/escoffier-labs/miseledger/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/escoffier-labs/miseledger/ci.yml?branch=master&style=for-the-badge&label=ci" alt="CI status"></a>
+  <a href="https://github.com/escoffier-labs/miseledger/releases"><img src="https://img.shields.io/github/v/release/escoffier-labs/miseledger?style=for-the-badge&label=release" alt="Latest release"></a>
+  <img src="https://img.shields.io/badge/go-1.22%2B-00ADD8?style=for-the-badge&logo=go&logoColor=white" alt="Go 1.22+">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green?style=for-the-badge" alt="MIT license"></a>
+</p>
+
 MiseLedger turns scattered AI work history into a local searchable evidence graph.
 
 The MVP is a local-first CLI named `miseledger`. It imports `miseledger.adapter.v1` JSONL records into SQLite, preserves raw payload references, searches with SQLite FTS5, shows normalized items, exports Markdown, emits Brigade-ready evidence bundles, and allows read-only SQL inspection.
