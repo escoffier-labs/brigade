@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- Internal refactor, no behavior change: shared helpers extracted into `brigade.localio` (JSON/JSONL/timestamps/hashes/slugs), `brigade.actionqueue` (action-queue lifecycle for center/repos/release stations), and `brigade.reportstore` (report-bundle lifecycle for center, repos, release candidates, and fleet release trains); and the 11.8k-line `work_cmd` module is now a package (`constants`, `helpers`, `ledger`, `config`, `services`, `session`) behind an explicit re-export facade guarded by a frozen surface test. Station variants with genuinely different semantics (phases actions/reports, release-train privacy conventions) intentionally stay local.
+
 ## [0.9.3] - 2026-06-09
 
 ### Fixed
