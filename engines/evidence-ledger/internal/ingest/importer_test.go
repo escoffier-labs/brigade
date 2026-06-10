@@ -81,3 +81,56 @@ func TestImportAdapterReaderLargeImportDoesNotSelfDeadlock(t *testing.T) {
 		t.Fatalf("items = %d, want 3000", items)
 	}
 }
+
+func TestImportAdapterReaderBatchedProgressAndResume(t *testing.T) {
+	// More than one batch (importBatchSize=1000) so commits happen mid-stream.
+	db, err := archive.Open(t.TempDir() + "/miseledger.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := archive.Migrate(db); err != nil {
+		t.Fatal(err)
+	}
+	build := func(n int) string {
+		var b strings.Builder
+		for i := 0; i < n; i++ {
+			b.WriteString(`{"schema":"miseledger.adapter.v1","source":{"kind":"batch-test","name":"Batch"},"collection":{"external_id":"batch:c","kind":"agent_session","name":"batch"},"item":{"external_id":"batch:item:`)
+			b.WriteString(strconv.Itoa(i))
+			b.WriteString(`","kind":"message","created_at":"2026-06-03T00:00:00Z","text":"batch record `)
+			b.WriteString(strconv.Itoa(i))
+			b.WriteString(`","tags":["batch"]},"actor":{"external_id":"batch:a","type":"human","name":"batch"},"artifacts":[],"links":[],"relations":[],"raw":{"format":"json","path":"batch.jsonl","ordinal":`)
+			b.WriteString(strconv.Itoa(i + 1))
+			b.WriteString(`}}` + "\n")
+		}
+		return b.String()
+	}
+
+	var progressCalls int
+	res, err := ImportAdapterReaderProgress(db, strings.NewReader(build(2500)), "batch://fixture", "batch-test", func(int) { progressCalls++ })
+	if err != nil {
+		t.Fatalf("batched import failed: %s", err)
+	}
+	if res.Inserted != 2500 {
+		t.Fatalf("inserted = %d, want 2500", res.Inserted)
+	}
+	if progressCalls < 2 {
+		t.Fatalf("progress callbacks = %d, want at least 2 across batches", progressCalls)
+	}
+
+	// Re-import identical content: idempotent, already-known, inserts nothing.
+	again, err := ImportAdapterReader(db, strings.NewReader(build(2500)), "batch://fixture", "batch-test")
+	if err != nil {
+		t.Fatalf("re-import failed: %s", err)
+	}
+	if again.Inserted != 0 || !again.AlreadyKnown {
+		t.Fatalf("re-import = %+v, want inserted 0 already-known", again)
+	}
+	var items int
+	if err := db.QueryRow(`select count(*) from items`).Scan(&items); err != nil {
+		t.Fatal(err)
+	}
+	if items != 2500 {
+		t.Fatalf("items = %d, want 2500 (no duplication across batches)", items)
+	}
+}

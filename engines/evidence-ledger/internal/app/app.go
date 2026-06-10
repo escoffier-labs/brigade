@@ -866,7 +866,7 @@ func cmdImportNative(name string, generator sources.Generator, args []string, ou
 		// Force a complete re-scan that ignores the manifest.
 		opts.Skip = func(string, int64, string) bool { return false }
 	}
-	result, generated, err := runNativeImportOpts(db, name, generator, rest[0], opts, true)
+	result, generated, err := runNativeImportOpts(db, name, generator, rest[0], opts, true, errw)
 	if err != nil {
 		return fatalf(errw, "import %s: %s", name, err)
 	}
@@ -879,10 +879,10 @@ func cmdImportNative(name string, generator sources.Generator, args []string, ou
 }
 
 func runNativeImport(db *sql.DB, name string, generator sources.Generator, path string, limit int, since string, recordScans bool) (ingest.AdapterResult, sources.Result, error) {
-	return runNativeImportOpts(db, name, generator, path, sources.Options{Limit: limit, Since: since}, recordScans)
+	return runNativeImportOpts(db, name, generator, path, sources.Options{Limit: limit, Since: since}, recordScans, nil)
 }
 
-func runNativeImportOpts(db *sql.DB, name string, generator sources.Generator, path string, opts sources.Options, recordScans bool) (ingest.AdapterResult, sources.Result, error) {
+func runNativeImportOpts(db *sql.DB, name string, generator sources.Generator, path string, opts sources.Options, recordScans bool, progress io.Writer) (ingest.AdapterResult, sources.Result, error) {
 	// Incremental skip: unchanged files (same size and mtime as the manifest)
 	// are never read or hashed. A full re-scan happens when opts.Skip is
 	// already set by the caller or the manifest is empty.
@@ -913,7 +913,16 @@ func runNativeImportOpts(db *sql.DB, name string, generator sources.Generator, p
 		}
 		done <- genResult{result: generated, err: err}
 	}()
-	result, err := ingest.ImportAdapterReader(db, pr, path, name)
+	var progressFn func(int)
+	if progress != nil {
+		progressFn = func(inserted int) {
+			fmt.Fprintf(progress, "\rimport %s: %d records committed...", name, inserted)
+		}
+	}
+	result, err := ingest.ImportAdapterReaderProgress(db, pr, path, name, progressFn)
+	if progress != nil && result.Inserted >= 1000 {
+		fmt.Fprintf(progress, "\rimport %s: %d records committed.\n", name, result.Inserted)
+	}
 	generated := <-done
 	if err == nil && generated.err != nil {
 		err = generated.err

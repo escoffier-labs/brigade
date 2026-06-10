@@ -41,21 +41,57 @@ func ImportAdapterFile(db *sql.DB, path, sourceOverride string) (AdapterResult, 
 	return ImportAdapterReader(db, f, abs, sourceOverride)
 }
 
+// importBatchSize is how many records are committed per transaction. Batching
+// keeps the WAL bounded, makes partial progress durable across a crash, and is
+// the cadence at which import progress is reported.
+const importBatchSize = 1000
+
 func ImportAdapterReader(db *sql.DB, r io.Reader, sourcePath, sourceOverride string) (AdapterResult, error) {
+	return ImportAdapterReaderProgress(db, r, sourcePath, sourceOverride, nil)
+}
+
+// ImportAdapterReaderProgress imports adapter JSONL, committing every
+// importBatchSize records and invoking progress (if non-nil) with the running
+// inserted count after each committed batch. Inserts are idempotent
+// (INSERT OR IGNORE), so a crash mid-import loses at most the open batch and a
+// re-run safely resumes.
+func ImportAdapterReaderProgress(db *sql.DB, r io.Reader, sourcePath, sourceOverride string, progress func(inserted int)) (AdapterResult, error) {
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	sourceKind := sourceOverride
-
-	tx, err := db.Begin()
-	if err != nil {
-		return AdapterResult{}, err
-	}
-	defer tx.Rollback()
 
 	result := AdapterResult{SourceKind: sourceKind, SourcePath: sourcePath}
 	h := sha256.New()
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 0, 64*1024), 10*1024*1024)
 	ordinal := int64(0)
+
+	tx, err := db.Begin()
+	if err != nil {
+		return AdapterResult{}, err
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+	batchCount := 0
+	flush := func() error {
+		if err := tx.Commit(); err != nil {
+			return err
+		}
+		if progress != nil {
+			progress(result.Inserted)
+		}
+		next, err := db.Begin()
+		if err != nil {
+			return err
+		}
+		tx = next
+		batchCount = 0
+		return nil
+	}
+
 	for scanner.Scan() {
 		line := append([]byte(nil), scanner.Bytes()...)
 		_, _ = h.Write(line)
@@ -84,6 +120,12 @@ func ImportAdapterReader(db *sql.DB, r io.Reader, sourcePath, sourceOverride str
 		if inserted {
 			result.Inserted++
 		}
+		batchCount++
+		if batchCount >= importBatchSize {
+			if err := flush(); err != nil {
+				return AdapterResult{}, err
+			}
+		}
 	}
 	if err := scanner.Err(); err != nil {
 		return AdapterResult{}, err
@@ -97,17 +139,18 @@ func ImportAdapterReader(db *sql.DB, r io.Reader, sourcePath, sourceOverride str
 	result.ImportID = importID
 	result.SourceHash = sourceHash
 
-	// Read through the open transaction, not the pool: a second pooled
-	// connection cannot read while a spilled write transaction holds the
-	// exclusive lock, which fails large imports with SQLITE_BUSY.
 	var exists int
 	err = tx.QueryRow("select count(*) from imports where source_kind = ? and source_hash = ? and completed_at is not null", sourceKind, sourceHash).Scan(&exists)
 	if err != nil {
 		return AdapterResult{}, err
 	}
 	if exists > 0 {
+		// Same content already fully imported. The batches above only re-ran
+		// idempotent INSERT OR IGNOREs (no-ops), so committing the final empty
+		// tx is harmless and we skip writing a duplicate import row.
 		result.AlreadyKnown = true
-		return result, tx.Rollback()
+		committed = true
+		return result, tx.Commit()
 	}
 	if _, err := tx.Exec(`insert or ignore into imports(id, source_kind, source_path, source_hash, started_at) values(?,?,?,?,?)`, importID, sourceKind, sourcePath, sourceHash, now); err != nil {
 		return AdapterResult{}, err
@@ -123,6 +166,7 @@ func ImportAdapterReader(db *sql.DB, r io.Reader, sourcePath, sourceOverride str
 	if _, err := tx.Exec(`update imports set completed_at = ?, item_count = ?, warning_count = ? where id = ?`, now, result.Inserted, len(result.Warnings), importID); err != nil {
 		return AdapterResult{}, err
 	}
+	committed = true
 	return result, tx.Commit()
 }
 
