@@ -34,7 +34,7 @@ This guide preserves the detailed command walkthroughs and operational notes tha
 
 Mise en place means "everything in its place before the work starts."
 In a kitchen, that is chopped mirepoix, clean pans, labels, and a station that does not make you hunt for salt mid-service.
-For agents, it is the same idea: rules, memory, tools, handoff inboxes, publish guards, and boring verification already laid out before the session gets expensive.
+For agents, it is the same idea: rules, memory, tools, handoff inboxes, publish guards, and routine verification already laid out before the session gets expensive.
 
 This package lays down a clean starting point for an agent workspace or a repo that needs durable memory handoffs, local work receipts, scanner inboxes, portable tool review, repo-fleet evidence, and release gates.
 It is meant for people running real tools, real docs, and real automation across OpenClaw, Claude Code, Codex, OpenCode, Antigravity, Pi, Cursor, Hermes, or a similar harness.
