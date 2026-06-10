@@ -852,3 +852,30 @@ func copyFixture(t *testing.T, from, to string) {
 func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
 }
+
+func TestImportDiscoveredAttributesWarningsAndFailures(t *testing.T) {
+	withTempHome(t)
+	runOK(t, "init")
+	root := filepath.Join(os.Getenv("HOME"), ".codex", "sessions", "2026", "06", "03")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// A malformed line produces a parse warning that must be attributed.
+	copyFixture(t, repoPath(t, "testdata/harnesses/codex-session.fixture.jsonl"), filepath.Join(root, "good.jsonl"))
+	copyFixture(t, repoPath(t, "testdata/harnesses/malformed-unknown.fixture.jsonl"), filepath.Join(root, "bad.jsonl"))
+
+	out := runJSON(t, "import", "discovered", "--json")
+	if _, ok := out["failures"]; !ok {
+		t.Fatalf("result missing failures key: %v", out)
+	}
+	warnings, _ := out["warnings"].([]any)
+	if len(warnings) == 0 {
+		t.Fatalf("expected attributed warnings from malformed file: %v", out)
+	}
+	for _, w := range warnings {
+		s := w.(string)
+		if !strings.Contains(s, ": ") {
+			t.Fatalf("warning not attributed to a source: %q", s)
+		}
+	}
+}

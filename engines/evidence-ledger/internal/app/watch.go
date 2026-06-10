@@ -40,6 +40,10 @@ type discoveredImportRow struct {
 	InsertedItems    int      `json:"inserted_items"`
 	AlreadyKnown     bool     `json:"already_known"`
 	Warnings         []string `json:"warnings"`
+	// Failed marks a hard error (generator or import failed) as distinct from
+	// a parse-level warning or a benign skip. Error carries the message.
+	Failed bool   `json:"failed,omitempty"`
+	Error  string `json:"error,omitempty"`
 }
 
 func cmdWatch(args []string, out, errw io.Writer) int {
@@ -217,12 +221,20 @@ func cmdImportDiscovered(args []string, out, errw io.Writer) int {
 	totalInserted := 0
 	totalGenerated := 0
 	warnings := []string{}
+	failures := []string{}
 	for _, row := range rows {
 		totalInserted += row.InsertedItems
 		totalGenerated += row.GeneratedRecords
-		warnings = append(warnings, row.Warnings...)
+		// Attribute every warning to its source so a flat list is still
+		// traceable (skip reasons were already prefixed; parse warnings were not).
+		for _, w := range row.Warnings {
+			warnings = append(warnings, row.SourceKind+": "+w)
+		}
 		if row.Skipped && row.Reason != "" {
 			warnings = append(warnings, row.SourceKind+": "+row.Reason)
+		}
+		if row.Failed {
+			failures = append(failures, row.SourceKind+": "+row.Error)
 		}
 	}
 	result := map[string]any{
@@ -230,12 +242,20 @@ func cmdImportDiscovered(args []string, out, errw io.Writer) int {
 		"generated_records": totalGenerated,
 		"inserted_items":    totalInserted,
 		"warnings":          warnings,
+		"failures":          failures,
 		"sources":           rows,
 	}
 	if bools["json"] {
 		writeJSON(out, result)
 	} else {
-		fmt.Fprintf(out, "generated=%d imported=%d warnings=%d\n", totalGenerated, totalInserted, len(warnings))
+		fmt.Fprintf(out, "generated=%d imported=%d warnings=%d failures=%d\n", totalGenerated, totalInserted, len(warnings), len(failures))
+		for _, f := range failures {
+			fmt.Fprintf(errw, "import failed: %s\n", f)
+		}
+	}
+	// A hard failure in any source is an error, not a silent generated=0.
+	if len(failures) > 0 {
+		return 1
 	}
 	return 0
 }
@@ -259,7 +279,8 @@ func importDiscoveredRoot(db *sql.DB, root discoveredRoot, values map[string]str
 		if dryRun {
 			summary, err := dryRunStationTrail(root.Kind, root.Root, values)
 			if err != nil {
-				row.Warnings = append(row.Warnings, err.Error())
+				row.Failed = true
+				row.Error = err.Error()
 				return row
 			}
 			row.GeneratedRecords = summary.Records
@@ -268,7 +289,8 @@ func importDiscoveredRoot(db *sql.DB, root discoveredRoot, values map[string]str
 		}
 		result, summary, err := runStationTrailImport(db, root.Kind, root.Root, values)
 		if err != nil {
-			row.Warnings = append(row.Warnings, err.Error())
+			row.Failed = true
+			row.Error = err.Error()
 			return row
 		}
 		row.GeneratedRecords = summary.Records
@@ -280,7 +302,8 @@ func importDiscoveredRoot(db *sql.DB, root discoveredRoot, values map[string]str
 	if dryRun {
 		generated, err := root.Generator(root.Root, sources.Options{Limit: limit, Since: values["since"]}, io.Discard)
 		if err != nil {
-			row.Warnings = append(row.Warnings, err.Error())
+			row.Failed = true
+			row.Error = err.Error()
 			return row
 		}
 		row.GeneratedRecords = generated.Records
@@ -289,7 +312,8 @@ func importDiscoveredRoot(db *sql.DB, root discoveredRoot, values map[string]str
 	}
 	result, generated, err := runNativeImport(db, root.Kind, root.Generator, root.Root, limit, values["since"], true)
 	if err != nil {
-		row.Warnings = append(row.Warnings, err.Error())
+		row.Failed = true
+		row.Error = err.Error()
 		return row
 	}
 	row.GeneratedRecords = generated.Records
