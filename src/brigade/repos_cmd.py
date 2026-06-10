@@ -17,7 +17,7 @@ from uuid import uuid4
 from .install import apply_gitignore
 from .localio import read_json_dict as _read_json, read_jsonl_dicts as _read_jsonl, utc_now as _now, write_json as _write_json
 from .selection import Selection, WRITER_INBOXES
-from . import actionqueue, toml_compat as tomllib, work_cmd
+from . import actionqueue, reportstore, toml_compat as tomllib, work_cmd
 
 OK = "ok"
 WARN = "warn"
@@ -1526,32 +1526,18 @@ def _reports_archive_root(target: Path) -> Path:
 
 
 def _report_json_path(path: Path) -> Path:
-    return path / "FLEET_EVIDENCE.json" if path.is_dir() else path
+    return reportstore.bundle_json_path(path, "FLEET_EVIDENCE.json")
 
 
 def _read_report(path: Path) -> dict[str, Any] | None:
-    payload = _read_json(_report_json_path(path))
-    if payload is not None:
-        payload.setdefault("path", str(_report_json_path(path).parent))
-    return payload
+    return reportstore.read_bundle(path, "FLEET_EVIDENCE.json")
 
 
 def _reports(target: Path, *, include_archived: bool = False) -> list[dict[str, Any]]:
     roots = [_reports_root(target)]
     if include_archived:
         roots.append(_reports_archive_root(target))
-    reports: list[dict[str, Any]] = []
-    for root in roots:
-        if not root.is_dir():
-            continue
-        for child in root.iterdir():
-            if not child.is_dir():
-                continue
-            payload = _read_report(child)
-            if payload is not None:
-                reports.append(payload)
-    reports.sort(key=lambda item: str(item.get("created_at") or item.get("report_id") or ""), reverse=True)
-    return reports
+    return reportstore.list_bundles(roots, _read_report, id_field="report_id")
 
 
 def latest_report(target: Path) -> dict[str, Any] | None:
@@ -1560,15 +1546,8 @@ def latest_report(target: Path) -> dict[str, Any] | None:
 
 
 def _resolve_report(target: Path, report_id: str) -> tuple[dict[str, Any] | None, str | None]:
-    if report_id == "latest":
-        latest = latest_report(target)
-        return (latest, None) if latest else (None, "fleet report not found: latest")
-    matches = [item for item in _reports(target, include_archived=True) if str(item.get("report_id") or "").startswith(report_id)]
-    if not matches:
-        return None, f"fleet report not found: {report_id}"
-    if len(matches) > 1:
-        return None, f"fleet report id is ambiguous: {report_id}"
-    return matches[0], None
+    reports = [] if report_id == "latest" else _reports(target, include_archived=True)
+    return reportstore.resolve_bundle(reports, report_id, id_field="report_id", label="fleet report", latest=lambda: latest_report(target))
 
 
 def _report_payload(target: Path) -> dict[str, Any]:
@@ -1658,8 +1637,7 @@ def _report_markdown(payload: dict[str, Any]) -> str:
 
 
 def _write_report_bundle(path: Path, payload: dict[str, Any]) -> None:
-    _write_json(path / "FLEET_EVIDENCE.json", payload)
-    (path / "FLEET_REPORT.md").write_text(_report_markdown(payload))
+    reportstore.write_bundle(path, payload, evidence_name="FLEET_EVIDENCE.json", documents={"FLEET_REPORT.md": _report_markdown(payload)})
 
 
 def report_plan(*, target: Path, json_output: bool = False) -> int:
@@ -1736,12 +1714,10 @@ def report_archive(*, target: Path, report_id: str, json_output: bool = False) -
     if not source.is_dir():
         print(f"error: fleet report path is missing: {source}", file=sys.stderr)
         return 2
-    destination = _reports_archive_root(target) / source.name
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    if destination.exists():
+    destination, moved = reportstore.move_bundle(source, _reports_archive_root(target))
+    if not moved:
         print(f"error: archived fleet report already exists: {destination}", file=sys.stderr)
         return 2
-    shutil.move(str(source), str(destination))
     payload = {"target": str(target), "report_id": report.get("report_id"), "status": "archived", "archive_path": str(destination)}
     if json_output:
         print(json.dumps(payload, indent=2, sort_keys=True))
@@ -1753,7 +1729,7 @@ def report_archive(*, target: Path, report_id: str, json_output: bool = False) -
 
 def report_closeout(*, target: Path, report_id: str = "latest", status: str = "reviewed", reason: str | None = None, json_output: bool = False) -> int:
     target = target.expanduser().resolve()
-    if status not in {"reviewed", "deferred", "superseded", "archived"}:
+    if status not in reportstore.CLOSEOUT_STATUSES:
         print("error: --status must be one of reviewed, deferred, superseded, archived", file=sys.stderr)
         return 2
     report, error = _resolve_report(target, report_id)
@@ -1772,9 +1748,7 @@ def report_closeout(*, target: Path, report_id: str = "latest", status: str = "r
         "reviewed_at": _now().isoformat(),
         "report_fingerprint": report.get("report_fingerprint"),
     }
-    closeout_path = report_path / "CLOSEOUT.json"
-    payload["path"] = str(closeout_path)
-    _write_json(closeout_path, payload)
+    reportstore.write_closeout(report_path, payload)
     report["closeout"] = payload
     _write_json(report_path / "FLEET_EVIDENCE.json", report)
     if json_output:

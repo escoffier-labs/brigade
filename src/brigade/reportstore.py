@@ -1,0 +1,123 @@
+"""Shared primitives for the directory-per-bundle report lifecycle.
+
+These helpers were extracted from near-identical private copies behind
+`center report` (center_cmd), `repos report` and `repos release`
+(repos_cmd), and `release candidate` (release_cmd). Each station keeps
+its own roots, payload builders, markdown renderers, receipt shapes,
+and output text; this module owns the evidence-file path convention,
+the bundle read annotation, root listing and newest-first sorting,
+latest/id-prefix resolution, the evidence-plus-documents bundle write,
+the CLOSEOUT.json stamp, and the archive move.
+
+The `work phases report` store in phases_cmd stays local on purpose:
+it lists bundles by globbing `*/PHASE_EVIDENCE.json` in name order,
+picks the latest report by ascending created_at, resolves ids by glob
+count with a distinct "invalid phase report" error path, and has no
+archive root. The repos release-train reader also stays local because
+it strips "path" and stamps a privacy-safe "path_label" instead of the
+shared "path" annotation.
+"""
+from __future__ import annotations
+
+import shutil
+from pathlib import Path
+from typing import Any, Callable, Iterable
+
+from .localio import read_json_dict, write_json
+
+CLOSEOUT_STATUSES = frozenset({"reviewed", "deferred", "superseded", "archived"})
+
+
+def bundle_json_path(path: Path, evidence_name: str) -> Path:
+    """Return the evidence JSON path inside a bundle dir, or path itself when it is a file."""
+    return path / evidence_name if path.is_dir() else path
+
+
+def read_bundle(path: Path, evidence_name: str) -> dict[str, Any] | None:
+    """Read a bundle's evidence JSON, defaulting its "path" to the bundle directory."""
+    json_path = bundle_json_path(path, evidence_name)
+    payload = read_json_dict(json_path)
+    if payload is not None:
+        payload.setdefault("path", str(json_path.parent))
+    return payload
+
+
+def list_bundles(
+    roots: Iterable[Path],
+    read: Callable[[Path], dict[str, Any] | None],
+    *,
+    id_field: str,
+    skip_child: Callable[[str], bool] | None = None,
+) -> list[dict[str, Any]]:
+    """Read the bundle dirs under roots via read, newest first by created_at then id_field."""
+    bundles: list[dict[str, Any]] = []
+    for root in roots:
+        if not root.is_dir():
+            continue
+        for child in root.iterdir():
+            if not child.is_dir() or (skip_child is not None and skip_child(child.name)):
+                continue
+            payload = read(child)
+            if payload is not None:
+                bundles.append(payload)
+    bundles.sort(key=lambda item: str(item.get("created_at") or item.get(id_field) or ""), reverse=True)
+    return bundles
+
+
+def resolve_bundle(
+    bundles: list[dict[str, Any]],
+    bundle_id: str,
+    *,
+    id_field: str,
+    label: str,
+    latest: Callable[[], dict[str, Any] | None],
+) -> tuple[dict[str, Any] | None, str | None]:
+    """Resolve "latest" via the latest callable, or a unique id_field prefix against bundles.
+
+    Returns (bundle, None) on success, otherwise (None, error) where the error
+    is a "{label} not found" or "{label} id is ambiguous" message.
+    """
+    if bundle_id == "latest":
+        found = latest()
+        return (found, None) if found else (None, f"{label} not found: latest")
+    matches = [item for item in bundles if str(item.get(id_field) or "").startswith(bundle_id)]
+    if not matches:
+        return None, f"{label} not found: {bundle_id}"
+    if len(matches) > 1:
+        return None, f"{label} id is ambiguous: {bundle_id}"
+    return matches[0], None
+
+
+def write_bundle(
+    bundle_dir: Path,
+    payload: dict[str, Any],
+    *,
+    evidence_name: str,
+    documents: dict[str, str],
+) -> None:
+    """Write the evidence JSON and the rendered text documents for a bundle."""
+    write_json(bundle_dir / evidence_name, payload)
+    for name, text in documents.items():
+        (bundle_dir / name).write_text(text)
+
+
+def write_closeout(bundle_dir: Path, closeout: dict[str, Any]) -> Path:
+    """Write CLOSEOUT.json under bundle_dir, stamping closeout["path"]; return its path."""
+    closeout_path = bundle_dir / "CLOSEOUT.json"
+    closeout["path"] = str(closeout_path)
+    write_json(closeout_path, closeout)
+    return closeout_path
+
+
+def move_bundle(source: Path, archive_root: Path) -> tuple[Path, bool]:
+    """Move source into archive_root, creating it; returns (destination, moved).
+
+    moved is False when the destination already exists, in which case the
+    source is left in place.
+    """
+    destination = archive_root / source.name
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if destination.exists():
+        return destination, False
+    shutil.move(str(source), str(destination))
+    return destination, True

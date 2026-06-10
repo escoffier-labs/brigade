@@ -5,7 +5,6 @@ import html
 import hashlib
 import json
 import re
-import shutil
 import subprocess
 import sys
 from datetime import datetime
@@ -13,7 +12,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from . import actionqueue, chat_cmd, context_cmd, handoff_cmd, learn_cmd, memory_cmd, notifications_cmd, pantry_cmd, phases_cmd, projects_cmd, release_cmd, repos_cmd, research_cmd, roadmap_cmd, security_cmd, tools_cmd, work_cmd
+from . import actionqueue, chat_cmd, context_cmd, handoff_cmd, learn_cmd, memory_cmd, notifications_cmd, pantry_cmd, phases_cmd, projects_cmd, release_cmd, repos_cmd, reportstore, research_cmd, roadmap_cmd, security_cmd, tools_cmd, work_cmd
 from .localio import read_json_dict as _read_json, read_jsonl_dicts as _read_jsonl, utc_now as _now, write_json as _write_json
 
 SCHEMA_VERSION = 1
@@ -1403,32 +1402,18 @@ def _report_diffs_root(target: Path) -> Path:
 
 
 def _report_json_path(path: Path) -> Path:
-    return path / "CENTER_EVIDENCE.json" if path.is_dir() else path
+    return reportstore.bundle_json_path(path, "CENTER_EVIDENCE.json")
 
 
 def _read_report(path: Path) -> dict[str, Any] | None:
-    payload = _read_json(_report_json_path(path))
-    if payload is not None:
-        payload.setdefault("path", str(_report_json_path(path).parent))
-    return payload
+    return reportstore.read_bundle(path, "CENTER_EVIDENCE.json")
 
 
 def _reports(target: Path, *, include_archived: bool = False) -> list[dict[str, Any]]:
     roots = [_reports_root(target)]
     if include_archived:
         roots.append(_reports_archive_root(target))
-    reports: list[dict[str, Any]] = []
-    for root in roots:
-        if not root.is_dir():
-            continue
-        for child in root.iterdir():
-            if child.name.endswith("archive") or not child.is_dir():
-                continue
-            payload = _read_report(child)
-            if payload is not None:
-                reports.append(payload)
-    reports.sort(key=lambda item: str(item.get("created_at") or item.get("report_id") or ""), reverse=True)
-    return reports
+    return reportstore.list_bundles(roots, _read_report, id_field="report_id", skip_child=lambda name: name.endswith("archive"))
 
 
 def latest_report(target: Path) -> dict[str, Any] | None:
@@ -1447,15 +1432,7 @@ def latest_report_diff(target: Path) -> dict[str, Any] | None:
 
 def _resolve_report(target: Path, report_id: str) -> tuple[dict[str, Any] | None, str | None]:
     reports = _reports(target, include_archived=True)
-    if report_id == "latest":
-        latest = latest_report(target)
-        return (latest, None) if latest else (None, "operator report not found: latest")
-    matches = [item for item in reports if str(item.get("report_id") or "").startswith(report_id)]
-    if not matches:
-        return None, f"operator report not found: {report_id}"
-    if len(matches) > 1:
-        return None, f"operator report id is ambiguous: {report_id}"
-    return matches[0], None
+    return reportstore.resolve_bundle(reports, report_id, id_field="report_id", label="operator report", latest=lambda: latest_report(target))
 
 
 def _receipt_references(payload: dict[str, Any]) -> list[str]:
@@ -1707,9 +1684,12 @@ def _report_html(markdown: str, payload: dict[str, Any]) -> str:
 
 def _write_report_bundle(report_dir: Path, payload: dict[str, Any]) -> None:
     markdown = _report_markdown(payload)
-    _write_json(report_dir / "CENTER_EVIDENCE.json", payload)
-    (report_dir / "OPERATOR_REPORT.md").write_text(markdown)
-    (report_dir / "OPERATOR_REPORT.html").write_text(_report_html(markdown, payload))
+    reportstore.write_bundle(
+        report_dir,
+        payload,
+        evidence_name="CENTER_EVIDENCE.json",
+        documents={"OPERATOR_REPORT.md": markdown, "OPERATOR_REPORT.html": _report_html(markdown, payload)},
+    )
 
 
 def report_health(target: Path) -> dict[str, Any]:
@@ -1873,12 +1853,10 @@ def report_archive(*, target: Path, report_id: str, json_output: bool = False) -
     if not source.is_dir():
         print(f"error: operator report path is missing: {source}", file=sys.stderr)
         return 2
-    destination = _reports_archive_root(target) / source.name
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    if destination.exists():
+    destination, moved = reportstore.move_bundle(source, _reports_archive_root(target))
+    if not moved:
         print(f"error: archived operator report already exists: {destination}", file=sys.stderr)
         return 2
-    shutil.move(str(source), str(destination))
     payload = {"schema_version": SCHEMA_VERSION, "target": str(target), "report_id": report.get("report_id"), "status": "archived", "archive_path": str(destination)}
     if json_output:
         print(json.dumps(payload, indent=2, sort_keys=True))
@@ -2157,7 +2135,7 @@ def report_closeout(
     json_output: bool = False,
 ) -> int:
     target = target.expanduser().resolve()
-    if status not in {"reviewed", "deferred", "superseded", "archived"}:
+    if status not in reportstore.CLOSEOUT_STATUSES:
         print("error: --status must be one of reviewed, deferred, superseded, archived", file=sys.stderr)
         return 2
     report, error = _resolve_report(target, report_id)
@@ -2182,9 +2160,7 @@ def report_closeout(
         "deferred_item_ids": deferred,
         "report_fingerprint": report.get("report_fingerprint") or _fingerprint_payload({"reviews": report.get("reviews"), "activity": report.get("activity")}),
     }
-    closeout_path = report_path / "CLOSEOUT.json"
-    payload["path"] = str(closeout_path)
-    _write_json(closeout_path, payload)
+    closeout_path = reportstore.write_closeout(report_path, payload)
     report["closeout"] = payload
     _write_json(report_path / "CENTER_EVIDENCE.json", report)
     if json_output:
