@@ -26,10 +26,12 @@ def test_stations_declare_attached_tools():
     memory = registry.resolve("memory")
     guard = registry.resolve("guard")
     tokens = registry.resolve("tokens")
+    search = registry.resolve("search")
     security = registry.resolve("security")
     assert set(memory.tools) == {"memory-doctor", "bootstrap-doctor"}
     assert set(guard.tools) == {"content-guard"}
     assert tokens is not None and set(tokens.tools) == {"tokenjuice"}
+    assert search is not None and set(search.tools) == {"code-search-api", "code-search-mcp"}
     assert security is not None and set(security.tools) == set()
 
 
@@ -50,3 +52,8 @@ def test_evidence_station_declares_miseledger_family():
 def test_resolve_evidence_by_name_and_alias():
     assert registry.resolve("evidence").name == "evidence"
     assert registry.resolve("ledger").name == "evidence"
+
+
+def test_resolve_search_by_name_and_alias():
+    assert registry.resolve("search").name == "search"
+    assert registry.resolve("code-search").name == "search"

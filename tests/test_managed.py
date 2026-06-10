@@ -14,7 +14,7 @@ def test_all_tools_declare_required_fields():
 
 def test_tools_attach_to_known_stations():
     stations = {t.station for t in managed.all_tools()}
-    assert stations <= {"memory", "guard", "tokens", "pantry", "notifications", "evidence"}
+    assert stations <= {"memory", "guard", "tokens", "search", "pantry", "notifications", "evidence"}
 
 
 def test_for_station_filters():
@@ -168,6 +168,69 @@ def test_evidence_install_args_use_escoffier_labs():
         t = managed.resolve(name)
         joined = " ".join(t.install_args)
         assert f"github.com/escoffier-labs/{name}/cmd/{name}@latest" in joined, name
+
+
+def test_search_tools_attach_to_search_station():
+    for name in ("code-search-api", "code-search-mcp"):
+        t = managed.resolve(name)
+        assert t is not None and t.station == "search", name
+    names = {t.name for t in managed.for_station("search")}
+    assert names == {"code-search-api", "code-search-mcp"}
+
+
+def test_search_install_args_keep_npm_scope_distinction():
+    api = managed.resolve("code-search-api")
+    mcp = managed.resolve("code-search-mcp")
+    assert "github.com/escoffier-labs/code-search-api" in " ".join(api.install_args)
+    # GitHub moved to escoffier-labs, but npm remains under Solomon's existing scope.
+    assert "@solomonneas/code-search-mcp" in " ".join(mcp.install_args)
+
+
+def test_code_search_api_doctor_reads_http_health(monkeypatch):
+    t = managed.resolve("code-search-api")
+    monkeypatch.setenv("CODE_SEARCH_API_URL", "http://search.local")
+    seen = {}
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def read(self):
+            return b'{"status": "ok", "version": "2.0.1", "chunks": 12, "embedded": 11, "summarized": 7}'
+
+    def fake_urlopen(request, timeout):
+        seen["url"] = request.full_url
+        seen["timeout"] = timeout
+        return FakeResponse()
+
+    monkeypatch.setattr(managed.urllib.request, "urlopen", fake_urlopen)
+    ctx = DoctorContext(target=Path("/tmp/ws"), selection=None, harnesses=[])
+    results = t.doctor(ctx)
+    assert seen == {"url": "http://search.local/api/health", "timeout": 2.0}
+    assert any(status == "OK" and "chunks=12" in detail for status, _, detail in results)
+
+
+def test_code_search_api_doctor_warns_when_service_unavailable(monkeypatch):
+    t = managed.resolve("code-search-api")
+
+    def fake_urlopen(request, timeout):
+        raise OSError("connection refused")
+
+    monkeypatch.setattr(managed.urllib.request, "urlopen", fake_urlopen)
+    ctx = DoctorContext(target=Path("/tmp/ws"), selection=None, harnesses=[])
+    results = t.doctor(ctx)
+    assert any(status == "WARN" and "service health unavailable" in detail for status, _, detail in results)
+    assert all(status != "FAIL" for status, _, _ in results)
+
+
+def test_code_search_mcp_doctor_is_presence_only():
+    t = managed.resolve("code-search-mcp")
+    ctx = DoctorContext(target=Path("/tmp/ws"), selection=None, harnesses=[])
+    results = t.doctor(ctx)
+    assert any(status == "OK" and "MCP clients" in detail for status, _, detail in results)
 
 
 def test_miseledger_doctor_parses_status(monkeypatch):

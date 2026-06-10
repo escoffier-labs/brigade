@@ -75,6 +75,12 @@ def tokens_station_checks(ctx: DoctorContext) -> List[CheckResult]:
     return []
 
 
+def search_station_checks(ctx: DoctorContext) -> List[CheckResult]:
+    # The managed code-search tools carry this station's signal. The station
+    # itself owns no per-workspace files and does not start local services.
+    return []
+
+
 def pantry_station_checks(ctx: DoctorContext) -> List[CheckResult]:
     # The agentpantry managed tool carries this station's signal; the station
     # itself lays down no per-workspace files.
