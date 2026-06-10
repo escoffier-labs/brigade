@@ -6,7 +6,7 @@ import (
 	"context"
 	"sort"
 
-	"github.com/solomonneas/agent-notify/internal/canonical"
+	"github.com/escoffier-labs/agent-notify/internal/canonical"
 )
 
 // Channel is the contract every channel adapter implements.

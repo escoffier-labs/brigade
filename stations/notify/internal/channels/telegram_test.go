@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/solomonneas/agent-notify/internal/canonical"
+	"github.com/escoffier-labs/agent-notify/internal/canonical"
 )
 
 type tgPayload struct {

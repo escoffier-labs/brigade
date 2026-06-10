@@ -5,7 +5,7 @@ import (
 	"sort"
 	"testing"
 
-	"github.com/solomonneas/agent-notify/internal/config"
+	"github.com/escoffier-labs/agent-notify/internal/config"
 )
 
 func sortedNames(ns []string) []string {

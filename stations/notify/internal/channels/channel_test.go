@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/solomonneas/agent-notify/internal/canonical"
+	"github.com/escoffier-labs/agent-notify/internal/canonical"
 )
 
 type fakeChannel struct {

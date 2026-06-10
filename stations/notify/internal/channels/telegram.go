@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/solomonneas/agent-notify/internal/canonical"
+	"github.com/escoffier-labs/agent-notify/internal/canonical"
 )
 
 // Compile-time assertion that *Telegram satisfies the Channel interface.

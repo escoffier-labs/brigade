@@ -17,11 +17,11 @@ import (
 	"sync"
 	"time"
 
-	"github.com/solomonneas/agent-notify/internal/adapter"
-	"github.com/solomonneas/agent-notify/internal/canonical"
-	"github.com/solomonneas/agent-notify/internal/channels"
-	"github.com/solomonneas/agent-notify/internal/config"
-	"github.com/solomonneas/agent-notify/internal/router"
+	"github.com/escoffier-labs/agent-notify/internal/adapter"
+	"github.com/escoffier-labs/agent-notify/internal/canonical"
+	"github.com/escoffier-labs/agent-notify/internal/channels"
+	"github.com/escoffier-labs/agent-notify/internal/config"
+	"github.com/escoffier-labs/agent-notify/internal/router"
 )
 
 const (

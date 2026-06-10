@@ -1,4 +1,4 @@
-module github.com/solomonneas/agent-notify
+module github.com/escoffier-labs/agent-notify
 
 go 1.22
 

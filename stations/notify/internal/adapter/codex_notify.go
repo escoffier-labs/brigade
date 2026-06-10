@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/solomonneas/agent-notify/internal/canonical"
+	"github.com/escoffier-labs/agent-notify/internal/canonical"
 )
 
 // CodexNotify reads a Codex CLI notify event JSON and produces a canonical

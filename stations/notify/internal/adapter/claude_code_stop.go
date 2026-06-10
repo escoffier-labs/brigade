@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/solomonneas/agent-notify/internal/canonical"
+	"github.com/escoffier-labs/agent-notify/internal/canonical"
 )
 
 // ClaudeCodeStop reads a Claude Code Stop hook event JSON from r and

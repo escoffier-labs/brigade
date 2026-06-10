@@ -8,7 +8,7 @@ import (
 	"io"
 	"strings"
 
-	"github.com/solomonneas/agent-notify/internal/canonical"
+	"github.com/escoffier-labs/agent-notify/internal/canonical"
 )
 
 // FromString builds a canonical message from a plain string body.

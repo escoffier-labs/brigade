@@ -7,7 +7,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/solomonneas/agent-notify/internal/config"
+	"github.com/escoffier-labs/agent-notify/internal/config"
 )
 
 // Resolve returns the channel names to send to, applying precedence:
