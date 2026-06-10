@@ -184,6 +184,29 @@ def test_skills_compatibility_reports_installed_and_planned_adapters(tmp_path, c
     assert by_id["cursor"]["render_valid"] is True
 
 
+def test_skills_compatibility_human_output_lists_adapters(tmp_path, capsys):
+    source = _write_skill(tmp_path / "source")
+    assert skills_cmd.import_skill(target=tmp_path, source=source, json_output=True) == 0
+    capsys.readouterr()
+
+    assert skills_cmd.compatibility(target=tmp_path, skill="security-review", json_output=False) == 0
+    out = capsys.readouterr().out
+    assert "skill compatibility: security-review" in out
+    assert "valid: true" in out
+    assert "- codex [" in out
+
+
+def test_skills_serve_mcp_human_output_counts_resources(tmp_path, capsys):
+    source = _write_skill(tmp_path / "source")
+    assert skills_cmd.import_skill(target=tmp_path, source=source, json_output=True) == 0
+    capsys.readouterr()
+
+    assert skills_cmd.serve_mcp(target=tmp_path, json_output=False) == 0
+    out = capsys.readouterr().out
+    assert "skills MCP resources: ready read_only=true" in out
+    assert "registered_resources: 1" in out
+
+
 def test_skills_lint_can_validate_harness_rendering(tmp_path, capsys):
     source = _write_skill(tmp_path / "source")
     assert skills_cmd.import_skill(target=tmp_path, source=source, json_output=True) == 0

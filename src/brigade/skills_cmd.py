@@ -1221,7 +1221,7 @@ def serve_mcp(*, target: Path, json_output: bool = False, stdio: bool = False) -
     print("skills MCP resources: ready read_only=true")
     print("resources: skill://registry/{skill_id}/SKILL.md, skill://registry/{skill_id}/skill.json, skill://registry/{skill_id}/compatibility.json, skill://registry/{skill_id}/history.json")
     print("tools: search_skills, get_skill, get_skill_metadata, get_skill_changelog, get_skill_compatibility, get_skill_history, lint_skill")
-    print(f"registered_resources: {len(resources)}")
+    print(f"registered_resources: {len(payload['registered_resources'])}")
     return 0
 
 
@@ -1395,9 +1395,9 @@ def compatibility(*, target: Path, skill: str, json_output: bool = False) -> int
     if json_output:
         print(json.dumps(payload, indent=2, sort_keys=True))
         return 0 if payload["valid"] else 1
-    print(f"skill compatibility: {skill_id}")
+    print(f"skill compatibility: {payload['skill_id']}")
     print(f"valid: {str(payload['valid']).lower()}")
-    for row in adapters:
+    for row in payload["adapters"]:
         blocked = f" blockers={len(row['blockers'])}" if row["blockers"] else ""
         print(f"- {row['id']} [{row['status']}] supported={row['supported']} installed={row['installed']}{blocked}")
     return 0 if payload["valid"] else 1
