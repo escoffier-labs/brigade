@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from . import chat_cmd, context_cmd, handoff_cmd, learn_cmd, memory_cmd, notifications_cmd, pantry_cmd, phases_cmd, projects_cmd, release_cmd, repos_cmd, research_cmd, roadmap_cmd, security_cmd, tools_cmd, work_cmd
+from . import actionqueue, chat_cmd, context_cmd, handoff_cmd, learn_cmd, memory_cmd, notifications_cmd, pantry_cmd, phases_cmd, projects_cmd, release_cmd, repos_cmd, research_cmd, roadmap_cmd, security_cmd, tools_cmd, work_cmd
 from .localio import read_json_dict as _read_json, read_jsonl_dicts as _read_jsonl, utc_now as _now, write_json as _write_json
 
 SCHEMA_VERSION = 1
@@ -566,13 +566,7 @@ def _actions_archive_path(target: Path) -> Path:
 
 
 def _read_actions(target: Path) -> list[dict[str, Any]]:
-    payload = _read_json(_actions_path(target))
-    if payload is None:
-        return []
-    actions = payload.get("actions")
-    if not isinstance(actions, list):
-        return []
-    return [item for item in actions if isinstance(item, dict)]
+    return actionqueue.read_actions(_actions_path(target))
 
 
 def _read_action_archive(target: Path) -> list[dict[str, Any]]:
@@ -590,13 +584,7 @@ def _write_actions(target: Path, actions: list[dict[str, Any]]) -> None:
 
 
 def _append_action_archive(target: Path, actions: list[dict[str, Any]]) -> None:
-    if not actions:
-        return
-    path = _actions_archive_path(target)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a") as handle:
-        for action in actions:
-            handle.write(json.dumps(action, sort_keys=True) + "\n")
+    actionqueue.append_archive(_actions_archive_path(target), actions)
 
 
 def _activity(target: Path) -> list[dict[str, Any]]:
@@ -2283,12 +2271,8 @@ def _planned_actions(report: dict[str, Any]) -> list[dict[str, Any]]:
 
 def _find_action(target: Path, action_id: str) -> tuple[list[dict[str, Any]], dict[str, Any] | None, str | None]:
     actions = _read_actions(target)
-    matches = [item for item in actions if str(item.get("action_id") or "").startswith(action_id)]
-    if not matches:
-        return actions, None, f"action not found: {action_id}"
-    if len(matches) > 1:
-        return actions, None, f"action id is ambiguous: {action_id}"
-    return actions, matches[0], None
+    action, error = actionqueue.find_action(actions, action_id, id_field="action_id", label="action")
+    return actions, action, error
 
 
 def _action_counts(actions: list[dict[str, Any]]) -> dict[str, int]:
@@ -2542,17 +2526,7 @@ def actions_build(*, target: Path, report_id: str = "latest", allow_unreviewed: 
         return 2
     planned = _planned_actions(report)
     existing = _read_actions(target)
-    existing_fingerprints = {str(item.get("source_fingerprint")) for item in existing}
-    existing_fingerprints.update(str(item.get("source_fingerprint")) for item in _read_action_archive(target))
-    created: list[dict[str, Any]] = []
-    skipped: list[dict[str, Any]] = []
-    for action in planned:
-        if str(action.get("source_fingerprint")) in existing_fingerprints:
-            skipped.append(action)
-            continue
-        created.append(action)
-        existing.append(action)
-        existing_fingerprints.add(str(action.get("source_fingerprint")))
+    created, skipped = actionqueue.merge_planned(existing, _read_action_archive(target), planned)
     _write_actions(target, existing)
     payload = {
         "schema_version": SCHEMA_VERSION,
@@ -2645,16 +2619,7 @@ def _set_action_status(
     if action is None:
         print(f"error: {error}", file=sys.stderr)
         return 1 if error and "not found" in error else 2
-    now = _now().isoformat()
-    action["status"] = status
-    action["updated_at"] = now
-    if status == "active":
-        action["started_at"] = now
-    elif status == "done":
-        action["completed_at"] = now
-    elif status == "deferred":
-        action["deferred_at"] = now
-        action["defer_reason"] = reason or "deferred"
+    actionqueue.stamp_status(action, status, now=_now().isoformat(), reason=reason)
     _write_actions(target, actions)
     payload = {
         "schema_version": SCHEMA_VERSION,
@@ -2688,18 +2653,7 @@ def actions_defer(*, target: Path, action_id: str, reason: str, json_output: boo
 def actions_archive_completed(*, target: Path, json_output: bool = False) -> int:
     target = target.expanduser().resolve()
     actions = _read_actions(target)
-    now = _now().isoformat()
-    archived: list[dict[str, Any]] = []
-    remaining: list[dict[str, Any]] = []
-    for action in actions:
-        if action.get("status") == "done":
-            archived_action = dict(action)
-            archived_action["status"] = "archived"
-            archived_action["archived_at"] = now
-            archived_action["updated_at"] = now
-            archived.append(archived_action)
-        else:
-            remaining.append(action)
+    archived, remaining = actionqueue.split_archived_completed(actions, now=_now().isoformat())
     _write_actions(target, remaining)
     _append_action_archive(target, archived)
     payload = {
