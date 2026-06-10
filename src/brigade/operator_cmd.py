@@ -191,7 +191,7 @@ def adoption_plan(*, target: Path, json_output: bool = False) -> int:
     print(f"operator adoption plan: {payload['target']}")
     print(f"status: {payload['status']}")
     print(f"brigade_root: {'yes' if payload['workspace']['brigade']['root_exists'] else 'no'}")
-    print(f"guidance_files: {payload['workspace']['guidance']['present_count']}")
+    print(f"guidance_files: {payload['workspace']['guidance']['present_count']} (+{payload['workspace']['guidance']['present_dir_count']} dirs)")
     print(f"handoff_inboxes: {payload['workspace']['harnesses']['handoff_inbox_count']}")
     print(f"shell_crontab_active: {payload['surfaces']['shell_crontab']['count']}")
     print(f"openclaw_cron_jobs: {payload['surfaces']['openclaw_cron']['count']}")
@@ -942,7 +942,11 @@ def _workspace_inventory(target: Path) -> dict[str, Any]:
         ".learnings",
         "memory/cards",
     ]
-    guidance = [{"path": rel, "exists": (target / rel).exists()} for rel in guidance_paths]
+    guidance_dirs = {"rules", ".learnings", "memory/cards"}
+    guidance = [
+        {"path": rel, "exists": (target / rel).exists(), "kind": "dir" if rel in guidance_dirs else "file"}
+        for rel in guidance_paths
+    ]
     harness_rows = []
     for harness in KNOWN_HARNESSES:
         root = target / f".{harness}"
@@ -974,7 +978,8 @@ def _workspace_inventory(target: Path) -> dict[str, Any]:
         },
         "guidance": {
             "items": guidance,
-            "present_count": sum(1 for item in guidance if item["exists"]),
+            "present_count": sum(1 for item in guidance if item["exists"] and item["kind"] == "file"),
+            "present_dir_count": sum(1 for item in guidance if item["exists"] and item["kind"] == "dir"),
         },
         "harnesses": {
             "items": harness_rows,

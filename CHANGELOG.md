@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.2] - 2026-06-10
+
+### Added
+- `brigade handoff migrate`: converts near-miss homegrown handoff notes (loose `- Type:` style metadata) into the Brigade template through the standard draft renderer. Dry-run by default; `--apply` rewrites convertible notes, preserves originals under `migrated-originals/`, verifies the result passes lint, and records a receipt. Injection-flagged notes are never converted. This closes the top adoption friction: existing notes no longer fail lint identically to garbage.
+
+### Fixed
+- `brigade handoff lint` now reports prompt-injection signal counts per file (content-guard checks egress, not instructions), so a poisoned note can no longer read as fully clean from the lint path.
+- `brigade doctor` collapses missing optional managed tools into one summary line instead of a per-tool wall, keeping single-workspace reports readable on first contact.
+- `brigade operator adopt plan` counts guidance files and guidance directories separately instead of calling `memory/cards/` a file.
+
 ## [0.10.1] - 2026-06-10
 
 ### Fixed

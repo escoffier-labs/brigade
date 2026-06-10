@@ -1312,3 +1312,14 @@ def test_local_operator_doctor_does_not_block_on_inactive_content_guard_hook(tmp
     payload = json.loads(capsys.readouterr().out)
     blocker_names = [b.get("name") for b in payload["blockers"]]
     assert "content_guard_hook_not_enabled" in blocker_names
+
+
+def test_adopt_plan_counts_guidance_files_and_dirs_separately(tmp_path, capsys):
+    (tmp_path / "CLAUDE.md").write_text("# rules\n")
+    (tmp_path / "memory" / "cards").mkdir(parents=True)
+
+    assert cli.main(["operator", "adopt", "plan", "--target", str(tmp_path), "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    guidance = payload["workspace"]["guidance"]
+    assert guidance["present_count"] == 1
+    assert guidance["present_dir_count"] == 1

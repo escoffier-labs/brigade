@@ -568,14 +568,32 @@ def lint(
     if not target.is_dir():
         print(f"error: --target is not a directory: {target}", file=sys.stderr)
         return 2
+    from .untrusted import scan_untrusted
+
     results = lint_targets(target, paths=paths)
     guard_results = [_guard_handoff_path(path, target=target, policy=guard_policy) for path in [result.path for result in results]] if content_guard else []
     guard_ok = all(item.get("exit_code") == 0 for item in guard_results)
+    # Content-guard checks egress (secrets/PII), not instructions. Surface the
+    # injection signal here too so a poisoned note never reads as fully clean.
+    injection_counts: dict[str, int] = {}
+    for result in results:
+        try:
+            signal = scan_untrusted(result.path.read_text(errors="replace"))
+        except OSError:
+            continue
+        if signal.flagged:
+            injection_counts[str(result.path)] = signal.count
+    result_dicts = []
+    for result in results:
+        row = result.as_dict()
+        row["injection_signals"] = injection_counts.get(str(result.path), 0)
+        result_dicts.append(row)
     payload = {
         "target": str(target),
         "count": len(results),
         "valid": all(result.valid for result in results) and guard_ok,
-        "results": [result.as_dict() for result in results],
+        "injection_flagged_count": len(injection_counts),
+        "results": result_dicts,
         "content_guard": guard_results,
     }
     if json_output:
@@ -591,6 +609,9 @@ def lint(
             print(f"  - {error}")
         for warning in result.warnings:
             print(f"  warning: {warning}")
+        signals = injection_counts.get(str(result.path), 0)
+        if signals:
+            print(f"  warning: {signals} prompt-injection signal(s); content-guard does not check this, see `brigade security scan`")
     if content_guard:
         print(f"content_guard_policy: {guard_policy}")
         for item in guard_results:
@@ -663,6 +684,157 @@ def lint_file(path: Path) -> HandoffLintResult:
         errors=tuple(errors),
         warnings=tuple(warnings),
     )
+
+
+_LOOSE_FIELD_TEMPLATE = r"^\s*[-*]?\s*\*{0,2}%s\*{0,2}\s*:\s*(.+)$"
+
+
+def _loose_field(text: str, name: str) -> str | None:
+    """Extract `- Name: value` / `Name: value` style metadata from a homegrown note."""
+    match = re.search(_LOOSE_FIELD_TEMPLATE % re.escape(name), text, re.IGNORECASE | re.MULTILINE)
+    return match.group(1).strip() if match else None
+
+
+def _migrate_extract(text: str) -> tuple[dict[str, str], list[str]]:
+    """Merge proper `## Section` values with loose bullet metadata; report gaps."""
+    sections = _parse_markdown_sections(text)
+
+    def field(section_name: str) -> str:
+        return _section_value(sections, section_name) or _loose_field(text, section_name) or ""
+
+    action_raw = field("Recommended memory action")
+    extracted = {
+        "type": field("Type"),
+        "title": field("Title"),
+        "summary": field("Summary"),
+        "action": (action_raw.splitlines() or [""])[0].strip().casefold(),
+        "target_card": field("Target card"),
+        "target_document": field("Target document"),
+        "card_content": _section_value(sections, "Suggested card content"),
+        "document_content": _section_value(sections, "Suggested document content"),
+    }
+    missing: list[str] = []
+    for key in ("type", "title", "summary"):
+        if not extracted[key]:
+            missing.append(key)
+    if extracted["action"] not in HANDOFF_ACTIONS:
+        missing.append("recommended memory action")
+    elif extracted["action"] in CARD_ACTIONS:
+        if not extracted["target_card"]:
+            missing.append("target card")
+        if not extracted["card_content"]:
+            missing.append("suggested card content")
+    else:
+        if not extracted["target_document"]:
+            missing.append("target document")
+        if not extracted["document_content"]:
+            missing.append("suggested document content")
+    return extracted, missing
+
+
+def migrate(*, target: Path, inbox: str | None = None, apply: bool = False, json_output: bool = False) -> int:
+    """Convert near-miss homegrown handoff notes into the Brigade template.
+
+    Pending notes that fail lint are parsed leniently (loose `- Type:` style
+    metadata merged with any proper sections). Convertible notes are re-rendered
+    through the standard draft template; originals are preserved under
+    `migrated-originals/`. Injection-flagged notes are never converted. Dry-run
+    by default.
+    """
+    from .untrusted import scan_untrusted
+
+    target = target.expanduser().resolve()
+    if not target.is_dir():
+        print(f"error: --target is not a directory: {target}", file=sys.stderr)
+        return 2
+    if inbox is not None:
+        inbox_paths = [_draft_inbox_path(target, inbox)[0]]
+    else:
+        inbox_paths = [target / rel for rel in WRITER_INBOXES if (target / rel).is_dir()]
+    items: list[dict[str, Any]] = []
+    migrated = 0
+    for inbox_path in inbox_paths:
+        for path in sorted(inbox_path.glob("*.md")):
+            if path.name == "TEMPLATE.md":
+                continue
+            if lint_file(path).valid:
+                continue
+            rel = str(path.relative_to(target))
+            text = path.read_text(errors="replace")
+            item: dict[str, Any] = {"file": rel}
+            if scan_untrusted(text).flagged:
+                item["status"] = "blocked-injection"
+                item["detail"] = "carries prompt-injection signals; review manually before any conversion"
+                items.append(item)
+                continue
+            extracted, missing = _migrate_extract(text)
+            if missing:
+                item["status"] = "unmigratable"
+                item["missing"] = missing
+                items.append(item)
+                continue
+            action = extracted["action"]
+            rendered = _render_handoff_draft(
+                handoff_type=extracted["type"],
+                title=extracted["title"],
+                summary=extracted["summary"],
+                facts=[],
+                evidence=[],
+                action=action,
+                target_card=extracted["target_card"] or None,
+                target_document=extracted["target_document"] or None,
+                suggested_content=extracted["card_content"] if action in CARD_ACTIONS else extracted["document_content"],
+            )
+            item["status"] = "migratable"
+            item["action"] = action
+            if apply:
+                originals = inbox_path / "migrated-originals"
+                originals.mkdir(parents=True, exist_ok=True)
+                (originals / path.name).write_text(text)
+                path.write_text(rendered)
+                converted = lint_file(path)
+                if not converted.valid:
+                    path.write_text(text)
+                    (originals / path.name).unlink()
+                    item["status"] = "unmigratable"
+                    item["missing"] = list(converted.errors)
+                else:
+                    item["status"] = "migrated"
+                    migrated += 1
+            items.append(item)
+    receipt_path: Path | None = None
+    if apply and migrated:
+        from .localio import utc_now, write_json
+
+        migrations_dir = _handoff_state_root(target) / "migrations"
+        migrations_dir.mkdir(parents=True, exist_ok=True)
+        receipt_path = migrations_dir / f"{utc_now().strftime('%Y%m%dT%H%M%S')}.json"
+        write_json(receipt_path, {"target": str(target), "migrated_count": migrated, "items": items})
+    payload = {
+        "target": str(target),
+        "apply": apply,
+        "item_count": len(items),
+        "migratable_count": len([i for i in items if i["status"] in {"migratable", "migrated"}]),
+        "migrated_count": migrated,
+        "blocked_count": len([i for i in items if i["status"] == "blocked-injection"]),
+        "unmigratable_count": len([i for i in items if i["status"] == "unmigratable"]),
+        "receipt_path": str(receipt_path) if receipt_path else None,
+        "items": items,
+        "next_command": "brigade handoff migrate --apply" if not apply and any(i["status"] == "migratable" for i in items) else "brigade handoff lint",
+    }
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+    print(f"handoff migrate: {target}")
+    print(f"apply: {apply}")
+    print(f"items: {len(items)} (migratable={payload['migratable_count']}, blocked={payload['blocked_count']}, unmigratable={payload['unmigratable_count']})")
+    for item in items[:15]:
+        extra = f" missing: {', '.join(item['missing'][:4])}" if item.get("missing") else ""
+        print(f"- {item['file']} [{item['status']}]{extra}")
+    if receipt_path:
+        print(f"receipt: {receipt_path}")
+    print(f"next_command: {payload['next_command']}")
+    return 0
 
 
 def _handoff_state_root(target: Path) -> Path:

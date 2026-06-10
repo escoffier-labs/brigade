@@ -538,3 +538,17 @@ def test_doctor_includes_agent_notify_managed_tool(monkeypatch, tmp_target, caps
     assert rc == 0
     assert "agent-notify" in out
     assert "operator notifications" in out
+
+
+def test_doctor_collapses_missing_managed_tools_to_one_line(tmp_path, capsys, monkeypatch):
+    from brigade import doctor as doctor_mod
+    from brigade.install import install_selection
+    from brigade.selection import Selection
+
+    install_selection(tmp_path, Selection(depth="repo", harnesses=["codex"], owner="codex", includes=[]))
+    capsys.readouterr()
+    doctor_mod.run(tmp_path, harness="generic")
+    out = capsys.readouterr().out
+    manual_lines = [l for l in out.splitlines() if "not installed; run `brigade add" in l]
+    assert len(manual_lines) <= 1, manual_lines
+    assert "managed tools not installed" in out

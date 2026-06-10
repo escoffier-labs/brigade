@@ -1075,6 +1075,11 @@ def _build_parser() -> argparse.ArgumentParser:
     p_handoff_doctor.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
     p_handoff_doctor.add_argument("--sources", type=Path, default=None, help="Override .brigade/handoff-sources.json.")
     p_handoff_doctor.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_handoff_migrate = handoff_sub.add_parser("migrate", help="Convert near-miss homegrown handoff notes into the Brigade template (dry-run by default).")
+    p_handoff_migrate.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
+    p_handoff_migrate.add_argument("--inbox", default=None, help="Limit to one writer inbox (harness id or path).")
+    p_handoff_migrate.add_argument("--apply", action="store_true", help="Rewrite convertible notes, preserving originals under migrated-originals/.")
+    p_handoff_migrate.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_handoff_lint = handoff_sub.add_parser("lint", help="Validate pending or explicit memory handoff files.")
     p_handoff_lint.add_argument("paths", nargs="*", type=Path, help="Handoff files to validate. Defaults to pending inbox files.")
     p_handoff_lint.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
@@ -3665,6 +3670,8 @@ def main(argv=None) -> int:
             return 2
         if args.handoff_command == "doctor":
             return handoff_cmd.doctor(target=args.target, sources=args.sources, json_output=args.json)
+        if args.handoff_command == "migrate":
+            return handoff_cmd.migrate(target=args.target, inbox=args.inbox, apply=args.apply, json_output=args.json)
         if args.handoff_command == "lint":
             return handoff_cmd.lint(target=args.target, paths=args.paths, content_guard=args.content_guard, guard_policy=args.guard_policy, json_output=args.json)
         if args.handoff_command == "draft":

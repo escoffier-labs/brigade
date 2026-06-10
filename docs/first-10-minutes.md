@@ -100,6 +100,8 @@ A handoff is a note an agent writes for the memory owner to file later. Four thi
 
 When unsure, `no-card` with a two-sentence content is the right default. `brigade handoff-template` prints the full format.
 
+Already have handoff-style notes in your own format? `brigade handoff migrate --target .` shows which ones convert cleanly into the Brigade template; `--apply` rewrites them and preserves the originals.
+
 One more concept: the **memory owner**. Quickstart auto-selects which harness owns durable memory (it prints the pick and `--owner` overrides it). In a code repo this mostly decides which tool's conventions the ingest docs assume; the auto-pick is fine until you have an opinion.
 
 ## 7. What To Commit

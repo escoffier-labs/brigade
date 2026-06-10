@@ -181,6 +181,7 @@ def run(target: Path, harness: str = "generic") -> int:
         )
 
     checks: List[CheckResult] = []
+    missing_tools: List[Tuple[str, str]] = []
     for station in all_stations():
         if station.doctor is not None:
             checks.extend(station.doctor(ctx))
@@ -188,7 +189,19 @@ def run(target: Path, harness: str = "generic") -> int:
             if tool.detect():
                 checks.extend(tool.doctor(ctx))
             else:
-                checks.append((MANUAL, f"{station.name}: {tool.name}", f"not installed; run `brigade add {station.name}`"))
+                missing_tools.append((station.name, tool.name))
+    if len(missing_tools) == 1:
+        station_name, tool_name = missing_tools[0]
+        checks.append((MANUAL, f"{station_name}: {tool_name}", f"not installed; run `brigade add {station_name}`"))
+    elif missing_tools:
+        stations = sorted({station for station, _ in missing_tools})
+        checks.append(
+            (
+                MANUAL,
+                "managed tools",
+                f"{len(missing_tools)} managed tools not installed ({', '.join(stations)}); optional, install with `brigade add <station>`",
+            )
+        )
     return _report(checks)
 
 
