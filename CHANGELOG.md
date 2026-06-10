@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.1] - 2026-06-10
+
+### Fixed
+- `brigade operator doctor --profile local-operator` no longer reports `ready: no` when content-guard is installed but its pre-push hook is inactive. The hook ships inactive by design, so a fresh setup now treats `content_guard_hook_not_enabled` as advisory under the local-operator profile; the strict `internal-dogfood` profile still blocks on it. Found by the new cold-start gate running with neutralized git config: the maintainer's global hooksPath had masked the clean-machine behavior in every earlier test.
+
+### Added
+- Cold-start release gate: `docs/runbooks/cold-start-gate.{json,sh}` executes the documented new-user journey (install, quickstart, handoff draft and lint, doctors, gitignore regression guards) in a neutral sandbox, wired into the RELEASE.md pre-tag checklist. `docs/cold-start-testing.md` documents it plus the three agent-driven cold-start scenarios that have been finding first-contact bugs all week.
+
 ## [0.10.0] - 2026-06-10
 
 ### Added

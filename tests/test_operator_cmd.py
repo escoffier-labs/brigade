@@ -1279,3 +1279,36 @@ def test_verify_harness_warns_when_inbox_template_shadowed_by_external_ignore(tm
     shadow = [c for c in payload["checks"] if c["name"] == "handoff_template_shadowed"]
     assert shadow and shadow[0]["status"] == "warn"
     assert "shadow" in shadow[0]["detail"] or "global" in shadow[0]["detail"]
+
+
+def test_local_operator_doctor_does_not_block_on_inactive_content_guard_hook(tmp_path, capsys, monkeypatch):
+    assert cli.main(["operator", "quickstart", "--target", str(tmp_path), "--harnesses", "codex", "--json"]) == 0
+    capsys.readouterr()
+
+    def fake_hook_status(target, policy="public-repo"):
+        return {
+            "available": True,
+            "hooks_path": None,
+            "configured_pre_push_hook_exists": False,
+            "git_pre_push_hook_exists": False,
+            "pre_push_hook_enabled": False,
+            "pre_push_hook_mode": "not-enabled",
+            "checks": [
+                {"status": "warn", "name": "content_guard_hook_not_enabled", "detail": "no executable pre-push hook found in the active Git hooks path"},
+            ],
+            "suggested_commands": ["git config core.hooksPath hooks"],
+            "last_scan": None,
+        }
+
+    monkeypatch.setattr(operator_cmd.scrub, "hook_status", fake_hook_status)
+
+    assert cli.main(["operator", "doctor", "--target", str(tmp_path), "--profile", "local-operator", "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    blocker_names = [b.get("name") for b in payload["blockers"]]
+    assert "content_guard_hook_not_enabled" not in blocker_names
+    assert payload["ready"] is True
+
+    cli.main(["operator", "doctor", "--target", str(tmp_path), "--profile", "internal-dogfood", "--json"])
+    payload = json.loads(capsys.readouterr().out)
+    blocker_names = [b.get("name") for b in payload["blockers"]]
+    assert "content_guard_hook_not_enabled" in blocker_names

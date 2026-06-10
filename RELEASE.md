@@ -14,6 +14,7 @@ Target: 100% green. No xfail in main suite.
 
 ```bash
 brigade security template-audit --target .
+brigade runbook run docs/runbooks/cold-start-gate.json --target .
 ```
 
 Target: no blocker findings.

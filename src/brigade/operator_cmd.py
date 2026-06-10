@@ -2247,6 +2247,11 @@ def status_payload(target: Path, *, profile: str = "internal-dogfood") -> dict[s
                 continue
             if name == "content_guard_hook_not_enabled" and not content_guard_configured:
                 continue
+            # The pre-push hook ships inactive by design and activation is the
+            # operator's call; a fresh local-operator setup should not be
+            # blocked on it. The internal-dogfood profile keeps the strict bar.
+            if name == "content_guard_hook_not_enabled" and profile == "local-operator":
+                continue
             issues.append(
                 {
                     "status": str(check.get("status") or "warn"),
