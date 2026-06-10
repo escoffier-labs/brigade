@@ -19,6 +19,94 @@ from .. import toml_compat as tomllib
 from ..install import apply_gitignore
 from ..selection import Selection
 from ..untrusted import scan_untrusted, wrap_untrusted
+from . import ledger as ledger_mod
+from . import ledger
+from .ledger import (
+    _read_task_ledger,
+    _write_task_ledger,
+    _read_imports,
+    _write_imports,
+    _append_archived_imports,
+    _task_sort_key,
+    _import_sort_key,
+    _task_text_key,
+    _string_field,
+    _confidence_rank,
+    _normalize_task_type,
+    _normalize_task_priority,
+    _normalize_acceptance,
+    _task_acceptance,
+    _task_summary,
+    _import_task_acceptance,
+    _import_task_type,
+    _import_task_priority,
+    _import_task_template,
+    _import_context,
+    _import_summary,
+    _task_preview_from_import,
+    _scanner_candidate,
+    _handoff_ready_imports,
+    _handoff_candidate,
+    _task_snapshot,
+    _template_acceptance,
+    _combined_acceptance,
+    _normalize_issue_heading,
+    _is_issue_acceptance_heading,
+    _issue_heading,
+    _issue_list_item,
+    _extract_issue_acceptance,
+    _task_issue_metadata,
+    _github_issue_ref,
+    _read_github_issue,
+    _safe_issue_task_id,
+    _issue_repair_record,
+    _issue_repair_records,
+    _import_record_key,
+    _import_source_key,
+    _import_fingerprint,
+    _import_source_identity,
+    _validate_import_record,
+    _load_import_jsonl,
+    _append_import_records,
+    _pending_tasks,
+    _pending_imports,
+    _import_counts,
+    _matching_pending_imports,
+    _import_metadata_matches,
+    _parse_metadata_filters,
+    _parse_or_report_metadata_filters,
+    _find_pending_task_by_text,
+    _find_import,
+    _mark_import_promoted,
+    _handoff_is_document_target,
+    _handoff_target_document,
+    _handoff_type,
+    _handoff_private_fields,
+    _handoff_redact_value,
+    _handoff_render_value,
+    _handoff_provenance,
+    _handoff_safe_text,
+    _handoff_title,
+    _handoff_suggested_document_content,
+    _render_import_handoff,
+    _import_handoff_plan_payload,
+    _write_import_handoff,
+    _mark_import_handoff_promoted,
+    _find_task,
+    _make_task,
+    _parse_metadata,
+    _make_import,
+    _add_task,
+    _plan_rel_path,
+    _append_dedupe,
+    _read_plan_receipt,
+    _build_plan_receipt,
+    _render_plan_md,
+    _plan_artifact_summary,
+    _significant_pending_without_plan,
+    _plan_coverage_payload,
+    _write_plan_artifact,
+)  # noqa: F401
 from . import helpers
 from .helpers import (
     _git,
@@ -117,1384 +205,154 @@ from .constants import _PROPOSAL_KINDS  # noqa: F401
 
 
 
-def _read_task_ledger(target: Path) -> dict[str, Any]:
-    path = helpers._tasks_path(target)
-    if not path.exists():
-        return {"version": 1, "tasks": []}
-    try:
-        payload = json.loads(path.read_text())
-    except (OSError, json.JSONDecodeError):
-        return {"version": 1, "tasks": []}
-    if not isinstance(payload, dict):
-        return {"version": 1, "tasks": []}
-    tasks = payload.get("tasks")
-    if not isinstance(tasks, list):
-        payload["tasks"] = []
-    payload["version"] = 1
-    return payload
-
-
-def _write_task_ledger(target: Path, payload: dict[str, Any]) -> None:
-    payload["version"] = 1
-    if not isinstance(payload.get("tasks"), list):
-        payload["tasks"] = []
-    helpers._write_json(helpers._tasks_path(target), payload)
-
-
-def _read_imports(target: Path) -> list[dict[str, Any]]:
-    path = helpers._imports_path(target)
-    if not path.exists():
-        return []
-    imports: list[dict[str, Any]] = []
-    try:
-        lines = path.read_text().splitlines()
-    except OSError:
-        return []
-    for line in lines:
-        if not line.strip():
-            continue
-        try:
-            item = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(item, dict):
-            imports.append(item)
-    return imports
-
-
-def _write_imports(target: Path, imports: list[dict[str, Any]]) -> None:
-    path = helpers._imports_path(target)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    rendered = "".join(json.dumps(item, sort_keys=True) + "\n" for item in imports)
-    path.write_text(rendered)
-
-
-def _append_archived_imports(target: Path, imports: list[dict[str, Any]]) -> None:
-    if not imports:
-        return
-    path = helpers._imports_archive_path(target)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a") as handle:
-        for item in imports:
-            handle.write(json.dumps(item, sort_keys=True) + "\n")
-
-
-def _task_sort_key(task: dict[str, Any]) -> str:
-    return str(task.get("created_at") or task.get("id") or "")
-
-
-def _import_sort_key(item: dict[str, Any]) -> str:
-    return str(item.get("created_at") or item.get("id") or "")
-
-
-def _task_text_key(text: str) -> str:
-    return " ".join(text.casefold().split())
-
-
-def _string_field(value: object) -> str | None:
-    if isinstance(value, str) and value.strip():
-        return value.strip()
-    return None
-
-
-def _confidence_rank(value: object) -> int:
-    text = value.strip().casefold() if isinstance(value, str) else ""
-    return CONFIDENCE_RANK.get(text, 1)
-
-
-def _normalize_task_type(value: object) -> str:
-    if isinstance(value, str) and value.strip() in TASK_TYPES:
-        return value.strip()
-    return "task"
-
-
-def _normalize_task_priority(value: object) -> str:
-    if isinstance(value, str) and value.strip() in TASK_PRIORITIES:
-        return value.strip()
-    return "normal"
-
-
-def _normalize_acceptance(values: object) -> list[str]:
-    if values is None:
-        return []
-    raw_values = values if isinstance(values, list) else [values]
-    accepted: list[str] = []
-    seen: set[str] = set()
-    for value in raw_values:
-        text = str(value).strip()
-        if not text:
-            continue
-        key = _task_text_key(text)
-        if key in seen:
-            continue
-        accepted.append(text)
-        seen.add(key)
-    return accepted
-
-
-def _task_acceptance(task: dict[str, Any]) -> list[str]:
-    values = task.get("acceptance")
-    if values is None:
-        metadata = task.get("metadata") if isinstance(task.get("metadata"), dict) else {}
-        values = metadata.get("acceptance")
-    return _normalize_acceptance(values)
-
-
-def _task_summary(task: dict[str, Any]) -> dict[str, Any]:
-    acceptance = _task_acceptance(task)
-    summary = {
-        "id": task.get("id"),
-        "text": str(task.get("text") or ""),
-        "status": task.get("status", "pending"),
-        "source": task.get("source", "manual"),
-        "type": _normalize_task_type(task.get("type")),
-        "priority": _normalize_task_priority(task.get("priority")),
-        "acceptance": acceptance,
-        "acceptance_count": len(acceptance),
-        "acceptance_missing": len(acceptance) == 0,
-    }
-    if isinstance(task.get("template"), str):
-        summary["template"] = task["template"]
-    metadata = task.get("metadata") if isinstance(task.get("metadata"), dict) else {}
-    closeouts = metadata.get("review_closeouts")
-    if isinstance(closeouts, list):
-        review_count = len([item for item in closeouts if isinstance(item, dict)])
-        unresolved = sum(
-            int(item.get("unresolved_count") or 0)
-            for item in closeouts
-            if isinstance(item, dict)
-        )
-        summary["review_closeout_count"] = review_count
-        summary["review_unresolved_count"] = unresolved
-    issue = _task_issue_metadata(task)
-    if issue:
-        summary["issue"] = issue
-    return summary
-
-
-def _import_task_acceptance(item: dict[str, Any]) -> list[str]:
-    template = item.get("template") if isinstance(item.get("template"), str) else None
-    acceptance = item.get("acceptance") if isinstance(item.get("acceptance"), list) else []
-    return _combined_acceptance(template if template in TASK_TEMPLATES else None, acceptance)
-
-
-def _import_task_type(item: dict[str, Any]) -> str:
-    return _normalize_task_type(item.get("type"))
-
-
-def _import_task_priority(item: dict[str, Any]) -> str:
-    return _normalize_task_priority(item.get("priority"))
-
-
-def _import_task_template(item: dict[str, Any]) -> str | None:
-    template = item.get("template")
-    return template if isinstance(template, str) and template in TASK_TEMPLATES else None
-
-
-def _import_context(item: dict[str, Any]) -> dict[str, Any]:
-    metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
-    keys = (
-        "provider",
-        "surface",
-        "workspace",
-        "channel",
-        "thread",
-        "message_range",
-        "confidence",
-        "evidence_summary",
-        "card_file",
-        "card_id",
-        "refresh_reason",
-        "reason",
-    )
-    return {key: metadata[key] for key in keys if metadata.get(key) not in (None, "")}
-
-
-def _import_summary(item: dict[str, Any], *, now: datetime | None = None) -> dict[str, Any]:
-    created_at = item.get("created_at")
-    created_dt = helpers._parse_iso_datetime(created_at)
-    age_hours = None
-    if created_dt is not None:
-        age_hours = ((now or helpers._now()) - created_dt).total_seconds() / 3600
-    summary: dict[str, Any] = {
-        "id": item.get("id"),
-        "text": str(item.get("text") or ""),
-        "kind": item.get("kind", "task"),
-        "source": item.get("source", "manual"),
-        "status": item.get("status", "pending"),
-        "created_at": created_at,
-        "updated_at": item.get("updated_at"),
-        "age_hours": round(age_hours, 2) if age_hours is not None else None,
-        "metadata": item.get("metadata") if isinstance(item.get("metadata"), dict) else {},
-        "context": _import_context(item),
-    }
-    if item.get("kind") == "task":
-        acceptance = _import_task_acceptance(item)
-        summary.update(
-            {
-                "type": _import_task_type(item),
-                "priority": _import_task_priority(item),
-                "template": _import_task_template(item),
-                "acceptance": acceptance,
-                "acceptance_count": len(acceptance),
-                "acceptance_missing": len(acceptance) == 0,
-            }
-        )
-    elif item.get("kind") in HANDOFF_READY_KINDS:
-        summary.update(
-            {
-                "handoff_ready": True,
-                "target_document": _handoff_target_document(item),
-            }
-        )
-    if item.get("handoff_path"):
-        summary["handoff_path"] = item.get("handoff_path")
-    if item.get("handoff_target_document"):
-        summary["handoff_target_document"] = item.get("handoff_target_document")
-    return summary
-
-
-def _task_preview_from_import(item: dict[str, Any]) -> dict[str, Any]:
-    metadata: dict[str, Any] = {
-        "import_id": item.get("id"),
-        "import_kind": item.get("kind"),
-        "import_source": item.get("source"),
-    }
-    item_metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
-    metadata.update(item_metadata)
-    template = _import_task_template(item)
-    return {
-        "text": str(item.get("text") or "").strip(),
-        "source": f"import:{item.get('source') or 'manual'}",
-        "type": _import_task_type(item),
-        "priority": _import_task_priority(item),
-        "template": template,
-        "acceptance": _import_task_acceptance(item),
-        "metadata": metadata,
-    }
-
-
-def _scanner_candidate(imports: list[dict[str, Any]]) -> dict[str, Any] | None:
-    candidates = [
-        item
-        for item in imports
-        if item.get("kind") == "task" and isinstance(item.get("text"), str) and item["text"].strip()
-    ]
-    if not candidates:
-        return None
-    candidates.sort(
-        key=lambda item: (
-            0 if _import_task_acceptance(item) else 1,
-            _confidence_rank(
-                (item.get("metadata") if isinstance(item.get("metadata"), dict) else {}).get("confidence")
-            ),
-            0 if item.get("source") in {"chat-memory-sweep", "memory-refresh", "memory-care"} else 1,
-            PRIORITY_RANK.get(_import_task_priority(item), 2),
-            str(item.get("created_at") or item.get("id") or ""),
-        )
-    )
-    return candidates[0]
-
-
-def _handoff_ready_imports(imports: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    candidates = [
-        item
-        for item in imports
-        if item.get("kind") in HANDOFF_READY_KINDS
-        and item.get("status", "pending") == "pending"
-        and isinstance(item.get("text"), str)
-        and item["text"].strip()
-    ]
-    candidates.sort(
-        key=lambda item: (
-            0 if item.get("source") in {"chat-memory-sweep", "memory-refresh", "memory-care"} else 1,
-            _confidence_rank(
-                (item.get("metadata") if isinstance(item.get("metadata"), dict) else {}).get("confidence")
-            ),
-            str(item.get("created_at") or item.get("id") or ""),
-        )
-    )
-    return candidates
-
-
-def _handoff_candidate(imports: list[dict[str, Any]]) -> dict[str, Any] | None:
-    candidates = _handoff_ready_imports(imports)
-    return candidates[0] if candidates else None
-
-
-def _task_snapshot(task: dict[str, Any]) -> dict[str, Any]:
-    summary = _task_summary(task)
-    snapshot: dict[str, Any] = {
-        "id": summary.get("id"),
-        "text": summary.get("text"),
-        "source": summary.get("source"),
-        "type": summary.get("type"),
-        "priority": summary.get("priority"),
-        "acceptance": summary.get("acceptance", []),
-        "acceptance_count": summary.get("acceptance_count", 0),
-    }
-    if summary.get("template"):
-        snapshot["template"] = summary["template"]
-    if summary.get("issue"):
-        snapshot["issue"] = summary["issue"]
-    return snapshot
-
-
-def _template_acceptance(template: str | None) -> list[str]:
-    if not template:
-        return []
-    item = TASK_TEMPLATES.get(template)
-    if item is None:
-        return []
-    return list(item["acceptance"])
-
-
-def _combined_acceptance(template: str | None, explicit: list[str] | None) -> list[str]:
-    return _normalize_acceptance([*_template_acceptance(template), *(explicit or [])])
-
-
-def _normalize_issue_heading(text: str) -> str:
-    value = text.strip().strip("#").strip().rstrip(":").casefold()
-    value = re.sub(r"[*_`]+", "", value)
-    return " ".join(value.split())
-
-
-def _is_issue_acceptance_heading(text: str) -> bool:
-    value = _normalize_issue_heading(text)
-    if value in ISSUE_ACCEPTANCE_HEADINGS or value in ISSUE_TEST_HEADINGS:
-        return True
-    return "acceptance" in value or value.startswith("test ")
-
-
-def _issue_heading(line: str) -> str | None:
-    stripped = line.strip()
-    if not stripped:
-        return None
-    markdown = re.fullmatch(r"#{1,6}\s+(.+?)\s*#*", stripped)
-    if markdown:
-        return markdown.group(1)
-    plain = re.fullmatch(r"([A-Za-z][A-Za-z0-9 _/-]{1,80}):", stripped)
-    if plain:
-        return plain.group(1)
-    return None
-
-
-def _issue_list_item(line: str) -> str | None:
-    checkbox = re.fullmatch(r"\s*[-*+]\s+\[[ xX]\]\s+(.+?)\s*", line)
-    if checkbox:
-        return checkbox.group(1).strip()
-    bullet = re.fullmatch(r"\s*(?:[-*+]|\d+[.)])\s+(.+?)\s*", line)
-    if bullet:
-        return bullet.group(1).strip()
-    return None
-
-
-def _extract_issue_acceptance(body: object) -> list[str]:
-    if not isinstance(body, str) or not body.strip():
-        return []
-    extracted: list[str] = []
-    in_relevant_section = False
-    for line in body.splitlines():
-        heading = _issue_heading(line)
-        if heading is not None:
-            in_relevant_section = _is_issue_acceptance_heading(heading)
-            continue
-        item = _issue_list_item(line)
-        if item is None:
-            continue
-        if re.fullmatch(r"\s*[-*+]\s+\[[ xX]\]\s+.+?\s*", line) or in_relevant_section:
-            extracted.append(item)
-    return _normalize_acceptance(extracted)
-
-
-def _task_issue_metadata(task: dict[str, Any]) -> dict[str, Any] | None:
-    metadata = task.get("metadata") if isinstance(task.get("metadata"), dict) else {}
-    issue = metadata.get("github_issue") if isinstance(metadata.get("github_issue"), dict) else None
-    if issue is None and metadata.get("github_issue_url"):
-        issue = {
-            "url": metadata.get("github_issue_url"),
-            "number": metadata.get("github_issue_number"),
-            "title": metadata.get("github_issue_title"),
-            "labels": metadata.get("github_issue_labels"),
-            "state": metadata.get("github_issue_state"),
-            "source": metadata.get("github_issue_source"),
-            "ref": metadata.get("github_issue_ref"),
-        }
-    if not isinstance(issue, dict):
-        return None
-    return {
-        key: value
-        for key, value in issue.items()
-        if key in {"url", "number", "title", "labels", "state", "source", "ref"} and value is not None
-    }
-
-
-def _github_issue_ref(issue: dict[str, Any]) -> str | None:
-    url = issue.get("url")
-    if isinstance(url, str) and url.strip():
-        return url.strip()
-    number = issue.get("number")
-    if isinstance(number, int):
-        return str(number)
-    if isinstance(number, str) and number.strip():
-        return number.strip()
-    return None
-
-
-def _read_github_issue(target: Path, issue_ref: str) -> tuple[dict[str, Any] | None, list[str], str | None]:
-    if shutil.which("gh") is None:
-        return None, [], "gh CLI is not available on PATH"
-    result = subprocess.run(
-        [
-            "gh",
-            "issue",
-            "view",
-            issue_ref,
-            "--json",
-            "url,number,title,labels,state,body",
-        ],
-        cwd=target,
-        check=False,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-    )
-    if result.returncode != 0:
-        detail = result.stderr.strip() or result.stdout.strip() or f"gh issue view exited {result.returncode}"
-        return None, [], detail
-    try:
-        payload = json.loads(result.stdout)
-    except json.JSONDecodeError as exc:
-        return None, [], f"gh issue view returned invalid JSON: {exc.msg}"
-    if not isinstance(payload, dict):
-        return None, [], "gh issue view returned invalid JSON object"
-    title = payload.get("title")
-    if not isinstance(title, str) or not title.strip():
-        return None, [], "gh issue view did not return an issue title"
-    labels = payload.get("labels")
-    label_names: list[str] = []
-    if isinstance(labels, list):
-        for label in labels:
-            if isinstance(label, dict) and isinstance(label.get("name"), str):
-                label_names.append(label["name"])
-            elif isinstance(label, str):
-                label_names.append(label)
-    return (
-        {
-            "url": payload.get("url"),
-            "number": payload.get("number"),
-            "title": title.strip(),
-            "labels": label_names,
-            "state": payload.get("state"),
-            "source": "gh",
-            "ref": issue_ref,
-        },
-        _extract_issue_acceptance(payload.get("body")),
-        None,
-    )
-
-
-def _safe_issue_task_id(task: dict[str, Any]) -> str:
-    value = task.get("id")
-    if isinstance(value, str) and value.strip():
-        return value.strip()
-    return helpers._stable_hash({"text": task.get("text"), "created_at": task.get("created_at")})
-
-
-def _issue_repair_record(
-    task: dict[str, Any],
-    *,
-    issue_type: str,
-    detail: str,
-    issue: dict[str, Any] | None = None,
-    remote_issue: dict[str, Any] | None = None,
-    error: str | None = None,
-) -> dict[str, Any]:
-    task_id = _safe_issue_task_id(task)
-    issue_ref = _github_issue_ref(issue or {}) if issue else None
-    source_key = f"{task_id}:{issue_type}:{issue_ref or 'missing-ref'}"
-    fingerprint_payload = {
-        "task_id": task_id,
-        "task_text": task.get("text"),
-        "issue_type": issue_type,
-        "issue_ref": issue_ref,
-        "stored_state": (issue or {}).get("state") if issue else None,
-        "stored_title": (issue or {}).get("title") if issue else None,
-        "remote_state": (remote_issue or {}).get("state") if remote_issue else None,
-        "remote_title": (remote_issue or {}).get("title") if remote_issue else None,
-        "error": error,
-    }
-    metadata = {
-        "source_item_key": source_key,
-        "source_item_id": source_key,
-        "source_fingerprint": helpers._stable_hash(fingerprint_payload),
-        "task_id": task_id,
-        "issue_type": issue_type,
-        "safe_summary": detail,
-    }
-    if issue_ref:
-        metadata["github_issue_ref"] = issue_ref
-    if issue:
-        for key in ("url", "number", "title", "state"):
-            value = issue.get(key)
-            if value not in (None, ""):
-                metadata[f"github_issue_{key}"] = value
-    if remote_issue:
-        for key in ("url", "number", "title", "state"):
-            value = remote_issue.get(key)
-            if value not in (None, ""):
-                metadata[f"remote_issue_{key}"] = value
-    if error:
-        metadata["check_error"] = helpers._short(error, 240)
-    return {
-        "kind": "task",
-        "source": "github-issue-repair",
-        "text": f"Repair issue-backed task context for {task_id}: {detail}",
-        "type": "workflow",
-        "priority": "high" if issue_type == "closed_remote_issue" else "normal",
-        "template": "bugfix",
-        "acceptance": [
-            f"Review local task {task_id} against its issue context without mutating GitHub.",
-            "Refresh, complete, dismiss, or replace the local task with explicit local evidence.",
-            "`brigade work doctor` no longer reports the same issue-backed task warning.",
-        ],
-        "metadata": metadata,
-    }
-
-
-def _issue_repair_records(target: Path) -> list[dict[str, Any]]:
-    pending = _pending_tasks(target)
-    records: list[dict[str, Any]] = []
-    issue_tasks: list[tuple[dict[str, Any], dict[str, Any]]] = []
-    for task in pending:
-        issue = _task_issue_metadata(task)
-        if issue is None:
-            if str(task.get("source") or "") == "github_issue":
-                records.append(
-                    _issue_repair_record(
-                        task,
-                        issue_type="missing_issue_context",
-                        detail="task is marked issue-backed but has no usable GitHub issue metadata",
-                    )
-                )
-            continue
-        issue_ref = _github_issue_ref(issue)
-        title = issue.get("title")
-        if issue_ref is None or not isinstance(title, str) or not title.strip():
-            records.append(
-                _issue_repair_record(
-                    task,
-                    issue_type="missing_issue_context",
-                    detail="task has incomplete GitHub issue metadata",
-                    issue=issue,
-                )
-            )
-            continue
-        issue_tasks.append((task, issue))
-    if not issue_tasks:
-        return records
-    if shutil.which("gh") is None:
-        for task, issue in issue_tasks:
-            records.append(
-                _issue_repair_record(
-                    task,
-                    issue_type="gh_unavailable",
-                    detail="gh CLI is unavailable, so issue context cannot be checked",
-                    issue=issue,
-                    error="gh CLI is not available on PATH",
-                )
-            )
-        return records
-    for task, issue in issue_tasks:
-        issue_ref = _github_issue_ref(issue)
-        if issue_ref is None:
-            continue
-        remote_issue, _, error = _read_github_issue(target, issue_ref)
-        if remote_issue is None:
-            records.append(
-                _issue_repair_record(
-                    task,
-                    issue_type="issue_check_failed",
-                    detail="remote issue context could not be read",
-                    issue=issue,
-                    error=error or "issue check failed",
-                )
-            )
-            continue
-        remote_state = str(remote_issue.get("state") or "").lower()
-        if remote_state == "closed":
-            records.append(
-                _issue_repair_record(
-                    task,
-                    issue_type="closed_remote_issue",
-                    detail="remote issue is closed while the local task is still pending",
-                    issue=issue,
-                    remote_issue=remote_issue,
-                )
-            )
-            continue
-        stored_title = str(issue.get("title") or "").strip()
-        remote_title = str(remote_issue.get("title") or "").strip()
-        stored_state = str(issue.get("state") or "").strip().lower()
-        if (stored_title and remote_title and stored_title != remote_title) or (
-            stored_state and remote_state and stored_state != remote_state
-        ):
-            records.append(
-                _issue_repair_record(
-                    task,
-                    issue_type="stale_issue_context",
-                    detail="stored issue title or state differs from the current issue context",
-                    issue=issue,
-                    remote_issue=remote_issue,
-                )
-            )
-    return records
-
-
-def _import_record_key(item: dict[str, Any]) -> tuple[str, str, str]:
-    return (
-        str(item.get("source") or "manual"),
-        str(item.get("kind") or "task"),
-        _task_text_key(str(item.get("text") or "")),
-    )
-
-
-def _import_source_key(item: dict[str, Any]) -> str | None:
-    metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
-    for key in (
-        "source_item_key",
-        "source_item_id",
-        "scanner_item_id",
-        "sweep_issue_id",
-        "issue_id",
-        "card_id",
-        "card_file",
-    ):
-        value = metadata.get(key)
-        if isinstance(value, str) and value.strip():
-            return value.strip()
-        if isinstance(value, (int, float)):
-            return str(value)
-    return None
-
-
-def _import_fingerprint(item: dict[str, Any]) -> str | None:
-    metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
-    value = metadata.get("source_fingerprint")
-    if isinstance(value, str) and value.strip():
-        return value.strip()
-    source_key = _import_source_key(item)
-    if not source_key:
-        return None
-    return helpers._stable_hash(
-        {
-            "text": item.get("text"),
-            "kind": item.get("kind"),
-            "type": item.get("type"),
-            "priority": item.get("priority"),
-            "template": item.get("template"),
-            "acceptance": item.get("acceptance"),
-            "metadata": {
-                key: value
-                for key, value in metadata.items()
-                if key not in {"source_fingerprint", "sweep_path", "queue_path"}
-            },
-        }
-    )
-
-
-def _import_source_identity(item: dict[str, Any]) -> tuple[str, str, str] | None:
-    source_key = _import_source_key(item)
-    if not source_key:
-        return None
-    return (
-        str(item.get("source") or "manual"),
-        str(item.get("kind") or "task"),
-        source_key,
-    )
-
-
-def _validate_import_record(value: object, *, label: str) -> tuple[dict[str, Any] | None, list[str]]:
-    errors: list[str] = []
-    if not isinstance(value, dict):
-        return None, [f"{label}: expected JSON object"]
-
-    text = value.get("text")
-    if not isinstance(text, str) or not text.strip():
-        errors.append(f"{label}: text must be a non-empty string")
-    kind = value.get("kind", "task")
-    if not isinstance(kind, str) or kind not in IMPORT_KINDS:
-        errors.append(f"{label}: kind must be one of: {', '.join(IMPORT_KINDS)}")
-    source = value.get("source", "manual")
-    if not isinstance(source, str) or not source.strip():
-        errors.append(f"{label}: source must be a non-empty string")
-    metadata = value.get("metadata", {})
-    if metadata is None:
-        metadata = {}
-    if not isinstance(metadata, dict):
-        errors.append(f"{label}: metadata must be an object when present")
-    task_type = value.get("type")
-    if task_type is not None and (not isinstance(task_type, str) or task_type.strip() not in TASK_TYPES):
-        errors.append(f"{label}: type must be one of: {', '.join(TASK_TYPES)}")
-    priority = value.get("priority")
-    if priority is not None and (not isinstance(priority, str) or priority.strip() not in TASK_PRIORITIES):
-        errors.append(f"{label}: priority must be one of: {', '.join(TASK_PRIORITIES)}")
-    template = value.get("template")
-    if template is not None and (not isinstance(template, str) or template.strip() not in TASK_TEMPLATES):
-        errors.append(f"{label}: template must be one of: {', '.join(TASK_TEMPLATES)}")
-    acceptance = value.get("acceptance")
-    normalized_acceptance: list[str] = []
-    if acceptance is not None:
-        if not isinstance(acceptance, list):
-            errors.append(f"{label}: acceptance must be a list of non-empty strings")
-        else:
-            seen_acceptance: set[str] = set()
-            for index, item in enumerate(acceptance, start=1):
-                if not isinstance(item, str) or not item.strip():
-                    errors.append(f"{label}: acceptance item {index} must be a non-empty string")
-                    continue
-                rendered = item.strip()
-                key = _task_text_key(rendered)
-                if key in seen_acceptance:
-                    continue
-                normalized_acceptance.append(rendered)
-                seen_acceptance.add(key)
-    task_fields = {
-        name
-        for name, present in {
-            "type": task_type is not None,
-            "priority": priority is not None,
-            "template": template is not None,
-            "acceptance": acceptance is not None,
-        }.items()
-        if present
-    }
-    if task_fields and kind != "task":
-        errors.append(f"{label}: task fields are only valid when kind is task")
-
-    if errors:
-        return None, errors
-    record: dict[str, Any] = {
-        "text": text.strip(),
-        "kind": kind,
-        "source": source.strip(),
-        "metadata": metadata,
-    }
-    if isinstance(task_type, str) and task_type.strip():
-        record["type"] = task_type.strip()
-    if isinstance(priority, str) and priority.strip():
-        record["priority"] = priority.strip()
-    if isinstance(template, str) and template.strip():
-        record["template"] = template.strip()
-    if acceptance is not None:
-        record["acceptance"] = normalized_acceptance
-    return record, []
-
-
-def _load_import_jsonl(path: Path) -> tuple[list[dict[str, Any]], list[str]]:
-    records: list[dict[str, Any]] = []
-    errors: list[str] = []
-    try:
-        lines = path.read_text().splitlines()
-    except OSError as exc:
-        return records, [f"{path}: {exc}"]
-    for line_number, line in enumerate(lines, start=1):
-        if not line.strip():
-            continue
-        label = f"line {line_number}"
-        try:
-            value = json.loads(line)
-        except json.JSONDecodeError as exc:
-            errors.append(f"{label}: invalid JSON: {exc.msg}")
-            continue
-        record, record_errors = _validate_import_record(value, label=label)
-        errors.extend(record_errors)
-        if record is not None:
-            records.append(record)
-    return records, errors
-
-
-def _append_import_records(
-    target: Path,
-    records: list[dict[str, Any]],
-    *,
-    dry_run: bool = False,
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
-    imports = _read_imports(target)
-    existing = {
-        _import_record_key(item)
-        for item in imports
-        if isinstance(item, dict) and item.get("status", "pending") in {"pending", "promoted"}
-    }
-    existing_by_source: dict[tuple[str, str, str], dict[str, Any]] = {}
-    for item in imports:
-        if not isinstance(item, dict):
-            continue
-        identity = _import_source_identity(item)
-        if identity is not None:
-            existing_by_source[identity] = item
-    imported: list[dict[str, Any]] = []
-    skipped: list[dict[str, Any]] = []
-    skipped_dismissed: list[dict[str, Any]] = []
-    for record in records:
-        key = _import_record_key(record)
-        identity = _import_source_identity(record)
-        if identity is not None and identity in existing_by_source:
-            existing_item = existing_by_source[identity]
-            if existing_item.get("status") == "dismissed":
-                if _import_fingerprint(existing_item) == _import_fingerprint(record):
-                    skipped_dismissed.append(record)
-                    continue
-            elif _import_fingerprint(existing_item) == _import_fingerprint(record):
-                skipped.append(record)
-                continue
-        elif key[2] and key in existing:
-            skipped.append(record)
-            continue
-        item = _make_import(
-            str(record["text"]),
-            kind=str(record["kind"]),
-            source=str(record["source"]),
-            metadata=record.get("metadata") if isinstance(record.get("metadata"), dict) else None,
-            task_type=record.get("type") if isinstance(record.get("type"), str) else None,
-            priority=record.get("priority") if isinstance(record.get("priority"), str) else None,
-            acceptance=record.get("acceptance") if isinstance(record.get("acceptance"), list) else None,
-            template=record.get("template") if isinstance(record.get("template"), str) else None,
-        )
-        imported.append(item)
-        existing.add(key)
-        if identity is not None:
-            existing_by_source[identity] = item
-    if imported and not dry_run:
-        imports.extend(imported)
-        _write_imports(target, imports)
-    return imported, skipped, skipped_dismissed
-
-
-def _pending_tasks(target: Path) -> list[dict[str, Any]]:
-    ledger = _read_task_ledger(target)
-    tasks = [
-        task
-        for task in ledger["tasks"]
-        if isinstance(task, dict)
-        and task.get("status", "pending") == "pending"
-        and isinstance(task.get("text"), str)
-        and task["text"].strip()
-    ]
-    tasks.sort(key=_task_sort_key)
-    return tasks
-
-
-def _pending_imports(target: Path) -> list[dict[str, Any]]:
-    imports = [
-        item
-        for item in _read_imports(target)
-        if isinstance(item, dict)
-        and item.get("status", "pending") == "pending"
-        and isinstance(item.get("text"), str)
-        and item["text"].strip()
-    ]
-    imports.sort(key=_import_sort_key)
-    return imports
-
-
-def _import_counts(imports: list[dict[str, Any]]) -> dict[str, Any]:
-    by_source: dict[str, int] = {}
-    by_kind: dict[str, int] = {}
-    for item in imports:
-        source = str(item.get("source") or "manual")
-        kind = str(item.get("kind") or "task")
-        by_source[source] = by_source.get(source, 0) + 1
-        by_kind[kind] = by_kind.get(kind, 0) + 1
-    return {
-        "total": len(imports),
-        "by_source": dict(sorted(by_source.items())),
-        "by_kind": dict(sorted(by_kind.items())),
-    }
-
-
-def _matching_pending_imports(
-    target: Path,
-    *,
-    kind: str | None = None,
-    source: str | None = None,
-    metadata_filters: dict[str, str] | None = None,
-) -> list[dict[str, Any]]:
-    imports = _pending_imports(target)
-    if kind:
-        imports = [item for item in imports if item.get("kind") == kind]
-    if source:
-        imports = [item for item in imports if item.get("source") == source]
-    if metadata_filters:
-        imports = [item for item in imports if _import_metadata_matches(item, metadata_filters)]
-    return imports
-
-
-def _import_metadata_matches(item: dict[str, Any], filters: dict[str, str]) -> bool:
-    metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
-    for key, expected in filters.items():
-        if str(metadata.get(key, "")) != expected:
-            return False
-    return True
-
-
-def _parse_metadata_filters(values: list[str] | None) -> tuple[dict[str, str], list[str]]:
-    filters: dict[str, str] = {}
-    errors: list[str] = []
-    for raw in values or []:
-        if "=" not in raw:
-            errors.append(f"--metadata filter must be key=value: {raw}")
-            continue
-        key, value = raw.split("=", 1)
-        key = key.strip()
-        if not key:
-            errors.append(f"--metadata filter key cannot be empty: {raw}")
-            continue
-        filters[key] = value.strip()
-    return filters, errors
-
-
-def _parse_or_report_metadata_filters(values: list[str] | None) -> tuple[dict[str, str] | None, int]:
-    filters, errors = _parse_metadata_filters(values)
-    if errors:
-        for error in errors:
-            print(f"error: {error}", file=sys.stderr)
-        return None, 2
-    return filters, 0
-
-
-def _find_pending_task_by_text(target: Path, text: str) -> dict[str, Any] | None:
-    wanted = _task_text_key(text)
-    if not wanted:
-        return None
-    for task in _pending_tasks(target):
-        if _task_text_key(str(task.get("text") or "")) == wanted:
-            return task
-    return None
-
-
-def _find_import(target: Path, import_id: str) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
-    imports = _read_imports(target)
-    matches: list[dict[str, Any]] = []
-    for item in imports:
-        if not isinstance(item, dict):
-            continue
-        if item.get("id") == import_id:
-            return item, imports
-        if isinstance(item.get("id"), str) and item["id"].startswith(import_id):
-            matches.append(item)
-    if len(matches) == 1:
-        return matches[0], imports
-    return None, imports
-
-
-def _mark_import_promoted(target: Path, item: dict[str, Any]) -> tuple[dict[str, Any], bool]:
-    text = str(item.get("text") or "").strip()
-    metadata: dict[str, Any] = {
-        "import_id": item.get("id"),
-        "import_kind": item.get("kind"),
-        "import_source": item.get("source"),
-    }
-    item_metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
-    metadata.update(item_metadata)
-    template = item.get("template") if isinstance(item.get("template"), str) and item.get("template") in TASK_TEMPLATES else None
-    acceptance = item.get("acceptance") if isinstance(item.get("acceptance"), list) else None
-    task, created = _add_task(
-        target,
-        text,
-        source=f"import:{item.get('source') or 'manual'}",
-        metadata=metadata,
-        task_type=str(item.get("type") or "task"),
-        priority=str(item.get("priority") or "normal"),
-        acceptance=_combined_acceptance(template, acceptance),
-        template=template,
-    )
-    now = helpers._now().isoformat()
-    item["status"] = "promoted"
-    item["updated_at"] = now
-    item["promoted_at"] = now
-    item["task_id"] = task["id"]
-    return task, created
-
-
-def _handoff_is_document_target(value: str) -> bool:
-    if value.startswith("/") or ".." in Path(value).parts:
-        return False
-    if value in {"TOOLS.md", "USER.md"}:
-        return True
-    return (
-        value.startswith("rules/")
-        or value.startswith(".learnings/")
-    ) and value.endswith(".md")
-
-
-def _handoff_target_document(item: dict[str, Any]) -> str:
-    metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
-    override = metadata.get("handoff_target_document") or metadata.get("target_document")
-    if isinstance(override, str) and _handoff_is_document_target(override.strip()):
-        return override.strip()
-    kind = str(item.get("kind") or "finding")
-    category = " ".join(
-        str(metadata.get(key) or "")
-        for key in ("category", "issue_type", "handoff_category", "memory_target", "reason")
-    ).casefold()
-    if "feature" in category or "request" in category:
-        return ".learnings/FEATURE_REQUESTS.md"
-    if "workflow" in category or "rule" in category or "policy" in category:
-        return "rules/scanner-imports.md"
-    if "failure" in category or "error" in category or "bug" in category:
-        return ".learnings/ERRORS.md"
-    if kind == "finding" and str(item.get("source") or "") == "security-scan":
-        return ".learnings/ERRORS.md"
-    return HANDOFF_TARGETS.get(kind, ".learnings/LEARNINGS.md")
-
-
-def _handoff_type(item: dict[str, Any], target_document: str) -> str:
-    kind = str(item.get("kind") or "finding")
-    source = str(item.get("source") or "")
-    if kind == "preference":
-        return "preference"
-    if kind == "incident" or target_document.endswith("ERRORS.md"):
-        return "bugfix"
-    if source == "security-scan":
-        return "security"
-    if target_document.startswith("rules/"):
-        return "workflow"
-    if kind == "decision":
-        return "decision"
-    return "project-context"
-
-
-def _handoff_private_fields(value: object, *, path: tuple[str, ...] = ()) -> list[str]:
-    found: list[str] = []
-    if isinstance(value, dict):
-        for key, item in value.items():
-            key_text = str(key)
-            normalized = key_text.strip().casefold()
-            is_top_text = not path and normalized == "text"
-            if not is_top_text and (normalized in RAW_CHAT_FIELDS or normalized.startswith("raw_")):
-                found.append(".".join((*path, key_text)))
-                continue
-            found.extend(_handoff_private_fields(item, path=(*path, key_text)))
-    elif isinstance(value, list):
-        for index, item in enumerate(value):
-            found.extend(_handoff_private_fields(item, path=(*path, str(index))))
-    return sorted(set(found))
-
-
-def _handoff_redact_value(value: object, *, key: str | None = None) -> object:
-    normalized = (key or "").strip().casefold()
-    if normalized in HANDOFF_UNSAFE_FIELD_NAMES or any(token in normalized for token in ("password", "secret", "token", "webhook")):
-        return "[redacted]"
-    if isinstance(value, str):
-        return HANDOFF_UNSAFE_VALUE_RE.sub("[redacted]", value)
-    if isinstance(value, list):
-        return [_handoff_redact_value(item) for item in value]
-    if isinstance(value, dict):
-        return {str(item_key): _handoff_redact_value(item_value, key=str(item_key)) for item_key, item_value in value.items()}
-    return value
-
-
-def _handoff_render_value(value: object) -> str:
-    redacted = _handoff_redact_value(value)
-    if isinstance(redacted, str):
-        return redacted.replace("\n", " ").strip()
-    return json.dumps(redacted, sort_keys=True, default=str)
-
-
-def _handoff_provenance(item: dict[str, Any]) -> dict[str, Any]:
-    metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
-    keys = (
-        "source_fingerprint",
-        "scanner_id",
-        "scanner_source",
-        "scanner_run_id",
-        "scanner_receipt_path",
-        "scanner_output_path_snapshot",
-        "scanner_import_path",
-        "sweep_id",
-        "sweep_issue_id",
-        "sweep_path",
-        "evidence_summary",
-        "evidence",
-        "local_evidence_path",
-        "provider",
-        "workspace",
-        "channel",
-        "thread",
-        "message_range",
-        "confidence",
-    )
-    provenance: dict[str, Any] = {
-        "import_id": item.get("id"),
-        "source": item.get("source"),
-        "kind": item.get("kind"),
-    }
-    for key in keys:
-        value = metadata.get(key)
-        if value not in (None, ""):
-            provenance[key] = _handoff_redact_value(value, key=key)
-    fingerprint = _import_fingerprint(item)
-    if fingerprint and "source_fingerprint" not in provenance:
-        provenance["source_fingerprint"] = fingerprint
-    return provenance
-
-
-def _handoff_safe_text(value: object) -> str:
-    return _handoff_render_value(value)[:500]
-
-
-def _handoff_title(item: dict[str, Any]) -> str:
-    text = _handoff_safe_text(item.get("text") or "scanner import")
-    return helpers._short(text, 80) or "Reviewed scanner import"
-
-
-def _handoff_suggested_document_content(item: dict[str, Any], target_document: str) -> str:
-    metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
-    provenance = _handoff_provenance(item)
-    title = _handoff_title(item)
-    lines = [
-        f"### Reviewed scanner import: {title}",
-        "",
-        f"- source: {_handoff_safe_text(item.get('source') or 'manual')}",
-        f"- kind: {_handoff_safe_text(item.get('kind') or 'finding')}",
-        f"- import: {_handoff_safe_text(item.get('id') or '')}",
-        f"- summary: {_handoff_safe_text(item.get('text') or '')}",
-    ]
-    for key in ("evidence_summary", "safe_summary", "reason", "issue_type", "category"):
-        if metadata.get(key) not in (None, ""):
-            lines.append(f"- {key}: {_handoff_safe_text(metadata[key])}")
-    if target_document.startswith("rules/"):
-        lines.append("- rule: Review this scanner import and convert the durable workflow correction into a concise rule.")
-    elif target_document == "TOOLS.md":
-        lines.append("- operational note: Review this command or tool detail before adding it to durable tool notes.")
-    elif target_document == "USER.md":
-        lines.append("- preference note: Review this preference before adding it to durable user context.")
-    else:
-        lines.append("- memory note: Review this item before adding it to durable memory.")
-    if provenance:
-        lines.append("- provenance:")
-        for key in sorted(provenance):
-            lines.append(f"  - {key}: {_handoff_safe_text(provenance[key])}")
-    return "\n".join(lines)
-
-
-def _render_import_handoff(target: Path, item: dict[str, Any], target_document: str) -> str:
-    title = _handoff_title(item)
-    provenance = _handoff_provenance(item)
-    evidence_lines = [
-        f"- import: {item.get('id')}",
-        f"- source: {_handoff_safe_text(item.get('source') or 'manual')}",
-        f"- kind: {_handoff_safe_text(item.get('kind') or 'finding')}",
-    ]
-    for key in sorted(provenance):
-        if key in {"import_id", "source", "kind"}:
-            continue
-        evidence_lines.append(f"- {key}: {_handoff_safe_text(provenance[key])}")
-    content = _handoff_suggested_document_content(item, target_document)
-    return f"""# Memory Handoff
-
-## Type
-{_handoff_type(item, target_document)}
-
-## Title
-{title}
-
-## Summary
-Reviewed scanner import `{item.get('id')}` from `{_handoff_safe_text(item.get('source') or 'manual')}`. This handoff preserves the safe conclusion and local provenance without editing canonical memory directly.
-
-## Durable facts
-- Source import kind: {_handoff_safe_text(item.get('kind') or 'finding')}
-- Source import status at promotion: {_handoff_safe_text(item.get('status') or 'pending')}
-- Target document: {target_document}
-
-## Evidence
-{chr(10).join(evidence_lines)}
-
-## Recommended memory action
-no-card
-
-## Target document
-{target_document}
-
-## Suggested document content
-{content}
-"""
-
-
-def _import_handoff_plan_payload(target: Path, item: dict[str, Any]) -> dict[str, Any]:
-    target = target.expanduser().resolve()
-    target_document = _handoff_target_document(item)
-    inbox = helpers._handoff_inbox(target, {}, None)
-    private_fields = _handoff_private_fields(item)
-    blockers: list[str] = []
-    if item.get("status", "pending") != "pending":
-        blockers.append(f"import is not pending: {item.get('status')}")
-    if item.get("kind") not in HANDOFF_READY_KINDS:
-        blockers.append(f"import kind is not handoff-ready: {item.get('kind')}")
-    if not str(item.get("text") or "").strip():
-        blockers.append("import text is required")
-    if private_fields:
-        blockers.append("raw private chat fields are not allowed: " + ", ".join(private_fields))
-    if not _handoff_is_document_target(target_document):
-        blockers.append(f"handoff target document is invalid: {target_document}")
-    return {
-        "target": str(target),
-        "imports_path": str(helpers._imports_path(target)),
-        "handoff_inbox": str(inbox),
-        "import": _import_summary(item),
-        "handoff_ready": not blockers,
-        "target_document": target_document,
-        "handoff_type": _handoff_type(item, target_document),
-        "provenance": _handoff_provenance(item),
-        "private_fields": private_fields,
-        "blockers": blockers,
-        "suggested_promote_handoff_command": f"brigade work import promote-handoff {item.get('id')}",
-        "suggested_dismiss_command": f'brigade work import dismiss {item.get("id")} --reason "..."',
-    }
-
-
-def _write_import_handoff(target: Path, item: dict[str, Any], target_document: str) -> Path:
-    now = helpers._now()
-    inbox = helpers._handoff_inbox(target, {}, None)
-    inbox.mkdir(parents=True, exist_ok=True)
-    path = inbox / f"{now.strftime('%Y-%m-%d-%H%M')}-scanner-import-{helpers._slug(str(item.get('kind') or 'finding'))}-{helpers._slug(str(item.get('id') or 'import'))}-{uuid4().hex[:6]}.md"
-    path.write_text(_render_import_handoff(target, item, target_document))
-    return path
-
-
-def _mark_import_handoff_promoted(target: Path, item: dict[str, Any], *, handoff_path: Path, target_document: str) -> None:
-    now = helpers._now().isoformat()
-    item["status"] = "promoted"
-    item["updated_at"] = now
-    item["promoted_at"] = now
-    item["handoff_path"] = str(handoff_path)
-    item["handoff_target_document"] = target_document
-    item["handoff_source_fingerprint"] = _import_fingerprint(item)
-
-
-def _find_task(target: Path, task_id: str) -> tuple[dict[str, Any] | None, dict[str, Any]]:
-    ledger = _read_task_ledger(target)
-    matches: list[dict[str, Any]] = []
-    for task in ledger["tasks"]:
-        if not isinstance(task, dict):
-            continue
-        if task.get("id") == task_id:
-            return task, ledger
-        if isinstance(task.get("id"), str) and task["id"].startswith(task_id):
-            matches.append(task)
-    if len(matches) == 1:
-        return matches[0], ledger
-    return None, ledger
-
-
-def _make_task(
-    text: str,
-    *,
-    source: str = "manual",
-    metadata: dict[str, Any] | None = None,
-    task_type: str = "task",
-    priority: str = "normal",
-    acceptance: list[str] | None = None,
-    template: str | None = None,
-) -> dict[str, Any]:
-    now = helpers._now()
-    created = now.isoformat()
-    task = {
-        "id": f"{now.strftime('%Y%m%d-%H%M%S')}-{helpers._slug(text)}-{uuid4().hex[:6]}",
-        "text": text,
-        "status": "pending",
-        "source": source,
-        "type": _normalize_task_type(task_type),
-        "priority": _normalize_task_priority(priority),
-        "acceptance": _normalize_acceptance(acceptance),
-        "created_at": created,
-        "updated_at": created,
-    }
-    if template:
-        task["template"] = template
-    if metadata:
-        task["metadata"] = metadata
-    return task
-
-
-def _parse_metadata(items: list[str] | None) -> dict[str, str]:
-    metadata: dict[str, str] = {}
-    for item in items or []:
-        if "=" not in item:
-            raise ValueError("--metadata entries must use key=value")
-        key, value = item.split("=", 1)
-        key = key.strip()
-        if not key:
-            raise ValueError("--metadata entries must have a key")
-        metadata[key] = value.strip()
-    return metadata
-
-
-def _make_import(
-    text: str,
-    *,
-    kind: str,
-    source: str,
-    metadata: dict[str, Any] | None = None,
-    task_type: str | None = None,
-    priority: str | None = None,
-    acceptance: list[str] | None = None,
-    template: str | None = None,
-) -> dict[str, Any]:
-    now = helpers._now()
-    created = now.isoformat()
-    item: dict[str, Any] = {
-        "id": f"{now.strftime('%Y%m%d-%H%M%S')}-{kind}-{helpers._slug(text)}-{uuid4().hex[:6]}",
-        "kind": kind,
-        "source": source,
-        "text": text,
-        "status": "pending",
-        "created_at": created,
-        "updated_at": created,
-    }
-    if task_type:
-        item["type"] = _normalize_task_type(task_type)
-    if priority:
-        item["priority"] = _normalize_task_priority(priority)
-    if template:
-        item["template"] = template
-    if acceptance is not None:
-        item["acceptance"] = _normalize_acceptance(acceptance)
-    if metadata:
-        item["metadata"] = metadata
-    return item
-
-
-def _add_task(
-    target: Path,
-    text: str,
-    *,
-    source: str = "manual",
-    metadata: dict[str, Any] | None = None,
-    task_type: str = "task",
-    priority: str = "normal",
-    acceptance: list[str] | None = None,
-    template: str | None = None,
-    dedupe: bool = True,
-) -> tuple[dict[str, Any], bool]:
-    ledger = _read_task_ledger(target)
-    if dedupe:
-        existing = _find_pending_task_by_text(target, text)
-        if existing is not None:
-            return existing, False
-    task = _make_task(
-        text,
-        source=source,
-        metadata=metadata,
-        task_type=task_type,
-        priority=priority,
-        acceptance=acceptance,
-        template=template,
-    )
-    ledger["tasks"].append(task)
-    _write_task_ledger(target, ledger)
-    return task, True
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 def _latest_run_next_metadata(target: Path) -> tuple[str | None, dict[str, Any]]:
@@ -1529,7 +387,7 @@ def _queue_latest_next(
         metadata["session_path"] = str(session_dir)
     if session_title:
         metadata["session_title"] = session_title
-    task, created = _add_task(
+    task, created = ledger_mod._add_task(
         target,
         next_step,
         source="latest_dogfood_run",
@@ -1813,9 +671,9 @@ def _backup_destination_checks(target: Path, destination: dict[str, Any], now: d
     if not isinstance(payload, dict):
         return [_backup_issue(destination, "invalid_summary", "summary must be a JSON object")]
     unsafe_fields = _backup_summary_unsafe_fields(payload)
-    safe_summary = _string_field(payload.get("summary")) or _string_field(payload.get("safe_summary"))
-    evidence_path = _string_field(payload.get("evidence_path"))
-    destination_label = _string_field(payload.get("destination_label")) or str(destination.get("id"))
+    safe_summary = ledger_mod._string_field(payload.get("summary")) or ledger_mod._string_field(payload.get("safe_summary"))
+    evidence_path = ledger_mod._string_field(payload.get("evidence_path"))
+    destination_label = ledger_mod._string_field(payload.get("destination_label")) or str(destination.get("id"))
     if unsafe_fields:
         checks.append(
             _backup_issue(
@@ -2502,7 +1360,7 @@ def _scanner_import_fingerprint(record: dict[str, Any], *, scanner: dict[str, An
         {
             "scanner_id": scanner.get("id"),
             "scanner_source": scanner.get("source"),
-            "source_item_key": _import_source_key(record),
+            "source_item_key": ledger_mod._import_source_key(record),
             "text": record.get("text"),
             "kind": record.get("kind"),
             "type": record.get("type"),
@@ -2558,7 +1416,7 @@ def _scanner_stamp_new_imports(
     run: dict[str, Any],
     before_ids: set[str],
 ) -> list[str]:
-    imports = _read_imports(target)
+    imports = ledger_mod._read_imports(target)
     changed = 0
     stamped_ids: list[str] = []
     for item in imports:
@@ -2575,7 +1433,7 @@ def _scanner_stamp_new_imports(
         changed += 1
         stamped_ids.append(import_id)
     if changed:
-        _write_imports(target, imports)
+        ledger_mod._write_imports(target, imports)
     return stamped_ids
 
 
@@ -2590,7 +1448,7 @@ def _scanner_validate_import_output(
         return import_path, [], [f"{scanner.get('id')}: import_format must be jsonl"]
     if not import_path.is_file():
         return import_path, [], [f"{scanner.get('id')}: import file not found: {import_path}"]
-    records, errors = _load_import_jsonl(import_path)
+    records, errors = ledger_mod._load_import_jsonl(import_path)
     return import_path, records, [f"{scanner.get('id')}: {error}" for error in errors]
 
 
@@ -2885,7 +1743,7 @@ def _scanner_run_one(
 
 
 def _review_stamp_completed_tasks(target: Path, run_id: str) -> list[str]:
-    ledger = _read_task_ledger(target)
+    ledger = ledger_mod._read_task_ledger(target)
     stamped: list[str] = []
     changed = False
     for task in ledger.get("tasks", []):
@@ -2904,7 +1762,7 @@ def _review_stamp_completed_tasks(target: Path, run_id: str) -> list[str]:
             stamped.append(str(task.get("id")))
             changed = True
     if changed:
-        _write_task_ledger(target, ledger)
+        ledger_mod._write_task_ledger(target, ledger)
     return stamped
 
 
@@ -3074,7 +1932,7 @@ def _review_plan_payload(target: Path) -> dict[str, Any]:
 def _review_pending_finding(target: Path) -> dict[str, Any] | None:
     candidates = [
         item
-        for item in _pending_imports(target)
+        for item in ledger_mod._pending_imports(target)
         if item.get("source") == "code-review"
     ]
     if not candidates:
@@ -3085,13 +1943,13 @@ def _review_pending_finding(target: Path) -> dict[str, Any] | None:
             str(item.get("created_at") or ""),
         )
     )
-    return _import_summary(candidates[0])
+    return ledger_mod._import_summary(candidates[0])
 
 
 def _review_imports(target: Path, *, run_id: str | None = None) -> list[dict[str, Any]]:
     items = [
         item
-        for item in _read_imports(target)
+        for item in ledger_mod._read_imports(target)
         if isinstance(item, dict) and item.get("source") == "code-review"
     ]
     if run_id is None:
@@ -3107,7 +1965,7 @@ def _review_imports(target: Path, *, run_id: str | None = None) -> list[dict[str
 def _review_tasks_by_id(target: Path) -> dict[str, dict[str, Any]]:
     return {
         str(task.get("id")): task
-        for task in _read_task_ledger(target).get("tasks", [])
+        for task in ledger_mod._read_task_ledger(target).get("tasks", [])
         if isinstance(task, dict) and isinstance(task.get("id"), str)
     }
 
@@ -3363,7 +2221,7 @@ def _review_health(target: Path) -> dict[str, Any]:
                 checks.append({"status": WARN, "name": "review_runs_stale", "detail": f"{latest_success.get('run_id')}={age_hours:.1f}h"})
             else:
                 checks.append({"status": OK, "name": "review_runs_stale", "detail": "latest review run is fresh"})
-    ledger = _read_task_ledger(target)
+    ledger = ledger_mod._read_task_ledger(target)
     done_tasks = [task for task in ledger.get("tasks", []) if isinstance(task, dict) and task.get("status") == "done"]
     if enabled and done_tasks and latest_success is None:
         checks.append({"status": WARN, "name": "review_completed_tasks", "detail": f"{len(done_tasks)} completed task(s) have no successful review receipt"})
@@ -3382,7 +2240,7 @@ def _review_health(target: Path) -> dict[str, Any]:
         "latest_unclosed_run": unclosed[0] if unclosed else None,
         "top_pending_finding": top_pending,
         "top_unresolved_finding": findings_payload["top_unresolved"],
-        "pending_finding_count": len([item for item in _pending_imports(target) if item.get("source") == "code-review"]),
+        "pending_finding_count": len([item for item in ledger_mod._pending_imports(target) if item.get("source") == "code-review"]),
         "unresolved_finding_count": findings_payload["unresolved_count"],
     }
 
@@ -3407,7 +2265,7 @@ def _resolve_review_run(target: Path, run_id: str) -> tuple[dict[str, Any] | Non
 
 
 def _review_stamp_task_closeouts(target: Path, closeout: dict[str, Any]) -> list[str]:
-    ledger = _read_task_ledger(target)
+    ledger = ledger_mod._read_task_ledger(target)
     wanted_task_ids = {
         str(item.get("task_id"))
         for item in closeout.get("findings", [])
@@ -3445,7 +2303,7 @@ def _review_stamp_task_closeouts(target: Path, closeout: dict[str, Any]) -> list
         stamped.append(str(task.get("id")))
         changed = True
     if changed:
-        _write_task_ledger(target, ledger)
+        ledger_mod._write_task_ledger(target, ledger)
     return stamped
 
 
@@ -4235,7 +3093,7 @@ def _work_closeout_payload(target: Path, session_id: str, *, write: bool = False
         "created_at": now.isoformat(),
         "session": helpers._session_info(session_path, session_payload),
         "session_path": str(session_path),
-        "task": _task_summary(task) if task else None,
+        "task": ledger_mod._task_summary(task) if task else None,
         "acceptance_criteria": task_acceptance,
         "verification": {
             "run_id": latest_verify.get("run_id"),
@@ -4310,7 +3168,7 @@ def _scanner_health_issue_records(target: Path) -> list[dict[str, Any]]:
 
 
 def _resolve_next_task(target: Path) -> dict[str, Any]:
-    pending = _pending_tasks(target)
+    pending = ledger_mod._pending_tasks(target)
     if pending:
         task = pending[0]
         return {
@@ -4340,7 +3198,7 @@ def _resolve_next_task(target: Path) -> dict[str, Any]:
 def _render_task_run_prompt(task: dict[str, Any]) -> str:
     text = str(task.get("text") or "").strip()
     lines = [text]
-    acceptance = _task_acceptance(task)
+    acceptance = ledger_mod._task_acceptance(task)
     if acceptance:
         lines.extend(["", "Acceptance criteria:"])
         lines.extend(f"- {item}" for item in acceptance)
@@ -4348,8 +3206,8 @@ def _render_task_run_prompt(task: dict[str, Any]) -> str:
         [
             "",
             "Task metadata:",
-            f"- type: {_normalize_task_type(task.get('type'))}",
-            f"- priority: {_normalize_task_priority(task.get('priority'))}",
+            f"- type: {ledger_mod._normalize_task_type(task.get('type'))}",
+            f"- priority: {ledger_mod._normalize_task_priority(task.get('priority'))}",
             "",
             "Definition of done:",
             "- Treat the acceptance criteria above as the completion checklist.",
@@ -4364,11 +3222,11 @@ def _task_plan_payload(target: Path, task_id: str) -> tuple[dict[str, Any] | Non
     if not target.is_dir():
         print(f"error: --target is not a directory: {target}", file=sys.stderr)
         return None, 2
-    task, _ = _find_task(target, task_id)
+    task, _ = ledger_mod._find_task(target, task_id)
     if task is None:
         print(f"error: task not found: {task_id}", file=sys.stderr)
         return None, 1
-    summary = _task_summary(task)
+    summary = ledger_mod._task_summary(task)
     template = summary.get("template") if isinstance(summary.get("template"), str) else None
     if template:
         summary["guidance"] = list(TASK_TEMPLATES.get(template, {}).get("guidance", ()))
@@ -4631,8 +3489,8 @@ def _next_payload(target: Path) -> dict[str, Any]:
         "dogfood": dogfood,
         "next_source": resolved["source"],
         "task_id": resolved.get("task_id"),
-        "next_task": _task_summary(ledger_task) if ledger_task else None,
-        "next_issue": _task_issue_metadata(ledger_task) if ledger_task else None,
+        "next_task": ledger_mod._task_summary(ledger_task) if ledger_task else None,
+        "next_issue": ledger_mod._task_issue_metadata(ledger_task) if ledger_task else None,
         "next": str(resolved["task"]),
         "suggested_command": suggested,
     }
@@ -4774,7 +3632,7 @@ def _compact_health_section(payload: object) -> dict[str, Any] | None:
         compact["review"] = {
             "issue_count": review.get("issue_count", 0),
             "top_issue": _compact_top(review.get("top_issue")),
-            "top_pending_import": _import_summary(review.get("top_pending_import")) if review.get("top_pending_import") else None,
+            "top_pending_import": ledger_mod._import_summary(review.get("top_pending_import")) if review.get("top_pending_import") else None,
         }
     return compact
 
@@ -4810,11 +3668,11 @@ def _brief_payload(target: Path, *, limit: int = 3) -> dict[str, Any]:
     ledger_task = resolved.get("ledger_task") if isinstance(resolved.get("ledger_task"), dict) else None
     git = helpers._git_snapshot(target)
     suggested = _suggested_command(active, resolved["task"], resolved["source"])
-    pending = _pending_tasks(target)
-    pending_imports = _pending_imports(target)
-    pending_import_counts = _import_counts(pending_imports)
-    scanner_candidate = _scanner_candidate(pending_imports)
-    handoff_candidate = _handoff_candidate(pending_imports)
+    pending = ledger_mod._pending_tasks(target)
+    pending_imports = ledger_mod._pending_imports(target)
+    pending_import_counts = ledger_mod._import_counts(pending_imports)
+    scanner_candidate = ledger_mod._scanner_candidate(pending_imports)
+    handoff_candidate = ledger_mod._handoff_candidate(pending_imports)
     inbox_hygiene = _inbox_hygiene_payload(target)
     scanner_health = _scanner_health(target)
     sweep_health = _scanner_sweep_health(target)
@@ -4849,12 +3707,12 @@ def _brief_payload(target: Path, *, limit: int = 3) -> dict[str, Any]:
         "skipped_sessions": skipped,
         "tasks_path": str(helpers._tasks_path(target)),
         "pending_tasks": pending,
-        "plan_coverage": _plan_coverage_payload(target),
+        "plan_coverage": ledger_mod._plan_coverage_payload(target),
         "imports_path": str(helpers._imports_path(target)),
         "pending_imports": pending_imports,
         "pending_import_counts": pending_import_counts,
-        "scanner_candidate": _import_summary(scanner_candidate) if scanner_candidate else None,
-        "handoff_candidate": _import_summary(handoff_candidate) if handoff_candidate else None,
+        "scanner_candidate": ledger_mod._import_summary(scanner_candidate) if scanner_candidate else None,
+        "handoff_candidate": ledger_mod._import_summary(handoff_candidate) if handoff_candidate else None,
         "inbox_hygiene": {
             "issue_count": inbox_hygiene["issue_count"],
             "top_issue": inbox_hygiene["top_issue"],
@@ -5020,8 +3878,8 @@ def _brief_payload(target: Path, *, limit: int = 3) -> dict[str, Any]:
         "dogfood": resolved["dogfood"],
         "next_source": resolved["source"],
         "task_id": resolved.get("task_id"),
-        "next_task": _task_summary(ledger_task) if ledger_task else None,
-        "next_issue": _task_issue_metadata(ledger_task) if ledger_task else None,
+        "next_task": ledger_mod._task_summary(ledger_task) if ledger_task else None,
+        "next_issue": ledger_mod._task_issue_metadata(ledger_task) if ledger_task else None,
         "next": str(resolved["task"]),
         "suggested_command": suggested,
     }
@@ -5479,7 +4337,7 @@ def brief(*, target: Path, limit: int = 3, json_output: bool = False) -> int:
         for task in pending[:5]:
             if not isinstance(task, dict):
                 continue
-            summary = _task_summary(task)
+            summary = ledger_mod._task_summary(task)
             print(
                 "  - "
                 f"{task.get('id')} "
@@ -5878,9 +4736,9 @@ def tasks(*, target: Path, all_tasks: bool = False, json_output: bool = False) -
     if not target.is_dir():
         print(f"error: --target is not a directory: {target}", file=sys.stderr)
         return 2
-    ledger = _read_task_ledger(target)
+    ledger = ledger_mod._read_task_ledger(target)
     task_items = [task for task in ledger["tasks"] if isinstance(task, dict)]
-    task_items.sort(key=_task_sort_key)
+    task_items.sort(key=ledger_mod._task_sort_key)
     if not all_tasks:
         task_items = [task for task in task_items if task.get("status", "pending") == "pending"]
 
@@ -5895,7 +4753,7 @@ def tasks(*, target: Path, all_tasks: bool = False, json_output: bool = False) -
         return 0
     for task in task_items:
         status_text = task.get("status", "pending")
-        summary = _task_summary(task)
+        summary = ledger_mod._task_summary(task)
         print(
             f"- {task.get('id')} [{status_text}] "
             f"[{summary['type']} {summary['priority']} acceptance={summary['acceptance_count']}] "
@@ -5905,7 +4763,7 @@ def tasks(*, target: Path, all_tasks: bool = False, json_output: bool = False) -
             print(f"  source: {task['source']}")
         if task.get("template"):
             print(f"  template: {task['template']}")
-        issue = _task_issue_metadata(task)
+        issue = ledger_mod._task_issue_metadata(task)
         if issue:
             print(f"  issue: {issue.get('url') or issue.get('number')}")
         metadata = task.get("metadata") if isinstance(task.get("metadata"), dict) else {}
@@ -5961,7 +4819,7 @@ def task_add(
         if not issue_ref:
             print("error: --from-issue requires an issue URL or number", file=sys.stderr)
             return 2
-        issue, issue_acceptance, error = _read_github_issue(target, issue_ref)
+        issue, issue_acceptance, error = ledger_mod._read_github_issue(target, issue_ref)
         if issue is None:
             print(f"error: could not read GitHub issue {issue_ref}: {error}", file=sys.stderr)
             return 1
@@ -5975,27 +4833,27 @@ def task_add(
     if not task_text:
         print("error: task text is required", file=sys.stderr)
         return 2
-    task, created = _add_task(
+    task, created = ledger_mod._add_task(
         target,
         task_text,
         source=source,
         metadata=metadata,
         task_type=task_type,
         priority=priority,
-        acceptance=_combined_acceptance(template, acceptance),
+        acceptance=ledger_mod._combined_acceptance(template, acceptance),
         template=template,
         dedupe=dedupe,
     )
     print(f"task: {task['id']}")
     print(f"status: {task['status']}")
     print(f"created: {created}")
-    print(f"type: {_normalize_task_type(task.get('type'))}")
-    print(f"priority: {_normalize_task_priority(task.get('priority'))}")
+    print(f"type: {ledger_mod._normalize_task_type(task.get('type'))}")
+    print(f"priority: {ledger_mod._normalize_task_priority(task.get('priority'))}")
     if task.get("template"):
         print(f"template: {task['template']}")
-    criteria = _task_acceptance(task)
+    criteria = ledger_mod._task_acceptance(task)
     print(f"acceptance: {len(criteria)}")
-    issue = _task_issue_metadata(task)
+    issue = ledger_mod._task_issue_metadata(task)
     if issue:
         print(f"issue: {issue.get('url') or issue.get('number')}")
     print(f"text: {task['text']}")
@@ -6007,24 +4865,24 @@ def task_show(*, target: Path, task_id: str) -> int:
     if not target.is_dir():
         print(f"error: --target is not a directory: {target}", file=sys.stderr)
         return 2
-    task, _ = _find_task(target, task_id)
+    task, _ = ledger_mod._find_task(target, task_id)
     if task is None:
         print(f"error: task not found: {task_id}", file=sys.stderr)
         return 1
     print(f"task: {task.get('id')}")
     print(f"status: {task.get('status', 'pending')}")
     print(f"source: {task.get('source', '')}")
-    print(f"type: {_normalize_task_type(task.get('type'))}")
-    print(f"priority: {_normalize_task_priority(task.get('priority'))}")
+    print(f"type: {ledger_mod._normalize_task_type(task.get('type'))}")
+    print(f"priority: {ledger_mod._normalize_task_priority(task.get('priority'))}")
     if task.get("template"):
         print(f"template: {task['template']}")
     print(f"created_at: {task.get('created_at', '')}")
     print(f"updated_at: {task.get('updated_at', '')}")
-    criteria = _task_acceptance(task)
+    criteria = ledger_mod._task_acceptance(task)
     print(f"acceptance: {len(criteria)}")
     for item in criteria:
         print(f"  - {item}")
-    issue = _task_issue_metadata(task)
+    issue = ledger_mod._task_issue_metadata(task)
     if issue:
         print("issue:")
         print(f"  url: {issue.get('url', '')}")
@@ -6069,279 +4927,22 @@ def task_show(*, target: Path, task_id: str) -> int:
     return 0
 
 
-def _plan_rel_path(target: Path, path: Path) -> str:
-    try:
-        return str(path.relative_to(target))
-    except ValueError:
-        return str(path)
 
 
-def _append_dedupe(existing: list[str], additions: list[str] | None) -> list[str]:
-    result: list[str] = []
-    seen: set[str] = set()
-    for value in list(existing) + list(additions or []):
-        text = str(value)
-        if text in seen:
-            continue
-        seen.add(text)
-        result.append(text)
-    return result
 
 
-def _read_plan_receipt(target: Path, task_id: str, kind: str = "plan") -> dict[str, Any] | None:
-    json_path, _ = helpers._plan_paths(target, task_id, kind)
-    if not json_path.is_file():
-        return None
-    try:
-        data = json.loads(json_path.read_text())
-    except (json.JSONDecodeError, OSError):
-        return None
-    if not isinstance(data, dict):
-        return None
-    return data
 
 
-def _build_plan_receipt(
-    *,
-    target: Path,
-    task: dict[str, Any],
-    task_id: str,
-    existing: dict[str, Any] | None,
-    title: str | None,
-    assumptions: list[str] | None,
-    risks: list[str] | None,
-    sources: list[str] | None,
-    next_command: str | None,
-    accept: bool,
-    kind: str = "plan",
-    steps: list[str] | None = None,
-    research: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    now = helpers._now().isoformat()
-    acceptance = _task_acceptance(task)
-    json_path, md_path = helpers._plan_paths(target, task_id, kind)
-    receipt_paths = [
-        _plan_rel_path(target, helpers._tasks_path(target)),
-        _plan_rel_path(target, json_path),
-        _plan_rel_path(target, md_path),
-    ]
-    if existing is None:
-        resolved_title = title if title is not None else str(task.get("text") or "")
-        return {
-            "task_id": task_id,
-            "kind": kind,
-            "title": resolved_title,
-            "status": "accepted" if accept else "draft",
-            "created_at": now,
-            "updated_at": now,
-            "source_context": _append_dedupe([], sources),
-            "assumptions": _append_dedupe([], assumptions),
-            "acceptance": acceptance,
-            "risks": _append_dedupe([], risks),
-            "steps": _append_dedupe([], steps),
-            "next_command": next_command if next_command is not None else "brigade work run",
-            "receipt_paths": receipt_paths,
-            "research_runs": [research] if research else [],
-        }
-
-    def _as_list(value: Any) -> list[str]:
-        return [str(item) for item in value] if isinstance(value, list) else []
-
-    created_at = existing.get("created_at") if isinstance(existing.get("created_at"), str) else now
-    prior_title = existing.get("title") if isinstance(existing.get("title"), str) else str(task.get("text") or "")
-    prior_next = existing.get("next_command") if isinstance(existing.get("next_command"), str) else "brigade work run"
-    prior_status = existing.get("status") if existing.get("status") in ("draft", "accepted") else "draft"
-    prior_runs = existing.get("research_runs")
-    research_runs = [r for r in prior_runs if isinstance(r, dict)] if isinstance(prior_runs, list) else []
-    if research:
-        if not any(r.get("run_id") == research.get("run_id") for r in research_runs):
-            research_runs = research_runs + [research]
-    return {
-        "task_id": task_id,
-        "kind": kind,
-        "title": title if title is not None else prior_title,
-        "status": "accepted" if accept else prior_status,
-        "created_at": created_at,
-        "updated_at": now,
-        "source_context": _append_dedupe(_as_list(existing.get("source_context")), sources),
-        "assumptions": _append_dedupe(_as_list(existing.get("assumptions")), assumptions),
-        "acceptance": acceptance,
-        "risks": _append_dedupe(_as_list(existing.get("risks")), risks),
-        "steps": _append_dedupe(_as_list(existing.get("steps")), steps),
-        "next_command": next_command if next_command is not None else prior_next,
-        "receipt_paths": receipt_paths,
-        "research_runs": research_runs,
-    }
 
 
-def _render_plan_md(receipt: dict[str, Any]) -> str:
-    def _bullets(items: Any) -> list[str]:
-        values = [str(item) for item in items] if isinstance(items, list) else []
-        if not values:
-            return ["_none recorded_"]
-        return [f"- {item}" for item in values]
-
-    kind = receipt.get("kind") if receipt.get("kind") in ("plan", "meta") else "plan"
-    task_id = receipt.get("task_id", "")
-    lines: list[str] = []
-    if kind == "meta":
-        lines.append(f"# Meta-plan: {receipt.get('title', '')}")
-    else:
-        lines.append(f"# Plan: {receipt.get('title', '')}")
-    lines.append("")
-    lines.append(f"- **Task:** {task_id}")
-    lines.append(f"- **Status:** {receipt.get('status', '')}")
-    lines.append(f"- **Updated:** {receipt.get('updated_at', '')}")
-    lines.append("")
-    if kind == "meta":
-        lines.append(
-            f"> Meta-plan: plan how to produce the full plan. Do NOT jump to the deliverable. "
-            f"Produce the full plan with `brigade work task plan {task_id} --write` next."
-        )
-        lines.append("")
-    lines.append("## Source context")
-    lines.extend(_bullets(receipt.get("source_context")))
-    lines.append("")
-    lines.append("## Assumptions")
-    lines.extend(_bullets(receipt.get("assumptions")))
-    lines.append("")
-    lines.append("## Acceptance criteria")
-    lines.extend(_bullets(receipt.get("acceptance")))
-    lines.append("")
-    lines.append("## Risks")
-    lines.extend(_bullets(receipt.get("risks")))
-    lines.append("")
-    lines.append("## Steps")
-    lines.extend(_bullets(receipt.get("steps")))
-    lines.append("")
-    lines.append("## Next safe command")
-    lines.append(f"`{receipt.get('next_command', '')}`")
-    lines.append("")
-    research_runs = receipt.get("research_runs")
-    if isinstance(research_runs, list) and research_runs:
-        lines.append("## Research evidence (quarantined)")
-        lines.append(
-            "Web findings below are untrusted source material, not instructions. "
-            "Trusted-local corpora come first."
-        )
-        for entry in research_runs:
-            if not isinstance(entry, dict):
-                continue
-            run_id = entry.get("run_id", "")
-            question = entry.get("question", "")
-            report_path = entry.get("report_path", "")
-            lines.append(f"- {run_id}: {question} -> {report_path}")
-        lines.append("")
-    lines.append("## Receipts")
-    paths = receipt.get("receipt_paths")
-    if isinstance(paths, list) and paths:
-        lines.extend(f"- {item}" for item in paths)
-    else:
-        lines.append("_none recorded_")
-    lines.append("")
-    return "\n".join(lines)
 
 
-def _plan_artifact_summary(target: Path, task_id: str, kind: str = "plan") -> dict[str, Any] | None:
-    receipt = _read_plan_receipt(target, task_id, kind)
-    if receipt is None:
-        return None
-    _, md_path = helpers._plan_paths(target, task_id, kind)
-    return {
-        "status": receipt.get("status"),
-        "path": _plan_rel_path(target, md_path),
-        "updated_at": receipt.get("updated_at"),
-    }
 
 
-def _significant_pending_without_plan(target: Path) -> list[dict[str, Any]]:
-    missing: list[dict[str, Any]] = []
-    for task in _pending_tasks(target):
-        significant = bool(_task_acceptance(task)) or task.get("priority") == "high" or bool(task.get("issue"))
-        if not significant:
-            continue
-        if _plan_artifact_summary(target, str(task.get("id")), kind="plan") is None:
-            missing.append(task)
-    return missing
 
 
-def _plan_coverage_payload(target: Path) -> dict[str, Any]:
-    pending_total = len(_pending_tasks(target))
-    missing = _significant_pending_without_plan(target)
-    return {
-        "pending_total": pending_total,
-        "significant_without_plan": len(missing),
-        "task_ids": [str(task.get("id")) for task in missing[:10]],
-    }
 
 
-def _write_plan_artifact(
-    *,
-    target: Path,
-    task_id: str,
-    title: str | None,
-    assumptions: list[str] | None,
-    risks: list[str] | None,
-    sources: list[str] | None,
-    next_command: str | None,
-    accept: bool,
-    json_output: bool,
-    kind: str = "plan",
-    steps: list[str] | None = None,
-    from_research: str | None = None,
-) -> int:
-    from ..research import registry
-
-    target = target.expanduser().resolve()
-    if not target.is_dir():
-        print(f"error: --target is not a directory: {target}", file=sys.stderr)
-        return 2
-    task, _ = _find_task(target, task_id)
-    if task is None:
-        print(f"error: task not found: {task_id}", file=sys.stderr)
-        return 1
-    resolved_id = str(task.get("id") or task_id)
-    research_entry: dict[str, Any] | None = None
-    research_sources = list(sources or [])
-    if from_research is not None:
-        rec = registry.show_run(target, from_research)
-        if rec is None:
-            print(f"error: research run not found: {from_research}", file=sys.stderr)
-            return 1
-        artifacts = rec.get("artifacts") or {}
-        report_rel = artifacts.get("report_md") or "report.md"
-        report_path = _plan_rel_path(target, registry.run_dir(target, from_research) / report_rel)
-        research_entry = {
-            "run_id": from_research,
-            "question": str(rec.get("question") or ""),
-            "report_path": report_path,
-        }
-        research_sources.append(f"research:{from_research} (untrusted-web) -> {report_path}")
-    existing = _read_plan_receipt(target, resolved_id, kind)
-    receipt = _build_plan_receipt(
-        target=target,
-        task=task,
-        task_id=resolved_id,
-        existing=existing,
-        title=title,
-        assumptions=assumptions,
-        risks=risks,
-        sources=research_sources,
-        next_command=next_command,
-        accept=accept,
-        kind=kind,
-        steps=steps,
-        research=research_entry,
-    )
-    json_path, md_path = helpers._plan_paths(target, resolved_id, kind)
-    helpers._plans_dir(target).mkdir(parents=True, exist_ok=True)
-    json_path.write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n")
-    md_path.write_text(_render_plan_md(receipt))
-    if json_output:
-        print(json.dumps(receipt, indent=2, sort_keys=True))
-        return 0
-    print(f"wrote plan: {_plan_rel_path(target, md_path)}  status: {receipt['status']}")
-    return 0
 
 
 def task_plan(
@@ -6361,7 +4962,7 @@ def task_plan(
     from_research: str | None = None,
 ) -> int:
     if write:
-        return _write_plan_artifact(
+        return ledger_mod._write_plan_artifact(
             target=target,
             task_id=task_id,
             title=title,
@@ -6380,8 +4981,8 @@ def task_plan(
         return rc
     resolved_target = target.expanduser().resolve()
     resolved_id = str(payload.get("id") or task_id)
-    artifact = _plan_artifact_summary(resolved_target, resolved_id)
-    meta_artifact = _plan_artifact_summary(resolved_target, resolved_id, kind="meta")
+    artifact = ledger_mod._plan_artifact_summary(resolved_target, resolved_id)
+    meta_artifact = ledger_mod._plan_artifact_summary(resolved_target, resolved_id, kind="meta")
     payload["plan_artifact"] = artifact
     payload["meta_artifact"] = meta_artifact
     if json_output:
@@ -6432,7 +5033,7 @@ def task_done(*, target: Path, task_id: str) -> int:
     if not target.is_dir():
         print(f"error: --target is not a directory: {target}", file=sys.stderr)
         return 2
-    task, ledger = _find_task(target, task_id)
+    task, ledger = ledger_mod._find_task(target, task_id)
     if task is None:
         print(f"error: task not found: {task_id}", file=sys.stderr)
         return 1
@@ -6440,7 +5041,7 @@ def task_done(*, target: Path, task_id: str) -> int:
     task["status"] = "done"
     task["updated_at"] = now
     task["completed_at"] = now
-    _write_task_ledger(target, ledger)
+    ledger_mod._write_task_ledger(target, ledger)
     print(f"task: {task.get('id')}")
     print("status: done")
     return 0
@@ -6467,15 +5068,15 @@ def import_add(
         return 2
     source_text = source.strip() or "manual"
     try:
-        parsed_metadata = _parse_metadata(metadata)
+        parsed_metadata = ledger_mod._parse_metadata(metadata)
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
 
-    imports = _read_imports(target)
-    item = _make_import(rendered, kind=kind, source=source_text, metadata=parsed_metadata)
+    imports = ledger_mod._read_imports(target)
+    item = ledger_mod._make_import(rendered, kind=kind, source=source_text, metadata=parsed_metadata)
     imports.append(item)
-    _write_imports(target, imports)
+    ledger_mod._write_imports(target, imports)
     print(f"import: {item['id']}")
     print(f"status: {item['status']}")
     print(f"kind: {item['kind']}")
@@ -6532,10 +5133,10 @@ def import_context(
     }
     source_text = source.strip() or "manual"
 
-    imports = _read_imports(target)
-    item = _make_import(framed, kind="context", source=source_text, metadata=metadata)
+    imports = ledger_mod._read_imports(target)
+    item = ledger_mod._make_import(framed, kind="context", source=source_text, metadata=metadata)
     imports.append(item)
-    _write_imports(target, imports)
+    ledger_mod._write_imports(target, imports)
 
     if json_output:
         print(json.dumps(item, indent=2, sort_keys=True))
@@ -6567,15 +5168,15 @@ def import_list(
     if kind is not None and kind not in IMPORT_KINDS:
         print(f"error: --kind must be one of: {', '.join(IMPORT_KINDS)}", file=sys.stderr)
         return 2
-    metadata_filters, rc = _parse_or_report_metadata_filters(metadata)
+    metadata_filters, rc = ledger_mod._parse_or_report_metadata_filters(metadata)
     if rc:
         return rc
     target = target.expanduser().resolve()
     if not target.is_dir():
         print(f"error: --target is not a directory: {target}", file=sys.stderr)
         return 2
-    imports = [item for item in _read_imports(target) if isinstance(item, dict)]
-    imports.sort(key=_import_sort_key)
+    imports = [item for item in ledger_mod._read_imports(target) if isinstance(item, dict)]
+    imports.sort(key=ledger_mod._import_sort_key)
     if not all_imports:
         imports = [item for item in imports if item.get("status", "pending") == "pending"]
     if source:
@@ -6583,7 +5184,7 @@ def import_list(
     if kind:
         imports = [item for item in imports if item.get("kind") == kind]
     if metadata_filters:
-        imports = [item for item in imports if _import_metadata_matches(item, metadata_filters)]
+        imports = [item for item in imports if ledger_mod._import_metadata_matches(item, metadata_filters)]
     imports = imports[:limit]
 
     if json_output:
@@ -6614,7 +5215,7 @@ def import_validate(*, input_path: Path, json_output: bool = False) -> int:
     if not path.is_file():
         print(f"error: import file not found: {path}", file=sys.stderr)
         return 2
-    records, errors = _load_import_jsonl(path)
+    records, errors = ledger_mod._load_import_jsonl(path)
     payload = {
         "path": str(path),
         "valid": not errors,
@@ -6650,7 +5251,7 @@ def import_ingest(
     if not path.is_file():
         print(f"error: import file not found: {path}", file=sys.stderr)
         return 2
-    records, errors = _load_import_jsonl(path)
+    records, errors = ledger_mod._load_import_jsonl(path)
     if errors:
         if json_output:
             print(
@@ -6675,7 +5276,7 @@ def import_ingest(
                 print(f"- {error}", file=sys.stderr)
         return 2
 
-    imported, skipped, skipped_dismissed = _append_import_records(target, records, dry_run=dry_run)
+    imported, skipped, skipped_dismissed = ledger_mod._append_import_records(target, records, dry_run=dry_run)
     payload = {
         "path": str(path),
         "imports_path": str(helpers._imports_path(target)),
@@ -6714,8 +5315,8 @@ def import_issue_repairs(
     if not target.is_dir():
         print(f"error: --target is not a directory: {target}", file=sys.stderr)
         return 2
-    records = _issue_repair_records(target)
-    imported, skipped, skipped_dismissed = _append_import_records(target, records, dry_run=dry_run)
+    records = ledger_mod._issue_repair_records(target)
+    imported, skipped, skipped_dismissed = ledger_mod._append_import_records(target, records, dry_run=dry_run)
     payload = {
         "target": str(target),
         "imports_path": str(helpers._imports_path(target)),
@@ -6797,18 +5398,18 @@ def _memory_refresh_cards(payload: dict[str, Any], *, queue_path: Path) -> tuple
         if not isinstance(card, dict):
             errors.append(f"{label} must be an object")
             continue
-        card_file = _string_field(card.get("file")) or _string_field(card.get("path")) or _string_field(card.get("card_file"))
-        card_id = _string_field(card.get("id")) or _string_field(card.get("card_id")) or card_file
+        card_file = ledger_mod._string_field(card.get("file")) or ledger_mod._string_field(card.get("path")) or ledger_mod._string_field(card.get("card_file"))
+        card_id = ledger_mod._string_field(card.get("id")) or ledger_mod._string_field(card.get("card_id")) or card_file
         if not card_file:
             errors.append(f"{label} requires file")
             continue
         reason = (
-            _string_field(card.get("refresh_reason"))
-            or _string_field(card.get("reason"))
-            or _string_field(card.get("category"))
+            ledger_mod._string_field(card.get("refresh_reason"))
+            or ledger_mod._string_field(card.get("reason"))
+            or ledger_mod._string_field(card.get("category"))
             or "stale memory card"
         )
-        acceptance = _normalize_acceptance(card.get("acceptance"))
+        acceptance = ledger_mod._normalize_acceptance(card.get("acceptance"))
         if not acceptance:
             acceptance = [
                 f"Review {card_file} against current source evidence.",
@@ -6837,7 +5438,7 @@ def _memory_refresh_cards(payload: dict[str, Any], *, queue_path: Path) -> tuple
             value = card.get(key)
             if value not in (None, ""):
                 metadata[key] = value
-        source_item_key = _string_field(card.get("source_item_key")) or f"memory-refresh:{card_id}"
+        source_item_key = ledger_mod._string_field(card.get("source_item_key")) or f"memory-refresh:{card_id}"
         record = {
             "text": f"Refresh memory card {card_file}: {reason}",
             "kind": "task",
@@ -6848,7 +5449,7 @@ def _memory_refresh_cards(payload: dict[str, Any], *, queue_path: Path) -> tuple
             "acceptance": acceptance,
             "metadata": metadata,
         }
-        fingerprint = _string_field(card.get("source_fingerprint")) or helpers._stable_hash(
+        fingerprint = ledger_mod._string_field(card.get("source_fingerprint")) or helpers._stable_hash(
             {
                 "card_id": card_id,
                 "card_file": card_file,
@@ -6918,7 +5519,7 @@ def _import_memory_refresh_queue(
             for error in errors:
                 print(f"error: {error}", file=sys.stderr)
         return 2
-    imported, skipped, skipped_dismissed = _append_import_records(target, records, dry_run=dry_run)
+    imported, skipped, skipped_dismissed = ledger_mod._append_import_records(target, records, dry_run=dry_run)
     output = {
         "queue": str(queue_path),
         "imports_path": str(helpers._imports_path(target)),
@@ -6989,10 +5590,10 @@ def _chat_sweep_records(payload: dict[str, Any], *, sweep_path: Path) -> tuple[l
         return [], [f"chat memory sweep `issues` must be a list: {sweep_path}"], 0
 
     generated_at = payload.get("generated_at")
-    sweep_id = _string_field(payload.get("sweep_id")) or _string_field(payload.get("id")) or helpers._stable_hash(
+    sweep_id = ledger_mod._string_field(payload.get("sweep_id")) or ledger_mod._string_field(payload.get("id")) or helpers._stable_hash(
         {"path": str(sweep_path), "generated_at": generated_at}
     )
-    provider = _string_field(payload.get("provider"))
+    provider = ledger_mod._string_field(payload.get("provider"))
     records: list[dict[str, Any]] = []
     errors: list[str] = []
     for index, issue in enumerate(issues, start=1):
@@ -7000,11 +5601,11 @@ def _chat_sweep_records(payload: dict[str, Any], *, sweep_path: Path) -> tuple[l
         if not isinstance(issue, dict):
             errors.append(f"{label} must be an object")
             continue
-        title = _string_field(issue.get("title"))
+        title = ledger_mod._string_field(issue.get("title"))
         if not title:
             errors.append(f"{label} requires title")
             continue
-        issue_id = _string_field(issue.get("id")) or _string_field(issue.get("issue_id")) or helpers._stable_hash(
+        issue_id = ledger_mod._string_field(issue.get("id")) or ledger_mod._string_field(issue.get("issue_id")) or helpers._stable_hash(
             {"sweep_id": sweep_id, "title": title, "index": index}
         )
         actionable = bool(issue.get("actionable")) or bool(issue.get("task")) or issue.get("kind") == "task"
@@ -7020,10 +5621,10 @@ def _chat_sweep_records(payload: dict[str, Any], *, sweep_path: Path) -> tuple[l
         safe_metadata, omitted_fields = _safe_chat_metadata(issue)
         if provider and "provider" not in safe_metadata:
             safe_metadata["provider"] = provider
-        summary = _string_field(issue.get("summary"))
-        evidence_summary = _string_field(issue.get("evidence_summary"))
-        severity = _string_field(issue.get("severity"))
-        issue_source = _string_field(issue.get("source"))
+        summary = ledger_mod._string_field(issue.get("summary"))
+        evidence_summary = ledger_mod._string_field(issue.get("evidence_summary"))
+        severity = ledger_mod._string_field(issue.get("severity"))
+        issue_source = ledger_mod._string_field(issue.get("source"))
         rendered_title = title
         severity_prefix = f" [{severity}]" if severity else ""
         if actionable:
@@ -7053,7 +5654,7 @@ def _chat_sweep_records(payload: dict[str, Any], *, sweep_path: Path) -> tuple[l
             record_metadata["generated_at"] = generated_at.strip()
         if omitted_fields:
             record_metadata["private_fields_omitted"] = omitted_fields
-        acceptance = _normalize_acceptance(issue.get("acceptance"))
+        acceptance = ledger_mod._normalize_acceptance(issue.get("acceptance"))
         if actionable and not acceptance:
             acceptance = [
                 "Review the sweep summary and local evidence locator.",
@@ -7135,7 +5736,7 @@ def import_chat_sweep(
                 print(f"error: {error}", file=sys.stderr)
         return 2
 
-    imported, skipped, skipped_dismissed = _append_import_records(target, records, dry_run=dry_run)
+    imported, skipped, skipped_dismissed = ledger_mod._append_import_records(target, records, dry_run=dry_run)
     output = {
         "input": str(sweep_path),
         "imports_path": str(helpers._imports_path(target)),
@@ -7221,7 +5822,7 @@ def import_content_guard(
     effective_scan_target = scan_target.expanduser().resolve() if scan_target is not None else target
     result = scrub.run_scan(effective_scan_target, repo_target=target, policy=policy)
     records = _content_guard_import_records(result)
-    imported, skipped, skipped_dismissed = _append_import_records(target, records, dry_run=dry_run)
+    imported, skipped, skipped_dismissed = ledger_mod._append_import_records(target, records, dry_run=dry_run)
     output = {
         "target": str(target),
         "scan_target": str(effective_scan_target),
@@ -7272,15 +5873,15 @@ def import_triage(
     if kind is not None and kind not in IMPORT_KINDS:
         print(f"error: --kind must be one of: {', '.join(IMPORT_KINDS)}", file=sys.stderr)
         return 2
-    metadata_filters, rc = _parse_or_report_metadata_filters(metadata)
+    metadata_filters, rc = ledger_mod._parse_or_report_metadata_filters(metadata)
     if rc:
         return rc
     target = target.expanduser().resolve()
     if not target.is_dir():
         print(f"error: --target is not a directory: {target}", file=sys.stderr)
         return 2
-    pending = _matching_pending_imports(target, kind=kind, source=source, metadata_filters=metadata_filters)
-    counts = _import_counts(pending)
+    pending = ledger_mod._matching_pending_imports(target, kind=kind, source=source, metadata_filters=metadata_filters)
+    counts = ledger_mod._import_counts(pending)
     groups: dict[str, dict[str, list[dict[str, Any]]]] = {}
     for item in pending:
         source = str(item.get("source") or "manual")
@@ -7352,8 +5953,8 @@ def _provenance_audit_item(
         return None
 
     missing: list[str] = []
-    source_identity = _import_source_identity(item)
-    fingerprint = _import_fingerprint(item)
+    source_identity = ledger_mod._import_source_identity(item)
+    fingerprint = ledger_mod._import_fingerprint(item)
     explicit_fingerprint = metadata.get("source_fingerprint")
     has_explicit_fingerprint = isinstance(explicit_fingerprint, str) and bool(explicit_fingerprint.strip())
     if source_identity is None:
@@ -7392,7 +5993,7 @@ def _provenance_audit_item(
 
 def _import_provenance_payload(target: Path) -> dict[str, Any]:
     target = target.expanduser().resolve()
-    imports = [item for item in _read_imports(target) if isinstance(item, dict)]
+    imports = [item for item in ledger_mod._read_imports(target) if isinstance(item, dict)]
     scanner_sources = _scanner_source_map(target)
     audited_sources = _provenance_audit_sources(target)
     items = [
@@ -7454,9 +6055,9 @@ def import_provenance(*, target: Path, json_output: bool = False) -> int:
 
 def _inbox_payload(target: Path) -> dict[str, Any]:
     target = target.expanduser().resolve()
-    pending = _pending_imports(target)
+    pending = ledger_mod._pending_imports(target)
     now = helpers._now()
-    summaries = [_import_summary(item, now=now) for item in pending]
+    summaries = [ledger_mod._import_summary(item, now=now) for item in pending]
     by_source: dict[str, int] = {}
     by_kind: dict[str, int] = {}
     by_priority: dict[str, int] = {}
@@ -7480,8 +6081,8 @@ def _inbox_payload(target: Path) -> dict[str, Any]:
         age_hours = summary.get("age_hours")
         if isinstance(age_hours, (int, float)) and age_hours > IMPORT_STALE_HOURS:
             stale.append(summary)
-    candidate = _scanner_candidate(pending)
-    handoff_candidate = _handoff_candidate(pending)
+    candidate = ledger_mod._scanner_candidate(pending)
+    handoff_candidate = ledger_mod._handoff_candidate(pending)
     return {
         "target": str(target),
         "imports_path": str(helpers._imports_path(target)),
@@ -7494,8 +6095,8 @@ def _inbox_payload(target: Path) -> dict[str, Any]:
             "handoff_ready": handoff_ready,
             "stale": len(stale),
         },
-        "candidate": _import_summary(candidate, now=now) if candidate else None,
-        "handoff_candidate": _import_summary(handoff_candidate, now=now) if handoff_candidate else None,
+        "candidate": ledger_mod._import_summary(candidate, now=now) if candidate else None,
+        "handoff_candidate": ledger_mod._import_summary(handoff_candidate, now=now) if handoff_candidate else None,
         "imports": summaries,
     }
 
@@ -7522,7 +6123,7 @@ def _import_hygiene_issue(status: str, name: str, detail: str, items: list[str] 
 
 def _inbox_hygiene_payload(target: Path) -> dict[str, Any]:
     target = target.expanduser().resolve()
-    imports = [item for item in _read_imports(target) if isinstance(item, dict)]
+    imports = [item for item in ledger_mod._read_imports(target) if isinstance(item, dict)]
     scanner_sources = _scanner_source_map(target)
     checks: list[dict[str, Any]] = []
     now: datetime | None = None
@@ -7591,7 +6192,7 @@ def _inbox_hygiene_payload(target: Path) -> dict[str, Any]:
 
     task_ids = {
         str(task.get("id"))
-        for task in _read_task_ledger(target).get("tasks", [])
+        for task in ledger_mod._read_task_ledger(target).get("tasks", [])
         if isinstance(task, dict) and isinstance(task.get("id"), str)
     }
     broken_promoted = [
@@ -7629,16 +6230,16 @@ def _inbox_hygiene_payload(target: Path) -> dict[str, Any]:
 
     by_identity: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
     for item in imports:
-        identity = _import_source_identity(item)
+        identity = ledger_mod._import_source_identity(item)
         if identity is not None:
             by_identity.setdefault(identity, []).append(item)
     changed_dismissed: list[str] = []
     for items in by_identity.values():
         dismissed = [item for item in items if item.get("status") == "dismissed"]
         active = [item for item in items if item.get("status", "pending") in {"pending", "promoted"}]
-        active_fingerprints = {_import_fingerprint(item) for item in active if _import_fingerprint(item)}
+        active_fingerprints = {ledger_mod._import_fingerprint(item) for item in active if ledger_mod._import_fingerprint(item)}
         for item in dismissed:
-            fingerprint = _import_fingerprint(item)
+            fingerprint = ledger_mod._import_fingerprint(item)
             if fingerprint and active_fingerprints and fingerprint not in active_fingerprints:
                 changed_dismissed.append(str(item.get("id")))
     checks.append(
@@ -7790,7 +6391,7 @@ def _inbox_hygiene_payload(target: Path) -> dict[str, Any]:
 
 def _inbox_quality_payload(target: Path) -> dict[str, Any]:
     target = target.expanduser().resolve()
-    imports = [item for item in _read_imports(target) if isinstance(item, dict)]
+    imports = [item for item in ledger_mod._read_imports(target) if isinstance(item, dict)]
     pending = [item for item in imports if item.get("status", "pending") == "pending"]
     dismissed_by_source = Counter(str(item.get("source") or "unknown") for item in imports if item.get("status") == "dismissed")
     promoted_by_source = Counter(str(item.get("source") or "unknown") for item in imports if item.get("status") == "promoted")
@@ -7801,7 +6402,7 @@ def _inbox_quality_payload(target: Path) -> dict[str, Any]:
     }
     by_identity: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
     for item in imports:
-        identity = _import_source_identity(item)
+        identity = ledger_mod._import_source_identity(item)
         if identity is not None:
             by_identity.setdefault(identity, []).append(item)
     changed_dismissed: list[str] = []
@@ -7811,9 +6412,9 @@ def _inbox_quality_payload(target: Path) -> dict[str, Any]:
         if len(pending_items) > 1:
             duplicate_pending.extend(str(item.get("id")) for item in pending_items[1:])
         dismissed_items = [item for item in items if item.get("status") == "dismissed"]
-        active_fingerprints = {_import_fingerprint(item) for item in pending_items if _import_fingerprint(item)}
+        active_fingerprints = {ledger_mod._import_fingerprint(item) for item in pending_items if ledger_mod._import_fingerprint(item)}
         for item in dismissed_items:
-            fingerprint = _import_fingerprint(item)
+            fingerprint = ledger_mod._import_fingerprint(item)
             if fingerprint and active_fingerprints and fingerprint not in active_fingerprints:
                 changed_dismissed.append(str(item.get("id")))
 
@@ -8000,7 +6601,7 @@ def inbox_archive(*, target: Path, json_output: bool = False) -> int:
         print(f"error: --target is not a directory: {target}", file=sys.stderr)
         return 2
     now = helpers._now()
-    imports = [item for item in _read_imports(target) if isinstance(item, dict)]
+    imports = [item for item in ledger_mod._read_imports(target) if isinstance(item, dict)]
     archived: list[dict[str, Any]] = []
     kept: list[dict[str, Any]] = []
     for item in imports:
@@ -8015,8 +6616,8 @@ def inbox_archive(*, target: Path, json_output: bool = False) -> int:
         else:
             kept.append(item)
     if archived:
-        _append_archived_imports(target, archived)
-        _write_imports(target, kept)
+        ledger_mod._append_archived_imports(target, archived)
+        ledger_mod._write_imports(target, kept)
     payload = {
         "target": str(target),
         "imports_path": str(helpers._imports_path(target)),
@@ -8043,7 +6644,7 @@ def import_show(*, target: Path, import_id: str) -> int:
     if not target.is_dir():
         print(f"error: --target is not a directory: {target}", file=sys.stderr)
         return 2
-    item, _ = _find_import(target, import_id)
+    item, _ = ledger_mod._find_import(target, import_id)
     if item is None:
         print(f"error: import not found: {import_id}", file=sys.stderr)
         return 1
@@ -8075,11 +6676,11 @@ def _import_plan_payload(target: Path, import_id: str) -> tuple[dict[str, Any] |
     if not target.is_dir():
         print(f"error: --target is not a directory: {target}", file=sys.stderr)
         return None, 2
-    item, _ = _find_import(target, import_id)
+    item, _ = ledger_mod._find_import(target, import_id)
     if item is None:
         print(f"error: import not found: {import_id}", file=sys.stderr)
         return None, 1
-    summary = _import_summary(item)
+    summary = ledger_mod._import_summary(item)
     payload: dict[str, Any] = {
         "target": str(target),
         "imports_path": str(helpers._imports_path(target)),
@@ -8088,7 +6689,7 @@ def _import_plan_payload(target: Path, import_id: str) -> tuple[dict[str, Any] |
         "suggested_dismiss_command": f'brigade work import dismiss {item.get("id")} --reason "..."',
     }
     if item.get("kind") == "task":
-        task = _task_preview_from_import(item)
+        task = ledger_mod._task_preview_from_import(item)
         template = task.get("template") if isinstance(task.get("template"), str) else None
         payload["task"] = task
         if template:
@@ -8096,7 +6697,7 @@ def _import_plan_payload(target: Path, import_id: str) -> tuple[dict[str, Any] |
         payload["suggested_run_command"] = f"brigade work import promote --run {item.get('id')}"
         payload["recommended_action"] = "promote-task"
     elif item.get("kind") in HANDOFF_READY_KINDS:
-        handoff = _import_handoff_plan_payload(target, item)
+        handoff = ledger_mod._import_handoff_plan_payload(target, item)
         payload["handoff"] = {
             "ready": handoff["handoff_ready"],
             "target_document": handoff["target_document"],
@@ -8172,11 +6773,11 @@ def import_plan_handoff(*, target: Path, import_id: str, json_output: bool = Fal
     if not target.is_dir():
         print(f"error: --target is not a directory: {target}", file=sys.stderr)
         return 2
-    item, _ = _find_import(target, import_id)
+    item, _ = ledger_mod._find_import(target, import_id)
     if item is None:
         print(f"error: import not found: {import_id}", file=sys.stderr)
         return 1
-    payload = _import_handoff_plan_payload(target, item)
+    payload = ledger_mod._import_handoff_plan_payload(target, item)
     if json_output:
         print(json.dumps(payload, indent=2, sort_keys=True))
         return 0 if payload["handoff_ready"] else 2
@@ -8186,7 +6787,7 @@ def import_plan_handoff(*, target: Path, import_id: str, json_output: bool = Fal
     print(f"status: {item.get('status', 'pending')}")
     print(f"kind: {kind}")
     print(f"source: {source}")
-    print(f"text: {_handoff_safe_text(item.get('text') or '')}")
+    print(f"text: {ledger_mod._handoff_safe_text(item.get('text') or '')}")
     print(f"handoff_ready: {payload['handoff_ready']}")
     print(f"handoff_inbox: {payload['handoff_inbox']}")
     print(f"target_document: {payload['target_document']}")
@@ -8211,7 +6812,7 @@ def import_promote_handoff(
     if not target.is_dir():
         print(f"error: --target is not a directory: {target}", file=sys.stderr)
         return 2
-    item, imports = _find_import(target, import_id)
+    item, imports = ledger_mod._find_import(target, import_id)
     if item is None:
         print(f"error: import not found: {import_id}", file=sys.stderr)
         return 1
@@ -8220,7 +6821,7 @@ def import_promote_handoff(
             print(f"error: --run requires a task import: {item.get('id')}", file=sys.stderr)
             return 2
         return import_promote(target=target, import_id=str(item.get("id")), run_after=True)
-    payload = _import_handoff_plan_payload(target, item)
+    payload = ledger_mod._import_handoff_plan_payload(target, item)
     if payload["blockers"]:
         if json_output:
             print(json.dumps(payload, indent=2, sort_keys=True))
@@ -8229,7 +6830,7 @@ def import_promote_handoff(
                 print(f"error: {blocker}", file=sys.stderr)
         return 2
     target_document = str(payload["target_document"])
-    handoff_path = _write_import_handoff(target, item, target_document)
+    handoff_path = ledger_mod._write_import_handoff(target, item, target_document)
     from .. import handoff_cmd
 
     lint_result = handoff_cmd.lint_file(handoff_path)
@@ -8253,15 +6854,15 @@ def import_promote_handoff(
             for error in lint_result.errors:
                 print(f"error: handoff lint failed: {error}", file=sys.stderr)
         return 2
-    _mark_import_handoff_promoted(target, item, handoff_path=handoff_path, target_document=target_document)
-    _write_imports(target, imports)
+    ledger_mod._mark_import_handoff_promoted(target, item, handoff_path=handoff_path, target_document=target_document)
+    ledger_mod._write_imports(target, imports)
     output = dict(payload)
     output.update(
         {
             "handoff_ready": True,
             "handoff_path": str(handoff_path),
             "lint": lint_result.as_dict(),
-            "import": _import_summary(item),
+            "import": ledger_mod._import_summary(item),
         }
     )
     if json_output:
@@ -8292,7 +6893,7 @@ def import_promote(
     if kind is not None and kind not in IMPORT_KINDS:
         print(f"error: --kind must be one of: {', '.join(IMPORT_KINDS)}", file=sys.stderr)
         return 2
-    metadata_filters, rc = _parse_or_report_metadata_filters(metadata)
+    metadata_filters, rc = ledger_mod._parse_or_report_metadata_filters(metadata)
     if rc:
         return rc
     if all_matching and import_id:
@@ -8302,10 +6903,10 @@ def import_promote(
         print("error: --run can only be used with one import id", file=sys.stderr)
         return 2
     if all_matching:
-        imports = _read_imports(target)
+        imports = ledger_mod._read_imports(target)
         wanted_ids = {
             item.get("id")
-            for item in _matching_pending_imports(
+            for item in ledger_mod._matching_pending_imports(
                 target,
                 kind=kind,
                 source=source,
@@ -8319,9 +6920,9 @@ def import_promote(
             text = str(item.get("text") or "").strip()
             if not text:
                 continue
-            task, created = _mark_import_promoted(target, item)
+            task, created = ledger_mod._mark_import_promoted(target, item)
             promoted.append((item, task, created))
-        _write_imports(target, imports)
+        ledger_mod._write_imports(target, imports)
         created_count = len([item for item in promoted if item[2]])
         print(f"promoted: {len(promoted)}")
         print(f"created: {created_count}")
@@ -8329,14 +6930,14 @@ def import_promote(
         for item, task, created in promoted:
             status = "created" if created else "existing"
             print(
-                f"- {item.get('id')} -> {task['id']} [{status} acceptance={len(_task_acceptance(task))}] "
+                f"- {item.get('id')} -> {task['id']} [{status} acceptance={len(ledger_mod._task_acceptance(task))}] "
                 f"{helpers._short(str(task.get('text', '')))}"
             )
         return 0
     if not import_id:
         print("error: import id is required unless --all is passed", file=sys.stderr)
         return 2
-    item, imports = _find_import(target, import_id)
+    item, imports = ledger_mod._find_import(target, import_id)
     if item is None:
         print(f"error: import not found: {import_id}", file=sys.stderr)
         return 1
@@ -8350,13 +6951,13 @@ def import_promote(
     if not text:
         print(f"error: import has no text: {import_id}", file=sys.stderr)
         return 2
-    task, created = _mark_import_promoted(target, item)
-    _write_imports(target, imports)
+    task, created = ledger_mod._mark_import_promoted(target, item)
+    ledger_mod._write_imports(target, imports)
     print(f"import: {item.get('id')}")
     print(f"status: {item.get('status')}")
     print(f"task: {task['id']}")
     print(f"created: {created}")
-    print(f"acceptance: {len(_task_acceptance(task))}")
+    print(f"acceptance: {len(ledger_mod._task_acceptance(task))}")
     print(f"text: {task['text']}")
     if run_after:
         print("run: starting")
@@ -8381,17 +6982,17 @@ def import_dismiss(
     if kind is not None and kind not in IMPORT_KINDS:
         print(f"error: --kind must be one of: {', '.join(IMPORT_KINDS)}", file=sys.stderr)
         return 2
-    metadata_filters, rc = _parse_or_report_metadata_filters(metadata)
+    metadata_filters, rc = ledger_mod._parse_or_report_metadata_filters(metadata)
     if rc:
         return rc
     if all_matching and import_id:
         print("error: pass an import id or --all, not both", file=sys.stderr)
         return 2
     if all_matching:
-        imports = _read_imports(target)
+        imports = ledger_mod._read_imports(target)
         wanted_ids = {
             item.get("id")
-            for item in _matching_pending_imports(
+            for item in ledger_mod._matching_pending_imports(
                 target,
                 kind=kind,
                 source=source,
@@ -8409,7 +7010,7 @@ def import_dismiss(
             if reason and reason.strip():
                 item["dismiss_reason"] = reason.strip()
             dismissed.append(item)
-        _write_imports(target, imports)
+        ledger_mod._write_imports(target, imports)
         print(f"dismissed: {len(dismissed)}")
         if reason and reason.strip():
             print(f"reason: {reason.strip()}")
@@ -8419,7 +7020,7 @@ def import_dismiss(
     if not import_id:
         print("error: import id is required unless --all is passed", file=sys.stderr)
         return 2
-    item, imports = _find_import(target, import_id)
+    item, imports = ledger_mod._find_import(target, import_id)
     if item is None:
         print(f"error: import not found: {import_id}", file=sys.stderr)
         return 1
@@ -8432,7 +7033,7 @@ def import_dismiss(
     item["dismissed_at"] = now
     if reason and reason.strip():
         item["dismiss_reason"] = reason.strip()
-    _write_imports(target, imports)
+    ledger_mod._write_imports(target, imports)
     print(f"import: {item.get('id')}")
     print("status: dismissed")
     if item.get("dismiss_reason"):
@@ -8552,7 +7153,7 @@ def backup_import_issues(*, target: Path, json_output: bool = False) -> int:
         print(f"error: --target is not a directory: {target}", file=sys.stderr)
         return 2
     records = _backup_issue_records(target)
-    imported, skipped, skipped_dismissed = _append_import_records(target, records)
+    imported, skipped, skipped_dismissed = ledger_mod._append_import_records(target, records)
     payload = {
         "target": str(target),
         "imports_path": str(helpers._imports_path(target)),
@@ -8867,7 +7468,7 @@ def review_import_findings(*, target: Path, run_id: str, json_output: bool = Fal
                 print(f"error: {error}", file=sys.stderr)
         return 2
     records = [_review_import_record(finding) for finding in findings]
-    imported, skipped, skipped_dismissed = _append_import_records(target, records, dry_run=dry_run)
+    imported, skipped, skipped_dismissed = ledger_mod._append_import_records(target, records, dry_run=dry_run)
     payload = {
         "target": str(target),
         "run_id": run.get("run_id"),
@@ -9131,16 +7732,16 @@ def closeout(*, target: Path, session_id: str, json_output: bool = False) -> int
 
 
 def _acceptance_payload(target: Path) -> dict[str, Any]:
-    tasks = [task for task in _read_task_ledger(target).get("tasks", []) if isinstance(task, dict)]
+    tasks = [task for task in ledger_mod._read_task_ledger(target).get("tasks", []) if isinstance(task, dict)]
     pending = [task for task in tasks if task.get("status", "pending") == "pending"]
     done = [task for task in tasks if task.get("status") == "done"]
-    pending_with_acceptance = [task for task in pending if _task_acceptance(task)]
-    pending_missing = [task for task in pending if not _task_acceptance(task)]
+    pending_with_acceptance = [task for task in pending if ledger_mod._task_acceptance(task)]
+    pending_missing = [task for task in pending if not ledger_mod._task_acceptance(task)]
     done_with_completion = [task for task in done if task.get("completion")]
     done_missing_completion = [task for task in done if not task.get("completion")]
     done_missing_completed_acceptance = [
         task for task in done
-        if _task_acceptance(task) and not _normalize_acceptance(task.get("completed_acceptance"))
+        if ledger_mod._task_acceptance(task) and not ledger_mod._normalize_acceptance(task.get("completed_acceptance"))
     ]
     review_payload = _review_findings_payload(target)
     review_groups = review_payload.get("groups") if isinstance(review_payload.get("groups"), dict) else {}
@@ -9357,7 +7958,7 @@ def scanners_doctor(*, target: Path, json_output: bool = False, import_issues: b
     skipped_dismissed: list[dict[str, Any]] = []
     if import_issues:
         records = _scanner_health_issue_records(target)
-        imported, skipped, skipped_dismissed = _append_import_records(target, records)
+        imported, skipped, skipped_dismissed = ledger_mod._append_import_records(target, records)
         health["import_issues"] = {
             "created": len(imported),
             "skipped": len(skipped),
@@ -9452,13 +8053,13 @@ def _scanners_run_payload(
     )
     if errors:
         return {"target": str(target), "errors": errors, "runs": [], "skipped": skipped}, 2
-    before_counts = _import_counts(_pending_imports(target))
+    before_counts = ledger_mod._import_counts(ledger_mod._pending_imports(target))
     runs: list[dict[str, Any]] = []
     contexts: list[tuple[dict[str, Any], dict[str, Any]]] = []
     for scanner in selected:
         before_ids = {
             str(item.get("id"))
-            for item in _read_imports(target)
+            for item in ledger_mod._read_imports(target)
             if isinstance(item, dict) and isinstance(item.get("id"), str)
         }
         run = _scanner_run_one(target, scanner, force=force)
@@ -9490,7 +8091,7 @@ def _scanners_run_payload(
                     )
                 )
         if ingest_errors:
-            after_counts = _import_counts(_pending_imports(target))
+            after_counts = ledger_mod._import_counts(ledger_mod._pending_imports(target))
             payload = {
                 "target": str(target),
                 "runs_root": str(helpers._scanner_runs_root(target)),
@@ -9510,7 +8111,7 @@ def _scanners_run_payload(
             }
             return payload, 2
         for scanner, run, path, records in ingest_payloads:
-            imported, skipped_records, skipped_dismissed = _append_import_records(target, records)
+            imported, skipped_records, skipped_dismissed = ledger_mod._append_import_records(target, records)
             run["ingest_output"] = {
                 "path": str(path),
                 "created": len(imported),
@@ -9525,17 +8126,17 @@ def _scanners_run_payload(
                 "skipped_source_fingerprints": [
                     fingerprint
                     for record in skipped_records
-                    if (fingerprint := _import_fingerprint(record))
+                    if (fingerprint := ledger_mod._import_fingerprint(record))
                 ],
                 "dismissed_source_fingerprints": [
                     fingerprint
                     for record in skipped_dismissed
-                    if (fingerprint := _import_fingerprint(record))
+                    if (fingerprint := ledger_mod._import_fingerprint(record))
                 ],
             }
             if run.get("path"):
                 helpers._write_json(Path(str(run["path"])) / "receipt.json", run)
-    after_counts = _import_counts(_pending_imports(target))
+    after_counts = ledger_mod._import_counts(ledger_mod._pending_imports(target))
     payload = {
         "target": str(target),
         "runs_root": str(helpers._scanner_runs_root(target)),
@@ -9915,7 +8516,7 @@ def plans(*, target: Path, json_output: bool = False, limit: int = 20) -> int:
                         "kind": kind,
                         "status": "unreadable",
                         "updated_at": "",
-                        "path": _plan_rel_path(target, md_path),
+                        "path": ledger_mod._plan_rel_path(target, md_path),
                     }
                 )
                 continue
@@ -9925,7 +8526,7 @@ def plans(*, target: Path, json_output: bool = False, limit: int = 20) -> int:
                     "kind": str(data.get("kind") or kind),
                     "status": str(data.get("status") or ""),
                     "updated_at": str(data.get("updated_at") or ""),
-                    "path": _plan_rel_path(target, md_path),
+                    "path": ledger_mod._plan_rel_path(target, md_path),
                 }
             )
     entries.sort(key=lambda item: (item.get("updated_at") or "", item.get("task_id") or ""), reverse=True)
@@ -10016,9 +8617,9 @@ def plan_promote(*, target: Path, task_id: str, as_kind: str, json_output: bool 
             file=sys.stderr,
         )
         return 2
-    task, _ = _find_task(target, task_id)
+    task, _ = ledger_mod._find_task(target, task_id)
     lookup_id = str(task.get("id") or task_id) if task is not None else task_id
-    receipt = _read_plan_receipt(target, lookup_id, kind="plan")
+    receipt = ledger_mod._read_plan_receipt(target, lookup_id, kind="plan")
     if receipt is None:
         print(f"error: no plan artifact for task: {task_id}", file=sys.stderr)
         return 1
@@ -10033,7 +8634,7 @@ def plan_promote(*, target: Path, task_id: str, as_kind: str, json_output: bool 
     proposal_path = _proposal_path(target, resolved_id, as_kind)
     _plan_proposals_dir(target).mkdir(parents=True, exist_ok=True)
     proposal_path.write_text(_render_proposal_md(receipt, as_kind))
-    rel = _plan_rel_path(target, proposal_path)
+    rel = ledger_mod._plan_rel_path(target, proposal_path)
     if json_output:
         print(json.dumps({"task_id": resolved_id, "as": as_kind, "path": rel}, indent=2, sort_keys=True))
         return 0
@@ -10063,7 +8664,7 @@ def plan_proposals(*, target: Path, json_output: bool = False) -> int:
                 {
                     "task_id": task_id,
                     "as": as_kind,
-                    "path": _plan_rel_path(target, md_path),
+                    "path": ledger_mod._plan_rel_path(target, md_path),
                     "_mtime": mtime,
                 }
             )
@@ -10148,7 +8749,7 @@ def _sweep_import_suggested_commands(import_id: str, kind: str) -> list[str]:
 
 
 def _sweep_import_review_summary(item: dict[str, Any], *, now: datetime | None = None) -> dict[str, Any]:
-    summary = _import_summary(item, now=now)
+    summary = ledger_mod._import_summary(item, now=now)
     metadata = summary.get("metadata") if isinstance(summary.get("metadata"), dict) else {}
     required = ("scanner_id", "scanner_source", "scanner_run_id", "source_fingerprint")
     provenance_complete = all(metadata.get(key) for key in required)
@@ -10173,7 +8774,7 @@ def _sweep_import_review_summary(item: dict[str, Any], *, now: datetime | None =
     )
     if summary.get("kind") in HANDOFF_READY_KINDS:
         summary["handoff_ready"] = True
-        summary["target_document"] = _handoff_target_document(item)
+        summary["target_document"] = ledger_mod._handoff_target_document(item)
     return summary
 
 
@@ -10295,7 +8896,7 @@ def _sweep_review_payload(target: Path, sweep_id: str) -> tuple[dict[str, Any] |
     references = _sweep_import_references(report)
     imports_by_id = {
         str(item.get("id")): item
-        for item in _read_imports(target)
+        for item in ledger_mod._read_imports(target)
         if isinstance(item, dict) and isinstance(item.get("id"), str)
     }
     now = helpers._now()
@@ -10652,7 +9253,7 @@ def run(
         if task:
             print("error: pass a task or task_id, not both", file=sys.stderr)
             return 2
-        selected_task, _ = _find_task(target, task_id)
+        selected_task, _ = ledger_mod._find_task(target, task_id)
         if selected_task is None or selected_task.get("status", "pending") != "pending":
             print(f"error: pending task not found: {task_id}", file=sys.stderr)
             return 1
@@ -10668,10 +9269,10 @@ def run(
     ledger_task = resolved.get("ledger_task") if consumed_task_id and isinstance(resolved.get("ledger_task"), dict) else None
     run_task_text = (
         _render_task_run_prompt(ledger_task)
-        if ledger_task is not None and _task_acceptance(ledger_task)
+        if ledger_task is not None and ledger_mod._task_acceptance(ledger_task)
         else task_text
     )
-    task_snapshot = _task_snapshot(ledger_task) if ledger_task is not None else None
+    task_snapshot = ledger_mod._task_snapshot(ledger_task) if ledger_task is not None else None
     session_title = title or task_text
     start_rc = start(target=target, title=session_title, task_snapshot=task_snapshot)
     if start_rc != 0:
@@ -10697,7 +9298,7 @@ def run(
     if end_rc != 0:
         return end_rc if dogfood_rc == 0 else dogfood_rc
     if dogfood_rc == 0 and isinstance(consumed_task_id, str):
-        task, ledger = _find_task(target, consumed_task_id)
+        task, ledger = ledger_mod._find_task(target, consumed_task_id)
         if task is not None:
             now = helpers._now().isoformat()
             task["status"] = "done"
@@ -10709,8 +9310,8 @@ def run(
             completed_run_path = _latest_completed_run_path(target, output_dir)
             if completed_run_path is not None:
                 task["completed_run_path"] = completed_run_path
-            task["completed_acceptance"] = _task_acceptance(task)
-            _write_task_ledger(target, ledger)
+            task["completed_acceptance"] = ledger_mod._task_acceptance(task)
+            ledger_mod._write_task_ledger(target, ledger)
     if dogfood_rc == 0 and queue_next:
         queued_task, created, reason = _queue_latest_next(
             target,
@@ -10917,15 +9518,15 @@ def doctor(*, target: Path) -> int:
     else:
         helpers._doctor_line(OK, "active_session", "none")
 
-    pending_tasks = _pending_tasks(effective_target)
-    missing_acceptance = [task for task in pending_tasks if not _task_acceptance(task)]
+    pending_tasks = ledger_mod._pending_tasks(effective_target)
+    missing_acceptance = [task for task in pending_tasks if not ledger_mod._task_acceptance(task)]
     if missing_acceptance:
         sample = ", ".join(str(task.get("id")) for task in missing_acceptance[:5])
         helpers._doctor_line(WARN, "task_acceptance", f"{len(missing_acceptance)} pending task(s) missing acceptance criteria: {sample}")
     else:
         helpers._doctor_line(OK, "task_acceptance", "pending tasks have acceptance criteria or no tasks are pending")
 
-    plan_coverage = _plan_coverage_payload(effective_target)
+    plan_coverage = ledger_mod._plan_coverage_payload(effective_target)
     if plan_coverage["significant_without_plan"] > 0:
         plan_sample = ", ".join(plan_coverage["task_ids"][:5])
         helpers._doctor_line(
@@ -10939,7 +9540,7 @@ def doctor(*, target: Path) -> int:
     workflow_rules = _workflow_rule_health(effective_target)
     helpers._doctor_line(str(workflow_rules["status"]), str(workflow_rules["name"]), workflow_rules["detail"])
 
-    issue_tasks = [(task, issue) for task in pending_tasks if (issue := _task_issue_metadata(task))]
+    issue_tasks = [(task, issue) for task in pending_tasks if (issue := ledger_mod._task_issue_metadata(task))]
     if issue_tasks:
         gh_path = shutil.which("gh")
         if gh_path is None:
@@ -10949,11 +9550,11 @@ def doctor(*, target: Path) -> int:
             closed: list[str] = []
             unchecked: list[str] = []
             for task, issue in issue_tasks:
-                issue_ref = _github_issue_ref(issue)
+                issue_ref = ledger_mod._github_issue_ref(issue)
                 if issue_ref is None:
                     unchecked.append(str(task.get("id")))
                     continue
-                remote_issue, _, error = _read_github_issue(effective_target, issue_ref)
+                remote_issue, _, error = ledger_mod._read_github_issue(effective_target, issue_ref)
                 if remote_issue is None:
                     unchecked.append(f"{task.get('id')} ({error})")
                     continue
@@ -10969,7 +9570,7 @@ def doctor(*, target: Path) -> int:
     else:
         helpers._doctor_line(OK, "github_issues", "none")
 
-    pending_imports = _pending_imports(effective_target)
+    pending_imports = ledger_mod._pending_imports(effective_target)
     now = helpers._now()
     stale_imports = [
         item
@@ -10985,7 +9586,7 @@ def doctor(*, target: Path) -> int:
     task_imports_missing_acceptance = [
         item
         for item in pending_imports
-        if item.get("kind") == "task" and not _import_task_acceptance(item)
+        if item.get("kind") == "task" and not ledger_mod._import_task_acceptance(item)
     ]
     if task_imports_missing_acceptance:
         sample = ", ".join(str(item.get("id")) for item in task_imports_missing_acceptance[:5])
@@ -10993,7 +9594,7 @@ def doctor(*, target: Path) -> int:
     else:
         helpers._doctor_line(OK, "scanner_import_acceptance", "pending task imports have acceptance criteria or no task imports are pending")
     dismissed_by_source: dict[str, int] = {}
-    for item in _read_imports(effective_target):
+    for item in ledger_mod._read_imports(effective_target):
         if not isinstance(item, dict) or item.get("status") != "dismissed":
             continue
         source = str(item.get("source") or "manual")
