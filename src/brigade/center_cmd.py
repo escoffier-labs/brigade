@@ -1,4 +1,5 @@
 """Read-only local operator center views."""
+
 from __future__ import annotations
 
 import html
@@ -12,8 +13,32 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from . import actionqueue, chat_cmd, context_cmd, handoff_cmd, learn_cmd, memory_cmd, notifications_cmd, pantry_cmd, phases_cmd, projects_cmd, release_cmd, repos_cmd, reportstore, research_cmd, roadmap_cmd, security_cmd, tools_cmd, work_cmd
-from .localio import read_json_dict as _read_json, read_jsonl_dicts as _read_jsonl, utc_now as _now, write_json as _write_json
+from . import (
+    actionqueue,
+    chat_cmd,
+    context_cmd,
+    handoff_cmd,
+    learn_cmd,
+    memory_cmd,
+    notifications_cmd,
+    pantry_cmd,
+    phases_cmd,
+    projects_cmd,
+    release_cmd,
+    repos_cmd,
+    reportstore,
+    research_cmd,
+    roadmap_cmd,
+    security_cmd,
+    tools_cmd,
+    work_cmd,
+)
+from .localio import (
+    read_json_dict as _read_json,
+    read_jsonl_dicts as _read_jsonl,
+    utc_now as _now,
+    write_json as _write_json,
+)
 
 SCHEMA_VERSION = 1
 SCHEMA_MANIFEST_VERSION = 1
@@ -138,7 +163,9 @@ def _center_schema_manifest_schemas() -> list[dict[str, Any]]:
         _schema_field("safe_summary", "string", description="Redacted operator-facing summary."),
         _schema_field("created_at", "string|null", required=False, description="ISO timestamp when available."),
         _schema_field("updated_at", "string|null", required=False, description="ISO timestamp when available."),
-        _schema_field("receipt_path", "string|null", required=False, description="Local receipt path label when available."),
+        _schema_field(
+            "receipt_path", "string|null", required=False, description="Local receipt path label when available."
+        ),
         _schema_field("path", "string|null", required=False, description="Local artifact path label when available."),
         _schema_field("suggested_next_command", "string", description="Manual local command to inspect or act."),
     ]
@@ -155,7 +182,9 @@ def _center_schema_manifest_schemas() -> list[dict[str, Any]]:
         _schema_field("suggested_command", "string", description="Manual local command, never auto-executed."),
         _schema_field("created_at", "string", description="ISO timestamp."),
         _schema_field("updated_at", "string", description="ISO timestamp."),
-        _schema_field("reviewed_at", "string|null", required=False, description="Source report review timestamp when available."),
+        _schema_field(
+            "reviewed_at", "string|null", required=False, description="Source report review timestamp when available."
+        ),
         _schema_field("source_fingerprint", "string", description="Stable dedupe fingerprint."),
     ]
     return [
@@ -390,15 +419,36 @@ def _center_contract_health(target: Path) -> dict[str, Any]:
         "templates": [
             _item("context", "task", "available", "Task context pack template", "brigade context plan --kind task"),
             _item("context", "repo", "available", "Repo context pack template", "brigade context plan --kind repo"),
-            _item("context", "release", "available", "Release context pack template", "brigade context plan --kind release"),
+            _item(
+                "context",
+                "release",
+                "available",
+                "Release context pack template",
+                "brigade context plan --kind release",
+            ),
             _item("tools", "tool-pack", "available", "Portable tool pack template", "brigade tools pack build"),
             _item("projects", "audit-plan", "available", "Project audit plan template", "brigade projects audit"),
-            _item("release", "candidate", "available", "Release candidate checklist template", "brigade release candidate plan"),
+            _item(
+                "release",
+                "candidate",
+                "available",
+                "Release candidate checklist template",
+                "brigade release candidate plan",
+            ),
             _item("review", "closeout", "available", "Review closeout template", "brigade work review closeout latest"),
         ],
     }
     status_data = status_payload(target)
-    status_required = {"schema_version", "schema", "target", "pending_task_count", "pending_import_count", "review_queue_count", "operator_report", "action_queue"}
+    status_required = {
+        "schema_version",
+        "schema",
+        "target",
+        "pending_task_count",
+        "pending_import_count",
+        "review_queue_count",
+        "operator_report",
+        "action_queue",
+    }
     missing_status_fields = sorted(status_required - set(status_data))
     if missing_status_fields:
         issues.append(
@@ -418,14 +468,33 @@ def _center_contract_health(target: Path) -> dict[str, Any]:
                 continue
             missing = sorted(CENTER_REQUIRED_ITEM_FIELDS - set(item))
             if missing:
-                item_issues.append({"output": output_name, "field": ",".join(missing), "local_id": item.get("local_id") or item.get("id")})
+                item_issues.append(
+                    {
+                        "output": output_name,
+                        "field": ",".join(missing),
+                        "local_id": item.get("local_id") or item.get("id"),
+                    }
+                )
             command = item.get("suggested_next_command")
             if not isinstance(command, str) or not command.startswith("brigade "):
-                item_issues.append({"output": output_name, "field": "suggested_next_command", "local_id": item.get("local_id") or item.get("id")})
+                item_issues.append(
+                    {
+                        "output": output_name,
+                        "field": "suggested_next_command",
+                        "local_id": item.get("local_id") or item.get("id"),
+                    }
+                )
             for key in ("path", "receipt_path"):
                 reason = _unsafe_reference(item.get(key))
                 if reason:
-                    item_issues.append({"output": output_name, "field": key, "local_id": item.get("local_id") or item.get("id"), "reason": reason})
+                    item_issues.append(
+                        {
+                            "output": output_name,
+                            "field": key,
+                            "local_id": item.get("local_id") or item.get("id"),
+                            "reason": reason,
+                        }
+                    )
     if item_issues:
         issues.append(
             {
@@ -453,11 +522,7 @@ def _center_contract_health(target: Path) -> dict[str, Any]:
                 "items": command_gaps[:20],
             }
         )
-    reference_gaps = [
-        issue
-        for issue in item_issues
-        if issue.get("field") in {"path", "receipt_path"}
-    ]
+    reference_gaps = [issue for issue in item_issues if issue.get("field") in {"path", "receipt_path"}]
     if reference_gaps:
         issues.append(
             {
@@ -548,7 +613,12 @@ def _iter_json_files(root: Path, pattern: str) -> list[dict[str, Any]]:
         if payload is not None:
             payload.setdefault("path", str(path))
             items.append(payload)
-    items.sort(key=lambda item: str(item.get("completed_at") or item.get("created_at") or item.get("started_at") or item.get("path") or ""), reverse=True)
+    items.sort(
+        key=lambda item: str(
+            item.get("completed_at") or item.get("created_at") or item.get("started_at") or item.get("path") or ""
+        ),
+        reverse=True,
+    )
     return items
 
 
@@ -614,7 +684,9 @@ def _activity(target: Path) -> list[dict[str, Any]]:
                 f"brigade work verify show {run_id}",
                 created_at=receipt.get("started_at") if isinstance(receipt.get("started_at"), str) else None,
                 updated_at=receipt.get("completed_at") or receipt.get("started_at"),
-                receipt_path=str(Path(str(receipt.get("path") or "")) / "receipt.json") if receipt.get("path") else None,
+                receipt_path=str(Path(str(receipt.get("path") or "")) / "receipt.json")
+                if receipt.get("path")
+                else None,
                 path=receipt.get("path") if isinstance(receipt.get("path"), str) else None,
             )
         )
@@ -629,25 +701,75 @@ def _activity(target: Path) -> list[dict[str, Any]]:
                 f"brigade work scanners run-show {run_id}",
                 created_at=receipt.get("started_at") if isinstance(receipt.get("started_at"), str) else None,
                 updated_at=receipt.get("completed_at") or receipt.get("started_at"),
-                receipt_path=str(Path(str(receipt.get("path") or "")) / "receipt.json") if receipt.get("path") else None,
+                receipt_path=str(Path(str(receipt.get("path") or "")) / "receipt.json")
+                if receipt.get("path")
+                else None,
                 path=receipt.get("path") if isinstance(receipt.get("path"), str) else None,
             )
         )
     for sweep in work_cmd._scanner_sweeps(target)[:20]:
         sweep_id = str(sweep.get("sweep_id") or "")
         path = str(Path(str(sweep.get("path") or "")) / "sweep.json") if sweep.get("path") else None
-        items.append(_item("scanner-sweep", sweep_id, str(sweep.get("status") or "unknown"), "scanner sweep", f"brigade work sweep-show {sweep_id}", created_at=sweep.get("started_at") if isinstance(sweep.get("started_at"), str) else None, updated_at=sweep.get("completed_at") or sweep.get("started_at"), receipt_path=path, path=sweep.get("path") if isinstance(sweep.get("path"), str) else None))
+        items.append(
+            _item(
+                "scanner-sweep",
+                sweep_id,
+                str(sweep.get("status") or "unknown"),
+                "scanner sweep",
+                f"brigade work sweep-show {sweep_id}",
+                created_at=sweep.get("started_at") if isinstance(sweep.get("started_at"), str) else None,
+                updated_at=sweep.get("completed_at") or sweep.get("started_at"),
+                receipt_path=path,
+                path=sweep.get("path") if isinstance(sweep.get("path"), str) else None,
+            )
+        )
     for receipt in work_cmd._review_receipts(target)[:20]:
         run_id = str(receipt.get("run_id") or "")
-        items.append(_item("code-review", run_id, str(receipt.get("status") or "unknown"), str(receipt.get("reviewer_id") or "review run"), f"brigade work review show {run_id}", created_at=receipt.get("started_at") if isinstance(receipt.get("started_at"), str) else None, updated_at=receipt.get("completed_at") or receipt.get("started_at"), receipt_path=str(Path(str(receipt.get("path") or "")) / "receipt.json") if receipt.get("path") else None, path=receipt.get("path") if isinstance(receipt.get("path"), str) else None))
+        items.append(
+            _item(
+                "code-review",
+                run_id,
+                str(receipt.get("status") or "unknown"),
+                str(receipt.get("reviewer_id") or "review run"),
+                f"brigade work review show {run_id}",
+                created_at=receipt.get("started_at") if isinstance(receipt.get("started_at"), str) else None,
+                updated_at=receipt.get("completed_at") or receipt.get("started_at"),
+                receipt_path=str(Path(str(receipt.get("path") or "")) / "receipt.json")
+                if receipt.get("path")
+                else None,
+                path=receipt.get("path") if isinstance(receipt.get("path"), str) else None,
+            )
+        )
     for draft in handoff_cmd.draft_queue_payload(target).get("drafts", [])[:20]:
         if not isinstance(draft, dict):
             continue
         draft_id = str(draft.get("id") or Path(str(draft.get("path") or "handoff")).stem)
-        items.append(_item("handoff-draft", draft_id, str(draft.get("status") or "pending"), str(draft.get("title") or draft.get("target_document") or "handoff draft"), f"brigade handoff show {draft_id}", severity=draft.get("severity") if isinstance(draft.get("severity"), str) else None, updated_at=draft.get("modified_at") if isinstance(draft.get("modified_at"), str) else None, path=draft.get("path") if isinstance(draft.get("path"), str) else None))
+        items.append(
+            _item(
+                "handoff-draft",
+                draft_id,
+                str(draft.get("status") or "pending"),
+                str(draft.get("title") or draft.get("target_document") or "handoff draft"),
+                f"brigade handoff show {draft_id}",
+                severity=draft.get("severity") if isinstance(draft.get("severity"), str) else None,
+                updated_at=draft.get("modified_at") if isinstance(draft.get("modified_at"), str) else None,
+                path=draft.get("path") if isinstance(draft.get("path"), str) else None,
+            )
+        )
     for receipt in _iter_json_files(target / ".brigade" / "handoffs" / "ingest-runs", "*.json")[:20]:
         run_id = str(receipt.get("run_id") or Path(str(receipt.get("path") or "run")).stem)
-        items.append(_item("handoff-ingest", run_id, str(receipt.get("status") or "completed"), "handoff ingest receipt", f"brigade handoff run-show {run_id}", created_at=receipt.get("started_at") if isinstance(receipt.get("started_at"), str) else None, updated_at=receipt.get("completed_at") or receipt.get("started_at"), receipt_path=receipt.get("path") if isinstance(receipt.get("path"), str) else None))
+        items.append(
+            _item(
+                "handoff-ingest",
+                run_id,
+                str(receipt.get("status") or "completed"),
+                "handoff ingest receipt",
+                f"brigade handoff run-show {run_id}",
+                created_at=receipt.get("started_at") if isinstance(receipt.get("started_at"), str) else None,
+                updated_at=receipt.get("completed_at") or receipt.get("started_at"),
+                receipt_path=receipt.get("path") if isinstance(receipt.get("path"), str) else None,
+            )
+        )
     for diff in _report_diffs(target)[:20]:
         diff_id = str(diff.get("diff_id") or Path(str(diff.get("path") or "diff")).parent.name)
         summary = diff.get("summary") if isinstance(diff.get("summary"), dict) else {}
@@ -665,50 +787,216 @@ def _activity(target: Path) -> list[dict[str, Any]]:
         )
     for call in _read_jsonl(tools_cmd.calls_path(target))[:20]:
         call_id = str(call.get("call_id") or call.get("id") or "")
-        items.append(_item("tool-call", call_id, str(call.get("status") or "unknown"), str(call.get("tool_id") or "tool call"), f"brigade tools call show {call_id}", severity=call.get("severity") if isinstance(call.get("severity"), str) else None, created_at=call.get("created_at") if isinstance(call.get("created_at"), str) else None, updated_at=call.get("reviewed_at") or call.get("created_at"), receipt_path=str(tools_cmd.calls_path(target))))
+        items.append(
+            _item(
+                "tool-call",
+                call_id,
+                str(call.get("status") or "unknown"),
+                str(call.get("tool_id") or "tool call"),
+                f"brigade tools call show {call_id}",
+                severity=call.get("severity") if isinstance(call.get("severity"), str) else None,
+                created_at=call.get("created_at") if isinstance(call.get("created_at"), str) else None,
+                updated_at=call.get("reviewed_at") or call.get("created_at"),
+                receipt_path=str(tools_cmd.calls_path(target)),
+            )
+        )
     for receipt in _iter_json_files(tools_cmd.runs_path(target), "*/receipt.json")[:20]:
         run_id = str(receipt.get("run_id") or Path(str(receipt.get("path") or "run")).parent.name)
-        items.append(_item("tool-run", run_id, str(receipt.get("status") or "unknown"), str(receipt.get("tool_id") or "tool run"), f"brigade tools run show {run_id}", created_at=receipt.get("started_at") if isinstance(receipt.get("started_at"), str) else None, updated_at=receipt.get("completed_at") or receipt.get("started_at"), receipt_path=receipt.get("path") if isinstance(receipt.get("path"), str) else None))
+        items.append(
+            _item(
+                "tool-run",
+                run_id,
+                str(receipt.get("status") or "unknown"),
+                str(receipt.get("tool_id") or "tool run"),
+                f"brigade tools run show {run_id}",
+                created_at=receipt.get("started_at") if isinstance(receipt.get("started_at"), str) else None,
+                updated_at=receipt.get("completed_at") or receipt.get("started_at"),
+                receipt_path=receipt.get("path") if isinstance(receipt.get("path"), str) else None,
+            )
+        )
     for checkpoint in _iter_json_files(tools_cmd.checkpoints_path(target), "*.json")[:20]:
         checkpoint_id = str(checkpoint.get("checkpoint_id") or Path(str(checkpoint.get("path") or "checkpoint")).stem)
-        items.append(_item("checkpoint", checkpoint_id, str(checkpoint.get("status") or "waiting"), str(checkpoint.get("reason") or "tool checkpoint"), f"brigade tools checkpoint show {checkpoint_id}", severity=checkpoint.get("severity") if isinstance(checkpoint.get("severity"), str) else None, created_at=checkpoint.get("created_at") if isinstance(checkpoint.get("created_at"), str) else None, updated_at=checkpoint.get("reviewed_at") or checkpoint.get("created_at"), receipt_path=checkpoint.get("path") if isinstance(checkpoint.get("path"), str) else None))
+        items.append(
+            _item(
+                "checkpoint",
+                checkpoint_id,
+                str(checkpoint.get("status") or "waiting"),
+                str(checkpoint.get("reason") or "tool checkpoint"),
+                f"brigade tools checkpoint show {checkpoint_id}",
+                severity=checkpoint.get("severity") if isinstance(checkpoint.get("severity"), str) else None,
+                created_at=checkpoint.get("created_at") if isinstance(checkpoint.get("created_at"), str) else None,
+                updated_at=checkpoint.get("reviewed_at") or checkpoint.get("created_at"),
+                receipt_path=checkpoint.get("path") if isinstance(checkpoint.get("path"), str) else None,
+            )
+        )
     for pack in tools_cmd._tool_packs(target)[:20]:
         pack_id = str(pack.get("pack_id") or "")
-        items.append(_item("tool-pack", pack_id, str(pack.get("status") or "built"), "portable tool pack", f"brigade tools pack show {pack_id}", created_at=pack.get("created_at") if isinstance(pack.get("created_at"), str) else None, updated_at=pack.get("created_at") if isinstance(pack.get("created_at"), str) else None, receipt_path=str(Path(str(pack.get("path") or "")) / "tool-pack.json") if pack.get("path") else None, path=pack.get("path") if isinstance(pack.get("path"), str) else None))
+        items.append(
+            _item(
+                "tool-pack",
+                pack_id,
+                str(pack.get("status") or "built"),
+                "portable tool pack",
+                f"brigade tools pack show {pack_id}",
+                created_at=pack.get("created_at") if isinstance(pack.get("created_at"), str) else None,
+                updated_at=pack.get("created_at") if isinstance(pack.get("created_at"), str) else None,
+                receipt_path=str(Path(str(pack.get("path") or "")) / "tool-pack.json") if pack.get("path") else None,
+                path=pack.get("path") if isinstance(pack.get("path"), str) else None,
+            )
+        )
     for pack in context_cmd._packs(target)[:20]:
         pack_id = str(pack.get("pack_id") or "")
-        items.append(_item("context-pack", pack_id, str(pack.get("status") or "built"), str(pack.get("kind") or "context"), f"brigade context show {pack_id}", created_at=pack.get("created_at") if isinstance(pack.get("created_at"), str) else None, updated_at=pack.get("created_at") if isinstance(pack.get("created_at"), str) else None, receipt_path=str(Path(str(pack.get("path") or "")) / "context.json") if pack.get("path") else None, path=pack.get("path") if isinstance(pack.get("path"), str) else None))
+        items.append(
+            _item(
+                "context-pack",
+                pack_id,
+                str(pack.get("status") or "built"),
+                str(pack.get("kind") or "context"),
+                f"brigade context show {pack_id}",
+                created_at=pack.get("created_at") if isinstance(pack.get("created_at"), str) else None,
+                updated_at=pack.get("created_at") if isinstance(pack.get("created_at"), str) else None,
+                receipt_path=str(Path(str(pack.get("path") or "")) / "context.json") if pack.get("path") else None,
+                path=pack.get("path") if isinstance(pack.get("path"), str) else None,
+            )
+        )
     for receipt in _iter_json_files(target / ".brigade" / "context" / "sync-plans", "*/sync-plan.json")[:20]:
         sync_id = str(receipt.get("sync_id") or Path(str(receipt.get("path") or "sync")).parent.name)
-        items.append(_item("context-sync", sync_id, str(receipt.get("status") or "planned"), f"{receipt.get('destination_count', 0)} destination(s)", f"brigade context sync plan {receipt.get('pack_id') or 'latest'}", created_at=receipt.get("created_at") if isinstance(receipt.get("created_at"), str) else None, updated_at=receipt.get("created_at") if isinstance(receipt.get("created_at"), str) else None, receipt_path=receipt.get("path") if isinstance(receipt.get("path"), str) else None))
+        items.append(
+            _item(
+                "context-sync",
+                sync_id,
+                str(receipt.get("status") or "planned"),
+                f"{receipt.get('destination_count', 0)} destination(s)",
+                f"brigade context sync plan {receipt.get('pack_id') or 'latest'}",
+                created_at=receipt.get("created_at") if isinstance(receipt.get("created_at"), str) else None,
+                updated_at=receipt.get("created_at") if isinstance(receipt.get("created_at"), str) else None,
+                receipt_path=receipt.get("path") if isinstance(receipt.get("path"), str) else None,
+            )
+        )
     for replay in _iter_json_files(target / ".brigade" / "learn" / "replays", "*/replay.json")[:20]:
         replay_id = str(replay.get("replay_id") or Path(str(replay.get("path") or "replay")).parent.name)
-        items.append(_item("learning-replay", replay_id, str(replay.get("status") or "recorded"), str(replay.get("scenario_id") or "learning replay"), "brigade learn plan", updated_at=replay.get("created_at") if isinstance(replay.get("created_at"), str) else None, receipt_path=replay.get("path") if isinstance(replay.get("path"), str) else None))
+        items.append(
+            _item(
+                "learning-replay",
+                replay_id,
+                str(replay.get("status") or "recorded"),
+                str(replay.get("scenario_id") or "learning replay"),
+                "brigade learn plan",
+                updated_at=replay.get("created_at") if isinstance(replay.get("created_at"), str) else None,
+                receipt_path=replay.get("path") if isinstance(replay.get("path"), str) else None,
+            )
+        )
     security_latest = target / ".brigade" / "security" / "latest" / "security-report.json"
     security_report = _read_json(security_latest)
     if security_report is not None:
-        generated = security_report.get("generated_at") if isinstance(security_report.get("generated_at"), str) else None
-        items.append(_item("security-report", "latest", "ready", "security report", "brigade security findings", created_at=generated, updated_at=generated, receipt_path=str(security_latest), path=str(security_latest.parent)))
+        generated = (
+            security_report.get("generated_at") if isinstance(security_report.get("generated_at"), str) else None
+        )
+        items.append(
+            _item(
+                "security-report",
+                "latest",
+                "ready",
+                "security report",
+                "brigade security findings",
+                created_at=generated,
+                updated_at=generated,
+                receipt_path=str(security_latest),
+                path=str(security_latest.parent),
+            )
+        )
     for closeout in _iter_json_files(target / ".brigade" / "security" / "closeouts", "*/closeout.json")[:20]:
         closeout_id = str(closeout.get("closeout_id") or Path(str(closeout.get("path") or "closeout")).parent.name)
-        items.append(_item("security-closeout", closeout_id, str(closeout.get("status") or "reviewed"), "security closeout", "brigade security closeout", created_at=closeout.get("created_at") if isinstance(closeout.get("created_at"), str) else None, updated_at=closeout.get("created_at") if isinstance(closeout.get("created_at"), str) else None, receipt_path=closeout.get("path") if isinstance(closeout.get("path"), str) else None))
+        items.append(
+            _item(
+                "security-closeout",
+                closeout_id,
+                str(closeout.get("status") or "reviewed"),
+                "security closeout",
+                "brigade security closeout",
+                created_at=closeout.get("created_at") if isinstance(closeout.get("created_at"), str) else None,
+                updated_at=closeout.get("created_at") if isinstance(closeout.get("created_at"), str) else None,
+                receipt_path=closeout.get("path") if isinstance(closeout.get("path"), str) else None,
+            )
+        )
     for closeout in _iter_json_files(target / ".brigade" / "backups" / "closeouts", "*/closeout.json")[:20]:
         closeout_id = str(closeout.get("closeout_id") or Path(str(closeout.get("path") or "closeout")).parent.name)
-        items.append(_item("backup-closeout", closeout_id, str(closeout.get("status") or "reviewed"), "backup closeout", "brigade work backup closeout", created_at=closeout.get("created_at") if isinstance(closeout.get("created_at"), str) else None, updated_at=closeout.get("created_at") if isinstance(closeout.get("created_at"), str) else None, receipt_path=closeout.get("path") if isinstance(closeout.get("path"), str) else None))
+        items.append(
+            _item(
+                "backup-closeout",
+                closeout_id,
+                str(closeout.get("status") or "reviewed"),
+                "backup closeout",
+                "brigade work backup closeout",
+                created_at=closeout.get("created_at") if isinstance(closeout.get("created_at"), str) else None,
+                updated_at=closeout.get("created_at") if isinstance(closeout.get("created_at"), str) else None,
+                receipt_path=closeout.get("path") if isinstance(closeout.get("path"), str) else None,
+            )
+        )
     for closeout in _iter_json_files(target / ".brigade" / "memory-care" / "closeouts", "*/closeout.json")[:20]:
         closeout_id = str(closeout.get("closeout_id") or Path(str(closeout.get("path") or "closeout")).parent.name)
-        items.append(_item("memory-care-closeout", closeout_id, str(closeout.get("status") or "reviewed"), "memory-care closeout", "brigade memory care closeout", created_at=closeout.get("created_at") if isinstance(closeout.get("created_at"), str) else None, updated_at=closeout.get("created_at") if isinstance(closeout.get("created_at"), str) else None, receipt_path=closeout.get("path") if isinstance(closeout.get("path"), str) else None))
+        items.append(
+            _item(
+                "memory-care-closeout",
+                closeout_id,
+                str(closeout.get("status") or "reviewed"),
+                "memory-care closeout",
+                "brigade memory care closeout",
+                created_at=closeout.get("created_at") if isinstance(closeout.get("created_at"), str) else None,
+                updated_at=closeout.get("created_at") if isinstance(closeout.get("created_at"), str) else None,
+                receipt_path=closeout.get("path") if isinstance(closeout.get("path"), str) else None,
+            )
+        )
     release = release_cmd._latest_release_receipt(target)
     if release:
         run_id = str(release.get("run_id") or "latest")
-        items.append(_item("release-readiness", run_id, str(release.get("status") or "unknown"), "release readiness", f"brigade release show {run_id}", created_at=release.get("started_at") if isinstance(release.get("started_at"), str) else None, updated_at=release.get("completed_at") or release.get("created_at") or release.get("started_at"), receipt_path=str(Path(str(release.get("path") or "")) / "receipt.json") if release.get("path") else None, path=release.get("path") if isinstance(release.get("path"), str) else None))
+        items.append(
+            _item(
+                "release-readiness",
+                run_id,
+                str(release.get("status") or "unknown"),
+                "release readiness",
+                f"brigade release show {run_id}",
+                created_at=release.get("started_at") if isinstance(release.get("started_at"), str) else None,
+                updated_at=release.get("completed_at") or release.get("created_at") or release.get("started_at"),
+                receipt_path=str(Path(str(release.get("path") or "")) / "receipt.json")
+                if release.get("path")
+                else None,
+                path=release.get("path") if isinstance(release.get("path"), str) else None,
+            )
+        )
     candidate = release_cmd._latest_candidate(target)
     if candidate:
         candidate_id = str(candidate.get("candidate_id") or "latest")
-        items.append(_item("release-candidate", candidate_id, str(candidate.get("status") or "draft"), "release candidate", f"brigade release candidate show {candidate_id}", created_at=candidate.get("created_at") if isinstance(candidate.get("created_at"), str) else None, updated_at=candidate.get("created_at") if isinstance(candidate.get("created_at"), str) else None, receipt_path=str(Path(str(candidate.get("path") or "")) / "EVIDENCE.json") if candidate.get("path") else None, path=candidate.get("path") if isinstance(candidate.get("path"), str) else None))
+        items.append(
+            _item(
+                "release-candidate",
+                candidate_id,
+                str(candidate.get("status") or "draft"),
+                "release candidate",
+                f"brigade release candidate show {candidate_id}",
+                created_at=candidate.get("created_at") if isinstance(candidate.get("created_at"), str) else None,
+                updated_at=candidate.get("created_at") if isinstance(candidate.get("created_at"), str) else None,
+                receipt_path=str(Path(str(candidate.get("path") or "")) / "EVIDENCE.json")
+                if candidate.get("path")
+                else None,
+                path=candidate.get("path") if isinstance(candidate.get("path"), str) else None,
+            )
+        )
     for receipt in release_cmd._read_install_smoke_receipts(target)[:20]:
         receipt_id = str(receipt.get("receipt_id") or "")
-        items.append(_item("install-smoke", receipt_id, str(receipt.get("status") or "unknown"), str(receipt.get("matrix_id") or "install smoke"), f"brigade release smoke show {receipt_id}", created_at=receipt.get("created_at") if isinstance(receipt.get("created_at"), str) else None, updated_at=receipt.get("completed_at") or receipt.get("created_at"), receipt_path=str(release_cmd._install_smoke_receipts_path(target))))
+        items.append(
+            _item(
+                "install-smoke",
+                receipt_id,
+                str(receipt.get("status") or "unknown"),
+                str(receipt.get("matrix_id") or "install smoke"),
+                f"brigade release smoke show {receipt_id}",
+                created_at=receipt.get("created_at") if isinstance(receipt.get("created_at"), str) else None,
+                updated_at=receipt.get("completed_at") or receipt.get("created_at"),
+                receipt_path=str(release_cmd._install_smoke_receipts_path(target)),
+            )
+        )
     for action in _read_actions(target)[:20]:
         action_id = str(action.get("action_id") or "")
         items.append(
@@ -728,7 +1016,21 @@ def _activity(target: Path) -> list[dict[str, Any]]:
     readiness = _latest_readiness(target)
     if readiness:
         readiness_id = str(readiness.get("readiness_id") or "latest")
-        items.append(_item("center-readiness", readiness_id, str(readiness.get("status") or "unknown"), "operator readiness closeout", f"brigade center readiness show {readiness_id}", created_at=readiness.get("created_at") if isinstance(readiness.get("created_at"), str) else None, updated_at=readiness.get("completed_at") or readiness.get("created_at"), receipt_path=str(Path(str(readiness.get("path") or "")) / "readiness.json") if readiness.get("path") else None, path=readiness.get("path") if isinstance(readiness.get("path"), str) else None))
+        items.append(
+            _item(
+                "center-readiness",
+                readiness_id,
+                str(readiness.get("status") or "unknown"),
+                "operator readiness closeout",
+                f"brigade center readiness show {readiness_id}",
+                created_at=readiness.get("created_at") if isinstance(readiness.get("created_at"), str) else None,
+                updated_at=readiness.get("completed_at") or readiness.get("created_at"),
+                receipt_path=str(Path(str(readiness.get("path") or "")) / "readiness.json")
+                if readiness.get("path")
+                else None,
+                path=readiness.get("path") if isinstance(readiness.get("path"), str) else None,
+            )
+        )
     items.sort(key=lambda item: str(item.get("updated_at") or ""), reverse=True)
     return items
 
@@ -757,17 +1059,47 @@ def _reviews(target: Path) -> list[dict[str, Any]]:
         finding = review_health.get(finding_key) if isinstance(review_health.get(finding_key), dict) else None
         if finding:
             finding_id = str(finding.get("id") or finding.get("import_id") or finding_key)
-            items.append(_item("code-review", finding_id, "pending", str(finding.get("text") or finding.get("safe_detail") or "review finding"), f"brigade work review finding-show {finding_id}", severity=finding.get("severity") if isinstance(finding.get("severity"), str) else None, updated_at=finding.get("created_at") if isinstance(finding.get("created_at"), str) else None))
+            items.append(
+                _item(
+                    "code-review",
+                    finding_id,
+                    "pending",
+                    str(finding.get("text") or finding.get("safe_detail") or "review finding"),
+                    f"brigade work review finding-show {finding_id}",
+                    severity=finding.get("severity") if isinstance(finding.get("severity"), str) else None,
+                    updated_at=finding.get("created_at") if isinstance(finding.get("created_at"), str) else None,
+                )
+            )
     handoffs = handoff_cmd.draft_queue_payload(target)
     for draft in handoffs.get("drafts", [])[:20]:
         if isinstance(draft, dict) and draft.get("status") in {None, "pending", "failed", "invalid"}:
             draft_id = str(draft.get("id") or Path(str(draft.get("path") or "handoff")).stem)
-            items.append(_item("handoff-draft", draft_id, str(draft.get("status") or "pending"), str(draft.get("title") or draft.get("target_document") or "handoff draft"), f"brigade handoff show {draft_id}", severity=draft.get("severity") if isinstance(draft.get("severity"), str) else None, updated_at=draft.get("modified_at") if isinstance(draft.get("modified_at"), str) else None, path=draft.get("path") if isinstance(draft.get("path"), str) else None))
+            items.append(
+                _item(
+                    "handoff-draft",
+                    draft_id,
+                    str(draft.get("status") or "pending"),
+                    str(draft.get("title") or draft.get("target_document") or "handoff draft"),
+                    f"brigade handoff show {draft_id}",
+                    severity=draft.get("severity") if isinstance(draft.get("severity"), str) else None,
+                    updated_at=draft.get("modified_at") if isinstance(draft.get("modified_at"), str) else None,
+                    path=draft.get("path") if isinstance(draft.get("path"), str) else None,
+                )
+            )
     research_handoffs = research_cmd.health(target)
     for issue in research_handoffs.get("runs", [])[:20]:
         if isinstance(issue, dict) and issue.get("status") != "exported":
             run_id = str(issue.get("run_id") or "")
-            items.append(_item("research-handoff", run_id, str(issue.get("status") or "warn"), str(issue.get("question") or "research handoff export"), str(issue.get("suggested_next_command") or f"brigade research show {run_id}"), severity="medium"))
+            items.append(
+                _item(
+                    "research-handoff",
+                    run_id,
+                    str(issue.get("status") or "warn"),
+                    str(issue.get("question") or "research handoff export"),
+                    str(issue.get("suggested_next_command") or f"brigade research show {run_id}"),
+                    severity="medium",
+                )
+            )
     tool_health = tools_cmd.health(target)
     for bucket, command in (
         ("call_queue", "brigade tools call list"),
@@ -777,7 +1109,16 @@ def _reviews(target: Path) -> list[dict[str, Any]]:
         value = tool_health.get(bucket) if isinstance(tool_health.get(bucket), dict) else {}
         top = value.get("top_issue") if isinstance(value.get("top_issue"), dict) else None
         if top:
-            items.append(_item("tools", str(top.get("call_id") or top.get("run_id") or top.get("checkpoint_id") or bucket), str(top.get("status") or "warn"), str(top.get("detail") or top.get("issue_type") or bucket), command, severity=top.get("severity") if isinstance(top.get("severity"), str) else None))
+            items.append(
+                _item(
+                    "tools",
+                    str(top.get("call_id") or top.get("run_id") or top.get("checkpoint_id") or bucket),
+                    str(top.get("status") or "warn"),
+                    str(top.get("detail") or top.get("issue_type") or bucket),
+                    command,
+                    severity=top.get("severity") if isinstance(top.get("severity"), str) else None,
+                )
+            )
     for name, health, command in (
         ("backup", work_cmd._backup_health(target), "brigade work backup status"),
         ("memory-care", memory_cmd.health(target), "brigade memory care status"),
@@ -785,7 +1126,16 @@ def _reviews(target: Path) -> list[dict[str, Any]]:
     ):
         top = health.get("top_issue") or health.get("top_finding")
         if isinstance(top, dict):
-            items.append(_item(name, str(top.get("id") or top.get("name") or top.get("issue_type") or name), str(top.get("status") or "warn"), str(top.get("detail") or top.get("title") or top.get("safe_summary") or name), command, severity=top.get("severity") if isinstance(top.get("severity"), str) else None))
+            items.append(
+                _item(
+                    name,
+                    str(top.get("id") or top.get("name") or top.get("issue_type") or name),
+                    str(top.get("status") or "warn"),
+                    str(top.get("detail") or top.get("title") or top.get("safe_summary") or name),
+                    command,
+                    severity=top.get("severity") if isinstance(top.get("severity"), str) else None,
+                )
+            )
     for candidate in learn_cmd.candidates(target):
         items.append(
             _item(
@@ -801,27 +1151,74 @@ def _reviews(target: Path) -> list[dict[str, Any]]:
     replay = learning_health.get("replay") if isinstance(learning_health.get("replay"), dict) else {}
     replay_issue = replay.get("top_issue") if isinstance(replay.get("top_issue"), dict) else None
     if replay_issue:
-        items.append(_item("learning", str(replay_issue.get("compare_id") or "learning-replay"), str(replay_issue.get("status") or "warn"), str(replay_issue.get("detail") or "learning replay needs review"), "brigade learn replay compare latest"))
+        items.append(
+            _item(
+                "learning",
+                str(replay_issue.get("compare_id") or "learning-replay"),
+                str(replay_issue.get("status") or "warn"),
+                str(replay_issue.get("detail") or "learning replay needs review"),
+                "brigade learn replay compare latest",
+            )
+        )
     project_health = projects_cmd.health(target)
     for issue in project_health.get("checks", []):
         if issue.get("status") != "ok":
-            items.append(_item("project-consolidation", str(issue.get("project_id") or issue.get("name")), str(issue.get("status")), str(issue.get("detail")), "brigade projects audit"))
+            items.append(
+                _item(
+                    "project-consolidation",
+                    str(issue.get("project_id") or issue.get("name")),
+                    str(issue.get("status")),
+                    str(issue.get("detail")),
+                    "brigade projects audit",
+                )
+            )
     repo_health = repos_cmd.health(target)
     repo_report = repo_health.get("report") if isinstance(repo_health.get("report"), dict) else {}
     repo_actions = repo_health.get("actions") if isinstance(repo_health.get("actions"), dict) else {}
     repo_sweep = repo_health.get("sweep") if isinstance(repo_health.get("sweep"), dict) else {}
     repo_release = repo_health.get("release_train") if isinstance(repo_health.get("release_train"), dict) else {}
-    for bucket, command in ((repo_report, "brigade repos report build"), (repo_actions, "brigade repos actions list"), (repo_sweep, "brigade repos sweep run"), (repo_release, "brigade repos release build")):
+    for bucket, command in (
+        (repo_report, "brigade repos report build"),
+        (repo_actions, "brigade repos actions list"),
+        (repo_sweep, "brigade repos sweep run"),
+        (repo_release, "brigade repos release build"),
+    ):
         top = bucket.get("top_issue") if isinstance(bucket.get("top_issue"), dict) else None
         if top:
-            items.append(_item("repo-fleet", str(top.get("name") or "repo-fleet"), str(top.get("status") or "warn"), str(top.get("detail") or "repo fleet issue"), str(top.get("suggested_next_command") or command)))
+            items.append(
+                _item(
+                    "repo-fleet",
+                    str(top.get("name") or "repo-fleet"),
+                    str(top.get("status") or "warn"),
+                    str(top.get("detail") or "repo fleet issue"),
+                    str(top.get("suggested_next_command") or command),
+                )
+            )
     context_health = context_cmd.health(target)
     for issue in context_health.get("issues", []):
-        items.append(_item("context", str(issue.get("name")), str(issue.get("status")), str(issue.get("detail")), "brigade context plan"))
+        items.append(
+            _item(
+                "context",
+                str(issue.get("name")),
+                str(issue.get("status")),
+                str(issue.get("detail")),
+                "brigade context plan",
+            )
+        )
     candidate = release_cmd._latest_candidate(target)
     if isinstance(candidate, dict) and candidate.get("status") in {"draft", "blocked"}:
         candidate_id = str(candidate.get("candidate_id") or "latest")
-        items.append(_item("release-candidate", candidate_id, str(candidate.get("status") or "draft"), "release candidate awaits review", f"brigade release candidate compare {candidate_id}", updated_at=candidate.get("created_at") if isinstance(candidate.get("created_at"), str) else None, path=candidate.get("path") if isinstance(candidate.get("path"), str) else None))
+        items.append(
+            _item(
+                "release-candidate",
+                candidate_id,
+                str(candidate.get("status") or "draft"),
+                "release candidate awaits review",
+                f"brigade release candidate compare {candidate_id}",
+                updated_at=candidate.get("created_at") if isinstance(candidate.get("created_at"), str) else None,
+                path=candidate.get("path") if isinstance(candidate.get("path"), str) else None,
+            )
+        )
     for action in _read_actions(target):
         if action.get("status") not in {"pending", "active", "deferred"}:
             continue
@@ -842,32 +1239,111 @@ def _reviews(target: Path) -> list[dict[str, Any]]:
     readiness = readiness_health(target)
     top_readiness = readiness.get("top_issue") if isinstance(readiness.get("top_issue"), dict) else None
     if top_readiness:
-        items.append(_item("center-readiness", str(top_readiness.get("name") or "readiness"), str(top_readiness.get("status") or "warn"), str(top_readiness.get("detail") or "operator readiness needs review"), "brigade center readiness plan"))
+        items.append(
+            _item(
+                "center-readiness",
+                str(top_readiness.get("name") or "readiness"),
+                str(top_readiness.get("status") or "warn"),
+                str(top_readiness.get("detail") or "operator readiness needs review"),
+                "brigade center readiness plan",
+            )
+        )
     daily_health = daily_cmd.health(target)
     approvals = daily_health.get("approvals") if isinstance(daily_health.get("approvals"), dict) else {}
     top_approval = approvals.get("top_pending") if isinstance(approvals.get("top_pending"), dict) else None
     if top_approval:
         approval_id = str(top_approval.get("approval_id") or "approval")
-        items.append(_item("daily-approval", approval_id, str(top_approval.get("status") or "pending"), str(top_approval.get("safe_summary") or "daily approval pending"), f"brigade daily approvals show {approval_id}"))
+        items.append(
+            _item(
+                "daily-approval",
+                approval_id,
+                str(top_approval.get("status") or "pending"),
+                str(top_approval.get("safe_summary") or "daily approval pending"),
+                f"brigade daily approvals show {approval_id}",
+            )
+        )
     top_daily = daily_health.get("top_issue") if isinstance(daily_health.get("top_issue"), dict) else None
     if top_daily:
-        items.append(_item("daily-driver", str(top_daily.get("name") or "daily"), str(top_daily.get("status") or "warn"), str(top_daily.get("detail") or "daily driver needs review"), "brigade daily doctor"))
+        items.append(
+            _item(
+                "daily-driver",
+                str(top_daily.get("name") or "daily"),
+                str(top_daily.get("status") or "warn"),
+                str(top_daily.get("detail") or "daily driver needs review"),
+                "brigade daily doctor",
+            )
+        )
     phase_health = phases_cmd.health(target)
     top_phase = phase_health.get("top_issue") if isinstance(phase_health.get("top_issue"), dict) else None
     if top_phase:
-        items.append(_item("phase-ledger", str(top_phase.get("phase_id") or top_phase.get("name") or "phase-ledger"), str(top_phase.get("status") or "warn"), str(top_phase.get("detail") or "phase execution ledger needs review"), "brigade work phases doctor"))
-    latest_phase_session = phase_health.get("latest_session") if isinstance(phase_health.get("latest_session"), dict) else None
+        items.append(
+            _item(
+                "phase-ledger",
+                str(top_phase.get("phase_id") or top_phase.get("name") or "phase-ledger"),
+                str(top_phase.get("status") or "warn"),
+                str(top_phase.get("detail") or "phase execution ledger needs review"),
+                "brigade work phases doctor",
+            )
+        )
+    latest_phase_session = (
+        phase_health.get("latest_session") if isinstance(phase_health.get("latest_session"), dict) else None
+    )
     if latest_phase_session and latest_phase_session.get("status") not in {"closed", "archived"}:
-        items.append(_item("phase-session", str(latest_phase_session.get("session_id") or "phase-session"), "warn", "active phase execution session needs review", "brigade work phases session next latest"))
-    latest_checkpoint = phase_health.get("latest_session_checkpoint") if isinstance(phase_health.get("latest_session_checkpoint"), dict) else None
-    latest_checkpoint_compare = phase_health.get("latest_session_checkpoint_compare") if isinstance(phase_health.get("latest_session_checkpoint_compare"), dict) else None
+        items.append(
+            _item(
+                "phase-session",
+                str(latest_phase_session.get("session_id") or "phase-session"),
+                "warn",
+                "active phase execution session needs review",
+                "brigade work phases session next latest",
+            )
+        )
+    latest_checkpoint = (
+        phase_health.get("latest_session_checkpoint")
+        if isinstance(phase_health.get("latest_session_checkpoint"), dict)
+        else None
+    )
+    latest_checkpoint_compare = (
+        phase_health.get("latest_session_checkpoint_compare")
+        if isinstance(phase_health.get("latest_session_checkpoint_compare"), dict)
+        else None
+    )
     if latest_checkpoint and latest_checkpoint.get("status") == "blocked":
         checkpoint_id = str(latest_checkpoint.get("checkpoint_id") or "phase-session-checkpoint")
-        items.append(_item("phase-session-checkpoint", checkpoint_id, "blocked", str(latest_checkpoint.get("summary") or "phase session checkpoint is blocked"), f"brigade work phases session checkpoints show {checkpoint_id}", severity="high", updated_at=latest_checkpoint.get("created_at") if isinstance(latest_checkpoint.get("created_at"), str) else None, receipt_path=latest_checkpoint.get("path") if isinstance(latest_checkpoint.get("path"), str) else None))
+        items.append(
+            _item(
+                "phase-session-checkpoint",
+                checkpoint_id,
+                "blocked",
+                str(latest_checkpoint.get("summary") or "phase session checkpoint is blocked"),
+                f"brigade work phases session checkpoints show {checkpoint_id}",
+                severity="high",
+                updated_at=latest_checkpoint.get("created_at")
+                if isinstance(latest_checkpoint.get("created_at"), str)
+                else None,
+                receipt_path=latest_checkpoint.get("path") if isinstance(latest_checkpoint.get("path"), str) else None,
+            )
+        )
     if latest_checkpoint_compare and int(latest_checkpoint_compare.get("issue_count") or 0) > 0:
         checkpoint_id = str(latest_checkpoint_compare.get("checkpoint_id") or "latest")
-        top_checkpoint = latest_checkpoint_compare.get("top_issue") if isinstance(latest_checkpoint_compare.get("top_issue"), dict) else {}
-        items.append(_item("phase-session-checkpoint", checkpoint_id, "warn", str(top_checkpoint.get("detail") or "phase session checkpoint compare needs review"), str(latest_checkpoint_compare.get("suggested_next_command") or "brigade work phases session checkpoints compare latest"), severity="medium"))
+        top_checkpoint = (
+            latest_checkpoint_compare.get("top_issue")
+            if isinstance(latest_checkpoint_compare.get("top_issue"), dict)
+            else {}
+        )
+        items.append(
+            _item(
+                "phase-session-checkpoint",
+                checkpoint_id,
+                "warn",
+                str(top_checkpoint.get("detail") or "phase session checkpoint compare needs review"),
+                str(
+                    latest_checkpoint_compare.get("suggested_next_command")
+                    or "brigade work phases session checkpoints compare latest"
+                ),
+                severity="medium",
+            )
+        )
     return items
 
 
@@ -935,7 +1411,9 @@ def status(*, target: Path, json_output: bool = False) -> int:
         print(f"phase_records: {phase_ledger.get('record_count', 0)}")
         print(f"phase_issues: {phase_ledger.get('issue_count', 0)}")
         print(f"phase_actions: {phase_ledger.get('open_action_count', 0)}")
-        latest_phase_session = phase_ledger.get("latest_session") if isinstance(phase_ledger.get("latest_session"), dict) else None
+        latest_phase_session = (
+            phase_ledger.get("latest_session") if isinstance(phase_ledger.get("latest_session"), dict) else None
+        )
         if latest_phase_session:
             print(f"phase_session: {latest_phase_session.get('session_id')} [{latest_phase_session.get('status')}]")
     return 0
@@ -959,7 +1437,13 @@ def schema(*, target: Path, json_output: bool = False) -> int:
 def activity(*, target: Path, json_output: bool = False, limit: int = 50) -> int:
     target = target.expanduser().resolve()
     items = _activity(target)[:limit]
-    payload = {"schema_version": SCHEMA_VERSION, "schema": _schema("center-activity"), "target": str(target), "activity": items, "activity_count": len(items)}
+    payload = {
+        "schema_version": SCHEMA_VERSION,
+        "schema": _schema("center-activity"),
+        "target": str(target),
+        "activity": items,
+        "activity_count": len(items),
+    }
     if json_output:
         print(json.dumps(payload, indent=2, sort_keys=True))
         return 0
@@ -972,7 +1456,13 @@ def activity(*, target: Path, json_output: bool = False, limit: int = 50) -> int
 def reviews(*, target: Path, json_output: bool = False, limit: int = 50) -> int:
     target = target.expanduser().resolve()
     items = _reviews(target)[:limit]
-    payload = {"schema_version": SCHEMA_VERSION, "schema": _schema("center-reviews"), "target": str(target), "reviews": items, "review_count": len(items)}
+    payload = {
+        "schema_version": SCHEMA_VERSION,
+        "schema": _schema("center-reviews"),
+        "target": str(target),
+        "reviews": items,
+        "review_count": len(items),
+    }
     if json_output:
         print(json.dumps(payload, indent=2, sort_keys=True))
         return 0
@@ -988,13 +1478,27 @@ def templates(*, target: Path, json_output: bool = False) -> int:
     items = [
         _item("context", "task", "available", "Task context pack template", "brigade context plan --kind task"),
         _item("context", "repo", "available", "Repo context pack template", "brigade context plan --kind repo"),
-        _item("context", "release", "available", "Release context pack template", "brigade context plan --kind release"),
+        _item(
+            "context", "release", "available", "Release context pack template", "brigade context plan --kind release"
+        ),
         _item("tools", "tool-pack", "available", "Portable tool pack template", "brigade tools pack build"),
         _item("projects", "audit-plan", "available", "Project audit plan template", "brigade projects audit"),
-        _item("release", "candidate", "available", "Release candidate checklist template", "brigade release candidate plan"),
+        _item(
+            "release",
+            "candidate",
+            "available",
+            "Release candidate checklist template",
+            "brigade release candidate plan",
+        ),
         _item("review", "closeout", "available", "Review closeout template", "brigade work review closeout latest"),
     ]
-    payload = {"schema_version": SCHEMA_VERSION, "schema": _schema("center-templates"), "target": str(target), "templates": items, "template_count": len(items)}
+    payload = {
+        "schema_version": SCHEMA_VERSION,
+        "schema": _schema("center-templates"),
+        "target": str(target),
+        "templates": items,
+        "template_count": len(items),
+    }
     if json_output:
         print(json.dumps(payload, indent=2, sort_keys=True))
         return 0
@@ -1035,7 +1539,9 @@ def _active_readiness_waivers(target: Path) -> dict[str, dict[str, Any]]:
     }
 
 
-def _readiness_finding(subsystem: str, name: str, severity: str, summary: str, command: str, *, status: str = "warn") -> dict[str, Any]:
+def _readiness_finding(
+    subsystem: str, name: str, severity: str, summary: str, command: str, *, status: str = "warn"
+) -> dict[str, Any]:
     fingerprint = _fingerprint_payload({"subsystem": subsystem, "name": name, "severity": severity, "summary": summary})
     return {
         "finding_id": f"readiness-{fingerprint[:16]}",
@@ -1057,17 +1563,60 @@ def _readiness_safe_text(target: Path, value: str) -> str:
 def _readiness_findings(target: Path, status_data: dict[str, Any]) -> list[dict[str, Any]]:
     findings: list[dict[str, Any]] = []
     if status_data.get("pending_task_count", 0) > 0:
-        findings.append(_readiness_finding("work", "pending_tasks", "warning", f"{status_data['pending_task_count']} pending task(s)", "brigade work tasks"))
+        findings.append(
+            _readiness_finding(
+                "work",
+                "pending_tasks",
+                "warning",
+                f"{status_data['pending_task_count']} pending task(s)",
+                "brigade work tasks",
+            )
+        )
     if status_data.get("pending_import_count", 0) > 0:
-        findings.append(_readiness_finding("work", "pending_imports", "blocker", f"{status_data['pending_import_count']} pending import(s)", "brigade work inbox", status="blocked"))
+        findings.append(
+            _readiness_finding(
+                "work",
+                "pending_imports",
+                "blocker",
+                f"{status_data['pending_import_count']} pending import(s)",
+                "brigade work inbox",
+                status="blocked",
+            )
+        )
     if status_data.get("review_queue_count", 0) > 0:
-        findings.append(_readiness_finding("center", "pending_reviews", "warning", f"{status_data['review_queue_count']} pending review item(s)", "brigade center reviews"))
+        findings.append(
+            _readiness_finding(
+                "center",
+                "pending_reviews",
+                "warning",
+                f"{status_data['review_queue_count']} pending review item(s)",
+                "brigade center reviews",
+            )
+        )
     release = status_data.get("release_readiness") if isinstance(status_data.get("release_readiness"), dict) else None
     if not release:
-        findings.append(_readiness_finding("release", "missing_release_readiness", "blocker", "release readiness receipt is missing", "brigade release run", status="blocked"))
+        findings.append(
+            _readiness_finding(
+                "release",
+                "missing_release_readiness",
+                "blocker",
+                "release readiness receipt is missing",
+                "brigade release run",
+                status="blocked",
+            )
+        )
     elif release.get("ready") is False or release.get("status") in {"blocked", "failed"}:
         run_id = str(release.get("run_id") or "latest")
-        findings.append(_readiness_finding("release", "blocked_release_readiness", "blocker", "release readiness is blocked", f"brigade release show {run_id}", status="blocked"))
+        findings.append(
+            _readiness_finding(
+                "release",
+                "blocked_release_readiness",
+                "blocker",
+                "release readiness is blocked",
+                f"brigade release show {run_id}",
+                status="blocked",
+            )
+        )
     for subsystem, command in (
         ("roadmap", "brigade roadmap audit"),
         ("repo_fleet", "brigade repos doctor"),
@@ -1087,8 +1636,17 @@ def _readiness_findings(target: Path, status_data: dict[str, Any]) -> list[dict[
         top = health.get("top_issue") if isinstance(health.get("top_issue"), dict) else None
         if issue_count <= 0 and not top:
             continue
-        detail = _readiness_safe_text(target, str((top or {}).get("detail") or (top or {}).get("safe_summary") or f"{subsystem} has unresolved health issue(s)"))
-        findings.append(_readiness_finding(subsystem, str((top or {}).get("name") or "health"), "warning", detail, command))
+        detail = _readiness_safe_text(
+            target,
+            str(
+                (top or {}).get("detail")
+                or (top or {}).get("safe_summary")
+                or f"{subsystem} has unresolved health issue(s)"
+            ),
+        )
+        findings.append(
+            _readiness_finding(subsystem, str((top or {}).get("name") or "health"), "warning", detail, command)
+        )
     command_health = roadmap_cmd.command_contract_payload(target)
     if not command_health.get("inventory_current"):
         findings.append(
@@ -1107,7 +1665,9 @@ def _readiness_findings(target: Path, status_data: dict[str, Any]) -> list[dict[
 def _readiness_payload(target: Path) -> dict[str, Any]:
     target = target.expanduser().resolve()
     status_data = status_payload(target)
-    status_data["review_queue_count"] = len([item for item in _reviews(target) if item.get("subsystem") != "center-readiness"])
+    status_data["review_queue_count"] = len(
+        [item for item in _reviews(target) if item.get("subsystem") != "center-readiness"]
+    )
     findings = _readiness_findings(target, status_data)
     waivers = _active_readiness_waivers(target)
     for finding in findings:
@@ -1116,18 +1676,34 @@ def _readiness_payload(target: Path) -> dict[str, Any]:
         if waiver:
             finding["waiver_id"] = waiver.get("waiver_id")
             finding["waiver_reason"] = waiver.get("reason")
-    unwaived_blockers = [finding for finding in findings if finding.get("severity") == "blocker" and not finding.get("waived")]
+    unwaived_blockers = [
+        finding for finding in findings if finding.get("severity") == "blocker" and not finding.get("waived")
+    ]
     warnings = [finding for finding in findings if finding.get("severity") != "blocker" and not finding.get("waived")]
     manual_checklist = [
         {"label": "roadmap audit", "command": "brigade roadmap audit --json", "manual_only": True},
         {"label": "command inventory check", "command": "brigade roadmap commands --check", "manual_only": True},
         {"label": "operator center status", "command": "brigade center status --json", "manual_only": True},
         {"label": "release doctor", "command": "brigade release doctor", "manual_only": True},
-        {"label": "release candidate compare", "command": "brigade release candidate compare latest", "manual_only": True},
+        {
+            "label": "release candidate compare",
+            "command": "brigade release candidate compare latest",
+            "manual_only": True,
+        },
         {"label": "diff check", "command": "git diff --check", "manual_only": True},
         {"label": "full tests", "command": "PYTHONPATH=src python3 -m pytest -q", "manual_only": True},
-        {"label": "manual tag placeholder", "command": "manual tag command after explicit operator approval", "manual_only": True, "remote_mutation": True},
-        {"label": "manual push placeholder", "command": "manual push command after explicit operator approval", "manual_only": True, "remote_mutation": True},
+        {
+            "label": "manual tag placeholder",
+            "command": "manual tag command after explicit operator approval",
+            "manual_only": True,
+            "remote_mutation": True,
+        },
+        {
+            "label": "manual push placeholder",
+            "command": "manual push command after explicit operator approval",
+            "manual_only": True,
+            "remote_mutation": True,
+        },
     ]
     payload = {
         "schema_version": SCHEMA_VERSION,
@@ -1178,9 +1754,21 @@ def readiness_health(target: Path) -> dict[str, Any]:
     latest = _latest_readiness(target)
     issues: list[dict[str, Any]] = []
     if latest is None:
-        issues.append({"status": "warn", "name": "center_readiness_missing", "detail": "no local operator readiness closeout found"})
+        issues.append(
+            {
+                "status": "warn",
+                "name": "center_readiness_missing",
+                "detail": "no local operator readiness closeout found",
+            }
+        )
     elif latest.get("ready") is False and latest.get("review_status") != "deferred":
-        issues.append({"status": "warn", "name": "center_readiness_blocked", "detail": str(latest.get("readiness_id") or "latest")})
+        issues.append(
+            {
+                "status": "warn",
+                "name": "center_readiness_blocked",
+                "detail": str(latest.get("readiness_id") or "latest"),
+            }
+        )
     return {
         "latest": latest,
         "issue_count": len(issues),
@@ -1291,7 +1879,13 @@ def _readiness_checklist_markdown(payload: dict[str, Any]) -> str:
 def readiness_list(*, target: Path, limit: int = 20, json_output: bool = False) -> int:
     target = target.expanduser().resolve()
     receipts = _readiness_receipts(target, include_archived=True)[:limit]
-    payload = {"schema_version": SCHEMA_VERSION, "schema": _schema("center-readiness-list"), "target": str(target), "readiness": receipts, "readiness_count": len(receipts)}
+    payload = {
+        "schema_version": SCHEMA_VERSION,
+        "schema": _schema("center-readiness-list"),
+        "target": str(target),
+        "readiness": receipts,
+        "readiness_count": len(receipts),
+    }
     if json_output:
         print(json.dumps(payload, indent=2, sort_keys=True))
         return 0
@@ -1413,7 +2007,9 @@ def _reports(target: Path, *, include_archived: bool = False) -> list[dict[str, 
     roots = [_reports_root(target)]
     if include_archived:
         roots.append(_reports_archive_root(target))
-    return reportstore.list_bundles(roots, _read_report, id_field="report_id", skip_child=lambda name: name.endswith("archive"))
+    return reportstore.list_bundles(
+        roots, _read_report, id_field="report_id", skip_child=lambda name: name.endswith("archive")
+    )
 
 
 def latest_report(target: Path) -> dict[str, Any] | None:
@@ -1432,7 +2028,9 @@ def latest_report_diff(target: Path) -> dict[str, Any] | None:
 
 def _resolve_report(target: Path, report_id: str) -> tuple[dict[str, Any] | None, str | None]:
     reports = _reports(target, include_archived=True)
-    return reportstore.resolve_bundle(reports, report_id, id_field="report_id", label="operator report", latest=lambda: latest_report(target))
+    return reportstore.resolve_bundle(
+        reports, report_id, id_field="report_id", label="operator report", latest=lambda: latest_report(target)
+    )
 
 
 def _receipt_references(payload: dict[str, Any]) -> list[str]:
@@ -1490,7 +2088,9 @@ def _report_payload(target: Path) -> dict[str, Any]:
             "inbox_hygiene": work_cmd._inbox_hygiene_payload(target),
             "code_review": status_data.get("code_review"),
             "handoff_drafts": status_data.get("handoff_drafts"),
-            "memory_care": status_data.get("memory_care") if "memory_care" in status_data else memory_cmd.health(target),
+            "memory_care": status_data.get("memory_care")
+            if "memory_care" in status_data
+            else memory_cmd.health(target),
             "tool_catalog": status_data.get("tool_catalog"),
             "backup": work_cmd._backup_health(target),
             "security": status_data.get("security"),
@@ -1527,7 +2127,9 @@ def _suggested_report_commands(status_data: dict[str, Any], reviews_data: list[d
                 urgent.append(command)
             else:
                 next_steps.append(command)
-    report_health_data = status_data.get("operator_report") if isinstance(status_data.get("operator_report"), dict) else {}
+    report_health_data = (
+        status_data.get("operator_report") if isinstance(status_data.get("operator_report"), dict) else {}
+    )
     top = report_health_data.get("top_issue") if isinstance(report_health_data.get("top_issue"), dict) else None
     if top:
         maintenance.insert(0, str(top.get("suggested_next_command") or "brigade center report build"))
@@ -1540,7 +2142,9 @@ def _suggested_report_commands(status_data: dict[str, Any], reviews_data: list[d
 
 def _report_markdown(payload: dict[str, Any]) -> str:
     status_data = payload.get("status") if isinstance(payload.get("status"), dict) else {}
-    commands = payload.get("suggested_next_commands") if isinstance(payload.get("suggested_next_commands"), dict) else {}
+    commands = (
+        payload.get("suggested_next_commands") if isinstance(payload.get("suggested_next_commands"), dict) else {}
+    )
     lines = [
         "# Operator Report",
         "",
@@ -1567,7 +2171,9 @@ def _report_markdown(payload: dict[str, Any]) -> str:
     lines.extend(["## Review Queue", ""])
     reviews_data = payload.get("reviews") if isinstance(payload.get("reviews"), list) else []
     for item in reviews_data[:25]:
-        lines.append(f"- `{item.get('subsystem')}` `{item.get('id')}` [{item.get('status')}] {item.get('safe_summary')}")
+        lines.append(
+            f"- `{item.get('subsystem')}` `{item.get('id')}` [{item.get('status')}] {item.get('safe_summary')}"
+        )
         if item.get("suggested_next_command"):
             lines.append(f"  - next: `{item.get('suggested_next_command')}`")
     if not reviews_data:
@@ -1575,10 +2181,23 @@ def _report_markdown(payload: dict[str, Any]) -> str:
     lines.extend(["", "## Activity", ""])
     activity_data = payload.get("activity") if isinstance(payload.get("activity"), list) else []
     for item in activity_data[:25]:
-        lines.append(f"- `{item.get('subsystem')}` `{item.get('id')}` [{item.get('status')}] {item.get('safe_summary')}")
+        lines.append(
+            f"- `{item.get('subsystem')}` `{item.get('id')}` [{item.get('status')}] {item.get('safe_summary')}"
+        )
     if not activity_data:
         lines.append("- none")
-    lines.extend(["", "## Boundaries", "", "- local report only", "- no daemon", "- no web server", "- no remote mutation", "- no automatic promotion"])
+    lines.extend(
+        [
+            "",
+            "## Boundaries",
+            "",
+            "- local report only",
+            "- no daemon",
+            "- no web server",
+            "- no remote mutation",
+            "- no automatic promotion",
+        ]
+    )
     return "\n".join(lines) + "\n"
 
 
@@ -1622,12 +2241,24 @@ def _review_groups(report: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
             groups["release_readiness_candidate_issues"].append(item)
         elif subsystem in {"project-consolidation", "learning"}:
             groups["project_learning_candidates"].append(item)
-    sweep_review = summaries.get("scanner_sweep") if isinstance(summaries.get("scanner_sweep"), dict) else status_data.get("scanner_sweeps")
+    sweep_review = (
+        summaries.get("scanner_sweep")
+        if isinstance(summaries.get("scanner_sweep"), dict)
+        else status_data.get("scanner_sweeps")
+    )
     if isinstance(sweep_review, dict):
-        top = (sweep_review.get("review") if isinstance(sweep_review.get("review"), dict) else {}).get("top_pending_import")
+        top = (sweep_review.get("review") if isinstance(sweep_review.get("review"), dict) else {}).get(
+            "top_pending_import"
+        )
         if isinstance(top, dict):
             groups["scanner_sweep_issues"].append(
-                _item("scanner-sweep", str(top.get("id") or "pending-import"), "pending", str(top.get("text") or "pending sweep import"), f"brigade work import plan {top.get('id')}")
+                _item(
+                    "scanner-sweep",
+                    str(top.get("id") or "pending-import"),
+                    "pending",
+                    str(top.get("text") or "pending sweep import"),
+                    f"brigade work import plan {top.get('id')}",
+                )
             )
     for name, command in (
         ("backup", "brigade work backup status"),
@@ -1638,16 +2269,39 @@ def _review_groups(report: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
         top = value.get("top_issue") or value.get("top_finding") if isinstance(value, dict) else None
         if isinstance(top, dict):
             groups["backup_security_memory_care_issues"].append(
-                _item(name.replace("_", "-"), str(top.get("id") or top.get("name") or top.get("issue_type") or name), str(top.get("status") or "warn"), str(top.get("detail") or top.get("title") or name), command, severity=top.get("severity") if isinstance(top.get("severity"), str) else None)
+                _item(
+                    name.replace("_", "-"),
+                    str(top.get("id") or top.get("name") or top.get("issue_type") or name),
+                    str(top.get("status") or "warn"),
+                    str(top.get("detail") or top.get("title") or name),
+                    command,
+                    severity=top.get("severity") if isinstance(top.get("severity"), str) else None,
+                )
             )
     readiness = release_data.get("readiness") if isinstance(release_data.get("readiness"), dict) else None
     candidate = release_data.get("candidate") if isinstance(release_data.get("candidate"), dict) else None
     if isinstance(readiness, dict) and readiness.get("ready") is False:
         run_id = str(readiness.get("run_id") or "latest")
-        groups["release_readiness_candidate_issues"].append(_item("release-readiness", run_id, str(readiness.get("status") or "blocked"), "release readiness is blocked", f"brigade release show {run_id}"))
+        groups["release_readiness_candidate_issues"].append(
+            _item(
+                "release-readiness",
+                run_id,
+                str(readiness.get("status") or "blocked"),
+                "release readiness is blocked",
+                f"brigade release show {run_id}",
+            )
+        )
     if isinstance(candidate, dict) and candidate.get("status") not in {None, "reviewed", "archived"}:
         candidate_id = str(candidate.get("candidate_id") or "latest")
-        groups["release_readiness_candidate_issues"].append(_item("release-candidate", candidate_id, str(candidate.get("status") or "draft"), "release candidate awaits review", f"brigade release candidate compare {candidate_id}"))
+        groups["release_readiness_candidate_issues"].append(
+            _item(
+                "release-candidate",
+                candidate_id,
+                str(candidate.get("status") or "draft"),
+                "release candidate awaits review",
+                f"brigade release candidate compare {candidate_id}",
+            )
+        )
     return groups
 
 
@@ -1673,12 +2327,10 @@ def _report_html(markdown: str, payload: dict[str, Any]) -> str:
     body = html.escape(markdown)
     return (
         "<!doctype html>\n"
-        "<html><head><meta charset=\"utf-8\"><title>"
+        '<html><head><meta charset="utf-8"><title>'
         + title
         + "</title><style>body{font-family:system-ui,sans-serif;max-width:980px;margin:2rem auto;padding:0 1rem;line-height:1.45}pre{white-space:pre-wrap;background:#f6f8fa;padding:1rem;border:1px solid #d0d7de}</style></head>"
-        "<body><pre>"
-        + body
-        + "</pre></body></html>\n"
+        "<body><pre>" + body + "</pre></body></html>\n"
     )
 
 
@@ -1698,31 +2350,73 @@ def report_health(target: Path) -> dict[str, Any]:
     reports = _reports(target)
     checks: list[dict[str, Any]] = []
     if latest is None:
-        checks.append({"status": "warn", "name": "operator_report_missing", "detail": "no local operator report has been built", "suggested_next_command": "brigade center report build"})
+        checks.append(
+            {
+                "status": "warn",
+                "name": "operator_report_missing",
+                "detail": "no local operator report has been built",
+                "suggested_next_command": "brigade center report build",
+            }
+        )
         return {"latest": None, "checks": checks, "issue_count": len(checks), "top_issue": checks[0]}
     closeout = latest.get("closeout") if isinstance(latest.get("closeout"), dict) else None
     closeout_status = str(closeout.get("status") or "") if closeout else ""
     if closeout_status not in {"reviewed", "deferred", "superseded", "archived"}:
-        checks.append({"status": "warn", "name": "operator_report_unclosed", "detail": f"{latest.get('report_id')} has not been closed out", "suggested_next_command": f"brigade center report review {latest.get('report_id')}"})
+        checks.append(
+            {
+                "status": "warn",
+                "name": "operator_report_unclosed",
+                "detail": f"{latest.get('report_id')} has not been closed out",
+                "suggested_next_command": f"brigade center report review {latest.get('report_id')}",
+            }
+        )
     created = _parse_time(latest.get("created_at") or latest.get("generated_at"))
     if created is not None:
         age_hours = (_now() - created).total_seconds() / 3600
         if age_hours > REPORT_STALE_HOURS:
-            checks.append({"status": "warn", "name": "operator_report_stale", "detail": f"{latest.get('report_id')}={age_hours:.1f}h", "suggested_next_command": "brigade center report build"})
+            checks.append(
+                {
+                    "status": "warn",
+                    "name": "operator_report_stale",
+                    "detail": f"{latest.get('report_id')}={age_hours:.1f}h",
+                    "suggested_next_command": "brigade center report build",
+                }
+            )
     current_head = _git_value(target, "rev-parse", "HEAD")
     git = latest.get("git") if isinstance(latest.get("git"), dict) else {}
     if git.get("head") and current_head and git.get("head") != current_head:
-        checks.append({"status": "warn", "name": "operator_report_head_changed", "detail": f"{latest.get('report_id')} head changed", "suggested_next_command": "brigade center report build"})
+        checks.append(
+            {
+                "status": "warn",
+                "name": "operator_report_head_changed",
+                "detail": f"{latest.get('report_id')} head changed",
+                "suggested_next_command": "brigade center report build",
+            }
+        )
     for ref in latest.get("receipt_references") if isinstance(latest.get("receipt_references"), list) else []:
         if isinstance(ref, str) and ref and not _receipt_reference_exists(target, ref):
-            checks.append({"status": "warn", "name": "operator_report_missing_receipt", "detail": f"missing receipt reference: {_path_label(target, ref)}", "suggested_next_command": f"brigade center report show {latest.get('report_id')}"})
+            checks.append(
+                {
+                    "status": "warn",
+                    "name": "operator_report_missing_receipt",
+                    "detail": f"missing receipt reference: {_path_label(target, ref)}",
+                    "suggested_next_command": f"brigade center report show {latest.get('report_id')}",
+                }
+            )
             break
     latest_activity = [item for item in _activity(target) if item.get("subsystem") != "center-report-diff"]
     report_activity = latest.get("activity") if isinstance(latest.get("activity"), list) else []
     latest_time = _parse_time(latest_activity[0].get("updated_at")) if latest_activity else None
     report_time = _parse_time(report_activity[0].get("updated_at")) if report_activity else created
     if latest_time is not None and report_time is not None and latest_time > report_time:
-        checks.append({"status": "warn", "name": "operator_report_newer_activity", "detail": f"{latest.get('report_id')} is older than local activity", "suggested_next_command": "brigade center report build"})
+        checks.append(
+            {
+                "status": "warn",
+                "name": "operator_report_newer_activity",
+                "detail": f"{latest.get('report_id')} is older than local activity",
+                "suggested_next_command": "brigade center report build",
+            }
+        )
     latest_diff = latest_report_diff(target)
     if len(reports) >= 2:
         compare_report = reports[0]
@@ -1736,7 +2430,9 @@ def report_health(target: Path) -> dict[str, Any]:
                     "suggested_next_command": f"brigade center report diff {base_report.get('report_id')} {compare_report.get('report_id')} --record",
                 }
             )
-        elif latest_diff.get("base_report_id") != base_report.get("report_id") or latest_diff.get("compare_report_id") != compare_report.get("report_id"):
+        elif latest_diff.get("base_report_id") != base_report.get("report_id") or latest_diff.get(
+            "compare_report_id"
+        ) != compare_report.get("report_id"):
             checks.append(
                 {
                     "status": "warn",
@@ -1745,7 +2441,10 @@ def report_health(target: Path) -> dict[str, Any]:
                     "suggested_next_command": f"brigade center report diff {base_report.get('report_id')} {compare_report.get('report_id')} --record",
                 }
             )
-        elif int((latest_diff.get("summary") or {}).get("new_blocker_count") or 0) > 0 or int((latest_diff.get("summary") or {}).get("stale_reference_count") or 0) > 0:
+        elif (
+            int((latest_diff.get("summary") or {}).get("new_blocker_count") or 0) > 0
+            or int((latest_diff.get("summary") or {}).get("stale_reference_count") or 0) > 0
+        ):
             checks.append(
                 {
                     "status": "warn",
@@ -1769,7 +2468,13 @@ def report_plan(*, target: Path, json_output: bool = False) -> int:
         print(f"error: --target is not a directory: {target}", file=sys.stderr)
         return 2
     payload = _report_payload(target)
-    payload.update({"report_id": "planned", "report_root": str(_reports_root(target)), "bundle_files": ["OPERATOR_REPORT.md", "OPERATOR_REPORT.html", "CENTER_EVIDENCE.json"]})
+    payload.update(
+        {
+            "report_id": "planned",
+            "report_root": str(_reports_root(target)),
+            "bundle_files": ["OPERATOR_REPORT.md", "OPERATOR_REPORT.html", "CENTER_EVIDENCE.json"],
+        }
+    )
     if json_output:
         print(json.dumps(payload, indent=2, sort_keys=True))
         return 0
@@ -1815,14 +2520,23 @@ def report_list(*, target: Path, limit: int = 20, json_output: bool = False) -> 
         return 2
     target = target.expanduser().resolve()
     reports = _reports(target)[:limit]
-    payload = {"schema_version": SCHEMA_VERSION, "schema": _schema("center-report-list"), "target": str(target), "reports_root": str(_reports_root(target)), "reports": reports, "report_count": len(reports)}
+    payload = {
+        "schema_version": SCHEMA_VERSION,
+        "schema": _schema("center-report-list"),
+        "target": str(target),
+        "reports_root": str(_reports_root(target)),
+        "reports": reports,
+        "report_count": len(reports),
+    }
     if json_output:
         print(json.dumps(payload, indent=2, sort_keys=True))
         return 0
     print(f"operator reports: {target}")
     print(f"reports_root: {payload['reports_root']}")
     for item in reports:
-        print(f"- {item.get('report_id')} reviews={len(item.get('reviews') if isinstance(item.get('reviews'), list) else [])} {item.get('created_at')}")
+        print(
+            f"- {item.get('report_id')} reviews={len(item.get('reviews') if isinstance(item.get('reviews'), list) else [])} {item.get('created_at')}"
+        )
     return 0
 
 
@@ -1833,7 +2547,18 @@ def report_show(*, target: Path, report_id: str, json_output: bool = False) -> i
         print(f"error: {error}", file=sys.stderr)
         return 1
     if json_output:
-        print(json.dumps({"schema_version": SCHEMA_VERSION, "schema": _schema("center-report-show"), "target": str(target), "report": report}, indent=2, sort_keys=True))
+        print(
+            json.dumps(
+                {
+                    "schema_version": SCHEMA_VERSION,
+                    "schema": _schema("center-report-show"),
+                    "target": str(target),
+                    "report": report,
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
         return 0
     print(f"operator report: {report.get('report_id')}")
     print(f"path: {report.get('path')}")
@@ -1857,7 +2582,13 @@ def report_archive(*, target: Path, report_id: str, json_output: bool = False) -
     if not moved:
         print(f"error: archived operator report already exists: {destination}", file=sys.stderr)
         return 2
-    payload = {"schema_version": SCHEMA_VERSION, "target": str(target), "report_id": report.get("report_id"), "status": "archived", "archive_path": str(destination)}
+    payload = {
+        "schema_version": SCHEMA_VERSION,
+        "target": str(target),
+        "report_id": report.get("report_id"),
+        "status": "archived",
+        "archive_path": str(destination),
+    }
     if json_output:
         print(json.dumps(payload, indent=2, sort_keys=True))
         return 0
@@ -1890,7 +2621,9 @@ def report_review(*, target: Path, report_id: str = "latest", json_output: bool 
     for group, items in plan["groups"].items():
         print(f"{group}: {len(items)}")
         for item in items[:10]:
-            print(f"- {item.get('subsystem')} {item.get('local_id') or item.get('id')} [{item.get('status')}] {item.get('safe_summary')}")
+            print(
+                f"- {item.get('subsystem')} {item.get('local_id') or item.get('id')} [{item.get('status')}] {item.get('safe_summary')}"
+            )
             if item.get("suggested_next_command"):
                 print(f"  next: {item.get('suggested_next_command')}")
     return 0
@@ -1899,7 +2632,12 @@ def report_review(*, target: Path, report_id: str = "latest", json_output: bool 
 def _receipt_newer_than_report(receipt: dict[str, Any] | None, report_created: datetime | None) -> bool:
     if receipt is None or report_created is None:
         return False
-    stamp = work_cmd._parse_iso_datetime(receipt.get("completed_at") or receipt.get("created_at") or receipt.get("started_at") or receipt.get("generated_at"))
+    stamp = work_cmd._parse_iso_datetime(
+        receipt.get("completed_at")
+        or receipt.get("created_at")
+        or receipt.get("started_at")
+        or receipt.get("generated_at")
+    )
     return bool(stamp and stamp > report_created)
 
 
@@ -2034,7 +2772,9 @@ def report_diff(
         created = _now()
         diff_id = f"{created.strftime('%Y%m%d-%H%M%S')}-report-diff-{uuid4().hex[:6]}"
         diff_dir = _report_diffs_root(target) / diff_id
-    payload = _report_diff_payload(target=target, base_report=base_report, compare_report=compare_report, diff_id=diff_id, path=diff_dir)
+    payload = _report_diff_payload(
+        target=target, base_report=base_report, compare_report=compare_report, diff_id=diff_id, path=diff_dir
+    )
     payload["write_required"] = bool(record)
     if record and diff_dir is not None:
         _write_json(diff_dir / "diff.json", payload)
@@ -2065,17 +2805,35 @@ def report_compare(*, target: Path, report_id: str = "latest", json_output: bool
     current_head = _git_value(target, "rev-parse", "HEAD")
     report_git = report.get("git") if isinstance(report.get("git"), dict) else {}
     if report_git.get("head") and current_head and report_git.get("head") != current_head:
-        issues.append({"status": "warn", "name": "operator_report_head_changed", "detail": "current HEAD differs from report HEAD"})
+        issues.append(
+            {
+                "status": "warn",
+                "name": "operator_report_head_changed",
+                "detail": "current HEAD differs from report HEAD",
+            }
+        )
     for ref in report.get("receipt_references") if isinstance(report.get("receipt_references"), list) else []:
         if isinstance(ref, str) and ref and not _receipt_reference_exists(target, ref):
-            issues.append({"status": "warn", "name": "operator_report_missing_receipt", "detail": f"missing receipt reference: {_path_label(target, ref)}"})
+            issues.append(
+                {
+                    "status": "warn",
+                    "name": "operator_report_missing_receipt",
+                    "detail": f"missing receipt reference: {_path_label(target, ref)}",
+                }
+            )
             break
     current_activity = _activity(target)
     report_activity = report.get("activity") if isinstance(report.get("activity"), list) else []
     current_activity_time = _parse_time(current_activity[0].get("updated_at")) if current_activity else None
     report_activity_time = _parse_time(report_activity[0].get("updated_at")) if report_activity else report_created
-    if current_activity_time is not None and report_activity_time is not None and current_activity_time > report_activity_time:
-        issues.append({"status": "warn", "name": "operator_report_newer_activity", "detail": "newer center activity exists"})
+    if (
+        current_activity_time is not None
+        and report_activity_time is not None
+        and current_activity_time > report_activity_time
+    ):
+        issues.append(
+            {"status": "warn", "name": "operator_report_newer_activity", "detail": "newer center activity exists"}
+        )
     latest_release = release_cmd._latest_release_receipt(target)
     latest_candidate = release_cmd._latest_candidate(target)
     latest_verify = work_cmd._latest_verify_receipt(target)
@@ -2092,12 +2850,22 @@ def report_compare(*, target: Path, report_id: str = "latest", json_output: bool
     ):
         if _receipt_newer_than_report(receipt if isinstance(receipt, dict) else None, report_created):
             issues.append({"status": "warn", "name": name, "detail": str((receipt or {}).get(key))})
-    security_generated = work_cmd._parse_iso_datetime((latest_security or {}).get("generated_at") if isinstance(latest_security, dict) else None)
+    security_generated = work_cmd._parse_iso_datetime(
+        (latest_security or {}).get("generated_at") if isinstance(latest_security, dict) else None
+    )
     if report_created and security_generated and security_generated > report_created:
-        issues.append({"status": "warn", "name": "newer_security_report", "detail": str((latest_security or {}).get("path"))})
+        issues.append(
+            {"status": "warn", "name": "newer_security_report", "detail": str((latest_security or {}).get("path"))}
+        )
     current_reviews = _reviews(target)
     if _report_queue_changed(report, current_reviews):
-        issues.append({"status": "warn", "name": "operator_report_review_queue_changed", "detail": "current review queue differs from report"})
+        issues.append(
+            {
+                "status": "warn",
+                "name": "operator_report_review_queue_changed",
+                "detail": "current review queue differs from report",
+            }
+        )
     payload = {
         "schema_version": SCHEMA_VERSION,
         "schema": _schema("center-report-compare"),
@@ -2158,7 +2926,8 @@ def report_closeout(
         "reviewed_at": _now().isoformat(),
         "unresolved_item_count": plan["unresolved_item_count"],
         "deferred_item_ids": deferred,
-        "report_fingerprint": report.get("report_fingerprint") or _fingerprint_payload({"reviews": report.get("reviews"), "activity": report.get("activity")}),
+        "report_fingerprint": report.get("report_fingerprint")
+        or _fingerprint_payload({"reviews": report.get("reviews"), "activity": report.get("activity")}),
     }
     closeout_path = reportstore.write_closeout(report_path, payload)
     report["closeout"] = payload
@@ -2198,7 +2967,10 @@ def _action_priority_rank(action: dict[str, Any]) -> tuple[int, int]:
 def _planned_actions(report: dict[str, Any]) -> list[dict[str, Any]]:
     plan = _action_plan(report)
     report_id = str(report.get("report_id") or "planned")
-    report_fingerprint = str(report.get("report_fingerprint") or _fingerprint_payload({"reviews": report.get("reviews"), "activity": report.get("activity")}))
+    report_fingerprint = str(
+        report.get("report_fingerprint")
+        or _fingerprint_payload({"reviews": report.get("reviews"), "activity": report.get("activity")})
+    )
     reviewed_at = _report_reviewed_at(report)
     created = _now().isoformat()
     actions: list[dict[str, Any]] = []
@@ -2241,7 +3013,13 @@ def _planned_actions(report: dict[str, Any]) -> list[dict[str, Any]]:
                     "source_fingerprint": source_fingerprint,
                 }
             )
-    actions.sort(key=lambda action: (_action_priority_rank(action), str(action.get("source_group") or ""), str(action.get("source_local_id") or "")))
+    actions.sort(
+        key=lambda action: (
+            _action_priority_rank(action),
+            str(action.get("source_group") or ""),
+            str(action.get("source_local_id") or ""),
+        )
+    )
     return actions
 
 
@@ -2484,13 +3262,17 @@ def actions_plan(*, target: Path, report_id: str = "latest", json_output: bool =
     print(f"report_status: {payload['report_review_status'] or 'unreviewed'}")
     print("run: brigade center actions build latest")
     for action in actions[:20]:
-        print(f"- {action['action_id']} {action['source_group']} {action['source_local_id']} [{action['status']}] {action['safe_summary']}")
+        print(
+            f"- {action['action_id']} {action['source_group']} {action['source_local_id']} [{action['status']}] {action['safe_summary']}"
+        )
         if action.get("suggested_command"):
             print(f"  next: {action['suggested_command']}")
     return 0
 
 
-def actions_build(*, target: Path, report_id: str = "latest", allow_unreviewed: bool = False, json_output: bool = False) -> int:
+def actions_build(
+    *, target: Path, report_id: str = "latest", allow_unreviewed: bool = False, json_output: bool = False
+) -> int:
     target = target.expanduser().resolve()
     report, error = _resolve_report(target, report_id)
     if report is None:
@@ -2498,7 +3280,10 @@ def actions_build(*, target: Path, report_id: str = "latest", allow_unreviewed: 
         return 1 if error and "not found" in error else 2
     review_status = _report_review_status(report)
     if review_status not in {"reviewed", "deferred"} and not allow_unreviewed:
-        print("error: source report must be closed out as reviewed or deferred, or pass --allow-unreviewed", file=sys.stderr)
+        print(
+            "error: source report must be closed out as reviewed or deferred, or pass --allow-unreviewed",
+            file=sys.stderr,
+        )
         return 2
     planned = _planned_actions(report)
     existing = _read_actions(target)
@@ -2549,7 +3334,9 @@ def actions_list(*, target: Path, json_output: bool = False, limit: int = 50) ->
     print(f"center actions: {target}")
     print(f"actions_path: {_actions_path(target)}")
     for action in actions[:limit]:
-        print(f"- {action.get('action_id')} [{action.get('status')}] {action.get('source_group')} {action.get('source_local_id')}: {action.get('safe_summary')}")
+        print(
+            f"- {action.get('action_id')} [{action.get('status')}] {action.get('source_group')} {action.get('source_local_id')}: {action.get('safe_summary')}"
+        )
         if action.get("suggested_command"):
             print(f"  next: {action.get('suggested_command')}")
     return 0
@@ -2623,7 +3410,9 @@ def actions_defer(*, target: Path, action_id: str, reason: str, json_output: boo
     if not reason:
         print("error: --reason is required", file=sys.stderr)
         return 2
-    return _set_action_status(target=target, action_id=action_id, status="deferred", reason=reason, json_output=json_output)
+    return _set_action_status(
+        target=target, action_id=action_id, status="deferred", reason=reason, json_output=json_output
+    )
 
 
 def actions_archive_completed(*, target: Path, json_output: bool = False) -> int:

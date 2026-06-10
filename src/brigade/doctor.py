@@ -1,30 +1,28 @@
 """`brigade doctor` - verify a target workspace is wired correctly."""
+
 from __future__ import annotations
 
 import json
 import os
 import re
 import shutil
-import subprocess
-import sys
 from datetime import date, datetime
 from pathlib import Path
-from typing import Callable, List, Tuple
-
-CheckResult = Tuple[str, str, str]  # (status, name, detail)
-OK = "OK"
-WARN = "WARN"
-FAIL = "FAIL"
-MANUAL = "MANUAL"
+from typing import List, Tuple
 
 from .budgets import (
     BOOTSTRAP_BUDGETS,
     MEMORY_CARD_BUDGET_BYTES,
     MEMORY_CARE_SCAN_STALE_DAYS,
 )
-
 from .selection import WRITER_INBOXES
 from .station import DoctorContext
+
+CheckResult = Tuple[str, str, str]  # (status, name, detail)
+OK = "OK"
+WARN = "WARN"
+FAIL = "FAIL"
+MANUAL = "MANUAL"
 
 
 def build_context(target: Path, harness: str = "generic") -> DoctorContext:
@@ -116,7 +114,9 @@ def security_station_checks(ctx: DoctorContext) -> List[CheckResult]:
             results.append((OK, "security: config", f"{config} (policy={loaded.policy if loaded else 'personal'})"))
             enrichment = security_cmd.enrichment_health(ctx.target)
             if enrichment.get("configured"):
-                results.append((OK, "security: enrichment", f"{enrichment.get('provider')} ({enrichment.get('status')})"))
+                results.append(
+                    (OK, "security: enrichment", f"{enrichment.get('provider')} ({enrichment.get('status')})")
+                )
             else:
                 results.append((WARN, "security: enrichment", str(enrichment.get("status"))))
     else:
@@ -133,20 +133,21 @@ def security_station_checks(ctx: DoctorContext) -> List[CheckResult]:
             missing_reasons = suppression_health["missing_reasons"]
             if stale:
                 preview = ", ".join(stale[:5])
-                results.append((WARN, "security: stale suppressions", f"{len(stale)} no longer match current findings: {preview}"))
+                results.append(
+                    (WARN, "security: stale suppressions", f"{len(stale)} no longer match current findings: {preview}")
+                )
             if missing_reasons:
                 preview = ", ".join(missing_reasons[:5])
-                results.append((WARN, "security: suppression reasons", f"{len(missing_reasons)} missing reason: {preview}"))
+                results.append(
+                    (WARN, "security: suppression reasons", f"{len(missing_reasons)} missing reason: {preview}")
+                )
             if not stale and not missing_reasons:
                 results.append((OK, "security: suppressions", f"{suppression_count} configured"))
 
     artifacts_dir = security_cmd.default_artifacts_dir(ctx.target)
     bundle = security_cmd.inspect_evidence_bundle(artifacts_dir)
     if bundle.get("ready"):
-        detail = (
-            f"{artifacts_dir} "
-            f"(generated_at={bundle.get('generated_at')}, findings={bundle.get('finding_count')})"
-        )
+        detail = f"{artifacts_dir} (generated_at={bundle.get('generated_at')}, findings={bundle.get('finding_count')})"
         results.append((OK, "security: evidence bundle", detail))
     else:
         results.append(
@@ -171,14 +172,9 @@ def run(target: Path, harness: str = "generic") -> int:
     print(f"brigade doctor: target {ctx.target}")
     if ctx.selection is not None:
         sel = ctx.selection
-        print(
-            f"  harnesses: {', '.join(sel.harnesses) or '(none)'} "
-            f"(owner={sel.owner}, depth={sel.depth})"
-        )
+        print(f"  harnesses: {', '.join(sel.harnesses) or '(none)'} (owner={sel.owner}, depth={sel.depth})")
     else:
-        print(
-            f"  harnesses: (legacy target, no config; assuming {', '.join(ctx.harnesses)})"
-        )
+        print(f"  harnesses: (legacy target, no config; assuming {', '.join(ctx.harnesses)})")
 
     checks: List[CheckResult] = []
     missing_tools: List[Tuple[str, str]] = []
@@ -260,9 +256,7 @@ def _check_bootstrap_budgets(target: Path) -> List[CheckResult]:
     return results
 
 
-def _check_handoff_inboxes(
-    target: Path, sel, selected_harnesses: List[str]
-) -> List[CheckResult]:
+def _check_handoff_inboxes(target: Path, sel, selected_harnesses: List[str]) -> List[CheckResult]:
     results: List[CheckResult] = []
     writers = selected_harnesses
     for h in writers:
@@ -278,16 +272,12 @@ def _check_handoff_inboxes(
         if tmpl.is_file():
             results.append((OK, f"handoff: {h} TEMPLATE.md", str(tmpl)))
         else:
-            results.append(
-                (WARN, f"handoff: {h} TEMPLATE.md", f"missing at {tmpl}")
-            )
+            results.append((WARN, f"handoff: {h} TEMPLATE.md", f"missing at {tmpl}"))
         processed = inbox / "processed"
         if processed.is_dir():
             results.append((OK, f"handoff: {h} processed/", str(processed)))
         else:
-            results.append(
-                (WARN, f"handoff: {h} processed/", f"missing at {processed}")
-            )
+            results.append((WARN, f"handoff: {h} processed/", f"missing at {processed}"))
     cards = target / "memory" / "cards"
     if cards.is_dir():
         card_count = len([path for path in cards.rglob("*.md") if path.is_file()])
@@ -339,7 +329,13 @@ def _check_memory_index(target: Path) -> List[CheckResult]:
         preview = ", ".join(missing[:5])
         if len(missing) > 5:
             preview += f", ... {len(missing) - 5} more"
-        return [(FAIL, "memory-index: card links", f"{len(missing)} broken link{'s' if len(missing) != 1 else ''}: {preview}")]
+        return [
+            (
+                FAIL,
+                "memory-index: card links",
+                f"{len(missing)} broken link{'s' if len(missing) != 1 else ''}: {preview}",
+            )
+        ]
     return [(OK, "memory-index: card links", f"{len(linked_cards)} verified")]
 
 
@@ -369,7 +365,9 @@ def _check_memory_cards(target: Path) -> List[CheckResult]:
         preview = ", ".join(empty[:5])
         if len(empty) > 5:
             preview += f", ... {len(empty) - 5} more"
-        results.append((WARN, "memory-card: empty", f"{len(empty)} empty card{'s' if len(empty) != 1 else ''}: {preview}"))
+        results.append(
+            (WARN, "memory-card: empty", f"{len(empty)} empty card{'s' if len(empty) != 1 else ''}: {preview}")
+        )
 
     if oversized:
         preview = ", ".join(oversized[:5])
@@ -384,13 +382,13 @@ def _check_memory_cards(target: Path) -> List[CheckResult]:
         )
     else:
         count = len([path for path in cards.rglob("*.md") if path.is_file()])
-        results.append((OK, "memory-card: budget", f"{count} card{'s' if count != 1 else ''} <= {MEMORY_CARD_BUDGET_BYTES} bytes"))
+        results.append(
+            (OK, "memory-card: budget", f"{count} card{'s' if count != 1 else ''} <= {MEMORY_CARD_BUDGET_BYTES} bytes")
+        )
     return results
 
 
-def _check_orphan_inboxes(
-    target: Path, selected_harnesses: List[str]
-) -> List[CheckResult]:
+def _check_orphan_inboxes(target: Path, selected_harnesses: List[str]) -> List[CheckResult]:
     results: List[CheckResult] = []
     for h, rel in WRITER_INBOXES.items():
         if h in selected_harnesses:
@@ -401,8 +399,7 @@ def _check_orphan_inboxes(
                 (
                     WARN,
                     f"orphan: {h} inbox",
-                    f"{inbox} exists but {h} is not in config; "
-                    f"remove or add to config (unselected harness)",
+                    f"{inbox} exists but {h} is not in config; remove or add to config (unselected harness)",
                 )
             )
     return results
@@ -550,9 +547,7 @@ def _check_openclaw() -> List[CheckResult]:
     else:
         results.append((WARN, "openclaw: plugins", "no plugin entries configured"))
 
-    primary = (
-        data.get("agents", {}).get("defaults", {}).get("model", {}).get("primary")
-    )
+    primary = data.get("agents", {}).get("defaults", {}).get("model", {}).get("primary")
     if primary:
         results.append((OK, "openclaw: primary model", primary))
     else:
@@ -649,7 +644,11 @@ def _check_hermes(target: Path) -> List[CheckResult]:
     else:
         results.append((WARN, "hermes: handoff inbox ignored", f"gitignore status: {gitignored}"))
     results.append(
-        (MANUAL, "hermes: runtime validation", "Hermes adapter runtime validation is experimental; validate against your live Hermes install")
+        (
+            MANUAL,
+            "hermes: runtime validation",
+            "Hermes adapter runtime validation is experimental; validate against your live Hermes install",
+        )
     )
     return results
 

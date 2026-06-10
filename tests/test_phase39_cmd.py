@@ -47,7 +47,9 @@ def _build_reviewed_report(path: Path, capsys):
     _seed_imports(path)
     assert center_cmd.report_build(target=path, json_output=True) == 0
     report = json.loads(capsys.readouterr().out)
-    assert center_cmd.report_closeout(target=path, report_id=report["report_id"], status="reviewed", json_output=True) == 0
+    assert (
+        center_cmd.report_closeout(target=path, report_id=report["report_id"], status="reviewed", json_output=True) == 0
+    )
     capsys.readouterr()
     return report
 
@@ -103,7 +105,14 @@ def _patch_release_health(monkeypatch):
     monkeypatch.setattr(
         handoff_cmd,
         "draft_queue_payload",
-        lambda target, **kwargs: {"counts": {"pending": 0}, "issue_count": 0, "top_issue": None, "latest_ingest_run": None, "drafts": [], "checks": []},
+        lambda target, **kwargs: {
+            "counts": {"pending": 0},
+            "issue_count": 0,
+            "top_issue": None,
+            "latest_ingest_run": None,
+            "drafts": [],
+            "checks": [],
+        },
     )
     monkeypatch.setattr(
         work_cmd,
@@ -120,9 +129,23 @@ def _patch_release_health(monkeypatch):
     monkeypatch.setattr(
         work_cmd,
         "_review_health",
-        lambda target: {"latest_run": None, "latest_success": None, "latest_unclosed_run": None, "unresolved_finding_count": 0, "pending_finding_count": 0, "top_pending_finding": None, "top_unresolved_finding": None, "checks": [], "config_path": None},
+        lambda target: {
+            "latest_run": None,
+            "latest_success": None,
+            "latest_unclosed_run": None,
+            "unresolved_finding_count": 0,
+            "pending_finding_count": 0,
+            "top_pending_finding": None,
+            "top_unresolved_finding": None,
+            "checks": [],
+            "config_path": None,
+        },
     )
-    monkeypatch.setattr(release_cmd, "_run_content_guard_check", lambda *args, **kwargs: {"name": "content_guard_tip", "status": "ok", "detail": "clean"})
+    monkeypatch.setattr(
+        release_cmd,
+        "_run_content_guard_check",
+        lambda *args, **kwargs: {"name": "content_guard_tip", "status": "ok", "detail": "clean"},
+    )
     monkeypatch.setattr(release_cmd, "_content_guard_available", lambda target: True)
 
 
@@ -135,7 +158,9 @@ def test_center_actions_plan_build_list_show_and_cli(tmp_path, capsys):
     assert plan["action_count"] >= 2
     import_actions = [action for action in plan["actions"] if action["source_subsystem"] == "work-import"]
     assert {action["source_local_id"] for action in import_actions} == {"import-high", "import-normal"}
-    assert [action for action in import_actions if action["source_local_id"] == "import-high"][0]["source_group"] == "urgent_blockers"
+    assert [action for action in import_actions if action["source_local_id"] == "import-high"][0][
+        "source_group"
+    ] == "urgent_blockers"
 
     assert center_cmd.actions_build(target=tmp_path, report_id=report["report_id"], json_output=True) == 0
     build = json.loads(capsys.readouterr().out)
@@ -159,14 +184,38 @@ def test_center_actions_require_reviewed_report_unless_allowed_and_dedupe(tmp_pa
 
     assert center_cmd.actions_build(target=tmp_path, report_id=report["report_id"], json_output=True) == 2
     capsys.readouterr()
-    assert center_cmd.actions_build(target=tmp_path, report_id=report["report_id"], allow_unreviewed=True, json_output=True) == 0
+    assert (
+        center_cmd.actions_build(
+            target=tmp_path, report_id=report["report_id"], allow_unreviewed=True, json_output=True
+        )
+        == 0
+    )
     first = json.loads(capsys.readouterr().out)
     assert first["created_count"] >= 2
-    assert center_cmd.actions_build(target=tmp_path, report_id=report["report_id"], allow_unreviewed=True, json_output=True) == 0
+    assert (
+        center_cmd.actions_build(
+            target=tmp_path, report_id=report["report_id"], allow_unreviewed=True, json_output=True
+        )
+        == 0
+    )
     second = json.loads(capsys.readouterr().out)
     assert second["created_count"] == 0
     assert second["skipped_count"] == first["created_count"]
-    assert cli.main(["center", "actions", "build", report["report_id"], "--target", str(tmp_path), "--allow-unreviewed", "--json"]) == 0
+    assert (
+        cli.main(
+            [
+                "center",
+                "actions",
+                "build",
+                report["report_id"],
+                "--target",
+                str(tmp_path),
+                "--allow-unreviewed",
+                "--json",
+            ]
+        )
+        == 0
+    )
     assert json.loads(capsys.readouterr().out)["created_count"] == 0
 
 
@@ -297,7 +346,9 @@ def test_center_actions_aging_policy_doctor_archive_and_imports(tmp_path, capsys
     assert center_cmd.actions_archive_completed(target=tmp_path, json_output=True) == 0
     assert json.loads(capsys.readouterr().out)["archived_count"] == 1
     health_after_archive = center_cmd.actions_health(tmp_path)
-    assert "center_action_completed_unarchived" not in {issue["name"] for issue in health_after_archive["policy_issues"]}
+    assert "center_action_completed_unarchived" not in {
+        issue["name"] for issue in health_after_archive["policy_issues"]
+    }
 
 
 def test_center_actions_integrate_with_center_work_and_release(tmp_path, monkeypatch, capsys):

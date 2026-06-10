@@ -1,4 +1,5 @@
 """Tests for brigade scrub policy resolution."""
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -60,12 +61,14 @@ def test_hook_status_detects_configured_global_pre_push(tmp_path: Path, monkeypa
     def fake_run(argv, **kwargs):
         calls.append(argv)
         if argv[:3] == ["git", "-C", str(target)] and argv[-1] == "core.hooksPath":
+
             class Result:
                 returncode = 0
                 stdout = str(hooks)
 
             return Result()
         if argv[:3] == ["git", "-C", str(target)] and argv[-1] == "--git-dir":
+
             class Result:
                 returncode = 0
                 stdout = ".git"
@@ -140,21 +143,27 @@ def _fake_git_run(target, *, global_hooks, local_hooks_path=None):
     def fake_run(argv, **kwargs):
         if argv[:3] == ["git", "-C", str(target)] and argv[-1] == "core.hooksPath":
             if "--local" in argv:
+
                 class Result:
                     returncode = 0 if local_hooks_path else 1
                     stdout = local_hooks_path or ""
+
                 return Result()
 
             class Result:
                 returncode = 0
                 stdout = str(global_hooks)
+
             return Result()
         if argv[:3] == ["git", "-C", str(target)] and argv[-1] == "--git-dir":
+
             class Result:
                 returncode = 0
                 stdout = ".git"
+
             return Result()
         raise AssertionError(argv)
+
     return fake_run
 
 

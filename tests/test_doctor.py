@@ -1,11 +1,11 @@
 """Tests for brigade doctor."""
+
 from __future__ import annotations
 
 from datetime import date
 from pathlib import Path
 import json
 
-import pytest
 
 from brigade import doctor as doctor_mod
 from brigade.install import install_selection
@@ -200,7 +200,10 @@ def test_doctor_hermes_flags_experimental(tmp_target: Path, capsys):
     assert "hermes: processed handoff inbox" in out
     assert ".hermes/memory-handoffs" in out
     assert ".claude/memory-handoffs" not in (tmp_target / ".brigade" / "hermes" / "workspace.harness.json").read_text()
-    assert ".claude/memory-handoffs" not in (tmp_target / ".brigade" / "hermes" / "memory-handoff.harness.json").read_text()
+    assert (
+        ".claude/memory-handoffs"
+        not in (tmp_target / ".brigade" / "hermes" / "memory-handoff.harness.json").read_text()
+    )
     assert "hermes: runtime validation" in out
     assert rc == 0
 
@@ -213,9 +216,7 @@ def test_doctor_reports_memory_care_files(tmp_target: Path, monkeypatch, capsys)
     )
     decay = tmp_target / "memory" / "cards" / "decay"
     decay.mkdir(exist_ok=True)
-    (decay / "scan-latest.json").write_text(
-        json.dumps({"scan_date": "2026-05-13", "counts": {"stale": 2}})
-    )
+    (decay / "scan-latest.json").write_text(json.dumps({"scan_date": "2026-05-13", "counts": {"stale": 2}}))
     (decay / "refresh-queue.json").write_text(json.dumps({"cards": [{"file": "x.md"}]}))
 
     rc = doctor_mod.run(target=tmp_target, harness="generic")
@@ -237,9 +238,7 @@ def test_doctor_warns_when_memory_care_scan_is_stale(tmp_target: Path, monkeypat
     )
     decay = tmp_target / "memory" / "cards" / "decay"
     decay.mkdir(exist_ok=True)
-    (decay / "scan-latest.json").write_text(
-        json.dumps({"scan_date": "2026-05-01", "counts": {"stale": 4}})
-    )
+    (decay / "scan-latest.json").write_text(json.dumps({"scan_date": "2026-05-01", "counts": {"stale": 4}}))
     (decay / "refresh-queue.json").write_text(json.dumps({"cards": []}))
 
     rc = doctor_mod.run(target=tmp_target, harness="generic")
@@ -479,6 +478,7 @@ def test_doctor_includes_installed_managed_tool(monkeypatch, tmp_target, capsys)
     from brigade.install import install_selection
     from brigade.selection import Selection
     from brigade import managed
+
     install_selection(tmp_target, Selection(depth="workspace", harnesses=["claude"], owner="claude", includes=[]))
 
     # Pretend content-guard is installed and healthy.
@@ -494,6 +494,7 @@ def test_doctor_reports_absent_tool_as_manual(monkeypatch, tmp_target, capsys):
     from brigade.install import install_selection
     from brigade.selection import Selection
     from brigade import managed
+
     install_selection(tmp_target, Selection(depth="workspace", harnesses=["claude"], owner="claude", includes=[]))
     monkeypatch.setattr(managed.proc, "which", lambda c: None)  # nothing installed
 
@@ -549,6 +550,6 @@ def test_doctor_collapses_missing_managed_tools_to_one_line(tmp_path, capsys, mo
     capsys.readouterr()
     doctor_mod.run(tmp_path, harness="generic")
     out = capsys.readouterr().out
-    manual_lines = [l for l in out.splitlines() if "not installed; run `brigade add" in l]
+    manual_lines = [line for line in out.splitlines() if "not installed; run `brigade add" in line]
     assert len(manual_lines) <= 1, manual_lines
     assert "managed tools not installed" in out

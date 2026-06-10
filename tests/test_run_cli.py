@@ -110,7 +110,9 @@ role = "code"
     monkeypatch.setattr(
         aboyeur,
         "run",
-        lambda task, loaded_roster, dry_run=False, show_plan=False, verbose=False, cwd=None, output_dir=None, handoff_inbox=None, read_only=False: 0,
+        lambda task, loaded_roster, dry_run=False, show_plan=False, verbose=False, cwd=None, output_dir=None, handoff_inbox=None, read_only=False: (
+            0
+        ),
     )
     assert cli.main(["run", json.dumps({"task": "x"}), "--dry-run"]) == 0
 

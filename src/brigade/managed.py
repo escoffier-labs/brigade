@@ -4,14 +4,14 @@ Each tool attaches to a station. The core never imports these tools; it shells
 out via brigade.proc. Absent tools are reported as MANUAL (a hint to install),
 never as a hard failure.
 """
+
 from __future__ import annotations
 
 import json
 import os
 import urllib.error
 import urllib.request
-from dataclasses import dataclass, field
-from pathlib import Path
+from dataclasses import dataclass
 from typing import Callable, List, Optional, Tuple
 
 from . import proc
@@ -21,19 +21,20 @@ from .station import CheckResult, DoctorContext
 
 @dataclass(frozen=True)
 class ManagedTool:
-    name: str            # e.g. "memory-doctor"
-    station: str         # "memory" | "guard" | "tokens"
-    command: str         # the binary name to detect on PATH
+    name: str  # e.g. "memory-doctor"
+    station: str  # "memory" | "guard" | "tokens"
+    command: str  # the binary name to detect on PATH
     summary: str
-    install_args: List[str]                      # argv to install (pipx/npm/pip)
-    wire: Callable[[DoctorContext], List[CheckResult]]   # lay config; returns notes
-    doctor: Callable[[DoctorContext], List[CheckResult]] # health via proc
+    install_args: List[str]  # argv to install (pipx/npm/pip)
+    wire: Callable[[DoctorContext], List[CheckResult]]  # lay config; returns notes
+    doctor: Callable[[DoctorContext], List[CheckResult]]  # health via proc
 
     def detect(self) -> bool:
         return proc.which(self.command) is not None
 
 
 # ---- adapters -------------------------------------------------------------
+
 
 def _noop_wire(ctx: DoctorContext) -> List[CheckResult]:
     return []
@@ -126,7 +127,13 @@ def _code_search_api_doctor(ctx: DoctorContext) -> List[CheckResult]:
 
 
 def _code_search_mcp_doctor(ctx: DoctorContext) -> List[CheckResult]:
-    return [(OK, "code-search-mcp (MCP bridge)", "installed; configure MCP clients with CODE_SEARCH_API_URL and optional CODE_SEARCH_API_KEY")]
+    return [
+        (
+            OK,
+            "code-search-mcp (MCP bridge)",
+            "installed; configure MCP clients with CODE_SEARCH_API_URL and optional CODE_SEARCH_API_KEY",
+        )
+    ]
 
 
 # agentpantry keeps the agent's machine authenticated by syncing browser sessions
@@ -274,70 +281,103 @@ def _tokenjuice_wire(ctx: DoctorContext) -> List[CheckResult]:
 
 _TOOLS: Tuple[ManagedTool, ...] = (
     ManagedTool(
-        name="memory-doctor", station="memory", command="memory-doctor",
+        name="memory-doctor",
+        station="memory",
+        command="memory-doctor",
         summary="memory index health, dead-link lint, handoff counts",
         install_args=["pipx", "install", "git+https://github.com/escoffier-labs/memory-doctor"],
-        wire=_noop_wire, doctor=_memory_doctor_doctor,
+        wire=_noop_wire,
+        doctor=_memory_doctor_doctor,
     ),
     ManagedTool(
-        name="bootstrap-doctor", station="memory", command="bootstrap-doctor",
+        name="bootstrap-doctor",
+        station="memory",
+        command="bootstrap-doctor",
         summary="bootstrap-file size/limit audit",
         install_args=["pipx", "install", "git+https://github.com/escoffier-labs/bootstrap-doctor"],
-        wire=_noop_wire, doctor=_bootstrap_doctor_doctor,
+        wire=_noop_wire,
+        doctor=_bootstrap_doctor_doctor,
     ),
     ManagedTool(
-        name="content-guard", station="guard", command="content-guard",
+        name="content-guard",
+        station="guard",
+        command="content-guard",
         summary="policy-driven content scanning",
         install_args=["pipx", "install", "git+https://github.com/escoffier-labs/content-guard"],
-        wire=_content_guard_wire, doctor=_content_guard_doctor,
+        wire=_content_guard_wire,
+        doctor=_content_guard_doctor,
     ),
     ManagedTool(
-        name="tokenjuice", station="tokens", command="tokenjuice",
+        name="tokenjuice",
+        station="tokens",
+        command="tokenjuice",
         summary="output compaction via host hooks",
         install_args=["npm", "install", "-g", "tokenjuice"],
-        wire=_tokenjuice_wire, doctor=_tokenjuice_doctor,
+        wire=_tokenjuice_wire,
+        doctor=_tokenjuice_doctor,
     ),
     ManagedTool(
-        name="code-search-api", station="search", command="code-search-api",
+        name="code-search-api",
+        station="search",
+        command="code-search-api",
         summary="local semantic code search service with SQLite and Ollama embeddings",
         install_args=["pipx", "install", "git+https://github.com/escoffier-labs/code-search-api"],
-        wire=_noop_wire, doctor=_code_search_api_doctor,
+        wire=_noop_wire,
+        doctor=_code_search_api_doctor,
     ),
     ManagedTool(
-        name="code-search-mcp", station="search", command="code-search-mcp",
+        name="code-search-mcp",
+        station="search",
+        command="code-search-mcp",
         summary="read-only MCP bridge for a running code-search-api service",
         install_args=["npm", "install", "-g", "@solomonneas/code-search-mcp"],
-        wire=_noop_wire, doctor=_code_search_mcp_doctor,
+        wire=_noop_wire,
+        doctor=_code_search_mcp_doctor,
     ),
     ManagedTool(
-        name="agentpantry", station="pantry", command="agentpantry",
+        name="agentpantry",
+        station="pantry",
+        command="agentpantry",
         summary="browser session auth sync (source -> sink)",
         install_args=["go", "install", "github.com/escoffier-labs/agentpantry/cmd/agentpantry@latest"],
-        wire=_noop_wire, doctor=_agentpantry_doctor,
+        wire=_noop_wire,
+        doctor=_agentpantry_doctor,
     ),
     ManagedTool(
-        name="agent-notify", station="notifications", command="agent-notify",
+        name="agent-notify",
+        station="notifications",
+        command="agent-notify",
         summary="private operator notifications for agent events",
         install_args=["go", "install", "github.com/escoffier-labs/agent-notify/cmd/agent-notify@latest"],
-        wire=_agent_notify_wire, doctor=_agent_notify_doctor,
+        wire=_agent_notify_wire,
+        doctor=_agent_notify_doctor,
     ),
     ManagedTool(
-        name="miseledger", station="evidence", command="miseledger",
+        name="miseledger",
+        station="evidence",
+        command="miseledger",
         summary="local-first evidence ledger: imports adapter JSONL, FTS search, evidence bundles",
         install_args=["go", "install", "github.com/escoffier-labs/miseledger/cmd/miseledger@latest"],
-        wire=_noop_wire, doctor=_miseledger_doctor,
+        wire=_noop_wire,
+        doctor=_miseledger_doctor,
     ),
     ManagedTool(
-        name="stationtrail", station="evidence", command="stationtrail",
+        name="stationtrail",
+        station="evidence",
+        command="stationtrail",
         summary="agent-session log exporter to miseledger.adapter.v1 JSONL",
         install_args=["go", "install", "github.com/escoffier-labs/stationtrail/cmd/stationtrail@latest"],
-        wire=_noop_wire, doctor=_stationtrail_doctor,
+        wire=_noop_wire,
+        doctor=_stationtrail_doctor,
     ),
     ManagedTool(
-        name="sourceharvest", station="evidence", command="sourceharvest",
+        name="sourceharvest",
+        station="evidence",
+        command="sourceharvest",
         summary="source-system record exporter to miseledger.adapter.v1 JSONL",
         install_args=["go", "install", "github.com/escoffier-labs/sourceharvest/cmd/sourceharvest@latest"],
-        wire=_noop_wire, doctor=_sourceharvest_doctor,
+        wire=_noop_wire,
+        doctor=_sourceharvest_doctor,
     ),
 )
 

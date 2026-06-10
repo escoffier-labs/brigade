@@ -3,6 +3,7 @@
 Each adapter reaches a model through the user's own authenticated CLI. Brigade
 does not store provider keys or import provider SDKs.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass

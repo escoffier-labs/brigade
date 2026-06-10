@@ -1,4 +1,5 @@
 """`brigade status` - show which stations are present and healthy."""
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -17,8 +18,5 @@ def run(target: Path) -> int:
         warn = sum(1 for s, _, _ in checks if s == _doctor.WARN)
         fail = sum(1 for s, _, _ in checks if s == _doctor.FAIL)
         health = "issues" if fail else ("ok" if ok else "empty")
-        print(
-            f"  {station.name.ljust(width)}  [{health}]  "
-            f"{ok} ok, {warn} warn, {fail} fail  - {station.summary}"
-        )
+        print(f"  {station.name.ljust(width)}  [{health}]  {ok} ok, {warn} warn, {fail} fail  - {station.summary}")
     return 0

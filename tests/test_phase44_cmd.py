@@ -53,27 +53,54 @@ def _seed_workspace(path: Path, repos: list[tuple[str, str, Path]]):
 def _seed_operator_report(repo: Path):
     _write_json(
         repo / ".brigade" / "center" / "reports" / "operator-one" / "CENTER_EVIDENCE.json",
-        {"report_id": "operator-one", "status": "ready", "created_at": "2026-05-30T01:00:00+00:00", "report_fingerprint": "fp-operator"},
+        {
+            "report_id": "operator-one",
+            "status": "ready",
+            "created_at": "2026-05-30T01:00:00+00:00",
+            "report_fingerprint": "fp-operator",
+        },
     )
 
 
 def _seed_release_ready(repo: Path, *, candidate: bool = True):
     _write_json(
         repo / ".brigade" / "work" / "verify-runs" / "verify-one" / "receipt.json",
-        {"run_id": "verify-one", "status": "completed", "started_at": "2026-05-30T01:10:00+00:00", "source_fingerprint": "fp-verify"},
+        {
+            "run_id": "verify-one",
+            "status": "completed",
+            "started_at": "2026-05-30T01:10:00+00:00",
+            "source_fingerprint": "fp-verify",
+        },
     )
     _write_json(
         repo / ".brigade" / "work" / "closeouts" / "closeout-one" / "closeout.json",
-        {"closeout_id": "closeout-one", "status": "ready", "created_at": "2026-05-30T01:20:00+00:00", "source_fingerprint": "fp-closeout"},
+        {
+            "closeout_id": "closeout-one",
+            "status": "ready",
+            "created_at": "2026-05-30T01:20:00+00:00",
+            "source_fingerprint": "fp-closeout",
+        },
     )
     _write_json(
         repo / ".brigade" / "release" / "runs" / "release-one" / "receipt.json",
-        {"run_id": "release-one", "status": "ready", "ready": True, "started_at": "2026-05-30T01:30:00+00:00", "source_fingerprint": "fp-release"},
+        {
+            "run_id": "release-one",
+            "status": "ready",
+            "ready": True,
+            "started_at": "2026-05-30T01:30:00+00:00",
+            "source_fingerprint": "fp-release",
+        },
     )
     if candidate:
         _write_json(
             repo / ".brigade" / "release" / "candidates" / "candidate-one" / "EVIDENCE.json",
-            {"candidate_id": "candidate-one", "status": "ready", "ready": True, "created_at": "2026-05-30T01:40:00+00:00", "source_fingerprint": "fp-candidate"},
+            {
+                "candidate_id": "candidate-one",
+                "status": "ready",
+                "ready": True,
+                "created_at": "2026-05-30T01:40:00+00:00",
+                "source_fingerprint": "fp-candidate",
+            },
         )
 
 
@@ -94,9 +121,20 @@ def _patch_quiet(monkeypatch):
     monkeypatch.setattr(
         handoff_cmd,
         "draft_queue_payload",
-        lambda target, **kwargs: {"counts": {"pending": 0}, "issue_count": 0, "top_issue": None, "latest_ingest_run": None, "drafts": [], "checks": []},
+        lambda target, **kwargs: {
+            "counts": {"pending": 0},
+            "issue_count": 0,
+            "top_issue": None,
+            "latest_ingest_run": None,
+            "drafts": [],
+            "checks": [],
+        },
     )
-    monkeypatch.setattr(release_cmd, "_run_content_guard_check", lambda *args, **kwargs: {"name": "content_guard_tip", "status": "ok", "detail": "clean"})
+    monkeypatch.setattr(
+        release_cmd,
+        "_run_content_guard_check",
+        lambda *args, **kwargs: {"name": "content_guard_tip", "status": "ok", "detail": "clean"},
+    )
     monkeypatch.setattr(release_cmd, "_content_guard_available", lambda target: True)
 
 
@@ -122,10 +160,17 @@ def test_release_train_actions_build_lifecycle_dedupe_archive_and_privacy(tmp_pa
 
     assert repos_cmd.release_actions_build(target=tmp_path, train_id=train["train_id"], json_output=True) == 2
     assert "closed out" in capsys.readouterr().err
-    assert repos_cmd.release_closeout(target=tmp_path, train_id=train["train_id"], status="reviewed", reason="reviewed", json_output=True) == 0
+    assert (
+        repos_cmd.release_closeout(
+            target=tmp_path, train_id=train["train_id"], status="reviewed", reason="reviewed", json_output=True
+        )
+        == 0
+    )
     capsys.readouterr()
 
-    assert cli.main(["repos", "release", "actions", "plan", train["train_id"], "--target", str(tmp_path), "--json"]) == 0
+    assert (
+        cli.main(["repos", "release", "actions", "plan", train["train_id"], "--target", str(tmp_path), "--json"]) == 0
+    )
     plan = json.loads(capsys.readouterr().out)
     assert plan["action_count"] == 1
     assert plan["actions"][0]["classification"] == "blocked"
@@ -161,30 +206,44 @@ def test_release_evidence_plan_record_list_show_and_health(tmp_path, monkeypatch
     assert plan["planned_count"] == 12
     assert {item["status"] for item in plan["planned"]} == {"missing"}
 
-    assert cli.main(
-        [
-            "repos",
-            "release",
-            "evidence",
-            "record",
-            train["train_id"],
-            "--repo",
-            "blocked",
-            "--step",
-            "candidate-compare",
-            "--status",
-            "blocked",
-            "--summary",
-            "candidate compare found a blocker",
-            "--target",
-            str(tmp_path),
-            "--json",
-        ]
-    ) == 0
+    assert (
+        cli.main(
+            [
+                "repos",
+                "release",
+                "evidence",
+                "record",
+                train["train_id"],
+                "--repo",
+                "blocked",
+                "--step",
+                "candidate-compare",
+                "--status",
+                "blocked",
+                "--summary",
+                "candidate compare found a blocker",
+                "--target",
+                str(tmp_path),
+                "--json",
+            ]
+        )
+        == 0
+    )
     recorded = json.loads(capsys.readouterr().out)
     evidence_id = recorded["record"]["evidence_id"]
     assert recorded["created"] is True
-    assert repos_cmd.release_evidence_record(target=tmp_path, train_id=train["train_id"], repo_id="blocked", step="candidate-compare", status="completed", summary="candidate compare completed", json_output=True) == 0
+    assert (
+        repos_cmd.release_evidence_record(
+            target=tmp_path,
+            train_id=train["train_id"],
+            repo_id="blocked",
+            step="candidate-compare",
+            status="completed",
+            summary="candidate compare completed",
+            json_output=True,
+        )
+        == 0
+    )
     updated = json.loads(capsys.readouterr().out)
     assert updated["updated"] is True
     assert updated["record"]["evidence_id"] == evidence_id
@@ -195,7 +254,18 @@ def test_release_evidence_plan_record_list_show_and_health(tmp_path, monkeypatch
     assert repos_cmd.release_evidence_show(target=tmp_path, evidence_id=evidence_id, json_output=True) == 0
     assert json.loads(capsys.readouterr().out)["record"]["status"] == "completed"
 
-    assert repos_cmd.release_evidence_record(target=tmp_path, train_id=train["train_id"], repo_id="blocked", step="release-doctor", status="blocked", summary="doctor blocked", json_output=True) == 0
+    assert (
+        repos_cmd.release_evidence_record(
+            target=tmp_path,
+            train_id=train["train_id"],
+            repo_id="blocked",
+            step="release-doctor",
+            status="blocked",
+            summary="doctor blocked",
+            json_output=True,
+        )
+        == 0
+    )
     capsys.readouterr()
     health = repos_cmd.release_train_health(tmp_path)
     assert health["evidence"]["blocked_count"] == 1
@@ -206,9 +276,31 @@ def test_release_matrix_writes_markdown_json_and_surfaces_health(tmp_path, monke
     train = _build_train(tmp_path, monkeypatch, capsys)
     health = repos_cmd.release_train_health(tmp_path)
     assert any(check["name"] == "repo_fleet_release_matrix_missing" for check in health["checks"])
-    assert repos_cmd.release_evidence_record(target=tmp_path, train_id=train["train_id"], repo_id="blocked", step="release-doctor", status="blocked", summary="doctor blocked", json_output=True) == 0
+    assert (
+        repos_cmd.release_evidence_record(
+            target=tmp_path,
+            train_id=train["train_id"],
+            repo_id="blocked",
+            step="release-doctor",
+            status="blocked",
+            summary="doctor blocked",
+            json_output=True,
+        )
+        == 0
+    )
     capsys.readouterr()
-    assert repos_cmd.release_waiver_record(target=tmp_path, train_id=train["train_id"], scope="blocked-evidence", repo_id="blocked", reason="reviewed blocker", expires_at="2026-06-30T00:00:00+00:00", json_output=True) == 0
+    assert (
+        repos_cmd.release_waiver_record(
+            target=tmp_path,
+            train_id=train["train_id"],
+            scope="blocked-evidence",
+            repo_id="blocked",
+            reason="reviewed blocker",
+            expires_at="2026-06-30T00:00:00+00:00",
+            json_output=True,
+        )
+        == 0
+    )
     waiver = json.loads(capsys.readouterr().out)
     assert waiver["waiver"]["scope"] == "blocked-evidence"
 
@@ -226,18 +318,34 @@ def test_release_matrix_writes_markdown_json_and_surfaces_health(tmp_path, monke
     assert (train_path / "RELEASE_TRAIN_MATRIX.md").is_file()
     assert "actual-repo-name" not in (train_path / "RELEASE_TRAIN_MATRIX.json").read_text()
     assert "private guidance that must not be copied" not in (train_path / "RELEASE_TRAIN_MATRIX.md").read_text()
-    assert not any(check["name"] == "repo_fleet_release_matrix_missing" for check in repos_cmd.release_train_health(tmp_path)["checks"])
+    assert not any(
+        check["name"] == "repo_fleet_release_matrix_missing"
+        for check in repos_cmd.release_train_health(tmp_path)["checks"]
+    )
 
 
 def test_release_train_actions_and_evidence_integrate_with_daily_surfaces(tmp_path, monkeypatch, capsys):
     _init_repo(tmp_path)
     _seed_release_ready(tmp_path)
     train = _build_train(tmp_path, monkeypatch, capsys)
-    assert repos_cmd.release_closeout(target=tmp_path, train_id=train["train_id"], status="reviewed", json_output=True) == 0
+    assert (
+        repos_cmd.release_closeout(target=tmp_path, train_id=train["train_id"], status="reviewed", json_output=True)
+        == 0
+    )
     capsys.readouterr()
     assert repos_cmd.release_actions_build(target=tmp_path, train_id=train["train_id"], json_output=True) == 0
     capsys.readouterr()
-    assert repos_cmd.release_evidence_record(target=tmp_path, train_id=train["train_id"], repo_id="blocked", step="release-doctor", status="blocked", json_output=True) == 0
+    assert (
+        repos_cmd.release_evidence_record(
+            target=tmp_path,
+            train_id=train["train_id"],
+            repo_id="blocked",
+            step="release-doctor",
+            status="blocked",
+            json_output=True,
+        )
+        == 0
+    )
     capsys.readouterr()
 
     health = repos_cmd.health(tmp_path)
@@ -254,7 +362,10 @@ def test_release_train_actions_and_evidence_integrate_with_daily_surfaces(tmp_pa
     assert center["repo_fleet"]["release_train"]["actions"]["open_count"] == 1
     assert center_cmd.reviews(target=tmp_path, json_output=True) == 0
     reviews = json.loads(capsys.readouterr().out)
-    assert any(item["subsystem"] == "repo-fleet" and item["local_id"] == "repo_fleet_release_train_blocked" for item in reviews["reviews"])
+    assert any(
+        item["subsystem"] == "repo-fleet" and item["local_id"] == "repo_fleet_release_train_blocked"
+        for item in reviews["reviews"]
+    )
 
     assert work_cmd.brief(target=tmp_path, json_output=True) == 0
     brief = json.loads(capsys.readouterr().out)

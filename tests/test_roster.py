@@ -137,9 +137,6 @@ def test_researcher_headers_via_fallback_parser(monkeypatch, tmp_path):
 
 
 def test_cli_agent_still_requires_cli_or_endpoint(tmp_path):
-    text = (
-        'orchestrator = "chef"\n'
-        '[agents.chef]\nrole = "plan"\n'
-    )
+    text = 'orchestrator = "chef"\n[agents.chef]\nrole = "plan"\n'
     with pytest.raises(ValueError):
         roster_mod.load_roster(_write(tmp_path, text))

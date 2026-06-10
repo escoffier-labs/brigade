@@ -20,7 +20,17 @@ def _write_skill(root, name="security-review"):
                 "version": "0.1.0",
                 "required_tools": ["git"],
                 "required_mcp_servers": ["github"],
-                "supported_harnesses": ["codex", "claude", "opencode", "antigravity", "pi", "cursor", "openclaw", "hermes", "mcp"],
+                "supported_harnesses": [
+                    "codex",
+                    "claude",
+                    "opencode",
+                    "antigravity",
+                    "pi",
+                    "cursor",
+                    "openclaw",
+                    "hermes",
+                    "mcp",
+                ],
                 "trust_level": "workspace",
                 "tests": ["brigade skills lint security-review"],
             }
@@ -83,7 +93,10 @@ def test_skills_cli_install_uses_target_for_harness(tmp_path):
     source = _write_skill(tmp_path / "source")
     assert cli.main(["skills", "import", str(source), "--target", str(tmp_path), "--json"]) == 0
 
-    assert cli.main(["skills", "install", "security-review", "--workspace", str(tmp_path), "--target", "all", "--json"]) == 0
+    assert (
+        cli.main(["skills", "install", "security-review", "--workspace", str(tmp_path), "--target", "all", "--json"])
+        == 0
+    )
 
     assert (tmp_path / ".codex" / "skills" / "security-review" / "SKILL.md").is_file()
 
@@ -128,7 +141,12 @@ def test_skills_inbox_add_diff_accept_and_reject(tmp_path, capsys):
     other = _write_skill(tmp_path / "source2", name="docs-review")
     assert skills_cmd.inbox_add(target=tmp_path, source=other, json_output=True) == 0
     other_proposal = json.loads(capsys.readouterr().out)
-    assert skills_cmd.inbox_reject(target=tmp_path, proposal_id=other_proposal["proposal_id"], reason="duplicate", json_output=True) == 0
+    assert (
+        skills_cmd.inbox_reject(
+            target=tmp_path, proposal_id=other_proposal["proposal_id"], reason="duplicate", json_output=True
+        )
+        == 0
+    )
     rejected = json.loads(capsys.readouterr().out)
     assert rejected["status"] == "rejected"
     assert rejected["reason"] == "duplicate"
@@ -282,7 +300,10 @@ def test_skills_rollback_restores_previous_install(tmp_path, capsys):
     (updated / "SKILL.md").write_text("# Security Review\n\nnew version\n")
     assert skills_cmd.import_skill(target=tmp_path, source=updated, force=True, json_output=True) == 0
     capsys.readouterr()
-    assert skills_cmd.install(workspace=tmp_path, skill="security-review", harness="claude", force=True, json_output=True) == 0
+    assert (
+        skills_cmd.install(workspace=tmp_path, skill="security-review", harness="claude", force=True, json_output=True)
+        == 0
+    )
     capsys.readouterr()
     assert "new version" in installed.read_text()
 
@@ -299,13 +320,16 @@ def test_skills_rollback_restores_transformed_codex_install(tmp_path, capsys):
     assert skills_cmd.install(workspace=tmp_path, skill="security-review", harness="codex", json_output=True) == 0
     capsys.readouterr()
     installed = tmp_path / ".codex" / "skills" / "security-review" / "SKILL.md"
-    installed.write_text("---\nname: \"security-review\"\ndescription: \"local\"\n---\n# Local\n")
+    installed.write_text('---\nname: "security-review"\ndescription: "local"\n---\n# Local\n')
 
     updated = _write_skill(tmp_path / "source2")
     (updated / "SKILL.md").write_text("# Security Review\n\nnew version\n")
     assert skills_cmd.import_skill(target=tmp_path, source=updated, force=True, json_output=True) == 0
     capsys.readouterr()
-    assert skills_cmd.install(workspace=tmp_path, skill="security-review", harness="codex", force=True, json_output=True) == 0
+    assert (
+        skills_cmd.install(workspace=tmp_path, skill="security-review", harness="codex", force=True, json_output=True)
+        == 0
+    )
     capsys.readouterr()
     assert "new version" in installed.read_text()
 
@@ -345,7 +369,9 @@ def test_skills_pack_build_show_import_and_archive(tmp_path, capsys):
     pack = json.loads(capsys.readouterr().out)
     pack_path = pack["path"]
     assert pack["skill_count"] == 1
-    assert (tmp_path / ".brigade" / "skills" / "packs" / pack["pack_id"] / "skills" / "security-review" / "SKILL.md").is_file()
+    assert (
+        tmp_path / ".brigade" / "skills" / "packs" / pack["pack_id"] / "skills" / "security-review" / "SKILL.md"
+    ).is_file()
 
     assert skills_cmd.pack_show(target=tmp_path, pack_id="latest", json_output=True) == 0
     shown = json.loads(capsys.readouterr().out)
@@ -353,7 +379,12 @@ def test_skills_pack_build_show_import_and_archive(tmp_path, capsys):
 
     other = tmp_path / "other"
     other.mkdir()
-    assert skills_cmd.pack_import(target=other, pack=tmp_path / ".brigade" / "skills" / "packs" / pack["pack_id"], json_output=True) == 0
+    assert (
+        skills_cmd.pack_import(
+            target=other, pack=tmp_path / ".brigade" / "skills" / "packs" / pack["pack_id"], json_output=True
+        )
+        == 0
+    )
     imported = json.loads(capsys.readouterr().out)
     assert imported["imported_count"] == 1
     assert (other / ".brigade" / "skills" / "registry" / "security-review" / "SKILL.md").is_file()
@@ -373,17 +404,35 @@ def test_skills_mcp_stdio_serves_read_only_resources(tmp_path, capsys, monkeypat
     source = _write_skill(tmp_path / "source")
     assert skills_cmd.import_skill(target=tmp_path, source=source, json_output=True) == 0
     capsys.readouterr()
-    requests = "\n".join(
-        json.dumps(item)
-        for item in (
-            {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
-            {"jsonrpc": "2.0", "id": 2, "method": "resources/list", "params": {}},
-            {"jsonrpc": "2.0", "id": 3, "method": "resources/read", "params": {"uri": "skill://registry/security-review/SKILL.md"}},
-            {"jsonrpc": "2.0", "id": 4, "method": "tools/list", "params": {}},
-            {"jsonrpc": "2.0", "id": 5, "method": "tools/call", "params": {"name": "get_skill_metadata", "arguments": {"skill_id": "security-review"}}},
-            {"jsonrpc": "2.0", "id": 6, "method": "tools/call", "params": {"name": "install_skill", "arguments": {"skill_id": "security-review"}}},
+    requests = (
+        "\n".join(
+            json.dumps(item)
+            for item in (
+                {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
+                {"jsonrpc": "2.0", "id": 2, "method": "resources/list", "params": {}},
+                {
+                    "jsonrpc": "2.0",
+                    "id": 3,
+                    "method": "resources/read",
+                    "params": {"uri": "skill://registry/security-review/SKILL.md"},
+                },
+                {"jsonrpc": "2.0", "id": 4, "method": "tools/list", "params": {}},
+                {
+                    "jsonrpc": "2.0",
+                    "id": 5,
+                    "method": "tools/call",
+                    "params": {"name": "get_skill_metadata", "arguments": {"skill_id": "security-review"}},
+                },
+                {
+                    "jsonrpc": "2.0",
+                    "id": 6,
+                    "method": "tools/call",
+                    "params": {"name": "install_skill", "arguments": {"skill_id": "security-review"}},
+                },
+            )
         )
-    ) + "\n"
+        + "\n"
+    )
     monkeypatch.setattr(sys, "stdin", io.StringIO(requests))
 
     assert cli.main(["skills", "serve-mcp", "--target", str(tmp_path), "--stdio"]) == 0

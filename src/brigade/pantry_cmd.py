@@ -3,6 +3,7 @@
 These commands deliberately plan and report. They do not generate keys, copy
 secret material, mutate auth files, or start services.
 """
+
 from __future__ import annotations
 
 import json
@@ -77,10 +78,7 @@ def status_payload(target: Path) -> dict[str, Any]:
     role = status_data.get("role") or doctor_data.get("role") or "?"
     peer = status_data.get("peer") or doctor_data.get("peer") or "?"
     last_sync = status_data.get("last_sync") or "unknown"
-    payload["summary"] = (
-        f"role={role}, peer={peer}, last_sync={last_sync}, "
-        f"checks={fail_count} fail/{warn_count} warn"
-    )
+    payload["summary"] = f"role={role}, peer={peer}, last_sync={last_sync}, checks={fail_count} fail/{warn_count} warn"
     return payload
 
 
@@ -92,14 +90,14 @@ def status(*, target: Path, json_output: bool = False) -> int:
     print(f"pantry: {payload['summary']}")
     if not payload["installed"]:
         return 0
-    status_data = ((payload.get("status") or {}).get("stdout_json") or {})
+    status_data = (payload.get("status") or {}).get("stdout_json") or {}
     if isinstance(status_data, dict) and status_data:
         print(f"role: {status_data.get('role') or '?'}")
         print(f"peer: {status_data.get('peer') or '?'}")
         print(f"surfaces: {', '.join(status_data.get('surfaces') or []) or 'none'}")
         print(f"last_sync: {status_data.get('last_sync') or 'unknown'}")
         print(f"last_counts: cookies={status_data.get('last_cookies', 0)} secrets={status_data.get('last_secrets', 0)}")
-    doctor_data = ((payload.get("doctor") or {}).get("stdout_json") or {})
+    doctor_data = (payload.get("doctor") or {}).get("stdout_json") or {}
     if isinstance(doctor_data, dict) and doctor_data.get("checks"):
         print("checks:")
         for row in doctor_data.get("checks") or []:

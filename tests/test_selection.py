@@ -11,31 +11,35 @@ from brigade.selection import (
 
 
 def test_opencode_is_a_known_harness():
-    from brigade.selection import KNOWN_HARNESSES, WRITER_INBOXES
+    from brigade.selection import KNOWN_HARNESSES
+
     assert "opencode" in KNOWN_HARNESSES
     assert WRITER_INBOXES["opencode"] == ".opencode/memory-handoffs"
 
 
 def test_antigravity_is_a_known_harness():
-    from brigade.selection import KNOWN_HARNESSES, WRITER_INBOXES
+    from brigade.selection import KNOWN_HARNESSES
+
     assert "antigravity" in KNOWN_HARNESSES
     assert WRITER_INBOXES["antigravity"] == ".antigravity/memory-handoffs"
 
 
 def test_pi_is_a_known_harness():
-    from brigade.selection import KNOWN_HARNESSES, WRITER_INBOXES
+    from brigade.selection import KNOWN_HARNESSES
+
     assert "pi" in KNOWN_HARNESSES
     assert WRITER_INBOXES["pi"] == ".pi/memory-handoffs"
 
 
 def test_cursor_is_a_known_harness():
-    from brigade.selection import KNOWN_HARNESSES, WRITER_INBOXES
+    from brigade.selection import KNOWN_HARNESSES
+
     assert "cursor" in KNOWN_HARNESSES
     assert WRITER_INBOXES["cursor"] == ".cursor/memory-handoffs"
 
 
 def test_expanded_cli_harnesses_are_known_writers():
-    from brigade.selection import KNOWN_HARNESSES, WRITER_INBOXES
+    from brigade.selection import KNOWN_HARNESSES
 
     for harness in ("aider", "goose", "continue", "copilot", "qwen", "kimi", "adal", "openhands"):
         assert harness in KNOWN_HARNESSES
@@ -43,7 +47,6 @@ def test_expanded_cli_harnesses_are_known_writers():
 
 
 def test_writer_inboxes_cover_known_writers():
-    from brigade.selection import WRITER_INBOXES
     assert WRITER_INBOXES["claude"] == ".claude/memory-handoffs"
     assert WRITER_INBOXES["codex"] == ".codex/memory-handoffs"
     assert WRITER_INBOXES["antigravity"] == ".antigravity/memory-handoffs"

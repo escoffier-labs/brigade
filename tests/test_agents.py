@@ -33,11 +33,32 @@ def test_build_argv_for_read_only_codex():
     assert agents.build_argv("opencode", "hi", read_only=True) == ["opencode", "run", "hi"]
     assert agents.build_argv("antigravity", "hi", read_only=True) == ["agy", "--sandbox", "--print", "hi"]
     assert agents.build_argv("pi", "hi", read_only=True) == ["pi", "--tools", "read,grep,find,ls", "-p", "hi"]
-    assert agents.build_argv("cursor", "hi", read_only=True) == ["cursor-agent", "-p", "--mode", "plan", "--output-format", "text", "hi"]
-    assert agents.build_argv("aider", "hi", read_only=True) == ["aider", "--no-auto-commits", "--dry-run", "--message", "hi"]
+    assert agents.build_argv("cursor", "hi", read_only=True) == [
+        "cursor-agent",
+        "-p",
+        "--mode",
+        "plan",
+        "--output-format",
+        "text",
+        "hi",
+    ]
+    assert agents.build_argv("aider", "hi", read_only=True) == [
+        "aider",
+        "--no-auto-commits",
+        "--dry-run",
+        "--message",
+        "hi",
+    ]
     assert agents.build_argv("continue", "hi", read_only=True) == ["cn", "-p", "hi", "--readonly"]
     assert agents.build_argv("qwen", "hi", read_only=True) == ["qwen", "-p", "hi", "--approval-mode", "plan"]
-    assert agents.build_argv("kimi", "hi", read_only=True) == ["kimi", "--plan", "--print", "-p", "hi", "--final-message-only"]
+    assert agents.build_argv("kimi", "hi", read_only=True) == [
+        "kimi",
+        "--plan",
+        "--print",
+        "-p",
+        "hi",
+        "--final-message-only",
+    ]
     assert agents.build_argv("goose", "hi", read_only=True)[-1].startswith("Read-only planning run.")
     assert agents.build_argv("copilot", "hi", read_only=True)[-1].startswith("Read-only planning run.")
     assert agents.build_argv("adal", "hi", read_only=True)[-1].startswith("Read-only planning run.")

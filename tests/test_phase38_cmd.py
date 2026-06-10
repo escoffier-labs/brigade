@@ -101,14 +101,17 @@ def test_report_closeout_states_and_metadata(tmp_path, capsys):
     assert center_cmd.report_build(target=tmp_path, json_output=True) == 0
     report = json.loads(capsys.readouterr().out)
 
-    assert center_cmd.report_closeout(
-        target=tmp_path,
-        report_id=report["report_id"],
-        status="deferred",
-        reason="reviewed for today",
-        deferred_item_ids=["import-normal"],
-        json_output=True,
-    ) == 0
+    assert (
+        center_cmd.report_closeout(
+            target=tmp_path,
+            report_id=report["report_id"],
+            status="deferred",
+            reason="reviewed for today",
+            deferred_item_ids=["import-normal"],
+            json_output=True,
+        )
+        == 0
+    )
     closeout = json.loads(capsys.readouterr().out)
     assert closeout["status"] == "deferred"
     assert closeout["deferred_item_ids"] == ["import-normal"]
@@ -120,7 +123,22 @@ def test_report_closeout_states_and_metadata(tmp_path, capsys):
     health = center_cmd.report_health(tmp_path)
     names = {check["name"] for check in health["checks"]}
     assert "operator_report_unclosed" not in names
-    assert cli.main(["center", "report", "closeout", report["report_id"], "--target", str(tmp_path), "--status", "reviewed", "--json"]) == 0
+    assert (
+        cli.main(
+            [
+                "center",
+                "report",
+                "closeout",
+                report["report_id"],
+                "--target",
+                str(tmp_path),
+                "--status",
+                "reviewed",
+                "--json",
+            ]
+        )
+        == 0
+    )
     assert json.loads(capsys.readouterr().out)["status"] == "reviewed"
 
 
@@ -147,7 +165,13 @@ def test_report_compare_detects_changed_head_missing_receipts_new_activity_and_r
     )
     _seed_imports(tmp_path)
     inbox = tmp_path / ".brigade" / "work" / "imports" / "inbox.jsonl"
-    inbox.write_text(inbox.read_text() + json.dumps({"id": "import-new", "text": "New import", "kind": "task", "source": "manual", "status": "pending"}) + "\n")
+    inbox.write_text(
+        inbox.read_text()
+        + json.dumps(
+            {"id": "import-new", "text": "New import", "kind": "task", "source": "manual", "status": "pending"}
+        )
+        + "\n"
+    )
     (tmp_path / "README.md").write_text("changed\n")
     subprocess.run(["git", "add", "README.md"], cwd=tmp_path, check=True)
     subprocess.run(["git", "commit", "-m", "change readme"], cwd=tmp_path, check=True, stdout=subprocess.DEVNULL)
@@ -173,7 +197,10 @@ def test_report_diff_records_changed_queue_blockers_and_activity(tmp_path, capsy
     base_payload = json.loads(base_path.read_text())
     base_payload["receipt_references"] = [str(tmp_path / ".brigade" / "missing" / "receipt.json")]
     base_path.write_text(json.dumps(base_payload, indent=2, sort_keys=True) + "\n")
-    assert center_cmd.report_closeout(target=tmp_path, report_id=base["report_id"], status="reviewed", json_output=True) == 0
+    assert (
+        center_cmd.report_closeout(target=tmp_path, report_id=base["report_id"], status="reviewed", json_output=True)
+        == 0
+    )
     capsys.readouterr()
 
     inbox = tmp_path / ".brigade" / "work" / "imports" / "inbox.jsonl"
@@ -202,10 +229,18 @@ def test_report_diff_records_changed_queue_blockers_and_activity(tmp_path, capsy
     inbox.write_text("".join(json.dumps(record, sort_keys=True) + "\n" for record in records))
     assert center_cmd.report_build(target=tmp_path, json_output=True) == 0
     compare = json.loads(capsys.readouterr().out)
-    assert center_cmd.report_closeout(target=tmp_path, report_id=compare["report_id"], status="reviewed", json_output=True) == 0
+    assert (
+        center_cmd.report_closeout(target=tmp_path, report_id=compare["report_id"], status="reviewed", json_output=True)
+        == 0
+    )
     capsys.readouterr()
 
-    assert center_cmd.report_diff(target=tmp_path, base_report_id=base["report_id"], compare_report_id=compare["report_id"], json_output=True) == 0
+    assert (
+        center_cmd.report_diff(
+            target=tmp_path, base_report_id=base["report_id"], compare_report_id=compare["report_id"], json_output=True
+        )
+        == 0
+    )
     planned = json.loads(capsys.readouterr().out)
     assert planned["diff_id"] == "planned"
     assert planned["write_required"] is False
@@ -217,7 +252,16 @@ def test_report_diff_records_changed_queue_blockers_and_activity(tmp_path, capsy
     assert "import-critical" in {item["local_id"] for item in planned["new_items"]}
     assert "import-high" in {item["local_id"] for item in planned["resolved_items"]}
 
-    assert center_cmd.report_diff(target=tmp_path, base_report_id=base["report_id"], compare_report_id=compare["report_id"], record=True, json_output=True) == 0
+    assert (
+        center_cmd.report_diff(
+            target=tmp_path,
+            base_report_id=base["report_id"],
+            compare_report_id=compare["report_id"],
+            record=True,
+            json_output=True,
+        )
+        == 0
+    )
     recorded = json.loads(capsys.readouterr().out)
     assert recorded["diff_id"] != "planned"
     assert recorded["path"]
@@ -226,7 +270,10 @@ def test_report_diff_records_changed_queue_blockers_and_activity(tmp_path, capsy
 
     assert center_cmd.activity(target=tmp_path, json_output=True) == 0
     activity = json.loads(capsys.readouterr().out)
-    assert any(item["subsystem"] == "center-report-diff" and item["local_id"] == recorded["diff_id"] for item in activity["activity"])
+    assert any(
+        item["subsystem"] == "center-report-diff" and item["local_id"] == recorded["diff_id"]
+        for item in activity["activity"]
+    )
 
     health = center_cmd.report_health(tmp_path)
     assert any(check["name"] == "operator_report_diff_has_issues" for check in health["checks"])
@@ -235,7 +282,22 @@ def test_report_diff_records_changed_queue_blockers_and_activity(tmp_path, capsy
     assert release_cmd.doctor(target=tmp_path, base_ref=None, json_output=True) == 1
     release_payload = json.loads(capsys.readouterr().out)
     assert any("operator report has issue" in warning for warning in release_payload["warnings"])
-    assert cli.main(["center", "report", "diff", base["report_id"], compare["report_id"], "--target", str(tmp_path), "--record", "--json"]) == 0
+    assert (
+        cli.main(
+            [
+                "center",
+                "report",
+                "diff",
+                base["report_id"],
+                compare["report_id"],
+                "--target",
+                str(tmp_path),
+                "--record",
+                "--json",
+            ]
+        )
+        == 0
+    )
     assert json.loads(capsys.readouterr().out)["summary"]["new_blocker_count"] >= 1
 
 
@@ -257,7 +319,13 @@ def test_report_closeout_integrates_with_work_and_release_compare(tmp_path, monk
     monkeypatch.setattr(
         handoff_cmd,
         "draft_queue_payload",
-        lambda target: {"counts": {"pending": 0}, "issue_count": 0, "top_issue": None, "latest_ingest_run": None, "drafts": []},
+        lambda target: {
+            "counts": {"pending": 0},
+            "issue_count": 0,
+            "top_issue": None,
+            "latest_ingest_run": None,
+            "drafts": [],
+        },
     )
     monkeypatch.setattr(
         work_cmd,
@@ -274,9 +342,23 @@ def test_report_closeout_integrates_with_work_and_release_compare(tmp_path, monk
     monkeypatch.setattr(
         work_cmd,
         "_review_health",
-        lambda target: {"latest_run": None, "latest_success": None, "latest_unclosed_run": None, "unresolved_finding_count": 0, "pending_finding_count": 0, "top_pending_finding": None, "top_unresolved_finding": None, "checks": [], "config_path": None},
+        lambda target: {
+            "latest_run": None,
+            "latest_success": None,
+            "latest_unclosed_run": None,
+            "unresolved_finding_count": 0,
+            "pending_finding_count": 0,
+            "top_pending_finding": None,
+            "top_unresolved_finding": None,
+            "checks": [],
+            "config_path": None,
+        },
     )
-    monkeypatch.setattr(release_cmd, "_run_content_guard_check", lambda *args, **kwargs: {"name": "content_guard_tip", "status": "ok", "detail": "clean"})
+    monkeypatch.setattr(
+        release_cmd,
+        "_run_content_guard_check",
+        lambda *args, **kwargs: {"name": "content_guard_tip", "status": "ok", "detail": "clean"},
+    )
     monkeypatch.setattr(release_cmd, "_content_guard_available", lambda target: True)
 
     assert center_cmd.report_build(target=tmp_path, json_output=True) == 0
@@ -284,7 +366,10 @@ def test_report_closeout_integrates_with_work_and_release_compare(tmp_path, monk
     assert work_cmd.brief(target=tmp_path, json_output=True) == 0
     brief = json.loads(capsys.readouterr().out)
     assert brief["operator_report"]["top_issue"]["name"] == "operator_report_unclosed"
-    assert center_cmd.report_closeout(target=tmp_path, report_id=report["report_id"], status="reviewed", json_output=True) == 0
+    assert (
+        center_cmd.report_closeout(target=tmp_path, report_id=report["report_id"], status="reviewed", json_output=True)
+        == 0
+    )
     capsys.readouterr()
     assert work_cmd.brief(target=tmp_path, json_output=True) == 0
     brief = json.loads(capsys.readouterr().out)

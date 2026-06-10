@@ -18,7 +18,16 @@ class CliSourceProvider:
     the normal research extractor as untrusted tool output.
     """
 
-    def __init__(self, *, source_id: str, command: list[str], cwd: Path, timeout: int = 120, trust: str = "cli", source_type: str = "cli") -> None:
+    def __init__(
+        self,
+        *,
+        source_id: str,
+        command: list[str],
+        cwd: Path,
+        timeout: int = 120,
+        trust: str = "cli",
+        source_type: str = "cli",
+    ) -> None:
         self.source_id = source_id
         self.command = command
         self.cwd = cwd
@@ -79,7 +88,9 @@ def build_providers(adapters: list[dict[str, Any]], *, target: Path) -> list[Cli
         source_type = str(item.get("type") or "").strip().lower()
         if source_type not in CLI_SOURCE_TYPES:
             continue
-        source_id = str(item.get("id") or item.get("name") or ("antigravity" if source_type == "antigravity" else "cli-source")).strip()
+        source_id = str(
+            item.get("id") or item.get("name") or ("antigravity" if source_type == "antigravity" else "cli-source")
+        ).strip()
         command = _command_parts(item.get("command") or item.get("argv"))
         if not source_id or not command:
             continue

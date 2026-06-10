@@ -32,7 +32,9 @@ def test_pantry_status_combines_status_and_doctor(monkeypatch, tmp_path):
                 "",
             )
         if args == ["agentpantry", "doctor", "--json"]:
-            return pantry_cmd.proc.Result(0, json.dumps({"configured": True, "fail_count": 0, "warn_count": 1, "checks": []}), "")
+            return pantry_cmd.proc.Result(
+                0, json.dumps({"configured": True, "fail_count": 0, "warn_count": 1, "checks": []}), ""
+            )
         raise AssertionError(args)
 
     monkeypatch.setattr(pantry_cmd.proc, "run", fake_run)
@@ -79,7 +81,9 @@ def test_setup_plan_write_creates_json_and_markdown(tmp_path):
 
 
 def test_work_brief_includes_pantry_health(monkeypatch, tmp_path):
-    monkeypatch.setattr(pantry_cmd, "status_payload", lambda target: {"installed": False, "summary": "pantry test summary"})
+    monkeypatch.setattr(
+        pantry_cmd, "status_payload", lambda target: {"installed": False, "summary": "pantry test summary"}
+    )
 
     payload = work_cmd._brief_payload(tmp_path)
 
@@ -87,7 +91,9 @@ def test_work_brief_includes_pantry_health(monkeypatch, tmp_path):
 
 
 def test_center_status_includes_pantry_health(monkeypatch, tmp_path):
-    monkeypatch.setattr(pantry_cmd, "status_payload", lambda target: {"installed": False, "summary": "pantry center summary"})
+    monkeypatch.setattr(
+        pantry_cmd, "status_payload", lambda target: {"installed": False, "summary": "pantry center summary"}
+    )
 
     payload = center_cmd.status_payload(tmp_path)
 

@@ -1,4 +1,5 @@
 """Tests for the canonical brigade.budgets source of truth."""
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -35,6 +36,7 @@ def test_route_would_exceed_budget_guards_only_bootstrap(tmp_path: Path):
 def test_budgets_show_json_reports_canonical_values(capsys):
     assert budgets_cmd.show(json_output=True) == 0
     import json
+
     payload = json.loads(capsys.readouterr().out)
     assert payload["bootstrap_budgets"]["TOOLS.md"] == budgets.BOOTSTRAP_BUDGETS["TOOLS.md"]
     assert payload["handoff_backlog_stale_days"] == budgets.HANDOFF_BACKLOG_STALE_DAYS
@@ -46,6 +48,7 @@ def test_budgets_check_fails_oversized_bootstrap_file(tmp_path: Path, capsys):
     assert budgets_cmd.check(target=tmp_path, json_output=True) == 1
 
     import json
+
     payload = json.loads(capsys.readouterr().out)
     tools = [row for row in payload["checks"] if row["name"] == "TOOLS.md"][0]
     assert tools["status"] == "fail"

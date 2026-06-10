@@ -1,4 +1,5 @@
 """CLI helpers for Brigade's canonical operator budgets."""
+
 from __future__ import annotations
 
 import json
@@ -77,8 +78,5 @@ def check(*, target: Path, json_output: bool = False) -> int:
 
     print(f"budget check: {target}")
     for row in checks:
-        print(
-            f"[{row['status']}] {row['name']}: "
-            f"{row['size_bytes']}/{row['budget_bytes']} bytes"
-        )
+        print(f"[{row['status']}] {row['name']}: {row['size_bytes']}/{row['budget_bytes']} bytes")
     return 0 if payload["valid"] else 1

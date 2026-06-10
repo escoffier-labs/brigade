@@ -1,4 +1,5 @@
 """Bounded cross-model orchestration for `brigade run`."""
+
 from __future__ import annotations
 
 import json
@@ -36,9 +37,7 @@ def build_plan_prompt(
     corrective_note: str | None = None,
     read_only: bool = False,
 ) -> str:
-    worker_lines = "\n".join(
-        f"- {agent.name}: cli={agent.cli}; role={agent.role}" for agent in workers(roster)
-    )
+    worker_lines = "\n".join(f"- {agent.name}: cli={agent.cli}; role={agent.role}" for agent in workers(roster))
     if not worker_lines:
         worker_lines = "- no workers configured"
 
@@ -139,14 +138,18 @@ def write_run_handoff(
     timestamp = (now or datetime.now(timezone.utc)).strftime("%Y-%m-%d-%H%M")
     safe_task = _one_line(task)
     path = inbox / f"{timestamp}-brigade-run-{_slug(safe_task)}.md"
-    worker_summary = "\n".join(
-        f"- {result.worker}: {'ok' if result.ok else 'failed'}"
-        + (f" ({_one_line(result.detail)})" if result.detail else "")
-        for result in worker_results
-    ) or "- no workers dispatched"
-    assignment_summary = "\n".join(
-        f"- {assignment.worker}: {_one_line(assignment.task)}" for assignment in assignments
-    ) or "- no worker assignments"
+    worker_summary = (
+        "\n".join(
+            f"- {result.worker}: {'ok' if result.ok else 'failed'}"
+            + (f" ({_one_line(result.detail)})" if result.detail else "")
+            for result in worker_results
+        )
+        or "- no workers dispatched"
+    )
+    assignment_summary = (
+        "\n".join(f"- {assignment.worker}: {_one_line(assignment.task)}" for assignment in assignments)
+        or "- no worker assignments"
+    )
     artifact_line = f"- artifacts: `{output_dir}`" if output_dir is not None else "- artifacts: none"
     cwd_line = f"- cwd: `{cwd}`" if cwd is not None else "- cwd: not set"
     mode_line = "- mode: read-only" if read_only else "- mode: normal"
@@ -404,10 +407,7 @@ def dispatch(
     results_by_index: dict[int, WorkerResult] = {}
     max_workers = min(roster.max_workers, len(assignments))
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        future_to_index = {
-            executor.submit(run_one, assignment): index
-            for index, assignment in enumerate(assignments)
-        }
+        future_to_index = {executor.submit(run_one, assignment): index for index, assignment in enumerate(assignments)}
         for future in as_completed(future_to_index):
             index = future_to_index[future]
             try:
@@ -474,10 +474,7 @@ def _print_worker_status(results: list[WorkerResult]) -> None:
 
 
 def _assignment_payload(assignments: list[Assignment]) -> list[dict[str, str]]:
-    return [
-        {"worker": assignment.worker, "task": assignment.task}
-        for assignment in assignments
-    ]
+    return [{"worker": assignment.worker, "task": assignment.task} for assignment in assignments]
 
 
 def _worker_payload(results: list[WorkerResult]) -> list[dict[str, object]]:

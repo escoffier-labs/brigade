@@ -4,7 +4,14 @@ from brigade import cli
 from brigade import repos_cmd
 from brigade import work_cmd
 
-from tests.test_phase44_cmd import _build_train, _init_repo, _patch_quiet, _seed_operator_report, _seed_release_ready, _seed_workspace
+from tests.test_phase44_cmd import (
+    _build_train,
+    _init_repo,
+    _patch_quiet,
+    _seed_operator_report,
+    _seed_release_ready,
+    _seed_workspace,
+)
 from tests.test_phase45_cmd import _record_required_evidence
 
 
@@ -23,7 +30,10 @@ def _ready_train(tmp_path, monkeypatch, capsys):
 
 def test_release_report_checklist_and_hygiene(tmp_path, monkeypatch, capsys):
     train = _build_train(tmp_path, monkeypatch, capsys)
-    assert repos_cmd.release_closeout(target=tmp_path, train_id=train["train_id"], status="reviewed", json_output=True) == 0
+    assert (
+        repos_cmd.release_closeout(target=tmp_path, train_id=train["train_id"], status="reviewed", json_output=True)
+        == 0
+    )
     capsys.readouterr()
     assert repos_cmd.release_actions_build(target=tmp_path, train_id=train["train_id"], json_output=True) == 0
     capsys.readouterr()
@@ -48,14 +58,22 @@ def test_release_report_checklist_and_hygiene(tmp_path, monkeypatch, capsys):
 
 def test_release_import_issues_dedupe_and_dismissed_until_changed(tmp_path, monkeypatch, capsys):
     train = _build_train(tmp_path, monkeypatch, capsys)
-    assert repos_cmd.release_closeout(target=tmp_path, train_id=train["train_id"], status="reviewed", json_output=True) == 0
+    assert (
+        repos_cmd.release_closeout(target=tmp_path, train_id=train["train_id"], status="reviewed", json_output=True)
+        == 0
+    )
     capsys.readouterr()
     assert repos_cmd.release_actions_build(target=tmp_path, train_id=train["train_id"], json_output=True) == 0
     capsys.readouterr()
     assert repos_cmd.release_reconcile(target=tmp_path, train_id=train["train_id"], json_output=True) == 0
     capsys.readouterr()
 
-    assert cli.main(["repos", "release", "import-issues", train["train_id"], "--target", str(tmp_path), "--dry-run", "--json"]) == 0
+    assert (
+        cli.main(
+            ["repos", "release", "import-issues", train["train_id"], "--target", str(tmp_path), "--dry-run", "--json"]
+        )
+        == 0
+    )
     dry = json.loads(capsys.readouterr().out)
     assert dry["dry_run"] is True
     assert dry["created"] == dry["issue_count"] == 2
@@ -80,7 +98,10 @@ def test_release_import_issues_dedupe_and_dismissed_until_changed(tmp_path, monk
 
 def test_release_ready_gate_blocks_and_passes(tmp_path, monkeypatch, capsys):
     blocked = _build_train(tmp_path, monkeypatch, capsys)
-    assert repos_cmd.release_closeout(target=tmp_path, train_id=blocked["train_id"], status="reviewed", json_output=True) == 0
+    assert (
+        repos_cmd.release_closeout(target=tmp_path, train_id=blocked["train_id"], status="reviewed", json_output=True)
+        == 0
+    )
     capsys.readouterr()
     assert repos_cmd.release_actions_build(target=tmp_path, train_id=blocked["train_id"], json_output=True) == 0
     capsys.readouterr()

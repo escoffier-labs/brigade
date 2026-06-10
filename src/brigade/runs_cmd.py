@@ -1,4 +1,5 @@
 """Inspect Brigade run artifact directories."""
+
 from __future__ import annotations
 
 import json

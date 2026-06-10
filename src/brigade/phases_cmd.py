@@ -1,4 +1,5 @@
 """Auditable local phase execution ledger."""
+
 from __future__ import annotations
 
 import json
@@ -250,17 +251,41 @@ def schema(*, target: Path, json_output: bool = False) -> int:
         ),
         _contract_schema(
             "phase-ledger-session-protocol",
-            ["session", "next_step", "safe_resume", "resume_blockers", "wrapper_steps", "allowed_command_prefixes", "forbidden_actions"],
+            [
+                "session",
+                "next_step",
+                "safe_resume",
+                "resume_blockers",
+                "wrapper_steps",
+                "allowed_command_prefixes",
+                "forbidden_actions",
+            ],
             description="Read-only wrapper protocol for safe AFK phase session resume decisions.",
         ),
         _contract_schema(
             "phase-ledger-session-audit",
-            ["session", "ready_for_resume", "ready_for_completion_claim", "checks", "issue_count", "suggested_next_command"],
+            [
+                "session",
+                "ready_for_resume",
+                "ready_for_completion_claim",
+                "checks",
+                "issue_count",
+                "suggested_next_command",
+            ],
             description="Read-only self-audit across AFK session health, evidence, and completion gate outputs.",
         ),
         _contract_schema(
             "phase-ledger-session-checkpoint",
-            ["checkpoint_id", "session_id", "phase_id", "status", "summary", "next_step", "suggested_next_command", "source_fingerprint"],
+            [
+                "checkpoint_id",
+                "session_id",
+                "phase_id",
+                "status",
+                "summary",
+                "next_step",
+                "suggested_next_command",
+                "source_fingerprint",
+            ],
             description="Local AFK recovery checkpoint without command execution.",
         ),
         _contract_schema(
@@ -275,12 +300,27 @@ def schema(*, target: Path, json_output: bool = False) -> int:
         ),
         _contract_schema(
             "phase-ledger-session-risk",
-            ["session", "risk_level", "risk_count", "risks", "checkpoint", "recovery_note_count", "suggested_next_command"],
+            [
+                "session",
+                "risk_level",
+                "risk_count",
+                "risks",
+                "checkpoint",
+                "recovery_note_count",
+                "suggested_next_command",
+            ],
             description="Read-only session risk summary across next step, checkpoint, notes, and doctor issues.",
         ),
         _contract_schema(
             "phase-ledger-session-verification",
-            ["session", "status_counts", "missing_phases", "failed_phases", "deferred_phases", "suggested_next_command"],
+            [
+                "session",
+                "status_counts",
+                "missing_phases",
+                "failed_phases",
+                "deferred_phases",
+                "suggested_next_command",
+            ],
             description="Read-only verification coverage rollup across an AFK phase session.",
         ),
         _contract_schema(
@@ -290,17 +330,45 @@ def schema(*, target: Path, json_output: bool = False) -> int:
         ),
         _contract_schema(
             "phase-ledger-session-handoffs",
-            ["session", "status_counts", "missing_phases", "failed_phases", "deferred_phases", "suggested_next_command"],
+            [
+                "session",
+                "status_counts",
+                "missing_phases",
+                "failed_phases",
+                "deferred_phases",
+                "suggested_next_command",
+            ],
             description="Read-only Memory Handoff coverage rollup across an AFK phase session.",
         ),
         _contract_schema(
             "phase-ledger-session-report",
-            ["session", "records", "doctor", "recovery", "actions", "imports", "commits", "tests", "blockers", "suggested_next_command"],
+            [
+                "session",
+                "records",
+                "doctor",
+                "recovery",
+                "actions",
+                "imports",
+                "commits",
+                "tests",
+                "blockers",
+                "suggested_next_command",
+            ],
             description="Local session report evidence bundle with recovery context.",
         ),
         _contract_schema(
             "phase-ledger-session-progress",
-            ["session", "percent_complete", "status_counts", "blockers", "current_phase", "test_summary", "commit_summary", "push_summary", "suggested_next_command"],
+            [
+                "session",
+                "percent_complete",
+                "status_counts",
+                "blockers",
+                "current_phase",
+                "test_summary",
+                "commit_summary",
+                "push_summary",
+                "suggested_next_command",
+            ],
             description="Read-only progress summary for an AFK phase session.",
         ),
         _contract_schema(
@@ -357,7 +425,13 @@ def init(*, target: Path, json_output: bool = False) -> int:
         written = True
     else:
         written = False
-    payload = {"schema_version": SCHEMA_VERSION, "schema": _schema("phase-ledger-init"), "target": str(target), "path": str(_root(target)), "written": written}
+    payload = {
+        "schema_version": SCHEMA_VERSION,
+        "schema": _schema("phase-ledger-init"),
+        "target": str(target),
+        "path": str(_root(target)),
+        "written": written,
+    }
     if json_output:
         print(json.dumps(payload, indent=2, sort_keys=True))
     else:
@@ -394,7 +468,9 @@ def plan(
         start, end = parsed_range
         if grouped:
             group_id = phase_id or f"phase-{start}-{end}-group"
-            record = _default_record(group_id, title=title or f"Grouped phases {start}-{end}", source_goal=source_goal, kind="group")
+            record = _default_record(
+                group_id, title=title or f"Grouped phases {start}-{end}", source_goal=source_goal, kind="group"
+            )
             record["phase_range"] = f"{start}-{end}"
             record["grouped_phase_ids"] = [_phase_id_for(number) for number in range(start, end + 1)]
             record["explicit_grouping"] = True
@@ -408,7 +484,11 @@ def plan(
                 created.append(_record_summary(record))
         for number in range(start, end + 1):
             item_id = _phase_id_for(number)
-            record = _default_record(item_id, title=(title or f"Phase {number}") if start == end else f"{title or 'Planned phase'} {number}", source_goal=source_goal)
+            record = _default_record(
+                item_id,
+                title=(title or f"Phase {number}") if start == end else f"{title or 'Planned phase'} {number}",
+                source_goal=source_goal,
+            )
             if grouped:
                 record["group_id"] = phase_id or f"phase-{start}-{end}-group"
                 record["explicit_grouping"] = True
@@ -454,7 +534,13 @@ def plan(
 def list_phases(*, target: Path, json_output: bool = False) -> int:
     target = target.expanduser().resolve()
     records = [_record_summary(record) for record in _records(target)]
-    payload = {"schema_version": SCHEMA_VERSION, "schema": _schema("phase-ledger-list"), "target": str(target), "records": records, "record_count": len(records)}
+    payload = {
+        "schema_version": SCHEMA_VERSION,
+        "schema": _schema("phase-ledger-list"),
+        "target": str(target),
+        "records": records,
+        "record_count": len(records),
+    }
     if json_output:
         print(json.dumps(payload, indent=2, sort_keys=True))
     else:
@@ -481,11 +567,18 @@ def status_payload(target: Path, *, phase_range: str | None = None) -> dict[str,
         range_records = [by_id[phase_id] for phase_id in expected if phase_id in by_id]
         missing = [phase_id for phase_id in expected if phase_id not in by_id]
     open_records = [record for record in range_records if record.get("status") in {"pending", "in-progress", "blocked"}]
-    done_records = [record for record in range_records if record.get("status") in DONE_STATUSES or record.get("status") == "deferred"]
+    done_records = [
+        record
+        for record in range_records
+        if record.get("status") in DONE_STATUSES or record.get("status") == "deferred"
+    ]
     next_record = next(
         (
             record
-            for record in sorted(range_records, key=lambda item: (_safe_phase_number(item.get("phase_id")) or 999999, str(item.get("phase_id"))))
+            for record in sorted(
+                range_records,
+                key=lambda item: (_safe_phase_number(item.get("phase_id")) or 999999, str(item.get("phase_id"))),
+            )
             if record.get("status") in {"pending", "blocked", "in-progress"}
         ),
         None,
@@ -504,7 +597,9 @@ def status_payload(target: Path, *, phase_range: str | None = None) -> dict[str,
         "done_count": len(done_records),
         "complete": not missing and bool(range_records) and len(done_records) == len(range_records),
         "next_phase": _record_summary(next_record) if isinstance(next_record, dict) else None,
-        "suggested_next_command": f"brigade work phases start {next_record.get('phase_id')}" if isinstance(next_record, dict) else "brigade work phases doctor",
+        "suggested_next_command": f"brigade work phases start {next_record.get('phase_id')}"
+        if isinstance(next_record, dict)
+        else "brigade work phases doctor",
     }
     return payload
 
@@ -645,7 +740,9 @@ def complete(
     return 0
 
 
-def defer(*, target: Path, phase_id: str, reason: str, next_phase_recommendation: str | None = None, json_output: bool = False) -> int:
+def defer(
+    *, target: Path, phase_id: str, reason: str, next_phase_recommendation: str | None = None, json_output: bool = False
+) -> int:
     if not reason.strip():
         print("error: --reason is required", file=sys.stderr)
         return 2
@@ -687,7 +784,10 @@ def _latest_record(records: list[dict[str, Any]]) -> dict[str, Any] | None:
     valid_records = [record for record in records if record.get("phase_id")]
     if not valid_records:
         return None
-    return sorted(valid_records, key=lambda item: (_safe_phase_number(item.get("phase_id")) or -1, str(item.get("created_at") or "")))[-1]
+    return sorted(
+        valid_records,
+        key=lambda item: (_safe_phase_number(item.get("phase_id")) or -1, str(item.get("created_at") or "")),
+    )[-1]
 
 
 def _selected_records(target: Path, selector: str) -> tuple[list[dict[str, Any]], list[str], str | None]:
@@ -705,7 +805,11 @@ def _selected_records(target: Path, selector: str) -> tuple[list[dict[str, Any]]
         start, end = parsed_range
         by_id = {str(record.get("phase_id")): record for record in records}
         expected = [_phase_id_for(number) for number in range(start, end + 1)]
-        return [by_id[phase_id] for phase_id in expected if phase_id in by_id], [phase_id for phase_id in expected if phase_id not in by_id], f"{start}-{end}"
+        return (
+            [by_id[phase_id] for phase_id in expected if phase_id in by_id],
+            [phase_id for phase_id in expected if phase_id not in by_id],
+            f"{start}-{end}",
+        )
     path, record = _find_record(target, selector)
     if record is None:
         return [], [selector], None
@@ -779,30 +883,75 @@ def _report_compare_summary(target: Path, report: dict[str, Any] | None) -> dict
     report_status = report.get("status") if isinstance(report.get("status"), dict) else {}
     report_doctor = report.get("doctor") if isinstance(report.get("doctor"), dict) else {}
     if current_status.get("status_counts") != report_status.get("status_counts"):
-        checks.append(_check("warn", "phase_report_status_counts_changed", "current phase status counts differ from report", suggested="brigade work phases report build"))
+        checks.append(
+            _check(
+                "warn",
+                "phase_report_status_counts_changed",
+                "current phase status counts differ from report",
+                suggested="brigade work phases report build",
+            )
+        )
     if int(current_doctor.get("issue_count") or 0) != int(report_doctor.get("issue_count") or 0):
-        checks.append(_check("warn", "phase_report_doctor_issue_count_changed", f"{report_doctor.get('issue_count')} -> {current_doctor.get('issue_count')}", suggested="brigade work phases doctor"))
+        checks.append(
+            _check(
+                "warn",
+                "phase_report_doctor_issue_count_changed",
+                f"{report_doctor.get('issue_count')} -> {current_doctor.get('issue_count')}",
+                suggested="brigade work phases doctor",
+            )
+        )
     current_head = _git_head(target)
     report_head = str(report.get("git_head") or "")
     if report_head and current_head and not _same_commit(report_head, current_head):
-        checks.append(_check("warn", "phase_report_head_changed", f"current HEAD {current_head} differs from report HEAD {report_head}", suggested="brigade work phases report build"))
+        checks.append(
+            _check(
+                "warn",
+                "phase_report_head_changed",
+                f"current HEAD {current_head} differs from report HEAD {report_head}",
+                suggested="brigade work phases report build",
+            )
+        )
     report_path = Path(str(report.get("path") or ""))
     closeout = _read_json(report_path / "CLOSEOUT.json")
     if closeout is None:
-        checks.append(_check("warn", "phase_report_missing_closeout", "phase report has no CLOSEOUT.json", suggested=f"brigade work phases report closeout {report.get('report_id')}"))
+        checks.append(
+            _check(
+                "warn",
+                "phase_report_missing_closeout",
+                "phase report has no CLOSEOUT.json",
+                suggested=f"brigade work phases report closeout {report.get('report_id')}",
+            )
+        )
     elif closeout.get("status") in {"deferred", "superseded", "archived"}:
-        checks.append(_check("warn", "phase_report_not_reviewed", f"phase report closeout status is {closeout.get('status')}", suggested=f"brigade work phases report closeout {report.get('report_id')} --status reviewed"))
+        checks.append(
+            _check(
+                "warn",
+                "phase_report_not_reviewed",
+                f"phase report closeout status is {closeout.get('status')}",
+                suggested=f"brigade work phases report closeout {report.get('report_id')} --status reviewed",
+            )
+        )
     created = _parse_time(report.get("created_at"))
     latest_record_time = max(
         [
             parsed
-            for parsed in (_parse_time(record.get("updated_at") or record.get("completed_at") or record.get("created_at")) for record in _records(target))
+            for parsed in (
+                _parse_time(record.get("updated_at") or record.get("completed_at") or record.get("created_at"))
+                for record in _records(target)
+            )
             if parsed is not None
         ],
         default=None,
     )
     if created and latest_record_time and latest_record_time > created:
-        checks.append(_check("warn", "phase_report_newer_phase_record", "a phase record changed after this report was built", suggested="brigade work phases report build"))
+        checks.append(
+            _check(
+                "warn",
+                "phase_report_newer_phase_record",
+                "a phase record changed after this report was built",
+                suggested="brigade work phases report build",
+            )
+        )
     if not checks:
         checks.append(_check("ok", "phase_report_current", "phase report matches current ledger checks"))
     issues = [check for check in checks if check["status"] != "ok"]
@@ -812,7 +961,9 @@ def _report_compare_summary(target: Path, report: dict[str, Any] | None) -> dict
         "checks": checks,
         "issue_count": len(issues),
         "top_issue": issues[0] if issues else None,
-        "suggested_next_command": issues[0]["suggested_next_command"] if issues else "brigade work phases report show latest",
+        "suggested_next_command": issues[0]["suggested_next_command"]
+        if issues
+        else "brigade work phases report show latest",
     }
 
 
@@ -823,7 +974,10 @@ def _resolve_report(target: Path, report_id: str) -> tuple[dict[str, Any] | None
         return (latest, None) if latest else (None, "phase report not found: latest")
     candidates = sorted(_reports_root(target).glob(f"{report_id}*/PHASE_EVIDENCE.json"))
     if len(candidates) != 1:
-        return None, f"phase report not found: {report_id}" if not candidates else f"phase report id is ambiguous: {report_id}"
+        return (
+            None,
+            f"phase report not found: {report_id}" if not candidates else f"phase report id is ambiguous: {report_id}",
+        )
     payload = _read_json(candidates[0])
     if payload is None:
         return None, f"invalid phase report: {candidates[0]}"
@@ -850,7 +1004,9 @@ def _session_summary(session: dict[str, Any]) -> dict[str, Any]:
         "current_phase_id": session.get("current_phase_id"),
         "started_at": session.get("started_at"),
         "completed_at": session.get("completed_at"),
-        "closeout_status": (session.get("closeout") or {}).get("status") if isinstance(session.get("closeout"), dict) else None,
+        "closeout_status": (session.get("closeout") or {}).get("status")
+        if isinstance(session.get("closeout"), dict)
+        else None,
         "path": session.get("path"),
         "next_recommended_command": session.get("next_recommended_command"),
     }
@@ -1000,7 +1156,9 @@ def _resolve_session(target: Path, session_id: str) -> tuple[Path | None, dict[s
     target = target.expanduser().resolve()
     if session_id == "latest":
         latest = _latest_session(target)
-        return (Path(str(latest.get("path"))), latest, None) if latest else (None, None, "phase session not found: latest")
+        return (
+            (Path(str(latest.get("path"))), latest, None) if latest else (None, None, "phase session not found: latest")
+        )
     wanted = _slug(session_id)
     exact = _sessions_root(target) / f"{wanted}.json"
     if exact.is_file():
@@ -1030,11 +1188,15 @@ def _session_payload(target: Path, *, phase_range: str, source_goal: str | None 
     next_phase_record = status_data.get("next_phase")
     current_phase_id = next_phase_record.get("phase_id") if isinstance(next_phase_record, dict) else None
     latest_report = _latest_report(target)
-    latest_report_summary = {
-        "report_id": latest_report.get("report_id"),
-        "phase_range": latest_report.get("phase_range"),
-        "path": latest_report.get("path"),
-    } if latest_report else None
+    latest_report_summary = (
+        {
+            "report_id": latest_report.get("report_id"),
+            "phase_range": latest_report.get("phase_range"),
+            "path": latest_report.get("path"),
+        }
+        if latest_report
+        else None
+    )
     session_id = f"{_now().strftime('%Y%m%d-%H%M%S')}-phase-session-{uuid4().hex[:6]}"
     return {
         "schema_version": SCHEMA_VERSION,
@@ -1163,7 +1325,15 @@ def session_checkpoint(
         "created_at": created_at,
         "next_step": next_payload["next_step"],
         "suggested_next_command": next_payload["suggested_next_command"],
-        "source_fingerprint": _source_fingerprint([], {"session_id": session.get("session_id"), "phase_id": selected_phase_id, "status": status, "next_step": next_payload["next_step"]}),
+        "source_fingerprint": _source_fingerprint(
+            [],
+            {
+                "session_id": session.get("session_id"),
+                "phase_id": selected_phase_id,
+                "status": status,
+                "next_step": next_payload["next_step"],
+            },
+        ),
         "path": str(checkpoint_path),
     }
     _write_json(checkpoint_path, record)
@@ -1187,7 +1357,9 @@ def session_checkpoint(
     return 0
 
 
-def session_checkpoint_list(*, target: Path, session_id: str | None = None, limit: int = 20, json_output: bool = False) -> int:
+def session_checkpoint_list(
+    *, target: Path, session_id: str | None = None, limit: int = 20, json_output: bool = False
+) -> int:
     target = target.expanduser().resolve()
     checkpoints = list(reversed(_read_session_checkpoints(target)))
     if session_id:
@@ -1207,14 +1379,18 @@ def session_checkpoint_list(*, target: Path, session_id: str | None = None, limi
         "session_id": resolved_session_id,
         "checkpoints": summaries,
         "checkpoint_count": len(summaries),
-        "suggested_next_command": "brigade work phases session checkpoints show latest" if summaries else "brigade work phases session checkpoint latest",
+        "suggested_next_command": "brigade work phases session checkpoints show latest"
+        if summaries
+        else "brigade work phases session checkpoint latest",
     }
     if json_output:
         print(json.dumps(payload, indent=2, sort_keys=True))
     else:
         print(f"phase session checkpoints: {len(summaries)}")
         for checkpoint in summaries:
-            print(f"- {checkpoint.get('checkpoint_id')} [{checkpoint.get('status')}] phase={checkpoint.get('phase_id') or 'none'}")
+            print(
+                f"- {checkpoint.get('checkpoint_id')} [{checkpoint.get('status')}] phase={checkpoint.get('phase_id') or 'none'}"
+            )
     return 0
 
 
@@ -1242,22 +1418,77 @@ def _session_checkpoint_compare_payload(target: Path, checkpoint: dict[str, Any]
     checks: list[dict[str, Any]] = []
     current_next = None
     if session is None:
-        checks.append(_check("block", "phase_session_checkpoint_missing_session", str(error or "checkpoint session is missing"), suggested="brigade work phases session list"))
+        checks.append(
+            _check(
+                "block",
+                "phase_session_checkpoint_missing_session",
+                str(error or "checkpoint session is missing"),
+                suggested="brigade work phases session list",
+            )
+        )
     else:
         current_next = _session_next_payload(target, session)
         saved_step = checkpoint.get("next_step") if isinstance(checkpoint.get("next_step"), dict) else {}
         current_step = current_next.get("next_step") if isinstance(current_next.get("next_step"), dict) else {}
         if saved_step.get("step_type") != current_step.get("step_type"):
-            checks.append(_check("warn", "phase_session_checkpoint_step_changed", f"{saved_step.get('step_type')} -> {current_step.get('step_type')}", phase_id=current_step.get("phase_id"), suggested="brigade work phases session checkpoint latest"))
+            checks.append(
+                _check(
+                    "warn",
+                    "phase_session_checkpoint_step_changed",
+                    f"{saved_step.get('step_type')} -> {current_step.get('step_type')}",
+                    phase_id=current_step.get("phase_id"),
+                    suggested="brigade work phases session checkpoint latest",
+                )
+            )
         if saved_step.get("phase_id") != current_step.get("phase_id"):
-            checks.append(_check("warn", "phase_session_checkpoint_phase_changed", f"{saved_step.get('phase_id')} -> {current_step.get('phase_id')}", phase_id=current_step.get("phase_id"), suggested="brigade work phases session checkpoint latest"))
+            checks.append(
+                _check(
+                    "warn",
+                    "phase_session_checkpoint_phase_changed",
+                    f"{saved_step.get('phase_id')} -> {current_step.get('phase_id')}",
+                    phase_id=current_step.get("phase_id"),
+                    suggested="brigade work phases session checkpoint latest",
+                )
+            )
         if checkpoint.get("suggested_next_command") != current_next.get("suggested_next_command"):
-            checks.append(_check("warn", "phase_session_checkpoint_command_changed", "saved suggested command differs from current session next command", phase_id=current_step.get("phase_id"), suggested="brigade work phases session next latest"))
-        current_fingerprint = _source_fingerprint([], {"session_id": session.get("session_id"), "phase_id": checkpoint.get("phase_id"), "status": checkpoint.get("status"), "next_step": current_step})
+            checks.append(
+                _check(
+                    "warn",
+                    "phase_session_checkpoint_command_changed",
+                    "saved suggested command differs from current session next command",
+                    phase_id=current_step.get("phase_id"),
+                    suggested="brigade work phases session next latest",
+                )
+            )
+        current_fingerprint = _source_fingerprint(
+            [],
+            {
+                "session_id": session.get("session_id"),
+                "phase_id": checkpoint.get("phase_id"),
+                "status": checkpoint.get("status"),
+                "next_step": current_step,
+            },
+        )
         if checkpoint.get("source_fingerprint") != current_fingerprint:
-            checks.append(_check("warn", "phase_session_checkpoint_fingerprint_changed", "checkpoint source fingerprint differs from current session state", phase_id=current_step.get("phase_id"), suggested="brigade work phases session checkpoint latest"))
+            checks.append(
+                _check(
+                    "warn",
+                    "phase_session_checkpoint_fingerprint_changed",
+                    "checkpoint source fingerprint differs from current session state",
+                    phase_id=current_step.get("phase_id"),
+                    suggested="brigade work phases session checkpoint latest",
+                )
+            )
     if not checks:
-        checks.append(_check("ok", "phase_session_checkpoint_current", "checkpoint matches current session next state", phase_id=checkpoint.get("phase_id"), suggested="brigade work phases session checkpoints show latest"))
+        checks.append(
+            _check(
+                "ok",
+                "phase_session_checkpoint_current",
+                "checkpoint matches current session next state",
+                phase_id=checkpoint.get("phase_id"),
+                suggested="brigade work phases session checkpoints show latest",
+            )
+        )
     issues = [check for check in checks if check["status"] != "ok"]
     return {
         "schema_version": SCHEMA_VERSION,
@@ -1271,7 +1502,9 @@ def _session_checkpoint_compare_payload(target: Path, checkpoint: dict[str, Any]
         "checks": checks,
         "issue_count": len(issues),
         "top_issue": issues[0] if issues else None,
-        "suggested_next_command": issues[0]["suggested_next_command"] if issues else "brigade work phases session checkpoints show latest",
+        "suggested_next_command": issues[0]["suggested_next_command"]
+        if issues
+        else "brigade work phases session checkpoints show latest",
     }
 
 
@@ -1297,7 +1530,9 @@ def session_checkpoint_compare(*, target: Path, checkpoint_id: str, json_output:
     return 0
 
 
-def _checkpoint_issue_import_records(target: Path, checkpoint: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+def _checkpoint_issue_import_records(
+    target: Path, checkpoint: dict[str, Any]
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     compare = _session_checkpoint_compare_payload(target, checkpoint)
     checkpoint_id = str(checkpoint.get("checkpoint_id") or "")
     session_id = str(checkpoint.get("session_id") or "")
@@ -1322,7 +1557,9 @@ def _checkpoint_issue_import_records(target: Path, checkpoint: dict[str, Any]) -
                 "source": "phase-session-checkpoint",
                 "text": f"Resolve phase session checkpoint issue {issue_type} for {phase_id or checkpoint_id}: {detail}",
                 "type": "workflow",
-                "priority": "high" if issue_type.endswith("_missing_session") or checkpoint.get("status") == "blocked" else "normal",
+                "priority": "high"
+                if issue_type.endswith("_missing_session") or checkpoint.get("status") == "blocked"
+                else "normal",
                 "template": "bugfix",
                 "acceptance": [
                     f"Checkpoint `{checkpoint_id}` no longer reports `{issue_type}`.",
@@ -1359,7 +1596,9 @@ def _checkpoint_issue_import_records(target: Path, checkpoint: dict[str, Any]) -
     return records, compare
 
 
-def session_checkpoint_import_issues(*, target: Path, checkpoint_id: str, dry_run: bool = False, json_output: bool = False) -> int:
+def session_checkpoint_import_issues(
+    *, target: Path, checkpoint_id: str, dry_run: bool = False, json_output: bool = False
+) -> int:
     from . import work_cmd
 
     target = target.expanduser().resolve()
@@ -1395,7 +1634,9 @@ def session_checkpoint_import_issues(*, target: Path, checkpoint_id: str, dry_ru
         "created_count": len(created),
         "skipped_count": len(skipped),
         "dismissed_count": len(dismissed),
-        "suggested_next_command": "brigade work inbox" if records else "brigade work phases session checkpoints show latest",
+        "suggested_next_command": "brigade work inbox"
+        if records
+        else "brigade work phases session checkpoints show latest",
     }
     if json_output:
         print(json.dumps(payload, indent=2, sort_keys=True))
@@ -1448,11 +1689,23 @@ def session_recovery_note(
         "created_at": created_at,
         "next_step": next_payload["next_step"],
         "suggested_next_command": next_payload["suggested_next_command"],
-        "source_fingerprint": _source_fingerprint([], {"session_id": session.get("session_id"), "phase_id": selected_phase_id, "next_step": next_payload["next_step"], "summary": summary, "notes": safe_notes, "evidence": safe_evidence}),
+        "source_fingerprint": _source_fingerprint(
+            [],
+            {
+                "session_id": session.get("session_id"),
+                "phase_id": selected_phase_id,
+                "next_step": next_payload["next_step"],
+                "summary": summary,
+                "notes": safe_notes,
+                "evidence": safe_evidence,
+            },
+        ),
         "path": str(note_path),
     }
     _write_json(note_path, record)
-    references = session.get("recovery_note_references") if isinstance(session.get("recovery_note_references"), list) else []
+    references = (
+        session.get("recovery_note_references") if isinstance(session.get("recovery_note_references"), list) else []
+    )
     references.append(_recovery_note_summary(record))
     session["recovery_note_references"] = references[-50:]
     session["latest_recovery_note"] = _recovery_note_summary(record)
@@ -1469,7 +1722,9 @@ def session_recovery_note(
     return 0
 
 
-def session_recovery_note_list(*, target: Path, session_id: str | None = None, limit: int = 20, json_output: bool = False) -> int:
+def session_recovery_note_list(
+    *, target: Path, session_id: str | None = None, limit: int = 20, json_output: bool = False
+) -> int:
     target = target.expanduser().resolve()
     notes = list(reversed(_read_session_recovery_notes(target)))
     if session_id:
@@ -1489,7 +1744,9 @@ def session_recovery_note_list(*, target: Path, session_id: str | None = None, l
         "session_id": resolved_session_id,
         "notes": summaries,
         "note_count": len(summaries),
-        "suggested_next_command": "brigade work phases session recovery-notes show latest" if summaries else "brigade work phases session recovery-note latest",
+        "suggested_next_command": "brigade work phases session recovery-notes show latest"
+        if summaries
+        else "brigade work phases session recovery-note latest",
     }
     if json_output:
         print(json.dumps(payload, indent=2, sort_keys=True))
@@ -1517,7 +1774,9 @@ def session_recovery_note_show(*, target: Path, note_id: str, json_output: bool 
     return 0
 
 
-def session_recovery_note_closeout(*, target: Path, note_id: str, status: str = "reviewed", reason: str | None = None, json_output: bool = False) -> int:
+def session_recovery_note_closeout(
+    *, target: Path, note_id: str, status: str = "reviewed", reason: str | None = None, json_output: bool = False
+) -> int:
     if status not in {"reviewed", "deferred", "blocked", "archived"}:
         print("error: --status must be one of ['archived', 'blocked', 'deferred', 'reviewed']", file=sys.stderr)
         return 2
@@ -1541,7 +1800,9 @@ def session_recovery_note_closeout(*, target: Path, note_id: str, status: str = 
     session_id = str(note.get("session_id") or "")
     session_path, session, _error = _resolve_session(target, session_id) if session_id else (None, None, None)
     if session is not None and session_path is not None:
-        references = session.get("recovery_note_references") if isinstance(session.get("recovery_note_references"), list) else []
+        references = (
+            session.get("recovery_note_references") if isinstance(session.get("recovery_note_references"), list) else []
+        )
         updated_summary = _recovery_note_summary(note)
         session["recovery_note_references"] = [
             updated_summary if item.get("note_id") == note.get("note_id") else item
@@ -1574,25 +1835,73 @@ def _session_risk_payload(target: Path, session: dict[str, Any]) -> dict[str, An
     risks: list[dict[str, Any]] = []
     step = next_payload.get("next_step") if isinstance(next_payload.get("next_step"), dict) else {}
     step_type = str(step.get("step_type") or "")
-    if step_type in {"missing_record", "blocked_phase", "stale_in_progress_phase", "unverified_phase", "missing_commit_hash", "missing_push_ref", "unreviewed_pushed_phase"}:
-        risks.append(_check("block" if step_type in {"missing_record", "blocked_phase"} else "warn", f"phase_session_{step_type}", str(step.get("detail") or step_type), phase_id=step.get("phase_id"), suggested=step.get("suggested_next_command")))
+    if step_type in {
+        "missing_record",
+        "blocked_phase",
+        "stale_in_progress_phase",
+        "unverified_phase",
+        "missing_commit_hash",
+        "missing_push_ref",
+        "unreviewed_pushed_phase",
+    }:
+        risks.append(
+            _check(
+                "block" if step_type in {"missing_record", "blocked_phase"} else "warn",
+                f"phase_session_{step_type}",
+                str(step.get("detail") or step_type),
+                phase_id=step.get("phase_id"),
+                suggested=step.get("suggested_next_command"),
+            )
+        )
     checkpoint = next_payload.get("checkpoint") if isinstance(next_payload.get("checkpoint"), dict) else None
     if checkpoint and int(checkpoint.get("issue_count") or 0) > 0:
         top_issue = checkpoint.get("top_issue") if isinstance(checkpoint.get("top_issue"), dict) else {}
         status = "block" if top_issue.get("status") == "block" else "warn"
-        risks.append(_check(status, "phase_session_checkpoint_risk", str(top_issue.get("detail") or "checkpoint issues are open"), phase_id=top_issue.get("phase_id"), suggested=checkpoint.get("suggested_next_command")))
+        risks.append(
+            _check(
+                status,
+                "phase_session_checkpoint_risk",
+                str(top_issue.get("detail") or "checkpoint issues are open"),
+                phase_id=top_issue.get("phase_id"),
+                suggested=checkpoint.get("suggested_next_command"),
+            )
+        )
     open_notes = [
-        note for note in _read_session_recovery_notes(target)
+        note
+        for note in _read_session_recovery_notes(target)
         if note.get("session_id") == session.get("session_id") and note.get("status") in {"open", "blocked"}
     ]
     if open_notes:
         top_note = open_notes[-1]
-        risks.append(_check("warn", "phase_session_open_recovery_notes", f"{len(open_notes)} open recovery note(s)", phase_id=top_note.get("phase_id"), suggested=f"brigade work phases session recovery-notes show {top_note.get('note_id')}"))
+        risks.append(
+            _check(
+                "warn",
+                "phase_session_open_recovery_notes",
+                f"{len(open_notes)} open recovery note(s)",
+                phase_id=top_note.get("phase_id"),
+                suggested=f"brigade work phases session recovery-notes show {top_note.get('note_id')}",
+            )
+        )
     if int(doctor.get("issue_count") or 0) > 0:
         top = doctor.get("top_issue") if isinstance(doctor.get("top_issue"), dict) else {}
-        risks.append(_check("warn", "phase_session_doctor_issues", str(top.get("detail") or "phase ledger doctor has issue(s)"), phase_id=top.get("phase_id"), suggested=top.get("suggested_next_command") or "brigade work phases doctor"))
+        risks.append(
+            _check(
+                "warn",
+                "phase_session_doctor_issues",
+                str(top.get("detail") or "phase ledger doctor has issue(s)"),
+                phase_id=top.get("phase_id"),
+                suggested=top.get("suggested_next_command") or "brigade work phases doctor",
+            )
+        )
     if not risks:
-        risks.append(_check("ok", "phase_session_risk", "no phase session risks detected", suggested="brigade work phases session next latest"))
+        risks.append(
+            _check(
+                "ok",
+                "phase_session_risk",
+                "no phase session risks detected",
+                suggested="brigade work phases session next latest",
+            )
+        )
     issues = [risk for risk in risks if risk["status"] != "ok"]
     risk_level = "high" if any(risk["status"] == "block" for risk in issues) else "medium" if issues else "low"
     return {
@@ -1609,7 +1918,9 @@ def _session_risk_payload(target: Path, session: dict[str, Any]) -> dict[str, An
         "checkpoint": checkpoint,
         "open_recovery_note_count": len(open_notes),
         "doctor_issue_count": doctor.get("issue_count"),
-        "suggested_next_command": issues[0]["suggested_next_command"] if issues else next_payload.get("suggested_next_command"),
+        "suggested_next_command": issues[0]["suggested_next_command"]
+        if issues
+        else next_payload.get("suggested_next_command"),
     }
 
 
@@ -1674,7 +1985,9 @@ def _session_verification_payload(target: Path, session: dict[str, Any]) -> dict
         "missing_verification_phase_ids": missing_verification,
         "failed_verification_phase_ids": failed_verification,
         "issue_count": issue_count,
-        "suggested_next_command": f"brigade work phases verify plan {missing_verification[0]}" if missing_verification else "brigade work phases session progress latest",
+        "suggested_next_command": f"brigade work phases verify plan {missing_verification[0]}"
+        if missing_verification
+        else "brigade work phases session progress latest",
     }
 
 
@@ -1730,7 +2043,13 @@ def _session_privacy_payload(target: Path, session: dict[str, Any]) -> dict[str,
             }
         )
     issue_count = len(missing) + len(blocked_phase_ids) + len(missing_privacy_phase_ids)
-    next_phase = blocked_phase_ids[0] if blocked_phase_ids else missing_privacy_phase_ids[0] if missing_privacy_phase_ids else None
+    next_phase = (
+        blocked_phase_ids[0]
+        if blocked_phase_ids
+        else missing_privacy_phase_ids[0]
+        if missing_privacy_phase_ids
+        else None
+    )
     return {
         "schema_version": SCHEMA_VERSION,
         "schema": _schema("phase-ledger-session-privacy"),
@@ -1744,7 +2063,9 @@ def _session_privacy_payload(target: Path, session: dict[str, Any]) -> dict[str,
         "blocked_phase_ids": blocked_phase_ids,
         "missing_privacy_phase_ids": missing_privacy_phase_ids,
         "issue_count": issue_count,
-        "suggested_next_command": f"brigade work phases privacy {next_phase}" if next_phase else "brigade work phases session progress latest",
+        "suggested_next_command": f"brigade work phases privacy {next_phase}"
+        if next_phase
+        else "brigade work phases session progress latest",
     }
 
 
@@ -1812,7 +2133,13 @@ def _session_handoffs_payload(target: Path, session: dict[str, Any]) -> dict[str
             }
         )
     issue_count = len(missing) + len(failed_handoff_phase_ids) + len(missing_handoff_phase_ids)
-    next_phase = failed_handoff_phase_ids[0] if failed_handoff_phase_ids else missing_handoff_phase_ids[0] if missing_handoff_phase_ids else None
+    next_phase = (
+        failed_handoff_phase_ids[0]
+        if failed_handoff_phase_ids
+        else missing_handoff_phase_ids[0]
+        if missing_handoff_phase_ids
+        else None
+    )
     return {
         "schema_version": SCHEMA_VERSION,
         "schema": _schema("phase-ledger-session-handoffs"),
@@ -1826,7 +2153,9 @@ def _session_handoffs_payload(target: Path, session: dict[str, Any]) -> dict[str
         "missing_handoff_phase_ids": missing_handoff_phase_ids,
         "failed_handoff_phase_ids": failed_handoff_phase_ids,
         "issue_count": issue_count,
-        "suggested_next_command": f"brigade work phases handoff {next_phase} --lint" if next_phase else "brigade work phases session progress latest",
+        "suggested_next_command": f"brigade work phases handoff {next_phase} --lint"
+        if next_phase
+        else "brigade work phases session progress latest",
     }
 
 
@@ -1848,33 +2177,87 @@ def session_handoffs(*, target: Path, session_id: str, json_output: bool = False
     return 0
 
 
-def _checkpoint_state_for_session_next(target: Path, session: dict[str, Any], step: dict[str, Any]) -> dict[str, Any] | None:
+def _checkpoint_state_for_session_next(
+    target: Path, session: dict[str, Any], step: dict[str, Any]
+) -> dict[str, Any] | None:
     checkpoint = _latest_checkpoint_for_session(target, session.get("session_id"))
     if checkpoint is None:
         return None
     checks: list[dict[str, Any]] = []
     saved_step = checkpoint.get("next_step") if isinstance(checkpoint.get("next_step"), dict) else {}
     if checkpoint.get("status") == "blocked":
-        checks.append(_check("block", "phase_session_checkpoint_blocked", str(checkpoint.get("summary") or "checkpoint is marked blocked"), phase_id=checkpoint.get("phase_id"), suggested=checkpoint.get("suggested_next_command")))
+        checks.append(
+            _check(
+                "block",
+                "phase_session_checkpoint_blocked",
+                str(checkpoint.get("summary") or "checkpoint is marked blocked"),
+                phase_id=checkpoint.get("phase_id"),
+                suggested=checkpoint.get("suggested_next_command"),
+            )
+        )
     if saved_step.get("step_type") != step.get("step_type"):
-        checks.append(_check("warn", "phase_session_checkpoint_step_changed", f"{saved_step.get('step_type')} -> {step.get('step_type')}", phase_id=step.get("phase_id"), suggested="brigade work phases session checkpoint latest"))
+        checks.append(
+            _check(
+                "warn",
+                "phase_session_checkpoint_step_changed",
+                f"{saved_step.get('step_type')} -> {step.get('step_type')}",
+                phase_id=step.get("phase_id"),
+                suggested="brigade work phases session checkpoint latest",
+            )
+        )
     if saved_step.get("phase_id") != step.get("phase_id"):
-        checks.append(_check("warn", "phase_session_checkpoint_phase_changed", f"{saved_step.get('phase_id')} -> {step.get('phase_id')}", phase_id=step.get("phase_id"), suggested="brigade work phases session checkpoint latest"))
+        checks.append(
+            _check(
+                "warn",
+                "phase_session_checkpoint_phase_changed",
+                f"{saved_step.get('phase_id')} -> {step.get('phase_id')}",
+                phase_id=step.get("phase_id"),
+                suggested="brigade work phases session checkpoint latest",
+            )
+        )
     if checkpoint.get("suggested_next_command") != step.get("suggested_next_command"):
-        checks.append(_check("warn", "phase_session_checkpoint_command_changed", "saved suggested command differs from current session next command", phase_id=step.get("phase_id"), suggested="brigade work phases session next latest"))
-    current_fingerprint = _source_fingerprint([], {"session_id": session.get("session_id"), "phase_id": checkpoint.get("phase_id"), "status": checkpoint.get("status"), "next_step": step})
+        checks.append(
+            _check(
+                "warn",
+                "phase_session_checkpoint_command_changed",
+                "saved suggested command differs from current session next command",
+                phase_id=step.get("phase_id"),
+                suggested="brigade work phases session next latest",
+            )
+        )
+    current_fingerprint = _source_fingerprint(
+        [],
+        {
+            "session_id": session.get("session_id"),
+            "phase_id": checkpoint.get("phase_id"),
+            "status": checkpoint.get("status"),
+            "next_step": step,
+        },
+    )
     if checkpoint.get("source_fingerprint") != current_fingerprint:
-        checks.append(_check("warn", "phase_session_checkpoint_fingerprint_changed", "checkpoint source fingerprint differs from current session state", phase_id=step.get("phase_id"), suggested="brigade work phases session checkpoint latest"))
+        checks.append(
+            _check(
+                "warn",
+                "phase_session_checkpoint_fingerprint_changed",
+                "checkpoint source fingerprint differs from current session state",
+                phase_id=step.get("phase_id"),
+                suggested="brigade work phases session checkpoint latest",
+            )
+        )
     issues = [check for check in checks if check["status"] != "ok"]
     return {
         "latest_checkpoint": _checkpoint_summary(checkpoint),
         "issue_count": len(issues),
         "top_issue": issues[0] if issues else None,
-        "suggested_next_command": "brigade work phases session checkpoints import-issues latest" if issues else "brigade work phases session checkpoints show latest",
+        "suggested_next_command": "brigade work phases session checkpoints import-issues latest"
+        if issues
+        else "brigade work phases session checkpoints show latest",
     }
 
 
-def session_closeout(*, target: Path, session_id: str, status: str = "reviewed", reason: str | None = None, json_output: bool = False) -> int:
+def session_closeout(
+    *, target: Path, session_id: str, status: str = "reviewed", reason: str | None = None, json_output: bool = False
+) -> int:
     if status not in PHASE_SESSION_CLOSEOUT_STATUSES:
         print(f"error: --status must be one of {sorted(PHASE_SESSION_CLOSEOUT_STATUSES)}", file=sys.stderr)
         return 2
@@ -1890,7 +2273,10 @@ def session_closeout(*, target: Path, session_id: str, status: str = "reviewed",
         "reason": reason or f"phase session marked {status}",
         "reviewed_at": _now().isoformat(),
         "unresolved_issue_count": doctor_data["issue_count"],
-        "source_fingerprint": _source_fingerprint(session.get("phase_records") if isinstance(session.get("phase_records"), list) else [], {"session_id": session.get("session_id"), "status": session.get("status")}),
+        "source_fingerprint": _source_fingerprint(
+            session.get("phase_records") if isinstance(session.get("phase_records"), list) else [],
+            {"session_id": session.get("session_id"), "status": session.get("status")},
+        ),
     }
     session["status"] = "closed" if status in {"reviewed", "archived"} else status
     session["completed_at"] = session.get("completed_at") or _now().isoformat()
@@ -1954,7 +2340,8 @@ def _session_next_payload(target: Path, session: dict[str, Any]) -> dict[str, An
                 "step_type": "blocked_phase",
                 "phase_id": phase_id,
                 "detail": str(record.get("blocker_reason") or f"{phase_id} is blocked"),
-                "suggested_next_command": record.get("next_phase_recommendation") or f"brigade work phases show {phase_id}",
+                "suggested_next_command": record.get("next_phase_recommendation")
+                or f"brigade work phases show {phase_id}",
             }
             break
         if status in DONE_STATUSES:
@@ -1963,7 +2350,7 @@ def _session_next_payload(target: Path, session: dict[str, Any]) -> dict[str, An
                     "step_type": "unverified_phase",
                     "phase_id": phase_id,
                     "detail": f"{phase_id} has no recorded tests",
-                    "suggested_next_command": f"brigade work phases complete {phase_id} --test \"<command>\"",
+                    "suggested_next_command": f'brigade work phases complete {phase_id} --test "<command>"',
                 }
                 break
             if status in {"committed", "pushed"} and not record.get("commit_hash"):
@@ -1990,7 +2377,11 @@ def _session_next_payload(target: Path, session: dict[str, Any]) -> dict[str, An
                     "suggested_next_command": f"brigade work phases closeout {phase_id}",
                 }
                 break
-    if not missing and expected and all(by_id.get(phase_id, {}).get("status") in DONE_STATUSES | {"deferred"} for phase_id in expected):
+    if (
+        not missing
+        and expected
+        and all(by_id.get(phase_id, {}).get("status") in DONE_STATUSES | {"deferred"} for phase_id in expected)
+    ):
         closeout = session.get("closeout") if isinstance(session.get("closeout"), dict) else None
         if closeout and closeout.get("status") == "reviewed":
             step = {
@@ -2040,7 +2431,9 @@ def session_next(*, target: Path, session_id: str, json_output: bool = False) ->
         print(f"detail: {step['detail']}")
         checkpoint = payload.get("checkpoint") if isinstance(payload.get("checkpoint"), dict) else None
         if checkpoint:
-            latest = checkpoint.get("latest_checkpoint") if isinstance(checkpoint.get("latest_checkpoint"), dict) else {}
+            latest = (
+                checkpoint.get("latest_checkpoint") if isinstance(checkpoint.get("latest_checkpoint"), dict) else {}
+            )
             print(f"checkpoint: {latest.get('checkpoint_id')} issues={checkpoint.get('issue_count')}")
         print(f"next: {payload['suggested_next_command']}")
     return 0
@@ -2065,7 +2458,9 @@ def _session_protocol_payload(target: Path, session: dict[str, Any]) -> dict[str
                 "phase_session_protocol_checkpoint_issue",
                 str(top_issue.get("detail") or "checkpoint needs review before resume"),
                 phase_id=top_issue.get("phase_id"),
-                suggested=str(checkpoint.get("suggested_next_command") or "brigade work phases session checkpoints compare latest"),
+                suggested=str(
+                    checkpoint.get("suggested_next_command") or "brigade work phases session checkpoints compare latest"
+                ),
             )
         )
     if risk_payload.get("risk_level") == "high":
@@ -2116,7 +2511,9 @@ def _session_protocol_payload(target: Path, session: dict[str, Any]) -> dict[str
         wrapper_steps.append(
             {
                 "step": "route-blockers",
-                "command": "brigade work phases session checkpoints import-issues latest --json" if checkpoint else f"brigade work phases session import-issues {session.get('session_id')} --json",
+                "command": "brigade work phases session checkpoints import-issues latest --json"
+                if checkpoint
+                else f"brigade work phases session import-issues {session.get('session_id')} --json",
                 "writes": True,
             }
         )
@@ -2256,7 +2653,9 @@ def _session_audit_payload(target: Path, session: dict[str, Any]) -> dict[str, A
         _gate_check(
             "ok" if gate.get("safe_to_claim_complete") else "block",
             "phase_session_audit_completion_gate",
-            "completion gate is clean" if gate.get("safe_to_claim_complete") else f"completion gate has {gate.get('blocker_count')} blocker(s)",
+            "completion gate is clean"
+            if gate.get("safe_to_claim_complete")
+            else f"completion gate has {gate.get('blocker_count')} blocker(s)",
             suggested=gate.get("suggested_next_command"),
         )
     )
@@ -2296,7 +2695,9 @@ def _session_audit_payload(target: Path, session: dict[str, Any]) -> dict[str, A
             "blocker_count": gate.get("blocker_count"),
             "top_blocker": gate.get("top_blocker"),
         },
-        "suggested_next_command": issues[0]["suggested_next_command"] if issues else "brigade work phases session show latest",
+        "suggested_next_command": issues[0]["suggested_next_command"]
+        if issues
+        else "brigade work phases session show latest",
     }
 
 
@@ -2363,7 +2764,9 @@ def session_resume(*, target: Path, session_id: str, json_output: bool = False) 
         print("executed: false")
         checkpoint = next_payload.get("checkpoint") if isinstance(next_payload.get("checkpoint"), dict) else None
         if checkpoint:
-            latest = checkpoint.get("latest_checkpoint") if isinstance(checkpoint.get("latest_checkpoint"), dict) else {}
+            latest = (
+                checkpoint.get("latest_checkpoint") if isinstance(checkpoint.get("latest_checkpoint"), dict) else {}
+            )
             print(f"checkpoint: {latest.get('checkpoint_id')} issues={checkpoint.get('issue_count')}")
         print(f"next: {payload['suggested_next_command']}")
     return 0
@@ -2398,7 +2801,9 @@ def _session_report_payload(target: Path, session: dict[str, Any]) -> dict[str, 
     records, missing = _session_phase_records(target, phase_range)
     doctor_data = doctor_payload(target, phase_range=phase_range)
     next_data = _session_next_payload(target, session)
-    actions = [_action_summary(action) for action in _read_actions(target) if action.get("status") in {"pending", "active"}]
+    actions = [
+        _action_summary(action) for action in _read_actions(target) if action.get("status") in {"pending", "active"}
+    ]
     latest_report = _latest_report(target)
     report_compare = _report_compare_summary(target, latest_report)
     latest_checkpoint = _latest_checkpoint_for_session(target, session.get("session_id"))
@@ -2432,7 +2837,9 @@ def _session_report_payload(target: Path, session: dict[str, Any]) -> dict[str, 
         },
         "next": next_data,
         "recovery": {
-            "latest_checkpoint": _checkpoint_summary(latest_checkpoint) if isinstance(latest_checkpoint, dict) else None,
+            "latest_checkpoint": _checkpoint_summary(latest_checkpoint)
+            if isinstance(latest_checkpoint, dict)
+            else None,
             "checkpoint_compare": {
                 "issue_count": checkpoint_compare.get("issue_count"),
                 "top_issue": checkpoint_compare.get("top_issue"),
@@ -2443,7 +2850,9 @@ def _session_report_payload(target: Path, session: dict[str, Any]) -> dict[str, 
             "recovery_notes": recovery_notes,
             "recovery_note_count": len(recovery_notes),
             "open_recovery_note_count": len(open_recovery_notes),
-            "suggested_next_command": "brigade work phases session recovery-notes list" if recovery_notes else "brigade work phases session recovery-note latest",
+            "suggested_next_command": "brigade work phases session recovery-notes list"
+            if recovery_notes
+            else "brigade work phases session recovery-note latest",
         },
         "actions": actions,
         "action_count": len(actions),
@@ -2487,7 +2896,9 @@ def _write_session_report_markdown(path: Path, payload: dict[str, Any]) -> None:
     ]
     recovery = payload.get("recovery") if isinstance(payload.get("recovery"), dict) else {}
     checkpoint = recovery.get("latest_checkpoint") if isinstance(recovery.get("latest_checkpoint"), dict) else None
-    checkpoint_compare = recovery.get("checkpoint_compare") if isinstance(recovery.get("checkpoint_compare"), dict) else {}
+    checkpoint_compare = (
+        recovery.get("checkpoint_compare") if isinstance(recovery.get("checkpoint_compare"), dict) else {}
+    )
     if checkpoint:
         lines.append(f"- Checkpoint: `{checkpoint.get('checkpoint_id')}` `{checkpoint.get('status')}`")
         lines.append(f"- Checkpoint issues: `{checkpoint_compare.get('issue_count', 0)}`")
@@ -2506,7 +2917,9 @@ def _write_session_report_markdown(path: Path, payload: dict[str, Any]) -> None:
         ]
     )
     for record in payload.get("phase_records", []):
-        lines.append(f"- `{record.get('phase_id')}` `{record.get('status')}` commit=`{record.get('commit_hash') or 'none'}` push=`{record.get('push_ref') or 'none'}`")
+        lines.append(
+            f"- `{record.get('phase_id')}` `{record.get('status')}` commit=`{record.get('commit_hash') or 'none'}` push=`{record.get('push_ref') or 'none'}`"
+        )
     lines.extend(["", "## Blockers", ""])
     blockers = payload.get("blockers") or []
     if not blockers:
@@ -2523,7 +2936,12 @@ def _resolve_session_report(target: Path, report_id: str) -> tuple[dict[str, Any
         return (reports[-1], None) if reports else (None, "phase session report not found: latest")
     candidates = sorted(_session_reports_root(target).glob(f"{report_id}*/SESSION_EVIDENCE.json"))
     if len(candidates) != 1:
-        return None, f"phase session report not found: {report_id}" if not candidates else f"phase session report id is ambiguous: {report_id}"
+        return (
+            None,
+            f"phase session report not found: {report_id}"
+            if not candidates
+            else f"phase session report id is ambiguous: {report_id}",
+        )
     payload = _read_json(candidates[0])
     if payload is None:
         return None, f"invalid phase session report: {candidates[0]}"
@@ -2557,15 +2975,25 @@ def session_report_list(*, target: Path, limit: int = 20, json_output: bool = Fa
     reports = [
         {
             "report_id": report.get("report_id"),
-            "session_id": (report.get("session") or {}).get("session_id") if isinstance(report.get("session"), dict) else None,
+            "session_id": (report.get("session") or {}).get("session_id")
+            if isinstance(report.get("session"), dict)
+            else None,
             "created_at": report.get("created_at"),
             "phase_range": report.get("phase_range"),
-            "issue_count": (report.get("doctor") or {}).get("issue_count") if isinstance(report.get("doctor"), dict) else None,
+            "issue_count": (report.get("doctor") or {}).get("issue_count")
+            if isinstance(report.get("doctor"), dict)
+            else None,
             "path": report.get("path"),
         }
         for report in reversed(_read_session_reports(target))
     ][:limit]
-    payload = {"schema_version": SCHEMA_VERSION, "schema": _schema("phase-ledger-session-report-list"), "target": str(target), "reports": reports, "report_count": len(reports)}
+    payload = {
+        "schema_version": SCHEMA_VERSION,
+        "schema": _schema("phase-ledger-session-report-list"),
+        "target": str(target),
+        "reports": reports,
+        "report_count": len(reports),
+    }
     if json_output:
         print(json.dumps(payload, indent=2, sort_keys=True))
     else:
@@ -2585,8 +3013,12 @@ def session_report_show(*, target: Path, report_id: str, json_output: bool = Fal
         print(json.dumps(report, indent=2, sort_keys=True))
     else:
         print(f"phase session report: {report.get('report_id')}")
-        print(f"session: {(report.get('session') or {}).get('session_id') if isinstance(report.get('session'), dict) else 'none'}")
-        print(f"issues: {(report.get('doctor') or {}).get('issue_count') if isinstance(report.get('doctor'), dict) else 0}")
+        print(
+            f"session: {(report.get('session') or {}).get('session_id') if isinstance(report.get('session'), dict) else 'none'}"
+        )
+        print(
+            f"issues: {(report.get('doctor') or {}).get('issue_count') if isinstance(report.get('doctor'), dict) else 0}"
+        )
     return 0
 
 
@@ -2701,45 +3133,181 @@ def _session_activity_payload(target: Path, session: dict[str, Any]) -> dict[str
     for record in records:
         phase_id = record.get("phase_id")
         if record.get("created_at"):
-            events.append(_activity_event(timestamp=record.get("created_at"), event_type="phase-record-created", phase_id=phase_id, status=record.get("status"), summary="phase record created", path=record.get("path")))
+            events.append(
+                _activity_event(
+                    timestamp=record.get("created_at"),
+                    event_type="phase-record-created",
+                    phase_id=phase_id,
+                    status=record.get("status"),
+                    summary="phase record created",
+                    path=record.get("path"),
+                )
+            )
         if record.get("started_at"):
-            events.append(_activity_event(timestamp=record.get("started_at"), event_type="phase-started", phase_id=phase_id, status=record.get("status"), summary="phase marked in progress", path=record.get("path")))
+            events.append(
+                _activity_event(
+                    timestamp=record.get("started_at"),
+                    event_type="phase-started",
+                    phase_id=phase_id,
+                    status=record.get("status"),
+                    summary="phase marked in progress",
+                    path=record.get("path"),
+                )
+            )
         for command in record.get("tests_run") or []:
-            events.append(_activity_event(timestamp=record.get("completed_at") or record.get("updated_at"), event_type="phase-test-recorded", phase_id=phase_id, status=record.get("test_result_summary") or "recorded", summary=f"test recorded: {command}", path=record.get("path")))
+            events.append(
+                _activity_event(
+                    timestamp=record.get("completed_at") or record.get("updated_at"),
+                    event_type="phase-test-recorded",
+                    phase_id=phase_id,
+                    status=record.get("test_result_summary") or "recorded",
+                    summary=f"test recorded: {command}",
+                    path=record.get("path"),
+                )
+            )
         if record.get("commit_hash"):
-            events.append(_activity_event(timestamp=record.get("completed_at") or record.get("updated_at"), event_type="phase-commit-recorded", phase_id=phase_id, status=record.get("status"), summary=f"commit recorded: {record.get('commit_hash')}", path=record.get("path")))
+            events.append(
+                _activity_event(
+                    timestamp=record.get("completed_at") or record.get("updated_at"),
+                    event_type="phase-commit-recorded",
+                    phase_id=phase_id,
+                    status=record.get("status"),
+                    summary=f"commit recorded: {record.get('commit_hash')}",
+                    path=record.get("path"),
+                )
+            )
         if record.get("push_ref"):
-            events.append(_activity_event(timestamp=record.get("completed_at") or record.get("updated_at"), event_type="phase-push-recorded", phase_id=phase_id, status=record.get("status"), summary=f"push ref recorded: {record.get('push_ref')}", path=record.get("path")))
+            events.append(
+                _activity_event(
+                    timestamp=record.get("completed_at") or record.get("updated_at"),
+                    event_type="phase-push-recorded",
+                    phase_id=phase_id,
+                    status=record.get("status"),
+                    summary=f"push ref recorded: {record.get('push_ref')}",
+                    path=record.get("path"),
+                )
+            )
         if record.get("completed_at"):
-            events.append(_activity_event(timestamp=record.get("completed_at"), event_type="phase-completed", phase_id=phase_id, status=record.get("status"), summary=str(record.get("implementation_summary") or "phase completion evidence recorded"), path=record.get("path")))
+            events.append(
+                _activity_event(
+                    timestamp=record.get("completed_at"),
+                    event_type="phase-completed",
+                    phase_id=phase_id,
+                    status=record.get("status"),
+                    summary=str(record.get("implementation_summary") or "phase completion evidence recorded"),
+                    path=record.get("path"),
+                )
+            )
         for handoff_item in record.get("phase_handoffs") or []:
             if isinstance(handoff_item, dict):
-                events.append(_activity_event(timestamp=handoff_item.get("created_at"), event_type="phase-handoff-drafted", phase_id=phase_id, local_id=handoff_item.get("handoff_id"), status=(handoff_item.get("lint") or {}).get("status") if isinstance(handoff_item.get("lint"), dict) else None, summary="phase handoff draft recorded", path=handoff_item.get("path"), suggested="brigade handoff lint"))
+                events.append(
+                    _activity_event(
+                        timestamp=handoff_item.get("created_at"),
+                        event_type="phase-handoff-drafted",
+                        phase_id=phase_id,
+                        local_id=handoff_item.get("handoff_id"),
+                        status=(handoff_item.get("lint") or {}).get("status")
+                        if isinstance(handoff_item.get("lint"), dict)
+                        else None,
+                        summary="phase handoff draft recorded",
+                        path=handoff_item.get("path"),
+                        suggested="brigade handoff lint",
+                    )
+                )
     for closeout in _read_closeouts(target):
         closeout_phase_ids = {str(item) for item in closeout.get("phase_ids") or []}
         if phase_ids and not closeout_phase_ids.intersection(phase_ids):
             continue
-        events.append(_activity_event(timestamp=closeout.get("reviewed_at"), event_type="phase-closeout", local_id=closeout.get("closeout_id"), status=closeout.get("status"), summary=str(closeout.get("reason") or "phase closeout recorded"), path=closeout.get("path")))
+        events.append(
+            _activity_event(
+                timestamp=closeout.get("reviewed_at"),
+                event_type="phase-closeout",
+                local_id=closeout.get("closeout_id"),
+                status=closeout.get("status"),
+                summary=str(closeout.get("reason") or "phase closeout recorded"),
+                path=closeout.get("path"),
+            )
+        )
     for action in _read_actions(target):
         if phase_ids and str(action.get("phase_id")) not in phase_ids:
             continue
-        events.append(_activity_event(timestamp=action.get("updated_at") or action.get("created_at"), event_type="phase-action", phase_id=action.get("phase_id"), local_id=action.get("action_id"), status=action.get("status"), summary=str(action.get("safe_summary") or action.get("issue_type") or "phase action"), path=action.get("path"), suggested=action.get("suggested_next_command")))
+        events.append(
+            _activity_event(
+                timestamp=action.get("updated_at") or action.get("created_at"),
+                event_type="phase-action",
+                phase_id=action.get("phase_id"),
+                local_id=action.get("action_id"),
+                status=action.get("status"),
+                summary=str(action.get("safe_summary") or action.get("issue_type") or "phase action"),
+                path=action.get("path"),
+                suggested=action.get("suggested_next_command"),
+            )
+        )
     for report in _read_reports(target):
         if report.get("phase_range") != phase_range:
             continue
-        events.append(_activity_event(timestamp=report.get("created_at"), event_type="phase-report", local_id=report.get("report_id"), status=(report.get("doctor") or {}).get("issue_count") if isinstance(report.get("doctor"), dict) else None, summary="phase report built", path=report.get("path"), suggested="brigade work phases report show latest"))
+        events.append(
+            _activity_event(
+                timestamp=report.get("created_at"),
+                event_type="phase-report",
+                local_id=report.get("report_id"),
+                status=(report.get("doctor") or {}).get("issue_count")
+                if isinstance(report.get("doctor"), dict)
+                else None,
+                summary="phase report built",
+                path=report.get("path"),
+                suggested="brigade work phases report show latest",
+            )
+        )
         compare_summary = _report_compare_summary(target, report)
         if compare_summary:
-            events.append(_activity_event(timestamp=report.get("created_at"), event_type="phase-report-compare", local_id=report.get("report_id"), status=compare_summary.get("issue_count"), summary="phase report compare state available", path=report.get("path"), suggested=compare_summary.get("suggested_next_command")))
+            events.append(
+                _activity_event(
+                    timestamp=report.get("created_at"),
+                    event_type="phase-report-compare",
+                    local_id=report.get("report_id"),
+                    status=compare_summary.get("issue_count"),
+                    summary="phase report compare state available",
+                    path=report.get("path"),
+                    suggested=compare_summary.get("suggested_next_command"),
+                )
+            )
     for report in _read_session_reports(target):
         session_summary = report.get("session") if isinstance(report.get("session"), dict) else {}
         if session_summary.get("session_id") != session.get("session_id"):
             continue
-        events.append(_activity_event(timestamp=report.get("created_at"), event_type="session-report", local_id=report.get("report_id"), status=(report.get("doctor") or {}).get("issue_count") if isinstance(report.get("doctor"), dict) else None, summary="phase session report built", path=report.get("path"), suggested="brigade work phases session report show latest"))
+        events.append(
+            _activity_event(
+                timestamp=report.get("created_at"),
+                event_type="session-report",
+                local_id=report.get("report_id"),
+                status=(report.get("doctor") or {}).get("issue_count")
+                if isinstance(report.get("doctor"), dict)
+                else None,
+                summary="phase session report built",
+                path=report.get("path"),
+                suggested="brigade work phases session report show latest",
+            )
+        )
     for item in _session_import_summaries(target):
-        events.append(_activity_event(timestamp=item.get("created_at"), event_type="phase-import", local_id=item.get("import_id"), status=item.get("status"), summary=str(item.get("text") or "phase import"), suggested=f"brigade work import show {item.get('import_id')}"))
+        events.append(
+            _activity_event(
+                timestamp=item.get("created_at"),
+                event_type="phase-import",
+                local_id=item.get("import_id"),
+                status=item.get("status"),
+                summary=str(item.get("text") or "phase import"),
+                suggested=f"brigade work import show {item.get('import_id')}",
+            )
+        )
     events = [event for event in events if event.get("timestamp")]
-    events.sort(key=lambda item: (str(item.get("timestamp") or ""), str(item.get("event_type") or ""), str(item.get("event_id") or "")))
+    events.sort(
+        key=lambda item: (
+            str(item.get("timestamp") or ""),
+            str(item.get("event_type") or ""),
+            str(item.get("event_id") or ""),
+        )
+    )
     next_payload = _session_next_payload(target, session)
     return {
         "schema_version": SCHEMA_VERSION,
@@ -2771,7 +3339,9 @@ def session_activity(*, target: Path, session_id: str, json_output: bool = False
         print(f"phase session activity: {payload['session_id']}")
         print(f"events: {payload['event_count']}")
         for event in payload["events"][-20:]:
-            print(f"- {event.get('timestamp')} {event.get('event_type')} {event.get('phase_id') or event.get('local_id')}: {event.get('safe_summary')}")
+            print(
+                f"- {event.get('timestamp')} {event.get('event_type')} {event.get('phase_id') or event.get('local_id')}: {event.get('safe_summary')}"
+            )
     return 0
 
 
@@ -2864,7 +3434,9 @@ def _session_blocker_import_candidates(target: Path, session: dict[str, Any]) ->
     for phase_id in progress.get("missing_phase_ids") or []:
         issue_type = "phase_session_missing_record"
         detail = f"{phase_id} is missing from the phase session range"
-        fingerprint = _session_blocker_fingerprint(session_id=session_id, phase_id=phase_id, issue_type=issue_type, detail=detail)
+        fingerprint = _session_blocker_fingerprint(
+            session_id=session_id, phase_id=phase_id, issue_type=issue_type, detail=detail
+        )
         candidates.append(
             {
                 "text": f"Resolve phase session blocker {issue_type} for {phase_id}: {detail}",
@@ -2890,7 +3462,9 @@ def _session_blocker_import_candidates(target: Path, session: dict[str, Any]) ->
         issue_type = str(blocker.get("name") or "phase_session_blocker")
         phase_id = blocker.get("phase_id") or progress.get("current_phase_id") or "session"
         detail = str(blocker.get("detail") or issue_type)
-        fingerprint = _session_blocker_fingerprint(session_id=session_id, phase_id=phase_id, issue_type=issue_type, detail=detail)
+        fingerprint = _session_blocker_fingerprint(
+            session_id=session_id, phase_id=phase_id, issue_type=issue_type, detail=detail
+        )
         candidates.append(
             {
                 "text": f"Resolve phase session blocker {issue_type} for {phase_id}: {detail}",
@@ -2902,7 +3476,8 @@ def _session_blocker_import_candidates(target: Path, session: dict[str, Any]) ->
                     "issue_type": issue_type,
                     "safe_summary": detail,
                     "source_fingerprint": fingerprint,
-                    "suggested_next_command": blocker.get("suggested_next_command") or progress.get("suggested_next_command"),
+                    "suggested_next_command": blocker.get("suggested_next_command")
+                    or progress.get("suggested_next_command"),
                 },
                 "acceptance": [
                     f"Phase session `{session_id}` no longer reports `{issue_type}` for `{phase_id}`.",
@@ -2950,7 +3525,13 @@ def session_import_issues(*, target: Path, session_id: str, dry_run: bool = Fals
             metadata.get("source_fingerprint"),
         )
         if key in existing_keys:
-            skipped.append({"import_id": existing_keys[key].get("id"), "status": existing_keys[key].get("status"), "metadata": metadata})
+            skipped.append(
+                {
+                    "import_id": existing_keys[key].get("id"),
+                    "status": existing_keys[key].get("status"),
+                    "metadata": metadata,
+                }
+            )
             continue
         item = work_cmd._make_import(
             candidate["text"],
@@ -3057,7 +3638,9 @@ def _latest_session_report_for_session(target: Path, session_id: object) -> dict
     return reports[-1] if reports else None
 
 
-def _gate_check(status: str, name: str, detail: str, *, phase_id: object = None, suggested: str | None = None) -> dict[str, Any]:
+def _gate_check(
+    status: str, name: str, detail: str, *, phase_id: object = None, suggested: str | None = None
+) -> dict[str, Any]:
     return {
         "status": status,
         "name": name,
@@ -3072,41 +3655,131 @@ def _session_gate_payload(target: Path, session: dict[str, Any]) -> dict[str, An
     records, missing = _session_phase_records(target, phase_range)
     checks: list[dict[str, Any]] = []
     if missing:
-        checks.append(_gate_check("block", "phase_session_gate_missing_records", f"missing phase record(s): {', '.join(missing)}", suggested=f"brigade work phases plan --range {phase_range}"))
+        checks.append(
+            _gate_check(
+                "block",
+                "phase_session_gate_missing_records",
+                f"missing phase record(s): {', '.join(missing)}",
+                suggested=f"brigade work phases plan --range {phase_range}",
+            )
+        )
     for record in records:
         phase_id = record.get("phase_id")
         status = str(record.get("status") or "pending")
         if status not in DONE_STATUSES | {"deferred"}:
-            checks.append(_gate_check("block", "phase_session_gate_phase_open", f"{phase_id} status is {status}", phase_id=phase_id, suggested=f"brigade work phases show {phase_id}"))
+            checks.append(
+                _gate_check(
+                    "block",
+                    "phase_session_gate_phase_open",
+                    f"{phase_id} status is {status}",
+                    phase_id=phase_id,
+                    suggested=f"brigade work phases show {phase_id}",
+                )
+            )
             continue
         if status == "deferred":
             continue
         if not record.get("tests_run"):
-            checks.append(_gate_check("block", "phase_session_gate_missing_tests", f"{phase_id} has no recorded tests", phase_id=phase_id, suggested=f"brigade work phases verify plan {phase_id}"))
+            checks.append(
+                _gate_check(
+                    "block",
+                    "phase_session_gate_missing_tests",
+                    f"{phase_id} has no recorded tests",
+                    phase_id=phase_id,
+                    suggested=f"brigade work phases verify plan {phase_id}",
+                )
+            )
         if not record.get("commit_hash"):
-            checks.append(_gate_check("block", "phase_session_gate_missing_commit", f"{phase_id} has no commit hash", phase_id=phase_id, suggested=f"brigade work phases complete {phase_id} --commit <hash>"))
+            checks.append(
+                _gate_check(
+                    "block",
+                    "phase_session_gate_missing_commit",
+                    f"{phase_id} has no commit hash",
+                    phase_id=phase_id,
+                    suggested=f"brigade work phases complete {phase_id} --commit <hash>",
+                )
+            )
         if not record.get("push_ref"):
-            checks.append(_gate_check("block", "phase_session_gate_missing_push_ref", f"{phase_id} has no push ref", phase_id=phase_id, suggested=f"brigade work phases complete {phase_id} --push-ref <ref>"))
+            checks.append(
+                _gate_check(
+                    "block",
+                    "phase_session_gate_missing_push_ref",
+                    f"{phase_id} has no push ref",
+                    phase_id=phase_id,
+                    suggested=f"brigade work phases complete {phase_id} --push-ref <ref>",
+                )
+            )
         if not _record_has_clean_privacy(record):
-            checks.append(_gate_check("block", "phase_session_gate_missing_privacy_check", f"{phase_id} has no clean privacy check", phase_id=phase_id, suggested=f"brigade work phases privacy {phase_id}"))
+            checks.append(
+                _gate_check(
+                    "block",
+                    "phase_session_gate_missing_privacy_check",
+                    f"{phase_id} has no clean privacy check",
+                    phase_id=phase_id,
+                    suggested=f"brigade work phases privacy {phase_id}",
+                )
+            )
         if not _record_has_linted_handoff(record):
-            checks.append(_gate_check("block", "phase_session_gate_missing_handoff", f"{phase_id} has no linted handoff or handoff deferral", phase_id=phase_id, suggested=f"brigade work phases handoff {phase_id} --lint"))
+            checks.append(
+                _gate_check(
+                    "block",
+                    "phase_session_gate_missing_handoff",
+                    f"{phase_id} has no linted handoff or handoff deferral",
+                    phase_id=phase_id,
+                    suggested=f"brigade work phases handoff {phase_id} --lint",
+                )
+            )
     phase_report = _latest_report_for_range(target, phase_range)
     if phase_report is None:
-        checks.append(_gate_check("block", "phase_session_gate_missing_phase_report", "no phase report exists for the session range", suggested=f"brigade work phases report build --range {phase_range}"))
+        checks.append(
+            _gate_check(
+                "block",
+                "phase_session_gate_missing_phase_report",
+                "no phase report exists for the session range",
+                suggested=f"brigade work phases report build --range {phase_range}",
+            )
+        )
     else:
         compare = _report_compare_summary(target, phase_report)
         if compare and int(compare.get("issue_count") or 0) > 0:
             top = compare.get("top_issue") if isinstance(compare.get("top_issue"), dict) else {}
-            checks.append(_gate_check("block", "phase_session_gate_compare_not_clean", str(top.get("name") or "phase report compare has issues"), suggested=compare.get("suggested_next_command")))
+            checks.append(
+                _gate_check(
+                    "block",
+                    "phase_session_gate_compare_not_clean",
+                    str(top.get("name") or "phase report compare has issues"),
+                    suggested=compare.get("suggested_next_command"),
+                )
+            )
     session_report = _latest_session_report_for_session(target, session.get("session_id"))
     if session_report is None:
-        checks.append(_gate_check("block", "phase_session_gate_missing_session_report", "no session report exists", suggested=f"brigade work phases session report build {session.get('session_id')}"))
+        checks.append(
+            _gate_check(
+                "block",
+                "phase_session_gate_missing_session_report",
+                "no session report exists",
+                suggested=f"brigade work phases session report build {session.get('session_id')}",
+            )
+        )
     closeout = session.get("closeout") if isinstance(session.get("closeout"), dict) else {}
     if closeout.get("status") != "reviewed":
-        checks.append(_gate_check("block", "phase_session_gate_missing_reviewed_closeout", "session closeout is not reviewed", suggested=f"brigade work phases session closeout {session.get('session_id')} --status reviewed"))
+        checks.append(
+            _gate_check(
+                "block",
+                "phase_session_gate_missing_reviewed_closeout",
+                "session closeout is not reviewed",
+                suggested=f"brigade work phases session closeout {session.get('session_id')} --status reviewed",
+            )
+        )
     if not checks:
-        checks.append(_gate_check("ok", "phase_session_gate_ready", "phase session satisfies completion gate", suggested="brigade work phases session show latest"))
+        checks.append(
+            _gate_check(
+                "ok",
+                "phase_session_gate_ready",
+                "phase session satisfies completion gate",
+                suggested="brigade work phases session show latest",
+            )
+        )
     blockers = [check for check in checks if check.get("status") != "ok"]
     return {
         "schema_version": SCHEMA_VERSION,
@@ -3118,9 +3791,15 @@ def _session_gate_payload(target: Path, session: dict[str, Any]) -> dict[str, An
         "checks": checks,
         "blocker_count": len(blockers),
         "top_blocker": blockers[0] if blockers else None,
-        "phase_report": {"report_id": phase_report.get("report_id"), "path": phase_report.get("path")} if isinstance(phase_report, dict) else None,
-        "session_report": {"report_id": session_report.get("report_id"), "path": session_report.get("path")} if isinstance(session_report, dict) else None,
-        "suggested_next_command": blockers[0]["suggested_next_command"] if blockers else "brigade work phases session show latest",
+        "phase_report": {"report_id": phase_report.get("report_id"), "path": phase_report.get("path")}
+        if isinstance(phase_report, dict)
+        else None,
+        "session_report": {"report_id": session_report.get("report_id"), "path": session_report.get("path")}
+        if isinstance(session_report, dict)
+        else None,
+        "suggested_next_command": blockers[0]["suggested_next_command"]
+        if blockers
+        else "brigade work phases session show latest",
     }
 
 
@@ -3172,7 +3851,9 @@ def _goal_scaffold_markdown(payload: dict[str, Any]) -> str:
     lines.extend(["", "Unresolved blockers:"])
     if blockers:
         for blocker in blockers[:20]:
-            lines.append(f"- `{blocker.get('name')}` `{blocker.get('phase_id') or 'session'}`: {_safe_handoff_text(blocker.get('detail'))}")
+            lines.append(
+                f"- `{blocker.get('name')}` `{blocker.get('phase_id') or 'session'}`: {_safe_handoff_text(blocker.get('detail'))}"
+            )
     else:
         lines.append("- none")
     lines.extend(
@@ -3215,7 +3896,11 @@ def goal_scaffold(*, target: Path, phase_range: str, json_output: bool = False) 
     records, missing, _ = _selected_records(target, rendered_range)
     doctor_data = doctor_payload(target, phase_range=rendered_range)
     session = _latest_session_for_range(target, rendered_range)
-    next_command = f"brigade work phases session next {session.get('session_id')}" if session else f"brigade work phases next --range {rendered_range}"
+    next_command = (
+        f"brigade work phases session next {session.get('session_id')}"
+        if session
+        else f"brigade work phases next --range {rendered_range}"
+    )
     goal_id = f"{_now().strftime('%Y%m%d-%H%M%S')}-phase-goal-{uuid4().hex[:6]}"
     payload = {
         "schema_version": SCHEMA_VERSION,
@@ -3230,7 +3915,9 @@ def goal_scaffold(*, target: Path, phase_range: str, json_output: bool = False) 
         "blockers": [check for check in doctor_data["checks"] if check.get("status") != "ok"],
         "blocker_count": doctor_data["issue_count"],
         "suggested_next_command": next_command,
-        "source_fingerprint": _source_fingerprint(records, {"phase_range": rendered_range, "missing": missing, "issue_count": doctor_data["issue_count"]}),
+        "source_fingerprint": _source_fingerprint(
+            records, {"phase_range": rendered_range, "missing": missing, "issue_count": doctor_data["issue_count"]}
+        ),
     }
     path = _goals_root(target) / f"{goal_id}.md"
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -3259,7 +3946,14 @@ def _find_action(target: Path, action_id: str) -> tuple[Path, dict[str, Any] | N
 
 def _git_head(target: Path) -> str:
     try:
-        result = subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=target, check=False, text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        result = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=target,
+            check=False,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+        )
     except OSError:
         return ""
     return result.stdout.strip() if result.returncode == 0 else ""
@@ -3269,7 +3963,13 @@ def _git_commit_exists(target: Path, commit_hash: str) -> bool:
     if not commit_hash:
         return False
     try:
-        result = subprocess.run(["git", "cat-file", "-e", f"{commit_hash}^{{commit}}"], cwd=target, check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        result = subprocess.run(
+            ["git", "cat-file", "-e", f"{commit_hash}^{{commit}}"],
+            cwd=target,
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
     except OSError:
         return False
     return result.returncode == 0
@@ -3279,7 +3979,14 @@ def _git_commit_on_branch(target: Path, commit_hash: str) -> bool:
     if not commit_hash:
         return False
     try:
-        result = subprocess.run(["git", "branch", "--contains", commit_hash], cwd=target, check=False, text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        result = subprocess.run(
+            ["git", "branch", "--contains", commit_hash],
+            cwd=target,
+            check=False,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+        )
     except OSError:
         return False
     return result.returncode == 0 and bool(result.stdout.strip())
@@ -3287,7 +3994,14 @@ def _git_commit_on_branch(target: Path, commit_hash: str) -> bool:
 
 def _git_dirty_paths(target: Path) -> list[str]:
     try:
-        result = subprocess.run(["git", "status", "--porcelain"], cwd=target, check=False, text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        result = subprocess.run(
+            ["git", "status", "--porcelain"],
+            cwd=target,
+            check=False,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+        )
     except OSError:
         return []
     if result.returncode != 0:
@@ -3386,7 +4100,10 @@ def _phase_action_candidates(target: Path, *, phase_range: str | None = None) ->
             }
         )
     for closeout_record in _read_closeouts(target):
-        if closeout_record.get("status") not in {"blocked", "deferred"} and int(closeout_record.get("unresolved_issue_count") or 0) == 0:
+        if (
+            closeout_record.get("status") not in {"blocked", "deferred"}
+            and int(closeout_record.get("unresolved_issue_count") or 0) == 0
+        ):
             continue
         for issue in closeout_record.get("unresolved_issues") or []:
             if not isinstance(issue, dict):
@@ -3414,7 +4131,8 @@ def _phase_action_candidates(target: Path, *, phase_range: str | None = None) ->
                     "updated_at": None,
                     "reviewed_at": None,
                     "review_reason": "",
-                    "suggested_next_command": issue.get("suggested_next_command") or "brigade work phases closeout latest",
+                    "suggested_next_command": issue.get("suggested_next_command")
+                    or "brigade work phases closeout latest",
                 }
             )
     latest_checkpoint, _checkpoint_error = _resolve_session_checkpoint(target, "latest")
@@ -3476,17 +4194,24 @@ def _phase_action_candidates(target: Path, *, phase_range: str | None = None) ->
                         "updated_at": None,
                         "reviewed_at": None,
                         "review_reason": "",
-                        "suggested_next_command": check.get("suggested_next_command") or "brigade work phases session checkpoints compare latest",
+                        "suggested_next_command": check.get("suggested_next_command")
+                        or "brigade work phases session checkpoints compare latest",
                     }
                 )
     deduped: dict[tuple[str, str, str], dict[str, Any]] = {}
     for candidate in candidates:
-        key = (str(candidate.get("phase_id")), str(candidate.get("issue_type")), str(candidate.get("source_fingerprint")))
+        key = (
+            str(candidate.get("phase_id")),
+            str(candidate.get("issue_type")),
+            str(candidate.get("source_fingerprint")),
+        )
         deduped.setdefault(key, candidate)
     return list(deduped.values())
 
 
-def _check(status: str, name: str, detail: str, *, phase_id: str | None = None, suggested: str = "brigade work phases doctor") -> dict[str, Any]:
+def _check(
+    status: str, name: str, detail: str, *, phase_id: str | None = None, suggested: str = "brigade work phases doctor"
+) -> dict[str, Any]:
     return {
         "status": status,
         "name": name,
@@ -3510,7 +4235,14 @@ def doctor_payload(target: Path, *, phase_range: str | None = None) -> dict[str,
         present = {str(record.get("phase_id")) for record in records}
         missing = [_phase_id_for(number) for number in range(start, end + 1) if _phase_id_for(number) not in present]
         if missing:
-            checks.append(_check("warn", "phase_range_missing_records", f"{len(missing)} missing phase record(s): {', '.join(missing[:10])}", suggested=f"brigade work phases plan --range {start}-{end}"))
+            checks.append(
+                _check(
+                    "warn",
+                    "phase_range_missing_records",
+                    f"{len(missing)} missing phase record(s): {', '.join(missing[:10])}",
+                    suggested=f"brigade work phases plan --range {start}-{end}",
+                )
+            )
         else:
             checks.append(_check("ok", "phase_range_records", f"{start}-{end} present"))
     now = _now()
@@ -3519,22 +4251,52 @@ def doctor_payload(target: Path, *, phase_range: str | None = None) -> dict[str,
         status = str(record.get("status") or "unknown")
         kind = str(record.get("kind") or "phase")
         if record.get("parse_error"):
-            checks.append(_check("fail", "phase_record_parse_error", str(record.get("path") or phase_id), phase_id=phase_id))
+            checks.append(
+                _check("fail", "phase_record_parse_error", str(record.get("path") or phase_id), phase_id=phase_id)
+            )
             continue
         if status in DONE_STATUSES:
             if not record.get("tests_run"):
-                checks.append(_check("warn", "phase_complete_without_tests", "phase is marked complete without tests run", phase_id=phase_id, suggested=f"brigade work phases show {phase_id}"))
+                checks.append(
+                    _check(
+                        "warn",
+                        "phase_complete_without_tests",
+                        "phase is marked complete without tests run",
+                        phase_id=phase_id,
+                        suggested=f"brigade work phases show {phase_id}",
+                    )
+                )
             if not record.get("files_changed") and not record.get("deferred_items"):
-                checks.append(_check("warn", "phase_complete_without_changes_or_deferral", "phase is complete without changed files or deferral evidence", phase_id=phase_id, suggested=f"brigade work phases show {phase_id}"))
+                checks.append(
+                    _check(
+                        "warn",
+                        "phase_complete_without_changes_or_deferral",
+                        "phase is complete without changed files or deferral evidence",
+                        phase_id=phase_id,
+                        suggested=f"brigade work phases show {phase_id}",
+                    )
+                )
             for attachment in record.get("evidence_attachments") or []:
                 if not isinstance(attachment, dict):
                     continue
                 for key in ("files_changed", "handoff_paths"):
                     for rel_path in attachment.get(key) or []:
                         if rel_path and not (target / str(rel_path)).exists():
-                            checks.append(_check("warn", "phase_evidence_missing_reference", f"missing {key[:-1]} evidence: {rel_path}", phase_id=phase_id, suggested=f"brigade work phases evidence add {phase_id}"))
+                            checks.append(
+                                _check(
+                                    "warn",
+                                    "phase_evidence_missing_reference",
+                                    f"missing {key[:-1]} evidence: {rel_path}",
+                                    phase_id=phase_id,
+                                    suggested=f"brigade work phases evidence add {phase_id}",
+                                )
+                            )
             completed = _parse_time(record.get("completed_at"))
-            if completed and now - completed > timedelta(hours=STALE_UNREVIEWED_COMPLETED_HOURS) and not _phase_has_current_closeout(target, phase_id, record):
+            if (
+                completed
+                and now - completed > timedelta(hours=STALE_UNREVIEWED_COMPLETED_HOURS)
+                and not _phase_has_current_closeout(target, phase_id, record)
+            ):
                 checks.append(
                     _check(
                         "warn",
@@ -3545,20 +4307,68 @@ def doctor_payload(target: Path, *, phase_range: str | None = None) -> dict[str,
                     )
                 )
         if status in {"committed", "pushed"} and not str(record.get("commit_hash") or "").strip():
-            checks.append(_check("warn", "phase_committed_without_hash", "phase is committed without a commit hash", phase_id=phase_id, suggested=f"brigade work phases complete {phase_id} --commit <hash>"))
+            checks.append(
+                _check(
+                    "warn",
+                    "phase_committed_without_hash",
+                    "phase is committed without a commit hash",
+                    phase_id=phase_id,
+                    suggested=f"brigade work phases complete {phase_id} --commit <hash>",
+                )
+            )
         if status == "pushed" and not str(record.get("push_ref") or "").strip():
-            checks.append(_check("warn", "phase_pushed_without_ref", "phase is pushed without a push ref", phase_id=phase_id, suggested=f"brigade work phases complete {phase_id} --push-ref <ref>"))
+            checks.append(
+                _check(
+                    "warn",
+                    "phase_pushed_without_ref",
+                    "phase is pushed without a push ref",
+                    phase_id=phase_id,
+                    suggested=f"brigade work phases complete {phase_id} --push-ref <ref>",
+                )
+            )
         if status == "in-progress":
             started = _parse_time(record.get("started_at"))
             if started and now - started > timedelta(hours=STALE_IN_PROGRESS_HOURS):
-                checks.append(_check("warn", "phase_stale_in_progress", f"phase has been in progress for more than {STALE_IN_PROGRESS_HOURS}h", phase_id=phase_id, suggested=f"brigade work phases show {phase_id}"))
+                checks.append(
+                    _check(
+                        "warn",
+                        "phase_stale_in_progress",
+                        f"phase has been in progress for more than {STALE_IN_PROGRESS_HOURS}h",
+                        phase_id=phase_id,
+                        suggested=f"brigade work phases show {phase_id}",
+                    )
+                )
         if status == "blocked" and not str(record.get("next_phase_recommendation") or "").strip():
-            checks.append(_check("warn", "phase_blocked_without_next_step", "blocked phase is missing a next phase recommendation", phase_id=phase_id, suggested=f"brigade work phases show {phase_id}"))
+            checks.append(
+                _check(
+                    "warn",
+                    "phase_blocked_without_next_step",
+                    "blocked phase is missing a next phase recommendation",
+                    phase_id=phase_id,
+                    suggested=f"brigade work phases show {phase_id}",
+                )
+            )
         phase_range_value = str(record.get("phase_range") or "")
         if kind != "group" and re.fullmatch(r"\d+-\d+", phase_range_value) and not record.get("explicit_grouping"):
-            checks.append(_check("warn", "phase_range_compressed_without_group", "phase range record lacks explicit grouping", phase_id=phase_id, suggested="brigade work phases plan --grouped"))
+            checks.append(
+                _check(
+                    "warn",
+                    "phase_range_compressed_without_group",
+                    "phase range record lacks explicit grouping",
+                    phase_id=phase_id,
+                    suggested="brigade work phases plan --grouped",
+                )
+            )
         if kind == "group" and not record.get("explicit_grouping"):
-            checks.append(_check("warn", "phase_group_without_explicit_grouping", "group record is missing explicit grouping marker", phase_id=phase_id, suggested=f"brigade work phases show {phase_id}"))
+            checks.append(
+                _check(
+                    "warn",
+                    "phase_group_without_explicit_grouping",
+                    "group record is missing explicit grouping marker",
+                    phase_id=phase_id,
+                    suggested=f"brigade work phases show {phase_id}",
+                )
+            )
     issue_checks = [check for check in checks if check["status"] != "ok"]
     if not issue_checks:
         checks.append(_check("ok", "phase_ledger", f"{len(records)} phase record(s) checked"))
@@ -3571,7 +4381,9 @@ def doctor_payload(target: Path, *, phase_range: str | None = None) -> dict[str,
         "checks": checks,
         "issue_count": len(issue_checks),
         "top_issue": issue_checks[0] if issue_checks else None,
-        "suggested_next_command": issue_checks[0]["suggested_next_command"] if issue_checks else "brigade work phases list",
+        "suggested_next_command": issue_checks[0]["suggested_next_command"]
+        if issue_checks
+        else "brigade work phases list",
     }
     return payload
 
@@ -3596,7 +4408,11 @@ def health(target: Path) -> dict[str, Any]:
     latest_report = _latest_report(target)
     latest_report_compare = _report_compare_summary(target, latest_report)
     latest_session = _latest_session(target)
-    latest_session_checkpoint = _latest_checkpoint_for_session(target, latest_session.get("session_id")) if isinstance(latest_session, dict) else None
+    latest_session_checkpoint = (
+        _latest_checkpoint_for_session(target, latest_session.get("session_id"))
+        if isinstance(latest_session, dict)
+        else None
+    )
     latest_session_checkpoint_compare = None
     if isinstance(latest_session_checkpoint, dict):
         try:
@@ -3621,13 +4437,17 @@ def health(target: Path) -> dict[str, Any]:
             "report_id": latest_report.get("report_id"),
             "created_at": latest_report.get("created_at"),
             "path": latest_report.get("path"),
-            "issue_count": (latest_report.get("doctor") or {}).get("issue_count") if isinstance(latest_report.get("doctor"), dict) else None,
+            "issue_count": (latest_report.get("doctor") or {}).get("issue_count")
+            if isinstance(latest_report.get("doctor"), dict)
+            else None,
         }
         if latest_report
         else None,
         "latest_report_compare": latest_report_compare,
         "latest_session": _session_summary(latest_session) if isinstance(latest_session, dict) else None,
-        "latest_session_checkpoint": _checkpoint_summary(latest_session_checkpoint) if isinstance(latest_session_checkpoint, dict) else None,
+        "latest_session_checkpoint": _checkpoint_summary(latest_session_checkpoint)
+        if isinstance(latest_session_checkpoint, dict)
+        else None,
         "latest_session_checkpoint_compare": {
             "checkpoint_id": latest_session_checkpoint_compare.get("checkpoint_id"),
             "session_id": latest_session_checkpoint_compare.get("session_id"),
@@ -3648,10 +4468,14 @@ def health(target: Path) -> dict[str, Any]:
         else None,
         "latest_session_report": {
             "report_id": latest_session_report.get("report_id"),
-            "session_id": (latest_session_report.get("session") or {}).get("session_id") if isinstance(latest_session_report.get("session"), dict) else None,
+            "session_id": (latest_session_report.get("session") or {}).get("session_id")
+            if isinstance(latest_session_report.get("session"), dict)
+            else None,
             "created_at": latest_session_report.get("created_at"),
             "path": latest_session_report.get("path"),
-            "issue_count": (latest_session_report.get("doctor") or {}).get("issue_count") if isinstance(latest_session_report.get("doctor"), dict) else None,
+            "issue_count": (latest_session_report.get("doctor") or {}).get("issue_count")
+            if isinstance(latest_session_report.get("doctor"), dict)
+            else None,
         }
         if isinstance(latest_session_report, dict)
         else None,
@@ -3667,7 +4491,9 @@ def health(target: Path) -> dict[str, Any]:
     }
 
 
-def closeout(*, target: Path, selector: str, status: str = "reviewed", reason: str | None = None, json_output: bool = False) -> int:
+def closeout(
+    *, target: Path, selector: str, status: str = "reviewed", reason: str | None = None, json_output: bool = False
+) -> int:
     if status not in PHASE_CLOSEOUT_STATUSES:
         print(f"error: --status must be one of {sorted(PHASE_CLOSEOUT_STATUSES)}", file=sys.stderr)
         return 2
@@ -3702,7 +4528,9 @@ def closeout(*, target: Path, selector: str, status: str = "reviewed", reason: s
         "unresolved_issue_count": len(selected_issues),
         "unresolved_issues": selected_issues,
         "deferred_phase_ids": deferred_phase_ids,
-        "phase_fingerprints": {str(record.get("phase_id")): _source_fingerprint([record]) for record in records if record.get("phase_id")},
+        "phase_fingerprints": {
+            str(record.get("phase_id")): _source_fingerprint([record]) for record in records if record.get("phase_id")
+        },
         "source_fingerprint": fingerprint,
         "suggested_next_command": "brigade work phases doctor",
     }
@@ -3767,7 +4595,9 @@ def evidence_add(
 
 def _verification_entries(record: dict[str, Any]) -> list[dict[str, Any]]:
     existing = record.get("verification_matrix") if isinstance(record.get("verification_matrix"), list) else []
-    by_command = {str(item.get("command")): dict(item) for item in existing if isinstance(item, dict) and item.get("command")}
+    by_command = {
+        str(item.get("command")): dict(item) for item in existing if isinstance(item, dict) and item.get("command")
+    }
     for command in record.get("tests_run") or []:
         rendered = str(command)
         by_command.setdefault(
@@ -3823,7 +4653,9 @@ def verify_plan(*, target: Path, selector: str, json_output: bool = False) -> in
             "missing_phase_ids": [],
             "records": record_payloads,
             "record_count": len(record_payloads),
-            "suggested_next_command": f"brigade work phases verify record {records[0].get('phase_id')}" if records else "brigade work phases status",
+            "suggested_next_command": f"brigade work phases verify record {records[0].get('phase_id')}"
+            if records
+            else "brigade work phases status",
         }
     if json_output:
         print(json.dumps(payload, indent=2, sort_keys=True))
@@ -3835,7 +4667,9 @@ def verify_plan(*, target: Path, selector: str, json_output: bool = False) -> in
     return 0
 
 
-def verify_record(*, target: Path, phase_id: str, command: str, status: str, summary: str | None = None, json_output: bool = False) -> int:
+def verify_record(
+    *, target: Path, phase_id: str, command: str, status: str, summary: str | None = None, json_output: bool = False
+) -> int:
     if status not in PHASE_VERIFY_STATUSES - {"expected"}:
         print(f"error: --status must be one of {sorted(PHASE_VERIFY_STATUSES - {'expected'})}", file=sys.stderr)
         return 2
@@ -3882,24 +4716,70 @@ def reconcile(*, target: Path, selector: str, json_output: bool = False) -> int:
     records, missing, parsed_range = _selected_records(target, selector)
     checks: list[dict[str, Any]] = []
     if missing:
-        checks.append(_check("warn", "phase_reconcile_missing_records", f"missing phase record(s): {', '.join(missing)}", suggested=f"brigade work phases plan --range {parsed_range or selector}"))
+        checks.append(
+            _check(
+                "warn",
+                "phase_reconcile_missing_records",
+                f"missing phase record(s): {', '.join(missing)}",
+                suggested=f"brigade work phases plan --range {parsed_range or selector}",
+            )
+        )
     dirty_paths = _git_dirty_paths(target)
     if dirty_paths:
-        checks.append(_check("warn", "phase_reconcile_dirty_worktree", f"{len(dirty_paths)} dirty path(s)", suggested="git status --short"))
+        checks.append(
+            _check(
+                "warn",
+                "phase_reconcile_dirty_worktree",
+                f"{len(dirty_paths)} dirty path(s)",
+                suggested="git status --short",
+            )
+        )
     for record in records:
         phase_id = str(record.get("phase_id") or "unknown")
         status = str(record.get("status") or "")
         commit_hash = str(record.get("commit_hash") or "")
         push_ref = str(record.get("push_ref") or "")
         if status in {"committed", "pushed"} and not commit_hash:
-            checks.append(_check("warn", "phase_reconcile_missing_commit_hash", "phase status requires commit hash", phase_id=phase_id, suggested=f"brigade work phases complete {phase_id} --commit <hash>"))
+            checks.append(
+                _check(
+                    "warn",
+                    "phase_reconcile_missing_commit_hash",
+                    "phase status requires commit hash",
+                    phase_id=phase_id,
+                    suggested=f"brigade work phases complete {phase_id} --commit <hash>",
+                )
+            )
             continue
         if commit_hash and not _git_commit_exists(target, commit_hash):
-            checks.append(_check("warn", "phase_reconcile_commit_missing", f"commit not found locally: {commit_hash}", phase_id=phase_id, suggested="git log --oneline"))
+            checks.append(
+                _check(
+                    "warn",
+                    "phase_reconcile_commit_missing",
+                    f"commit not found locally: {commit_hash}",
+                    phase_id=phase_id,
+                    suggested="git log --oneline",
+                )
+            )
         elif commit_hash and not _git_commit_on_branch(target, commit_hash):
-            checks.append(_check("warn", "phase_reconcile_commit_not_on_branch", f"commit is not on a local branch: {commit_hash}", phase_id=phase_id, suggested="git branch --contains <hash>"))
+            checks.append(
+                _check(
+                    "warn",
+                    "phase_reconcile_commit_not_on_branch",
+                    f"commit is not on a local branch: {commit_hash}",
+                    phase_id=phase_id,
+                    suggested="git branch --contains <hash>",
+                )
+            )
         if status == "pushed" and not push_ref:
-            checks.append(_check("warn", "phase_reconcile_pushed_without_ref", "pushed phase lacks push ref", phase_id=phase_id, suggested=f"brigade work phases complete {phase_id} --push-ref <ref>"))
+            checks.append(
+                _check(
+                    "warn",
+                    "phase_reconcile_pushed_without_ref",
+                    "pushed phase lacks push ref",
+                    phase_id=phase_id,
+                    suggested=f"brigade work phases complete {phase_id} --push-ref <ref>",
+                )
+            )
     if not checks:
         checks.append(_check("ok", "phase_reconcile_clean", "selected phase records match local git evidence"))
     issues = [check for check in checks if check.get("status") != "ok"]
@@ -3973,7 +4853,15 @@ def privacy(*, target: Path, selector: str, json_output: bool = False) -> int:
     records, missing, parsed_range = _selected_records(target, selector)
     findings: list[dict[str, Any]] = []
     if missing:
-        findings.append({"status": "warn", "name": "phase_privacy_missing_records", "source": selector, "line": None, "detail": f"missing phase record(s): {', '.join(missing)}"})
+        findings.append(
+            {
+                "status": "warn",
+                "name": "phase_privacy_missing_records",
+                "source": selector,
+                "line": None,
+                "detail": f"missing phase record(s): {', '.join(missing)}",
+            }
+        )
     scan_id = f"{_now().strftime('%Y%m%d-%H%M%S')}-phase-privacy-{uuid4().hex[:6]}"
     for record in records:
         phase_findings: list[dict[str, Any]] = []
@@ -3991,7 +4879,11 @@ def privacy(*, target: Path, selector: str, json_output: bool = False) -> int:
                     continue
             phase_findings.extend(_privacy_findings_for_text(text, source=rendered_path))
         if record.get("implementation_summary"):
-            phase_findings.extend(_privacy_findings_for_text(str(record.get("implementation_summary")), source=f"{record.get('phase_id')}:summary"))
+            phase_findings.extend(
+                _privacy_findings_for_text(
+                    str(record.get("implementation_summary")), source=f"{record.get('phase_id')}:summary"
+                )
+            )
         findings.extend([{**finding, "phase_id": record.get("phase_id")} for finding in phase_findings])
         path, current = _find_record(target, str(record.get("phase_id")))
         if current is not None:
@@ -4083,7 +4975,9 @@ def _phase_handoff_content(records: list[dict[str, Any]], *, selector: str, hand
         "Phase summaries:",
     ]
     for record in records:
-        summary = _safe_handoff_text(record.get("implementation_summary") or record.get("title") or record.get("status"))
+        summary = _safe_handoff_text(
+            record.get("implementation_summary") or record.get("title") or record.get("status")
+        )
         lines.append(f"- `{record.get('phase_id')}` `{record.get('status')}`: {summary}")
     return "\n".join(lines).rstrip() + "\n"
 
@@ -4126,7 +5020,9 @@ def handoff(*, target: Path, selector: str, lint: bool = False, json_output: boo
         handoffs = current.get("phase_handoffs") if isinstance(current.get("phase_handoffs"), list) else []
         handoffs.append(attachment)
         current["phase_handoffs"] = handoffs[-20:]
-        attachments = current.get("evidence_attachments") if isinstance(current.get("evidence_attachments"), list) else []
+        attachments = (
+            current.get("evidence_attachments") if isinstance(current.get("evidence_attachments"), list) else []
+        )
         attachments.append(
             {
                 "attached_at": _now().isoformat(),
@@ -4168,7 +5064,14 @@ def compare(*, target: Path, selector: str, json_output: bool = False) -> int:
     records, missing, parsed_range = _selected_records(target, selector)
     checks: list[dict[str, Any]] = []
     if missing:
-        checks.append(_check("warn", "phase_compare_missing_records", f"missing phase record(s): {', '.join(missing)}", suggested=f"brigade work phases plan --range {parsed_range or selector}"))
+        checks.append(
+            _check(
+                "warn",
+                "phase_compare_missing_records",
+                f"missing phase record(s): {', '.join(missing)}",
+                suggested=f"brigade work phases plan --range {parsed_range or selector}",
+            )
+        )
     current_head = _git_head(target)
     latest_report = _latest_report(target)
     doctor_data = doctor_payload(target, phase_range=parsed_range)
@@ -4178,18 +5081,60 @@ def compare(*, target: Path, selector: str, json_output: bool = False) -> int:
         commit_hash = str(record.get("commit_hash") or "")
         push_ref = str(record.get("push_ref") or "")
         if not commit_hash:
-            checks.append(_check("warn", "phase_compare_missing_commit_hash", "phase record has no commit hash", phase_id=phase_id, suggested=f"brigade work phases complete {phase_id} --commit <hash>"))
+            checks.append(
+                _check(
+                    "warn",
+                    "phase_compare_missing_commit_hash",
+                    "phase record has no commit hash",
+                    phase_id=phase_id,
+                    suggested=f"brigade work phases complete {phase_id} --commit <hash>",
+                )
+            )
         elif current_head and not _same_commit(commit_hash, current_head):
-            checks.append(_check("warn", "phase_compare_changed_head", f"current HEAD {current_head} differs from phase commit {commit_hash}", phase_id=phase_id, suggested=f"brigade work phases show {phase_id}"))
+            checks.append(
+                _check(
+                    "warn",
+                    "phase_compare_changed_head",
+                    f"current HEAD {current_head} differs from phase commit {commit_hash}",
+                    phase_id=phase_id,
+                    suggested=f"brigade work phases show {phase_id}",
+                )
+            )
         if record.get("status") == "pushed" and not push_ref:
-            checks.append(_check("warn", "phase_compare_missing_push_ref", "pushed phase record has no push ref", phase_id=phase_id, suggested=f"brigade work phases complete {phase_id} --push-ref <ref>"))
-        missing_files = [path for path in record.get("files_changed") or [] if path and not (target / str(path)).exists()]
+            checks.append(
+                _check(
+                    "warn",
+                    "phase_compare_missing_push_ref",
+                    "pushed phase record has no push ref",
+                    phase_id=phase_id,
+                    suggested=f"brigade work phases complete {phase_id} --push-ref <ref>",
+                )
+            )
+        missing_files = [
+            path for path in record.get("files_changed") or [] if path and not (target / str(path)).exists()
+        ]
         if missing_files:
-            checks.append(_check("warn", "phase_compare_missing_referenced_files", f"missing referenced file(s): {', '.join(missing_files[:5])}", phase_id=phase_id, suggested=f"brigade work phases show {phase_id}"))
+            checks.append(
+                _check(
+                    "warn",
+                    "phase_compare_missing_referenced_files",
+                    f"missing referenced file(s): {', '.join(missing_files[:5])}",
+                    phase_id=phase_id,
+                    suggested=f"brigade work phases show {phase_id}",
+                )
+            )
         completed = _parse_time(record.get("completed_at"))
         report_created = _parse_time(latest_report.get("created_at")) if latest_report else None
         if completed and report_created and report_created > completed:
-            checks.append(_check("warn", "phase_compare_newer_phase_report", f"newer phase report exists: {latest_report.get('report_id')}", phase_id=phase_id, suggested="brigade work phases report show latest"))
+            checks.append(
+                _check(
+                    "warn",
+                    "phase_compare_newer_phase_report",
+                    f"newer phase report exists: {latest_report.get('report_id')}",
+                    phase_id=phase_id,
+                    suggested="brigade work phases report show latest",
+                )
+            )
         stored_issue_count = record.get("doctor_issue_count")
         if isinstance(stored_issue_count, int) and stored_issue_count != current_issue_count:
             checks.append(
@@ -4202,7 +5147,15 @@ def compare(*, target: Path, selector: str, json_output: bool = False) -> int:
                 )
             )
         if record.get("tests_run") and completed and report_created and report_created > completed:
-            checks.append(_check("warn", "phase_compare_newer_test_evidence", "phase report is newer than stored test evidence", phase_id=phase_id, suggested="brigade work phases report show latest"))
+            checks.append(
+                _check(
+                    "warn",
+                    "phase_compare_newer_test_evidence",
+                    "phase report is newer than stored test evidence",
+                    phase_id=phase_id,
+                    suggested="brigade work phases report show latest",
+                )
+            )
     if not checks:
         checks.append(_check("ok", "phase_compare_current", "selected phase evidence matches current local checks"))
     issues = [check for check in checks if check["status"] != "ok"]
@@ -4239,7 +5192,11 @@ def compare(*, target: Path, selector: str, json_output: bool = False) -> int:
 
 def actions_plan(*, target: Path, phase_range: str | None = None, json_output: bool = False) -> int:
     target = target.expanduser().resolve()
-    existing = {(item.get("phase_id"), item.get("issue_type"), item.get("source_fingerprint")): item for item in _read_actions(target) if item.get("status") != "archived"}
+    existing = {
+        (item.get("phase_id"), item.get("issue_type"), item.get("source_fingerprint")): item
+        for item in _read_actions(target)
+        if item.get("status") != "archived"
+    }
     planned: list[dict[str, Any]] = []
     for candidate in _phase_action_candidates(target, phase_range=phase_range):
         key = (candidate.get("phase_id"), candidate.get("issue_type"), candidate.get("source_fingerprint"))
@@ -4265,7 +5222,11 @@ def actions_plan(*, target: Path, phase_range: str | None = None, json_output: b
 def actions_build(*, target: Path, phase_range: str | None = None, json_output: bool = False) -> int:
     target = target.expanduser().resolve()
     _actions_root(target).mkdir(parents=True, exist_ok=True)
-    existing = {(item.get("phase_id"), item.get("issue_type"), item.get("source_fingerprint")): item for item in _read_actions(target) if item.get("status") != "archived"}
+    existing = {
+        (item.get("phase_id"), item.get("issue_type"), item.get("source_fingerprint")): item
+        for item in _read_actions(target)
+        if item.get("status") != "archived"
+    }
     created: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
     for candidate in _phase_action_candidates(target, phase_range=phase_range):
@@ -4302,7 +5263,13 @@ def actions_build(*, target: Path, phase_range: str | None = None, json_output: 
 def actions_list(*, target: Path, json_output: bool = False) -> int:
     target = target.expanduser().resolve()
     actions = [_action_summary(action) for action in _read_actions(target) if action.get("status") != "archived"]
-    payload = {"schema_version": SCHEMA_VERSION, "schema": _schema("phase-ledger-action-list"), "target": str(target), "actions": actions, "action_count": len(actions)}
+    payload = {
+        "schema_version": SCHEMA_VERSION,
+        "schema": _schema("phase-ledger-action-list"),
+        "target": str(target),
+        "actions": actions,
+        "action_count": len(actions),
+    }
     if json_output:
         print(json.dumps(payload, indent=2, sort_keys=True))
     else:
@@ -4329,7 +5296,9 @@ def actions_show(*, target: Path, action_id: str, json_output: bool = False) -> 
     return 0
 
 
-def _set_action_status(target: Path, action_id: str, status: str, reason: str | None = None) -> tuple[int, dict[str, Any] | None]:
+def _set_action_status(
+    target: Path, action_id: str, status: str, reason: str | None = None
+) -> tuple[int, dict[str, Any] | None]:
     if status not in PHASE_ACTION_STATUSES:
         print(f"error: invalid phase action status: {status}", file=sys.stderr)
         return 2, None
@@ -4349,7 +5318,9 @@ def _set_action_status(target: Path, action_id: str, status: str, reason: str | 
     return 0, action
 
 
-def _actions_update_status(*, target: Path, action_id: str, status: str, reason: str | None = None, json_output: bool = False) -> int:
+def _actions_update_status(
+    *, target: Path, action_id: str, status: str, reason: str | None = None, json_output: bool = False
+) -> int:
     result, action = _set_action_status(target.expanduser().resolve(), action_id, status, reason)
     if result != 0 or action is None:
         return result
@@ -4373,10 +5344,14 @@ def actions_defer(*, target: Path, action_id: str, reason: str, json_output: boo
     if not reason.strip():
         print("error: --reason is required", file=sys.stderr)
         return 2
-    return _actions_update_status(target=target, action_id=action_id, status="deferred", reason=reason, json_output=json_output)
+    return _actions_update_status(
+        target=target, action_id=action_id, status="deferred", reason=reason, json_output=json_output
+    )
 
 
-def actions_archive(*, target: Path, action_id: str | None = None, completed: bool = False, json_output: bool = False) -> int:
+def actions_archive(
+    *, target: Path, action_id: str | None = None, completed: bool = False, json_output: bool = False
+) -> int:
     target = target.expanduser().resolve()
     archived: list[dict[str, Any]] = []
     if completed:
@@ -4395,7 +5370,13 @@ def actions_archive(*, target: Path, action_id: str | None = None, completed: bo
         result, updated = _set_action_status(target, str(action.get("action_id")), "archived")
         if result == 0 and updated is not None:
             archived.append(_action_summary(updated))
-    payload = {"schema_version": SCHEMA_VERSION, "schema": _schema("phase-ledger-action-archive"), "target": str(target), "archived": archived, "archived_count": len(archived)}
+    payload = {
+        "schema_version": SCHEMA_VERSION,
+        "schema": _schema("phase-ledger-action-archive"),
+        "target": str(target),
+        "archived": archived,
+        "archived_count": len(archived),
+    }
     if json_output:
         print(json.dumps(payload, indent=2, sort_keys=True))
     else:
@@ -4413,7 +5394,10 @@ def actions_import_issues(*, target: Path, dry_run: bool = False, json_output: b
             continue
         action_id = str(action.get("action_id") or "")
         issue_type = str(action.get("issue_type") or "phase_action")
-        source_fingerprint = str(action.get("source_fingerprint") or hashlib.sha256(json.dumps(action, sort_keys=True).encode("utf-8")).hexdigest()[:16])
+        source_fingerprint = str(
+            action.get("source_fingerprint")
+            or hashlib.sha256(json.dumps(action, sort_keys=True).encode("utf-8")).hexdigest()[:16]
+        )
         records.append(
             {
                 "kind": "task",
@@ -4557,18 +5541,28 @@ def report_list(*, target: Path, limit: int = 20, json_output: bool = False) -> 
                 "created_at": payload.get("created_at"),
                 "phase_range": payload.get("phase_range"),
                 "record_count": payload.get("record_count"),
-                "issue_count": (payload.get("doctor") or {}).get("issue_count") if isinstance(payload.get("doctor"), dict) else None,
+                "issue_count": (payload.get("doctor") or {}).get("issue_count")
+                if isinstance(payload.get("doctor"), dict)
+                else None,
                 "path": str(path.parent),
             }
         )
     reports = reports[:limit]
-    out = {"schema_version": SCHEMA_VERSION, "schema": _schema("phase-ledger-report-list"), "target": str(target), "reports": reports, "report_count": len(reports)}
+    out = {
+        "schema_version": SCHEMA_VERSION,
+        "schema": _schema("phase-ledger-report-list"),
+        "target": str(target),
+        "reports": reports,
+        "report_count": len(reports),
+    }
     if json_output:
         print(json.dumps(out, indent=2, sort_keys=True))
     else:
         print(f"phase reports: {target}")
         for item in reports:
-            print(f"- {item.get('report_id')} issues={item.get('issue_count')} range={item.get('phase_range') or 'all'}")
+            print(
+                f"- {item.get('report_id')} issues={item.get('issue_count')} range={item.get('phase_range') or 'all'}"
+            )
     return 0
 
 
@@ -4588,7 +5582,9 @@ def report_show(*, target: Path, report_id: str, json_output: bool = False) -> i
     return 0
 
 
-def report_closeout(*, target: Path, report_id: str, status: str = "reviewed", reason: str | None = None, json_output: bool = False) -> int:
+def report_closeout(
+    *, target: Path, report_id: str, status: str = "reviewed", reason: str | None = None, json_output: bool = False
+) -> int:
     if status not in PHASE_REPORT_CLOSEOUT_STATUSES:
         print(f"error: --status must be one of {sorted(PHASE_REPORT_CLOSEOUT_STATUSES)}", file=sys.stderr)
         return 2
@@ -4610,9 +5606,19 @@ def report_closeout(*, target: Path, report_id: str, status: str = "reviewed", r
         "status": status,
         "reason": reason or f"phase report marked {status}",
         "reviewed_at": _now().isoformat(),
-        "issue_count": (report.get("doctor") or {}).get("issue_count") if isinstance(report.get("doctor"), dict) else None,
+        "issue_count": (report.get("doctor") or {}).get("issue_count")
+        if isinstance(report.get("doctor"), dict)
+        else None,
         "record_count": report.get("record_count"),
-        "source_fingerprint": _source_fingerprint(report.get("records") if isinstance(report.get("records"), list) else [], {"report_id": report.get("report_id"), "issue_count": (report.get("doctor") or {}).get("issue_count") if isinstance(report.get("doctor"), dict) else None}),
+        "source_fingerprint": _source_fingerprint(
+            report.get("records") if isinstance(report.get("records"), list) else [],
+            {
+                "report_id": report.get("report_id"),
+                "issue_count": (report.get("doctor") or {}).get("issue_count")
+                if isinstance(report.get("doctor"), dict)
+                else None,
+            },
+        ),
         "suggested_next_command": "brigade work phases report list",
     }
     _write_json(report_path / "CLOSEOUT.json", closeout)
@@ -4632,7 +5638,12 @@ def report_compare(*, target: Path, report_id: str, json_output: bool = False) -
         print(f"error: {error}", file=sys.stderr)
         return 1
     report_path = Path(str(report.get("path") or ""))
-    summary = _report_compare_summary(target, report) or {"checks": [], "issue_count": 0, "top_issue": None, "phase_range": None}
+    summary = _report_compare_summary(target, report) or {
+        "checks": [],
+        "issue_count": 0,
+        "top_issue": None,
+        "phase_range": None,
+    }
     issues = [check for check in summary["checks"] if check["status"] != "ok"]
     payload = {
         "schema_version": SCHEMA_VERSION,
@@ -4645,7 +5656,9 @@ def report_compare(*, target: Path, report_id: str, json_output: bool = False) -
         "checks": summary["checks"],
         "issue_count": len(issues),
         "top_issue": issues[0] if issues else None,
-        "suggested_next_command": issues[0]["suggested_next_command"] if issues else "brigade work phases report show latest",
+        "suggested_next_command": issues[0]["suggested_next_command"]
+        if issues
+        else "brigade work phases report show latest",
     }
     if json_output:
         print(json.dumps(payload, indent=2, sort_keys=True))
@@ -4657,7 +5670,9 @@ def report_compare(*, target: Path, report_id: str, json_output: bool = False) -
     return 0 if not issues else 1
 
 
-def import_issues(*, target: Path, phase_range: str | None = None, dry_run: bool = False, json_output: bool = False) -> int:
+def import_issues(
+    *, target: Path, phase_range: str | None = None, dry_run: bool = False, json_output: bool = False
+) -> int:
     from . import work_cmd
 
     target = target.expanduser().resolve()

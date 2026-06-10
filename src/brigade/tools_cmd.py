@@ -1,4 +1,5 @@
 """Local portable tool and skill catalog inspection."""
+
 from __future__ import annotations
 
 import hashlib
@@ -59,7 +60,13 @@ KNOWN_HARNESSES = (
     "mcp",
     "scripts",
 )
-PARITY_ISSUE_TYPES = {"parity_gap", "missing_projection", "stale_projection", "conflicted_projection", "unmanaged_projection"}
+PARITY_ISSUE_TYPES = {
+    "parity_gap",
+    "missing_projection",
+    "stale_projection",
+    "conflicted_projection",
+    "unmanaged_projection",
+}
 APPROVAL_MODES = ("never", "on-request", "always")
 SCHEMA_TYPES = ("object", "array", "string", "number", "integer", "boolean", "null")
 UNSAFE_FIELD_PATTERN = re.compile(r"(password|secret|token|credential|api[_-]?key)", re.IGNORECASE)
@@ -77,7 +84,26 @@ DEFAULT_TOOLS = (
         "enabled": True,
         "description": "Portable simplify command placeholder.",
         "source_path": "tools/simplify.md",
-        "supported_harnesses": ["claude", "codex", "opencode", "antigravity", "pi", "cursor", "aider", "goose", "continue", "copilot", "qwen", "kimi", "adal", "openhands", "hermes", "openclaw", "mcp", "scripts"],
+        "supported_harnesses": [
+            "claude",
+            "codex",
+            "opencode",
+            "antigravity",
+            "pi",
+            "cursor",
+            "aider",
+            "goose",
+            "continue",
+            "copilot",
+            "qwen",
+            "kimi",
+            "adal",
+            "openhands",
+            "hermes",
+            "openclaw",
+            "mcp",
+            "scripts",
+        ],
         "projections": {
             "claude": ".claude/commands/simplify.md",
             "codex": ".codex/skills/simplify/SKILL.md",
@@ -106,7 +132,26 @@ DEFAULT_TOOLS = (
         "enabled": True,
         "description": "Portable superpowers placeholder.",
         "source_path": "tools/superpowers.md",
-        "supported_harnesses": ["claude", "codex", "opencode", "antigravity", "pi", "cursor", "aider", "goose", "continue", "copilot", "qwen", "kimi", "adal", "openhands", "hermes", "openclaw", "mcp", "scripts"],
+        "supported_harnesses": [
+            "claude",
+            "codex",
+            "opencode",
+            "antigravity",
+            "pi",
+            "cursor",
+            "aider",
+            "goose",
+            "continue",
+            "copilot",
+            "qwen",
+            "kimi",
+            "adal",
+            "openhands",
+            "hermes",
+            "openclaw",
+            "mcp",
+            "scripts",
+        ],
         "projections": {
             "claude": ".claude/commands/superpowers.md",
             "codex": ".codex/skills/superpowers/SKILL.md",
@@ -135,7 +180,26 @@ DEFAULT_TOOLS = (
         "enabled": True,
         "description": "Frontend implementation and visual quality workflow.",
         "source_path": "tools/frontend.md",
-        "supported_harnesses": ["claude", "codex", "opencode", "antigravity", "pi", "cursor", "aider", "goose", "continue", "copilot", "qwen", "kimi", "adal", "openhands", "hermes", "openclaw", "mcp", "scripts"],
+        "supported_harnesses": [
+            "claude",
+            "codex",
+            "opencode",
+            "antigravity",
+            "pi",
+            "cursor",
+            "aider",
+            "goose",
+            "continue",
+            "copilot",
+            "qwen",
+            "kimi",
+            "adal",
+            "openhands",
+            "hermes",
+            "openclaw",
+            "mcp",
+            "scripts",
+        ],
         "projections": {
             "claude": ".claude/commands/frontend.md",
             "codex": ".codex/skills/frontend/SKILL.md",
@@ -164,7 +228,26 @@ DEFAULT_TOOLS = (
         "enabled": True,
         "description": "Quality review workflow for removing vague or unfinished work.",
         "source_path": "tools/antislop.md",
-        "supported_harnesses": ["claude", "codex", "opencode", "antigravity", "pi", "cursor", "aider", "goose", "continue", "copilot", "qwen", "kimi", "adal", "openhands", "hermes", "openclaw", "mcp", "scripts"],
+        "supported_harnesses": [
+            "claude",
+            "codex",
+            "opencode",
+            "antigravity",
+            "pi",
+            "cursor",
+            "aider",
+            "goose",
+            "continue",
+            "copilot",
+            "qwen",
+            "kimi",
+            "adal",
+            "openhands",
+            "hermes",
+            "openclaw",
+            "mcp",
+            "scripts",
+        ],
         "projections": {
             "claude": ".claude/commands/antislop.md",
             "codex": ".codex/skills/antislop/SKILL.md",
@@ -474,7 +557,9 @@ def _format_toml_object(value: object) -> str:
     if isinstance(value, list):
         return "[" + ", ".join(_format_toml_object(item) for item in value) + "]"
     if isinstance(value, dict):
-        rendered = ", ".join(f"{_format_toml_key(str(key))} = {_format_toml_object(item)}" for key, item in value.items())
+        rendered = ", ".join(
+            f"{_format_toml_key(str(key))} = {_format_toml_object(item)}" for key, item in value.items()
+        )
         return "{ " + rendered + " }"
     return json.dumps(str(value))
 
@@ -548,17 +633,47 @@ def _ensure_default_tool_sources(target: Path, *, dry_run: bool = False) -> list
             continue
         rel = Path(source_path)
         if rel.is_absolute() or ".." in rel.parts:
-            results.append({"tool_id": tool_id, "source_path": source_path, "action": "skip", "detail": "source path is not repo-relative"})
+            results.append(
+                {
+                    "tool_id": tool_id,
+                    "source_path": source_path,
+                    "action": "skip",
+                    "detail": "source path is not repo-relative",
+                }
+            )
             continue
         dest = target / rel
         if dest.exists():
-            results.append({"tool_id": tool_id, "source_path": source_path, "path": str(dest), "action": "skip", "detail": "source exists"})
+            results.append(
+                {
+                    "tool_id": tool_id,
+                    "source_path": source_path,
+                    "path": str(dest),
+                    "action": "skip",
+                    "detail": "source exists",
+                }
+            )
             continue
         text = _default_tool_source_text(tool_id)
         if text is None:
-            results.append({"tool_id": tool_id, "source_path": source_path, "path": str(dest), "action": "missing", "detail": "built-in source text unavailable"})
+            results.append(
+                {
+                    "tool_id": tool_id,
+                    "source_path": source_path,
+                    "path": str(dest),
+                    "action": "missing",
+                    "detail": "built-in source text unavailable",
+                }
+            )
             continue
-        results.append({"tool_id": tool_id, "source_path": source_path, "path": str(dest), "action": "create" if not dry_run else "would_create"})
+        results.append(
+            {
+                "tool_id": tool_id,
+                "source_path": source_path,
+                "path": str(dest),
+                "action": "create" if not dry_run else "would_create",
+            }
+        )
         if not dry_run:
             dest.parent.mkdir(parents=True, exist_ok=True)
             dest.write_text(text if text.endswith("\n") else text + "\n")
@@ -572,7 +687,19 @@ def _format_runtimes_toml(runtimes: tuple[dict[str, Any], ...] = DEFAULT_RUNTIME
     ]
     for runtime in runtimes:
         lines.append("[[runtime]]")
-        for key in ("id", "name", "enabled", "command", "cwd", "port", "health_command", "health_path", "pid_path", "log_path", "timeout"):
+        for key in (
+            "id",
+            "name",
+            "enabled",
+            "command",
+            "cwd",
+            "port",
+            "health_command",
+            "health_path",
+            "pid_path",
+            "log_path",
+            "timeout",
+        ):
             lines.append(f"{key} = {dogfood_cmd._format_toml_value(runtime[key])}")
         lines.append("")
     return "\n".join(lines)
@@ -674,7 +801,9 @@ def _load_config(target: Path) -> tuple[list[dict[str, Any]], list[str]]:
         argument_template = raw_tool.get("argument_template", {})
         if argument_template is None:
             argument_template = {}
-        if not isinstance(argument_template, dict) or any(not isinstance(key, str) or not isinstance(value, str) for key, value in argument_template.items()):
+        if not isinstance(argument_template, dict) or any(
+            not isinstance(key, str) or not isinstance(value, str) for key, value in argument_template.items()
+        ):
             errors.append(f"{label}: argument_template must be a table of name = template")
             argument_template = {}
         tool["argument_template"] = {str(key): str(value) for key, value in argument_template.items()}
@@ -690,14 +819,18 @@ def _load_config(target: Path) -> tuple[list[dict[str, Any]], list[str]]:
             harnesses = []
         tool["supported_harnesses"] = [item.strip() for item in harnesses if isinstance(item, str) and item.strip()]
         projections = raw_tool.get("projections", {})
-        if not isinstance(projections, dict) or any(not isinstance(key, str) or not isinstance(value, str) for key, value in projections.items()):
+        if not isinstance(projections, dict) or any(
+            not isinstance(key, str) or not isinstance(value, str) for key, value in projections.items()
+        ):
             errors.append(f"{label}: projections must be a table of harness = path")
             projections = {}
         tool["projections"] = {str(key): str(value) for key, value in projections.items()}
         projection_fingerprints = raw_tool.get("projection_fingerprints", {})
         if projection_fingerprints is None:
             projection_fingerprints = {}
-        if not isinstance(projection_fingerprints, dict) or any(not isinstance(key, str) or not isinstance(value, str) for key, value in projection_fingerprints.items()):
+        if not isinstance(projection_fingerprints, dict) or any(
+            not isinstance(key, str) or not isinstance(value, str) for key, value in projection_fingerprints.items()
+        ):
             errors.append(f"{label}: projection_fingerprints must be a table of harness = fingerprint")
             projection_fingerprints = {}
         tool["projection_fingerprints"] = {str(key): str(value) for key, value in projection_fingerprints.items()}
@@ -778,7 +911,13 @@ def _load_policy_config(target: Path) -> tuple[dict[str, Any] | None, list[str]]
         return None, [f"invalid tool execution policy: {exc}"]
     errors: list[str] = []
     policy: dict[str, Any] = {"raw": raw_policy}
-    for field in ("allowed_families", "allowed_effects", "denied_effects", "required_approval_modes", "allowed_runtimes"):
+    for field in (
+        "allowed_families",
+        "allowed_effects",
+        "denied_effects",
+        "required_approval_modes",
+        "allowed_runtimes",
+    ):
         values = raw_policy.get(field, [])
         if values is None:
             values = []
@@ -804,10 +943,7 @@ def _load_policy_config(target: Path) -> tuple[dict[str, Any] | None, list[str]]
     if env_bindings is None:
         env_bindings = {}
     if not isinstance(env_bindings, dict) or any(
-        not isinstance(key, str)
-        or not key.strip()
-        or not isinstance(value, str)
-        or not value.strip()
+        not isinstance(key, str) or not key.strip() or not isinstance(value, str) or not value.strip()
         for key, value in env_bindings.items()
     ):
         errors.append("env_bindings must be a table of label = environment variable")
@@ -936,15 +1072,41 @@ def _runtime_status_item(target: Path, runtime: dict[str, Any], *, run_health: b
     cwd = _runtime_cwd(target, runtime)
     issues: list[dict[str, Any]] = []
     if _high_risk_command(runtime.get("command")):
-        issues.append(_tool_issue({"id": runtime.get("id"), "family": "runtime"}, "runtime_high_risk_command", "runtime command shape is high risk"))
+        issues.append(
+            _tool_issue(
+                {"id": runtime.get("id"), "family": "runtime"},
+                "runtime_high_risk_command",
+                "runtime command shape is high risk",
+            )
+        )
     if not _command_parts(runtime.get("command")):
-        issues.append(_tool_issue({"id": runtime.get("id"), "family": "runtime"}, "runtime_bad_command", "runtime command could not be parsed"))
+        issues.append(
+            _tool_issue(
+                {"id": runtime.get("id"), "family": "runtime"},
+                "runtime_bad_command",
+                "runtime command could not be parsed",
+            )
+        )
     if not cwd.is_dir():
-        issues.append(_tool_issue({"id": runtime.get("id"), "family": "runtime"}, "runtime_missing_cwd", f"runtime cwd missing: {cwd}"))
+        issues.append(
+            _tool_issue(
+                {"id": runtime.get("id"), "family": "runtime"}, "runtime_missing_cwd", f"runtime cwd missing: {cwd}"
+            )
+        )
     if stale_pid:
-        issues.append(_tool_issue({"id": runtime.get("id"), "family": "runtime"}, "runtime_stale_pid", f"stale pid file: {pid_path}"))
+        issues.append(
+            _tool_issue(
+                {"id": runtime.get("id"), "family": "runtime"}, "runtime_stale_pid", f"stale pid file: {pid_path}"
+            )
+        )
     if isinstance(runtime.get("port"), int) and _port_in_use(runtime["port"]) and not alive:
-        issues.append(_tool_issue({"id": runtime.get("id"), "family": "runtime"}, "runtime_port_conflict", f"port is already in use: {runtime['port']}"))
+        issues.append(
+            _tool_issue(
+                {"id": runtime.get("id"), "family": "runtime"},
+                "runtime_port_conflict",
+                f"port is already in use: {runtime['port']}",
+            )
+        )
     health_path = _runtime_health_path(target, runtime)
     health_ok = True
     health_detail = "not configured"
@@ -954,18 +1116,24 @@ def _runtime_status_item(target: Path, runtime: dict[str, Any], *, run_health: b
         else:
             health_ok = False
             health_detail = f"health path missing: {health_path}"
-            issues.append(_tool_issue({"id": runtime.get("id"), "family": "runtime"}, "runtime_health_failed", health_detail))
+            issues.append(
+                _tool_issue({"id": runtime.get("id"), "family": "runtime"}, "runtime_health_failed", health_detail)
+            )
     health_command = runtime.get("health_command")
     if alive and run_health and isinstance(health_command, str) and health_command.strip():
         parts = _command_parts(health_command)
         if not parts:
             health_ok = False
             health_detail = "health command could not be parsed"
-            issues.append(_tool_issue({"id": runtime.get("id"), "family": "runtime"}, "runtime_health_failed", health_detail))
+            issues.append(
+                _tool_issue({"id": runtime.get("id"), "family": "runtime"}, "runtime_health_failed", health_detail)
+            )
         elif _high_risk_command(health_command):
             health_ok = False
             health_detail = "health command shape is high risk"
-            issues.append(_tool_issue({"id": runtime.get("id"), "family": "runtime"}, "runtime_health_failed", health_detail))
+            issues.append(
+                _tool_issue({"id": runtime.get("id"), "family": "runtime"}, "runtime_health_failed", health_detail)
+            )
         else:
             try:
                 completed = subprocess.run(
@@ -979,12 +1147,18 @@ def _runtime_status_item(target: Path, runtime: dict[str, Any], *, run_health: b
             except (OSError, subprocess.TimeoutExpired) as exc:
                 health_ok = False
                 health_detail = f"health command failed: {_short(str(exc))}"
-                issues.append(_tool_issue({"id": runtime.get("id"), "family": "runtime"}, "runtime_health_failed", health_detail))
+                issues.append(
+                    _tool_issue({"id": runtime.get("id"), "family": "runtime"}, "runtime_health_failed", health_detail)
+                )
             else:
                 health_ok = completed.returncode == 0
                 health_detail = f"health command exit_code={completed.returncode}"
                 if completed.returncode != 0:
-                    issues.append(_tool_issue({"id": runtime.get("id"), "family": "runtime"}, "runtime_health_failed", health_detail))
+                    issues.append(
+                        _tool_issue(
+                            {"id": runtime.get("id"), "family": "runtime"}, "runtime_health_failed", health_detail
+                        )
+                    )
     state = "running" if alive else ("stale" if stale_pid else "stopped")
     return {
         "id": runtime.get("id"),
@@ -1018,10 +1192,16 @@ def _runtime_payload(target: Path, runtime_id: str | None = None, *, run_health:
         runtimes = [runtime for runtime in runtimes if runtime.get("id") == runtime_id]
         if not runtimes and not errors:
             errors.append(f"runtime not found: {runtime_id}")
-    statuses = [_runtime_status_item(target, runtime, run_health=run_health) for runtime in runtimes if runtime.get("enabled", True)]
+    statuses = [
+        _runtime_status_item(target, runtime, run_health=run_health)
+        for runtime in runtimes
+        if runtime.get("enabled", True)
+    ]
     issues = [issue for item in statuses for issue in item.get("issues", [])]
     if errors:
-        issues.insert(0, {"status": WARN, "name": "runtime_config", "issue_type": "runtime_config", "detail": "; ".join(errors)})
+        issues.insert(
+            0, {"status": WARN, "name": "runtime_config", "issue_type": "runtime_config", "detail": "; ".join(errors)}
+        )
     counts: dict[str, int] = {}
     for item in statuses:
         state = str(item.get("state") or "unknown")
@@ -1041,7 +1221,9 @@ def _runtime_payload(target: Path, runtime_id: str | None = None, *, run_health:
     }
 
 
-def _tool_runtime_issues(target: Path, tools: list[dict[str, Any]], runtime_payload: dict[str, Any]) -> list[dict[str, Any]]:
+def _tool_runtime_issues(
+    target: Path, tools: list[dict[str, Any]], runtime_payload: dict[str, Any]
+) -> list[dict[str, Any]]:
     runtimes_by_id = {str(item.get("id")): item for item in runtime_payload.get("runtimes", []) if item.get("id")}
     issues: list[dict[str, Any]] = []
     for tool in tools:
@@ -1100,7 +1282,12 @@ def _policy_decision(
         if float(timeout) > float(policy["max_timeout"]):
             blockers.append(f"timeout exceeds policy max: {timeout} > {policy['max_timeout']}")
     runtime_id = plan.get("runtime_id")
-    if isinstance(runtime_id, str) and runtime_id.strip() and policy["allowed_runtimes"] and runtime_id not in policy["allowed_runtimes"]:
+    if (
+        isinstance(runtime_id, str)
+        and runtime_id.strip()
+        and policy["allowed_runtimes"]
+        and runtime_id not in policy["allowed_runtimes"]
+    ):
         blockers.append(f"runtime is not allowed by policy: {runtime_id}")
     env_bindings = policy.get("env_bindings", {}) if isinstance(policy.get("env_bindings"), dict) else {}
     env_labels = [str(label) for label in (plan.get("env_labels") if isinstance(plan.get("env_labels"), list) else [])]
@@ -1239,7 +1426,13 @@ def _start_runtime_payload(target: Path, runtime_id: str) -> tuple[dict[str, Any
     if isinstance(runtime.get("port"), int) and _port_in_use(runtime["port"]):
         blockers.append(f"port is already in use: {runtime['port']}")
     if blockers:
-        return {"target": str(target), "runtime": status, "started": 0, "blockers": blockers, "error": "runtime is not startable"}, 1
+        return {
+            "target": str(target),
+            "runtime": status,
+            "started": 0,
+            "blockers": blockers,
+            "error": "runtime is not startable",
+        }, 1
     pid_path = _runtime_pid_path(target, runtime)
     metadata_path = _runtime_metadata_path(target, runtime)
     stdout_path, stderr_path = _runtime_log_paths(target, runtime)
@@ -1275,7 +1468,10 @@ def _start_runtime_payload(target: Path, runtime_id: str) -> tuple[dict[str, Any
     health_path = _runtime_health_path(target, runtime)
     if health_path is not None:
         health_path.parent.mkdir(parents=True, exist_ok=True)
-        health_path.write_text(json.dumps({"runtime_id": runtime.get("id"), "pid": process.pid, "started_at": started_at}, sort_keys=True) + "\n")
+        health_path.write_text(
+            json.dumps({"runtime_id": runtime.get("id"), "pid": process.pid, "started_at": started_at}, sort_keys=True)
+            + "\n"
+        )
     status = _runtime_status_item(target, runtime)
     return {
         "target": str(target),
@@ -1297,8 +1493,18 @@ def _stop_runtime_payload(target: Path, runtime_id: str) -> tuple[dict[str, Any]
     pid = _read_pid(pid_path)
     metadata = _read_runtime_metadata(target, runtime)
     if pid is None:
-        return {"target": str(target), "runtime": _runtime_status_item(target, runtime), "stopped": 0, "reason": "runtime is not running"}, 0
-    if not metadata or metadata.get("runtime_id") != runtime.get("id") or metadata.get("pid") != pid or metadata.get("command") != runtime.get("command"):
+        return {
+            "target": str(target),
+            "runtime": _runtime_status_item(target, runtime),
+            "stopped": 0,
+            "reason": "runtime is not running",
+        }, 0
+    if (
+        not metadata
+        or metadata.get("runtime_id") != runtime.get("id")
+        or metadata.get("pid") != pid
+        or metadata.get("command") != runtime.get("command")
+    ):
         return {
             "target": str(target),
             "runtime": _runtime_status_item(target, runtime),
@@ -1310,11 +1516,21 @@ def _stop_runtime_payload(target: Path, runtime_id: str) -> tuple[dict[str, Any]
         metadata["stopped_at"] = _now().isoformat()
         metadata["stop_reason"] = "stale pid"
         _write_runtime_metadata(target, runtime, metadata)
-        return {"target": str(target), "runtime": _runtime_status_item(target, runtime), "stopped": 0, "reason": "stale pid removed"}, 0
+        return {
+            "target": str(target),
+            "runtime": _runtime_status_item(target, runtime),
+            "stopped": 0,
+            "reason": "stale pid removed",
+        }, 0
     try:
         os.kill(pid, signal.SIGTERM)
     except OSError as exc:
-        return {"target": str(target), "runtime": _runtime_status_item(target, runtime), "stopped": 0, "error": str(exc)}, 1
+        return {
+            "target": str(target),
+            "runtime": _runtime_status_item(target, runtime),
+            "stopped": 0,
+            "error": str(exc),
+        }, 1
     deadline = time.monotonic() + 2
     while time.monotonic() < deadline:
         if not _process_alive(pid):
@@ -1334,9 +1550,18 @@ def _stop_runtime_payload(target: Path, runtime_id: str) -> tuple[dict[str, Any]
 def _restart_runtime_payload(target: Path, runtime_id: str) -> tuple[dict[str, Any], int]:
     stop_payload, stop_rc = _stop_runtime_payload(target, runtime_id)
     if stop_rc != 0:
-        return {"target": str(target.expanduser().resolve()), "stop": stop_payload, "error": stop_payload.get("error")}, stop_rc
+        return {
+            "target": str(target.expanduser().resolve()),
+            "stop": stop_payload,
+            "error": stop_payload.get("error"),
+        }, stop_rc
     start_payload, start_rc = _start_runtime_payload(target, runtime_id)
-    return {"target": str(target.expanduser().resolve()), "stop": stop_payload, "start": start_payload, "runtime": start_payload.get("runtime")}, start_rc
+    return {
+        "target": str(target.expanduser().resolve()),
+        "stop": stop_payload,
+        "start": start_payload,
+        "runtime": start_payload.get("runtime"),
+    }, start_rc
 
 
 def _unsafe_fields(value: object, prefix: str = "") -> list[str]:
@@ -1396,7 +1621,9 @@ def _redact_value(key: str, value: object) -> object:
     if UNSAFE_FIELD_PATTERN.search(key):
         return "[redacted]"
     if isinstance(value, dict):
-        return {str(nested_key): _redact_value(str(nested_key), nested_value) for nested_key, nested_value in value.items()}
+        return {
+            str(nested_key): _redact_value(str(nested_key), nested_value) for nested_key, nested_value in value.items()
+        }
     if isinstance(value, list):
         return [_redact_value(key, item) for item in value]
     if isinstance(value, str):
@@ -1493,7 +1720,9 @@ def _schema_shape_errors(schema: object, *, path: str = "$", root: bool = True) 
             errors.append(f"{path}.items: required for arrays")
         else:
             errors.extend(_schema_shape_errors(items, path=f"{path}[]", root=False))
-    unsupported = sorted(set(schema) - {"type", "properties", "required", "additionalProperties", "items", "enum", "description"})
+    unsupported = sorted(
+        set(schema) - {"type", "properties", "required", "additionalProperties", "items", "enum", "description"}
+    )
     if unsupported:
         errors.append(f"{path}: unsupported schema keywords: {', '.join(unsupported)}")
     return errors
@@ -1664,7 +1893,9 @@ def _contract_issues(target: Path, tool: dict[str, Any]) -> list[dict[str, Any]]
         schema_path = _schema_path(target, tool, field)
         if schema_path is None:
             if field == "input_schema_path":
-                issues.append(_tool_issue(tool, "missing_input_schema", "input_schema_path is required for call planning"))
+                issues.append(
+                    _tool_issue(tool, "missing_input_schema", "input_schema_path is required for call planning")
+                )
             continue
         if not schema_path.is_file():
             issues.append(_tool_issue(tool, f"missing_{issue_prefix}", f"missing schema: {schema_path}"))
@@ -1879,7 +2110,9 @@ def _projection_item(
         item.update({"status": "missing", "action": "skip", "detail": f"missing projection target for {harness}"})
         return item
     if not _path_within_target(target, projection_path):
-        item.update({"status": "invalid", "action": "skip", "detail": f"projection path escapes target: {projection_value}"})
+        item.update(
+            {"status": "invalid", "action": "skip", "detail": f"projection path escapes target: {projection_value}"}
+        )
         return item
     if source_path is None or not source_path.is_file():
         item.update({"status": "missing_source", "action": "skip", "detail": f"missing source: {source_path}"})
@@ -1974,10 +2207,7 @@ def _projection_plan_payload(target: Path, tool_id: str | None = None, *, force:
         "errors": errors,
         "tool_id": tool_id,
         "tools": [tool.get("id") for tool in selected],
-        "projections": [
-            {key: value for key, value in item.items() if key != "rendered"}
-            for item in projections
-        ],
+        "projections": [{key: value for key, value in item.items() if key != "rendered"} for item in projections],
         "counts": counts,
     }
 
@@ -1997,14 +2227,17 @@ def _projection_issue(tool: dict[str, Any], item: dict[str, Any]) -> dict[str, A
         {
             "projection_status": status,
             "tool_source_fingerprint": item.get("source_fingerprint"),
-            "expected_projection_fingerprint": item.get("expected_projection_fingerprint") or item.get("expected_fingerprint"),
+            "expected_projection_fingerprint": item.get("expected_projection_fingerprint")
+            or item.get("expected_fingerprint"),
             "actual_projection_fingerprint": item.get("actual_projection_fingerprint"),
         }
     )
     return issue
 
 
-def _tool_issue(tool: dict[str, Any], issue_type: str, detail: str, *, harness: str | None = None, target: str | None = None) -> dict[str, Any]:
+def _tool_issue(
+    tool: dict[str, Any], issue_type: str, detail: str, *, harness: str | None = None, target: str | None = None
+) -> dict[str, Any]:
     return {
         "status": WARN,
         "name": f"tool_{issue_type}",
@@ -2102,7 +2335,9 @@ def _inspect_mcp_config(tool: dict[str, Any], path: Path) -> tuple[dict[str, Any
     return {"server_count": len(server_ids), "server_ids": server_ids}, issues
 
 
-def _inspect_tool(target: Path, tool: dict[str, Any], now: datetime | None = None) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+def _inspect_tool(
+    target: Path, tool: dict[str, Any], now: datetime | None = None
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     now = now or datetime.now(timezone.utc)
     issues: list[dict[str, Any]] = []
     summary: dict[str, Any] = {
@@ -2319,7 +2554,9 @@ def _call_plan_payload(
             blockers.append("one or more projections are conflicted or unmanaged")
         if isinstance(parsed_args, dict):
             for key, template in tool.get("argument_template", {}).items():
-                missing = [var for var in re.findall(r"\{([A-Za-z_][A-Za-z0-9_]*)\}", template) if var not in parsed_args]
+                missing = [
+                    var for var in re.findall(r"\{([A-Za-z_][A-Za-z0-9_]*)\}", template) if var not in parsed_args
+                ]
                 for var in missing:
                     blockers.append(f"argument_template {key} references missing arg {var}")
                 rendered = _render_argument_template(str(template), parsed_args)
@@ -2342,11 +2579,15 @@ def _call_plan_payload(
         "cwd": tool.get("cwd") if tool is not None else None,
         "timeout": tool.get("timeout") if tool is not None else None,
         "runtime_id": tool.get("runtime_id") if tool is not None else None,
-        "requires_runtime": (tool.get("requires_runtime", False) or tool.get("family") == "mcp") if tool is not None else False,
+        "requires_runtime": (tool.get("requires_runtime", False) or tool.get("family") == "mcp")
+        if tool is not None
+        else False,
         "runtime_health_path": tool.get("runtime_health_path") if tool is not None else None,
         "mcp_server_id": tool.get("mcp_server_id") if tool is not None else None,
         "mcp_tool_name": tool.get("mcp_tool_name") if tool is not None else None,
-        "auth_label": "[redacted]" if tool is not None and UNSAFE_FIELD_PATTERN.search(str(tool.get("auth_label") or "")) else (tool.get("auth_label") if tool is not None else None),
+        "auth_label": "[redacted]"
+        if tool is not None and UNSAFE_FIELD_PATTERN.search(str(tool.get("auth_label") or ""))
+        else (tool.get("auth_label") if tool is not None else None),
         "env_labels": safe_env_labels,
         "arguments": mapped_arguments,
         "args": safe_args,
@@ -2570,7 +2811,9 @@ def _queue_call_payload(
             }, 0
     existing_ids = {str(existing.get("id")) for existing in calls}
     if record["id"] in existing_ids:
-        record["id"] = f"{record['id']}-queued-{_stable_hash({'created_at': record['created_at'], 'count': len(calls)})}"
+        record["id"] = (
+            f"{record['id']}-queued-{_stable_hash({'created_at': record['created_at'], 'count': len(calls)})}"
+        )
     calls.append(record)
     _write_calls(target, calls)
     return {
@@ -3109,7 +3352,9 @@ def _replay_call_payload(target: Path, run_id: str) -> tuple[dict[str, Any], int
     calls = _read_calls(target)
     existing_ids = {str(call.get("id")) for call in calls}
     if record["id"] in existing_ids:
-        record["id"] = f"{record['id']}-replay-{_stable_hash({'run_id': receipt.get('id'), 'created_at': record['replay_created_at']})}"
+        record["id"] = (
+            f"{record['id']}-replay-{_stable_hash({'run_id': receipt.get('id'), 'created_at': record['replay_created_at']})}"
+        )
     calls.append(record)
     _write_calls(target, calls)
     payload["call"] = record
@@ -3229,7 +3474,9 @@ def _checkpoint_expired(checkpoint: dict[str, Any], *, now: datetime | None = No
     return (now or _now()) > expires
 
 
-def _checkpoint_resume_blockers(target: Path, checkpoint: dict[str, Any]) -> tuple[list[str], dict[str, Any] | None, list[dict[str, Any]]]:
+def _checkpoint_resume_blockers(
+    target: Path, checkpoint: dict[str, Any]
+) -> tuple[list[str], dict[str, Any] | None, list[dict[str, Any]]]:
     blockers: list[str] = []
     status = str(checkpoint.get("status") or "")
     if status != "approved":
@@ -3524,7 +3771,9 @@ def _next_approved_call(calls: list[dict[str, Any]]) -> dict[str, Any] | None:
     return approved[0] if approved else None
 
 
-def _run_call_payload(target: Path, *, call_id: str | None = None, next_call: bool = False) -> tuple[dict[str, Any], int]:
+def _run_call_payload(
+    target: Path, *, call_id: str | None = None, next_call: bool = False
+) -> tuple[dict[str, Any], int]:
     target = target.expanduser().resolve()
     calls = _read_calls(target)
     call: dict[str, Any] | None
@@ -3906,16 +4155,20 @@ def _catalog_payload(target: Path) -> dict[str, Any]:
     wants_runtime = runtimes_config_path(target).is_file() or any(
         tool.get("runtime_id") or tool.get("requires_runtime") for tool in tools
     )
-    runtime_health = _runtime_payload(target, run_health=False) if wants_runtime else {
-        "config_path": str(runtimes_config_path(target)),
-        "state_path": str(runtime_state_path(target)),
-        "counts": {},
-        "runtime_count": 0,
-        "issue_count": 0,
-        "top_issue": None,
-        "issues": [],
-        "runtimes": [],
-    }
+    runtime_health = (
+        _runtime_payload(target, run_health=False)
+        if wants_runtime
+        else {
+            "config_path": str(runtimes_config_path(target)),
+            "state_path": str(runtime_state_path(target)),
+            "counts": {},
+            "runtime_count": 0,
+            "issue_count": 0,
+            "top_issue": None,
+            "issues": [],
+            "runtimes": [],
+        }
+    )
     issues.extend(runtime_health["issues"])
     issues.extend(_tool_runtime_issues(target, tools, runtime_health))
     policy_health = _policy_health(target, tools)
@@ -4021,22 +4274,25 @@ def _issue_records(target: Path) -> list[dict[str, Any]]:
         issue_type = str(issue.get("issue_type") or issue.get("name") or "tool_issue")
         tool_id = str(issue.get("tool_id") or "catalog")
         detail = str(issue.get("detail") or "")
-        source_fingerprint = str(issue.get("parity_fingerprint") or _stable_hash(
-            {
-                "tool_id": tool_id,
-                "issue_type": issue_type,
-                "detail": detail,
-                "harness": issue.get("harness"),
-                "call_id": issue.get("call_id"),
-                "run_id": issue.get("run_id"),
-                "checkpoint_id": issue.get("checkpoint_id"),
-                "projection_target": issue.get("projection_target"),
-                "projection_status": issue.get("projection_status"),
-                "tool_source_fingerprint": issue.get("tool_source_fingerprint"),
-                "expected_projection_fingerprint": issue.get("expected_projection_fingerprint"),
-                "actual_projection_fingerprint": issue.get("actual_projection_fingerprint"),
-            }
-        ))
+        source_fingerprint = str(
+            issue.get("parity_fingerprint")
+            or _stable_hash(
+                {
+                    "tool_id": tool_id,
+                    "issue_type": issue_type,
+                    "detail": detail,
+                    "harness": issue.get("harness"),
+                    "call_id": issue.get("call_id"),
+                    "run_id": issue.get("run_id"),
+                    "checkpoint_id": issue.get("checkpoint_id"),
+                    "projection_target": issue.get("projection_target"),
+                    "projection_status": issue.get("projection_status"),
+                    "tool_source_fingerprint": issue.get("tool_source_fingerprint"),
+                    "expected_projection_fingerprint": issue.get("expected_projection_fingerprint"),
+                    "actual_projection_fingerprint": issue.get("actual_projection_fingerprint"),
+                }
+            )
+        )
         metadata = {
             "tool_id": tool_id,
             "tool_family": issue.get("family"),
@@ -4154,7 +4410,14 @@ def _scoped_default_tool(tool: dict[str, Any], scope: set[str] | None) -> dict[s
     return entry
 
 
-def defaults(*, target: Path, dry_run: bool = False, force: bool = False, update_gitignore: bool = True, json_output: bool = False) -> int:
+def defaults(
+    *,
+    target: Path,
+    dry_run: bool = False,
+    force: bool = False,
+    update_gitignore: bool = True,
+    json_output: bool = False,
+) -> int:
     target = target.expanduser().resolve()
     if not target.is_dir():
         print(f"error: --target is not a directory: {target}", file=sys.stderr)
@@ -4550,7 +4813,11 @@ def show(*, target: Path, tool_id: str, json_output: bool = False) -> int:
             tool = item
             break
     if json_output:
-        print(json.dumps({"target": str(target), "config_path": payload["config_path"], "tool": tool}, indent=2, sort_keys=True))
+        print(
+            json.dumps(
+                {"target": str(target), "config_path": payload["config_path"], "tool": tool}, indent=2, sort_keys=True
+            )
+        )
         return 0 if tool is not None else 1
     if tool is None:
         print(f"error: tool not found: {tool_id}", file=sys.stderr)
@@ -4582,8 +4849,7 @@ def search(*, target: Path, query: str, json_output: bool = False) -> int:
         tool
         for tool in payload["tools"]
         if needle
-        and needle
-        in " ".join(str(tool.get(key, "")) for key in ("id", "name", "family", "description")).casefold()
+        and needle in " ".join(str(tool.get(key, "")) for key in ("id", "name", "family", "description")).casefold()
     ]
     result = {"target": str(target), "query": query, "matches": matches, "match_count": len(matches)}
     if json_output:
@@ -4745,7 +5011,9 @@ def call_list(*, target: Path, json_output: bool = False) -> int:
     for status, count in sorted(counts.items()):
         print(f"{status}: {count}")
     for call in calls:
-        print(f"- {call.get('id')} [{call.get('status')}] {call.get('tool_id')} blockers={len(call.get('blockers', []))}")
+        print(
+            f"- {call.get('id')} [{call.get('status')}] {call.get('tool_id')} blockers={len(call.get('blockers', []))}"
+        )
     return 0
 
 
@@ -4979,7 +5247,9 @@ def checkpoint_list(*, target: Path, json_output: bool = False) -> int:
     for error in payload["errors"]:
         print(f"[warn] checkpoint_invalid: {error.get('checkpoint_path')} {error.get('error')}")
     for checkpoint in payload["checkpoints"]:
-        print(f"- {checkpoint.get('id')} [{checkpoint.get('status')}] {checkpoint.get('tool_id')} {checkpoint.get('requested_action')}")
+        print(
+            f"- {checkpoint.get('id')} [{checkpoint.get('status')}] {checkpoint.get('tool_id')} {checkpoint.get('requested_action')}"
+        )
     return 0
 
 
@@ -5041,7 +5311,11 @@ def _checkpoint_review(
     if status == "approved":
         choices = [str(item) for item in checkpoint.get("choices", []) if isinstance(item, str)]
         if choices and choice not in choices:
-            payload = {"target": str(target), "error": "choice is not allowed", "checkpoint": _checkpoint_public_summary(checkpoint)}
+            payload = {
+                "target": str(target),
+                "error": "choice is not allowed",
+                "checkpoint": _checkpoint_public_summary(checkpoint),
+            }
             if json_output:
                 print(json.dumps(payload, indent=2, sort_keys=True))
             else:
@@ -5149,11 +5423,7 @@ def plan(*, target: Path, tool_id: str | None = None, json_output: bool = False)
         for status, count in sorted(payload["counts"].items()):
             print(f"  {status}: {count}")
     for item in projections:
-        print(
-            "- "
-            f"{item.get('tool_id')} {item.get('harness')} "
-            f"{item.get('status')} action={item.get('action')}"
-        )
+        print(f"- {item.get('tool_id')} {item.get('harness')} {item.get('status')} action={item.get('action')}")
         print(f"  source: {item.get('source_path')}")
         print(f"  target: {item.get('projection_path')}")
         if item.get("expected_fingerprint"):
@@ -5179,11 +5449,7 @@ def apply(
         print("error: pass exactly one of <tool-id> or --all", file=sys.stderr)
         return 2
     tools, errors = _load_config(target)
-    selected = [
-        tool
-        for tool in tools
-        if tool.get("enabled", True) and (all_tools or tool.get("id") == tool_id)
-    ]
+    selected = [tool for tool in tools if tool.get("enabled", True) and (all_tools or tool.get("id") == tool_id)]
     if tool_id is not None and not selected and not errors:
         errors.append(f"tool not found: {tool_id}")
     generated_at = datetime.now(timezone.utc)
@@ -5290,19 +5556,27 @@ def _tool_pack_evidence_fingerprint(payload: dict[str, Any]) -> str:
             "projection_counts": payload.get("projection_counts"),
             "issue_count": payload.get("issue_count"),
             "issue_fingerprints": [
-                issue.get("parity_fingerprint") or _stable_hash(issue)
-                for issue in issues
-                if isinstance(issue, dict)
+                issue.get("parity_fingerprint") or _stable_hash(issue) for issue in issues if isinstance(issue, dict)
             ],
-            "call_queue_counts": (payload.get("call_queue") or {}).get("counts") if isinstance(payload.get("call_queue"), dict) else {},
-            "run_history_counts": (payload.get("run_history") or {}).get("counts") if isinstance(payload.get("run_history"), dict) else {},
-            "checkpoint_counts": (payload.get("checkpoints") or {}).get("counts") if isinstance(payload.get("checkpoints"), dict) else {},
+            "call_queue_counts": (payload.get("call_queue") or {}).get("counts")
+            if isinstance(payload.get("call_queue"), dict)
+            else {},
+            "run_history_counts": (payload.get("run_history") or {}).get("counts")
+            if isinstance(payload.get("run_history"), dict)
+            else {},
+            "checkpoint_counts": (payload.get("checkpoints") or {}).get("counts")
+            if isinstance(payload.get("checkpoints"), dict)
+            else {},
             "parity_closeout_id": latest_closeout.get("closeout_id"),
             "parity_closeout_status": latest_closeout.get("status"),
             "parity_quieted_count": parity.get("quieted_issue_count"),
             "parity_changed_count": parity.get("changed_issue_count"),
-            "policy_issue_count": (payload.get("policy") or {}).get("issue_count") if isinstance(payload.get("policy"), dict) else None,
-            "runtime_issue_count": (payload.get("runtimes") or {}).get("issue_count") if isinstance(payload.get("runtimes"), dict) else None,
+            "policy_issue_count": (payload.get("policy") or {}).get("issue_count")
+            if isinstance(payload.get("policy"), dict)
+            else None,
+            "runtime_issue_count": (payload.get("runtimes") or {}).get("issue_count")
+            if isinstance(payload.get("runtimes"), dict)
+            else None,
         }
     )
 
@@ -5325,16 +5599,32 @@ def pack_build(*, target: Path, json_output: bool = False) -> int:
             continue
         source = _as_path(target, source_path)
         if source is None or not source.is_file():
-            source_files.append({"tool_id": entry.get("id"), "source_path": source_path, "packed": False, "reason": "source missing"})
+            source_files.append(
+                {"tool_id": entry.get("id"), "source_path": source_path, "packed": False, "reason": "source missing"}
+            )
             continue
         rel = Path(source_path)
         if rel.is_absolute() or ".." in rel.parts:
-            source_files.append({"tool_id": entry.get("id"), "source_path": source_path, "packed": False, "reason": "source path is not repo-relative"})
+            source_files.append(
+                {
+                    "tool_id": entry.get("id"),
+                    "source_path": source_path,
+                    "packed": False,
+                    "reason": "source path is not repo-relative",
+                }
+            )
             continue
         dest = source_root / rel
         dest.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source, dest)
-        source_files.append({"tool_id": entry.get("id"), "source_path": source_path, "packed": True, "pack_path": str(dest.relative_to(pack_dir))})
+        source_files.append(
+            {
+                "tool_id": entry.get("id"),
+                "source_path": source_path,
+                "packed": True,
+                "pack_path": str(dest.relative_to(pack_dir)),
+            }
+        )
     portable_catalog = {"entries": entries, "entry_errors": entry_errors, "source_files": source_files}
     payload["portable_catalog"] = portable_catalog
     if entries:
@@ -5402,13 +5692,34 @@ def _tool_pack_health(target: Path) -> dict[str, Any]:
     current = _tool_pack_payload(target)
     checks: list[dict[str, Any]] = []
     if latest is None:
-        checks.append({"status": WARN, "name": "tool_pack_missing", "issue_type": "pack_missing", "detail": "no tool pack has been built"})
+        checks.append(
+            {
+                "status": WARN,
+                "name": "tool_pack_missing",
+                "issue_type": "pack_missing",
+                "detail": "no tool pack has been built",
+            }
+        )
     else:
         if latest.get("evidence_fingerprint") != current.get("evidence_fingerprint"):
-            checks.append({"status": WARN, "name": "tool_pack_stale", "issue_type": "pack_stale", "detail": f"{latest.get('pack_id')} no longer matches current catalog evidence"})
+            checks.append(
+                {
+                    "status": WARN,
+                    "name": "tool_pack_stale",
+                    "issue_type": "pack_stale",
+                    "detail": f"{latest.get('pack_id')} no longer matches current catalog evidence",
+                }
+            )
         path = latest.get("path")
         if path and not Path(str(path)).exists():
-            checks.append({"status": WARN, "name": "tool_pack_missing_path", "issue_type": "pack_missing_path", "detail": str(path)})
+            checks.append(
+                {
+                    "status": WARN,
+                    "name": "tool_pack_missing_path",
+                    "issue_type": "pack_missing_path",
+                    "detail": str(path),
+                }
+            )
     return {
         "packs_path": str(_packs_root(target)),
         "pack_count": len(packs),
@@ -5473,7 +5784,12 @@ def pack_archive(*, target: Path, pack_id: str, json_output: bool = False) -> in
         print(f"error: archived tool pack already exists: {destination}", file=sys.stderr)
         return 2
     source.rename(destination)
-    payload = {"target": str(target), "pack_id": pack.get("pack_id"), "status": "archived", "archive_path": str(destination)}
+    payload = {
+        "target": str(target),
+        "pack_id": pack.get("pack_id"),
+        "status": "archived",
+        "archive_path": str(destination),
+    }
     if json_output:
         print(json.dumps(payload, indent=2, sort_keys=True))
         return 0
@@ -5506,21 +5822,48 @@ def pack_import(*, target: Path, pack: Path, force: bool = False, json_output: b
             continue
         existing_entry = existing_by_id.get(tool_id)
         if existing_entry is not None and not force and _stable_hash(existing_entry) != _stable_hash(entry):
-            conflicts.append({"tool_id": tool_id, "reason": "tool id already exists with different definition", "existing_source_path": existing_entry.get("source_path")})
+            conflicts.append(
+                {
+                    "tool_id": tool_id,
+                    "reason": "tool id already exists with different definition",
+                    "existing_source_path": existing_entry.get("source_path"),
+                }
+            )
         source_path = entry.get("source_path")
         if isinstance(source_path, str) and source_path.strip():
             rel = Path(source_path)
             if rel.is_absolute() or ".." in rel.parts:
-                conflicts.append({"tool_id": tool_id, "reason": "source path is not repo-relative", "source_path": source_path})
+                conflicts.append(
+                    {"tool_id": tool_id, "reason": "source path is not repo-relative", "source_path": source_path}
+                )
                 continue
             packed_source = pack / "source-files" / rel
             target_source = target / rel
-            if packed_source.is_file() and target_source.is_file() and packed_source.read_bytes() != target_source.read_bytes() and not force:
-                conflicts.append({"tool_id": tool_id, "reason": "source file already exists with different content", "source_path": source_path})
+            if (
+                packed_source.is_file()
+                and target_source.is_file()
+                and packed_source.read_bytes() != target_source.read_bytes()
+                and not force
+            ):
+                conflicts.append(
+                    {
+                        "tool_id": tool_id,
+                        "reason": "source file already exists with different content",
+                        "source_path": source_path,
+                    }
+                )
     if errors:
         conflicts.append({"tool_id": None, "reason": "existing catalog errors", "errors": errors})
     if conflicts:
-        payload = {"target": str(target), "pack": str(pack), "valid": False, "imported": [], "copied_sources": copied_sources, "skipped_existing": skipped_existing, "conflicts": conflicts}
+        payload = {
+            "target": str(target),
+            "pack": str(pack),
+            "valid": False,
+            "imported": [],
+            "copied_sources": copied_sources,
+            "skipped_existing": skipped_existing,
+            "conflicts": conflicts,
+        }
         if json_output:
             print(json.dumps(payload, indent=2, sort_keys=True))
             return 1
@@ -5542,9 +5885,17 @@ def pack_import(*, target: Path, pack: Path, force: bool = False, json_output: b
                 target_source.parent.mkdir(parents=True, exist_ok=True)
                 if force or not target_source.exists() or packed_source.read_bytes() == target_source.read_bytes():
                     shutil.copy2(packed_source, target_source)
-                    copied_sources.append({"tool_id": tool_id, "source_path": source_path, "target_path": str(target_source)})
+                    copied_sources.append(
+                        {"tool_id": tool_id, "source_path": source_path, "target_path": str(target_source)}
+                    )
         if tool_id in existing_by_id and not force:
-            skipped_existing.append({"tool_id": tool_id, "reason": "identical entry already exists", "source_path": entry.get("source_path")})
+            skipped_existing.append(
+                {
+                    "tool_id": tool_id,
+                    "reason": "identical entry already exists",
+                    "source_path": entry.get("source_path"),
+                }
+            )
             continue
         merged_by_id[tool_id] = dict(entry)
         imported.append({"tool_id": tool_id, "source_path": entry.get("source_path")})
@@ -5587,7 +5938,15 @@ def sync_plan(*, target: Path, tool_id: str | None = None, json_output: bool = F
     return 0 if payload["valid"] else 1
 
 
-def sync_apply(*, target: Path, tool_id: str | None = None, all_tools: bool = False, dry_run: bool = True, force: bool = False, json_output: bool = False) -> int:
+def sync_apply(
+    *,
+    target: Path,
+    tool_id: str | None = None,
+    all_tools: bool = False,
+    dry_run: bool = True,
+    force: bool = False,
+    json_output: bool = False,
+) -> int:
     if tool_id is None and not all_tools:
         if not dry_run and force:
             print("error: pass <tool-id> or --all for write sync apply", file=sys.stderr)
@@ -5704,9 +6063,7 @@ def parity_closeout(*, target: Path, reason: str | None = None, defer: bool = Fa
         return 2
     payload = _catalog_payload(target)
     source_issues = [
-        issue
-        for issue in payload.get("raw_issues", [])
-        if isinstance(issue, dict) and _is_parity_issue(issue)
+        issue for issue in payload.get("raw_issues", []) if isinstance(issue, dict) and _is_parity_issue(issue)
     ]
     fingerprints = [_parity_issue_fingerprint(issue) for issue in source_issues]
     closeout_id = f"{_now().strftime('%Y%m%d-%H%M%S')}-tool-parity-closeout"

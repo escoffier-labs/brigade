@@ -1,9 +1,9 @@
 """Tests for brigade init (CLI + install_selection behavior)."""
+
 from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
 
 from brigade.install import install_selection
 from brigade.selection import Selection
@@ -215,15 +215,23 @@ def test_owner_override_renders_in_bootstrap(tmp_target: Path):
 
 def test_cli_parses_depth_harnesses(monkeypatch, tmp_path):
     from brigade.cli import _build_parser
+
     parser = _build_parser()
-    ns = parser.parse_args([
-        "init",
-        "--target", str(tmp_path),
-        "--depth", "workspace",
-        "--harnesses", "claude,codex,openclaw",
-        "--owner", "openclaw",
-        "--include", "publisher",
-    ])
+    ns = parser.parse_args(
+        [
+            "init",
+            "--target",
+            str(tmp_path),
+            "--depth",
+            "workspace",
+            "--harnesses",
+            "claude,codex,openclaw",
+            "--owner",
+            "openclaw",
+            "--include",
+            "publisher",
+        ]
+    )
     assert ns.depth == "workspace"
     assert ns.harnesses == "claude,codex,openclaw"
     assert ns.owner == "openclaw"
@@ -232,10 +240,16 @@ def test_cli_parses_depth_harnesses(monkeypatch, tmp_path):
 
 def test_cli_rejects_unknown_harness(tmp_path):
     from brigade.cli import main
-    rc = main([
-        "init", "--target", str(tmp_path),
-        "--harnesses", "claude,weird",
-    ])
+
+    rc = main(
+        [
+            "init",
+            "--target",
+            str(tmp_path),
+            "--harnesses",
+            "claude,weird",
+        ]
+    )
     assert rc != 0
 
 
@@ -257,8 +271,10 @@ def test_cli_invokes_prompt_when_no_selection_flags(monkeypatch, tmp_path):
 
 def test_cli_skips_prompt_when_depth_given(monkeypatch, tmp_path):
     from brigade import cli
+
     def fail():
         raise AssertionError("prompt should not be called")
+
     monkeypatch.setattr(cli, "prompt_for_selection", fail)
     rc = cli.main(["init", "--target", str(tmp_path), "--depth", "repo", "--harnesses", "claude"])
     assert rc == 0

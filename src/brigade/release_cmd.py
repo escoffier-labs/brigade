@@ -1,4 +1,5 @@
 """Local release readiness receipts."""
+
 from __future__ import annotations
 
 import json
@@ -12,9 +13,28 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from . import context_cmd, handoff_cmd, learn_cmd, memory_cmd, phases_cmd, projects_cmd, repos_cmd, reportstore, research_cmd, roadmap_cmd, security_cmd, tools_cmd, work_cmd
+from . import (
+    context_cmd,
+    handoff_cmd,
+    learn_cmd,
+    memory_cmd,
+    phases_cmd,
+    projects_cmd,
+    repos_cmd,
+    reportstore,
+    research_cmd,
+    roadmap_cmd,
+    security_cmd,
+    tools_cmd,
+    work_cmd,
+)
 from .selection import KNOWN_HARNESSES
-from .localio import read_json_dict as _read_json, read_jsonl_dicts as _read_jsonl, utc_now as _now, write_json as _write_json
+from .localio import (
+    read_json_dict as _read_json,
+    read_jsonl_dicts as _read_jsonl,
+    utc_now as _now,
+    write_json as _write_json,
+)
 
 OK = "ok"
 WARN = "warn"
@@ -35,7 +55,11 @@ INSTALL_SMOKE_MATRIX = (
     {"matrix_id": "workspace-claude", "depth": "workspace", "harnesses": ["claude"]},
     {"matrix_id": "workspace-claude-openclaw", "depth": "workspace", "harnesses": ["claude", "openclaw"]},
     {"matrix_id": "workspace-codex-openclaw", "depth": "workspace", "harnesses": ["codex", "openclaw"]},
-    {"matrix_id": "workspace-claude-codex-openclaw", "depth": "workspace", "harnesses": ["claude", "codex", "openclaw"]},
+    {
+        "matrix_id": "workspace-claude-codex-openclaw",
+        "depth": "workspace",
+        "harnesses": ["claude", "codex", "openclaw"],
+    },
 )
 CI_DEPRECATION_PATTERNS = (
     re.compile(r"(?i)\bnode(?:\.js)?\s*(12|16)\b.*\b(deprecat|unsupported|retired)"),
@@ -188,9 +212,7 @@ def _docs_warnings(target: Path, base_ref: str | None) -> list[str]:
     user_facing = [
         path
         for path in changed
-        if path.startswith("src/brigade/")
-        and not path.startswith("src/brigade/templates/")
-        and path.endswith(".py")
+        if path.startswith("src/brigade/") and not path.startswith("src/brigade/templates/") and path.endswith(".py")
     ]
     if not user_facing:
         return []
@@ -234,7 +256,10 @@ def _install_smoke_matrix() -> list[dict[str, Any]]:
 
 def _read_install_smoke_receipts(target: Path) -> list[dict[str, Any]]:
     receipts = _read_jsonl(_install_smoke_receipts_path(target))
-    receipts.sort(key=lambda item: str(item.get("completed_at") or item.get("created_at") or item.get("receipt_id") or ""), reverse=True)
+    receipts.sort(
+        key=lambda item: str(item.get("completed_at") or item.get("created_at") or item.get("receipt_id") or ""),
+        reverse=True,
+    )
     return receipts
 
 
@@ -253,31 +278,56 @@ def _install_smoke_record_from_payload(payload: dict[str, Any]) -> dict[str, Any
     completed_at = str(payload.get("completed_at") or payload.get("created_at") or _now().isoformat())
     matrix_id = str(payload.get("matrix_id") or _install_smoke_matrix_id(depth, harnesses))
     record = {
-        "receipt_id": str(payload.get("receipt_id") or f"install-smoke-{work_cmd._stable_hash({'matrix_id': matrix_id, 'completed_at': completed_at, 'status': status})[:16]}"),
+        "receipt_id": str(
+            payload.get("receipt_id")
+            or f"install-smoke-{work_cmd._stable_hash({'matrix_id': matrix_id, 'completed_at': completed_at, 'status': status})[:16]}"
+        ),
         "matrix_id": matrix_id,
         "depth": depth,
         "harnesses": harnesses,
         "status": status,
-        "command_label": _release_safe_text(str(payload.get("command_label") or f"brigade init --depth {depth} --harnesses {','.join(harnesses) or 'none'}")),
-        "safe_summary": _release_safe_text(str(payload.get("safe_summary") or payload.get("summary") or f"install smoke {status}")),
+        "command_label": _release_safe_text(
+            str(
+                payload.get("command_label")
+                or f"brigade init --depth {depth} --harnesses {','.join(harnesses) or 'none'}"
+            )
+        ),
+        "safe_summary": _release_safe_text(
+            str(payload.get("safe_summary") or payload.get("summary") or f"install smoke {status}")
+        ),
         "stdout_summary": _release_safe_text(str(payload.get("stdout_summary") or "")),
         "stderr_summary": _release_safe_text(str(payload.get("stderr_summary") or "")),
         "duration_seconds": payload.get("duration_seconds"),
         "created_at": completed_at,
         "completed_at": completed_at,
     }
-    record["source_fingerprint"] = work_cmd._stable_hash({key: value for key, value in record.items() if key not in {"receipt_id", "created_at", "completed_at"}})
+    record["source_fingerprint"] = work_cmd._stable_hash(
+        {key: value for key, value in record.items() if key not in {"receipt_id", "created_at", "completed_at"}}
+    )
     return record
 
 
 def install_smoke_plan(*, target: Path, json_output: bool = False) -> int:
     target = target.expanduser().resolve()
-    latest_by_matrix = {str(receipt.get("matrix_id") or ""): receipt for receipt in _read_install_smoke_receipts(target)}
+    latest_by_matrix = {
+        str(receipt.get("matrix_id") or ""): receipt for receipt in _read_install_smoke_receipts(target)
+    }
     matrix = []
     for item in _install_smoke_matrix():
         latest = latest_by_matrix.get(str(item.get("matrix_id") or ""))
-        matrix.append({**item, "latest_receipt_id": latest.get("receipt_id") if isinstance(latest, dict) else None, "latest_status": latest.get("status") if isinstance(latest, dict) else None})
-    payload = {"target": str(target), "receipt_path_label": ".brigade/release/install-smoke/receipts.jsonl", "matrix": matrix, "matrix_count": len(matrix)}
+        matrix.append(
+            {
+                **item,
+                "latest_receipt_id": latest.get("receipt_id") if isinstance(latest, dict) else None,
+                "latest_status": latest.get("status") if isinstance(latest, dict) else None,
+            }
+        )
+    payload = {
+        "target": str(target),
+        "receipt_path_label": ".brigade/release/install-smoke/receipts.jsonl",
+        "matrix": matrix,
+        "matrix_count": len(matrix),
+    }
     if json_output:
         print(json.dumps(payload, indent=2, sort_keys=True))
         return 0
@@ -305,7 +355,13 @@ def install_smoke_record(
             print(f"error: invalid install smoke receipt JSON: {receipt_json}", file=sys.stderr)
             return 2
     else:
-        payload = {"depth": depth, "harnesses": harnesses, "status": status, "command_label": command_label, "safe_summary": summary}
+        payload = {
+            "depth": depth,
+            "harnesses": harnesses,
+            "status": status,
+            "command_label": command_label,
+            "safe_summary": summary,
+        }
     record = _install_smoke_record_from_payload(payload)
     if record["depth"] not in {"repo", "workspace"}:
         print("error: --depth must be repo or workspace", file=sys.stderr)
@@ -321,7 +377,11 @@ def install_smoke_record(
     receipts = [receipt for receipt in receipts if receipt.get("receipt_id") != record["receipt_id"]]
     receipts.append(record)
     _write_install_smoke_receipts(target, receipts)
-    payload_out = {"target": str(target), "record": record, "receipt_path_label": ".brigade/release/install-smoke/receipts.jsonl"}
+    payload_out = {
+        "target": str(target),
+        "record": record,
+        "receipt_path_label": ".brigade/release/install-smoke/receipts.jsonl",
+    }
     if json_output:
         print(json.dumps(payload_out, indent=2, sort_keys=True))
         return 0
@@ -387,13 +447,39 @@ def install_smoke_health(target: Path) -> dict[str, Any]:
         matrix_id = str(item["matrix_id"])
         latest = latest_by_matrix.get(matrix_id)
         if latest is None:
-            issues.append({"status": WARN, "name": "install_smoke_missing", "matrix_id": matrix_id, "detail": f"{matrix_id} has no install smoke receipt", "suggested_next_command": f"brigade release smoke record --depth {item['depth']} --harnesses {','.join(item['harnesses']) or 'none'} --status passed"})
+            issues.append(
+                {
+                    "status": WARN,
+                    "name": "install_smoke_missing",
+                    "matrix_id": matrix_id,
+                    "detail": f"{matrix_id} has no install smoke receipt",
+                    "suggested_next_command": f"brigade release smoke record --depth {item['depth']} --harnesses {','.join(item['harnesses']) or 'none'} --status passed",
+                }
+            )
             continue
         if latest.get("status") not in {"passed", "skipped"}:
-            issues.append({"status": WARN, "name": "install_smoke_failed", "matrix_id": matrix_id, "receipt_id": latest.get("receipt_id"), "detail": f"{matrix_id} latest smoke is {latest.get('status')}", "suggested_next_command": f"brigade release smoke show {latest.get('receipt_id')}"})
+            issues.append(
+                {
+                    "status": WARN,
+                    "name": "install_smoke_failed",
+                    "matrix_id": matrix_id,
+                    "receipt_id": latest.get("receipt_id"),
+                    "detail": f"{matrix_id} latest smoke is {latest.get('status')}",
+                    "suggested_next_command": f"brigade release smoke show {latest.get('receipt_id')}",
+                }
+            )
         completed = work_cmd._parse_iso_datetime(latest.get("completed_at"))
         if completed is not None and (now - completed).total_seconds() / 3600 > INSTALL_SMOKE_STALE_HOURS:
-            issues.append({"status": WARN, "name": "install_smoke_stale", "matrix_id": matrix_id, "receipt_id": latest.get("receipt_id"), "detail": f"{matrix_id} install smoke is stale", "suggested_next_command": f"brigade release smoke record --depth {item['depth']} --harnesses {','.join(item['harnesses']) or 'none'} --status passed"})
+            issues.append(
+                {
+                    "status": WARN,
+                    "name": "install_smoke_stale",
+                    "matrix_id": matrix_id,
+                    "receipt_id": latest.get("receipt_id"),
+                    "detail": f"{matrix_id} install smoke is stale",
+                    "suggested_next_command": f"brigade release smoke record --depth {item['depth']} --harnesses {','.join(item['harnesses']) or 'none'} --status passed",
+                }
+            )
     return {
         "target_label": "release-install-smoke",
         "receipt_path_label": ".brigade/release/install-smoke/receipts.jsonl",
@@ -471,7 +557,9 @@ def _ci_finding(
         "suggested_next_command": "Review the workflow action version and update it manually if appropriate.",
     }
     payload["finding_id"] = f"ci-deprecation-{work_cmd._stable_hash(payload)[:16]}"
-    payload["source_fingerprint"] = work_cmd._stable_hash({key: value for key, value in payload.items() if key != "finding_id"})
+    payload["source_fingerprint"] = work_cmd._stable_hash(
+        {key: value for key, value in payload.items() if key != "finding_id"}
+    )
     return payload
 
 
@@ -524,7 +612,11 @@ def _ci_findings_from_workflows(target: Path) -> tuple[list[dict[str, Any]], lis
             action, ref = match.group(1), match.group(2)
             major_match = re.match(r"v?(\d+)(?:\D|$)", ref)
             major = major_match.group(1) if major_match else None
-            if major and action.lower() in CI_DEPRECATED_ACTION_MAJORS and major in CI_DEPRECATED_ACTION_MAJORS[action.lower()]:
+            if (
+                major
+                and action.lower() in CI_DEPRECATED_ACTION_MAJORS
+                and major in CI_DEPRECATED_ACTION_MAJORS[action.lower()]
+            ):
                 findings.append(
                     _ci_finding(
                         source="workflow",
@@ -549,7 +641,13 @@ def ci_platform_payload(target: Path, *, summary_path: Path | None = None) -> di
         logs.append(log_summary)
     workflow_findings, workflows = _ci_findings_from_workflows(target)
     findings.extend(workflow_findings)
-    findings.sort(key=lambda item: (str(item.get("path_label") or ""), int(item.get("line") or 0), str(item.get("finding_id") or "")))
+    findings.sort(
+        key=lambda item: (
+            str(item.get("path_label") or ""),
+            int(item.get("line") or 0),
+            str(item.get("finding_id") or ""),
+        )
+    )
     return {
         "target_label": "release-ci",
         "status": WARN if findings else OK,
@@ -607,7 +705,9 @@ def _ci_import_records(payload: dict[str, Any]) -> list[dict[str, Any]]:
     return records
 
 
-def ci_import_issues(*, target: Path, summary_path: Path | None = None, dry_run: bool = False, json_output: bool = False) -> int:
+def ci_import_issues(
+    *, target: Path, summary_path: Path | None = None, dry_run: bool = False, json_output: bool = False
+) -> int:
     target = target.expanduser().resolve()
     payload = ci_platform_payload(target, summary_path=summary_path)
     records = _ci_import_records(payload)
@@ -637,32 +737,42 @@ def _content_guard_available(target: Path) -> bool:
     return scanner_dir.is_dir()
 
 
-def _content_guard_command(target: Path, *, policy: str, introduced: bool, base_ref: str | None) -> tuple[list[str] | None, dict[str, str], str | None]:
+def _content_guard_command(
+    target: Path, *, policy: str, introduced: bool, base_ref: str | None
+) -> tuple[list[str] | None, dict[str, str], str | None]:
     scanner_dir = Path(os.environ.get("CONTENT_GUARD_DIR", str(Path.home() / "repos" / "content-guard")))
     env: dict[str, str] = {}
     if scanner_dir.is_dir():
         policy_path = scanner_dir / "policies" / f"{policy}.json"
         env["PYTHONPATH"] = str(scanner_dir / "src")
         if introduced and base_ref:
-            return [
+            return (
+                [
+                    sys.executable,
+                    "-m",
+                    "content_guard.git_scan",
+                    "--history",
+                    "--range",
+                    f"{base_ref}..HEAD",
+                    "--policy",
+                    str(policy_path),
+                ],
+                env,
+                None,
+            )
+        return (
+            [
                 sys.executable,
                 "-m",
-                "content_guard.git_scan",
-                "--history",
-                "--range",
-                f"{base_ref}..HEAD",
+                "content_guard",
+                "scan",
+                str(target),
                 "--policy",
                 str(policy_path),
-            ], env, None
-        return [
-            sys.executable,
-            "-m",
-            "content_guard",
-            "scan",
-            str(target),
-            "--policy",
-            str(policy_path),
-        ], env, None
+            ],
+            env,
+            None,
+        )
     executable = shutil.which("content-guard")
     if executable:
         if introduced and base_ref:
@@ -749,7 +859,9 @@ def _release_candidates(target: Path, *, include_archived: bool = False) -> list
     roots = [_release_candidates_root(target)]
     if include_archived:
         roots.append(_release_candidates_archive_root(target))
-    return reportstore.list_bundles(roots, _read_candidate, id_field="candidate_id", skip_child=lambda name: name == "archive")
+    return reportstore.list_bundles(
+        roots, _read_candidate, id_field="candidate_id", skip_child=lambda name: name == "archive"
+    )
 
 
 def _latest_candidate(target: Path) -> dict[str, Any] | None:
@@ -763,32 +875,96 @@ def _phase_release_checks(target: Path) -> list[dict[str, Any]]:
     latest_closeout = health.get("latest_closeout") if isinstance(health.get("latest_closeout"), dict) else None
     latest_report = health.get("latest_report") if isinstance(health.get("latest_report"), dict) else None
     if latest_closeout is not None and int(latest_closeout.get("unresolved_issue_count") or 0) > 0:
-        checks.append({"status": WARN, "name": "phase_ledger_unresolved_closeout", "detail": str(latest_closeout.get("closeout_id"))})
-    latest_report_compare = health.get("latest_report_compare") if isinstance(health.get("latest_report_compare"), dict) else None
+        checks.append(
+            {
+                "status": WARN,
+                "name": "phase_ledger_unresolved_closeout",
+                "detail": str(latest_closeout.get("closeout_id")),
+            }
+        )
+    latest_report_compare = (
+        health.get("latest_report_compare") if isinstance(health.get("latest_report_compare"), dict) else None
+    )
     if latest_report_compare is not None and int(latest_report_compare.get("issue_count") or 0) > 0:
-        top_compare = latest_report_compare.get("top_issue") if isinstance(latest_report_compare.get("top_issue"), dict) else {}
-        checks.append({"status": WARN, "name": "phase_ledger_report_compare_issue", "detail": str(top_compare.get("name") or latest_report_compare.get("issue_count"))})
+        top_compare = (
+            latest_report_compare.get("top_issue") if isinstance(latest_report_compare.get("top_issue"), dict) else {}
+        )
+        checks.append(
+            {
+                "status": WARN,
+                "name": "phase_ledger_report_compare_issue",
+                "detail": str(top_compare.get("name") or latest_report_compare.get("issue_count")),
+            }
+        )
     latest_session = health.get("latest_session") if isinstance(health.get("latest_session"), dict) else None
-    latest_session_checkpoint = health.get("latest_session_checkpoint") if isinstance(health.get("latest_session_checkpoint"), dict) else None
-    latest_session_checkpoint_compare = health.get("latest_session_checkpoint_compare") if isinstance(health.get("latest_session_checkpoint_compare"), dict) else None
-    latest_session_report = health.get("latest_session_report") if isinstance(health.get("latest_session_report"), dict) else None
-    latest_session_gate = health.get("latest_session_gate") if isinstance(health.get("latest_session_gate"), dict) else None
+    latest_session_checkpoint = (
+        health.get("latest_session_checkpoint") if isinstance(health.get("latest_session_checkpoint"), dict) else None
+    )
+    latest_session_checkpoint_compare = (
+        health.get("latest_session_checkpoint_compare")
+        if isinstance(health.get("latest_session_checkpoint_compare"), dict)
+        else None
+    )
+    latest_session_report = (
+        health.get("latest_session_report") if isinstance(health.get("latest_session_report"), dict) else None
+    )
+    latest_session_gate = (
+        health.get("latest_session_gate") if isinstance(health.get("latest_session_gate"), dict) else None
+    )
     if latest_session and latest_session.get("status") not in {"closed", "archived"}:
         checks.append({"status": WARN, "name": "phase_session_active", "detail": str(latest_session.get("session_id"))})
         if latest_session_report is None:
-            checks.append({"status": WARN, "name": "phase_session_missing_report", "detail": str(latest_session.get("session_id"))})
+            checks.append(
+                {
+                    "status": WARN,
+                    "name": "phase_session_missing_report",
+                    "detail": str(latest_session.get("session_id")),
+                }
+            )
         if latest_session.get("closeout_status") is None and latest_session.get("current_phase_id") is None:
-            checks.append({"status": WARN, "name": "phase_session_missing_closeout", "detail": str(latest_session.get("session_id"))})
+            checks.append(
+                {
+                    "status": WARN,
+                    "name": "phase_session_missing_closeout",
+                    "detail": str(latest_session.get("session_id")),
+                }
+            )
     if latest_session_gate and not latest_session_gate.get("safe_to_claim_complete"):
-        top_blocker = latest_session_gate.get("top_blocker") if isinstance(latest_session_gate.get("top_blocker"), dict) else {}
-        checks.append({"status": WARN, "name": "phase_session_gate_blocked", "detail": str(top_blocker.get("name") or latest_session_gate.get("blocker_count"))})
+        top_blocker = (
+            latest_session_gate.get("top_blocker") if isinstance(latest_session_gate.get("top_blocker"), dict) else {}
+        )
+        checks.append(
+            {
+                "status": WARN,
+                "name": "phase_session_gate_blocked",
+                "detail": str(top_blocker.get("name") or latest_session_gate.get("blocker_count")),
+            }
+        )
     if latest_session_checkpoint and latest_session_checkpoint.get("status") == "blocked":
-        checks.append({"status": WARN, "name": "phase_session_checkpoint_blocked", "detail": str(latest_session_checkpoint.get("checkpoint_id"))})
+        checks.append(
+            {
+                "status": WARN,
+                "name": "phase_session_checkpoint_blocked",
+                "detail": str(latest_session_checkpoint.get("checkpoint_id")),
+            }
+        )
     if latest_session_checkpoint_compare and int(latest_session_checkpoint_compare.get("issue_count") or 0) > 0:
-        top_checkpoint = latest_session_checkpoint_compare.get("top_issue") if isinstance(latest_session_checkpoint_compare.get("top_issue"), dict) else {}
-        checks.append({"status": WARN, "name": "phase_session_checkpoint_compare_issue", "detail": str(top_checkpoint.get("name") or latest_session_checkpoint_compare.get("issue_count"))})
+        top_checkpoint = (
+            latest_session_checkpoint_compare.get("top_issue")
+            if isinstance(latest_session_checkpoint_compare.get("top_issue"), dict)
+            else {}
+        )
+        checks.append(
+            {
+                "status": WARN,
+                "name": "phase_session_checkpoint_compare_issue",
+                "detail": str(top_checkpoint.get("name") or latest_session_checkpoint_compare.get("issue_count")),
+            }
+        )
     if int(health.get("open_action_count") or 0) > 0:
-        checks.append({"status": WARN, "name": "phase_session_unresolved_actions", "detail": str(health.get("open_action_count"))})
+        checks.append(
+            {"status": WARN, "name": "phase_session_unresolved_actions", "detail": str(health.get("open_action_count"))}
+        )
     records = phases_cmd._records(target)
     pushed_without_closeout = []
     for record in records:
@@ -798,27 +974,50 @@ def _phase_release_checks(target: Path) -> list[dict[str, Any]]:
         if phase_id and not phases_cmd._phase_has_current_closeout(target, phase_id, record):
             pushed_without_closeout.append(phase_id)
     if pushed_without_closeout:
-        checks.append({"status": WARN, "name": "phase_ledger_unreviewed_pushed_phase", "detail": ", ".join(pushed_without_closeout[:5])})
+        checks.append(
+            {
+                "status": WARN,
+                "name": "phase_ledger_unreviewed_pushed_phase",
+                "detail": ", ".join(pushed_without_closeout[:5]),
+            }
+        )
     if records:
         record_times = [
             parsed
-            for parsed in (work_cmd._parse_iso_datetime(record.get("updated_at") or record.get("completed_at") or record.get("created_at")) for record in records)
+            for parsed in (
+                work_cmd._parse_iso_datetime(
+                    record.get("updated_at") or record.get("completed_at") or record.get("created_at")
+                )
+                for record in records
+            )
             if parsed is not None
         ]
         latest_record_time = max(record_times) if record_times else None
         report_time = work_cmd._parse_iso_datetime(latest_report.get("created_at")) if latest_report else None
         if latest_report is None:
-            checks.append({"status": WARN, "name": "phase_ledger_missing_report", "detail": "no phase ledger report found"})
+            checks.append(
+                {"status": WARN, "name": "phase_ledger_missing_report", "detail": "no phase ledger report found"}
+            )
         elif latest_record_time and report_time and latest_record_time > report_time:
-            checks.append({"status": WARN, "name": "phase_ledger_stale_report", "detail": str(latest_report.get("report_id"))})
+            checks.append(
+                {"status": WARN, "name": "phase_ledger_stale_report", "detail": str(latest_report.get("report_id"))}
+            )
         elif report_time and _now() - report_time > timedelta(hours=PHASE_REPORT_STALE_HOURS):
-            checks.append({"status": WARN, "name": "phase_ledger_stale_report", "detail": str(latest_report.get("report_id"))})
+            checks.append(
+                {"status": WARN, "name": "phase_ledger_stale_report", "detail": str(latest_report.get("report_id"))}
+            )
     return checks
 
 
 def _resolve_candidate(target: Path, candidate_id: str) -> tuple[dict[str, Any] | None, str | None]:
     candidates = _release_candidates(target, include_archived=True)
-    return reportstore.resolve_bundle(candidates, candidate_id, id_field="candidate_id", label="release candidate", latest=lambda: _latest_candidate(target))
+    return reportstore.resolve_bundle(
+        candidates,
+        candidate_id,
+        id_field="candidate_id",
+        label="release candidate",
+        latest=lambda: _latest_candidate(target),
+    )
 
 
 def _evidence(target: Path, *, base_ref: str | None) -> dict[str, Any]:
@@ -1075,7 +1274,9 @@ def _evidence(target: Path, *, base_ref: str | None) -> dict[str, Any]:
     }
 
 
-def _assess(evidence: dict[str, Any], checks: list[dict[str, Any]], docs_warnings: list[str]) -> tuple[list[str], list[str]]:
+def _assess(
+    evidence: dict[str, Any], checks: list[dict[str, Any]], docs_warnings: list[str]
+) -> tuple[list[str], list[str]]:
     blockers: list[str] = []
     warnings = list(docs_warnings)
     git = evidence.get("git") if isinstance(evidence.get("git"), dict) else {}
@@ -1100,7 +1301,9 @@ def _assess(evidence: dict[str, Any], checks: list[dict[str, Any]], docs_warning
     task_acceptance = evidence.get("task_acceptance") if isinstance(evidence.get("task_acceptance"), dict) else {}
     if int(task_acceptance.get("issue_count") or 0) > 0:
         top_acceptance = task_acceptance.get("top_issue") if isinstance(task_acceptance.get("top_issue"), dict) else {}
-        blockers.append(f"task acceptance has issue(s): {top_acceptance.get('detail') or task_acceptance.get('issue_count')}")
+        blockers.append(
+            f"task acceptance has issue(s): {top_acceptance.get('detail') or task_acceptance.get('issue_count')}"
+        )
     sweep = evidence.get("scanner_sweep") if isinstance(evidence.get("scanner_sweep"), dict) else {}
     sweep_review = sweep.get("review") if isinstance(sweep.get("review"), dict) else {}
     if int(sweep_review.get("issue_count") or 0) > 0:
@@ -1111,7 +1314,9 @@ def _assess(evidence: dict[str, Any], checks: list[dict[str, Any]], docs_warning
     ci_platform = evidence.get("ci_platform") if isinstance(evidence.get("ci_platform"), dict) else {}
     if int(ci_platform.get("issue_count") or 0) > 0:
         top_ci = ci_platform.get("top_issue") if isinstance(ci_platform.get("top_issue"), dict) else {}
-        warnings.append(f"ci platform deprecation warning(s): {top_ci.get('safe_excerpt') or ci_platform.get('issue_count')}")
+        warnings.append(
+            f"ci platform deprecation warning(s): {top_ci.get('safe_excerpt') or ci_platform.get('issue_count')}"
+        )
     install_smoke = evidence.get("install_smoke") if isinstance(evidence.get("install_smoke"), dict) else {}
     if int(install_smoke.get("issue_count") or 0) > 0:
         top_smoke = install_smoke.get("top_issue") if isinstance(install_smoke.get("top_issue"), dict) else {}
@@ -1121,21 +1326,31 @@ def _assess(evidence: dict[str, Any], checks: list[dict[str, Any]], docs_warning
         blockers.append(f"handoff draft queue has issue(s): {handoffs.get('issue_count')}")
     research_handoffs = evidence.get("research_handoffs") if isinstance(evidence.get("research_handoffs"), dict) else {}
     if int(research_handoffs.get("issue_count") or 0) > 0:
-        top_research = research_handoffs.get("top_issue") if isinstance(research_handoffs.get("top_issue"), dict) else {}
-        warnings.append(f"research handoff export issue(s): {top_research.get('run_id') or research_handoffs.get('issue_count')}")
+        top_research = (
+            research_handoffs.get("top_issue") if isinstance(research_handoffs.get("top_issue"), dict) else {}
+        )
+        warnings.append(
+            f"research handoff export issue(s): {top_research.get('run_id') or research_handoffs.get('issue_count')}"
+        )
     operator_report = evidence.get("operator_report") if isinstance(evidence.get("operator_report"), dict) else {}
     if int(operator_report.get("issue_count") or 0) > 0:
         top_report = operator_report.get("top_issue") if isinstance(operator_report.get("top_issue"), dict) else {}
-        warnings.append(f"operator report has issue(s): {top_report.get('detail') or operator_report.get('issue_count')}")
+        warnings.append(
+            f"operator report has issue(s): {top_report.get('detail') or operator_report.get('issue_count')}"
+        )
     operator_actions = evidence.get("operator_actions") if isinstance(evidence.get("operator_actions"), dict) else {}
     if int(operator_actions.get("open_count") or 0) > 0:
         top_action = operator_actions.get("top_action") if isinstance(operator_actions.get("top_action"), dict) else {}
-        warnings.append(f"operator action queue has open action(s): {top_action.get('action_id') or operator_actions.get('open_count')}")
+        warnings.append(
+            f"operator action queue has open action(s): {top_action.get('action_id') or operator_actions.get('open_count')}"
+        )
     repo_fleet = evidence.get("repo_fleet") if isinstance(evidence.get("repo_fleet"), dict) else {}
     repo_actions = repo_fleet.get("actions") if isinstance(repo_fleet.get("actions"), dict) else {}
     if int(repo_actions.get("open_count") or 0) > 0:
         top_action = repo_actions.get("top_action") if isinstance(repo_actions.get("top_action"), dict) else {}
-        warnings.append(f"repo fleet action queue has open action(s): {top_action.get('fleet_action_id') or repo_actions.get('open_count')}")
+        warnings.append(
+            f"repo fleet action queue has open action(s): {top_action.get('fleet_action_id') or repo_actions.get('open_count')}"
+        )
     repo_sweep = repo_fleet.get("sweep") if isinstance(repo_fleet.get("sweep"), dict) else {}
     if int(repo_sweep.get("issue_count") or 0) > 0:
         top_sweep = repo_sweep.get("top_issue") if isinstance(repo_sweep.get("top_issue"), dict) else {}
@@ -1143,7 +1358,9 @@ def _assess(evidence: dict[str, Any], checks: list[dict[str, Any]], docs_warning
     repo_release = repo_fleet.get("release_train") if isinstance(repo_fleet.get("release_train"), dict) else {}
     if int(repo_release.get("issue_count") or 0) > 0:
         top_release = repo_release.get("top_issue") if isinstance(repo_release.get("top_issue"), dict) else {}
-        warnings.append(f"repo fleet release train has issue(s): {top_release.get('detail') or repo_release.get('issue_count')}")
+        warnings.append(
+            f"repo fleet release train has issue(s): {top_release.get('detail') or repo_release.get('issue_count')}"
+        )
     for check in checks:
         if check.get("status") == FAIL:
             blockers.append(f"{check.get('name')}: {check.get('detail')}")
@@ -1160,7 +1377,9 @@ def _payload(target: Path, *, base_ref: str | None, run_checks: bool, policy: st
         if base_ref:
             checks.append(_run_content_guard_check(target, name="introduced", policy=policy, base_ref=base_ref))
     elif not _content_guard_available(target):
-        checks.append({"name": "content_guard", "status": WARN, "detail": "content-guard not available", "available": False})
+        checks.append(
+            {"name": "content_guard", "status": WARN, "detail": "content-guard not available", "available": False}
+        )
     blockers, warnings = _assess(evidence, checks, _docs_warnings(target, base_ref))
     return {
         "target": str(target),
@@ -1362,7 +1581,11 @@ def _command_contract_snapshot(target: Path) -> dict[str, Any]:
     payload = roadmap_cmd.command_contract_payload(target)
     snapshot = {
         "cli_command_count": len(payload.get("cli_commands") if isinstance(payload.get("cli_commands"), list) else []),
-        "documented_command_count": len(payload.get("normalized_documented_commands") if isinstance(payload.get("normalized_documented_commands"), list) else []),
+        "documented_command_count": len(
+            payload.get("normalized_documented_commands")
+            if isinstance(payload.get("normalized_documented_commands"), list)
+            else []
+        ),
         "issue_count": payload.get("issue_count"),
         "top_issue": payload.get("top_issue"),
     }
@@ -1379,18 +1602,42 @@ def _candidate_health(target: Path) -> dict[str, Any]:
     if created is not None:
         age_hours = (_now() - created).total_seconds() / 3600
         if age_hours > RELEASE_CANDIDATE_STALE_HOURS:
-            checks.append({"status": WARN, "name": "release_candidate_stale", "detail": f"{latest.get('candidate_id')}={age_hours:.1f}h"})
+            checks.append(
+                {
+                    "status": WARN,
+                    "name": "release_candidate_stale",
+                    "detail": f"{latest.get('candidate_id')}={age_hours:.1f}h",
+                }
+            )
     git = latest.get("git") if isinstance(latest.get("git"), dict) else {}
     current_head = _git_value(target, "rev-parse", "HEAD")
     if git.get("head") and current_head and git.get("head") != current_head:
-        checks.append({"status": WARN, "name": "release_candidate_head_changed", "detail": f"{latest.get('candidate_id')} head changed"})
+        checks.append(
+            {
+                "status": WARN,
+                "name": "release_candidate_head_changed",
+                "detail": f"{latest.get('candidate_id')} head changed",
+            }
+        )
     readiness = latest.get("release_readiness") if isinstance(latest.get("release_readiness"), dict) else {}
     if readiness.get("ready") is False:
-        checks.append({"status": WARN, "name": "release_candidate_blocked", "detail": f"{latest.get('candidate_id')} readiness was blocked"})
+        checks.append(
+            {
+                "status": WARN,
+                "name": "release_candidate_blocked",
+                "detail": f"{latest.get('candidate_id')} readiness was blocked",
+            }
+        )
     for label, value in (
         ("release_candidate_missing_release_receipt", readiness.get("path")),
-        ("release_candidate_missing_work_closeout", (latest.get("work_closeout") or {}).get("path") if isinstance(latest.get("work_closeout"), dict) else None),
-        ("release_candidate_missing_verification", (latest.get("verification") or {}).get("path") if isinstance(latest.get("verification"), dict) else None),
+        (
+            "release_candidate_missing_work_closeout",
+            (latest.get("work_closeout") or {}).get("path") if isinstance(latest.get("work_closeout"), dict) else None,
+        ),
+        (
+            "release_candidate_missing_verification",
+            (latest.get("verification") or {}).get("path") if isinstance(latest.get("verification"), dict) else None,
+        ),
     ):
         if value and not Path(str(value)).exists():
             checks.append({"status": WARN, "name": label, "detail": str(value)})
@@ -1401,6 +1648,7 @@ def _release_dogfood_health(target: Path) -> dict[str, Any]:
     from . import daily_cmd
 
     target = target.expanduser().resolve()
+
     def local_ref(payload: dict[str, Any] | None, id_field: str) -> dict[str, Any] | None:
         if not isinstance(payload, dict):
             return None
@@ -1415,15 +1663,47 @@ def _release_dogfood_health(target: Path) -> dict[str, Any]:
     latest_candidate = _latest_candidate(target)
     latest_daily_run = daily_cmd._latest_run(target)
     if latest_readiness is None:
-        checks.append({"status": WARN, "name": "release_dogfood_readiness_missing", "detail": "no release readiness receipt found", "phase": 155, "suggested_next_command": "brigade release run"})
+        checks.append(
+            {
+                "status": WARN,
+                "name": "release_dogfood_readiness_missing",
+                "detail": "no release readiness receipt found",
+                "phase": 155,
+                "suggested_next_command": "brigade release run",
+            }
+        )
     elif not latest_readiness.get("ready"):
-        checks.append({"status": WARN, "name": "release_dogfood_readiness_blocked", "detail": str(latest_readiness.get("run_id") or "latest"), "phase": 158, "suggested_next_command": f"brigade release show {latest_readiness.get('run_id')}"})
+        checks.append(
+            {
+                "status": WARN,
+                "name": "release_dogfood_readiness_blocked",
+                "detail": str(latest_readiness.get("run_id") or "latest"),
+                "phase": 158,
+                "suggested_next_command": f"brigade release show {latest_readiness.get('run_id')}",
+            }
+        )
     if latest_candidate is None:
-        checks.append({"status": WARN, "name": "release_dogfood_candidate_missing", "detail": "no release candidate evidence found", "phase": 156, "suggested_next_command": "brigade release candidate build"})
+        checks.append(
+            {
+                "status": WARN,
+                "name": "release_dogfood_candidate_missing",
+                "detail": "no release candidate evidence found",
+                "phase": 156,
+                "suggested_next_command": "brigade release candidate build",
+            }
+        )
     else:
         for key in ("daily_driver", "daily_hardening", "inbox_quality", "repo_fleet_daily_use"):
             if not isinstance(latest_candidate.get(key), dict):
-                checks.append({"status": WARN, "name": f"release_dogfood_candidate_missing_{key}", "detail": f"candidate missing {key}", "phase": 157, "suggested_next_command": "brigade release candidate build"})
+                checks.append(
+                    {
+                        "status": WARN,
+                        "name": f"release_dogfood_candidate_missing_{key}",
+                        "detail": f"candidate missing {key}",
+                        "phase": 157,
+                        "suggested_next_command": "brigade release candidate build",
+                    }
+                )
         candidate_path = Path(str(latest_candidate.get("path") or ""))
         publish_plan = candidate_path / "PUBLISH_PLAN.md"
         if publish_plan.is_file():
@@ -1434,15 +1714,47 @@ def _release_dogfood_health(target: Path) -> dict[str, Any]:
                 and "Manual-only" not in line
             ]
             if unsafe_lines:
-                checks.append({"status": WARN, "name": "release_dogfood_publish_plan_not_manual", "detail": "remote-mutating publish command is not marked manual-only", "phase": 160, "suggested_next_command": f"brigade release candidate show {latest_candidate.get('candidate_id')}"})
+                checks.append(
+                    {
+                        "status": WARN,
+                        "name": "release_dogfood_publish_plan_not_manual",
+                        "detail": "remote-mutating publish command is not marked manual-only",
+                        "phase": 160,
+                        "suggested_next_command": f"brigade release candidate show {latest_candidate.get('candidate_id')}",
+                    }
+                )
         else:
-            checks.append({"status": WARN, "name": "release_dogfood_publish_plan_missing", "detail": "candidate publish plan is missing", "phase": 160, "suggested_next_command": "brigade release candidate build"})
+            checks.append(
+                {
+                    "status": WARN,
+                    "name": "release_dogfood_publish_plan_missing",
+                    "detail": "candidate publish plan is missing",
+                    "phase": 160,
+                    "suggested_next_command": "brigade release candidate build",
+                }
+            )
     if latest_daily_run is not None:
         if latest_daily_run.get("closeout_status") and "verification_status" not in latest_daily_run:
-            checks.append({"status": WARN, "name": "release_dogfood_daily_closeout_missing_verification", "detail": str(latest_daily_run.get("run_id") or "latest"), "phase": 161, "suggested_next_command": "brigade daily closeout --json"})
+            checks.append(
+                {
+                    "status": WARN,
+                    "name": "release_dogfood_daily_closeout_missing_verification",
+                    "detail": str(latest_daily_run.get("run_id") or "latest"),
+                    "phase": 161,
+                    "suggested_next_command": "brigade daily closeout --json",
+                }
+            )
     schema_ids = {schema["id"] for schema in _schema_manifest_schemas()}
     if "release-dogfood-health" not in schema_ids:
-        checks.append({"status": WARN, "name": "release_dogfood_schema_missing", "detail": "schema manifest missing release dogfood health", "phase": 163, "suggested_next_command": "brigade release schema"})
+        checks.append(
+            {
+                "status": WARN,
+                "name": "release_dogfood_schema_missing",
+                "detail": "schema manifest missing release dogfood health",
+                "phase": 163,
+                "suggested_next_command": "brigade release schema",
+            }
+        )
     return {
         "schema_version": SCHEMA_MANIFEST_VERSION,
         "schema": {"name": "release-dogfood-health", "version": SCHEMA_MANIFEST_VERSION},
@@ -1616,7 +1928,9 @@ def _schema_manifest(target: Path) -> dict[str, Any]:
         {
             "name": "fleet_release_manual_evidence",
             "status": OK,
-            "detail": str(manual_evidence_path) if manual_evidence_path.exists() else "no manual evidence records found",
+            "detail": str(manual_evidence_path)
+            if manual_evidence_path.exists()
+            else "no manual evidence records found",
         }
     )
     return {
@@ -1656,9 +1970,13 @@ def _candidate_release_notes(candidate: dict[str, Any]) -> str:
     else:
         lines.append("- review-needed: summarize user-visible changes.")
     lines.extend(["", "## Commit Subjects", ""])
-    lines.extend(f"- {item}" for item in commits[:20]) if commits else lines.append("- review-needed: no commit subjects found for base ref.")
+    lines.extend(f"- {item}" for item in commits[:20]) if commits else lines.append(
+        "- review-needed: no commit subjects found for base ref."
+    )
     lines.extend(["", "## Documentation Touched", ""])
-    lines.extend(f"- `{item}`" for item in docs[:20]) if docs else lines.append("- review-needed: confirm docs coverage.")
+    lines.extend(f"- `{item}`" for item in docs[:20]) if docs else lines.append(
+        "- review-needed: confirm docs coverage."
+    )
     return "\n".join(lines) + "\n"
 
 
@@ -1860,7 +2178,9 @@ def candidate_list(*, target: Path, limit: int = 20, json_output: bool = False) 
         print("candidates: none")
         return 0
     for candidate in candidates:
-        print(f"- {candidate.get('candidate_id')} [{candidate.get('status')}] ready={candidate.get('ready')} {candidate.get('created_at')}")
+        print(
+            f"- {candidate.get('candidate_id')} [{candidate.get('status')}] ready={candidate.get('ready')} {candidate.get('created_at')}"
+        )
     return 0
 
 
@@ -1944,9 +2264,24 @@ def _candidate_privacy_issues(candidate: dict[str, Any]) -> list[dict[str, Any]]
 def _candidate_reference_issues(candidate: dict[str, Any]) -> list[dict[str, Any]]:
     issues: list[dict[str, Any]] = []
     for key, value in (
-        ("release_readiness", (candidate.get("release_readiness") or {}).get("path") if isinstance(candidate.get("release_readiness"), dict) else None),
-        ("work_closeout", (candidate.get("work_closeout") or {}).get("path") if isinstance(candidate.get("work_closeout"), dict) else None),
-        ("verification", (candidate.get("verification") or {}).get("path") if isinstance(candidate.get("verification"), dict) else None),
+        (
+            "release_readiness",
+            (candidate.get("release_readiness") or {}).get("path")
+            if isinstance(candidate.get("release_readiness"), dict)
+            else None,
+        ),
+        (
+            "work_closeout",
+            (candidate.get("work_closeout") or {}).get("path")
+            if isinstance(candidate.get("work_closeout"), dict)
+            else None,
+        ),
+        (
+            "verification",
+            (candidate.get("verification") or {}).get("path")
+            if isinstance(candidate.get("verification"), dict)
+            else None,
+        ),
     ):
         if not value:
             issues.append({"status": WARN, "name": f"missing_{key}_evidence", "detail": "not captured in candidate"})
@@ -1983,17 +2318,33 @@ def _candidate_audit_payload(target: Path, candidate: dict[str, Any]) -> dict[st
     git = candidate.get("git") if isinstance(candidate.get("git"), dict) else {}
     current_head = _git_value(target, "rev-parse", "HEAD")
     if git.get("head") and current_head and git.get("head") != current_head:
-        issues.append({"status": WARN, "name": "candidate_head_changed", "detail": "current HEAD differs from candidate HEAD"})
+        issues.append(
+            {"status": WARN, "name": "candidate_head_changed", "detail": "current HEAD differs from candidate HEAD"}
+        )
     issues.extend(_candidate_reference_issues(candidate))
     docs_changed = _candidate_docs_changed_after_build(candidate)
     if docs_changed:
         issues.append({"status": WARN, "name": "candidate_docs_changed", "detail": ", ".join(docs_changed)})
     current_contract = _command_contract_snapshot(target)
-    candidate_contract = candidate.get("command_contract") if isinstance(candidate.get("command_contract"), dict) else {}
+    candidate_contract = (
+        candidate.get("command_contract") if isinstance(candidate.get("command_contract"), dict) else {}
+    )
     if not candidate_contract.get("fingerprint"):
-        issues.append({"status": WARN, "name": "candidate_missing_command_contract", "detail": "candidate has no command contract fingerprint"})
+        issues.append(
+            {
+                "status": WARN,
+                "name": "candidate_missing_command_contract",
+                "detail": "candidate has no command contract fingerprint",
+            }
+        )
     elif candidate_contract.get("fingerprint") != current_contract.get("fingerprint"):
-        issues.append({"status": WARN, "name": "candidate_command_contract_changed", "detail": "current CLI/docs command contract differs from candidate"})
+        issues.append(
+            {
+                "status": WARN,
+                "name": "candidate_command_contract_changed",
+                "detail": "current CLI/docs command contract differs from candidate",
+            }
+        )
     issues.extend(_candidate_privacy_issues(candidate))
     return {
         "target": str(target),
@@ -2035,7 +2386,9 @@ def candidate_audit(*, target: Path, candidate_id: str = "latest", json_output: 
     return 0 if payload["issue_count"] == 0 else 1
 
 
-def candidate_import_issues(*, target: Path, candidate_id: str = "latest", dry_run: bool = False, json_output: bool = False) -> int:
+def candidate_import_issues(
+    *, target: Path, candidate_id: str = "latest", dry_run: bool = False, json_output: bool = False
+) -> int:
     target = target.expanduser().resolve()
     if not target.is_dir():
         print(f"error: --target is not a directory: {target}", file=sys.stderr)
@@ -2060,7 +2413,9 @@ def candidate_import_issues(*, target: Path, candidate_id: str = "latest", dry_r
                     "issue_name": name,
                     "detail": issue.get("detail"),
                     "source_item_key": f"release-candidate:{candidate.get('candidate_id')}:{name}",
-                    "source_fingerprint": work_cmd._stable_hash({"candidate": candidate.get("candidate_id"), "issue": issue}),
+                    "source_fingerprint": work_cmd._stable_hash(
+                        {"candidate": candidate.get("candidate_id"), "issue": issue}
+                    ),
                 },
             }
         )
@@ -2090,7 +2445,9 @@ def candidate_import_issues(*, target: Path, candidate_id: str = "latest", dry_r
 def _receipt_newer_than_candidate(receipt: dict[str, Any] | None, candidate_created: datetime | None) -> bool:
     if receipt is None or candidate_created is None:
         return False
-    stamp = work_cmd._parse_iso_datetime(receipt.get("completed_at") or receipt.get("created_at") or receipt.get("started_at"))
+    stamp = work_cmd._parse_iso_datetime(
+        receipt.get("completed_at") or receipt.get("created_at") or receipt.get("started_at")
+    )
     return bool(stamp and stamp > candidate_created)
 
 
@@ -2123,7 +2480,9 @@ def candidate_compare(*, target: Path, candidate_id: str = "latest", json_output
             changed_docs_after_candidate.append(path)
     issues: list[dict[str, Any]] = []
     if candidate_git.get("head") and current_git.get("head") and candidate_git.get("head") != current_git.get("head"):
-        issues.append({"status": WARN, "name": "candidate_head_changed", "detail": "current HEAD differs from candidate HEAD"})
+        issues.append(
+            {"status": WARN, "name": "candidate_head_changed", "detail": "current HEAD differs from candidate HEAD"}
+        )
     if _receipt_newer_than_candidate(latest_release, candidate_created):
         issues.append({"status": WARN, "name": "newer_release_readiness", "detail": str(latest_release.get("run_id"))})
     if _receipt_newer_than_candidate(latest_verify, candidate_created):
@@ -2132,25 +2491,52 @@ def candidate_compare(*, target: Path, candidate_id: str = "latest", json_output
         issues.append({"status": WARN, "name": "newer_review_run", "detail": str(latest_review.get("run_id"))})
     if _receipt_newer_than_candidate(latest_sweep, candidate_created):
         issues.append({"status": WARN, "name": "newer_scanner_sweep", "detail": str(latest_sweep.get("sweep_id"))})
-    security_generated = work_cmd._parse_iso_datetime((latest_security or {}).get("generated_at") if isinstance(latest_security, dict) else None)
+    security_generated = work_cmd._parse_iso_datetime(
+        (latest_security or {}).get("generated_at") if isinstance(latest_security, dict) else None
+    )
     if candidate_created and security_generated and security_generated > candidate_created:
-        issues.append({"status": WARN, "name": "newer_security_report", "detail": str((latest_security or {}).get("path"))})
+        issues.append(
+            {"status": WARN, "name": "newer_security_report", "detail": str((latest_security or {}).get("path"))}
+        )
     for key, value in (
-        ("release_readiness", (candidate.get("release_readiness") or {}).get("path") if isinstance(candidate.get("release_readiness"), dict) else None),
-        ("work_closeout", (candidate.get("work_closeout") or {}).get("path") if isinstance(candidate.get("work_closeout"), dict) else None),
-        ("verification", (candidate.get("verification") or {}).get("path") if isinstance(candidate.get("verification"), dict) else None),
+        (
+            "release_readiness",
+            (candidate.get("release_readiness") or {}).get("path")
+            if isinstance(candidate.get("release_readiness"), dict)
+            else None,
+        ),
+        (
+            "work_closeout",
+            (candidate.get("work_closeout") or {}).get("path")
+            if isinstance(candidate.get("work_closeout"), dict)
+            else None,
+        ),
+        (
+            "verification",
+            (candidate.get("verification") or {}).get("path")
+            if isinstance(candidate.get("verification"), dict)
+            else None,
+        ),
     ):
         if value and not Path(str(value)).exists():
             issues.append({"status": WARN, "name": f"missing_{key}_receipt", "detail": str(value)})
     if changed_docs_after_candidate:
-        issues.append({"status": WARN, "name": "docs_changed_after_candidate", "detail": ", ".join(changed_docs_after_candidate)})
+        issues.append(
+            {"status": WARN, "name": "docs_changed_after_candidate", "detail": ", ".join(changed_docs_after_candidate)}
+        )
     operator_report = candidate.get("operator_report") if isinstance(candidate.get("operator_report"), dict) else {}
     candidate_report = operator_report.get("latest") if isinstance(operator_report.get("latest"), dict) else None
     current_report = center_cmd.latest_report(target)
     if isinstance(candidate_report, dict) and isinstance(current_report, dict):
         if candidate_report.get("report_id") != current_report.get("report_id"):
-            issues.append({"status": WARN, "name": "newer_operator_report", "detail": str(current_report.get("report_id"))})
-    elif current_report is not None and candidate_created and _receipt_newer_than_candidate(current_report, candidate_created):
+            issues.append(
+                {"status": WARN, "name": "newer_operator_report", "detail": str(current_report.get("report_id"))}
+            )
+    elif (
+        current_report is not None
+        and candidate_created
+        and _receipt_newer_than_candidate(current_report, candidate_created)
+    ):
         issues.append({"status": WARN, "name": "newer_operator_report", "detail": str(current_report.get("report_id"))})
     report_health = center_cmd.report_health(target)
     top_report_issue = report_health.get("top_issue") if isinstance(report_health.get("top_issue"), dict) else None
@@ -2163,69 +2549,192 @@ def candidate_compare(*, target: Path, candidate_id: str = "latest", json_output
     candidate_phase = candidate.get("phase_ledger") if isinstance(candidate.get("phase_ledger"), dict) else {}
     current_phase = phases_cmd.health(target)
     if int(current_phase.get("issue_count") or 0) != int(candidate_phase.get("issue_count") or 0):
-        issues.append({"status": WARN, "name": "phase_ledger_issue_count_changed", "detail": f"{candidate_phase.get('issue_count')} -> {current_phase.get('issue_count')}"})
-    candidate_closeout = candidate_phase.get("latest_closeout") if isinstance(candidate_phase.get("latest_closeout"), dict) else None
-    current_closeout = current_phase.get("latest_closeout") if isinstance(current_phase.get("latest_closeout"), dict) else None
-    if isinstance(current_closeout, dict) and (not isinstance(candidate_closeout, dict) or candidate_closeout.get("closeout_id") != current_closeout.get("closeout_id")):
-        issues.append({"status": WARN, "name": "newer_phase_closeout", "detail": str(current_closeout.get("closeout_id"))})
-    candidate_report = candidate_phase.get("latest_report") if isinstance(candidate_phase.get("latest_report"), dict) else None
-    current_phase_report = current_phase.get("latest_report") if isinstance(current_phase.get("latest_report"), dict) else None
-    if isinstance(current_phase_report, dict) and (not isinstance(candidate_report, dict) or candidate_report.get("report_id") != current_phase_report.get("report_id")):
-        issues.append({"status": WARN, "name": "newer_phase_report", "detail": str(current_phase_report.get("report_id"))})
-    candidate_session = candidate_phase.get("latest_session") if isinstance(candidate_phase.get("latest_session"), dict) else None
-    current_session = current_phase.get("latest_session") if isinstance(current_phase.get("latest_session"), dict) else None
-    if isinstance(current_session, dict) and (not isinstance(candidate_session, dict) or candidate_session.get("session_id") != current_session.get("session_id") or candidate_session.get("status") != current_session.get("status")):
+        issues.append(
+            {
+                "status": WARN,
+                "name": "phase_ledger_issue_count_changed",
+                "detail": f"{candidate_phase.get('issue_count')} -> {current_phase.get('issue_count')}",
+            }
+        )
+    candidate_closeout = (
+        candidate_phase.get("latest_closeout") if isinstance(candidate_phase.get("latest_closeout"), dict) else None
+    )
+    current_closeout = (
+        current_phase.get("latest_closeout") if isinstance(current_phase.get("latest_closeout"), dict) else None
+    )
+    if isinstance(current_closeout, dict) and (
+        not isinstance(candidate_closeout, dict)
+        or candidate_closeout.get("closeout_id") != current_closeout.get("closeout_id")
+    ):
+        issues.append(
+            {"status": WARN, "name": "newer_phase_closeout", "detail": str(current_closeout.get("closeout_id"))}
+        )
+    candidate_report = (
+        candidate_phase.get("latest_report") if isinstance(candidate_phase.get("latest_report"), dict) else None
+    )
+    current_phase_report = (
+        current_phase.get("latest_report") if isinstance(current_phase.get("latest_report"), dict) else None
+    )
+    if isinstance(current_phase_report, dict) and (
+        not isinstance(candidate_report, dict)
+        or candidate_report.get("report_id") != current_phase_report.get("report_id")
+    ):
+        issues.append(
+            {"status": WARN, "name": "newer_phase_report", "detail": str(current_phase_report.get("report_id"))}
+        )
+    candidate_session = (
+        candidate_phase.get("latest_session") if isinstance(candidate_phase.get("latest_session"), dict) else None
+    )
+    current_session = (
+        current_phase.get("latest_session") if isinstance(current_phase.get("latest_session"), dict) else None
+    )
+    if isinstance(current_session, dict) and (
+        not isinstance(candidate_session, dict)
+        or candidate_session.get("session_id") != current_session.get("session_id")
+        or candidate_session.get("status") != current_session.get("status")
+    ):
         issues.append({"status": WARN, "name": "newer_phase_session", "detail": str(current_session.get("session_id"))})
-    candidate_session_report = candidate_phase.get("latest_session_report") if isinstance(candidate_phase.get("latest_session_report"), dict) else None
-    current_session_report = current_phase.get("latest_session_report") if isinstance(current_phase.get("latest_session_report"), dict) else None
-    if isinstance(current_session_report, dict) and (not isinstance(candidate_session_report, dict) or candidate_session_report.get("report_id") != current_session_report.get("report_id")):
-        issues.append({"status": WARN, "name": "newer_phase_session_report", "detail": str(current_session_report.get("report_id"))})
-    candidate_session_checkpoint = candidate_phase.get("latest_session_checkpoint") if isinstance(candidate_phase.get("latest_session_checkpoint"), dict) else None
-    current_session_checkpoint = current_phase.get("latest_session_checkpoint") if isinstance(current_phase.get("latest_session_checkpoint"), dict) else None
+    candidate_session_report = (
+        candidate_phase.get("latest_session_report")
+        if isinstance(candidate_phase.get("latest_session_report"), dict)
+        else None
+    )
+    current_session_report = (
+        current_phase.get("latest_session_report")
+        if isinstance(current_phase.get("latest_session_report"), dict)
+        else None
+    )
+    if isinstance(current_session_report, dict) and (
+        not isinstance(candidate_session_report, dict)
+        or candidate_session_report.get("report_id") != current_session_report.get("report_id")
+    ):
+        issues.append(
+            {
+                "status": WARN,
+                "name": "newer_phase_session_report",
+                "detail": str(current_session_report.get("report_id")),
+            }
+        )
+    candidate_session_checkpoint = (
+        candidate_phase.get("latest_session_checkpoint")
+        if isinstance(candidate_phase.get("latest_session_checkpoint"), dict)
+        else None
+    )
+    current_session_checkpoint = (
+        current_phase.get("latest_session_checkpoint")
+        if isinstance(current_phase.get("latest_session_checkpoint"), dict)
+        else None
+    )
     if isinstance(candidate_session_checkpoint, dict) or isinstance(current_session_checkpoint, dict):
         candidate_checkpoint_key = (
-            candidate_session_checkpoint.get("checkpoint_id"),
-            candidate_session_checkpoint.get("status"),
-            candidate_session_checkpoint.get("suggested_next_command"),
-        ) if isinstance(candidate_session_checkpoint, dict) else None
+            (
+                candidate_session_checkpoint.get("checkpoint_id"),
+                candidate_session_checkpoint.get("status"),
+                candidate_session_checkpoint.get("suggested_next_command"),
+            )
+            if isinstance(candidate_session_checkpoint, dict)
+            else None
+        )
         current_checkpoint_key = (
-            current_session_checkpoint.get("checkpoint_id"),
-            current_session_checkpoint.get("status"),
-            current_session_checkpoint.get("suggested_next_command"),
-        ) if isinstance(current_session_checkpoint, dict) else None
+            (
+                current_session_checkpoint.get("checkpoint_id"),
+                current_session_checkpoint.get("status"),
+                current_session_checkpoint.get("suggested_next_command"),
+            )
+            if isinstance(current_session_checkpoint, dict)
+            else None
+        )
         if candidate_checkpoint_key != current_checkpoint_key:
-            detail = str((current_session_checkpoint or candidate_session_checkpoint or {}).get("checkpoint_id") or "missing")
+            detail = str(
+                (current_session_checkpoint or candidate_session_checkpoint or {}).get("checkpoint_id") or "missing"
+            )
             issues.append({"status": WARN, "name": "phase_session_checkpoint_changed", "detail": detail})
-    candidate_checkpoint_compare = candidate_phase.get("latest_session_checkpoint_compare") if isinstance(candidate_phase.get("latest_session_checkpoint_compare"), dict) else None
-    current_checkpoint_compare = current_phase.get("latest_session_checkpoint_compare") if isinstance(current_phase.get("latest_session_checkpoint_compare"), dict) else None
+    candidate_checkpoint_compare = (
+        candidate_phase.get("latest_session_checkpoint_compare")
+        if isinstance(candidate_phase.get("latest_session_checkpoint_compare"), dict)
+        else None
+    )
+    current_checkpoint_compare = (
+        current_phase.get("latest_session_checkpoint_compare")
+        if isinstance(current_phase.get("latest_session_checkpoint_compare"), dict)
+        else None
+    )
     if isinstance(candidate_checkpoint_compare, dict) or isinstance(current_checkpoint_compare, dict):
         candidate_compare_key = (
-            candidate_checkpoint_compare.get("issue_count"),
-            (candidate_checkpoint_compare.get("top_issue") or {}).get("name") if isinstance(candidate_checkpoint_compare, dict) and isinstance(candidate_checkpoint_compare.get("top_issue"), dict) else None,
-        ) if isinstance(candidate_checkpoint_compare, dict) else None
+            (
+                candidate_checkpoint_compare.get("issue_count"),
+                (candidate_checkpoint_compare.get("top_issue") or {}).get("name")
+                if isinstance(candidate_checkpoint_compare, dict)
+                and isinstance(candidate_checkpoint_compare.get("top_issue"), dict)
+                else None,
+            )
+            if isinstance(candidate_checkpoint_compare, dict)
+            else None
+        )
         current_compare_key = (
-            current_checkpoint_compare.get("issue_count"),
-            (current_checkpoint_compare.get("top_issue") or {}).get("name") if isinstance(current_checkpoint_compare, dict) and isinstance(current_checkpoint_compare.get("top_issue"), dict) else None,
-        ) if isinstance(current_checkpoint_compare, dict) else None
+            (
+                current_checkpoint_compare.get("issue_count"),
+                (current_checkpoint_compare.get("top_issue") or {}).get("name")
+                if isinstance(current_checkpoint_compare, dict)
+                and isinstance(current_checkpoint_compare.get("top_issue"), dict)
+                else None,
+            )
+            if isinstance(current_checkpoint_compare, dict)
+            else None
+        )
         if candidate_compare_key != current_compare_key:
-            issues.append({"status": WARN, "name": "phase_session_checkpoint_compare_changed", "detail": f"{candidate_compare_key} -> {current_compare_key}"})
-    candidate_session_gate = candidate_phase.get("latest_session_gate") if isinstance(candidate_phase.get("latest_session_gate"), dict) else None
-    current_session_gate = current_phase.get("latest_session_gate") if isinstance(current_phase.get("latest_session_gate"), dict) else None
+            issues.append(
+                {
+                    "status": WARN,
+                    "name": "phase_session_checkpoint_compare_changed",
+                    "detail": f"{candidate_compare_key} -> {current_compare_key}",
+                }
+            )
+    candidate_session_gate = (
+        candidate_phase.get("latest_session_gate")
+        if isinstance(candidate_phase.get("latest_session_gate"), dict)
+        else None
+    )
+    current_session_gate = (
+        current_phase.get("latest_session_gate") if isinstance(current_phase.get("latest_session_gate"), dict) else None
+    )
     if isinstance(candidate_session_gate, dict) or isinstance(current_session_gate, dict):
         candidate_gate_key = (
-            candidate_session_gate.get("safe_to_claim_complete"),
-            candidate_session_gate.get("blocker_count"),
-            (candidate_session_gate.get("top_blocker") or {}).get("name") if isinstance(candidate_session_gate, dict) and isinstance(candidate_session_gate.get("top_blocker"), dict) else None,
-        ) if isinstance(candidate_session_gate, dict) else None
+            (
+                candidate_session_gate.get("safe_to_claim_complete"),
+                candidate_session_gate.get("blocker_count"),
+                (candidate_session_gate.get("top_blocker") or {}).get("name")
+                if isinstance(candidate_session_gate, dict)
+                and isinstance(candidate_session_gate.get("top_blocker"), dict)
+                else None,
+            )
+            if isinstance(candidate_session_gate, dict)
+            else None
+        )
         current_gate_key = (
-            current_session_gate.get("safe_to_claim_complete"),
-            current_session_gate.get("blocker_count"),
-            (current_session_gate.get("top_blocker") or {}).get("name") if isinstance(current_session_gate, dict) and isinstance(current_session_gate.get("top_blocker"), dict) else None,
-        ) if isinstance(current_session_gate, dict) else None
+            (
+                current_session_gate.get("safe_to_claim_complete"),
+                current_session_gate.get("blocker_count"),
+                (current_session_gate.get("top_blocker") or {}).get("name")
+                if isinstance(current_session_gate, dict) and isinstance(current_session_gate.get("top_blocker"), dict)
+                else None,
+            )
+            if isinstance(current_session_gate, dict)
+            else None
+        )
         if candidate_gate_key != current_gate_key:
-            issues.append({"status": WARN, "name": "phase_session_gate_changed", "detail": f"{candidate_gate_key} -> {current_gate_key}"})
+            issues.append(
+                {
+                    "status": WARN,
+                    "name": "phase_session_gate_changed",
+                    "detail": f"{candidate_gate_key} -> {current_gate_key}",
+                }
+            )
     phase_checks = _phase_release_checks(target)
-    issues.extend({"status": check.get("status", WARN), "name": f"release_{check.get('name')}", "detail": check.get("detail")} for check in phase_checks)
+    issues.extend(
+        {"status": check.get("status", WARN), "name": f"release_{check.get('name')}", "detail": check.get("detail")}
+        for check in phase_checks
+    )
     payload = {
         "target": str(target),
         "candidate_id": candidate.get("candidate_id"),
@@ -2350,7 +2859,9 @@ def runs(*, target: Path, limit: int = 20, json_output: bool = False) -> int:
         print("runs: none")
         return 0
     for item in items:
-        print(f"- {item.get('run_id')} [{item.get('status')}] blockers={len(item.get('blockers') or [])} {item.get('started_at')}")
+        print(
+            f"- {item.get('run_id')} [{item.get('status')}] blockers={len(item.get('blockers') or [])} {item.get('started_at')}"
+        )
     return 0
 
 

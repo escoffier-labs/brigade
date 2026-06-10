@@ -8,6 +8,7 @@ content-derived boundary and a do-not-follow preamble before it reaches a
 model; `scan_untrusted` reports whether the content looks like it carries
 injection-style instructions. Standard library only.
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -50,9 +51,7 @@ def wrap_untrusted(
     preamble, outside the fence.
     """
     if source_kind not in SOURCE_KINDS:
-        raise ValueError(
-            f"unknown source_kind {source_kind!r}; expected one of {SOURCE_KINDS}"
-        )
+        raise ValueError(f"unknown source_kind {source_kind!r}; expected one of {SOURCE_KINDS}")
     text = content if isinstance(content, str) else ""
     truncated = False
     if max_chars is not None and len(text) > max_chars:
@@ -98,5 +97,5 @@ def scan_untrusted(content: str) -> InjectionSignal:
         normalized = re.sub(r"\s+", " ", text)
         m = PROMPT_INJECTION_RE.search(normalized)
         if m:
-            markers.append(normalized[m.start():].strip()[:_MARKER_MAX])
+            markers.append(normalized[m.start() :].strip()[:_MARKER_MAX])
     return InjectionSignal(flagged=bool(markers), count=len(markers), markers=markers)

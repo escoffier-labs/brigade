@@ -12,7 +12,15 @@ from typing import Any
 from .. import dogfood_cmd
 from ..selection import Selection
 from . import constants
-from ..localio import read_json_dict as _read_json, stable_hash as _stable_hash, utc_now as _now, write_json as _write_json
+
+# Re-exported for the work_cmd package and its tests, which import these
+# private aliases from here rather than from localio directly.
+from ..localio import (  # noqa: F401
+    read_json_dict as _read_json,
+    stable_hash as _stable_hash,
+    utc_now as _now,
+    write_json as _write_json,
+)
 
 
 def _git(target: Path, *args: str) -> subprocess.CompletedProcess[str]:

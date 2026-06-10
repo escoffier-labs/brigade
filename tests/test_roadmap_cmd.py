@@ -14,9 +14,7 @@ def test_roadmap_audit_classifies_stale_sections_and_command_mismatch(tmp_path):
         "- Add closeout map. Status: started\n"
         "- Keep future work visible. Status: planned\n"
     )
-    (tmp_path / "README.md").write_text(
-        "Run `brigade roadmap audit` and `brigade imaginary command`.\n"
-    )
+    (tmp_path / "README.md").write_text("Run `brigade roadmap audit` and `brigade imaginary command`.\n")
     payload = roadmap_cmd.audit_payload(tmp_path)
 
     assert payload["roadmap"]["status_counts"]["implemented"] == 1

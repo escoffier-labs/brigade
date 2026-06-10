@@ -196,7 +196,9 @@ projections = { claude = ".claude/commands/portable.md", codex = ".codex/skills/
     assert evidence["tool_catalog"]["sync_plan"]["blocker_count"] >= 1
 
 
-def test_release_blocks_missing_closeout_failed_verification_unclosed_review_dirty_handoff_and_content_guard(tmp_path, monkeypatch, capsys):
+def test_release_blocks_missing_closeout_failed_verification_unclosed_review_dirty_handoff_and_content_guard(
+    tmp_path, monkeypatch, capsys
+):
     _init_repo(tmp_path)
     _seed_ready_evidence(tmp_path)
     _patch_clean_health(monkeypatch)
@@ -400,7 +402,10 @@ def test_release_cli(tmp_path, monkeypatch):
     assert cli.main(["release", "candidate", "show", "latest", "--target", str(tmp_path), "--json"]) == 0
     assert cli.main(["release", "candidate", "archive", "latest", "--target", str(tmp_path), "--json"]) == 0
     assert cli.main(["release", "candidate", "audit", "latest", "--target", str(tmp_path), "--json"]) == 0
-    assert cli.main(["release", "candidate", "import-issues", "latest", "--target", str(tmp_path), "--dry-run", "--json"]) == 0
+    assert (
+        cli.main(["release", "candidate", "import-issues", "latest", "--target", str(tmp_path), "--dry-run", "--json"])
+        == 0
+    )
     assert seen == [
         ("plan", {"target": tmp_path, "base_ref": "main", "json_output": True}),
         ("doctor", {"target": tmp_path, "base_ref": "main", "json_output": True}),
@@ -414,7 +419,10 @@ def test_release_cli(tmp_path, monkeypatch):
         ("candidate_show", {"target": tmp_path, "candidate_id": "latest", "json_output": True}),
         ("candidate_archive", {"target": tmp_path, "candidate_id": "latest", "json_output": True}),
         ("candidate_audit", {"target": tmp_path, "candidate_id": "latest", "json_output": True}),
-        ("candidate_import_issues", {"target": tmp_path, "candidate_id": "latest", "dry_run": True, "json_output": True}),
+        (
+            "candidate_import_issues",
+            {"target": tmp_path, "candidate_id": "latest", "dry_run": True, "json_output": True},
+        ),
     ]
 
 
@@ -467,19 +475,27 @@ def test_release_phase_ledger_closeout_and_report_evidence(tmp_path, monkeypatch
     _seed_ready_evidence(tmp_path)
     _patch_clean_health(monkeypatch)
     _patch_content_guard(monkeypatch)
-    assert phases_cmd.plan(target=tmp_path, phase_id="phase-280", title="Release phase", source_goal="audit", json_output=True) == 0
+    assert (
+        phases_cmd.plan(
+            target=tmp_path, phase_id="phase-280", title="Release phase", source_goal="audit", json_output=True
+        )
+        == 0
+    )
     capsys.readouterr()
-    assert phases_cmd.complete(
-        target=tmp_path,
-        phase_id="phase-280",
-        status="pushed",
-        summary="Release evidence",
-        files_changed=["README.md"],
-        tests_run=["pytest"],
-        commit_hash="abc123",
-        push_ref="main",
-        json_output=True,
-    ) == 0
+    assert (
+        phases_cmd.complete(
+            target=tmp_path,
+            phase_id="phase-280",
+            status="pushed",
+            summary="Release evidence",
+            files_changed=["README.md"],
+            tests_run=["pytest"],
+            commit_hash="abc123",
+            push_ref="main",
+            json_output=True,
+        )
+        == 0
+    )
     capsys.readouterr()
 
     assert release_cmd.doctor(target=tmp_path, base_ref=None, json_output=True) == 0
@@ -488,15 +504,41 @@ def test_release_phase_ledger_closeout_and_report_evidence(tmp_path, monkeypatch
     assert "phase_ledger_unreviewed_pushed_phase" in check_names
     assert "phase_ledger_missing_report" in check_names
 
-    assert phases_cmd.closeout(target=tmp_path, selector="phase-280", status="reviewed", reason="Release reviewed.", json_output=True) == 0
+    assert (
+        phases_cmd.closeout(
+            target=tmp_path, selector="phase-280", status="reviewed", reason="Release reviewed.", json_output=True
+        )
+        == 0
+    )
     closeout = json.loads(capsys.readouterr().out)
     assert phases_cmd.report_build(target=tmp_path, json_output=True) == 0
     report = json.loads(capsys.readouterr().out)
-    assert phases_cmd.report_closeout(target=tmp_path, report_id=report["report_id"], status="reviewed", reason="Report reviewed.", json_output=True) == 0
+    assert (
+        phases_cmd.report_closeout(
+            target=tmp_path,
+            report_id=report["report_id"],
+            status="reviewed",
+            reason="Report reviewed.",
+            json_output=True,
+        )
+        == 0
+    )
     capsys.readouterr()
-    assert phases_cmd.session_start(target=tmp_path, phase_range="280", source_goal="release session", json_output=True) == 0
+    assert (
+        phases_cmd.session_start(target=tmp_path, phase_range="280", source_goal="release session", json_output=True)
+        == 0
+    )
     session = json.loads(capsys.readouterr().out)
-    assert phases_cmd.session_checkpoint(target=tmp_path, session_id=session["session_id"], status="blocked", summary="Needs release review.", json_output=True) == 0
+    assert (
+        phases_cmd.session_checkpoint(
+            target=tmp_path,
+            session_id=session["session_id"],
+            status="blocked",
+            summary="Needs release review.",
+            json_output=True,
+        )
+        == 0
+    )
     checkpoint = json.loads(capsys.readouterr().out)
     assert phases_cmd.session_report_build(target=tmp_path, session_id=session["session_id"], json_output=True) == 0
     session_report = json.loads(capsys.readouterr().out)
@@ -518,15 +560,33 @@ def test_release_phase_ledger_closeout_and_report_evidence(tmp_path, monkeypatch
     assert candidate["phase_ledger"]["latest_session_gate"]["safe_to_claim_complete"] is False
     assert candidate["phase_ledger"]["latest_session_report"]["report_id"] == session_report["report_id"]
 
-    assert phases_cmd.closeout(target=tmp_path, selector="phase-280", status="blocked", reason="Needs another look.", json_output=True) == 0
+    assert (
+        phases_cmd.closeout(
+            target=tmp_path, selector="phase-280", status="blocked", reason="Needs another look.", json_output=True
+        )
+        == 0
+    )
     capsys.readouterr()
     assert phases_cmd.report_build(target=tmp_path, json_output=True) == 0
     capsys.readouterr()
-    assert phases_cmd.session_start(target=tmp_path, phase_range="280", source_goal="newer session", json_output=True) == 0
+    assert (
+        phases_cmd.session_start(target=tmp_path, phase_range="280", source_goal="newer session", json_output=True) == 0
+    )
     newer_session = json.loads(capsys.readouterr().out)
-    assert phases_cmd.session_report_build(target=tmp_path, session_id=newer_session["session_id"], json_output=True) == 0
+    assert (
+        phases_cmd.session_report_build(target=tmp_path, session_id=newer_session["session_id"], json_output=True) == 0
+    )
     capsys.readouterr()
-    assert phases_cmd.session_closeout(target=tmp_path, session_id=newer_session["session_id"], status="reviewed", reason="Session reviewed.", json_output=True) == 0
+    assert (
+        phases_cmd.session_closeout(
+            target=tmp_path,
+            session_id=newer_session["session_id"],
+            status="reviewed",
+            reason="Session reviewed.",
+            json_output=True,
+        )
+        == 0
+    )
     capsys.readouterr()
     assert release_cmd.candidate_compare(target=tmp_path, candidate_id=candidate["candidate_id"], json_output=True) == 1
     compare = json.loads(capsys.readouterr().out)
@@ -618,7 +678,12 @@ def test_release_candidate_audit_and_import_issues(tmp_path, monkeypatch, capsys
     assert "candidate_command_contract_changed" in issue_names
     assert "candidate_privacy_secret_like_value" in issue_names
 
-    assert release_cmd.candidate_import_issues(target=tmp_path, candidate_id=candidate["candidate_id"], dry_run=True, json_output=True) == 0
+    assert (
+        release_cmd.candidate_import_issues(
+            target=tmp_path, candidate_id=candidate["candidate_id"], dry_run=True, json_output=True
+        )
+        == 0
+    )
     payload = json.loads(capsys.readouterr().out)
     assert payload["issues"] == audit["issue_count"]
     assert payload["imported"] == audit["issue_count"]
@@ -644,7 +709,9 @@ def test_release_candidate_notes_and_publish_plan(tmp_path, monkeypatch, capsys)
     docs.mkdir()
     (docs / "release-candidates.md").write_text("docs\n")
     subprocess.run(["git", "add", "CHANGELOG.md", "docs/release-candidates.md"], cwd=tmp_path, check=True)
-    subprocess.run(["git", "commit", "-m", "add release candidate docs"], cwd=tmp_path, check=True, stdout=subprocess.DEVNULL)
+    subprocess.run(
+        ["git", "commit", "-m", "add release candidate docs"], cwd=tmp_path, check=True, stdout=subprocess.DEVNULL
+    )
 
     assert release_cmd.run(target=tmp_path, base_ref="HEAD~1", json_output=True) == 0
     capsys.readouterr()

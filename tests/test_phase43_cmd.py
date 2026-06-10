@@ -52,36 +52,71 @@ def _seed_workspace(path: Path, repos: list[tuple[str, str, Path]]):
 def _seed_operator_report(repo: Path, report_id: str = "operator-one"):
     _write_json(
         repo / ".brigade" / "center" / "reports" / report_id / "CENTER_EVIDENCE.json",
-        {"report_id": report_id, "status": "ready", "created_at": "2026-05-30T01:00:00+00:00", "report_fingerprint": f"fp-{report_id}"},
+        {
+            "report_id": report_id,
+            "status": "ready",
+            "created_at": "2026-05-30T01:00:00+00:00",
+            "report_fingerprint": f"fp-{report_id}",
+        },
     )
 
 
 def _seed_release_readiness(repo: Path, run_id: str = "release-one", status: str = "ready"):
     _write_json(
         repo / ".brigade" / "release" / "runs" / run_id / "receipt.json",
-        {"run_id": run_id, "status": status, "ready": status == "ready", "started_at": "2026-05-30T02:00:00+00:00", "source_fingerprint": f"fp-{run_id}"},
+        {
+            "run_id": run_id,
+            "status": status,
+            "ready": status == "ready",
+            "started_at": "2026-05-30T02:00:00+00:00",
+            "source_fingerprint": f"fp-{run_id}",
+        },
     )
 
 
 def _seed_release_candidate(repo: Path, candidate_id: str = "candidate-one", status: str = "ready"):
     _write_json(
         repo / ".brigade" / "release" / "candidates" / candidate_id / "EVIDENCE.json",
-        {"candidate_id": candidate_id, "status": status, "ready": status in {"ready", "reviewed"}, "created_at": "2026-05-30T02:10:00+00:00", "source_fingerprint": f"fp-{candidate_id}"},
+        {
+            "candidate_id": candidate_id,
+            "status": status,
+            "ready": status in {"ready", "reviewed"},
+            "created_at": "2026-05-30T02:10:00+00:00",
+            "source_fingerprint": f"fp-{candidate_id}",
+        },
     )
 
 
 def _seed_work_evidence(repo: Path):
     _write_json(
         repo / ".brigade" / "work" / "closeouts" / "closeout-one" / "closeout.json",
-        {"closeout_id": "closeout-one", "status": "ready", "created_at": "2026-05-30T01:30:00+00:00", "source_fingerprint": "fp-closeout"},
+        {
+            "closeout_id": "closeout-one",
+            "status": "ready",
+            "created_at": "2026-05-30T01:30:00+00:00",
+            "source_fingerprint": "fp-closeout",
+        },
     )
     _write_json(
         repo / ".brigade" / "work" / "verify-runs" / "verify-one" / "receipt.json",
-        {"run_id": "verify-one", "status": "completed", "started_at": "2026-05-30T01:40:00+00:00", "source_fingerprint": "fp-verify"},
+        {
+            "run_id": "verify-one",
+            "status": "completed",
+            "started_at": "2026-05-30T01:40:00+00:00",
+            "source_fingerprint": "fp-verify",
+        },
     )
 
 
-def _action(action_id: str, repo_id: str, label: str, *, status: str = "pending", resolution: str | None = None, dispatched: bool = False) -> dict:
+def _action(
+    action_id: str,
+    repo_id: str,
+    label: str,
+    *,
+    status: str = "pending",
+    resolution: str | None = None,
+    dispatched: bool = False,
+) -> dict:
     payload = {
         "fleet_action_id": action_id,
         "repo_id": repo_id,
@@ -101,7 +136,10 @@ def _action(action_id: str, repo_id: str, label: str, *, status: str = "pending"
     if resolution:
         payload["resolution_status"] = resolution
     if dispatched:
-        payload["dispatch"] = {"target_import_id": f"import-{action_id}", "source_fingerprint": payload["source_fingerprint"]}
+        payload["dispatch"] = {
+            "target_import_id": f"import-{action_id}",
+            "source_fingerprint": payload["source_fingerprint"],
+        }
     return payload
 
 
@@ -122,9 +160,20 @@ def _patch_quiet_health(monkeypatch):
     monkeypatch.setattr(
         handoff_cmd,
         "draft_queue_payload",
-        lambda target, **kwargs: {"counts": {"pending": 0}, "issue_count": 0, "top_issue": None, "latest_ingest_run": None, "drafts": [], "checks": []},
+        lambda target, **kwargs: {
+            "counts": {"pending": 0},
+            "issue_count": 0,
+            "top_issue": None,
+            "latest_ingest_run": None,
+            "drafts": [],
+            "checks": [],
+        },
     )
-    monkeypatch.setattr(release_cmd, "_run_content_guard_check", lambda *args, **kwargs: {"name": "content_guard_tip", "status": "ok", "detail": "clean"})
+    monkeypatch.setattr(
+        release_cmd,
+        "_run_content_guard_check",
+        lambda *args, **kwargs: {"name": "content_guard_tip", "status": "ok", "detail": "clean"},
+    )
     monkeypatch.setattr(release_cmd, "_content_guard_available", lambda target: True)
 
 
@@ -166,7 +215,12 @@ def test_repos_release_plan_build_list_show_closeout_archive_and_privacy(tmp_pat
     shown = json.loads(capsys.readouterr().out)
     assert shown["train"]["train_id"] == built["train_id"]
 
-    assert repos_cmd.release_closeout(target=tmp_path, train_id=built["train_id"], status="reviewed", reason="ready", json_output=True) == 0
+    assert (
+        repos_cmd.release_closeout(
+            target=tmp_path, train_id=built["train_id"], status="reviewed", reason="ready", json_output=True
+        )
+        == 0
+    )
     closeout = json.loads(capsys.readouterr().out)
     assert closeout["status"] == "reviewed"
     assert (train_path / "CLOSEOUT.json").is_file()
@@ -239,7 +293,9 @@ def test_repos_release_compare_detects_stale_train_evidence(tmp_path, monkeypatc
     _seed_work_evidence(repo)
     _seed_release_readiness(repo, "release-one")
     _seed_release_candidate(repo, "candidate-one")
-    repos_cmd._write_actions(tmp_path, [_action("act-alpha", "alpha", "service alpha", resolution="dispatched", dispatched=True)])
+    repos_cmd._write_actions(
+        tmp_path, [_action("act-alpha", "alpha", "service alpha", resolution="dispatched", dispatched=True)]
+    )
     _patch_quiet_health(monkeypatch)
 
     assert repos_cmd.release_build(target=tmp_path, json_output=True) == 0
@@ -250,12 +306,24 @@ def test_repos_release_compare_detects_stale_train_evidence(tmp_path, monkeypatc
     _seed_release_readiness(repo, "release-two")
     _write_json(
         repo / ".brigade" / "release" / "runs" / "release-two" / "receipt.json",
-        {"run_id": "release-two", "status": "ready", "ready": True, "started_at": "2026-05-30T03:00:00+00:00", "source_fingerprint": "fp-release-two"},
+        {
+            "run_id": "release-two",
+            "status": "ready",
+            "ready": True,
+            "started_at": "2026-05-30T03:00:00+00:00",
+            "source_fingerprint": "fp-release-two",
+        },
     )
     _seed_release_candidate(repo, "candidate-two")
     _write_json(
         repo / ".brigade" / "release" / "candidates" / "candidate-two" / "EVIDENCE.json",
-        {"candidate_id": "candidate-two", "status": "ready", "ready": True, "created_at": "2026-05-30T03:10:00+00:00", "source_fingerprint": "fp-candidate-two"},
+        {
+            "candidate_id": "candidate-two",
+            "status": "ready",
+            "ready": True,
+            "created_at": "2026-05-30T03:10:00+00:00",
+            "source_fingerprint": "fp-candidate-two",
+        },
     )
     actions = repos_cmd._read_actions(tmp_path)
     actions[0]["resolution_status"] = "completed"
@@ -265,7 +333,13 @@ def test_repos_release_compare_detects_stale_train_evidence(tmp_path, monkeypatc
     assert repos_cmd.release_compare(target=tmp_path, train_id=train["train_id"], json_output=True) == 0
     compare = json.loads(capsys.readouterr().out)
     names = {issue["name"] for issue in compare["issues"]}
-    assert {"train_repo_head_changed", "newer_release_readiness", "newer_release_candidate", "train_fleet_actions_changed", "train_unresolved_state_changed"} <= names
+    assert {
+        "train_repo_head_changed",
+        "newer_release_readiness",
+        "newer_release_candidate",
+        "train_fleet_actions_changed",
+        "train_unresolved_state_changed",
+    } <= names
 
     train_file = tmp_path / ".brigade" / "repos" / "releases" / train["train_id"] / "FLEET_RELEASE_EVIDENCE.json"
     stored = json.loads(train_file.read_text())
@@ -306,7 +380,10 @@ def test_repos_release_train_health_integrates_with_daily_surfaces(tmp_path, mon
     assert center["repo_fleet"]["release_train"]["latest"]["train_id"] == train["train_id"]
     assert center_cmd.reviews(target=tmp_path, json_output=True) == 0
     reviews = json.loads(capsys.readouterr().out)
-    assert any(item["subsystem"] == "repo-fleet" and item["local_id"] == "repo_fleet_release_train_blocked" for item in reviews["reviews"])
+    assert any(
+        item["subsystem"] == "repo-fleet" and item["local_id"] == "repo_fleet_release_train_blocked"
+        for item in reviews["reviews"]
+    )
 
     assert work_cmd.brief(target=tmp_path, json_output=True) == 0
     brief = json.loads(capsys.readouterr().out)

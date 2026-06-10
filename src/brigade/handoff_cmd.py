@@ -1,4 +1,5 @@
 """Handoff health checks shared by CLI doctors."""
+
 from __future__ import annotations
 
 import json
@@ -11,14 +12,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-OK = "ok"
-WARN = "warn"
-FAIL = "fail"
-
 from . import scrub
+from .budgets import HANDOFF_BACKLOG_STALE_SECONDS
 from .config import load_config as load_brigade_config
 from .localio import write_json as _write_json
 from .selection import WRITER_INBOXES as _WRITER_INBOX_MAP
+
+OK = "ok"
+WARN = "warn"
+FAIL = "fail"
 
 WRITER_INBOXES = tuple(_WRITER_INBOX_MAP.values())
 IGNORED_HANDOFF_NAMES = {"TEMPLATE.md"}
@@ -29,7 +31,7 @@ HANDOFF_DRAFT_STALE_HOURS = 72
 # ingesting them. Catches the silent pile-up where a repo's inbox is never
 # reached by the canonical ingester (e.g. an uncovered repo in the fleet).
 # Canonical value lives in budgets.py so doctor/ingest/repos all agree.
-from .budgets import HANDOFF_BACKLOG_STALE_SECONDS as BACKLOG_STALE_SECONDS
+BACKLOG_STALE_SECONDS = HANDOFF_BACKLOG_STALE_SECONDS
 MAX_INGESTOR_WARNING_SIGNALS = 5
 CARD_ACTIONS = ("create-card", "update-card")
 NO_CARD_ACTION = "no-card"
@@ -277,9 +279,7 @@ def inspect(target: Path, sources: Path | None = None) -> HandoffHealth:
     warnings: list[str] = []
     pending_total = sum(inbox.pending for inbox in inboxes)
     if pending_total and not sources_loaded and not failures:
-        warnings.append(
-            "pending handoffs exist but no .brigade/handoff-sources.json is configured"
-        )
+        warnings.append("pending handoffs exist but no .brigade/handoff-sources.json is configured")
     for inbox in inboxes:
         if inbox.pending and not inbox.watched:
             warnings.append(
@@ -320,7 +320,9 @@ def doctor_checks(target: Path, sources: Path | None = None) -> list[tuple[str, 
     else:
         pending_total = sum(inbox.pending for inbox in health.inboxes)
         level = WARN if pending_total else OK
-        checks.append((level, "handoff_sources", "not configured; no pending handoffs" if not pending_total else "not configured"))
+        checks.append(
+            (level, "handoff_sources", "not configured; no pending handoffs" if not pending_total else "not configured")
+        )
 
     quiet_inboxes = [
         inbox
@@ -337,8 +339,7 @@ def doctor_checks(target: Path, sources: Path | None = None) -> list[tuple[str, 
         watched = "yes" if inbox.watched else "no"
         exists = "yes" if inbox.exists else "no"
         detail = (
-            f"{inbox.path} "
-            f"(exists={exists}, pending={inbox.pending}, processed={inbox.processed}, watched={watched})"
+            f"{inbox.path} (exists={exists}, pending={inbox.pending}, processed={inbox.processed}, watched={watched})"
         )
         checks.append((level, f"handoff_watch: {inbox.inbox}", detail))
     if quiet_inboxes:
@@ -359,9 +360,7 @@ def doctor_checks(target: Path, sources: Path | None = None) -> list[tuple[str, 
     ]
     if stale_backlog:
         pending_total = sum(inbox.pending for inbox in stale_backlog)
-        oldest = max(
-            inbox.oldest_pending_age_seconds or 0 for inbox in stale_backlog
-        )
+        oldest = max(inbox.oldest_pending_age_seconds or 0 for inbox in stale_backlog)
         oldest_days = oldest // (24 * 60 * 60)
         names = ", ".join(inbox.inbox for inbox in stale_backlog)
         checks.append(
@@ -404,12 +403,16 @@ def doctor_checks(target: Path, sources: Path | None = None) -> list[tuple[str, 
     if not health.lint:
         checks.append((OK, "handoff_lint", "no pending handoffs"))
     elif invalid_lint:
-        checks.append((WARN, "handoff_lint", f"{len(invalid_lint)} invalid of {len(health.lint)} pending handoff files"))
+        checks.append(
+            (WARN, "handoff_lint", f"{len(invalid_lint)} invalid of {len(health.lint)} pending handoff files")
+        )
         for result in invalid_lint:
             first_error = result.errors[0] if result.errors else "invalid handoff"
             checks.append((WARN, "handoff_lint", f"{result.path}: {first_error}"))
     else:
-        checks.append((OK, "handoff_lint", f"{len(health.lint)} pending handoff file{'s' if len(health.lint) != 1 else ''} valid"))
+        checks.append(
+            (OK, "handoff_lint", f"{len(health.lint)} pending handoff file{'s' if len(health.lint) != 1 else ''} valid")
+        )
 
     for warning in health.warnings:
         checks.append((WARN, "handoff_warning", warning))
@@ -571,7 +574,11 @@ def lint(
     from .untrusted import scan_untrusted
 
     results = lint_targets(target, paths=paths)
-    guard_results = [_guard_handoff_path(path, target=target, policy=guard_policy) for path in [result.path for result in results]] if content_guard else []
+    guard_results = (
+        [_guard_handoff_path(path, target=target, policy=guard_policy) for path in [result.path for result in results]]
+        if content_guard
+        else []
+    )
     guard_ok = all(item.get("exit_code") == 0 for item in guard_results)
     # Content-guard checks egress (secrets/PII), not instructions. Surface the
     # injection signal here too so a poisoned note never reads as fully clean.
@@ -611,7 +618,9 @@ def lint(
             print(f"  warning: {warning}")
         signals = injection_counts.get(str(result.path), 0)
         if signals:
-            print(f"  warning: {signals} prompt-injection signal(s); content-guard does not check this, see `brigade security scan`")
+            print(
+                f"  warning: {signals} prompt-injection signal(s); content-guard does not check this, see `brigade security scan`"
+            )
     if content_guard:
         print(f"content_guard_policy: {guard_policy}")
         for item in guard_results:
@@ -667,10 +676,7 @@ def lint_file(path: Path) -> HandoffLintResult:
     if action_value:
         action = action_value.splitlines()[0].strip().casefold()
         if action not in HANDOFF_ACTIONS:
-            errors.append(
-                "Recommended memory action must be one of: "
-                + ", ".join(HANDOFF_ACTIONS)
-            )
+            errors.append("Recommended memory action must be one of: " + ", ".join(HANDOFF_ACTIONS))
 
     if action in CARD_ACTIONS:
         _lint_card_action(sections, errors, warnings)
@@ -783,7 +789,9 @@ def migrate(*, target: Path, inbox: str | None = None, apply: bool = False, json
                 action=action,
                 target_card=extracted["target_card"] or None,
                 target_document=extracted["target_document"] or None,
-                suggested_content=extracted["card_content"] if action in CARD_ACTIONS else extracted["document_content"],
+                suggested_content=extracted["card_content"]
+                if action in CARD_ACTIONS
+                else extracted["document_content"],
             )
             item["status"] = "migratable"
             item["action"] = action
@@ -820,14 +828,18 @@ def migrate(*, target: Path, inbox: str | None = None, apply: bool = False, json
         "unmigratable_count": len([i for i in items if i["status"] == "unmigratable"]),
         "receipt_path": str(receipt_path) if receipt_path else None,
         "items": items,
-        "next_command": "brigade handoff migrate --apply" if not apply and any(i["status"] == "migratable" for i in items) else "brigade handoff lint",
+        "next_command": "brigade handoff migrate --apply"
+        if not apply and any(i["status"] == "migratable" for i in items)
+        else "brigade handoff lint",
     }
     if json_output:
         print(json.dumps(payload, indent=2, sort_keys=True))
         return 0
     print(f"handoff migrate: {target}")
     print(f"apply: {apply}")
-    print(f"items: {len(items)} (migratable={payload['migratable_count']}, blocked={payload['blocked_count']}, unmigratable={payload['unmigratable_count']})")
+    print(
+        f"items: {len(items)} (migratable={payload['migratable_count']}, blocked={payload['blocked_count']}, unmigratable={payload['unmigratable_count']})"
+    )
     for item in items[:15]:
         extra = f" missing: {', '.join(item['missing'][:4])}" if item.get("missing") else ""
         print(f"- {item['file']} [{item['status']}]{extra}")
@@ -857,20 +869,34 @@ def _handoff_closeouts_root(target: Path) -> Path:
     return _handoff_state_root(target) / "closeouts"
 
 
-def _load_source_config_for_drafts(target: Path, sources: Path | None = None) -> tuple[SourceConfig, Path | None, list[str], bool]:
+def _load_source_config_for_drafts(
+    target: Path, sources: Path | None = None
+) -> tuple[SourceConfig, Path | None, list[str], bool]:
     target = target.expanduser().resolve()
     sources_path = sources.expanduser().resolve() if sources is not None else default_sources_path(target)
     if sources_path.is_file():
         try:
             return _load_sources(target, sources_path), sources_path, [], True
         except ValueError as exc:
-            return SourceConfig(watched=(), ingestor=None), sources_path, [f"invalid handoff source config {sources_path}: {exc}"], False
+            return (
+                SourceConfig(watched=(), ingestor=None),
+                sources_path,
+                [f"invalid handoff source config {sources_path}: {exc}"],
+                False,
+            )
     if sources is not None:
-        return SourceConfig(watched=(), ingestor=None), sources_path, [f"handoff source config not found: {sources_path}"], False
+        return (
+            SourceConfig(watched=(), ingestor=None),
+            sources_path,
+            [f"handoff source config not found: {sources_path}"],
+            False,
+        )
     return SourceConfig(watched=(), ingestor=None), None, [], False
 
 
-def _draft_inbox_specs(target: Path, sources: Path | None = None) -> tuple[list[tuple[Path, str, bool]], list[str], bool]:
+def _draft_inbox_specs(
+    target: Path, sources: Path | None = None
+) -> tuple[list[tuple[Path, str, bool]], list[str], bool]:
     target = target.expanduser().resolve()
     config, _, errors, loaded = _load_source_config_for_drafts(target, sources=sources)
     specs: dict[tuple[str, str], tuple[Path, str, bool]] = {}
@@ -960,7 +986,9 @@ def _ingest_receipt_path(target: Path, run_id: str) -> Path:
     return _handoff_ingest_runs_root(target) / f"{run_id}.json"
 
 
-def _normalize_ingest_receipt(target: Path, payload: dict[str, Any], *, source_path: Path | None = None) -> dict[str, Any]:
+def _normalize_ingest_receipt(
+    target: Path, payload: dict[str, Any], *, source_path: Path | None = None
+) -> dict[str, Any]:
     run_id = str(payload.get("run_id") or (source_path.stem if source_path is not None else "")).strip()
     if not run_id:
         raise ValueError("receipt missing run_id")
@@ -1013,9 +1041,7 @@ def _normalize_ingest_receipt(target: Path, payload: dict[str, Any], *, source_p
         ],
         "no_reply": bool(payload.get("no_reply")),
         "warning_events": [
-            item
-            for item in _normalize_receipt_list(payload.get("warning_events"))
-            if isinstance(item, dict)
+            item for item in _normalize_receipt_list(payload.get("warning_events")) if isinstance(item, dict)
         ],
         "warning_count": int(payload.get("warning_count") or 0),
         "safe_summary": str(payload.get("safe_summary") or ""),
@@ -1047,18 +1073,20 @@ def _ingest_receipts(target: Path) -> list[dict[str, Any]]:
     if not root.is_dir():
         return []
     receipts = [
-        receipt
-        for path in sorted(root.glob("*.json"))
-        if (receipt := _load_ingest_receipt(target, path)) is not None
+        receipt for path in sorted(root.glob("*.json")) if (receipt := _load_ingest_receipt(target, path)) is not None
     ]
-    receipts.sort(key=lambda item: str(item.get("completed_at") or item.get("started_at") or item.get("run_id")), reverse=True)
+    receipts.sort(
+        key=lambda item: str(item.get("completed_at") or item.get("started_at") or item.get("run_id")), reverse=True
+    )
     return receipts
 
 
 def _ingest_receipt_outcomes(target: Path, receipt: dict[str, Any]) -> list[dict[str, Any]]:
     outcomes: dict[str, dict[str, Any]] = {}
 
-    def add(path_value: str, status: str, *, target_card: str | None = None, target_document: str | None = None) -> None:
+    def add(
+        path_value: str, status: str, *, target_card: str | None = None, target_document: str | None = None
+    ) -> None:
         entry = {
             "path": path_value,
             "status": status,
@@ -1107,7 +1135,9 @@ def _ingest_outcomes_by_path(target: Path) -> dict[str, dict[str, Any]]:
     return mapped
 
 
-def _latest_ingest_outcome_for_path(target: Path, path: Path, outcomes: dict[str, dict[str, Any]] | None = None) -> dict[str, Any] | None:
+def _latest_ingest_outcome_for_path(
+    target: Path, path: Path, outcomes: dict[str, dict[str, Any]] | None = None
+) -> dict[str, Any] | None:
     outcomes = outcomes if outcomes is not None else _ingest_outcomes_by_path(target)
     for key in _path_match_keys(target, path):
         outcome = outcomes.get(key)
@@ -1176,8 +1206,16 @@ def _draft_summary(
     sections = _parse_markdown_sections(text)
     lint_result = lint_file(path)
     action = lint_result.action
-    target_card = _section_value(sections, "Target card").splitlines()[0].strip() if _section_value(sections, "Target card") else None
-    target_document = _section_value(sections, "Target document").splitlines()[0].strip() if _section_value(sections, "Target document") else None
+    target_card = (
+        _section_value(sections, "Target card").splitlines()[0].strip()
+        if _section_value(sections, "Target card")
+        else None
+    )
+    target_document = (
+        _section_value(sections, "Target document").splitlines()[0].strip()
+        if _section_value(sections, "Target document")
+        else None
+    )
     key_values = _extract_handoff_key_values(text)
     source_import_id = key_values.get("import") or key_values.get("import_id") or key_values.get("source_import_id")
     source_fingerprint = key_values.get("source_fingerprint") or key_values.get("handoff_source_fingerprint")
@@ -1219,7 +1257,9 @@ def _draft_summary(
         watched=watched,
         ingestion_status=str(ingest_outcome.get("status")) if ingest_outcome and ingest_outcome.get("status") else None,
         ingest_run_id=str(ingest_outcome.get("run_id")) if ingest_outcome and ingest_outcome.get("run_id") else None,
-        ingest_log_path=str(ingest_outcome.get("log_path")) if ingest_outcome and ingest_outcome.get("log_path") else None,
+        ingest_log_path=str(ingest_outcome.get("log_path"))
+        if ingest_outcome and ingest_outcome.get("log_path")
+        else None,
     )
 
 
@@ -1271,7 +1311,9 @@ def _append_archive_record(target: Path, record: dict[str, Any]) -> None:
         handle.write(json.dumps(record, sort_keys=True) + "\n")
 
 
-def _archive_record_with_ingest_outcome(target: Path, record: dict[str, Any], outcomes: dict[str, dict[str, Any]] | None = None) -> dict[str, Any]:
+def _archive_record_with_ingest_outcome(
+    target: Path, record: dict[str, Any], outcomes: dict[str, dict[str, Any]] | None = None
+) -> dict[str, Any]:
     outcomes = outcomes if outcomes is not None else _ingest_outcomes_by_path(target)
     outcome = None
     for key in ("archive_path", "path"):
@@ -1335,9 +1377,7 @@ def draft_queue_payload(target: Path, sources: Path | None = None) -> dict[str, 
     receipts = _ingest_receipts(target)
     stale = [draft.id for draft in drafts if draft.stale and draft.status != "archived"]
     unreconciled = [
-        draft.id
-        for draft in drafts
-        if draft.stale and draft.ingestion_status is None and draft.status != "archived"
+        draft.id for draft in drafts if draft.stale and draft.ingestion_status is None and draft.status != "archived"
     ]
     invalid = [draft.id for draft in drafts if not draft.lint.valid]
     uncovered = [draft.id for draft in drafts if not draft.watched]
@@ -1358,7 +1398,9 @@ def draft_queue_payload(target: Path, sources: Path | None = None) -> dict[str, 
         {
             "status": WARN if unreconciled else OK,
             "name": "handoff_draft_unreconciled",
-            "detail": f"{len(unreconciled)} stale handoff draft(s) not represented in recent ingest receipts" if unreconciled else "none",
+            "detail": f"{len(unreconciled)} stale handoff draft(s) not represented in recent ingest receipts"
+            if unreconciled
+            else "none",
             "items": unreconciled[:10],
         },
         {
@@ -1370,19 +1412,25 @@ def draft_queue_payload(target: Path, sources: Path | None = None) -> dict[str, 
         {
             "status": WARN if missing_imports else OK,
             "name": "handoff_draft_missing_source_import",
-            "detail": f"{len(missing_imports)} handoff draft(s) reference missing source imports" if missing_imports else "none",
+            "detail": f"{len(missing_imports)} handoff draft(s) reference missing source imports"
+            if missing_imports
+            else "none",
             "items": missing_imports[:10],
         },
         {
             "status": WARN if changed_fingerprints else OK,
             "name": "handoff_draft_changed_source_fingerprint",
-            "detail": f"{len(changed_fingerprints)} handoff draft(s) have changed source fingerprints" if changed_fingerprints else "none",
+            "detail": f"{len(changed_fingerprints)} handoff draft(s) have changed source fingerprints"
+            if changed_fingerprints
+            else "none",
             "items": changed_fingerprints[:10],
         },
         {
             "status": WARN if uncovered else OK,
             "name": "handoff_draft_uncovered_inbox",
-            "detail": f"{len(uncovered)} handoff draft(s) are in inboxes not covered by source config" if uncovered else "none",
+            "detail": f"{len(uncovered)} handoff draft(s) are in inboxes not covered by source config"
+            if uncovered
+            else "none",
             "items": uncovered[:10],
         },
     ]
@@ -1410,7 +1458,9 @@ def draft_queue_payload(target: Path, sources: Path | None = None) -> dict[str, 
     }
 
 
-def _find_draft(target: Path, draft_id_or_path: str, sources: Path | None = None) -> tuple[HandoffDraft | None, str | None]:
+def _find_draft(
+    target: Path, draft_id_or_path: str, sources: Path | None = None
+) -> tuple[HandoffDraft | None, str | None]:
     target = target.expanduser().resolve()
     raw_path = Path(draft_id_or_path).expanduser()
     candidates: list[HandoffDraft] = []
@@ -1708,7 +1758,10 @@ def _archive_one(target: Path, draft: HandoffDraft, *, reason: str | None = None
     archive_dir.mkdir(parents=True, exist_ok=True)
     destination = archive_dir / draft.path.name
     if destination.exists():
-        destination = archive_dir / f"{draft.path.stem}-{hashlib.sha1(str(draft.path).encode()).hexdigest()[:8]}{draft.path.suffix}"
+        destination = (
+            archive_dir
+            / f"{draft.path.stem}-{hashlib.sha1(str(draft.path).encode()).hexdigest()[:8]}{draft.path.suffix}"
+        )
     shutil.move(str(draft.path), str(destination))
     record = {
         "id": draft.id,
@@ -1904,7 +1957,11 @@ def run_show(*, target: Path, run_id: str, json_output: bool = False) -> int:
     if not target.is_dir():
         print(f"error: --target is not a directory: {target}", file=sys.stderr)
         return 2
-    matches = [receipt for receipt in _ingest_receipts(target) if str(receipt.get("run_id")) == run_id or str(receipt.get("run_id", "")).startswith(run_id)]
+    matches = [
+        receipt
+        for receipt in _ingest_receipts(target)
+        if str(receipt.get("run_id")) == run_id or str(receipt.get("run_id", "")).startswith(run_id)
+    ]
     if not matches:
         print(f"error: handoff ingest run not found: {run_id}", file=sys.stderr)
         return 1
@@ -1988,7 +2045,9 @@ def _receipt_payload_for_drafts(
     log_path: str | None,
 ) -> dict[str, Any]:
     owner_label = _safe_label(owner)
-    run_id = _safe_label(run_id or f"{owner_label}-handoff-ingest-{_timestamp_id()}", fallback=f"handoff-ingest-{_timestamp_id()}")
+    run_id = _safe_label(
+        run_id or f"{owner_label}-handoff-ingest-{_timestamp_id()}", fallback=f"handoff-ingest-{_timestamp_id()}"
+    )
     now = _iso_from_timestamp()
     inbox_paths = sorted({str(draft.path.parent) for draft in drafts})
     handoff_paths = [str(draft.path) for draft in drafts]
@@ -2009,8 +2068,7 @@ def _receipt_payload_for_drafts(
         "warning_count": 0,
         "no_reply": False,
         "safe_summary": safe_summary
-        or f"{owner_label} recorded {len(drafts)} {status} reviewed handoff"
-        f"{'s' if len(drafts) != 1 else ''}.",
+        or f"{owner_label} recorded {len(drafts)} {status} reviewed handoff{'s' if len(drafts) != 1 else ''}.",
         "log_path": log_path or "",
         "owner": owner_label,
         "recorded_by": "brigade handoff receipt record",
@@ -2019,9 +2077,7 @@ def _receipt_payload_for_drafts(
     if status == "ingested":
         for draft in drafts:
             if draft.target_card:
-                payload["promoted_card_targets"].append(
-                    {"handoff_path": str(draft.path), "target": draft.target_card}
-                )
+                payload["promoted_card_targets"].append({"handoff_path": str(draft.path), "target": draft.target_card})
             if draft.target_document:
                 payload["routed_document_targets"].append(
                     {"handoff_path": str(draft.path), "target": draft.target_document}
@@ -2106,7 +2162,7 @@ def receipt_plan(
         print(json.dumps(payload, indent=2, sort_keys=True))
         return 0
     print(f"handoff receipt plan: {target}")
-    print(f"would_write: false")
+    print("would_write: false")
     print(f"receipt: {payload['receipt_path']}")
     print(f"run_id: {payload['run']['run_id']}")
     print(f"owner: {payload['owner']}")
@@ -2315,11 +2371,7 @@ def sync_issues(
     current_ids = {issue.id for issue in found}
     known_ids = _known_local_issue_ids(target)
     covered_summary_ids = _covered_warning_summary_ids(found, known_ids)
-    new_issues = [
-        issue
-        for issue in found
-        if issue.id not in known_ids and issue.id not in covered_summary_ids
-    ]
+    new_issues = [issue for issue in found if issue.id not in known_ids and issue.id not in covered_summary_ids]
     records = [issue.as_import_record() for issue in new_issues]
     from . import work_cmd
 
@@ -2393,7 +2445,9 @@ def doctor(*, target: Path, sources: Path | None = None, json_output: bool = Fal
     return 1 if health.failures else 0
 
 
-def sources_init(*, target: Path, force: bool = False, inboxes: list[str] | None = None, json_output: bool = False) -> int:
+def sources_init(
+    *, target: Path, force: bool = False, inboxes: list[str] | None = None, json_output: bool = False
+) -> int:
     target = target.expanduser().resolve()
     if not target.is_dir():
         print(f"error: --target is not a directory: {target}", file=sys.stderr)
@@ -2411,11 +2465,7 @@ def sources_init(*, target: Path, force: bool = False, inboxes: list[str] | None
         except Exception:
             config = None
         if config is not None and config.selection.harnesses:
-            selected = [
-                _WRITER_INBOX_MAP[h]
-                for h in config.selection.harnesses
-                if h in _WRITER_INBOX_MAP
-            ]
+            selected = [_WRITER_INBOX_MAP[h] for h in config.selection.harnesses if h in _WRITER_INBOX_MAP]
             if selected:
                 inbox_values = selected
     payload = {
@@ -2526,7 +2576,9 @@ def _lint_card_action(
             errors.append(f"card handoffs must omit the {prohibited} section entirely")
 
     if any(line.startswith("## ") for line in suggested_card.splitlines()):
-        warnings.append("Suggested card content contains level-2 markdown headings, which may be parsed as handoff sections")
+        warnings.append(
+            "Suggested card content contains level-2 markdown headings, which may be parsed as handoff sections"
+        )
 
 
 def _lint_no_card_action(sections: dict[str, str], errors: list[str]) -> None:
@@ -2754,9 +2806,7 @@ def _handoff_issue_fingerprint(issue: HandoffIssue, metadata: dict[str, Any]) ->
         "repair": issue.repair,
         "evidence": issue.evidence,
         "metadata": {
-            key: value
-            for key, value in metadata.items()
-            if key not in {"source_fingerprint", "handoff_issue_id"}
+            key: value for key, value in metadata.items() if key not in {"source_fingerprint", "handoff_issue_id"}
         },
     }
     return hashlib.sha1(json.dumps(payload, sort_keys=True, default=str).encode("utf-8")).hexdigest()[:16]
@@ -2899,7 +2949,9 @@ def _parse_ingestor_log_receipt(target: Path, config: SourceConfig, log_path: Pa
             warning_events.append(_warning_event("source-unreachable", stripped, line_number))
     if no_reply and warning_count == 0:
         warning_count = 1
-    if warning_events and warning_count < len([event for event in warning_events if event.get("category") != "warning-summary"]):
+    if warning_events and warning_count < len(
+        [event for event in warning_events if event.get("category") != "warning-summary"]
+    ):
         warning_count = len([event for event in warning_events if event.get("category") != "warning-summary"])
     inbox_paths = [str(watched.root / watched.inbox) for watched in config.watched]
     safe_summary = (
@@ -3016,7 +3068,18 @@ def _repair_for_issue(category: str, line: str) -> str:
 
 def _looks_unreachable(line: str) -> bool:
     lowered = line.casefold()
-    return any(token in lowered for token in ("unreachable", "unavailable", "cannot reach", "could not reach", "timed out", "timeout", "no route"))
+    return any(
+        token in lowered
+        for token in (
+            "unreachable",
+            "unavailable",
+            "cannot reach",
+            "could not reach",
+            "timed out",
+            "timeout",
+            "no route",
+        )
+    )
 
 
 def _looks_no_reply(line: str) -> bool:
@@ -3026,7 +3089,11 @@ def _looks_no_reply(line: str) -> bool:
 
 def _looks_malformed(line: str) -> bool:
     lowered = line.casefold()
-    return lowered.startswith(("malformed ", "invalid ", "parse-error ", "parse error ")) or "malformed handoff" in lowered or "invalid handoff" in lowered
+    return (
+        lowered.startswith(("malformed ", "invalid ", "parse-error ", "parse error "))
+        or "malformed handoff" in lowered
+        or "invalid handoff" in lowered
+    )
 
 
 def _warning_event(category: str, line: str, line_number: int) -> dict[str, Any]:

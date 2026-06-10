@@ -33,7 +33,10 @@ def _fake_surface_run(argv, timeout=8):
             "stdout": json.dumps(
                 [
                     {"name": "example-service", "pm2_env": {"status": "online", "EXAMPLE_ENV": "abc"}},
-                    {"name": "example-api", "pm2_env": {"status": "stopped", "pm_exec_path": "/example/private/api.js"}},
+                    {
+                        "name": "example-api",
+                        "pm2_env": {"status": "stopped", "pm_exec_path": "/example/private/api.js"},
+                    },
                 ]
             ),
             "error": None,
@@ -61,7 +64,9 @@ def test_operator_internal_dogfood_plan_includes_dogfood(tmp_path, capsys):
     assert any("security evidence" in boundary for boundary in payload["boundaries"])
 
 
-def test_operator_adoption_plan_summarizes_existing_workspace_without_raw_surface_details(tmp_path, capsys, monkeypatch):
+def test_operator_adoption_plan_summarizes_existing_workspace_without_raw_surface_details(
+    tmp_path, capsys, monkeypatch
+):
     (tmp_path / "AGENTS.md").write_text("Use the private operator workflow.\n")
     (tmp_path / "MEMORY.md").write_text("Private memory index.\n")
     (tmp_path / ".claude" / "memory-handoffs").mkdir(parents=True)
@@ -142,7 +147,11 @@ def test_operator_adoption_plan_managed_workspace_without_external_surfaces(tmp_
     (tmp_path / ".brigade").mkdir()
     (tmp_path / ".brigade" / "config.json").write_text("{}\n")
 
-    monkeypatch.setattr(operator_cmd, "_run_read_only_command", lambda argv, timeout=8: {"ok": False, "stdout": "", "error": "command not found"})
+    monkeypatch.setattr(
+        operator_cmd,
+        "_run_read_only_command",
+        lambda argv, timeout=8: {"ok": False, "stdout": "", "error": "command not found"},
+    )
 
     assert operator_cmd.adoption_plan(target=tmp_path, json_output=True) == 0
     payload = json.loads(capsys.readouterr().out)
@@ -186,7 +195,11 @@ def test_operator_adoption_import_issues_uses_work_inbox_and_dedupes(tmp_path, c
         if argv == ["crontab", "-l"]:
             return {"ok": True, "stdout": "* * * * * brigade-example-task\n", "error": None}
         if argv == ["pm2", "jlist"]:
-            return {"ok": True, "stdout": json.dumps([{"name": "example-service", "pm2_env": {"status": "online"}}]), "error": None}
+            return {
+                "ok": True,
+                "stdout": json.dumps([{"name": "example-service", "pm2_env": {"status": "online"}}]),
+                "error": None,
+            }
         return {"ok": False, "stdout": "", "error": "command not found"}
 
     monkeypatch.setattr(operator_cmd, "_run_read_only_command", fake_run)
@@ -218,14 +231,17 @@ def test_operator_migration_status_rolls_up_adoption_surfaces_reviews_and_work(t
 
     assert operator_cmd.surfaces_capture(target=tmp_path, json_output=True) == 0
     capsys.readouterr()
-    assert operator_cmd.surfaces_review(
-        target=tmp_path,
-        surface="shell_crontab",
-        status="needs-owner",
-        all_records=True,
-        reason="needs-owner-before-migration",
-        json_output=True,
-    ) == 0
+    assert (
+        operator_cmd.surfaces_review(
+            target=tmp_path,
+            surface="shell_crontab",
+            status="needs-owner",
+            all_records=True,
+            reason="needs-owner-before-migration",
+            json_output=True,
+        )
+        == 0
+    )
     capsys.readouterr()
     assert operator_cmd.surfaces_import_issues(target=tmp_path, json_output=True) == 0
     capsys.readouterr()
@@ -304,28 +320,34 @@ def test_operator_migration_import_issues_supersedes_changed_rollups(tmp_path, c
     monkeypatch.setattr(operator_cmd, "_run_read_only_command", _fake_surface_run)
     assert operator_cmd.surfaces_capture(target=tmp_path, json_output=True) == 0
     capsys.readouterr()
-    assert operator_cmd.surfaces_review(
-        target=tmp_path,
-        surface="shell_crontab",
-        status="needs-owner",
-        all_records=True,
-        reason="needs-owner-before-migration",
-        json_output=True,
-    ) == 0
+    assert (
+        operator_cmd.surfaces_review(
+            target=tmp_path,
+            surface="shell_crontab",
+            status="needs-owner",
+            all_records=True,
+            reason="needs-owner-before-migration",
+            json_output=True,
+        )
+        == 0
+    )
     capsys.readouterr()
     assert operator_cmd.migration_import_issues(target=tmp_path, json_output=True) == 0
     first = json.loads(capsys.readouterr().out)
     first_ids = [item["id"] for item in first["imports"]]
     assert first_ids
 
-    assert operator_cmd.surfaces_review(
-        target=tmp_path,
-        surface="pm2",
-        status="needs-owner",
-        all_records=True,
-        reason="needs-owner-before-migration",
-        json_output=True,
-    ) == 0
+    assert (
+        operator_cmd.surfaces_review(
+            target=tmp_path,
+            surface="pm2",
+            status="needs-owner",
+            all_records=True,
+            reason="needs-owner-before-migration",
+            json_output=True,
+        )
+        == 0
+    )
     capsys.readouterr()
     assert operator_cmd.migration_import_issues(target=tmp_path, json_output=True) == 0
     second = json.loads(capsys.readouterr().out)
@@ -344,14 +366,17 @@ def test_operator_migration_import_issues_supersedes_stale_source_imports(tmp_pa
 
     assert operator_cmd.surfaces_capture(target=tmp_path, json_output=True) == 0
     capsys.readouterr()
-    assert operator_cmd.surfaces_review(
-        target=tmp_path,
-        surface="shell_crontab",
-        status="needs-owner",
-        all_records=True,
-        reason="needs-owner-before-migration",
-        json_output=True,
-    ) == 0
+    assert (
+        operator_cmd.surfaces_review(
+            target=tmp_path,
+            surface="shell_crontab",
+            status="needs-owner",
+            all_records=True,
+            reason="needs-owner-before-migration",
+            json_output=True,
+        )
+        == 0
+    )
     capsys.readouterr()
 
     imports = [
@@ -408,32 +433,46 @@ def test_operator_migration_consolidate_dismisses_tiny_surface_review_imports(tm
     monkeypatch.setattr(operator_cmd, "_run_read_only_command", _fake_surface_run)
     assert operator_cmd.surfaces_capture(target=tmp_path, json_output=True) == 0
     capsys.readouterr()
-    assert operator_cmd.surfaces_review(
-        target=tmp_path,
-        surface="shell_crontab",
-        status="needs-owner",
-        all_records=True,
-        reason="needs-owner-before-migration",
-        json_output=True,
-    ) == 0
+    assert (
+        operator_cmd.surfaces_review(
+            target=tmp_path,
+            surface="shell_crontab",
+            status="needs-owner",
+            all_records=True,
+            reason="needs-owner-before-migration",
+            json_output=True,
+        )
+        == 0
+    )
     capsys.readouterr()
     assert operator_cmd.surfaces_import_issues(target=tmp_path, json_output=True) == 0
     capsys.readouterr()
     assert operator_cmd.migration_import_issues(target=tmp_path, json_output=True) == 0
     capsys.readouterr()
 
-    assert operator_cmd.migration_consolidate(target=tmp_path, surface="shell_crontab", review_status="needs-owner", dry_run=True, json_output=True) == 0
+    assert (
+        operator_cmd.migration_consolidate(
+            target=tmp_path, surface="shell_crontab", review_status="needs-owner", dry_run=True, json_output=True
+        )
+        == 0
+    )
     dry_run = json.loads(capsys.readouterr().out)
     assert dry_run["candidate_count"] == 1
     assert dry_run["dismissed"] == 0
 
-    assert operator_cmd.migration_consolidate(target=tmp_path, surface="shell_crontab", review_status="needs-owner", json_output=True) == 0
+    assert (
+        operator_cmd.migration_consolidate(
+            target=tmp_path, surface="shell_crontab", review_status="needs-owner", json_output=True
+        )
+        == 0
+    )
     payload = json.loads(capsys.readouterr().out)
     assert payload["candidate_count"] == 1
     assert payload["dismissed"] == 1
     imports = work_cmd._read_imports(tmp_path)
     dismissed = [
-        item for item in imports
+        item
+        for item in imports
         if item.get("source") == "operator-surface-review" and item.get("status") == "dismissed"
     ]
     assert len(dismissed) == 1
@@ -492,14 +531,17 @@ def test_operator_surfaces_capture_lists_and_doctors_redacted_records(tmp_path, 
     assert any(issue["name"] == "surface_reviews_missing" for issue in doctor["issues"])
     assert "example-service" not in json.dumps(doctor)
 
-    assert operator_cmd.surfaces_review(
-        target=tmp_path,
-        surface="shell_crontab",
-        status="external-ok",
-        all_records=True,
-        reason="reviewed-external-ownership",
-        json_output=True,
-    ) == 0
+    assert (
+        operator_cmd.surfaces_review(
+            target=tmp_path,
+            surface="shell_crontab",
+            status="external-ok",
+            all_records=True,
+            reason="reviewed-external-ownership",
+            json_output=True,
+        )
+        == 0
+    )
     review = json.loads(capsys.readouterr().out)
     assert review["reviewed_count"] == 1
     assert (tmp_path / ".brigade" / "operator" / "surfaces" / "reviews").is_dir()
@@ -540,7 +582,11 @@ def test_operator_surfaces_import_issues_uses_work_inbox_and_dedupes(tmp_path, c
     imports = work_cmd._read_imports(tmp_path)
     assert len(imports) == 3
     assert {item["source"] for item in imports} == {"operator-surface"}
-    assert {(item.get("metadata") or {}).get("surface") for item in imports} == {"shell_crontab", "openclaw_cron", "pm2"}
+    assert {(item.get("metadata") or {}).get("surface") for item in imports} == {
+        "shell_crontab",
+        "openclaw_cron",
+        "pm2",
+    }
     assert all((item.get("metadata") or {}).get("source_fingerprint") for item in imports)
     rendered = json.dumps(imports)
     assert "example-service" not in rendered
@@ -560,15 +606,18 @@ def test_operator_surfaces_review_rejects_secret_like_reason(tmp_path, capsys, m
     assert operator_cmd.surfaces_capture(target=tmp_path, json_output=True) == 0
     capsys.readouterr()
 
-    assert operator_cmd.surfaces_review(
-        target=tmp_path,
-        surface="shell_crontab",
-        status="external-ok",
-        all_records=True,
-        # content-guard: allow api-key-assignment
-        reason="token=REDACTED_EXAMPLE_VALUE",
-        json_output=True,
-    ) == 2
+    assert (
+        operator_cmd.surfaces_review(
+            target=tmp_path,
+            surface="shell_crontab",
+            status="external-ok",
+            all_records=True,
+            # content-guard: allow api-key-assignment
+            reason="token=REDACTED_EXAMPLE_VALUE",
+            json_output=True,
+        )
+        == 2
+    )
     assert "secret-looking" in capsys.readouterr().err
 
 
@@ -576,14 +625,17 @@ def test_operator_surfaces_review_imports_actionable_records(tmp_path, capsys, m
     monkeypatch.setattr(operator_cmd, "_run_read_only_command", _fake_surface_run)
     assert operator_cmd.surfaces_capture(target=tmp_path, json_output=True) == 0
     capsys.readouterr()
-    assert operator_cmd.surfaces_review(
-        target=tmp_path,
-        surface="shell_crontab",
-        status="brigade-runbook-candidate",
-        all_records=True,
-        reason="candidate-for-runbook",
-        json_output=True,
-    ) == 0
+    assert (
+        operator_cmd.surfaces_review(
+            target=tmp_path,
+            surface="shell_crontab",
+            status="brigade-runbook-candidate",
+            all_records=True,
+            reason="candidate-for-runbook",
+            json_output=True,
+        )
+        == 0
+    )
     capsys.readouterr()
 
     assert operator_cmd.surfaces_import_issues(target=tmp_path, json_output=True) == 0
@@ -632,9 +684,34 @@ def test_operator_surfaces_cli_dispatch(tmp_path, monkeypatch):
     monkeypatch.setattr(operator_cmd, "surfaces_import_issues", fake_import_issues)
     assert cli.main(["operator", "surfaces", "capture", "--target", str(tmp_path), "--json"]) == 0
     assert cli.main(["operator", "surfaces", "list", "--target", str(tmp_path), "--json"]) == 0
-    assert cli.main(["operator", "surfaces", "doctor", "--target", str(tmp_path), "--surface", "shell_crontab", "--json"]) == 0
-    assert cli.main(["operator", "surfaces", "review", "--target", str(tmp_path), "--surface", "shell_crontab", "--status", "external-ok", "--all", "--reason", "reviewed", "--json"]) == 0
-    assert cli.main(["operator", "surfaces", "reviews", "--target", str(tmp_path), "--surface", "shell_crontab", "--json"]) == 0
+    assert (
+        cli.main(["operator", "surfaces", "doctor", "--target", str(tmp_path), "--surface", "shell_crontab", "--json"])
+        == 0
+    )
+    assert (
+        cli.main(
+            [
+                "operator",
+                "surfaces",
+                "review",
+                "--target",
+                str(tmp_path),
+                "--surface",
+                "shell_crontab",
+                "--status",
+                "external-ok",
+                "--all",
+                "--reason",
+                "reviewed",
+                "--json",
+            ]
+        )
+        == 0
+    )
+    assert (
+        cli.main(["operator", "surfaces", "reviews", "--target", str(tmp_path), "--surface", "shell_crontab", "--json"])
+        == 0
+    )
     assert cli.main(["operator", "surfaces", "import-issues", "--target", str(tmp_path), "--dry-run", "--json"]) == 0
     assert seen["capture"] == {"target": tmp_path, "json_output": True}
     assert seen["list"] == {"target": tmp_path, "json_output": True}
@@ -704,7 +781,26 @@ def test_operator_migration_cli_dispatch(tmp_path, monkeypatch):
     assert cli.main(["operator", "migration", "status", "--target", str(tmp_path), "--json"]) == 0
     assert cli.main(["operator", "migration", "doctor", "--target", str(tmp_path), "--json"]) == 0
     assert cli.main(["operator", "migration", "import-issues", "--target", str(tmp_path), "--dry-run", "--json"]) == 0
-    assert cli.main(["operator", "migration", "consolidate", "--target", str(tmp_path), "--surface", "shell_crontab", "--review-status", "needs-owner", "--reason", "superseded", "--dry-run", "--json"]) == 0
+    assert (
+        cli.main(
+            [
+                "operator",
+                "migration",
+                "consolidate",
+                "--target",
+                str(tmp_path),
+                "--surface",
+                "shell_crontab",
+                "--review-status",
+                "needs-owner",
+                "--reason",
+                "superseded",
+                "--dry-run",
+                "--json",
+            ]
+        )
+        == 0
+    )
     assert seen["status"] == {"target": tmp_path, "json_output": True}
     assert seen["doctor"] == {"target": tmp_path, "json_output": True}
     assert seen["import"] == {"target": tmp_path, "dry_run": True, "json_output": True}
@@ -753,7 +849,9 @@ def test_operator_internal_dogfood_init_and_status(tmp_path, capsys, monkeypatch
         },
     )
 
-    assert operator_cmd.init(target=tmp_path, profile="internal-dogfood", waive_public_release=True, json_output=True) == 0
+    assert (
+        operator_cmd.init(target=tmp_path, profile="internal-dogfood", waive_public_release=True, json_output=True) == 0
+    )
     payload = json.loads(capsys.readouterr().out)
     assert payload["profile"] == "internal-dogfood"
     assert (tmp_path / ".brigade" / "dogfood.toml").is_file()
@@ -776,10 +874,21 @@ def test_operator_status_content_guard_missing_unconfigured_is_nonblocking(tmp_p
     monkeypatch.setattr("shutil.which", lambda name: f"/usr/bin/{name}")
     (tmp_path / ".brigade").mkdir()
     (tmp_path / ".brigade" / "dogfood.toml").write_text("[dogfood]\n")
-    monkeypatch.setattr("brigade.daily_cmd.health", lambda target: {"issue_count": 0, "top_issue": None, "latest_plan": None, "latest_run": None})
-    monkeypatch.setattr("brigade.security_cmd.health", lambda target: {"issue_count": 0, "top_issue": None, "evidence": None})
-    monkeypatch.setattr("brigade.center_cmd._readiness_payload", lambda target: {"status": "ready", "blocker_count": 0, "warning_count": 0, "waived_count": 0, "blockers": []})
-    monkeypatch.setattr("brigade.notifications_cmd.health", lambda target: {"installed": False, "configured": False, "config_path": None})
+    monkeypatch.setattr(
+        "brigade.daily_cmd.health",
+        lambda target: {"issue_count": 0, "top_issue": None, "latest_plan": None, "latest_run": None},
+    )
+    monkeypatch.setattr(
+        "brigade.security_cmd.health", lambda target: {"issue_count": 0, "top_issue": None, "evidence": None}
+    )
+    monkeypatch.setattr(
+        "brigade.center_cmd._readiness_payload",
+        lambda target: {"status": "ready", "blocker_count": 0, "warning_count": 0, "waived_count": 0, "blockers": []},
+    )
+    monkeypatch.setattr(
+        "brigade.notifications_cmd.health",
+        lambda target: {"installed": False, "configured": False, "config_path": None},
+    )
     monkeypatch.setattr(
         "brigade.scrub.hook_status",
         lambda target: {
@@ -793,7 +902,11 @@ def test_operator_status_content_guard_missing_unconfigured_is_nonblocking(tmp_p
             "hooks_path": None,
             "checks": [
                 {"status": "warn", "name": "content_guard_missing", "detail": "content-guard not found"},
-                {"status": "warn", "name": "content_guard_hook_not_enabled", "detail": "no executable pre-push hook found"},
+                {
+                    "status": "warn",
+                    "name": "content_guard_hook_not_enabled",
+                    "detail": "no executable pre-push hook found",
+                },
             ],
             "suggested_commands": ["clone content-guard"],
         },
@@ -810,10 +923,21 @@ def test_operator_status_generated_content_guard_hook_unconfigured_is_nonblockin
     monkeypatch.setattr("shutil.which", lambda name: f"/usr/bin/{name}")
     (tmp_path / ".brigade").mkdir()
     (tmp_path / ".brigade" / "dogfood.toml").write_text("[dogfood]\n")
-    monkeypatch.setattr("brigade.daily_cmd.health", lambda target: {"issue_count": 0, "top_issue": None, "latest_plan": None, "latest_run": None})
-    monkeypatch.setattr("brigade.security_cmd.health", lambda target: {"issue_count": 0, "top_issue": None, "evidence": None})
-    monkeypatch.setattr("brigade.center_cmd._readiness_payload", lambda target: {"status": "ready", "blocker_count": 0, "warning_count": 0, "waived_count": 0, "blockers": []})
-    monkeypatch.setattr("brigade.notifications_cmd.health", lambda target: {"installed": False, "configured": False, "config_path": None})
+    monkeypatch.setattr(
+        "brigade.daily_cmd.health",
+        lambda target: {"issue_count": 0, "top_issue": None, "latest_plan": None, "latest_run": None},
+    )
+    monkeypatch.setattr(
+        "brigade.security_cmd.health", lambda target: {"issue_count": 0, "top_issue": None, "evidence": None}
+    )
+    monkeypatch.setattr(
+        "brigade.center_cmd._readiness_payload",
+        lambda target: {"status": "ready", "blocker_count": 0, "warning_count": 0, "waived_count": 0, "blockers": []},
+    )
+    monkeypatch.setattr(
+        "brigade.notifications_cmd.health",
+        lambda target: {"installed": False, "configured": False, "config_path": None},
+    )
     monkeypatch.setattr(
         "brigade.scrub.hook_status",
         lambda target: {
@@ -827,13 +951,22 @@ def test_operator_status_generated_content_guard_hook_unconfigured_is_nonblockin
             "hooks_path": None,
             "checks": [
                 {"status": "warn", "name": "content_guard_missing", "detail": "content-guard not found"},
-                {"status": "warn", "name": "content_guard_hook_not_enabled", "detail": "no executable pre-push hook found"},
+                {
+                    "status": "warn",
+                    "name": "content_guard_hook_not_enabled",
+                    "detail": "no executable pre-push hook found",
+                },
             ],
             "suggested_commands": ["clone content-guard", "git config core.hooksPath hooks"],
         },
     )
-    monkeypatch.setattr("brigade.daily_cmd.status_payload", lambda target: {"daily_health": {"issue_count": 0}, "next_recommended_command": "brigade daily plan"})
-    monkeypatch.setattr("brigade.tools_cmd.health", lambda target: {"issue_count": 0, "tool_count": 4, "top_issue": None})
+    monkeypatch.setattr(
+        "brigade.daily_cmd.status_payload",
+        lambda target: {"daily_health": {"issue_count": 0}, "next_recommended_command": "brigade daily plan"},
+    )
+    monkeypatch.setattr(
+        "brigade.tools_cmd.health", lambda target: {"issue_count": 0, "tool_count": 4, "top_issue": None}
+    )
 
     assert operator_cmd.doctor(target=tmp_path, profile="local-operator", json_output=True) == 0
     payload = json.loads(capsys.readouterr().out)
@@ -912,7 +1045,10 @@ def test_operator_doctor_blocks_on_tool_projection_health(tmp_path, capsys, monk
             "daily": {"issue_count": 0},
         },
     )
-    monkeypatch.setattr("brigade.daily_cmd.status_payload", lambda target: {"daily_health": {"issue_count": 0}, "next_recommended_command": "brigade daily plan"})
+    monkeypatch.setattr(
+        "brigade.daily_cmd.status_payload",
+        lambda target: {"daily_health": {"issue_count": 0}, "next_recommended_command": "brigade daily plan"},
+    )
     monkeypatch.setattr(
         "brigade.tools_cmd.health",
         lambda target: {
@@ -935,23 +1071,26 @@ def test_operator_verify_harness_hermes_after_handoff_init_and_draft(tmp_path, c
     capsys.readouterr()
     assert cli.main(["handoff", "sources", "init", "--target", str(tmp_path), "--json"]) == 0
     capsys.readouterr()
-    assert cli.main(
-        [
-            "handoff",
-            "draft",
-            "--target",
-            str(tmp_path),
-            "--inbox",
-            "hermes",
-            "--title",
-            "Hermes verification",
-            "--summary",
-            "Hermes has a local handoff draft.",
-            "--content",
-            "### Hermes verification\n\nUse the Hermes inbox for local handoffs.",
-            "--json",
-        ]
-    ) == 0
+    assert (
+        cli.main(
+            [
+                "handoff",
+                "draft",
+                "--target",
+                str(tmp_path),
+                "--inbox",
+                "hermes",
+                "--title",
+                "Hermes verification",
+                "--summary",
+                "Hermes has a local handoff draft.",
+                "--content",
+                "### Hermes verification\n\nUse the Hermes inbox for local handoffs.",
+                "--json",
+            ]
+        )
+        == 0
+    )
     capsys.readouterr()
 
     assert operator_cmd.verify_harness(target=tmp_path, harness="hermes", json_output=True) == 0
@@ -959,7 +1098,9 @@ def test_operator_verify_harness_hermes_after_handoff_init_and_draft(tmp_path, c
     assert payload["ready"] is True
     assert payload["handoff_inbox"]["relative_path"] == ".hermes/memory-handoffs"
     assert payload["handoff_inbox"]["watched"] is True
-    assert any(row["name"] == "hermes_adapter_workspace_handoff_inbox" and row["status"] == "ok" for row in payload["checks"])
+    assert any(
+        row["name"] == "hermes_adapter_workspace_handoff_inbox" and row["status"] == "ok" for row in payload["checks"]
+    )
     assert any(row["name"] == "handoff_lint" and row["status"] == "ok" for row in payload["checks"])
 
 
@@ -1057,7 +1198,9 @@ def test_operator_bootstrap_portable_syncs_builtins(tmp_path, capsys):
 
 
 def test_operator_quickstart_prepares_new_user_workspace(tmp_path, capsys):
-    assert cli.main(["operator", "quickstart", "--target", str(tmp_path), "--harnesses", "codex,opencode", "--json"]) == 0
+    assert (
+        cli.main(["operator", "quickstart", "--target", str(tmp_path), "--harnesses", "codex,opencode", "--json"]) == 0
+    )
     payload = json.loads(capsys.readouterr().out)
     assert payload["status"] == "ok"
     assert payload["owner"] == "codex"
@@ -1093,7 +1236,12 @@ def test_operator_quickstart_prepares_new_user_workspace(tmp_path, capsys):
 
 
 def test_operator_quickstart_dry_run_does_not_write(tmp_path, capsys):
-    assert cli.main(["operator", "quickstart", "--target", str(tmp_path), "--harnesses", "codex,claude", "--dry-run", "--json"]) == 0
+    assert (
+        cli.main(
+            ["operator", "quickstart", "--target", str(tmp_path), "--harnesses", "codex,claude", "--dry-run", "--json"]
+        )
+        == 0
+    )
     payload = json.loads(capsys.readouterr().out)
     assert payload["dry_run"] is True
     assert payload["status"] == "ok"
@@ -1205,7 +1353,21 @@ def test_internal_dogfood_fresh_repo_onboarding_loop(tmp_path, capsys, monkeypat
 
     assert cli.main(["roadmap", "commands", "--target", str(tmp_path), "--write", "--json"]) == 0
     capsys.readouterr()
-    assert cli.main(["operator", "init", "--profile", "internal-dogfood", "--target", str(tmp_path), "--waive-public-release", "--json"]) == 0
+    assert (
+        cli.main(
+            [
+                "operator",
+                "init",
+                "--profile",
+                "internal-dogfood",
+                "--target",
+                str(tmp_path),
+                "--waive-public-release",
+                "--json",
+            ]
+        )
+        == 0
+    )
     init_payload = json.loads(capsys.readouterr().out)
     assert init_payload["profile"] == "internal-dogfood"
 
@@ -1294,7 +1456,11 @@ def test_local_operator_doctor_does_not_block_on_inactive_content_guard_hook(tmp
             "pre_push_hook_enabled": False,
             "pre_push_hook_mode": "not-enabled",
             "checks": [
-                {"status": "warn", "name": "content_guard_hook_not_enabled", "detail": "no executable pre-push hook found in the active Git hooks path"},
+                {
+                    "status": "warn",
+                    "name": "content_guard_hook_not_enabled",
+                    "detail": "no executable pre-push hook found in the active Git hooks path",
+                },
             ],
             "suggested_commands": ["git config core.hooksPath hooks"],
             "last_scan": None,

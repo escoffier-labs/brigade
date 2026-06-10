@@ -67,12 +67,29 @@ def test_memory_care_scan_detects_card_decay_issues(tmp_path, monkeypatch, capsy
     )
     _write_card(
         cards / "expired.md",
-        {"topic": "expired", "last_reviewed": "2026-05-20", "fresh_until": "2026-05-01", "confidence": "high", "evidence": ["README.md"]},
+        {
+            "topic": "expired",
+            "last_reviewed": "2026-05-20",
+            "fresh_until": "2026-05-01",
+            "confidence": "high",
+            "evidence": ["README.md"],
+        },
     )
-    _write_card(cards / "undersourced.md", {"topic": "undersourced", "last_reviewed": "2026-05-20", "confidence": "low"})
-    _write_card(cards / "orphan.md", {"topic": "orphan", "last_reviewed": "2026-05-20", "confidence": "high", "evidence": ["README.md"]})
-    _write_card(cards / "dup-a.md", {"topic": "duplicate", "last_reviewed": "2026-05-20", "confidence": "high", "evidence": ["README.md"]})
-    _write_card(cards / "dup-b.md", {"topic": "duplicate", "last_reviewed": "2026-05-20", "confidence": "high", "evidence": ["README.md"]})
+    _write_card(
+        cards / "undersourced.md", {"topic": "undersourced", "last_reviewed": "2026-05-20", "confidence": "low"}
+    )
+    _write_card(
+        cards / "orphan.md",
+        {"topic": "orphan", "last_reviewed": "2026-05-20", "confidence": "high", "evidence": ["README.md"]},
+    )
+    _write_card(
+        cards / "dup-a.md",
+        {"topic": "duplicate", "last_reviewed": "2026-05-20", "confidence": "high", "evidence": ["README.md"]},
+    )
+    _write_card(
+        cards / "dup-b.md",
+        {"topic": "duplicate", "last_reviewed": "2026-05-20", "confidence": "high", "evidence": ["README.md"]},
+    )
     _write_card(
         cards / "big.md",
         {"topic": "big", "last_reviewed": "2026-05-20", "confidence": "high", "evidence": ["README.md"]},
@@ -121,13 +138,28 @@ def test_memory_care_status_explains_freshness_metadata(tmp_path, monkeypatch, c
     _write_card(cards / "missing-meta.md", {"topic": "missing-meta", "confidence": "high", "evidence": ["README.md"]})
     _write_card(
         cards / "stale.md",
-        {"topic": "stale", "last_reviewed": "2026-01-01", "fresh_until": "2026-12-01", "confidence": "high", "evidence": ["README.md"]},
+        {
+            "topic": "stale",
+            "last_reviewed": "2026-01-01",
+            "fresh_until": "2026-12-01",
+            "confidence": "high",
+            "evidence": ["README.md"],
+        },
     )
     _write_card(
         cards / "expired.md",
-        {"topic": "expired", "last_reviewed": "2026-05-01", "fresh_until": "2026-05-01", "confidence": "high", "evidence": ["README.md"]},
+        {
+            "topic": "expired",
+            "last_reviewed": "2026-05-01",
+            "fresh_until": "2026-05-01",
+            "confidence": "high",
+            "evidence": ["README.md"],
+        },
     )
-    _write_card(cards / "undersourced.md", {"topic": "undersourced", "last_reviewed": "2026-05-01", "fresh_until": "2026-12-01", "confidence": "low"})
+    _write_card(
+        cards / "undersourced.md",
+        {"topic": "undersourced", "last_reviewed": "2026-05-01", "fresh_until": "2026-12-01", "confidence": "low"},
+    )
     (tmp_path / "MEMORY.md").write_text(
         "\n".join(
             [
@@ -177,8 +209,14 @@ def test_memory_care_plan_fixes_reports_blockers_and_writes_nothing(tmp_path, mo
     cards = tmp_path / "memory" / "cards"
     reviewed_missing = cards / "reviewed-missing.md"
     freshness_missing = cards / "freshness-missing.md"
-    _write_card(reviewed_missing, {"topic": "reviewed-missing", "fresh_until": "2026-12-01", "confidence": "high", "evidence": ["README.md"]})
-    _write_card(freshness_missing, {"topic": "freshness-missing", "last_reviewed": "2026-05-01", "confidence": "high", "evidence": ["README.md"]})
+    _write_card(
+        reviewed_missing,
+        {"topic": "reviewed-missing", "fresh_until": "2026-12-01", "confidence": "high", "evidence": ["README.md"]},
+    )
+    _write_card(
+        freshness_missing,
+        {"topic": "freshness-missing", "last_reviewed": "2026-05-01", "confidence": "high", "evidence": ["README.md"]},
+    )
     (tmp_path / "MEMORY.md").write_text(
         "- [reviewed-missing](memory/cards/reviewed-missing.md)\n"
         "- [freshness-missing](memory/cards/freshness-missing.md)\n"
@@ -212,7 +250,10 @@ def test_memory_care_imports_autofix_plan_and_brief_visibility(tmp_path, monkeyp
     monkeypatch.setattr(memory_cmd, "_today", lambda: date(2026, 5, 28))
     monkeypatch.setattr(work_cmd.helpers, "_now", lambda: datetime(2026, 5, 28, 12, 0, tzinfo=timezone.utc))
     cards = tmp_path / "memory" / "cards"
-    _write_card(cards / "missing-reviewed.md", {"topic": "missing-reviewed", "fresh_until": "2026-12-01", "confidence": "high", "evidence": ["README.md"]})
+    _write_card(
+        cards / "missing-reviewed.md",
+        {"topic": "missing-reviewed", "fresh_until": "2026-12-01", "confidence": "high", "evidence": ["README.md"]},
+    )
     (tmp_path / "MEMORY.md").write_text("- [missing-reviewed](memory/cards/missing-reviewed.md)\n")
 
     assert memory_cmd.scan(target=tmp_path) == 0
@@ -238,7 +279,16 @@ def test_memory_care_imports_dedupe_and_respect_dismissed(tmp_path, monkeypatch,
     monkeypatch.setattr(memory_cmd, "_today", lambda: date(2026, 5, 28))
     monkeypatch.setattr(work_cmd.helpers, "_now", lambda: datetime(2026, 5, 28, 12, 0, tzinfo=timezone.utc))
     cards = tmp_path / "memory" / "cards"
-    _write_card(cards / "stale.md", {"topic": "stale", "last_reviewed": "2026-01-01", "fresh_until": "2026-12-01", "confidence": "high", "evidence": ["README.md"]})
+    _write_card(
+        cards / "stale.md",
+        {
+            "topic": "stale",
+            "last_reviewed": "2026-01-01",
+            "fresh_until": "2026-12-01",
+            "confidence": "high",
+            "evidence": ["README.md"],
+        },
+    )
     (tmp_path / "MEMORY.md").write_text("- [stale](memory/cards/stale.md)\n")
     assert memory_cmd.scan(target=tmp_path) == 0
     capsys.readouterr()
@@ -281,7 +331,16 @@ def test_memory_care_promoted_task_reaches_work_run_acceptance(tmp_path, monkeyp
     )
     monkeypatch.setattr(work_cmd.helpers, "_now", lambda: next(times))
     cards = tmp_path / "memory" / "cards"
-    _write_card(cards / "stale.md", {"topic": "stale", "last_reviewed": "2026-01-01", "fresh_until": "2026-12-01", "confidence": "high", "evidence": ["README.md"]})
+    _write_card(
+        cards / "stale.md",
+        {
+            "topic": "stale",
+            "last_reviewed": "2026-01-01",
+            "fresh_until": "2026-12-01",
+            "confidence": "high",
+            "evidence": ["README.md"],
+        },
+    )
     (tmp_path / "MEMORY.md").write_text("- [stale](memory/cards/stale.md)\n")
     assert memory_cmd.scan(target=tmp_path) == 0
     assert memory_cmd.import_issues(target=tmp_path) == 0
@@ -293,7 +352,9 @@ def test_memory_care_promoted_task_reaches_work_run_acceptance(tmp_path, monkeyp
         seen["task"] = task
         run_dir = kwargs["output_dir"]
         run_dir.mkdir(parents=True)
-        (run_dir / "run.json").write_text(json.dumps({"started_at": "2026-05-28T12:10:00Z", "status": "ok", "task": task}))
+        (run_dir / "run.json").write_text(
+            json.dumps({"started_at": "2026-05-28T12:10:00Z", "status": "ok", "task": task})
+        )
         (run_dir / "final.txt").write_text("Done.\n")
         return 0
 
@@ -379,7 +440,9 @@ def test_memory_care_readers_fall_back_to_legacy_decay_dir(tmp_path, capsys):
         "cards": [],
     }
     (legacy / "refresh-queue.json").write_text(json.dumps(legacy_queue))
-    (legacy / "scan-latest.json").write_text(json.dumps({"scan_date": "2026-06-01", "generated_at": "2026-06-01T00:00:00+00:00", "issues": []}))
+    (legacy / "scan-latest.json").write_text(
+        json.dumps({"scan_date": "2026-06-01", "generated_at": "2026-06-01T00:00:00+00:00", "issues": []})
+    )
 
     rc = memory_cmd.import_issues(target=tmp_path, dry_run=True, json_output=True)
     out = capsys.readouterr()
@@ -404,7 +467,13 @@ def test_memory_care_backfill_dry_run_derives_dates_and_writes_nothing(tmp_path,
     _write_card(cards / "bare.md", {"topic": "bare", "confidence": "high", "evidence": ["README.md"]})
     _write_card(
         cards / "complete.md",
-        {"topic": "complete", "last_reviewed": "2026-05-01", "fresh_until": "2026-12-01", "confidence": "high", "evidence": ["README.md"]},
+        {
+            "topic": "complete",
+            "last_reviewed": "2026-05-01",
+            "fresh_until": "2026-12-01",
+            "confidence": "high",
+            "evidence": ["README.md"],
+        },
     )
     _git(tmp_path, "add", "-A")
     _git(tmp_path, "commit", "-q", "-m", "add cards")
@@ -431,7 +500,13 @@ def test_memory_care_backfill_apply_writes_metadata_receipt_and_is_idempotent(tm
     _write_card(cards / "bare.md", {"topic": "bare", "confidence": "high", "evidence": ["README.md"]})
     _write_card(
         cards / "complete.md",
-        {"topic": "complete", "last_reviewed": "2026-05-01", "fresh_until": "2026-12-01", "confidence": "high", "evidence": ["README.md"]},
+        {
+            "topic": "complete",
+            "last_reviewed": "2026-05-01",
+            "fresh_until": "2026-12-01",
+            "confidence": "high",
+            "evidence": ["README.md"],
+        },
     )
     _git(tmp_path, "add", "-A")
     _git(tmp_path, "commit", "-q", "-m", "add cards")

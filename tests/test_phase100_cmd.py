@@ -38,13 +38,17 @@ def test_center_readiness_clean_closeout_and_manual_checklist(tmp_path, capsys):
     assert plan["ready"] is True
     assert plan["blocker_count"] == 0
     assert all(item["manual_only"] is True for item in plan["manual_publish_checklist"])
-    assert any(item["remote_mutation"] is True for item in plan["manual_publish_checklist"] if "remote_mutation" in item)
+    assert any(
+        item["remote_mutation"] is True for item in plan["manual_publish_checklist"] if "remote_mutation" in item
+    )
 
     assert cli.main(["center", "readiness", "closeout", "--target", str(tmp_path), "--json"]) == 0
     closeout = json.loads(capsys.readouterr().out)
     assert closeout["ready"] is True
     assert closeout["review_status"] == "reviewed"
-    assert (tmp_path / ".brigade" / "center" / "readiness" / closeout["readiness_id"] / "MANUAL_PUBLISH_CHECKLIST.md").is_file()
+    assert (
+        tmp_path / ".brigade" / "center" / "readiness" / closeout["readiness_id"] / "MANUAL_PUBLISH_CHECKLIST.md"
+    ).is_file()
 
     assert center_cmd.readiness_list(target=tmp_path, json_output=True) == 0
     listed = json.loads(capsys.readouterr().out)

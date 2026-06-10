@@ -1,6 +1,8 @@
 # src/brigade/research/engine.py
 from __future__ import annotations
-import json, re, time
+import json
+import re
+import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional
 from .types import Caps, Finding
@@ -32,17 +34,19 @@ FINAL_PROMPT = """Write a detailed, well-structured final report answering:
 **Evidence:** {report}
 Use ## headings, synthesize, keep inline citations, add an executive summary and a conclusion."""
 
+
 @dataclass
 class ResearchResult:
     report: str
     findings: List[Finding]
     stats: Dict[str, Any]
 
+
 @dataclass
 class DeepResearcher:
     llm: Any
     local_index: Any
-    web: Any                                   # SearchProvider or None
+    web: Any  # SearchProvider or None
     caps: Caps
     external_sources: List[Any] = field(default_factory=list)
     on_checkpoint: Optional[Callable[[Dict[str, Any]], None]] = None
@@ -74,8 +78,7 @@ class DeepResearcher:
         start = time.time()
         prior = prior or {}
         report = prior.get("report", "")
-        findings: List[Finding] = [Finding(**f) if isinstance(f, dict) else f
-                                   for f in prior.get("findings", [])]
+        findings: List[Finding] = [Finding(**f) if isinstance(f, dict) else f for f in prior.get("findings", [])]
         seen_q = set(prior.get("queries", []))
         seen_u = set(prior.get("urls", []))
         round_no = prior.get("round", 0)
@@ -89,8 +92,7 @@ class DeepResearcher:
                 break
             round_no += 1
             self._emit("searching", round=round_no)
-            queries = [q for q in self._gen_queries(question, plan, report, round_no)
-                       if q not in seen_q]
+            queries = [q for q in self._gen_queries(question, plan, report, round_no) if q not in seen_q]
             seen_q.update(queries)
             if not queries:
                 break
@@ -108,18 +110,27 @@ class DeepResearcher:
                     break
 
             if self.on_checkpoint:
-                self.on_checkpoint({"round": round_no, "report": report,
-                                    "findings": [f.as_dict() for f in findings],
-                                    "urls": sorted(seen_u), "queries": sorted(seen_q),
-                                    "plan": plan})
+                self.on_checkpoint(
+                    {
+                        "round": round_no,
+                        "report": report,
+                        "findings": [f.as_dict() for f in findings],
+                        "urls": sorted(seen_u),
+                        "queries": sorted(seen_q),
+                        "plan": plan,
+                    }
+                )
             if round_no >= self.caps.min_rounds and self._should_stop(question, report):
                 break
 
         self._emit("writing")
         final = self._final(question, report) if report else "No information gathered."
-        stats = {"rounds": round_no, "findings": len(findings),
-                 "sources": len(seen_u) + sum(1 for f in findings if f.trust == "local"),
-                 "elapsed": round(time.time() - start, 1)}
+        stats = {
+            "rounds": round_no,
+            "findings": len(findings),
+            "sources": len(seen_u) + sum(1 for f in findings if f.trust == "local"),
+            "elapsed": round(time.time() - start, 1),
+        }
         return ResearchResult(report=final, findings=findings, stats=stats)
 
     def _safe_plan(self, q: str) -> str:
@@ -130,9 +141,11 @@ class DeepResearcher:
 
     def _gen_queries(self, q: str, plan: str, report: str, rnd: int) -> List[str]:
         n = 4 if rnd == 1 else 3
-        out = self._ask(QUERY_PROMPT.format(q=q, plan=plan or "(none)",
-                                            report=report or "(none)", n=n),
-                        max_tokens=2048, temperature=0.5)
+        out = self._ask(
+            QUERY_PROMPT.format(q=q, plan=plan or "(none)", report=report or "(none)", n=n),
+            max_tokens=2048,
+            temperature=0.5,
+        )
         return self._json_array(out)
 
     def _gather(self, query: str, goal: str, seen_u: set) -> List[Finding]:
@@ -140,20 +153,31 @@ class DeepResearcher:
         # trusted local
         if self.local_index is not None:
             for hit in self.local_index.search(query, limit=self.caps.max_local_docs_per_round):
-                f = _extract.extract_finding(self.llm, goal=goal, source=hit["source"],
-                                             title=hit.get("title", ""), content=hit["text"],
-                                             trust="local",
-                                             max_content_chars=self.caps.max_content_chars)
+                f = _extract.extract_finding(
+                    self.llm,
+                    goal=goal,
+                    source=hit["source"],
+                    title=hit.get("title", ""),
+                    content=hit["text"],
+                    trust="local",
+                    max_content_chars=self.caps.max_content_chars,
+                )
                 if f:
                     results.append(f)
         # untrusted web (opt-in: web provider supplied)
         if self.web is not None:
-            results += self._gather_provider(self.web, query, goal, seen_u, default_trust=getattr(self.web, "trust", "web"))
+            results += self._gather_provider(
+                self.web, query, goal, seen_u, default_trust=getattr(self.web, "trust", "web")
+            )
         for provider in self.external_sources:
-            results += self._gather_provider(provider, query, goal, seen_u, default_trust=getattr(provider, "trust", "cli"))
+            results += self._gather_provider(
+                provider, query, goal, seen_u, default_trust=getattr(provider, "trust", "cli")
+            )
         return results
 
-    def _gather_provider(self, provider: Any, query: str, goal: str, seen_u: set, *, default_trust: str) -> List[Finding]:
+    def _gather_provider(
+        self, provider: Any, query: str, goal: str, seen_u: set, *, default_trust: str
+    ) -> List[Finding]:
         results: List[Finding] = []
         for r in provider.search(query, self.caps.max_urls_per_round):
             url = r.get("url", "")
@@ -166,20 +190,27 @@ class DeepResearcher:
             trust = str(r.get("trust") or getattr(provider, "trust", default_trust))
             if trust not in {"web", "cli", "browser", "local"}:
                 trust = default_trust
-            f = _extract.extract_finding(self.llm, goal=goal, source=url,
-                                         title=r.get("title", ""), content=page["content"],
-                                         trust=trust,  # type: ignore[arg-type]
-                                         max_content_chars=self.caps.max_content_chars)
+            f = _extract.extract_finding(
+                self.llm,
+                goal=goal,
+                source=url,
+                title=r.get("title", ""),
+                content=page["content"],
+                trust=trust,  # type: ignore[arg-type]
+                max_content_chars=self.caps.max_content_chars,
+            )
             if f:
                 results.append(f)
         return results
 
     def _synthesize(self, q: str, findings: List[Finding], report: str) -> str:
-        window = findings[-self.caps.synthesis_window:]
+        window = findings[-self.caps.synthesis_window :]
         text = "\n\n".join(f"[{f.trust}] {f.title} ({f.source})\n{f.summary}" for f in window)
         try:
-            return self._ask(SYNTH_PROMPT.format(q=q, report=report or "(none)", findings=text),
-                             max_tokens=self.caps.max_report_tokens)
+            return self._ask(
+                SYNTH_PROMPT.format(q=q, report=report or "(none)", findings=text),
+                max_tokens=self.caps.max_report_tokens,
+            )
         except Exception:
             return report
 
@@ -192,7 +223,8 @@ class DeepResearcher:
 
     def _final(self, q: str, report: str) -> str:
         try:
-            return self._ask(FINAL_PROMPT.format(q=q, report=report),
-                             max_tokens=self.caps.max_report_tokens, timeout=180)
+            return self._ask(
+                FINAL_PROMPT.format(q=q, report=report), max_tokens=self.caps.max_report_tokens, timeout=180
+            )
         except Exception:
             return report

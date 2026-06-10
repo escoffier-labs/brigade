@@ -1,4 +1,5 @@
 """Selection data model: depth + harnesses + owner + includes."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -60,23 +61,15 @@ class Selection:
 
     def validate(self) -> None:
         if self.depth not in KNOWN_DEPTHS:
-            raise ValueError(
-                f"unknown depth: {self.depth!r} (valid: {KNOWN_DEPTHS})"
-            )
+            raise ValueError(f"unknown depth: {self.depth!r} (valid: {KNOWN_DEPTHS})")
         for h in self.harnesses:
             if h not in KNOWN_HARNESSES:
-                raise ValueError(
-                    f"unknown harness: {h!r} (valid: {KNOWN_HARNESSES})"
-                )
+                raise ValueError(f"unknown harness: {h!r} (valid: {KNOWN_HARNESSES})")
         for inc in self.includes:
             if inc not in KNOWN_INCLUDES:
-                raise ValueError(
-                    f"unknown include: {inc!r} (valid: {KNOWN_INCLUDES})"
-                )
+                raise ValueError(f"unknown include: {inc!r} (valid: {KNOWN_INCLUDES})")
         if self.owner != "this-repo" and self.owner not in self.harnesses:
-            raise ValueError(
-                f"owner {self.owner!r} not in selected harnesses {self.harnesses}"
-            )
+            raise ValueError(f"owner {self.owner!r} not in selected harnesses {self.harnesses}")
 
 
 def resolve_owner(harnesses: List[str], override: Optional[str] = None) -> str:
@@ -90,9 +83,7 @@ def resolve_owner(harnesses: List[str], override: Optional[str] = None) -> str:
         if override == "this-repo":
             return override
         if override not in harnesses:
-            raise ValueError(
-                f"owner override {override!r} not in selected harnesses {harnesses}"
-            )
+            raise ValueError(f"owner override {override!r} not in selected harnesses {harnesses}")
         return override
     for candidate in HARNESS_PRIORITY:
         if candidate == "this-repo":

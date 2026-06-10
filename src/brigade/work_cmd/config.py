@@ -98,7 +98,9 @@ def _backup_summary_unsafe_fields(payload: object, prefix: str = "") -> list[str
             rendered = str(key)
             normalized = rendered.strip().casefold()
             path = f"{prefix}.{rendered}" if prefix else rendered
-            if normalized in constants.BACKUP_UNSAFE_FIELDS or any(token in normalized for token in ("password", "secret", "token", "webhook")):
+            if normalized in constants.BACKUP_UNSAFE_FIELDS or any(
+                token in normalized for token in ("password", "secret", "token", "webhook")
+            ):
                 unsafe.append(path)
                 continue
             unsafe.extend(_backup_summary_unsafe_fields(value, path))
@@ -270,7 +272,9 @@ def _backup_destination_checks(target: Path, destination: dict[str, Any], now: d
     if not isinstance(payload, dict):
         return [_backup_issue(destination, "invalid_summary", "summary must be a JSON object")]
     unsafe_fields = _backup_summary_unsafe_fields(payload)
-    safe_summary = ledger_mod._string_field(payload.get("summary")) or ledger_mod._string_field(payload.get("safe_summary"))
+    safe_summary = ledger_mod._string_field(payload.get("summary")) or ledger_mod._string_field(
+        payload.get("safe_summary")
+    )
     evidence_path = ledger_mod._string_field(payload.get("evidence_path"))
     destination_label = ledger_mod._string_field(payload.get("destination_label")) or str(destination.get("id"))
     if unsafe_fields:
@@ -286,33 +290,121 @@ def _backup_destination_checks(target: Path, destination: dict[str, Any], now: d
         )
     snapshot_age = _backup_age_hours(payload.get("latest_snapshot_at"), now)
     if snapshot_age is None:
-        checks.append(_backup_issue(destination, "snapshot_missing", f"{destination_label} latest snapshot time is missing", summary=safe_summary, evidence_path=evidence_path))
+        checks.append(
+            _backup_issue(
+                destination,
+                "snapshot_missing",
+                f"{destination_label} latest snapshot time is missing",
+                summary=safe_summary,
+                evidence_path=evidence_path,
+            )
+        )
     elif snapshot_age > float(destination.get("snapshot_stale_hours", 36)):
-        checks.append(_backup_issue(destination, "snapshot_stale", f"{destination_label} latest snapshot is {snapshot_age:.1f}h old", summary=safe_summary, evidence_path=evidence_path))
+        checks.append(
+            _backup_issue(
+                destination,
+                "snapshot_stale",
+                f"{destination_label} latest snapshot is {snapshot_age:.1f}h old",
+                summary=safe_summary,
+                evidence_path=evidence_path,
+            )
+        )
     check_result = payload.get("latest_check_result")
     check_age = _backup_age_hours(payload.get("latest_check_at"), now)
     if not _backup_result_ok(check_result):
-        checks.append(_backup_issue(destination, "check_failed", f"{destination_label} latest check result is {check_result or 'missing'}", summary=safe_summary, evidence_path=evidence_path))
+        checks.append(
+            _backup_issue(
+                destination,
+                "check_failed",
+                f"{destination_label} latest check result is {check_result or 'missing'}",
+                summary=safe_summary,
+                evidence_path=evidence_path,
+            )
+        )
     elif check_age is None:
-        checks.append(_backup_issue(destination, "check_missing", f"{destination_label} latest check time is missing", summary=safe_summary, evidence_path=evidence_path))
+        checks.append(
+            _backup_issue(
+                destination,
+                "check_missing",
+                f"{destination_label} latest check time is missing",
+                summary=safe_summary,
+                evidence_path=evidence_path,
+            )
+        )
     elif check_age > float(destination.get("check_stale_hours", 168)):
-        checks.append(_backup_issue(destination, "check_stale", f"{destination_label} latest check is {check_age:.1f}h old", summary=safe_summary, evidence_path=evidence_path))
+        checks.append(
+            _backup_issue(
+                destination,
+                "check_stale",
+                f"{destination_label} latest check is {check_age:.1f}h old",
+                summary=safe_summary,
+                evidence_path=evidence_path,
+            )
+        )
     prune_result = payload.get("latest_prune_result")
     prune_age = _backup_age_hours(payload.get("latest_prune_at"), now)
     if not _backup_result_ok(prune_result):
-        checks.append(_backup_issue(destination, "prune_failed", f"{destination_label} latest prune result is {prune_result or 'missing'}", summary=safe_summary, evidence_path=evidence_path))
+        checks.append(
+            _backup_issue(
+                destination,
+                "prune_failed",
+                f"{destination_label} latest prune result is {prune_result or 'missing'}",
+                summary=safe_summary,
+                evidence_path=evidence_path,
+            )
+        )
     elif prune_age is None:
-        checks.append(_backup_issue(destination, "prune_missing", f"{destination_label} latest prune time is missing", summary=safe_summary, evidence_path=evidence_path))
+        checks.append(
+            _backup_issue(
+                destination,
+                "prune_missing",
+                f"{destination_label} latest prune time is missing",
+                summary=safe_summary,
+                evidence_path=evidence_path,
+            )
+        )
     elif prune_age > float(destination.get("prune_stale_hours", 168)):
-        checks.append(_backup_issue(destination, "prune_stale", f"{destination_label} latest prune is {prune_age:.1f}h old", summary=safe_summary, evidence_path=evidence_path))
+        checks.append(
+            _backup_issue(
+                destination,
+                "prune_stale",
+                f"{destination_label} latest prune is {prune_age:.1f}h old",
+                summary=safe_summary,
+                evidence_path=evidence_path,
+            )
+        )
     restore_result = payload.get("latest_restore_rehearsal_result")
     restore_age = _backup_age_hours(payload.get("latest_restore_rehearsal_at"), now)
     if not _backup_result_ok(restore_result):
-        checks.append(_backup_issue(destination, "restore_rehearsal_failed", f"{destination_label} latest restore rehearsal result is {restore_result or 'missing'}", summary=safe_summary, evidence_path=evidence_path))
+        checks.append(
+            _backup_issue(
+                destination,
+                "restore_rehearsal_failed",
+                f"{destination_label} latest restore rehearsal result is {restore_result or 'missing'}",
+                summary=safe_summary,
+                evidence_path=evidence_path,
+            )
+        )
     elif restore_age is None:
-        checks.append(_backup_issue(destination, "restore_rehearsal_missing", f"{destination_label} latest restore rehearsal time is missing", summary=safe_summary, evidence_path=evidence_path))
+        checks.append(
+            _backup_issue(
+                destination,
+                "restore_rehearsal_missing",
+                f"{destination_label} latest restore rehearsal time is missing",
+                summary=safe_summary,
+                evidence_path=evidence_path,
+            )
+        )
     elif restore_age > float(destination.get("restore_rehearsal_stale_days", 90)) * 24:
-        checks.append(_backup_issue(destination, "restore_rehearsal_overdue", f"{destination_label} latest restore rehearsal is {restore_age / 24:.1f}d old", summary=safe_summary, evidence_path=evidence_path))
+        checks.append(
+            _backup_issue(
+                destination,
+                "restore_rehearsal_overdue",
+                f"{destination_label} latest restore rehearsal is {restore_age / 24:.1f}d old",
+                summary=safe_summary,
+                evidence_path=evidence_path,
+            )
+        )
     return checks
 
 
@@ -324,7 +416,9 @@ def _backup_health(target: Path) -> dict[str, Any]:
         status = constants.WARN if not helpers._backup_config_path(target).is_file() else constants.FAIL
         checks.append({"status": status, "name": "backup_config", "detail": "; ".join(errors)})
     else:
-        checks.append({"status": constants.OK, "name": "backup_config", "detail": str(helpers._backup_config_path(target))})
+        checks.append(
+            {"status": constants.OK, "name": "backup_config", "detail": str(helpers._backup_config_path(target))}
+        )
     now = helpers._now() if destinations else None
     for destination in destinations:
         if not destination.get("enabled", True):
@@ -334,17 +428,9 @@ def _backup_health(target: Path) -> dict[str, Any]:
     closeout = _backup_latest_closeout(target)
     closed_fingerprints = set(closeout.get("source_fingerprints", [])) if isinstance(closeout, dict) else set()
     raw_issues = [check for check in checks if check.get("status") != constants.OK]
-    quieted_issues = [
-        issue for issue in raw_issues if _backup_issue_fingerprint(issue) in closed_fingerprints
-    ]
-    issues = [
-        issue for issue in raw_issues if _backup_issue_fingerprint(issue) not in closed_fingerprints
-    ]
-    changed_fingerprints = [
-        _backup_issue_fingerprint(issue)
-        for issue in issues
-        if closed_fingerprints
-    ]
+    quieted_issues = [issue for issue in raw_issues if _backup_issue_fingerprint(issue) in closed_fingerprints]
+    issues = [issue for issue in raw_issues if _backup_issue_fingerprint(issue) not in closed_fingerprints]
+    changed_fingerprints = [_backup_issue_fingerprint(issue) for issue in issues if closed_fingerprints]
     restore_rehearsal_issues = [
         issue
         for issue in raw_issues
@@ -439,7 +525,9 @@ def _backup_issue_records(target: Path) -> list[dict[str, Any]]:
                 "kind": "task" if issue_type in {"missing_summary", "unsafe_summary_fields"} else "incident",
                 "source": "backup-health",
                 "type": "workflow",
-                "priority": "high" if issue_type in {"snapshot_stale", "check_failed", "restore_rehearsal_failed"} else "normal",
+                "priority": "high"
+                if issue_type in {"snapshot_stale", "check_failed", "restore_rehearsal_failed"}
+                else "normal",
                 "template": "bugfix",
                 "acceptance": [f"`brigade work backup doctor` no longer reports {destination}/{issue_type}."],
                 "metadata": metadata,
@@ -638,7 +726,9 @@ def _load_review_config(target: Path) -> tuple[list[dict[str, Any]], list[str]]:
                 if safe is not None:
                     reviewer[field] = safe
         target_paths = _string_list(item.get("target_paths", []), label=f"{label}: target_paths", errors=errors)
-        supported_modes = _string_list(item.get("supported_modes", []), label=f"{label}: supported_modes", errors=errors)
+        supported_modes = _string_list(
+            item.get("supported_modes", []), label=f"{label}: supported_modes", errors=errors
+        )
         reviewer["target_paths"] = target_paths
         reviewer["supported_modes"] = supported_modes
         enabled = item.get("enabled", True)

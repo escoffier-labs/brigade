@@ -276,11 +276,11 @@ def _write_work_handoff(target: Path, session_dir: Path, payload: dict[str, Any]
     next_step = dogfood.get("next") if isinstance(dogfood, dict) else None
     next_line = f"- next: {next_step}" if next_step else "- next: none extracted"
     note = payload.get("note") or ""
-    document_content = f"""### Brigade work session: {payload.get('id')}
+    document_content = f"""### Brigade work session: {payload.get("id")}
 - target: `{target}`
 - session artifacts: `{session_dir}`
-- branch: {git.get('branch') if isinstance(git, dict) else 'unknown'}
-- dirty files: {len(dirty) if isinstance(dirty, list) else 'unknown'}
+- branch: {git.get("branch") if isinstance(git, dict) else "unknown"}
+- dirty files: {len(dirty) if isinstance(dirty, list) else "unknown"}
 {latest_line}
 {next_line}
 """
@@ -302,14 +302,14 @@ A Brigade work session was ended and local session artifacts were written. This 
 
 ## Durable facts
 
-- session: `{payload.get('id')}`
+- session: `{payload.get("id")}`
 - target: `{target}`
 - session artifacts: `{session_dir}`
-- status: {payload.get('status')}
-- started: {payload.get('started_at')}
-- ended: {payload.get('ended_at')}
-- note: {note or 'none'}
-- branch: {git.get('branch') if isinstance(git, dict) else 'unknown'}
+- status: {payload.get("status")}
+- started: {payload.get("started_at")}
+- ended: {payload.get("ended_at")}
+- note: {note or "none"}
+- branch: {git.get("branch") if isinstance(git, dict) else "unknown"}
 - dirty files:
 {dirty_lines}
 {latest_line}
@@ -317,9 +317,9 @@ A Brigade work session was ended and local session artifacts were written. This 
 
 ## Evidence
 
-- session.json: `{session_dir / 'session.json'}`
-- start summary: `{session_dir / 'start.md'}`
-- end summary: `{session_dir / 'end.md'}`
+- session.json: `{session_dir / "session.json"}`
+- start summary: `{session_dir / "start.md"}`
+- end summary: `{session_dir / "end.md"}`
 
 ## Recommended memory action
 
@@ -525,7 +525,9 @@ def _compact_health_section(payload: object) -> dict[str, Any] | None:
         compact["review"] = {
             "issue_count": review.get("issue_count", 0),
             "top_issue": _compact_top(review.get("top_issue")),
-            "top_pending_import": ledger_mod._import_summary(review.get("top_pending_import")) if review.get("top_pending_import") else None,
+            "top_pending_import": ledger_mod._import_summary(review.get("top_pending_import"))
+            if review.get("top_pending_import")
+            else None,
         }
     return compact
 
@@ -550,7 +552,24 @@ def _compact_repo_fleet_health(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def _brief_payload(target: Path, *, limit: int = 3) -> dict[str, Any]:
-    from .. import center_cmd, chat_cmd, context_cmd, daily_cmd, handoff_cmd, learn_cmd, memory_cmd, notifications_cmd, pantry_cmd, phases_cmd, projects_cmd, repos_cmd, research_cmd, roadmap_cmd, security_cmd, tools_cmd
+    from .. import (
+        center_cmd,
+        chat_cmd,
+        context_cmd,
+        daily_cmd,
+        handoff_cmd,
+        learn_cmd,
+        memory_cmd,
+        notifications_cmd,
+        pantry_cmd,
+        phases_cmd,
+        projects_cmd,
+        repos_cmd,
+        research_cmd,
+        roadmap_cmd,
+        security_cmd,
+        tools_cmd,
+    )
 
     target = target.expanduser().resolve()
     active = helpers._active_session_info(target)
@@ -818,7 +837,7 @@ def start(
     _write_session_markdown(session_dir / "start.md", title="Brigade Work Session Start", payload=payload, key="start")
     current.write_text(session_id + "\n")
     print(f"session: {session_dir}")
-    print(f"status: active")
+    print("status: active")
     return 0
 
 
@@ -995,7 +1014,10 @@ def recap(*, target: Path, limit: int = 5, since: str | None = None) -> int:
         sessions = [
             (path, payload)
             for path, payload in sessions
-            if (helpers._parse_iso_datetime(payload.get("ended_at") or payload.get("started_at")) or datetime.min.replace(tzinfo=timezone.utc))
+            if (
+                helpers._parse_iso_datetime(payload.get("ended_at") or payload.get("started_at"))
+                or datetime.min.replace(tzinfo=timezone.utc)
+            )
             >= since_dt
         ]
     sessions = sessions[:limit]
@@ -1196,7 +1218,9 @@ def brief(*, target: Path, limit: int = 3, json_output: bool = False) -> int:
         print(f"notifications: {notifications.get('status')} configured={notifications.get('configured')}")
         top_notification = notifications.get("top_issue") if isinstance(notifications.get("top_issue"), dict) else None
         if top_notification:
-            print(f"notifications_top_issue: {top_notification.get('name')} {helpers._short(str(top_notification.get('detail', '')))}")
+            print(
+                f"notifications_top_issue: {top_notification.get('name')} {helpers._short(str(top_notification.get('detail', '')))}"
+            )
 
     print(f"next_source: {payload['next_source']}")
     if payload.get("task_id"):
@@ -1300,25 +1324,24 @@ def brief(*, target: Path, limit: int = 3, json_output: bool = False) -> int:
         print(f"inbox_hygiene: {helpers._count_status(issue_count)}")
         top_inbox = inbox_hygiene.get("top_issue") if isinstance(inbox_hygiene.get("top_issue"), dict) else None
         if top_inbox:
-            print(
-                "inbox_top_issue: "
-                f"{top_inbox.get('name')} "
-                f"{helpers._short(str(top_inbox.get('detail', '')))}"
-            )
+            print(f"inbox_top_issue: {top_inbox.get('name')} {helpers._short(str(top_inbox.get('detail', '')))}")
 
     scanner_health = payload.get("scanner_health") if isinstance(payload.get("scanner_health"), dict) else {}
     scanner_checks = scanner_health.get("checks") if isinstance(scanner_health.get("checks"), list) else []
     if scanner_checks:
-        warnings = [check for check in scanner_checks if isinstance(check, dict) and check.get("status") != constants.OK]
+        warnings = [
+            check for check in scanner_checks if isinstance(check, dict) and check.get("status") != constants.OK
+        ]
         print(f"scanner_config: {scanner_health.get('config_path')}")
         print(f"scanner_health: {helpers._count_status(len(warnings), 'warning')}")
         next_scanner = scanner_health.get("next_run") if isinstance(scanner_health.get("next_run"), dict) else None
         if next_scanner:
             print(
-                "scanner_next_run: "
-                f"{next_scanner.get('id')} {next_scanner.get('start')} {next_scanner.get('cadence')}"
+                f"scanner_next_run: {next_scanner.get('id')} {next_scanner.get('start')} {next_scanner.get('cadence')}"
             )
-        latest_scanner_run = scanner_health.get("latest_run") if isinstance(scanner_health.get("latest_run"), dict) else None
+        latest_scanner_run = (
+            scanner_health.get("latest_run") if isinstance(scanner_health.get("latest_run"), dict) else None
+        )
         if latest_scanner_run:
             print(
                 "scanner_latest_run: "
@@ -1327,7 +1350,9 @@ def brief(*, target: Path, limit: int = 3, json_output: bool = False) -> int:
             )
         due_scanners = scanner_health.get("due") if isinstance(scanner_health.get("due"), list) else []
         if due_scanners:
-            print(f"scanner_due: {', '.join(str(item.get('id')) for item in due_scanners[:5] if isinstance(item, dict))}")
+            print(
+                f"scanner_due: {', '.join(str(item.get('id')) for item in due_scanners[:5] if isinstance(item, dict))}"
+            )
 
     scanner_sweeps = payload.get("scanner_sweeps") if isinstance(payload.get("scanner_sweeps"), dict) else {}
     if scanner_sweeps:
@@ -1340,7 +1365,9 @@ def brief(*, target: Path, limit: int = 3, json_output: bool = False) -> int:
         top_pending = review.get("top_pending_import") if isinstance(review.get("top_pending_import"), dict) else None
         if top_pending and latest_sweep:
             print(f"scanner_unreviewed_sweep: {latest_sweep.get('sweep_id')}")
-            print(f"scanner_sweep_import: {top_pending.get('id')} {top_pending.get('source')} {helpers._short(str(top_pending.get('text', '')))}")
+            print(
+                f"scanner_sweep_import: {top_pending.get('id')} {top_pending.get('source')} {helpers._short(str(top_pending.get('text', '')))}"
+            )
             print(f"scanner_sweep_review: brigade work sweep-review {latest_sweep.get('sweep_id')}")
 
     chat_surfaces = payload.get("chat_surfaces") if isinstance(payload.get("chat_surfaces"), dict) else {}
@@ -1378,7 +1405,9 @@ def brief(*, target: Path, limit: int = 3, json_output: bool = False) -> int:
         print(f"security_config: {security_health.get('config_path')}")
         issue_count = security_health.get("issue_count")
         print(f"security_health: {helpers._count_status(issue_count)}")
-        top_security = security_health.get("top_finding") if isinstance(security_health.get("top_finding"), dict) else None
+        top_security = (
+            security_health.get("top_finding") if isinstance(security_health.get("top_finding"), dict) else None
+        )
         if top_security:
             print(
                 "security_top_finding: "
@@ -1415,27 +1444,45 @@ def brief(*, target: Path, limit: int = 3, json_output: bool = False) -> int:
         approvals = daily_driver.get("approvals") if isinstance(daily_driver.get("approvals"), dict) else {}
         if approvals.get("pending_count"):
             top_approval = approvals.get("top_pending") if isinstance(approvals.get("top_pending"), dict) else {}
-            print(f"daily_pending_approval: {top_approval.get('approval_id')} {helpers._short(str(top_approval.get('safe_summary', '')))}")
+            print(
+                f"daily_pending_approval: {top_approval.get('approval_id')} {helpers._short(str(top_approval.get('safe_summary', '')))}"
+            )
 
     phase_ledger = payload.get("phase_ledger") if isinstance(payload.get("phase_ledger"), dict) else {}
     if phase_ledger:
         print(f"phase_ledger: {helpers._count_status(phase_ledger.get('issue_count'))}")
         print(f"phase_records: {phase_ledger.get('record_count', 0)}")
         print(f"phase_actions: {phase_ledger.get('open_action_count', 0)}")
-        latest_phase_session = phase_ledger.get("latest_session") if isinstance(phase_ledger.get("latest_session"), dict) else None
+        latest_phase_session = (
+            phase_ledger.get("latest_session") if isinstance(phase_ledger.get("latest_session"), dict) else None
+        )
         if latest_phase_session:
             print(f"phase_session: {latest_phase_session.get('session_id')} [{latest_phase_session.get('status')}]")
-        latest_checkpoint = phase_ledger.get("latest_session_checkpoint") if isinstance(phase_ledger.get("latest_session_checkpoint"), dict) else None
-        latest_checkpoint_compare = phase_ledger.get("latest_session_checkpoint_compare") if isinstance(phase_ledger.get("latest_session_checkpoint_compare"), dict) else None
+        latest_checkpoint = (
+            phase_ledger.get("latest_session_checkpoint")
+            if isinstance(phase_ledger.get("latest_session_checkpoint"), dict)
+            else None
+        )
+        latest_checkpoint_compare = (
+            phase_ledger.get("latest_session_checkpoint_compare")
+            if isinstance(phase_ledger.get("latest_session_checkpoint_compare"), dict)
+            else None
+        )
         if latest_checkpoint:
-            compare_count = latest_checkpoint_compare.get("issue_count") if isinstance(latest_checkpoint_compare, dict) else 0
-            print(f"phase_checkpoint: {latest_checkpoint.get('checkpoint_id')} [{latest_checkpoint.get('status')}] issues={compare_count}")
+            compare_count = (
+                latest_checkpoint_compare.get("issue_count") if isinstance(latest_checkpoint_compare, dict) else 0
+            )
+            print(
+                f"phase_checkpoint: {latest_checkpoint.get('checkpoint_id')} [{latest_checkpoint.get('status')}] issues={compare_count}"
+            )
         top_phase = phase_ledger.get("top_issue") if isinstance(phase_ledger.get("top_issue"), dict) else None
         if top_phase:
             print(f"phase_top_issue: {top_phase.get('name')} {helpers._short(str(top_phase.get('detail', '')))}")
         top_phase_action = phase_ledger.get("top_action") if isinstance(phase_ledger.get("top_action"), dict) else None
         if top_phase_action:
-            print(f"phase_top_action: {top_phase_action.get('action_id')} {helpers._short(str(top_phase_action.get('safe_summary', '')))}")
+            print(
+                f"phase_top_action: {top_phase_action.get('action_id')} {helpers._short(str(top_phase_action.get('safe_summary', '')))}"
+            )
 
     tool_catalog = payload.get("tool_catalog") if isinstance(payload.get("tool_catalog"), dict) else {}
     if tool_catalog:
@@ -1480,14 +1527,15 @@ def brief(*, target: Path, limit: int = 3, json_output: bool = False) -> int:
                     f"{helpers._short(str(checkpoint_top.get('detail', '')))}"
                 )
 
-    roadmap_completion = payload.get("roadmap_completion") if isinstance(payload.get("roadmap_completion"), dict) else {}
+    roadmap_completion = (
+        payload.get("roadmap_completion") if isinstance(payload.get("roadmap_completion"), dict) else {}
+    )
     if roadmap_completion:
         issue_count = roadmap_completion.get("issue_count")
-        print(
-            "roadmap_completion: "
-            f"{helpers._count_status(issue_count)}"
+        print(f"roadmap_completion: {helpers._count_status(issue_count)}")
+        top_roadmap = (
+            roadmap_completion.get("top_issue") if isinstance(roadmap_completion.get("top_issue"), dict) else None
         )
-        top_roadmap = roadmap_completion.get("top_issue") if isinstance(roadmap_completion.get("top_issue"), dict) else None
         if top_roadmap:
             print(f"roadmap_top_issue: {top_roadmap.get('name')} {helpers._short(str(top_roadmap.get('detail', '')))}")
 
@@ -1506,27 +1554,39 @@ def brief(*, target: Path, limit: int = 3, json_output: bool = False) -> int:
         if context_packs.get("issue_count"):
             top_context = context_packs.get("top_issue") if isinstance(context_packs.get("top_issue"), dict) else None
             if top_context:
-                print(f"context_top_issue: {top_context.get('name')} {helpers._short(str(top_context.get('detail', '')))}")
+                print(
+                    f"context_top_issue: {top_context.get('name')} {helpers._short(str(top_context.get('detail', '')))}"
+                )
 
-    project_consolidation = payload.get("project_consolidation") if isinstance(payload.get("project_consolidation"), dict) else {}
+    project_consolidation = (
+        payload.get("project_consolidation") if isinstance(payload.get("project_consolidation"), dict) else {}
+    )
     if project_consolidation:
         issue_count = project_consolidation.get("issue_count")
         print(f"project_consolidation: {helpers._count_status(issue_count)}")
-        top_project = project_consolidation.get("top_issue") if isinstance(project_consolidation.get("top_issue"), dict) else None
+        top_project = (
+            project_consolidation.get("top_issue") if isinstance(project_consolidation.get("top_issue"), dict) else None
+        )
         if top_project:
-            print(f"project_consolidation_top_issue: {top_project.get('name')} {helpers._short(str(top_project.get('detail', '')))}")
+            print(
+                f"project_consolidation_top_issue: {top_project.get('name')} {helpers._short(str(top_project.get('detail', '')))}"
+            )
 
     learning = payload.get("learning") if isinstance(payload.get("learning"), dict) else {}
     if learning:
         print(f"learning_candidates: {learning.get('candidate_count', 0)}")
         top_learning = learning.get("top_issue") if isinstance(learning.get("top_issue"), dict) else None
         if top_learning:
-            print(f"learning_top_issue: {top_learning.get('name')} {helpers._short(str(top_learning.get('detail', '')))}")
+            print(
+                f"learning_top_issue: {top_learning.get('name')} {helpers._short(str(top_learning.get('detail', '')))}"
+            )
 
     research_handoffs = payload.get("research_handoffs") if isinstance(payload.get("research_handoffs"), dict) else {}
     if research_handoffs:
         print(f"research_handoffs: {helpers._count_status(research_handoffs.get('issue_count'))}")
-        top_research = research_handoffs.get("top_issue") if isinstance(research_handoffs.get("top_issue"), dict) else None
+        top_research = (
+            research_handoffs.get("top_issue") if isinstance(research_handoffs.get("top_issue"), dict) else None
+        )
         if top_research:
             print(f"research_handoff_top_issue: {top_research.get('run_id')} {top_research.get('status')}")
             if top_research.get("suggested_next_command"):
@@ -1541,16 +1601,22 @@ def brief(*, target: Path, limit: int = 3, json_output: bool = False) -> int:
         print(f"operator_report: {helpers._count_status(issue_count)}")
         top_report = operator_report.get("top_issue") if isinstance(operator_report.get("top_issue"), dict) else None
         if top_report:
-            print(f"operator_report_top_issue: {top_report.get('name')} {helpers._short(str(top_report.get('detail', '')))}")
+            print(
+                f"operator_report_top_issue: {top_report.get('name')} {helpers._short(str(top_report.get('detail', '')))}"
+            )
             if top_report.get("suggested_next_command"):
                 print(f"operator_report_command: {top_report.get('suggested_next_command')}")
 
     operator_actions = payload.get("operator_actions") if isinstance(payload.get("operator_actions"), dict) else {}
     if operator_actions:
         print(f"operator_actions: {operator_actions.get('open_count', 0)} open")
-        top_action = operator_actions.get("top_action") if isinstance(operator_actions.get("top_action"), dict) else None
+        top_action = (
+            operator_actions.get("top_action") if isinstance(operator_actions.get("top_action"), dict) else None
+        )
         if top_action:
-            print(f"operator_action_top: {top_action.get('action_id')} {top_action.get('source_group')} {helpers._short(str(top_action.get('safe_summary', '')))}")
+            print(
+                f"operator_action_top: {top_action.get('action_id')} {top_action.get('source_group')} {helpers._short(str(top_action.get('safe_summary', '')))}"
+            )
             if top_action.get("suggested_command"):
                 print(f"operator_action_command: {top_action.get('suggested_command')}")
 
@@ -1562,16 +1628,24 @@ def brief(*, target: Path, limit: int = 3, json_output: bool = False) -> int:
                 f"review_latest: {latest_review.get('run_id')} "
                 f"{latest_review.get('reviewer_id')} [{latest_review.get('status')}]"
             )
-        unclosed_review = code_review.get("latest_unclosed_run") if isinstance(code_review.get("latest_unclosed_run"), dict) else None
+        unclosed_review = (
+            code_review.get("latest_unclosed_run") if isinstance(code_review.get("latest_unclosed_run"), dict) else None
+        )
         if unclosed_review:
             print(f"review_unclosed: {unclosed_review.get('run_id')} {unclosed_review.get('reviewer_id')}")
         if code_review.get("pending_finding_count"):
             print(f"review_pending_findings: {code_review.get('pending_finding_count')}")
         if code_review.get("unresolved_finding_count"):
             print(f"review_unresolved_findings: {code_review.get('unresolved_finding_count')}")
-        top_review = code_review.get("top_pending_finding") if isinstance(code_review.get("top_pending_finding"), dict) else None
+        top_review = (
+            code_review.get("top_pending_finding") if isinstance(code_review.get("top_pending_finding"), dict) else None
+        )
         if not top_review:
-            top_review = code_review.get("top_unresolved_finding") if isinstance(code_review.get("top_unresolved_finding"), dict) else None
+            top_review = (
+                code_review.get("top_unresolved_finding")
+                if isinstance(code_review.get("top_unresolved_finding"), dict)
+                else None
+            )
         if top_review:
             finding_id = top_review.get("id") or top_review.get("import_id")
             print(f"review_top_finding: {finding_id} {helpers._short(str(top_review.get('text', '')))}")
@@ -1594,7 +1668,11 @@ def brief(*, target: Path, limit: int = 3, json_output: bool = False) -> int:
         if total:
             print(f"handoff_drafts_pending: {counts.get('pending', 0)}")
             print(f"handoff_drafts_reviewed: {counts.get('reviewed', 0)}")
-            latest_ingest = handoff_drafts.get("latest_ingest_run") if isinstance(handoff_drafts.get("latest_ingest_run"), dict) else None
+            latest_ingest = (
+                handoff_drafts.get("latest_ingest_run")
+                if isinstance(handoff_drafts.get("latest_ingest_run"), dict)
+                else None
+            )
             if latest_ingest:
                 print(
                     f"handoff_ingest_latest: {latest_ingest.get('run_id')} "
@@ -1602,7 +1680,9 @@ def brief(*, target: Path, limit: int = 3, json_output: bool = False) -> int:
                 )
             top_issue = handoff_drafts.get("top_issue") if isinstance(handoff_drafts.get("top_issue"), dict) else None
             if top_issue:
-                print(f"handoff_draft_top_issue: {top_issue.get('name')} {helpers._short(str(top_issue.get('detail', '')))}")
+                print(
+                    f"handoff_draft_top_issue: {top_issue.get('name')} {helpers._short(str(top_issue.get('detail', '')))}"
+                )
             drafts = handoff_drafts.get("drafts") if isinstance(handoff_drafts.get("drafts"), list) else []
             if drafts:
                 first = drafts[0]
@@ -1634,7 +1714,9 @@ def tasks(*, target: Path, all_tasks: bool = False, json_output: bool = False) -
         task_items = [task for task in task_items if task.get("status", "pending") == "pending"]
 
     if json_output:
-        print(json.dumps({"tasks_path": str(helpers._tasks_path(target)), "tasks": task_items}, indent=2, sort_keys=True))
+        print(
+            json.dumps({"tasks_path": str(helpers._tasks_path(target)), "tasks": task_items}, indent=2, sort_keys=True)
+        )
         return 0
 
     print(f"work tasks: {target}")
@@ -2069,9 +2151,7 @@ def bootstrap(
     artifacts_ignored = dogfood_cmd._check_git_ignored(effective_target, effective_artifacts_dir)
     work_ignored = dogfood_cmd._check_git_ignored(effective_target, work_root)
     handoff_ignored = (
-        dogfood_cmd._check_git_ignored(effective_target, effective_handoff_inbox)
-        if effective_handoff
-        else "disabled"
+        dogfood_cmd._check_git_ignored(effective_target, effective_handoff_inbox) if effective_handoff else "disabled"
     )
     ignore_values = {
         "config_ignored": config_ignored,
@@ -2084,7 +2164,11 @@ def bootstrap(
         _print_bootstrap_line(level, name, value)
 
     ready = failures == 0
-    _print_bootstrap_line(constants.OK if ready else constants.FAIL, "ready", "daily work loop is usable" if ready else f"{failures} blocker{'s' if failures != 1 else ''}")
+    _print_bootstrap_line(
+        constants.OK if ready else constants.FAIL,
+        "ready",
+        "daily work loop is usable" if ready else f"{failures} blocker{'s' if failures != 1 else ''}",
+    )
     print("next_command: brigade work run")
     return 0 if ready else 1
 
@@ -2132,7 +2216,9 @@ def run(
         }
     task_text = task or str(resolved["task"])
     consumed_task_id = resolved.get("task_id") if task is None and resolved.get("source") == "task_ledger" else None
-    ledger_task = resolved.get("ledger_task") if consumed_task_id and isinstance(resolved.get("ledger_task"), dict) else None
+    ledger_task = (
+        resolved.get("ledger_task") if consumed_task_id and isinstance(resolved.get("ledger_task"), dict) else None
+    )
     run_task_text = (
         _render_task_run_prompt(ledger_task)
         if ledger_task is not None and ledger_mod._task_acceptance(ledger_task)
@@ -2257,7 +2343,21 @@ def status(*, target: Path, limit: int = 12) -> int:
 
 
 def doctor(*, target: Path) -> int:
-    from .. import center_cmd, chat_cmd, context_cmd, daily_cmd, handoff_cmd, learn_cmd, memory_cmd, phases_cmd, projects_cmd, repos_cmd, roadmap_cmd, security_cmd, tools_cmd
+    from .. import (
+        center_cmd,
+        chat_cmd,
+        context_cmd,
+        daily_cmd,
+        handoff_cmd,
+        learn_cmd,
+        memory_cmd,
+        phases_cmd,
+        projects_cmd,
+        repos_cmd,
+        roadmap_cmd,
+        security_cmd,
+        tools_cmd,
+    )
 
     target = target.expanduser().resolve()
     failures = 0
@@ -2289,7 +2389,9 @@ def doctor(*, target: Path) -> int:
             helpers._doctor_line(constants.OK, "dogfood_config", config)
         else:
             failures += 1
-            helpers._doctor_line(constants.FAIL, "dogfood_config", f"missing, run `brigade dogfood init --target {target}`")
+            helpers._doctor_line(
+                constants.FAIL, "dogfood_config", f"missing, run `brigade dogfood init --target {target}`"
+            )
         helpers._doctor_line(constants.OK, "dogfood_target", effective_target)
         helpers._doctor_line(constants.OK, "dogfood_artifacts", artifacts_dir)
 
@@ -2312,7 +2414,9 @@ def doctor(*, target: Path) -> int:
                 f"{enrichment.get('provider') or 'none'} ({enrichment.get('status')})",
             )
     else:
-        helpers._doctor_line(constants.WARN, "security_config", f"missing, run `brigade security init --target {effective_target}`")
+        helpers._doctor_line(
+            constants.WARN, "security_config", f"missing, run `brigade security init --target {effective_target}`"
+        )
 
     if security_config_valid:
         try:
@@ -2324,11 +2428,21 @@ def doctor(*, target: Path) -> int:
             stale = suppression_health["stale"]
             missing_reasons = suppression_health["missing_reasons"]
             if stale:
-                helpers._doctor_line(constants.WARN, "security_stale_suppressions", f"{len(stale)} no longer match current findings: {', '.join(stale[:5])}")
+                helpers._doctor_line(
+                    constants.WARN,
+                    "security_stale_suppressions",
+                    f"{len(stale)} no longer match current findings: {', '.join(stale[:5])}",
+                )
             if missing_reasons:
-                helpers._doctor_line(constants.WARN, "security_suppression_reasons", f"{len(missing_reasons)} missing reason: {', '.join(missing_reasons[:5])}")
+                helpers._doctor_line(
+                    constants.WARN,
+                    "security_suppression_reasons",
+                    f"{len(missing_reasons)} missing reason: {', '.join(missing_reasons[:5])}",
+                )
             if not stale and not missing_reasons:
-                helpers._doctor_line(constants.OK, "security_suppressions", f"{suppression_health['suppression_count']} configured")
+                helpers._doctor_line(
+                    constants.OK, "security_suppressions", f"{suppression_health['suppression_count']} configured"
+                )
 
     security_artifacts = security_cmd.default_artifacts_dir(effective_target)
     security_bundle = security_cmd.inspect_evidence_bundle(security_artifacts)
@@ -2352,7 +2466,9 @@ def doctor(*, target: Path) -> int:
             open_finding_check = check
             break
     if open_finding_check is not None:
-        helpers._doctor_line(str(open_finding_check.get("status")), "security_open_findings", open_finding_check.get("detail"))
+        helpers._doctor_line(
+            str(open_finding_check.get("status")), "security_open_findings", open_finding_check.get("detail")
+        )
 
     codex_path = shutil.which("codex")
     if codex_path is None:
@@ -2388,9 +2504,15 @@ def doctor(*, target: Path) -> int:
     missing_acceptance = [task for task in pending_tasks if not ledger_mod._task_acceptance(task)]
     if missing_acceptance:
         sample = ", ".join(str(task.get("id")) for task in missing_acceptance[:5])
-        helpers._doctor_line(constants.WARN, "task_acceptance", f"{len(missing_acceptance)} pending task(s) missing acceptance criteria: {sample}")
+        helpers._doctor_line(
+            constants.WARN,
+            "task_acceptance",
+            f"{len(missing_acceptance)} pending task(s) missing acceptance criteria: {sample}",
+        )
     else:
-        helpers._doctor_line(constants.OK, "task_acceptance", "pending tasks have acceptance criteria or no tasks are pending")
+        helpers._doctor_line(
+            constants.OK, "task_acceptance", "pending tasks have acceptance criteria or no tasks are pending"
+        )
 
     plan_coverage = ledger_mod._plan_coverage_payload(effective_target)
     if plan_coverage["significant_without_plan"] > 0:
@@ -2411,7 +2533,11 @@ def doctor(*, target: Path) -> int:
         gh_path = shutil.which("gh")
         if gh_path is None:
             sample = ", ".join(str(task.get("id")) for task, _ in issue_tasks[:5])
-            helpers._doctor_line(constants.WARN, "github_issues", f"{len(issue_tasks)} issue-backed task(s) cannot be checked because gh is missing: {sample}")
+            helpers._doctor_line(
+                constants.WARN,
+                "github_issues",
+                f"{len(issue_tasks)} issue-backed task(s) cannot be checked because gh is missing: {sample}",
+            )
         else:
             closed: list[str] = []
             unchecked: list[str] = []
@@ -2428,9 +2554,17 @@ def doctor(*, target: Path) -> int:
                 if state == "closed":
                     closed.append(str(task.get("id")))
             if closed:
-                helpers._doctor_line(constants.WARN, "github_issues_closed", f"{len(closed)} remote issue(s) are closed: {', '.join(closed[:5])}")
+                helpers._doctor_line(
+                    constants.WARN,
+                    "github_issues_closed",
+                    f"{len(closed)} remote issue(s) are closed: {', '.join(closed[:5])}",
+                )
             if unchecked:
-                helpers._doctor_line(constants.WARN, "github_issues_unchecked", f"{len(unchecked)} issue-backed task(s) could not be checked: {', '.join(unchecked[:5])}")
+                helpers._doctor_line(
+                    constants.WARN,
+                    "github_issues_unchecked",
+                    f"{len(unchecked)} issue-backed task(s) could not be checked: {', '.join(unchecked[:5])}",
+                )
             if not closed and not unchecked:
                 helpers._doctor_line(constants.OK, "github_issues", f"{len(issue_tasks)} issue-backed task(s) checked")
     else:
@@ -2446,19 +2580,29 @@ def doctor(*, target: Path) -> int:
     ]
     if stale_imports:
         sample = ", ".join(str(item.get("id")) for item in stale_imports[:5])
-        helpers._doctor_line(constants.WARN, "scanner_imports_stale", f"{len(stale_imports)} pending import(s) older than {constants.IMPORT_STALE_HOURS}h: {sample}")
+        helpers._doctor_line(
+            constants.WARN,
+            "scanner_imports_stale",
+            f"{len(stale_imports)} pending import(s) older than {constants.IMPORT_STALE_HOURS}h: {sample}",
+        )
     else:
         helpers._doctor_line(constants.OK, "scanner_imports_stale", "none")
     task_imports_missing_acceptance = [
-        item
-        for item in pending_imports
-        if item.get("kind") == "task" and not ledger_mod._import_task_acceptance(item)
+        item for item in pending_imports if item.get("kind") == "task" and not ledger_mod._import_task_acceptance(item)
     ]
     if task_imports_missing_acceptance:
         sample = ", ".join(str(item.get("id")) for item in task_imports_missing_acceptance[:5])
-        helpers._doctor_line(constants.WARN, "scanner_import_acceptance", f"{len(task_imports_missing_acceptance)} pending task import(s) missing acceptance criteria: {sample}")
+        helpers._doctor_line(
+            constants.WARN,
+            "scanner_import_acceptance",
+            f"{len(task_imports_missing_acceptance)} pending task import(s) missing acceptance criteria: {sample}",
+        )
     else:
-        helpers._doctor_line(constants.OK, "scanner_import_acceptance", "pending task imports have acceptance criteria or no task imports are pending")
+        helpers._doctor_line(
+            constants.OK,
+            "scanner_import_acceptance",
+            "pending task imports have acceptance criteria or no task imports are pending",
+        )
     dismissed_by_source: dict[str, int] = {}
     for item in ledger_mod._read_imports(effective_target):
         if not isinstance(item, dict) or item.get("status") != "dismissed":
@@ -2472,7 +2616,11 @@ def doctor(*, target: Path) -> int:
     }
     if noisy_sources:
         detail = ", ".join(f"{source}={count}" for source, count in sorted(noisy_sources.items()))
-        helpers._doctor_line(constants.WARN, "scanner_import_noise", f"dismissed import threshold {constants.DISMISSED_SOURCE_WARN_THRESHOLD}: {detail}")
+        helpers._doctor_line(
+            constants.WARN,
+            "scanner_import_noise",
+            f"dismissed import threshold {constants.DISMISSED_SOURCE_WARN_THRESHOLD}: {detail}",
+        )
     else:
         helpers._doctor_line(constants.OK, "scanner_import_noise", "none")
 
@@ -2555,7 +2703,11 @@ def doctor(*, target: Path) -> int:
     learning_health = learn_cmd.health(effective_target)
     if learning_health.get("issue_count"):
         top_learning = learning_health.get("top_issue") if isinstance(learning_health.get("top_issue"), dict) else {}
-        helpers._doctor_line(constants.WARN, "learning_candidates", top_learning.get("detail") or f"{learning_health.get('candidate_count', 0)} candidate(s)")
+        helpers._doctor_line(
+            constants.WARN,
+            "learning_candidates",
+            top_learning.get("detail") or f"{learning_health.get('candidate_count', 0)} candidate(s)",
+        )
     else:
         helpers._doctor_line(constants.OK, "learning_candidates", "none")
 
@@ -2563,14 +2715,18 @@ def doctor(*, target: Path) -> int:
     for check in center_report_health.get("checks", []):
         helpers._doctor_line(str(check.get("status")), str(check.get("name")), check.get("detail"))
     if not center_report_health.get("checks"):
-        latest_report = center_report_health.get("latest") if isinstance(center_report_health.get("latest"), dict) else {}
+        latest_report = (
+            center_report_health.get("latest") if isinstance(center_report_health.get("latest"), dict) else {}
+        )
         helpers._doctor_line(constants.OK, "operator_report", latest_report.get("report_id") or "none")
 
     center_actions_health = center_cmd.actions_health(effective_target)
     for check in center_actions_health.get("checks", []):
         helpers._doctor_line(str(check.get("status")), str(check.get("name")), check.get("detail"))
     if not center_actions_health.get("checks"):
-        helpers._doctor_line(constants.OK, "operator_actions", f"{center_actions_health.get('action_count', 0)} action(s)")
+        helpers._doctor_line(
+            constants.OK, "operator_actions", f"{center_actions_health.get('action_count', 0)} action(s)"
+        )
 
     daily_health = daily_cmd.health(effective_target)
     for check in daily_health.get("checks", []):
@@ -2593,7 +2749,9 @@ def doctor(*, target: Path) -> int:
         if cfg and cfg.handoff_inbox is not None
         else dogfood_cmd.default_handoff_inbox(effective_target)
     )
-    helpers._doctor_line(constants.OK if handoff_inbox.parent.exists() else constants.WARN, "handoff_inbox", handoff_inbox)
+    helpers._doctor_line(
+        constants.OK if handoff_inbox.parent.exists() else constants.WARN, "handoff_inbox", handoff_inbox
+    )
 
     config_ignored = dogfood_cmd._check_git_ignored(effective_target, config)
     helpers._doctor_line(_doctor_ignore_level(config_ignored), "config_ignored", config_ignored)
@@ -2601,9 +2759,13 @@ def doctor(*, target: Path) -> int:
     helpers._doctor_line(_doctor_ignore_level(artifacts_ignored), "artifacts_ignored", artifacts_ignored)
     security_ignored = dogfood_cmd._check_git_ignored(effective_target, security_artifacts)
     helpers._doctor_line(_doctor_ignore_level(security_ignored), "security_ignored", security_ignored)
-    backup_config_ignored = dogfood_cmd._check_git_ignored(effective_target, helpers._backup_config_path(effective_target))
+    backup_config_ignored = dogfood_cmd._check_git_ignored(
+        effective_target, helpers._backup_config_path(effective_target)
+    )
     helpers._doctor_line(_doctor_ignore_level(backup_config_ignored), "backup_config_ignored", backup_config_ignored)
-    scanner_config_ignored = dogfood_cmd._check_git_ignored(effective_target, helpers._scanner_config_path(effective_target))
+    scanner_config_ignored = dogfood_cmd._check_git_ignored(
+        effective_target, helpers._scanner_config_path(effective_target)
+    )
     helpers._doctor_line(_doctor_ignore_level(scanner_config_ignored), "scanner_config_ignored", scanner_config_ignored)
     tools_config_ignored = dogfood_cmd._check_git_ignored(effective_target, tools_cmd.config_path(effective_target))
     helpers._doctor_line(_doctor_ignore_level(tools_config_ignored), "tools_config_ignored", tools_config_ignored)
@@ -2622,9 +2784,15 @@ def doctor(*, target: Path) -> int:
         helpers._doctor_line(constants.WARN, "latest_run", "none")
     else:
         latest_path, latest_meta = latest
-        helpers._doctor_line(constants.OK, "latest_run", f"{latest_meta.get('started_at', latest_path.name)} {latest_path}")
+        helpers._doctor_line(
+            constants.OK, "latest_run", f"{latest_meta.get('started_at', latest_path.name)} {latest_path}"
+        )
         next_step = dogfood_cmd.extract_next_step(dogfood_cmd._read_final(latest_path))
-        helpers._doctor_line(constants.OK if next_step else constants.WARN, "latest_next", helpers._short(next_step) if next_step else "none")
+        helpers._doctor_line(
+            constants.OK if next_step else constants.WARN,
+            "latest_next",
+            helpers._short(next_step) if next_step else "none",
+        )
 
     if failures:
         helpers._doctor_line(constants.FAIL, "ready", f"{failures} blocker{'s' if failures != 1 else ''}")

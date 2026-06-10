@@ -8,7 +8,10 @@ from tests.test_phase44_cmd import _build_train
 
 def test_release_waivers_record_list_show_revoke_and_ready_gate(tmp_path, monkeypatch, capsys):
     train = _build_train(tmp_path, monkeypatch, capsys)
-    assert repos_cmd.release_closeout(target=tmp_path, train_id=train["train_id"], status="reviewed", json_output=True) == 0
+    assert (
+        repos_cmd.release_closeout(target=tmp_path, train_id=train["train_id"], status="reviewed", json_output=True)
+        == 0
+    )
     capsys.readouterr()
     assert repos_cmd.release_actions_build(target=tmp_path, train_id=train["train_id"], json_output=True) == 0
     capsys.readouterr()
@@ -20,17 +23,39 @@ def test_release_waivers_record_list_show_revoke_and_ready_gate(tmp_path, monkey
     assert "train has missing manual evidence" in not_ready["blockers"]
 
     for scope in ("blocked-repo", "unresolved-action", "missing-evidence"):
-        assert cli.main(["repos", "release", "waivers", "record", train["train_id"], "--scope", scope, "--reason", f"{scope} reviewed", "--target", str(tmp_path), "--json"]) == 0
+        assert (
+            cli.main(
+                [
+                    "repos",
+                    "release",
+                    "waivers",
+                    "record",
+                    train["train_id"],
+                    "--scope",
+                    scope,
+                    "--reason",
+                    f"{scope} reviewed",
+                    "--target",
+                    str(tmp_path),
+                    "--json",
+                ]
+            )
+            == 0
+        )
         waiver = json.loads(capsys.readouterr().out)["waiver"]
     assert waiver["status"] == "active"
     assert waiver["scope"] == "missing-evidence"
 
-    assert cli.main(["repos", "release", "waivers", "list", train["train_id"], "--target", str(tmp_path), "--json"]) == 0
+    assert (
+        cli.main(["repos", "release", "waivers", "list", train["train_id"], "--target", str(tmp_path), "--json"]) == 0
+    )
     waivers = json.loads(capsys.readouterr().out)
     assert waivers["waiver_count"] == 3
     assert {item["scope"] for item in waivers["waivers"]} == {"blocked-repo", "unresolved-action", "missing-evidence"}
 
-    assert cli.main(["repos", "release", "waivers", "show", waiver["waiver_id"], "--target", str(tmp_path), "--json"]) == 0
+    assert (
+        cli.main(["repos", "release", "waivers", "show", waiver["waiver_id"], "--target", str(tmp_path), "--json"]) == 0
+    )
     shown = json.loads(capsys.readouterr().out)
     assert shown["waiver"]["waiver_id"] == waiver["waiver_id"]
 
@@ -40,7 +65,23 @@ def test_release_waivers_record_list_show_revoke_and_ready_gate(tmp_path, monkey
     assert ready["blockers"] == []
     assert {item["scope"] for item in ready["waived"]} == {"blocked-repo", "unresolved-action", "missing-evidence"}
 
-    assert cli.main(["repos", "release", "waivers", "revoke", waiver["waiver_id"], "--reason", "missing evidence must be refreshed", "--target", str(tmp_path), "--json"]) == 0
+    assert (
+        cli.main(
+            [
+                "repos",
+                "release",
+                "waivers",
+                "revoke",
+                waiver["waiver_id"],
+                "--reason",
+                "missing evidence must be refreshed",
+                "--target",
+                str(tmp_path),
+                "--json",
+            ]
+        )
+        == 0
+    )
     revoked = json.loads(capsys.readouterr().out)
     assert revoked["waiver"]["status"] == "revoked"
     assert repos_cmd.release_ready(target=tmp_path, train_id=train["train_id"], json_output=True) == 1
@@ -50,13 +91,38 @@ def test_release_waivers_record_list_show_revoke_and_ready_gate(tmp_path, monkey
 
 def test_release_manifest_and_activity_include_safe_receipt_events(tmp_path, monkeypatch, capsys):
     train = _build_train(tmp_path, monkeypatch, capsys)
-    assert repos_cmd.release_closeout(target=tmp_path, train_id=train["train_id"], status="reviewed", reason="reviewed train", json_output=True) == 0
+    assert (
+        repos_cmd.release_closeout(
+            target=tmp_path, train_id=train["train_id"], status="reviewed", reason="reviewed train", json_output=True
+        )
+        == 0
+    )
     capsys.readouterr()
     assert repos_cmd.release_actions_build(target=tmp_path, train_id=train["train_id"], json_output=True) == 0
     capsys.readouterr()
-    assert repos_cmd.release_evidence_record(target=tmp_path, train_id=train["train_id"], repo_id="blocked", step="verification", status="blocked", summary="verification blocked", json_output=True) == 0
+    assert (
+        repos_cmd.release_evidence_record(
+            target=tmp_path,
+            train_id=train["train_id"],
+            repo_id="blocked",
+            step="verification",
+            status="blocked",
+            summary="verification blocked",
+            json_output=True,
+        )
+        == 0
+    )
     capsys.readouterr()
-    assert repos_cmd.release_waiver_record(target=tmp_path, train_id=train["train_id"], scope="blocked-evidence", reason="accepted local risk", json_output=True) == 0
+    assert (
+        repos_cmd.release_waiver_record(
+            target=tmp_path,
+            train_id=train["train_id"],
+            scope="blocked-evidence",
+            reason="accepted local risk",
+            json_output=True,
+        )
+        == 0
+    )
     capsys.readouterr()
     assert repos_cmd.release_report(target=tmp_path, train_id=train["train_id"], json_output=True) == 0
     capsys.readouterr()
@@ -65,7 +131,10 @@ def test_release_manifest_and_activity_include_safe_receipt_events(tmp_path, mon
     manifest_payload = json.loads(capsys.readouterr().out)
     manifest = manifest_payload["manifest"]
     assert manifest["train_id"] == train["train_id"]
-    assert {item["path_label"] for item in manifest["files"]} >= {"FLEET_RELEASE_EVIDENCE.json", "RELEASE_TRAIN_MANIFEST.json"}
+    assert {item["path_label"] for item in manifest["files"]} >= {
+        "FLEET_RELEASE_EVIDENCE.json",
+        "RELEASE_TRAIN_MANIFEST.json",
+    }
     assert all(not str(item.get("path_label")).startswith(str(tmp_path)) for item in manifest["files"])
     train_dir = tmp_path / ".brigade" / "repos" / "releases" / train["train_id"]
     assert (train_dir / "RELEASE_TRAIN_MANIFEST.json").is_file()
@@ -79,7 +148,10 @@ def test_release_manifest_and_activity_include_safe_receipt_events(tmp_path, mon
 
 def test_release_audit_reports_missing_bundle_and_evidence_then_improves(tmp_path, monkeypatch, capsys):
     train = _build_train(tmp_path, monkeypatch, capsys)
-    assert repos_cmd.release_closeout(target=tmp_path, train_id=train["train_id"], status="reviewed", json_output=True) == 0
+    assert (
+        repos_cmd.release_closeout(target=tmp_path, train_id=train["train_id"], status="reviewed", json_output=True)
+        == 0
+    )
     capsys.readouterr()
     assert repos_cmd.release_actions_build(target=tmp_path, train_id=train["train_id"], json_output=True) == 0
     capsys.readouterr()

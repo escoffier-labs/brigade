@@ -1,4 +1,5 @@
 """Local context engineering packs."""
+
 from __future__ import annotations
 
 import json
@@ -10,7 +11,12 @@ from typing import Any
 from uuid import uuid4
 
 from . import work_cmd
-from .localio import read_json_dict as _read_json, stable_hash as _stable_hash, utc_now as _now, write_json as _write_json
+from .localio import (
+    read_json_dict as _read_json,
+    stable_hash as _stable_hash,
+    utc_now as _now,
+    write_json as _write_json,
+)
 
 OK = "ok"
 WARN = "warn"
@@ -92,12 +98,21 @@ def _latest_json(root: Path, filename: str) -> dict[str, Any] | None:
     return _read_json(candidates[0]) if candidates else None
 
 
-def _context_payload(target: Path, *, kind: str = "repo", task_id: str | None = None, tool_id: str | None = None, release_id: str | None = None) -> dict[str, Any]:
+def _context_payload(
+    target: Path,
+    *,
+    kind: str = "repo",
+    task_id: str | None = None,
+    tool_id: str | None = None,
+    release_id: str | None = None,
+) -> dict[str, Any]:
     target = target.expanduser().resolve()
     pending_tasks = work_cmd._pending_tasks(target)
     selected_task = None
     if task_id:
-        selected_task = next((task for task in work_cmd._read_task_ledger(target).get("tasks", []) if task.get("id") == task_id), None)
+        selected_task = next(
+            (task for task in work_cmd._read_task_ledger(target).get("tasks", []) if task.get("id") == task_id), None
+        )
     elif pending_tasks:
         selected_task = pending_tasks[0]
     excluded = [
@@ -153,7 +168,15 @@ def _context_payload(target: Path, *, kind: str = "repo", task_id: str | None = 
     }
 
 
-def plan(*, target: Path, kind: str = "repo", task_id: str | None = None, tool_id: str | None = None, release_id: str | None = None, json_output: bool = False) -> int:
+def plan(
+    *,
+    target: Path,
+    kind: str = "repo",
+    task_id: str | None = None,
+    tool_id: str | None = None,
+    release_id: str | None = None,
+    json_output: bool = False,
+) -> int:
     payload = _context_payload(target, kind=kind, task_id=task_id, tool_id=tool_id, release_id=release_id)
     if json_output:
         print(json.dumps(payload, indent=2, sort_keys=True))
@@ -165,7 +188,15 @@ def plan(*, target: Path, kind: str = "repo", task_id: str | None = None, tool_i
     return 0
 
 
-def build(*, target: Path, kind: str = "repo", task_id: str | None = None, tool_id: str | None = None, release_id: str | None = None, json_output: bool = False) -> int:
+def build(
+    *,
+    target: Path,
+    kind: str = "repo",
+    task_id: str | None = None,
+    tool_id: str | None = None,
+    release_id: str | None = None,
+    json_output: bool = False,
+) -> int:
     target = target.expanduser().resolve()
     payload = _context_payload(target, kind=kind, task_id=task_id, tool_id=tool_id, release_id=release_id)
     pack_id = f"{_now().strftime('%Y%m%d-%H%M%S')}-context-{kind}-{uuid4().hex[:6]}"
@@ -328,10 +359,18 @@ def _context_sync_plan_payload(target: Path, pack_id: str = "latest") -> dict[st
         if created is not None:
             age_hours = (_now() - created).total_seconds() / 3600
             if age_hours > CONTEXT_PACK_STALE_HOURS:
-                checks.append({"status": WARN, "name": "context_sync_pack_stale", "detail": f"{pack.get('pack_id')} is {age_hours:.1f}h old"})
+                checks.append(
+                    {
+                        "status": WARN,
+                        "name": "context_sync_pack_stale",
+                        "detail": f"{pack.get('pack_id')} is {age_hours:.1f}h old",
+                    }
+                )
         for ref in pack.get("source_references", []) if isinstance(pack.get("source_references"), list) else []:
             if isinstance(ref, dict) and ref.get("exists") and not (target / str(ref.get("path"))).exists():
-                checks.append({"status": WARN, "name": "context_sync_missing_source_reference", "detail": str(ref.get("path"))})
+                checks.append(
+                    {"status": WARN, "name": "context_sync_missing_source_reference", "detail": str(ref.get("path"))}
+                )
     planned: list[dict[str, Any]] = []
     for sync_target in targets:
         destination = Path(str(sync_target["path"]))
@@ -351,11 +390,23 @@ def _context_sync_plan_payload(target: Path, pack_id: str = "latest") -> dict[st
         else:
             metadata = _read_sync_metadata(destination)
             if metadata is None:
-                item.update({"status": "conflict", "action": "skip", "detail": "destination exists without Brigade context sync metadata"})
+                item.update(
+                    {
+                        "status": "conflict",
+                        "action": "skip",
+                        "detail": "destination exists without Brigade context sync metadata",
+                    }
+                )
             elif metadata.get("pack_fingerprint") == pack_fingerprint:
                 item.update({"status": "current", "action": "skip", "detail": "destination is current"})
             else:
-                item.update({"status": "stale", "action": "update", "detail": "destination was built from older context evidence"})
+                item.update(
+                    {
+                        "status": "stale",
+                        "action": "update",
+                        "detail": "destination was built from older context evidence",
+                    }
+                )
         planned.append(item)
     blockers = [item for item in planned if item.get("status") in {"blocked", "conflict"}]
     return {
@@ -404,7 +455,9 @@ def _context_pack_issues(target: Path, pack: dict[str, Any]) -> list[dict[str, A
     task = pack.get("task") if isinstance(pack.get("task"), dict) else {}
     task_id = task.get("id")
     if isinstance(task_id, str) and task_id:
-        current = next((item for item in work_cmd._read_task_ledger(target).get("tasks", []) if item.get("id") == task_id), None)
+        current = next(
+            (item for item in work_cmd._read_task_ledger(target).get("tasks", []) if item.get("id") == task_id), None
+        )
         if current is None:
             issues.append(_context_issue(pack, "missing_task", task_id))
         else:
@@ -511,7 +564,8 @@ def import_issues(*, target: Path, json_output: bool = False) -> int:
                     "context_issue_type": issue_type,
                     "context_issue_detail": detail,
                     "source_item_key": f"context-pack:{pack_id}:{issue_type}",
-                    "source_fingerprint": issue.get("source_fingerprint") or _stable_hash({"pack_id": pack_id, "issue_type": issue_type, "detail": detail}),
+                    "source_fingerprint": issue.get("source_fingerprint")
+                    or _stable_hash({"pack_id": pack_id, "issue_type": issue_type, "detail": detail}),
                 },
             }
         )
@@ -549,7 +603,12 @@ def archive(*, target: Path, pack_id: str, json_output: bool = False) -> int:
         print(f"error: archived context pack already exists: {destination}", file=sys.stderr)
         return 2
     source.rename(destination)
-    payload = {"target": str(target), "pack_id": pack.get("pack_id"), "status": "archived", "archive_path": str(destination)}
+    payload = {
+        "target": str(target),
+        "pack_id": pack.get("pack_id"),
+        "status": "archived",
+        "archive_path": str(destination),
+    }
     if json_output:
         print(json.dumps(payload, indent=2, sort_keys=True))
         return 0
@@ -574,7 +633,13 @@ def health(target: Path) -> dict[str, Any]:
             if item.get("status") != OK:
                 issues.append(item)
         if sync.get("blocker_count", 0):
-            issues.append({"status": WARN, "name": "context_sync_blocked", "detail": f"{sync.get('blocker_count')} context sync destination(s) blocked"})
+            issues.append(
+                {
+                    "status": WARN,
+                    "name": "context_sync_blocked",
+                    "detail": f"{sync.get('blocker_count')} context sync destination(s) blocked",
+                }
+            )
     return {
         "target": str(target),
         "pack_count": len(packs),

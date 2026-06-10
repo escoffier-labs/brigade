@@ -48,20 +48,40 @@ expect_brigade = true
 def _seed_repo_state(repo: Path, capsys):
     inbox = repo / ".brigade" / "work" / "imports" / "inbox.jsonl"
     inbox.parent.mkdir(parents=True, exist_ok=True)
-    inbox.write_text(json.dumps({"id": "import-one", "text": "Fix local issue", "kind": "task", "source": "scanner", "status": "pending"}, sort_keys=True) + "\n")
+    inbox.write_text(
+        json.dumps(
+            {"id": "import-one", "text": "Fix local issue", "kind": "task", "source": "scanner", "status": "pending"},
+            sort_keys=True,
+        )
+        + "\n"
+    )
     assert center_cmd.report_build(target=repo, json_output=True) == 0
     report = json.loads(capsys.readouterr().out)
-    assert center_cmd.report_closeout(target=repo, report_id=report["report_id"], status="reviewed", json_output=True) == 0
+    assert (
+        center_cmd.report_closeout(target=repo, report_id=report["report_id"], status="reviewed", json_output=True) == 0
+    )
     capsys.readouterr()
     assert center_cmd.actions_build(target=repo, report_id=report["report_id"], json_output=True) == 0
     capsys.readouterr()
     _write_json(
         repo / ".brigade" / "release" / "runs" / "release-one" / "release.json",
-        {"run_id": "release-one", "status": "ready", "ready": True, "created_at": "2026-05-30T01:00:00+00:00", "path": str(repo / ".brigade" / "release" / "runs" / "release-one")},
+        {
+            "run_id": "release-one",
+            "status": "ready",
+            "ready": True,
+            "created_at": "2026-05-30T01:00:00+00:00",
+            "path": str(repo / ".brigade" / "release" / "runs" / "release-one"),
+        },
     )
     _write_json(
         repo / ".brigade" / "work" / "closeouts" / "closeout-one" / "closeout.json",
-        {"closeout_id": "closeout-one", "status": "ready", "ready": True, "created_at": "2026-05-30T01:00:00+00:00", "path": str(repo / ".brigade" / "work" / "closeouts" / "closeout-one" / "closeout.json")},
+        {
+            "closeout_id": "closeout-one",
+            "status": "ready",
+            "ready": True,
+            "created_at": "2026-05-30T01:00:00+00:00",
+            "path": str(repo / ".brigade" / "work" / "closeouts" / "closeout-one" / "closeout.json"),
+        },
     )
     (repo / "README.md").write_text("changed\n")
 
@@ -106,9 +126,20 @@ def _patch_release_health(monkeypatch):
     monkeypatch.setattr(
         handoff_cmd,
         "draft_queue_payload",
-        lambda target, **kwargs: {"counts": {"pending": 0}, "issue_count": 0, "top_issue": None, "latest_ingest_run": None, "drafts": [], "checks": []},
+        lambda target, **kwargs: {
+            "counts": {"pending": 0},
+            "issue_count": 0,
+            "top_issue": None,
+            "latest_ingest_run": None,
+            "drafts": [],
+            "checks": [],
+        },
     )
-    monkeypatch.setattr(release_cmd, "_run_content_guard_check", lambda *args, **kwargs: {"name": "content_guard_tip", "status": "ok", "detail": "clean"})
+    monkeypatch.setattr(
+        release_cmd,
+        "_run_content_guard_check",
+        lambda *args, **kwargs: {"name": "content_guard_tip", "status": "ok", "detail": "clean"},
+    )
     monkeypatch.setattr(release_cmd, "_content_guard_available", lambda target: True)
 
 
@@ -150,11 +181,17 @@ def test_repos_actions_review_gate_dedupe_transitions_and_archive(tmp_path, caps
 
     assert repos_cmd.actions_build(target=tmp_path, report_id=report["report_id"], json_output=True) == 2
     capsys.readouterr()
-    assert repos_cmd.actions_build(target=tmp_path, report_id=report["report_id"], allow_unreviewed=True, json_output=True) == 0
+    assert (
+        repos_cmd.actions_build(target=tmp_path, report_id=report["report_id"], allow_unreviewed=True, json_output=True)
+        == 0
+    )
     first = json.loads(capsys.readouterr().out)
     assert first["created_count"] >= 1
     action_id = first["created_actions"][0]["fleet_action_id"]
-    assert repos_cmd.actions_build(target=tmp_path, report_id=report["report_id"], allow_unreviewed=True, json_output=True) == 0
+    assert (
+        repos_cmd.actions_build(target=tmp_path, report_id=report["report_id"], allow_unreviewed=True, json_output=True)
+        == 0
+    )
     assert json.loads(capsys.readouterr().out)["created_count"] == 0
 
     assert repos_cmd.actions_start(target=tmp_path, action_id=action_id, json_output=True) == 0
@@ -163,7 +200,10 @@ def test_repos_actions_review_gate_dedupe_transitions_and_archive(tmp_path, caps
     assert json.loads(capsys.readouterr().out)["action"]["status"] == "done"
     assert repos_cmd.actions_archive_completed(target=tmp_path, json_output=True) == 0
     assert json.loads(capsys.readouterr().out)["archived_count"] == 1
-    assert repos_cmd.actions_build(target=tmp_path, report_id=report["report_id"], allow_unreviewed=True, json_output=True) == 0
+    assert (
+        repos_cmd.actions_build(target=tmp_path, report_id=report["report_id"], allow_unreviewed=True, json_output=True)
+        == 0
+    )
     assert json.loads(capsys.readouterr().out)["created_count"] == 0
 
     remaining = repos_cmd._read_actions(tmp_path)
@@ -185,7 +225,10 @@ def test_repos_fleet_integrates_with_center_work_and_release(tmp_path, monkeypat
     _patch_release_health(monkeypatch)
     assert repos_cmd.report_build(target=tmp_path, json_output=True) == 0
     report = json.loads(capsys.readouterr().out)
-    assert repos_cmd.report_closeout(target=tmp_path, report_id=report["report_id"], status="reviewed", json_output=True) == 0
+    assert (
+        repos_cmd.report_closeout(target=tmp_path, report_id=report["report_id"], status="reviewed", json_output=True)
+        == 0
+    )
     capsys.readouterr()
     assert repos_cmd.actions_build(target=tmp_path, report_id=report["report_id"], json_output=True) == 0
     capsys.readouterr()

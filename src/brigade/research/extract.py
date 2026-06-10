@@ -1,6 +1,7 @@
 # src/brigade/research/extract.py
 from __future__ import annotations
-import json, re
+import json
+import re
 from typing import Optional
 from .types import Finding, Trust
 from ..untrusted import wrap_untrusted
@@ -17,8 +18,8 @@ Return ONLY a JSON object:
 
 _TRUST_KIND = {"local": "retrieved-doc", "web": "web", "cli": "tool-output", "browser": "web"}
 
-_LOW = ("does not contain", "no relevant", "not relevant", "irrelevant",
-        "no information", "cannot find", "n/a")
+_LOW = ("does not contain", "no relevant", "not relevant", "irrelevant", "no information", "cannot find", "n/a")
+
 
 def _parse_json(text: str):
     text = text.strip()
@@ -35,23 +36,36 @@ def _parse_json(text: str):
                 return None
     return None
 
+
 def is_low_quality(summary: str) -> bool:
     s = (summary or "").strip().lower()
     return (not s) or any(p in s for p in _LOW)
 
-def extract_finding(llm, *, goal: str, source: str, title: str, content: str,
-                    trust: Trust, max_content_chars: int = 15000,
-                    timeout: int = 90) -> Optional[Finding]:
-    block = wrap_untrusted(content, source_kind=_TRUST_KIND[trust],
-                           goal=goal, max_chars=max_content_chars)
+
+def extract_finding(
+    llm,
+    *,
+    goal: str,
+    source: str,
+    title: str,
+    content: str,
+    trust: Trust,
+    max_content_chars: int = 15000,
+    timeout: int = 90,
+) -> Optional[Finding]:
+    block = wrap_untrusted(content, source_kind=_TRUST_KIND[trust], goal=goal, max_chars=max_content_chars)
     prompt = EXTRACTOR_PROMPT.format(untrusted_block=block)
-    out = llm.complete([{"role": "user", "content": prompt}], max_tokens=1024,
-                       temperature=0.2, timeout=timeout)
+    out = llm.complete([{"role": "user", "content": prompt}], max_tokens=1024, temperature=0.2, timeout=timeout)
     data = _parse_json(out)
     if not data:
         return None
     summary = str(data.get("summary", ""))
     if is_low_quality(summary):
         return None
-    return Finding(source=source, title=title or source, summary=summary,
-                   evidence=str(data.get("evidence", ""))[:3000], trust=trust)
+    return Finding(
+        source=source,
+        title=title or source,
+        summary=summary,
+        evidence=str(data.get("evidence", ""))[:3000],
+        trust=trust,
+    )

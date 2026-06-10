@@ -1,5 +1,4 @@
 # tests/test_add.py
-from pathlib import Path
 
 from brigade import add as add_mod
 from brigade import managed

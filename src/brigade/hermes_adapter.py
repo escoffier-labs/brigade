@@ -1,4 +1,5 @@
 """Shared Hermes adapter contract checks."""
+
 from __future__ import annotations
 
 import json

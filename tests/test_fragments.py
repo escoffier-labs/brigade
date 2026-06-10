@@ -1,4 +1,5 @@
 """Tests for brigade openclaw-fragments / hermes-fragments."""
+
 from __future__ import annotations
 
 import json
@@ -130,11 +131,13 @@ def test_load_harness_hermes():
 
 def test_codex_template_file_exists():
     from brigade.templates import template_root
+
     assert (template_root() / "codex" / "memory-handoffs" / "TEMPLATE.md").is_file()
 
 
 def test_all_harness_files_exist():
     from brigade.templates import template_root
+
     for h in ("claude", "codex", "openclaw", "hermes"):
         m = load_harness_manifest(h)
         for entry in m["files"]:

@@ -1,4 +1,5 @@
 """CLI helpers for untrusted-context wrapping and scanning."""
+
 from __future__ import annotations
 
 import json
@@ -6,7 +7,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from .untrusted import SOURCE_KINDS, scan_untrusted, wrap_untrusted
+from .untrusted import scan_untrusted, wrap_untrusted
 
 
 def _read_input(*, text: list[str], from_file: Path | None) -> tuple[str | None, str | None]:

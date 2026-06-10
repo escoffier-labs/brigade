@@ -1,4 +1,5 @@
 """Commands for creating and checking aboyeur rosters."""
+
 from __future__ import annotations
 
 import sys

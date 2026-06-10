@@ -3,15 +3,12 @@
 No external deps. Uses stdin line input + numbered toggles, so it works
 over any TTY (no raw mode, no curses, no ANSI escape sequences required).
 """
+
 from __future__ import annotations
 
 import sys
-from typing import List
 
 from .selection import (
-    KNOWN_HARNESSES,
-    KNOWN_DEPTHS,
-    KNOWN_INCLUDES,
     Selection,
     resolve_owner,
 )
@@ -74,8 +71,7 @@ _INCLUDE_LABELS = {
 def prompt_for_selection() -> Selection:
     if not sys.stdin.isatty():
         raise NonInteractiveError(
-            "brigade init needs a TTY for the interactive prompt. "
-            "Pass --depth and --harnesses for scripting."
+            "brigade init needs a TTY for the interactive prompt. Pass --depth and --harnesses for scripting."
         )
 
     selected_harnesses = _toggle_prompt(

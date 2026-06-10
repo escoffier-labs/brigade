@@ -75,16 +75,32 @@ def _patch_release_health(monkeypatch):
     monkeypatch.setattr(
         handoff_cmd,
         "draft_queue_payload",
-        lambda target, **kwargs: {"counts": {"pending": 0}, "issue_count": 0, "top_issue": None, "latest_ingest_run": None, "drafts": [], "checks": []},
+        lambda target, **kwargs: {
+            "counts": {"pending": 0},
+            "issue_count": 0,
+            "top_issue": None,
+            "latest_ingest_run": None,
+            "drafts": [],
+            "checks": [],
+        },
     )
-    monkeypatch.setattr(release_cmd, "_run_content_guard_check", lambda *args, **kwargs: {"name": "content_guard_tip", "status": "ok", "detail": "clean"})
+    monkeypatch.setattr(
+        release_cmd,
+        "_run_content_guard_check",
+        lambda *args, **kwargs: {"name": "content_guard_tip", "status": "ok", "detail": "clean"},
+    )
     monkeypatch.setattr(release_cmd, "_content_guard_available", lambda target: True)
 
 
 def _seed_release_prereqs(path: Path):
     _write_json(
         path / ".brigade" / "work" / "verify-runs" / "verify-one" / "receipt.json",
-        {"run_id": "verify-one", "status": "completed", "started_at": "2026-05-30T01:00:00+00:00", "completed_at": "2026-05-30T01:00:10+00:00"},
+        {
+            "run_id": "verify-one",
+            "status": "completed",
+            "started_at": "2026-05-30T01:00:00+00:00",
+            "completed_at": "2026-05-30T01:00:10+00:00",
+        },
     )
     _write_json(
         path / ".brigade" / "work" / "closeouts" / "closeout-one" / "closeout.json",
@@ -132,7 +148,11 @@ def test_repos_sweep_run_writes_receipts_logs_show_closeout_and_privacy(tmp_path
     sweep = json.loads(capsys.readouterr().out)
     assert sweep["status"] == "completed"
     assert sweep["repos"][0]["repo_id"] == "alpha"
-    assert {command["label"] for command in sweep["repos"][0]["commands"]} == {"center-report-build", "release-plan", "work-brief"}
+    assert {command["label"] for command in sweep["repos"][0]["commands"]} == {
+        "center-report-build",
+        "release-plan",
+        "work-brief",
+    }
     assert all("stdout_log_label" in command for command in sweep["repos"][0]["commands"])
     assert "actual-repo-name" not in json.dumps(sweep)
     assert sweep["path_label"] == sweep["sweep_id"]
@@ -147,7 +167,12 @@ def test_repos_sweep_run_writes_receipts_logs_show_closeout_and_privacy(tmp_path
     assert json.loads(capsys.readouterr().out)["sweep"]["sweep_id"] == sweep["sweep_id"]
     assert repos_cmd.sweep_show(target=tmp_path, sweep_id=sweep["sweep_id"]) == 0
     assert "path_label" in capsys.readouterr().out
-    assert repos_cmd.sweep_closeout(target=tmp_path, sweep_id=sweep["sweep_id"], status="deferred", reason="review later", json_output=True) == 0
+    assert (
+        repos_cmd.sweep_closeout(
+            target=tmp_path, sweep_id=sweep["sweep_id"], status="deferred", reason="review later", json_output=True
+        )
+        == 0
+    )
     closeout = json.loads(capsys.readouterr().out)
     assert closeout["status"] == "deferred"
     assert closeout["source_fingerprint"]

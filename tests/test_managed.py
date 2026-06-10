@@ -63,7 +63,9 @@ def test_agentpantry_doctor_unwired(monkeypatch):
 
     def fake_run(args, **kw):
         assert args == ["agentpantry", "doctor", "--json"]
-        return managed.proc.Result(code=2, stdout='{"configured": false, "fail_count": 1, "warn_count": 0, "checks": []}', stderr="")
+        return managed.proc.Result(
+            code=2, stdout='{"configured": false, "fail_count": 1, "warn_count": 0, "checks": []}', stderr=""
+        )
 
     monkeypatch.setattr(managed.proc, "run", fake_run)
     ctx = DoctorContext(target=Path("/tmp/ws"), selection=None, harnesses=[])
@@ -79,8 +81,8 @@ def test_agentpantry_doctor_parses_status(monkeypatch):
         return managed.proc.Result(
             code=0,
             stdout='{"role": "source", "configured": true, "peer": "127.0.0.1:8787",'
-                   ' "surfaces": ["sidecar"], "browser_count": 1,'
-                   ' "fail_count": 0, "warn_count": 0, "checks": []}',
+            ' "surfaces": ["sidecar"], "browser_count": 1,'
+            ' "fail_count": 0, "warn_count": 0, "checks": []}',
             stderr="",
         )
 
@@ -99,9 +101,9 @@ def test_agentpantry_never_fails_workspace(monkeypatch):
         return managed.proc.Result(
             code=1,
             stdout='{"role": "sink", "configured": true, "peer": "0.0.0.0:8787",'
-                   ' "surfaces": ["sidecar"], "browser_count": 0,'
-                   ' "fail_count": 1, "warn_count": 1,'
-                   ' "checks": [{"name": "key", "status": "FAIL", "detail": "PSK not found"}]}',
+            ' "surfaces": ["sidecar"], "browser_count": 0,'
+            ' "fail_count": 1, "warn_count": 1,'
+            ' "checks": [{"name": "key", "status": "FAIL", "detail": "PSK not found"}]}',
             stderr="",
         )
 
@@ -143,8 +145,8 @@ def test_agentpantry_doctor_falls_back_to_status_for_old_binary(monkeypatch):
         return managed.proc.Result(
             code=0,
             stdout='{"role": "sink", "configured": true, "peer": "127.0.0.1:8787",'
-                   ' "key_present": true, "surfaces": ["sidecar"], "browsers": 0,'
-                   ' "allow": [], "deny": []}',
+            ' "key_present": true, "surfaces": ["sidecar"], "browsers": 0,'
+            ' "allow": [], "deny": []}',
             stderr="",
         )
 
@@ -240,8 +242,7 @@ def test_miseledger_doctor_parses_status(monkeypatch):
         assert args == ["miseledger", "status", "--json"]
         return managed.proc.Result(
             code=0,
-            stdout='{"schema_version": 7, "items": 42, "sources": 3,'
-                   ' "artifacts": 5, "fts": "ok", "source_counts": {}}',
+            stdout='{"schema_version": 7, "items": 42, "sources": 3, "artifacts": 5, "fts": "ok", "source_counts": {}}',
             stderr="",
         )
 
@@ -289,8 +290,8 @@ def test_stationtrail_doctor_parses_report(monkeypatch):
         return managed.proc.Result(
             code=0,
             stdout='{"ok": true, "warnings": [],'
-                   ' "sources": [{"kind": "codex", "status": "ready"},'
-                   ' {"kind": "claude", "status": "missing"}]}',
+            ' "sources": [{"kind": "codex", "status": "ready"},'
+            ' {"kind": "claude", "status": "missing"}]}',
             stderr="",
         )
 
@@ -308,7 +309,7 @@ def test_stationtrail_doctor_warns_but_never_fails(monkeypatch):
         return managed.proc.Result(
             code=0,
             stdout='{"ok": false, "warnings": ["codex status is error"],'
-                   ' "sources": [{"kind": "codex", "status": "error"}]}',
+            ' "sources": [{"kind": "codex", "status": "error"}]}',
             stderr="",
         )
 

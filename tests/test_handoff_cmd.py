@@ -185,7 +185,10 @@ def test_handoff_lint_can_run_content_guard(tmp_path, capsys, monkeypatch):
         }
 
     monkeypatch.setattr("brigade.scrub.run_scan", fake_run_scan)
-    assert handoff_cmd.lint(target=tmp_path, paths=[path], content_guard=True, guard_policy="personal", json_output=True) == 0
+    assert (
+        handoff_cmd.lint(target=tmp_path, paths=[path], content_guard=True, guard_policy="personal", json_output=True)
+        == 0
+    )
     payload = json.loads(capsys.readouterr().out)
     assert payload["valid"] is True
     assert payload["content_guard"][0]["exit_code"] == 0
@@ -203,15 +206,18 @@ def test_handoff_draft_guard_blocks_on_content_guard_findings(tmp_path, capsys, 
         }
 
     monkeypatch.setattr("brigade.scrub.run_scan", fake_run_scan)
-    assert handoff_cmd.draft(
-        target=tmp_path,
-        handoff_type="workflow",
-        title="Guarded draft",
-        summary="Guarded drafts fail when Content Guard blocks.",
-        content="### Guarded draft\n\nDurable context.",
-        guard=True,
-        json_output=True,
-    ) == 1
+    assert (
+        handoff_cmd.draft(
+            target=tmp_path,
+            handoff_type="workflow",
+            title="Guarded draft",
+            summary="Guarded drafts fail when Content Guard blocks.",
+            content="### Guarded draft\n\nDurable context.",
+            guard=True,
+            json_output=True,
+        )
+        == 1
+    )
     payload = json.loads(capsys.readouterr().out)
     assert payload["valid"] is False
     assert payload["lint"]["valid"] is True
@@ -219,16 +225,19 @@ def test_handoff_draft_guard_blocks_on_content_guard_findings(tmp_path, capsys, 
 
 
 def test_handoff_draft_writes_linted_no_card_style(tmp_path, capsys):
-    assert handoff_cmd.draft(
-        target=tmp_path,
-        handoff_type="workflow",
-        title="Brigade production loop",
-        summary="The local loop is ready for use.",
-        fact=["Run operator status before substantial work."],
-        evidence=["commands run: brigade operator status --profile internal-dogfood --target ."],
-        content="### Brigade production loop\n\nUse the explicit local Brigade loop before repo work.",
-        json_output=True,
-    ) == 0
+    assert (
+        handoff_cmd.draft(
+            target=tmp_path,
+            handoff_type="workflow",
+            title="Brigade production loop",
+            summary="The local loop is ready for use.",
+            fact=["Run operator status before substantial work."],
+            evidence=["commands run: brigade operator status --profile internal-dogfood --target ."],
+            content="### Brigade production loop\n\nUse the explicit local Brigade loop before repo work.",
+            json_output=True,
+        )
+        == 0
+    )
 
     payload = json.loads(capsys.readouterr().out)
     path = tmp_path / payload["path"]
@@ -261,17 +270,20 @@ tags: [memory, handoff]
 
 Drafts can create cards.
 """
-    assert handoff_cmd.draft(
-        target=tmp_path,
-        handoff_type="decision",
-        title="Handoff draft card",
-        summary="Card branch omits document sections.",
-        action="create-card",
-        target_card="handoff-draft.md",
-        content=card_content,
-        inbox="antigravity",
-        json_output=True,
-    ) == 0
+    assert (
+        handoff_cmd.draft(
+            target=tmp_path,
+            handoff_type="decision",
+            title="Handoff draft card",
+            summary="Card branch omits document sections.",
+            action="create-card",
+            target_card="handoff-draft.md",
+            content=card_content,
+            inbox="antigravity",
+            json_output=True,
+        )
+        == 0
+    )
 
     payload = json.loads(capsys.readouterr().out)
     path = tmp_path / payload["path"]
@@ -290,16 +302,19 @@ def test_handoff_draft_supports_hermes_writer_inbox(tmp_path, capsys):
     sources_payload = json.loads(capsys.readouterr().out)
     assert ".hermes/memory-handoffs" in sources_payload["inboxes"]
 
-    assert handoff_cmd.draft(
-        target=tmp_path,
-        handoff_type="workflow",
-        title="Hermes handoff wiring",
-        summary="Hermes can write local Brigade handoff drafts.",
-        content="### Hermes handoff wiring\n\nHermes uses the shared Memory Handoff format.",
-        evidence=["commands run: brigade handoff draft --inbox hermes --target ."],
-        inbox="hermes",
-        json_output=True,
-    ) == 0
+    assert (
+        handoff_cmd.draft(
+            target=tmp_path,
+            handoff_type="workflow",
+            title="Hermes handoff wiring",
+            summary="Hermes can write local Brigade handoff drafts.",
+            content="### Hermes handoff wiring\n\nHermes uses the shared Memory Handoff format.",
+            evidence=["commands run: brigade handoff draft --inbox hermes --target ."],
+            inbox="hermes",
+            json_output=True,
+        )
+        == 0
+    )
 
     payload = json.loads(capsys.readouterr().out)
     path = tmp_path / payload["path"]
@@ -318,28 +333,34 @@ def test_handoff_draft_supports_hermes_writer_inbox(tmp_path, capsys):
 def test_hermes_handoff_smoke_receipt_show_and_archive(tmp_path, capsys):
     assert handoff_cmd.sources_init(target=tmp_path, json_output=True) == 0
     capsys.readouterr()
-    assert handoff_cmd.draft(
-        target=tmp_path,
-        handoff_type="workflow",
-        title="Hermes production smoke",
-        summary="Hermes users can create a reviewable local Brigade handoff.",
-        content="### Hermes production smoke\n\nThe Hermes inbox follows the shared Brigade handoff contract.",
-        evidence=["commands run: brigade handoff draft --inbox hermes --target ."],
-        inbox="hermes",
-        json_output=True,
-    ) == 0
+    assert (
+        handoff_cmd.draft(
+            target=tmp_path,
+            handoff_type="workflow",
+            title="Hermes production smoke",
+            summary="Hermes users can create a reviewable local Brigade handoff.",
+            content="### Hermes production smoke\n\nThe Hermes inbox follows the shared Brigade handoff contract.",
+            evidence=["commands run: brigade handoff draft --inbox hermes --target ."],
+            inbox="hermes",
+            json_output=True,
+        )
+        == 0
+    )
     draft_payload = json.loads(capsys.readouterr().out)
     draft_path = tmp_path / draft_payload["path"]
     draft_id = draft_path.stem
 
-    assert handoff_cmd.receipt_record(
-        target=tmp_path,
-        draft_ids=[draft_id],
-        owner="hermes",
-        run_id="hermes-smoke-run",
-        safe_summary="Hermes handoff smoke was reviewed and ingested.",
-        json_output=True,
-    ) == 0
+    assert (
+        handoff_cmd.receipt_record(
+            target=tmp_path,
+            draft_ids=[draft_id],
+            owner="hermes",
+            run_id="hermes-smoke-run",
+            safe_summary="Hermes handoff smoke was reviewed and ingested.",
+            json_output=True,
+        )
+        == 0
+    )
     receipt_payload = json.loads(capsys.readouterr().out)
     assert receipt_payload["owner"] == "hermes"
     assert receipt_payload["run"]["processed_handoff_paths"] == [str(draft_path.resolve())]
@@ -350,12 +371,15 @@ def test_hermes_handoff_smoke_receipt_show_and_archive(tmp_path, capsys):
     assert show_payload["draft"]["ingestion_status"] == "ingested"
     assert show_payload["draft"]["ingest_run_id"] == "hermes-smoke-run"
 
-    assert handoff_cmd.archive_draft(
-        target=tmp_path,
-        draft_id=draft_id,
-        reason="Hermes smoke reviewed",
-        json_output=True,
-    ) == 0
+    assert (
+        handoff_cmd.archive_draft(
+            target=tmp_path,
+            draft_id=draft_id,
+            reason="Hermes smoke reviewed",
+            json_output=True,
+        )
+        == 0
+    )
     archive_payload = json.loads(capsys.readouterr().out)
     assert archive_payload["archived"] == 1
     record = archive_payload["records"][0]
@@ -367,36 +391,42 @@ def test_hermes_handoff_smoke_receipt_show_and_archive(tmp_path, capsys):
 
 
 def test_handoff_draft_cli_dispatch(tmp_path, capsys):
-    assert cli.main(
-        [
-            "handoff",
-            "draft",
-            "--target",
-            str(tmp_path),
-            "--title",
-            "CLI handoff",
-            "--summary",
-            "CLI writes a valid draft.",
-            "--content",
-            "### CLI handoff\n\nUse the command instead of hand-writing boilerplate.",
-            "--fact",
-            "The writer lints its output.",
-            "--json",
-        ]
-    ) == 0
+    assert (
+        cli.main(
+            [
+                "handoff",
+                "draft",
+                "--target",
+                str(tmp_path),
+                "--title",
+                "CLI handoff",
+                "--summary",
+                "CLI writes a valid draft.",
+                "--content",
+                "### CLI handoff\n\nUse the command instead of hand-writing boilerplate.",
+                "--fact",
+                "The writer lints its output.",
+                "--json",
+            ]
+        )
+        == 0
+    )
     payload = json.loads(capsys.readouterr().out)
     assert payload["valid"] is True
     assert (tmp_path / payload["path"]).is_file()
 
 
 def test_handoff_draft_rejects_card_without_target_card(tmp_path, capsys):
-    assert handoff_cmd.draft(
-        target=tmp_path,
-        title="Missing card",
-        summary="Cards need explicit targets.",
-        action="create-card",
-        content="---\ntopic: missing-card\n---\n\n# Missing card\n",
-    ) == 2
+    assert (
+        handoff_cmd.draft(
+            target=tmp_path,
+            title="Missing card",
+            summary="Cards need explicit targets.",
+            action="create-card",
+            content="---\ntopic: missing-card\n---\n\n# Missing card\n",
+        )
+        == 2
+    )
 
     assert "--target-card is required" in capsys.readouterr().err
 
@@ -441,9 +471,7 @@ def test_handoff_runs_list_show_and_draft_ingestion_status(tmp_path, capsys):
         "inbox_paths": [str(codex_inbox)],
         "processed_handoff_paths": [str(draft_path)],
         "promoted_card_targets": [],
-        "routed_document_targets": [
-            {"handoff_path": str(draft_path), "target": ".learnings/LEARNINGS.md"}
-        ],
+        "routed_document_targets": [{"handoff_path": str(draft_path), "target": ".learnings/LEARNINGS.md"}],
         "skipped_handoff_paths": [],
         "failed_handoff_paths": [],
         "warning_count": 0,
@@ -480,13 +508,16 @@ def test_handoff_receipt_plan_and_record_external_ingest(tmp_path, capsys):
     draft_path = hermes_inbox / "hermes-reviewed.md"
     draft_path.write_text(NO_CARD_HANDOFF)
 
-    assert handoff_cmd.receipt_plan(
-        target=tmp_path,
-        draft_ids=["hermes-reviewed"],
-        owner="OpenClaw",
-        run_id="openclaw-manual-one",
-        json_output=True,
-    ) == 0
+    assert (
+        handoff_cmd.receipt_plan(
+            target=tmp_path,
+            draft_ids=["hermes-reviewed"],
+            owner="OpenClaw",
+            run_id="openclaw-manual-one",
+            json_output=True,
+        )
+        == 0
+    )
     payload = json.loads(capsys.readouterr().out)
     assert payload["would_write"] is False
     assert payload["owner"] == "openclaw"
@@ -495,14 +526,17 @@ def test_handoff_receipt_plan_and_record_external_ingest(tmp_path, capsys):
     assert payload["run"]["routed_document_targets"][0]["target"] == ".learnings/LEARNINGS.md"
     assert not (tmp_path / ".brigade" / "handoffs" / "ingest-runs" / "openclaw-manual-one.json").exists()
 
-    assert handoff_cmd.receipt_record(
-        target=tmp_path,
-        draft_ids=["hermes-reviewed"],
-        owner="OpenClaw",
-        run_id="openclaw-manual-one",
-        safe_summary="OpenClaw ingested one reviewed Hermes handoff.",
-        json_output=True,
-    ) == 0
+    assert (
+        handoff_cmd.receipt_record(
+            target=tmp_path,
+            draft_ids=["hermes-reviewed"],
+            owner="OpenClaw",
+            run_id="openclaw-manual-one",
+            safe_summary="OpenClaw ingested one reviewed Hermes handoff.",
+            json_output=True,
+        )
+        == 0
+    )
     payload = json.loads(capsys.readouterr().out)
     receipt_path = tmp_path / payload["receipt_path"]
     assert receipt_path.exists()
@@ -525,20 +559,26 @@ def test_handoff_receipt_record_skipped_and_failed_statuses(tmp_path, capsys):
     skipped.write_text(NO_CARD_HANDOFF)
     failed.write_text(NO_CARD_HANDOFF)
 
-    assert handoff_cmd.receipt_record(
-        target=tmp_path,
-        draft_ids=["skipped"],
-        status="skipped",
-        run_id="skip-run",
-        json_output=True,
-    ) == 0
-    assert handoff_cmd.receipt_record(
-        target=tmp_path,
-        draft_ids=["failed"],
-        status="failed",
-        run_id="fail-run",
-        json_output=True,
-    ) == 0
+    assert (
+        handoff_cmd.receipt_record(
+            target=tmp_path,
+            draft_ids=["skipped"],
+            status="skipped",
+            run_id="skip-run",
+            json_output=True,
+        )
+        == 0
+    )
+    assert (
+        handoff_cmd.receipt_record(
+            target=tmp_path,
+            draft_ids=["failed"],
+            status="failed",
+            run_id="fail-run",
+            json_output=True,
+        )
+        == 0
+    )
     capsys.readouterr()
 
     assert handoff_cmd.list_drafts(target=tmp_path, json_output=True) == 0
@@ -553,21 +593,24 @@ def test_handoff_receipt_cli_dispatch_records_receipt(tmp_path, capsys):
     inbox.mkdir(parents=True)
     (inbox / "cli-reviewed.md").write_text(NO_CARD_HANDOFF)
 
-    assert cli.main(
-        [
-            "handoff",
-            "receipt",
-            "record",
-            "--target",
-            str(tmp_path),
-            "--owner",
-            "hermes",
-            "--run-id",
-            "hermes-cli-run",
-            "--json",
-            "cli-reviewed",
-        ]
-    ) == 0
+    assert (
+        cli.main(
+            [
+                "handoff",
+                "receipt",
+                "record",
+                "--target",
+                str(tmp_path),
+                "--owner",
+                "hermes",
+                "--run-id",
+                "hermes-cli-run",
+                "--json",
+                "cli-reviewed",
+            ]
+        )
+        == 0
+    )
     payload = json.loads(capsys.readouterr().out)
     assert payload["owner"] == "hermes"
     assert (tmp_path / payload["receipt_path"]).exists()
@@ -642,7 +685,9 @@ def test_handoff_archive_preserves_reason_and_adds_ingest_outcome(tmp_path, caps
         )
     )
 
-    assert handoff_cmd.archive_draft(target=tmp_path, draft_id="valid-one", reason="manual review", json_output=True) == 0
+    assert (
+        handoff_cmd.archive_draft(target=tmp_path, draft_id="valid-one", reason="manual review", json_output=True) == 0
+    )
     payload = json.loads(capsys.readouterr().out)
     record = payload["records"][0]
     assert record["review_reason"] == "manual review"
@@ -718,8 +763,7 @@ def test_handoff_archive_single_and_all_reviewed_write_records(tmp_path, capsys)
     assert not (inbox / "valid-two.md").exists()
     assert (inbox / "invalid.md").exists()
     records = [
-        json.loads(line)
-        for line in (tmp_path / ".brigade" / "handoffs" / "archive.jsonl").read_text().splitlines()
+        json.loads(line) for line in (tmp_path / ".brigade" / "handoffs" / "archive.jsonl").read_text().splitlines()
     ]
     assert [record["id"] for record in records] == ["valid-one", "valid-two"]
 
@@ -827,7 +871,10 @@ def test_handoff_source_config_drift_reports_missing_configured_inbox(tmp_path, 
     assert "[warn] handoff_source_coverage:" in out
     assert "configured inbox missing" in out
 
-    assert handoff_cmd.import_issues(target=tmp_path, categories=["source-inbox-missing"], dry_run=True, json_output=True) == 0
+    assert (
+        handoff_cmd.import_issues(target=tmp_path, categories=["source-inbox-missing"], dry_run=True, json_output=True)
+        == 0
+    )
     payload = json.loads(capsys.readouterr().out)
     assert payload["by_category"] == {"source-inbox-missing": 1}
     item = payload["imports"][0]
@@ -1563,7 +1610,13 @@ def test_handoff_import_issues_cli(tmp_path, monkeypatch):
         )
         == 0
     )
-    assert seen == {"target": tmp_path, "sources": None, "dry_run": True, "json_output": True, "categories": ["route-skip"]}
+    assert seen == {
+        "target": tmp_path,
+        "sources": None,
+        "dry_run": True,
+        "json_output": True,
+        "categories": ["route-skip"],
+    }
 
 
 def test_handoff_sync_issues_cli(tmp_path, monkeypatch):
@@ -1645,14 +1698,13 @@ def test_doctor_checks_no_backlog_warn_for_fresh_pending(tmp_path):
     _write_handoff(tmp_path, "fresh.md", age_seconds=30)
 
     checks = handoff_cmd.doctor_checks(tmp_path)
-    backlog_warns = [
-        c for c in checks if c[1] == "handoff_backlog" and c[0] == handoff_cmd.WARN
-    ]
+    backlog_warns = [c for c in checks if c[1] == "handoff_backlog" and c[0] == handoff_cmd.WARN]
     assert not backlog_warns, "fresh pending handoff should not trip the stale backlog warning"
 
 
 def test_handoff_writer_inboxes_include_supported_writer_harnesses():
     from brigade import handoff_cmd
+
     assert ".opencode/memory-handoffs" in handoff_cmd.WRITER_INBOXES
     assert ".antigravity/memory-handoffs" in handoff_cmd.WRITER_INBOXES
     assert ".pi/memory-handoffs" in handoff_cmd.WRITER_INBOXES
@@ -1663,6 +1715,7 @@ def test_handoff_writer_inboxes_include_supported_writer_harnesses():
 def test_handoff_sources_example_lists_supported_writer_harnesses():
     import json
     from brigade.templates import template_root
+
     data = json.loads((template_root() / "handoff" / "handoff-sources.example.json").read_text())
     assert ".opencode/memory-handoffs" in data["sources"][0]["inboxes"]
     assert ".antigravity/memory-handoffs" in data["sources"][0]["inboxes"]

@@ -1,4 +1,5 @@
 """Dogfood Brigade against a trusted workspace with a safe default roster."""
+
 from __future__ import annotations
 
 import ast
@@ -220,7 +221,9 @@ def _load_effective_paths(target: Path) -> tuple[Path, Path, DogfoodConfig | Non
     effective_target = effective_target.expanduser().resolve()
     if not effective_target.is_dir():
         raise FileNotFoundError(f"configured target is not a directory: {effective_target}")
-    artifacts_dir = cfg.artifacts_dir if cfg and cfg.artifacts_dir is not None else effective_target / ".brigade" / "runs"
+    artifacts_dir = (
+        cfg.artifacts_dir if cfg and cfg.artifacts_dir is not None else effective_target / ".brigade" / "runs"
+    )
     return effective_target, artifacts_dir, cfg
 
 
@@ -364,7 +367,9 @@ def status(*, target: Path) -> int:
 
     effective_target = cfg.target if cfg and cfg.target is not None else target
     effective_target = effective_target.expanduser().resolve()
-    artifacts_dir = cfg.artifacts_dir if cfg and cfg.artifacts_dir is not None else effective_target / ".brigade" / "runs"
+    artifacts_dir = (
+        cfg.artifacts_dir if cfg and cfg.artifacts_dir is not None else effective_target / ".brigade" / "runs"
+    )
     agent_cli = cfg.agent_cli if cfg else DEFAULT_AGENT_CLI
     handoff = cfg.handoff if cfg else True
     handoff_inbox = (
@@ -531,7 +536,9 @@ def run(
         print("error: --timeout-seconds must be positive", file=sys.stderr)
         return 2
 
-    artifacts_dir = cfg.artifacts_dir if cfg and cfg.artifacts_dir is not None else effective_target / ".brigade" / "runs"
+    artifacts_dir = (
+        cfg.artifacts_dir if cfg and cfg.artifacts_dir is not None else effective_target / ".brigade" / "runs"
+    )
     chosen_output_dir = output_dir.expanduser() if output_dir is not None else aboyeur.make_run_dir(artifacts_dir)
     chosen_handoff_inbox = None
     if handoff is False:

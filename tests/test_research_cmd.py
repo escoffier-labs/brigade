@@ -25,10 +25,14 @@ class StubLlm:
 def test_run_local_only_writes_artifacts(tmp_path: Path, monkeypatch):
     (tmp_path / "a.md").write_text("photosynthesis converts light to energy in plants")
     monkeypatch.setattr(research_cmd, "_resolve_backend", lambda target: StubLlm())
-    rid = research_cmd.run(target=tmp_path, question="how do plants make energy?",
-                           sources=[str(tmp_path / "*.md")], web=False,
-                           overrides={"max_rounds": 2, "min_rounds": 1, "max_time": 30},
-                           run_id="20260602-120000-x")
+    rid = research_cmd.run(
+        target=tmp_path,
+        question="how do plants make energy?",
+        sources=[str(tmp_path / "*.md")],
+        web=False,
+        overrides={"max_rounds": 2, "min_rounds": 1, "max_time": 30},
+        run_id="20260602-120000-x",
+    )
     rec = registry.show_run(tmp_path, rid)
     assert rec["status"] == "done"
     d = registry.run_dir(tmp_path, rid)
@@ -39,10 +43,16 @@ def test_run_local_only_writes_artifacts(tmp_path: Path, monkeypatch):
 def test_web_flag_without_playwright_records_blocker(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(research_cmd, "_resolve_backend", lambda target: StubLlm())
     from brigade.research.sources import web as webmod
+
     monkeypatch.setattr(webmod, "_import_playwright", lambda: None)
-    rid = research_cmd.run(target=tmp_path, question="q", sources=[], web=True,
-                           overrides={"max_rounds": 1, "min_rounds": 1, "max_time": 20},
-                           run_id="20260602-120001-x")
+    rid = research_cmd.run(
+        target=tmp_path,
+        question="q",
+        sources=[],
+        web=True,
+        overrides={"max_rounds": 1, "min_rounds": 1, "max_time": 20},
+        run_id="20260602-120001-x",
+    )
     rec = registry.show_run(tmp_path, rid)
     assert rec["status"] in ("done", "error")
     assert any("playwright" in b.lower() for b in rec.get("blockers", []))
@@ -170,11 +180,7 @@ def test_antigravity_source_adapter_is_cli_lane(tmp_path: Path):
 
 def test_antigravity_source_without_command_reports_actionable_failure(tmp_path: Path):
     (tmp_path / ".brigade").mkdir()
-    (tmp_path / ".brigade" / "research.toml").write_text(
-        "[[source]]\n"
-        'id = "antigravity"\n'
-        'type = "antigravity"\n'
-    )
+    (tmp_path / ".brigade" / "research.toml").write_text('[[source]]\nid = "antigravity"\ntype = "antigravity"\n')
 
     payload = research_cmd.sources_payload(target=tmp_path)
     route = next(route for route in payload["routes"] if route["id"] == "antigravity")

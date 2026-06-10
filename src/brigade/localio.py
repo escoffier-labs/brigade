@@ -4,6 +4,7 @@ These helpers were extracted from near-identical private copies that lived in
 most command modules. Modules with intentionally different behavior (error
 reporting reads, unsorted writes, custom slug charsets) keep their own copies.
 """
+
 from __future__ import annotations
 
 import hashlib

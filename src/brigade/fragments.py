@@ -3,6 +3,7 @@
 These never mutate a live config. They drop JSON fragments into the chosen
 output directory so the user can `jq -s '.[0] * .[1]'` them in by hand.
 """
+
 from __future__ import annotations
 
 import shutil
@@ -50,15 +51,8 @@ def write_fragments(out: Path, harness: str) -> int:
     print("Next steps:")
     print(f"  - inspect each fragment under {out}")
     if harness == "openclaw":
-        print(
-            "  - merge with: jq -s '.[0] * .[1]' ~/.openclaw/openclaw.json "
-            f"{out}/<fragment>.json > /tmp/merged.json"
-        )
-        print(
-            "  - verify with: brigade doctor --target ~/.openclaw/workspace --harness openclaw"
-        )
+        print(f"  - merge with: jq -s '.[0] * .[1]' ~/.openclaw/openclaw.json {out}/<fragment>.json > /tmp/merged.json")
+        print("  - verify with: brigade doctor --target ~/.openclaw/workspace --harness openclaw")
     elif harness == "hermes":
-        print(
-            "  - the Hermes adapter is experimental; validate against your real Hermes install"
-        )
+        print("  - the Hermes adapter is experimental; validate against your real Hermes install")
     return 0

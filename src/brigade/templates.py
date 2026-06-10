@@ -1,4 +1,5 @@
 """Template discovery and placeholder rendering."""
+
 from __future__ import annotations
 
 import json

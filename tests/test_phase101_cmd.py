@@ -37,7 +37,15 @@ def _seed_ready_repo(path, capsys=None):
     _write_release_receipt(path)
 
 
-def _daily_action(action_type, *, source_subsystem="test", source_local_id="item", metadata=None, approval_required=False, risk_level="low"):
+def _daily_action(
+    action_type,
+    *,
+    source_subsystem="test",
+    source_local_id="item",
+    metadata=None,
+    approval_required=False,
+    risk_level="low",
+):
     return daily_cmd._candidate(
         target=Path("."),
         action_type=action_type,
@@ -104,7 +112,9 @@ def test_daily_status_uses_lightweight_center_snapshot(tmp_path, capsys, monkeyp
 
     assert daily_cmd.status(target=tmp_path, json_output=True) == 0
     payload = json.loads(capsys.readouterr().out)
-    center_status = next(check for check in payload["status_section_checks"] if check["name"] == "daily_status_section:center-status")
+    center_status = next(
+        check for check in payload["status_section_checks"] if check["name"] == "daily_status_section:center-status"
+    )
     assert center_status["status"] == "ok"
     assert "daily_status_section:center-readiness" in {check["name"] for check in payload["status_section_checks"]}
 
@@ -274,7 +284,12 @@ def test_daily_plan_ranks_tasks_imports_center_actions_and_readiness(tmp_path, c
 
 def test_daily_plan_and_run_handle_phase_ledger_actions(tmp_path, capsys):
     _seed_ready_repo(tmp_path, capsys)
-    assert phases_cmd.plan(target=tmp_path, phase_id="phase-270", title="Daily phase", source_goal="audit", json_output=True) == 0
+    assert (
+        phases_cmd.plan(
+            target=tmp_path, phase_id="phase-270", title="Daily phase", source_goal="audit", json_output=True
+        )
+        == 0
+    )
     capsys.readouterr()
     assert phases_cmd.complete(target=tmp_path, phase_id="phase-270", summary="No evidence", json_output=True) == 0
     capsys.readouterr()
@@ -298,7 +313,9 @@ def test_daily_plan_and_run_handle_phase_ledger_actions(tmp_path, capsys):
     run_payload = json.loads(capsys.readouterr().out)
     assert run_payload["selected_action"]["source_subsystem"] == "phase-ledger-action"
     assert len(run_payload["adapter_result"]["commands_invoked"]) == 1
-    assert run_payload["adapter_result"]["commands_invoked"][0]["command"].startswith("brigade work phases actions start")
+    assert run_payload["adapter_result"]["commands_invoked"][0]["command"].startswith(
+        "brigade work phases actions start"
+    )
 
     assert phases_cmd.actions_show(target=tmp_path, action_id=action_id, json_output=True) == 0
     action_payload = json.loads(capsys.readouterr().out)
@@ -307,7 +324,12 @@ def test_daily_plan_and_run_handle_phase_ledger_actions(tmp_path, capsys):
 
 def test_daily_phase_issue_candidate_skips_current_reviewed_report_baseline(tmp_path, capsys):
     _seed_ready_repo(tmp_path, capsys)
-    assert phases_cmd.plan(target=tmp_path, phase_id="phase-271", title="Daily phase", source_goal="audit", json_output=True) == 0
+    assert (
+        phases_cmd.plan(
+            target=tmp_path, phase_id="phase-271", title="Daily phase", source_goal="audit", json_output=True
+        )
+        == 0
+    )
     capsys.readouterr()
     assert phases_cmd.complete(target=tmp_path, phase_id="phase-271", summary="No evidence", json_output=True) == 0
     capsys.readouterr()
@@ -318,7 +340,16 @@ def test_daily_phase_issue_candidate_skips_current_reviewed_report_baseline(tmp_
 
     assert phases_cmd.report_build(target=tmp_path, json_output=True) == 0
     report = json.loads(capsys.readouterr().out)
-    assert phases_cmd.report_closeout(target=tmp_path, report_id=report["report_id"], status="reviewed", reason="Baseline reviewed.", json_output=True) == 0
+    assert (
+        phases_cmd.report_closeout(
+            target=tmp_path,
+            report_id=report["report_id"],
+            status="reviewed",
+            reason="Baseline reviewed.",
+            json_output=True,
+        )
+        == 0
+    )
     capsys.readouterr()
 
     assert daily_cmd.plan(target=tmp_path, json_output=True) == 0
@@ -332,18 +363,36 @@ def test_daily_phase_issue_candidate_skips_current_reviewed_report_baseline(tmp_
 
 def test_daily_plan_includes_phase_checkpoint_candidates(tmp_path, capsys):
     _seed_ready_repo(tmp_path, capsys)
-    assert phases_cmd.plan(target=tmp_path, phase_range="233-234", title="Checkpoint Daily", source_goal="afk", json_output=True) == 0
+    assert (
+        phases_cmd.plan(
+            target=tmp_path, phase_range="233-234", title="Checkpoint Daily", source_goal="afk", json_output=True
+        )
+        == 0
+    )
     capsys.readouterr()
-    assert phases_cmd.session_start(target=tmp_path, phase_range="233-234", source_goal="checkpoint daily", json_output=True) == 0
+    assert (
+        phases_cmd.session_start(
+            target=tmp_path, phase_range="233-234", source_goal="checkpoint daily", json_output=True
+        )
+        == 0
+    )
     session = json.loads(capsys.readouterr().out)
-    assert phases_cmd.session_checkpoint(target=tmp_path, session_id=session["session_id"], status="blocked", summary="Checkpoint needs review.", json_output=True) == 0
+    assert (
+        phases_cmd.session_checkpoint(
+            target=tmp_path,
+            session_id=session["session_id"],
+            status="blocked",
+            summary="Checkpoint needs review.",
+            json_output=True,
+        )
+        == 0
+    )
     checkpoint = json.loads(capsys.readouterr().out)
 
     assert daily_cmd.plan(target=tmp_path, json_output=True) == 0
     plan_payload = json.loads(capsys.readouterr().out)
     checkpoint_candidates = [
-        item for item in plan_payload["candidate_actions"]
-        if item["source_subsystem"] == "phase-session-checkpoint"
+        item for item in plan_payload["candidate_actions"] if item["source_subsystem"] == "phase-session-checkpoint"
     ]
     assert checkpoint_candidates
     candidate = checkpoint_candidates[0]
@@ -355,16 +404,26 @@ def test_daily_plan_includes_phase_checkpoint_candidates(tmp_path, capsys):
 
 def test_daily_run_writes_one_phase_session_checkpoint(tmp_path, capsys):
     _seed_ready_repo(tmp_path, capsys)
-    assert phases_cmd.plan(target=tmp_path, phase_range="234-235", title="Checkpoint Run", source_goal="afk", json_output=True) == 0
+    assert (
+        phases_cmd.plan(
+            target=tmp_path, phase_range="234-235", title="Checkpoint Run", source_goal="afk", json_output=True
+        )
+        == 0
+    )
     capsys.readouterr()
-    assert phases_cmd.session_start(target=tmp_path, phase_range="234-235", source_goal="checkpoint run", json_output=True) == 0
+    assert (
+        phases_cmd.session_start(target=tmp_path, phase_range="234-235", source_goal="checkpoint run", json_output=True)
+        == 0
+    )
     session = json.loads(capsys.readouterr().out)
 
     assert daily_cmd.run(target=tmp_path, json_output=True) == 0
     run_payload = json.loads(capsys.readouterr().out)
     assert run_payload["selected_action"]["action_type"] == "write-phase-session-checkpoint"
     assert len(run_payload["adapter_result"]["commands_invoked"]) == 1
-    assert run_payload["adapter_result"]["commands_invoked"][0]["command"].startswith("brigade work phases session checkpoint")
+    assert run_payload["adapter_result"]["commands_invoked"][0]["command"].startswith(
+        "brigade work phases session checkpoint"
+    )
     assert run_payload["adapter_result"]["receipts_created"]
 
     checkpoints = phases_cmd._read_session_checkpoints(tmp_path)
@@ -437,7 +496,9 @@ def test_daily_run_refuses_approval_required_import_and_promotes_when_approved(t
     receipt = json.loads(capsys.readouterr().out)
     assert receipt["status"] == "completed"
     assert receipt["selected_action"]["metadata"]["import_id"] == import_id
-    assert not any("push" in command["command"] or "tag" in command["command"] for command in receipt["commands_invoked"])
+    assert not any(
+        "push" in command["command"] or "tag" in command["command"] for command in receipt["commands_invoked"]
+    )
     assert work_cmd._pending_tasks(tmp_path)
 
 
@@ -472,12 +533,18 @@ def test_daily_approvals_list_show_review_and_no_execution(tmp_path, capsys):
     assert shown["selected_adapter"] == "brigade work import promote"
     assert shown["source_local_id"] == imported[0]["id"]
 
-    assert cli.main(["daily", "approvals", "hold", approval_id, "--target", str(tmp_path), "--reason", "later", "--json"]) == 0
+    assert (
+        cli.main(["daily", "approvals", "hold", approval_id, "--target", str(tmp_path), "--reason", "later", "--json"])
+        == 0
+    )
     held = json.loads(capsys.readouterr().out)
     assert held["status"] == "held"
     assert not work_cmd._pending_tasks(tmp_path)
 
-    assert cli.main(["daily", "approvals", "reject", approval_id, "--target", str(tmp_path), "--reason", "no", "--json"]) == 0
+    assert (
+        cli.main(["daily", "approvals", "reject", approval_id, "--target", str(tmp_path), "--reason", "no", "--json"])
+        == 0
+    )
     rejected = json.loads(capsys.readouterr().out)
     assert rejected["status"] == "rejected"
     assert rejected["review_reason"] == "no"
@@ -678,7 +745,9 @@ def test_daily_doctor_stale_blocked_missing_evidence_and_parse_errors(tmp_path, 
                 "status": "blocked",
                 "started_at": "2026-05-29T00:00:00+00:00",
                 "completed_at": "2026-05-29T00:01:00+00:00",
-                "selected_action": _daily_action("run-task", source_subsystem="work-task", source_local_id="missing", metadata={"task_id": "missing"}),
+                "selected_action": _daily_action(
+                    "run-task", source_subsystem="work-task", source_local_id="missing", metadata={"task_id": "missing"}
+                ),
             }
         )
     )
@@ -689,7 +758,13 @@ def test_daily_doctor_stale_blocked_missing_evidence_and_parse_errors(tmp_path, 
     assert daily_cmd.doctor(target=tmp_path, json_output=True) == 1
     payload = json.loads(capsys.readouterr().out)
     names = {check["name"] for check in payload["checks"]}
-    assert {"daily_stale_plan", "daily_blocked_run", "daily_unclosed_run", "daily_missing_evidence", "daily_receipt_parse"} <= names
+    assert {
+        "daily_stale_plan",
+        "daily_blocked_run",
+        "daily_unclosed_run",
+        "daily_missing_evidence",
+        "daily_receipt_parse",
+    } <= names
 
 
 def test_daily_run_safe_adapters_and_json_cleanliness(tmp_path, monkeypatch, capsys):
@@ -716,7 +791,14 @@ def test_daily_run_safe_adapters_and_json_cleanliness(tmp_path, monkeypatch, cap
         calls.append(payload["commands_invoked"][-1]["command"])
         return payload
 
-    run_one(_daily_action("start-center-action", source_subsystem="center-action", source_local_id="action-safe", metadata={"action_id": "action-safe"}))
+    run_one(
+        _daily_action(
+            "start-center-action",
+            source_subsystem="center-action",
+            source_local_id="action-safe",
+            metadata={"action_id": "action-safe"},
+        )
+    )
 
     monkeypatch.setattr(center_cmd, "readiness_import_issues", lambda **kwargs: print("noisy readiness") or 0)
     run_one(_daily_action("import-readiness-issues", source_subsystem="center-readiness", source_local_id="ready"))
@@ -775,7 +857,9 @@ def test_daily_run_handles_one_task_and_builds_context(tmp_path, monkeypatch, ca
     assert receipt["context_pack_id"]
     assert receipt["task_id"] == task["id"]
     assert any(command["command"] == "brigade context build" for command in receipt["commands_invoked"])
-    assert len([command for command in receipt["commands_invoked"] if command["command"] != "brigade context build"]) == 1
+    assert (
+        len([command for command in receipt["commands_invoked"] if command["command"] != "brigade context build"]) == 1
+    )
 
 
 def test_daily_health_integration_with_work_and_center(tmp_path, capsys):
@@ -792,7 +876,9 @@ def test_daily_health_integration_with_work_and_center(tmp_path, capsys):
 
     run_dir = tmp_path / ".brigade" / "daily" / "runs" / "blocked-run"
     run_dir.mkdir(parents=True)
-    (run_dir / "run.json").write_text(json.dumps({"run_id": "blocked-run", "status": "blocked", "started_at": "2026-05-30T00:00:00+00:00"}))
+    (run_dir / "run.json").write_text(
+        json.dumps({"run_id": "blocked-run", "status": "blocked", "started_at": "2026-05-30T00:00:00+00:00"})
+    )
     assert cli.main(["center", "reviews", "--target", str(tmp_path), "--json"]) == 0
     reviews = json.loads(capsys.readouterr().out)
     assert any(item["subsystem"] == "daily-driver" for item in reviews["reviews"])
@@ -849,7 +935,9 @@ def test_daily_plan_explainability_noise_and_adapter_result_shape(tmp_path, monk
     )
     imports = work_cmd._read_imports(tmp_path)
     for idx in range(4):
-        item = work_cmd._make_import(f"dismissed {idx}", kind="task", source="noisy-source", metadata={"source_fingerprint": f"old-{idx}"})
+        item = work_cmd._make_import(
+            f"dismissed {idx}", kind="task", source="noisy-source", metadata={"source_fingerprint": f"old-{idx}"}
+        )
         item["status"] = "dismissed"
         imports.append(item)
     work_cmd._write_imports(tmp_path, imports)
@@ -862,7 +950,11 @@ def test_daily_plan_explainability_noise_and_adapter_result_shape(tmp_path, monk
     assert noisy["metadata"]["inbox_quality"]["quality_score"] < 100
     clean = next(item for item in plan["candidate_actions"] if item["safe_summary"] == "Clean import")
     assert clean["metadata"]["inbox_quality"]["quality_score"] >= noisy["metadata"]["inbox_quality"]["quality_score"]
-    assert any(item["rejection_reasons"] for item in plan["candidate_explanations"] if item["action_id"] != plan["selected_action_id"])
+    assert any(
+        item["rejection_reasons"]
+        for item in plan["candidate_explanations"]
+        if item["action_id"] != plan["selected_action_id"]
+    )
 
     action = _daily_action("build-operator-report", source_subsystem="center-report", source_local_id="report")
     monkeypatch.setattr(daily_cmd, "_all_candidates", lambda target: [action])
@@ -1043,7 +1135,10 @@ def test_daily_hardening_plan_audit_import_and_closeout(tmp_path, capsys):
     assert audit["phase_count"] == 50
     assert "inbox-evidence-quality" in audit["workstreams"]
     assert any(finding["workstream"] == "inbox-evidence-quality" for finding in audit["findings"])
-    assert all("finding_id" in finding and "source_fingerprint" in finding and "phase" in finding for finding in audit["findings"])
+    assert all(
+        "finding_id" in finding and "source_fingerprint" in finding and "phase" in finding
+        for finding in audit["findings"]
+    )
 
     assert cli.main(["daily", "hardening", "import-issues", "--target", str(tmp_path), "--dry-run", "--json"]) == 0
     dry_run = json.loads(capsys.readouterr().out)
@@ -1056,7 +1151,23 @@ def test_daily_hardening_plan_audit_import_and_closeout(tmp_path, capsys):
     assert all(item["source"] == "daily-hardening" for item in imports["created_imports"])
     assert all("phase" in item["metadata"] for item in imports["created_imports"])
 
-    assert cli.main(["daily", "hardening", "closeout", "--target", str(tmp_path), "--status", "deferred", "--reason", "tracked", "--json"]) == 0
+    assert (
+        cli.main(
+            [
+                "daily",
+                "hardening",
+                "closeout",
+                "--target",
+                str(tmp_path),
+                "--status",
+                "deferred",
+                "--reason",
+                "tracked",
+                "--json",
+            ]
+        )
+        == 0
+    )
     closeout = json.loads(capsys.readouterr().out)
     assert closeout["status"] == "deferred"
     assert closeout["finding_count"] > 0
@@ -1097,7 +1208,23 @@ def test_daily_hardening_daily_receipt_checks_and_reviewed_quieting(tmp_path, ca
     assert 117 in phases
     assert audit["workstreams"]["daily-production-hardening"]["finding_count"] >= 2
 
-    assert cli.main(["daily", "hardening", "closeout", "--target", str(tmp_path), "--status", "reviewed", "--reason", "known", "--json"]) == 0
+    assert (
+        cli.main(
+            [
+                "daily",
+                "hardening",
+                "closeout",
+                "--target",
+                str(tmp_path),
+                "--status",
+                "reviewed",
+                "--reason",
+                "known",
+                "--json",
+            ]
+        )
+        == 0
+    )
     closeout = json.loads(capsys.readouterr().out)
     assert closeout["finding_fingerprints"]
 
@@ -1159,7 +1286,9 @@ def test_daily_hardening_center_contract_findings(tmp_path, monkeypatch, capsys)
 
     assert cli.main(["daily", "hardening", "audit", "--target", str(tmp_path), "--json"]) == 0
     audit = json.loads(capsys.readouterr().out)
-    center_findings = [finding for finding in audit["findings"] if finding["workstream"] == "operator-center-contract-cleanup"]
+    center_findings = [
+        finding for finding in audit["findings"] if finding["workstream"] == "operator-center-contract-cleanup"
+    ]
     assert center_findings
     assert {finding["phase"] for finding in center_findings} & {126, 127, 129}
     assert audit["implemented_phase_count"] >= 20
@@ -1182,7 +1311,12 @@ def test_daily_hardening_inbox_quality_findings(tmp_path, capsys):
     imports = work_cmd._read_imports(tmp_path)
     imports[0]["created_at"] = "2026-05-20T00:00:00+00:00"
     for idx in range(5):
-        dismissed = work_cmd._make_import(f"dismissed {idx}", kind="task", source="quality-source", metadata={"source_fingerprint": f"quality-old-{idx}"})
+        dismissed = work_cmd._make_import(
+            f"dismissed {idx}",
+            kind="task",
+            source="quality-source",
+            metadata={"source_fingerprint": f"quality-old-{idx}"},
+        )
         dismissed["status"] = "dismissed"
         imports.append(dismissed)
     work_cmd._write_imports(tmp_path, imports)
@@ -1196,7 +1330,9 @@ def test_daily_hardening_inbox_quality_findings(tmp_path, capsys):
 
     assert cli.main(["daily", "hardening", "audit", "--target", str(tmp_path), "--json"]) == 0
     audit = json.loads(capsys.readouterr().out)
-    inbox_phases = {finding["phase"] for finding in audit["findings"] if finding["workstream"] == "inbox-evidence-quality"}
+    inbox_phases = {
+        finding["phase"] for finding in audit["findings"] if finding["workstream"] == "inbox-evidence-quality"
+    }
     assert {135, 138, 142} <= inbox_phases
 
 
@@ -1209,14 +1345,28 @@ def test_daily_hardening_repo_fleet_daily_use_findings(tmp_path, monkeypatch, ca
         lambda target: {
             "issue_count": 2,
             "checks": [
-                {"status": "warn", "name": "repo_fleet_actions_need_review", "detail": "1 open fleet action", "phase": 146, "suggested_next_command": "brigade repos actions list"},
-                {"status": "warn", "name": "repo_fleet_release_manual_plan_missing", "detail": "manual plan missing", "phase": 151, "suggested_next_command": "brigade repos release show latest"},
+                {
+                    "status": "warn",
+                    "name": "repo_fleet_actions_need_review",
+                    "detail": "1 open fleet action",
+                    "phase": 146,
+                    "suggested_next_command": "brigade repos actions list",
+                },
+                {
+                    "status": "warn",
+                    "name": "repo_fleet_release_manual_plan_missing",
+                    "detail": "manual plan missing",
+                    "phase": 151,
+                    "suggested_next_command": "brigade repos release show latest",
+                },
             ],
         },
     )
 
     assert cli.main(["daily", "hardening", "audit", "--target", str(tmp_path), "--json"]) == 0
     audit = json.loads(capsys.readouterr().out)
-    fleet_phases = {finding["phase"] for finding in audit["findings"] if finding["workstream"] == "repo-fleet-daily-use"}
+    fleet_phases = {
+        finding["phase"] for finding in audit["findings"] if finding["workstream"] == "repo-fleet-daily-use"
+    }
     assert {146, 151} <= fleet_phases
     assert audit["implemented_phase_count"] == 50

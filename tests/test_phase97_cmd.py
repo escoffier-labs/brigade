@@ -10,26 +10,29 @@ def test_release_smoke_plan_record_list_show_and_receipt_json(tmp_path, capsys):
     assert plan["matrix_count"] == len(release_cmd.INSTALL_SMOKE_MATRIX)
     assert any(item["matrix_id"] == "repo-codex" for item in plan["matrix"])
 
-    assert cli.main(
-        [
-            "release",
-            "smoke",
-            "record",
-            "--target",
-            str(tmp_path),
-            "--depth",
-            "repo",
-            "--harnesses",
-            "codex",
-            "--status",
-            "passed",
-            "--command-label",
-            "brigade init --depth repo --harnesses codex",
-            "--summary",
-            "smoke passed",
-            "--json",
-        ]
-    ) == 0
+    assert (
+        cli.main(
+            [
+                "release",
+                "smoke",
+                "record",
+                "--target",
+                str(tmp_path),
+                "--depth",
+                "repo",
+                "--harnesses",
+                "codex",
+                "--status",
+                "passed",
+                "--command-label",
+                "brigade init --depth repo --harnesses codex",
+                "--summary",
+                "smoke passed",
+                "--json",
+            ]
+        )
+        == 0
+    )
     recorded = json.loads(capsys.readouterr().out)["record"]
     assert recorded["matrix_id"] == "repo-codex"
     assert recorded["harnesses"] == ["codex"]
@@ -54,21 +57,29 @@ def test_release_smoke_plan_record_list_show_and_receipt_json(tmp_path, capsys):
             }
         )
     )
-    assert cli.main(["release", "smoke", "record", "--target", str(tmp_path), "--receipt-json", str(receipt_path), "--json"]) == 0
+    assert (
+        cli.main(
+            ["release", "smoke", "record", "--target", str(tmp_path), "--receipt-json", str(receipt_path), "--json"]
+        )
+        == 0
+    )
     parsed = json.loads(capsys.readouterr().out)["record"]
     assert parsed["matrix_id"] == "workspace-claude-codex-openclaw"
 
 
 def test_release_smoke_health_stale_candidate_and_center_activity(tmp_path, capsys):
     stale_time = (release_cmd._now() - timedelta(days=10)).isoformat()
-    assert release_cmd.install_smoke_record(
-        target=tmp_path,
-        depth="repo",
-        harnesses="codex",
-        status="passed",
-        summary="old smoke",
-        json_output=True,
-    ) == 0
+    assert (
+        release_cmd.install_smoke_record(
+            target=tmp_path,
+            depth="repo",
+            harnesses="codex",
+            status="passed",
+            summary="old smoke",
+            json_output=True,
+        )
+        == 0
+    )
     receipt = json.loads(capsys.readouterr().out)["record"]
     receipts_path = tmp_path / ".brigade" / "release" / "install-smoke" / "receipts.jsonl"
     receipt["created_at"] = stale_time
@@ -87,4 +98,7 @@ def test_release_smoke_health_stale_candidate_and_center_activity(tmp_path, caps
 
     assert center_cmd.activity(target=tmp_path, json_output=True) == 0
     activity = json.loads(capsys.readouterr().out)
-    assert any(item["subsystem"] == "install-smoke" and item["local_id"] == receipt["receipt_id"] for item in activity["activity"])
+    assert any(
+        item["subsystem"] == "install-smoke" and item["local_id"] == receipt["receipt_id"]
+        for item in activity["activity"]
+    )

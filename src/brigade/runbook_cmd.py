@@ -1,4 +1,5 @@
 """Explicit runbook execution with local receipts."""
+
 from __future__ import annotations
 
 import json
@@ -109,9 +110,7 @@ def _plan_payload(target: Path, runbook: Path) -> tuple[dict[str, Any] | None, s
         for index, step in enumerate(payload["steps"], start=1)
     ]
     policy_failures = [
-        {"step": step["id"], "failures": step["policy"]["failures"]}
-        for step in steps
-        if step["policy"]["failures"]
+        {"step": step["id"], "failures": step["policy"]["failures"]} for step in steps if step["policy"]["failures"]
     ]
     return {
         "target": str(target),
@@ -160,13 +159,25 @@ def _execute_plan(
 ) -> int:
     if not plan_payload["policy_valid"]:
         if json_output:
-            print(json.dumps({"target": str(target), "status": "blocked", "policy_failures": plan_payload["policy_failures"]}, indent=2, sort_keys=True))
+            print(
+                json.dumps(
+                    {"target": str(target), "status": "blocked", "policy_failures": plan_payload["policy_failures"]},
+                    indent=2,
+                    sort_keys=True,
+                )
+            )
         else:
             print("error: runbook policy failed", file=sys.stderr)
         return 2
     if not (approved or bool(plan_payload.get("approved"))):
         if json_output:
-            print(json.dumps({"target": str(target), "status": "approval-required", "runbook_id": plan_payload["runbook_id"]}, indent=2, sort_keys=True))
+            print(
+                json.dumps(
+                    {"target": str(target), "status": "approval-required", "runbook_id": plan_payload["runbook_id"]},
+                    indent=2,
+                    sort_keys=True,
+                )
+            )
         else:
             print("error: runbook execution requires --approved or approved=true in the runbook", file=sys.stderr)
         return 1
@@ -182,7 +193,9 @@ def _execute_plan(
         return 0
     target = target.expanduser().resolve()
     started = _now()
-    run_id, run_dir = _unique_run_dir(target, f"{started[:19].replace(':', '').replace('-', '')}-{plan_payload['runbook_id']}")
+    run_id, run_dir = _unique_run_dir(
+        target, f"{started[:19].replace(':', '').replace('-', '')}-{plan_payload['runbook_id']}"
+    )
     results: list[dict[str, Any]] = []
     status = "completed"
     for step in steps:
@@ -246,14 +259,23 @@ def _execute_plan(
     return 0 if status == "completed" else 1
 
 
-def run(*, target: Path, runbook: Path, approved: bool = False, dry_run: bool = False, json_output: bool = False) -> int:
+def run(
+    *, target: Path, runbook: Path, approved: bool = False, dry_run: bool = False, json_output: bool = False
+) -> int:
     target = target.expanduser().resolve()
     runbook = runbook.expanduser().resolve()
     plan_payload, error = _plan_payload(target, runbook)
     if plan_payload is None:
         print(f"error: {error}", file=sys.stderr)
         return 2
-    return _execute_plan(target=target, runbook=runbook, plan_payload=plan_payload, approved=approved, dry_run=dry_run, json_output=json_output)
+    return _execute_plan(
+        target=target,
+        runbook=runbook,
+        plan_payload=plan_payload,
+        approved=approved,
+        dry_run=dry_run,
+        json_output=json_output,
+    )
 
 
 def _run_receipts(target: Path) -> list[dict[str, Any]]:
@@ -306,7 +328,9 @@ def resume(*, target: Path, run_id: str = "latest", json_output: bool = False) -
     return 0
 
 
-def retry(*, target: Path, run_id: str = "latest", approved: bool = False, dry_run: bool = False, json_output: bool = False) -> int:
+def retry(
+    *, target: Path, run_id: str = "latest", approved: bool = False, dry_run: bool = False, json_output: bool = False
+) -> int:
     target = target.expanduser().resolve()
     receipt, error = _resolve_receipt(target, run_id)
     if receipt is None:
@@ -315,7 +339,13 @@ def retry(*, target: Path, run_id: str = "latest", approved: bool = False, dry_r
     failed = [step for step in receipt.get("steps", []) if isinstance(step, dict) and step.get("status") != "completed"]
     if not failed:
         if json_output:
-            print(json.dumps({"target": str(target), "status": "no-failed-step", "run_id": receipt.get("run_id")}, indent=2, sort_keys=True))
+            print(
+                json.dumps(
+                    {"target": str(target), "status": "no-failed-step", "run_id": receipt.get("run_id")},
+                    indent=2,
+                    sort_keys=True,
+                )
+            )
         else:
             print(f"runbook_retry: {receipt.get('run_id')}")
             print("status: no-failed-step")
@@ -337,7 +367,14 @@ def retry(*, target: Path, run_id: str = "latest", approved: bool = False, dry_r
     )
 
 
-def closeout(*, target: Path, run_id: str = "latest", status: str = "reviewed", reason: str | None = None, json_output: bool = False) -> int:
+def closeout(
+    *,
+    target: Path,
+    run_id: str = "latest",
+    status: str = "reviewed",
+    reason: str | None = None,
+    json_output: bool = False,
+) -> int:
     target = target.expanduser().resolve()
     receipt, error = _resolve_receipt(target, run_id)
     if receipt is None:

@@ -6,6 +6,7 @@ Conservative by design:
   - everything ambiguous lands in memory/handoff-inbox/ for manual review
   - processed files move to the writer inbox's processed/ directory
 """
+
 from __future__ import annotations
 
 import re
@@ -337,9 +338,7 @@ def _execute(
             # harness actually wrote, not a reconstruction.
             original = handoff_path.read_text()
             header = (
-                f"<!-- routed from {handoff_path.name}\n"
-                f"     reason: {outcome.reason}\n"
-                f"     routed-at: {slug} -->\n\n"
+                f"<!-- routed from {handoff_path.name}\n     reason: {outcome.reason}\n     routed-at: {slug} -->\n\n"
             )
             dest.write_text(header + original)
             _archive(handoff_path, processed_dir)

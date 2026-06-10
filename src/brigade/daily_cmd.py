@@ -1,4 +1,5 @@
 """Agent-facing daily driver over local Brigade operator state."""
+
 from __future__ import annotations
 
 import json
@@ -18,7 +19,18 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from . import center_cmd, context_cmd, handoff_cmd, memory_cmd, notifications_cmd, phases_cmd, security_cmd, toml_compat as tomllib, tools_cmd, work_cmd
+from . import (
+    center_cmd,
+    context_cmd,
+    handoff_cmd,
+    memory_cmd,
+    notifications_cmd,
+    phases_cmd,
+    security_cmd,
+    toml_compat as tomllib,
+    tools_cmd,
+    work_cmd,
+)
 from .localio import read_json_dict as _read_json, utc_now as _now, write_json as _write_json
 
 SCHEMA_VERSION = 1
@@ -200,7 +212,9 @@ def _hardening_phases() -> list[dict[str, Any]]:
                 {
                     "phase": phase,
                     "workstream": stream["id"],
-                    "title": HARDENING_PHASE_TITLES.get(phase, f"{stream['focus']} #{phase - int(stream['phase_start']) + 1}"),
+                    "title": HARDENING_PHASE_TITLES.get(
+                        phase, f"{stream['focus']} #{phase - int(stream['phase_start']) + 1}"
+                    ),
                     "status": "implemented" if phase in IMPLEMENTED_HARDENING_PHASES else "planned",
                 }
             )
@@ -229,25 +243,128 @@ def _schemas() -> dict[str, Any]:
     return {
         "schema_version": SCHEMA_VERSION,
         "schemas": [
-            {"name": "daily-status", "top_level_fields": ["target", "selected_action", "next_recommended_command", "daily_health"], "item_fields": base_fields},
-            {"name": "daily-plan", "top_level_fields": ["plan_id", "candidate_actions", "selected_action", "approval_required", "recorded"], "item_fields": base_fields},
-            {"name": "daily-review", "top_level_fields": ["selected_action", "selected_adapter", "source_evidence_refs", "acceptance", "config_blockers", "context_pack_would_build"], "item_fields": base_fields},
-            {"name": "daily-run", "top_level_fields": ["run_id", "plan_id", "selected_action", "status", "commands_invoked", "receipts_created", "blockers"], "item_fields": base_fields},
-            {"name": "daily-closeout", "top_level_fields": ["run_id", "closeout_status", "reviewed_at", "handoff_path"], "item_fields": []},
-            {"name": "daily-history", "top_level_fields": ["runs", "plans", "run_count", "plan_count"], "item_fields": ["id", "status", "created_at", "path"]},
-            {"name": "daily-doctor", "top_level_fields": ["checks", "issue_count", "top_issue", "health"], "item_fields": ["status", "name", "detail"]},
-            {"name": "daily-approval", "top_level_fields": ["approval_id", "status", "selected_action", "selected_adapter", "source_fingerprint"], "item_fields": ["approval_id", "status", "safe_summary", "suggested_next_command"]},
-            {"name": "daily-approval-compare", "top_level_fields": ["approval_id", "issues", "ok"], "item_fields": ["name", "status", "detail"]},
-            {"name": "daily-approval-archive", "top_level_fields": ["archived", "archived_count"], "item_fields": ["approval_id", "status", "archive_path"]},
-            {"name": "daily-resume", "top_level_fields": ["status", "latest_run", "action_taken", "next_recommended_command"], "item_fields": ["name", "detail", "status"]},
-            {"name": "daily-repair", "top_level_fields": ["repair_id", "checks", "suggestions", "writes"], "item_fields": ["name", "detail", "status"]},
-            {"name": "daily-unblock", "top_level_fields": ["unblock_id", "created_imports", "approval_request", "blockers"], "item_fields": ["id", "source", "kind", "status"]},
-            {"name": "daily-protocol", "top_level_fields": ["steps", "commands", "safety_boundaries"], "item_fields": ["step", "command", "purpose"]},
-            {"name": "daily-telemetry", "top_level_fields": ["metrics", "issue_count", "top_issue"], "item_fields": ["name", "value", "detail"]},
-            {"name": "daily-hardening-plan", "top_level_fields": ["phase_count", "workstreams", "phases"], "item_fields": ["phase", "workstream", "title", "status"]},
-            {"name": "daily-hardening-audit", "top_level_fields": ["workstreams", "findings", "issue_count", "top_issue"], "item_fields": ["finding_id", "workstream", "severity", "safe_summary"]},
-            {"name": "daily-hardening-import-issues", "top_level_fields": ["created_imports", "skipped_imports", "finding_count"], "item_fields": ["id", "source", "kind", "status"]},
-            {"name": "daily-hardening-closeout", "top_level_fields": ["closeout_id", "status", "finding_count", "unresolved_count"], "item_fields": ["finding_id", "severity", "safe_summary"]},
+            {
+                "name": "daily-status",
+                "top_level_fields": ["target", "selected_action", "next_recommended_command", "daily_health"],
+                "item_fields": base_fields,
+            },
+            {
+                "name": "daily-plan",
+                "top_level_fields": [
+                    "plan_id",
+                    "candidate_actions",
+                    "selected_action",
+                    "approval_required",
+                    "recorded",
+                ],
+                "item_fields": base_fields,
+            },
+            {
+                "name": "daily-review",
+                "top_level_fields": [
+                    "selected_action",
+                    "selected_adapter",
+                    "source_evidence_refs",
+                    "acceptance",
+                    "config_blockers",
+                    "context_pack_would_build",
+                ],
+                "item_fields": base_fields,
+            },
+            {
+                "name": "daily-run",
+                "top_level_fields": [
+                    "run_id",
+                    "plan_id",
+                    "selected_action",
+                    "status",
+                    "commands_invoked",
+                    "receipts_created",
+                    "blockers",
+                ],
+                "item_fields": base_fields,
+            },
+            {
+                "name": "daily-closeout",
+                "top_level_fields": ["run_id", "closeout_status", "reviewed_at", "handoff_path"],
+                "item_fields": [],
+            },
+            {
+                "name": "daily-history",
+                "top_level_fields": ["runs", "plans", "run_count", "plan_count"],
+                "item_fields": ["id", "status", "created_at", "path"],
+            },
+            {
+                "name": "daily-doctor",
+                "top_level_fields": ["checks", "issue_count", "top_issue", "health"],
+                "item_fields": ["status", "name", "detail"],
+            },
+            {
+                "name": "daily-approval",
+                "top_level_fields": [
+                    "approval_id",
+                    "status",
+                    "selected_action",
+                    "selected_adapter",
+                    "source_fingerprint",
+                ],
+                "item_fields": ["approval_id", "status", "safe_summary", "suggested_next_command"],
+            },
+            {
+                "name": "daily-approval-compare",
+                "top_level_fields": ["approval_id", "issues", "ok"],
+                "item_fields": ["name", "status", "detail"],
+            },
+            {
+                "name": "daily-approval-archive",
+                "top_level_fields": ["archived", "archived_count"],
+                "item_fields": ["approval_id", "status", "archive_path"],
+            },
+            {
+                "name": "daily-resume",
+                "top_level_fields": ["status", "latest_run", "action_taken", "next_recommended_command"],
+                "item_fields": ["name", "detail", "status"],
+            },
+            {
+                "name": "daily-repair",
+                "top_level_fields": ["repair_id", "checks", "suggestions", "writes"],
+                "item_fields": ["name", "detail", "status"],
+            },
+            {
+                "name": "daily-unblock",
+                "top_level_fields": ["unblock_id", "created_imports", "approval_request", "blockers"],
+                "item_fields": ["id", "source", "kind", "status"],
+            },
+            {
+                "name": "daily-protocol",
+                "top_level_fields": ["steps", "commands", "safety_boundaries"],
+                "item_fields": ["step", "command", "purpose"],
+            },
+            {
+                "name": "daily-telemetry",
+                "top_level_fields": ["metrics", "issue_count", "top_issue"],
+                "item_fields": ["name", "value", "detail"],
+            },
+            {
+                "name": "daily-hardening-plan",
+                "top_level_fields": ["phase_count", "workstreams", "phases"],
+                "item_fields": ["phase", "workstream", "title", "status"],
+            },
+            {
+                "name": "daily-hardening-audit",
+                "top_level_fields": ["workstreams", "findings", "issue_count", "top_issue"],
+                "item_fields": ["finding_id", "workstream", "severity", "safe_summary"],
+            },
+            {
+                "name": "daily-hardening-import-issues",
+                "top_level_fields": ["created_imports", "skipped_imports", "finding_count"],
+                "item_fields": ["id", "source", "kind", "status"],
+            },
+            {
+                "name": "daily-hardening-closeout",
+                "top_level_fields": ["closeout_id", "status", "finding_count", "unresolved_count"],
+                "item_fields": ["finding_id", "severity", "safe_summary"],
+            },
         ],
     }
 
@@ -271,7 +388,9 @@ def _load_config(target: Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     checks: list[dict[str, Any]] = []
     config = dict(DEFAULT_CONFIG)
     if not path.exists():
-        checks.append({"status": "warn", "name": "daily_config_missing", "detail": f"missing {path}; run `brigade daily init`"})
+        checks.append(
+            {"status": "warn", "name": "daily_config_missing", "detail": f"missing {path}; run `brigade daily init`"}
+        )
         return config, checks
     try:
         loaded = tomllib.loads(path.read_text())
@@ -291,7 +410,13 @@ def _load_config(target: Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
 def _validate_config(config: dict[str, Any]) -> list[dict[str, Any]]:
     checks: list[dict[str, Any]] = []
     if config.get("preferred_mode") not in PREFERRED_MODES:
-        checks.append({"status": "fail", "name": "daily_preferred_mode", "detail": "expected task-first, inbox-first, or readiness-first"})
+        checks.append(
+            {
+                "status": "fail",
+                "name": "daily_preferred_mode",
+                "detail": "expected task-first, inbox-first, or readiness-first",
+            }
+        )
     if config.get("max_risk_without_approval") not in RISK_LEVELS:
         checks.append({"status": "fail", "name": "daily_max_risk", "detail": "expected low, medium, or high"})
     for key in (
@@ -315,11 +440,17 @@ def _validate_config(config: dict[str, Any]) -> list[dict[str, Any]]:
     if not isinstance(commands, str) and not (
         isinstance(commands, list) and all(isinstance(item, str) for item in commands)
     ):
-        checks.append({"status": "fail", "name": "allowed_verification_commands", "detail": "expected string or list of strings"})
+        checks.append(
+            {"status": "fail", "name": "allowed_verification_commands", "detail": "expected string or list of strings"}
+        )
     if config.get("enabled") is False:
-        checks.append({"status": "warn", "name": "daily_disabled", "detail": "daily driver is disabled in local config"})
+        checks.append(
+            {"status": "warn", "name": "daily_disabled", "detail": "daily driver is disabled in local config"}
+        )
     if config.get("max_risk_without_approval") == "high":
-        checks.append({"status": "warn", "name": "daily_risk_policy", "detail": "high risk actions are allowed without approval"})
+        checks.append(
+            {"status": "warn", "name": "daily_risk_policy", "detail": "high risk actions are allowed without approval"}
+        )
     return checks
 
 
@@ -360,7 +491,9 @@ def _status_section_check(label: str, status: str, detail: str, elapsed_ms: int)
     }
 
 
-def _bounded_status_call(label: str, func, fallback: Any, *, timeout_seconds: int | None = None) -> tuple[Any, dict[str, Any]]:
+def _bounded_status_call(
+    label: str, func, fallback: Any, *, timeout_seconds: int | None = None
+) -> tuple[Any, dict[str, Any]]:
     timeout = timeout_seconds or _status_section_timeout_seconds()
     start = time.monotonic()
     use_alarm = threading.current_thread() is threading.main_thread() and hasattr(signal, "SIGALRM")
@@ -384,7 +517,9 @@ def _bounded_status_call(label: str, func, fallback: Any, *, timeout_seconds: in
         return fallback, _status_section_check(label, "warn", f"timed out after {timeout}s", elapsed)
     except Exception as exc:
         elapsed = int((time.monotonic() - start) * 1000)
-        return fallback, _status_section_check(label, "warn", _safe_text(Path("."), f"{type(exc).__name__}: {exc}"), elapsed)
+        return fallback, _status_section_check(
+            label, "warn", _safe_text(Path("."), f"{type(exc).__name__}: {exc}"), elapsed
+        )
     finally:
         if use_alarm:
             signal.setitimer(signal.ITIMER_REAL, 0)
@@ -471,7 +606,9 @@ def _pending_task_candidates(target: Path) -> list[dict[str, Any]]:
                 risk_level="medium",
                 acceptance=acceptance,
                 evidence_refs=[str(work_cmd._tasks_path(target))],
-                source_fingerprint=_fingerprint({"task_id": task_id, "text": task.get("text"), "acceptance": acceptance}),
+                source_fingerprint=_fingerprint(
+                    {"task_id": task_id, "text": task.get("text"), "acceptance": acceptance}
+                ),
                 context_kind="task",
                 metadata={"task_id": task_id},
             )
@@ -483,19 +620,25 @@ def _pending_import_candidates(target: Path) -> list[dict[str, Any]]:
     candidates: list[dict[str, Any]] = []
     quality = work_cmd._inbox_quality_payload(target)
     quality_by_id = {
-        str(item.get("import_id")): item
-        for item in quality.get("scored_imports", [])
-        if isinstance(item, dict)
+        str(item.get("import_id")): item for item in quality.get("scored_imports", []) if isinstance(item, dict)
     }
     all_imports = work_cmd._read_imports(target)
-    dismissed_by_source = Counter(str(item.get("source") or "unknown") for item in all_imports if item.get("status") == "dismissed")
-    promoted_by_source = Counter(str(item.get("source") or "unknown") for item in all_imports if item.get("status") == "promoted")
+    dismissed_by_source = Counter(
+        str(item.get("source") or "unknown") for item in all_imports if item.get("status") == "dismissed"
+    )
+    promoted_by_source = Counter(
+        str(item.get("source") or "unknown") for item in all_imports if item.get("status") == "promoted"
+    )
     for item in work_cmd._pending_imports(target):
         import_id = str(item.get("id") or "")
         source = str(item.get("source") or "unknown")
-        acceptance = [str(value) for value in item.get("acceptance", [])] if isinstance(item.get("acceptance"), list) else []
+        acceptance = (
+            [str(value) for value in item.get("acceptance", [])] if isinstance(item.get("acceptance"), list) else []
+        )
         metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
-        has_provenance = bool(metadata.get("source_fingerprint") or metadata.get("scanner_run_id") or item.get("source"))
+        has_provenance = bool(
+            metadata.get("source_fingerprint") or metadata.get("scanner_run_id") or item.get("source")
+        )
         noisy_source = dismissed_by_source[source] >= max(3, promoted_by_source[source] * 3)
         deferred = bool(metadata.get("deferred") or metadata.get("deferred_at") or item.get("deferred_at"))
         stale = _is_stale(item.get("created_at"), 72)
@@ -595,7 +738,9 @@ def _readiness_candidates(target: Path) -> list[dict[str, Any]]:
     return candidates
 
 
-def _daily_readiness_finding(subsystem: str, name: str, severity: str, summary: str, command: str, *, status: str = "warn") -> dict[str, Any]:
+def _daily_readiness_finding(
+    subsystem: str, name: str, severity: str, summary: str, command: str, *, status: str = "warn"
+) -> dict[str, Any]:
     fingerprint = _fingerprint({"subsystem": subsystem, "name": name, "severity": severity, "summary": summary})
     return {
         "finding_id": f"daily-readiness-{fingerprint}",
@@ -618,17 +763,56 @@ def _daily_readiness_payload(target: Path) -> dict[str, Any]:
     pending_imports = int(status_data.get("pending_import_count") or 0)
     review_count = int(status_data.get("review_queue_count") or 0)
     if pending_tasks:
-        findings.append(_daily_readiness_finding("work", "pending_tasks", "warning", f"{pending_tasks} pending task(s)", "brigade work tasks"))
+        findings.append(
+            _daily_readiness_finding(
+                "work", "pending_tasks", "warning", f"{pending_tasks} pending task(s)", "brigade work tasks"
+            )
+        )
     if pending_imports:
-        findings.append(_daily_readiness_finding("work", "pending_imports", "blocker", f"{pending_imports} pending import(s)", "brigade work inbox", status="blocked"))
+        findings.append(
+            _daily_readiness_finding(
+                "work",
+                "pending_imports",
+                "blocker",
+                f"{pending_imports} pending import(s)",
+                "brigade work inbox",
+                status="blocked",
+            )
+        )
     if review_count:
-        findings.append(_daily_readiness_finding("center", "pending_reviews", "warning", f"{review_count} pending review item(s)", "brigade center reviews"))
+        findings.append(
+            _daily_readiness_finding(
+                "center",
+                "pending_reviews",
+                "warning",
+                f"{review_count} pending review item(s)",
+                "brigade center reviews",
+            )
+        )
     release = release_cmd._latest_release_receipt(target)
     if not release:
-        findings.append(_daily_readiness_finding("release", "missing_release_readiness", "blocker", "release readiness receipt is missing", "brigade release run", status="blocked"))
+        findings.append(
+            _daily_readiness_finding(
+                "release",
+                "missing_release_readiness",
+                "blocker",
+                "release readiness receipt is missing",
+                "brigade release run",
+                status="blocked",
+            )
+        )
     elif release.get("ready") is False or release.get("status") in {"blocked", "failed"}:
         run_id = str(release.get("run_id") or "latest")
-        findings.append(_daily_readiness_finding("release", "blocked_release_readiness", "blocker", "release readiness is blocked", f"brigade release show {run_id}", status="blocked"))
+        findings.append(
+            _daily_readiness_finding(
+                "release",
+                "blocked_release_readiness",
+                "blocker",
+                "release readiness is blocked",
+                f"brigade release show {run_id}",
+                status="blocked",
+            )
+        )
     for subsystem, command in (
         ("memory_care", "brigade memory care doctor"),
         ("security", "brigade security doctor"),
@@ -642,8 +826,16 @@ def _daily_readiness_payload(target: Path) -> dict[str, Any]:
         top = health.get("top_issue") if isinstance(health.get("top_issue"), dict) else None
         if issue_count <= 0 and not top:
             continue
-        detail = str((top or {}).get("detail") or (top or {}).get("safe_summary") or f"{subsystem} has unresolved health issue(s)")
-        findings.append(_daily_readiness_finding(subsystem, str((top or {}).get("name") or "health"), "warning", _safe_text(target, detail), command))
+        detail = str(
+            (top or {}).get("detail")
+            or (top or {}).get("safe_summary")
+            or f"{subsystem} has unresolved health issue(s)"
+        )
+        findings.append(
+            _daily_readiness_finding(
+                subsystem, str((top or {}).get("name") or "health"), "warning", _safe_text(target, detail), command
+            )
+        )
     blockers = [finding for finding in findings if finding.get("severity") == "blocker"]
     warnings = [finding for finding in findings if finding.get("severity") != "blocker"]
     return {
@@ -753,7 +945,9 @@ def _notification_candidates(target: Path) -> list[dict[str, Any]]:
             approval_required=False,
             risk_level="low",
             evidence_refs=["~/.config/agent-notify/config.toml", "agent-notify environment variable names"],
-            source_fingerprint=_fingerprint({"subsystem": "notifications", "status": health.get("status"), "issue": top}),
+            source_fingerprint=_fingerprint(
+                {"subsystem": "notifications", "status": health.get("status"), "issue": top}
+            ),
             metadata={"notification_health": health},
         )
     ]
@@ -794,7 +988,10 @@ def _phase_ledger_action_candidates(target: Path) -> list[dict[str, Any]]:
             continue
         action_id = str(action.get("action_id") or "")
         issue_type = str(action.get("issue_type") or "")
-        blocking_issue = any(token in issue_type for token in ("missing", "pushed", "committed", "blocked", "stale_unreviewed", "complete_without"))
+        blocking_issue = any(
+            token in issue_type
+            for token in ("missing", "pushed", "committed", "blocked", "stale_unreviewed", "complete_without")
+        )
         score = 185 if blocking_issue else 95
         candidates.append(
             _candidate(
@@ -828,7 +1025,10 @@ def _phase_ledger_issue_candidates(target: Path) -> list[dict[str, Any]]:
     if not top:
         return []
     issue_type = str(top.get("name") or "phase-ledger-issue")
-    blocking_issue = any(token in issue_type for token in ("missing", "pushed", "committed", "blocked", "stale_unreviewed", "complete_without"))
+    blocking_issue = any(
+        token in issue_type
+        for token in ("missing", "pushed", "committed", "blocked", "stale_unreviewed", "complete_without")
+    )
     score = 170 if blocking_issue else 80
     return [
         _candidate(
@@ -857,7 +1057,9 @@ def _phase_ledger_issues_captured_by_report(phase_health: dict[str, Any]) -> boo
     if issue_count <= 0:
         return False
     latest_report = phase_health.get("latest_report") if isinstance(phase_health.get("latest_report"), dict) else {}
-    latest_compare = phase_health.get("latest_report_compare") if isinstance(phase_health.get("latest_report_compare"), dict) else {}
+    latest_compare = (
+        phase_health.get("latest_report_compare") if isinstance(phase_health.get("latest_report_compare"), dict) else {}
+    )
     report_issue_count = latest_report.get("issue_count")
     compare_issue_count = latest_compare.get("issue_count")
     try:
@@ -891,8 +1093,13 @@ def _phase_session_candidates(target: Path) -> list[dict[str, Any]]:
                 action_type="import-phase-checkpoint-issues",
                 source_subsystem="phase-session-checkpoint",
                 source_local_id=checkpoint_id,
-                safe_summary=str((top_issue or {}).get("detail") or latest.get("summary") or "phase session checkpoint needs review"),
-                suggested_next_command=str(checkpoint.get("suggested_next_command") or f"brigade work phases session checkpoints import-issues {checkpoint_id}"),
+                safe_summary=str(
+                    (top_issue or {}).get("detail") or latest.get("summary") or "phase session checkpoint needs review"
+                ),
+                suggested_next_command=str(
+                    checkpoint.get("suggested_next_command")
+                    or f"brigade work phases session checkpoints import-issues {checkpoint_id}"
+                ),
                 score=190,
                 ranking_reasons=[
                     "phase session checkpoint issue",
@@ -903,7 +1110,12 @@ def _phase_session_candidates(target: Path) -> list[dict[str, Any]]:
                 risk_level="low",
                 evidence_refs=[str(latest.get("path") or phases_cmd._session_checkpoints_root(target))],
                 source_fingerprint=str(latest.get("source_fingerprint") or _fingerprint(checkpoint)),
-                metadata={"checkpoint_id": checkpoint_id, "session_id": session_id, "issue_count": checkpoint.get("issue_count"), "top_issue": top_issue},
+                metadata={
+                    "checkpoint_id": checkpoint_id,
+                    "session_id": session_id,
+                    "issue_count": checkpoint.get("issue_count"),
+                    "top_issue": top_issue,
+                },
             )
         )
     elif step_type not in {"session_closeout_needed", "session_reviewed"}:
@@ -929,7 +1141,12 @@ def _phase_session_candidates(target: Path) -> list[dict[str, Any]]:
             )
         )
     action_type = "closeout-phase-session" if step_type == "session_closeout_needed" else "build-phase-session-report"
-    score = 260 if step_type in {"missing_record", "pending_phase", "blocked_phase", "stale_in_progress_phase", "session_closeout_needed"} else 125
+    score = (
+        260
+        if step_type
+        in {"missing_record", "pending_phase", "blocked_phase", "stale_in_progress_phase", "session_closeout_needed"}
+        else 125
+    )
     candidates.append(
         _candidate(
             target=target,
@@ -937,7 +1154,9 @@ def _phase_session_candidates(target: Path) -> list[dict[str, Any]]:
             source_subsystem="phase-session",
             source_local_id=session_id,
             safe_summary=str(step.get("detail") or "phase execution session needs review"),
-            suggested_next_command=str(next_payload.get("suggested_next_command") or "brigade work phases session next latest"),
+            suggested_next_command=str(
+                next_payload.get("suggested_next_command") or "brigade work phases session next latest"
+            ),
             score=score,
             ranking_reasons=[
                 "active phase execution session",
@@ -1076,7 +1295,9 @@ def _candidate_blockers(target: Path, config: dict[str, Any], action: dict[str, 
     }
 
 
-def _candidate_explanation(target: Path, config: dict[str, Any], action: dict[str, Any], selected_id: str | None) -> dict[str, Any]:
+def _candidate_explanation(
+    target: Path, config: dict[str, Any], action: dict[str, Any], selected_id: str | None
+) -> dict[str, Any]:
     blockers = _candidate_blockers(target, config, action)
     rejection_reasons: list[str] = []
     if action.get("action_id") != selected_id:
@@ -1162,7 +1383,9 @@ def _matching_approvals(target: Path, action: dict[str, Any], config: dict[str, 
     ]
 
 
-def _ensure_approval(target: Path, plan_data: dict[str, Any], action: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]:
+def _ensure_approval(
+    target: Path, plan_data: dict[str, Any], action: dict[str, Any], config: dict[str, Any]
+) -> dict[str, Any]:
     matches = _matching_approvals(target, action, config)
     for status in ("pending", "approved"):
         existing = next((approval for approval in matches if approval.get("status") == status), None)
@@ -1284,11 +1507,17 @@ def _evidence_blockers(target: Path, action: dict[str, Any] | None) -> list[str]
             return [f"pending import not found: {import_id}"]
     if action_type == "start-center-action":
         action_id = str(metadata.get("action_id") or source_id)
-        if not any(str(item.get("action_id")) == action_id and item.get("status") in {"pending", "active"} for item in center_cmd._read_actions(target)):
+        if not any(
+            str(item.get("action_id")) == action_id and item.get("status") in {"pending", "active"}
+            for item in center_cmd._read_actions(target)
+        ):
             return [f"center action not found: {action_id}"]
     if action_type == "start-phase-action":
         action_id = str(metadata.get("action_id") or source_id)
-        if not any(str(item.get("action_id")) == action_id and item.get("status") in {"pending", "active"} for item in phases_cmd._read_actions(target)):
+        if not any(
+            str(item.get("action_id")) == action_id and item.get("status") in {"pending", "active"}
+            for item in phases_cmd._read_actions(target)
+        ):
             return [f"phase action not found: {action_id}"]
     if action_type in {"write-phase-session-checkpoint", "build-phase-session-report", "closeout-phase-session"}:
         session_id = str(metadata.get("session_id") or source_id)
@@ -1361,14 +1590,27 @@ def _daily_security_health(target: Path) -> dict[str, Any]:
         checks.append({"status": "warn", "name": "security_config", "detail": "missing"})
     bundle = security_cmd.inspect_evidence_bundle(security_cmd.default_artifacts_dir(target))
     if bundle.get("ready"):
-        checks.append({"status": "ok", "name": "security_evidence", "detail": f"findings={bundle.get('finding_count')}"})
+        checks.append(
+            {"status": "ok", "name": "security_evidence", "detail": f"findings={bundle.get('finding_count')}"}
+        )
     else:
         checks.append({"status": "warn", "name": "security_evidence", "detail": str(bundle.get("reason"))})
     issues = [item for item in checks if item.get("status") != "ok"]
     top_finding = None
     if bundle.get("ready") and int(bundle.get("finding_count") or 0) > 0:
-        top_finding = {"id": "latest", "title": "latest security scan has findings", "severity": "unknown", "status": "warn"}
-        checks.append({"status": "warn", "name": "security_open_findings", "detail": f"{bundle.get('finding_count')} finding(s) in latest evidence"})
+        top_finding = {
+            "id": "latest",
+            "title": "latest security scan has findings",
+            "severity": "unknown",
+            "status": "warn",
+        }
+        checks.append(
+            {
+                "status": "warn",
+                "name": "security_open_findings",
+                "detail": f"{bundle.get('finding_count')} finding(s) in latest evidence",
+            }
+        )
         issues = [item for item in checks if item.get("status") != "ok"]
     return {
         "target": str(target),
@@ -1388,7 +1630,9 @@ def status_payload(target: Path) -> dict[str, Any]:
     status_section_checks: list[dict[str, Any]] = []
     center, check = _bounded_status_call("center-status", lambda: _daily_center_status_payload(target), {})
     status_section_checks.append(check)
-    readiness, check = _bounded_status_call("center-readiness", lambda: _daily_readiness_payload(target), {"blockers": []})
+    readiness, check = _bounded_status_call(
+        "center-readiness", lambda: _daily_readiness_payload(target), {"blockers": []}
+    )
     status_section_checks.append(check)
     config, config_checks = _load_config(target)
     candidates = _all_candidates(target, diagnostics=status_section_checks)
@@ -1398,7 +1642,9 @@ def status_payload(target: Path) -> dict[str, Any]:
     security = center.get("security") if isinstance(center.get("security"), dict) else {}
     notifications = center.get("notifications") if isinstance(center.get("notifications"), dict) else {}
     tools = center.get("tool_catalog") if isinstance(center.get("tool_catalog"), dict) else {}
-    latest_report, check = _bounded_status_call("latest-operator-report", lambda: center_cmd.latest_report(target), None)
+    latest_report, check = _bounded_status_call(
+        "latest-operator-report", lambda: center_cmd.latest_report(target), None
+    )
     status_section_checks.append(check)
     daily_health_fallback = {
         "schema_version": SCHEMA_VERSION,
@@ -1419,7 +1665,9 @@ def status_payload(target: Path) -> dict[str, Any]:
     status_section_checks.append(check)
     phase_health, check = _bounded_status_call("phase-health", lambda: phases_cmd.health(target), {})
     status_section_checks.append(check)
-    latest_phase_session, check = _bounded_status_call("latest-phase-session", lambda: phases_cmd._latest_session(target), None)
+    latest_phase_session, check = _bounded_status_call(
+        "latest-phase-session", lambda: phases_cmd._latest_session(target), None
+    )
     status_section_checks.append(check)
     approvals = daily_health.get("approvals") if isinstance(daily_health.get("approvals"), dict) else {}
     status_section_issues = [item for item in status_section_checks if item.get("status") != "ok"]
@@ -1434,28 +1682,42 @@ def status_payload(target: Path) -> dict[str, Any]:
         "top_status_section_issue": status_section_issues[0] if status_section_issues else None,
         "daily_health": daily_health,
         "phase_ledger": phase_health,
-        "phase_session": phases_cmd._session_summary(latest_phase_session) if isinstance(latest_phase_session, dict) else None,
+        "phase_session": phases_cmd._session_summary(latest_phase_session)
+        if isinstance(latest_phase_session, dict)
+        else None,
         "top_pending_approval": approvals.get("top_pending"),
         "telemetry": daily_health.get("telemetry"),
         "active_session": center.get("active_session"),
         "pending_task_count": center.get("pending_task_count", 0),
         "pending_import_count": center.get("pending_import_count", 0),
         "center_review_count": center.get("review_queue_count", 0),
-        "open_daily_action_count": (center.get("action_queue") or {}).get("open_count", 0) if isinstance(center.get("action_queue"), dict) else 0,
+        "open_daily_action_count": (center.get("action_queue") or {}).get("open_count", 0)
+        if isinstance(center.get("action_queue"), dict)
+        else 0,
         "top_readiness_blocker": readiness.get("blockers", [None])[0] if readiness.get("blockers") else None,
-        "pending_handoff_draft_count": (handoffs.get("counts") or {}).get("pending", 0) if isinstance(handoffs.get("counts"), dict) else int(handoffs.get("draft_count") or 0),
+        "pending_handoff_draft_count": (handoffs.get("counts") or {}).get("pending", 0)
+        if isinstance(handoffs.get("counts"), dict)
+        else int(handoffs.get("draft_count") or 0),
         "memory_care_issue_count": int(memory.get("issue_count") or 0),
         "security_issue_count": int(security.get("issue_count") or security.get("finding_count") or 0),
         "notification_issue_count": int(notifications.get("issue_count") or 0),
         "notifications": notifications,
-        "tool_approval_count": int(((tools.get("call_queue") or {}) if isinstance(tools.get("call_queue"), dict) else {}).get("pending_count") or 0),
-        "tool_checkpoint_count": int(((tools.get("checkpoints") or {}) if isinstance(tools.get("checkpoints"), dict) else {}).get("open_count") or 0),
+        "tool_approval_count": int(
+            ((tools.get("call_queue") or {}) if isinstance(tools.get("call_queue"), dict) else {}).get("pending_count")
+            or 0
+        ),
+        "tool_checkpoint_count": int(
+            ((tools.get("checkpoints") or {}) if isinstance(tools.get("checkpoints"), dict) else {}).get("open_count")
+            or 0
+        ),
         "latest_release_readiness": center.get("release_readiness"),
         "latest_operator_report": {
             "report_id": latest_report.get("report_id"),
             "status": latest_report.get("status"),
             "path": latest_report.get("path"),
-        } if isinstance(latest_report, dict) else None,
+        }
+        if isinstance(latest_report, dict)
+        else None,
         "next_recommended_command": selected.get("suggested_next_command") if selected else "brigade daily plan",
         "selected_action": selected,
     }
@@ -1499,7 +1761,9 @@ def plan_payload(target: Path, *, record: bool = False) -> dict[str, Any]:
     selected = _selected(candidates)
     selected_id = selected.get("action_id") if selected else None
     candidate_explanations = [_candidate_explanation(target, config, action, selected_id) for action in candidates]
-    selection_blockers = _candidate_blockers(target, config, selected) if selected else _candidate_blockers(target, config, None)
+    selection_blockers = (
+        _candidate_blockers(target, config, selected) if selected else _candidate_blockers(target, config, None)
+    )
     created = _now().isoformat()
     plan_id = f"{_now().strftime('%Y%m%d-%H%M%S')}-daily-plan-{uuid4().hex[:6]}"
     payload = {
@@ -1520,7 +1784,9 @@ def plan_payload(target: Path, *, record: bool = False) -> dict[str, Any]:
         "source_local_id": selected.get("source_local_id") if selected else None,
         "source_fingerprint": selected.get("source_fingerprint") if selected else None,
         "approval_required": bool(selected.get("approval_required")) if selected else False,
-        "approval_requirement": selected.get("approval_reason") if selected and selected.get("approval_required") else None,
+        "approval_requirement": selected.get("approval_reason")
+        if selected and selected.get("approval_required")
+        else None,
         "ranking_reasons": selected.get("ranking_reasons") if selected else [],
         "selection_reasons": selected.get("ranking_reasons") if selected else [],
         "rejection_reasons": {
@@ -1571,7 +1837,9 @@ def _review_payload(target: Path, selected: dict[str, Any] | None = None) -> dic
     target = target.expanduser().resolve()
     config, config_checks = _load_config(target)
     action = selected or _selected(_all_candidates(target))
-    explain = _candidate_explanation(target, config, action, action.get("action_id") if action else None) if action else None
+    explain = (
+        _candidate_explanation(target, config, action, action.get("action_id") if action else None) if action else None
+    )
     context_plan = None
     context_would_build = bool(action and action.get("context_kind") and config.get("allow_context_pack_build", True))
     approval_request = None
@@ -1605,7 +1873,9 @@ def _review_payload(target: Path, selected: dict[str, Any] | None = None) -> dic
         "acceptance": action.get("acceptance") if action else [],
         "risk_level": action.get("risk_level") if action else None,
         "approval_required": bool(action.get("approval_required")) if action else False,
-        "approval_boundary": action.get("approval_reason") if action and action.get("approval_required") else "no explicit approval required",
+        "approval_boundary": action.get("approval_reason")
+        if action and action.get("approval_required")
+        else "no explicit approval required",
         "approval_request": approval_request,
         "likely_next_command": action.get("suggested_next_command") if action else None,
         "context_pack_plan": context_plan,
@@ -1671,7 +1941,12 @@ def _iter_receipts(root: Path, filename: str) -> tuple[list[dict[str, Any]], lis
             errors.append({"path": str(path), "error": "missing or invalid JSON"})
             continue
         receipts.append(payload)
-    receipts.sort(key=lambda item: str(item.get("started_at") or item.get("created_at") or item.get("run_id") or item.get("plan_id") or ""), reverse=True)
+    receipts.sort(
+        key=lambda item: str(
+            item.get("started_at") or item.get("created_at") or item.get("run_id") or item.get("plan_id") or ""
+        ),
+        reverse=True,
+    )
     return receipts, errors
 
 
@@ -1708,7 +1983,12 @@ def _invoke_context_build(target: Path, action: dict[str, Any]) -> tuple[str | N
     task_id = (action.get("metadata") or {}).get("task_id")
     before = {str(pack.get("pack_id")) for pack in context_cmd._packs(target)}
     with redirect_stdout(StringIO()):
-        rc = context_cmd.build(target=target, kind=str(action.get("context_kind")), task_id=str(task_id) if task_id else None, json_output=False)
+        rc = context_cmd.build(
+            target=target,
+            kind=str(action.get("context_kind")),
+            task_id=str(task_id) if task_id else None,
+            json_output=False,
+        )
     after = context_cmd._packs(target)
     created = next((pack for pack in after if str(pack.get("pack_id")) not in before), None)
     if isinstance(created, dict):
@@ -1729,13 +2009,26 @@ def _invoke_context_build(target: Path, action: dict[str, Any]) -> tuple[str | N
                 for run in (_iter_receipts(_runs_root(target), "run.json")[0])
                 if run.get("status") in {"failed", "blocked"}
             ][:5]
-            excluded = context_payload.get("excluded_private_evidence") if isinstance(context_payload.get("excluded_private_evidence"), list) else []
-            for item in ("raw scanner output", "raw chat text", "private repo names", "owner names", "org names", "hostnames"):
+            excluded = (
+                context_payload.get("excluded_private_evidence")
+                if isinstance(context_payload.get("excluded_private_evidence"), list)
+                else []
+            )
+            for item in (
+                "raw scanner output",
+                "raw chat text",
+                "private repo names",
+                "owner names",
+                "org names",
+                "hostnames",
+            ):
                 if item not in excluded:
                     excluded.append(item)
             context_payload["excluded_private_evidence"] = excluded
             _write_json(context_path, context_payload)
-    return (str(created.get("pack_id")) if isinstance(created, dict) else None), [{"command": "brigade context build", "exit_code": rc}]
+    return (str(created.get("pack_id")) if isinstance(created, dict) else None), [
+        {"command": "brigade context build", "exit_code": rc}
+    ]
 
 
 def _blocked_run(
@@ -1751,7 +2044,13 @@ def _blocked_run(
     receipt["completed_at"] = _now().isoformat()
     receipt["next_recommended_command"] = next_command
     receipt["blockers"].extend(blockers)
-    adapter = receipt.get("adapter_result") if isinstance(receipt.get("adapter_result"), dict) else _adapter_result(receipt.get("selected_action") if isinstance(receipt.get("selected_action"), dict) else None)
+    adapter = (
+        receipt.get("adapter_result")
+        if isinstance(receipt.get("adapter_result"), dict)
+        else _adapter_result(
+            receipt.get("selected_action") if isinstance(receipt.get("selected_action"), dict) else None
+        )
+    )
     adapter["status"] = "blocked"
     adapter["blockers"] = list(dict.fromkeys([*(adapter.get("blockers") or []), *blockers]))
     adapter["next_recommended_command"] = receipt["next_recommended_command"]
@@ -1767,7 +2066,9 @@ def _blocked_run(
             "type": "daily-run",
             "run_id": receipt.get("run_id"),
             "status": "blocked",
-            "action_type": (receipt.get("selected_action") or {}).get("action_type") if isinstance(receipt.get("selected_action"), dict) else None,
+            "action_type": (receipt.get("selected_action") or {}).get("action_type")
+            if isinstance(receipt.get("selected_action"), dict)
+            else None,
             "blockers": blockers,
             "approval_id": receipt.get("approval_id"),
         },
@@ -1827,7 +2128,9 @@ def run(
         "started_at": started,
         "completed_at": None,
         "commands_invoked": [],
-        "receipts_created": [str(Path(str(plan_data.get("path") or "")) / "plan.json")] if plan_data.get("path") else [],
+        "receipts_created": [str(Path(str(plan_data.get("path") or "")) / "plan.json")]
+        if plan_data.get("path")
+        else [],
         "adapter_result": _adapter_result(action, status="running" if action else "blocked"),
         "work_session_id": None,
         "task_id": None,
@@ -1840,28 +2143,54 @@ def run(
         "config": config,
     }
     if plan_data.get("approval_load_error"):
-        return _blocked_run(target=target, receipt=receipt, blockers=[str(plan_data["approval_load_error"])], json_output=json_output)
+        return _blocked_run(
+            target=target, receipt=receipt, blockers=[str(plan_data["approval_load_error"])], json_output=json_output
+        )
     if plan_data.get("plan_load_error"):
-        return _blocked_run(target=target, receipt=receipt, blockers=[str(plan_data["plan_load_error"])], json_output=json_output)
-    if plan_id and not replan and _is_stale(plan_data.get("created_at"), int(config.get("stale_plan_threshold_hours") or 12)):
-        return _blocked_run(target=target, receipt=receipt, blockers=[f"recorded plan is stale: {plan_data.get('plan_id')}"], json_output=json_output, next_command="brigade daily plan --record")
+        return _blocked_run(
+            target=target, receipt=receipt, blockers=[str(plan_data["plan_load_error"])], json_output=json_output
+        )
+    if (
+        plan_id
+        and not replan
+        and _is_stale(plan_data.get("created_at"), int(config.get("stale_plan_threshold_hours") or 12))
+    ):
+        return _blocked_run(
+            target=target,
+            receipt=receipt,
+            blockers=[f"recorded plan is stale: {plan_data.get('plan_id')}"],
+            json_output=json_output,
+            next_command="brigade daily plan --record",
+        )
     if action is None:
-        return _blocked_run(target=target, receipt=receipt, blockers=["no daily action selected"], json_output=json_output, next_command="brigade daily plan")
+        return _blocked_run(
+            target=target,
+            receipt=receipt,
+            blockers=["no daily action selected"],
+            json_output=json_output,
+            next_command="brigade daily plan",
+        )
     approval_granted = approved or approval is not None
     config_blockers = _config_blockers(config, action, approved=approval_granted)
     if approval is not None:
         approval_blockers = _approval_blockers(target, approval, config)
         if config_blockers or approval_blockers:
-            return _blocked_run(target=target, receipt=receipt, blockers=[*config_blockers, *approval_blockers], json_output=json_output)
+            return _blocked_run(
+                target=target, receipt=receipt, blockers=[*config_blockers, *approval_blockers], json_output=json_output
+            )
     evidence_blockers = _evidence_blockers(target, action)
     if config_blockers or evidence_blockers:
-        return _blocked_run(target=target, receipt=receipt, blockers=[*config_blockers, *evidence_blockers], json_output=json_output)
+        return _blocked_run(
+            target=target, receipt=receipt, blockers=[*config_blockers, *evidence_blockers], json_output=json_output
+        )
     if action.get("approval_required") and not approval_granted:
         approval = _ensure_approval(target, plan_data, action, config)
         blockers = [str(action.get("approval_reason") or "explicit approval required")]
         if approval.get("status") not in {"pending", "approved"}:
             blockers.append(f"approval status is {approval.get('status')}")
-        return _blocked_run(target=target, receipt=receipt, blockers=blockers, json_output=json_output, approval=approval)
+        return _blocked_run(
+            target=target, receipt=receipt, blockers=blockers, json_output=json_output, approval=approval
+        )
     if action.get("context_kind") and config.get("allow_context_pack_build", True):
         context_pack_id, context_commands = _invoke_context_build(target, action)
     else:
@@ -1871,7 +2200,9 @@ def run(
     receipt["adapter_result"]["commands_invoked"].extend(context_commands)
     if context_pack_id:
         receipt["receipts_created"].append(str(context_cmd._packs_root(target) / context_pack_id / "context.json"))
-        receipt["adapter_result"]["receipts_created"].append(str(context_cmd._packs_root(target) / context_pack_id / "context.json"))
+        receipt["adapter_result"]["receipts_created"].append(
+            str(context_cmd._packs_root(target) / context_pack_id / "context.json")
+        )
     if approval is not None:
         _consume_approval(target, approval, run_id)
     rc = 0
@@ -1890,45 +2221,70 @@ def run(
         with redirect_stdout(StringIO()):
             rc = work_cmd.import_promote(target=target, import_id=import_id)
         receipt["commands_invoked"].append({"command": f"brigade work import promote {import_id}", "exit_code": rc})
-        receipt["adapter_result"]["commands_invoked"].append({"command": f"brigade work import promote {import_id}", "exit_code": rc})
+        receipt["adapter_result"]["commands_invoked"].append(
+            {"command": f"brigade work import promote {import_id}", "exit_code": rc}
+        )
     elif action_type == "start-center-action":
         action_id = str((action.get("metadata") or {}).get("action_id") or action.get("source_local_id"))
         with redirect_stdout(StringIO()):
             rc = center_cmd.actions_start(target=target, action_id=action_id)
         receipt["commands_invoked"].append({"command": f"brigade center actions start {action_id}", "exit_code": rc})
-        receipt["adapter_result"]["commands_invoked"].append({"command": f"brigade center actions start {action_id}", "exit_code": rc})
+        receipt["adapter_result"]["commands_invoked"].append(
+            {"command": f"brigade center actions start {action_id}", "exit_code": rc}
+        )
     elif action_type == "import-readiness-issues":
         with redirect_stdout(StringIO()):
             rc = center_cmd.readiness_import_issues(target=target)
         receipt["commands_invoked"].append({"command": "brigade center readiness import-issues", "exit_code": rc})
-        receipt["adapter_result"]["commands_invoked"].append({"command": "brigade center readiness import-issues", "exit_code": rc})
+        receipt["adapter_result"]["commands_invoked"].append(
+            {"command": "brigade center readiness import-issues", "exit_code": rc}
+        )
     elif action_type == "import-handoff-issues":
         with redirect_stdout(StringIO()):
             rc = handoff_cmd.import_issues(target=target)
         receipt["commands_invoked"].append({"command": "brigade handoff import-issues", "exit_code": rc})
-        receipt["adapter_result"]["commands_invoked"].append({"command": "brigade handoff import-issues", "exit_code": rc})
+        receipt["adapter_result"]["commands_invoked"].append(
+            {"command": "brigade handoff import-issues", "exit_code": rc}
+        )
     elif action_type == "build-operator-report":
         with redirect_stdout(StringIO()):
             rc = center_cmd.report_build(target=target)
         receipt["commands_invoked"].append({"command": "brigade center report build", "exit_code": rc})
-        receipt["adapter_result"]["commands_invoked"].append({"command": "brigade center report build", "exit_code": rc})
+        receipt["adapter_result"]["commands_invoked"].append(
+            {"command": "brigade center report build", "exit_code": rc}
+        )
     elif action_type == "start-phase-action":
         action_id = str((action.get("metadata") or {}).get("action_id") or action.get("source_local_id"))
         with redirect_stdout(StringIO()):
             rc = phases_cmd.actions_start(target=target, action_id=action_id)
-        receipt["commands_invoked"].append({"command": f"brigade work phases actions start {action_id}", "exit_code": rc})
-        receipt["adapter_result"]["commands_invoked"].append({"command": f"brigade work phases actions start {action_id}", "exit_code": rc})
+        receipt["commands_invoked"].append(
+            {"command": f"brigade work phases actions start {action_id}", "exit_code": rc}
+        )
+        receipt["adapter_result"]["commands_invoked"].append(
+            {"command": f"brigade work phases actions start {action_id}", "exit_code": rc}
+        )
     elif action_type == "build-phase-report":
         with redirect_stdout(StringIO()):
             rc = phases_cmd.report_build(target=target)
         receipt["commands_invoked"].append({"command": "brigade work phases report build", "exit_code": rc})
-        receipt["adapter_result"]["commands_invoked"].append({"command": "brigade work phases report build", "exit_code": rc})
+        receipt["adapter_result"]["commands_invoked"].append(
+            {"command": "brigade work phases report build", "exit_code": rc}
+        )
     elif action_type == "write-phase-session-checkpoint":
         session_id = str((action.get("metadata") or {}).get("session_id") or action.get("source_local_id") or "latest")
         with redirect_stdout(StringIO()):
-            rc = phases_cmd.session_checkpoint(target=target, session_id=session_id, status="noted", summary="Daily driver checkpoint before continuing AFK session.")
-        receipt["commands_invoked"].append({"command": f"brigade work phases session checkpoint {session_id}", "exit_code": rc})
-        receipt["adapter_result"]["commands_invoked"].append({"command": f"brigade work phases session checkpoint {session_id}", "exit_code": rc})
+            rc = phases_cmd.session_checkpoint(
+                target=target,
+                session_id=session_id,
+                status="noted",
+                summary="Daily driver checkpoint before continuing AFK session.",
+            )
+        receipt["commands_invoked"].append(
+            {"command": f"brigade work phases session checkpoint {session_id}", "exit_code": rc}
+        )
+        receipt["adapter_result"]["commands_invoked"].append(
+            {"command": f"brigade work phases session checkpoint {session_id}", "exit_code": rc}
+        )
         latest_checkpoint = phases_cmd._latest_checkpoint_for_session(target, session_id)
         if isinstance(latest_checkpoint, dict) and latest_checkpoint.get("path"):
             receipt["receipts_created"].append(str(latest_checkpoint["path"]))
@@ -1937,21 +2293,36 @@ def run(
         session_id = str((action.get("metadata") or {}).get("session_id") or action.get("source_local_id") or "latest")
         with redirect_stdout(StringIO()):
             rc = phases_cmd.session_report_build(target=target, session_id=session_id)
-        receipt["commands_invoked"].append({"command": f"brigade work phases session report build {session_id}", "exit_code": rc})
-        receipt["adapter_result"]["commands_invoked"].append({"command": f"brigade work phases session report build {session_id}", "exit_code": rc})
+        receipt["commands_invoked"].append(
+            {"command": f"brigade work phases session report build {session_id}", "exit_code": rc}
+        )
+        receipt["adapter_result"]["commands_invoked"].append(
+            {"command": f"brigade work phases session report build {session_id}", "exit_code": rc}
+        )
     elif action_type == "closeout-phase-session":
         session_id = str((action.get("metadata") or {}).get("session_id") or action.get("source_local_id") or "latest")
         with redirect_stdout(StringIO()):
-            rc = phases_cmd.session_closeout(target=target, session_id=session_id, status="reviewed", reason="Daily driver reviewed completed phase session.")
-        receipt["commands_invoked"].append({"command": f"brigade work phases session closeout {session_id}", "exit_code": rc})
-        receipt["adapter_result"]["commands_invoked"].append({"command": f"brigade work phases session closeout {session_id}", "exit_code": rc})
+            rc = phases_cmd.session_closeout(
+                target=target,
+                session_id=session_id,
+                status="reviewed",
+                reason="Daily driver reviewed completed phase session.",
+            )
+        receipt["commands_invoked"].append(
+            {"command": f"brigade work phases session closeout {session_id}", "exit_code": rc}
+        )
+        receipt["adapter_result"]["commands_invoked"].append(
+            {"command": f"brigade work phases session closeout {session_id}", "exit_code": rc}
+        )
     else:
         receipt["blockers"].append(f"selected action is review-only: {action_type}")
         rc = 1
     receipt["status"] = "completed" if rc == 0 else "failed"
     receipt["adapter_result"]["status"] = receipt["status"]
     receipt["adapter_result"]["blockers"] = receipt["blockers"]
-    receipt["adapter_result"]["next_recommended_command"] = "brigade daily closeout" if rc == 0 else "brigade daily repair"
+    receipt["adapter_result"]["next_recommended_command"] = (
+        "brigade daily closeout" if rc == 0 else "brigade daily repair"
+    )
     receipt["completed_at"] = _now().isoformat()
     receipt["next_recommended_command"] = "brigade daily closeout"
     _record_run(target, receipt)
@@ -2018,7 +2389,9 @@ def approvals_show(*, target: Path, approval_id: str, json_output: bool = False)
     return 0
 
 
-def _review_approval(target: Path, approval_id: str, status: str, reason: str | None, *, json_output: bool = False) -> int:
+def _review_approval(
+    target: Path, approval_id: str, status: str, reason: str | None, *, json_output: bool = False
+) -> int:
     if status not in {"approved", "rejected", "held"}:
         print(f"error: invalid approval status: {status}", file=sys.stderr)
         return 2
@@ -2081,7 +2454,13 @@ def approvals_compare_payload(target: Path, approval_id: str) -> dict[str, Any]:
             and str(item.get("created_at") or "") > str(approval.get("created_at") or "")
         ]
         if newer:
-            issues.append({"status": "warn", "name": "approval_newer_matching_request", "detail": str(newer[0].get("approval_id"))})
+            issues.append(
+                {
+                    "status": "warn",
+                    "name": "approval_newer_matching_request",
+                    "detail": str(newer[0].get("approval_id")),
+                }
+            )
     return {
         "schema_version": SCHEMA_VERSION,
         "schema": {"name": "daily-approval-compare", "version": SCHEMA_VERSION},
@@ -2150,10 +2529,22 @@ def init(*, target: Path, force: bool = False, json_output: bool = False) -> int
     target = target.expanduser().resolve()
     path = _config_path(target)
     if path.exists() and not force:
-        payload = {"schema_version": SCHEMA_VERSION, "target": str(target), "path": str(path), "written": False, "reason": "already exists"}
+        payload = {
+            "schema_version": SCHEMA_VERSION,
+            "target": str(target),
+            "path": str(path),
+            "written": False,
+            "reason": "already exists",
+        }
     else:
         _write_config(path, DEFAULT_CONFIG)
-        payload = {"schema_version": SCHEMA_VERSION, "target": str(target), "path": str(path), "written": True, "config": DEFAULT_CONFIG}
+        payload = {
+            "schema_version": SCHEMA_VERSION,
+            "target": str(target),
+            "path": str(path),
+            "written": True,
+            "config": DEFAULT_CONFIG,
+        }
     if json_output:
         print(json.dumps(payload, indent=2, sort_keys=True))
     else:
@@ -2234,9 +2625,13 @@ def health(target: Path) -> dict[str, Any]:
     for error in [*run_errors, *plan_errors]:
         checks.append({"status": "fail", "name": "daily_receipt_parse", "detail": f"{error['path']}: {error['error']}"})
     for error in approval_errors:
-        checks.append({"status": "fail", "name": "daily_approval_parse", "detail": f"{error['path']}: {error['error']}"})
+        checks.append(
+            {"status": "fail", "name": "daily_approval_parse", "detail": f"{error['path']}: {error['error']}"}
+        )
     for error in telemetry_errors:
-        checks.append({"status": "fail", "name": "daily_telemetry_parse", "detail": f"{error['path']}: {error['error']}"})
+        checks.append(
+            {"status": "fail", "name": "daily_telemetry_parse", "detail": f"{error['path']}: {error['error']}"}
+        )
     plan_hours = int(config.get("stale_plan_threshold_hours") or 12)
     run_hours = int(config.get("stale_run_threshold_hours") or 12)
     latest_plan = plans[0] if plans else None
@@ -2248,7 +2643,11 @@ def health(target: Path) -> dict[str, Any]:
             checks.append({"status": "warn", "name": "daily_stale_run", "detail": str(latest_run.get("run_id"))})
         if latest_run.get("status") == "blocked":
             checks.append({"status": "warn", "name": "daily_blocked_run", "detail": str(latest_run.get("run_id"))})
-        if latest_run.get("status") in {"completed", "failed", "blocked"} and not latest_run.get("closeout_status") and _is_stale(latest_run.get("completed_at") or latest_run.get("started_at"), run_hours):
+        if (
+            latest_run.get("status") in {"completed", "failed", "blocked"}
+            and not latest_run.get("closeout_status")
+            and _is_stale(latest_run.get("completed_at") or latest_run.get("started_at"), run_hours)
+        ):
             checks.append({"status": "warn", "name": "daily_unclosed_run", "detail": str(latest_run.get("run_id"))})
     for run_receipt in runs[:10]:
         action = run_receipt.get("selected_action") if isinstance(run_receipt.get("selected_action"), dict) else None
@@ -2262,26 +2661,62 @@ def health(target: Path) -> dict[str, Any]:
     top_pending = pending_approvals[0] if pending_approvals else None
     for approval in pending_approvals:
         if _is_stale(approval.get("created_at"), run_hours):
-            checks.append({"status": "warn", "name": "daily_stale_pending_approval", "detail": str(approval.get("approval_id"))})
+            checks.append(
+                {"status": "warn", "name": "daily_stale_pending_approval", "detail": str(approval.get("approval_id"))}
+            )
             break
     if approved_approvals:
-        checks.append({"status": "warn", "name": "daily_approved_approval", "detail": str(approved_approvals[0].get("approval_id"))})
+        checks.append(
+            {
+                "status": "warn",
+                "name": "daily_approved_approval",
+                "detail": str(approved_approvals[0].get("approval_id")),
+            }
+        )
     if held_approvals:
-        checks.append({"status": "warn", "name": "daily_held_approval", "detail": str(held_approvals[0].get("approval_id"))})
+        checks.append(
+            {"status": "warn", "name": "daily_held_approval", "detail": str(held_approvals[0].get("approval_id"))}
+        )
     if rejected_approvals:
-        checks.append({"status": "warn", "name": "daily_rejected_approval", "detail": str(rejected_approvals[0].get("approval_id"))})
+        checks.append(
+            {
+                "status": "warn",
+                "name": "daily_rejected_approval",
+                "detail": str(rejected_approvals[0].get("approval_id")),
+            }
+        )
     if phase_health.get("issue_count") and not _phase_ledger_issues_captured_by_report(phase_health):
         top_phase_issue = phase_health.get("top_issue") if isinstance(phase_health.get("top_issue"), dict) else {}
-        checks.append({"status": "warn", "name": "phase_ledger_issue", "detail": top_phase_issue.get("detail") or "phase execution ledger needs review"})
+        checks.append(
+            {
+                "status": "warn",
+                "name": "phase_ledger_issue",
+                "detail": top_phase_issue.get("detail") or "phase execution ledger needs review",
+            }
+        )
     if isinstance(latest_phase_session, dict) and latest_phase_session.get("status") not in {"closed", "archived"}:
-        checks.append({"status": "warn", "name": "phase_session_active", "detail": str(latest_phase_session.get("session_id"))})
+        checks.append(
+            {"status": "warn", "name": "phase_session_active", "detail": str(latest_phase_session.get("session_id"))}
+        )
     for approval in approvals:
         current = _current_action_for_approval(target, approval)
         if current is None and approval.get("status") in {"pending", "approved"}:
-            checks.append({"status": "warn", "name": "daily_approval_missing_evidence", "detail": str(approval.get("approval_id"))})
+            checks.append(
+                {
+                    "status": "warn",
+                    "name": "daily_approval_missing_evidence",
+                    "detail": str(approval.get("approval_id")),
+                }
+            )
             break
         if current is not None and current.get("source_fingerprint") != approval.get("source_fingerprint"):
-            checks.append({"status": "warn", "name": "daily_approval_changed_evidence", "detail": str(approval.get("approval_id"))})
+            checks.append(
+                {
+                    "status": "warn",
+                    "name": "daily_approval_changed_evidence",
+                    "detail": str(approval.get("approval_id")),
+                }
+            )
             break
     active_checks = [check for check in checks if check.get("status") != "ok"]
     top_issue = active_checks[0] if active_checks else None
@@ -2307,7 +2742,9 @@ def health(target: Path) -> dict[str, Any]:
             "blocked_run_count": sum(1 for run in runs if run.get("status") == "blocked"),
         },
         "phase_ledger": phase_health,
-        "phase_session": phases_cmd._session_summary(latest_phase_session) if isinstance(latest_phase_session, dict) else None,
+        "phase_session": phases_cmd._session_summary(latest_phase_session)
+        if isinstance(latest_phase_session, dict)
+        else None,
         "checks": checks,
         "issue_count": len(active_checks),
         "top_issue": top_issue,
@@ -2339,11 +2776,27 @@ def protocol_payload(target: Path) -> dict[str, Any]:
     steps = [
         {"step": "status", "command": "brigade daily status --json", "purpose": "inspect local operating state"},
         {"step": "plan", "command": "brigade daily plan --json", "purpose": "rank safe local actions"},
-        {"step": "review", "command": "brigade daily review --json", "purpose": "preview evidence, acceptance, risk, and approval boundary"},
-        {"step": "approval", "command": "brigade daily approvals approve <approval-id> --json", "purpose": "approve only when the selected action requires it"},
+        {
+            "step": "review",
+            "command": "brigade daily review --json",
+            "purpose": "preview evidence, acceptance, risk, and approval boundary",
+        },
+        {
+            "step": "approval",
+            "command": "brigade daily approvals approve <approval-id> --json",
+            "purpose": "approve only when the selected action requires it",
+        },
         {"step": "run", "command": "brigade daily run --json", "purpose": "execute one bounded safe adapter action"},
-        {"step": "closeout", "command": "brigade daily closeout --json", "purpose": "record review, verification, and evidence state"},
-        {"step": "recover", "command": "brigade daily resume --json", "purpose": "resume or explain recovery when blocked"},
+        {
+            "step": "closeout",
+            "command": "brigade daily closeout --json",
+            "purpose": "record review, verification, and evidence state",
+        },
+        {
+            "step": "recover",
+            "command": "brigade daily resume --json",
+            "purpose": "resume or explain recovery when blocked",
+        },
     ]
     return {
         "schema_version": SCHEMA_VERSION,
@@ -2429,7 +2882,11 @@ def unblock_payload(target: Path, *, dry_run: bool = False) -> dict[str, Any]:
     skipped: list[dict[str, Any]] = []
     approval_request = None
     blockers: list[str] = []
-    action = latest.get("selected_action") if isinstance(latest, dict) and isinstance(latest.get("selected_action"), dict) else None
+    action = (
+        latest.get("selected_action")
+        if isinstance(latest, dict) and isinstance(latest.get("selected_action"), dict)
+        else None
+    )
     if action and action.get("approval_required"):
         plan_data = {"plan_id": latest.get("plan_id") if isinstance(latest, dict) else None}
         approval_request = _ensure_approval(target, plan_data, action, config)
@@ -2444,7 +2901,9 @@ def unblock_payload(target: Path, *, dry_run: bool = False) -> dict[str, Any]:
                 "acceptance": ["Daily blocker is reviewed.", "Daily driver can plan or run the next safe action."],
                 "metadata": {
                     "daily_run_id": latest.get("run_id"),
-                    "source_fingerprint": _fingerprint({"run_id": latest.get("run_id"), "blockers": latest.get("blockers")}),
+                    "source_fingerprint": _fingerprint(
+                        {"run_id": latest.get("run_id"), "blockers": latest.get("blockers")}
+                    ),
                     "source_item_key": f"daily-driver:{latest.get('run_id')}",
                 },
             }
@@ -2542,7 +3001,11 @@ def telemetry_payload(target: Path) -> dict[str, Any]:
     runs, _ = _iter_receipts(_runs_root(target), "run.json")
     approvals, _ = _read_approvals(target)
     statuses = Counter(str(run.get("status") or "unknown") for run in runs)
-    action_types = Counter(str((run.get("selected_action") or {}).get("action_type") or "unknown") for run in runs if isinstance(run.get("selected_action"), dict))
+    action_types = Counter(
+        str((run.get("selected_action") or {}).get("action_type") or "unknown")
+        for run in runs
+        if isinstance(run.get("selected_action"), dict)
+    )
     blocker_counts = Counter()
     for run in runs:
         for blocker in run.get("blockers", []) if isinstance(run.get("blockers"), list) else []:
@@ -2559,20 +3022,34 @@ def telemetry_payload(target: Path) -> dict[str, Any]:
         "selected_action_types": dict(action_types),
         "approval_frequency": len(approvals),
         "block_reasons": dict(blocker_counts),
-        "stale_evidence_rate": sum(1 for check in health(target).get("checks", []) if "evidence" in str(check.get("name"))) / max(1, len(runs)),
+        "stale_evidence_rate": sum(
+            1 for check in health(target).get("checks", []) if "evidence" in str(check.get("name"))
+        )
+        / max(1, len(runs)),
         "failed_run_rate": statuses.get("failed", 0) / max(1, len(runs)),
         "closeout_status_counts": dict(Counter(str(run.get("closeout_status") or "open") for run in runs)),
         "repeated_blocker_fingerprints": [key for key, count in blocker_counts.items() if count > 1],
-        "ignored_or_deferred_recommendations": statuses.get("blocked", 0) + sum(1 for run in runs if run.get("closeout_status") == "deferred"),
+        "ignored_or_deferred_recommendations": statuses.get("blocked", 0)
+        + sum(1 for run in runs if run.get("closeout_status") == "deferred"),
         "average_run_to_closeout_hours": round(sum(closed_ages) / len(closed_ages), 2) if closed_ages else None,
     }
     checks: list[dict[str, Any]] = []
     if statuses.get("failed", 0):
-        checks.append({"status": "warn", "name": "daily_telemetry_failed_runs", "detail": str(statuses.get("failed", 0))})
+        checks.append(
+            {"status": "warn", "name": "daily_telemetry_failed_runs", "detail": str(statuses.get("failed", 0))}
+        )
     if metrics["repeated_blocker_fingerprints"]:
-        checks.append({"status": "warn", "name": "daily_telemetry_repeated_blockers", "detail": str(metrics["repeated_blocker_fingerprints"][0])})
+        checks.append(
+            {
+                "status": "warn",
+                "name": "daily_telemetry_repeated_blockers",
+                "detail": str(metrics["repeated_blocker_fingerprints"][0]),
+            }
+        )
     for error in errors:
-        checks.append({"status": "fail", "name": "daily_telemetry_parse", "detail": f"{error['path']}: {error['error']}"})
+        checks.append(
+            {"status": "fail", "name": "daily_telemetry_parse", "detail": f"{error['path']}: {error['error']}"}
+        )
     issues = [check for check in checks if check.get("status") != "ok"]
     return {
         "schema_version": SCHEMA_VERSION,
@@ -2685,7 +3162,9 @@ def _latest_hardening_closeout(target: Path) -> dict[str, Any] | None:
     return closeouts[0] if closeouts else None
 
 
-def _hardening_quieted_findings(target: Path, findings: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any] | None]:
+def _hardening_quieted_findings(
+    target: Path, findings: list[dict[str, Any]]
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any] | None]:
     closeout = _latest_hardening_closeout(target)
     if not closeout or closeout.get("status") not in {"reviewed", "archived"}:
         return findings, [], closeout
@@ -2745,12 +3224,22 @@ def hardening_audit_payload(target: Path) -> dict[str, Any]:
     runs, run_errors = _iter_receipts(_runs_root(target), "run.json")
     plans, plan_errors = _iter_receipts(_plans_root(target), "plan.json")
     latest_run = runs[0] if runs else None
-    latest_plan = plans[0] if plans else None
     daily_health = health(target)
     telemetry_data = telemetry_payload(target)
     config_issues = [check for check in config_checks if check.get("status") != "ok"]
     if any(check.get("status") == "fail" for check in config_checks):
-        findings.append(_hardening_finding(workstream="daily-production-hardening", phase=115, name="daily_config_invalid", severity="high", safe_summary="daily config has invalid fields", suggested_command="brigade daily doctor", evidence_refs=[str(_config_path(target))], metadata={"checks": config_issues}))
+        findings.append(
+            _hardening_finding(
+                workstream="daily-production-hardening",
+                phase=115,
+                name="daily_config_invalid",
+                severity="high",
+                safe_summary="daily config has invalid fields",
+                suggested_command="brigade daily doctor",
+                evidence_refs=[str(_config_path(target))],
+                metadata={"checks": config_issues},
+            )
+        )
     unsafe_config_checks = [
         check
         for check in config_issues
@@ -2758,9 +3247,22 @@ def hardening_audit_payload(target: Path) -> dict[str, Any]:
         or str(check.get("name") or "").startswith("allow_")
     ]
     if unsafe_config_checks:
-        findings.append(_hardening_finding(workstream="daily-production-hardening", phase=115, name="daily_config_policy_warning", severity="medium", safe_summary="daily config has unsafe or blocking local policy states", suggested_command="brigade daily doctor", evidence_refs=[str(_config_path(target))], metadata={"checks": unsafe_config_checks}))
+        findings.append(
+            _hardening_finding(
+                workstream="daily-production-hardening",
+                phase=115,
+                name="daily_config_policy_warning",
+                severity="medium",
+                safe_summary="daily config has unsafe or blocking local policy states",
+                suggested_command="brigade daily doctor",
+                evidence_refs=[str(_config_path(target))],
+                metadata={"checks": unsafe_config_checks},
+            )
+        )
     malformed_runs = [run for run in runs[:10] if not _adapter_result_is_normalized(run)]
-    malformed_run_errors = [{"run_id": None, "error": item.get("error"), "path": item.get("path")} for item in run_errors]
+    malformed_run_errors = [
+        {"run_id": None, "error": item.get("error"), "path": item.get("path")} for item in run_errors
+    ]
     if malformed_runs or malformed_run_errors:
         findings.append(
             _hardening_finding(
@@ -2790,7 +3292,9 @@ def hardening_audit_payload(target: Path) -> dict[str, Any]:
             )
         )
     malformed_plans = [plan for plan in plans[:10] if not _plan_explanations_are_complete(plan)]
-    malformed_plan_errors = [{"plan_id": None, "error": item.get("error"), "path": item.get("path")} for item in plan_errors]
+    malformed_plan_errors = [
+        {"plan_id": None, "error": item.get("error"), "path": item.get("path")} for item in plan_errors
+    ]
     if malformed_plans or malformed_plan_errors:
         findings.append(
             _hardening_finding(
@@ -2815,9 +3319,18 @@ def hardening_audit_payload(target: Path) -> dict[str, Any]:
         item
         for item in approval_items
         if item.get("status") in {"pending", "approved"}
-        and (_age_hours(item.get("created_at")) is not None and (_age_hours(item.get("created_at")) or 0) > int(config.get("stale_run_threshold_hours") or 24))
+        and (
+            _age_hours(item.get("created_at")) is not None
+            and (_age_hours(item.get("created_at")) or 0) > int(config.get("stale_run_threshold_hours") or 24)
+        )
     ]
-    if int(approvals.get("pending_count") or 0) > 0 or stale_approvals or approval_counts.get("held") or approval_counts.get("rejected") or approval_errors:
+    if (
+        int(approvals.get("pending_count") or 0) > 0
+        or stale_approvals
+        or approval_counts.get("held")
+        or approval_counts.get("rejected")
+        or approval_errors
+    ):
         findings.append(
             _hardening_finding(
                 workstream="daily-production-hardening",
@@ -2835,29 +3348,92 @@ def hardening_audit_payload(target: Path) -> dict[str, Any]:
             )
         )
     if telemetry_data.get("issue_count"):
-        findings.append(_hardening_finding(workstream="daily-production-hardening", phase=119, name="daily_telemetry_issue", severity="medium", safe_summary="daily telemetry has warnings or parse errors", suggested_command="brigade daily telemetry doctor", evidence_refs=[str(_telemetry_root(target))], metadata={"checks": telemetry_data.get("checks"), "metrics": telemetry_data.get("metrics")}))
+        findings.append(
+            _hardening_finding(
+                workstream="daily-production-hardening",
+                phase=119,
+                name="daily_telemetry_issue",
+                severity="medium",
+                safe_summary="daily telemetry has warnings or parse errors",
+                suggested_command="brigade daily telemetry doctor",
+                evidence_refs=[str(_telemetry_root(target))],
+                metadata={"checks": telemetry_data.get("checks"), "metrics": telemetry_data.get("metrics")},
+            )
+        )
     protocol_data = protocol_payload(target)
     protocol_steps = {str(item.get("step")) for item in protocol_data.get("steps", []) if isinstance(item, dict)}
     required_protocol_steps = {"status", "plan", "review", "approval", "run", "closeout", "recover"}
     if not required_protocol_steps <= protocol_steps:
-        findings.append(_hardening_finding(workstream="daily-production-hardening", phase=122, name="daily_protocol_incomplete", severity="high", safe_summary="daily protocol is missing wrapper-facing steps", suggested_command="brigade daily protocol", evidence_refs=["daily protocol"], metadata={"required_steps": sorted(required_protocol_steps), "actual_steps": sorted(protocol_steps)}))
+        findings.append(
+            _hardening_finding(
+                workstream="daily-production-hardening",
+                phase=122,
+                name="daily_protocol_incomplete",
+                severity="high",
+                safe_summary="daily protocol is missing wrapper-facing steps",
+                suggested_command="brigade daily protocol",
+                evidence_refs=["daily protocol"],
+                metadata={"required_steps": sorted(required_protocol_steps), "actual_steps": sorted(protocol_steps)},
+            )
+        )
     for command in protocol_data.get("commands", []) if isinstance(protocol_data.get("commands"), list) else []:
         if not str(command).startswith("brigade daily "):
-            findings.append(_hardening_finding(workstream="daily-production-hardening", phase=122, name="daily_protocol_command_scope", severity="medium", safe_summary="daily protocol includes a non-daily command", suggested_command="brigade daily protocol", evidence_refs=["daily protocol"], metadata={"command": command}))
+            findings.append(
+                _hardening_finding(
+                    workstream="daily-production-hardening",
+                    phase=122,
+                    name="daily_protocol_command_scope",
+                    severity="medium",
+                    safe_summary="daily protocol includes a non-daily command",
+                    suggested_command="brigade daily protocol",
+                    evidence_refs=["daily protocol"],
+                    metadata={"command": command},
+                )
+            )
             break
     latest_run_output = latest_run.get("wrapped_output") if isinstance(latest_run, dict) else None
     if isinstance(latest_run_output, (str, list, dict)):
-        findings.append(_hardening_finding(workstream="daily-production-hardening", phase=123, name="wrapped_output_in_run_json", severity="medium", safe_summary="daily run receipt appears to include wrapped command output instead of receipt references", suggested_command="brigade daily show latest", evidence_refs=[str(_runs_root(target))]))
+        findings.append(
+            _hardening_finding(
+                workstream="daily-production-hardening",
+                phase=123,
+                name="wrapped_output_in_run_json",
+                severity="medium",
+                safe_summary="daily run receipt appears to include wrapped command output instead of receipt references",
+                suggested_command="brigade daily show latest",
+                evidence_refs=[str(_runs_root(target))],
+            )
+        )
 
     center_manifest = center_cmd._center_schema_manifest(target)
     center_contract = center_cmd._center_contract_health(target)
     if int(center_manifest.get("schema_count") or 0) < 1:
-        findings.append(_hardening_finding(workstream="operator-center-contract-cleanup", phase=125, name="center_schema_missing", severity="high", safe_summary="center schema manifest is empty", suggested_command="brigade center schema", evidence_refs=["center schema"]))
+        findings.append(
+            _hardening_finding(
+                workstream="operator-center-contract-cleanup",
+                phase=125,
+                name="center_schema_missing",
+                severity="high",
+                safe_summary="center schema manifest is empty",
+                suggested_command="brigade center schema",
+                evidence_refs=["center schema"],
+            )
+        )
     center_reviews = center_cmd._reviews(target)
     required_review_fields = {"subsystem", "local_id", "status", "safe_summary", "suggested_next_command"}
     malformed_review = next((item for item in center_reviews if not required_review_fields <= set(item)), None)
     if malformed_review:
-        findings.append(_hardening_finding(workstream="operator-center-contract-cleanup", phase=126, name="center_review_shape", severity="medium", safe_summary="center review item is missing wrapper-facing fields", suggested_command="brigade center reviews --json", evidence_refs=["center reviews"]))
+        findings.append(
+            _hardening_finding(
+                workstream="operator-center-contract-cleanup",
+                phase=126,
+                name="center_review_shape",
+                severity="medium",
+                safe_summary="center review item is missing wrapper-facing fields",
+                suggested_command="brigade center reviews --json",
+                evidence_refs=["center reviews"],
+            )
+        )
     for issue in center_contract.get("issues", []) if isinstance(center_contract.get("issues"), list) else []:
         phase = issue.get("phase") if isinstance(issue.get("phase"), int) else 129
         findings.append(
@@ -2878,19 +3454,56 @@ def hardening_audit_payload(target: Path) -> dict[str, Any]:
     missing_provenance = [
         item
         for item in pending_imports
-        if not ((item.get("metadata") if isinstance(item.get("metadata"), dict) else {}).get("source_fingerprint") or item.get("source"))
+        if not (
+            (item.get("metadata") if isinstance(item.get("metadata"), dict) else {}).get("source_fingerprint")
+            or item.get("source")
+        )
     ]
     if missing_acceptance:
-        findings.append(_hardening_finding(workstream="inbox-evidence-quality", phase=135, name="pending_import_missing_acceptance", severity="medium", safe_summary=f"{len(missing_acceptance)} pending import(s) missing acceptance", suggested_command="brigade work inbox doctor", evidence_refs=[str(work_cmd._imports_path(target))]))
+        findings.append(
+            _hardening_finding(
+                workstream="inbox-evidence-quality",
+                phase=135,
+                name="pending_import_missing_acceptance",
+                severity="medium",
+                safe_summary=f"{len(missing_acceptance)} pending import(s) missing acceptance",
+                suggested_command="brigade work inbox doctor",
+                evidence_refs=[str(work_cmd._imports_path(target))],
+            )
+        )
     if missing_provenance:
-        findings.append(_hardening_finding(workstream="inbox-evidence-quality", phase=136, name="pending_import_missing_provenance", severity="medium", safe_summary=f"{len(missing_provenance)} pending import(s) missing provenance", suggested_command="brigade work import provenance", evidence_refs=[str(work_cmd._imports_path(target))]))
+        findings.append(
+            _hardening_finding(
+                workstream="inbox-evidence-quality",
+                phase=136,
+                name="pending_import_missing_provenance",
+                severity="medium",
+                safe_summary=f"{len(missing_provenance)} pending import(s) missing provenance",
+                suggested_command="brigade work import provenance",
+                evidence_refs=[str(work_cmd._imports_path(target))],
+            )
+        )
     inbox_hygiene = work_cmd._inbox_hygiene_payload(target)
     inbox_quality = work_cmd._inbox_quality_payload(target)
     if int(inbox_hygiene.get("issue_count") or 0) > 0:
         top = inbox_hygiene.get("top_issue") if isinstance(inbox_hygiene.get("top_issue"), dict) else {}
-        findings.append(_hardening_finding(workstream="inbox-evidence-quality", phase=137, name="inbox_hygiene_issue", severity="medium", safe_summary=str(top.get("detail") or "work inbox has hygiene issues"), suggested_command="brigade work inbox doctor", evidence_refs=[str(work_cmd._imports_path(target))]))
+        findings.append(
+            _hardening_finding(
+                workstream="inbox-evidence-quality",
+                phase=137,
+                name="inbox_hygiene_issue",
+                severity="medium",
+                safe_summary=str(top.get("detail") or "work inbox has hygiene issues"),
+                suggested_command="brigade work inbox doctor",
+                evidence_refs=[str(work_cmd._imports_path(target))],
+            )
+        )
     quality_counts = inbox_quality.get("issue_counts") if isinstance(inbox_quality.get("issue_counts"), dict) else {}
-    noisy_or_deferred = int(quality_counts.get("noisy_source") or 0) + int(quality_counts.get("deferred") or 0) + int(quality_counts.get("stale") or 0)
+    noisy_or_deferred = (
+        int(quality_counts.get("noisy_source") or 0)
+        + int(quality_counts.get("deferred") or 0)
+        + int(quality_counts.get("stale") or 0)
+    )
     if noisy_or_deferred:
         findings.append(
             _hardening_finding(
@@ -2930,7 +3543,10 @@ def hardening_audit_payload(target: Path) -> dict[str, Any]:
                 metadata={"issue_counts": quality_counts},
             )
         )
-    if inbox_quality.get("best_import") and int((inbox_quality.get("best_import") or {}).get("quality_score") or 0) < 80:
+    if (
+        inbox_quality.get("best_import")
+        and int((inbox_quality.get("best_import") or {}).get("quality_score") or 0) < 80
+    ):
         findings.append(
             _hardening_finding(
                 workstream="inbox-evidence-quality",
@@ -2948,7 +3564,17 @@ def hardening_audit_payload(target: Path) -> dict[str, Any]:
     repo_daily_use = repos_cmd.daily_use_health(target)
     if int(repo_health.get("issue_count") or 0) > 0:
         top = repo_health.get("top_issue") if isinstance(repo_health.get("top_issue"), dict) else {}
-        findings.append(_hardening_finding(workstream="repo-fleet-daily-use", phase=145, name="repo_fleet_health_issue", severity="medium", safe_summary=str(top.get("detail") or "repo fleet has health issues"), suggested_command="brigade repos doctor", evidence_refs=["repo fleet health"]))
+        findings.append(
+            _hardening_finding(
+                workstream="repo-fleet-daily-use",
+                phase=145,
+                name="repo_fleet_health_issue",
+                severity="medium",
+                safe_summary=str(top.get("detail") or "repo fleet has health issues"),
+                suggested_command="brigade repos doctor",
+                evidence_refs=["repo fleet health"],
+            )
+        )
     for issue in repo_daily_use.get("checks", []) if isinstance(repo_daily_use.get("checks"), list) else []:
         if not isinstance(issue, dict) or issue.get("status") == "ok":
             continue
@@ -2969,17 +3595,67 @@ def hardening_audit_payload(target: Path) -> dict[str, Any]:
     release_candidate = release_cmd._latest_candidate(target)
     release_dogfood = release_cmd._release_dogfood_health(target)
     if not release_readiness:
-        findings.append(_hardening_finding(workstream="self-dogfood-release-loop", phase=155, name="missing_release_readiness", severity="medium", safe_summary="latest release readiness receipt is missing", suggested_command="brigade release run", evidence_refs=[".brigade/release/runs"]))
+        findings.append(
+            _hardening_finding(
+                workstream="self-dogfood-release-loop",
+                phase=155,
+                name="missing_release_readiness",
+                severity="medium",
+                safe_summary="latest release readiness receipt is missing",
+                suggested_command="brigade release run",
+                evidence_refs=[".brigade/release/runs"],
+            )
+        )
     elif not release_readiness.get("ready"):
-        findings.append(_hardening_finding(workstream="self-dogfood-release-loop", phase=158, name="blocked_release_readiness", severity="high", safe_summary="latest release readiness is blocked", suggested_command=f"brigade release show {release_readiness.get('run_id')}", evidence_refs=[str(release_readiness.get("path") or ".brigade/release/runs")]))
+        findings.append(
+            _hardening_finding(
+                workstream="self-dogfood-release-loop",
+                phase=158,
+                name="blocked_release_readiness",
+                severity="high",
+                safe_summary="latest release readiness is blocked",
+                suggested_command=f"brigade release show {release_readiness.get('run_id')}",
+                evidence_refs=[str(release_readiness.get("path") or ".brigade/release/runs")],
+            )
+        )
     if not release_candidate:
-        findings.append(_hardening_finding(workstream="self-dogfood-release-loop", phase=156, name="missing_release_candidate", severity="low", safe_summary="latest release candidate packet is missing", suggested_command="brigade release candidate build", evidence_refs=[".brigade/release/candidates"]))
+        findings.append(
+            _hardening_finding(
+                workstream="self-dogfood-release-loop",
+                phase=156,
+                name="missing_release_candidate",
+                severity="low",
+                safe_summary="latest release candidate packet is missing",
+                suggested_command="brigade release candidate build",
+                evidence_refs=[".brigade/release/candidates"],
+            )
+        )
     elif not isinstance(release_candidate.get("daily_driver"), dict):
-        findings.append(_hardening_finding(workstream="self-dogfood-release-loop", phase=157, name="candidate_missing_daily_evidence", severity="medium", safe_summary="latest release candidate is missing daily driver evidence", suggested_command="brigade release candidate build", evidence_refs=[str(release_candidate.get("path") or ".brigade/release/candidates")]))
+        findings.append(
+            _hardening_finding(
+                workstream="self-dogfood-release-loop",
+                phase=157,
+                name="candidate_missing_daily_evidence",
+                severity="medium",
+                safe_summary="latest release candidate is missing daily driver evidence",
+                suggested_command="brigade release candidate build",
+                evidence_refs=[str(release_candidate.get("path") or ".brigade/release/candidates")],
+            )
+        )
     if release_readiness:
         evidence = release_readiness.get("evidence") if isinstance(release_readiness.get("evidence"), dict) else {}
         if not isinstance(evidence.get("daily_hardening"), dict):
-            findings.append(_hardening_finding(workstream="daily-production-hardening", phase=124, name="release_missing_daily_hardening", severity="medium", safe_summary="latest release readiness evidence is missing daily hardening state", suggested_command="brigade release run", evidence_refs=[str(release_readiness.get("path") or ".brigade/release/runs")]))
+            findings.append(
+                _hardening_finding(
+                    workstream="daily-production-hardening",
+                    phase=124,
+                    name="release_missing_daily_hardening",
+                    severity="medium",
+                    safe_summary="latest release readiness evidence is missing daily hardening state",
+                    suggested_command="brigade release run",
+                    evidence_refs=[str(release_readiness.get("path") or ".brigade/release/runs")],
+                )
+            )
     for issue in release_dogfood.get("checks", []) if isinstance(release_dogfood.get("checks"), list) else []:
         if not isinstance(issue, dict) or issue.get("status") == "ok":
             continue
@@ -2996,7 +3672,13 @@ def hardening_audit_payload(target: Path) -> dict[str, Any]:
             )
         )
 
-    findings.sort(key=lambda item: ({"high": 3, "medium": 2, "low": 1}.get(str(item.get("severity")), 0), str(item.get("finding_id"))), reverse=True)
+    findings.sort(
+        key=lambda item: (
+            {"high": 3, "medium": 2, "low": 1}.get(str(item.get("severity")), 0),
+            str(item.get("finding_id")),
+        ),
+        reverse=True,
+    )
     raw_findings = list(findings)
     findings, quieted_findings, latest_closeout = _hardening_quieted_findings(target, findings)
     by_workstream = {
@@ -3169,7 +3851,12 @@ def _changed_files_summary(target: Path) -> dict[str, Any]:
             untracked += 1
         else:
             tracked += 1
-    return {"available": proc.returncode == 0, "tracked_dirty_count": tracked, "untracked_count": untracked, "files": files[:50]}
+    return {
+        "available": proc.returncode == 0,
+        "tracked_dirty_count": tracked,
+        "untracked_count": untracked,
+        "files": files[:50],
+    }
 
 
 def _verification_expectation(config: dict[str, Any], run_receipt: dict[str, Any]) -> dict[str, Any]:
@@ -3204,17 +3891,17 @@ workflow
 Brigade daily loop closeout
 
 ## Summary
-Brigade daily closeout recorded status `{status}` for daily run `{run_receipt.get('run_id')}`. The receipt preserves the selected action, invoked local commands, blockers, and next recommendation for future operator review.
+Brigade daily closeout recorded status `{status}` for daily run `{run_receipt.get("run_id")}`. The receipt preserves the selected action, invoked local commands, blockers, and next recommendation for future operator review.
 
 ## Durable facts
-- Daily run id: `{run_receipt.get('run_id')}`
-- Selected action: `{run_receipt.get('selected_action_id')}`
+- Daily run id: `{run_receipt.get("run_id")}`
+- Selected action: `{run_receipt.get("selected_action_id")}`
 - Closeout status: `{status}`
-- Reason: `{_safe_text(target, reason or 'not provided')}`
+- Reason: `{_safe_text(target, reason or "not provided")}`
 
 ## Evidence
-- daily receipt: `{run_receipt.get('path')}`
-- next command: `{run_receipt.get('next_recommended_command')}`
+- daily receipt: `{run_receipt.get("path")}`
+- next command: `{run_receipt.get("next_recommended_command")}`
 
 ## Recommended memory action
 no-card
@@ -3225,7 +3912,7 @@ no-card
 ## Suggested document content
 ### Brigade daily loop closeout
 
-Daily run `{run_receipt.get('run_id')}` closed with status `{status}`. Review the local daily receipt for selected action, commands invoked, blockers, and next recommendation.
+Daily run `{run_receipt.get("run_id")}` closed with status `{status}`. Review the local daily receipt for selected action, commands invoked, blockers, and next recommendation.
 """
     path.write_text(content)
     lint = handoff_cmd.lint_file(path)
@@ -3263,7 +3950,9 @@ def closeout(
     receipt["reviewed_at"] = _now().isoformat()
     receipt["latest_work_closeout"] = work_cmd._latest_work_closeout_payload(target)
     receipt["latest_verification"] = latest_verification
-    receipt["verification_status"] = "missing" if latest_verification is None else str(latest_verification.get("status") or "unknown")
+    receipt["verification_status"] = (
+        "missing" if latest_verification is None else str(latest_verification.get("status") or "unknown")
+    )
     receipt["verification_expectation"] = verification_expectation
     receipt["verification_blockers"] = verification_blockers
     receipt["changed_files_summary"] = _changed_files_summary(target)

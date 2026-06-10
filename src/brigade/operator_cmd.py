@@ -1,4 +1,5 @@
 """Safe local operator bootstrap commands."""
+
 from __future__ import annotations
 
 import json
@@ -13,7 +14,22 @@ from io import StringIO
 from pathlib import Path
 from typing import Any
 
-from . import __version__, center_cmd, chat_cmd, daily_cmd, dogfood_cmd, handoff_cmd, memory_cmd, notifications_cmd, repos_cmd, scrub, security_cmd, skills_cmd, tools_cmd, work_cmd
+from . import (
+    __version__,
+    center_cmd,
+    chat_cmd,
+    daily_cmd,
+    dogfood_cmd,
+    handoff_cmd,
+    memory_cmd,
+    notifications_cmd,
+    repos_cmd,
+    scrub,
+    security_cmd,
+    skills_cmd,
+    tools_cmd,
+    work_cmd,
+)
 from .install import install_selection
 from .selection import KNOWN_HARNESSES, WRITER_INBOXES, Selection, resolve_owner
 from .localio import write_json as _write_json
@@ -76,21 +92,65 @@ def guide(*, profile: str = "internal-dogfood", json_output: bool = False) -> in
     return 0
 
 
-def _steps(target: Path, *, profile: str = "local-operator", handoff_inboxes: list[str] | None = None) -> list[dict[str, Any]]:
+def _steps(
+    target: Path, *, profile: str = "local-operator", handoff_inboxes: list[str] | None = None
+) -> list[dict[str, Any]]:
     steps = [
         {"id": "daily", "path": daily_cmd._config_path(target), "command": daily_cmd.init, "kwargs": {}},
-        {"id": "handoff-sources", "path": handoff_cmd.default_sources_path(target), "command": handoff_cmd.sources_init, "kwargs": {"inboxes": handoff_inboxes} if handoff_inboxes is not None else {}},
-        {"id": "work-backup", "path": work_cmd._backup_config_path(target), "command": work_cmd.backup_init, "kwargs": {"update_gitignore": False}},
-        {"id": "work-scanners", "path": work_cmd._scanner_config_path(target), "command": work_cmd.scanners_init, "kwargs": {"update_gitignore": False}},
-        {"id": "work-review", "path": work_cmd._review_config_path(target), "command": work_cmd.review_init, "kwargs": {"update_gitignore": False}},
-        {"id": "chat-surfaces", "path": chat_cmd._config_path(target), "command": chat_cmd.surfaces_init, "kwargs": {"update_gitignore": False}},
-        {"id": "memory-care", "path": memory_cmd.config_path(target), "command": memory_cmd.init, "kwargs": {"update_gitignore": False}},
-        {"id": "repo-fleet", "path": repos_cmd.config_path(target), "command": repos_cmd.init, "kwargs": {"update_gitignore": False}},
+        {
+            "id": "handoff-sources",
+            "path": handoff_cmd.default_sources_path(target),
+            "command": handoff_cmd.sources_init,
+            "kwargs": {"inboxes": handoff_inboxes} if handoff_inboxes is not None else {},
+        },
+        {
+            "id": "work-backup",
+            "path": work_cmd._backup_config_path(target),
+            "command": work_cmd.backup_init,
+            "kwargs": {"update_gitignore": False},
+        },
+        {
+            "id": "work-scanners",
+            "path": work_cmd._scanner_config_path(target),
+            "command": work_cmd.scanners_init,
+            "kwargs": {"update_gitignore": False},
+        },
+        {
+            "id": "work-review",
+            "path": work_cmd._review_config_path(target),
+            "command": work_cmd.review_init,
+            "kwargs": {"update_gitignore": False},
+        },
+        {
+            "id": "chat-surfaces",
+            "path": chat_cmd._config_path(target),
+            "command": chat_cmd.surfaces_init,
+            "kwargs": {"update_gitignore": False},
+        },
+        {
+            "id": "memory-care",
+            "path": memory_cmd.config_path(target),
+            "command": memory_cmd.init,
+            "kwargs": {"update_gitignore": False},
+        },
+        {
+            "id": "repo-fleet",
+            "path": repos_cmd.config_path(target),
+            "command": repos_cmd.init,
+            "kwargs": {"update_gitignore": False},
+        },
         {"id": "security", "path": security_cmd.config_path(target), "command": security_cmd.init, "kwargs": {}},
-        {"id": "tools", "path": tools_cmd.config_path(target), "command": tools_cmd.init, "kwargs": {"update_gitignore": False}},
+        {
+            "id": "tools",
+            "path": tools_cmd.config_path(target),
+            "command": tools_cmd.init,
+            "kwargs": {"update_gitignore": False},
+        },
     ]
     if profile == "internal-dogfood":
-        steps.insert(1, {"id": "dogfood", "path": dogfood_cmd.config_path(target), "command": dogfood_cmd.init, "kwargs": {}})
+        steps.insert(
+            1, {"id": "dogfood", "path": dogfood_cmd.config_path(target), "command": dogfood_cmd.init, "kwargs": {}}
+        )
     return steps
 
 
@@ -100,7 +160,9 @@ def _validate_profile(profile: str) -> str:
     return profile
 
 
-def plan_payload(target: Path, *, profile: str = "local-operator", handoff_inboxes: list[str] | None = None) -> dict[str, Any]:
+def plan_payload(
+    target: Path, *, profile: str = "local-operator", handoff_inboxes: list[str] | None = None
+) -> dict[str, Any]:
     target = target.expanduser().resolve()
     profile = _validate_profile(profile)
     steps = []
@@ -191,7 +253,9 @@ def adoption_plan(*, target: Path, json_output: bool = False) -> int:
     print(f"operator adoption plan: {payload['target']}")
     print(f"status: {payload['status']}")
     print(f"brigade_root: {'yes' if payload['workspace']['brigade']['root_exists'] else 'no'}")
-    print(f"guidance_files: {payload['workspace']['guidance']['present_count']} (+{payload['workspace']['guidance']['present_dir_count']} dirs)")
+    print(
+        f"guidance_files: {payload['workspace']['guidance']['present_count']} (+{payload['workspace']['guidance']['present_dir_count']} dirs)"
+    )
     print(f"handoff_inboxes: {payload['workspace']['harnesses']['handoff_inbox_count']}")
     print(f"shell_crontab_active: {payload['surfaces']['shell_crontab']['count']}")
     print(f"openclaw_cron_jobs: {payload['surfaces']['openclaw_cron']['count']}")
@@ -300,14 +364,18 @@ def migration_status_payload(target: Path) -> dict[str, Any]:
     target = target.expanduser().resolve()
     adoption = adoption_plan_payload(target)
     capture = _read_latest_surfaces_capture(target)
-    review_summary = _surface_review_summary(target, capture=capture) if capture is not None else {
-        "surface_count": 0,
-        "record_count": 0,
-        "reviewed_count": 0,
-        "unreviewed_count": 0,
-        "stale_review_count": 0,
-        "surfaces": [],
-    }
+    review_summary = (
+        _surface_review_summary(target, capture=capture)
+        if capture is not None
+        else {
+            "surface_count": 0,
+            "record_count": 0,
+            "reviewed_count": 0,
+            "unreviewed_count": 0,
+            "stale_review_count": 0,
+            "surfaces": [],
+        }
+    )
     imports = _operator_migration_import_summary(target)
     tasks = _operator_migration_task_summary(target)
     gaps = _operator_migration_gaps(adoption=adoption, capture=capture, review_summary=review_summary, imports=imports)
@@ -497,7 +565,11 @@ def migration_consolidate(
     candidates = []
     now = datetime.now(timezone.utc).isoformat()
     for item in imports:
-        if not isinstance(item, dict) or item.get("status", "pending") != "pending" or item.get("source") != "operator-surface-review":
+        if (
+            not isinstance(item, dict)
+            or item.get("status", "pending") != "pending"
+            or item.get("source") != "operator-surface-review"
+        ):
             continue
         metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
         if surface and metadata.get("surface") != surface:
@@ -728,11 +800,19 @@ def surfaces_doctor_payload(target: Path, *, surface: str | None = None) -> dict
                         "suggested_next_command": f"brigade operator surfaces review --target . --surface {row.get('surface')} --status external-ok --all --reason refreshed-external-ownership",
                     }
                 )
-    review_summary = _surface_review_summary(target, capture=capture, surface=surface) if capture is not None else {"surface_filter": surface, "surfaces": []}
+    review_summary = (
+        _surface_review_summary(target, capture=capture, surface=surface)
+        if capture is not None
+        else {"surface_filter": surface, "surfaces": []}
+    )
     ready = not blockers
-    surface_count = sum(int(row.get("record_count") or 0) for row in review_summary.get("surfaces") or [] if isinstance(row, dict))
+    surface_count = sum(
+        int(row.get("record_count") or 0) for row in review_summary.get("surfaces") or [] if isinstance(row, dict)
+    )
     if not ready:
-        next_command = str(blockers[0].get("suggested_next_command") or "brigade operator surfaces capture --target . --json")
+        next_command = str(
+            blockers[0].get("suggested_next_command") or "brigade operator surfaces capture --target . --json"
+        )
     elif surface_count:
         next_command = "brigade operator surfaces import-issues --target . --json"
     else:
@@ -796,7 +876,10 @@ def surfaces_review(
         return 2
     capture = _read_latest_surfaces_capture(target)
     if capture is None:
-        print("error: no surface capture exists; run `brigade operator surfaces capture --target . --json` first", file=sys.stderr)
+        print(
+            "error: no surface capture exists; run `brigade operator surfaces capture --target . --json` first",
+            file=sys.stderr,
+        )
         return 2
     if status not in SURFACE_REVIEW_STATUSES:
         print(f"error: --status must be one of: {', '.join(sorted(SURFACE_REVIEW_STATUSES))}", file=sys.stderr)
@@ -913,7 +996,9 @@ def surfaces_import_issues(*, target: Path, dry_run: bool = False, json_output: 
         "skipped": len(skipped),
         "dismissed": len(skipped_dismissed),
         "imports": imported,
-        "next_command": "brigade operator surfaces capture --target . --json" if capture is None else "brigade work imports --target .",
+        "next_command": "brigade operator surfaces capture --target . --json"
+        if capture is None
+        else "brigade work imports --target .",
     }
     if json_output:
         print(json.dumps(payload, indent=2, sort_keys=True))
@@ -974,7 +1059,9 @@ def _workspace_inventory(target: Path) -> dict[str, Any]:
         "brigade": {
             "root_exists": brigade_root.exists(),
             "config_exists": (brigade_root / "config.json").exists(),
-            "local_config_count": len([path for path in _steps(target, profile="local-operator") if path["path"].exists()]),
+            "local_config_count": len(
+                [path for path in _steps(target, profile="local-operator") if path["path"].exists()]
+            ),
         },
         "guidance": {
             "items": guidance,
@@ -1173,7 +1260,9 @@ def _openclaw_cron_capture() -> dict[str, Any]:
             "enabled": _bool_or_none(status_payload.get("enabled")) if isinstance(status_payload, dict) else None,
             "status_counts": dict(sorted(status_counts.items())),
             "raw_jobs_included": False,
-            "error": None if status_result["ok"] or list_result["ok"] else status_result["error"] or list_result["error"],
+            "error": None
+            if status_result["ok"] or list_result["ok"]
+            else status_result["error"] or list_result["error"],
         },
         "records": records,
     }
@@ -1211,7 +1300,9 @@ def _pm2_capture() -> dict[str, Any]:
     }
 
 
-def _surface_record(*, surface: str, label: str, status: str, fingerprint_source: dict[str, Any], extras: dict[str, Any] | None = None) -> dict[str, Any]:
+def _surface_record(
+    *, surface: str, label: str, status: str, fingerprint_source: dict[str, Any], extras: dict[str, Any] | None = None
+) -> dict[str, Any]:
     record = {
         "surface": surface,
         "record_label": label,
@@ -1321,7 +1412,9 @@ def _safe_surface_review_reason(reason: str) -> str:
     if any(pattern.search(value) for pattern in secret_patterns):
         raise ValueError("--reason must not include secret-looking values")
     if not re.fullmatch(r"[A-Za-z0-9 .,_:-]+", value):
-        raise ValueError("--reason may only use letters, numbers, spaces, dots, commas, underscores, colons, and hyphens")
+        raise ValueError(
+            "--reason may only use letters, numbers, spaces, dots, commas, underscores, colons, and hyphens"
+        )
     return value
 
 
@@ -1373,7 +1466,9 @@ def _surface_review_state(target: Path) -> dict[tuple[str, str], dict[str, Any]]
     return state
 
 
-def _surface_review_summary(target: Path, *, capture: dict[str, Any] | None, surface: str | None = None) -> dict[str, Any]:
+def _surface_review_summary(
+    target: Path, *, capture: dict[str, Any] | None, surface: str | None = None
+) -> dict[str, Any]:
     surface = surface.strip() if isinstance(surface, str) and surface.strip() else None
     records = capture.get("records") if isinstance(capture, dict) and isinstance(capture.get("records"), list) else []
     state = _surface_review_state(target)
@@ -1499,7 +1594,9 @@ def _surface_import_records(capture: dict[str, Any] | None) -> list[dict[str, An
                     "surface_count": count,
                     "record_count": record_counts.get(surface_id, 0),
                     "capture_fingerprint": capture.get("source_fingerprint"),
-                    "capture_path": str(_surfaces_latest_path(Path(str(capture.get("target") or ".")))) if capture.get("target") else None,
+                    "capture_path": str(_surfaces_latest_path(Path(str(capture.get("target") or "."))))
+                    if capture.get("target")
+                    else None,
                     "source_item_key": f"operator-surface:{surface_id}",
                     "source_fingerprint": fingerprint,
                     "private_fields_omitted": [
@@ -1580,7 +1677,9 @@ def _surface_review_import_records(capture: dict[str, Any]) -> list[dict[str, An
 
 def _run_read_only_command(argv: list[str], *, timeout: int = 8) -> dict[str, Any]:
     try:
-        result = subprocess.run(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False, timeout=timeout)
+        result = subprocess.run(
+            argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False, timeout=timeout
+        )
     except FileNotFoundError:
         return {"ok": False, "stdout": "", "error": "command not found"}
     except subprocess.TimeoutExpired:
@@ -1761,7 +1860,9 @@ def _adoption_import_records(plan: dict[str, Any]) -> list[dict[str, Any]]:
                     "source_item_key": f"operator-adoption:{name}",
                     "source_fingerprint": fingerprint,
                     "capture_fingerprint": plan.get("source_fingerprint"),
-                    "capture_path": str(_adoption_latest_path(Path(str(plan.get("target") or ".")))) if plan.get("target") else None,
+                    "capture_path": str(_adoption_latest_path(Path(str(plan.get("target") or "."))))
+                    if plan.get("target")
+                    else None,
                 },
             }
         )
@@ -1812,7 +1913,9 @@ def _operator_migration_task_summary(target: Path) -> dict[str, Any]:
             continue
         metadata = task.get("metadata") if isinstance(task.get("metadata"), dict) else {}
         source = str(metadata.get("source") or task.get("source") or "")
-        if source in sources or str(task.get("text") or "").lower().startswith(("bridge operator", "review external operator", "resolve operator surface")):
+        if source in sources or str(task.get("text") or "").lower().startswith(
+            ("bridge operator", "review external operator", "resolve operator surface")
+        ):
             pending.append(task)
     by_source = Counter()
     for task in pending:
@@ -1881,7 +1984,11 @@ def _operator_migration_gaps(
     needs_owner = 0
     for surface in review_summary.get("surfaces") or []:
         if isinstance(surface, dict):
-            needs_owner += int((surface.get("status_counts") or {}).get("needs-owner") or 0) if isinstance(surface.get("status_counts"), dict) else 0
+            needs_owner += (
+                int((surface.get("status_counts") or {}).get("needs-owner") or 0)
+                if isinstance(surface.get("status_counts"), dict)
+                else 0
+            )
     if needs_owner:
         gaps.append(
             {
@@ -1927,9 +2034,15 @@ def _operator_migration_import_records(payload: dict[str, Any]) -> list[dict[str
                 "name": name,
                 "detail": detail,
                 "status": payload.get("status"),
-                "surface_record_count": (payload.get("surfaces") or {}).get("record_count") if isinstance(payload.get("surfaces"), dict) else None,
-                "surface_reviewed_count": (payload.get("surfaces") or {}).get("reviewed_count") if isinstance(payload.get("surfaces"), dict) else None,
-                "surface_unreviewed_count": (payload.get("surfaces") or {}).get("unreviewed_count") if isinstance(payload.get("surfaces"), dict) else None,
+                "surface_record_count": (payload.get("surfaces") or {}).get("record_count")
+                if isinstance(payload.get("surfaces"), dict)
+                else None,
+                "surface_reviewed_count": (payload.get("surfaces") or {}).get("reviewed_count")
+                if isinstance(payload.get("surfaces"), dict)
+                else None,
+                "surface_unreviewed_count": (payload.get("surfaces") or {}).get("unreviewed_count")
+                if isinstance(payload.get("surfaces"), dict)
+                else None,
             }
         )
         records.append(
@@ -1966,7 +2079,9 @@ def _operator_migration_import_records(payload: dict[str, Any]) -> list[dict[str
     return records
 
 
-def _supersede_stale_operator_migration_imports(target: Path, records: list[dict[str, Any]], *, dry_run: bool = False) -> list[str]:
+def _supersede_stale_operator_migration_imports(
+    target: Path, records: list[dict[str, Any]], *, dry_run: bool = False
+) -> list[str]:
     current_by_identity: dict[tuple[str, str, str], str] = {}
     for record in records:
         identity = work_cmd._import_source_identity(record)
@@ -1979,7 +2094,11 @@ def _supersede_stale_operator_migration_imports(target: Path, records: list[dict
     superseded: list[str] = []
     now = datetime.now(timezone.utc).isoformat()
     for item in imports:
-        if not isinstance(item, dict) or item.get("status", "pending") != "pending" or item.get("source") != "operator-migration":
+        if (
+            not isinstance(item, dict)
+            or item.get("status", "pending") != "pending"
+            or item.get("source") != "operator-migration"
+        ):
             continue
         identity = work_cmd._import_source_identity(item)
         if identity not in current_by_identity:
@@ -2004,7 +2123,9 @@ def _supersede_stale_operator_migration_imports(target: Path, records: list[dict
     return superseded
 
 
-def _supersede_stale_operator_source_imports(target: Path, payload: dict[str, Any], *, dry_run: bool = False) -> list[str]:
+def _supersede_stale_operator_source_imports(
+    target: Path, payload: dict[str, Any], *, dry_run: bool = False
+) -> list[str]:
     current_adoption_issue_keys = {
         f"operator-adoption:{issue.get('name')}"
         for issue in (payload.get("adoption") or {}).get("issues") or []
@@ -2023,9 +2144,7 @@ def _supersede_stale_operator_source_imports(target: Path, payload: dict[str, An
         ):
             reviewed_surfaces.add(surface)
     migration_gap_names = {
-        gap.get("name")
-        for gap in (payload.get("gaps") or {}).get("items") or []
-        if isinstance(gap, dict)
+        gap.get("name") for gap in (payload.get("gaps") or {}).get("items") or [] if isinstance(gap, dict)
     }
     has_surface_rollup = "surface_records_need_owner" in migration_gap_names
     imports = work_cmd._read_imports(target)
@@ -2039,7 +2158,11 @@ def _supersede_stale_operator_source_imports(target: Path, payload: dict[str, An
         source_key = metadata.get("source_item_key")
         should_supersede = False
         reason = "superseded-by-current-migration-status"
-        if source == "operator-adoption" and isinstance(source_key, str) and source_key not in current_adoption_issue_keys:
+        if (
+            source == "operator-adoption"
+            and isinstance(source_key, str)
+            and source_key not in current_adoption_issue_keys
+        ):
             should_supersede = True
         elif source == "operator-surface" and has_surface_rollup:
             surface = metadata.get("surface")
@@ -2066,10 +2189,18 @@ def _adoption_workspace_counts(workspace: Any) -> dict[str, Any]:
     if not isinstance(workspace, dict):
         return {}
     return {
-        "guidance_present": (workspace.get("guidance") or {}).get("present_count") if isinstance(workspace.get("guidance"), dict) else None,
-        "harness_roots": (workspace.get("harnesses") or {}).get("root_count") if isinstance(workspace.get("harnesses"), dict) else None,
-        "handoff_inboxes": (workspace.get("harnesses") or {}).get("handoff_inbox_count") if isinstance(workspace.get("harnesses"), dict) else None,
-        "local_state": (workspace.get("local_state") or {}).get("present_count") if isinstance(workspace.get("local_state"), dict) else None,
+        "guidance_present": (workspace.get("guidance") or {}).get("present_count")
+        if isinstance(workspace.get("guidance"), dict)
+        else None,
+        "harness_roots": (workspace.get("harnesses") or {}).get("root_count")
+        if isinstance(workspace.get("harnesses"), dict)
+        else None,
+        "handoff_inboxes": (workspace.get("harnesses") or {}).get("handoff_inbox_count")
+        if isinstance(workspace.get("harnesses"), dict)
+        else None,
+        "local_state": (workspace.get("local_state") or {}).get("present_count")
+        if isinstance(workspace.get("local_state"), dict)
+        else None,
     }
 
 
@@ -2146,7 +2277,9 @@ def init(
 
 
 def _bootstrap_ok(results: list[dict[str, Any]], post_actions: list[dict[str, Any]]) -> bool:
-    return all(row.get("return_code", 0) == 0 for row in results if row["status"] != "skipped") and all(row.get("return_code", 0) == 0 for row in post_actions if row.get("status") != "skipped")
+    return all(row.get("return_code", 0) == 0 for row in results if row["status"] != "skipped") and all(
+        row.get("return_code", 0) == 0 for row in post_actions if row.get("status") != "skipped"
+    )
 
 
 def _post_init_actions(target: Path, *, profile: str, waive_public_release: bool) -> list[dict[str, Any]]:
@@ -2155,7 +2288,9 @@ def _post_init_actions(target: Path, *, profile: str, waive_public_release: bool
     if profile == "internal-dogfood":
         output = StringIO()
         with redirect_stdout(output):
-            rc = security_cmd.scan(target=target, output_dir=target / ".brigade" / "security" / "latest", json_output=False)
+            rc = security_cmd.scan(
+                target=target, output_dir=target / ".brigade" / "security" / "latest", json_output=False
+            )
         actions.append(
             {
                 "id": "security-scan",
@@ -2184,9 +2319,15 @@ def _ensure_initial_handoff_ingest_log(target: Path) -> dict[str, Any]:
 
 def _waive_public_release_readiness(target: Path) -> dict[str, Any]:
     payload = center_cmd._readiness_payload(target)
-    finding = next((item for item in payload.get("findings", []) if item.get("name") == "missing_release_readiness"), None)
+    finding = next(
+        (item for item in payload.get("findings", []) if item.get("name") == "missing_release_readiness"), None
+    )
     if not isinstance(finding, dict):
-        return {"id": "public-release-readiness-waiver", "status": "skipped", "reason": "missing_release_readiness not present"}
+        return {
+            "id": "public-release-readiness-waiver",
+            "status": "skipped",
+            "reason": "missing_release_readiness not present",
+        }
     output = StringIO()
     with redirect_stdout(output):
         rc = center_cmd.readiness_closeout(
@@ -2232,13 +2373,30 @@ def status_payload(target: Path, *, profile: str = "internal-dogfood") -> dict[s
     dogfood_ready = dogfood_cmd.config_path(target).exists() and codex_path is not None
     issues = []
     if profile == "internal-dogfood" and not dogfood_ready:
-        issues.append({"status": "warn", "name": "dogfood_not_ready", "detail": "dogfood config or codex binary missing"})
+        issues.append(
+            {"status": "warn", "name": "dogfood_not_ready", "detail": "dogfood config or codex binary missing"}
+        )
     security_top_issue = security_health.get("top_issue") if isinstance(security_health.get("top_issue"), dict) else {}
-    security_missing_evidence = security_top_issue.get("name") == "security_evidence" and str(security_top_issue.get("detail") or "") == "missing"
+    security_missing_evidence = (
+        security_top_issue.get("name") == "security_evidence"
+        and str(security_top_issue.get("detail") or "") == "missing"
+    )
     if security_health.get("issue_count") and (profile == "internal-dogfood" or not security_missing_evidence):
-        issues.append({"status": "warn", "name": "security_health", "detail": str((security_health.get("top_issue") or {}).get("detail") or "security health issue")})
+        issues.append(
+            {
+                "status": "warn",
+                "name": "security_health",
+                "detail": str((security_health.get("top_issue") or {}).get("detail") or "security health issue"),
+            }
+        )
     if profile == "internal-dogfood" and readiness.get("blocker_count"):
-        issues.append({"status": "warn", "name": "operator_readiness_blocked", "detail": str((readiness.get("blockers") or [{}])[0].get("safe_summary") or "readiness blocker")})
+        issues.append(
+            {
+                "status": "warn",
+                "name": "operator_readiness_blocked",
+                "detail": str((readiness.get("blockers") or [{}])[0].get("safe_summary") or "readiness blocker"),
+            }
+        )
     content_guard_configured = bool(
         content_guard_health.get("available")
         or content_guard_health.get("hooks_path")
@@ -2262,7 +2420,10 @@ def status_payload(target: Path, *, profile: str = "internal-dogfood") -> dict[s
                     "status": str(check.get("status") or "warn"),
                     "name": name,
                     "detail": str(check.get("detail") or "content guard needs attention"),
-                    "suggested_next_command": (content_guard_health.get("suggested_commands") or ["brigade operator status --profile internal-dogfood --target ."])[0],
+                    "suggested_next_command": (
+                        content_guard_health.get("suggested_commands")
+                        or ["brigade operator status --profile internal-dogfood --target ."]
+                    )[0],
                 }
             )
     return {
@@ -2326,12 +2487,18 @@ def status(*, target: Path, profile: str = "internal-dogfood", json_output: bool
     print(f"repo_configs_not_gitignored: {payload['repo']['not_gitignored_count']}")
     print(f"security_issues: {payload['security']['issue_count']}")
     content_guard = payload.get("content_guard") if isinstance(payload.get("content_guard"), dict) else {}
-    hook_label = content_guard.get("pre_push_hook_mode") or ("enabled" if content_guard.get("pre_push_hook_enabled") else "not-enabled")
-    print(f"content_guard: {'installed' if content_guard.get('available') else 'missing'} hook={hook_label} policy={content_guard.get('policy')}")
+    hook_label = content_guard.get("pre_push_hook_mode") or (
+        "enabled" if content_guard.get("pre_push_hook_enabled") else "not-enabled"
+    )
+    print(
+        f"content_guard: {'installed' if content_guard.get('available') else 'missing'} hook={hook_label} policy={content_guard.get('policy')}"
+    )
     for command in content_guard.get("suggested_commands") or []:
         print(f"content_guard_next: {command}")
     print(f"daily_issues: {payload['daily']['issue_count']}")
-    print(f"readiness: {payload['readiness']['status']} blockers={payload['readiness']['blocker_count']} warnings={payload['readiness']['warning_count']}")
+    print(
+        f"readiness: {payload['readiness']['status']} blockers={payload['readiness']['blocker_count']} warnings={payload['readiness']['warning_count']}"
+    )
     top = payload.get("top_issue")
     if isinstance(top, dict):
         print(f"top_issue: {top.get('name')} {top.get('detail')}")
@@ -2360,7 +2527,9 @@ def doctor_payload(target: Path, *, profile: str = "internal-dogfood") -> dict[s
     ready = not blockers
     if not ready:
         first = blockers[0]
-        next_command = str(first.get("suggested_next_command") or "brigade operator status --profile internal-dogfood --target .")
+        next_command = str(
+            first.get("suggested_next_command") or "brigade operator status --profile internal-dogfood --target ."
+        )
     else:
         next_command = _operator_doctor_next_command(profile, daily_status)
     return {
@@ -2372,11 +2541,21 @@ def doctor_payload(target: Path, *, profile: str = "internal-dogfood") -> dict[s
         "next_command": next_command,
         "operator_status": {
             "issue_count": status.get("issue_count"),
-            "dogfood_ready": (status.get("dogfood") or {}).get("ready") if isinstance(status.get("dogfood"), dict) else None,
-            "missing_config_count": (status.get("repo") or {}).get("missing_config_count") if isinstance(status.get("repo"), dict) else None,
-            "not_gitignored_count": (status.get("repo") or {}).get("not_gitignored_count") if isinstance(status.get("repo"), dict) else None,
-            "security_issue_count": (status.get("security") or {}).get("issue_count") if isinstance(status.get("security"), dict) else None,
-            "daily_issue_count": (status.get("daily") or {}).get("issue_count") if isinstance(status.get("daily"), dict) else None,
+            "dogfood_ready": (status.get("dogfood") or {}).get("ready")
+            if isinstance(status.get("dogfood"), dict)
+            else None,
+            "missing_config_count": (status.get("repo") or {}).get("missing_config_count")
+            if isinstance(status.get("repo"), dict)
+            else None,
+            "not_gitignored_count": (status.get("repo") or {}).get("not_gitignored_count")
+            if isinstance(status.get("repo"), dict)
+            else None,
+            "security_issue_count": (status.get("security") or {}).get("issue_count")
+            if isinstance(status.get("security"), dict)
+            else None,
+            "daily_issue_count": (status.get("daily") or {}).get("issue_count")
+            if isinstance(status.get("daily"), dict)
+            else None,
         },
         "content_guard": status.get("content_guard"),
         "tool_health": {
@@ -2385,7 +2564,9 @@ def doctor_payload(target: Path, *, profile: str = "internal-dogfood") -> dict[s
             "top_issue": tool_health.get("top_issue"),
         },
         "daily": {
-            "issue_count": (daily_status.get("daily_health") or {}).get("issue_count") if isinstance(daily_status.get("daily_health"), dict) else None,
+            "issue_count": (daily_status.get("daily_health") or {}).get("issue_count")
+            if isinstance(daily_status.get("daily_health"), dict)
+            else None,
             "selected_action": daily_status.get("selected_action"),
             "next_recommended_command": daily_status.get("next_recommended_command"),
         },
@@ -2434,7 +2615,9 @@ def doctor(*, target: Path, profile: str = "internal-dogfood", json_output: bool
             print(f"- {item.get('name')}: {item.get('detail')}")
     content_guard = payload.get("content_guard") if isinstance(payload.get("content_guard"), dict) else {}
     if content_guard:
-        hook_label = content_guard.get("pre_push_hook_mode") or ("enabled" if content_guard.get("pre_push_hook_enabled") else "not-enabled")
+        hook_label = content_guard.get("pre_push_hook_mode") or (
+            "enabled" if content_guard.get("pre_push_hook_enabled") else "not-enabled"
+        )
         print(
             "content_guard: "
             f"{'installed' if content_guard.get('available') else 'missing'} "
@@ -2497,7 +2680,13 @@ def verify_harness_payload(target: Path, *, harness: str) -> dict[str, Any]:
         if inbox_health.watched:
             checks.append({"status": "ok", "name": "handoff_source_coverage", "detail": f"{inbox_rel} is watched"})
         else:
-            checks.append({"status": "fail", "name": "handoff_source_coverage", "detail": f"{inbox_rel} is not watched by .brigade/handoff-sources.json"})
+            checks.append(
+                {
+                    "status": "fail",
+                    "name": "handoff_source_coverage",
+                    "detail": f"{inbox_rel} is not watched by .brigade/handoff-sources.json",
+                }
+            )
 
     if harness == "hermes":
         checks.extend(_hermes_adapter_checks(target, inbox_rel))
@@ -2505,11 +2694,15 @@ def verify_harness_payload(target: Path, *, harness: str) -> dict[str, Any]:
     gitignore_probe = inbox_path / ".brigade-ignore-probe"
     gitignored = dogfood_cmd._check_git_ignored(target, gitignore_probe)
     if gitignored == "no":
-        checks.append({"status": "fail", "name": "handoff_inbox_gitignored", "detail": f"{inbox_rel} is not ignored by git"})
+        checks.append(
+            {"status": "fail", "name": "handoff_inbox_gitignored", "detail": f"{inbox_rel} is not ignored by git"}
+        )
     elif gitignored in {"yes", "unknown"}:
         checks.append({"status": "ok", "name": "handoff_inbox_gitignored", "detail": f"gitignore status: {gitignored}"})
     else:
-        checks.append({"status": "warn", "name": "handoff_inbox_gitignored", "detail": f"gitignore status: {gitignored}"})
+        checks.append(
+            {"status": "warn", "name": "handoff_inbox_gitignored", "detail": f"gitignore status: {gitignored}"}
+        )
 
     # The managed .gitignore un-ignores each inbox's TEMPLATE.md so the format
     # travels with the repo. Git cannot re-include a file whose parent dir is
@@ -2540,16 +2733,24 @@ def verify_harness_payload(target: Path, *, harness: str) -> dict[str, Any]:
                 }
             )
 
-    lint_results = [
-        result
-        for result in health.lint
-        if _path_under(result.path, inbox_path)
-    ]
+    lint_results = [result for result in health.lint if _path_under(result.path, inbox_path)]
     invalid = [result for result in lint_results if not result.valid]
     if invalid:
-        checks.append({"status": "fail", "name": "handoff_lint", "detail": f"{len(invalid)} invalid of {len(lint_results)} pending {harness} handoff(s)"})
+        checks.append(
+            {
+                "status": "fail",
+                "name": "handoff_lint",
+                "detail": f"{len(invalid)} invalid of {len(lint_results)} pending {harness} handoff(s)",
+            }
+        )
     elif lint_results:
-        checks.append({"status": "ok", "name": "handoff_lint", "detail": f"{len(lint_results)} pending {harness} handoff(s) lint clean"})
+        checks.append(
+            {
+                "status": "ok",
+                "name": "handoff_lint",
+                "detail": f"{len(lint_results)} pending {harness} handoff(s) lint clean",
+            }
+        )
     else:
         checks.append({"status": "ok", "name": "handoff_lint", "detail": f"no pending {harness} handoffs"})
 
@@ -2557,8 +2758,7 @@ def verify_harness_payload(target: Path, *, harness: str) -> dict[str, Any]:
     hermes_adapter_issues = [
         item
         for item in checks
-        if str(item.get("name", "")).startswith("hermes_adapter_")
-        and item.get("status") in {"fail", "warn"}
+        if str(item.get("name", "")).startswith("hermes_adapter_") and item.get("status") in {"fail", "warn"}
     ]
     if issue_count:
         if harness == "hermes" and hermes_adapter_issues and not (inbox_health and inbox_health.exists):
@@ -2574,7 +2774,7 @@ def verify_harness_payload(target: Path, *, harness: str) -> dict[str, Any]:
         else:
             next_command = "brigade handoff doctor --target ."
     else:
-        next_command = f"brigade handoff list --target . --json"
+        next_command = "brigade handoff list --target . --json"
     return {
         "target": str(target),
         "harness": harness,
@@ -2679,7 +2879,13 @@ def sync_tools(*, target: Path, dry_run: bool = False, force: bool = False, json
             "force": force,
             "defaults": defaults_payload,
             "apply": {"applied_count": 0, "skipped_count": 0, "conflict_count": 0},
-            "tool_health": {"valid": False, "tool_count": None, "issue_count": None, "top_issue": None, "sync_plan": None},
+            "tool_health": {
+                "valid": False,
+                "tool_count": None,
+                "issue_count": None,
+                "top_issue": None,
+                "sync_plan": None,
+            },
             "projection_paths": [],
             "status": "warn",
         }
@@ -2835,7 +3041,9 @@ def quickstart(
             "force": force,
             "steps": steps,
             "status": "blocked",
-            "next_commands": [f"brigade init --target {target} --depth {depth} --harnesses {','.join(selected_harnesses) or 'none'} --force"],
+            "next_commands": [
+                f"brigade init --target {target} --depth {depth} --harnesses {','.join(selected_harnesses) or 'none'} --force"
+            ],
             "local_only_notes": _quickstart_local_notes(),
         }
         payload["issue_report"] = _quickstart_issue_report(payload)
@@ -2846,7 +3054,9 @@ def quickstart(
         return 1
 
     selected_inboxes = [WRITER_INBOXES[harness] for harness in selected_harnesses if harness in WRITER_INBOXES]
-    init_rc, init_payload = _capture_json_call(init, target=target, profile="local-operator", handoff_inboxes=selected_inboxes, force=force, dry_run=dry_run)
+    init_rc, init_payload = _capture_json_call(
+        init, target=target, profile="local-operator", handoff_inboxes=selected_inboxes, force=force, dry_run=dry_run
+    )
     init_status = "planned" if dry_run and init_rc == 0 else "ok" if init_rc == 0 else "error"
     steps.append({"id": "operator-init", "status": init_status, "return_code": init_rc, "payload": init_payload})
 
@@ -2859,19 +3069,41 @@ def quickstart(
         force=force,
     )
     portable_status = "planned" if dry_run and portable_rc == 0 else "ok" if portable_rc == 0 else "error"
-    steps.append({"id": "portable-bootstrap", "status": portable_status, "return_code": portable_rc, "payload": portable_payload})
+    steps.append(
+        {"id": "portable-bootstrap", "status": portable_status, "return_code": portable_rc, "payload": portable_payload}
+    )
 
     if dry_run:
         for harness in selected_harnesses:
             if harness in WRITER_INBOXES:
-                steps.append({"id": f"verify-{harness}", "status": "planned", "return_code": 0, "next_command": f"brigade operator verify-harness --harness {harness} --target {target}"})
+                steps.append(
+                    {
+                        "id": f"verify-{harness}",
+                        "status": "planned",
+                        "return_code": 0,
+                        "next_command": f"brigade operator verify-harness --harness {harness} --target {target}",
+                    }
+                )
     else:
         for harness in selected_harnesses:
             if harness not in WRITER_INBOXES:
-                steps.append({"id": f"verify-{harness}", "status": "skipped", "reason": "no Brigade handoff writer inbox for this harness"})
+                steps.append(
+                    {
+                        "id": f"verify-{harness}",
+                        "status": "skipped",
+                        "reason": "no Brigade handoff writer inbox for this harness",
+                    }
+                )
                 continue
             verify_rc, verify_payload = _capture_json_call(verify_harness, target=target, harness=harness)
-            steps.append({"id": f"verify-{harness}", "status": "ok" if verify_rc == 0 else "warn", "return_code": verify_rc, "payload": verify_payload})
+            steps.append(
+                {
+                    "id": f"verify-{harness}",
+                    "status": "ok" if verify_rc == 0 else "warn",
+                    "return_code": verify_rc,
+                    "payload": verify_payload,
+                }
+            )
 
     ok = all(step.get("return_code", 0) == 0 for step in steps if step.get("status") not in {"skipped", "planned"})
     if dry_run:
@@ -2906,7 +3138,11 @@ def _quickstart_next_commands(harnesses: list[str], *, dry_run: bool) -> list[st
         "brigade skills doctor --target .",
         "brigade security scan --target . --output-dir .brigade/security/latest",
     ]
-    commands.extend(f"brigade operator verify-harness --target . --harness {harness}" for harness in harnesses if harness in WRITER_INBOXES)
+    commands.extend(
+        f"brigade operator verify-harness --target . --harness {harness}"
+        for harness in harnesses
+        if harness in WRITER_INBOXES
+    )
     return commands
 
 
@@ -2989,13 +3225,31 @@ def bootstrap_portable(
             steps.append({"id": "tools-pack-import", "status": "skipped", "reason": "dry-run", "pack": str(tool_pack)})
         else:
             rc, payload = _capture_json_call(tools_cmd.pack_import, target=target, pack=tool_pack, force=force)
-            steps.append({"id": "tools-pack-import", "status": "ok" if rc == 0 else "error", "return_code": rc, "pack": str(tool_pack), "payload": payload})
+            steps.append(
+                {
+                    "id": "tools-pack-import",
+                    "status": "ok" if rc == 0 else "error",
+                    "return_code": rc,
+                    "pack": str(tool_pack),
+                    "payload": payload,
+                }
+            )
     if skill_pack is not None:
         if dry_run:
-            steps.append({"id": "skills-pack-import", "status": "skipped", "reason": "dry-run", "pack": str(skill_pack)})
+            steps.append(
+                {"id": "skills-pack-import", "status": "skipped", "reason": "dry-run", "pack": str(skill_pack)}
+            )
         else:
             rc, payload = _capture_json_call(skills_cmd.pack_import, target=target, pack=skill_pack, force=force)
-            steps.append({"id": "skills-pack-import", "status": "ok" if rc == 0 else "error", "return_code": rc, "pack": str(skill_pack), "payload": payload})
+            steps.append(
+                {
+                    "id": "skills-pack-import",
+                    "status": "ok" if rc == 0 else "error",
+                    "return_code": rc,
+                    "pack": str(skill_pack),
+                    "payload": payload,
+                }
+            )
 
     sync_rc, sync_payload = _capture_json_call(sync_tools, target=target, dry_run=dry_run, force=force)
     sync_status = "ok" if sync_rc == 0 else "error"
@@ -3005,9 +3259,23 @@ def bootstrap_portable(
     steps.append({"id": "operator-sync-tools", "status": sync_status, "return_code": sync_rc, "payload": sync_payload})
     if not dry_run:
         tools_rc, tools_payload = _capture_json_call(tools_cmd.doctor, target=target)
-        steps.append({"id": "tools-doctor", "status": "ok" if tools_rc == 0 else "error", "return_code": tools_rc, "payload": tools_payload})
+        steps.append(
+            {
+                "id": "tools-doctor",
+                "status": "ok" if tools_rc == 0 else "error",
+                "return_code": tools_rc,
+                "payload": tools_payload,
+            }
+        )
         skills_rc, skills_payload = _capture_json_call(skills_cmd.doctor, target=target)
-        steps.append({"id": "skills-doctor", "status": "ok" if skills_rc == 0 else "error", "return_code": skills_rc, "payload": skills_payload})
+        steps.append(
+            {
+                "id": "skills-doctor",
+                "status": "ok" if skills_rc == 0 else "error",
+                "return_code": skills_rc,
+                "payload": skills_payload,
+            }
+        )
 
     ok = all(step.get("return_code", 0) == 0 for step in steps if step.get("status") != "skipped")
     payload = {

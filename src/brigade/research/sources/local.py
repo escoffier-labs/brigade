@@ -1,14 +1,19 @@
 # src/brigade/research/sources/local.py
 from __future__ import annotations
-import glob, math, os, re
+import glob
+import math
+import os
+import re
 from collections import Counter
 from pathlib import Path
 from typing import Dict, List
 
 _WORD = re.compile(r"[a-z0-9]+")
 
+
 def _tok(text: str) -> List[str]:
     return _WORD.findall(text.lower())
+
 
 def _read_text(path: Path) -> str:
     if path.suffix.lower() in {".md", ".txt", ""}:
@@ -16,7 +21,8 @@ def _read_text(path: Path) -> str:
             return path.read_text(errors="ignore")
         except OSError:
             return ""
-    return ""   # other types (e.g. pdf) skipped here; logged by caller
+    return ""  # other types (e.g. pdf) skipped here; logged by caller
+
 
 def _chunk(text: str, chunk_chars: int) -> List[str]:
     if len(text) <= chunk_chars:
@@ -25,11 +31,14 @@ def _chunk(text: str, chunk_chars: int) -> List[str]:
     size = 0
     for para in text.split("\n\n"):
         if size + len(para) > chunk_chars and cur:
-            parts.append("\n\n".join(cur)); cur, size = [], 0
-        cur.append(para); size += len(para)
+            parts.append("\n\n".join(cur))
+            cur, size = [], 0
+        cur.append(para)
+        size += len(para)
     if cur:
         parts.append("\n\n".join(cur))
     return parts
+
 
 class LexicalIndex:
     def __init__(self, chunks: List[Dict[str, str]]):
@@ -64,9 +73,16 @@ class LexicalIndex:
             if score > 0:
                 scored.append((score, i))
         scored.sort(reverse=True)
-        return [{"source": self._chunks[i]["source"], "title": self._chunks[i]["title"],
-                 "text": self._chunks[i]["text"], "trust": "local"}
-                for _, i in scored[:limit]]
+        return [
+            {
+                "source": self._chunks[i]["source"],
+                "title": self._chunks[i]["title"],
+                "text": self._chunks[i]["text"],
+                "trust": "local",
+            }
+            for _, i in scored[:limit]
+        ]
+
 
 def build_index(patterns: List[str], chunk_chars: int = 4000) -> LexicalIndex:
     chunks: List[Dict[str, str]] = []

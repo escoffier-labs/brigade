@@ -1,4 +1,5 @@
 """Read/write .brigade/config.json - the per-target source of truth."""
+
 from __future__ import annotations
 
 import json
@@ -52,9 +53,7 @@ def load_config(target: Path) -> Optional[Config]:
     data = json.loads(path.read_text())
     version = data.get("version")
     if version not in SUPPORTED_VERSIONS:
-        raise ValueError(
-            f"unsupported config version: {version!r} (supported: {SUPPORTED_VERSIONS})"
-        )
+        raise ValueError(f"unsupported config version: {version!r} (supported: {SUPPORTED_VERSIONS})")
     sel = Selection(
         depth=data.get("depth", ""),
         harnesses=list(data.get("harnesses", [])),

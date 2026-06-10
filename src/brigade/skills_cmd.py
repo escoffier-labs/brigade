@@ -4,6 +4,7 @@ Skills are treated as versioned workflow code: imports land in a local Brigade
 registry, lint checks provenance and injection risk, and installs materialize
 reviewed packs into harness-specific folders.
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -26,7 +27,11 @@ HARNESS_ADAPTERS: dict[str, dict[str, Any]] = {
     "codex": {"status": "built-in", "format": "codex-skill", "install_path": ".codex/skills/{skill_id}"},
     "claude": {"status": "built-in", "format": "claude-skill", "install_path": ".claude/skills/{skill_id}"},
     "opencode": {"status": "built-in", "format": "opencode-skill", "install_path": ".opencode/skills/{skill_id}"},
-    "antigravity": {"status": "built-in", "format": "antigravity-skill", "install_path": ".antigravity/skills/{skill_id}"},
+    "antigravity": {
+        "status": "built-in",
+        "format": "antigravity-skill",
+        "install_path": ".antigravity/skills/{skill_id}",
+    },
     "pi": {"status": "built-in", "format": "pi-skill", "install_path": ".pi/skills/{skill_id}"},
     "cursor": {"status": "built-in", "format": "cursor-skill", "install_path": ".cursor/skills/{skill_id}"},
     "aider": {"status": "built-in", "format": "aider-skill", "install_path": ".aider/skills/{skill_id}"},
@@ -108,9 +113,7 @@ def _has_yaml_frontmatter(text: str) -> bool:
 def _codex_frontmatter_values(metadata: dict[str, Any], skill_id: str) -> dict[str, str]:
     name = _slug(str(metadata.get("id") or skill_id))
     description = str(
-        metadata.get("description")
-        or metadata.get("title")
-        or f"Use this reviewed Brigade skill for {name}."
+        metadata.get("description") or metadata.get("title") or f"Use this reviewed Brigade skill for {name}."
     )
     return {"name": name, "description": description}
 
@@ -176,7 +179,9 @@ def _rendered_skill_validation(text: str, harness: str) -> list[str]:
     return errors
 
 
-def _copy_skill_for_harness(source_dir: Path, dest: Path, metadata: dict[str, Any], skill_id: str, harness: str) -> None:
+def _copy_skill_for_harness(
+    source_dir: Path, dest: Path, metadata: dict[str, Any], skill_id: str, harness: str
+) -> None:
     if dest.exists():
         shutil.rmtree(dest)
     dest.parent.mkdir(parents=True, exist_ok=True)
@@ -260,7 +265,9 @@ def _changelog_payload(skill_dir: Path, metadata: dict[str, Any]) -> dict[str, A
     }
 
 
-def _trust_score_payload(skill_dir: Path, metadata: dict[str, Any], lint_payload: dict[str, Any] | None = None) -> dict[str, Any]:
+def _trust_score_payload(
+    skill_dir: Path, metadata: dict[str, Any], lint_payload: dict[str, Any] | None = None
+) -> dict[str, Any]:
     score = 100
     signals: list[str] = []
     trust_level = str(metadata.get("trust_level") or "unreviewed")
@@ -342,16 +349,26 @@ def _registry_import_payload(
             "source": str(source),
             "imported_at": _now(),
             "trust_level": str(metadata.get("trust_level") or "unreviewed"),
-            "required_tools": metadata.get("required_tools") if isinstance(metadata.get("required_tools"), list) else [],
-            "required_mcp_servers": metadata.get("required_mcp_servers") if isinstance(metadata.get("required_mcp_servers"), list) else [],
-            "supported_harnesses": metadata.get("supported_harnesses") if isinstance(metadata.get("supported_harnesses"), list) else list(HARNESS_TARGETS),
+            "required_tools": metadata.get("required_tools")
+            if isinstance(metadata.get("required_tools"), list)
+            else [],
+            "required_mcp_servers": metadata.get("required_mcp_servers")
+            if isinstance(metadata.get("required_mcp_servers"), list)
+            else [],
+            "supported_harnesses": metadata.get("supported_harnesses")
+            if isinstance(metadata.get("supported_harnesses"), list)
+            else list(HARNESS_TARGETS),
             "tests": metadata.get("tests") if isinstance(metadata.get("tests"), list) else [],
         }
     )
     metadata["fingerprint"] = _fingerprint(dest)
     _write_json(_metadata_path(dest), metadata)
     lint_payload = _lint_payload(target, resolved_id)
-    return {"target": str(target), "skill_id": resolved_id, "skill_dir": str(dest), "lint": lint_payload}, None, 0 if lint_payload["valid"] else 1
+    return (
+        {"target": str(target), "skill_id": resolved_id, "skill_dir": str(dest), "lint": lint_payload},
+        None,
+        0 if lint_payload["valid"] else 1,
+    )
 
 
 def _load_skill(target: Path, skill_or_path: str) -> tuple[Path, dict[str, Any]]:
@@ -423,8 +440,22 @@ def _lint_payload(target: Path, skill_or_path: str, harness: str | None = None) 
         "metadata": metadata,
         "fingerprint": _fingerprint(skill_dir) if skill_dir.is_dir() else None,
     }
-    payload["changelog"] = _changelog_payload(skill_dir, metadata) if skill_dir.is_dir() else {"present": False, "path": None, "fingerprint": None, "headings": []}
-    payload["trust_score"] = _trust_score_payload(skill_dir, metadata, payload) if skill_dir.is_dir() else {"score": 0, "trust_level": metadata.get("trust_level") or "unreviewed", "signals": ["skill directory missing"], "tests_declared": 0, "changelog": payload["changelog"]}
+    payload["changelog"] = (
+        _changelog_payload(skill_dir, metadata)
+        if skill_dir.is_dir()
+        else {"present": False, "path": None, "fingerprint": None, "headings": []}
+    )
+    payload["trust_score"] = (
+        _trust_score_payload(skill_dir, metadata, payload)
+        if skill_dir.is_dir()
+        else {
+            "score": 0,
+            "trust_level": metadata.get("trust_level") or "unreviewed",
+            "signals": ["skill directory missing"],
+            "tests_declared": 0,
+            "changelog": payload["changelog"],
+        }
+    )
     return payload
 
 
@@ -549,7 +580,8 @@ def _adapter_map(target: Path) -> dict[str, dict[str, Any]]:
 
 def _install_targets(workspace: Path) -> tuple[str, ...]:
     return tuple(
-        key for key, value in _adapter_map(workspace).items()
+        key
+        for key, value in _adapter_map(workspace).items()
         if value.get("status") in {"built-in", "local"} and value.get("install_path")
     )
 
@@ -585,7 +617,11 @@ def install(
     lint_payload = _lint_payload(workspace, skill)
     if not lint_payload["valid"]:
         if json_output:
-            print(json.dumps({"workspace": str(workspace), "installed": False, "lint": lint_payload}, indent=2, sort_keys=True))
+            print(
+                json.dumps(
+                    {"workspace": str(workspace), "installed": False, "lint": lint_payload}, indent=2, sort_keys=True
+                )
+            )
         else:
             print(f"error: skill lint failed: {skill}", file=sys.stderr)
         return 1
@@ -628,7 +664,9 @@ def install(
         previous_receipt = _read_json(receipt_path) if receipt_path.is_file() else {}
         rollback_snapshot: str | None = None
         if dest.exists():
-            rollback_dir = _rollback_root(workspace, skill_id, install_target) / _now().replace(":", "").replace("+", "Z").replace(".", "-")
+            rollback_dir = _rollback_root(workspace, skill_id, install_target) / _now().replace(":", "").replace(
+                "+", "Z"
+            ).replace(".", "-")
             shutil.copytree(dest, rollback_dir)
             rollback_snapshot = str(rollback_dir)
             shutil.rmtree(dest)
@@ -720,7 +758,9 @@ def rollback(*, workspace: Path, skill: str, harness: str, json_output: bool = F
     return 0
 
 
-def history(*, target: Path, skill: str | None = None, harness: str | None = None, json_output: bool = False, limit: int = 20) -> int:
+def history(
+    *, target: Path, skill: str | None = None, harness: str | None = None, json_output: bool = False, limit: int = 20
+) -> int:
     target = target.expanduser().resolve()
     rows = _install_history(target, skill_id=skill, harness=harness)[:limit]
     payload = {
@@ -750,7 +790,13 @@ def diff(*, target: Path, skill: str, harness: str, json_output: bool = False) -
     lint_payload = _lint_payload(target, skill)
     if not lint_payload["valid"]:
         if json_output:
-            print(json.dumps({"target": str(target), "skill_id": skill, "valid": False, "lint": lint_payload}, indent=2, sort_keys=True))
+            print(
+                json.dumps(
+                    {"target": str(target), "skill_id": skill, "valid": False, "lint": lint_payload},
+                    indent=2,
+                    sort_keys=True,
+                )
+            )
         else:
             print(f"error: skill lint failed: {skill}", file=sys.stderr)
         return 1
@@ -944,7 +990,12 @@ def pack_archive(*, target: Path, pack_id: str, json_output: bool = False) -> in
         print(f"error: archived skill pack already exists: {destination}", file=sys.stderr)
         return 2
     source.rename(destination)
-    payload = {"target": str(target), "pack_id": pack.get("pack_id"), "status": "archived", "archive_path": str(destination)}
+    payload = {
+        "target": str(target),
+        "pack_id": pack.get("pack_id"),
+        "status": "archived",
+        "archive_path": str(destination),
+    }
     if json_output:
         print(json.dumps(payload, indent=2, sort_keys=True))
         return 0
@@ -969,9 +1020,18 @@ def pack_import(*, target: Path, pack: Path, force: bool = False, json_output: b
         metadata = _read_json(skill_path / "skill.json")
         skill_id = _slug(str(metadata.get("id") or skill_path.name))
         if _skill_path(target, skill_id).exists() and not force:
-            conflicts.append({"skill_id": skill_id, "existing": str(_skill_path(target, skill_id)), "source": str(skill_path)})
+            conflicts.append(
+                {"skill_id": skill_id, "existing": str(_skill_path(target, skill_id)), "source": str(skill_path)}
+            )
     if conflicts:
-        payload = {"target": str(target), "pack": str(pack), "imported": imported, "conflicts": conflicts, "errors": errors, "valid": False}
+        payload = {
+            "target": str(target),
+            "pack": str(pack),
+            "imported": imported,
+            "conflicts": conflicts,
+            "errors": errors,
+            "valid": False,
+        }
         if json_output:
             print(json.dumps(payload, indent=2, sort_keys=True))
             return 1
@@ -1021,7 +1081,9 @@ def _mcp_contract_payload(target: Path) -> dict[str, Any]:
                 "skill_id": skill_id,
                 "skill": f"skill://registry/{skill_id}/SKILL.md",
                 "metadata": f"skill://registry/{skill_id}/skill.json",
-                "changelog": f"skill://registry/{skill_id}/CHANGELOG.md" if lint_payload.get("changelog", {}).get("present") else None,
+                "changelog": f"skill://registry/{skill_id}/CHANGELOG.md"
+                if lint_payload.get("changelog", {}).get("present")
+                else None,
                 "compatibility": compatibility_payload["skill"],
                 "history": f"skill://registry/{skill_id}/history.json",
                 "fingerprint": metadata.get("fingerprint"),
@@ -1043,7 +1105,15 @@ def _mcp_contract_payload(target: Path) -> dict[str, Any]:
         ],
         "registered_resources": resources,
         "resource_count": len(resources),
-        "tools": ["search_skills", "get_skill", "get_skill_metadata", "get_skill_changelog", "get_skill_compatibility", "get_skill_history", "lint_skill"],
+        "tools": [
+            "search_skills",
+            "get_skill",
+            "get_skill_metadata",
+            "get_skill_changelog",
+            "get_skill_compatibility",
+            "get_skill_history",
+            "lint_skill",
+        ],
         "blocked_tools": ["install_skill", "publish_skill", "fork_skill"],
         "detail": "Local registry resources are available for a read-only MCP adapter; this command reports the contract and does not start a long-running server.",
     }
@@ -1072,7 +1142,7 @@ def _mcp_read_resource(target: Path, uri: str) -> tuple[str, str] | tuple[None, 
     prefix = "skill://registry/"
     if not uri.startswith(prefix):
         return None, None
-    remainder = uri[len(prefix):]
+    remainder = uri[len(prefix) :]
     if "/" not in remainder:
         return None, None
     skill_id, name = remainder.split("/", 1)
@@ -1117,7 +1187,11 @@ def _mcp_tool_specs() -> list[dict[str, Any]]:
         {"name": "get_skill", "description": "Read a skill SKILL.md file.", "inputSchema": schema_skill},
         {"name": "get_skill_metadata", "description": "Read skill.json metadata.", "inputSchema": schema_skill},
         {"name": "get_skill_changelog", "description": "Read skill changelog text.", "inputSchema": schema_skill},
-        {"name": "get_skill_compatibility", "description": "Read skill compatibility JSON.", "inputSchema": schema_skill},
+        {
+            "name": "get_skill_compatibility",
+            "description": "Read skill compatibility JSON.",
+            "inputSchema": schema_skill,
+        },
         {"name": "get_skill_history", "description": "Read skill install history JSON.", "inputSchema": schema_skill},
         {"name": "lint_skill", "description": "Read skill lint JSON.", "inputSchema": schema_skill},
     ]
@@ -1154,7 +1228,9 @@ def _mcp_tool_call(target: Path, name: str, arguments: dict[str, Any]) -> tuple[
     return {"error": f"unknown read-only skill tool: {name}"}, True
 
 
-def _mcp_response(request_id: object, *, result: object | None = None, error: dict[str, Any] | None = None) -> dict[str, Any]:
+def _mcp_response(
+    request_id: object, *, result: object | None = None, error: dict[str, Any] | None = None
+) -> dict[str, Any]:
     response: dict[str, Any] = {"jsonrpc": "2.0", "id": request_id}
     if error is not None:
         response["error"] = error
@@ -1188,16 +1264,37 @@ def _run_mcp_stdio(target: Path) -> int:
             }
             print(json.dumps(_mcp_response(request_id, result=result), sort_keys=True), flush=True)
         elif method == "resources/list":
-            print(json.dumps(_mcp_response(request_id, result={"resources": _mcp_resource_items(target)}), sort_keys=True), flush=True)
+            print(
+                json.dumps(
+                    _mcp_response(request_id, result={"resources": _mcp_resource_items(target)}), sort_keys=True
+                ),
+                flush=True,
+            )
         elif method == "resources/read":
             uri = str(params.get("uri") or "")
             text, mime_type = _mcp_read_resource(target, uri)
             if text is None:
-                print(json.dumps(_mcp_response(request_id, error={"code": -32004, "message": f"resource not found: {uri}"}), sort_keys=True), flush=True)
+                print(
+                    json.dumps(
+                        _mcp_response(request_id, error={"code": -32004, "message": f"resource not found: {uri}"}),
+                        sort_keys=True,
+                    ),
+                    flush=True,
+                )
             else:
-                print(json.dumps(_mcp_response(request_id, result={"contents": [{"uri": uri, "mimeType": mime_type, "text": text}]}), sort_keys=True), flush=True)
+                print(
+                    json.dumps(
+                        _mcp_response(
+                            request_id, result={"contents": [{"uri": uri, "mimeType": mime_type, "text": text}]}
+                        ),
+                        sort_keys=True,
+                    ),
+                    flush=True,
+                )
         elif method == "tools/list":
-            print(json.dumps(_mcp_response(request_id, result={"tools": _mcp_tool_specs()}), sort_keys=True), flush=True)
+            print(
+                json.dumps(_mcp_response(request_id, result={"tools": _mcp_tool_specs()}), sort_keys=True), flush=True
+            )
         elif method == "tools/call":
             name = str(params.get("name") or "")
             arguments = params.get("arguments") if isinstance(params.get("arguments"), dict) else {}
@@ -1206,7 +1303,13 @@ def _run_mcp_stdio(target: Path) -> int:
             result = {"content": [{"type": "text", "text": text}], "isError": failed}
             print(json.dumps(_mcp_response(request_id, result=result), sort_keys=True), flush=True)
         else:
-            print(json.dumps(_mcp_response(request_id, error={"code": -32601, "message": f"method not found: {method}"}), sort_keys=True), flush=True)
+            print(
+                json.dumps(
+                    _mcp_response(request_id, error={"code": -32601, "message": f"method not found: {method}"}),
+                    sort_keys=True,
+                ),
+                flush=True,
+            )
     return 0
 
 
@@ -1219,8 +1322,12 @@ def serve_mcp(*, target: Path, json_output: bool = False, stdio: bool = False) -
         print(json.dumps(payload, indent=2, sort_keys=True))
         return 0
     print("skills MCP resources: ready read_only=true")
-    print("resources: skill://registry/{skill_id}/SKILL.md, skill://registry/{skill_id}/skill.json, skill://registry/{skill_id}/compatibility.json, skill://registry/{skill_id}/history.json")
-    print("tools: search_skills, get_skill, get_skill_metadata, get_skill_changelog, get_skill_compatibility, get_skill_history, lint_skill")
+    print(
+        "resources: skill://registry/{skill_id}/SKILL.md, skill://registry/{skill_id}/skill.json, skill://registry/{skill_id}/compatibility.json, skill://registry/{skill_id}/history.json"
+    )
+    print(
+        "tools: search_skills, get_skill, get_skill_metadata, get_skill_changelog, get_skill_compatibility, get_skill_history, lint_skill"
+    )
     print(f"registered_resources: {len(payload['registered_resources'])}")
     return 0
 
@@ -1262,8 +1369,7 @@ def adapters_init(*, target: Path, force: bool = False, json_output: bool = Fals
         return 2
     payload = {
         "description": "Local skill harness adapter overlay. install_path is relative to the workspace and may use {skill_id}.",
-        "adapters": {
-        },
+        "adapters": {},
     }
     _write_json(path, payload)
     output = {"target": str(target), "path": str(path), "adapter_count": len(payload["adapters"])}
@@ -1283,7 +1389,13 @@ def adapters_list(*, target: Path = Path("."), include_planned: bool = False, js
         for adapter_id, data in adapter_map.items()
         if include_planned or data["status"] in {"built-in", "local"}
     ]
-    payload = {"target": str(target), "config_path": str(_adapters_config_path(target)), "adapters": adapters, "count": len(adapters), "include_planned": include_planned}
+    payload = {
+        "target": str(target),
+        "config_path": str(_adapters_config_path(target)),
+        "adapters": adapters,
+        "count": len(adapters),
+        "include_planned": include_planned,
+    }
     if json_output:
         print(json.dumps(payload, indent=2, sort_keys=True))
         return 0
@@ -1350,7 +1462,9 @@ def _compatibility_payload(target: Path, skill: str) -> dict[str, Any]:
         installed_render_fingerprint = latest_receipt.get("render_fingerprint")
         version_drift = bool(latest_receipt and latest_receipt.get("version") != current_version)
         source_drift = bool(latest_receipt and installed_source_fingerprint != lint_payload.get("fingerprint"))
-        render_drift = bool(latest_receipt and render_fingerprint and installed_render_fingerprint != render_fingerprint)
+        render_drift = bool(
+            latest_receipt and render_fingerprint and installed_render_fingerprint != render_fingerprint
+        )
         adapters.append(
             {
                 "id": adapter_id,
@@ -1370,7 +1484,9 @@ def _compatibility_payload(target: Path, skill: str) -> dict[str, Any]:
                 "source_drift": source_drift,
                 "render_drift": render_drift,
                 "install_history_count": history_count,
-                "receipt_path": str(_installs_root(target) / f"{skill_id}-{adapter_id}.json") if latest_receipt else None,
+                "receipt_path": str(_installs_root(target) / f"{skill_id}-{adapter_id}.json")
+                if latest_receipt
+                else None,
                 "render_valid": not rendered_errors,
                 "render_errors": rendered_errors,
                 "blockers": blockers,
@@ -1495,7 +1611,8 @@ def _skill_health_issues(target: Path) -> list[dict[str, Any]]:
                         "skill_id": skill_id,
                         "harness": adapter_id,
                         "detail": f"{adapter_id} installed skill differs from current registry render",
-                        "fingerprint": adapter.get("installed_render_fingerprint") or adapter.get("current_render_fingerprint"),
+                        "fingerprint": adapter.get("installed_render_fingerprint")
+                        or adapter.get("current_render_fingerprint"),
                     }
                 )
     return issues
@@ -1528,7 +1645,9 @@ def doctor(*, target: Path, json_output: bool = False) -> int:
     if payload["issues"]:
         for issue in payload["issues"]:
             harness = f" {issue.get('harness')}" if issue.get("harness") else ""
-            print(f"[{issue.get('status', WARN)}] {issue.get('name')}: {issue.get('skill_id')}{harness}: {issue.get('detail')}")
+            print(
+                f"[{issue.get('status', WARN)}] {issue.get('name')}: {issue.get('skill_id')}{harness}: {issue.get('detail')}"
+            )
     else:
         print("[ok] skill_registry: no issues")
     print(f"skill_issues: {payload['issue_count']}")
@@ -1686,7 +1805,7 @@ def inbox_add(
         return 0 if lint_payload["valid"] else 1
     print(f"skill_proposal: {proposal['proposal_id']}")
     print(f"skill_id: {resolved_skill_id}")
-    print(f"status: pending")
+    print("status: pending")
     return 0 if lint_payload["valid"] else 1
 
 
@@ -1732,7 +1851,12 @@ def inbox_diff(*, target: Path, proposal_id: str, json_output: bool = False) -> 
     before = existing.read_text(errors="replace").splitlines() if existing.is_file() else []
     after = proposed.read_text(errors="replace").splitlines() if proposed.is_file() else []
     diff = list(difflib.unified_diff(before, after, fromfile=str(existing), tofile=str(proposed), lineterm=""))
-    payload = {"target": str(target), "proposal_id": proposal.get("proposal_id"), "skill_id": proposal.get("skill_id"), "diff": diff}
+    payload = {
+        "target": str(target),
+        "proposal_id": proposal.get("proposal_id"),
+        "skill_id": proposal.get("skill_id"),
+        "diff": diff,
+    }
     if json_output:
         print(json.dumps(payload, indent=2, sort_keys=True))
         return 0

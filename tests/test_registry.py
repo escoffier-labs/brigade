@@ -23,6 +23,7 @@ def test_resolve_by_name_and_alias():
 
 def test_stations_declare_attached_tools():
     from brigade import registry
+
     memory = registry.resolve("memory")
     guard = registry.resolve("guard")
     tokens = registry.resolve("tokens")

@@ -138,11 +138,32 @@ def test_center_schema_manifest_is_stable_and_read_only(tmp_path, capsys):
     } <= schema_ids
     schemas = {schema["id"]: schema for schema in payload["schemas"]}
     status_fields = {field["name"] for field in schemas["center-status"]["top_level_fields"]}
-    assert {"target", "pending_task_count", "pending_import_count", "review_queue_count", "operator_report", "action_queue"} <= status_fields
+    assert {
+        "target",
+        "pending_task_count",
+        "pending_import_count",
+        "review_queue_count",
+        "operator_report",
+        "action_queue",
+    } <= status_fields
     activity_fields = {field["name"] for field in schemas["center-activity"]["item_fields"]}
-    assert {"subsystem", "local_id", "status", "safe_summary", "receipt_path", "suggested_next_command"} <= activity_fields
+    assert {
+        "subsystem",
+        "local_id",
+        "status",
+        "safe_summary",
+        "receipt_path",
+        "suggested_next_command",
+    } <= activity_fields
     action_fields = {field["name"] for field in schemas["center-actions"]["action_fields"]}
-    assert {"action_id", "source_report_id", "source_group", "source_subsystem", "source_local_id", "source_fingerprint"} <= action_fields
+    assert {
+        "action_id",
+        "source_report_id",
+        "source_group",
+        "source_subsystem",
+        "source_local_id",
+        "source_fingerprint",
+    } <= action_fields
     assert all(check["status"] == "ok" for check in payload["checks"])
 
     assert center_cmd.schema(target=tmp_path) == 0
@@ -155,7 +176,9 @@ def test_center_schema_manifest_is_stable_and_read_only(tmp_path, capsys):
     contract = center_cmd._center_contract_health(tmp_path)
     assert contract["issue_count"] == 0
     assert "center-status" in contract["schema_ids"]
-    assert {"subsystem", "local_id", "status", "safe_summary", "suggested_next_command"} <= set(contract["required_item_fields"])
+    assert {"subsystem", "local_id", "status", "safe_summary", "suggested_next_command"} <= set(
+        contract["required_item_fields"]
+    )
 
 
 def test_center_report_plan_build_list_show_archive_and_cli(tmp_path, capsys):
@@ -173,7 +196,10 @@ def test_center_report_plan_build_list_show_archive_and_cli(tmp_path, capsys):
     assert (report_dir / "OPERATOR_REPORT.html").is_file()
     assert (report_dir / "CENTER_EVIDENCE.json").is_file()
     assert "Review Queue" in (report_dir / "OPERATOR_REPORT.md").read_text()
-    assert "&lt;" in (report_dir / "OPERATOR_REPORT.html").read_text() or "<pre>" in (report_dir / "OPERATOR_REPORT.html").read_text()
+    assert (
+        "&lt;" in (report_dir / "OPERATOR_REPORT.html").read_text()
+        or "<pre>" in (report_dir / "OPERATOR_REPORT.html").read_text()
+    )
 
     assert center_cmd.report_list(target=tmp_path, json_output=True) == 0
     assert json.loads(capsys.readouterr().out)["report_count"] == 1
@@ -266,7 +292,13 @@ def test_center_report_integrates_with_work_and_release(tmp_path, monkeypatch, c
     monkeypatch.setattr(
         handoff_cmd,
         "draft_queue_payload",
-        lambda target: {"counts": {"pending": 0}, "issue_count": 0, "top_issue": None, "latest_ingest_run": None, "drafts": []},
+        lambda target: {
+            "counts": {"pending": 0},
+            "issue_count": 0,
+            "top_issue": None,
+            "latest_ingest_run": None,
+            "drafts": [],
+        },
     )
     monkeypatch.setattr(
         work_cmd,
@@ -283,9 +315,23 @@ def test_center_report_integrates_with_work_and_release(tmp_path, monkeypatch, c
     monkeypatch.setattr(
         work_cmd,
         "_review_health",
-        lambda target: {"latest_run": None, "latest_success": None, "latest_unclosed_run": None, "unresolved_finding_count": 0, "pending_finding_count": 0, "top_pending_finding": None, "top_unresolved_finding": None, "checks": [], "config_path": None},
+        lambda target: {
+            "latest_run": None,
+            "latest_success": None,
+            "latest_unclosed_run": None,
+            "unresolved_finding_count": 0,
+            "pending_finding_count": 0,
+            "top_pending_finding": None,
+            "top_unresolved_finding": None,
+            "checks": [],
+            "config_path": None,
+        },
     )
-    monkeypatch.setattr(release_cmd, "_run_content_guard_check", lambda *args, **kwargs: {"name": "content_guard_tip", "status": "ok", "detail": "clean"})
+    monkeypatch.setattr(
+        release_cmd,
+        "_run_content_guard_check",
+        lambda *args, **kwargs: {"name": "content_guard_tip", "status": "ok", "detail": "clean"},
+    )
     monkeypatch.setattr(release_cmd, "_content_guard_available", lambda target: True)
 
     assert work_cmd.brief(target=tmp_path, json_output=True) == 0

@@ -1,4 +1,5 @@
 """Load and validate a Brigade aboyeur roster."""
+
 from __future__ import annotations
 
 import fnmatch

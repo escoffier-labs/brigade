@@ -1507,9 +1507,7 @@ def test_task_plan_write_from_research_records_entry_and_quarantined_source(tmp_
     assert runs[0]["run_id"] == "r1"
     assert runs[0]["question"] == "what is the loop"
     assert runs[0]["report_path"].endswith("report.md")
-    assert any(
-        "research:r1 (untrusted-web)" in line for line in receipt["source_context"]
-    )
+    assert any("research:r1 (untrusted-web)" in line for line in receipt["source_context"])
 
 
 def test_task_plan_write_from_research_renders_quarantined_section(tmp_path, capsys):
@@ -1572,14 +1570,8 @@ def test_task_plan_write_from_research_dedupes_same_run(tmp_path, capsys):
     task_id = _plan_task_id(tmp_path, capsys)
     _make_research_run(tmp_path, run_id="r1", question="what is the loop")
 
-    assert (
-        work_cmd.task_plan(target=tmp_path, task_id=task_id[:12], write=True, from_research="r1")
-        == 0
-    )
-    assert (
-        work_cmd.task_plan(target=tmp_path, task_id=task_id[:12], write=True, from_research="r1")
-        == 0
-    )
+    assert work_cmd.task_plan(target=tmp_path, task_id=task_id[:12], write=True, from_research="r1") == 0
+    assert work_cmd.task_plan(target=tmp_path, task_id=task_id[:12], write=True, from_research="r1") == 0
     capsys.readouterr()
     json_path, _ = work_cmd._plan_paths(tmp_path, task_id)
     receipt = json.loads(json_path.read_text())
@@ -1636,9 +1628,7 @@ def test_work_plans_unreadable_json_does_not_crash(tmp_path, capsys):
 
 def _accepted_plan_task_id(tmp_path, capsys, **add_kwargs):
     task_id = _plan_task_id(tmp_path, capsys, **add_kwargs)
-    assert (
-        work_cmd.task_plan(target=tmp_path, task_id=task_id[:12], write=True, accept=True) == 0
-    )
+    assert work_cmd.task_plan(target=tmp_path, task_id=task_id[:12], write=True, accept=True) == 0
     capsys.readouterr()
     return task_id
 
@@ -1678,12 +1668,7 @@ def test_plan_promote_json_output(tmp_path, capsys):
     _init_git_repo(tmp_path)
     task_id = _accepted_plan_task_id(tmp_path, capsys)
 
-    assert (
-        work_cmd.plan_promote(
-            target=tmp_path, task_id=task_id[:12], as_kind="template", json_output=True
-        )
-        == 0
-    )
+    assert work_cmd.plan_promote(target=tmp_path, task_id=task_id[:12], as_kind="template", json_output=True) == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["task_id"] == task_id
     assert payload["as"] == "template"
@@ -1856,9 +1841,7 @@ def test_plan_and_meta_coexist_independently(tmp_path, capsys):
     task_id = _plan_task_id(tmp_path, capsys)
     assert work_cmd.task_plan(target=tmp_path, task_id=task_id[:12], write=True) == 0
     capsys.readouterr()
-    assert (
-        work_cmd.task_plan(target=tmp_path, task_id=task_id[:12], write=True, kind="meta", steps=["meta step"]) == 0
-    )
+    assert work_cmd.task_plan(target=tmp_path, task_id=task_id[:12], write=True, kind="meta", steps=["meta step"]) == 0
     capsys.readouterr()
 
     plan_json, _ = work_cmd._plan_paths(tmp_path, task_id, "plan")
@@ -2884,7 +2867,14 @@ projections = { claude = ".claude/commands/tool.md" }
     assert tools_cmd.doctor(target=tmp_path, json_output=True) == 0
     payload = json.loads(capsys.readouterr().out)
     issue_types = {issue["issue_type"] for issue in payload["issues"]}
-    assert {"unsafe_auth_fields", "invalid_schema", "stale_health", "missing_command", "stale_projection", "parity_gap"} <= issue_types
+    assert {
+        "unsafe_auth_fields",
+        "invalid_schema",
+        "stale_health",
+        "missing_command",
+        "stale_projection",
+        "parity_gap",
+    } <= issue_types
     rendered = json.dumps(payload, sort_keys=True)
     assert "do-not-print" not in rendered
 
@@ -2978,7 +2968,10 @@ def test_work_brief_and_doctor_include_roadmap_and_repo_fleet_health(tmp_path, m
         lambda target: {
             "issue_count": 1,
             "top_issue": {"status": "warn", "name": "roadmap_example", "detail": "needs review"},
-            "audit": {"issue_count": 1, "top_issue": {"status": "warn", "name": "roadmap_example", "detail": "needs review"}},
+            "audit": {
+                "issue_count": 1,
+                "top_issue": {"status": "warn", "name": "roadmap_example", "detail": "needs review"},
+            },
             "patterns": {"issue_count": 0, "top_issue": None},
             "checks": [{"status": "warn", "name": "roadmap_example", "detail": "needs review"}],
         },
@@ -3369,7 +3362,13 @@ projections = { claude = ".claude/commands/gap.md" }
     assert tools_cmd.parity_status(target=tmp_path, json_output=True) == 0
     payload = json.loads(capsys.readouterr().out)
     issue_types = {issue["issue_type"] for issue in payload["issues"]}
-    assert {"stale_projection", "missing_projection", "unmanaged_projection", "conflicted_projection", "parity_gap"} <= issue_types
+    assert {
+        "stale_projection",
+        "missing_projection",
+        "unmanaged_projection",
+        "conflicted_projection",
+        "parity_gap",
+    } <= issue_types
     assert payload["quieted_issue_count"] == 0
 
     assert tools_cmd.parity_closeout(target=tmp_path, reason="reviewed", json_output=True) == 0
@@ -3511,7 +3510,12 @@ supported_harnesses = []
     assert tools_cmd.contracts(target=tmp_path, json_output=True) == 0
     payload = json.loads(capsys.readouterr().out)
     issue_types = {issue["issue_type"] for issue in payload["issues"]}
-    assert {"invalid_input_schema", "unsupported_output_schema", "missing_examples", "bad_argument_template"} <= issue_types
+    assert {
+        "invalid_input_schema",
+        "unsupported_output_schema",
+        "missing_examples",
+        "bad_argument_template",
+    } <= issue_types
 
 
 def test_tools_call_plan_validates_args_and_renders_template(tmp_path, capsys):
@@ -3566,12 +3570,15 @@ supported_harnesses = []
     assert payload["plan"]["arguments"]["mode"] == "--mode=safe"
     assert payload["plan"]["approval_required"] is False
 
-    assert tools_cmd.call_plan(
-        target=tmp_path,
-        tool_id="runner",
-        args='{"path":"README.md","count":"two","tags":["a", 1],"mode":"slow","extra":true}',
-        json_output=True,
-    ) == 1
+    assert (
+        tools_cmd.call_plan(
+            target=tmp_path,
+            tool_id="runner",
+            args='{"path":"README.md","count":"two","tags":["a", 1],"mode":"slow","extra":true}',
+            json_output=True,
+        )
+        == 1
+    )
     payload = json.loads(capsys.readouterr().out)
     blockers = "\n".join(payload["blockers"])
     assert "$.count: expected integer" in blockers
@@ -3585,7 +3592,9 @@ def test_tools_call_plan_redacts_and_reports_blockers(tmp_path, capsys):
     tools_dir = tmp_path / "tools"
     tools_dir.mkdir()
     (tools_dir / "blocked.md").write_text("Blocked source.\n")
-    (tools_dir / "input.schema.json").write_text(json.dumps({"type": "object", "properties": {"token": {"type": "string"}}}))
+    (tools_dir / "input.schema.json").write_text(
+        json.dumps({"type": "object", "properties": {"token": {"type": "string"}}})
+    )
     projection = tmp_path / ".claude" / "commands" / "blocked.md"
     projection.parent.mkdir(parents=True)
     projection.write_text("unmanaged\n")
@@ -3657,7 +3666,9 @@ def test_tools_call_queue_list_show_and_review_transitions(tmp_path, capsys):
     _init_git_repo(tmp_path)
     tools_dir = tmp_path / "tools"
     tools_dir.mkdir()
-    (tools_dir / "input.schema.json").write_text(json.dumps({"type": "object", "properties": {"path": {"type": "string"}}}))
+    (tools_dir / "input.schema.json").write_text(
+        json.dumps({"type": "object", "properties": {"path": {"type": "string"}}})
+    )
     config = tmp_path / ".brigade" / "tools.toml"
     config.parent.mkdir()
     config.write_text(
@@ -3739,7 +3750,9 @@ supported_harnesses = []
     assert payload["blocked"] == 1
     assert not (tmp_path / ".brigade" / "tools" / "calls.jsonl").exists()
 
-    assert tools_cmd.call_queue(target=tmp_path, tool_id="blocked", args="{}", include_blocked=True, json_output=True) == 0
+    assert (
+        tools_cmd.call_queue(target=tmp_path, tool_id="blocked", args="{}", include_blocked=True, json_output=True) == 0
+    )
     payload = json.loads(capsys.readouterr().out)
     call_id = payload["call"]["id"]
     assert payload["call"]["blockers"]
@@ -3781,19 +3794,29 @@ supported_harnesses = []
     assert payload["skipped"] == 1
     assert "already approved" in payload["reason"]
 
-    assert tools_cmd.call_queue(target=tmp_path, tool_id="runner", args='{"path":"CHANGELOG.md"}', json_output=True) == 0
+    assert (
+        tools_cmd.call_queue(target=tmp_path, tool_id="runner", args='{"path":"CHANGELOG.md"}', json_output=True) == 0
+    )
     second = json.loads(capsys.readouterr().out)
     assert second["created"] == 1
     assert second["call"]["id"] != first["id"]
-    assert tools_cmd.call_reject(target=tmp_path, call_id=second["call"]["id"], reason="bad timing", json_output=True) == 0
+    assert (
+        tools_cmd.call_reject(target=tmp_path, call_id=second["call"]["id"], reason="bad timing", json_output=True) == 0
+    )
     capsys.readouterr()
-    assert tools_cmd.call_queue(target=tmp_path, tool_id="runner", args='{"path":"CHANGELOG.md"}', json_output=True) == 0
+    assert (
+        tools_cmd.call_queue(target=tmp_path, tool_id="runner", args='{"path":"CHANGELOG.md"}', json_output=True) == 0
+    )
     payload = json.loads(capsys.readouterr().out)
     assert payload["skipped"] == 1
     assert "rejected" in payload["reason"]
 
-    schema.write_text(json.dumps({"type": "object", "properties": {"path": {"type": "string"}, "mode": {"type": "string"}}}))
-    assert tools_cmd.call_queue(target=tmp_path, tool_id="runner", args='{"path":"CHANGELOG.md"}', json_output=True) == 0
+    schema.write_text(
+        json.dumps({"type": "object", "properties": {"path": {"type": "string"}, "mode": {"type": "string"}}})
+    )
+    assert (
+        tools_cmd.call_queue(target=tmp_path, tool_id="runner", args='{"path":"CHANGELOG.md"}', json_output=True) == 0
+    )
     payload = json.loads(capsys.readouterr().out)
     assert payload["created"] == 1
 
@@ -3831,11 +3854,15 @@ supported_harnesses = []
     calls[0]["created_at"] = "2026-05-25T12:00:00+00:00"
     tools_cmd._write_calls(tmp_path, calls)
 
-    assert tools_cmd.call_queue(target=tmp_path, tool_id="runner", args='{"path":"CHANGELOG.md"}', json_output=True) == 0
+    assert (
+        tools_cmd.call_queue(target=tmp_path, tool_id="runner", args='{"path":"CHANGELOG.md"}', json_output=True) == 0
+    )
     approved = json.loads(capsys.readouterr().out)["call"]
     assert tools_cmd.call_approve(target=tmp_path, call_id=approved["id"], json_output=True) == 0
     capsys.readouterr()
-    schema.write_text(json.dumps({"type": "object", "properties": {"path": {"type": "string"}, "mode": {"type": "string"}}}))
+    schema.write_text(
+        json.dumps({"type": "object", "properties": {"path": {"type": "string"}, "mode": {"type": "string"}}})
+    )
 
     assert tools_cmd.doctor(target=tmp_path) == 0
     out = capsys.readouterr().out
@@ -4031,7 +4058,9 @@ command = "{sys.executable} tools/runner.py"
 supported_harnesses = []
 """
     )
-    assert tools_cmd.call_queue(target=tmp_path, tool_id="blocked", args="{}", include_blocked=True, json_output=True) == 0
+    assert (
+        tools_cmd.call_queue(target=tmp_path, tool_id="blocked", args="{}", include_blocked=True, json_output=True) == 0
+    )
     blocked = json.loads(capsys.readouterr().out)["call"]
     calls = tools_cmd._read_calls(tmp_path)
     for item in calls:
@@ -4080,7 +4109,7 @@ def test_tools_call_run_next_failure_timeout_health_and_imports(tmp_path, monkey
 
     _write_script_tool_config(
         tmp_path,
-        script='import time\ntime.sleep(3)\n',
+        script="import time\ntime.sleep(3)\n",
         timeout=0.1,
     )
     timed = _queue_and_approve_runner(tmp_path, capsys, args='{"path":"timed"}')
@@ -4246,7 +4275,7 @@ def test_tools_run_history_integrates_with_brief_and_imports(tmp_path, monkeypat
     capsys.readouterr()
     monkeypatch.setattr(work_cmd.helpers.shutil, "which", lambda name: f"/usr/bin/{name}")
     monkeypatch.setattr(dogfood_cmd, "_check_git_ignored", lambda repo, path: "yes")
-    _write_script_tool_config(tmp_path, script='import sys\nsys.exit(6)\n')
+    _write_script_tool_config(tmp_path, script="import sys\nsys.exit(6)\n")
     failed = _queue_and_approve_runner(tmp_path, capsys)
 
     assert tools_cmd.call_run(target=tmp_path, call_id=failed["id"], json_output=True) == 1
@@ -4335,7 +4364,10 @@ def test_tools_checkpoint_approve_reject_and_successful_resume(tmp_path, capsys)
     _init_git_repo(tmp_path)
     call, checkpoint_id, receipt = _create_waiting_checkpoint(tmp_path, capsys)
 
-    assert tools_cmd.checkpoint_approve(target=tmp_path, checkpoint_id=checkpoint_id, choice="continue", json_output=True) == 0
+    assert (
+        tools_cmd.checkpoint_approve(target=tmp_path, checkpoint_id=checkpoint_id, choice="continue", json_output=True)
+        == 0
+    )
     payload = json.loads(capsys.readouterr().out)
     assert payload["checkpoint"]["status"] == "approved"
     assert payload["checkpoint"]["selected_choice"] == "continue"
@@ -4356,7 +4388,12 @@ def test_tools_checkpoint_approve_reject_and_successful_resume(tmp_path, capsys)
     second = _queue_and_approve_runner(tmp_path, capsys, args='{"path":"other"}')
     assert tools_cmd.call_run(target=tmp_path, call_id=second["id"], json_output=True) == 0
     second_checkpoint = json.loads(capsys.readouterr().out)["receipt"]["checkpoint_id"]
-    assert tools_cmd.checkpoint_reject(target=tmp_path, checkpoint_id=second_checkpoint, reason="not now", json_output=True) == 0
+    assert (
+        tools_cmd.checkpoint_reject(
+            target=tmp_path, checkpoint_id=second_checkpoint, reason="not now", json_output=True
+        )
+        == 0
+    )
     payload = json.loads(capsys.readouterr().out)
     assert payload["checkpoint"]["status"] == "rejected"
     assert payload["checkpoint"]["review_reason"] == "not now"
@@ -4369,7 +4406,10 @@ def test_tools_checkpoint_resume_refuses_unapproved_expired_stale_blocked_and_po
     payload = json.loads(capsys.readouterr().out)
     assert "checkpoint must be approved before resume" in "\n".join(payload["blockers"])
 
-    assert tools_cmd.checkpoint_approve(target=tmp_path, checkpoint_id=checkpoint_id, choice="continue", json_output=True) == 0
+    assert (
+        tools_cmd.checkpoint_approve(target=tmp_path, checkpoint_id=checkpoint_id, choice="continue", json_output=True)
+        == 0
+    )
     capsys.readouterr()
     checkpoint, _ = tools_cmd._resolve_checkpoint(tmp_path, checkpoint_id)
     assert checkpoint is not None
@@ -4380,7 +4420,12 @@ def test_tools_checkpoint_resume_refuses_unapproved_expired_stale_blocked_and_po
 
     _write_script_tool_config(tmp_path, script=_checkpoint_script())
     _, stale_checkpoint, _ = _create_waiting_checkpoint(tmp_path, capsys, args='{"path":"stale"}')
-    assert tools_cmd.checkpoint_approve(target=tmp_path, checkpoint_id=stale_checkpoint, choice="continue", json_output=True) == 0
+    assert (
+        tools_cmd.checkpoint_approve(
+            target=tmp_path, checkpoint_id=stale_checkpoint, choice="continue", json_output=True
+        )
+        == 0
+    )
     capsys.readouterr()
     (tmp_path / "tools" / "input.schema.json").write_text(
         json.dumps({"type": "object", "properties": {"path": {"type": "string"}, "mode": {"type": "string"}}})
@@ -4391,7 +4436,12 @@ def test_tools_checkpoint_resume_refuses_unapproved_expired_stale_blocked_and_po
 
     _write_script_tool_config(tmp_path, script=_checkpoint_script())
     _, blocked_checkpoint, _ = _create_waiting_checkpoint(tmp_path, capsys, args='{"path":"blocked"}')
-    assert tools_cmd.checkpoint_approve(target=tmp_path, checkpoint_id=blocked_checkpoint, choice="continue", json_output=True) == 0
+    assert (
+        tools_cmd.checkpoint_approve(
+            target=tmp_path, checkpoint_id=blocked_checkpoint, choice="continue", json_output=True
+        )
+        == 0
+    )
     capsys.readouterr()
     calls = tools_cmd._read_calls(tmp_path)
     for item in calls:
@@ -4406,7 +4456,12 @@ def test_tools_checkpoint_resume_refuses_unapproved_expired_stale_blocked_and_po
     _write_policy_config(tmp_path)
     _, policy_checkpoint, _ = _create_waiting_checkpoint(tmp_path, capsys, args='{"path":"policy"}')
     _write_policy_config(tmp_path, denied_effects=["local-read"])
-    assert tools_cmd.checkpoint_approve(target=tmp_path, checkpoint_id=policy_checkpoint, choice="continue", json_output=True) == 0
+    assert (
+        tools_cmd.checkpoint_approve(
+            target=tmp_path, checkpoint_id=policy_checkpoint, choice="continue", json_output=True
+        )
+        == 0
+    )
     capsys.readouterr()
     assert tools_cmd.checkpoint_resume(target=tmp_path, checkpoint_id=policy_checkpoint, json_output=True) == 1
     assert "effect is denied by policy: local-read" in "\n".join(json.loads(capsys.readouterr().out)["blockers"])
@@ -4419,7 +4474,10 @@ def test_tools_checkpoint_resume_failure_health_brief_and_imports(tmp_path, monk
     monkeypatch.setattr(work_cmd.helpers.shutil, "which", lambda name: f"/usr/bin/{name}")
     monkeypatch.setattr(dogfood_cmd, "_check_git_ignored", lambda repo, path: "yes")
     _, checkpoint_id, _ = _create_waiting_checkpoint(tmp_path, capsys, script=_checkpoint_script(fail_on_resume=True))
-    assert tools_cmd.checkpoint_approve(target=tmp_path, checkpoint_id=checkpoint_id, choice="continue", json_output=True) == 0
+    assert (
+        tools_cmd.checkpoint_approve(target=tmp_path, checkpoint_id=checkpoint_id, choice="continue", json_output=True)
+        == 0
+    )
     capsys.readouterr()
     assert tools_cmd.checkpoint_resume(target=tmp_path, checkpoint_id=checkpoint_id, json_output=True) == 1
     payload = json.loads(capsys.readouterr().out)
@@ -4479,7 +4537,10 @@ else:
     assert secret_value not in rendered
     assert "argument-secret" not in rendered
 
-    assert tools_cmd.checkpoint_approve(target=tmp_path, checkpoint_id=checkpoint_id, choice="continue", json_output=True) == 0
+    assert (
+        tools_cmd.checkpoint_approve(target=tmp_path, checkpoint_id=checkpoint_id, choice="continue", json_output=True)
+        == 0
+    )
     capsys.readouterr()
     assert tools_cmd.checkpoint_resume(target=tmp_path, checkpoint_id=checkpoint_id, json_output=True) == 0
     payload = json.loads(capsys.readouterr().out)
@@ -4680,7 +4741,12 @@ def test_tools_call_run_mcp_redacts_payloads_and_env_values(tmp_path, monkeypatc
     config = tmp_path / ".brigade" / "tools.toml"
     config.write_text(config.read_text() + 'env_labels = ["SAFE_LABEL"]\n')
     _write_runtime_config(tmp_path)
-    _write_policy_config(tmp_path, allowed_families=["mcp"], allowed_runtimes=["helper"], env_bindings={"SAFE_LABEL": "BRIGADE_TEST_SECRET"})
+    _write_policy_config(
+        tmp_path,
+        allowed_families=["mcp"],
+        allowed_runtimes=["helper"],
+        env_bindings={"SAFE_LABEL": "BRIGADE_TEST_SECRET"},
+    )
     assert tools_cmd.runtime_start(target=tmp_path, runtime_id="helper", json_output=True) == 0
     capsys.readouterr()
     try:
@@ -4974,7 +5040,12 @@ env_labels = ["SAFE_LABEL"]
     assert "runtime is not allowed by policy: helper" in blockers
     assert "missing env binding for label: SAFE_LABEL" in blockers
 
-    assert tools_cmd.call_queue(target=tmp_path, tool_id="runner", args='{"path":"README.md"}', include_blocked=True, json_output=True) == 0
+    assert (
+        tools_cmd.call_queue(
+            target=tmp_path, tool_id="runner", args='{"path":"README.md"}', include_blocked=True, json_output=True
+        )
+        == 0
+    )
     call = json.loads(capsys.readouterr().out)["call"]
     calls = tools_cmd._read_calls(tmp_path)
     calls[0]["status"] = "approved"
@@ -5017,8 +5088,14 @@ env_labels = ["SAFE_TOKEN"]
     assert payload["receipt"]["env_labels_used"] == ["SAFE_LABEL"]
     assert payload["receipt"]["policy"]["env_labels_used"] == ["SAFE_LABEL"]
     assert secret_value not in json.dumps(payload)
-    assert secret_value not in (tmp_path / ".brigade" / "tools" / "runs" / f"{payload['receipt']['id']}.stdout.log").read_text()
-    assert "[redacted]" in (tmp_path / ".brigade" / "tools" / "runs" / f"{payload['receipt']['id']}.stdout.log").read_text()
+    assert (
+        secret_value
+        not in (tmp_path / ".brigade" / "tools" / "runs" / f"{payload['receipt']['id']}.stdout.log").read_text()
+    )
+    assert (
+        "[redacted]"
+        in (tmp_path / ".brigade" / "tools" / "runs" / f"{payload['receipt']['id']}.stdout.log").read_text()
+    )
     assert secret_value not in Path(payload["receipt"]["receipt_path"]).read_text()
 
 
@@ -5327,7 +5404,10 @@ enabled = true
     assert payload["raw_issue_count"] == 1
     assert payload["quieted_issue_count"] == 1
     assert payload["changed_fingerprint_count"] == 0
-    assert payload["operator_summary"] == "0 active backup issue(s), 1 reviewed/deferred issue(s), 0 restore rehearsal issue(s)"
+    assert (
+        payload["operator_summary"]
+        == "0 active backup issue(s), 1 reviewed/deferred issue(s), 0 restore rehearsal issue(s)"
+    )
 
     assert work_cmd.backup_doctor(target=tmp_path) == 0
     out = capsys.readouterr().out
@@ -6191,7 +6271,12 @@ privacy_mode = "safe-summary"
 
     assert work_cmd.review_run(target=tmp_path, reviewer_id="malformed-review", json_output=True) == 0
     malformed_payload = json.loads(capsys.readouterr().out)
-    assert work_cmd.review_import_findings(target=tmp_path, run_id=malformed_payload["runs"][0]["run_id"], json_output=True) == 2
+    assert (
+        work_cmd.review_import_findings(
+            target=tmp_path, run_id=malformed_payload["runs"][0]["run_id"], json_output=True
+        )
+        == 2
+    )
     assert "invalid JSON" in json.loads(capsys.readouterr().out)["errors"][0]
 
     assert work_cmd.doctor(target=tmp_path) == 1
@@ -6359,11 +6444,46 @@ def test_work_review_closeout_tracks_resolution_states_and_changed_fingerprints(
         json.dumps(
             {
                 "findings": [
-                    {"id": "pending-one", "severity": "medium", "category": "bug", "path": "a.py", "rationale": "Pending.", "source_fingerprint": "fp-pending"},
-                    {"id": "dismissed-one", "severity": "low", "category": "docs", "path": "b.py", "rationale": "Dismissed.", "source_fingerprint": "fp-dismissed"},
-                    {"id": "promoted-one", "severity": "high", "category": "bug", "path": "c.py", "rationale": "Promoted.", "source_fingerprint": "fp-promoted"},
-                    {"id": "completed-one", "severity": "high", "category": "bug", "path": "d.py", "rationale": "Completed.", "source_fingerprint": "fp-completed"},
-                    {"id": "changed-one", "severity": "medium", "category": "bug", "path": "e.py", "rationale": "Changed.", "source_fingerprint": "fp-new"},
+                    {
+                        "id": "pending-one",
+                        "severity": "medium",
+                        "category": "bug",
+                        "path": "a.py",
+                        "rationale": "Pending.",
+                        "source_fingerprint": "fp-pending",
+                    },
+                    {
+                        "id": "dismissed-one",
+                        "severity": "low",
+                        "category": "docs",
+                        "path": "b.py",
+                        "rationale": "Dismissed.",
+                        "source_fingerprint": "fp-dismissed",
+                    },
+                    {
+                        "id": "promoted-one",
+                        "severity": "high",
+                        "category": "bug",
+                        "path": "c.py",
+                        "rationale": "Promoted.",
+                        "source_fingerprint": "fp-promoted",
+                    },
+                    {
+                        "id": "completed-one",
+                        "severity": "high",
+                        "category": "bug",
+                        "path": "d.py",
+                        "rationale": "Completed.",
+                        "source_fingerprint": "fp-completed",
+                    },
+                    {
+                        "id": "changed-one",
+                        "severity": "medium",
+                        "category": "bug",
+                        "path": "e.py",
+                        "rationale": "Changed.",
+                        "source_fingerprint": "fp-new",
+                    },
                 ]
             }
         )
@@ -6442,12 +6562,31 @@ def test_work_review_closeout_stamps_completed_task_and_session(tmp_path, capsys
     _init_git_repo(tmp_path)
     session_dir = tmp_path / ".brigade" / "work" / "session-one"
     session_dir.mkdir(parents=True)
-    _write_json(session_dir / "session.json", {"id": "session-one", "status": "ended", "started_at": "2026-05-28T12:00:00+00:00"})
+    _write_json(
+        session_dir / "session.json",
+        {"id": "session-one", "status": "ended", "started_at": "2026-05-28T12:00:00+00:00"},
+    )
     run_dir = tmp_path / ".brigade" / "reviews" / "runs" / "run-done"
     run_dir.mkdir(parents=True)
     findings_path = tmp_path / ".brigade" / "reviews" / "done-findings.json"
     findings_path.parent.mkdir(parents=True, exist_ok=True)
-    findings_path.write_text(json.dumps({"findings": [{"id": "done-one", "severity": "high", "category": "bug", "path": "x.py", "rationale": "Fixed.", "source_fingerprint": "fp-done"}]}) + "\n")
+    findings_path.write_text(
+        json.dumps(
+            {
+                "findings": [
+                    {
+                        "id": "done-one",
+                        "severity": "high",
+                        "category": "bug",
+                        "path": "x.py",
+                        "rationale": "Fixed.",
+                        "source_fingerprint": "fp-done",
+                    }
+                ]
+            }
+        )
+        + "\n"
+    )
     _write_json(
         run_dir / "receipt.json",
         {
@@ -6507,7 +6646,9 @@ def test_work_verify_plan_run_list_show(tmp_path, capsys):
     assert payload["commands"] == ["python3 -c \"print('ok')\""]
     assert payload["blockers"] == []
 
-    assert work_cmd.verify_run(target=tmp_path, commands=["python3 -c \"print('ok')\""], timeout=30, json_output=True) == 0
+    assert (
+        work_cmd.verify_run(target=tmp_path, commands=["python3 -c \"print('ok')\""], timeout=30, json_output=True) == 0
+    )
     receipt = json.loads(capsys.readouterr().out)
     assert receipt["status"] == "completed"
     assert receipt["commands"][0]["stdout_summary"] == "ok"
@@ -6568,7 +6709,7 @@ def test_work_closeout_blocks_failed_verification(tmp_path, capsys):
     capsys.readouterr()
     assert work_cmd.end(target=tmp_path, note="done", handoff=False) == 0
     capsys.readouterr()
-    assert work_cmd.verify_run(target=tmp_path, commands=["python3 -c \"raise SystemExit(3)\""], timeout=30) == 3
+    assert work_cmd.verify_run(target=tmp_path, commands=['python3 -c "raise SystemExit(3)"'], timeout=30) == 3
     capsys.readouterr()
 
     assert work_cmd.closeout(target=tmp_path, session_id="latest", json_output=True) == 1
@@ -6749,7 +6890,7 @@ conflict_window = "02:00-02:10"
     assert review["actionable_imports"][0]["suggested_commands"] == [
         f"brigade work import plan {imports[0]['id']}",
         f"brigade work import promote {imports[0]['id']}",
-        f"brigade work import dismiss {imports[0]['id']} --reason \"...\"",
+        f'brigade work import dismiss {imports[0]["id"]} --reason "..."',
         f"brigade work import promote --run {imports[0]['id']}",
     ]
 
@@ -6850,7 +6991,9 @@ conflict_window = "04:00-04:10"
     all_report = json.loads(capsys.readouterr().out)
     assert all_report["status"] == "failed"
     assert all_report["run_result"]["failed"] == 1
-    assert any(run["scanner_id"] == "fail-scan" and run["status"] == "failed" for run in all_report["run_result"]["runs"])
+    assert any(
+        run["scanner_id"] == "fail-scan" and run["status"] == "failed" for run in all_report["run_result"]["runs"]
+    )
 
 
 def test_work_sweep_records_skipped_and_dismissed_fingerprints(tmp_path, capsys):
@@ -8186,7 +8329,10 @@ def test_work_import_plan_handoff_covers_durable_kinds(tmp_path, monkeypatch, ca
         "finding": ".learnings/LEARNINGS.md",
         "incident": ".learnings/ERRORS.md",
     }
-    imports = [json.loads(line) for line in (tmp_path / ".brigade" / "work" / "imports" / "inbox.jsonl").read_text().splitlines()]
+    imports = [
+        json.loads(line)
+        for line in (tmp_path / ".brigade" / "work" / "imports" / "inbox.jsonl").read_text().splitlines()
+    ]
     for item in imports:
         assert work_cmd.import_plan_handoff(target=tmp_path, import_id=item["id"], json_output=True) == 0
         payload = json.loads(capsys.readouterr().out)
@@ -8363,7 +8509,11 @@ def test_work_handoff_ready_imports_surface_in_inbox_sweep_brief_and_doctor(tmp_
             "sweep_id": "sweep-one",
             "status": "completed",
             "completed_at": "2026-05-24T08:30:00+00:00",
-            "import_references": {"created_import_ids": [import_id], "skipped_source_fingerprints": [], "dismissed_source_fingerprints": []},
+            "import_references": {
+                "created_import_ids": [import_id],
+                "skipped_source_fingerprints": [],
+                "dismissed_source_fingerprints": [],
+            },
         },
     )
 
@@ -8429,7 +8579,10 @@ def test_work_import_handoff_dedupe_respects_promoted_and_changed_fingerprints(t
     assert work_cmd.import_ingest(target=tmp_path, input_path=import_file, json_output=True) == 0
     changed_payload = json.loads(capsys.readouterr().out)
     assert changed_payload["created"] == 1
-    imports = [json.loads(line) for line in (tmp_path / ".brigade" / "work" / "imports" / "inbox.jsonl").read_text().splitlines()]
+    imports = [
+        json.loads(line)
+        for line in (tmp_path / ".brigade" / "work" / "imports" / "inbox.jsonl").read_text().splitlines()
+    ]
     assert [item["status"] for item in imports] == ["promoted", "pending"]
 
 
@@ -9509,7 +9662,9 @@ def test_work_run_leaves_consumed_task_pending_when_dogfood_fails(tmp_path, monk
         ]
     )
     monkeypatch.setattr(work_cmd.helpers, "_now", lambda: next(times))
-    assert work_cmd.task_add(target=tmp_path, text="Build pending failure", acceptance=["Do not complete on failure"]) == 0
+    assert (
+        work_cmd.task_add(target=tmp_path, text="Build pending failure", acceptance=["Do not complete on failure"]) == 0
+    )
     monkeypatch.setattr(dogfood_cmd, "run", lambda task, **kwargs: 7)
 
     assert work_cmd.run(None, target=tmp_path, handoff=False) == 7
@@ -9778,7 +9933,9 @@ def test_work_review_cli(tmp_path, monkeypatch):
     assert cli.main(["work", "review", "run", "--all", "--target", str(tmp_path)]) == 0
     assert cli.main(["work", "review", "runs", "--target", str(tmp_path), "--limit", "5", "--json"]) == 0
     assert cli.main(["work", "review", "show", "run-1", "--target", str(tmp_path), "--json"]) == 0
-    assert cli.main(["work", "review", "import-findings", "run-1", "--target", str(tmp_path), "--dry-run", "--json"]) == 0
+    assert (
+        cli.main(["work", "review", "import-findings", "run-1", "--target", str(tmp_path), "--dry-run", "--json"]) == 0
+    )
     assert cli.main(["work", "review", "findings", "--target", str(tmp_path), "--run-id", "run-1", "--json"]) == 0
     assert cli.main(["work", "review", "finding-show", "finding-one", "--target", str(tmp_path), "--json"]) == 0
     assert cli.main(["work", "review", "closeout", "latest", "--target", str(tmp_path), "--json"]) == 0
@@ -9931,7 +10088,12 @@ def test_sweep_closeout_blocks_pending_imports(tmp_path, capsys):
         "Review scanner finding",
         kind="task",
         source="scanner-health",
-        metadata={"scanner_id": "scanner-one", "scanner_source": "scanner-health", "scanner_run_id": "run-one", "source_fingerprint": "abc"},
+        metadata={
+            "scanner_id": "scanner-one",
+            "scanner_source": "scanner-health",
+            "scanner_run_id": "run-one",
+            "source_fingerprint": "abc",
+        },
     )
     work_cmd._write_imports(tmp_path, [item])
     work_cmd._write_sweep_report(
@@ -10056,8 +10218,27 @@ def test_work_verify_and_closeout_cli(tmp_path, monkeypatch):
     monkeypatch.setattr(work_cmd, "verify_show", fake_verify_show)
     monkeypatch.setattr(work_cmd, "closeout", fake_closeout)
 
-    assert cli.main(["work", "verify", "plan", "--target", str(tmp_path), "--command", "python3 -m pytest -q", "--json"]) == 0
-    assert cli.main(["work", "verify", "run", "--target", str(tmp_path), "--command", "python3 -m pytest -q", "--timeout", "12", "--json"]) == 0
+    assert (
+        cli.main(["work", "verify", "plan", "--target", str(tmp_path), "--command", "python3 -m pytest -q", "--json"])
+        == 0
+    )
+    assert (
+        cli.main(
+            [
+                "work",
+                "verify",
+                "run",
+                "--target",
+                str(tmp_path),
+                "--command",
+                "python3 -m pytest -q",
+                "--timeout",
+                "12",
+                "--json",
+            ]
+        )
+        == 0
+    )
     assert cli.main(["work", "verify", "runs", "--target", str(tmp_path), "--limit", "3", "--json"]) == 0
     assert cli.main(["work", "verify", "show", "latest", "--target", str(tmp_path), "--json"]) == 0
     assert cli.main(["work", "closeout", "latest", "--target", str(tmp_path), "--json"]) == 0
@@ -10323,14 +10504,35 @@ def test_tools_cli(tmp_path, monkeypatch):
     monkeypatch.setattr(tools_cmd, "parity_closeout", fake_parity_closeout)
 
     assert cli.main(["tools", "init", "--target", str(tmp_path), "--force", "--no-gitignore"]) == 0
-    assert cli.main(["tools", "defaults", "--target", str(tmp_path), "--dry-run", "--force", "--no-gitignore", "--json"]) == 0
+    assert (
+        cli.main(["tools", "defaults", "--target", str(tmp_path), "--dry-run", "--force", "--no-gitignore", "--json"])
+        == 0
+    )
     assert cli.main(["tools", "list", "--target", str(tmp_path), "--json"]) == 0
     assert cli.main(["tools", "show", "simplify", "--target", str(tmp_path), "--json"]) == 0
     assert cli.main(["tools", "describe", "simplify", "--target", str(tmp_path), "--json"]) == 0
     assert cli.main(["tools", "contracts", "--target", str(tmp_path), "--json"]) == 0
     assert cli.main(["tools", "search", "simple", "--target", str(tmp_path), "--json"]) == 0
-    assert cli.main(["tools", "call", "plan", "simplify", "--target", str(tmp_path), "--args", '{"x":1}', "--json"]) == 0
-    assert cli.main(["tools", "call", "queue", "simplify", "--target", str(tmp_path), "--args", '{"x":1}', "--include-blocked", "--json"]) == 0
+    assert (
+        cli.main(["tools", "call", "plan", "simplify", "--target", str(tmp_path), "--args", '{"x":1}', "--json"]) == 0
+    )
+    assert (
+        cli.main(
+            [
+                "tools",
+                "call",
+                "queue",
+                "simplify",
+                "--target",
+                str(tmp_path),
+                "--args",
+                '{"x":1}',
+                "--include-blocked",
+                "--json",
+            ]
+        )
+        == 0
+    )
     assert cli.main(["tools", "call", "list", "--target", str(tmp_path), "--json"]) == 0
     assert cli.main(["tools", "call", "show", "call-123", "--target", str(tmp_path), "--json"]) == 0
     assert cli.main(["tools", "call", "approve", "call-123", "--target", str(tmp_path), "--json"]) == 0
@@ -10344,8 +10546,28 @@ def test_tools_cli(tmp_path, monkeypatch):
     assert cli.main(["tools", "run", "replay", "run-123", "--target", str(tmp_path), "--json"]) == 0
     assert cli.main(["tools", "checkpoint", "list", "--target", str(tmp_path), "--json"]) == 0
     assert cli.main(["tools", "checkpoint", "show", "checkpoint-123", "--target", str(tmp_path), "--json"]) == 0
-    assert cli.main(["tools", "checkpoint", "approve", "checkpoint-123", "--choice", "continue", "--target", str(tmp_path), "--json"]) == 0
-    assert cli.main(["tools", "checkpoint", "reject", "checkpoint-123", "--reason", "no", "--target", str(tmp_path), "--json"]) == 0
+    assert (
+        cli.main(
+            [
+                "tools",
+                "checkpoint",
+                "approve",
+                "checkpoint-123",
+                "--choice",
+                "continue",
+                "--target",
+                str(tmp_path),
+                "--json",
+            ]
+        )
+        == 0
+    )
+    assert (
+        cli.main(
+            ["tools", "checkpoint", "reject", "checkpoint-123", "--reason", "no", "--target", str(tmp_path), "--json"]
+        )
+        == 0
+    )
     assert cli.main(["tools", "checkpoint", "resume", "checkpoint-123", "--target", str(tmp_path), "--json"]) == 0
     assert cli.main(["tools", "runtime", "init", "--target", str(tmp_path), "--force"]) == 0
     assert cli.main(["tools", "runtime", "list", "--target", str(tmp_path), "--json"]) == 0
@@ -10359,7 +10581,12 @@ def test_tools_cli(tmp_path, monkeypatch):
     assert cli.main(["tools", "policy", "show", "--target", str(tmp_path), "--json"]) == 0
     assert cli.main(["tools", "policy", "doctor", "--target", str(tmp_path), "--json"]) == 0
     assert cli.main(["tools", "parity", "status", "--target", str(tmp_path), "--json"]) == 0
-    assert cli.main(["tools", "parity", "closeout", "--target", str(tmp_path), "--reason", "reviewed", "--defer", "--json"]) == 0
+    assert (
+        cli.main(
+            ["tools", "parity", "closeout", "--target", str(tmp_path), "--reason", "reviewed", "--defer", "--json"]
+        )
+        == 0
+    )
     assert cli.main(["tools", "plan", "simplify", "--target", str(tmp_path), "--json"]) == 0
     assert cli.main(["tools", "apply", "simplify", "--target", str(tmp_path), "--dry-run", "--force", "--json"]) == 0
     assert cli.main(["tools", "apply", "--all", "--target", str(tmp_path), "--json"]) == 0
@@ -10416,8 +10643,14 @@ def test_tools_cli(tmp_path, monkeypatch):
         ("run-replay", {"target": tmp_path, "run_id": "run-123", "json_output": True}),
         ("checkpoint-list", {"target": tmp_path, "json_output": True}),
         ("checkpoint-show", {"target": tmp_path, "checkpoint_id": "checkpoint-123", "json_output": True}),
-        ("checkpoint-approve", {"target": tmp_path, "checkpoint_id": "checkpoint-123", "choice": "continue", "json_output": True}),
-        ("checkpoint-reject", {"target": tmp_path, "checkpoint_id": "checkpoint-123", "reason": "no", "json_output": True}),
+        (
+            "checkpoint-approve",
+            {"target": tmp_path, "checkpoint_id": "checkpoint-123", "choice": "continue", "json_output": True},
+        ),
+        (
+            "checkpoint-reject",
+            {"target": tmp_path, "checkpoint_id": "checkpoint-123", "reason": "no", "json_output": True},
+        ),
         ("checkpoint-resume", {"target": tmp_path, "checkpoint_id": "checkpoint-123", "json_output": True}),
         ("runtime-init", {"target": tmp_path, "force": True}),
         ("runtime-list", {"target": tmp_path, "json_output": True}),
@@ -10987,7 +11220,9 @@ def test_chat_cli(tmp_path, monkeypatch):
     assert cli.main(["chat", "surfaces", "list", "--target", str(tmp_path), "--json"]) == 0
     assert cli.main(["chat", "surfaces", "show", "discord-export", "--target", str(tmp_path), "--json"]) == 0
     assert cli.main(["chat", "surfaces", "doctor", "--target", str(tmp_path), "--json"]) == 0
-    assert cli.main(["chat", "sweep", "validate", str(tmp_path / "export.json"), "--target", str(tmp_path), "--json"]) == 0
+    assert (
+        cli.main(["chat", "sweep", "validate", str(tmp_path / "export.json"), "--target", str(tmp_path), "--json"]) == 0
+    )
     assert cli.main(["chat", "sweep", "ingest", "discord-export", "--target", str(tmp_path), "--json"]) == 0
     assert cli.main(["chat", "sweep", "import-issues", "discord-export", "--target", str(tmp_path), "--json"]) == 0
     assert seen == [

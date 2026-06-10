@@ -1,4 +1,5 @@
 """Bounded local learning candidate aggregation."""
+
 from __future__ import annotations
 
 import json
@@ -49,7 +50,9 @@ LEARNINGS_ENTRY_KINDS = {
     "FEAT": "task",
 }
 LEARNINGS_PROMOTED_STATUSES = {"promoted", "resolved"}
-_LEARNINGS_HEADING_RE = re.compile(r"^##\s+\[?(?P<id>(?P<prefix>ERR|LRN|FEAT)-\d{8}-\d+)\]?\s*[:\-]?\s*(?P<title>.*?)\s*$")
+_LEARNINGS_HEADING_RE = re.compile(
+    r"^##\s+\[?(?P<id>(?P<prefix>ERR|LRN|FEAT)-\d{8}-\d+)\]?\s*[:\-]?\s*(?P<title>.*?)\s*$"
+)
 _LEARNINGS_FIELD_RE = re.compile(r"^\*\*(?P<key>[A-Za-z][A-Za-z _-]*)\*\*\s*:\s*(?P<value>.*?)\s*$")
 
 
@@ -126,7 +129,16 @@ def _short(value: str, limit: int = 160) -> str:
     return rendered[: limit - 3].rstrip() + "..."
 
 
-def _candidate(candidate_id: str, subsystem: str, status: str, summary: str, command: str, *, severity: str | None = None, metadata: dict[str, Any] | None = None) -> dict[str, Any]:
+def _candidate(
+    candidate_id: str,
+    subsystem: str,
+    status: str,
+    summary: str,
+    command: str,
+    *,
+    severity: str | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     candidate = {
         "id": candidate_id,
         "subsystem": subsystem,
@@ -145,7 +157,14 @@ def _candidate_fingerprint(candidate: dict[str, Any]) -> str:
     explicit = metadata.get("source_fingerprint")
     if isinstance(explicit, str) and explicit.strip():
         return explicit.strip()
-    return work_cmd._stable_hash({"id": candidate.get("id"), "subsystem": candidate.get("subsystem"), "summary": candidate.get("safe_summary"), "status": candidate.get("status")})
+    return work_cmd._stable_hash(
+        {
+            "id": candidate.get("id"),
+            "subsystem": candidate.get("subsystem"),
+            "summary": candidate.get("safe_summary"),
+            "status": candidate.get("status"),
+        }
+    )
 
 
 def _read_closeouts(target: Path) -> list[dict[str, Any]]:
@@ -243,14 +262,20 @@ def _raw_candidates(target: Path) -> list[dict[str, Any]]:
     for receipt in work_cmd._review_receipts(target):
         if receipt.get("status") == "failed":
             run_id = str(receipt.get("run_id") or "")
-            results.append(_candidate(run_id, "code-review", "failed", "failed review run", f"brigade work review show {run_id}"))
+            results.append(
+                _candidate(run_id, "code-review", "failed", "failed review run", f"brigade work review show {run_id}")
+            )
     tool_runs = target / ".brigade" / "tools" / "runs"
     if tool_runs.is_dir():
         for path in sorted(tool_runs.glob("*/receipt.json")):
             payload = _read_json(path)
             if isinstance(payload, dict) and payload.get("status") == "failed":
                 run_id = str(payload.get("run_id") or path.parent.name)
-                results.append(_candidate(run_id, "tool-run", "failed", "failed portable tool run", f"brigade tools run show {run_id}"))
+                results.append(
+                    _candidate(
+                        run_id, "tool-run", "failed", "failed portable tool run", f"brigade tools run show {run_id}"
+                    )
+                )
     return results
 
 
@@ -260,14 +285,22 @@ def candidates(target: Path, *, include_quieted: bool = False) -> list[dict[str,
     results: list[dict[str, Any]] = []
     for item in _raw_candidates(target):
         closeout = closeout_by_candidate.get(_closeout_key(item))
-        if closeout and closeout.get("source_fingerprint") == item.get("source_fingerprint") and closeout.get("status") in LEARNING_CLOSEOUT_STATUSES:
+        if (
+            closeout
+            and closeout.get("source_fingerprint") == item.get("source_fingerprint")
+            and closeout.get("status") in LEARNING_CLOSEOUT_STATUSES
+        ):
             if include_quieted:
                 item = {**item, "quieted_by": closeout.get("closeout_id"), "closeout_status": closeout.get("status")}
                 results.append(item)
             continue
         if closeout and closeout.get("source_fingerprint") != item.get("source_fingerprint"):
             metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
-            item["metadata"] = {**metadata, "changed_closeout_id": closeout.get("closeout_id"), "previous_fingerprint": closeout.get("source_fingerprint")}
+            item["metadata"] = {
+                **metadata,
+                "changed_closeout_id": closeout.get("closeout_id"),
+                "previous_fingerprint": closeout.get("source_fingerprint"),
+            }
             item["closeout_status"] = "changed-fingerprint"
         results.append(item)
     return results
@@ -329,7 +362,12 @@ def import_issues(*, target: Path, dry_run: bool = False, json_output: bool = Fa
     payload = plan_payload(target)
     records: list[dict[str, Any]] = []
     for item in payload["candidates"]:
-        fingerprint = str(item.get("source_fingerprint") or work_cmd._stable_hash({"id": item["id"], "subsystem": item["subsystem"], "summary": item["safe_summary"]}))
+        fingerprint = str(
+            item.get("source_fingerprint")
+            or work_cmd._stable_hash(
+                {"id": item["id"], "subsystem": item["subsystem"], "summary": item["safe_summary"]}
+            )
+        )
         records.append(
             {
                 "text": f"Review learning candidate: {item['safe_summary']}",
@@ -351,8 +389,16 @@ def import_issues(*, target: Path, dry_run: bool = False, json_output: bool = Fa
                 },
             }
         )
-    imported, skipped, dismissed = work_cmd._append_import_records(target.expanduser().resolve(), records, dry_run=dry_run)
-    output = {"target": payload["target"], "created": len(imported), "skipped": len(skipped), "dismissed": len(dismissed), "dry_run": dry_run}
+    imported, skipped, dismissed = work_cmd._append_import_records(
+        target.expanduser().resolve(), records, dry_run=dry_run
+    )
+    output = {
+        "target": payload["target"],
+        "created": len(imported),
+        "skipped": len(skipped),
+        "dismissed": len(dismissed),
+        "dry_run": dry_run,
+    }
     if json_output:
         print(json.dumps(output, indent=2, sort_keys=True))
         return 0
@@ -579,7 +625,9 @@ def _skill_candidate_from_group(target: Path, key: str, items: list[dict[str, An
                 safe_option = _safe_learning_text(option, limit=220)
                 if safe_option and safe_option not in response_options:
                     response_options.append(safe_option)
-    review_risk = "high" if any(str(item.get("severity") or "").lower() in {"high", "critical"} for item in items) else "normal"
+    review_risk = (
+        "high" if any(str(item.get("severity") or "").lower() in {"high", "critical"} for item in items) else "normal"
+    )
     if subsystem == "security-scan" or first_metadata.get("category") == "secrets":
         review_risk = "high"
     if guarded_input and review_risk == "normal":
@@ -652,17 +700,15 @@ def skill_candidates(*, target: Path, min_count: int = 2, source: str | None = N
     return 0
 
 
-def _resolve_skill_candidate(target: Path, candidate_id: str, *, min_count: int, source: str | None = None) -> tuple[dict[str, Any] | None, str | None]:
+def _resolve_skill_candidate(
+    target: Path, candidate_id: str, *, min_count: int, source: str | None = None
+) -> tuple[dict[str, Any] | None, str | None]:
     payload = skill_candidates_payload(target, min_count=min_count, source=source)
     needle = candidate_id.strip()
     matches = [
         item
         for item in payload["candidates"]
-        if needle
-        and (
-            str(item.get("id") or "") == needle
-            or str(item.get("id") or "").startswith(needle)
-        )
+        if needle and (str(item.get("id") or "") == needle or str(item.get("id") or "").startswith(needle))
     ]
     if not matches:
         return None, f"skill candidate not found: {candidate_id}"
@@ -684,7 +730,9 @@ def _render_skill_candidate_markdown(candidate: dict[str, Any]) -> str:
     if not evidence_lines:
         evidence_lines = "- No linked evidence."
     response_options = candidate.get("response_options") if isinstance(candidate.get("response_options"), list) else []
-    response_lines = "\n".join(f"- {_safe_learning_text(option, limit=220)}" for option in response_options[:10] if isinstance(option, str))
+    response_lines = "\n".join(
+        f"- {_safe_learning_text(option, limit=220)}" for option in response_options[:10] if isinstance(option, str)
+    )
     if not response_lines:
         response_lines = "- Choose and document the response path during review."
     grouping_reason = _safe_learning_text(candidate.get("grouping_reason") or "Repeated learning evidence.", limit=220)
@@ -907,7 +955,15 @@ def propose_skill(
     return rc
 
 
-def closeout(*, target: Path, candidate_id: str, status: str, reason: str, subsystem: str | None = None, json_output: bool = False) -> int:
+def closeout(
+    *,
+    target: Path,
+    candidate_id: str,
+    status: str,
+    reason: str,
+    subsystem: str | None = None,
+    json_output: bool = False,
+) -> int:
     if status not in LEARNING_CLOSEOUT_STATUSES:
         print(f"error: status must be one of: {', '.join(sorted(LEARNING_CLOSEOUT_STATUSES))}", file=sys.stderr)
         return 1
@@ -938,7 +994,14 @@ def closeout(*, target: Path, candidate_id: str, status: str, reason: str, subsy
         "created_at": _now().isoformat(),
         "manual_only": True,
         "remote_mutation": False,
-        "receipt_fingerprint": work_cmd._stable_hash({"candidate_key": _closeout_key(candidate), "status": status, "reason": reason, "source_fingerprint": candidate.get("source_fingerprint")}),
+        "receipt_fingerprint": work_cmd._stable_hash(
+            {
+                "candidate_key": _closeout_key(candidate),
+                "status": status,
+                "reason": reason,
+                "source_fingerprint": candidate.get("source_fingerprint"),
+            }
+        ),
     }
     root = _closeouts_root(target) / closeout_id
     _write_json(root / "closeout.json", payload)
@@ -1096,7 +1159,16 @@ def _compare_replay_payload(target: Path, replay: dict[str, Any]) -> dict[str, A
     }
 
 
-def replay_export(*, target: Path, scenario_id: str, before_summary: str, after_summary: str, before_count: int | None = None, after_count: int | None = None, json_output: bool = False) -> int:
+def replay_export(
+    *,
+    target: Path,
+    scenario_id: str,
+    before_summary: str,
+    after_summary: str,
+    before_count: int | None = None,
+    after_count: int | None = None,
+    json_output: bool = False,
+) -> int:
     before: dict[str, Any] = {"summary": before_summary}
     after: dict[str, Any] = {"summary": after_summary}
     if before_count is not None:
@@ -1168,7 +1240,12 @@ def health(target: Path) -> dict[str, Any]:
     replay_issue = None
     latest_compare = compares[0] if compares else None
     if isinstance(latest_compare, dict) and latest_compare.get("outcome") == "regressed":
-        replay_issue = {"status": WARN, "name": "learning_replay_regressed", "detail": f"{latest_compare.get('replay_id')} regressed by {latest_compare.get('candidate_delta')}", "compare_id": latest_compare.get("compare_id")}
+        replay_issue = {
+            "status": WARN,
+            "name": "learning_replay_regressed",
+            "detail": f"{latest_compare.get('replay_id')} regressed by {latest_compare.get('candidate_delta')}",
+            "compare_id": latest_compare.get("compare_id"),
+        }
     issue_count = payload["issue_count"] + (1 if replay_issue else 0)
     return {
         "target": payload["target"],

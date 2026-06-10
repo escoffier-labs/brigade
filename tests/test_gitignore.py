@@ -1,4 +1,5 @@
 """Tests for the auto-gitignore behavior of `brigade init`."""
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -184,6 +185,7 @@ def test_workspace_profile_also_adds_block(tmp_target: Path):
 
 def test_gitignore_block_includes_claude_section_when_selected():
     from brigade.install import build_gitignore_block
+
     sel = Selection(depth="repo", harnesses=["claude"], owner="claude", includes=[])
     block = build_gitignore_block(sel)
     assert ".claude/memory-handoffs/*" in block
@@ -200,6 +202,7 @@ def test_gitignore_block_includes_claude_section_when_selected():
 
 def test_gitignore_block_includes_codex_section_when_selected():
     from brigade.install import build_gitignore_block
+
     sel = Selection(depth="repo", harnesses=["claude", "codex"], owner="claude", includes=[])
     block = build_gitignore_block(sel)
     assert ".claude/memory-handoffs/*" in block
@@ -209,6 +212,7 @@ def test_gitignore_block_includes_codex_section_when_selected():
 
 def test_gitignore_block_includes_hermes_section_when_selected():
     from brigade.install import build_gitignore_block
+
     sel = Selection(depth="repo", harnesses=["hermes"], owner="hermes", includes=[])
     block = build_gitignore_block(sel)
     assert ".hermes/memory-handoffs/*" in block
@@ -218,6 +222,7 @@ def test_gitignore_block_includes_hermes_section_when_selected():
 
 def test_gitignore_block_no_inbox_section_for_readers_only():
     from brigade.install import build_gitignore_block
+
     sel = Selection(depth="workspace", harnesses=["openclaw"], owner="openclaw", includes=[])
     block = build_gitignore_block(sel)
     assert "memory-handoffs" not in block
@@ -225,6 +230,7 @@ def test_gitignore_block_no_inbox_section_for_readers_only():
 
 def test_gitignore_block_includes_generated_tool_projection_roots():
     from brigade.install import build_gitignore_block
+
     sel = Selection(depth="repo", harnesses=["codex"], owner="codex", includes=[])
     block = build_gitignore_block(sel)
     for pattern in (
@@ -250,6 +256,7 @@ def test_gitignore_block_includes_generated_tool_projection_roots():
 
 def test_install_writes_gitignore_block(tmp_path):
     from brigade.install import install_selection
+
     sel = Selection(depth="repo", harnesses=["claude", "codex"], owner="claude", includes=[])
     install_selection(tmp_path, sel)
     gi = (tmp_path / ".gitignore").read_text()

@@ -1,4 +1,5 @@
 """Small TOML compatibility layer for Python 3.10."""
+
 from __future__ import annotations
 
 import ast

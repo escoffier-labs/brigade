@@ -1,4 +1,5 @@
 """Read-only security scanner for agent workspaces."""
+
 from __future__ import annotations
 
 import ast
@@ -154,9 +155,12 @@ ENRICHMENT_MARKDOWN_START = "<!-- brigade-security-enrichment:start -->"
 ENRICHMENT_MARKDOWN_END = "<!-- brigade-security-enrichment:end -->"
 TEMPLATE_AUDIT_ROOTS = ("src/brigade/templates", "templates", "docs")
 TEMPLATE_PRIVATE_PATH_RE = re.compile(r"(?<![`$<])/(?:home|Users|private|mnt|Volumes)/[A-Za-z0-9_.@/-]+")
-TEMPLATE_PRIVATE_URL_RE = re.compile(r"https?://(?:[A-Za-z0-9_-]+\.)*(?:lan|local|internal|private)(?:[/:][^\s`\"'<)]*)?", re.IGNORECASE)
+TEMPLATE_PRIVATE_URL_RE = re.compile(
+    r"https?://(?:[A-Za-z0-9_-]+\.)*(?:lan|local|internal|private)(?:[/:][^\s`\"'<)]*)?", re.IGNORECASE
+)
 TEMPLATE_ALLOWLIST_RE = re.compile(
-    r"(example[.](com|org|net|invalid)|local" r"host|127[.]0[.]0[.]1|0[.]0[.]0[.]0|<[^>]+>|\{\{[^}]+\}\}|\$\{?[A-Z_][A-Z0-9_]*(?::-[^}]*)?\}?)",
+    r"(example[.](com|org|net|invalid)|local"
+    r"host|127[.]0[.]0[.]1|0[.]0[.]0[.]0|<[^>]+>|\{\{[^}]+\}\}|\$\{?[A-Z_][A-Z0-9_]*(?::-[^}]*)?\}?)",
     re.IGNORECASE,
 )
 HARNESS_ROOTS = {
@@ -197,7 +201,10 @@ HARNESS_PATH_KEYS = {
 }
 HARNESS_COMMAND_KEYS = {"args", "command", "commands", "script", "scripts"}
 HARNESS_URL_KEYS = {"baseUrl", "endpoint", "host", "misp_url", "url"}
-HARNESS_ALLOWED_URL_RE = re.compile(r"https?://(?:example[.](?:com|org|net|invalid)|localhost|127[.]0[.]0[.]1|0[.]0[.]0[.]0)(?::\d+)?(?:[/?#][^\s]*)?$", re.IGNORECASE)
+HARNESS_ALLOWED_URL_RE = re.compile(
+    r"https?://(?:example[.](?:com|org|net|invalid)|localhost|127[.]0[.]0[.]1|0[.]0[.]0[.]0)(?::\d+)?(?:[/?#][^\s]*)?$",
+    re.IGNORECASE,
+)
 SESSION_CHAT_PARTS = {
     "chat",
     "chats",
@@ -749,7 +756,9 @@ def findings(*, target: Path, output_dir: Path | None = None, json_output: bool 
     return review(target=target, output_dir=output_dir, json_output=json_output)
 
 
-def sarif(*, target: Path, output_dir: Path | None = None, output_path: Path | None = None, json_output: bool = False) -> int:
+def sarif(
+    *, target: Path, output_dir: Path | None = None, output_path: Path | None = None, json_output: bool = False
+) -> int:
     target = target.expanduser().resolve()
     artifacts_dir = output_dir.expanduser().resolve() if output_dir is not None else default_artifacts_dir(target)
     try:
@@ -761,9 +770,16 @@ def sarif(*, target: Path, output_dir: Path | None = None, output_path: Path | N
         print(f"error: invalid security report: {exc}", file=sys.stderr)
         return 2
     payload = _sarif_report(report)
-    destination = output_path.expanduser().resolve() if output_path is not None else artifacts_dir / "security-report.sarif"
+    destination = (
+        output_path.expanduser().resolve() if output_path is not None else artifacts_dir / "security-report.sarif"
+    )
     _write_json(destination, payload)
-    output = {"target": str(target), "path": str(destination), "result_count": len(payload["runs"][0]["results"]), "sarif": payload}
+    output = {
+        "target": str(target),
+        "path": str(destination),
+        "result_count": len(payload["runs"][0]["results"]),
+        "sarif": payload,
+    }
     if json_output:
         print(json.dumps(output, indent=2, sort_keys=True))
         return 0
@@ -772,7 +788,9 @@ def sarif(*, target: Path, output_dir: Path | None = None, output_path: Path | N
     return 0
 
 
-def _resolve_finding_record(target: Path, identifier: str, output_dir: Path | None = None) -> tuple[dict[str, Any] | None, str | None]:
+def _resolve_finding_record(
+    target: Path, identifier: str, output_dir: Path | None = None
+) -> tuple[dict[str, Any] | None, str | None]:
     artifacts_dir = output_dir.expanduser().resolve() if output_dir is not None else default_artifacts_dir(target)
     try:
         report = _load_report(artifacts_dir)
@@ -908,7 +926,9 @@ def _local_enrich(indicators: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "match_count": 0,
                 "cache_hit": False,
                 "summary": "Observed in the local security report; no external lookup was performed.",
-                "source_fingerprints": [source.get("fingerprint") for source in indicator["sources"] if source.get("fingerprint")],
+                "source_fingerprints": [
+                    source.get("fingerprint") for source in indicator["sources"] if source.get("fingerprint")
+                ],
             }
         )
     return results
@@ -974,7 +994,9 @@ def _misp_query_indicator(
         "tags": tags[:10],
         "cache_hit": False,
         "summary": f"MISP returned {len(attributes)} attribute match(es).",
-        "source_fingerprints": [source.get("fingerprint") for source in indicator["sources"] if source.get("fingerprint")],
+        "source_fingerprints": [
+            source.get("fingerprint") for source in indicator["sources"] if source.get("fingerprint")
+        ],
     }
 
 
@@ -989,7 +1011,9 @@ def _misp_attributes(payload: object) -> list[dict[str, Any]]:
     return []
 
 
-def _misp_enrich(target: Path, config: SecurityEnrichmentConfig, indicators: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _misp_enrich(
+    target: Path, config: SecurityEnrichmentConfig, indicators: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
     if not config.misp_url:
         raise ValueError("enrichment.misp_url is required when provider is misp")
     api_key = os.environ.get(config.misp_api_key_env)
@@ -1023,7 +1047,9 @@ def _misp_enrich(target: Path, config: SecurityEnrichmentConfig, indicators: lis
                 "match_count": 0,
                 "cache_hit": False,
                 "summary": f"MISP lookup failed: {exc}",
-                "source_fingerprints": [source.get("fingerprint") for source in indicator["sources"] if source.get("fingerprint")],
+                "source_fingerprints": [
+                    source.get("fingerprint") for source in indicator["sources"] if source.get("fingerprint")
+                ],
             }
         cache[cache_key] = result
         changed = True
@@ -1075,7 +1101,7 @@ def _render_enrichment_summary(payload: dict[str, Any]) -> str:
             f"- indicators: `{payload['indicator_count']}`",
             f"- hits: `{payload['hit_count']}`",
             f"- errors: `{payload['error_count']}`",
-            f"- details: `security-enrichment.md`",
+            "- details: `security-enrichment.md`",
             ENRICHMENT_MARKDOWN_END,
             "",
         ]
@@ -1146,7 +1172,9 @@ def enrich(
         print(f"error: --target is not a directory: {target}", file=sys.stderr)
         return 2
     artifacts_dir = output_dir.expanduser().resolve() if output_dir is not None else default_artifacts_dir(target)
-    report_file = report_path.expanduser().resolve() if report_path is not None else artifacts_dir / "security-report.json"
+    report_file = (
+        report_path.expanduser().resolve() if report_path is not None else artifacts_dir / "security-report.json"
+    )
     try:
         loaded = load_config(target)
     except ValueError as exc:
@@ -1331,7 +1359,9 @@ def suppression_health(target: Path) -> dict[str, Any]:
     )
     active = {str(item.get("fingerprint")) for item in report["findings"] if item.get("fingerprint")}
     stale = [fingerprint for fingerprint in config.suppressions if fingerprint not in active]
-    missing_reasons = [fingerprint for fingerprint in config.suppressions if not config.suppression_reasons.get(fingerprint)]
+    missing_reasons = [
+        fingerprint for fingerprint in config.suppressions if not config.suppression_reasons.get(fingerprint)
+    ]
     return {
         "suppression_count": len(config.suppressions),
         "missing_reasons": missing_reasons,
@@ -1395,7 +1425,9 @@ def _template_relpath(target: Path, path: Path) -> str:
         return path.name
 
 
-def _template_audit_finding(*, target: Path, path: Path, line_number: int, category: str, title: str, line: str) -> dict[str, Any]:
+def _template_audit_finding(
+    *, target: Path, path: Path, line_number: int, category: str, title: str, line: str
+) -> dict[str, Any]:
     rel = _template_relpath(target, path)
     evidence = _redact_secret_evidence(line.strip())
     if len(evidence) > 220:
@@ -1436,12 +1468,43 @@ def template_privacy_payload(target: Path) -> dict[str, Any]:
             for line_number, line in enumerate(text.splitlines(), start=1):
                 if TEMPLATE_ALLOWLIST_RE.search(line):
                     continue
-                if SECRET_VALUE_RE.search(line) or ENV_ASSIGNMENT_RE.search(line) or _contains_private_key_material(line):
-                    findings.append(_template_audit_finding(target=target, path=path, line_number=line_number, category="secret", title="Template contains secret-looking value", line=line))
+                if (
+                    SECRET_VALUE_RE.search(line)
+                    or ENV_ASSIGNMENT_RE.search(line)
+                    or _contains_private_key_material(line)
+                ):
+                    findings.append(
+                        _template_audit_finding(
+                            target=target,
+                            path=path,
+                            line_number=line_number,
+                            category="secret",
+                            title="Template contains secret-looking value",
+                            line=line,
+                        )
+                    )
                 elif TEMPLATE_PRIVATE_PATH_RE.search(line):
-                    findings.append(_template_audit_finding(target=target, path=path, line_number=line_number, category="private-path", title="Template contains host-private path", line=line))
+                    findings.append(
+                        _template_audit_finding(
+                            target=target,
+                            path=path,
+                            line_number=line_number,
+                            category="private-path",
+                            title="Template contains host-private path",
+                            line=line,
+                        )
+                    )
                 elif TEMPLATE_PRIVATE_URL_RE.search(line):
-                    findings.append(_template_audit_finding(target=target, path=path, line_number=line_number, category="private-url", title="Template contains private-looking URL", line=line))
+                    findings.append(
+                        _template_audit_finding(
+                            target=target,
+                            path=path,
+                            line_number=line_number,
+                            category="private-url",
+                            title="Template contains private-looking URL",
+                            line=line,
+                        )
+                    )
     findings.sort(key=lambda item: (str(item.get("path") or ""), int(item.get("line") or 0), str(item.get("id") or "")))
     return {
         "target": str(target),
@@ -1452,7 +1515,16 @@ def template_privacy_payload(target: Path) -> dict[str, Any]:
         "findings": findings,
         "status": "warn" if findings else "ok",
         "top_finding": findings[0] if findings else None,
-        "allowlisted_examples": ["example.com", "example.invalid", "loopback-host", "loopback-ipv4", "wildcard-ipv4", "<placeholder>", "{{placeholder}}", "$ENV_LABEL"],
+        "allowlisted_examples": [
+            "example.com",
+            "example.invalid",
+            "loopback-host",
+            "loopback-ipv4",
+            "wildcard-ipv4",
+            "<placeholder>",
+            "{{placeholder}}",
+            "$ENV_LABEL",
+        ],
     }
 
 
@@ -1713,7 +1785,9 @@ def _scan_harness_value(
             _scan_harness_value(findings, target=target, path=path, text=text, value=child, key_path=key_path + (key,))
     elif isinstance(value, list):
         for index, child in enumerate(value):
-            _scan_harness_value(findings, target=target, path=path, text=text, value=child, key_path=key_path + (str(index),))
+            _scan_harness_value(
+                findings, target=target, path=path, text=text, value=child, key_path=key_path + (str(index),)
+            )
     elif isinstance(value, str):
         _scan_harness_string(findings, target=target, path=path, text=text, value=value, key_path=key_path)
 
@@ -2021,7 +2095,9 @@ def _scan_github_actions(findings: list[dict[str, Any]], *, target: Path, path: 
         pinned_match = PINNED_ACTION_RE.search(stripped)
         if pinned_match:
             ref = pinned_match.group(2)
-            if ref.lower() in GITHUB_ACTION_FLOATING_REFS or (not ref.startswith("v") and not re.fullmatch(r"[a-fA-F0-9]{40}", ref)):
+            if ref.lower() in GITHUB_ACTION_FLOATING_REFS or (
+                not ref.startswith("v") and not re.fullmatch(r"[a-fA-F0-9]{40}", ref)
+            ):
                 _finding(
                     findings,
                     target=target,
@@ -2047,7 +2123,9 @@ def _scan_python_project(findings: list[dict[str, Any]], *, target: Path, path: 
         if table_match:
             current_section = table_match.group(1).lower()
             continue
-        if PYTHON_URL_DEP_RE.search(stripped) and _python_url_dependency_candidate(path.name, current_section, stripped):
+        if PYTHON_URL_DEP_RE.search(stripped) and _python_url_dependency_candidate(
+            path.name, current_section, stripped
+        ):
             _finding(
                 findings,
                 target=target,
@@ -2120,7 +2198,15 @@ def _surface_for(path: Path, target: Path) -> str:
         return "slash-command"
     if ("agents" in parts or "subagents" in parts) and path.suffix.lower() == ".md":
         return "subagent"
-    if any(part in {"wrappers", "tools", "tool-wrappers"} for part in parts) and path.suffix.lower() in {".sh", ".py", ".js", ".ts", ".toml", ".json", ".md"}:
+    if any(part in {"wrappers", "tools", "tool-wrappers"} for part in parts) and path.suffix.lower() in {
+        ".sh",
+        ".py",
+        ".js",
+        ".ts",
+        ".toml",
+        ".json",
+        ".md",
+    }:
         return "tool-wrapper"
     if parts and parts[0] == ".brigade":
         if path.name == "tools.toml" or "tools" in parts:
@@ -2253,9 +2339,7 @@ def _is_security_scanner_literal(path: Path, line: str) -> bool:
     if stripped.startswith(("password_match =", "password_emitted =")):
         return True
     return stripped.startswith("if ") and (
-        '"danger-full-access"' in stripped
-        or '"sandbox_permissions"' in stripped
-        or '"require_escalated"' in stripped
+        '"danger-full-access"' in stripped or '"sandbox_permissions"' in stripped or '"require_escalated"' in stripped
     )
 
 
@@ -2296,7 +2380,9 @@ def _scan_line(findings: list[dict[str, Any]], *, target: Path, path: Path, line
             ),
             response_options=_secret_response_options(path, target),
         )
-    if _contains_private_key_material(line) or (ENV_ASSIGNMENT_RE.search(line) and not password_emitted and not _is_placeholder(line)):
+    if _contains_private_key_material(line) or (
+        ENV_ASSIGNMENT_RE.search(line) and not password_emitted and not _is_placeholder(line)
+    ):
         session_chat = _is_session_chat_path(path, target)
         _finding(
             findings,
@@ -2401,7 +2487,16 @@ def _scan_line(findings: list[dict[str, Any]], *, target: Path, path: Path, line
                 evidence=line,
                 suggestion="Avoid blanket auto-approval and require review for mutable or networked tools.",
             )
-    if _surface_for(path, target) in {"agent-instructions", "claude", "codex", "repo", "skill", "slash-command", "subagent", "tool-wrapper"} and PROMPT_INJECTION_RE.search(line):
+    if _surface_for(path, target) in {
+        "agent-instructions",
+        "claude",
+        "codex",
+        "repo",
+        "skill",
+        "slash-command",
+        "subagent",
+        "tool-wrapper",
+    } and PROMPT_INJECTION_RE.search(line):
         _finding(
             findings,
             target=target,
@@ -2586,7 +2681,9 @@ def _import_findings(
         ]
         response_options = finding.get("response_options")
         if isinstance(response_options, list) and response_options:
-            acceptance.append("The chosen response path is recorded, such as .env storage, scrub/rotate, KeePass review, transcript redaction, or accepted local risk.")
+            acceptance.append(
+                "The chosen response path is recorded, such as .env storage, scrub/rotate, KeePass review, transcript redaction, or accepted local risk."
+            )
         records.append(
             {
                 "text": f"Review security finding [{severity}] {category} in {path}:{line}: {title}",
@@ -2676,9 +2773,7 @@ def _render_markdown_report(report: dict[str, Any]) -> str:
             finding_lines.append("- response_options:")
             finding_lines.extend(f"  - {item}" for item in response_options)
         finding_lines.append("")
-        lines.extend(
-            finding_lines
-        )
+        lines.extend(finding_lines)
     return "\n".join(lines).rstrip() + "\n"
 
 
@@ -2703,7 +2798,11 @@ def _sarif_report(report: dict[str, Any]) -> dict[str, Any]:
                 "id": rule_id,
                 "name": str(finding.get("title") or rule_id),
                 "shortDescription": {"text": str(finding.get("title") or rule_id)},
-                "fullDescription": {"text": str(finding.get("remediation_hint") or finding.get("suggestion") or finding.get("title") or rule_id)},
+                "fullDescription": {
+                    "text": str(
+                        finding.get("remediation_hint") or finding.get("suggestion") or finding.get("title") or rule_id
+                    )
+                },
                 "properties": {
                     "category": finding.get("category"),
                     "severity": finding.get("severity"),
@@ -2720,7 +2819,11 @@ def _sarif_report(report: dict[str, Any]) -> dict[str, Any]:
             {
                 "ruleId": rule_id,
                 "level": _sarif_level(finding.get("severity")),
-                "message": {"text": str(finding.get("title") or finding.get("safe_excerpt") or finding.get("evidence") or rule_id)},
+                "message": {
+                    "text": str(
+                        finding.get("title") or finding.get("safe_excerpt") or finding.get("evidence") or rule_id
+                    )
+                },
                 "locations": [
                     {
                         "physicalLocation": {
@@ -2729,7 +2832,9 @@ def _sarif_report(report: dict[str, Any]) -> dict[str, Any]:
                         }
                     }
                 ],
-                "partialFingerprints": {"primaryLocationLineHash": str(finding.get("fingerprint") or finding.get("id") or "")},
+                "partialFingerprints": {
+                    "primaryLocationLineHash": str(finding.get("fingerprint") or finding.get("id") or "")
+                },
                 "properties": {
                     "id": finding.get("id"),
                     "fingerprint": finding.get("fingerprint"),
@@ -2774,7 +2879,9 @@ def write_evidence_bundle(report: dict[str, Any], output_dir: Path) -> Path:
     report["artifacts"] = str(output_dir)
     (output_dir / "security-report.json").write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
     (output_dir / "security-report.md").write_text(_render_markdown_report(report))
-    (output_dir / "security-report.sarif").write_text(json.dumps(_sarif_report(report), indent=2, sort_keys=True) + "\n")
+    (output_dir / "security-report.sarif").write_text(
+        json.dumps(_sarif_report(report), indent=2, sort_keys=True) + "\n"
+    )
     return output_dir
 
 
@@ -2855,9 +2962,21 @@ def health(target: Path) -> dict[str, Any]:
         checks.append({"status": "fail", "name": "security_config", "detail": str(exc)})
     if config_ok:
         if loaded is None:
-            checks.append({"status": "warn", "name": "security_config", "detail": f"missing, run `brigade security init --target {target}`"})
+            checks.append(
+                {
+                    "status": "warn",
+                    "name": "security_config",
+                    "detail": f"missing, run `brigade security init --target {target}`",
+                }
+            )
         else:
-            checks.append({"status": "ok", "name": "security_config", "detail": f"{config_path(target)} (profile={loaded.scan_profile})"})
+            checks.append(
+                {
+                    "status": "ok",
+                    "name": "security_config",
+                    "detail": f"{config_path(target)} (profile={loaded.scan_profile})",
+                }
+            )
     bundle = inspect_evidence_bundle(default_artifacts_dir(target))
     if bundle.get("ready"):
         checks.append(
@@ -2871,32 +2990,74 @@ def health(target: Path) -> dict[str, Any]:
         checks.append({"status": "warn", "name": "security_evidence", "detail": str(bundle.get("reason"))})
     template_audit_payload = template_privacy_payload(target)
     if template_audit_payload["finding_count"]:
-        top_template = template_audit_payload["top_finding"] if isinstance(template_audit_payload.get("top_finding"), dict) else {}
-        checks.append({"status": "warn", "name": "security_template_privacy", "detail": f"{template_audit_payload['finding_count']} public template privacy finding(s), top={top_template.get('path')}:{top_template.get('line')}"})
+        top_template = (
+            template_audit_payload["top_finding"] if isinstance(template_audit_payload.get("top_finding"), dict) else {}
+        )
+        checks.append(
+            {
+                "status": "warn",
+                "name": "security_template_privacy",
+                "detail": f"{template_audit_payload['finding_count']} public template privacy finding(s), top={top_template.get('path')}:{top_template.get('line')}",
+            }
+        )
     else:
-        checks.append({"status": "ok", "name": "security_template_privacy", "detail": f"{template_audit_payload['scanned_file_count']} public file(s) checked"})
+        checks.append(
+            {
+                "status": "ok",
+                "name": "security_template_privacy",
+                "detail": f"{template_audit_payload['scanned_file_count']} public file(s) checked",
+            }
+        )
     harness_wiring = harness_wiring_payload(target)
     if harness_wiring["finding_count"]:
         top_harness = harness_wiring["top_finding"] if isinstance(harness_wiring.get("top_finding"), dict) else {}
-        checks.append({"status": "warn", "name": "security_harness_wiring", "detail": f"{harness_wiring['finding_count']} harness wiring finding(s), top={top_harness.get('path')}:{top_harness.get('line')}"})
+        checks.append(
+            {
+                "status": "warn",
+                "name": "security_harness_wiring",
+                "detail": f"{harness_wiring['finding_count']} harness wiring finding(s), top={top_harness.get('path')}:{top_harness.get('line')}",
+            }
+        )
     else:
-        checks.append({"status": "ok", "name": "security_harness_wiring", "detail": f"{harness_wiring['scanned_file_count']} harness wiring file(s) checked"})
+        checks.append(
+            {
+                "status": "ok",
+                "name": "security_harness_wiring",
+                "detail": f"{harness_wiring['scanned_file_count']} harness wiring file(s) checked",
+            }
+        )
     try:
         suppression = suppression_health(target)
     except ValueError as exc:
         checks.append({"status": "fail", "name": "security_suppressions", "detail": str(exc)})
     else:
         if suppression["stale"]:
-            checks.append({"status": "warn", "name": "security_stale_suppressions", "detail": ", ".join(suppression["stale"][:5])})
+            checks.append(
+                {"status": "warn", "name": "security_stale_suppressions", "detail": ", ".join(suppression["stale"][:5])}
+            )
         if suppression["missing_reasons"]:
-            checks.append({"status": "warn", "name": "security_suppression_reasons", "detail": ", ".join(suppression["missing_reasons"][:5])})
+            checks.append(
+                {
+                    "status": "warn",
+                    "name": "security_suppression_reasons",
+                    "detail": ", ".join(suppression["missing_reasons"][:5]),
+                }
+            )
         if not suppression["stale"] and not suppression["missing_reasons"]:
-            checks.append({"status": "ok", "name": "security_suppressions", "detail": f"{suppression['suppression_count']} configured"})
+            checks.append(
+                {
+                    "status": "ok",
+                    "name": "security_suppressions",
+                    "detail": f"{suppression['suppression_count']} configured",
+                }
+            )
     top_finding: dict[str, Any] | None = None
     if bundle.get("ready"):
         try:
             report = _load_report(default_artifacts_dir(target))
-            records = [item for item in _report_findings_for_review(target, report) if item.get("status") != "suppressed"]
+            records = [
+                item for item in _report_findings_for_review(target, report) if item.get("status") != "suppressed"
+            ]
         except (OSError, ValueError, json.JSONDecodeError):
             records = []
         if records:
@@ -2940,7 +3101,9 @@ def doctor(*, target: Path, json_output: bool = False) -> int:
         print(f"[{check['status']}] {check['name']}: {check['detail']}")
     top = payload.get("top_finding") if isinstance(payload.get("top_finding"), dict) else None
     if top:
-        print(f"top_finding: {top.get('id')} [{top.get('severity')}] {top.get('path')}:{top.get('line')} {top.get('title')}")
+        print(
+            f"top_finding: {top.get('id')} [{top.get('severity')}] {top.get('path')}:{top.get('line')} {top.get('title')}"
+        )
         print(f"show_command: brigade security show {top.get('id')}")
     return 0 if payload["valid"] else 1
 
@@ -2975,7 +3138,11 @@ def closeout(
     policy_name = str(report.get("policy") or "personal")
     policy = POLICIES.get(policy_name, POLICIES["personal"])
     fail_on = str(report.get("fail_on") or policy["fail_on"])
-    blocker_count = sum(1 for item in opened if SEVERITY_ORDER.get(str(item.get("severity")), 0) >= SEVERITY_ORDER.get(fail_on, SEVERITY_ORDER["critical"]))
+    blocker_count = sum(
+        1
+        for item in opened
+        if SEVERITY_ORDER.get(str(item.get("severity")), 0) >= SEVERITY_ORDER.get(fail_on, SEVERITY_ORDER["critical"])
+    )
     warning_count = max(0, len(opened) - blocker_count)
     finding_records = [
         {

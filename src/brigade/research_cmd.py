@@ -15,11 +15,14 @@ from .research import report as reportmod, handoff as handoffmod
 from .selection import WRITER_INBOXES
 from .localio import utc_now_iso as _now
 
+
 def _resolve_backend(target: Path):
     from . import roster as roster_mod
     from .research import llm
+
     r = roster_mod.load_roster(target / ".brigade" / "roster.toml")
     return llm.resolve_backend(r)
+
 
 def _resolve_sources(target: Path, corpus: Optional[str], sources: List[str]) -> List[str]:
     cfg = rconfig.load(target)
@@ -27,6 +30,7 @@ def _resolve_sources(target: Path, corpus: Optional[str], sources: List[str]) ->
     if corpus:
         paths += cfg.corpus_paths(corpus)
     return paths
+
 
 def _safe_source_adapters(adapters: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     safe: List[Dict[str, Any]] = []
@@ -49,15 +53,28 @@ def _safe_source_adapters(adapters: List[Dict[str, Any]]) -> List[Dict[str, Any]
         safe.append(safe_item)
     return safe
 
-def _manifest(*, target: Path, cfg: rconfig.ResearchConfig, corpus: Optional[str],
-              sources: List[str], paths: List[str], web: bool, provider: Optional[str],
-              cli_providers: List[Any]) -> Dict[str, Any]:
+
+def _manifest(
+    *,
+    target: Path,
+    cfg: rconfig.ResearchConfig,
+    corpus: Optional[str],
+    sources: List[str],
+    paths: List[str],
+    web: bool,
+    provider: Optional[str],
+    cli_providers: List[Any],
+) -> Dict[str, Any]:
     web_provider = str(provider or cfg.search_settings().get("research_search_provider") or "playwright").strip()
     routes = [
         {"id": "local", "type": "local", "enabled": bool(paths), "trust": "local"},
         {"id": "configured-cli", "type": "cli", "enabled": bool(cli_providers), "trust": "cli"},
-        {"id": web_provider, "type": "browser" if web_provider in {"playwright", "browser", ""} else "web",
-         "enabled": bool(web), "trust": "browser" if web_provider in {"playwright", "browser", ""} else "web"},
+        {
+            "id": web_provider,
+            "type": "browser" if web_provider in {"playwright", "browser", ""} else "web",
+            "enabled": bool(web),
+            "trust": "browser" if web_provider in {"playwright", "browser", ""} else "web",
+        },
     ]
     return {
         "target": str(target),
@@ -77,20 +94,35 @@ def _manifest(*, target: Path, cfg: rconfig.ResearchConfig, corpus: Optional[str
         "routes": routes,
     }
 
-def run(*, target: Path, question: str, sources: List[str], web: bool,
-        overrides: Dict[str, Any], corpus: Optional[str] = None,
-        provider: Optional[str] = None, run_id: Optional[str] = None) -> str:
+
+def run(
+    *,
+    target: Path,
+    question: str,
+    sources: List[str],
+    web: bool,
+    overrides: Dict[str, Any],
+    corpus: Optional[str] = None,
+    provider: Optional[str] = None,
+    run_id: Optional[str] = None,
+) -> str:
     cfg = rconfig.load(target)
     caps_kwargs = {**cfg.caps_overrides(), **{k: v for k, v in overrides.items() if v is not None}}
     caps = Caps.build(**caps_kwargs)
     run_id = run_id or _new_run_id(question)
     paths = _resolve_sources(target, corpus, sources)
     cli_providers = clisrc.build_providers(cfg.source_adapters(), target=target)
-    manifest = _manifest(target=target, cfg=cfg, corpus=corpus, sources=sources,
-                         paths=paths, web=web, provider=provider,
-                         cli_providers=cli_providers)
-    registry.create_run(target, question=question, run_id=run_id,
-                        caps=caps.__dict__.copy(), manifest=manifest)
+    manifest = _manifest(
+        target=target,
+        cfg=cfg,
+        corpus=corpus,
+        sources=sources,
+        paths=paths,
+        web=web,
+        provider=provider,
+        cli_providers=cli_providers,
+    )
+    registry.create_run(target, question=question, run_id=run_id, caps=caps.__dict__.copy(), manifest=manifest)
     blockers: List[str] = []
 
     index = localsrc.build_index(paths) if paths else None
@@ -98,13 +130,14 @@ def run(*, target: Path, question: str, sources: List[str], web: bool,
     web_provider = None
     if web:
         from .research.sources import web as webmod
+
         try:
             web_provider = webmod.build_provider(provider, cfg.search_settings())
             # surface a missing-browser problem up front, not mid-loop
             if isinstance(web_provider, webmod.PlaywrightProvider) and webmod._import_playwright() is None:
                 raise webmod.PlaywrightUnavailable(
-                    "Playwright not installed. Run: pip install 'brigade[research]' "
-                    "&& playwright install chromium")
+                    "Playwright not installed. Run: pip install 'brigade[research]' && playwright install chromium"
+                )
         except Exception as e:
             blockers.append(str(e))
             web_provider = None
@@ -112,12 +145,14 @@ def run(*, target: Path, question: str, sources: List[str], web: bool,
     try:
         backend = _resolve_backend(target)
     except Exception as e:
-        registry.finish_run(target, run_id, status="error", stats={},
-                            artifacts={}, blockers=blockers + [str(e)])
+        registry.finish_run(target, run_id, status="error", stats={}, artifacts={}, blockers=blockers + [str(e)])
         return run_id
 
     eng = DeepResearcher(
-        llm=backend, local_index=index, web=web_provider, caps=caps,
+        llm=backend,
+        local_index=index,
+        web=web_provider,
+        caps=caps,
         external_sources=cli_providers,
         on_checkpoint=lambda cp: registry.save_checkpoint(target, run_id, cp),
         on_event=lambda phase, d: registry.append_event(target, run_id, {"phase": phase, **d}),
@@ -126,24 +161,30 @@ def run(*, target: Path, question: str, sources: List[str], web: bool,
     try:
         result = eng.research(question, prior=prior)
     except Exception as e:
-        registry.finish_run(target, run_id, status="error", stats={}, artifacts={},
-                            blockers=blockers + [str(e)])
+        registry.finish_run(target, run_id, status="error", stats={}, artifacts={}, blockers=blockers + [str(e)])
         return run_id
 
     d = registry.run_dir(target, run_id)
-    md = reportmod.render_markdown(question=question, markdown_report=result.report,
-                                   findings=result.findings)
-    html = reportmod.render_html(question=question, markdown_report=result.report,
-                                 findings=result.findings, stats=result.stats)
-    ho = handoffmod.render_handoff(question=question, markdown_report=result.report,
-                                   findings=result.findings, stats=result.stats)
+    md = reportmod.render_markdown(question=question, markdown_report=result.report, findings=result.findings)
+    html = reportmod.render_html(
+        question=question, markdown_report=result.report, findings=result.findings, stats=result.stats
+    )
+    ho = handoffmod.render_handoff(
+        question=question, markdown_report=result.report, findings=result.findings, stats=result.stats
+    )
     (d / "report.md").write_text(md)
     (d / "report.html").write_text(html)
     (d / "handoff.md").write_text(ho)
-    registry.finish_run(target, run_id, status="done", stats=result.stats,
-                        artifacts={"report_html": "report.html", "report_md": "report.md",
-                                   "handoff": "handoff.md"}, blockers=blockers)
+    registry.finish_run(
+        target,
+        run_id,
+        status="done",
+        stats=result.stats,
+        artifacts={"report_html": "report.html", "report_md": "report.md", "handoff": "handoff.md"},
+        blockers=blockers,
+    )
     return run_id
+
 
 def resume(*, target: Path, run_id: str, overrides: Dict[str, Any]) -> str:
     rec = registry.show_run(target, run_id)
@@ -166,6 +207,7 @@ def resume(*, target: Path, run_id: str, overrides: Dict[str, Any]) -> str:
         overrides=restored_overrides,
         run_id=run_id,
     )
+
 
 def cancel(*, target: Path, run_id: str) -> None:
     registry.set_status(target, run_id, "cancelled")
@@ -290,7 +332,9 @@ def export_handoff(
         handoff_text = ""
     else:
         handoff_text = artifact_path.read_text(errors="replace")
-    destination, inbox_label, destination_blockers = _resolve_handoff_destination(target, inbox=inbox, handoff_inbox=handoff_inbox)
+    destination, inbox_label, destination_blockers = _resolve_handoff_destination(
+        target, inbox=inbox, handoff_inbox=handoff_inbox
+    )
     blockers.extend(destination_blockers)
     if destination is not None and not destination.exists():
         blockers.append(f"handoff inbox missing: {destination}")
@@ -323,6 +367,7 @@ def export_handoff(
     out_path.write_text(export_text)
 
     from . import handoff_cmd
+
     lint_result = handoff_cmd.lint_file(out_path)
     if not lint_result.valid:
         try:
@@ -490,6 +535,7 @@ def cli_handoffs_import_issues(*, target: Path, dry_run: bool = False, json_outp
     target = target.expanduser().resolve()
     records = _handoff_issue_records(target)
     from . import work_cmd
+
     imported, skipped, skipped_dismissed = work_cmd._append_import_records(target, records, dry_run=dry_run)
     payload = {
         "target": str(target),
@@ -513,10 +559,13 @@ def cli_handoffs_import_issues(*, target: Path, dry_run: bool = False, json_outp
         print("status: no new imports")
     return 0
 
+
 def _new_run_id(question: str) -> str:
     # Caller passes run_id in tests for determinism; production stamps the time.
     from datetime import datetime, timezone
+
     return datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S-") + registry.slug(question)
+
 
 def sources_payload(*, target: Path) -> Dict[str, Any]:
     cfg = rconfig.load(target)
@@ -536,24 +585,33 @@ def sources_payload(*, target: Path) -> Dict[str, Any]:
     browser_ok = False
     try:
         from .research.sources import web as webmod
+
         browser_ok = webmod._import_playwright() is not None
     except Exception:
         browser_ok = False
-    routes.append({
-        "id": "playwright",
-        "type": "browser",
-        "status": "ok" if browser_ok else "warn",
-        "detail": "available for --web browser search" if browser_ok else "install brigade[research] and chromium for --web browser search",
-        "trust": "browser",
-    })
+    routes.append(
+        {
+            "id": "playwright",
+            "type": "browser",
+            "status": "ok" if browser_ok else "warn",
+            "detail": "available for --web browser search"
+            if browser_ok
+            else "install brigade[research] and chromium for --web browser search",
+            "trust": "browser",
+        }
+    )
     if web_provider == "searxng" or settings.get("searxng_url"):
-        routes.append({
-            "id": "searxng",
-            "type": "web",
-            "status": "ok" if settings.get("searxng_url") else "fail",
-            "detail": "configured web search endpoint" if settings.get("searxng_url") else "missing search.searxng_url",
-            "trust": "web",
-        })
+        routes.append(
+            {
+                "id": "searxng",
+                "type": "web",
+                "status": "ok" if settings.get("searxng_url") else "fail",
+                "detail": "configured web search endpoint"
+                if settings.get("searxng_url")
+                else "missing search.searxng_url",
+                "trust": "web",
+            }
+        )
 
     for raw, item in zip(adapters, _safe_source_adapters(adapters)):
         if item.get("type") not in clisrc.CLI_SOURCE_TYPES:
@@ -567,15 +625,19 @@ def sources_payload(*, target: Path) -> Dict[str, Any]:
         executable_path = Path(executable).expanduser()
         if "/" in executable and not executable_path.is_absolute():
             executable_path = target / executable_path
-        exists = bool(executable) and (executable_path.exists() if "/" in executable else shutil.which(executable) is not None)
+        exists = bool(executable) and (
+            executable_path.exists() if "/" in executable else shutil.which(executable) is not None
+        )
         detail = "configured CLI source ready" if exists else "configured CLI executable not found"
         if item.get("type") == "antigravity" and not command:
             detail = "missing Antigravity CLI command; configure command or argv for agy"
-        routes.append({
-            **item,
-            "status": "ok" if exists else "fail",
-            "detail": detail,
-        })
+        routes.append(
+            {
+                **item,
+                "status": "ok" if exists else "fail",
+                "detail": detail,
+            }
+        )
 
     statuses = [route["status"] for route in routes]
     return {
@@ -587,11 +649,27 @@ def sources_payload(*, target: Path) -> Dict[str, Any]:
 
 # --- CLI presentation helpers (return process exit codes) ---
 
-def cli_run(*, target: Path, question: str, corpus: Optional[str], sources: List[str],
-            web: bool, overrides: Dict[str, Any], provider: Optional[str] = None,
-            json_output: bool = False) -> int:
-    rid = run(target=target, question=question, corpus=corpus, sources=sources,
-              web=web, overrides=overrides, provider=provider)
+
+def cli_run(
+    *,
+    target: Path,
+    question: str,
+    corpus: Optional[str],
+    sources: List[str],
+    web: bool,
+    overrides: Dict[str, Any],
+    provider: Optional[str] = None,
+    json_output: bool = False,
+) -> int:
+    rid = run(
+        target=target,
+        question=question,
+        corpus=corpus,
+        sources=sources,
+        web=web,
+        overrides=overrides,
+        provider=provider,
+    )
     rec = registry.show_run(target, rid) or {"run_id": rid}
     if json_output:
         print(_json.dumps(rec, indent=2, sort_keys=True))
@@ -696,8 +774,7 @@ def cli_cancel(*, target: Path, run_id: str, json_output: bool = False) -> int:
     return 0
 
 
-def cli_resume(*, target: Path, run_id: str, overrides: Dict[str, Any],
-               json_output: bool = False) -> int:
+def cli_resume(*, target: Path, run_id: str, overrides: Dict[str, Any], json_output: bool = False) -> int:
     try:
         resume(target=target, run_id=run_id, overrides=overrides)
     except SystemExit as e:
@@ -736,7 +813,9 @@ def cli_sources_list(*, target: Path, json_output: bool = False) -> int:
         return 0
     print(f"research sources: {target}")
     for route in payload["routes"]:
-        print(f"- [{route.get('status')}] {route.get('type')}:{route.get('id')} ({route.get('trust')}) - {route.get('detail')}")
+        print(
+            f"- [{route.get('status')}] {route.get('type')}:{route.get('id')} ({route.get('trust')}) - {route.get('detail')}"
+        )
     return 0
 
 

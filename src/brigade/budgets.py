@@ -10,6 +10,7 @@ Satellite tools (bootstrap-doctor, memory-doctor) are intended to depend on
 brigade and consume these definitions rather than redeclaring them, so updating
 a budget here updates every downstream consumer.
 """
+
 from __future__ import annotations
 
 from pathlib import Path

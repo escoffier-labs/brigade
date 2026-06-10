@@ -1,6 +1,5 @@
 import json
 import pytest
-from pathlib import Path
 from brigade.config import (
     Config,
     CONFIG_REL_PATH,
@@ -73,6 +72,7 @@ def test_write_produces_pretty_json(tmp_path):
 
 def test_load_config_reads_legacy_solo_mise_dir(tmp_path):
     from brigade.config import load_config
+
     legacy = tmp_path / ".solo-mise"
     legacy.mkdir()
     (legacy / "config.json").write_text(

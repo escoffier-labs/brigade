@@ -263,9 +263,7 @@ def test_dogfood_status_reports_config_and_latest_run(tmp_path, monkeypatch, cap
     dogfood_cmd.init(target=tmp_path, timeout_seconds=33)
     run_dir = tmp_path / ".brigade" / "runs" / "20260526-120000-test"
     run_dir.mkdir(parents=True)
-    (run_dir / "run.json").write_text(
-        '{"started_at":"2026-05-26T12:00:00Z","status":"ok","task":"review the repo"}'
-    )
+    (run_dir / "run.json").write_text('{"started_at":"2026-05-26T12:00:00Z","status":"ok","task":"review the repo"}')
     (run_dir / "final.txt").write_text("Done.\n\nSmallest follow-up slice: Ship the status command.\n")
 
     monkeypatch.setattr(dogfood_cmd.shutil, "which", lambda name: f"/usr/bin/{name}")

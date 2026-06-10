@@ -1,4 +1,5 @@
 """Local chat surface export scanner helpers."""
+
 from __future__ import annotations
 
 import hashlib
@@ -213,7 +214,9 @@ def _load_config(target: Path) -> tuple[list[dict[str, Any]], list[str]]:
         entry["workspace_label"] = _string(item.get("workspace_label")) or surface_id
         entry["channel_label"] = _string(item.get("channel_label")) or "unknown"
         entry["export_path"] = _string(item.get("export_path")) or f".brigade/chat-surfaces/{surface_id}.json"
-        entry["sweep_output_path"] = _string(item.get("sweep_output_path")) or f".brigade/chat-memory-sweeps/{surface_id}-latest.json"
+        entry["sweep_output_path"] = (
+            _string(item.get("sweep_output_path")) or f".brigade/chat-memory-sweeps/{surface_id}-latest.json"
+        )
         entry["privacy_mode"] = _string(item.get("privacy_mode")) or "summary-only"
         entry["evidence_policy"] = _string(item.get("evidence_policy")) or "local-path"
         entry["confidence_threshold"] = _string(item.get("confidence_threshold")) or "medium"
@@ -347,7 +350,9 @@ def _normalize_finding(
         errors.append(f"finding {index} requires suggested_task_text")
     if not isinstance(acceptance, list) or not all(isinstance(item, str) and item.strip() for item in acceptance):
         errors.append(f"finding {index} acceptance criteria must be a list of non-empty strings")
-    raw_fields = [key for key in value if str(key).casefold() in RAW_FIELD_NAMES or str(key).casefold().startswith("raw_")]
+    raw_fields = [
+        key for key in value if str(key).casefold() in RAW_FIELD_NAMES or str(key).casefold().startswith("raw_")
+    ]
     if raw_fields and surface.get("privacy_mode") in {"summary-only", "strict"}:
         errors.append(f"finding {index} contains raw private chat fields: {', '.join(sorted(raw_fields))}")
     unsafe_fields = [key for key in value if str(key).casefold() in UNSAFE_FIELD_NAMES]
@@ -356,7 +361,6 @@ def _normalize_finding(
         redacted += len(set([*unsafe_fields, *unsafe_values]))
     if errors:
         return None, errors, redacted
-    sweep_id = _string(value.get("sweep_id")) or _string(value.get("sweep")) or f"{surface_id}-{_now().strftime('%Y%m%d')}"
     fingerprint = _string(value.get("source_fingerprint"))
     metadata = {
         "provider": provider,
@@ -421,7 +425,9 @@ def _surface_by_id(target: Path, surface_id: str) -> tuple[dict[str, Any] | None
     return matches[0], surfaces, []
 
 
-def _normalized_sweep(target: Path, surface: dict[str, Any], findings: list[dict[str, Any]], source_path: Path) -> tuple[dict[str, Any], list[str], int, int]:
+def _normalized_sweep(
+    target: Path, surface: dict[str, Any], findings: list[dict[str, Any]], source_path: Path
+) -> tuple[dict[str, Any], list[str], int, int]:
     issues: list[dict[str, Any]] = []
     errors: list[str] = []
     redacted = 0
@@ -438,7 +444,9 @@ def _normalized_sweep(target: Path, surface: dict[str, Any], findings: list[dict
             errors.extend(finding_errors)
             invalid += 1
             continue
-        if normalized is not None and _confidence_allows(normalized.get("confidence"), surface.get("confidence_threshold")):
+        if normalized is not None and _confidence_allows(
+            normalized.get("confidence"), surface.get("confidence_threshold")
+        ):
             issues.append(normalized)
     sweep_id = f"{surface['id']}-{_now().strftime('%Y%m%d-%H%M%S')}"
     return (
@@ -459,7 +467,9 @@ def _normalized_sweep(target: Path, surface: dict[str, Any], findings: list[dict
 
 
 def _write_sweep_output(target: Path, surface: dict[str, Any], payload: dict[str, Any]) -> Path:
-    output_path = _resolve_target_path(target, _string(surface.get("sweep_output_path")), f"{OUTPUT_ROOT_REL_PATH}/{surface['id']}-latest.json")
+    output_path = _resolve_target_path(
+        target, _string(surface.get("sweep_output_path")), f"{OUTPUT_ROOT_REL_PATH}/{surface['id']}-latest.json"
+    )
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
     latest = target / OUTPUT_ROOT_REL_PATH / "latest.json"
@@ -481,15 +491,29 @@ def _health(target: Path) -> dict[str, Any]:
     for surface in surfaces:
         if not surface.get("enabled"):
             continue
-        output = _resolve_target_path(target, _string(surface.get("sweep_output_path")), f"{OUTPUT_ROOT_REL_PATH}/{surface['id']}-latest.json")
+        output = _resolve_target_path(
+            target, _string(surface.get("sweep_output_path")), f"{OUTPUT_ROOT_REL_PATH}/{surface['id']}-latest.json"
+        )
         if not output.exists():
             missing.append(str(surface["id"]))
             continue
         age_hours = (_now() - datetime.fromtimestamp(output.stat().st_mtime, tz=timezone.utc)).total_seconds() / 3600
         if age_hours > SWEEP_STALE_HOURS:
             stale.append(f"{surface['id']}={age_hours:.1f}h")
-    checks.append({"status": "warn" if missing else "ok", "name": "chat_surface_outputs", "detail": ", ".join(missing) if missing else "present"})
-    checks.append({"status": "warn" if stale else "ok", "name": "chat_surface_stale_outputs", "detail": ", ".join(stale) if stale else "none"})
+    checks.append(
+        {
+            "status": "warn" if missing else "ok",
+            "name": "chat_surface_outputs",
+            "detail": ", ".join(missing) if missing else "present",
+        }
+    )
+    checks.append(
+        {
+            "status": "warn" if stale else "ok",
+            "name": "chat_surface_stale_outputs",
+            "detail": ", ".join(stale) if stale else "none",
+        }
+    )
     issues = [check for check in checks if check["status"] != "ok"]
     return {
         "target": str(target),
@@ -540,7 +564,9 @@ def surfaces_list(*, target: Path, json_output: bool = False) -> int:
         return 2
     print(f"chat surfaces: {target}")
     for surface in surfaces:
-        print(f"- {surface['id']} [{surface['provider']}] enabled={surface['enabled']} channel={surface['channel_label']}")
+        print(
+            f"- {surface['id']} [{surface['provider']}] enabled={surface['enabled']} channel={surface['channel_label']}"
+        )
     return 0
 
 
@@ -601,7 +627,14 @@ def sweep_validate(*, target: Path, input_path: Path, json_output: bool = False)
         if finding_errors:
             invalid += 1
         redacted += redacted_count
-    payload = {"input": str(input_path), "valid": not errors, "findings": len(findings), "invalid": invalid, "redacted": redacted, "errors": errors}
+    payload = {
+        "input": str(input_path),
+        "valid": not errors,
+        "findings": len(findings),
+        "invalid": invalid,
+        "redacted": redacted,
+        "errors": errors,
+    }
     if json_output:
         print(json.dumps(payload, indent=2, sort_keys=True))
     else:
@@ -625,12 +658,21 @@ def sweep_ingest(*, target: Path, surface_id: str, json_output: bool = False) ->
             for error in errors:
                 print(f"error: {error}", file=sys.stderr)
         return 2
-    export_path = _resolve_target_path(target, _string(surface.get("export_path")), f".brigade/chat-surfaces/{surface_id}.json")
+    export_path = _resolve_target_path(
+        target, _string(surface.get("export_path")), f".brigade/chat-surfaces/{surface_id}.json"
+    )
     findings, load_errors = _load_export(export_path)
     sweep_payload, validate_errors, invalid, redacted = _normalized_sweep(target, surface, findings, export_path)
     errors = [*load_errors, *validate_errors]
     if errors:
-        payload = {"target": str(target), "surface_id": surface_id, "valid": False, "errors": errors, "invalid": invalid or len(errors), "redacted": redacted}
+        payload = {
+            "target": str(target),
+            "surface_id": surface_id,
+            "valid": False,
+            "errors": errors,
+            "invalid": invalid or len(errors),
+            "redacted": redacted,
+        }
         if json_output:
             print(json.dumps(payload, indent=2, sort_keys=True))
         else:
@@ -665,20 +707,43 @@ def sweep_import_issues(*, target: Path, surface_id: str, json_output: bool = Fa
     surface, _, errors = _surface_by_id(target, surface_id)
     if errors or surface is None:
         if json_output:
-            print(json.dumps({"target": str(target), "surface_id": surface_id, "valid": False, "errors": errors}, indent=2, sort_keys=True))
+            print(
+                json.dumps(
+                    {"target": str(target), "surface_id": surface_id, "valid": False, "errors": errors},
+                    indent=2,
+                    sort_keys=True,
+                )
+            )
         else:
             for error in errors:
                 print(f"error: {error}", file=sys.stderr)
         return 2
-    output_path = _resolve_target_path(target, _string(surface.get("sweep_output_path")), f"{OUTPUT_ROOT_REL_PATH}/{surface_id}-latest.json")
+    output_path = _resolve_target_path(
+        target, _string(surface.get("sweep_output_path")), f"{OUTPUT_ROOT_REL_PATH}/{surface_id}-latest.json"
+    )
     if not output_path.is_file():
-        export_path = _resolve_target_path(target, _string(surface.get("export_path")), f".brigade/chat-surfaces/{surface_id}.json")
+        export_path = _resolve_target_path(
+            target, _string(surface.get("export_path")), f".brigade/chat-surfaces/{surface_id}.json"
+        )
         findings, load_errors = _load_export(export_path)
         sweep_payload, validate_errors, invalid, redacted = _normalized_sweep(target, surface, findings, export_path)
         errors = [*load_errors, *validate_errors]
         if errors:
             if json_output:
-                print(json.dumps({"target": str(target), "surface_id": surface_id, "valid": False, "errors": errors, "invalid": invalid or len(errors), "redacted": redacted}, indent=2, sort_keys=True))
+                print(
+                    json.dumps(
+                        {
+                            "target": str(target),
+                            "surface_id": surface_id,
+                            "valid": False,
+                            "errors": errors,
+                            "invalid": invalid or len(errors),
+                            "redacted": redacted,
+                        },
+                        indent=2,
+                        sort_keys=True,
+                    )
+                )
             else:
                 for error in errors:
                     print(f"error: {error}", file=sys.stderr)

@@ -18,7 +18,7 @@ def test_repos_init_list_show_scan_doctor_json(tmp_path, capsys):
     (tmp_path / "README.md").write_text("readme\n")
     (tmp_path / "CHANGELOG.md").write_text("changes\n")
     (tmp_path / "ROADMAP.md").write_text("roadmap\n")
-    (tmp_path / "pyproject.toml").write_text("[project]\nname = \"demo\"\n")
+    (tmp_path / "pyproject.toml").write_text('[project]\nname = "demo"\n')
     (tmp_path / "tests").mkdir()
     (tmp_path / ".claude" / "memory-handoffs").mkdir(parents=True)
 
@@ -84,7 +84,7 @@ def test_repos_claude_fallback_detection_does_not_copy_contents(tmp_path, capsys
     (tmp_path / "CLAUDE.md").write_text("private setup detail should stay local\n")
     (tmp_path / ".brigade").mkdir()
     (tmp_path / ".claude" / "memory-handoffs").mkdir(parents=True)
-    (tmp_path / "pyproject.toml").write_text("[project]\nname = \"demo\"\n")
+    (tmp_path / "pyproject.toml").write_text('[project]\nname = "demo"\n')
     assert repos_cmd.init(target=tmp_path) == 0
     capsys.readouterr()
 
@@ -172,6 +172,7 @@ def test_repos_cli_dispatch(tmp_path, monkeypatch):
         def _fake(**kwargs):
             seen.append((name, kwargs))
             return 0
+
         return _fake
 
     monkeypatch.setattr(repos_cmd, "init", record("init"))
@@ -255,10 +256,7 @@ def test_repos_ingest_routes_fleet_handoffs_into_owner(tmp_path, capsys):
     assert repos_cmd.init(target=owner, json_output=True) == 0
     capsys.readouterr()
     cfg = repos_cmd.config_path(owner)
-    cfg.write_text(
-        cfg.read_text()
-        + f'\n[[repo]]\nid = "writer-repo"\nlabel = "writer"\npath = "{repo}"\n'
-    )
+    cfg.write_text(cfg.read_text() + f'\n[[repo]]\nid = "writer-repo"\nlabel = "writer"\npath = "{repo}"\n')
     # the writer repo has a card handoff pending
     inbox = repo / ".claude" / "memory-handoffs"
     inbox.mkdir(parents=True)

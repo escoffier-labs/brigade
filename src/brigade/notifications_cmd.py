@@ -1,4 +1,5 @@
 """Operator notification integration through agent-notify."""
+
 from __future__ import annotations
 
 import json
@@ -209,12 +210,24 @@ def _status_payload(profile: str | None = None) -> dict[str, Any]:
         selected_channels = _env_only_channels()
 
     if not selected_channels:
-        checks.append({"status": "WARN", "name": "agent-notify-channels", "detail": "no configured notification channels selected"})
+        checks.append(
+            {
+                "status": "WARN",
+                "name": "agent-notify-channels",
+                "detail": "no configured notification channels selected",
+            }
+        )
     for name, envs in missing_env.items():
-        checks.append({"status": "WARN", "name": "agent-notify-env", "detail": f"{name} missing env: {', '.join(envs)}"})
+        checks.append(
+            {"status": "WARN", "name": "agent-notify-env", "detail": f"{name} missing env: {', '.join(envs)}"}
+        )
     if not checks:
-        checks.append({"status": "OK", "name": "agent-notify", "detail": f"{len(selected_channels)} local channel(s) configured"})
-    configured = bool(selected_channels) and not missing_env and not any(str(check.get("status")) == "WARN" for check in checks)
+        checks.append(
+            {"status": "OK", "name": "agent-notify", "detail": f"{len(selected_channels)} local channel(s) configured"}
+        )
+    configured = (
+        bool(selected_channels) and not missing_env and not any(str(check.get("status")) == "WARN" for check in checks)
+    )
     status = "ok" if configured else "warn"
     suggested = "brigade notifications setup plan" if not configured else "brigade notifications status --json"
     return {
@@ -243,7 +256,6 @@ def health(target: Path, profile: str | None = None) -> dict[str, Any]:
     if payload.get("status") == "manual":
         issue_checks = checks
     top_issue = issue_checks[0] if issue_checks else None
-    agent_notify = payload.get("agent_notify") if isinstance(payload.get("agent_notify"), dict) else {}
     channels = payload.get("selected_channels") if isinstance(payload.get("selected_channels"), list) else []
     return {
         "installed": bool(payload.get("installed")),
@@ -446,7 +458,7 @@ def event_plan(
     print(f"event_id: {payload['event_id']}")
     print(f"event_type: {event_type}")
     print(f"configured: {payload['configured']}")
-    print(f"would_write: false")
+    print("would_write: false")
     print(f"receipt: {payload['receipt_path']}")
     print("planned_argv: " + " ".join(payload["planned_argv"]))
     return 0

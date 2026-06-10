@@ -1,10 +1,10 @@
 """Roadmap completion audit and neutral inspiration pattern registry."""
+
 from __future__ import annotations
 
 import argparse
 import json
 import re
-import sys
 from pathlib import Path
 from typing import Any
 
@@ -398,9 +398,7 @@ def _section_stale_checks(sections: list[dict[str, Any]]) -> list[dict[str, Any]
         if not items:
             continue
         finished = [
-            item
-            for item in items
-            if isinstance(item, dict) and item.get("status") in {"implemented", "started"}
+            item for item in items if isinstance(item, dict) and item.get("status") in {"implemented", "started"}
         ]
         ratio = len(finished) / len(items)
         if ratio >= 0.75:
@@ -467,11 +465,7 @@ def _cli_command_paths() -> list[str]:
     commands: set[str] = set()
 
     def walk(prefix: list[str], parser_obj: argparse.ArgumentParser) -> None:
-        subparsers = [
-            action
-            for action in parser_obj._actions
-            if isinstance(action, argparse._SubParsersAction)
-        ]
+        subparsers = [action for action in parser_obj._actions if isinstance(action, argparse._SubParsersAction)]
         if not subparsers and prefix:
             commands.add(" ".join(["brigade", *prefix]))
             return
@@ -511,7 +505,9 @@ def _archived_items() -> list[dict[str, Any]]:
 
 def _deferred_item_checks(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     missing_owner = [item["id"] for item in items if not item.get("owner")]
-    missing_phase = [item["id"] for item in items if item.get("status") != "out-of-scope" and not item.get("suggested_phase")]
+    missing_phase = [
+        item["id"] for item in items if item.get("status") != "out-of-scope" and not item.get("suggested_phase")
+    ]
     return [
         {
             "status": WARN if missing_owner else OK,
@@ -541,9 +537,7 @@ def audit_payload(target: Path) -> dict[str, Any]:
     documented = _documented_brigade_commands(target)
     cli_commands = _cli_command_paths()
     cli_prefixes = _cli_command_prefixes(cli_commands)
-    normalized_documented = sorted(
-        {_normalize_documented_command(command, cli_prefixes) for command in documented}
-    )
+    normalized_documented = sorted({_normalize_documented_command(command, cli_prefixes) for command in documented})
     documented_set = set(normalized_documented)
     cli_set = set(cli_commands)
     missing_cli = sorted(
@@ -638,7 +632,9 @@ def audit(*, target: Path, json_output: bool = False, import_issues: bool = Fals
     skipped: list[dict[str, Any]] = []
     dismissed: list[dict[str, Any]] = []
     if import_issues:
-        imported, skipped, dismissed = work_cmd._append_import_records(target.expanduser().resolve(), _roadmap_import_records(payload))
+        imported, skipped, dismissed = work_cmd._append_import_records(
+            target.expanduser().resolve(), _roadmap_import_records(payload)
+        )
         payload["imported"] = len(imported)
         payload["skipped"] = len(skipped)
         payload["dismissed"] = len(dismissed)
@@ -776,19 +772,13 @@ def command_contract_payload(target: Path) -> dict[str, Any]:
     documented = _documented_brigade_commands(target)
     cli_commands = _cli_command_paths()
     cli_prefixes = _cli_command_prefixes(cli_commands)
-    normalized_documented = sorted(
-        {_normalize_documented_command(command, cli_prefixes) for command in documented}
-    )
+    normalized_documented = sorted({_normalize_documented_command(command, cli_prefixes) for command in documented})
     top_level_names = sorted({command.split()[1] for command in cli_commands if len(command.split()) > 1})
     groups: list[dict[str, Any]] = []
     missing_groups: list[str] = []
     for name in top_level_names:
         command = f"brigade {name}"
-        documented_paths = [
-            item
-            for item in normalized_documented
-            if item == command or item.startswith(f"{command} ")
-        ]
+        documented_paths = [item for item in normalized_documented if item == command or item.startswith(f"{command} ")]
         documented_group = command in normalized_documented or bool(documented_paths)
         if not documented_group:
             missing_groups.append(command)
@@ -811,15 +801,19 @@ def command_contract_payload(target: Path) -> dict[str, Any]:
         {
             "status": WARN if missing_groups else OK,
             "name": "roadmap_command_group_missing_docs",
-            "detail": f"{len(missing_groups)} top-level command group(s) missing public docs" if missing_groups else "none",
+            "detail": f"{len(missing_groups)} top-level command group(s) missing public docs"
+            if missing_groups
+            else "none",
             "commands": missing_groups,
         },
         {
             "status": OK if inventory_current else WARN,
             "name": "roadmap_command_inventory_current",
-            "detail": f"{COMMAND_INVENTORY_RELATIVE_PATH.as_posix()} is current" if inventory_current else f"{COMMAND_INVENTORY_RELATIVE_PATH.as_posix()} missing or stale",
+            "detail": f"{COMMAND_INVENTORY_RELATIVE_PATH.as_posix()} is current"
+            if inventory_current
+            else f"{COMMAND_INVENTORY_RELATIVE_PATH.as_posix()} missing or stale",
             "path": COMMAND_INVENTORY_RELATIVE_PATH.as_posix(),
-        }
+        },
     ]
     issues = [check for check in checks if check["status"] != OK]
     return {
@@ -867,7 +861,9 @@ def _command_inventory_markdown(*, groups: list[dict[str, Any]], cli_commands: l
     return "\n".join(lines)
 
 
-def commands(*, target: Path, json_output: bool = False, write_inventory: bool = False, check_inventory: bool = False) -> int:
+def commands(
+    *, target: Path, json_output: bool = False, write_inventory: bool = False, check_inventory: bool = False
+) -> int:
     payload = command_contract_payload(target)
     if write_inventory:
         inventory_path = Path(payload["inventory_path"])

@@ -8,7 +8,10 @@ from tests.test_phase44_cmd import _build_train
 
 def _reviewed_train(tmp_path, monkeypatch, capsys):
     train = _build_train(tmp_path, monkeypatch, capsys)
-    assert repos_cmd.release_closeout(target=tmp_path, train_id=train["train_id"], status="reviewed", json_output=True) == 0
+    assert (
+        repos_cmd.release_closeout(target=tmp_path, train_id=train["train_id"], status="reviewed", json_output=True)
+        == 0
+    )
     capsys.readouterr()
     assert repos_cmd.release_actions_build(target=tmp_path, train_id=train["train_id"], json_output=True) == 0
     built = json.loads(capsys.readouterr().out)
@@ -17,7 +20,18 @@ def _reviewed_train(tmp_path, monkeypatch, capsys):
 
 def _record_required_evidence(tmp_path, train_id: str, repo_id: str, *, status: str = "completed"):
     for step in repos_cmd.REQUIRED_RELEASE_EVIDENCE_STEPS:
-        assert repos_cmd.release_evidence_record(target=tmp_path, train_id=train_id, repo_id=repo_id, step=step, status=status, summary=f"{step} {status}", json_output=True) == 0
+        assert (
+            repos_cmd.release_evidence_record(
+                target=tmp_path,
+                train_id=train_id,
+                repo_id=repo_id,
+                step=step,
+                status=status,
+                summary=f"{step} {status}",
+                json_output=True,
+            )
+            == 0
+        )
 
 
 def test_release_reconcile_marks_actions_done_when_evidence_is_complete(tmp_path, monkeypatch, capsys):
@@ -42,7 +56,12 @@ def test_release_reconcile_marks_actions_done_when_evidence_is_complete(tmp_path
     blocked_repo = next(repo for repo in summary["repos"] if repo["repo_id"] == "blocked")
     assert blocked_repo["evidence_status"] == "manually-completed"
 
-    assert repos_cmd.release_closeout(target=tmp_path, train_id=train["train_id"], status="reviewed", reason="final", json_output=True) == 0
+    assert (
+        repos_cmd.release_closeout(
+            target=tmp_path, train_id=train["train_id"], status="reviewed", reason="final", json_output=True
+        )
+        == 0
+    )
     closeout = json.loads(capsys.readouterr().out)
     assert closeout["summary"]["unresolved_action_count"] == 0
     assert closeout["summary"]["summary_fingerprint"]
@@ -50,7 +69,18 @@ def test_release_reconcile_marks_actions_done_when_evidence_is_complete(tmp_path
 
 def test_release_reconcile_keeps_actions_open_for_blocked_or_missing_evidence(tmp_path, monkeypatch, capsys):
     train, action_id = _reviewed_train(tmp_path, monkeypatch, capsys)
-    assert repos_cmd.release_evidence_record(target=tmp_path, train_id=train["train_id"], repo_id="blocked", step="verification", status="blocked", summary="verification blocked", json_output=True) == 0
+    assert (
+        repos_cmd.release_evidence_record(
+            target=tmp_path,
+            train_id=train["train_id"],
+            repo_id="blocked",
+            step="verification",
+            status="blocked",
+            summary="verification blocked",
+            json_output=True,
+        )
+        == 0
+    )
     capsys.readouterr()
 
     assert repos_cmd.release_reconcile(target=tmp_path, train_id=train["train_id"], json_output=True) == 0
@@ -64,14 +94,27 @@ def test_release_reconcile_keeps_actions_open_for_blocked_or_missing_evidence(tm
     names = {check["name"] for check in health["checks"]}
     assert "repo_fleet_release_actions_open" in names
     assert "repo_fleet_release_evidence_blocked" in names
-    assert any(action["resolution_status"] == "blocked-evidence" for action in repos_cmd._read_release_actions(tmp_path))
+    assert any(
+        action["resolution_status"] == "blocked-evidence" for action in repos_cmd._read_release_actions(tmp_path)
+    )
 
 
 def test_release_reconcile_accepts_skipped_or_deferred_manual_evidence(tmp_path, monkeypatch, capsys):
     train, _ = _reviewed_train(tmp_path, monkeypatch, capsys)
     statuses = ["completed", "skipped", "deferred", "completed", "skipped", "deferred"]
     for step, status in zip(repos_cmd.REQUIRED_RELEASE_EVIDENCE_STEPS, statuses, strict=True):
-        assert repos_cmd.release_evidence_record(target=tmp_path, train_id=train["train_id"], repo_id="blocked", step=step, status=status, summary=f"{step} {status}", json_output=True) == 0
+        assert (
+            repos_cmd.release_evidence_record(
+                target=tmp_path,
+                train_id=train["train_id"],
+                repo_id="blocked",
+                step=step,
+                status=status,
+                summary=f"{step} {status}",
+                json_output=True,
+            )
+            == 0
+        )
     capsys.readouterr()
 
     assert repos_cmd.release_reconcile(target=tmp_path, train_id=train["train_id"], json_output=True) == 0

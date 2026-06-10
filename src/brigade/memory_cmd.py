@@ -1,4 +1,5 @@
 """Local memory card decay scanner."""
+
 from __future__ import annotations
 
 import ast
@@ -11,7 +12,7 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from . import dogfood_cmd, toml_compat as tomllib, work_cmd
+from . import toml_compat as tomllib, work_cmd
 from .install import apply_gitignore
 from .selection import Selection
 from .localio import utc_now_iso_z as _utc_iso
@@ -117,7 +118,9 @@ def _format_config(config: MemoryCareConfig = MemoryCareConfig()) -> str:
     )
 
 
-def _string_list(raw: object, *, field: str, default: tuple[str, ...], allowed: tuple[str, ...] | None = None) -> tuple[str, ...]:
+def _string_list(
+    raw: object, *, field: str, default: tuple[str, ...], allowed: tuple[str, ...] | None = None
+) -> tuple[str, ...]:
     if raw is None:
         return default
     if not isinstance(raw, list) or not all(isinstance(item, str) for item in raw):
@@ -331,7 +334,13 @@ def _safe_summary(text: str) -> str:
 def _priority(issue_type: str, severity: str) -> str:
     if severity == "high" or issue_type in {"expired", "missing-index-link"}:
         return "high"
-    if issue_type in {"missing-frontmatter", "missing-reviewed", "missing-freshness", "oversized-card", "contradictory"}:
+    if issue_type in {
+        "missing-frontmatter",
+        "missing-reviewed",
+        "missing-freshness",
+        "oversized-card",
+        "contradictory",
+    }:
         return "normal"
     return "normal"
 
@@ -372,8 +381,28 @@ def _issue(
         "reason": issue_type,
         "severity": severity,
         "priority": _priority(issue_type, severity),
-        "type": "docs" if issue_type in {"missing-index-link", "orphaned-card", "missing-frontmatter", "missing-reviewed", "missing-freshness", "oversized-card"} else "research",
-        "template": "docs" if issue_type in {"missing-index-link", "orphaned-card", "missing-frontmatter", "missing-reviewed", "missing-freshness", "oversized-card"} else "bugfix",
+        "type": "docs"
+        if issue_type
+        in {
+            "missing-index-link",
+            "orphaned-card",
+            "missing-frontmatter",
+            "missing-reviewed",
+            "missing-freshness",
+            "oversized-card",
+        }
+        else "research",
+        "template": "docs"
+        if issue_type
+        in {
+            "missing-index-link",
+            "orphaned-card",
+            "missing-frontmatter",
+            "missing-reviewed",
+            "missing-freshness",
+            "oversized-card",
+        }
+        else "bugfix",
         "safe_summary": _safe_summary(summary),
         "evidence_references": evidence,
         "evidence_summary": "; ".join(evidence) if evidence else summary,
@@ -393,11 +422,7 @@ def _issue(
                 if issue_type == "missing-reviewed"
                 else ["requires-operator-freshness-date"]
             ),
-            "candidate_fields": (
-                ["last_reviewed"]
-                if issue_type == "missing-reviewed"
-                else ["fresh_until"]
-            ),
+            "candidate_fields": (["last_reviewed"] if issue_type == "missing-reviewed" else ["fresh_until"]),
         }
     return record
 
@@ -682,12 +707,22 @@ def _autofix_plan_item(issue: dict[str, Any], *, target: Path, scan_date: str) -
     }
 
 
-def _autofix_plan_payload(target: Path, config: MemoryCareConfig, scan_payload: dict[str, Any] | None = None) -> dict[str, Any]:
+def _autofix_plan_payload(
+    target: Path, config: MemoryCareConfig, scan_payload: dict[str, Any] | None = None
+) -> dict[str, Any]:
     target = target.expanduser().resolve()
     if scan_payload is None:
         scan_payload = _load_scan_payload(target, config)
-    scan_date = str(scan_payload.get("scan_date") or _today().isoformat()) if isinstance(scan_payload, dict) else _today().isoformat()
-    issues = scan_payload.get("issues") if isinstance(scan_payload, dict) and isinstance(scan_payload.get("issues"), list) else []
+    scan_date = (
+        str(scan_payload.get("scan_date") or _today().isoformat())
+        if isinstance(scan_payload, dict)
+        else _today().isoformat()
+    )
+    issues = (
+        scan_payload.get("issues")
+        if isinstance(scan_payload, dict) and isinstance(scan_payload.get("issues"), list)
+        else []
+    )
     items = [
         _autofix_plan_item(issue, target=target, scan_date=scan_date)
         for issue in issues
@@ -807,7 +842,13 @@ def health(target: Path) -> dict[str, Any]:
         if config_path(target).is_file():
             checks.append({"status": "ok", "name": "memory_care_config", "detail": str(config_path(target))})
         else:
-            checks.append({"status": "warn", "name": "memory_care_config", "detail": f"missing, run `brigade memory care init --target {target}`"})
+            checks.append(
+                {
+                    "status": "warn",
+                    "name": "memory_care_config",
+                    "detail": f"missing, run `brigade memory care init --target {target}`",
+                }
+            )
     scan_path = _scan_path(target, config)
     queue_path = _queue_path(target, config)
     scan_payload = None
@@ -819,7 +860,13 @@ def health(target: Path) -> dict[str, Any]:
     if scan_payload is None:
         checks.append({"status": "warn", "name": "memory_care_scan", "detail": f"missing at {scan_path}"})
     else:
-        checks.append({"status": "ok", "name": "memory_care_scan", "detail": f"{scan_path} issues={scan_payload.get('issue_count')}"})
+        checks.append(
+            {
+                "status": "ok",
+                "name": "memory_care_scan",
+                "detail": f"{scan_path} issues={scan_payload.get('issue_count')}",
+            }
+        )
     try:
         queue_payload = _load_json_file(queue_path)
         if queue_payload is not None:
@@ -827,7 +874,13 @@ def health(target: Path) -> dict[str, Any]:
             if errors:
                 checks.append({"status": "fail", "name": "memory_care_queue", "detail": "; ".join(errors[:5])})
             else:
-                checks.append({"status": "ok", "name": "memory_care_queue", "detail": f"{queue_path} queued={len(queue_payload.get('cards', []))}"})
+                checks.append(
+                    {
+                        "status": "ok",
+                        "name": "memory_care_queue",
+                        "detail": f"{queue_path} queued={len(queue_payload.get('cards', []))}",
+                    }
+                )
     except (OSError, json.JSONDecodeError, ValueError) as exc:
         checks.append({"status": "fail", "name": "memory_care_queue", "detail": str(exc)})
     if queue_payload is None:
@@ -837,7 +890,8 @@ def health(target: Path) -> dict[str, Any]:
     top_issue = None
     if isinstance(queue_payload, dict) and isinstance(queue_payload.get("cards"), list) and queue_payload["cards"]:
         open_cards = [
-            card for card in queue_payload["cards"]
+            card
+            for card in queue_payload["cards"]
             if isinstance(card, dict) and str(card.get("source_fingerprint") or "") not in closed
         ]
         if open_cards:
@@ -850,17 +904,27 @@ def health(target: Path) -> dict[str, Any]:
                 }
             )
         else:
-            checks.append({"status": "ok", "name": "memory_care_open_issues", "detail": "queued issues reviewed or deferred"})
+            checks.append(
+                {"status": "ok", "name": "memory_care_open_issues", "detail": "queued issues reviewed or deferred"}
+            )
     else:
         checks.append({"status": "ok", "name": "memory_care_open_issues", "detail": "none"})
     issues = [check for check in checks if check["status"] != "ok"]
-    metadata = scan_payload.get("metadata") if isinstance(scan_payload, dict) and isinstance(scan_payload.get("metadata"), dict) else {}
-    autofix_plan = _autofix_plan_payload(target, config, scan_payload) if isinstance(scan_payload, dict) else {
-        "plan_count": 0,
-        "blocked_count": 0,
-        "items": [],
-        "would_write": False,
-    }
+    metadata = (
+        scan_payload.get("metadata")
+        if isinstance(scan_payload, dict) and isinstance(scan_payload.get("metadata"), dict)
+        else {}
+    )
+    autofix_plan = (
+        _autofix_plan_payload(target, config, scan_payload)
+        if isinstance(scan_payload, dict)
+        else {
+            "plan_count": 0,
+            "blocked_count": 0,
+            "items": [],
+            "would_write": False,
+        }
+    )
     return {
         "target": str(target),
         "config_path": str(config_path(target)),
@@ -903,9 +967,13 @@ def status(*, target: Path, json_output: bool = False) -> int:
     evidence = metadata.get("evidence") if isinstance(metadata.get("evidence"), dict) else None
     confidence = metadata.get("confidence") if isinstance(metadata.get("confidence"), dict) else None
     if reviewed:
-        print(f"reviewed_dates: present={reviewed.get('present', 0)} missing={reviewed.get('missing', 0)} stale={reviewed.get('stale', 0)}")
+        print(
+            f"reviewed_dates: present={reviewed.get('present', 0)} missing={reviewed.get('missing', 0)} stale={reviewed.get('stale', 0)}"
+        )
     if freshness:
-        print(f"freshness_dates: present={freshness.get('present', 0)} missing={freshness.get('missing', 0)} expired={freshness.get('expired', 0)}")
+        print(
+            f"freshness_dates: present={freshness.get('present', 0)} missing={freshness.get('missing', 0)} expired={freshness.get('expired', 0)}"
+        )
     if evidence:
         print(f"evidence_metadata: present={evidence.get('present', 0)} missing={evidence.get('missing', 0)}")
     if confidence:
@@ -913,7 +981,9 @@ def status(*, target: Path, json_output: bool = False) -> int:
         print(f"confidence_metadata: {rendered}")
     autofix_plan = payload.get("autofix_plan") if isinstance(payload.get("autofix_plan"), dict) else {}
     if autofix_plan.get("plan_count"):
-        print(f"autofix_plan: planned={autofix_plan.get('plan_count')} blocked={autofix_plan.get('blocked_count')} would_write=false")
+        print(
+            f"autofix_plan: planned={autofix_plan.get('plan_count')} blocked={autofix_plan.get('blocked_count')} would_write=false"
+        )
         if autofix_plan.get("suggested_next_command"):
             print(f"autofix_plan_command: {autofix_plan.get('suggested_next_command')}")
     top = payload.get("top_issue") if isinstance(payload.get("top_issue"), dict) else None
@@ -1052,7 +1122,9 @@ def backfill(*, target: Path, apply: bool = False, json_output: bool = False) ->
         "stale_after_days": config.stale_after_days,
         "receipt_path": str(receipt_path) if receipt_path else None,
         "candidates": candidates,
-        "next_command": "brigade memory care backfill --apply" if candidates and not apply else "brigade memory care scan",
+        "next_command": "brigade memory care backfill --apply"
+        if candidates and not apply
+        else "brigade memory care scan",
     }
     if json_output:
         print(json.dumps(payload, indent=2, sort_keys=True))
@@ -1083,7 +1155,9 @@ def import_issues(*, target: Path, json_output: bool = False, dry_run: bool = Fa
     except ValueError as exc:
         print(f"error: invalid memory-care config: {exc}", file=sys.stderr)
         return 2
-    return work_cmd.import_memory_care(target=target, queue=_queue_path(target, config), dry_run=dry_run, json_output=json_output)
+    return work_cmd.import_memory_care(
+        target=target, queue=_queue_path(target, config), dry_run=dry_run, json_output=json_output
+    )
 
 
 def _closeouts_root(target: Path) -> Path:

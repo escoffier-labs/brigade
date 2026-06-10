@@ -48,7 +48,13 @@ def _seed_workspace(path: Path, repo: Path):
     )
 
 
-def _action(*, action_id: str = "fleet-act-alpha", fingerprint: str = "fp-one", status: str = "pending", summary: str = "Fix fleet setup") -> dict:
+def _action(
+    *,
+    action_id: str = "fleet-act-alpha",
+    fingerprint: str = "fp-one",
+    status: str = "pending",
+    summary: str = "Fix fleet setup",
+) -> dict:
     return {
         "fleet_action_id": action_id,
         "repo_id": "alpha",
@@ -89,9 +95,20 @@ def _patch_release_health(monkeypatch):
     monkeypatch.setattr(
         handoff_cmd,
         "draft_queue_payload",
-        lambda target, **kwargs: {"counts": {"pending": 0}, "issue_count": 0, "top_issue": None, "latest_ingest_run": None, "drafts": [], "checks": []},
+        lambda target, **kwargs: {
+            "counts": {"pending": 0},
+            "issue_count": 0,
+            "top_issue": None,
+            "latest_ingest_run": None,
+            "drafts": [],
+            "checks": [],
+        },
     )
-    monkeypatch.setattr(release_cmd, "_run_content_guard_check", lambda *args, **kwargs: {"name": "content_guard_tip", "status": "ok", "detail": "clean"})
+    monkeypatch.setattr(
+        release_cmd,
+        "_run_content_guard_check",
+        lambda *args, **kwargs: {"name": "content_guard_tip", "status": "ok", "detail": "clean"},
+    )
     monkeypatch.setattr(release_cmd, "_content_guard_available", lambda target: True)
 
 
@@ -100,19 +117,30 @@ def test_fleet_action_dispatch_plan_apply_dry_run_all_reviewed_and_privacy(tmp_p
     _init_repo(repo)
     _seed_workspace(tmp_path, repo)
     private_summary = f"Fix setup in {repo}"
-    _seed_action_queue(tmp_path, [_action(summary=private_summary), _action(action_id="fleet-act-beta", fingerprint="fp-two", summary="Second action")])
+    _seed_action_queue(
+        tmp_path,
+        [
+            _action(summary=private_summary),
+            _action(action_id="fleet-act-beta", fingerprint="fp-two", summary="Second action"),
+        ],
+    )
 
     assert repos_cmd.actions_dispatch_plan(target=tmp_path, action_id="fleet-act-alpha", json_output=True) == 0
     plan = json.loads(capsys.readouterr().out)
     assert plan["plans"][0]["dispatchable"] is True
     assert "actual-repo-name" not in json.dumps(plan)
 
-    assert repos_cmd.actions_dispatch_apply(target=tmp_path, action_id="fleet-act-alpha", dry_run=True, json_output=True) == 0
+    assert (
+        repos_cmd.actions_dispatch_apply(target=tmp_path, action_id="fleet-act-alpha", dry_run=True, json_output=True)
+        == 0
+    )
     dry = json.loads(capsys.readouterr().out)
     assert dry["dry_run"] is True
     assert work_cmd._read_imports(repo) == []
 
-    assert cli.main(["repos", "actions", "dispatch", "apply", "fleet-act-alpha", "--target", str(tmp_path), "--json"]) == 0
+    assert (
+        cli.main(["repos", "actions", "dispatch", "apply", "fleet-act-alpha", "--target", str(tmp_path), "--json"]) == 0
+    )
     applied = json.loads(capsys.readouterr().out)
     assert applied["created_count"] == 1
     imports = work_cmd._read_imports(repo)
@@ -129,7 +157,9 @@ def test_fleet_action_dispatch_plan_apply_dry_run_all_reviewed_and_privacy(tmp_p
         repo / ".brigade" / "work" / "closeouts" / "closeout-one" / "closeout.json",
         {"closeout_id": "closeout-one", "status": "ready", "created_at": "2026-05-30T02:00:00+00:00"},
     )
-    assert any(check["name"] == "repo_fleet_action_evidence_changed" for check in repos_cmd.actions_health(tmp_path)["checks"])
+    assert any(
+        check["name"] == "repo_fleet_action_evidence_changed" for check in repos_cmd.actions_health(tmp_path)["checks"]
+    )
 
     assert repos_cmd.actions_dispatch_apply(target=tmp_path, action_id="fleet-act-alpha", json_output=True) == 0
     skipped = json.loads(capsys.readouterr().out)
@@ -163,7 +193,9 @@ def test_fleet_action_dispatch_dismissed_until_changed_and_supersede(tmp_path, c
     assert repos_cmd.actions_dispatch_report(target=tmp_path, action_id="fleet-act-alpha", json_output=True) == 0
     dismissed_report = json.loads(capsys.readouterr().out)
     assert dismissed_report["actions"][0]["dismissed_import_count"] == 1
-    assert any(check["name"] == "repo_fleet_dispatch_import_dismissed" for check in dismissed_report["actions"][0]["checks"])
+    assert any(
+        check["name"] == "repo_fleet_dispatch_import_dismissed" for check in dismissed_report["actions"][0]["checks"]
+    )
 
     actions = repos_cmd._read_actions(tmp_path)
     actions[0]["source_fingerprint"] = "fp-two"
@@ -175,7 +207,22 @@ def test_fleet_action_dispatch_dismissed_until_changed_and_supersede(tmp_path, c
     imports = work_cmd._read_imports(repo)
     statuses = sorted(item["status"] for item in imports)
     assert statuses == ["pending", "superseded"]
-    assert cli.main(["repos", "actions", "dispatch", "report", "fleet-act-alpha", "--target", str(tmp_path), "--record", "--json"]) == 0
+    assert (
+        cli.main(
+            [
+                "repos",
+                "actions",
+                "dispatch",
+                "report",
+                "fleet-act-alpha",
+                "--target",
+                str(tmp_path),
+                "--record",
+                "--json",
+            ]
+        )
+        == 0
+    )
     report = json.loads(capsys.readouterr().out)
     assert report["recorded"] is True
     assert report["actions"][0]["superseded_import_count"] == 1
@@ -200,7 +247,9 @@ def test_fleet_action_context_plan_build_excludes_private_evidence(tmp_path, cap
     assert "local guidance that must not be copied" not in rendered
     assert "raw guidance file contents" in rendered
 
-    assert cli.main(["repos", "actions", "context", "build", "fleet-act-alpha", "--target", str(tmp_path), "--json"]) == 0
+    assert (
+        cli.main(["repos", "actions", "context", "build", "fleet-act-alpha", "--target", str(tmp_path), "--json"]) == 0
+    )
     built = json.loads(capsys.readouterr().out)
     pack_path = repo / ".brigade" / "context" / "packs" / built["pack_id"]
     assert (pack_path / "context.json").is_file()
@@ -246,10 +295,14 @@ def test_fleet_action_reconcile_states_and_completion(tmp_path, capsys):
     assert states["fleet-act-stale"] == "stale"
     assert states["fleet-act-broken"] == "broken-reference"
 
-    alpha_import = next(item for item in work_cmd._read_imports(repo) if item["metadata"]["fleet_action_id"] == "fleet-act-alpha")
+    alpha_import = next(
+        item for item in work_cmd._read_imports(repo) if item["metadata"]["fleet_action_id"] == "fleet-act-alpha"
+    )
     assert work_cmd.import_promote(target=repo, import_id=alpha_import["id"]) == 0
     capsys.readouterr()
-    promoted = next(item for item in work_cmd._read_imports(repo) if item["metadata"]["fleet_action_id"] == "fleet-act-alpha")
+    promoted = next(
+        item for item in work_cmd._read_imports(repo) if item["metadata"]["fleet_action_id"] == "fleet-act-alpha"
+    )
     assert repos_cmd.actions_reconcile(target=tmp_path, action_id="fleet-act-alpha", json_output=True) == 0
     assert json.loads(capsys.readouterr().out)["results"][0]["status"] == "in-progress"
     assert work_cmd.task_done(target=repo, task_id=promoted["task_id"]) == 0
@@ -292,7 +345,11 @@ def test_fleet_action_dispatch_health_integrates_with_daily_surfaces(tmp_path, m
     assert center_cmd.reviews(target=tmp_path, json_output=True) == 0
     reviews = json.loads(capsys.readouterr().out)
     assert any(item["subsystem"] == "repo-fleet" for item in reviews["reviews"])
-    assert any("dispatch report" in item["suggested_next_command"] for item in reviews["reviews"] if item["subsystem"] == "repo-fleet")
+    assert any(
+        "dispatch report" in item["suggested_next_command"]
+        for item in reviews["reviews"]
+        if item["subsystem"] == "repo-fleet"
+    )
     assert work_cmd.brief(target=tmp_path, json_output=True) == 0
     assert json.loads(capsys.readouterr().out)["repo_fleet"]["actions"]["issue_count"] >= 1
     assert work_cmd.doctor(target=tmp_path) == 1

@@ -1,4 +1,5 @@
 """`brigade scrub` - run the content-guard scanner against a target."""
+
 from __future__ import annotations
 
 import json
@@ -58,10 +59,14 @@ def hook_status(target: Path, policy: str = "public-repo") -> dict[str, Any]:
     checks: list[dict[str, str]] = []
     suggestions: list[str] = []
     if not available():
-        checks.append({"status": "warn", "name": "content_guard_missing", "detail": f"content-guard not found at {scanner_dir()}"})
+        checks.append(
+            {"status": "warn", "name": "content_guard_missing", "detail": f"content-guard not found at {scanner_dir()}"}
+        )
         suggestions.append("clone https://github.com/escoffier-labs/content-guard or set CONTENT_GUARD_DIR")
     if not policy_exists:
-        checks.append({"status": "warn", "name": "content_guard_policy_missing", "detail": f"policy not found: {resolved_policy}"})
+        checks.append(
+            {"status": "warn", "name": "content_guard_policy_missing", "detail": f"policy not found: {resolved_policy}"}
+        )
         suggestions.append(f"brigade scrub --target . --policy {policy} --dry-run")
     if hook_mode == "external-hooks-path":
         checks.append(
@@ -74,13 +79,25 @@ def hook_status(target: Path, policy: str = "public-repo") -> dict[str, Any]:
         if hook.is_file():
             suggestions.append("git config core.hooksPath hooks")
     elif not hook_enabled:
-        checks.append({"status": "warn", "name": "content_guard_hook_not_enabled", "detail": "no executable pre-push hook found in the active Git hooks path"})
+        checks.append(
+            {
+                "status": "warn",
+                "name": "content_guard_hook_not_enabled",
+                "detail": "no executable pre-push hook found in the active Git hooks path",
+            }
+        )
         if hook.is_file():
             suggestions.append("git config core.hooksPath hooks")
         else:
             suggestions.append("brigade init --target . --force")
     if not checks:
-        checks.append({"status": "ok", "name": "content_guard_ready", "detail": "content-guard policy and pre-push hook are available"})
+        checks.append(
+            {
+                "status": "ok",
+                "name": "content_guard_ready",
+                "detail": "content-guard policy and pre-push hook are available",
+            }
+        )
     return {
         "available": available(),
         "scanner_dir": str(scanner_dir()),
@@ -259,8 +276,7 @@ def run(
             file=sys.stderr,
         )
         print(
-            "brigade scrub: clone https://github.com/escoffier-labs/content-guard "
-            "or set CONTENT_GUARD_DIR",
+            "brigade scrub: clone https://github.com/escoffier-labs/content-guard or set CONTENT_GUARD_DIR",
             file=sys.stderr,
         )
         return 2

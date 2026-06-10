@@ -140,7 +140,9 @@ def test_context_sync_plan_receipts_freshness_conflicts_and_release_center_integ
     assert plan["write_default"] is False
     assert any(issue["name"] == "context_sync_missing_source_reference" for issue in plan["issues"])
 
-    _write_json(config, {"targets": [{"id": "codex", "harness": "codex", "path": ".codex/context.md", "enabled": True}]})
+    _write_json(
+        config, {"targets": [{"id": "codex", "harness": "codex", "path": ".codex/context.md", "enabled": True}]}
+    )
     assert context_cmd.sync_record(target=tmp_path, pack_id="latest", json_output=True) == 0
     receipt = json.loads(capsys.readouterr().out)
     assert Path(receipt["path"], "sync-plan.json").is_file()
@@ -151,7 +153,11 @@ def test_context_sync_plan_receipts_freshness_conflicts_and_release_center_integ
     assert health["sync"]["destination_count"] == 1
     assert any(issue["name"] == "context_sync_missing_source_reference" for issue in health["issues"])
 
-    monkeypatch.setattr(release_cmd, "_run_content_guard_check", lambda *args, **kwargs: {"name": "content_guard_tip", "status": "ok", "exit_code": 0, "detail": "clean"})
+    monkeypatch.setattr(
+        release_cmd,
+        "_run_content_guard_check",
+        lambda *args, **kwargs: {"name": "content_guard_tip", "status": "ok", "exit_code": 0, "detail": "clean"},
+    )
     monkeypatch.setattr(release_cmd, "_content_guard_available", lambda target: True)
     assert release_cmd.plan(target=tmp_path, base_ref=None, json_output=True) in {0, 1}
     release = json.loads(capsys.readouterr().out)
@@ -167,7 +173,10 @@ def test_context_pack_freshness_doctor_imports_and_daily_release_surfaces(tmp_pa
     _seed_import(tmp_path)
     (tmp_path / "README.md").write_text("local readme\n")
     monkeypatch.setattr(context_cmd, "_now", lambda: datetime(2026, 5, 30, 12, 0, 0, tzinfo=timezone.utc))
-    assert context_cmd.build(target=tmp_path, kind="task", task_id="task-one", tool_id="missing-tool", json_output=True) == 0
+    assert (
+        context_cmd.build(target=tmp_path, kind="task", task_id="task-one", tool_id="missing-tool", json_output=True)
+        == 0
+    )
     built = json.loads(capsys.readouterr().out)
     context_path = Path(built["path"], "context.json")
     payload = json.loads(context_path.read_text())
@@ -201,7 +210,11 @@ def test_context_pack_freshness_doctor_imports_and_daily_release_surfaces(tmp_pa
     reviews = json.loads(capsys.readouterr().out)
     assert any(item["subsystem"] == "context" for item in reviews["reviews"])
 
-    monkeypatch.setattr(release_cmd, "_run_content_guard_check", lambda *args, **kwargs: {"name": "content_guard_tip", "status": "ok", "exit_code": 0, "detail": "clean"})
+    monkeypatch.setattr(
+        release_cmd,
+        "_run_content_guard_check",
+        lambda *args, **kwargs: {"name": "content_guard_tip", "status": "ok", "exit_code": 0, "detail": "clean"},
+    )
     monkeypatch.setattr(release_cmd, "_content_guard_available", lambda target: True)
     assert release_cmd.plan(target=tmp_path, base_ref=None, json_output=True) in {0, 1}
     release = json.loads(capsys.readouterr().out)
@@ -256,14 +269,26 @@ decision = "leave-alone"
     )
     assert projects_cmd.audit(target=tmp_path, json_output=True) == 0
     audit = json.loads(capsys.readouterr().out)
-    assert {item["decision"] for item in audit["projects"]} == {"move-candidate", "bake-in", "integrate", "catalog-only", "leave-alone"}
+    assert {item["decision"] for item in audit["projects"]} == {
+        "move-candidate",
+        "bake-in",
+        "integrate",
+        "catalog-only",
+        "leave-alone",
+    }
     assert audit["issue_count"] == 1
     assert projects_cmd.readiness_plan(target=tmp_path, json_output=True) == 0
     readiness = json.loads(capsys.readouterr().out)
     assert readiness["remote_mutation"] is False
     assert readiness["manual_only"] is True
     assert readiness["project_count"] == 5
-    assert {item["decision"] for item in readiness["projects"]} == {"move-candidate", "bake-in", "integrate", "catalog-only", "leave-alone"}
+    assert {item["decision"] for item in readiness["projects"]} == {
+        "move-candidate",
+        "bake-in",
+        "integrate",
+        "catalog-only",
+        "leave-alone",
+    }
     move = next(item for item in readiness["projects"] if item["decision"] == "move-candidate")
     assert move["status"] == "blocked"
     assert move["missing_readiness"] == ["license", "security", "release", "ownership"]
@@ -316,7 +341,10 @@ ownership_ready = true
     )
     assert projects_cmd.import_issues(target=tmp_path, json_output=True) == 0
     assert json.loads(capsys.readouterr().out)["created"] == 1
-    assert projects_cmd.closeout(target=tmp_path, status="reviewed", reason="tracked outside Brigade", json_output=True) == 0
+    assert (
+        projects_cmd.closeout(target=tmp_path, status="reviewed", reason="tracked outside Brigade", json_output=True)
+        == 0
+    )
     reviewed = json.loads(capsys.readouterr().out)
     assert reviewed["quieting_status"] is True
     assert reviewed["remote_mutation"] is False
@@ -344,7 +372,9 @@ ownership_ready = true
     assert projects_cmd.closeout(target=tmp_path, status="deferred", reason="wait for release", json_output=True) == 0
     assert json.loads(capsys.readouterr().out)["status"] == "deferred"
     assert projects_cmd.health(tmp_path)["issue_count"] == 0
-    assert projects_cmd.closeout(target=tmp_path, status="superseded", reason="needs fresh review", json_output=True) == 0
+    assert (
+        projects_cmd.closeout(target=tmp_path, status="superseded", reason="needs fresh review", json_output=True) == 0
+    )
     assert json.loads(capsys.readouterr().out)["status"] == "superseded"
     assert projects_cmd.health(tmp_path)["issue_count"] == 1
     assert projects_cmd.closeout(target=tmp_path, status="archived", reason="accepted archive", json_output=True) == 0
@@ -407,7 +437,12 @@ def test_learning_closeouts_quiet_sources_and_changed_fingerprints(tmp_path, cap
         "tool-catalog-one": "deferred",
     }
     for candidate_id, status in status_by_id.items():
-        assert learn_cmd.closeout(target=tmp_path, candidate_id=candidate_id, status=status, reason="reviewed", json_output=True) == 0
+        assert (
+            learn_cmd.closeout(
+                target=tmp_path, candidate_id=candidate_id, status=status, reason="reviewed", json_output=True
+            )
+            == 0
+        )
         closeout = json.loads(capsys.readouterr().out)
         assert closeout["status"] == status
         assert closeout["remote_mutation"] is False
@@ -508,10 +543,17 @@ def test_learning_skill_candidates_create_reviewed_skill_proposals(tmp_path, cap
     assert len(candidate["response_options"]) == 2
     assert candidate["suggested_skill_id"].startswith("security-scan-")
 
-    assert cli.main(["learn", "skill-candidates", "--target", str(tmp_path), "--source", "security-scan", "--json"]) == 0
+    assert (
+        cli.main(["learn", "skill-candidates", "--target", str(tmp_path), "--source", "security-scan", "--json"]) == 0
+    )
     assert json.loads(capsys.readouterr().out)["candidate_count"] == 1
 
-    assert learn_cmd.propose_skill(target=tmp_path, candidate_id=candidate["id"], source="security-scan", dry_run=True, json_output=True) == 0
+    assert (
+        learn_cmd.propose_skill(
+            target=tmp_path, candidate_id=candidate["id"], source="security-scan", dry_run=True, json_output=True
+        )
+        == 0
+    )
     dry_run = json.loads(capsys.readouterr().out)
     assert dry_run["dry_run"] is True
     assert dry_run["proposal"]["status"] == "planned"
@@ -596,7 +638,10 @@ def test_learning_skill_proposals_redact_guarded_agent_authored_metadata(tmp_pat
     assert candidate["guarded_input"] is True
     assert candidate["review_risk"] == "high"
 
-    assert learn_cmd.propose_skill(target=tmp_path, candidate_id=candidate["id"], source="security-scan", json_output=True) == 0
+    assert (
+        learn_cmd.propose_skill(target=tmp_path, candidate_id=candidate["id"], source="security-scan", json_output=True)
+        == 0
+    )
     proposal_payload = json.loads(capsys.readouterr().out)
     proposal_rendered = json.dumps(proposal_payload)
     assert secret not in proposal_rendered
@@ -617,15 +662,18 @@ def test_learning_skill_proposals_redact_guarded_agent_authored_metadata(tmp_pat
 
 
 def test_learning_replay_export_compare_redaction_release_and_center(tmp_path, capsys):
-    assert learn_cmd.replay_export(
-        target=tmp_path,
-        scenario_id="scenario-one",
-        before_summary="before token=super-secret https://private.invalid/path",
-        after_summary="after password=hunter2",
-        before_count=1,
-        after_count=3,
-        json_output=True,
-    ) == 0
+    assert (
+        learn_cmd.replay_export(
+            target=tmp_path,
+            scenario_id="scenario-one",
+            before_summary="before token=super-secret https://private.invalid/path",
+            after_summary="after password=hunter2",
+            before_count=1,
+            after_count=3,
+            json_output=True,
+        )
+        == 0
+    )
     replay = json.loads(capsys.readouterr().out)
     assert replay["remote_mutation"] is False
     rendered = json.dumps(replay)
@@ -758,7 +806,13 @@ def test_security_closeout_and_release_candidate_compare_closeout(tmp_path, monk
     monkeypatch.setattr(
         security_cmd,
         "health",
-        lambda target: {"valid": True, "issue_count": 0, "top_issue": None, "top_finding": None, "evidence": {"ready": True, "finding_count": 0}},
+        lambda target: {
+            "valid": True,
+            "issue_count": 0,
+            "top_issue": None,
+            "top_finding": None,
+            "evidence": {"ready": True, "finding_count": 0},
+        },
     )
     monkeypatch.setattr(
         handoff_cmd,
@@ -775,7 +829,11 @@ def test_security_closeout_and_release_candidate_compare_closeout(tmp_path, monk
         "_review_health",
         lambda target: {"latest_run": None, "latest_unclosed_run": None, "unresolved_finding_count": 0},
     )
-    monkeypatch.setattr(release_cmd, "_run_content_guard_check", lambda *args, **kwargs: {"name": "content_guard_tip", "status": "ok", "detail": "clean"})
+    monkeypatch.setattr(
+        release_cmd,
+        "_run_content_guard_check",
+        lambda *args, **kwargs: {"name": "content_guard_tip", "status": "ok", "detail": "clean"},
+    )
     monkeypatch.setattr(release_cmd, "_content_guard_available", lambda target: True)
     assert release_cmd.run(target=tmp_path, base_ref=None, json_output=True) == 0
     capsys.readouterr()
@@ -784,7 +842,12 @@ def test_security_closeout_and_release_candidate_compare_closeout(tmp_path, monk
     assert release_cmd.candidate_compare(target=tmp_path, candidate_id=candidate["candidate_id"], json_output=True) == 0
     compare = json.loads(capsys.readouterr().out)
     assert compare["status"] == "current"
-    assert release_cmd.candidate_closeout(target=tmp_path, candidate_id=candidate["candidate_id"], status="reviewed", json_output=True) == 0
+    assert (
+        release_cmd.candidate_closeout(
+            target=tmp_path, candidate_id=candidate["candidate_id"], status="reviewed", json_output=True
+        )
+        == 0
+    )
     closeout = json.loads(capsys.readouterr().out)
     assert Path(closeout["path"]).is_file()
 
@@ -912,10 +975,7 @@ def test_import_learnings_feeds_plan_and_recurrence_detection(tmp_path, capsys):
     assert learn_cmd.plan(target=tmp_path, json_output=True) == 0
     plan = json.loads(capsys.readouterr().out)
     assert plan["candidate_count"] == 4
-    assert all(
-        candidate["subsystem"] == "learnings-import"
-        for candidate in plan["candidates"]
-    )
+    assert all(candidate["subsystem"] == "learnings-import" for candidate in plan["candidates"])
 
     assert learn_cmd.skill_candidates(target=tmp_path, min_count=3, json_output=True) == 0
     skills = json.loads(capsys.readouterr().out)

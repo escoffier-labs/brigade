@@ -1,12 +1,12 @@
 """brigade reconfigure - adjust an existing install to a new Selection."""
+
 from __future__ import annotations
 
 import shutil
-import sys
 from pathlib import Path
 
-from .config import Config, load_config, write_config
-from .install import apply_gitignore, install_selection, resolve_manifests
+from .config import load_config
+from .install import install_selection
 from .selection import Selection
 
 

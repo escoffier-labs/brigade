@@ -115,7 +115,11 @@ def _scanner_latest_sweep(target: Path) -> dict[str, Any] | None:
 
 def _scanner_latest_success(target: Path, scanner_id: str) -> dict[str, Any] | None:
     for receipt in _scanner_receipts(target):
-        if receipt.get("scanner_id") == scanner_id and receipt.get("status") == "completed" and receipt.get("exit_code") == 0:
+        if (
+            receipt.get("scanner_id") == scanner_id
+            and receipt.get("status") == "completed"
+            and receipt.get("exit_code") == 0
+        ):
             return receipt
     return None
 
@@ -315,7 +319,9 @@ def _review_finding_fingerprint(finding: dict[str, Any], *, reviewer_id: str) ->
     )
 
 
-def _normalize_review_finding(value: object, *, reviewer_id: str, run_id: str, run: dict[str, Any], label: str) -> tuple[dict[str, Any] | None, list[str]]:
+def _normalize_review_finding(
+    value: object, *, reviewer_id: str, run_id: str, run: dict[str, Any], label: str
+) -> tuple[dict[str, Any] | None, list[str]]:
     if not isinstance(value, dict):
         return None, [f"{label}: expected JSON object"]
     errors: list[str] = []
@@ -369,7 +375,9 @@ def _normalize_review_finding(value: object, *, reviewer_id: str, run_id: str, r
     return normalized, []
 
 
-def _load_review_findings(path: Path, *, reviewer_id: str, run_id: str, run: dict[str, Any]) -> tuple[list[dict[str, Any]], list[str]]:
+def _load_review_findings(
+    path: Path, *, reviewer_id: str, run_id: str, run: dict[str, Any]
+) -> tuple[list[dict[str, Any]], list[str]]:
     try:
         payload = json.loads(path.read_text())
     except OSError as exc:
@@ -404,7 +412,9 @@ def _review_import_record(finding: dict[str, Any]) -> dict[str, Any]:
     location = str(finding.get("path") or "")
     if finding.get("line"):
         location = f"{location}:{finding.get('line')}"
-    text = f"Review finding {finding.get('severity')} {finding.get('category')} in {location}: {finding.get('rationale')}"
+    text = (
+        f"Review finding {finding.get('severity')} {finding.get('category')} in {location}: {finding.get('rationale')}"
+    )
     metadata = {
         "reviewer_id": finding.get("reviewer_id"),
         "review_run_id": finding.get("run_id"),
@@ -736,8 +746,12 @@ def _review_plan_payload(target: Path) -> dict[str, Any]:
                 "timeout": reviewer.get("timeout"),
                 "target_paths": reviewer.get("target_paths") or [],
                 "base_ref": reviewer.get("base_ref"),
-                "output_path": str(config_mod._review_output_path(target, reviewer)) if config_mod._review_output_path(target, reviewer) else None,
-                "findings_path": str(config_mod._review_findings_path(target, reviewer)) if config_mod._review_findings_path(target, reviewer) else None,
+                "output_path": str(config_mod._review_output_path(target, reviewer))
+                if config_mod._review_output_path(target, reviewer)
+                else None,
+                "findings_path": str(config_mod._review_findings_path(target, reviewer))
+                if config_mod._review_findings_path(target, reviewer)
+                else None,
                 "supported_modes": reviewer.get("supported_modes") or [],
                 "privacy_mode": reviewer.get("privacy_mode"),
             }
@@ -753,11 +767,7 @@ def _review_plan_payload(target: Path) -> dict[str, Any]:
 
 
 def _review_pending_finding(target: Path) -> dict[str, Any] | None:
-    candidates = [
-        item
-        for item in ledger_mod._pending_imports(target)
-        if item.get("source") == "code-review"
-    ]
+    candidates = [item for item in ledger_mod._pending_imports(target) if item.get("source") == "code-review"]
     if not candidates:
         return None
     candidates.sort(
@@ -913,7 +923,9 @@ def _review_findings_payload(target: Path, *, run_id: str | None = None) -> dict
     for item in imports:
         metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
         item_run_id = metadata.get("review_run_id")
-        current_fingerprints = current_fingerprints_by_run.get(str(item_run_id)) if isinstance(item_run_id, str) else None
+        current_fingerprints = (
+            current_fingerprints_by_run.get(str(item_run_id)) if isinstance(item_run_id, str) else None
+        )
         summaries.append(
             _review_finding_summary(item, tasks_by_id=tasks_by_id, current_fingerprints=current_fingerprints)
         )
@@ -975,7 +987,9 @@ def _review_malformed_findings(target: Path, runs: list[dict[str, Any]], reviewe
     for reviewer in reviewers:
         path = config_mod._review_findings_path(target, reviewer)
         if path is not None and path.is_file():
-            items.append((str(reviewer.get("id")), path, {"run_id": str(reviewer.get("id")), "findings_path": str(path)}))
+            items.append(
+                (str(reviewer.get("id")), path, {"run_id": str(reviewer.get("id")), "findings_path": str(path)})
+            )
     malformed: list[str] = []
     seen: set[str] = set()
     for label, path, run in items:
@@ -1000,7 +1014,13 @@ def _review_health(target: Path) -> dict[str, Any]:
     receipts = _review_receipts(target)
     checks: list[dict[str, Any]] = []
     if not helpers._review_config_path(target).is_file():
-        checks.append({"status": constants.WARN, "name": "review_config", "detail": f"missing, run `brigade work review init --target {target}`"})
+        checks.append(
+            {
+                "status": constants.WARN,
+                "name": "review_config",
+                "detail": f"missing, run `brigade work review init --target {target}`",
+            }
+        )
     elif plan.get("valid"):
         checks.append({"status": constants.OK, "name": "review_config", "detail": plan["config_path"]})
     else:
@@ -1013,10 +1033,18 @@ def _review_health(target: Path) -> dict[str, Any]:
     if blocked:
         checks.append({"status": constants.WARN, "name": "review_commands", "detail": ", ".join(blocked[:5])})
     elif plan.get("valid"):
-        checks.append({"status": constants.OK, "name": "review_commands", "detail": "enabled reviewer commands are resolvable"})
+        checks.append(
+            {"status": constants.OK, "name": "review_commands", "detail": "enabled reviewer commands are resolvable"}
+        )
     failed = [run for run in receipts if run.get("status") == "failed" or run.get("timed_out")][:5]
     if failed:
-        checks.append({"status": constants.WARN, "name": "review_runs_failed", "detail": ", ".join(str(run.get("run_id")) for run in failed)})
+        checks.append(
+            {
+                "status": constants.WARN,
+                "name": "review_runs_failed",
+                "detail": ", ".join(str(run.get("run_id")) for run in failed),
+            }
+        )
     elif receipts:
         checks.append({"status": constants.OK, "name": "review_runs_failed", "detail": "none"})
     missing_logs: list[str] = []
@@ -1031,7 +1059,9 @@ def _review_health(target: Path) -> dict[str, Any]:
         checks.append({"status": constants.OK, "name": "review_run_logs", "detail": "receipt logs exist"})
     malformed = _review_malformed_findings(target, receipts, reviewers)
     if malformed:
-        checks.append({"status": constants.WARN, "name": "review_findings_malformed", "detail": "; ".join(malformed[:3])})
+        checks.append(
+            {"status": constants.WARN, "name": "review_findings_malformed", "detail": "; ".join(malformed[:3])}
+        )
     latest_success = _review_latest_success(target)
     enabled = [reviewer for reviewer in reviewers if reviewer.get("enabled", True)]
     if enabled and latest_success is None:
@@ -1041,16 +1071,38 @@ def _review_health(target: Path) -> dict[str, Any]:
         if completed is not None:
             age_hours = (helpers._now() - completed).total_seconds() / 3600
             if age_hours > constants.REVIEW_RUN_STALE_HOURS:
-                checks.append({"status": constants.WARN, "name": "review_runs_stale", "detail": f"{latest_success.get('run_id')}={age_hours:.1f}h"})
+                checks.append(
+                    {
+                        "status": constants.WARN,
+                        "name": "review_runs_stale",
+                        "detail": f"{latest_success.get('run_id')}={age_hours:.1f}h",
+                    }
+                )
             else:
-                checks.append({"status": constants.OK, "name": "review_runs_stale", "detail": "latest review run is fresh"})
+                checks.append(
+                    {"status": constants.OK, "name": "review_runs_stale", "detail": "latest review run is fresh"}
+                )
     ledger = ledger_mod._read_task_ledger(target)
     done_tasks = [task for task in ledger.get("tasks", []) if isinstance(task, dict) and task.get("status") == "done"]
     if enabled and done_tasks and latest_success is None:
-        checks.append({"status": constants.WARN, "name": "review_completed_tasks", "detail": f"{len(done_tasks)} completed task(s) have no successful review receipt"})
-    unclosed = [run for run in receipts if run.get("status") == "completed" and not isinstance(run.get("closeout"), dict)]
+        checks.append(
+            {
+                "status": constants.WARN,
+                "name": "review_completed_tasks",
+                "detail": f"{len(done_tasks)} completed task(s) have no successful review receipt",
+            }
+        )
+    unclosed = [
+        run for run in receipts if run.get("status") == "completed" and not isinstance(run.get("closeout"), dict)
+    ]
     if unclosed:
-        checks.append({"status": constants.WARN, "name": "review_runs_unclosed", "detail": ", ".join(str(run.get("run_id")) for run in unclosed[:5])})
+        checks.append(
+            {
+                "status": constants.WARN,
+                "name": "review_runs_unclosed",
+                "detail": ", ".join(str(run.get("run_id")) for run in unclosed[:5]),
+            }
+        )
     findings_payload = _review_findings_payload(target)
     top_pending = _review_pending_finding(target)
     return {
@@ -1063,7 +1115,9 @@ def _review_health(target: Path) -> dict[str, Any]:
         "latest_unclosed_run": unclosed[0] if unclosed else None,
         "top_pending_finding": top_pending,
         "top_unresolved_finding": findings_payload["top_unresolved"],
-        "pending_finding_count": len([item for item in ledger_mod._pending_imports(target) if item.get("source") == "code-review"]),
+        "pending_finding_count": len(
+            [item for item in ledger_mod._pending_imports(target) if item.get("source") == "code-review"]
+        ),
         "unresolved_finding_count": findings_payload["unresolved_count"],
     }
 
@@ -1095,9 +1149,7 @@ def _review_stamp_task_closeouts(target: Path, closeout: dict[str, Any]) -> list
         if isinstance(item, dict) and isinstance(item.get("task_id"), str)
     }
     wanted_task_ids.update(
-        str(item)
-        for item in closeout.get("completed_task_ids_reviewed", [])
-        if isinstance(item, str)
+        str(item) for item in closeout.get("completed_task_ids_reviewed", []) if isinstance(item, str)
     )
     stamped: list[str] = []
     changed = False
@@ -1176,11 +1228,7 @@ def _review_closeout_payload(target: Path, run_id: str, *, write: bool = False) 
         _review_finding_summary(item, tasks_by_id=tasks_by_id, current_fingerprints=current_fingerprints)
         for item in imported
     ]
-    imported_finding_ids = {
-        str(item.get("finding_id"))
-        for item in summaries
-        if item.get("finding_id")
-    }
+    imported_finding_ids = {str(item.get("finding_id")) for item in summaries if item.get("finding_id")}
     for finding in findings:
         finding_id = str(finding.get("finding_id") or "")
         if finding_id and finding_id in imported_finding_ids:
@@ -1232,7 +1280,9 @@ def _review_closeout_payload(target: Path, run_id: str, *, write: bool = False) 
         "current_findings_errors": current_errors,
         "findings": summaries,
         "unresolved_findings": unresolved,
-        "completed_task_ids_reviewed": run.get("completed_task_ids_reviewed") if isinstance(run.get("completed_task_ids_reviewed"), list) else [],
+        "completed_task_ids_reviewed": run.get("completed_task_ids_reviewed")
+        if isinstance(run.get("completed_task_ids_reviewed"), list)
+        else [],
     }
     if write:
         stamped_tasks = _review_stamp_task_closeouts(target, closeout)
@@ -1368,7 +1418,9 @@ def _scanner_health(target: Path) -> dict[str, Any]:
             detail_parts.append(f"disabled={','.join(disabled_required)}")
         checks.append({"status": constants.WARN, "name": "scanner_required", "detail": "; ".join(detail_parts)})
     else:
-        checks.append({"status": constants.OK, "name": "scanner_required", "detail": "required local producers are enabled"})
+        checks.append(
+            {"status": constants.OK, "name": "scanner_required", "detail": "required local producers are enabled"}
+        )
 
     bad_commands = []
     for scanner in scanners:
@@ -1380,7 +1432,9 @@ def _scanner_health(target: Path) -> dict[str, Any]:
     if bad_commands:
         checks.append({"status": constants.WARN, "name": "scanner_commands", "detail": ", ".join(bad_commands)})
     else:
-        checks.append({"status": constants.OK, "name": "scanner_commands", "detail": "enabled scanner commands are resolvable"})
+        checks.append(
+            {"status": constants.OK, "name": "scanner_commands", "detail": "enabled scanner commands are resolvable"}
+        )
 
     stale_outputs: list[str] = []
     missing_outputs: list[str] = []
@@ -1409,11 +1463,15 @@ def _scanner_health(target: Path) -> dict[str, Any]:
             parts.append(f"stale={','.join(stale_outputs)}")
         checks.append({"status": constants.WARN, "name": "scanner_outputs", "detail": "; ".join(parts)})
     else:
-        checks.append({"status": constants.OK, "name": "scanner_outputs", "detail": "enabled scanner outputs exist and are fresh"})
+        checks.append(
+            {"status": constants.OK, "name": "scanner_outputs", "detail": "enabled scanner outputs exist and are fresh"}
+        )
 
     conflicts = plan.get("conflicts") if isinstance(plan.get("conflicts"), list) else []
     if conflicts:
-        rendered = ", ".join(f"{item.get('type')}:{'/'.join(str(v) for v in item.get('scanners', []))}" for item in conflicts[:5])
+        rendered = ", ".join(
+            f"{item.get('type')}:{'/'.join(str(v) for v in item.get('scanners', []))}" for item in conflicts[:5]
+        )
         checks.append({"status": constants.WARN, "name": "scanner_schedule", "detail": rendered})
     elif plan.get("valid"):
         checks.append({"status": constants.OK, "name": "scanner_schedule", "detail": "no scanner schedule conflicts"})
@@ -1426,17 +1484,23 @@ def _scanner_health(target: Path) -> dict[str, Any]:
             if path.is_dir() and _scanner_read_receipt(path) is None:
                 malformed_receipts.append(path.name)
     if malformed_receipts:
-        checks.append({"status": constants.FAIL, "name": "scanner_run_receipts", "detail": ", ".join(malformed_receipts[:5])})
+        checks.append(
+            {"status": constants.FAIL, "name": "scanner_run_receipts", "detail": ", ".join(malformed_receipts[:5])}
+        )
 
     running = [receipt for receipt in receipts if receipt.get("status") == "running"]
     if running:
-        checks.append({"status": constants.WARN, "name": "scanner_runs_running", "detail": ", ".join(str(item.get("run_id")) for item in running[:5])})
+        checks.append(
+            {
+                "status": constants.WARN,
+                "name": "scanner_runs_running",
+                "detail": ", ".join(str(item.get("run_id")) for item in running[:5]),
+            }
+        )
 
-    recent_failed = [
-        receipt
-        for receipt in receipts
-        if receipt.get("status") == "failed" or receipt.get("timed_out")
-    ][:5]
+    recent_failed = [receipt for receipt in receipts if receipt.get("status") == "failed" or receipt.get("timed_out")][
+        :5
+    ]
     if recent_failed:
         rendered = ", ".join(f"{item.get('scanner_id')}:{item.get('run_id')}" for item in recent_failed)
         checks.append({"status": constants.WARN, "name": "scanner_runs_failed", "detail": rendered})
@@ -1463,7 +1527,9 @@ def _scanner_health(target: Path) -> dict[str, Any]:
             latest_success = _scanner_latest_success(target, str(scanner.get("id") or ""))
             if latest_success is None:
                 continue
-            completed = helpers._parse_iso_datetime(latest_success.get("completed_at") or latest_success.get("started_at"))
+            completed = helpers._parse_iso_datetime(
+                latest_success.get("completed_at") or latest_success.get("started_at")
+            )
             if completed is None:
                 stale_successes.append(str(scanner.get("id")))
                 continue
@@ -1471,13 +1537,21 @@ def _scanner_health(target: Path) -> dict[str, Any]:
             if age_hours > constants.SCANNER_RUN_STALE_HOURS:
                 stale_successes.append(f"{scanner.get('id')}={age_hours:.1f}h")
     if stale_successes:
-        checks.append({"status": constants.WARN, "name": "scanner_runs_stale", "detail": ", ".join(stale_successes[:5])})
+        checks.append(
+            {"status": constants.WARN, "name": "scanner_runs_stale", "detail": ", ".join(stale_successes[:5])}
+        )
     elif receipts and plan.get("valid"):
         checks.append({"status": constants.OK, "name": "scanner_runs_stale", "detail": "none"})
 
     due = _scanner_due_items(target, scanners)
     if due:
-        checks.append({"status": constants.WARN, "name": "scanner_runs_due", "detail": ", ".join(str(item.get("id")) for item in due[:5])})
+        checks.append(
+            {
+                "status": constants.WARN,
+                "name": "scanner_runs_due",
+                "detail": ", ".join(str(item.get("id")) for item in due[:5]),
+            }
+        )
     elif plan.get("valid"):
         checks.append({"status": constants.OK, "name": "scanner_runs_due", "detail": "none"})
 
@@ -1508,12 +1582,24 @@ def _scanner_sweep_health(target: Path) -> dict[str, Any]:
         if status == "failed":
             checks.append({"status": constants.WARN, "name": "scanner_sweep_failed", "detail": latest.get("sweep_id")})
         else:
-            checks.append({"status": constants.OK, "name": "scanner_sweep_latest", "detail": f"{latest.get('sweep_id')} [{status}]"})
+            checks.append(
+                {
+                    "status": constants.OK,
+                    "name": "scanner_sweep_latest",
+                    "detail": f"{latest.get('sweep_id')} [{status}]",
+                }
+            )
         completed = helpers._parse_iso_datetime(latest.get("completed_at") or latest.get("started_at"))
         if completed is not None:
             age_hours = (helpers._now() - completed).total_seconds() / 3600
             if age_hours > constants.SCANNER_SWEEP_STALE_HOURS:
-                checks.append({"status": constants.WARN, "name": "scanner_sweep_stale", "detail": f"{latest.get('sweep_id')}={age_hours:.1f}h"})
+                checks.append(
+                    {
+                        "status": constants.WARN,
+                        "name": "scanner_sweep_stale",
+                        "detail": f"{latest.get('sweep_id')}={age_hours:.1f}h",
+                    }
+                )
         review, _ = _sweep_review_payload(target, str(latest.get("sweep_id") or "latest"))
         if isinstance(review, dict):
             checks.extend(review["issues"])
@@ -1633,12 +1719,18 @@ def _verification_evidence_payload(target: Path, session: tuple[Path, dict[str, 
         "target": str(target),
         "session": session_info,
         "task": task,
-        "task_acceptance": task.get("acceptance") if isinstance(task, dict) and isinstance(task.get("acceptance"), list) else [],
+        "task_acceptance": task.get("acceptance")
+        if isinstance(task, dict) and isinstance(task.get("acceptance"), list)
+        else [],
         "latest_verify": latest_verify,
         "scanner_sweep": {
             "latest": sweep_health.get("latest"),
-            "issue_count": sweep_health.get("review", {}).get("issue_count") if isinstance(sweep_health.get("review"), dict) else 0,
-            "top_issue": sweep_health.get("review", {}).get("top_issue") if isinstance(sweep_health.get("review"), dict) else None,
+            "issue_count": sweep_health.get("review", {}).get("issue_count")
+            if isinstance(sweep_health.get("review"), dict)
+            else 0,
+            "top_issue": sweep_health.get("review", {}).get("top_issue")
+            if isinstance(sweep_health.get("review"), dict)
+            else None,
             "due_count": sweep_health.get("due_count"),
         },
         "code_review": {
@@ -1673,7 +1765,9 @@ def _verify_plan_payload(target: Path, commands: list[str] | None = None) -> dic
         "commands": planned_commands,
         "blockers": blockers,
         "evidence": evidence,
-        "suggested_command": "brigade work verify run" if planned_commands else 'brigade work verify run --command "..."',
+        "suggested_command": "brigade work verify run"
+        if planned_commands
+        else 'brigade work verify run --command "..."',
     }
 
 
@@ -1818,7 +1912,12 @@ def _resolve_closeout_session(target: Path, session_id: str) -> tuple[Path | Non
     matches: list[tuple[Path, dict[str, Any]]] = []
     for path, payload in sessions:
         payload_id = str(payload.get("id") or path.name)
-        if payload_id == session_id or path.name == session_id or payload_id.startswith(session_id) or path.name.startswith(session_id):
+        if (
+            payload_id == session_id
+            or path.name == session_id
+            or payload_id.startswith(session_id)
+            or path.name.startswith(session_id)
+        ):
             matches.append((path, payload))
     if not matches:
         path = helpers._resolve_session(target, session_id)
@@ -1890,7 +1989,9 @@ def _work_closeout_payload(target: Path, session_id: str, *, write: bool = False
     if latest_verify is None:
         blockers.append("no verification receipt found")
     elif latest_verify.get("status") != "completed":
-        blockers.append(f"latest verification did not complete: {latest_verify.get('run_id')} [{latest_verify.get('status')}]")
+        blockers.append(
+            f"latest verification did not complete: {latest_verify.get('run_id')} [{latest_verify.get('status')}]"
+        )
     if task is not None and not task_acceptance:
         blockers.append(f"task has no acceptance criteria: {task.get('id')}")
     latest_sweep = scanner_sweep.get("latest") if isinstance(scanner_sweep.get("latest"), dict) else None
@@ -2117,7 +2218,11 @@ def import_list(
     imports = imports[:limit]
 
     if json_output:
-        print(json.dumps({"imports_path": str(helpers._imports_path(target)), "imports": imports}, indent=2, sort_keys=True))
+        print(
+            json.dumps(
+                {"imports_path": str(helpers._imports_path(target)), "imports": imports}, indent=2, sort_keys=True
+            )
+        )
         return 0
 
     print(f"work imports: {target}")
@@ -2230,7 +2335,9 @@ def import_ingest(
     if skipped_dismissed:
         print(f"skipped_dismissed: {len(skipped_dismissed)}")
     for item in imported:
-        print(f"- {item.get('id')} [{item.get('kind')}] {item.get('source')}: {helpers._short(str(item.get('text', '')))}")
+        print(
+            f"- {item.get('id')} [{item.get('kind')}] {item.get('source')}: {helpers._short(str(item.get('text', '')))}"
+        )
     return 0
 
 
@@ -2327,7 +2434,11 @@ def _memory_refresh_cards(payload: dict[str, Any], *, queue_path: Path) -> tuple
         if not isinstance(card, dict):
             errors.append(f"{label} must be an object")
             continue
-        card_file = ledger_mod._string_field(card.get("file")) or ledger_mod._string_field(card.get("path")) or ledger_mod._string_field(card.get("card_file"))
+        card_file = (
+            ledger_mod._string_field(card.get("file"))
+            or ledger_mod._string_field(card.get("path"))
+            or ledger_mod._string_field(card.get("card_file"))
+        )
         card_id = ledger_mod._string_field(card.get("id")) or ledger_mod._string_field(card.get("card_id")) or card_file
         if not card_file:
             errors.append(f"{label} requires file")
@@ -2407,7 +2518,11 @@ def _import_memory_refresh_queue(
     if not target.is_dir():
         print(f"error: --target is not a directory: {target}", file=sys.stderr)
         return 2
-    queue_path = queue.expanduser().resolve() if queue is not None else target / "memory" / "cards" / "decay" / "refresh-queue.json"
+    queue_path = (
+        queue.expanduser().resolve()
+        if queue is not None
+        else target / "memory" / "cards" / "decay" / "refresh-queue.json"
+    )
     if not queue_path.is_file():
         print(f"error: memory-care refresh queue not found: {queue_path}", file=sys.stderr)
         return 2
@@ -2519,8 +2634,10 @@ def _chat_sweep_records(payload: dict[str, Any], *, sweep_path: Path) -> tuple[l
         return [], [f"chat memory sweep `issues` must be a list: {sweep_path}"], 0
 
     generated_at = payload.get("generated_at")
-    sweep_id = ledger_mod._string_field(payload.get("sweep_id")) or ledger_mod._string_field(payload.get("id")) or helpers._stable_hash(
-        {"path": str(sweep_path), "generated_at": generated_at}
+    sweep_id = (
+        ledger_mod._string_field(payload.get("sweep_id"))
+        or ledger_mod._string_field(payload.get("id"))
+        or helpers._stable_hash({"path": str(sweep_path), "generated_at": generated_at})
     )
     provider = ledger_mod._string_field(payload.get("provider"))
     records: list[dict[str, Any]] = []
@@ -2534,8 +2651,10 @@ def _chat_sweep_records(payload: dict[str, Any], *, sweep_path: Path) -> tuple[l
         if not title:
             errors.append(f"{label} requires title")
             continue
-        issue_id = ledger_mod._string_field(issue.get("id")) or ledger_mod._string_field(issue.get("issue_id")) or helpers._stable_hash(
-            {"sweep_id": sweep_id, "title": title, "index": index}
+        issue_id = (
+            ledger_mod._string_field(issue.get("id"))
+            or ledger_mod._string_field(issue.get("issue_id"))
+            or helpers._stable_hash({"sweep_id": sweep_id, "title": title, "index": index})
         )
         actionable = bool(issue.get("actionable")) or bool(issue.get("task")) or issue.get("kind") == "task"
         kind = "task" if actionable else issue.get("kind", "incident")
@@ -3096,7 +3215,9 @@ def _inbox_hygiene_payload(target: Path) -> dict[str, Any]:
         _import_hygiene_issue(
             constants.WARN if stale_pending else constants.OK,
             "inbox_stale_pending",
-            f"{len(stale_pending)} pending import(s) older than {constants.IMPORT_STALE_HOURS}h" if stale_pending else "none",
+            f"{len(stale_pending)} pending import(s) older than {constants.IMPORT_STALE_HOURS}h"
+            if stale_pending
+            else "none",
             stale_pending[:10],
         )
     )
@@ -3166,7 +3287,9 @@ def _inbox_hygiene_payload(target: Path) -> dict[str, Any]:
     for items in by_identity.values():
         dismissed = [item for item in items if item.get("status") == "dismissed"]
         active = [item for item in items if item.get("status", "pending") in {"pending", "promoted"}]
-        active_fingerprints = {ledger_mod._import_fingerprint(item) for item in active if ledger_mod._import_fingerprint(item)}
+        active_fingerprints = {
+            ledger_mod._import_fingerprint(item) for item in active if ledger_mod._import_fingerprint(item)
+        }
         for item in dismissed:
             fingerprint = ledger_mod._import_fingerprint(item)
             if fingerprint and active_fingerprints and fingerprint not in active_fingerprints:
@@ -3175,7 +3298,9 @@ def _inbox_hygiene_payload(target: Path) -> dict[str, Any]:
         _import_hygiene_issue(
             constants.WARN if changed_dismissed else constants.OK,
             "inbox_dismissed_changed",
-            f"{len(changed_dismissed)} dismissed import(s) have changed source fingerprints" if changed_dismissed else "none",
+            f"{len(changed_dismissed)} dismissed import(s) have changed source fingerprints"
+            if changed_dismissed
+            else "none",
             changed_dismissed[:10],
         )
     )
@@ -3190,7 +3315,8 @@ def _inbox_hygiene_payload(target: Path) -> dict[str, Any]:
     noisy_sources = [
         f"{source}=dismissed:{counts['dismissed']},promoted:{counts['promoted']}"
         for source, counts in sorted(by_source.items())
-        if counts["dismissed"] >= constants.DISMISSED_SOURCE_WARN_THRESHOLD and counts["dismissed"] > max(1, counts["promoted"]) * 2
+        if counts["dismissed"] >= constants.DISMISSED_SOURCE_WARN_THRESHOLD
+        and counts["dismissed"] > max(1, counts["promoted"]) * 2
     ]
     checks.append(
         _import_hygiene_issue(
@@ -3203,9 +3329,7 @@ def _inbox_hygiene_payload(target: Path) -> dict[str, Any]:
 
     provenance = _import_provenance_payload(target)
     provenance_missing = [
-        str(item.get("id"))
-        for item in provenance["issues"]
-        if item.get("status", "pending") == "pending"
+        str(item.get("id")) for item in provenance["issues"] if item.get("status", "pending") == "pending"
     ]
     checks.append(
         _import_hygiene_issue(
@@ -3243,16 +3367,14 @@ def _inbox_hygiene_payload(target: Path) -> dict[str, Any]:
         _import_hygiene_issue(
             constants.WARN if no_import_runs else constants.OK,
             "inbox_scanner_run_no_imports",
-            f"{len(no_import_runs)} scanner run(s) produced no imports despite configured import_path" if no_import_runs else "none",
+            f"{len(no_import_runs)} scanner run(s) produced no imports despite configured import_path"
+            if no_import_runs
+            else "none",
             no_import_runs[:10],
         )
     )
 
-    imports_by_id = {
-        str(item.get("id")): item
-        for item in imports
-        if isinstance(item.get("id"), str)
-    }
+    imports_by_id = {str(item.get("id")): item for item in imports if isinstance(item.get("id"), str)}
     sweep_missing_refs: list[str] = []
     sweep_lost_provenance: list[str] = []
     sweep_unclosed: list[str] = []
@@ -3279,9 +3401,7 @@ def _inbox_hygiene_payload(target: Path) -> dict[str, Any]:
         _import_hygiene_issue(
             constants.WARN if sweep_missing_refs else constants.OK,
             "inbox_sweep_import_missing",
-            f"{len(sweep_missing_refs)} sweep import reference(s) missing from inbox"
-            if sweep_missing_refs
-            else "none",
+            f"{len(sweep_missing_refs)} sweep import reference(s) missing from inbox" if sweep_missing_refs else "none",
             sweep_missing_refs[:10],
         )
     )
@@ -3322,12 +3442,14 @@ def _inbox_quality_payload(target: Path) -> dict[str, Any]:
     target = target.expanduser().resolve()
     imports = [item for item in ledger_mod._read_imports(target) if isinstance(item, dict)]
     pending = [item for item in imports if item.get("status", "pending") == "pending"]
-    dismissed_by_source = Counter(str(item.get("source") or "unknown") for item in imports if item.get("status") == "dismissed")
-    promoted_by_source = Counter(str(item.get("source") or "unknown") for item in imports if item.get("status") == "promoted")
+    dismissed_by_source = Counter(
+        str(item.get("source") or "unknown") for item in imports if item.get("status") == "dismissed"
+    )
+    promoted_by_source = Counter(
+        str(item.get("source") or "unknown") for item in imports if item.get("status") == "promoted"
+    )
     noisy_sources = {
-        source
-        for source, count in dismissed_by_source.items()
-        if count >= max(3, promoted_by_source[source] * 3)
+        source for source, count in dismissed_by_source.items() if count >= max(3, promoted_by_source[source] * 3)
     }
     by_identity: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
     for item in imports:
@@ -3341,7 +3463,9 @@ def _inbox_quality_payload(target: Path) -> dict[str, Any]:
         if len(pending_items) > 1:
             duplicate_pending.extend(str(item.get("id")) for item in pending_items[1:])
         dismissed_items = [item for item in items if item.get("status") == "dismissed"]
-        active_fingerprints = {ledger_mod._import_fingerprint(item) for item in pending_items if ledger_mod._import_fingerprint(item)}
+        active_fingerprints = {
+            ledger_mod._import_fingerprint(item) for item in pending_items if ledger_mod._import_fingerprint(item)
+        }
         for item in dismissed_items:
             fingerprint = ledger_mod._import_fingerprint(item)
             if fingerprint and active_fingerprints and fingerprint not in active_fingerprints:
@@ -3355,7 +3479,9 @@ def _inbox_quality_payload(target: Path) -> dict[str, Any]:
         metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
         acceptance = item.get("acceptance") if isinstance(item.get("acceptance"), list) else []
         has_acceptance = bool(acceptance)
-        has_provenance = bool(metadata.get("source_fingerprint") or metadata.get("scanner_run_id") or item.get("source"))
+        has_provenance = bool(
+            metadata.get("source_fingerprint") or metadata.get("scanner_run_id") or item.get("source")
+        )
         created = helpers._parse_iso_datetime(item.get("created_at"))
         age_hours = (now - created).total_seconds() / 3600 if created is not None else None
         flags: list[str] = []
@@ -3481,7 +3607,7 @@ def inbox(*, target: Path, json_output: bool = False, limit: int = 20) -> int:
         elif candidate.get("kind") in constants.HANDOFF_READY_KINDS:
             print(f"  plan_handoff: brigade work import plan-handoff {candidate.get('id')}")
             print(f"  promote_handoff: brigade work import promote-handoff {candidate.get('id')}")
-        print(f"  dismiss: brigade work import dismiss {candidate.get('id')} --reason \"...\"")
+        print(f'  dismiss: brigade work import dismiss {candidate.get("id")} --reason "..."')
     imports = payload.get("imports") if isinstance(payload.get("imports"), list) else []
     if imports:
         print("items:")
@@ -4045,9 +4171,7 @@ def backup_status(*, target: Path, json_output: bool = False) -> int:
         if not isinstance(destination, dict):
             continue
         status = "enabled" if destination.get("enabled", True) else "disabled"
-        destination_issues = [
-            issue for issue in health["issues"] if issue.get("destination") == destination.get("id")
-        ]
+        destination_issues = [issue for issue in health["issues"] if issue.get("destination") == destination.get("id")]
         print(f"- {destination.get('id')} [{status}] {destination.get('kind')} issues={len(destination_issues)}")
         print(f"  summary: {destination.get('summary_path')}")
     top_issue = health.get("top_issue")
@@ -4136,7 +4260,9 @@ def backup_closeout(*, target: Path, reason: str | None = None, defer: bool = Fa
         print(f"error: --target is not a directory: {target}", file=sys.stderr)
         return 2
     raw_health = config_mod._backup_health(target)
-    source_issues = raw_health.get("raw_issues") if isinstance(raw_health.get("raw_issues"), list) else raw_health["issues"]
+    source_issues = (
+        raw_health.get("raw_issues") if isinstance(raw_health.get("raw_issues"), list) else raw_health["issues"]
+    )
     fingerprints = [config_mod._backup_issue_fingerprint(issue) for issue in source_issues if isinstance(issue, dict)]
     closeout_id = f"{helpers._now().strftime('%Y%m%d-%H%M%S')}-backup-closeout"
     payload = {
@@ -4265,7 +4391,11 @@ def review_run(
     )
     if errors:
         if json_output:
-            print(json.dumps({"target": str(target), "errors": errors, "runs": [], "skipped": []}, indent=2, sort_keys=True))
+            print(
+                json.dumps(
+                    {"target": str(target), "errors": errors, "runs": [], "skipped": []}, indent=2, sort_keys=True
+                )
+            )
         else:
             for error in errors:
                 print(f"error: {error}", file=sys.stderr)
@@ -4393,7 +4523,11 @@ def review_import_findings(*, target: Path, run_id: str, json_output: bool = Fal
     )
     if errors:
         if json_output:
-            print(json.dumps({"target": str(target), "run_id": run.get("run_id"), "errors": errors}, indent=2, sort_keys=True))
+            print(
+                json.dumps(
+                    {"target": str(target), "run_id": run.get("run_id"), "errors": errors}, indent=2, sort_keys=True
+                )
+            )
         else:
             for error in errors:
                 print(f"error: {error}", file=sys.stderr)
@@ -4602,7 +4736,9 @@ def verify_runs(*, target: Path, json_output: bool = False, limit: int = 20) -> 
         print("runs: none")
         return 0
     for run in runs:
-        print(f"- {run.get('run_id')} [{run.get('status')}] commands={len(run.get('commands') or [])} {run.get('started_at')}")
+        print(
+            f"- {run.get('run_id')} [{run.get('status')}] commands={len(run.get('commands') or [])} {run.get('started_at')}"
+        )
     return 0
 
 
@@ -4671,7 +4807,8 @@ def _acceptance_payload(target: Path) -> dict[str, Any]:
     done_with_completion = [task for task in done if task.get("completion")]
     done_missing_completion = [task for task in done if not task.get("completion")]
     done_missing_completed_acceptance = [
-        task for task in done
+        task
+        for task in done
         if ledger_mod._task_acceptance(task) and not ledger_mod._normalize_acceptance(task.get("completed_acceptance"))
     ]
     review_payload = _review_findings_payload(target)
@@ -4690,17 +4827,53 @@ def _acceptance_payload(target: Path) -> dict[str, Any]:
         }
     issues: list[dict[str, Any]] = []
     if pending_missing:
-        issues.append({"status": constants.WARN, "name": "acceptance_pending_missing", "detail": f"{len(pending_missing)} pending task(s) missing acceptance"})
+        issues.append(
+            {
+                "status": constants.WARN,
+                "name": "acceptance_pending_missing",
+                "detail": f"{len(pending_missing)} pending task(s) missing acceptance",
+            }
+        )
     if done_missing_completion:
-        issues.append({"status": constants.WARN, "name": "acceptance_done_missing_completion", "detail": f"{len(done_missing_completion)} done task(s) missing completion evidence"})
+        issues.append(
+            {
+                "status": constants.WARN,
+                "name": "acceptance_done_missing_completion",
+                "detail": f"{len(done_missing_completion)} done task(s) missing completion evidence",
+            }
+        )
     if done_missing_completed_acceptance:
-        issues.append({"status": constants.WARN, "name": "acceptance_done_missing_completed_acceptance", "detail": f"{len(done_missing_completed_acceptance)} done task(s) missing completion-time acceptance evidence"})
+        issues.append(
+            {
+                "status": constants.WARN,
+                "name": "acceptance_done_missing_completed_acceptance",
+                "detail": f"{len(done_missing_completed_acceptance)} done task(s) missing completion-time acceptance evidence",
+            }
+        )
     if int(review_payload.get("unresolved_count") or 0) > 0:
-        issues.append({"status": constants.WARN, "name": "acceptance_review_findings_unresolved", "detail": f"{review_payload.get('unresolved_count')} review finding(s) unresolved"})
+        issues.append(
+            {
+                "status": constants.WARN,
+                "name": "acceptance_review_findings_unresolved",
+                "detail": f"{review_payload.get('unresolved_count')} review finding(s) unresolved",
+            }
+        )
     if done and latest_closeout is None:
-        issues.append({"status": constants.WARN, "name": "acceptance_work_closeout_missing", "detail": "completed tasks exist but no work closeout receipt was found"})
+        issues.append(
+            {
+                "status": constants.WARN,
+                "name": "acceptance_work_closeout_missing",
+                "detail": "completed tasks exist but no work closeout receipt was found",
+            }
+        )
     elif latest_closeout is not None and not latest_closeout.get("ready"):
-        issues.append({"status": constants.WARN, "name": "acceptance_work_closeout_blocked", "detail": f"latest work closeout is not ready: {latest_closeout.get('closeout_id')}"})
+        issues.append(
+            {
+                "status": constants.WARN,
+                "name": "acceptance_work_closeout_blocked",
+                "detail": f"latest work closeout is not ready: {latest_closeout.get('closeout_id')}",
+            }
+        )
     return {
         "target": str(target),
         "task_count": len(tasks),
@@ -4726,7 +4899,8 @@ def _acceptance_payload(target: Path) -> dict[str, Any]:
             "done_missing_completion": len(done_missing_completion),
             "done_with_completed_acceptance": len(done) - len(done_missing_completed_acceptance),
             "done_missing_completed_acceptance": len(done_missing_completed_acceptance),
-            "review_findings_resolved": int(review_payload.get("count") or 0) - int(review_payload.get("unresolved_count") or 0),
+            "review_findings_resolved": int(review_payload.get("count") or 0)
+            - int(review_payload.get("unresolved_count") or 0),
             "review_findings_unresolved": int(review_payload.get("unresolved_count") or 0),
             "work_closeout_ready": 1 if latest_closeout is not None and latest_closeout.get("ready") else 0,
             "work_closeout_missing": 1 if latest_closeout is None else 0,
@@ -4960,7 +5134,12 @@ def _scanners_run_payload(
 ) -> tuple[dict[str, Any], int]:
     target = target.expanduser().resolve()
     if not target.is_dir():
-        return {"target": str(target), "errors": [f"--target is not a directory: {target}"], "runs": [], "skipped": []}, 2
+        return {
+            "target": str(target),
+            "errors": [f"--target is not a directory: {target}"],
+            "runs": [],
+            "skipped": [],
+        }, 2
     selector_count = sum(1 for item in (scanner_id, all_matching, due) if bool(item))
     if require_selector and selector_count != 1:
         error = "pass exactly one of scanner id, --all, or --due"
@@ -5049,15 +5228,9 @@ def _scanners_run_payload(
                 "skipped": len(skipped_records),
                 "dismissed": len(skipped_dismissed),
                 "records": len(records),
-                "created_import_ids": [
-                    str(item.get("id"))
-                    for item in imported
-                    if isinstance(item.get("id"), str)
-                ],
+                "created_import_ids": [str(item.get("id")) for item in imported if isinstance(item.get("id"), str)],
                 "skipped_source_fingerprints": [
-                    fingerprint
-                    for record in skipped_records
-                    if (fingerprint := ledger_mod._import_fingerprint(record))
+                    fingerprint for record in skipped_records if (fingerprint := ledger_mod._import_fingerprint(record))
                 ],
                 "dismissed_source_fingerprints": [
                     fingerprint
@@ -5175,11 +5348,7 @@ def scanners_run_show(*, target: Path, run_id: str, json_output: bool = False) -
     if not target.is_dir():
         print(f"error: --target is not a directory: {target}", file=sys.stderr)
         return 2
-    matches = [
-        receipt
-        for receipt in _scanner_receipts(target)
-        if str(receipt.get("run_id") or "").startswith(run_id)
-    ]
+    matches = [receipt for receipt in _scanner_receipts(target) if str(receipt.get("run_id") or "").startswith(run_id)]
     if not matches:
         print(f"error: scanner run not found: {run_id}", file=sys.stderr)
         return 1
@@ -5212,22 +5381,16 @@ def scanners_run_show(*, target: Path, run_id: str, json_output: bool = False) -
 def _sweep_run_references(run: dict[str, Any]) -> dict[str, Any]:
     ingest = run.get("ingest_output") if isinstance(run.get("ingest_output"), dict) else {}
     created_import_ids = [
-        str(item)
-        for item in ingest.get("created_import_ids", [])
-        if isinstance(item, str) and item.strip()
+        str(item) for item in ingest.get("created_import_ids", []) if isinstance(item, str) and item.strip()
     ]
     for item in run.get("stamped_import_ids", []):
         if isinstance(item, str) and item.strip() and item not in created_import_ids:
             created_import_ids.append(item)
     skipped_source_fingerprints = [
-        str(item)
-        for item in ingest.get("skipped_source_fingerprints", [])
-        if isinstance(item, str) and item.strip()
+        str(item) for item in ingest.get("skipped_source_fingerprints", []) if isinstance(item, str) and item.strip()
     ]
     dismissed_source_fingerprints = [
-        str(item)
-        for item in ingest.get("dismissed_source_fingerprints", [])
-        if isinstance(item, str) and item.strip()
+        str(item) for item in ingest.get("dismissed_source_fingerprints", []) if isinstance(item, str) and item.strip()
     ]
     return {
         "scanner_id": run.get("scanner_id"),
@@ -5259,19 +5422,13 @@ def _sweep_references_from_runs(runs: list[dict[str, Any]]) -> dict[str, Any]:
     dismissed_source_fingerprints: list[str] = []
     for run in runs:
         created_import_ids.extend(
-            str(item)
-            for item in run.get("created_import_ids", [])
-            if isinstance(item, str) and item.strip()
+            str(item) for item in run.get("created_import_ids", []) if isinstance(item, str) and item.strip()
         )
         skipped_source_fingerprints.extend(
-            str(item)
-            for item in run.get("skipped_source_fingerprints", [])
-            if isinstance(item, str) and item.strip()
+            str(item) for item in run.get("skipped_source_fingerprints", []) if isinstance(item, str) and item.strip()
         )
         dismissed_source_fingerprints.extend(
-            str(item)
-            for item in run.get("dismissed_source_fingerprints", [])
-            if isinstance(item, str) and item.strip()
+            str(item) for item in run.get("dismissed_source_fingerprints", []) if isinstance(item, str) and item.strip()
         )
     return {
         "created_import_ids": sorted(set(created_import_ids)),
@@ -5415,7 +5572,9 @@ def sweeps(*, target: Path, json_output: bool = False, limit: int = 20) -> int:
         print("sweeps: none")
         return 0
     for report in reports:
-        print(f"- {report.get('sweep_id')} [{report.get('status')}] runs={len(report.get('scanner_run_ids') or [])} {report.get('started_at')}")
+        print(
+            f"- {report.get('sweep_id')} [{report.get('status')}] runs={len(report.get('scanner_run_ids') or [])} {report.get('started_at')}"
+        )
     return 0
 
 
@@ -5554,8 +5713,7 @@ def plan_promote(*, target: Path, task_id: str, as_kind: str, json_output: bool 
         return 1
     if receipt.get("status") != "accepted":
         print(
-            "error: plan not accepted "
-            "(run: brigade work task plan {id} --write --accept)".format(id=task_id),
+            "error: plan not accepted (run: brigade work task plan {id} --write --accept)".format(id=task_id),
             file=sys.stderr,
         )
         return 1
@@ -5616,11 +5774,7 @@ def sweep_show(*, target: Path, sweep_id: str, json_output: bool = False) -> int
     if not target.is_dir():
         print(f"error: --target is not a directory: {target}", file=sys.stderr)
         return 2
-    matches = [
-        report
-        for report in _scanner_sweeps(target)
-        if str(report.get("sweep_id") or "").startswith(sweep_id)
-    ]
+    matches = [report for report in _scanner_sweeps(target) if str(report.get("sweep_id") or "").startswith(sweep_id)]
     if not matches:
         print(f"error: sweep not found: {sweep_id}", file=sys.stderr)
         return 1
@@ -5651,11 +5805,7 @@ def _find_sweep_report(target: Path, sweep_id: str) -> tuple[dict[str, Any] | No
         if latest is None:
             return None, "sweep not found: latest"
         return latest, None
-    matches = [
-        report
-        for report in _scanner_sweeps(target)
-        if str(report.get("sweep_id") or "").startswith(sweep_id)
-    ]
+    matches = [report for report in _scanner_sweeps(target) if str(report.get("sweep_id") or "").startswith(sweep_id)]
     if not matches:
         return None, f"sweep not found: {sweep_id}"
     if len(matches) > 1:
@@ -5666,7 +5816,7 @@ def _find_sweep_report(target: Path, sweep_id: str) -> tuple[dict[str, Any] | No
 def _sweep_import_suggested_commands(import_id: str, kind: str) -> list[str]:
     commands = [
         f"brigade work import plan {import_id}",
-        f"brigade work import dismiss {import_id} --reason \"...\"",
+        f'brigade work import dismiss {import_id} --reason "..."',
     ]
     if kind == "task":
         commands.insert(1, f"brigade work import promote {import_id}")
@@ -5751,9 +5901,7 @@ def _sweep_review_checks(
 ) -> list[dict[str, Any]]:
     checks: list[dict[str, Any]] = []
     pending_ids = [
-        str(item.get("id"))
-        for item in items
-        if item.get("status") == "pending" and isinstance(item.get("id"), str)
+        str(item.get("id")) for item in items if item.get("status") == "pending" and isinstance(item.get("id"), str)
     ]
     completed = helpers._parse_iso_datetime(report.get("completed_at") or report.get("started_at"))
     stale_pending: list[str] = []
@@ -5775,28 +5923,24 @@ def _sweep_review_checks(
         _import_hygiene_issue(
             constants.WARN if missing_import_ids else constants.OK,
             "scanner_sweep_missing_imports",
-            f"{len(missing_import_ids)} sweep import reference(s) missing from inbox"
-            if missing_import_ids
-            else "none",
+            f"{len(missing_import_ids)} sweep import reference(s) missing from inbox" if missing_import_ids else "none",
             missing_import_ids[:10],
         )
     )
     missing_provenance = [
-        str(item.get("id"))
-        for item in items
-        if not item.get("provenance_complete") and isinstance(item.get("id"), str)
+        str(item.get("id")) for item in items if not item.get("provenance_complete") and isinstance(item.get("id"), str)
     ]
     checks.append(
         _import_hygiene_issue(
             constants.WARN if missing_provenance else constants.OK,
             "scanner_sweep_missing_provenance",
-            f"{len(missing_provenance)} sweep import(s) missing scanner provenance"
-            if missing_provenance
-            else "none",
+            f"{len(missing_provenance)} sweep import(s) missing scanner provenance" if missing_provenance else "none",
             missing_provenance[:10],
         )
     )
-    created = len(references.get("created_import_ids", []) if isinstance(references.get("created_import_ids"), list) else [])
+    created = len(
+        references.get("created_import_ids", []) if isinstance(references.get("created_import_ids"), list) else []
+    )
     skipped = len(
         references.get("skipped_source_fingerprints", [])
         if isinstance(references.get("skipped_source_fingerprints"), list)
@@ -5830,9 +5974,7 @@ def _sweep_review_payload(target: Path, sweep_id: str) -> tuple[dict[str, Any] |
     }
     now = helpers._now()
     import_ids = [
-        str(item)
-        for item in references.get("created_import_ids", [])
-        if isinstance(item, str) and item.strip()
+        str(item) for item in references.get("created_import_ids", []) if isinstance(item, str) and item.strip()
     ]
     missing_import_ids = sorted(import_id for import_id in import_ids if import_id not in imports_by_id)
     items = [
@@ -5907,7 +6049,9 @@ def sweep_review(*, target: Path, sweep_id: str, json_output: bool = False) -> i
     if payload["actionable_imports"]:
         print("actionable:")
         for item in payload["actionable_imports"]:
-            print(f"- {item.get('id')} [{item.get('kind')}] {item.get('source')}: {helpers._short(str(item.get('text', '')))}")
+            print(
+                f"- {item.get('id')} [{item.get('kind')}] {item.get('source')}: {helpers._short(str(item.get('text', '')))}"
+            )
             for command in item.get("suggested_commands", []):
                 print(f"  next: {command}")
     for check in payload["checks"]:

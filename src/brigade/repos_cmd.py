@@ -1,4 +1,5 @@
 """Local repository fleet readiness inspection."""
+
 from __future__ import annotations
 
 import json
@@ -14,8 +15,14 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from .budgets import HANDOFF_BACKLOG_STALE_DAYS
 from .install import apply_gitignore
-from .localio import read_json_dict as _read_json, read_jsonl_dicts as _read_jsonl, utc_now as _now, write_json as _write_json
+from .localio import (
+    read_json_dict as _read_json,
+    read_jsonl_dicts as _read_jsonl,
+    utc_now as _now,
+    write_json as _write_json,
+)
 from .selection import Selection, WRITER_INBOXES
 from . import actionqueue, reportstore, toml_compat as tomllib, work_cmd
 
@@ -27,7 +34,7 @@ REPORT_STALE_HOURS = 24
 # A fleet repo with pending handoffs whose oldest is older than this is flagged
 # as an un-ingested backlog (handoffs written but the ingester never reaches it).
 # Canonical value lives in budgets.py so doctor/ingest/repos all agree.
-from .budgets import HANDOFF_BACKLOG_STALE_DAYS as BACKLOG_STALE_DAYS
+BACKLOG_STALE_DAYS = HANDOFF_BACKLOG_STALE_DAYS
 HEALTH_COMMAND_RECEIPT_STALE_HOURS = 24
 ACTION_STATUSES = {"pending", "active", "done", "deferred", "archived"}
 DISPATCH_STALE_HOURS = 24
@@ -137,7 +144,10 @@ def _health_command_from_raw(raw: object, repo_id: str, index: int) -> tuple[Swe
             if executable in work_cmd.SCANNER_HIGH_RISK_COMMANDS:
                 return None, f"repo {repo_id}: health command {label}: high-risk scanner command: {executable}"
             if any(work_cmd.SCANNER_SHELL_META_RE.search(part) for part in argv):
-                return None, f"repo {repo_id}: health command {label}: high-risk scanner command contains shell metacharacters"
+                return (
+                    None,
+                    f"repo {repo_id}: health command {label}: high-risk scanner command contains shell metacharacters",
+                )
             if executable != "brigade" and "/" not in argv[0] and shutil.which(argv[0]) is None:
                 return None, f"repo {repo_id}: health command {label}: scanner command is not resolvable: {argv[0]}"
         else:
@@ -294,9 +304,18 @@ def _discover_repos(root: DiscoveryRoot) -> tuple[list[dict[str, Any]], list[dic
             continue
         rel_label = "." if str(rel) == "." else rel.as_posix()
         if rel_label != "." and _match_any(rel_label, root.exclude):
-            skipped.append({"root_id": root.root_id, "path_label": f"{root.root_id}:excluded-{len(skipped) + 1}", "reason": "excluded", "depth": depth})
+            skipped.append(
+                {
+                    "root_id": root.root_id,
+                    "path_label": f"{root.root_id}:excluded-{len(skipped) + 1}",
+                    "reason": "excluded",
+                    "depth": depth,
+                }
+            )
             continue
-        if (current / ".git").exists() and (rel_label == "." or _match_any(rel_label, root.include) or _match_any(current.name, root.include)):
+        if (current / ".git").exists() and (
+            rel_label == "." or _match_any(rel_label, root.include) or _match_any(current.name, root.include)
+        ):
             candidate_index = len(candidates) + 1
             path_label = f"{root.root_id}:candidate-{candidate_index}"
             candidates.append(
@@ -311,16 +330,29 @@ def _discover_repos(root: DiscoveryRoot) -> tuple[list[dict[str, Any]], list[dic
                     "has_git": True,
                     "would_clone": False,
                     "would_write": False,
-                    "source_fingerprint": _fingerprint_payload({"root_id": root.root_id, "path_label": path_label, "depth": depth}),
+                    "source_fingerprint": _fingerprint_payload(
+                        {"root_id": root.root_id, "path_label": path_label, "depth": depth}
+                    ),
                 }
             )
             continue
         if depth >= root.max_depth:
             continue
         try:
-            children = sorted(child for child in current.iterdir() if child.is_dir() and not child.is_symlink() and child.name != ".git")
+            children = sorted(
+                child
+                for child in current.iterdir()
+                if child.is_dir() and not child.is_symlink() and child.name != ".git"
+            )
         except OSError:
-            skipped.append({"root_id": root.root_id, "path_label": f"{root.root_id}:unreadable-{len(skipped) + 1}", "reason": "unreadable", "depth": depth})
+            skipped.append(
+                {
+                    "root_id": root.root_id,
+                    "path_label": f"{root.root_id}:unreadable-{len(skipped) + 1}",
+                    "reason": "unreadable",
+                    "depth": depth,
+                }
+            )
             continue
         pending.extend((child, depth + 1) for child in children)
     return candidates, skipped
@@ -352,9 +384,21 @@ def discover_plan(*, target: Path, json_output: bool = False) -> int:
     if errors:
         checks.extend({"status": WARN, "name": "repo_discovery_config", "detail": error} for error in errors)
     if config_loaded and not roots:
-        checks.append({"status": WARN, "name": "repo_discovery_roots_missing", "detail": "no [[discovery_root]] entries configured"})
+        checks.append(
+            {
+                "status": WARN,
+                "name": "repo_discovery_roots_missing",
+                "detail": "no [[discovery_root]] entries configured",
+            }
+        )
     if not config_loaded:
-        checks.append({"status": WARN, "name": "repo_discovery_config_missing", "detail": "repo discovery uses only explicit configured roots"})
+        checks.append(
+            {
+                "status": WARN,
+                "name": "repo_discovery_config_missing",
+                "detail": "repo discovery uses only explicit configured roots",
+            }
+        )
     payload = {
         "schema_version": 1,
         "target_label": "repo-fleet",
@@ -458,7 +502,9 @@ def _safe_receipt(path: str | None, repo_id: str, label: str) -> dict[str, Any] 
     return {"repo_id": repo_id, "repo_label": label, "path_label": f"{repo_id}:{Path(path).name}"}
 
 
-def _safe_text(value: object, repo_path: Path | None = None, repo_id: str | None = None, label: str | None = None) -> str:
+def _safe_text(
+    value: object, repo_path: Path | None = None, repo_id: str | None = None, label: str | None = None
+) -> str:
     text = str(value or "")
     replacements = []
     if repo_path is not None:
@@ -475,7 +521,10 @@ def _safe_report_ref(payload: dict[str, Any] | None, repo_id: str, label: str) -
     return {
         "repo_id": repo_id,
         "repo_label": label,
-        "id": payload.get("report_id") or payload.get("run_id") or payload.get("candidate_id") or payload.get("closeout_id"),
+        "id": payload.get("report_id")
+        or payload.get("run_id")
+        or payload.get("candidate_id")
+        or payload.get("closeout_id"),
         "status": payload.get("status") if isinstance(payload.get("status"), str) else None,
         "created_at": payload.get("created_at") or payload.get("generated_at") or payload.get("started_at"),
         "fingerprint": payload.get("report_fingerprint") or payload.get("source_fingerprint"),
@@ -523,15 +572,35 @@ def _repo_brigade_state(entry: RepoEntry) -> dict[str, Any]:
     pending_imports = work_cmd._pending_imports(repo)
     pending_tasks = work_cmd._pending_tasks(repo)
     receipt_refs = [
-        _safe_receipt(str(Path(str(latest_report.get("path"))) / "CENTER_EVIDENCE.json") if isinstance(latest_report, dict) and latest_report.get("path") else None, repo_id, label),
-        _safe_receipt(str(Path(str(release_ready.get("path"))) / "receipt.json") if isinstance(release_ready, dict) and release_ready.get("path") else None, repo_id, label),
-        _safe_receipt(str(Path(str(release_candidate.get("path"))) / "EVIDENCE.json") if isinstance(release_candidate, dict) and release_candidate.get("path") else None, repo_id, label),
+        _safe_receipt(
+            str(Path(str(latest_report.get("path"))) / "CENTER_EVIDENCE.json")
+            if isinstance(latest_report, dict) and latest_report.get("path")
+            else None,
+            repo_id,
+            label,
+        ),
+        _safe_receipt(
+            str(Path(str(release_ready.get("path"))) / "receipt.json")
+            if isinstance(release_ready, dict) and release_ready.get("path")
+            else None,
+            repo_id,
+            label,
+        ),
+        _safe_receipt(
+            str(Path(str(release_candidate.get("path"))) / "EVIDENCE.json")
+            if isinstance(release_candidate, dict) and release_candidate.get("path")
+            else None,
+            repo_id,
+            label,
+        ),
         _safe_receipt(str(work_closeout.get("path")) if isinstance(work_closeout, dict) else None, repo_id, label),
     ]
     warnings: list[dict[str, Any]] = []
     blockers: list[dict[str, Any]] = []
     if tracked_dirty:
-        warnings.append({"name": "repo_dirty_tracked", "detail": f"{repo_id} has dirty tracked files", "count": tracked_dirty})
+        warnings.append(
+            {"name": "repo_dirty_tracked", "detail": f"{repo_id} has dirty tracked files", "count": tracked_dirty}
+        )
     if isinstance(latest_report, dict):
         report_created = _parse_time(latest_report.get("created_at") or latest_report.get("generated_at"))
         if report_created and (_now() - report_created).total_seconds() / 3600 > REPORT_STALE_HOURS:
@@ -539,10 +608,18 @@ def _repo_brigade_state(entry: RepoEntry) -> dict[str, Any]:
     else:
         warnings.append({"name": "repo_operator_report_missing", "detail": f"{repo_id} has no operator report"})
     if int(action_health.get("open_count") or 0) > 0:
-        warnings.append({"name": "repo_actions_open", "detail": f"{repo_id} has open operator actions", "count": action_health.get("open_count")})
+        warnings.append(
+            {
+                "name": "repo_actions_open",
+                "detail": f"{repo_id} has open operator actions",
+                "count": action_health.get("open_count"),
+            }
+        )
     security_count = int(security_health.get("issue_count") or 0)
     if security_count > 0:
-        warnings.append({"name": "repo_security_issues", "detail": f"{repo_id} has security issue(s)", "count": security_count})
+        warnings.append(
+            {"name": "repo_security_issues", "detail": f"{repo_id} has security issue(s)", "count": security_count}
+        )
     return {
         "repo_id": repo_id,
         "repo_label": label,
@@ -551,14 +628,25 @@ def _repo_brigade_state(entry: RepoEntry) -> dict[str, Any]:
         "dirty_tracked_count": tracked_dirty,
         "pending_import_count": len(pending_imports),
         "pending_task_count": len(pending_tasks),
-        "review_finding_count": int(review_health.get("pending_finding_count") or 0) + int(review_health.get("unresolved_finding_count") or 0),
-        "handoff_draft_count": int((handoff_payload.get("counts") if isinstance(handoff_payload.get("counts"), dict) else {}).get("pending") or 0),
+        "review_finding_count": int(review_health.get("pending_finding_count") or 0)
+        + int(review_health.get("unresolved_finding_count") or 0),
+        "handoff_draft_count": int(
+            (handoff_payload.get("counts") if isinstance(handoff_payload.get("counts"), dict) else {}).get("pending")
+            or 0
+        ),
         "security_issue_count": security_count,
-        "scanner_sweep_status": (sweep_health.get("latest") or {}).get("status") if isinstance(sweep_health.get("latest"), dict) else "missing",
+        "scanner_sweep_status": (sweep_health.get("latest") or {}).get("status")
+        if isinstance(sweep_health.get("latest"), dict)
+        else "missing",
         "latest_operator_report": _safe_report_ref(latest_report, repo_id, label),
         "action_queue": {
             "open_count": action_health.get("open_count"),
-            "top_action": _safe_action_ref(action_health.get("top_action") if isinstance(action_health.get("top_action"), dict) else None, repo_id, label, repo),
+            "top_action": _safe_action_ref(
+                action_health.get("top_action") if isinstance(action_health.get("top_action"), dict) else None,
+                repo_id,
+                label,
+                repo,
+            ),
         },
         "latest_release_readiness": _safe_report_ref(release_ready, repo_id, label),
         "latest_release_candidate": _safe_report_ref(release_candidate, repo_id, label),
@@ -570,7 +658,9 @@ def _repo_brigade_state(entry: RepoEntry) -> dict[str, Any]:
     }
 
 
-def _safe_action_ref(action: dict[str, Any] | None, repo_id: str, label: str, repo_path: Path | None = None) -> dict[str, Any] | None:
+def _safe_action_ref(
+    action: dict[str, Any] | None, repo_id: str, label: str, repo_path: Path | None = None
+) -> dict[str, Any] | None:
     if not isinstance(action, dict):
         return None
     return {
@@ -628,18 +718,12 @@ def _repo_summary(entry: RepoEntry) -> dict[str, Any]:
     tracked_dirty, untracked_dirty = _dirty_counts(repo) if repo.is_dir() else (0, 0)
     has_agents = (repo / "AGENTS.md").is_file()
     has_claude = (repo / "CLAUDE.md").is_file() or (repo / ".claude" / "CLAUDE.md").is_file()
-    handoff_inboxes = [
-        inbox
-        for inbox in WRITER_INBOXES.values()
-        if (repo / inbox).is_dir()
-    ]
+    handoff_inboxes = [inbox for inbox in WRITER_INBOXES.values() if (repo / inbox).is_dir()]
     handoff_pending, handoff_backlog_oldest_days = _handoff_backlog(repo)
     hooks = repo / ".git" / "hooks"
-    publish_guard_hooks = [
-        hook.name
-        for hook in (hooks / "pre-commit", hooks / "pre-push")
-        if hook.is_file()
-    ] if hooks.is_dir() else []
+    publish_guard_hooks = (
+        [hook.name for hook in (hooks / "pre-commit", hooks / "pre-push") if hook.is_file()] if hooks.is_dir() else []
+    )
     return {
         "id": entry.repo_id,
         "label": entry.label,
@@ -673,31 +757,84 @@ def _repo_checks(summary: dict[str, Any]) -> list[dict[str, Any]]:
     repo_id = str(summary.get("id") or "unknown")
     checks: list[dict[str, Any]] = []
     if not summary.get("exists"):
-        checks.append({"status": WARN, "name": "repo_missing", "detail": f"{repo_id} is not reachable", "repo_id": repo_id})
+        checks.append(
+            {"status": WARN, "name": "repo_missing", "detail": f"{repo_id} is not reachable", "repo_id": repo_id}
+        )
         return checks
     if not summary.get("has_agents") and summary.get("has_claude"):
-        checks.append({"status": WARN, "name": "repo_claude_fallback", "detail": f"{repo_id} relies on CLAUDE guidance fallback", "repo_id": repo_id})
+        checks.append(
+            {
+                "status": WARN,
+                "name": "repo_claude_fallback",
+                "detail": f"{repo_id} relies on CLAUDE guidance fallback",
+                "repo_id": repo_id,
+            }
+        )
     elif not summary.get("has_agents") and not summary.get("has_claude"):
-        checks.append({"status": WARN, "name": "repo_missing_guidance", "detail": f"{repo_id} has no AGENTS or CLAUDE guidance", "repo_id": repo_id})
+        checks.append(
+            {
+                "status": WARN,
+                "name": "repo_missing_guidance",
+                "detail": f"{repo_id} has no AGENTS or CLAUDE guidance",
+                "repo_id": repo_id,
+            }
+        )
     if not summary.get("test_hints"):
-        checks.append({"status": WARN, "name": "repo_missing_test_hint", "detail": f"{repo_id} has no detected test hint", "repo_id": repo_id})
+        checks.append(
+            {
+                "status": WARN,
+                "name": "repo_missing_test_hint",
+                "detail": f"{repo_id} has no detected test hint",
+                "repo_id": repo_id,
+            }
+        )
     if summary.get("expect_brigade") and not summary.get("has_brigade_config"):
-        checks.append({"status": WARN, "name": "repo_missing_brigade_config", "detail": f"{repo_id} lacks local Brigade config", "repo_id": repo_id})
+        checks.append(
+            {
+                "status": WARN,
+                "name": "repo_missing_brigade_config",
+                "detail": f"{repo_id} lacks local Brigade config",
+                "repo_id": repo_id,
+            }
+        )
     if summary.get("expect_publish_guard") and not summary.get("publish_guard_hooks"):
-        checks.append({"status": WARN, "name": "repo_missing_publish_guard", "detail": f"{repo_id} lacks expected publish-guard hooks", "repo_id": repo_id})
+        checks.append(
+            {
+                "status": WARN,
+                "name": "repo_missing_publish_guard",
+                "detail": f"{repo_id} lacks expected publish-guard hooks",
+                "repo_id": repo_id,
+            }
+        )
     if int(summary.get("dirty_tracked_count", 0) or 0) > 0:
-        checks.append({"status": WARN, "name": "repo_dirty_tracked", "detail": f"{repo_id} has dirty tracked files", "repo_id": repo_id})
+        checks.append(
+            {
+                "status": WARN,
+                "name": "repo_dirty_tracked",
+                "detail": f"{repo_id} has dirty tracked files",
+                "repo_id": repo_id,
+            }
+        )
     if not summary.get("handoff_inboxes"):
-        checks.append({"status": WARN, "name": "repo_missing_handoff_inbox", "detail": f"{repo_id} has no local handoff inbox", "repo_id": repo_id})
+        checks.append(
+            {
+                "status": WARN,
+                "name": "repo_missing_handoff_inbox",
+                "detail": f"{repo_id} has no local handoff inbox",
+                "repo_id": repo_id,
+            }
+        )
     pending = int(summary.get("handoff_pending", 0) or 0)
     oldest_days = summary.get("handoff_backlog_oldest_days")
     if pending and isinstance(oldest_days, int) and oldest_days >= BACKLOG_STALE_DAYS:
-        checks.append({
-            "status": WARN,
-            "name": "repo_handoff_backlog",
-            "detail": f"{repo_id} has {pending} un-ingested handoff(s), oldest {oldest_days}d old; ingester is not reaching it",
-            "repo_id": repo_id,
-        })
+        checks.append(
+            {
+                "status": WARN,
+                "name": "repo_handoff_backlog",
+                "detail": f"{repo_id} has {pending} un-ingested handoff(s), oldest {oldest_days}d old; ingester is not reaching it",
+                "repo_id": repo_id,
+            }
+        )
     return checks
 
 
@@ -776,14 +913,16 @@ def ingest_fleet(
         if rc == 2:
             skipped.append({"repo_id": entry.repo_id, "reason": "no handoff inbox"})
             continue
-        per_repo.append({
-            "repo_id": entry.repo_id,
-            "processed": stats.processed - before[0],
-            "promoted": stats.promoted - before[1],
-            "routed": stats.routed - before[2],
-            "inboxed": stats.inboxed - before[3],
-            "skipped": stats.skipped - before[4],
-        })
+        per_repo.append(
+            {
+                "repo_id": entry.repo_id,
+                "processed": stats.processed - before[0],
+                "promoted": stats.promoted - before[1],
+                "routed": stats.routed - before[2],
+                "inboxed": stats.inboxed - before[3],
+                "skipped": stats.skipped - before[4],
+            }
+        )
 
     payload = {
         "target": str(target),
@@ -888,7 +1027,9 @@ def scan(*, target: Path, json_output: bool = False) -> int:
     print(f"repos: {payload['repo_count']}")
     print(f"issues: {payload['issue_count']}")
     for repo in payload["repos"]:
-        print(f"- {repo['id']} guidance={repo.get('guidance_source') or 'none'} tests={len(repo.get('test_hints') or [])}")
+        print(
+            f"- {repo['id']} guidance={repo.get('guidance_source') or 'none'} tests={len(repo.get('test_hints') or [])}"
+        )
     return 0 if payload["config_loaded"] else 1
 
 
@@ -946,7 +1087,9 @@ def _import_records(payload: dict[str, Any]) -> list[dict[str, Any]]:
 def import_issues(*, target: Path, json_output: bool = False, dry_run: bool = False) -> int:
     payload = scan_payload(target)
     records = _import_records(payload)
-    imported, skipped, dismissed = work_cmd._append_import_records(target.expanduser().resolve(), records, dry_run=dry_run)
+    imported, skipped, dismissed = work_cmd._append_import_records(
+        target.expanduser().resolve(), records, dry_run=dry_run
+    )
     output = {
         "target": payload["target"],
         "created": len(imported),
@@ -1057,7 +1200,14 @@ def _health_command_registry_payload(target: Path) -> dict[str, Any]:
     checks: list[dict[str, Any]] = []
     repos: list[dict[str, Any]] = []
     if errors:
-        checks.extend({"status": WARN, "name": "repo_health_command_config", "detail": _safe_text(error, target, "repo-fleet", "repo fleet")} for error in errors)
+        checks.extend(
+            {
+                "status": WARN,
+                "name": "repo_health_command_config",
+                "detail": _safe_text(error, target, "repo-fleet", "repo fleet"),
+            }
+            for error in errors
+        )
     elif config_loaded:
         checks.append({"status": OK, "name": "repo_health_command_config", "detail": CONFIG_REL_PATH})
     for entry in entries:
@@ -1121,7 +1271,9 @@ def _health_command_registry_payload(target: Path) -> dict[str, Any]:
                     "receipt_status": receipt.get("status") if isinstance(receipt, dict) else "missing",
                     "receipt_age_hours": age_hours,
                     "stale": stale,
-                    "source_fingerprint": _fingerprint_payload({"repo_id": entry.repo_id, "label": command.label, "timeout": command.timeout}),
+                    "source_fingerprint": _fingerprint_payload(
+                        {"repo_id": entry.repo_id, "label": command.label, "timeout": command.timeout}
+                    ),
                 }
             )
         for label in sorted(duplicate_labels):
@@ -1176,7 +1328,9 @@ def health_commands(*, target: Path, json_output: bool = False) -> int:
     print(f"issues: {payload['issue_count']}")
     for repo in payload["repos"]:
         for command in repo.get("health_commands", []):
-            print(f"- {repo['repo_id']}:{command['label']} timeout={command['timeout']} receipt={command['receipt_status']}")
+            print(
+                f"- {repo['repo_id']}:{command['label']} timeout={command['timeout']} receipt={command['receipt_status']}"
+            )
     for issue in payload["issues"]:
         print(f"[{issue['status']}] {issue['name']}: {issue['detail']}")
     return 0 if payload["config_loaded"] and not payload["issues"] else 1
@@ -1246,7 +1400,9 @@ def _sweep_plan_payload(
                 "enabled": entry.enabled,
                 "exists": entry.path.is_dir(),
                 "stale": _latest_sweep_for_repo(target, entry.repo_id) is None,
-                "commands": [{"label": command.label, "timeout": command.timeout} for command in _commands_for_entry(entry)],
+                "commands": [
+                    {"label": command.label, "timeout": command.timeout} for command in _commands_for_entry(entry)
+                ],
             }
             for entry in selected
         ],
@@ -1265,7 +1421,14 @@ def sweep_plan(
     force: bool = False,
     json_output: bool = False,
 ) -> int:
-    payload = _sweep_plan_payload(target, repo_ids=repo_ids, include_disabled=include_disabled, stale_only=stale_only, force=force, all_repos=all_repos)
+    payload = _sweep_plan_payload(
+        target,
+        repo_ids=repo_ids,
+        include_disabled=include_disabled,
+        stale_only=stale_only,
+        force=force,
+        all_repos=all_repos,
+    )
     if json_output:
         print(json.dumps(payload, indent=2, sort_keys=True))
         return 0 if payload["config_loaded"] and not payload["errors"] else 1
@@ -1346,7 +1509,14 @@ def sweep_run(
     json_output: bool = False,
 ) -> int:
     target = target.expanduser().resolve()
-    plan = _sweep_plan_payload(target, repo_ids=repo_ids, include_disabled=include_disabled, stale_only=stale_only, force=force, all_repos=all_repos)
+    plan = _sweep_plan_payload(
+        target,
+        repo_ids=repo_ids,
+        include_disabled=include_disabled,
+        stale_only=stale_only,
+        force=force,
+        all_repos=all_repos,
+    )
     selected, errors, config_loaded = _select_sweep_entries(
         target,
         repo_ids=repo_ids,
@@ -1381,12 +1551,30 @@ def sweep_run(
         failed = [command for command in command_results if command.get("status") != "completed"]
         state = _repo_brigade_state(entry)
         receipt_labels = []
-        latest_report_ref = state.get("latest_operator_report") if isinstance(state.get("latest_operator_report"), dict) else None
+        latest_report_ref = (
+            state.get("latest_operator_report") if isinstance(state.get("latest_operator_report"), dict) else None
+        )
         if latest_report_ref:
-            receipt_labels.append({"repo_id": entry.repo_id, "repo_label": entry.label, "kind": "operator-report", "id": latest_report_ref.get("id")})
-        latest_release = state.get("latest_release_readiness") if isinstance(state.get("latest_release_readiness"), dict) else None
+            receipt_labels.append(
+                {
+                    "repo_id": entry.repo_id,
+                    "repo_label": entry.label,
+                    "kind": "operator-report",
+                    "id": latest_report_ref.get("id"),
+                }
+            )
+        latest_release = (
+            state.get("latest_release_readiness") if isinstance(state.get("latest_release_readiness"), dict) else None
+        )
         if latest_release:
-            receipt_labels.append({"repo_id": entry.repo_id, "repo_label": entry.label, "kind": "release-readiness", "id": latest_release.get("id")})
+            receipt_labels.append(
+                {
+                    "repo_id": entry.repo_id,
+                    "repo_label": entry.label,
+                    "kind": "release-readiness",
+                    "id": latest_release.get("id"),
+                }
+            )
         repo_results.append(
             {
                 "repo_id": entry.repo_id,
@@ -1442,13 +1630,20 @@ def sweep_runs(*, target: Path, limit: int = 20, json_output: bool = False) -> i
         return 2
     target = target.expanduser().resolve()
     sweeps = _sweeps(target)[:limit]
-    payload = {"target_label": "repo-fleet", "sweeps_root_label": ".brigade/repos/sweeps", "sweeps": sweeps, "sweep_count": len(sweeps)}
+    payload = {
+        "target_label": "repo-fleet",
+        "sweeps_root_label": ".brigade/repos/sweeps",
+        "sweeps": sweeps,
+        "sweep_count": len(sweeps),
+    }
     if json_output:
         print(json.dumps(payload, indent=2, sort_keys=True))
         return 0
     print("repo fleet sweeps: repo-fleet")
     for sweep in sweeps:
-        print(f"- {sweep.get('sweep_id')} [{sweep.get('status')}] repos={sweep.get('repo_count')} {sweep.get('started_at')}")
+        print(
+            f"- {sweep.get('sweep_id')} [{sweep.get('status')}] repos={sweep.get('repo_count')} {sweep.get('started_at')}"
+        )
     return 0
 
 
@@ -1468,7 +1663,14 @@ def sweep_show(*, target: Path, sweep_id: str, json_output: bool = False) -> int
     return 0
 
 
-def sweep_closeout(*, target: Path, sweep_id: str = "latest", status: str = "reviewed", reason: str | None = None, json_output: bool = False) -> int:
+def sweep_closeout(
+    *,
+    target: Path,
+    sweep_id: str = "latest",
+    status: str = "reviewed",
+    reason: str | None = None,
+    json_output: bool = False,
+) -> int:
     target = target.expanduser().resolve()
     if status not in {"reviewed", "deferred", "superseded", "archived"}:
         print("error: --status must be one of reviewed, deferred, superseded, archived", file=sys.stderr)
@@ -1507,13 +1709,34 @@ def sweep_health(target: Path) -> dict[str, Any]:
     latest = latest_sweep(target)
     checks: list[dict[str, Any]] = []
     if latest is None:
-        checks.append({"status": WARN, "name": "repo_fleet_sweep_missing", "detail": "no repo fleet sweep has been run", "suggested_next_command": "brigade repos sweep run"})
+        checks.append(
+            {
+                "status": WARN,
+                "name": "repo_fleet_sweep_missing",
+                "detail": "no repo fleet sweep has been run",
+                "suggested_next_command": "brigade repos sweep run",
+            }
+        )
         return {"latest": None, "checks": checks, "issue_count": len(checks), "top_issue": checks[0]}
     closeout = latest.get("closeout") if isinstance(latest.get("closeout"), dict) else None
     if not closeout or closeout.get("status") not in {"reviewed", "deferred", "superseded", "archived"}:
-        checks.append({"status": WARN, "name": "repo_fleet_sweep_unclosed", "detail": f"{latest.get('sweep_id')} has not been closed out", "suggested_next_command": f"brigade repos sweep closeout {latest.get('sweep_id')}"})
+        checks.append(
+            {
+                "status": WARN,
+                "name": "repo_fleet_sweep_unclosed",
+                "detail": f"{latest.get('sweep_id')} has not been closed out",
+                "suggested_next_command": f"brigade repos sweep closeout {latest.get('sweep_id')}",
+            }
+        )
     if latest.get("status") != "completed":
-        checks.append({"status": WARN, "name": "repo_fleet_sweep_failed", "detail": f"{latest.get('sweep_id')} did not complete", "suggested_next_command": f"brigade repos sweep show {latest.get('sweep_id')}"})
+        checks.append(
+            {
+                "status": WARN,
+                "name": "repo_fleet_sweep_failed",
+                "detail": f"{latest.get('sweep_id')} did not complete",
+                "suggested_next_command": f"brigade repos sweep show {latest.get('sweep_id')}",
+            }
+        )
     return {"latest": latest, "checks": checks, "issue_count": len(checks), "top_issue": checks[0] if checks else None}
 
 
@@ -1547,7 +1770,9 @@ def latest_report(target: Path) -> dict[str, Any] | None:
 
 def _resolve_report(target: Path, report_id: str) -> tuple[dict[str, Any] | None, str | None]:
     reports = [] if report_id == "latest" else _reports(target, include_archived=True)
-    return reportstore.resolve_bundle(reports, report_id, id_field="report_id", label="fleet report", latest=lambda: latest_report(target))
+    return reportstore.resolve_bundle(
+        reports, report_id, id_field="report_id", label="fleet report", latest=lambda: latest_report(target)
+    )
 
 
 def _report_payload(target: Path) -> dict[str, Any]:
@@ -1572,7 +1797,9 @@ def _report_payload(target: Path) -> dict[str, Any]:
         "blocker_count": len(blockers),
         "warning_count": len(warnings) + len(errors) + len(health_command_warnings),
         "blockers": blockers,
-        "warnings": warnings + [{"name": "repo_fleet_config", "detail": error} for error in errors] + health_command_warnings,
+        "warnings": warnings
+        + [{"name": "repo_fleet_config", "detail": error} for error in errors]
+        + health_command_warnings,
         "receipt_references": receipt_refs,
         "latest_sweep": _safe_sweep_ref(sweep.get("latest") if isinstance(sweep.get("latest"), dict) else None),
         "sweep_health": {"issue_count": sweep.get("issue_count"), "top_issue": sweep.get("top_issue")},
@@ -1582,7 +1809,9 @@ def _report_payload(target: Path) -> dict[str, Any]:
             "top_issue": health_registry.get("top_issue"),
             "repos": health_registry.get("repos"),
         },
-        "suggested_next_commands": [repo.get("suggested_command") for repo in repo_states if repo.get("suggested_command")],
+        "suggested_next_commands": [
+            repo.get("suggested_command") for repo in repo_states if repo.get("suggested_command")
+        ],
     }
     payload["report_fingerprint"] = _fingerprint_payload(
         {
@@ -1623,7 +1852,9 @@ def _report_markdown(payload: dict[str, Any]) -> str:
     ]
     repos = payload.get("repos") if isinstance(payload.get("repos"), list) else []
     for repo in repos:
-        lines.append(f"- `{repo.get('repo_id')}` {repo.get('repo_label')} warnings={len(repo.get('warnings') if isinstance(repo.get('warnings'), list) else [])} blockers={len(repo.get('blockers') if isinstance(repo.get('blockers'), list) else [])}")
+        lines.append(
+            f"- `{repo.get('repo_id')}` {repo.get('repo_label')} warnings={len(repo.get('warnings') if isinstance(repo.get('warnings'), list) else [])} blockers={len(repo.get('blockers') if isinstance(repo.get('blockers'), list) else [])}"
+        )
         top = repo.get("action_queue") if isinstance(repo.get("action_queue"), dict) else {}
         top_action = top.get("top_action") if isinstance(top.get("top_action"), dict) else None
         if top_action:
@@ -1632,18 +1863,36 @@ def _report_markdown(payload: dict[str, Any]) -> str:
             lines.append(f"  - next: `{repo.get('suggested_command')}`")
     if not repos:
         lines.append("- none")
-    lines.extend(["", "## Boundaries", "", "- local report only", "- no cloning", "- no remote mutation", "- no automatic action execution"])
+    lines.extend(
+        [
+            "",
+            "## Boundaries",
+            "",
+            "- local report only",
+            "- no cloning",
+            "- no remote mutation",
+            "- no automatic action execution",
+        ]
+    )
     return "\n".join(lines) + "\n"
 
 
 def _write_report_bundle(path: Path, payload: dict[str, Any]) -> None:
-    reportstore.write_bundle(path, payload, evidence_name="FLEET_EVIDENCE.json", documents={"FLEET_REPORT.md": _report_markdown(payload)})
+    reportstore.write_bundle(
+        path, payload, evidence_name="FLEET_EVIDENCE.json", documents={"FLEET_REPORT.md": _report_markdown(payload)}
+    )
 
 
 def report_plan(*, target: Path, json_output: bool = False) -> int:
     target = target.expanduser().resolve()
     payload = _report_payload(target)
-    payload.update({"report_id": "planned", "reports_root": str(_reports_root(target)), "bundle_files": ["FLEET_REPORT.md", "FLEET_EVIDENCE.json"]})
+    payload.update(
+        {
+            "report_id": "planned",
+            "reports_root": str(_reports_root(target)),
+            "bundle_files": ["FLEET_REPORT.md", "FLEET_EVIDENCE.json"],
+        }
+    )
     if json_output:
         print(json.dumps(payload, indent=2, sort_keys=True))
         return 0 if payload["config_loaded"] else 1
@@ -1660,7 +1909,14 @@ def report_build(*, target: Path, json_output: bool = False) -> int:
     created = _now()
     report_id = f"{created.strftime('%Y%m%d-%H%M%S')}-repo-fleet-report-{uuid4().hex[:6]}"
     report_dir = _reports_root(target) / report_id
-    payload.update({"report_id": report_id, "created_at": created.isoformat(), "path": str(report_dir), "bundle_files": ["FLEET_REPORT.md", "FLEET_EVIDENCE.json"]})
+    payload.update(
+        {
+            "report_id": report_id,
+            "created_at": created.isoformat(),
+            "path": str(report_dir),
+            "bundle_files": ["FLEET_REPORT.md", "FLEET_EVIDENCE.json"],
+        }
+    )
     _write_report_bundle(report_dir, payload)
     if json_output:
         print(json.dumps(payload, indent=2, sort_keys=True))
@@ -1678,13 +1934,20 @@ def report_list(*, target: Path, limit: int = 20, json_output: bool = False) -> 
         return 2
     target = target.expanduser().resolve()
     reports = _reports(target)[:limit]
-    payload = {"target": str(target), "reports_root": str(_reports_root(target)), "reports": reports, "report_count": len(reports)}
+    payload = {
+        "target": str(target),
+        "reports_root": str(_reports_root(target)),
+        "reports": reports,
+        "report_count": len(reports),
+    }
     if json_output:
         print(json.dumps(payload, indent=2, sort_keys=True))
         return 0
     print(f"repo fleet reports: {target}")
     for report in reports:
-        print(f"- {report.get('report_id')} repos={report.get('repo_count')} warnings={report.get('warning_count')} {report.get('created_at')}")
+        print(
+            f"- {report.get('report_id')} repos={report.get('repo_count')} warnings={report.get('warning_count')} {report.get('created_at')}"
+        )
     return 0
 
 
@@ -1718,7 +1981,12 @@ def report_archive(*, target: Path, report_id: str, json_output: bool = False) -
     if not moved:
         print(f"error: archived fleet report already exists: {destination}", file=sys.stderr)
         return 2
-    payload = {"target": str(target), "report_id": report.get("report_id"), "status": "archived", "archive_path": str(destination)}
+    payload = {
+        "target": str(target),
+        "report_id": report.get("report_id"),
+        "status": "archived",
+        "archive_path": str(destination),
+    }
     if json_output:
         print(json.dumps(payload, indent=2, sort_keys=True))
         return 0
@@ -1727,7 +1995,14 @@ def report_archive(*, target: Path, report_id: str, json_output: bool = False) -
     return 0
 
 
-def report_closeout(*, target: Path, report_id: str = "latest", status: str = "reviewed", reason: str | None = None, json_output: bool = False) -> int:
+def report_closeout(
+    *,
+    target: Path,
+    report_id: str = "latest",
+    status: str = "reviewed",
+    reason: str | None = None,
+    json_output: bool = False,
+) -> int:
     target = target.expanduser().resolve()
     if status not in reportstore.CLOSEOUT_STATUSES:
         print("error: --status must be one of reviewed, deferred, superseded, archived", file=sys.stderr)
@@ -1861,11 +2136,15 @@ def _target_imports_for_action(repo_path: Path, action: dict[str, Any]) -> list[
         metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
         if metadata.get("fleet_action_id") == action_id:
             matches.append(item)
-    matches.sort(key=lambda item: str(item.get("updated_at") or item.get("created_at") or item.get("id") or ""), reverse=True)
+    matches.sort(
+        key=lambda item: str(item.get("updated_at") or item.get("created_at") or item.get("id") or ""), reverse=True
+    )
     return matches
 
 
-def _supersede_prior_dispatch_imports(repo_path: Path, action: dict[str, Any], current_import_ids: set[str]) -> list[str]:
+def _supersede_prior_dispatch_imports(
+    repo_path: Path, action: dict[str, Any], current_import_ids: set[str]
+) -> list[str]:
     source_fingerprint = str(action.get("source_fingerprint") or _fingerprint_payload(action))
     imports = work_cmd._read_imports(repo_path)
     superseded: list[str] = []
@@ -1906,7 +2185,9 @@ def _dispatch_state(action: dict[str, Any], repo_path: Path | None = None) -> di
     }
 
 
-def _actions_for_dispatch(target: Path, *, action_id: str | None = None, all_reviewed: bool = False) -> tuple[list[dict[str, Any]], list[dict[str, Any]], str | None]:
+def _actions_for_dispatch(
+    target: Path, *, action_id: str | None = None, all_reviewed: bool = False
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], str | None]:
     actions = _read_actions(target)
     if action_id:
         matches = [action for action in actions if str(action.get("fleet_action_id") or "").startswith(action_id)]
@@ -1917,15 +2198,15 @@ def _actions_for_dispatch(target: Path, *, action_id: str | None = None, all_rev
         return actions, [matches[0]], None
     if all_reviewed:
         selected = [
-            action
-            for action in actions
-            if action.get("reviewed_at") and action.get("status") in {"pending", "active"}
+            action for action in actions if action.get("reviewed_at") and action.get("status") in {"pending", "active"}
         ]
         return actions, selected, None
     return actions, [], "fleet action id is required unless --all-reviewed is passed"
 
 
-def _dispatch_plan_for_action(target: Path, action: dict[str, Any], *, include_deferred: bool = False) -> dict[str, Any]:
+def _dispatch_plan_for_action(
+    target: Path, action: dict[str, Any], *, include_deferred: bool = False
+) -> dict[str, Any]:
     entry, error = _action_target_entry(target, action)
     blockers: list[str] = []
     if error:
@@ -1938,7 +2219,9 @@ def _dispatch_plan_for_action(target: Path, action: dict[str, Any], *, include_d
     record = _action_import_record(action)
     if entry is not None:
         record["text"] = _safe_text(record.get("text"), entry.path, entry.repo_id, entry.label)
-        record["acceptance"] = [_safe_text(item, entry.path, entry.repo_id, entry.label) for item in record.get("acceptance", [])]
+        record["acceptance"] = [
+            _safe_text(item, entry.path, entry.repo_id, entry.label) for item in record.get("acceptance", [])
+        ]
         metadata = record.get("metadata") if isinstance(record.get("metadata"), dict) else {}
         for key in ("safe_summary", "suggested_command"):
             if key in metadata:
@@ -1971,7 +2254,7 @@ def _dispatch_plan_for_action(target: Path, action: dict[str, Any], *, include_d
         "existing_same_fingerprint_import_ids": same_fingerprint,
         "existing_changed_fingerprint_import_ids": changed_fingerprint,
         "dismissed_same_fingerprint_import_ids": dismissed_same_fingerprint,
-        "suggested_next_command": f"brigade work import plan <import-id>",
+        "suggested_next_command": "brigade work import plan <import-id>",
     }
 
 
@@ -1989,7 +2272,12 @@ def actions_dispatch_plan(
         print(f"error: {error}", file=sys.stderr)
         return 1 if "not found" in error else 2
     plans = [_dispatch_plan_for_action(target, action, include_deferred=include_deferred) for action in selected]
-    payload = {"target": str(target), "plans": plans, "plan_count": len(plans), "blocker_count": sum(len(plan["blockers"]) for plan in plans)}
+    payload = {
+        "target": str(target),
+        "plans": plans,
+        "plan_count": len(plans),
+        "blocker_count": sum(len(plan["blockers"]) for plan in plans),
+    }
     if json_output:
         print(json.dumps(payload, indent=2, sort_keys=True))
         return 0 if payload["blocker_count"] == 0 else 2
@@ -2020,17 +2308,23 @@ def actions_dispatch_apply(
     for action in selected:
         plan = _dispatch_plan_for_action(target, action, include_deferred=include_deferred)
         if plan["blockers"]:
-            results.append({"fleet_action_id": action.get("fleet_action_id"), "status": "blocked", "blockers": plan["blockers"]})
+            results.append(
+                {"fleet_action_id": action.get("fleet_action_id"), "status": "blocked", "blockers": plan["blockers"]}
+            )
             continue
         entry, _ = _action_target_entry(target, action)
         assert entry is not None
-        imported, skipped, skipped_dismissed = work_cmd._append_import_records(entry.path, [plan["record"]], dry_run=dry_run)
+        imported, skipped, skipped_dismissed = work_cmd._append_import_records(
+            entry.path, [plan["record"]], dry_run=dry_run
+        )
         imported_ids = {str(item.get("id")) for item in imported if item.get("id")}
         skipped_ids = {str(item_id) for item_id in plan.get("existing_same_fingerprint_import_ids", []) if item_id}
         dismissed_ids = {str(item_id) for item_id in plan.get("dismissed_same_fingerprint_import_ids", []) if item_id}
         superseded_ids = [] if dry_run else _supersede_prior_dispatch_imports(entry.path, action, imported_ids)
         target_import_id = next(iter(imported_ids or skipped_ids or dismissed_ids), None)
-        status = "dry-run" if dry_run else ("created" if imported else ("dismissed" if skipped_dismissed else "skipped"))
+        status = (
+            "dry-run" if dry_run else ("created" if imported else ("dismissed" if skipped_dismissed else "skipped"))
+        )
         if not dry_run:
             action["dispatch"] = {
                 "status": "dispatched" if imported or skipped else "dismissed" if skipped_dismissed else "dispatched",
@@ -2039,9 +2333,13 @@ def actions_dispatch_apply(
                 "dispatched_at": now,
                 "source_fingerprint": action.get("source_fingerprint"),
                 "superseded_import_ids": superseded_ids,
-                "target_evidence_fingerprint": _fingerprint_payload(_latest_safe_receipts(entry.path, entry.repo_id, entry.label)),
+                "target_evidence_fingerprint": _fingerprint_payload(
+                    _latest_safe_receipts(entry.path, entry.repo_id, entry.label)
+                ),
             }
-            action["resolution_status"] = "dispatched" if imported or skipped else "dismissed" if skipped_dismissed else "dispatched"
+            action["resolution_status"] = (
+                "dispatched" if imported or skipped else "dismissed" if skipped_dismissed else "dispatched"
+            )
             action["updated_at"] = now
             changed = True
         results.append(
@@ -2091,7 +2389,9 @@ def _dispatch_import_summary(entry: RepoEntry, action: dict[str, Any], item: dic
         "fingerprint_matches_action": bool(source_fingerprint and source_fingerprint == wanted_fingerprint),
         "created_at": item.get("created_at"),
         "updated_at": item.get("updated_at"),
-        "dismiss_reason": _safe_text(item.get("dismiss_reason"), entry.path, entry.repo_id, entry.label) if item.get("dismiss_reason") else None,
+        "dismiss_reason": _safe_text(item.get("dismiss_reason"), entry.path, entry.repo_id, entry.label)
+        if item.get("dismiss_reason")
+        else None,
         "superseded_at": item.get("superseded_at"),
         "superseded_by": item.get("superseded_by"),
     }
@@ -2112,7 +2412,9 @@ def _dispatch_report_for_action(target: Path, action: dict[str, Any]) -> dict[st
             }
         )
     else:
-        imports = [_dispatch_import_summary(entry, action, item) for item in _target_imports_for_action(entry.path, action)]
+        imports = [
+            _dispatch_import_summary(entry, action, item) for item in _target_imports_for_action(entry.path, action)
+        ]
     target_import_id = dispatch.get("target_import_id")
     if dispatch and target_import_id and not any(item.get("import_id") == target_import_id for item in imports):
         warnings.append(
@@ -2123,7 +2425,9 @@ def _dispatch_report_for_action(target: Path, action: dict[str, Any]) -> dict[st
                 "suggested_next_command": f"brigade repos actions reconcile {action.get('fleet_action_id')}",
             }
         )
-    changed = [item for item in imports if item.get("source_fingerprint") and not item.get("fingerprint_matches_action")]
+    changed = [
+        item for item in imports if item.get("source_fingerprint") and not item.get("fingerprint_matches_action")
+    ]
     dismissed = [item for item in imports if item.get("status") == "dismissed"]
     superseded = [item for item in imports if item.get("status") == "superseded"]
     if changed:
@@ -2165,11 +2469,28 @@ def _dispatch_report_for_action(target: Path, action: dict[str, Any]) -> dict[st
         )
     history = [
         {"event": "action-created", "timestamp": action.get("created_at"), "status": action.get("status")},
-        {"event": "action-reviewed", "timestamp": action.get("reviewed_at"), "status": action.get("status")} if action.get("reviewed_at") else None,
-        {"event": "dispatch-applied", "timestamp": dispatch.get("dispatched_at"), "status": dispatch.get("status"), "target_import_id": dispatch.get("target_import_id")} if dispatch else None,
-        {"event": "reconciled", "timestamp": action.get("reconciled_at"), "status": resolution_status} if action.get("reconciled_at") else None,
+        {"event": "action-reviewed", "timestamp": action.get("reviewed_at"), "status": action.get("status")}
+        if action.get("reviewed_at")
+        else None,
+        {
+            "event": "dispatch-applied",
+            "timestamp": dispatch.get("dispatched_at"),
+            "status": dispatch.get("status"),
+            "target_import_id": dispatch.get("target_import_id"),
+        }
+        if dispatch
+        else None,
+        {"event": "reconciled", "timestamp": action.get("reconciled_at"), "status": resolution_status}
+        if action.get("reconciled_at")
+        else None,
     ]
-    checks = warnings or [{"status": OK, "name": "repo_fleet_dispatch_report", "detail": f"{action.get('fleet_action_id')} dispatch is traceable"}]
+    checks = warnings or [
+        {
+            "status": OK,
+            "name": "repo_fleet_dispatch_report",
+            "detail": f"{action.get('fleet_action_id')} dispatch is traceable",
+        }
+    ]
     return {
         "fleet_action_id": action.get("fleet_action_id"),
         "repo_id": action.get("repo_id"),
@@ -2187,7 +2508,9 @@ def _dispatch_report_for_action(target: Path, action: dict[str, Any]) -> dict[st
             "target_inbox_label": dispatch.get("target_inbox_label"),
             "dispatched_at": dispatch.get("dispatched_at"),
             "source_fingerprint": dispatch.get("source_fingerprint"),
-            "superseded_import_ids": dispatch.get("superseded_import_ids") if isinstance(dispatch.get("superseded_import_ids"), list) else [],
+            "superseded_import_ids": dispatch.get("superseded_import_ids")
+            if isinstance(dispatch.get("superseded_import_ids"), list)
+            else [],
         },
         "target_repo": {
             "repo_id": entry.repo_id if entry is not None else action.get("repo_id"),
@@ -2220,13 +2543,25 @@ def _dispatch_report_markdown(payload: dict[str, Any]) -> str:
         "",
     ]
     for action in payload.get("actions") if isinstance(payload.get("actions"), list) else []:
-        lines.append(f"- `{action.get('fleet_action_id')}` repo={action.get('repo_id')} status={action.get('resolution_status') or action.get('action_status')} issues={action.get('issue_count')}")
+        lines.append(
+            f"- `{action.get('fleet_action_id')}` repo={action.get('repo_id')} status={action.get('resolution_status') or action.get('action_status')} issues={action.get('issue_count')}"
+        )
         for check in action.get("checks") if isinstance(action.get("checks"), list) else []:
             if check.get("status") != OK:
                 lines.append(f"  - {check.get('name')}: {check.get('detail')}")
     if not payload.get("actions"):
         lines.append("- none")
-    lines.extend(["", "## Boundaries", "", "- local dispatch report only", "- no target command execution", "- no promotion", "- no remote mutation"])
+    lines.extend(
+        [
+            "",
+            "## Boundaries",
+            "",
+            "- local dispatch report only",
+            "- no target command execution",
+            "- no promotion",
+            "- no remote mutation",
+        ]
+    )
     return "\n".join(lines) + "\n"
 
 
@@ -2251,7 +2586,12 @@ def actions_dispatch_report(
     elif all_actions:
         selected = actions
     else:
-        selected = [action for action in actions if action.get("status") in {"pending", "active", "deferred"} or action.get("resolution_status") in {"broken-reference", "stale", "dismissed", "superseded"}]
+        selected = [
+            action
+            for action in actions
+            if action.get("status") in {"pending", "active", "deferred"}
+            or action.get("resolution_status") in {"broken-reference", "stale", "dismissed", "superseded"}
+        ]
     generated = _now()
     reports = [_dispatch_report_for_action(target, action) for action in selected]
     payload = {
@@ -2264,12 +2604,23 @@ def actions_dispatch_report(
         "action_count": len(reports),
         "issue_count": sum(int(report.get("issue_count") or 0) for report in reports),
         "top_issue": next((report.get("top_issue") for report in reports if report.get("top_issue")), None),
-        "suggested_next_commands": [f"brigade repos actions reconcile {report.get('fleet_action_id')}" for report in reports if report.get("issue_count")],
+        "suggested_next_commands": [
+            f"brigade repos actions reconcile {report.get('fleet_action_id')}"
+            for report in reports
+            if report.get("issue_count")
+        ],
     }
     if record:
         report_id = f"{generated.strftime('%Y%m%d-%H%M%S')}-dispatch-report-{uuid4().hex[:6]}"
         report_dir = _dispatch_reports_root(target) / report_id
-        payload.update({"report_id": report_id, "recorded": True, "path_label": f".brigade/repos/actions/dispatch-reports/{report_id}", "bundle_files": ["DISPATCH_REPORT.json", "DISPATCH_REPORT.md"]})
+        payload.update(
+            {
+                "report_id": report_id,
+                "recorded": True,
+                "path_label": f".brigade/repos/actions/dispatch-reports/{report_id}",
+                "bundle_files": ["DISPATCH_REPORT.json", "DISPATCH_REPORT.md"],
+            }
+        )
         _write_json(report_dir / "DISPATCH_REPORT.json", payload)
         (report_dir / "DISPATCH_REPORT.md").write_text(_dispatch_report_markdown(payload))
     if json_output:
@@ -2307,9 +2658,7 @@ def _action_context_payload(target: Path, action: dict[str, Any]) -> tuple[dict[
         "has_agents": (entry.path / "AGENTS.md").is_file(),
         "has_claude": (entry.path / "CLAUDE.md").is_file() or (entry.path / ".claude" / "CLAUDE.md").is_file(),
         "source_labels": [
-            name
-            for name in ("AGENTS.md", "CLAUDE.md", ".claude/CLAUDE.md")
-            if (entry.path / name).is_file()
+            name for name in ("AGENTS.md", "CLAUDE.md", ".claude/CLAUDE.md") if (entry.path / name).is_file()
         ],
     }
     payload = {
@@ -2334,7 +2683,10 @@ def _action_context_payload(target: Path, action: dict[str, Any]) -> tuple[dict[
         ],
         "source_references": [
             {"label": f"{entry.repo_id}:AGENTS.md", "exists": guidance["has_agents"]},
-            {"label": f"{entry.repo_id}:.brigade/work/imports/inbox.jsonl", "exists": work_cmd._imports_path(entry.path).is_file()},
+            {
+                "label": f"{entry.repo_id}:.brigade/work/imports/inbox.jsonl",
+                "exists": work_cmd._imports_path(entry.path).is_file(),
+            },
         ],
         "checks": [{"status": OK, "name": "repo_fleet_action_context", "detail": "ready"}],
     }
@@ -2373,7 +2725,14 @@ def actions_context_build(*, target: Path, action_id: str, json_output: bool = F
         return 2
     now = _now()
     pack_id = f"{now.strftime('%Y%m%d-%H%M%S')}-fleet-action-context-{uuid4().hex[:6]}"
-    payload.update({"pack_id": pack_id, "status": "built", "created_at": now.isoformat(), "path_label": f"{entry.repo_id}:.brigade/context/packs/{pack_id}"})
+    payload.update(
+        {
+            "pack_id": pack_id,
+            "status": "built",
+            "created_at": now.isoformat(),
+            "path_label": f"{entry.repo_id}:.brigade/context/packs/{pack_id}",
+        }
+    )
     pack_dir = entry.path / ".brigade" / "context" / "packs" / pack_id
     _write_json(pack_dir / "context.json", payload)
     markdown = [
@@ -2391,7 +2750,11 @@ def actions_context_build(*, target: Path, action_id: str, json_output: bool = F
         "",
     ]
     (pack_dir / "CONTEXT.md").write_text("\n".join(markdown))
-    action["context_pack"] = {"pack_id": pack_id, "path_label": payload["path_label"], "created_at": payload["created_at"]}
+    action["context_pack"] = {
+        "pack_id": pack_id,
+        "path_label": payload["path_label"],
+        "created_at": payload["created_at"],
+    }
     action["updated_at"] = payload["created_at"]
     _write_actions(target, actions)
     if json_output:
@@ -2418,7 +2781,11 @@ def _reconcile_one(target: Path, action: dict[str, Any]) -> dict[str, Any]:
         action["resolution_status"] = "broken-reference"
         action["reconciled_at"] = now
         action["updated_at"] = now
-        return {"fleet_action_id": action.get("fleet_action_id"), "status": "broken-reference", "detail": error or "target repo missing"}
+        return {
+            "fleet_action_id": action.get("fleet_action_id"),
+            "status": "broken-reference",
+            "detail": error or "target repo missing",
+        }
     dispatch = action.get("dispatch") if isinstance(action.get("dispatch"), dict) else {}
     imports = _target_imports_for_action(entry.path, action)
     target_import = None
@@ -2433,7 +2800,9 @@ def _reconcile_one(target: Path, action: dict[str, Any]) -> dict[str, Any]:
         action["reconciled_at"] = now
         action["updated_at"] = now
         return {"fleet_action_id": action.get("fleet_action_id"), "status": status, "detail": "target import not found"}
-    task = _task_by_id(entry.path, target_import.get("task_id") if isinstance(target_import.get("task_id"), str) else None)
+    task = _task_by_id(
+        entry.path, target_import.get("task_id") if isinstance(target_import.get("task_id"), str) else None
+    )
     if target_import.get("status") == "superseded":
         status = "superseded"
     elif target_import.get("status") == "dismissed":
@@ -2450,8 +2819,12 @@ def _reconcile_one(target: Path, action: dict[str, Any]) -> dict[str, Any]:
             status = "dispatched"
     else:
         status = str(target_import.get("status") or "dispatched")
-    latest_closeout = _safe_receipt(_latest_json(entry.path / ".brigade" / "work" / "closeouts", "closeout.json"), entry.repo_id, entry.label)
-    latest_release = _safe_receipt(_latest_json(entry.path / ".brigade" / "release" / "runs", "release.json"), entry.repo_id, entry.label)
+    latest_closeout = _safe_receipt(
+        _latest_json(entry.path / ".brigade" / "work" / "closeouts", "closeout.json"), entry.repo_id, entry.label
+    )
+    latest_release = _safe_receipt(
+        _latest_json(entry.path / ".brigade" / "release" / "runs", "release.json"), entry.repo_id, entry.label
+    )
     result = {
         "fleet_action_id": action.get("fleet_action_id"),
         "status": status,
@@ -2459,7 +2832,9 @@ def _reconcile_one(target: Path, action: dict[str, Any]) -> dict[str, Any]:
         "target_import_status": target_import.get("status"),
         "target_task_id": target_import.get("task_id"),
         "target_task_status": task.get("status") if isinstance(task, dict) else None,
-        "completion": task.get("completion") if isinstance(task, dict) and isinstance(task.get("completion"), dict) else None,
+        "completion": task.get("completion")
+        if isinstance(task, dict) and isinstance(task.get("completion"), dict)
+        else None,
         "closeout": latest_closeout,
         "release": latest_release,
         "reconciled_at": now,
@@ -2540,7 +2915,9 @@ def latest_release_train(target: Path) -> dict[str, Any] | None:
 
 def _resolve_release_train(target: Path, train_id: str) -> tuple[dict[str, Any] | None, str | None]:
     trains = [] if train_id == "latest" else _release_trains(target, include_archived=True)
-    return reportstore.resolve_bundle(trains, train_id, id_field="train_id", label="fleet release train", latest=lambda: latest_release_train(target))
+    return reportstore.resolve_bundle(
+        trains, train_id, id_field="train_id", label="fleet release train", latest=lambda: latest_release_train(target)
+    )
 
 
 def _repo_git_labels(repo: Path) -> dict[str, Any]:
@@ -2620,7 +2997,9 @@ def _latest_review_closeout_ref(repo: Path, repo_id: str, label: str) -> dict[st
 
 
 def _latest_security_closeout_ref(repo: Path, repo_id: str, label: str) -> dict[str, Any] | None:
-    return _safe_report_ref(_latest_json_payload(repo / ".brigade" / "security" / "closeouts", "closeout.json"), repo_id, label)
+    return _safe_report_ref(
+        _latest_json_payload(repo / ".brigade" / "security" / "closeouts", "closeout.json"), repo_id, label
+    )
 
 
 def _latest_verification_ref(repo: Path, repo_id: str, label: str) -> dict[str, Any] | None:
@@ -2691,19 +3070,30 @@ def _release_repo_payload(target: Path, entry: RepoEntry) -> dict[str, Any]:
         "git": _repo_git_labels(repo),
         "dirty_tracked_count": state.get("dirty_tracked_count"),
         "action_count": len(actions),
-        "open_action_count": len([action for action in actions if action.get("status") in {"pending", "active", "deferred"}]),
+        "open_action_count": len(
+            [action for action in actions if action.get("status") in {"pending", "active", "deferred"}]
+        ),
         "pending_fleet_import_count": len(evidence["pending_fleet_imports"]),
         "warning_count": len(state.get("warnings") if isinstance(state.get("warnings"), list) else []),
         "blocker_count": len(state.get("blockers") if isinstance(state.get("blockers"), list) else []),
         "evidence": evidence,
         "suggested_next_command": _release_repo_next_command(entry.repo_id, classification, actions),
-        "source_fingerprint": _fingerprint_payload({"repo_id": entry.repo_id, "classification": classification, "evidence": evidence, "git": _repo_git_labels(repo)}),
+        "source_fingerprint": _fingerprint_payload(
+            {
+                "repo_id": entry.repo_id,
+                "classification": classification,
+                "evidence": evidence,
+                "git": _repo_git_labels(repo),
+            }
+        ),
     }
 
 
 def _release_repo_next_command(repo_id: str, classification: str, actions: list[dict[str, Any]]) -> str:
     if classification == "needs-dispatch":
-        action = next((item for item in actions if item.get("status") in {"pending", "active"} and not item.get("dispatch")), None)
+        action = next(
+            (item for item in actions if item.get("status") in {"pending", "active"} and not item.get("dispatch")), None
+        )
         if action:
             return f"brigade repos actions dispatch plan {action.get('fleet_action_id')}"
     if classification in {"in-progress", "blocked", "stale-evidence"}:
@@ -2715,7 +3105,7 @@ def _release_repo_next_command(repo_id: str, classification: str, actions: list[
     if classification == "needs-review":
         return "brigade release doctor"
     if classification == "deferred":
-        return f"brigade repos actions list --target ."
+        return "brigade repos actions list --target ."
     return f"brigade repos show {repo_id}"
 
 
@@ -2727,7 +3117,12 @@ def _release_train_payload(target: Path) -> dict[str, Any]:
     for repo in repos:
         counts[str(repo.get("classification"))] = counts.get(str(repo.get("classification")), 0) + 1
     blockers = [repo for repo in repos if repo.get("classification") in {"blocked"}]
-    warnings = [repo for repo in repos if repo.get("classification") in {"needs-review", "needs-dispatch", "in-progress", "stale-evidence", "no-release-candidate", "deferred"}]
+    warnings = [
+        repo
+        for repo in repos
+        if repo.get("classification")
+        in {"needs-review", "needs-dispatch", "in-progress", "stale-evidence", "no-release-candidate", "deferred"}
+    ]
     payload = {
         "schema_version": 1,
         "target_label": "repo-fleet",
@@ -2739,11 +3134,29 @@ def _release_train_payload(target: Path) -> dict[str, Any]:
         "repos": repos,
         "blocker_count": len(blockers) + len(errors),
         "warning_count": len(warnings),
-        "blockers": [{"repo_id": repo.get("repo_id"), "classification": repo.get("classification"), "detail": f"{repo.get('repo_id')} is blocked"} for repo in blockers],
-        "warnings": [{"repo_id": repo.get("repo_id"), "classification": repo.get("classification"), "detail": f"{repo.get('repo_id')} is {repo.get('classification')}"} for repo in warnings],
-        "suggested_next_commands": [repo.get("suggested_next_command") for repo in repos if repo.get("suggested_next_command")],
+        "blockers": [
+            {
+                "repo_id": repo.get("repo_id"),
+                "classification": repo.get("classification"),
+                "detail": f"{repo.get('repo_id')} is blocked",
+            }
+            for repo in blockers
+        ],
+        "warnings": [
+            {
+                "repo_id": repo.get("repo_id"),
+                "classification": repo.get("classification"),
+                "detail": f"{repo.get('repo_id')} is {repo.get('classification')}",
+            }
+            for repo in warnings
+        ],
+        "suggested_next_commands": [
+            repo.get("suggested_next_command") for repo in repos if repo.get("suggested_next_command")
+        ],
     }
-    payload["train_fingerprint"] = _fingerprint_payload({"repos": repos, "counts": counts, "errors": payload["config_errors"]})
+    payload["train_fingerprint"] = _fingerprint_payload(
+        {"repos": repos, "counts": counts, "errors": payload["config_errors"]}
+    )
     return payload
 
 
@@ -2767,7 +3180,16 @@ def _release_train_markdown(train: dict[str, Any]) -> str:
             lines.append(f"  - next: `{repo.get('suggested_next_command')}`")
     if not repos:
         lines.append("- none")
-    lines.extend(["", "## Boundaries", "", "- local release train only", "- no push, tags, releases, uploads, or remote mutation", "- manual publish steps only"])
+    lines.extend(
+        [
+            "",
+            "## Boundaries",
+            "",
+            "- local release train only",
+            "- no push, tags, releases, uploads, or remote mutation",
+            "- manual publish steps only",
+        ]
+    )
     return "\n".join(lines) + "\n"
 
 
@@ -2828,7 +3250,14 @@ def release_build(*, target: Path, json_output: bool = False) -> int:
     train_id = f"{created.strftime('%Y%m%d-%H%M%S')}-fleet-release-{uuid4().hex[:6]}"
     train_dir = _release_trains_root(target) / train_id
     payload = _release_train_payload(target)
-    payload.update({"train_id": train_id, "status": "blocked" if payload["blocker_count"] else "ready", "created_at": created.isoformat(), "path_label": train_id})
+    payload.update(
+        {
+            "train_id": train_id,
+            "status": "blocked" if payload["blocker_count"] else "ready",
+            "created_at": created.isoformat(),
+            "path_label": train_id,
+        }
+    )
     _write_release_train_bundle(train_dir, payload)
     if json_output:
         print(json.dumps(payload, indent=2, sort_keys=True))
@@ -2845,13 +3274,20 @@ def release_list(*, target: Path, limit: int = 20, json_output: bool = False) ->
         return 2
     target = target.expanduser().resolve()
     trains = _release_trains(target)[:limit]
-    payload = {"target_label": "repo-fleet", "release_train_root_label": ".brigade/repos/releases", "trains": trains, "train_count": len(trains)}
+    payload = {
+        "target_label": "repo-fleet",
+        "release_train_root_label": ".brigade/repos/releases",
+        "trains": trains,
+        "train_count": len(trains),
+    }
     if json_output:
         print(json.dumps(payload, indent=2, sort_keys=True))
         return 0
     print("repo fleet release trains")
     for train in trains:
-        print(f"- {train.get('train_id')} [{train.get('status')}] repos={train.get('repo_count')} {train.get('created_at')}")
+        print(
+            f"- {train.get('train_id')} [{train.get('status')}] repos={train.get('repo_count')} {train.get('created_at')}"
+        )
     return 0
 
 
@@ -2879,17 +3315,41 @@ def release_compare(*, target: Path, train_id: str = "latest", json_output: bool
         return 1 if error and "not found" in error else 2
     current = _release_train_payload(target)
     issues: list[dict[str, Any]] = []
-    old_by_repo = {repo.get("repo_id"): repo for repo in train.get("repos") if isinstance(train.get("repos"), list) for repo in [repo] if isinstance(repo, dict)}
+    old_by_repo = {
+        repo.get("repo_id"): repo
+        for repo in train.get("repos")
+        if isinstance(train.get("repos"), list)
+        for repo in [repo]
+        if isinstance(repo, dict)
+    }
     current_by_repo = {repo.get("repo_id"): repo for repo in current.get("repos", []) if isinstance(repo, dict)}
     for repo_id, old in old_by_repo.items():
         new = current_by_repo.get(repo_id)
         if new is None:
-            issues.append({"status": WARN, "name": "train_repo_missing", "repo_id": repo_id, "detail": f"{repo_id} is no longer in release train"})
+            issues.append(
+                {
+                    "status": WARN,
+                    "name": "train_repo_missing",
+                    "repo_id": repo_id,
+                    "detail": f"{repo_id} is no longer in release train",
+                }
+            )
             continue
         old_git = old.get("git") if isinstance(old.get("git"), dict) else {}
         new_git = new.get("git") if isinstance(new.get("git"), dict) else {}
-        if old_git.get("head_label") and new_git.get("head_label") and old_git.get("head_label") != new_git.get("head_label"):
-            issues.append({"status": WARN, "name": "train_repo_head_changed", "repo_id": repo_id, "detail": f"{repo_id} HEAD changed"})
+        if (
+            old_git.get("head_label")
+            and new_git.get("head_label")
+            and old_git.get("head_label") != new_git.get("head_label")
+        ):
+            issues.append(
+                {
+                    "status": WARN,
+                    "name": "train_repo_head_changed",
+                    "repo_id": repo_id,
+                    "detail": f"{repo_id} HEAD changed",
+                }
+            )
         old_evidence = old.get("evidence") if isinstance(old.get("evidence"), dict) else {}
         new_evidence = new.get("evidence") if isinstance(new.get("evidence"), dict) else {}
         for key, name in (
@@ -2899,16 +3359,48 @@ def release_compare(*, target: Path, train_id: str = "latest", json_output: bool
             old_id = (old_evidence.get(key) or {}).get("id") if isinstance(old_evidence.get(key), dict) else None
             new_id = (new_evidence.get(key) or {}).get("id") if isinstance(new_evidence.get(key), dict) else None
             if old_id and not new_id:
-                issues.append({"status": WARN, "name": "train_missing_receipt", "repo_id": repo_id, "detail": f"{repo_id} missing {key}"})
+                issues.append(
+                    {
+                        "status": WARN,
+                        "name": "train_missing_receipt",
+                        "repo_id": repo_id,
+                        "detail": f"{repo_id} missing {key}",
+                    }
+                )
             elif old_id and new_id and old_id != new_id:
-                issues.append({"status": WARN, "name": name, "repo_id": repo_id, "detail": f"{repo_id} has newer {key}"})
+                issues.append(
+                    {"status": WARN, "name": name, "repo_id": repo_id, "detail": f"{repo_id} has newer {key}"}
+                )
         old_actions = old_evidence.get("fleet_actions") if isinstance(old_evidence.get("fleet_actions"), list) else []
         new_actions = new_evidence.get("fleet_actions") if isinstance(new_evidence.get("fleet_actions"), list) else []
         if _fingerprint_payload(old_actions) != _fingerprint_payload(new_actions):
-            issues.append({"status": WARN, "name": "train_fleet_actions_changed", "repo_id": repo_id, "detail": f"{repo_id} fleet action reconciliation changed"})
+            issues.append(
+                {
+                    "status": WARN,
+                    "name": "train_fleet_actions_changed",
+                    "repo_id": repo_id,
+                    "detail": f"{repo_id} fleet action reconciliation changed",
+                }
+            )
         if old.get("source_fingerprint") != new.get("source_fingerprint"):
-            issues.append({"status": WARN, "name": "train_unresolved_state_changed", "repo_id": repo_id, "detail": f"{repo_id} unresolved release state changed"})
-    payload = {"target_label": "repo-fleet", "train_id": train.get("train_id"), "issue_count": len(issues), "issues": issues, "suggested_next_commands": ["brigade repos release build", f"brigade repos release closeout {train.get('train_id')} --status superseded"]}
+            issues.append(
+                {
+                    "status": WARN,
+                    "name": "train_unresolved_state_changed",
+                    "repo_id": repo_id,
+                    "detail": f"{repo_id} unresolved release state changed",
+                }
+            )
+    payload = {
+        "target_label": "repo-fleet",
+        "train_id": train.get("train_id"),
+        "issue_count": len(issues),
+        "issues": issues,
+        "suggested_next_commands": [
+            "brigade repos release build",
+            f"brigade repos release closeout {train.get('train_id')} --status superseded",
+        ],
+    }
     if json_output:
         print(json.dumps(payload, indent=2, sort_keys=True))
         return 0
@@ -2919,7 +3411,14 @@ def release_compare(*, target: Path, train_id: str = "latest", json_output: bool
     return 0
 
 
-def release_closeout(*, target: Path, train_id: str = "latest", status: str = "reviewed", reason: str | None = None, json_output: bool = False) -> int:
+def release_closeout(
+    *,
+    target: Path,
+    train_id: str = "latest",
+    status: str = "reviewed",
+    reason: str | None = None,
+    json_output: bool = False,
+) -> int:
     target = target.expanduser().resolve()
     if status not in reportstore.CLOSEOUT_STATUSES:
         print("error: --status must be one of reviewed, deferred, superseded, archived", file=sys.stderr)
@@ -2930,7 +3429,10 @@ def release_closeout(*, target: Path, train_id: str = "latest", status: str = "r
         return 1 if error and "not found" in error else 2
     train_path = _release_trains_root(target) / str(train.get("train_id") or "")
     if not train_path.is_dir():
-        print(f"error: fleet release train path is missing: {train.get('path_label') or train.get('train_id')}", file=sys.stderr)
+        print(
+            f"error: fleet release train path is missing: {train.get('path_label') or train.get('train_id')}",
+            file=sys.stderr,
+        )
         return 2
     payload = {
         "target_label": "repo-fleet",
@@ -2945,7 +3447,16 @@ def release_closeout(*, target: Path, train_id: str = "latest", status: str = "r
     payload["summary"] = {
         key: value
         for key, value in _release_summary_payload(target, train).items()
-        if key in {"counts", "repo_count", "ready_count", "blocked_count", "missing_evidence_count", "unresolved_action_count", "summary_fingerprint"}
+        if key
+        in {
+            "counts",
+            "repo_count",
+            "ready_count",
+            "blocked_count",
+            "missing_evidence_count",
+            "unresolved_action_count",
+            "summary_fingerprint",
+        }
     }
     _write_json(train_path / "CLOSEOUT.json", payload)
     train["closeout"] = payload
@@ -2973,7 +3484,12 @@ def release_archive(*, target: Path, train_id: str, json_output: bool = False) -
     if not moved:
         print(f"error: archived fleet release train already exists: {train.get('train_id')}", file=sys.stderr)
         return 2
-    payload = {"target_label": "repo-fleet", "train_id": train.get("train_id"), "status": "archived", "archive_path_label": train.get("train_id")}
+    payload = {
+        "target_label": "repo-fleet",
+        "train_id": train.get("train_id"),
+        "status": "archived",
+        "archive_path_label": train.get("train_id"),
+    }
     if json_output:
         print(json.dumps(payload, indent=2, sort_keys=True))
         return 0
@@ -3006,7 +3522,9 @@ def _append_release_action_archive(target: Path, actions: list[dict[str, Any]]) 
 
 
 def _release_action_rank(action: dict[str, Any]) -> tuple[int, int, str]:
-    status_rank = {"active": 0, "pending": 1, "deferred": 2, "done": 3, "archived": 4}.get(str(action.get("status") or ""), 5)
+    status_rank = {"active": 0, "pending": 1, "deferred": 2, "done": 3, "archived": 4}.get(
+        str(action.get("status") or ""), 5
+    )
     class_rank = {
         "blocked": 0,
         "needs-dispatch": 1,
@@ -3061,7 +3579,9 @@ def _planned_release_actions(train: dict[str, Any]) -> list[dict[str, Any]]:
                 "status": "pending",
                 "priority": "high" if classification in {"blocked", "needs-dispatch"} else "normal",
                 "safe_summary": f"{repo_id} is {classification} for the fleet release train",
-                "suggested_command": str(repo.get("suggested_next_command") or f"brigade repos release show {train_id}"),
+                "suggested_command": str(
+                    repo.get("suggested_next_command") or f"brigade repos release show {train_id}"
+                ),
                 "created_at": created,
                 "updated_at": created,
                 "reviewed_at": reviewed_at,
@@ -3093,11 +3613,15 @@ def release_actions_plan(*, target: Path, train_id: str = "latest", json_output:
     print(f"repo fleet release actions plan: {train.get('train_id')}")
     print(f"actions: {len(actions)}")
     for action in actions[:20]:
-        print(f"- {action.get('release_action_id')} {action.get('repo_id')} [{action.get('classification')}] {action.get('safe_summary')}")
+        print(
+            f"- {action.get('release_action_id')} {action.get('repo_id')} [{action.get('classification')}] {action.get('safe_summary')}"
+        )
     return 0
 
 
-def release_actions_build(*, target: Path, train_id: str = "latest", allow_unreviewed: bool = False, json_output: bool = False) -> int:
+def release_actions_build(
+    *, target: Path, train_id: str = "latest", allow_unreviewed: bool = False, json_output: bool = False
+) -> int:
     target = target.expanduser().resolve()
     train, error = _resolve_release_train(target, train_id)
     if train is None:
@@ -3105,10 +3629,15 @@ def release_actions_build(*, target: Path, train_id: str = "latest", allow_unrev
         return 1 if error and "not found" in error else 2
     review_status = _train_closeout_status(train)
     if review_status not in {"reviewed", "deferred"} and not allow_unreviewed:
-        print("error: source fleet release train must be closed out as reviewed or deferred, or pass --allow-unreviewed", file=sys.stderr)
+        print(
+            "error: source fleet release train must be closed out as reviewed or deferred, or pass --allow-unreviewed",
+            file=sys.stderr,
+        )
         return 2
     existing = _read_release_actions(target)
-    created, skipped = actionqueue.merge_planned(existing, _read_release_action_archive(target), _planned_release_actions(train))
+    created, skipped = actionqueue.merge_planned(
+        existing, _read_release_action_archive(target), _planned_release_actions(train)
+    )
     _write_release_actions(target, existing)
     payload = {
         "target_label": "repo-fleet",
@@ -3135,19 +3664,30 @@ def release_actions_list(*, target: Path, limit: int = 50, json_output: bool = F
     target = target.expanduser().resolve()
     actions = _read_release_actions(target)
     actions.sort(key=_release_action_rank)
-    payload = {"target_label": "repo-fleet", "actions_path_label": ".brigade/repos/releases/actions.json", "actions": actions[:limit], "action_count": len(actions)}
+    payload = {
+        "target_label": "repo-fleet",
+        "actions_path_label": ".brigade/repos/releases/actions.json",
+        "actions": actions[:limit],
+        "action_count": len(actions),
+    }
     if json_output:
         print(json.dumps(payload, indent=2, sort_keys=True))
         return 0
     print("repo fleet release actions")
     for action in actions[:limit]:
-        print(f"- {action.get('release_action_id')} {action.get('repo_id')} [{action.get('status')}] {action.get('safe_summary')}")
+        print(
+            f"- {action.get('release_action_id')} {action.get('repo_id')} [{action.get('status')}] {action.get('safe_summary')}"
+        )
     return 0
 
 
-def _find_release_action(target: Path, action_id: str) -> tuple[list[dict[str, Any]], dict[str, Any] | None, str | None]:
+def _find_release_action(
+    target: Path, action_id: str
+) -> tuple[list[dict[str, Any]], dict[str, Any] | None, str | None]:
     actions = _read_release_actions(target)
-    action, error = actionqueue.find_action(actions, action_id, id_field="release_action_id", label="fleet release action")
+    action, error = actionqueue.find_action(
+        actions, action_id, id_field="release_action_id", label="fleet release action"
+    )
     return actions, action, error
 
 
@@ -3167,7 +3707,9 @@ def release_actions_show(*, target: Path, action_id: str, json_output: bool = Fa
     return 0
 
 
-def _set_release_action_status(*, target: Path, action_id: str, status: str, reason: str | None = None, json_output: bool = False) -> int:
+def _set_release_action_status(
+    *, target: Path, action_id: str, status: str, reason: str | None = None, json_output: bool = False
+) -> int:
     target = target.expanduser().resolve()
     actions, action, error = _find_release_action(target, action_id)
     if action is None:
@@ -3194,7 +3736,9 @@ def release_actions_defer(*, target: Path, action_id: str, reason: str, json_out
     if not reason:
         print("error: --reason is required", file=sys.stderr)
         return 2
-    return _set_release_action_status(target=target, action_id=action_id, status="deferred", reason=reason, json_output=json_output)
+    return _set_release_action_status(
+        target=target, action_id=action_id, status="deferred", reason=reason, json_output=json_output
+    )
 
 
 def release_actions_archive_completed(*, target: Path, json_output: bool = False) -> int:
@@ -3203,7 +3747,12 @@ def release_actions_archive_completed(*, target: Path, json_output: bool = False
     archived, remaining = actionqueue.split_archived_completed(actions, now=_now().isoformat())
     _write_release_actions(target, remaining)
     _append_release_action_archive(target, archived)
-    payload = {"target_label": "repo-fleet", "archived_count": len(archived), "archive_path_label": ".brigade/repos/releases/actions-archive.jsonl", "archived_actions": archived}
+    payload = {
+        "target_label": "repo-fleet",
+        "archived_count": len(archived),
+        "archive_path_label": ".brigade/repos/releases/actions-archive.jsonl",
+        "archived_actions": archived,
+    }
     if json_output:
         print(json.dumps(payload, indent=2, sort_keys=True))
         return 0
@@ -3253,7 +3802,9 @@ def _active_release_waivers(target: Path, train_id: str) -> list[dict[str, Any]]
     return [
         waiver
         for waiver in _read_release_waivers(target)
-        if waiver.get("train_id") == train_id and waiver.get("status") == "active" and not _release_waiver_expired(waiver)
+        if waiver.get("train_id") == train_id
+        and waiver.get("status") == "active"
+        and not _release_waiver_expired(waiver)
     ]
 
 
@@ -3261,7 +3812,9 @@ def _release_waiver_scope_names(waivers: list[dict[str, Any]]) -> set[str]:
     return {str(waiver.get("scope") or "") for waiver in waivers if waiver.get("scope") in RELEASE_WAIVER_SCOPES}
 
 
-def _find_release_waiver(target: Path, waiver_id: str) -> tuple[list[dict[str, Any]], dict[str, Any] | None, str | None]:
+def _find_release_waiver(
+    target: Path, waiver_id: str
+) -> tuple[list[dict[str, Any]], dict[str, Any] | None, str | None]:
     waivers = _read_release_waivers(target)
     matches = [waiver for waiver in waivers if str(waiver.get("waiver_id") or "").startswith(waiver_id)]
     if not matches:
@@ -3317,7 +3870,16 @@ def release_waiver_record(
         "expires_at": expires_at,
         "created_at": now,
         "updated_at": now,
-        "source_fingerprint": _fingerprint_payload({"train_id": train_id_value, "repo_id": repo_id or "all", "scope": scope, "reason": reason, "expires_at": expires_at, "owner_label": owner_label or ""}),
+        "source_fingerprint": _fingerprint_payload(
+            {
+                "train_id": train_id_value,
+                "repo_id": repo_id or "all",
+                "scope": scope,
+                "reason": reason,
+                "expires_at": expires_at,
+                "owner_label": owner_label or "",
+            }
+        ),
     }
     replaced = False
     for index, existing in enumerate(waivers):
@@ -3338,7 +3900,9 @@ def release_waiver_record(
     return 0
 
 
-def release_waiver_list(*, target: Path, train_id: str | None = None, limit: int = 50, json_output: bool = False) -> int:
+def release_waiver_list(
+    *, target: Path, train_id: str | None = None, limit: int = 50, json_output: bool = False
+) -> int:
     if limit < 1:
         print("error: --limit must be a positive integer", file=sys.stderr)
         return 2
@@ -3349,8 +3913,16 @@ def release_waiver_list(*, target: Path, train_id: str | None = None, limit: int
             latest = latest_release_train(target)
             train_id = str(latest.get("train_id")) if isinstance(latest, dict) else train_id
         waivers = [waiver for waiver in waivers if str(waiver.get("train_id") or "").startswith(train_id or "")]
-    waivers.sort(key=lambda item: str(item.get("updated_at") or item.get("created_at") or item.get("waiver_id") or ""), reverse=True)
-    payload = {"target_label": "repo-fleet", "waivers_path_label": ".brigade/repos/releases/waivers.jsonl", "waivers": waivers[:limit], "waiver_count": len(waivers)}
+    waivers.sort(
+        key=lambda item: str(item.get("updated_at") or item.get("created_at") or item.get("waiver_id") or ""),
+        reverse=True,
+    )
+    payload = {
+        "target_label": "repo-fleet",
+        "waivers_path_label": ".brigade/repos/releases/waivers.jsonl",
+        "waivers": waivers[:limit],
+        "waiver_count": len(waivers),
+    }
     if json_output:
         print(json.dumps(payload, indent=2, sort_keys=True))
         return 0
@@ -3397,7 +3969,15 @@ def release_waiver_revoke(*, target: Path, waiver_id: str, reason: str, json_out
     return 0
 
 
-def release_waiver_renew(*, target: Path, waiver_id: str, reason: str, expires_at: str | None = None, owner_label: str | None = None, json_output: bool = False) -> int:
+def release_waiver_renew(
+    *,
+    target: Path,
+    waiver_id: str,
+    reason: str,
+    expires_at: str | None = None,
+    owner_label: str | None = None,
+    json_output: bool = False,
+) -> int:
     target = target.expanduser().resolve()
     if not reason:
         print("error: --reason is required", file=sys.stderr)
@@ -3420,7 +4000,16 @@ def release_waiver_renew(*, target: Path, waiver_id: str, reason: str, expires_a
     waiver["updated_at"] = now
     if isinstance(train, dict):
         waiver["train_fingerprint"] = train.get("train_fingerprint")
-    waiver["source_fingerprint"] = _fingerprint_payload({"train_id": waiver.get("train_id"), "repo_id": waiver.get("repo_id") or "all", "scope": waiver.get("scope"), "reason": reason, "expires_at": expires_at, "owner_label": waiver.get("owner_label") or ""})
+    waiver["source_fingerprint"] = _fingerprint_payload(
+        {
+            "train_id": waiver.get("train_id"),
+            "repo_id": waiver.get("repo_id") or "all",
+            "scope": waiver.get("scope"),
+            "reason": reason,
+            "expires_at": expires_at,
+            "owner_label": waiver.get("owner_label") or "",
+        }
+    )
     _write_release_waivers(target, waivers)
     if json_output:
         print(json.dumps({"target_label": "repo-fleet", "waiver": waiver}, indent=2, sort_keys=True))
@@ -3450,28 +4039,132 @@ def _release_waiver_health_payload(target: Path, train_id: str | None = None) ->
         repos = train.get("repos") if isinstance(train, dict) and isinstance(train.get("repos"), list) else []
         repo_ids = {str(repo.get("repo_id") or "") for repo in repos if isinstance(repo, dict)}
         if scope not in RELEASE_WAIVER_SCOPES:
-            issues.append({"status": WARN, "name": "release_waiver_invalid_scope", "waiver_id": waiver_id, "train_id": waiver.get("train_id"), "scope": waiver.get("scope"), "detail": f"{waiver_id} has an invalid waiver scope", "suggested_next_command": f"brigade repos release waivers revoke {waiver_id} --reason \"invalid scope\""})
+            issues.append(
+                {
+                    "status": WARN,
+                    "name": "release_waiver_invalid_scope",
+                    "waiver_id": waiver_id,
+                    "train_id": waiver.get("train_id"),
+                    "scope": waiver.get("scope"),
+                    "detail": f"{waiver_id} has an invalid waiver scope",
+                    "suggested_next_command": f'brigade repos release waivers revoke {waiver_id} --reason "invalid scope"',
+                }
+            )
         repo_id = str(waiver.get("repo_id") or "")
         if repo_id and repo_ids and repo_id not in repo_ids:
-            issues.append({"status": WARN, "name": "release_waiver_repo_missing", "waiver_id": waiver_id, "train_id": waiver.get("train_id"), "scope": waiver.get("scope"), "repo_id": repo_id, "detail": f"{waiver_id} references a repo outside the train", "suggested_next_command": f"brigade repos release waivers revoke {waiver_id} --reason \"repo no longer in train\""})
+            issues.append(
+                {
+                    "status": WARN,
+                    "name": "release_waiver_repo_missing",
+                    "waiver_id": waiver_id,
+                    "train_id": waiver.get("train_id"),
+                    "scope": waiver.get("scope"),
+                    "repo_id": repo_id,
+                    "detail": f"{waiver_id} references a repo outside the train",
+                    "suggested_next_command": f'brigade repos release waivers revoke {waiver_id} --reason "repo no longer in train"',
+                }
+            )
         reason = str(waiver.get("reason") or "").strip()
         if len(reason) < RELEASE_WAIVER_REASON_MIN_LENGTH:
-            issues.append({"status": WARN, "name": "release_waiver_reason_too_short", "waiver_id": waiver_id, "train_id": waiver.get("train_id"), "scope": waiver.get("scope"), "detail": f"{waiver_id} reason is too short for review", "suggested_next_command": f"brigade repos release waivers renew {waiver_id} --reason \"reviewed with current train context\""})
+            issues.append(
+                {
+                    "status": WARN,
+                    "name": "release_waiver_reason_too_short",
+                    "waiver_id": waiver_id,
+                    "train_id": waiver.get("train_id"),
+                    "scope": waiver.get("scope"),
+                    "detail": f"{waiver_id} reason is too short for review",
+                    "suggested_next_command": f'brigade repos release waivers renew {waiver_id} --reason "reviewed with current train context"',
+                }
+            )
         if reason.lower() in RELEASE_WAIVER_GENERIC_REASONS:
-            issues.append({"status": WARN, "name": "release_waiver_reason_generic", "waiver_id": waiver_id, "train_id": waiver.get("train_id"), "scope": waiver.get("scope"), "detail": f"{waiver_id} reason is too generic", "suggested_next_command": f"brigade repos release waivers renew {waiver_id} --reason \"reviewed with current train context\""})
+            issues.append(
+                {
+                    "status": WARN,
+                    "name": "release_waiver_reason_generic",
+                    "waiver_id": waiver_id,
+                    "train_id": waiver.get("train_id"),
+                    "scope": waiver.get("scope"),
+                    "detail": f"{waiver_id} reason is too generic",
+                    "suggested_next_command": f'brigade repos release waivers renew {waiver_id} --reason "reviewed with current train context"',
+                }
+            )
         if not str(waiver.get("owner_label") or "").strip():
-            issues.append({"status": WARN, "name": "release_waiver_missing_owner", "waiver_id": waiver_id, "train_id": waiver.get("train_id"), "scope": waiver.get("scope"), "detail": f"{waiver_id} has no review owner label", "suggested_next_command": f"brigade repos release waivers renew {waiver_id} --reason \"reviewed with current train context\" --owner-label <label>"})
+            issues.append(
+                {
+                    "status": WARN,
+                    "name": "release_waiver_missing_owner",
+                    "waiver_id": waiver_id,
+                    "train_id": waiver.get("train_id"),
+                    "scope": waiver.get("scope"),
+                    "detail": f"{waiver_id} has no review owner label",
+                    "suggested_next_command": f'brigade repos release waivers renew {waiver_id} --reason "reviewed with current train context" --owner-label <label>',
+                }
+            )
         if _release_waiver_expired(waiver):
-            issues.append({"status": WARN, "name": "release_waiver_expired", "waiver_id": waiver_id, "train_id": waiver.get("train_id"), "scope": waiver.get("scope"), "detail": f"{waiver_id} is expired", "suggested_next_command": f"brigade repos release waivers renew {waiver_id} --reason \"reviewed again\""})
+            issues.append(
+                {
+                    "status": WARN,
+                    "name": "release_waiver_expired",
+                    "waiver_id": waiver_id,
+                    "train_id": waiver.get("train_id"),
+                    "scope": waiver.get("scope"),
+                    "detail": f"{waiver_id} is expired",
+                    "suggested_next_command": f'brigade repos release waivers renew {waiver_id} --reason "reviewed again"',
+                }
+            )
             continue
         if not waiver.get("expires_at"):
-            issues.append({"status": WARN, "name": "release_waiver_missing_expiry", "waiver_id": waiver_id, "train_id": waiver.get("train_id"), "scope": waiver.get("scope"), "detail": f"{waiver_id} has no expiry", "suggested_next_command": f"brigade repos release waivers renew {waiver_id} --reason \"set expiry\" --expires-at <timestamp>"})
+            issues.append(
+                {
+                    "status": WARN,
+                    "name": "release_waiver_missing_expiry",
+                    "waiver_id": waiver_id,
+                    "train_id": waiver.get("train_id"),
+                    "scope": waiver.get("scope"),
+                    "detail": f"{waiver_id} has no expiry",
+                    "suggested_next_command": f'brigade repos release waivers renew {waiver_id} --reason "set expiry" --expires-at <timestamp>',
+                }
+            )
         created = _parse_time(waiver.get("renewed_at") or waiver.get("created_at"))
         if created and (now - created).total_seconds() / 3600 > RELEASE_WAIVER_STALE_HOURS:
-            issues.append({"status": WARN, "name": "release_waiver_stale_review", "waiver_id": waiver_id, "train_id": waiver.get("train_id"), "scope": waiver.get("scope"), "detail": f"{waiver_id} has not been reviewed recently", "suggested_next_command": f"brigade repos release waivers renew {waiver_id} --reason \"reviewed again\""})
-        if isinstance(train, dict) and waiver.get("train_fingerprint") and train.get("train_fingerprint") and waiver.get("train_fingerprint") != train.get("train_fingerprint"):
-            issues.append({"status": WARN, "name": "release_waiver_train_changed", "waiver_id": waiver_id, "train_id": waiver.get("train_id"), "scope": waiver.get("scope"), "detail": f"{waiver_id} references an older train fingerprint", "suggested_next_command": f"brigade repos release waivers renew {waiver_id} --reason \"train reviewed again\""})
-    return {"target_label": "repo-fleet", "waivers_path_label": ".brigade/repos/releases/waivers.jsonl", "train_id": selected_train_id, "waiver_count": len(waivers), "issues": issues, "issue_count": len(issues), "top_issue": issues[0] if issues else None}
+            issues.append(
+                {
+                    "status": WARN,
+                    "name": "release_waiver_stale_review",
+                    "waiver_id": waiver_id,
+                    "train_id": waiver.get("train_id"),
+                    "scope": waiver.get("scope"),
+                    "detail": f"{waiver_id} has not been reviewed recently",
+                    "suggested_next_command": f'brigade repos release waivers renew {waiver_id} --reason "reviewed again"',
+                }
+            )
+        if (
+            isinstance(train, dict)
+            and waiver.get("train_fingerprint")
+            and train.get("train_fingerprint")
+            and waiver.get("train_fingerprint") != train.get("train_fingerprint")
+        ):
+            issues.append(
+                {
+                    "status": WARN,
+                    "name": "release_waiver_train_changed",
+                    "waiver_id": waiver_id,
+                    "train_id": waiver.get("train_id"),
+                    "scope": waiver.get("scope"),
+                    "detail": f"{waiver_id} references an older train fingerprint",
+                    "suggested_next_command": f'brigade repos release waivers renew {waiver_id} --reason "train reviewed again"',
+                }
+            )
+    return {
+        "target_label": "repo-fleet",
+        "waivers_path_label": ".brigade/repos/releases/waivers.jsonl",
+        "train_id": selected_train_id,
+        "waiver_count": len(waivers),
+        "issues": issues,
+        "issue_count": len(issues),
+        "top_issue": issues[0] if issues else None,
+    }
 
 
 def _release_waiver_templates_payload() -> dict[str, Any]:
@@ -3484,7 +4177,7 @@ def _release_waiver_templates_payload() -> dict[str, Any]:
                 "requires_expiry": True,
                 "recommended_expiry_hours": RELEASE_WAIVER_STALE_HOURS,
                 "reason_hint": "Describe the reviewed risk, current train context, and why manual publish may proceed.",
-                "suggested_command": f"brigade repos release waivers record latest --scope {scope} --reason \"reviewed risk and mitigation\" --expires-at <timestamp> --owner-label <label>",
+                "suggested_command": f'brigade repos release waivers record latest --scope {scope} --reason "reviewed risk and mitigation" --expires-at <timestamp> --owner-label <label>',
             }
         )
     return {
@@ -3528,14 +4221,29 @@ def _release_waiver_import_records(health: dict[str, Any]) -> list[dict[str, Any
         if not isinstance(issue, dict):
             continue
         waiver_id = str(issue.get("waiver_id") or "unknown")
-        fingerprint = _fingerprint_payload({"waiver_id": waiver_id, "name": issue.get("name"), "scope": issue.get("scope"), "train_id": issue.get("train_id")})
+        fingerprint = _fingerprint_payload(
+            {
+                "waiver_id": waiver_id,
+                "name": issue.get("name"),
+                "scope": issue.get("scope"),
+                "train_id": issue.get("train_id"),
+            }
+        )
         records.append(
             {
                 "text": f"Review fleet release waiver {waiver_id}: {issue.get('name')}",
                 "kind": "task",
                 "source": "repo-fleet-release-waiver",
                 "type": "docs",
-                "priority": "high" if issue.get("name") in {"release_waiver_expired", "release_waiver_train_changed", "release_waiver_invalid_scope", "release_waiver_repo_missing"} else "normal",
+                "priority": "high"
+                if issue.get("name")
+                in {
+                    "release_waiver_expired",
+                    "release_waiver_train_changed",
+                    "release_waiver_invalid_scope",
+                    "release_waiver_repo_missing",
+                }
+                else "normal",
                 "template": "docs",
                 "acceptance": [
                     "The release waiver is renewed with current review context, owner label, and expiry or revoked.",
@@ -3556,7 +4264,9 @@ def _release_waiver_import_records(health: dict[str, Any]) -> list[dict[str, Any
     return records
 
 
-def release_waiver_import_issues(*, target: Path, train_id: str | None = None, dry_run: bool = False, json_output: bool = False) -> int:
+def release_waiver_import_issues(
+    *, target: Path, train_id: str | None = None, dry_run: bool = False, json_output: bool = False
+) -> int:
     target = target.expanduser().resolve()
     health = _release_waiver_health_payload(target, train_id)
     records = _release_waiver_import_records(health)
@@ -3608,7 +4318,13 @@ def release_evidence_plan(*, target: Path, train_id: str = "latest", json_output
                     "suggested_record_command": f"brigade repos release evidence record {train.get('train_id')} --repo {repo_id} --step {step} --status completed",
                 }
             )
-    payload = {"target_label": "repo-fleet", "train_id": train.get("train_id"), "records_path_label": ".brigade/repos/releases/evidence.jsonl", "planned": planned, "planned_count": len(planned)}
+    payload = {
+        "target_label": "repo-fleet",
+        "train_id": train.get("train_id"),
+        "records_path_label": ".brigade/repos/releases/evidence.jsonl",
+        "planned": planned,
+        "planned_count": len(planned),
+    }
     if json_output:
         print(json.dumps(payload, indent=2, sort_keys=True))
         return 0
@@ -3660,7 +4376,9 @@ def release_evidence_record(
         "status": status,
         "safe_summary": _safe_text(summary or f"{step} marked {status} for {repo_id}"),
         "recorded_at": now,
-        "source_fingerprint": _fingerprint_payload({"train_id": train_id_value, "repo_id": repo_id, "step": step, "status": status, "summary": summary or ""}),
+        "source_fingerprint": _fingerprint_payload(
+            {"train_id": train_id_value, "repo_id": repo_id, "step": step, "status": status, "summary": summary or ""}
+        ),
     }
     replaced = False
     for index, existing in enumerate(records):
@@ -3682,7 +4400,9 @@ def release_evidence_record(
     return 0
 
 
-def release_evidence_list(*, target: Path, train_id: str | None = None, limit: int = 50, json_output: bool = False) -> int:
+def release_evidence_list(
+    *, target: Path, train_id: str | None = None, limit: int = 50, json_output: bool = False
+) -> int:
     if limit < 1:
         print("error: --limit must be a positive integer", file=sys.stderr)
         return 2
@@ -3694,7 +4414,12 @@ def release_evidence_list(*, target: Path, train_id: str | None = None, limit: i
             train_id = str(latest.get("train_id")) if isinstance(latest, dict) else train_id
         records = [record for record in records if str(record.get("train_id") or "").startswith(train_id or "")]
     records.sort(key=lambda item: str(item.get("recorded_at") or item.get("evidence_id") or ""), reverse=True)
-    payload = {"target_label": "repo-fleet", "records_path_label": ".brigade/repos/releases/evidence.jsonl", "records": records[:limit], "record_count": len(records)}
+    payload = {
+        "target_label": "repo-fleet",
+        "records_path_label": ".brigade/repos/releases/evidence.jsonl",
+        "records": records[:limit],
+        "record_count": len(records),
+    }
     if json_output:
         print(json.dumps(payload, indent=2, sort_keys=True))
         return 0
@@ -3706,7 +4431,11 @@ def release_evidence_list(*, target: Path, train_id: str | None = None, limit: i
 
 def release_evidence_show(*, target: Path, evidence_id: str, json_output: bool = False) -> int:
     target = target.expanduser().resolve()
-    matches = [record for record in _read_release_evidence(target) if str(record.get("evidence_id") or "").startswith(evidence_id)]
+    matches = [
+        record
+        for record in _read_release_evidence(target)
+        if str(record.get("evidence_id") or "").startswith(evidence_id)
+    ]
     if not matches:
         print(f"error: fleet release evidence not found: {evidence_id}", file=sys.stderr)
         return 1
@@ -3724,7 +4453,9 @@ def release_evidence_show(*, target: Path, evidence_id: str, json_output: bool =
     return 0
 
 
-def _release_records_by_repo_step(records: list[dict[str, Any]], train_id: str) -> dict[tuple[str, str], dict[str, Any]]:
+def _release_records_by_repo_step(
+    records: list[dict[str, Any]], train_id: str
+) -> dict[tuple[str, str], dict[str, Any]]:
     by_step: dict[tuple[str, str], dict[str, Any]] = {}
     for record in records:
         if record.get("train_id") != train_id:
@@ -3736,7 +4467,9 @@ def _release_records_by_repo_step(records: list[dict[str, Any]], train_id: str) 
     return by_step
 
 
-def _reconcile_release_action(action: dict[str, Any], records_by_step: dict[tuple[str, str], dict[str, Any]]) -> dict[str, Any]:
+def _reconcile_release_action(
+    action: dict[str, Any], records_by_step: dict[tuple[str, str], dict[str, Any]]
+) -> dict[str, Any]:
     repo_id = str(action.get("repo_id") or "")
     evidence: list[dict[str, Any]] = []
     missing_steps: list[str] = []
@@ -3791,7 +4524,12 @@ def release_reconcile(*, target: Path, train_id: str = "latest", json_output: bo
     records_by_step = _release_records_by_repo_step(_read_release_evidence(target), train_id_value)
     results = [_reconcile_release_action(action, records_by_step) for action in selected]
     _write_release_actions(target, actions)
-    payload = {"target_label": "repo-fleet", "train_id": train_id_value, "result_count": len(results), "results": results}
+    payload = {
+        "target_label": "repo-fleet",
+        "train_id": train_id_value,
+        "result_count": len(results),
+        "results": results,
+    }
     if json_output:
         print(json.dumps(payload, indent=2, sort_keys=True))
         return 0
@@ -3801,7 +4539,9 @@ def release_reconcile(*, target: Path, train_id: str = "latest", json_output: bo
     return 0
 
 
-def _repo_release_summary(repo: dict[str, Any], train_id: str, records_by_step: dict[tuple[str, str], dict[str, Any]]) -> dict[str, Any]:
+def _repo_release_summary(
+    repo: dict[str, Any], train_id: str, records_by_step: dict[tuple[str, str], dict[str, Any]]
+) -> dict[str, Any]:
     repo_id = str(repo.get("repo_id") or "unknown")
     steps: list[dict[str, Any]] = []
     missing: list[str] = []
@@ -3870,12 +4610,25 @@ def _release_summary_payload(target: Path, train: dict[str, Any]) -> dict[str, A
         "repo_count": len(repos),
         "repos": repos,
         "counts": counts,
-        "ready_count": sum(1 for repo in train.get("repos", []) if isinstance(repo, dict) and repo.get("classification") == "ready"),
+        "ready_count": sum(
+            1 for repo in train.get("repos", []) if isinstance(repo, dict) and repo.get("classification") == "ready"
+        ),
         "blocked_count": len(blocked_evidence),
         "missing_evidence_count": len(missing_evidence),
         "unresolved_action_count": len(unresolved_actions),
-        "unresolved_actions": [{"release_action_id": action.get("release_action_id"), "repo_id": action.get("repo_id"), "status": action.get("status"), "resolution_status": action.get("resolution_status")} for action in unresolved_actions],
-        "suggested_next_commands": ["brigade repos release reconcile latest", "brigade repos release evidence plan latest"],
+        "unresolved_actions": [
+            {
+                "release_action_id": action.get("release_action_id"),
+                "repo_id": action.get("repo_id"),
+                "status": action.get("status"),
+                "resolution_status": action.get("resolution_status"),
+            }
+            for action in unresolved_actions
+        ],
+        "suggested_next_commands": [
+            "brigade repos release reconcile latest",
+            "brigade repos release evidence plan latest",
+        ],
         "summary_fingerprint": _fingerprint_payload({"train": train_id, "repos": repos, "actions": unresolved_actions}),
     }
 
@@ -3923,7 +4676,15 @@ def _release_report_markdown(summary: dict[str, Any]) -> str:
             lines.append(f"  - blocked: {', '.join(str(step) for step in blocked)}")
     if not repos:
         lines.append("- none")
-    lines.extend(["", "## Boundaries", "", "- local report only", "- no verification, tag, push, release, upload, or remote mutation"])
+    lines.extend(
+        [
+            "",
+            "## Boundaries",
+            "",
+            "- local report only",
+            "- no verification, tag, push, release, upload, or remote mutation",
+        ]
+    )
     return "\n".join(lines) + "\n"
 
 
@@ -3935,7 +4696,10 @@ def release_report(*, target: Path, train_id: str = "latest", json_output: bool 
         return 1 if error and "not found" in error else 2
     train_dir = _release_trains_root(target) / str(train.get("train_id") or "")
     if not train_dir.is_dir():
-        print(f"error: fleet release train path is missing: {train.get('path_label') or train.get('train_id')}", file=sys.stderr)
+        print(
+            f"error: fleet release train path is missing: {train.get('path_label') or train.get('train_id')}",
+            file=sys.stderr,
+        )
         return 2
     summary = _release_summary_payload(target, train)
     report = {
@@ -3948,7 +4712,12 @@ def release_report(*, target: Path, train_id: str = "latest", json_output: bool 
     }
     _write_json(train_dir / "RELEASE_TRAIN_REPORT.json", report)
     (train_dir / "RELEASE_TRAIN_REPORT.md").write_text(_release_report_markdown(summary))
-    payload = {"target_label": "repo-fleet", "train_id": train.get("train_id"), "path_label": str(train.get("train_id") or ""), "report": report}
+    payload = {
+        "target_label": "repo-fleet",
+        "train_id": train.get("train_id"),
+        "path_label": str(train.get("train_id") or ""),
+        "report": report,
+    }
     if json_output:
         print(json.dumps(payload, indent=2, sort_keys=True))
         return 0
@@ -3986,7 +4755,9 @@ def _release_matrix_payload(target: Path, train: dict[str, Any]) -> dict[str, An
         repo_id = str(repo.get("repo_id") or "")
         repo_summary = summary_by_repo.get(repo_id, {})
         repo_actions = [action for action in actions if action.get("repo_id") == repo_id]
-        unresolved_actions = [action for action in repo_actions if action.get("status") in {"pending", "active", "deferred"}]
+        unresolved_actions = [
+            action for action in repo_actions if action.get("status") in {"pending", "active", "deferred"}
+        ]
         repo_waivers = _waivers_for_repo(waivers, repo_id)
         waived_scopes = _release_waiver_scope_names(repo_waivers)
         blockers: list[str] = []
@@ -4006,12 +4777,20 @@ def _release_matrix_payload(target: Path, train: dict[str, Any]) -> dict[str, An
                 "evidence_status": repo_summary.get("evidence_status"),
                 "evidence_steps": repo_summary.get("steps") if isinstance(repo_summary.get("steps"), list) else [],
                 "unresolved_action_count": len(unresolved_actions),
-                "unresolved_actions": [{"release_action_id": action.get("release_action_id"), "status": action.get("status"), "resolution_status": action.get("resolution_status")} for action in unresolved_actions],
+                "unresolved_actions": [
+                    {
+                        "release_action_id": action.get("release_action_id"),
+                        "status": action.get("status"),
+                        "resolution_status": action.get("resolution_status"),
+                    }
+                    for action in unresolved_actions
+                ],
                 "active_waivers": repo_waivers,
                 "waived_scopes": sorted(waived_scopes),
                 "blockers": blockers,
                 "ready": not blockers,
-                "suggested_next_command": repo_summary.get("suggested_next_command") or repo.get("suggested_next_command"),
+                "suggested_next_command": repo_summary.get("suggested_next_command")
+                or repo.get("suggested_next_command"),
             }
         )
     blocker_rows = [row for row in rows if row.get("blockers")]
@@ -4025,7 +4804,10 @@ def _release_matrix_payload(target: Path, train: dict[str, Any]) -> dict[str, An
         "blocked_count": len(blocker_rows),
         "waiver_count": len(waivers),
         "evidence_steps": list(REQUIRED_RELEASE_EVIDENCE_STEPS),
-        "summary": {key: summary.get(key) for key in ("counts", "missing_evidence_count", "blocked_count", "unresolved_action_count")},
+        "summary": {
+            key: summary.get(key)
+            for key in ("counts", "missing_evidence_count", "blocked_count", "unresolved_action_count")
+        },
         "matrix_fingerprint": _fingerprint_payload({"train_id": train_id, "rows": rows, "waivers": waivers}),
         "suggested_next_commands": ["brigade repos release ready latest", "brigade repos release checklist latest"],
     }
@@ -4051,7 +4833,15 @@ def _release_matrix_markdown(matrix: dict[str, Any]) -> str:
         lines.append(
             f"| `{row.get('repo_id')}` | {row.get('classification')} | {row.get('evidence_status')} | {row.get('unresolved_action_count')} | {waivers} | {str(bool(row.get('ready'))).lower()} |"
         )
-    lines.extend(["", "## Boundaries", "", "- local matrix only", "- no verification, tag, push, release, upload, or remote mutation"])
+    lines.extend(
+        [
+            "",
+            "## Boundaries",
+            "",
+            "- local matrix only",
+            "- no verification, tag, push, release, upload, or remote mutation",
+        ]
+    )
     return "\n".join(lines) + "\n"
 
 
@@ -4063,7 +4853,10 @@ def release_matrix(*, target: Path, train_id: str = "latest", json_output: bool 
         return 1 if error and "not found" in error else 2
     train_dir = _release_trains_root(target) / str(train.get("train_id") or "")
     if not train_dir.is_dir():
-        print(f"error: fleet release train path is missing: {train.get('path_label') or train.get('train_id')}", file=sys.stderr)
+        print(
+            f"error: fleet release train path is missing: {train.get('path_label') or train.get('train_id')}",
+            file=sys.stderr,
+        )
         return 2
     matrix = _release_matrix_payload(target, train)
     report = {
@@ -4076,7 +4869,12 @@ def release_matrix(*, target: Path, train_id: str = "latest", json_output: bool 
     }
     _write_json(train_dir / "RELEASE_TRAIN_MATRIX.json", report)
     (train_dir / "RELEASE_TRAIN_MATRIX.md").write_text(_release_matrix_markdown(matrix))
-    payload = {"target_label": "repo-fleet", "train_id": train.get("train_id"), "path_label": "RELEASE_TRAIN_MATRIX.md", "report": report}
+    payload = {
+        "target_label": "repo-fleet",
+        "train_id": train.get("train_id"),
+        "path_label": "RELEASE_TRAIN_MATRIX.md",
+        "report": report,
+    }
     if json_output:
         print(json.dumps(payload, indent=2, sort_keys=True))
         return 0
@@ -4132,7 +4930,9 @@ def _release_import_records(summary: dict[str, Any]) -> list[dict[str, Any]]:
     return records
 
 
-def release_import_issues(*, target: Path, train_id: str = "latest", dry_run: bool = False, json_output: bool = False) -> int:
+def release_import_issues(
+    *, target: Path, train_id: str = "latest", dry_run: bool = False, json_output: bool = False
+) -> int:
     target = target.expanduser().resolve()
     train, error = _resolve_release_train(target, train_id)
     if train is None:
@@ -4181,7 +4981,12 @@ def release_checklist(*, target: Path, train_id: str = "latest", json_output: bo
         for step in repo.get("steps", [])
         if isinstance(step, dict)
     ]
-    payload = {"target_label": "repo-fleet", "train_id": train.get("train_id"), "items": items, "item_count": len(items)}
+    payload = {
+        "target_label": "repo-fleet",
+        "train_id": train.get("train_id"),
+        "items": items,
+        "item_count": len(items),
+    }
     if json_output:
         print(json.dumps(payload, indent=2, sort_keys=True))
         return 0
@@ -4199,14 +5004,44 @@ def release_hygiene(*, target: Path, json_output: bool = False) -> int:
         train_id = str(train.get("train_id") or "")
         closeout = train.get("closeout") if isinstance(train.get("closeout"), dict) else None
         if not closeout:
-            issues.append({"status": WARN, "name": "fleet_release_train_unclosed", "train_id": train_id, "detail": f"{train_id} has no closeout", "suggested_next_command": f"brigade repos release closeout {train_id}"})
+            issues.append(
+                {
+                    "status": WARN,
+                    "name": "fleet_release_train_unclosed",
+                    "train_id": train_id,
+                    "detail": f"{train_id} has no closeout",
+                    "suggested_next_command": f"brigade repos release closeout {train_id}",
+                }
+            )
         report_path = _release_trains_root(target) / train_id / "RELEASE_TRAIN_REPORT.json"
         if not report_path.is_file():
-            issues.append({"status": WARN, "name": "fleet_release_report_missing", "train_id": train_id, "detail": f"{train_id} has no review report", "suggested_next_command": f"brigade repos release report {train_id}"})
+            issues.append(
+                {
+                    "status": WARN,
+                    "name": "fleet_release_report_missing",
+                    "train_id": train_id,
+                    "detail": f"{train_id} has no review report",
+                    "suggested_next_command": f"brigade repos release report {train_id}",
+                }
+            )
         created = _parse_time(train.get("created_at") or train.get("generated_at"))
         if created and (_now() - created).total_seconds() / 3600 > RELEASE_TRAIN_STALE_HOURS:
-            issues.append({"status": WARN, "name": "fleet_release_train_stale", "train_id": train_id, "detail": f"{train_id} is stale", "suggested_next_command": "brigade repos release build"})
-    payload = {"target_label": "repo-fleet", "train_count": len(trains), "issues": issues, "issue_count": len(issues), "top_issue": issues[0] if issues else None}
+            issues.append(
+                {
+                    "status": WARN,
+                    "name": "fleet_release_train_stale",
+                    "train_id": train_id,
+                    "detail": f"{train_id} is stale",
+                    "suggested_next_command": "brigade repos release build",
+                }
+            )
+    payload = {
+        "target_label": "repo-fleet",
+        "train_count": len(trains),
+        "issues": issues,
+        "issue_count": len(issues),
+        "top_issue": issues[0] if issues else None,
+    }
     if json_output:
         print(json.dumps(payload, indent=2, sort_keys=True))
         return 0
@@ -4244,7 +5079,10 @@ def release_manifest(*, target: Path, train_id: str = "latest", json_output: boo
         return 1 if error and "not found" in error else 2
     train_dir = _release_train_dir(target, train)
     if not train_dir.is_dir():
-        print(f"error: fleet release train path is missing: {train.get('path_label') or train.get('train_id')}", file=sys.stderr)
+        print(
+            f"error: fleet release train path is missing: {train.get('path_label') or train.get('train_id')}",
+            file=sys.stderr,
+        )
         return 2
     files = [_release_bundle_file_entry(train_dir, name) for name in RELEASE_BUNDLE_FILES]
     manifest = {
@@ -4278,7 +5116,14 @@ def _release_audit_payload(target: Path, train: dict[str, Any]) -> dict[str, Any
     summary = _release_summary_payload(target, train)
     issues: list[dict[str, Any]] = []
     if not train_dir.is_dir():
-        issues.append({"status": WARN, "name": "release_train_bundle_missing", "detail": f"{train_id} bundle path is missing", "suggested_next_command": "brigade repos release build"})
+        issues.append(
+            {
+                "status": WARN,
+                "name": "release_train_bundle_missing",
+                "detail": f"{train_id} bundle path is missing",
+                "suggested_next_command": "brigade repos release build",
+            }
+        )
     else:
         for name in RELEASE_BUNDLE_FILES:
             if not (train_dir / name).is_file():
@@ -4287,27 +5132,83 @@ def _release_audit_payload(target: Path, train: dict[str, Any]) -> dict[str, Any
                     command = f"brigade repos release report {train_id}"
                 elif name == "CLOSEOUT.json":
                     command = f"brigade repos release closeout {train_id}"
-                issues.append({"status": WARN, "name": "release_train_bundle_file_missing", "path_label": name, "detail": f"{name} is missing", "suggested_next_command": command})
+                issues.append(
+                    {
+                        "status": WARN,
+                        "name": "release_train_bundle_file_missing",
+                        "path_label": name,
+                        "detail": f"{name} is missing",
+                        "suggested_next_command": command,
+                    }
+                )
         manifest = _read_json(train_dir / "RELEASE_TRAIN_MANIFEST.json")
         if isinstance(manifest, dict):
-            expected = {item["path_label"]: item for item in [_release_bundle_file_entry(train_dir, name) for name in RELEASE_BUNDLE_FILES]}
+            expected = {
+                item["path_label"]: item
+                for item in [_release_bundle_file_entry(train_dir, name) for name in RELEASE_BUNDLE_FILES]
+            }
             stored_files = manifest.get("files") if isinstance(manifest.get("files"), list) else []
             for stored in stored_files:
                 if not isinstance(stored, dict):
                     continue
                 current = expected.get(str(stored.get("path_label") or ""))
-                if current and stored.get("fingerprint") and current.get("fingerprint") and stored.get("fingerprint") != current.get("fingerprint"):
-                    issues.append({"status": WARN, "name": "release_train_manifest_stale", "path_label": stored.get("path_label"), "detail": f"{stored.get('path_label')} changed after manifest build", "suggested_next_command": f"brigade repos release manifest {train_id}"})
+                if (
+                    current
+                    and stored.get("fingerprint")
+                    and current.get("fingerprint")
+                    and stored.get("fingerprint") != current.get("fingerprint")
+                ):
+                    issues.append(
+                        {
+                            "status": WARN,
+                            "name": "release_train_manifest_stale",
+                            "path_label": stored.get("path_label"),
+                            "detail": f"{stored.get('path_label')} changed after manifest build",
+                            "suggested_next_command": f"brigade repos release manifest {train_id}",
+                        }
+                    )
                     break
-    open_actions = [action for action in _read_release_actions(target) if action.get("source_train_id") == train_id and action.get("status") in {"pending", "active", "deferred"}]
+    open_actions = [
+        action
+        for action in _read_release_actions(target)
+        if action.get("source_train_id") == train_id and action.get("status") in {"pending", "active", "deferred"}
+    ]
     if open_actions:
-        issues.append({"status": WARN, "name": "release_train_open_actions", "detail": f"{len(open_actions)} release action(s) remain open", "suggested_next_command": f"brigade repos release actions list --target ."})
+        issues.append(
+            {
+                "status": WARN,
+                "name": "release_train_open_actions",
+                "detail": f"{len(open_actions)} release action(s) remain open",
+                "suggested_next_command": "brigade repos release actions list --target .",
+            }
+        )
     if int(summary.get("missing_evidence_count") or 0) > 0:
-        issues.append({"status": WARN, "name": "release_train_missing_evidence", "detail": f"{summary.get('missing_evidence_count')} repo(s) have missing evidence", "suggested_next_command": f"brigade repos release evidence plan {train_id}"})
+        issues.append(
+            {
+                "status": WARN,
+                "name": "release_train_missing_evidence",
+                "detail": f"{summary.get('missing_evidence_count')} repo(s) have missing evidence",
+                "suggested_next_command": f"brigade repos release evidence plan {train_id}",
+            }
+        )
     if int(summary.get("blocked_count") or 0) > 0:
-        issues.append({"status": WARN, "name": "release_train_blocked_evidence", "detail": f"{summary.get('blocked_count')} repo(s) have blocked evidence", "suggested_next_command": f"brigade repos release evidence plan {train_id}"})
+        issues.append(
+            {
+                "status": WARN,
+                "name": "release_train_blocked_evidence",
+                "detail": f"{summary.get('blocked_count')} repo(s) have blocked evidence",
+                "suggested_next_command": f"brigade repos release evidence plan {train_id}",
+            }
+        )
     if int(train.get("blocker_count") or 0) > 0:
-        issues.append({"status": WARN, "name": "release_train_blocked_repos", "detail": f"{train.get('blocker_count')} repo blocker(s) remain", "suggested_next_command": f"brigade repos release show {train_id}"})
+        issues.append(
+            {
+                "status": WARN,
+                "name": "release_train_blocked_repos",
+                "detail": f"{train.get('blocker_count')} repo blocker(s) remain",
+                "suggested_next_command": f"brigade repos release show {train_id}",
+            }
+        )
     waiver_health = _release_waiver_health_payload(target, train_id)
     for issue in waiver_health.get("issues") if isinstance(waiver_health.get("issues"), list) else []:
         if isinstance(issue, dict):
@@ -4319,7 +5220,10 @@ def _release_audit_payload(target: Path, train: dict[str, Any]) -> dict[str, Any
         "issue_count": len(issues),
         "issues": issues,
         "waiver_issue_count": waiver_health.get("issue_count"),
-        "summary": {key: summary.get(key) for key in ("repo_count", "counts", "unresolved_action_count", "missing_evidence_count", "blocked_count")},
+        "summary": {
+            key: summary.get(key)
+            for key in ("repo_count", "counts", "unresolved_action_count", "missing_evidence_count", "blocked_count")
+        },
     }
 
 
@@ -4492,7 +5396,10 @@ def release_ready(*, target: Path, train_id: str = "latest", json_output: bool =
             "requires_expiry": True,
             "template_command": "brigade repos release waivers templates",
         },
-        "summary": {key: summary.get(key) for key in ("repo_count", "counts", "unresolved_action_count", "missing_evidence_count", "blocked_count")},
+        "summary": {
+            key: summary.get(key)
+            for key in ("repo_count", "counts", "unresolved_action_count", "missing_evidence_count", "blocked_count")
+        },
     }
     if json_output:
         print(json.dumps(payload, indent=2, sort_keys=True))
@@ -4512,16 +5419,49 @@ def release_train_actions_health(target: Path) -> dict[str, Any]:
     checks: list[dict[str, Any]] = []
     if open_actions:
         top = open_actions[0]
-        checks.append({"status": WARN, "name": "repo_fleet_release_actions_open", "detail": f"{len(open_actions)} open fleet release action(s)", "suggested_next_command": f"brigade repos release actions show {top.get('release_action_id')}"})
-    unreconciled = [action for action in actions if action.get("status") in {"pending", "active", "deferred"} and not action.get("reconciled_at")]
+        checks.append(
+            {
+                "status": WARN,
+                "name": "repo_fleet_release_actions_open",
+                "detail": f"{len(open_actions)} open fleet release action(s)",
+                "suggested_next_command": f"brigade repos release actions show {top.get('release_action_id')}",
+            }
+        )
+    unreconciled = [
+        action
+        for action in actions
+        if action.get("status") in {"pending", "active", "deferred"} and not action.get("reconciled_at")
+    ]
     if unreconciled:
         top = unreconciled[0]
-        checks.append({"status": WARN, "name": "repo_fleet_release_action_unreconciled", "detail": f"{len(unreconciled)} fleet release action(s) need reconciliation", "suggested_next_command": f"brigade repos release reconcile {top.get('source_train_id') or 'latest'}"})
+        checks.append(
+            {
+                "status": WARN,
+                "name": "repo_fleet_release_action_unreconciled",
+                "detail": f"{len(unreconciled)} fleet release action(s) need reconciliation",
+                "suggested_next_command": f"brigade repos release reconcile {top.get('source_train_id') or 'latest'}",
+            }
+        )
     missing = [action for action in actions if action.get("resolution_status") == "missing-evidence"]
     if missing:
         top = missing[0]
-        checks.append({"status": WARN, "name": "repo_fleet_release_evidence_missing", "detail": f"{len(missing)} fleet release action(s) are missing manual evidence", "suggested_next_command": f"brigade repos release evidence plan {top.get('source_train_id') or 'latest'}"})
-    return {"actions_path_label": ".brigade/repos/releases/actions.json", "action_count": len(actions), "open_count": len(open_actions), "top_action": open_actions[0] if open_actions else None, "checks": checks, "issue_count": len(checks), "top_issue": checks[0] if checks else None}
+        checks.append(
+            {
+                "status": WARN,
+                "name": "repo_fleet_release_evidence_missing",
+                "detail": f"{len(missing)} fleet release action(s) are missing manual evidence",
+                "suggested_next_command": f"brigade repos release evidence plan {top.get('source_train_id') or 'latest'}",
+            }
+        )
+    return {
+        "actions_path_label": ".brigade/repos/releases/actions.json",
+        "action_count": len(actions),
+        "open_count": len(open_actions),
+        "top_action": open_actions[0] if open_actions else None,
+        "checks": checks,
+        "issue_count": len(checks),
+        "top_issue": checks[0] if checks else None,
+    }
 
 
 def release_train_evidence_health(target: Path) -> dict[str, Any]:
@@ -4531,8 +5471,23 @@ def release_train_evidence_health(target: Path) -> dict[str, Any]:
     checks: list[dict[str, Any]] = []
     if blocked:
         top = blocked[0]
-        checks.append({"status": WARN, "name": "repo_fleet_release_evidence_blocked", "detail": f"{len(blocked)} blocked fleet release evidence record(s)", "suggested_next_command": f"brigade repos release evidence show {top.get('evidence_id')}"})
-    return {"records_path_label": ".brigade/repos/releases/evidence.jsonl", "record_count": len(records), "blocked_count": len(blocked), "latest": records[-1] if records else None, "checks": checks, "issue_count": len(checks), "top_issue": checks[0] if checks else None}
+        checks.append(
+            {
+                "status": WARN,
+                "name": "repo_fleet_release_evidence_blocked",
+                "detail": f"{len(blocked)} blocked fleet release evidence record(s)",
+                "suggested_next_command": f"brigade repos release evidence show {top.get('evidence_id')}",
+            }
+        )
+    return {
+        "records_path_label": ".brigade/repos/releases/evidence.jsonl",
+        "record_count": len(records),
+        "blocked_count": len(blocked),
+        "latest": records[-1] if records else None,
+        "checks": checks,
+        "issue_count": len(checks),
+        "top_issue": checks[0] if checks else None,
+    }
 
 
 def release_train_health(target: Path) -> dict[str, Any]:
@@ -4542,24 +5497,73 @@ def release_train_health(target: Path) -> dict[str, Any]:
     evidence = release_train_evidence_health(target)
     checks: list[dict[str, Any]] = []
     if latest is None:
-        checks.append({"status": WARN, "name": "repo_fleet_release_train_missing", "detail": "no repo fleet release train has been built", "suggested_next_command": "brigade repos release build"})
+        checks.append(
+            {
+                "status": WARN,
+                "name": "repo_fleet_release_train_missing",
+                "detail": "no repo fleet release train has been built",
+                "suggested_next_command": "brigade repos release build",
+            }
+        )
         checks.extend(actions.get("checks") if isinstance(actions.get("checks"), list) else [])
         checks.extend(evidence.get("checks") if isinstance(evidence.get("checks"), list) else [])
-        return {"latest": None, "actions": actions, "evidence": evidence, "checks": checks, "issue_count": len(checks), "top_issue": checks[0]}
+        return {
+            "latest": None,
+            "actions": actions,
+            "evidence": evidence,
+            "checks": checks,
+            "issue_count": len(checks),
+            "top_issue": checks[0],
+        }
     closeout = latest.get("closeout") if isinstance(latest.get("closeout"), dict) else None
     if latest.get("status") == "blocked" or int(latest.get("blocker_count") or 0) > 0:
-        checks.append({"status": WARN, "name": "repo_fleet_release_train_blocked", "detail": f"{latest.get('train_id')} has blocker(s)", "suggested_next_command": f"brigade repos release show {latest.get('train_id')}"})
+        checks.append(
+            {
+                "status": WARN,
+                "name": "repo_fleet_release_train_blocked",
+                "detail": f"{latest.get('train_id')} has blocker(s)",
+                "suggested_next_command": f"brigade repos release show {latest.get('train_id')}",
+            }
+        )
     train_id = str(latest.get("train_id") or "")
     if train_id and not (_release_trains_root(target) / train_id / "RELEASE_TRAIN_MATRIX.json").is_file():
-        checks.append({"status": WARN, "name": "repo_fleet_release_matrix_missing", "detail": f"{train_id} has no release matrix", "suggested_next_command": f"brigade repos release matrix {train_id}"})
+        checks.append(
+            {
+                "status": WARN,
+                "name": "repo_fleet_release_matrix_missing",
+                "detail": f"{train_id} has no release matrix",
+                "suggested_next_command": f"brigade repos release matrix {train_id}",
+            }
+        )
     if not closeout or closeout.get("status") not in {"reviewed", "deferred", "superseded", "archived"}:
-        checks.append({"status": WARN, "name": "repo_fleet_release_train_unclosed", "detail": f"{latest.get('train_id')} has not been closed out", "suggested_next_command": f"brigade repos release closeout {latest.get('train_id')}"})
+        checks.append(
+            {
+                "status": WARN,
+                "name": "repo_fleet_release_train_unclosed",
+                "detail": f"{latest.get('train_id')} has not been closed out",
+                "suggested_next_command": f"brigade repos release closeout {latest.get('train_id')}",
+            }
+        )
     created = _parse_time(latest.get("created_at") or latest.get("generated_at"))
     if created and (_now() - created).total_seconds() / 3600 > RELEASE_TRAIN_STALE_HOURS:
-        checks.append({"status": WARN, "name": "repo_fleet_release_train_stale", "detail": f"{latest.get('train_id')} is stale", "suggested_next_command": "brigade repos release build"})
+        checks.append(
+            {
+                "status": WARN,
+                "name": "repo_fleet_release_train_stale",
+                "detail": f"{latest.get('train_id')} is stale",
+                "suggested_next_command": "brigade repos release build",
+            }
+        )
     checks.extend(actions.get("checks") if isinstance(actions.get("checks"), list) else [])
     checks.extend(evidence.get("checks") if isinstance(evidence.get("checks"), list) else [])
-    return {"latest": latest, "actions": actions, "evidence": evidence, "checks": checks, "issue_count": len(checks), "top_issue": checks[0] if checks else None}
+    return {
+        "latest": latest,
+        "actions": actions,
+        "evidence": evidence,
+        "checks": checks,
+        "issue_count": len(checks),
+        "top_issue": checks[0] if checks else None,
+    }
 
 
 def _dispatch_health_checks(target: Path, actions: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -4580,17 +5584,37 @@ def _dispatch_health_checks(target: Path, actions: list[dict[str, Any]]) -> list
             dispatch = action.get("dispatch") if isinstance(action.get("dispatch"), dict) else {}
             entry, error = _action_target_entry(target, action)
             if error or entry is None:
-                checks.append({"status": WARN, "name": "repo_fleet_action_broken_reference", "detail": f"{action.get('fleet_action_id')} target repo is missing", "suggested_next_command": f"brigade repos actions reconcile {action.get('fleet_action_id')}"})
+                checks.append(
+                    {
+                        "status": WARN,
+                        "name": "repo_fleet_action_broken_reference",
+                        "detail": f"{action.get('fleet_action_id')} target repo is missing",
+                        "suggested_next_command": f"brigade repos actions reconcile {action.get('fleet_action_id')}",
+                    }
+                )
                 continue
             old_evidence = dispatch.get("target_evidence_fingerprint")
             new_evidence = _fingerprint_payload(_latest_safe_receipts(entry.path, entry.repo_id, entry.label))
             if old_evidence and old_evidence != new_evidence:
-                checks.append({"status": WARN, "name": "repo_fleet_action_evidence_changed", "detail": f"{action.get('fleet_action_id')} target repo evidence changed after dispatch", "suggested_next_command": f"brigade repos actions reconcile {action.get('fleet_action_id')}"})
+                checks.append(
+                    {
+                        "status": WARN,
+                        "name": "repo_fleet_action_evidence_changed",
+                        "detail": f"{action.get('fleet_action_id')} target repo evidence changed after dispatch",
+                        "suggested_next_command": f"brigade repos actions reconcile {action.get('fleet_action_id')}",
+                    }
+                )
             imports = _target_imports_for_action(entry.path, action)
             if not imports:
-                checks.append({"status": WARN, "name": "repo_fleet_action_missing_import", "detail": f"{action.get('fleet_action_id')} target import is missing", "suggested_next_command": f"brigade repos actions reconcile {action.get('fleet_action_id')}"})
+                checks.append(
+                    {
+                        "status": WARN,
+                        "name": "repo_fleet_action_missing_import",
+                        "detail": f"{action.get('fleet_action_id')} target import is missing",
+                        "suggested_next_command": f"brigade repos actions reconcile {action.get('fleet_action_id')}",
+                    }
+                )
     return checks
-
 
 
 def _append_action_archive(target: Path, actions: list[dict[str, Any]]) -> None:
@@ -4610,7 +5634,9 @@ def _report_reviewed_at(report: dict[str, Any]) -> str | None:
 
 
 def _action_rank(action: dict[str, Any]) -> tuple[int, int, str]:
-    status_rank = {"active": 0, "pending": 1, "deferred": 2, "done": 3, "archived": 4}.get(str(action.get("status") or ""), 5)
+    status_rank = {"active": 0, "pending": 1, "deferred": 2, "done": 3, "archived": 4}.get(
+        str(action.get("status") or ""), 5
+    )
     severity_rank = {"critical": 0, "high": 1, "medium": 2, "low": 3}.get(str(action.get("severity") or ""), 4)
     priority_rank = {"urgent": 0, "high": 1, "normal": 2, "low": 3}.get(str(action.get("priority") or ""), 4)
     return (status_rank, min(severity_rank, priority_rank), str(action.get("fleet_action_id") or ""))
@@ -4630,22 +5656,58 @@ def _planned_actions(report: dict[str, Any]) -> list[dict[str, Any]]:
         repo_items: list[dict[str, Any]] = []
         for warning in repo.get("warnings") if isinstance(repo.get("warnings"), list) else []:
             if isinstance(warning, dict):
-                repo_items.append({"subsystem": "repo-fleet", "local_id": warning.get("name"), "summary": warning.get("detail"), "severity": "medium", "command": repo.get("suggested_command")})
+                repo_items.append(
+                    {
+                        "subsystem": "repo-fleet",
+                        "local_id": warning.get("name"),
+                        "summary": warning.get("detail"),
+                        "severity": "medium",
+                        "command": repo.get("suggested_command"),
+                    }
+                )
         top_action = (repo.get("action_queue") if isinstance(repo.get("action_queue"), dict) else {}).get("top_action")
         if isinstance(top_action, dict):
-            repo_items.insert(0, {"subsystem": "center-action", "local_id": top_action.get("action_id"), "summary": top_action.get("safe_summary"), "priority": "high", "command": top_action.get("suggested_command"), "source_report_id": top_action.get("source_report_id"), "source_fingerprint": top_action.get("source_fingerprint")})
+            repo_items.insert(
+                0,
+                {
+                    "subsystem": "center-action",
+                    "local_id": top_action.get("action_id"),
+                    "summary": top_action.get("safe_summary"),
+                    "priority": "high",
+                    "command": top_action.get("suggested_command"),
+                    "source_report_id": top_action.get("source_report_id"),
+                    "source_fingerprint": top_action.get("source_fingerprint"),
+                },
+            )
         if int(repo.get("pending_import_count") or 0) > 0:
-            repo_items.append({"subsystem": "work-import", "local_id": "pending-imports", "summary": f"{repo_id} has pending imports", "priority": "normal", "command": repo.get("suggested_command")})
+            repo_items.append(
+                {
+                    "subsystem": "work-import",
+                    "local_id": "pending-imports",
+                    "summary": f"{repo_id} has pending imports",
+                    "priority": "normal",
+                    "command": repo.get("suggested_command"),
+                }
+            )
         seen: set[str] = set()
         for item in repo_items:
             source_subsystem = str(item.get("subsystem") or "repo-fleet")
             source_local_id = str(item.get("local_id") or source_subsystem)
-            source_basis = item.get("source_fingerprint") or _fingerprint_payload({"repo_id": repo_id, "subsystem": source_subsystem, "local_id": source_local_id, "summary": item.get("summary")})
+            source_basis = item.get("source_fingerprint") or _fingerprint_payload(
+                {
+                    "repo_id": repo_id,
+                    "subsystem": source_subsystem,
+                    "local_id": source_local_id,
+                    "summary": item.get("summary"),
+                }
+            )
             key = f"{repo_id}:{source_basis}"
             if key in seen:
                 continue
             seen.add(key)
-            source_fingerprint = _fingerprint_payload({"repo_id": repo_id, "report_fingerprint": report_fingerprint, "source": source_basis})
+            source_fingerprint = _fingerprint_payload(
+                {"repo_id": repo_id, "report_fingerprint": report_fingerprint, "source": source_basis}
+            )
             actions.append(
                 {
                     "fleet_action_id": f"fleet-act-{source_fingerprint[:16]}",
@@ -4679,7 +5741,14 @@ def actions_health(target: Path) -> dict[str, Any]:
     checks.extend(_dispatch_health_checks(target, actions))
     if open_actions:
         top = open_actions[0]
-        checks.append({"status": WARN, "name": "repo_fleet_actions_open", "detail": f"{len(open_actions)} open fleet action(s)", "suggested_next_command": f"brigade repos actions show {top.get('fleet_action_id')}"})
+        checks.append(
+            {
+                "status": WARN,
+                "name": "repo_fleet_actions_open",
+                "detail": f"{len(open_actions)} open fleet action(s)",
+                "suggested_next_command": f"brigade repos actions show {top.get('fleet_action_id')}",
+            }
+        )
     return {
         "actions_path": str(_actions_path(target)),
         "action_count": len(actions),
@@ -4698,18 +5767,29 @@ def actions_plan(*, target: Path, report_id: str = "latest", json_output: bool =
         print(f"error: {error}", file=sys.stderr)
         return 1 if error and "not found" in error else 2
     actions = _planned_actions(report)
-    payload = {"target": str(target), "report_id": report.get("report_id"), "report_review_status": _report_review_status(report), "actions_root": str(_actions_root(target)), "actions": actions, "action_count": len(actions)}
+    payload = {
+        "target": str(target),
+        "report_id": report.get("report_id"),
+        "report_review_status": _report_review_status(report),
+        "actions_root": str(_actions_root(target)),
+        "actions": actions,
+        "action_count": len(actions),
+    }
     if json_output:
         print(json.dumps(payload, indent=2, sort_keys=True))
         return 0
     print(f"repo fleet actions plan: {report.get('report_id')}")
     print(f"actions: {len(actions)}")
     for action in actions[:20]:
-        print(f"- {action.get('fleet_action_id')} {action.get('repo_id')} [{action.get('status')}] {action.get('safe_summary')}")
+        print(
+            f"- {action.get('fleet_action_id')} {action.get('repo_id')} [{action.get('status')}] {action.get('safe_summary')}"
+        )
     return 0
 
 
-def actions_build(*, target: Path, report_id: str = "latest", allow_unreviewed: bool = False, json_output: bool = False) -> int:
+def actions_build(
+    *, target: Path, report_id: str = "latest", allow_unreviewed: bool = False, json_output: bool = False
+) -> int:
     target = target.expanduser().resolve()
     report, error = _resolve_report(target, report_id)
     if report is None:
@@ -4717,12 +5797,23 @@ def actions_build(*, target: Path, report_id: str = "latest", allow_unreviewed: 
         return 1 if error and "not found" in error else 2
     review_status = _report_review_status(report)
     if review_status not in {"reviewed", "deferred"} and not allow_unreviewed:
-        print("error: source fleet report must be closed out as reviewed or deferred, or pass --allow-unreviewed", file=sys.stderr)
+        print(
+            "error: source fleet report must be closed out as reviewed or deferred, or pass --allow-unreviewed",
+            file=sys.stderr,
+        )
         return 2
     existing = _read_actions(target)
     created, skipped = actionqueue.merge_planned(existing, _read_action_archive(target), _planned_actions(report))
     _write_actions(target, existing)
-    payload = {"target": str(target), "report_id": report.get("report_id"), "actions_path": str(_actions_path(target)), "created_count": len(created), "skipped_count": len(skipped), "created_actions": created, "skipped_actions": skipped}
+    payload = {
+        "target": str(target),
+        "report_id": report.get("report_id"),
+        "actions_path": str(_actions_path(target)),
+        "created_count": len(created),
+        "skipped_count": len(skipped),
+        "created_actions": created,
+        "skipped_actions": skipped,
+    }
     if json_output:
         print(json.dumps(payload, indent=2, sort_keys=True))
         return 0
@@ -4739,13 +5830,20 @@ def actions_list(*, target: Path, limit: int = 50, json_output: bool = False) ->
     target = target.expanduser().resolve()
     actions = _read_actions(target)
     actions.sort(key=_action_rank)
-    payload = {"target": str(target), "actions_path": str(_actions_path(target)), "actions": actions[:limit], "action_count": len(actions)}
+    payload = {
+        "target": str(target),
+        "actions_path": str(_actions_path(target)),
+        "actions": actions[:limit],
+        "action_count": len(actions),
+    }
     if json_output:
         print(json.dumps(payload, indent=2, sort_keys=True))
         return 0
     print(f"repo fleet actions: {target}")
     for action in actions[:limit]:
-        print(f"- {action.get('fleet_action_id')} {action.get('repo_id')} [{action.get('status')}] {action.get('safe_summary')}")
+        print(
+            f"- {action.get('fleet_action_id')} {action.get('repo_id')} [{action.get('status')}] {action.get('safe_summary')}"
+        )
     return 0
 
 
@@ -4771,7 +5869,9 @@ def actions_show(*, target: Path, action_id: str, json_output: bool = False) -> 
     return 0
 
 
-def _set_action_status(*, target: Path, action_id: str, status: str, reason: str | None = None, json_output: bool = False) -> int:
+def _set_action_status(
+    *, target: Path, action_id: str, status: str, reason: str | None = None, json_output: bool = False
+) -> int:
     target = target.expanduser().resolve()
     actions, action, error = _find_action(target, action_id)
     if action is None:
@@ -4798,7 +5898,9 @@ def actions_defer(*, target: Path, action_id: str, reason: str, json_output: boo
     if not reason:
         print("error: --reason is required", file=sys.stderr)
         return 2
-    return _set_action_status(target=target, action_id=action_id, status="deferred", reason=reason, json_output=json_output)
+    return _set_action_status(
+        target=target, action_id=action_id, status="deferred", reason=reason, json_output=json_output
+    )
 
 
 def actions_archive_completed(*, target: Path, json_output: bool = False) -> int:
@@ -4807,7 +5909,12 @@ def actions_archive_completed(*, target: Path, json_output: bool = False) -> int
     archived, remaining = actionqueue.split_archived_completed(actions, now=_now().isoformat())
     _write_actions(target, remaining)
     _append_action_archive(target, archived)
-    payload = {"target": str(target), "archived_count": len(archived), "archive_path": str(_actions_archive_path(target)), "archived_actions": archived}
+    payload = {
+        "target": str(target),
+        "archived_count": len(archived),
+        "archive_path": str(_actions_archive_path(target)),
+        "archived_actions": archived,
+    }
     if json_output:
         print(json.dumps(payload, indent=2, sort_keys=True))
         return 0
@@ -4831,7 +5938,14 @@ def health(target: Path) -> dict[str, Any]:
         + int(health_registry.get("issue_count") or 0)
         + int(release_train.get("issue_count") or 0)
     )
-    top_issue = payload["top_issue"] or report.get("top_issue") or actions.get("top_issue") or sweep.get("top_issue") or health_registry.get("top_issue") or release_train.get("top_issue")
+    top_issue = (
+        payload["top_issue"]
+        or report.get("top_issue")
+        or actions.get("top_issue")
+        or sweep.get("top_issue")
+        or health_registry.get("top_issue")
+        or release_train.get("top_issue")
+    )
     return {
         "target": payload["target"],
         "config_path": payload["config_path"],
@@ -4926,11 +6040,21 @@ def daily_use_health(target: Path) -> dict[str, Any]:
         "schema": {"name": "repo-fleet-daily-use-health", "version": 1},
         "target_label": "repo-fleet",
         "repo_count": data.get("repo_count"),
-        "report_issue_count": int((data.get("report") or {}).get("issue_count") or 0) if isinstance(data.get("report"), dict) else 0,
-        "action_issue_count": int((data.get("actions") or {}).get("issue_count") or 0) if isinstance(data.get("actions"), dict) else 0,
-        "sweep_issue_count": int((data.get("sweep") or {}).get("issue_count") or 0) if isinstance(data.get("sweep"), dict) else 0,
-        "release_train_issue_count": int((data.get("release_train") or {}).get("issue_count") or 0) if isinstance(data.get("release_train"), dict) else 0,
-        "health_command_issue_count": int((data.get("health_commands") or {}).get("issue_count") or 0) if isinstance(data.get("health_commands"), dict) else 0,
+        "report_issue_count": int((data.get("report") or {}).get("issue_count") or 0)
+        if isinstance(data.get("report"), dict)
+        else 0,
+        "action_issue_count": int((data.get("actions") or {}).get("issue_count") or 0)
+        if isinstance(data.get("actions"), dict)
+        else 0,
+        "sweep_issue_count": int((data.get("sweep") or {}).get("issue_count") or 0)
+        if isinstance(data.get("sweep"), dict)
+        else 0,
+        "release_train_issue_count": int((data.get("release_train") or {}).get("issue_count") or 0)
+        if isinstance(data.get("release_train"), dict)
+        else 0,
+        "health_command_issue_count": int((data.get("health_commands") or {}).get("issue_count") or 0)
+        if isinstance(data.get("health_commands"), dict)
+        else 0,
         "manual_only": True,
         "privacy": {
             "safe_labels_only": True,
@@ -4940,7 +6064,13 @@ def daily_use_health(target: Path) -> dict[str, Any]:
         "checks": checks,
         "issue_count": len(checks),
         "top_issue": checks[0] if checks else None,
-        "suggested_next_commands": ["brigade repos report build", "brigade repos actions list", "brigade repos release build"] if checks else [],
+        "suggested_next_commands": [
+            "brigade repos report build",
+            "brigade repos actions list",
+            "brigade repos release build",
+        ]
+        if checks
+        else [],
     }
 
 
@@ -4999,7 +6129,9 @@ def first_run_payload(target: Path) -> dict[str, Any]:
             "Review and close out the fleet sweep",
             "brigade repos sweep closeout latest --target .",
             latest_sweep_value is not None and isinstance(latest_sweep_value.get("closeout"), dict),
-            "latest sweep has closeout" if latest_sweep_value and isinstance(latest_sweep_value.get("closeout"), dict) else "sweep still needs review closeout",
+            "latest sweep has closeout"
+            if latest_sweep_value and isinstance(latest_sweep_value.get("closeout"), dict)
+            else "sweep still needs review closeout",
         ),
         step(
             "report",
@@ -5013,7 +6145,9 @@ def first_run_payload(target: Path) -> dict[str, Any]:
             "Review and close out the fleet report",
             "brigade repos report closeout latest --target .",
             latest_report_value is not None and isinstance(latest_report_value.get("closeout"), dict),
-            "latest report has closeout" if latest_report_value and isinstance(latest_report_value.get("closeout"), dict) else "report still needs review closeout",
+            "latest report has closeout"
+            if latest_report_value and isinstance(latest_report_value.get("closeout"), dict)
+            else "report still needs review closeout",
         ),
         step(
             "release-train",
@@ -5027,14 +6161,18 @@ def first_run_payload(target: Path) -> dict[str, Any]:
             "Build release report and matrix",
             "brigade repos release report latest --target . && brigade repos release matrix latest --target .",
             release_report_ready,
-            "release report and matrix are present" if release_report_ready else "release report and matrix are not both present",
+            "release report and matrix are present"
+            if release_report_ready
+            else "release report and matrix are not both present",
         ),
         step(
             "ready",
             "Check the manual release gate",
             "brigade repos release ready latest --target .",
             latest_train is not None and not release_train.get("top_issue"),
-            "release train has no fleet health issue" if latest_train and not release_train.get("top_issue") else "release train still has review work",
+            "release train has no fleet health issue"
+            if latest_train and not release_train.get("top_issue")
+            else "release train still has review work",
         ),
     ]
     next_step = next((item for item in steps if not item["ready"]), None)
@@ -5081,12 +6219,33 @@ def report_health(target: Path) -> dict[str, Any]:
     latest = latest_report(target)
     checks: list[dict[str, Any]] = []
     if latest is None:
-        checks.append({"status": WARN, "name": "repo_fleet_report_missing", "detail": "no local repo fleet report has been built", "suggested_next_command": "brigade repos report build"})
+        checks.append(
+            {
+                "status": WARN,
+                "name": "repo_fleet_report_missing",
+                "detail": "no local repo fleet report has been built",
+                "suggested_next_command": "brigade repos report build",
+            }
+        )
         return {"latest": None, "checks": checks, "issue_count": len(checks), "top_issue": checks[0]}
     closeout = latest.get("closeout") if isinstance(latest.get("closeout"), dict) else None
     if not closeout or closeout.get("status") not in {"reviewed", "deferred", "superseded", "archived"}:
-        checks.append({"status": WARN, "name": "repo_fleet_report_unclosed", "detail": f"{latest.get('report_id')} has not been closed out", "suggested_next_command": f"brigade repos report closeout {latest.get('report_id')}"})
+        checks.append(
+            {
+                "status": WARN,
+                "name": "repo_fleet_report_unclosed",
+                "detail": f"{latest.get('report_id')} has not been closed out",
+                "suggested_next_command": f"brigade repos report closeout {latest.get('report_id')}",
+            }
+        )
     created = _parse_time(latest.get("created_at") or latest.get("generated_at"))
     if created and (_now() - created).total_seconds() / 3600 > REPORT_STALE_HOURS:
-        checks.append({"status": WARN, "name": "repo_fleet_report_stale", "detail": f"{latest.get('report_id')} is stale", "suggested_next_command": "brigade repos report build"})
+        checks.append(
+            {
+                "status": WARN,
+                "name": "repo_fleet_report_stale",
+                "detail": f"{latest.get('report_id')} is stale",
+                "suggested_next_command": "brigade repos report build",
+            }
+        )
     return {"latest": latest, "checks": checks, "issue_count": len(checks), "top_issue": checks[0] if checks else None}

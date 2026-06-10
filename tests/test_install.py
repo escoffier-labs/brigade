@@ -1,4 +1,3 @@
-from pathlib import Path
 import pytest
 from brigade.install import resolve_manifests, install_selection
 from brigade.selection import Selection
@@ -66,6 +65,7 @@ def test_install_selection_writes_files(tmp_path):
 
 def test_install_selection_writes_config(tmp_path):
     from brigade.config import load_config
+
     sel = Selection(
         depth="workspace",
         harnesses=["claude", "codex", "openclaw"],
@@ -84,6 +84,7 @@ def test_install_selection_writes_config(tmp_path):
 def test_opencode_install_creates_inbox_and_gitignore(tmp_path):
     from brigade.install import install_selection, build_gitignore_block
     from brigade.selection import Selection
+
     sel = Selection(depth="repo", harnesses=["opencode"], owner="opencode", includes=[])
     rc = install_selection(tmp_path, sel)
     assert rc == 0
@@ -97,6 +98,7 @@ def test_opencode_install_creates_inbox_and_gitignore(tmp_path):
 def test_antigravity_install_creates_inbox_and_gitignore(tmp_path):
     from brigade.install import install_selection, build_gitignore_block
     from brigade.selection import Selection
+
     sel = Selection(depth="repo", harnesses=["antigravity"], owner="antigravity", includes=[])
     rc = install_selection(tmp_path, sel)
     assert rc == 0
@@ -110,6 +112,7 @@ def test_antigravity_install_creates_inbox_and_gitignore(tmp_path):
 def test_pi_install_creates_inbox_and_gitignore(tmp_path):
     from brigade.install import install_selection, build_gitignore_block
     from brigade.selection import Selection
+
     sel = Selection(depth="repo", harnesses=["pi"], owner="pi", includes=[])
     rc = install_selection(tmp_path, sel)
     assert rc == 0
@@ -123,6 +126,7 @@ def test_pi_install_creates_inbox_and_gitignore(tmp_path):
 def test_cursor_install_creates_inbox_and_gitignore(tmp_path):
     from brigade.install import install_selection, build_gitignore_block
     from brigade.selection import Selection
+
     sel = Selection(depth="repo", harnesses=["cursor"], owner="cursor", includes=[])
     rc = install_selection(tmp_path, sel)
     assert rc == 0

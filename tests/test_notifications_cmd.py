@@ -101,10 +101,7 @@ def test_notifications_surface_in_center_work_and_daily(monkeypatch, tmp_target,
     assert daily_payload["notifications"]["issue_count"] == 1
 
     plan_payload = daily_cmd.plan_payload(tmp_target)
-    assert any(
-        item["source_subsystem"] == "notifications"
-        for item in plan_payload["candidate_actions"]
-    )
+    assert any(item["source_subsystem"] == "notifications" for item in plan_payload["candidate_actions"])
 
 
 def test_notifications_event_record_writes_local_receipt_without_sending(monkeypatch, tmp_target, capsys):
@@ -165,29 +162,32 @@ def test_notifications_event_record_can_explicitly_send(monkeypatch, tmp_target,
     monkeypatch.setattr(notifications_cmd.proc, "run", fake_run)
     monkeypatch.setenv("TEST_DISCORD_WEBHOOK_URL", "https://example.invalid/hook")
 
-    assert cli.main(
-        [
-            "notifications",
-            "event",
-            "record",
-            "--target",
-            str(tmp_target),
-            "--type",
-            "ci-green",
-            "--title",
-            "CI green",
-            "--message",
-            "Brigade CI passed.",
-            "--level",
-            "success",
-            "--profile",
-            "operator",
-            "--source",
-            "ci",
-            "--send",
-            "--json",
-        ]
-    ) == 0
+    assert (
+        cli.main(
+            [
+                "notifications",
+                "event",
+                "record",
+                "--target",
+                str(tmp_target),
+                "--type",
+                "ci-green",
+                "--title",
+                "CI green",
+                "--message",
+                "Brigade CI passed.",
+                "--level",
+                "success",
+                "--profile",
+                "operator",
+                "--source",
+                "ci",
+                "--send",
+                "--json",
+            ]
+        )
+        == 0
+    )
     payload = json.loads(capsys.readouterr().out)
     assert payload["sent"] is True
     assert payload["send_exit_code"] == 0

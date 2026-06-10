@@ -1,4 +1,5 @@
 """`brigade add <station>` - install and wire a station's managed tools."""
+
 from __future__ import annotations
 
 import sys

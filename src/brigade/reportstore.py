@@ -19,6 +19,7 @@ shared "path" annotation, and its closeout write stays on plain
 write_json because the train CLOSEOUT.json intentionally carries no
 "path" field for the same privacy reason.
 """
+
 from __future__ import annotations
 
 import shutil

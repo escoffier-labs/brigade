@@ -3,11 +3,12 @@ import re
 from typing import Any, Dict, List
 from .types import Finding
 
+
 def _demote_level_two_headings(markdown: str) -> str:
     return re.sub(r"(?m)^## ", "### ", markdown.strip())
 
-def render_handoff(*, question: str, markdown_report: str, findings: List[Finding],
-                   stats: Dict[str, Any]) -> str:
+
+def render_handoff(*, question: str, markdown_report: str, findings: List[Finding], stats: Dict[str, Any]) -> str:
     local = [f for f in findings if f.trust == "local"]
     cli = [f for f in findings if f.trust == "cli"]
     browser = [f for f in findings if f.trust == "browser"]

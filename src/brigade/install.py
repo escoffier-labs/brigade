@@ -4,6 +4,7 @@ Composes a depth manifest + N harness manifests + M include manifests
 into a single deduped file/dir list, then copies+renders into target.
 Persists the Selection to .brigade/config.json.
 """
+
 from __future__ import annotations
 
 import os
@@ -40,85 +41,89 @@ def build_gitignore_block(selection: Selection) -> str:
     for h in selection.harnesses:
         inbox = WRITER_INBOXES.get(h)
         if inbox:
-            lines.extend([
-                f"# {h}: handoffs are session-local and may contain private context.",
-                f"{inbox}/*",
-                f"!{inbox}/TEMPLATE.md",
-                f"!{inbox}/.gitkeep",
-                "",
-            ])
-    lines.extend([
-        "# Daily session logs are machine-local raw context.",
-        "memory/20[0-9][0-9]-[0-1][0-9]-[0-3][0-9].md",
-        "",
-        "# Review inbox: ambiguous handoffs awaiting human triage.",
-        "memory/handoff-inbox/",
-        "",
-        "# brigade local state (logs, scrub cache, dogfood runs, work sessions).",
-        ".brigade/",
-        ".brigade/backups/",
-        ".brigade/backups.toml",
-        ".brigade/center/",
-        ".brigade/context/",
-        ".brigade/dogfood.toml",
-        ".brigade/handoffs/",
-        ".brigade/handoff-sources.json",
-        ".brigade/learn/",
-        ".brigade/projects.toml",
-        ".brigade/release/",
-        ".brigade/repos.toml",
-        ".brigade/chat-surfaces.toml",
-        ".brigade/daily.toml",
-        ".brigade/memory-care.toml",
-        ".brigade/reviews.toml",
-        ".brigade/scanners.toml",
-        ".brigade/security.toml",
-        ".brigade/tools.toml",
-        ".brigade/logs/",
-        ".brigade/runs/",
-        ".brigade/scrub-cache/",
-        ".brigade/scanners/",
-        ".brigade/security/",
-        ".brigade/tools/",
-        ".brigade/chat-memory-sweeps/",
-        ".brigade/work/",
-        "",
-        "# Generated tool projections are local harness state.",
-        ".claude/commands/",
-        ".codex/skills/",
-        ".opencode/commands/",
-        ".opencode/superpowers/",
-        ".antigravity/commands/",
-        ".antigravity/superpowers/",
-        ".pi/commands/",
-        ".pi/superpowers/",
-        ".cursor/rules/",
-        ".cursor/skills/",
-        ".aider/commands/",
-        ".aider/skills/",
-        ".goose/commands/",
-        ".goose/skills/",
-        ".continue/rules/",
-        ".continue/skills/",
-        ".copilot/instructions/",
-        ".copilot/skills/",
-        ".qwen/commands/",
-        ".qwen/skills/",
-        ".kimi/commands/",
-        ".kimi/skills/",
-        ".adal/commands/",
-        ".adal/skills/",
-        ".openhands/instructions/",
-        ".openhands/skills/",
-        ".hermes/commands/",
-        ".hermes/superpowers/",
-        ".openclaw/commands/",
-        ".openclaw/superpowers/",
-        ".mcp/",
-        "scripts/*.md",
-        GITIGNORE_END,
-        "",
-    ])
+            lines.extend(
+                [
+                    f"# {h}: handoffs are session-local and may contain private context.",
+                    f"{inbox}/*",
+                    f"!{inbox}/TEMPLATE.md",
+                    f"!{inbox}/.gitkeep",
+                    "",
+                ]
+            )
+    lines.extend(
+        [
+            "# Daily session logs are machine-local raw context.",
+            "memory/20[0-9][0-9]-[0-1][0-9]-[0-3][0-9].md",
+            "",
+            "# Review inbox: ambiguous handoffs awaiting human triage.",
+            "memory/handoff-inbox/",
+            "",
+            "# brigade local state (logs, scrub cache, dogfood runs, work sessions).",
+            ".brigade/",
+            ".brigade/backups/",
+            ".brigade/backups.toml",
+            ".brigade/center/",
+            ".brigade/context/",
+            ".brigade/dogfood.toml",
+            ".brigade/handoffs/",
+            ".brigade/handoff-sources.json",
+            ".brigade/learn/",
+            ".brigade/projects.toml",
+            ".brigade/release/",
+            ".brigade/repos.toml",
+            ".brigade/chat-surfaces.toml",
+            ".brigade/daily.toml",
+            ".brigade/memory-care.toml",
+            ".brigade/reviews.toml",
+            ".brigade/scanners.toml",
+            ".brigade/security.toml",
+            ".brigade/tools.toml",
+            ".brigade/logs/",
+            ".brigade/runs/",
+            ".brigade/scrub-cache/",
+            ".brigade/scanners/",
+            ".brigade/security/",
+            ".brigade/tools/",
+            ".brigade/chat-memory-sweeps/",
+            ".brigade/work/",
+            "",
+            "# Generated tool projections are local harness state.",
+            ".claude/commands/",
+            ".codex/skills/",
+            ".opencode/commands/",
+            ".opencode/superpowers/",
+            ".antigravity/commands/",
+            ".antigravity/superpowers/",
+            ".pi/commands/",
+            ".pi/superpowers/",
+            ".cursor/rules/",
+            ".cursor/skills/",
+            ".aider/commands/",
+            ".aider/skills/",
+            ".goose/commands/",
+            ".goose/skills/",
+            ".continue/rules/",
+            ".continue/skills/",
+            ".copilot/instructions/",
+            ".copilot/skills/",
+            ".qwen/commands/",
+            ".qwen/skills/",
+            ".kimi/commands/",
+            ".kimi/skills/",
+            ".adal/commands/",
+            ".adal/skills/",
+            ".openhands/instructions/",
+            ".openhands/skills/",
+            ".hermes/commands/",
+            ".hermes/superpowers/",
+            ".openclaw/commands/",
+            ".openclaw/superpowers/",
+            ".mcp/",
+            "scripts/*.md",
+            GITIGNORE_END,
+            "",
+        ]
+    )
     return "\n".join(lines)
 
 
@@ -305,7 +310,9 @@ def install_selection(
     print(f"brigade: gitignore {result}")
 
     # Post-install output.
-    print(f"brigade: installed depth={selection.depth} harnesses={','.join(selection.harnesses) or '(none)'} -> {target}")
+    print(
+        f"brigade: installed depth={selection.depth} harnesses={','.join(selection.harnesses) or '(none)'} -> {target}"
+    )
     print(f"brigade: memory owner -> {owner_label}")
     if "hermes" in selection.harnesses:
         print(
