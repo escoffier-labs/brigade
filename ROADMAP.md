@@ -41,7 +41,7 @@ The highest-priority work is making Brigade adapt and operate a real, organicall
 
 ## Later: the workspace on top of the bones
 
-The CLI is the load-bearing skeleton. Every future surface sits on top of an existing command plus its JSON contract, never a parallel implementation.
+The CLI is the skeleton that carries everything. Every future surface sits on top of an existing command plus its JSON contract, never a parallel implementation.
 
 - A workspace UI that is a view over the CLI: model comparison, a document editor, a viewer for research reports and operator-center state.
 - Optional local semantic memory retrieval (on-device embeddings over `memory/cards/`), staying file-first and optional.
