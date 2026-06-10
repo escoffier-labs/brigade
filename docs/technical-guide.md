@@ -1105,8 +1105,8 @@ Each subsystem has a companion doc under [`docs/`]() with the full local contrac
 
 ## Related
 
-- [Cookbook](https://github.com/solomonneas/solos-cookbook): the long-form companion guide and reference docs
-- [content-guard](https://github.com/solomonneas/content-guard): the publish-gate scanner used by the pre-push hook
+- [Cookbook](https://github.com/escoffier-labs/solos-cookbook): the long-form companion guide and reference docs
+- [content-guard](https://github.com/escoffier-labs/content-guard): the publish-gate scanner used by the pre-push hook
 - [OpenClaw](https://github.com/openclaw/openclaw): the reference memory owner
 
 ## License

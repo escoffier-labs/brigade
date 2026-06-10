@@ -46,9 +46,9 @@ flowchart TB
     class WORK,SCAN,RELEASE,CODEX,CLAUDE,OPEN,MORE,HERMES lane;
 ```
 
-> Brigade was extracted from the [**solos-cookbook**](https://github.com/solomonneas/solos-cookbook), a documented 24/7 multi-agent stack running in production. If you want the full picture of how Brigade fits into a real setup, start there, and a star helps other people find it.
+> Brigade was extracted from the [**solos-cookbook**](https://github.com/escoffier-labs/solos-cookbook), a documented 24/7 multi-agent stack running in production. If you want the full picture of how Brigade fits into a real setup, start there, and a star helps other people find it.
 >
-> [![Star the cookbook](https://img.shields.io/github/stars/solomonneas/solos-cookbook?style=social&label=Star%20solos-cookbook)](https://github.com/solomonneas/solos-cookbook)
+> [![Star the cookbook](https://img.shields.io/github/stars/escoffier-labs/solos-cookbook?style=social&label=Star%20solos-cookbook)](https://github.com/escoffier-labs/solos-cookbook)
 
 ## Why This Exists
 
@@ -361,10 +361,16 @@ Memory and handoff tools:
 
 Safety and operations tools:
 
-- [Content Guard](https://github.com/solomonneas/content-guard): policy-driven content scanning and publish checks.
+- [Content Guard](https://github.com/escoffier-labs/content-guard): policy-driven content scanning and publish checks.
 - [Agent Pantry](https://github.com/escoffier-labs/agentpantry): encrypted browser session, cookie, and secret sync for agent machines.
-- [agent-notify](https://github.com/solomonneas/agent-notify): optional notification hooks for long-running agent work.
+- [agent-notify](https://github.com/escoffier-labs/agent-notify): optional notification hooks for long-running agent work.
 - [tokenjuice](https://github.com/solomonneas/tokenjuice): output compaction for terminal-heavy agent workflows.
+
+Evidence ledger tools:
+
+- [MiseLedger](https://github.com/escoffier-labs/miseledger): local-first evidence ledger that imports `miseledger.adapter.v1` JSONL into SQLite, searches with FTS5, and emits Brigade-ready evidence bundles.
+- [StationTrail](https://github.com/escoffier-labs/stationtrail): agent-session log exporter that normalizes Codex, Claude, OpenClaw, OpenCode, and Hermes sessions into adapter JSONL for MiseLedger.
+- [SourceHarvest](https://github.com/escoffier-labs/sourceharvest): source-system record exporter that normalizes notes, files, git history, and generic exports into adapter JSONL for MiseLedger.
 
 Brigade also has native local workflows for [repo fleet operations](repo-fleet.md), [portable tool catalogs](tool-catalog.md), [security scans](security.md), and [handoff promotion](handoff-promotion.md). The highlights are below.
 

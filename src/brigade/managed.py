@@ -171,6 +171,54 @@ def _agent_notify_wire(ctx: DoctorContext) -> List[CheckResult]:
     ]
 
 
+# The miseledger family (miseledger + its stationtrail/sourceharvest exporters)
+# operates on the operator's host-global evidence archive and local session logs,
+# not a per-target workspace. Like the memory and pantry satellites, their findings
+# are advisory: they never FAIL a workspace doctor run.
+def _miseledger_doctor(ctx: DoctorContext) -> List[CheckResult]:
+    name = "miseledger (evidence archive)"
+    # `status --json` opens (and migrates) the local archive and reports counts.
+    r = proc.run(["miseledger", "status", "--json"])
+    data = r.json()
+    if data is None:
+        return [(WARN, name, f"installed but unwired or errored (exit {r.code})")]
+    if not isinstance(data, dict):
+        return [(WARN, name, f"unexpected status output (exit {r.code})")]
+    items = data.get("items", 0)
+    sources = data.get("sources", 0)
+    schema = data.get("schema_version", "?")
+    fts = data.get("fts") or "?"
+    status = WARN if fts != "ok" else OK
+    return [(status, name, f"schema={schema}, items={items}, sources={sources}, fts={fts}")]
+
+
+def _stationtrail_doctor(ctx: DoctorContext) -> List[CheckResult]:
+    name = "stationtrail (session exporter)"
+    # `doctor --json` discovers local harness session roots; ok=false means a
+    # source could not be read, which is advisory (operator local state).
+    r = proc.run(["stationtrail", "doctor", "--json"])
+    data = r.json()
+    if data is None:
+        return [(WARN, name, f"installed but doctor output unreadable (exit {r.code})")]
+    if not isinstance(data, dict):
+        return [(WARN, name, f"unexpected doctor output (exit {r.code})")]
+    sources = data.get("sources") if isinstance(data.get("sources"), list) else []
+    ready = [s for s in sources if isinstance(s, dict) and s.get("status") == "ready"]
+    warnings = data.get("warnings") if isinstance(data.get("warnings"), list) else []
+    status = WARN if (data.get("ok") is False or warnings) else OK
+    return [(status, name, f"sources={len(sources)}, ready={len(ready)}, warnings={len(warnings)}")]
+
+
+def _sourceharvest_doctor(ctx: DoctorContext) -> List[CheckResult]:
+    name = "sourceharvest (source exporter)"
+    # sourceharvest is a stateless adapter emitter with no archive to inspect;
+    # presence + a runnable `version` is the most we can advisively assert.
+    r = proc.run(["sourceharvest", "version"])
+    if r.code != 0:
+        return [(WARN, name, f"installed but not runnable (exit {r.code})")]
+    return [(OK, name, f"installed; {r.stdout.strip() or 'version ok'}")]
+
+
 def _tokenjuice_wire(ctx: DoctorContext) -> List[CheckResult]:
     # Wiring installs a host hook; which host depends on the workspace's harnesses.
     hosts = [h for h in ctx.harnesses if h in ("claude", "codex", "cursor")]
@@ -202,7 +250,7 @@ _TOOLS: Tuple[ManagedTool, ...] = (
     ManagedTool(
         name="content-guard", station="guard", command="content-guard",
         summary="policy-driven content scanning",
-        install_args=["pipx", "install", "git+https://github.com/solomonneas/content-guard"],
+        install_args=["pipx", "install", "git+https://github.com/escoffier-labs/content-guard"],
         wire=_content_guard_wire, doctor=_content_guard_doctor,
     ),
     ManagedTool(
@@ -220,8 +268,26 @@ _TOOLS: Tuple[ManagedTool, ...] = (
     ManagedTool(
         name="agent-notify", station="notifications", command="agent-notify",
         summary="private operator notifications for agent events",
-        install_args=["go", "install", "github.com/solomonneas/agent-notify/cmd/agent-notify@latest"],
+        install_args=["go", "install", "github.com/escoffier-labs/agent-notify/cmd/agent-notify@latest"],
         wire=_agent_notify_wire, doctor=_agent_notify_doctor,
+    ),
+    ManagedTool(
+        name="miseledger", station="evidence", command="miseledger",
+        summary="local-first evidence ledger: imports adapter JSONL, FTS search, evidence bundles",
+        install_args=["go", "install", "github.com/escoffier-labs/miseledger/cmd/miseledger@latest"],
+        wire=_noop_wire, doctor=_miseledger_doctor,
+    ),
+    ManagedTool(
+        name="stationtrail", station="evidence", command="stationtrail",
+        summary="agent-session log exporter to miseledger.adapter.v1 JSONL",
+        install_args=["go", "install", "github.com/escoffier-labs/stationtrail/cmd/stationtrail@latest"],
+        wire=_noop_wire, doctor=_stationtrail_doctor,
+    ),
+    ManagedTool(
+        name="sourceharvest", station="evidence", command="sourceharvest",
+        summary="source-system record exporter to miseledger.adapter.v1 JSONL",
+        install_args=["go", "install", "github.com/escoffier-labs/sourceharvest/cmd/sourceharvest@latest"],
+        wire=_noop_wire, doctor=_sourceharvest_doctor,
     ),
 )
 

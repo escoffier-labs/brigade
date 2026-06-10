@@ -54,7 +54,15 @@ NOTIFICATIONS = Station(
     tools=("agent-notify",),
 )
 
-_BUILTIN: Tuple[Station, ...] = (CORE, MEMORY, GUARD, TOKENS, SECURITY, PANTRY, NOTIFICATIONS)
+EVIDENCE = Station(
+    name="evidence",
+    summary="local-first evidence ledger and source exporters",
+    aliases=("ledger",),
+    doctor=_doctor.evidence_station_checks,
+    tools=("miseledger", "stationtrail", "sourceharvest"),
+)
+
+_BUILTIN: Tuple[Station, ...] = (CORE, MEMORY, GUARD, TOKENS, SECURITY, PANTRY, NOTIFICATIONS, EVIDENCE)
 
 
 def all_stations() -> Tuple[Station, ...]:

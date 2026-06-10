@@ -44,7 +44,7 @@ git config core.hooksPath hooks
 If content-guard is not installed:
 
 ```bash
-git clone https://github.com/solomonneas/content-guard ~/repos/content-guard
+git clone https://github.com/escoffier-labs/content-guard ~/repos/content-guard
 ```
 
 The hook reads `CONTENT_GUARD_DIR` (defaults to `$HOME/repos/content-guard`) and `CONTENT_GUARD_POLICY` (defaults to `$SCANNER_DIR/policies/public-repo.json`).

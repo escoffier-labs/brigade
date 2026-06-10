@@ -24,7 +24,7 @@ Install: `pipx install brigade-cli` - then `brigade operator quickstart --target
 
 Repo: https://github.com/escoffier-labs/brigade
 Site: https://brigade.tools
-The full production stack it came from: https://github.com/solomonneas/solos-cookbook
+The full production stack it came from: https://github.com/escoffier-labs/solos-cookbook
 
 MIT, Python stdlib only, no runtime dependencies. Early-stage; I fix reported issues fast.
 

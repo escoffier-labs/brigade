@@ -26,7 +26,7 @@ You should get an acknowledgment within 72 hours. If you do not, please follow u
 ## Out of scope
 
 - Bugs in `content-guard` itself - please report those upstream at
-  <https://github.com/solomonneas/content-guard>.
+  <https://github.com/escoffier-labs/content-guard>.
 - Bugs in OpenClaw, Hermes, Claude Code, or Codex - report those to their respective projects.
 - Issues that require an attacker to already have write access to the user's machine, harness config, or PyPI account.
 - Memory cards or handoffs that a user wrote and committed themselves. solo-mise provides scaffolding and guardrails, not perfect content review.

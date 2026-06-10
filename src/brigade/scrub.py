@@ -59,7 +59,7 @@ def hook_status(target: Path, policy: str = "public-repo") -> dict[str, Any]:
     suggestions: list[str] = []
     if not available():
         checks.append({"status": "warn", "name": "content_guard_missing", "detail": f"content-guard not found at {scanner_dir()}"})
-        suggestions.append("clone https://github.com/solomonneas/content-guard or set CONTENT_GUARD_DIR")
+        suggestions.append("clone https://github.com/escoffier-labs/content-guard or set CONTENT_GUARD_DIR")
     if not policy_exists:
         checks.append({"status": "warn", "name": "content_guard_policy_missing", "detail": f"policy not found: {resolved_policy}"})
         suggestions.append(f"brigade scrub --target . --policy {policy} --dry-run")
@@ -187,7 +187,7 @@ def run_scan(scan_target: Path, *, repo_target: Path | None = None, policy: str 
             "exit_code": 2,
             "detail": f"content-guard not found at {scanner}",
             "stdout": "",
-            "stderr": "clone https://github.com/solomonneas/content-guard or set CONTENT_GUARD_DIR",
+            "stderr": "clone https://github.com/escoffier-labs/content-guard or set CONTENT_GUARD_DIR",
             "policy": policy,
             "policy_path": None,
             "target": str(scan_target),
@@ -259,7 +259,7 @@ def run(
             file=sys.stderr,
         )
         print(
-            "brigade scrub: clone https://github.com/solomonneas/content-guard "
+            "brigade scrub: clone https://github.com/escoffier-labs/content-guard "
             "or set CONTENT_GUARD_DIR",
             file=sys.stderr,
         )
