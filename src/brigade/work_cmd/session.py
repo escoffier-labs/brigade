@@ -14,6 +14,7 @@ from uuid import uuid4
 from .. import dogfood_cmd
 from ..install import apply_gitignore
 from . import constants, helpers, ledger as ledger_mod, config as config_mod, services as services_mod
+from . import scanners as scanners_mod, reviews as reviews_mod
 
 
 def _latest_run_next_metadata(target: Path) -> tuple[str | None, dict[str, Any]]:
@@ -586,9 +587,9 @@ def _brief_payload(target: Path, *, limit: int = 3) -> dict[str, Any]:
     scanner_candidate = ledger_mod._scanner_candidate(pending_imports)
     handoff_candidate = ledger_mod._handoff_candidate(pending_imports)
     inbox_hygiene = services_mod._inbox_hygiene_payload(target)
-    scanner_health = services_mod._scanner_health(target)
-    sweep_health = services_mod._scanner_sweep_health(target)
-    review_health = services_mod._review_health(target)
+    scanner_health = scanners_mod._scanner_health(target)
+    sweep_health = scanners_mod._scanner_sweep_health(target)
+    review_health = reviews_mod._review_health(target)
     chat_health = chat_cmd.health(target)
     memory_health = memory_cmd.health(target)
     security_health = security_cmd.health(target)
@@ -2629,17 +2630,17 @@ def doctor(*, target: Path) -> int:
         if check.get("status") != constants.OK:
             helpers._doctor_line(str(check.get("status")), str(check.get("name")), check.get("detail"))
 
-    scanner_health = services_mod._scanner_health(effective_target)
+    scanner_health = scanners_mod._scanner_health(effective_target)
     for check in scanner_health["checks"]:
         if check.get("status") == constants.FAIL:
             failures += 1
         helpers._doctor_line(str(check.get("status")), str(check.get("name")), check.get("detail"))
 
-    sweep_health = services_mod._scanner_sweep_health(effective_target)
+    sweep_health = scanners_mod._scanner_sweep_health(effective_target)
     for check in sweep_health["checks"]:
         helpers._doctor_line(str(check.get("status")), str(check.get("name")), check.get("detail"))
 
-    review_health = services_mod._review_health(effective_target)
+    review_health = reviews_mod._review_health(effective_target)
     for check in review_health["checks"]:
         if check.get("status") == constants.FAIL:
             failures += 1
