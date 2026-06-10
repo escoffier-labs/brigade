@@ -22,7 +22,7 @@ classifiers = [
 dependencies = []
 
 [project.optional-dependencies]
-dev = ["pytest>=7"]
+dev = ["pytest>=7", "ruff>=0.15"]
 research = ["playwright>=1.40"]
 
 [project.urls]
@@ -47,3 +47,14 @@ brigade = ["py.typed", "templates/**/*"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra"
+
+[tool.ruff]
+line-length = 120
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+# Pragmatic initial gate: ruff's default rule set (pyflakes plus the
+# E4/E7/E9 pycodestyle errors). Deferred for later, separate passes:
+# import sorting (I), pyupgrade (UP), bugbear (B), the full pycodestyle
+# E/W set, and any type checking (mypy/pyright).
+select = ["E4", "E7", "E9", "F"]
