@@ -33,10 +33,30 @@ func Open(path string) (*sql.DB, error) {
 		_ = db.Close()
 		return nil, err
 	}
-	if _, err := os.Stat(path); err == nil {
-		_ = security.ChmodPrivateFile(path)
-	}
+	chmodDBFiles(path)
 	return db, nil
+}
+
+// chmodDBFiles keeps the database and its WAL sidecars private. The -wal and
+// -shm files hold the same evidence as the main DB, so they must not be left
+// world-readable. They are created lazily by SQLite, so this is best-effort.
+func chmodDBFiles(path string) {
+	for _, p := range []string{path, path + "-wal", path + "-shm"} {
+		if _, err := os.Stat(p); err == nil {
+			_ = security.ChmodPrivateFile(p)
+		}
+	}
+}
+
+// Checkpoint flushes the WAL back into the main database and truncates it,
+// keeping the -wal file from growing without bound after large imports. It
+// re-applies private permissions afterward.
+func Checkpoint(db *sql.DB, path string) error {
+	if _, err := db.Exec("PRAGMA wal_checkpoint(TRUNCATE)"); err != nil {
+		return err
+	}
+	chmodDBFiles(path)
+	return nil
 }
 
 func Migrate(db *sql.DB) error {

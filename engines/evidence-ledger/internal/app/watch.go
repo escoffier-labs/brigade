@@ -15,6 +15,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/escoffier-labs/miseledger/internal/archive"
 	"github.com/escoffier-labs/miseledger/internal/sources"
 	"github.com/escoffier-labs/miseledger/internal/sources/claude"
 	"github.com/escoffier-labs/miseledger/internal/sources/codex"
@@ -205,13 +206,21 @@ func cmdImportDiscovered(args []string, out, errw io.Writer) int {
 		return fatalf(errw, "import discovered: %s", err)
 	}
 	var db *sql.DB
+	var dbPath string
 	if !bools["dry-run"] {
+		var paths Paths
 		var openErr error
-		db, _, openErr = openMigrated()
+		db, paths, openErr = openMigrated()
 		if openErr != nil {
 			return fatalf(errw, "import discovered: %s", openErr)
 		}
+		dbPath = paths.DBPath
 		defer db.Close()
+		defer func() {
+			if db != nil {
+				_ = archive.Checkpoint(db, dbPath)
+			}
+		}()
 	}
 	rows := []discoveredImportRow{}
 	for _, root := range discoveredRoots() {

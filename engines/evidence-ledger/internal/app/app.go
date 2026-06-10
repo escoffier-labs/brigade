@@ -856,7 +856,7 @@ func cmdImportNative(name string, generator sources.Generator, args []string, ou
 		writeJSON(out, map[string]any{"source_kind": name, "dry_run": true, "generated_records": generated.Records, "warnings": generated.Warnings, "files": generated.Files})
 		return 0
 	}
-	db, _, err := openMigrated()
+	db, paths, err := openMigrated()
 	if err != nil {
 		return fatalf(errw, "import %s: %s", name, err)
 	}
@@ -867,6 +867,7 @@ func cmdImportNative(name string, generator sources.Generator, args []string, ou
 		opts.Skip = func(string, int64, string) bool { return false }
 	}
 	result, generated, err := runNativeImportOpts(db, name, generator, rest[0], opts, true, errw)
+	_ = archive.Checkpoint(db, paths.DBPath)
 	if err != nil {
 		return fatalf(errw, "import %s: %s", name, err)
 	}
@@ -1794,7 +1795,7 @@ func cmdPruneImports(args []string, out, errw io.Writer) int {
 	if err != nil {
 		return fatalf(errw, "prune imports: %s", err)
 	}
-	db, _, err := openMigrated()
+	db, paths, err := openMigrated()
 	if err != nil {
 		return fatalf(errw, "prune imports: %s", err)
 	}
@@ -1823,6 +1824,7 @@ func cmdPruneImports(args []string, out, errw io.Writer) int {
 		if err := tx.Commit(); err != nil {
 			return fatalf(errw, "prune imports: %s", err)
 		}
+		_ = archive.Checkpoint(db, paths.DBPath)
 	} else {
 		deletedImports = count
 		deletedWarnings = warnings

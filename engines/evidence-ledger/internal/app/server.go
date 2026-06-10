@@ -9,7 +9,12 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 )
+
+// maxRequestBody caps request bodies on the loopback API so a malformed or
+// hostile local client cannot stream an unbounded payload.
+const maxRequestBody = 1 << 20 // 1 MiB
 
 func cmdServe(args []string, out, errw io.Writer) int {
 	values, bools, rest, err := splitFlags(args, map[string]bool{"addr": true}, map[string]bool{"json": true})
@@ -32,7 +37,15 @@ func cmdServe(args []string, out, errw io.Writer) int {
 	} else {
 		fmt.Fprintf(out, "listening on http://%s\n", addr)
 	}
-	if err := http.ListenAndServe(addr, handler); err != nil {
+	srv := &http.Server{
+		Addr:              addr,
+		Handler:           handler,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      60 * time.Second,
+		IdleTimeout:       120 * time.Second,
+	}
+	if err := srv.ListenAndServe(); err != nil {
 		return fatalf(errw, "serve: %s", err)
 	}
 	return 0
@@ -154,6 +167,7 @@ func handleEvidence(w http.ResponseWriter, r *http.Request) {
 		IncludeRelated      bool   `json:"include_related"`
 		IncludeArtifactText bool   `json:"include_artifact_text"`
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBody)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		httpError(w, http.StatusBadRequest, err.Error())
 		return

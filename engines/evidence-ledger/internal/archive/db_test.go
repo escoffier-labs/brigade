@@ -2,6 +2,7 @@ package archive
 
 import (
 	"database/sql"
+	"os"
 	"path/filepath"
 	"testing"
 )
@@ -117,6 +118,35 @@ func TestOpenAppliesPragmasToAllConnections(t *testing.T) {
 		}
 		if fk != 1 {
 			t.Fatalf("foreign_keys = %d, want 1", fk)
+		}
+	}
+}
+
+func TestCheckpointTruncatesWALAndKeepsSidecarsPrivate(t *testing.T) {
+	path := t.TempDir() + "/miseledger.db"
+	db, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := Migrate(db); err != nil {
+		t.Fatal(err)
+	}
+	// Generate WAL traffic.
+	if _, err := db.Exec(`insert into sources(id, kind, name, created_at, updated_at) values('s','k','n','t','t')`); err != nil {
+		t.Fatal(err)
+	}
+	if err := Checkpoint(db, path); err != nil {
+		t.Fatalf("checkpoint: %v", err)
+	}
+	// Any WAL/SHM sidecars that exist must be private (0600), not world-readable.
+	for _, suffix := range []string{"", "-wal", "-shm"} {
+		info, err := os.Stat(path + suffix)
+		if err != nil {
+			continue // sidecar may not exist after truncate; that is fine
+		}
+		if perm := info.Mode().Perm(); perm&0o077 != 0 {
+			t.Fatalf("%s perms = %o, want no group/other access", path+suffix, perm)
 		}
 	}
 }
