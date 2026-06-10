@@ -206,6 +206,8 @@ Goal: make Brigade a safe target for local automations that discover useful work
 
 ## Later Phase: Chat Surface Scanners
 
+Phase status: core shipped (`brigade chat surfaces`, `brigade chat sweep validate/ingest/import-issues`, `brigade work import chat-sweep`); only the scheduler-spreading bullet remains started. Removed from the live roadmap's Next section 2026-06-10.
+
 > **In plain terms:** pull work items out of chat apps (Discord, Slack, Telegram, and so on). It summarizes private messages instead of pasting raw chat into public docs, and events become inbox items rather than direct memory writes. The long platform list is just "we do not want to hardcode one chat product."
 
 Goal: support the common places agent work happens without making any one chat product mandatory.
@@ -221,6 +223,8 @@ Goal: support the common places agent work happens without making any one chat p
 - Add scheduler rules that spread memory ingest, crawler repair, chat sweeps, and OpenClaw updater jobs around update windows so upgrades do not race plugin or extension loads. Status: started with local scanner schedule planning and conflict warnings, without cron mutation or daemon execution.
 
 ## Later Phase: Backup And Recovery Visibility
+
+Phase status: core shipped (`brigade work backup status/doctor/import-issues/closeout` with backup-health incident imports); outbound chat/status notifications remain open under the live roadmap's Later notifications item. Removed from the live roadmap's Next section 2026-06-10.
 
 > **In plain terms:** fold backup health into the same daily dashboard. Show how old your latest NAS and cloud snapshots are, whether the integrity check passed, and when you last test-restored. Stale or broken backups become "incident" items in the inbox.
 

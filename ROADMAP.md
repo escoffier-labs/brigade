@@ -20,7 +20,7 @@ The one rule behind all of it: Brigade writes local files and queues, but it nev
 
 ## Where things stand
 
-The base layers are built and shipped: portable setup (`operator quickstart`), memory handoffs with lint and source coverage, the local security scanner and Content Guard integration, the daily operator loop, the scanner-ready work inbox, repo fleet evidence, release readiness receipts, the tool catalog, the skill registry, deep research, and runbook execution. See the [archive](docs/roadmap-archive.md) for the complete record.
+The base layers are built and shipped: portable setup (`operator quickstart`), memory handoffs with lint and source coverage, the local security scanner and Content Guard integration, the daily operator loop, the scanner-ready work inbox, repo fleet evidence, release readiness receipts, the tool catalog, the skill registry, deep research, runbook execution, chat surface sweeps, and backup health visibility. See the [archive](docs/roadmap-archive.md) for the complete record.
 
 What follows is what is actually ahead.
 
@@ -36,10 +36,10 @@ What "now" means after that shift:
 
 ## Next: the surfaces around the loop
 
-- **Chat surface scanners**: pull reviewable work items out of chat exports (Discord, Slack, Telegram, and friends) through the same import inbox, summarized rather than quoted, never written to memory directly.
-- **Backup and recovery visibility**: snapshot age, check results, and restore-rehearsal dates as part of the same daily loop, with stale or failed backups becoming inbox incidents.
 - **Security plugin depth**: richer rule packs for agent workspaces (hooks, MCP configs, prompt-injection patterns), policy packs per audience, and optional offline threat-intel enrichment.
 - **Memory care depth**: smarter staleness, contradiction, and evidence checks for cards, with safe gated metadata repairs.
+
+Chat surface scanners (`brigade chat surfaces`, `brigade chat sweep`) and backup and recovery visibility (`brigade work backup`) shipped and moved to the archive; their remaining slices (scheduler spreading, outbound backup notifications) are tracked there and under Later notifications.
 
 ## Later: the workspace on top of the bones
 
