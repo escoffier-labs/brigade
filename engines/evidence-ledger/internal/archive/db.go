@@ -48,10 +48,22 @@ func chmodDBFiles(path string) {
 	}
 }
 
-// Checkpoint flushes the WAL back into the main database and truncates it,
-// keeping the -wal file from growing without bound after large imports. It
-// re-applies private permissions afterward.
+// Checkpoint runs a non-blocking PASSIVE WAL checkpoint: it folds what it can
+// from the WAL into the main database without taking a lock that would stall
+// concurrent readers (search, stats, a second CLI). This is the right cadence
+// after routine imports and prunes. Use CheckpointTruncate for explicit
+// compaction when shrinking the -wal file is the goal.
 func Checkpoint(db *sql.DB, path string) error {
+	if _, err := db.Exec("PRAGMA wal_checkpoint(PASSIVE)"); err != nil {
+		return err
+	}
+	chmodDBFiles(path)
+	return nil
+}
+
+// CheckpointTruncate fully flushes the WAL and truncates the -wal file. It can
+// briefly block readers, so it is reserved for the explicit compact command.
+func CheckpointTruncate(db *sql.DB, path string) error {
 	if _, err := db.Exec("PRAGMA wal_checkpoint(TRUNCATE)"); err != nil {
 		return err
 	}

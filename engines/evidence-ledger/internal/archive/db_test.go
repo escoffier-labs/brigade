@@ -137,7 +137,10 @@ func TestCheckpointTruncatesWALAndKeepsSidecarsPrivate(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := Checkpoint(db, path); err != nil {
-		t.Fatalf("checkpoint: %v", err)
+		t.Fatalf("passive checkpoint: %v", err)
+	}
+	if err := CheckpointTruncate(db, path); err != nil {
+		t.Fatalf("truncate checkpoint: %v", err)
 	}
 	// Any WAL/SHM sidecars that exist must be private (0600), not world-readable.
 	for _, suffix := range []string{"", "-wal", "-shm"} {

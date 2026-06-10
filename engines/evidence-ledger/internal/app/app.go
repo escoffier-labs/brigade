@@ -1793,7 +1793,7 @@ func cmdCompact(args []string, out, errw io.Writer) int {
 	defer db.Close()
 	beforeSize := fileSize(paths.DBPath)
 	beforePages := dbPageStats(db)
-	if _, err := db.Exec(`pragma wal_checkpoint(truncate)`); err != nil {
+	if err := archive.CheckpointTruncate(db, paths.DBPath); err != nil {
 		return fatalf(errw, "compact: %s", err)
 	}
 	if _, err := db.Exec(`analyze`); err != nil {
