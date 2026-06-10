@@ -562,3 +562,74 @@ def test_no_card_route_skips_content_already_present(tmp_target: Path):
     # landed in the review inbox instead
     drafts = list((tmp_target / "memory" / "handoff-inbox").glob("*dup*.md"))
     assert drafts, "duplicate content should route to the inbox"
+
+
+def _card_handoff_body(card: str, topic: str, body_line: str) -> str:
+    return f"""\
+    # Memory Handoff
+
+    ## Type
+    decision
+
+    ## Title
+    {topic}
+
+    ## Recommended memory action
+    create-card
+
+    ## Target card
+    {card}
+
+    ## Suggested card content
+    ---
+    topic: {topic}
+    category: test
+    tags: [test]
+    ---
+
+    # {topic}
+
+    {body_line}
+    """
+
+
+def test_same_named_handoffs_archive_without_clobber(tmp_target: Path):
+    """A second handoff reusing a processed filename gets a stamped archive name."""
+    inbox = _seed(tmp_target)
+    name = "2026-05-13-1000-same-name.md"
+
+    _write_handoff(inbox, name, _card_handoff_body("first.md", "first", "first body"))
+    assert ingest_mod.run(target=tmp_target, dry_run=False, promote_cards=True, route_documents=True) == 0
+
+    _write_handoff(inbox, name, _card_handoff_body("second.md", "second", "second body"))
+    assert ingest_mod.run(target=tmp_target, dry_run=False, promote_cards=True, route_documents=True) == 0
+
+    processed = tmp_target / ".claude" / "memory-handoffs" / "processed"
+    archived = sorted(processed.glob("2026-05-13-1000-same-name*.md"))
+    assert len(archived) == 2, "both handoffs must survive in processed/"
+    assert (processed / name).is_file()
+    contents = {p.read_text().splitlines()[-1].strip() for p in archived}
+    assert contents == {"first body", "second body"}
+
+
+def test_promote_replaces_existing_card_wholesale(tmp_target: Path):
+    """Promotion overwrites an existing card with the suggested content.
+
+    This is the documented update semantic: card handoffs carry the full
+    replacement content, never a partial diff.
+    """
+    inbox = _seed(tmp_target)
+    card = tmp_target / "memory" / "cards" / "replace-me.md"
+    card.parent.mkdir(parents=True, exist_ok=True)
+    card.write_text("---\ntopic: replace-me\n---\n\n# Old\n\nold body\n")
+
+    _write_handoff(
+        inbox,
+        "2026-05-13-1001-replace.md",
+        _card_handoff_body("replace-me.md", "replace-me", "new body"),
+    )
+    assert ingest_mod.run(target=tmp_target, dry_run=False, promote_cards=True, route_documents=True) == 0
+
+    text = card.read_text()
+    assert "new body" in text
+    assert "old body" not in text
