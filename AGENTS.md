@@ -2,6 +2,8 @@
 
 Use these instructions when a user points you at the Brigade repository and asks you to install, evaluate, or adapt Brigade for their workspace.
 
+Developing Brigade itself? The build, test, and lint loop lives in `CONTRIBUTING.md`.
+
 ## Start Here
 
 Read these files first:

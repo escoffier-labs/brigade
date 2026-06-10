@@ -1,7 +1,5 @@
 # line-check report: brigade (2026-06-10)
 
-NOTE: contains local absolute paths; review before committing to the public repo.
-
 ## Verdict
 
 Brigade is healthy. CI is green on main, all 1038 tests pass locally in 101 seconds, the release machinery is airtight (version in `pyproject.toml`, `__init__.py`, and the latest tag all agree at 0.10.1, and the publish workflow enforces that match), zero open issues, zero TODO markers in source, zero runtime dependencies by design, and the gitignore is one of the most carefully reasoned I have audited. The single most important thing to do is add a lint/format gate to CI: a 66k-line Python codebase written largely by coding agents has no ruff, black, mypy, or any style/type check anywhere, which is the one place quiet drift can still accumulate. After that, refresh the stale QUICKSTART.md. Everything else is polish on an already well-run line.
