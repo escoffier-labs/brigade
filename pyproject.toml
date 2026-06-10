@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "brigade-cli"
-version = "0.10.1"
+version = "0.10.2"
 description = "AI agent memory, handoffs, and local guardrails for Codex, Claude Code, OpenCode, Hermes, and OpenClaw."
 readme = "README.md"
 requires-python = ">=3.10"
