@@ -26,7 +26,7 @@ brigade roadmap commands --write
 - `brigade ingest`: 1 command path(s)
 - `brigade init`: 1 command path(s)
 - `brigade learn`: 13 command path(s)
-- `brigade memory`: 7 command path(s)
+- `brigade memory`: 8 command path(s)
 - `brigade notifications`: 4 command path(s)
 - `brigade openclaw-fragments`: 1 command path(s)
 - `brigade operator`: 22 command path(s)
@@ -159,6 +159,7 @@ brigade roadmap commands --write
 - `brigade learn replay list`
 - `brigade learn replay show`
 - `brigade learn skill-candidates`
+- `brigade memory care backfill`
 - `brigade memory care closeout`
 - `brigade memory care doctor`
 - `brigade memory care import-issues`

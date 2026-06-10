@@ -384,3 +384,90 @@ def test_memory_care_readers_fall_back_to_legacy_decay_dir(tmp_path, capsys):
     rc = memory_cmd.import_issues(target=tmp_path, dry_run=True, json_output=True)
     out = capsys.readouterr()
     assert rc == 0, out.err
+
+
+def _git(tmp_path, *args, env=None):
+    import os
+    import subprocess
+
+    base_env = {**os.environ, "GIT_AUTHOR_DATE": "2026-03-15T12:00:00", "GIT_COMMITTER_DATE": "2026-03-15T12:00:00"}
+    if env:
+        base_env.update(env)
+    subprocess.run(["git", "-C", str(tmp_path), *args], check=True, capture_output=True, env=base_env)
+
+
+def test_memory_care_backfill_dry_run_derives_dates_and_writes_nothing(tmp_path, capsys):
+    _git(tmp_path, "init", "-q")
+    _git(tmp_path, "config", "user.email", "t@example.invalid")
+    _git(tmp_path, "config", "user.name", "t")
+    cards = tmp_path / "memory" / "cards"
+    _write_card(cards / "bare.md", {"topic": "bare", "confidence": "high", "evidence": ["README.md"]})
+    _write_card(
+        cards / "complete.md",
+        {"topic": "complete", "last_reviewed": "2026-05-01", "fresh_until": "2026-12-01", "confidence": "high", "evidence": ["README.md"]},
+    )
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-q", "-m", "add cards")
+    before = (cards / "bare.md").read_text()
+
+    assert memory_cmd.backfill(target=tmp_path, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["apply"] is False
+    assert payload["candidate_count"] == 1
+    item = payload["candidates"][0]
+    assert item["file"].endswith("bare.md")
+    assert item["source"] == "git-history"
+    assert item["last_reviewed"] == "2026-03-15"
+    assert item["fresh_until"] == "2026-06-13"
+    assert (cards / "bare.md").read_text() == before
+    assert not (tmp_path / ".brigade" / "memory-care" / "backfills").exists()
+
+
+def test_memory_care_backfill_apply_writes_metadata_receipt_and_is_idempotent(tmp_path, capsys):
+    _git(tmp_path, "init", "-q")
+    _git(tmp_path, "config", "user.email", "t@example.invalid")
+    _git(tmp_path, "config", "user.name", "t")
+    cards = tmp_path / "memory" / "cards"
+    _write_card(cards / "bare.md", {"topic": "bare", "confidence": "high", "evidence": ["README.md"]})
+    _write_card(
+        cards / "complete.md",
+        {"topic": "complete", "last_reviewed": "2026-05-01", "fresh_until": "2026-12-01", "confidence": "high", "evidence": ["README.md"]},
+    )
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-q", "-m", "add cards")
+    complete_before = (cards / "complete.md").read_text()
+
+    assert memory_cmd.backfill(target=tmp_path, apply=True, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["apply"] is True
+    assert payload["written_count"] == 1
+    text = (cards / "bare.md").read_text()
+    assert "last_reviewed: 2026-03-15" in text
+    assert "fresh_until: 2026-06-13" in text
+    assert text.endswith("Body.\n")
+    assert (cards / "complete.md").read_text() == complete_before
+    receipts = list((tmp_path / ".brigade" / "memory-care" / "backfills").glob("*.json"))
+    assert len(receipts) == 1
+    receipt = json.loads(receipts[0].read_text())
+    assert receipt["written_count"] == 1
+    assert receipt["candidates"][0]["source"] == "git-history"
+
+    assert memory_cmd.backfill(target=tmp_path, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["candidate_count"] == 0
+
+
+def test_memory_care_backfill_falls_back_to_mtime_outside_git(tmp_path, capsys):
+    import os
+
+    cards = tmp_path / "memory" / "cards"
+    _write_card(cards / "bare.md", {"topic": "bare", "confidence": "high", "evidence": ["README.md"]})
+    stamp = datetime(2026, 4, 2, 12, 0, tzinfo=timezone.utc).timestamp()
+    os.utime(cards / "bare.md", (stamp, stamp))
+
+    assert memory_cmd.backfill(target=tmp_path, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["candidate_count"] == 1
+    item = payload["candidates"][0]
+    assert item["source"] == "file-mtime"
+    assert item["last_reviewed"] == "2026-04-02"

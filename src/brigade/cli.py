@@ -1203,6 +1203,10 @@ def _build_parser() -> argparse.ArgumentParser:
     p_memory_care_plan_fixes = memory_care_sub.add_parser("plan-fixes", help="Plan safe memory-care metadata fixes without writing files.")
     p_memory_care_plan_fixes.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
     p_memory_care_plan_fixes.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_memory_care_backfill = memory_care_sub.add_parser("backfill", help="Backfill missing reviewed/freshness card metadata from git history (dry-run by default).")
+    p_memory_care_backfill.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
+    p_memory_care_backfill.add_argument("--apply", action="store_true", help="Write the derived metadata into card frontmatter and record a receipt.")
+    p_memory_care_backfill.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_memory_care_status = memory_care_sub.add_parser("status", help="Show local memory-care status.")
     p_memory_care_status.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
     p_memory_care_status.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
@@ -4065,6 +4069,8 @@ def main(argv=None) -> int:
                 )
             if args.memory_care_command == "scan":
                 return memory_cmd.scan(target=args.target, json_output=args.json)
+            if args.memory_care_command == "backfill":
+                return memory_cmd.backfill(target=args.target, apply=args.apply, json_output=args.json)
             if args.memory_care_command == "plan-fixes":
                 return memory_cmd.plan_fixes(target=args.target, json_output=args.json)
             if args.memory_care_command == "status":

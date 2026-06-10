@@ -933,6 +933,146 @@ def doctor(*, target: Path, json_output: bool = False) -> int:
     return 0 if payload["valid"] else 1
 
 
+def _git_last_commit_date(target: Path, rel: str) -> date | None:
+    import subprocess
+
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(target), "log", "-1", "--format=%cs", "--", rel],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=15,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    value = result.stdout.strip()
+    return _parse_date(value) if value else None
+
+
+def _backfill_candidates(target: Path, config: MemoryCareConfig) -> tuple[list[dict[str, Any]], int]:
+    """Cards with frontmatter but missing review/freshness metadata, with derived values.
+
+    The derived `last_reviewed` is the card file's last git commit date (the
+    last time anyone touched the fact), falling back to file mtime outside git.
+    `fresh_until` is the derived or existing reviewed date plus the configured
+    stale window. Existing values are never proposed for change.
+    """
+    candidates: list[dict[str, Any]] = []
+    skipped_no_frontmatter = 0
+    for path in _iter_cards(target, config):
+        rel = str(path.relative_to(target))
+        text = path.read_text(errors="replace")
+        meta, has_frontmatter = _parse_frontmatter(text)
+        if not has_frontmatter:
+            skipped_no_frontmatter += 1
+            continue
+        reviewed = _parse_date(_frontmatter_value(meta, "last_reviewed", "last_reviewed_at", "reviewed_at"))
+        expiry = _parse_date(_frontmatter_value(meta, "fresh_until", "expires_at", "expires"))
+        if reviewed is not None and expiry is not None:
+            continue
+        derived = _git_last_commit_date(target, rel)
+        source = "git-history"
+        if derived is None:
+            from datetime import datetime as _dt, timezone as _tz
+
+            derived = _dt.fromtimestamp(path.stat().st_mtime, tz=_tz.utc).date()
+            source = "file-mtime"
+        base_reviewed = reviewed or derived
+        from datetime import timedelta as _td
+
+        candidate: dict[str, Any] = {
+            "file": rel,
+            "source": source,
+            "fields": [],
+        }
+        if reviewed is None:
+            candidate["last_reviewed"] = derived.isoformat()
+            candidate["fields"].append("last_reviewed")
+        if expiry is None:
+            candidate["fresh_until"] = (base_reviewed + _td(days=config.stale_after_days)).isoformat()
+            candidate["fields"].append("fresh_until")
+        candidates.append(candidate)
+    return candidates, skipped_no_frontmatter
+
+
+def _backfill_write(target: Path, candidate: dict[str, Any]) -> None:
+    path = target / candidate["file"]
+    text = path.read_text(errors="replace")
+    lines = text.split("\n")
+    # _parse_frontmatter guarantees a leading `---` block; insert the new keys
+    # just before its closing fence, leaving every other byte untouched.
+    closing = next(i for i, line in enumerate(lines[1:], start=1) if line.strip() == "---")
+    additions = [f"{field}: {candidate[field]}" for field in candidate["fields"]]
+    path.write_text("\n".join(lines[:closing] + additions + lines[closing:]))
+
+
+def backfill(*, target: Path, apply: bool = False, json_output: bool = False) -> int:
+    """Plan or apply safe metadata backfill for cards missing review/freshness dates."""
+    target = target.expanduser().resolve()
+    if not target.is_dir():
+        print(f"error: --target is not a directory: {target}", file=sys.stderr)
+        return 2
+    try:
+        config = load_config(target) or MemoryCareConfig()
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    candidates, skipped_no_frontmatter = _backfill_candidates(target, config)
+    written = 0
+    receipt_path: Path | None = None
+    if apply and candidates:
+        for candidate in candidates:
+            _backfill_write(target, candidate)
+            written += 1
+        receipts_dir = target / ".brigade" / "memory-care" / "backfills"
+        receipts_dir.mkdir(parents=True, exist_ok=True)
+        from .localio import utc_now, write_json
+
+        stamp = utc_now().strftime("%Y%m%dT%H%M%S")
+        receipt_path = receipts_dir / f"{stamp}.json"
+        write_json(
+            receipt_path,
+            {
+                "target": str(target),
+                "generated_at": _utc_iso(),
+                "written_count": written,
+                "skipped_no_frontmatter": skipped_no_frontmatter,
+                "stale_after_days": config.stale_after_days,
+                "candidates": candidates,
+            },
+        )
+    payload = {
+        "target": str(target),
+        "apply": apply,
+        "candidate_count": len(candidates),
+        "written_count": written,
+        "skipped_no_frontmatter": skipped_no_frontmatter,
+        "stale_after_days": config.stale_after_days,
+        "receipt_path": str(receipt_path) if receipt_path else None,
+        "candidates": candidates,
+        "next_command": "brigade memory care backfill --apply" if candidates and not apply else "brigade memory care scan",
+    }
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+    print(f"memory care backfill: {target}")
+    print(f"apply: {apply}")
+    print(f"candidates: {len(candidates)}")
+    print(f"written: {written}")
+    print(f"skipped_no_frontmatter: {skipped_no_frontmatter}")
+    for candidate in candidates[:10]:
+        rendered = ", ".join(f"{field}={candidate[field]}" for field in candidate["fields"])
+        print(f"- {candidate['file']} [{candidate['source']}] {rendered}")
+    if len(candidates) > 10:
+        print(f"- ... {len(candidates) - 10} more")
+    if receipt_path:
+        print(f"receipt: {receipt_path}")
+    print(f"next_command: {payload['next_command']}")
+    return 0
+
+
 def import_issues(*, target: Path, json_output: bool = False, dry_run: bool = False) -> int:
     target = target.expanduser().resolve()
     if not target.is_dir():

@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `brigade memory care backfill`: bulk-repairs cards that predate the freshness convention by deriving `last_reviewed` from each card's last git commit date (file mtime outside git, labeled as such) and proposing `fresh_until` from the configured stale window. Dry-run by default, `--apply` writes frontmatter without ever overwriting existing values and records a receipt under `.brigade/memory-care/backfills/`.
 - New `evidence` station (alias `ledger`) wiring the MiseLedger family of managed tools: `miseledger` (local-first evidence ledger, doctored via `status --json`), `stationtrail` (agent-session log exporter, doctored via `doctor --json`), and `sourceharvest` (source-system record exporter, presence-checked via `version`). All three install from `github.com/escoffier-labs/...` and are advisory: they inspect host-global state and never FAIL a workspace doctor run.
 
 ### Changed
