@@ -2515,7 +2515,7 @@ def _release_trains_archive_root(target: Path) -> Path:
 
 
 def _train_json_path(path: Path) -> Path:
-    return path / "FLEET_RELEASE_EVIDENCE.json" if path.is_dir() else path
+    return reportstore.bundle_json_path(path, "FLEET_RELEASE_EVIDENCE.json")
 
 
 def _read_train(path: Path) -> dict[str, Any] | None:
@@ -2530,18 +2530,7 @@ def _release_trains(target: Path, *, include_archived: bool = False) -> list[dic
     roots = [_release_trains_root(target)]
     if include_archived:
         roots.append(_release_trains_archive_root(target))
-    trains: list[dict[str, Any]] = []
-    for root in roots:
-        if not root.is_dir():
-            continue
-        for child in root.iterdir():
-            if child.name == "archive" or not child.is_dir():
-                continue
-            train = _read_train(child)
-            if train is not None:
-                trains.append(train)
-    trains.sort(key=lambda item: str(item.get("created_at") or item.get("train_id") or ""), reverse=True)
-    return trains
+    return reportstore.list_bundles(roots, _read_train, id_field="train_id", skip_child=lambda name: name == "archive")
 
 
 def latest_release_train(target: Path) -> dict[str, Any] | None:
@@ -2550,15 +2539,8 @@ def latest_release_train(target: Path) -> dict[str, Any] | None:
 
 
 def _resolve_release_train(target: Path, train_id: str) -> tuple[dict[str, Any] | None, str | None]:
-    if train_id == "latest":
-        latest = latest_release_train(target)
-        return (latest, None) if latest else (None, "fleet release train not found: latest")
-    matches = [item for item in _release_trains(target, include_archived=True) if str(item.get("train_id") or "").startswith(train_id)]
-    if not matches:
-        return None, f"fleet release train not found: {train_id}"
-    if len(matches) > 1:
-        return None, f"fleet release train id is ambiguous: {train_id}"
-    return matches[0], None
+    trains = [] if train_id == "latest" else _release_trains(target, include_archived=True)
+    return reportstore.resolve_bundle(trains, train_id, id_field="train_id", label="fleet release train", latest=lambda: latest_release_train(target))
 
 
 def _repo_git_labels(repo: Path) -> dict[str, Any]:
@@ -2815,9 +2797,15 @@ def _release_train_publish_plan(train: dict[str, Any]) -> str:
 
 
 def _write_release_train_bundle(train_dir: Path, train: dict[str, Any]) -> None:
-    _write_json(train_dir / "FLEET_RELEASE_EVIDENCE.json", train)
-    (train_dir / "FLEET_RELEASE_TRAIN.md").write_text(_release_train_markdown(train))
-    (train_dir / "MANUAL_PUBLISH_PLAN.md").write_text(_release_train_publish_plan(train))
+    reportstore.write_bundle(
+        train_dir,
+        train,
+        evidence_name="FLEET_RELEASE_EVIDENCE.json",
+        documents={
+            "FLEET_RELEASE_TRAIN.md": _release_train_markdown(train),
+            "MANUAL_PUBLISH_PLAN.md": _release_train_publish_plan(train),
+        },
+    )
 
 
 def release_plan(*, target: Path, json_output: bool = False) -> int:
@@ -2933,7 +2921,7 @@ def release_compare(*, target: Path, train_id: str = "latest", json_output: bool
 
 def release_closeout(*, target: Path, train_id: str = "latest", status: str = "reviewed", reason: str | None = None, json_output: bool = False) -> int:
     target = target.expanduser().resolve()
-    if status not in {"reviewed", "deferred", "superseded", "archived"}:
+    if status not in reportstore.CLOSEOUT_STATUSES:
         print("error: --status must be one of reviewed, deferred, superseded, archived", file=sys.stderr)
         return 2
     train, error = _resolve_release_train(target, train_id)
@@ -2981,12 +2969,10 @@ def release_archive(*, target: Path, train_id: str, json_output: bool = False) -
     if not source.is_dir() or source.parent == _release_trains_archive_root(target):
         print(f"error: fleet release train cannot be archived: {train.get('train_id')}", file=sys.stderr)
         return 2
-    destination = _release_trains_archive_root(target) / source.name
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    if destination.exists():
+    _, moved = reportstore.move_bundle(source, _release_trains_archive_root(target))
+    if not moved:
         print(f"error: archived fleet release train already exists: {train.get('train_id')}", file=sys.stderr)
         return 2
-    shutil.move(str(source), str(destination))
     payload = {"target_label": "repo-fleet", "train_id": train.get("train_id"), "status": "archived", "archive_path_label": train.get("train_id")}
     if json_output:
         print(json.dumps(payload, indent=2, sort_keys=True))

@@ -15,7 +15,9 @@ picks the latest report by ascending created_at, resolves ids by glob
 count with a distinct "invalid phase report" error path, and has no
 archive root. The repos release-train reader also stays local because
 it strips "path" and stamps a privacy-safe "path_label" instead of the
-shared "path" annotation.
+shared "path" annotation, and its closeout write stays on plain
+write_json because the train CLOSEOUT.json intentionally carries no
+"path" field for the same privacy reason.
 """
 from __future__ import annotations
 
