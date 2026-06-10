@@ -14,12 +14,12 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from . import dogfood_cmd, scrub
-from . import toml_compat as tomllib
-from .install import apply_gitignore
-from .selection import Selection
-from .untrusted import scan_untrusted, wrap_untrusted
-from .localio import read_json_dict as _read_json, stable_hash as _stable_hash, utc_now as _now, write_json as _write_json
+from .. import dogfood_cmd, scrub
+from .. import toml_compat as tomllib
+from ..install import apply_gitignore
+from ..selection import Selection
+from ..untrusted import scan_untrusted, wrap_untrusted
+from ..localio import read_json_dict as _read_json, stable_hash as _stable_hash, utc_now as _now, write_json as _write_json
 
 OK = "ok"
 WARN = "warn"
@@ -4428,7 +4428,7 @@ def _verification_task_from_session(payload: dict[str, Any]) -> dict[str, Any] |
 
 
 def _verification_evidence_payload(target: Path, session: tuple[Path, dict[str, Any]] | None = None) -> dict[str, Any]:
-    from . import handoff_cmd
+    from .. import handoff_cmd
 
     target = target.expanduser().resolve()
     sessions, _ = _collect_sessions(_work_root(target))
@@ -5390,7 +5390,7 @@ def _compact_repo_fleet_health(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def _brief_payload(target: Path, *, limit: int = 3) -> dict[str, Any]:
-    from . import center_cmd, chat_cmd, context_cmd, daily_cmd, handoff_cmd, learn_cmd, memory_cmd, notifications_cmd, pantry_cmd, phases_cmd, projects_cmd, repos_cmd, research_cmd, roadmap_cmd, security_cmd, tools_cmd
+    from .. import center_cmd, chat_cmd, context_cmd, daily_cmd, handoff_cmd, learn_cmd, memory_cmd, notifications_cmd, pantry_cmd, phases_cmd, projects_cmd, repos_cmd, research_cmd, roadmap_cmd, security_cmd, tools_cmd
 
     target = target.expanduser().resolve()
     active = _active_session_info(target)
@@ -6896,7 +6896,7 @@ def _write_plan_artifact(
     steps: list[str] | None = None,
     from_research: str | None = None,
 ) -> int:
-    from .research import registry
+    from ..research import registry
 
     target = target.expanduser().resolve()
     if not target.is_dir():
@@ -8836,7 +8836,7 @@ def import_promote_handoff(
         return 2
     target_document = str(payload["target_document"])
     handoff_path = _write_import_handoff(target, item, target_document)
-    from . import handoff_cmd
+    from .. import handoff_cmd
 
     lint_result = handoff_cmd.lint_file(handoff_path)
     if not lint_result.valid:
@@ -11397,7 +11397,7 @@ def status(*, target: Path, limit: int = 12) -> int:
 
 
 def doctor(*, target: Path) -> int:
-    from . import center_cmd, chat_cmd, context_cmd, daily_cmd, handoff_cmd, learn_cmd, memory_cmd, phases_cmd, projects_cmd, repos_cmd, roadmap_cmd, security_cmd, tools_cmd
+    from .. import center_cmd, chat_cmd, context_cmd, daily_cmd, handoff_cmd, learn_cmd, memory_cmd, phases_cmd, projects_cmd, repos_cmd, roadmap_cmd, security_cmd, tools_cmd
 
     target = target.expanduser().resolve()
     failures = 0
