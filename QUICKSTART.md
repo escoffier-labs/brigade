@@ -1,6 +1,6 @@
 # Quickstart
 
-Five minutes from clone to a working agent kitchen.
+Five minutes from install to a working agent kitchen.
 
 ## 1. Install
 
@@ -23,7 +23,19 @@ python3 -m pipx ensurepath
 
 ## First install
 
-The fastest path is to run `brigade init` with no flags and answer the prompts:
+The canonical first-run command is `brigade operator quickstart`. It installs the template files, wires the operator config, and runs the health checks in one shot:
+
+```bash
+# Code repo with Codex as the writer
+brigade operator quickstart --target ./my-repo --harnesses codex
+
+# OpenClaw or Hermes workspace instead of a code repo
+brigade operator quickstart --target ~/agent-workspace --depth workspace --harnesses openclaw,hermes --owner openclaw
+```
+
+Pass `--dry-run` first to preview the planned steps without writing anything.
+
+Two commands share this surface: `brigade init` installs the template files only, and `brigade operator quickstart` wraps it (init, then operator config, then doctor). Use `init` when you want the interactive harness picker or just the files:
 
 ```bash
 $ brigade init --target ~/agent-kitchen
@@ -58,24 +70,30 @@ Defaults are claude harness, repo depth, no includes. Enter ships the install.
 
 ## CI / scripted install
 
-Pass flags directly to skip the prompt:
+Pass flags directly to skip the prompt. The same flags work on `operator quickstart`:
 
 ```bash
 # Claude Code + Codex + OpenClaw, full workspace
-brigade init --target ~/agent-kitchen \
+brigade operator quickstart --target ~/agent-kitchen \
   --depth workspace \
   --harnesses claude,codex,openclaw
 
 # Codex-only project, minimal install
-brigade init --target ./my-project --depth repo --harnesses codex
+brigade operator quickstart --target ./my-project --depth repo --harnesses codex
 
-# Generic layout, no harness-specific files
+# Template files only, no harness-specific files
 brigade init --target ./my-project --harnesses none
 ```
 
 ## Verifying
 
-After install, `brigade doctor --target <path>` reports the apparent harness shape and checks every configured inbox and adapter:
+After install, check the operator profile:
+
+```bash
+brigade operator doctor --target <path> --profile local-operator
+```
+
+For the file-by-file view, `brigade doctor --target <path>` reports the apparent harness shape and checks every configured inbox and adapter:
 
 ```
 brigade doctor: target /home/you/agent-kitchen
