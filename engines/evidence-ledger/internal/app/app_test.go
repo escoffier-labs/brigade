@@ -907,3 +907,27 @@ func TestSearchMultiTermAndPrefix(t *testing.T) {
 		}
 	}
 }
+
+func TestEvalStationTrailCompat(t *testing.T) {
+	good := stationTrailCapabilities{Version: "0.1.5", Schema: "miseledger.adapter.v1", Sources: []string{"codex", "claude", "openclaw", "hermes"}}
+	cases := []struct {
+		name    string
+		caps    stationTrailCapabilities
+		ok      bool
+		source  string
+		wantErr bool
+	}{
+		{"old binary tolerated", stationTrailCapabilities{}, false, "codex", false},
+		{"compatible", good, true, "codex", false},
+		{"schema mismatch", stationTrailCapabilities{Version: "9", Schema: "other.v2", Sources: []string{"codex"}}, true, "codex", true},
+		{"unsupported source", good, true, "opencode", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := evalStationTrailCompat(tc.caps, tc.ok, tc.source)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("err = %v, wantErr = %v", err, tc.wantErr)
+			}
+		})
+	}
+}

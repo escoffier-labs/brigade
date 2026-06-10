@@ -19,6 +19,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/escoffier-labs/miseledger/internal/adapter"
 	"github.com/escoffier-labs/miseledger/internal/archive"
 	"github.com/escoffier-labs/miseledger/internal/ingest"
 	"github.com/escoffier-labs/miseledger/internal/security"
@@ -720,7 +721,63 @@ func cmdImportStationTrail(args []string, out, errw io.Writer) int {
 	return 0
 }
 
+type stationTrailCapabilities struct {
+	Tool    string   `json:"tool"`
+	Version string   `json:"version"`
+	Schema  string   `json:"schema"`
+	Sources []string `json:"sources"`
+}
+
+// stationTrailCaps queries the stationtrail binary's capabilities. ok is false
+// when the binary is too old to support the command (we then proceed without a
+// compatibility guarantee rather than blocking).
+func stationTrailCaps() (stationTrailCapabilities, bool) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "stationtrail", "capabilities", "--json").Output()
+	if err != nil {
+		return stationTrailCapabilities{}, false
+	}
+	var caps stationTrailCapabilities
+	if err := json.Unmarshal(out, &caps); err != nil {
+		return stationTrailCapabilities{}, false
+	}
+	return caps, true
+}
+
+// checkStationTrailCompat fails fast on an incompatible stationtrail binary: a
+// mismatched adapter schema or a source the binary does not produce. An older
+// binary without the capabilities command is tolerated.
+func checkStationTrailCompat(sourceKind string) error {
+	caps, ok := stationTrailCaps()
+	return evalStationTrailCompat(caps, ok, sourceKind)
+}
+
+// evalStationTrailCompat is the pure compatibility decision. ok=false (old
+// binary without capabilities) is tolerated; a schema mismatch or unsupported
+// source is a hard error.
+func evalStationTrailCompat(caps stationTrailCapabilities, ok bool, sourceKind string) error {
+	if !ok {
+		return nil
+	}
+	if caps.Schema != "" && caps.Schema != adapter.SchemaV1 {
+		return fmt.Errorf("stationtrail %s emits schema %q but this miseledger expects %q; upgrade the older of the two", caps.Version, caps.Schema, adapter.SchemaV1)
+	}
+	if len(caps.Sources) > 0 {
+		for _, s := range caps.Sources {
+			if s == sourceKind {
+				return nil
+			}
+		}
+		return fmt.Errorf("stationtrail %s does not support source %q (supports %s)", caps.Version, sourceKind, strings.Join(caps.Sources, ", "))
+	}
+	return nil
+}
+
 func runStationTrailImport(db *sql.DB, sourceKind, sourcePath string, values map[string]string) (ingest.AdapterResult, stationTrailSummary, error) {
+	if err := checkStationTrailCompat(sourceKind); err != nil {
+		return ingest.AdapterResult{}, stationTrailSummary{}, err
+	}
 	summaryFile, err := os.CreateTemp("", "miseledger-stationtrail-*.json")
 	if err != nil {
 		return ingest.AdapterResult{}, stationTrailSummary{}, err

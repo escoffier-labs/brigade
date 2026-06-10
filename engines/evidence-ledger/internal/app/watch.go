@@ -333,6 +333,9 @@ func importDiscoveredRoot(db *sql.DB, root discoveredRoot, values map[string]str
 }
 
 func dryRunStationTrail(sourceKind, root string, values map[string]string) (stationTrailSummary, error) {
+	if err := checkStationTrailCompat(sourceKind); err != nil {
+		return stationTrailSummary{}, err
+	}
 	cmdArgs := []string{sourceKind, root, "--dry-run", "--json"}
 	if values["limit"] != "" {
 		cmdArgs = append(cmdArgs, "--limit", values["limit"])
