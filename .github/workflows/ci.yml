@@ -24,6 +24,28 @@ jobs:
         run: python -m ruff check .
       - name: Ruff format
         run: python -m ruff format --check .
+      - name: Version sync
+        run: |
+          python - <<'EOF'
+          import json, pathlib, re, sys, tomllib
+
+          versions = {
+              "pyproject.toml": tomllib.loads(pathlib.Path("pyproject.toml").read_text())["project"]["version"],
+              "src/brigade/__init__.py": re.search(
+                  r'__version__ = "([^"]+)"', pathlib.Path("src/brigade/__init__.py").read_text()
+              ).group(1),
+          }
+          for path in sorted(pathlib.Path("src/brigade/templates").rglob("*.json")):
+              fields = json.loads(path.read_text())
+              if "_brigade_version" in fields:
+                  versions[str(path)] = fields["_brigade_version"]
+          expected = versions["pyproject.toml"]
+          mismatched = {p: v for p, v in versions.items() if v != expected}
+          print(f"version={expected} checked={len(versions)} locations")
+          for p, v in mismatched.items():
+              print(f"::error::{p} declares {v}, pyproject.toml says {expected}")
+          sys.exit(1 if mismatched else 0)
+          EOF
 
   test:
     runs-on: ubuntu-latest

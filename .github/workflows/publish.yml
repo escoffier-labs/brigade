@@ -23,17 +23,30 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Verify tag matches package version
+      - name: Verify tag matches every declared version
         if: startsWith(github.ref, 'refs/tags/v')
         run: |
           set -e
-          tag_version="${GITHUB_REF_NAME#v}"
-          pkg_version=$(python -c "import tomllib,sys; print(tomllib.loads(open('pyproject.toml','rb').read().decode())['project']['version'])")
-          echo "tag=$tag_version pkg=$pkg_version"
-          if [ "$tag_version" != "$pkg_version" ]; then
-            echo "::error::tag $tag_version does not match pyproject.toml version $pkg_version"
-            exit 1
-          fi
+          python - "${GITHUB_REF_NAME#v}" <<'EOF'
+          import json, pathlib, re, sys, tomllib
+
+          expected = sys.argv[1]
+          versions = {
+              "pyproject.toml": tomllib.loads(pathlib.Path("pyproject.toml").read_text())["project"]["version"],
+              "src/brigade/__init__.py": re.search(
+                  r'__version__ = "([^"]+)"', pathlib.Path("src/brigade/__init__.py").read_text()
+              ).group(1),
+          }
+          for path in sorted(pathlib.Path("src/brigade/templates").rglob("*.json")):
+              fields = json.loads(path.read_text())
+              if "_brigade_version" in fields:
+                  versions[str(path)] = fields["_brigade_version"]
+          mismatched = {p: v for p, v in versions.items() if v != expected}
+          print(f"tag={expected} checked={len(versions)} locations")
+          for p, v in mismatched.items():
+              print(f"::error::{p} declares {v}, tag says {expected}")
+          sys.exit(1 if mismatched else 0)
+          EOF
 
       - name: Install build tooling
         run: |

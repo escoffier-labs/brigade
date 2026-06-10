@@ -22,7 +22,7 @@ Target: no blocker findings.
 ## 3. Local install smoke
 
 ```bash
-rm -rf /tmp/brigade-rc
+rm -rf /tmp/brigade-rc dist build
 pipx install --force "$PWD"
 brigade --version
 brigade init --target /tmp/brigade-rc --depth workspace --harnesses claude,codex,openclaw
@@ -37,10 +37,9 @@ Edit:
 
 - `pyproject.toml` → `[project] version = "X.Y.Z"`
 - `src/brigade/__init__.py` → `__version__ = "X.Y.Z"`
-- `src/brigade/templates/policies/*.json` → `_brigade_version` fields, if present
-- `src/brigade/templates/hermes/*.json` → `_brigade_version` fields, if present
+- `src/brigade/templates/**/*.json` → every `_brigade_version` field (policies, hermes, memory)
 
-Bump both numbers together. Mismatches break `--version` reporting.
+Bump all of them together. Mismatches break `--version` reporting; the CI lint job checks internal sync on every push, and the publish workflow refuses a tag that does not match every declared version.
 
 ## 5. Tag
 
