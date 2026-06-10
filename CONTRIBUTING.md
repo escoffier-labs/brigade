@@ -1,6 +1,6 @@
 # Contributing to Brigade
 
-Brigade is the local-first operator CLI for agent memory, handoffs, and reviewable work receipts. It grew out of [Solomon's Cookbook](https://github.com/solomonneas/solos-cookbook), and patches are welcome. Before you start, please skim this file so we both spend our time on the right things.
+Brigade is the local-first operator CLI for agent memory, handoffs, and reviewable work receipts. It grew out of [Solomon's Cookbook](https://github.com/escoffier-labs/solos-cookbook), and patches are welcome. Before you start, please skim this file so we both spend our time on the right things.
 
 ## What kinds of changes land easily
 

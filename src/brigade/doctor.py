@@ -87,6 +87,13 @@ def notifications_station_checks(ctx: DoctorContext) -> List[CheckResult]:
     return []
 
 
+def evidence_station_checks(ctx: DoctorContext) -> List[CheckResult]:
+    # The miseledger family managed tools (miseledger + the stationtrail and
+    # sourceharvest exporters) carry this station's signal; the station itself
+    # owns no per-workspace files and inspects only host-global state.
+    return []
+
+
 def security_station_checks(ctx: DoctorContext) -> List[CheckResult]:
     from . import dogfood_cmd, security_cmd
 

@@ -96,11 +96,11 @@ brigade reconfigure --target . --harnesses claude --prune
 
 The starter handoff template lives at `<inbox>/TEMPLATE.md`. Copy it to a new dated file (e.g. `2026-05-16-1430-fixed-X.md`), fill it in, and the ingester promotes safe card handoffs into `memory/cards/`, appends targeted updates to the right file, and kicks ambiguous material to the review inbox.
 
-See the [Solo Cookbook](https://github.com/solomonneas/solos-cookbook) for the longer-form guidance on what makes a good handoff and when to use which routing.
+See the [Solo Cookbook](https://github.com/escoffier-labs/solos-cookbook) for the longer-form guidance on what makes a good handoff and when to use which routing.
 
 ## Next steps
 
-- Read [the cookbook](https://github.com/solomonneas/solos-cookbook) for the deep version of every concept here.
+- Read [the cookbook](https://github.com/escoffier-labs/solos-cookbook) for the deep version of every concept here.
 - Customize `USER.md` and `TOOLS.md` with your real preferences and runbooks (kept private; do not commit personal details).
 - Wire the ingester on a cron or a manual end-of-day workflow.
 - Add a memory-care staleness scan when your card set starts to matter. See `memory/cards/memory-care-staleness.md`.

@@ -28,9 +28,9 @@ research = ["playwright>=1.40"]
 [project.urls]
 Homepage = "https://brigade.tools"
 Repository = "https://github.com/escoffier-labs/brigade"
-Cookbook = "https://github.com/solomonneas/solos-cookbook"
+Cookbook = "https://github.com/escoffier-labs/solos-cookbook"
 OpenClaw = "https://github.com/solomonneas/openclaw"
-ContentGuard = "https://github.com/solomonneas/content-guard"
+ContentGuard = "https://github.com/escoffier-labs/content-guard"
 AgentPantry = "https://github.com/escoffier-labs/agentpantry"
 Issues = "https://github.com/escoffier-labs/brigade/issues"
 

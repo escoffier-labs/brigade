@@ -25,7 +25,7 @@ So I hand-rolled the fixes, one incident at a time: a slim `MEMORY.md` index poi
 
 Two incidents shaped the design more than anything I planned. First, a nightly "dreaming" job that auto-promoted session fragments quietly bloated `MEMORY.md` to 41KB, way past the 12KB bootstrap budget, so every session started with truncated memory and nobody noticed for weeks. Auto-promotion died that day. Everything goes through review now. Second, I found 195 handoff notes sitting unread across 35 repos because the ingester had a hardcoded three-repo allowlist and nothing warned about the coverage gap. Silence is the failure mode. Every part of Brigade that lints, warns, or writes a receipt exists because something once failed quietly.
 
-That system now runs 482 memory cards and survives daily multi-agent work. But explaining it to anyone meant: clone six repos, write these crons, keep your index slim, watch for staleness, and whatever you do, turn auto-promotion off. Brigade is that setup packaged as one installable CLI. The full production stack is documented in the [solos-cookbook](https://github.com/solomonneas/solos-cookbook) if you want to see where it came from.
+That system now runs 482 memory cards and survives daily multi-agent work. But explaining it to anyone meant: clone six repos, write these crons, keep your index slim, watch for staleness, and whatever you do, turn auto-promotion off. Brigade is that setup packaged as one installable CLI. The full production stack is documented in the [solos-cookbook](https://github.com/escoffier-labs/solos-cookbook) if you want to see where it came from.
 
 ## The loop
 

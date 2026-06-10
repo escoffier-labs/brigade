@@ -14,7 +14,7 @@ def test_all_tools_declare_required_fields():
 
 def test_tools_attach_to_known_stations():
     stations = {t.station for t in managed.all_tools()}
-    assert stations <= {"memory", "guard", "tokens", "pantry", "notifications"}
+    assert stations <= {"memory", "guard", "tokens", "pantry", "notifications", "evidence"}
 
 
 def test_for_station_filters():
@@ -153,3 +153,153 @@ def test_agentpantry_doctor_falls_back_to_status_for_old_binary(monkeypatch):
     results = t.doctor(ctx)
     assert any(status == "OK" and "role=sink" in detail for status, _, detail in results)
     assert calls == [["agentpantry", "doctor", "--json"], ["agentpantry", "status", "--json"]]
+
+
+def test_evidence_tools_attach_to_evidence_station():
+    for name in ("miseledger", "stationtrail", "sourceharvest"):
+        t = managed.resolve(name)
+        assert t is not None and t.station == "evidence", name
+    names = {t.name for t in managed.for_station("evidence")}
+    assert names == {"miseledger", "stationtrail", "sourceharvest"}
+
+
+def test_evidence_install_args_use_escoffier_labs():
+    for name in ("miseledger", "stationtrail", "sourceharvest"):
+        t = managed.resolve(name)
+        joined = " ".join(t.install_args)
+        assert f"github.com/escoffier-labs/{name}/cmd/{name}@latest" in joined, name
+
+
+def test_miseledger_doctor_parses_status(monkeypatch):
+    t = managed.resolve("miseledger")
+
+    def fake_run(args, **kw):
+        assert args == ["miseledger", "status", "--json"]
+        return managed.proc.Result(
+            code=0,
+            stdout='{"schema_version": 7, "items": 42, "sources": 3,'
+                   ' "artifacts": 5, "fts": "ok", "source_counts": {}}',
+            stderr="",
+        )
+
+    monkeypatch.setattr(managed.proc, "run", fake_run)
+    ctx = DoctorContext(target=Path("/tmp/ws"), selection=None, harnesses=[])
+    results = t.doctor(ctx)
+    assert any(status == "OK" and "items=42" in detail for status, _, detail in results)
+
+
+def test_miseledger_doctor_warns_on_unavailable_fts(monkeypatch):
+    t = managed.resolve("miseledger")
+
+    def fake_run(args, **kw):
+        return managed.proc.Result(
+            code=0,
+            stdout='{"schema_version": 7, "items": 0, "sources": 0, "fts": "unavailable"}',
+            stderr="",
+        )
+
+    monkeypatch.setattr(managed.proc, "run", fake_run)
+    ctx = DoctorContext(target=Path("/tmp/ws"), selection=None, harnesses=[])
+    results = t.doctor(ctx)
+    assert any(status == "WARN" for status, _, _ in results)
+    assert all(status != "FAIL" for status, _, _ in results)
+
+
+def test_miseledger_doctor_handles_garbage_output(monkeypatch):
+    t = managed.resolve("miseledger")
+
+    def fake_run(args, **kw):
+        return managed.proc.Result(code=1, stdout="boom", stderr="kaboom")
+
+    monkeypatch.setattr(managed.proc, "run", fake_run)
+    ctx = DoctorContext(target=Path("/tmp/ws"), selection=None, harnesses=[])
+    results = t.doctor(ctx)
+    assert any(status == "WARN" and "unwired or errored" in detail for status, _, detail in results)
+    assert all(status != "FAIL" for status, _, _ in results)
+
+
+def test_stationtrail_doctor_parses_report(monkeypatch):
+    t = managed.resolve("stationtrail")
+
+    def fake_run(args, **kw):
+        assert args == ["stationtrail", "doctor", "--json"]
+        return managed.proc.Result(
+            code=0,
+            stdout='{"ok": true, "warnings": [],'
+                   ' "sources": [{"kind": "codex", "status": "ready"},'
+                   ' {"kind": "claude", "status": "missing"}]}',
+            stderr="",
+        )
+
+    monkeypatch.setattr(managed.proc, "run", fake_run)
+    ctx = DoctorContext(target=Path("/tmp/ws"), selection=None, harnesses=[])
+    results = t.doctor(ctx)
+    assert any(status == "OK" and "sources=2" in detail and "ready=1" in detail for status, _, detail in results)
+
+
+def test_stationtrail_doctor_warns_but_never_fails(monkeypatch):
+    # ok=false (a source could not be read) is advisory, not a workspace failure.
+    t = managed.resolve("stationtrail")
+
+    def fake_run(args, **kw):
+        return managed.proc.Result(
+            code=0,
+            stdout='{"ok": false, "warnings": ["codex status is error"],'
+                   ' "sources": [{"kind": "codex", "status": "error"}]}',
+            stderr="",
+        )
+
+    monkeypatch.setattr(managed.proc, "run", fake_run)
+    ctx = DoctorContext(target=Path("/tmp/ws"), selection=None, harnesses=[])
+    results = t.doctor(ctx)
+    assert any(status == "WARN" for status, _, _ in results)
+    assert all(status != "FAIL" for status, _, _ in results)
+
+
+def test_stationtrail_doctor_handles_garbage_output(monkeypatch):
+    t = managed.resolve("stationtrail")
+
+    def fake_run(args, **kw):
+        return managed.proc.Result(code=2, stdout="not json", stderr="flag provided but not defined")
+
+    monkeypatch.setattr(managed.proc, "run", fake_run)
+    ctx = DoctorContext(target=Path("/tmp/ws"), selection=None, harnesses=[])
+    results = t.doctor(ctx)
+    assert any(status == "WARN" and "unreadable" in detail for status, _, detail in results)
+    assert all(status != "FAIL" for status, _, _ in results)
+
+
+def test_sourceharvest_doctor_present(monkeypatch):
+    t = managed.resolve("sourceharvest")
+
+    def fake_run(args, **kw):
+        assert args == ["sourceharvest", "version"]
+        return managed.proc.Result(code=0, stdout="sourceharvest 0.1.0", stderr="")
+
+    monkeypatch.setattr(managed.proc, "run", fake_run)
+    ctx = DoctorContext(target=Path("/tmp/ws"), selection=None, harnesses=[])
+    results = t.doctor(ctx)
+    assert any(status == "OK" and "sourceharvest 0.1.0" in detail for status, _, detail in results)
+
+
+def test_sourceharvest_doctor_warns_when_not_runnable(monkeypatch):
+    t = managed.resolve("sourceharvest")
+
+    def fake_run(args, **kw):
+        return managed.proc.Result(code=127, stdout="", stderr="boom")
+
+    monkeypatch.setattr(managed.proc, "run", fake_run)
+    ctx = DoctorContext(target=Path("/tmp/ws"), selection=None, harnesses=[])
+    results = t.doctor(ctx)
+    assert any(status == "WARN" and "not runnable" in detail for status, _, detail in results)
+    assert all(status != "FAIL" for status, _, _ in results)
+
+
+def test_content_guard_install_args_use_escoffier_labs():
+    t = managed.resolve("content-guard")
+    assert "github.com/escoffier-labs/content-guard" in " ".join(t.install_args)
+
+
+def test_agent_notify_install_args_use_escoffier_labs():
+    t = managed.resolve("agent-notify")
+    assert "github.com/escoffier-labs/agent-notify/cmd/agent-notify@latest" in " ".join(t.install_args)
