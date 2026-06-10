@@ -59,9 +59,15 @@ Thumbs.db
 /scripts/
 /skills/
 
-# Internal implementation plans and stale generated branding assets.
+# Local plan/spec scratch dirs only. Reviewed planning artifacts ARE
+# tracked and public: docs/phase-*.md, docs/roadmap-completion-plan.md,
+# docs/superpowers/plans/, and docs/superpowers/specs/. These two paths
+# exist for in-flight drafts that have not been reviewed for publication.
+# See "Planning artifacts" in CONTRIBUTING.md.
 /docs/plans/
 /docs/specs/
+
+# Stale generated branding asset.
 /docs/assets/solo-mise-banner.png
 
 # scratch

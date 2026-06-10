@@ -22,6 +22,12 @@ Brigade is the local-first operator CLI for agent memory, handoffs, and reviewab
 - Cron jobs or hooks that post or call out to the network without explicit opt-in.
 - AI-co-authorship trailers on commits (`Co-Authored-By: <model>`). Conventional commits only.
 
+## Planning artifacts
+
+Reviewed planning docs are public and tracked: the phase plans (`docs/phase-*.md`), `docs/roadmap-completion-plan.md`, and the superpowers plans and specs under `docs/superpowers/`. They stay in the repo as a record of how the work was sequenced.
+
+`/docs/plans/` and `/docs/specs/` are gitignored on purpose. They are scratch space for in-flight drafts that have not been reviewed for publication. When a plan there is finished and scrubbed, move it to one of the tracked locations above (or delete it).
+
 ## Local dev
 
 ```bash
