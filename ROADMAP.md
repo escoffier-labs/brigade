@@ -24,13 +24,15 @@ The base layers are built and shipped: portable setup (`operator quickstart`), m
 
 What follows is what is actually ahead.
 
-## Now: prove it on a real homegrown setup
+## Now: respond to real usage
 
-The highest-priority work is making Brigade adapt and operate a real, organically grown operator workspace, not just fresh repos. If Brigade cannot take over the maintainer's own stack (OpenClaw cron, shell crontab, PM2 services, a live 30-minute ingest loop), it will not work for anyone else's homegrown system either.
+The proving-ground milestone is done: the maintainer's production workspace (live cron surfaces, a 30-minute ingest loop, ~500 memory cards) runs on Brigade end to end, including the adoption loop, metadata backfill, and the first runbook conversions. The archive holds the detail.
 
-- Drive the adoption loop (`brigade operator adopt`, `operator surfaces`, `operator migration`) to an actual completed cutover on a production workspace, and fix every rough edge found on the way.
-- Convert reviewed shell-cron jobs into explicit `brigade runbook` definitions, starting with the memory-ingest wrapper.
-- Keep first contact clean: quickstart writes only what the selected harnesses need, doctors stay quiet on healthy setups, and new-user issues get fixed fast.
+What "now" means after that shift:
+
+- Treat the first external signals (issues, threads, install patterns) as the feature queue. Nothing speculative ships ahead of a reported need.
+- Keep first contact honest: every release runs the cold-start gate (`docs/runbooks/cold-start-gate.json`), and significant releases re-run the agent cold-start scenarios in `docs/cold-start-testing.md`.
+- Keep the adoption path smooth as real homegrown setups arrive: `operator adopt`, `handoff migrate`, and the memory-care backfill are the on-ramp, and friction found there outranks new stations.
 
 ## Next: the surfaces around the loop
 
