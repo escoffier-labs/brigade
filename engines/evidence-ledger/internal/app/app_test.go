@@ -879,3 +879,31 @@ func TestImportDiscoveredAttributesWarningsAndFailures(t *testing.T) {
 		}
 	}
 }
+
+func TestSearchMultiTermAndPrefix(t *testing.T) {
+	withTempHome(t)
+	runOK(t, "init")
+	runOK(t, "import", "adapter", repoPath(t, "testdata/adapters/discrawl.fixture.jsonl"), "--source", "discrawl")
+	runOK(t, "import", "adapter", repoPath(t, "testdata/adapters/agent-session.fixture.jsonl"), "--source", "codex")
+
+	// Two terms that both occur in the corpus but not as a contiguous phrase.
+	// The old single-phrase builder required adjacency; AND semantics should
+	// find the item that contains both words anywhere.
+	multi := runJSON(t, "search", "contract adapter", "--json")
+	if len(multi["results"].([]any)) == 0 {
+		t.Fatalf("multi-term AND search returned nothing: %v", multi)
+	}
+
+	// Prefix match: "adapt*" should match "adapter"/"adapters".
+	prefix := runJSON(t, "search", "adapt*", "--json")
+	if len(prefix["results"].([]any)) == 0 {
+		t.Fatalf("prefix search returned nothing: %v", prefix)
+	}
+
+	// Bare FTS operators and punctuation must stay literal, never crash.
+	for _, q := range []string{"AND", "OR", "NEAR", "*", `"`, "a AND b"} {
+		if code, _, errb := run("search", q, "--json"); code != 0 {
+			t.Fatalf("search %q crashed: code=%d err=%s", q, code, errb)
+		}
+	}
+}

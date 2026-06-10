@@ -1010,7 +1010,7 @@ func search(db *sql.DB, opts SearchOpts) ([]SearchResult, error) {
 		opts.Limit = 20
 	}
 	where := []string{"item_fts match ?"}
-	params := []any{ftsPhrase(opts.Query)}
+	params := []any{ftsQuery(opts.Query)}
 	if opts.Source != "" {
 		where = append(where, "s.kind = ?")
 		params = append(params, opts.Source)
@@ -1075,9 +1075,35 @@ limit ?`
 	return results, rows.Err()
 }
 
-func ftsPhrase(s string) string {
-	s = strings.ReplaceAll(s, `"`, `""`)
-	return `"` + s + `"`
+// ftsQuery turns a user query into a safe FTS5 MATCH string. Each
+// whitespace-separated term is quoted (so bare FTS operators like AND/OR/NEAR
+// and punctuation are treated as literal text, never injected syntax) and the
+// terms are ANDed together, which is what people expect from a search box. A
+// trailing '*' on a term is preserved as an FTS5 prefix match.
+func ftsQuery(s string) string {
+	fields := strings.Fields(s)
+	terms := make([]string, 0, len(fields))
+	for _, f := range fields {
+		prefix := false
+		if len(f) > 1 && strings.HasSuffix(f, "*") {
+			prefix = true
+			f = strings.TrimSuffix(f, "*")
+		}
+		f = strings.Trim(f, `"`)
+		if f == "" {
+			continue
+		}
+		term := `"` + strings.ReplaceAll(f, `"`, `""`) + `"`
+		if prefix {
+			term += "*"
+		}
+		terms = append(terms, term)
+	}
+	if len(terms) == 0 {
+		// Preserve prior behavior for empty/punctuation-only queries.
+		return `"` + strings.ReplaceAll(s, `"`, `""`) + `"`
+	}
+	return strings.Join(terms, " ")
 }
 
 func cmdExplain(args []string, out, errw io.Writer) int {
@@ -1136,7 +1162,7 @@ func explainSearch(db *sql.DB, opts SearchOpts) (map[string]any, error) {
 	}
 	return map[string]any{
 		"query":             opts.Query,
-		"fts_query":         ftsPhrase(opts.Query),
+		"fts_query":         ftsQuery(opts.Query),
 		"filters":           map[string]any{"source": opts.Source, "collection": opts.Collection, "kind": opts.Kind, "actor_type": opts.ActorType, "project": opts.Project, "tags": opts.Tags, "from": opts.From, "to": opts.To, "limit": opts.Limit},
 		"result_count":      len(results),
 		"source_counts":     sourceCounts,
