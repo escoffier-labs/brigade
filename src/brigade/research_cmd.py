@@ -613,7 +613,9 @@ def sources_payload(*, target: Path) -> Dict[str, Any]:
             }
         )
 
-    for raw, item in zip(adapters, _safe_source_adapters(adapters)):
+    # _safe_source_adapters drops typeless entries, so pair against the same filter.
+    typed_adapters = [entry for entry in adapters if str(entry.get("type") or "").strip()]
+    for raw, item in zip(typed_adapters, _safe_source_adapters(adapters), strict=True):
         if item.get("type") not in clisrc.CLI_SOURCE_TYPES:
             routes.append({**item, "status": "warn", "detail": "unsupported research source adapter type"})
             continue

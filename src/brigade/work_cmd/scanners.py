@@ -1020,7 +1020,7 @@ def _scanners_run_payload(
                 "runs": runs,
             }
             return payload, 2
-        for scanner, run, path, records in ingest_payloads:
+        for _scanner, run, path, records in ingest_payloads:
             imported, skipped_records, skipped_dismissed = ledger_mod._append_import_records(target, records)
             run["ingest_output"] = {
                 "path": str(path),

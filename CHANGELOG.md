@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- `brigade research sources` no longer misreports route status when a configured source adapter is missing its `type`: the malformed entry previously shifted every following source's executable check onto the wrong adapter.
+
+### Changed
+- Internal restructuring with no command surface changes: `operator_cmd` and `work_cmd/services` split into focused modules, the CLI moved to per-command dispatch modules, and shared git-ignore/TOML/datetime helpers moved to neutral homes. The lint gate now includes ruff bugbear (B).
+
 ## [0.10.3] - 2026-06-10
 
 ### Fixed

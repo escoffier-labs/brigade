@@ -53,8 +53,8 @@ line-length = 120
 src = ["src", "tests"]
 
 [tool.ruff.lint]
-# Pragmatic initial gate: ruff's default rule set (pyflakes plus the
-# E4/E7/E9 pycodestyle errors). Deferred for later, separate passes:
-# import sorting (I), pyupgrade (UP), bugbear (B), the full pycodestyle
-# E/W set, and any type checking (mypy/pyright).
-select = ["E4", "E7", "E9", "F"]
+# Pragmatic gate: ruff's default rule set (pyflakes plus the E4/E7/E9
+# pycodestyle errors) plus bugbear (B). Deferred for later, separate
+# passes: import sorting (I), pyupgrade (UP), the full pycodestyle E/W
+# set, and any type checking (mypy/pyright).
+select = ["B", "E4", "E7", "E9", "F"]

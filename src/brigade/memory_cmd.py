@@ -98,7 +98,8 @@ def _toml_value(value: object) -> str:
     return json.dumps(value)
 
 
-def _format_config(config: MemoryCareConfig = MemoryCareConfig()) -> str:
+def _format_config(config: MemoryCareConfig | None = None) -> str:
+    config = config if config is not None else MemoryCareConfig()
     return "\n".join(
         [
             "# Local memory-care scanner config. Brigade scans and imports issues, but never edits cards automatically.",

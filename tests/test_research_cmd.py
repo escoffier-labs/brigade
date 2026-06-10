@@ -315,3 +315,23 @@ def test_research_handoffs_import_respects_dismissed_until_changed(tmp_path: Pat
     imports = work_cmd._read_imports(tmp_path)
     assert len(imports) == 2
     assert imports[-1]["metadata"]["source_fingerprint"] != item["metadata"]["source_fingerprint"]
+
+
+def test_sources_payload_typeless_adapter_does_not_misalign_routes(tmp_path: Path):
+    """A malformed (typeless) adapter must not shift command checks onto the wrong source."""
+    (tmp_path / ".brigade").mkdir()
+    (tmp_path / ".brigade" / "research.toml").write_text(
+        "[[source]]\n"
+        'id = "broken"\n'
+        'command = ["/nonexistent/never-here"]\n'
+        "[[source]]\n"
+        'id = "research-cli"\n'
+        'type = "cli"\n'
+        f'command = ["{sys.executable}", "-c", "print(\'ok\')", "{{query}}"]\n'
+    )
+
+    payload = research_cmd.sources_payload(target=tmp_path)
+    route = next(route for route in payload["routes"] if route["id"] == "research-cli")
+    # Misalignment would pair research-cli's safe entry with the broken raw
+    # adapter's missing executable and report fail.
+    assert route["status"] == "ok"
