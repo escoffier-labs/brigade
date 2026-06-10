@@ -6,61 +6,40 @@ import argparse
 import sys
 from pathlib import Path
 
-from . import __version__
-from .dogfood_cmd import DEFAULT_TIMEOUT_SECONDS
-from .work_cmd import TASK_PRIORITIES, TASK_TYPES
-from .prompt import prompt_for_selection  # imported here so tests can monkeypatch cli.prompt_for_selection
+from .. import __version__
+from ..dogfood_cmd import DEFAULT_TIMEOUT_SECONDS
+from ..work_cmd import TASK_PRIORITIES, TASK_TYPES
 
+# imported here so tests can monkeypatch cli.prompt_for_selection
+from ..prompt import prompt_for_selection as prompt_for_selection
 
-# Top-level help groups. Every sub.add_parser command must appear in exactly
-# one group; tests/test_cli_help.py enforces full coverage.
-COMMAND_GROUPS: list[tuple[str, list[str]]] = [
-    ("Core memory loop", ["init", "handoff", "handoff-template", "ingest", "memory", "doctor", "status"]),
-    ("Daily operator loop", ["operator", "daily", "work", "center", "runbook", "budgets", "notifications"]),
-    ("Stations and tools", ["add", "skills", "tools", "pantry", "roster", "run", "runs", "dogfood"]),
-    (
-        "Review, security, and research",
-        ["security", "scrub", "untrusted", "research", "learn", "chat", "context", "projects"],
-    ),
-    ("Wiring and advanced", ["release", "roadmap", "repos", "reconfigure", "openclaw-fragments", "hermes-fragments"]),
-]
+# Shared parser helpers live in cli._common. COMMAND_GROUPS is re-exported here
+# so it stays on the public surface (tests reference cli.COMMAND_GROUPS).
+from ._common import (
+    COMMAND_GROUPS as COMMAND_GROUPS,
+    _START_HERE,
+    _TopLevelHelpFormatter,
+    _grouped_epilog,
+)
 
-_START_HERE = """Brigade: run your agent brigade. Operator-system CLI for agent workspaces.
-
-Start here:
-  brigade operator quickstart --target <repo> --harnesses codex   set up a repo or workspace
-  brigade operator doctor --target <repo>                         check the wiring
-  brigade handoff draft --target <repo> ...                       record a durable note
-  brigade ingest --target <workspace>                             route handoffs into memory"""
-
-
-class _TopLevelHelpFormatter(argparse.RawDescriptionHelpFormatter):
-    """Suppress argparse's flat subcommand dump on the top-level parser.
-
-    The grouped epilog lists every command instead. Subparsers do not inherit
-    this formatter, so `brigade <command> --help` keeps the normal listing.
-    """
-
-    def _iter_indented_subactions(self, action):
-        if isinstance(action, argparse._SubParsersAction):
-            return iter(())
-        return super()._iter_indented_subactions(action)
-
-
-def _grouped_epilog(sub: argparse._SubParsersAction) -> str:
-    helps = {action.dest: (action.help or "") for action in sub._choices_actions}
-    lines = ["commands:"]
-    for title, names in COMMAND_GROUPS:
-        lines.append("")
-        lines.append(f"{title}:")
-        lines.extend(f"  {name:<22}{helps.get(name, '')}" for name in names)
-    lines.append("")
-    lines.append("Run 'brigade <command> --help' for details on any command.")
-    return "\n".join(lines)
+# Migrated command-group modules (batch 1). Each exposes register(sub) and
+# dispatch(args). They are registered in _build_parser in the same order the
+# inline parser blocks were originally added.
+from . import (
+    init as _init_group,
+    doctor as _doctor_group,
+    status as _status_group,
+    daily as _daily_group,
+    add as _add_group,
+    pantry as _pantry_group,
+    notifications as _notifications_group,
+    budgets as _budgets_group,
+    untrusted as _untrusted_group,
+)
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    from . import learn_cmd, projects_cmd, release_cmd, repos_cmd
+    from .. import learn_cmd, projects_cmd, release_cmd, repos_cmd
 
     parser = argparse.ArgumentParser(
         prog="brigade",
@@ -71,334 +50,15 @@ def _build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", metavar="<command>")
     sub.required = True
 
-    # init
-    p_init = sub.add_parser("init", help="Materialize a selection into a target directory.")
-    p_init.add_argument("--target", "-t", type=Path, default=Path("."), help="Where to install.")
-    p_init.add_argument("--force", action="store_true", help="Overwrite existing files.")
-    p_init.add_argument(
-        "--allow-home",
-        action="store_true",
-        help="Override the safety guard that refuses to install directly into $HOME.",
-    )
-    p_init.add_argument(
-        "--no-gitignore",
-        dest="update_gitignore",
-        action="store_false",
-        default=True,
-        help="Do not create or update the target's .gitignore.",
-    )
-    p_init.add_argument("--dry-run", action="store_true", help="Show what would happen.")
-    p_init.add_argument(
-        "--depth",
-        choices=["repo", "workspace"],
-        default=None,
-        help="Install depth: 'repo' (minimal) or 'workspace' (full home). Omit for an interactive prompt.",
-    )
-    p_init.add_argument(
-        "--harnesses",
-        default=None,
-        help="Comma-separated harness ids: claude, codex, opencode, antigravity, pi, cursor, aider, goose, continue, copilot, qwen, kimi, adal, openhands, openclaw, hermes. "
-        "Pass 'none' for a generic install with no harness-specific files.",
-    )
-    p_init.add_argument(
-        "--owner",
-        default=None,
-        help="Override the canonical memory owner. Must be 'this-repo' or one of --harnesses.",
-    )
-    p_init.add_argument(
-        "--include",
-        dest="includes",
-        action="append",
-        default=[],
-        help="Optional add-on (currently: 'publisher'). May be repeated.",
-    )
-
-    # doctor
-    p_doctor = sub.add_parser("doctor", help="Verify a target workspace.")
-    p_doctor.add_argument("--target", "-t", type=Path, default=Path("."))
-    p_doctor.add_argument(
-        "--harness",
-        choices=["generic", "openclaw", "hermes"],
-        default="generic",
-    )
-
-    # status
-    p_status = sub.add_parser("status", help="Show which stations are present and healthy.")
-    p_status.add_argument("--target", "-t", type=Path, default=Path("."))
-
-    # daily
-    p_daily = sub.add_parser("daily", help="Run the personal daily operator loop.")
-    daily_sub = p_daily.add_subparsers(dest="daily_command", metavar="<daily-command>")
-    daily_sub.required = True
-    for name in ("status", "review", "schema", "doctor"):
-        p_daily_action = daily_sub.add_parser(name, help=f"Show daily {name}.")
-        p_daily_action.add_argument(
-            "--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect."
-        )
-        p_daily_action.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
-    p_daily_init = daily_sub.add_parser("init", help="Write local daily driver defaults.")
-    p_daily_init.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
-    p_daily_init.add_argument("--force", action="store_true", help="Overwrite an existing daily config.")
-    p_daily_init.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
-    p_daily_plan = daily_sub.add_parser("plan", help="Create the ranked daily plan.")
-    p_daily_plan.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
-    p_daily_plan.add_argument("--record", action="store_true", help="Write a local daily plan receipt.")
-    p_daily_plan.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
-    p_daily_run = daily_sub.add_parser("run", help="Run one bounded safe daily action.")
-    p_daily_run.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
-    p_daily_run.add_argument(
-        "--approved", action="store_true", help="Allow the selected action when it requires explicit approval."
-    )
-    p_daily_run.add_argument("--approval", default=None, help="Run using an approved daily approval request.")
-    p_daily_run.add_argument("--plan-id", default=None, help="Run from a recorded daily plan id or latest.")
-    p_daily_run.add_argument(
-        "--replan", action="store_true", help="Ignore a stale or supplied plan and choose a fresh action."
-    )
-    p_daily_run.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
-    for name, help_text in (
-        ("resume", "Resume or explain recovery for the latest daily run."),
-        ("repair", "Inspect daily driver state and write local repair metadata."),
-        ("unblock", "Create local unblock metadata, imports, or approval requests."),
-        ("protocol", "Print the wrapper-facing daily agent protocol."),
-    ):
-        p_daily_extra = daily_sub.add_parser(name, help=help_text)
-        p_daily_extra.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
-        if name == "unblock":
-            p_daily_extra.add_argument("--dry-run", action="store_true", help="Preview unblock writes.")
-        p_daily_extra.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
-    p_daily_telemetry = daily_sub.add_parser("telemetry", help="Summarize local daily driver telemetry.")
-    p_daily_telemetry.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
-    p_daily_telemetry.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
-    telemetry_sub = p_daily_telemetry.add_subparsers(dest="daily_telemetry_command", metavar="<telemetry-command>")
-    p_daily_telemetry_doctor = telemetry_sub.add_parser("doctor", help="Check daily telemetry health.")
-    p_daily_telemetry_doctor.add_argument(
-        "--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect."
-    )
-    p_daily_telemetry_doctor.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
-    p_daily_hardening = daily_sub.add_parser("hardening", help="Plan and audit daily production hardening.")
-    hardening_sub = p_daily_hardening.add_subparsers(dest="daily_hardening_command", metavar="<hardening-command>")
-    hardening_sub.required = True
-    for name in ("plan", "audit"):
-        p_daily_hardening_action = hardening_sub.add_parser(name, help=f"Run daily hardening {name}.")
-        p_daily_hardening_action.add_argument(
-            "--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect."
-        )
-        p_daily_hardening_action.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
-    p_daily_hardening_import = hardening_sub.add_parser(
-        "import-issues", help="Route hardening findings into the work inbox."
-    )
-    p_daily_hardening_import.add_argument(
-        "--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update."
-    )
-    p_daily_hardening_import.add_argument("--dry-run", action="store_true", help="Preview imports without writing.")
-    p_daily_hardening_import.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
-    p_daily_hardening_closeout = hardening_sub.add_parser("closeout", help="Write a local hardening closeout receipt.")
-    p_daily_hardening_closeout.add_argument(
-        "--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update."
-    )
-    p_daily_hardening_closeout.add_argument(
-        "--status", choices=["reviewed", "deferred", "blocked", "archived"], default="reviewed"
-    )
-    p_daily_hardening_closeout.add_argument("--reason", default=None, help="Closeout reason.")
-    p_daily_hardening_closeout.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
-    p_daily_approvals = daily_sub.add_parser("approvals", help="Review daily approval requests.")
-    approvals_sub = p_daily_approvals.add_subparsers(dest="daily_approval_command", metavar="<approval-command>")
-    approvals_sub.required = True
-    p_daily_approvals_list = approvals_sub.add_parser("list", help="List daily approval requests.")
-    p_daily_approvals_list.add_argument(
-        "--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect."
-    )
-    p_daily_approvals_list.add_argument("--limit", type=int, default=50, help="Maximum approvals to show.")
-    p_daily_approvals_list.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
-    p_daily_approvals_show = approvals_sub.add_parser("show", help="Show a daily approval request.")
-    p_daily_approvals_show.add_argument("approval_id")
-    p_daily_approvals_show.add_argument(
-        "--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect."
-    )
-    p_daily_approvals_show.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
-    for name in ("approve", "reject", "hold"):
-        p_daily_approval_review = approvals_sub.add_parser(name, help=f"{name.title()} a daily approval request.")
-        p_daily_approval_review.add_argument("approval_id")
-        p_daily_approval_review.add_argument(
-            "--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update."
-        )
-        if name in {"reject", "hold"}:
-            p_daily_approval_review.add_argument("--reason", required=True, help="Review reason.")
-        else:
-            p_daily_approval_review.add_argument("--reason", default=None, help="Optional review reason.")
-        p_daily_approval_review.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
-    p_daily_approvals_compare = approvals_sub.add_parser(
-        "compare", help="Compare a daily approval request with current evidence."
-    )
-    p_daily_approvals_compare.add_argument("approval_id")
-    p_daily_approvals_compare.add_argument(
-        "--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect."
-    )
-    p_daily_approvals_compare.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
-    p_daily_approvals_archive = approvals_sub.add_parser("archive", help="Archive closed daily approval requests.")
-    p_daily_approvals_archive.add_argument(
-        "--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update."
-    )
-    p_daily_approvals_archive.add_argument(
-        "--consumed", action="store_true", help="Archive consumed, rejected, or superseded approvals."
-    )
-    p_daily_approvals_archive.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
-    p_daily_history = daily_sub.add_parser("history", help="List local daily receipts.")
-    p_daily_history.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
-    p_daily_history.add_argument("--limit", type=int, default=20, help="Maximum receipts to show.")
-    p_daily_history.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
-    p_daily_show = daily_sub.add_parser("show", help="Show a daily run receipt.")
-    p_daily_show.add_argument("run_id", nargs="?", default="latest", help="Run id or latest.")
-    p_daily_show.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
-    p_daily_show.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
-    p_daily_closeout = daily_sub.add_parser("closeout", help="Close out the latest daily run.")
-    p_daily_closeout.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
-    p_daily_closeout.add_argument(
-        "--status", choices=["reviewed", "deferred", "blocked", "archived"], default="reviewed"
-    )
-    p_daily_closeout.add_argument("--reason", default=None, help="Closeout reason.")
-    p_daily_closeout.add_argument("--handoff", action="store_true", help="Write and lint a Memory Handoff draft.")
-    p_daily_closeout.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
-
-    # add
-    p_add = sub.add_parser("add", help="Install and wire a station's managed tools.")
-    p_add.add_argument("station", help="Station to add tools for (e.g. memory, guard, tokens).")
-    p_add.add_argument("--target", "-t", type=Path, default=Path("."))
-
-    # pantry
-    p_pantry = sub.add_parser("pantry", help="Inspect and plan agentpantry session-auth sync.")
-    pantry_sub = p_pantry.add_subparsers(dest="pantry_command", metavar="<pantry-command>")
-    pantry_sub.required = True
-    p_pantry_status = pantry_sub.add_parser("status", help="Show agentpantry status and advisory health.")
-    p_pantry_status.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
-    p_pantry_status.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
-    p_pantry_setup = pantry_sub.add_parser("setup", help="Plan source or sink setup without applying it.")
-    pantry_setup_sub = p_pantry_setup.add_subparsers(dest="pantry_setup_command", metavar="<setup-command>")
-    pantry_setup_sub.required = True
-    p_pantry_setup_plan = pantry_setup_sub.add_parser("plan", help="Plan agentpantry source or sink setup.")
-    p_pantry_setup_plan.add_argument(
-        "--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update when --write is used."
-    )
-    p_pantry_setup_plan.add_argument(
-        "--role", choices=["source", "sink"], required=True, help="agentpantry role to plan."
-    )
-    p_pantry_setup_plan.add_argument(
-        "--peer", default="127.0.0.1:8787", help="Peer/bind address to document in the plan."
-    )
-    p_pantry_setup_plan.add_argument(
-        "--config-path", default="~/.config/agentpantry/config.toml", help="agentpantry config path to document."
-    )
-    p_pantry_setup_plan.add_argument(
-        "--key-path", default="~/.config/agentpantry/psk.key", help="agentpantry PSK path to document."
-    )
-    p_pantry_setup_plan.add_argument(
-        "--write", action="store_true", help="Write a local reviewed plan under .brigade/pantry/plans/."
-    )
-    p_pantry_setup_plan.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
-    p_pantry_service = pantry_sub.add_parser("service", help="Plan service setup without starting services.")
-    pantry_service_sub = p_pantry_service.add_subparsers(dest="pantry_service_command", metavar="<service-command>")
-    pantry_service_sub.required = True
-    p_pantry_service_plan = pantry_service_sub.add_parser("plan", help="Plan agentpantry service installation.")
-    p_pantry_service_plan.add_argument(
-        "--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update when --write is used."
-    )
-    p_pantry_service_plan.add_argument(
-        "--role", choices=["source", "sink"], required=True, help="agentpantry role to document."
-    )
-    p_pantry_service_plan.add_argument(
-        "--config-path", default="~/.config/agentpantry/config.toml", help="agentpantry config path to document."
-    )
-    p_pantry_service_plan.add_argument(
-        "--write", action="store_true", help="Write a local reviewed plan under .brigade/pantry/plans/."
-    )
-    p_pantry_service_plan.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
-
-    # notifications
-    p_notifications = sub.add_parser("notifications", help="Inspect and plan operator notification wiring.")
-    notifications_sub = p_notifications.add_subparsers(dest="notifications_command", metavar="<notifications-command>")
-    notifications_sub.required = True
-    p_notifications_status = notifications_sub.add_parser("status", help="Show agent-notify status.")
-    p_notifications_status.add_argument(
-        "--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect."
-    )
-    p_notifications_status.add_argument("--profile", default=None, help="agent-notify profile to inspect.")
-    p_notifications_status.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
-    p_notifications_setup = notifications_sub.add_parser("setup", help="Plan notification setup without applying it.")
-    notifications_setup_sub = p_notifications_setup.add_subparsers(
-        dest="notifications_setup_command", metavar="<setup-command>"
-    )
-    notifications_setup_sub.required = True
-    p_notifications_setup_plan = notifications_setup_sub.add_parser(
-        "plan", help="Print reviewed hook snippets and setup commands."
-    )
-    p_notifications_setup_plan.add_argument(
-        "--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect."
-    )
-    p_notifications_setup_plan.add_argument(
-        "--profile", default="operator", help="agent-notify profile to use in snippets."
-    )
-    p_notifications_setup_plan.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
-    p_notifications_event = notifications_sub.add_parser(
-        "event", help="Plan or record explicit operator notification events."
-    )
-    notifications_event_sub = p_notifications_event.add_subparsers(
-        dest="notifications_event_command", metavar="<event-command>"
-    )
-    notifications_event_sub.required = True
-    notification_event_types = (
-        "ci-green",
-        "ci-failed",
-        "handoff-waiting",
-        "handoff-ingested",
-        "release-ready",
-        "operator-alert",
-    )
-    for event_command in ("plan", "record"):
-        p_event = notifications_event_sub.add_parser(
-            event_command, help=f"{event_command.title()} an explicit notification event."
-        )
-        p_event.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
-        p_event.add_argument("--type", choices=notification_event_types, required=True, help="Notification event type.")
-        p_event.add_argument("--title", required=True, help="Safe notification title.")
-        p_event.add_argument("--message", required=True, help="Safe notification message.")
-        p_event.add_argument(
-            "--level", choices=["info", "success", "warning", "error"], default="info", help="Safe event level."
-        )
-        p_event.add_argument("--profile", default=None, help="agent-notify profile to use.")
-        p_event.add_argument("--source", default=None, help="Safe source label, such as ci or handoff.")
-        if event_command == "record":
-            p_event.add_argument("--send", action="store_true", help="Also invoke agent-notify explicitly.")
-        p_event.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
-
-    # budgets
-    p_budgets = sub.add_parser("budgets", help="Inspect Brigade's canonical operator budgets.")
-    budgets_sub = p_budgets.add_subparsers(dest="budgets_command", metavar="<budgets-command>")
-    budgets_sub.required = True
-    p_budgets_show = budgets_sub.add_parser("show", help="Show canonical size and staleness budgets.")
-    p_budgets_show.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
-    p_budgets_check = budgets_sub.add_parser("check", help="Check local bootstrap files against budgets.")
-    p_budgets_check.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
-    p_budgets_check.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
-
-    # untrusted
-    p_untrusted = sub.add_parser("untrusted", help="Wrap and scan untrusted context.")
-    untrusted_sub = p_untrusted.add_subparsers(dest="untrusted_command", metavar="<untrusted-command>")
-    untrusted_sub.required = True
-    p_untrusted_scan = untrusted_sub.add_parser("scan", help="Scan text for prompt-injection-style instructions.")
-    p_untrusted_scan.add_argument("text", nargs="*", help="Text to scan.")
-    p_untrusted_scan.add_argument("--from-file", type=Path, default=None, help="Read text from a file.")
-    p_untrusted_scan.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
-    p_untrusted_wrap = untrusted_sub.add_parser("wrap", help="Frame external content as untrusted data.")
-    p_untrusted_wrap.add_argument("text", nargs="*", help="Text to wrap.")
-    p_untrusted_wrap.add_argument("--from-file", type=Path, default=None, help="Read text from a file.")
-    p_untrusted_wrap.add_argument(
-        "--source-kind", choices=["web", "tool-output", "retrieved-doc", "memory", "skill", "handoff"], required=True
-    )
-    p_untrusted_wrap.add_argument("--goal", default=None, help="Trusted goal to include outside the untrusted block.")
-    p_untrusted_wrap.add_argument(
-        "--max-chars", type=int, default=None, help="Explicitly truncate content before wrapping."
-    )
-    p_untrusted_wrap.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    _init_group.register(sub)
+    _doctor_group.register(sub)
+    _status_group.register(sub)
+    _daily_group.register(sub)
+    _add_group.register(sub)
+    _pantry_group.register(sub)
+    _notifications_group.register(sub)
+    _budgets_group.register(sub)
+    _untrusted_group.register(sub)
 
     # skills
     p_skills = sub.add_parser("skills", help="Manage reviewed cross-harness skill packs.")
@@ -4519,247 +4179,17 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv)
     cmd = args.command
 
-    if cmd == "init":
-        # New v0.3.0 path: --depth/--harnesses build a Selection directly.
-        if getattr(args, "depth", None) is not None or getattr(args, "harnesses", None) is not None:
-            from .selection import Selection, KNOWN_HARNESSES, resolve_owner
-            from .install import install_selection
+    # Migrated command groups dispatch via set_defaults(func=...). The parser is
+    # attached so dispatch functions can call parser.error for unreachable
+    # unknown-subcommand cases (required subparsers normally prevent these).
+    args._brigade_parser = parser
+    func = getattr(args, "func", None)
+    if func is not None:
+        return func(args)
 
-            depth = args.depth or "repo"
-            if args.harnesses is None or args.harnesses == "":
-                harnesses = ["claude"]
-            elif args.harnesses == "none":
-                harnesses = []
-            else:
-                harnesses = [h.strip() for h in args.harnesses.split(",") if h.strip()]
-            for h in harnesses:
-                if h not in KNOWN_HARNESSES:
-                    print(f"error: unknown harness {h!r} (valid: {KNOWN_HARNESSES})", file=sys.stderr)
-                    return 2
-            try:
-                owner = resolve_owner(harnesses, override=args.owner)
-            except ValueError as exc:
-                print(f"error: {exc}", file=sys.stderr)
-                return 2
-            sel = Selection(depth=depth, harnesses=harnesses, owner=owner, includes=list(args.includes))
-            return install_selection(
-                target=args.target,
-                selection=sel,
-                force=getattr(args, "force", False),
-                dry_run=getattr(args, "dry_run", False),
-                allow_home=getattr(args, "allow_home", False),
-            )
-
-        # No selection flags: interactive prompt.
-        from .prompt import NonInteractiveError
-        from .install import install_selection
-
-        try:
-            sel = prompt_for_selection()
-        except NonInteractiveError as exc:
-            print(f"error: {exc}", file=sys.stderr)
-            return 2
-        return install_selection(
-            target=args.target,
-            selection=sel,
-            force=getattr(args, "force", False),
-            dry_run=getattr(args, "dry_run", False),
-            allow_home=getattr(args, "allow_home", False),
-        )
-    if cmd == "doctor":
-        from . import doctor as doctor_mod
-
-        return doctor_mod.run(target=args.target, harness=args.harness)
-    if cmd == "status":
-        from . import status as status_mod
-
-        return status_mod.run(target=args.target)
-    if cmd == "daily":
-        from . import daily_cmd
-
-        if args.daily_command == "init":
-            return daily_cmd.init(target=args.target, force=args.force, json_output=args.json)
-        if args.daily_command == "status":
-            return daily_cmd.status(target=args.target, json_output=args.json)
-        if args.daily_command == "plan":
-            return daily_cmd.plan(target=args.target, record=args.record, json_output=args.json)
-        if args.daily_command == "review":
-            return daily_cmd.review(target=args.target, json_output=args.json)
-        if args.daily_command == "schema":
-            return daily_cmd.schema(target=args.target, json_output=args.json)
-        if args.daily_command == "protocol":
-            return daily_cmd.protocol(target=args.target, json_output=args.json)
-        if args.daily_command == "resume":
-            return daily_cmd.resume(target=args.target, json_output=args.json)
-        if args.daily_command == "repair":
-            return daily_cmd.repair(target=args.target, json_output=args.json)
-        if args.daily_command == "unblock":
-            return daily_cmd.unblock(target=args.target, dry_run=args.dry_run, json_output=args.json)
-        if args.daily_command == "telemetry":
-            if getattr(args, "daily_telemetry_command", None) == "doctor":
-                return daily_cmd.telemetry_doctor(target=args.target, json_output=args.json)
-            return daily_cmd.telemetry(target=args.target, json_output=args.json)
-        if args.daily_command == "hardening":
-            if args.daily_hardening_command == "plan":
-                return daily_cmd.hardening_plan(target=args.target, json_output=args.json)
-            if args.daily_hardening_command == "audit":
-                return daily_cmd.hardening_audit(target=args.target, json_output=args.json)
-            if args.daily_hardening_command == "import-issues":
-                return daily_cmd.hardening_import_issues(
-                    target=args.target, dry_run=args.dry_run, json_output=args.json
-                )
-            if args.daily_hardening_command == "closeout":
-                return daily_cmd.hardening_closeout(
-                    target=args.target, status=args.status, reason=args.reason, json_output=args.json
-                )
-            parser.error(f"unknown daily hardening command: {args.daily_hardening_command}")
-            return 2
-        if args.daily_command == "history":
-            return daily_cmd.history(target=args.target, limit=args.limit, json_output=args.json)
-        if args.daily_command == "show":
-            return daily_cmd.show(target=args.target, run_id=args.run_id, json_output=args.json)
-        if args.daily_command == "doctor":
-            return daily_cmd.doctor(target=args.target, json_output=args.json)
-        if args.daily_command == "approvals":
-            if args.daily_approval_command == "list":
-                return daily_cmd.approvals_list(target=args.target, limit=args.limit, json_output=args.json)
-            if args.daily_approval_command == "show":
-                return daily_cmd.approvals_show(target=args.target, approval_id=args.approval_id, json_output=args.json)
-            if args.daily_approval_command == "approve":
-                return daily_cmd.approvals_approve(
-                    target=args.target, approval_id=args.approval_id, json_output=args.json
-                )
-            if args.daily_approval_command == "reject":
-                return daily_cmd.approvals_reject(
-                    target=args.target, approval_id=args.approval_id, reason=args.reason, json_output=args.json
-                )
-            if args.daily_approval_command == "hold":
-                return daily_cmd.approvals_hold(
-                    target=args.target, approval_id=args.approval_id, reason=args.reason, json_output=args.json
-                )
-            if args.daily_approval_command == "compare":
-                return daily_cmd.approvals_compare(
-                    target=args.target, approval_id=args.approval_id, json_output=args.json
-                )
-            if args.daily_approval_command == "archive":
-                return daily_cmd.approvals_archive(target=args.target, consumed=args.consumed, json_output=args.json)
-            parser.error(f"unknown daily approvals command: {args.daily_approval_command}")
-            return 2
-        if args.daily_command == "run":
-            return daily_cmd.run(
-                target=args.target,
-                approved=args.approved,
-                approval_id=args.approval,
-                plan_id=args.plan_id,
-                replan=args.replan,
-                json_output=args.json,
-            )
-        if args.daily_command == "closeout":
-            return daily_cmd.closeout(
-                target=args.target, status=args.status, reason=args.reason, handoff=args.handoff, json_output=args.json
-            )
-        parser.error(f"unknown daily command: {args.daily_command}")
-        return 2
-    if cmd == "add":
-        from . import add as add_mod
-
-        return add_mod.run(target=args.target, station=args.station)
-    if cmd == "pantry":
-        from . import pantry_cmd
-
-        if args.pantry_command == "status":
-            return pantry_cmd.status(target=args.target, json_output=args.json)
-        if args.pantry_command == "setup":
-            if args.pantry_setup_command == "plan":
-                return pantry_cmd.setup_plan(
-                    target=args.target,
-                    role=args.role,
-                    peer=args.peer,
-                    config_path=args.config_path,
-                    key_path=args.key_path,
-                    write=args.write,
-                    json_output=args.json,
-                )
-            parser.error(f"unknown pantry setup command: {args.pantry_setup_command}")
-            return 2
-        if args.pantry_command == "service":
-            if args.pantry_service_command == "plan":
-                return pantry_cmd.service_plan(
-                    target=args.target,
-                    role=args.role,
-                    config_path=args.config_path,
-                    write=args.write,
-                    json_output=args.json,
-                )
-            parser.error(f"unknown pantry service command: {args.pantry_service_command}")
-            return 2
-        parser.error(f"unknown pantry command: {args.pantry_command}")
-        return 2
-    if cmd == "notifications":
-        from . import notifications_cmd
-
-        if args.notifications_command == "status":
-            return notifications_cmd.status(target=args.target, profile=args.profile, json_output=args.json)
-        if args.notifications_command == "setup":
-            if args.notifications_setup_command == "plan":
-                return notifications_cmd.setup_plan(target=args.target, profile=args.profile, json_output=args.json)
-            parser.error(f"unknown notifications setup command: {args.notifications_setup_command}")
-            return 2
-        if args.notifications_command == "event":
-            if args.notifications_event_command == "plan":
-                return notifications_cmd.event_plan(
-                    target=args.target,
-                    event_type=args.type,
-                    title=args.title,
-                    message=args.message,
-                    level=args.level,
-                    profile=args.profile,
-                    source=args.source,
-                    json_output=args.json,
-                )
-            if args.notifications_event_command == "record":
-                return notifications_cmd.event_record(
-                    target=args.target,
-                    event_type=args.type,
-                    title=args.title,
-                    message=args.message,
-                    level=args.level,
-                    profile=args.profile,
-                    source=args.source,
-                    send=args.send,
-                    json_output=args.json,
-                )
-            parser.error(f"unknown notifications event command: {args.notifications_event_command}")
-            return 2
-        parser.error(f"unknown notifications command: {args.notifications_command}")
-        return 2
-    if cmd == "budgets":
-        from . import budgets_cmd
-
-        if args.budgets_command == "show":
-            return budgets_cmd.show(json_output=args.json)
-        if args.budgets_command == "check":
-            return budgets_cmd.check(target=args.target, json_output=args.json)
-        parser.error(f"unknown budgets command: {args.budgets_command}")
-        return 2
-    if cmd == "untrusted":
-        from . import untrusted_cmd
-
-        if args.untrusted_command == "scan":
-            return untrusted_cmd.scan(text=args.text, from_file=args.from_file, json_output=args.json)
-        if args.untrusted_command == "wrap":
-            return untrusted_cmd.wrap(
-                text=args.text,
-                from_file=args.from_file,
-                source_kind=args.source_kind,
-                goal=args.goal,
-                max_chars=args.max_chars,
-                json_output=args.json,
-            )
-        parser.error(f"unknown untrusted command: {args.untrusted_command}")
-        return 2
+    # Legacy if-chain for not-yet-migrated groups.
     if cmd == "skills":
-        from . import skills_cmd
+        from .. import skills_cmd
 
         if args.skills_command == "search":
             return skills_cmd.search(target=args.target, query=args.query, json_output=args.json)
@@ -4860,7 +4290,7 @@ def main(argv=None) -> int:
         parser.error(f"unknown skills command: {args.skills_command}")
         return 2
     if cmd == "operator":
-        from . import operator_cmd
+        from .. import operator_cmd
 
         if args.operator_command == "guide":
             return operator_cmd.guide(profile=args.profile, json_output=args.json)
@@ -4965,7 +4395,7 @@ def main(argv=None) -> int:
         parser.error(f"unknown operator command: {args.operator_command}")
         return 2
     if cmd == "runbook":
-        from . import runbook_cmd
+        from .. import runbook_cmd
 
         if args.runbook_command == "plan":
             return runbook_cmd.plan(target=args.target, runbook=args.runbook, json_output=args.json)
@@ -4997,7 +4427,7 @@ def main(argv=None) -> int:
         parser.error(f"unknown runbook command: {args.runbook_command}")
         return 2
     if cmd == "dogfood":
-        from . import dogfood_cmd
+        from .. import dogfood_cmd
 
         dogfood_args = list(args.dogfood_args)
         if dogfood_args and dogfood_args[0] == "init":
@@ -5043,7 +4473,7 @@ def main(argv=None) -> int:
             timeout_seconds=args.timeout_seconds,
         )
     if cmd == "release":
-        from . import release_cmd
+        from .. import release_cmd
 
         if args.release_command == "plan":
             return release_cmd.plan(target=args.target, base_ref=args.base_ref, json_output=args.json)
@@ -5133,7 +4563,7 @@ def main(argv=None) -> int:
         parser.error(f"unknown release command: {args.release_command}")
         return 2
     if cmd == "roadmap":
-        from . import roadmap_cmd
+        from .. import roadmap_cmd
 
         if args.roadmap_command == "audit":
             return roadmap_cmd.audit(target=args.target, json_output=args.json, import_issues=args.import_issues)
@@ -5148,7 +4578,7 @@ def main(argv=None) -> int:
         parser.error(f"unknown roadmap command: {args.roadmap_command}")
         return 2
     if cmd == "repos":
-        from . import repos_cmd
+        from .. import repos_cmd
 
         if args.repos_command == "init":
             return repos_cmd.init(
@@ -5467,7 +4897,7 @@ def main(argv=None) -> int:
         parser.error(f"unknown repos command: {args.repos_command}")
         return 2
     if cmd == "handoff":
-        from . import handoff_cmd
+        from .. import handoff_cmd
 
         if args.handoff_command == "sources":
             if args.handoff_sources_command == "init":
@@ -5603,7 +5033,7 @@ def main(argv=None) -> int:
         parser.error(f"unknown handoff command: {args.handoff_command}")
         return 2
     if cmd == "chat":
-        from . import chat_cmd
+        from .. import chat_cmd
 
         if args.chat_command == "surfaces":
             if args.surfaces_command == "init":
@@ -5634,7 +5064,7 @@ def main(argv=None) -> int:
         parser.error(f"unknown chat command: {args.chat_command}")
         return 2
     if cmd == "context":
-        from . import context_cmd
+        from .. import context_cmd
 
         if args.context_command == "plan":
             return context_cmd.plan(
@@ -5672,7 +5102,7 @@ def main(argv=None) -> int:
         parser.error(f"unknown context command: {args.context_command}")
         return 2
     if cmd == "projects":
-        from . import projects_cmd
+        from .. import projects_cmd
 
         if args.projects_command == "audit":
             return projects_cmd.audit(target=args.target, json_output=args.json)
@@ -5706,7 +5136,7 @@ def main(argv=None) -> int:
         parser.error(f"unknown projects command: {args.projects_command}")
         return 2
     if cmd == "learn":
-        from . import learn_cmd
+        from .. import learn_cmd
 
         if args.learn_command == "plan":
             return learn_cmd.plan(target=args.target, json_output=args.json)
@@ -5767,7 +5197,7 @@ def main(argv=None) -> int:
         parser.error(f"unknown learn command: {args.learn_command}")
         return 2
     if cmd == "research":
-        from . import research_cmd
+        from .. import research_cmd
 
         if args.research_command == "run":
             overrides = {"max_rounds": args.rounds, "max_time": args.max_time}
@@ -5822,7 +5252,7 @@ def main(argv=None) -> int:
         parser.error(f"unknown research command: {args.research_command}")
         return 2
     if cmd == "center":
-        from . import center_cmd
+        from .. import center_cmd
 
         if args.center_command == "status":
             return center_cmd.status(target=args.target, json_output=args.json)
@@ -5924,7 +5354,7 @@ def main(argv=None) -> int:
         parser.error(f"unknown center command: {args.center_command}")
         return 2
     if cmd == "memory":
-        from . import memory_cmd
+        from .. import memory_cmd
 
         if args.memory_command == "care":
             if args.memory_care_command == "init":
@@ -5961,7 +5391,7 @@ def main(argv=None) -> int:
         parser.error(f"unknown memory command: {args.memory_command}")
         return 2
     if cmd == "work":
-        from . import work_cmd
+        from .. import work_cmd
 
         if args.work_command == "status":
             return work_cmd.status(target=args.target, limit=args.limit)
@@ -6154,7 +5584,7 @@ def main(argv=None) -> int:
             parser.error(f"unknown review command: {args.review_command}")
             return 2
         if args.work_command == "phases":
-            from . import phases_cmd
+            from .. import phases_cmd
 
             if args.phases_command == "init":
                 return phases_cmd.init(target=args.target, json_output=args.json)
@@ -6673,8 +6103,8 @@ def main(argv=None) -> int:
         parser.error(f"unknown work command: {args.work_command}")
         return 2
     if cmd == "run":
-        from . import aboyeur as aboyeur_mod
-        from . import roster as roster_mod
+        from .. import aboyeur as aboyeur_mod
+        from .. import roster as roster_mod
 
         run_cwd = args.cwd.expanduser().resolve()
         if not run_cwd.is_dir():
@@ -6718,12 +6148,12 @@ def main(argv=None) -> int:
         if output_dir is not None:
             print(f"artifacts: {output_dir}", file=sys.stderr)
             if args.inspect:
-                from . import runs_cmd
+                from .. import runs_cmd
 
                 runs_cmd.show(output_dir)
         return rc
     if cmd == "roster":
-        from . import roster_cmd
+        from .. import roster_cmd
 
         if args.roster_command == "init":
             return roster_cmd.init(
@@ -6737,7 +6167,7 @@ def main(argv=None) -> int:
         parser.error(f"unknown roster command: {args.roster_command}")
         return 2
     if cmd == "runs":
-        from . import runs_cmd
+        from .. import runs_cmd
 
         if args.runs_command == "list":
             return runs_cmd.list_runs(cwd=args.cwd, runs_dir=args.runs_dir, limit=args.limit)
@@ -6748,11 +6178,11 @@ def main(argv=None) -> int:
         parser.error(f"unknown runs command: {args.runs_command}")
         return 2
     if cmd == "scrub":
-        from . import scrub as scrub_mod
+        from .. import scrub as scrub_mod
 
         return scrub_mod.run(target=args.target, policy=args.policy, dry_run=args.dry_run)
     if cmd == "security":
-        from . import security_cmd
+        from .. import security_cmd
 
         if args.security_command == "init":
             return security_cmd.init(target=args.target, force=args.force)
@@ -6812,7 +6242,7 @@ def main(argv=None) -> int:
         parser.error(f"unknown security command: {args.security_command}")
         return 2
     if cmd == "tools":
-        from . import tools_cmd
+        from .. import tools_cmd
 
         if args.tools_command == "init":
             return tools_cmd.init(
@@ -7001,11 +6431,11 @@ def main(argv=None) -> int:
         parser.error(f"unknown tools command: {args.tools_command}")
         return 2
     if cmd == "handoff-template":
-        from . import handoff as handoff_mod
+        from .. import handoff as handoff_mod
 
         return handoff_mod.run(target=args.target)
     if cmd == "ingest":
-        from . import ingest as ingest_mod
+        from .. import ingest as ingest_mod
 
         return ingest_mod.run(
             target=args.target,
@@ -7014,17 +6444,17 @@ def main(argv=None) -> int:
             route_documents=args.route_documents,
         )
     if cmd == "openclaw-fragments":
-        from . import fragments as frag_mod
+        from .. import fragments as frag_mod
 
         return frag_mod.write_fragments(args.out, harness="openclaw")
     if cmd == "hermes-fragments":
-        from . import fragments as frag_mod
+        from .. import fragments as frag_mod
 
         return frag_mod.write_fragments(args.out, harness="hermes")
     if cmd == "reconfigure":
-        from .config import load_config
-        from .reconfigure import reconfigure as _reconfigure
-        from .selection import Selection, KNOWN_HARNESSES, resolve_owner
+        from ..config import load_config
+        from ..reconfigure import reconfigure as _reconfigure
+        from ..selection import Selection, KNOWN_HARNESSES, resolve_owner
 
         existing = load_config(args.target)
         if existing is None:
