@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from . import context_cmd, handoff_cmd, learn_cmd, memory_cmd, phases_cmd, projects_cmd, repos_cmd, research_cmd, roadmap_cmd, security_cmd, tools_cmd, work_cmd
+from . import context_cmd, handoff_cmd, learn_cmd, memory_cmd, phases_cmd, projects_cmd, repos_cmd, reportstore, research_cmd, roadmap_cmd, security_cmd, tools_cmd, work_cmd
 from .selection import KNOWN_HARNESSES
 from .localio import read_json_dict as _read_json, read_jsonl_dicts as _read_jsonl, utc_now as _now, write_json as _write_json
 
@@ -742,29 +742,14 @@ def _resolve_release_receipt(target: Path, run_id: str) -> tuple[dict[str, Any] 
 
 
 def _read_candidate(path: Path) -> dict[str, Any] | None:
-    candidate_path = path / "EVIDENCE.json" if path.is_dir() else path
-    payload = _read_json(candidate_path)
-    if payload is not None:
-        payload.setdefault("path", str(candidate_path.parent))
-    return payload
+    return reportstore.read_bundle(path, "EVIDENCE.json")
 
 
 def _release_candidates(target: Path, *, include_archived: bool = False) -> list[dict[str, Any]]:
     roots = [_release_candidates_root(target)]
     if include_archived:
         roots.append(_release_candidates_archive_root(target))
-    candidates: list[dict[str, Any]] = []
-    for root in roots:
-        if not root.is_dir():
-            continue
-        for child in root.iterdir():
-            if child.name == "archive" or not child.is_dir():
-                continue
-            payload = _read_candidate(child)
-            if payload is not None:
-                candidates.append(payload)
-    candidates.sort(key=lambda item: str(item.get("created_at") or item.get("candidate_id") or ""), reverse=True)
-    return candidates
+    return reportstore.list_bundles(roots, _read_candidate, id_field="candidate_id", skip_child=lambda name: name == "archive")
 
 
 def _latest_candidate(target: Path) -> dict[str, Any] | None:
@@ -833,19 +818,7 @@ def _phase_release_checks(target: Path) -> list[dict[str, Any]]:
 
 def _resolve_candidate(target: Path, candidate_id: str) -> tuple[dict[str, Any] | None, str | None]:
     candidates = _release_candidates(target, include_archived=True)
-    if candidate_id == "latest":
-        latest = _latest_candidate(target)
-        return (latest, None) if latest else (None, "release candidate not found: latest")
-    matches = [
-        item
-        for item in candidates
-        if str(item.get("candidate_id") or "").startswith(candidate_id)
-    ]
-    if not matches:
-        return None, f"release candidate not found: {candidate_id}"
-    if len(matches) > 1:
-        return None, f"release candidate id is ambiguous: {candidate_id}"
-    return matches[0], None
+    return reportstore.resolve_bundle(candidates, candidate_id, id_field="candidate_id", label="release candidate", latest=lambda: _latest_candidate(target))
 
 
 def _evidence(target: Path, *, base_ref: str | None) -> dict[str, Any]:
@@ -1734,10 +1707,16 @@ def _candidate_summary(candidate: dict[str, Any]) -> str:
 
 
 def _write_candidate_bundle(candidate_dir: Path, candidate: dict[str, Any]) -> None:
-    _write_json(candidate_dir / "EVIDENCE.json", candidate)
-    (candidate_dir / "RELEASE_CANDIDATE.md").write_text(_candidate_summary(candidate))
-    (candidate_dir / "RELEASE_NOTES_DRAFT.md").write_text(_candidate_release_notes(candidate))
-    (candidate_dir / "PUBLISH_PLAN.md").write_text(_candidate_publish_plan(candidate))
+    reportstore.write_bundle(
+        candidate_dir,
+        candidate,
+        evidence_name="EVIDENCE.json",
+        documents={
+            "RELEASE_CANDIDATE.md": _candidate_summary(candidate),
+            "RELEASE_NOTES_DRAFT.md": _candidate_release_notes(candidate),
+            "PUBLISH_PLAN.md": _candidate_publish_plan(candidate),
+        },
+    )
 
 
 def plan(*, target: Path, base_ref: str | None = "origin/main", json_output: bool = False) -> int:
@@ -1921,13 +1900,10 @@ def candidate_archive(*, target: Path, candidate_id: str, json_output: bool = Fa
     if not source.is_dir() or source.parent == _release_candidates_archive_root(target):
         print(f"error: release candidate cannot be archived: {candidate.get('candidate_id')}", file=sys.stderr)
         return 2
-    archive_root = _release_candidates_archive_root(target)
-    archive_root.mkdir(parents=True, exist_ok=True)
-    destination = archive_root / source.name
-    if destination.exists():
+    destination, moved = reportstore.move_bundle(source, _release_candidates_archive_root(target))
+    if not moved:
         print(f"error: archived release candidate already exists: {candidate.get('candidate_id')}", file=sys.stderr)
         return 2
-    shutil.move(str(source), str(destination))
     payload = {
         "target": str(target),
         "candidate_id": candidate.get("candidate_id"),
@@ -2313,9 +2289,7 @@ def candidate_closeout(
     if not candidate_path.is_dir():
         print(f"error: release candidate path is missing: {candidate.get('path')}", file=sys.stderr)
         return 2
-    closeout_path = candidate_path / "CLOSEOUT.json"
-    payload["path"] = str(closeout_path)
-    _write_json(closeout_path, payload)
+    closeout_path = reportstore.write_closeout(candidate_path, payload)
     if json_output:
         print(json.dumps(payload, indent=2, sort_keys=True))
         return 0
