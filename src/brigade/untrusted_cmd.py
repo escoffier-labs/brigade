@@ -17,6 +17,13 @@ def _read_input(*, text: list[str], from_file: Path | None) -> tuple[str | None,
         except OSError as exc:
             return None, f"cannot read input file: {exc}"
     if text:
+        if len(text) == 1 and "\n" not in text[0]:
+            candidate = Path(text[0]).expanduser()
+            if candidate.is_file():
+                return None, (
+                    f"{text[0]} is a file path; pass --from-file {text[0]} to scan its contents "
+                    "(positional text is scanned literally)"
+                )
         return " ".join(text), None
     return None, "provide text or --from-file"
 

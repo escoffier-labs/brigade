@@ -40,7 +40,7 @@ def guide_payload(*, profile: str = "internal-dogfood") -> dict[str, Any]:
         ],
         "boundaries": [
             "Brigade does not run automatically.",
-            "Brigade does not start daemons or install hooks.",
+            "Brigade does not start daemons. Templates may include an inactive hooks/pre-push file, but Brigade never activates hooks (git config core.hooksPath stays your call).",
             "Brigade does not send notifications unless a separate hook is explicitly configured.",
             "Brigade does not ingest handoffs into canonical memory from operator init/status.",
             "Brigade does not publish, push, tag, or mutate remotes.",
@@ -176,7 +176,7 @@ def adoption_plan_payload(target: Path) -> dict[str, Any]:
         "suggested_next_commands": commands,
         "boundaries": [
             "Read-only: does not write files.",
-            "Does not start services, install hooks, install schedulers, or mutate remotes.",
+            "Does not start services, activate hooks, install schedulers, or mutate remotes.",
             "Does not include raw crontab lines, OpenClaw job names, PM2 process names, command paths, or environment values.",
         ],
     }
@@ -348,7 +348,7 @@ def migration_status_payload(target: Path) -> dict[str, Any]:
         "boundaries": [
             "Uses redacted adoption, surface capture, review, work import, and task metadata.",
             "Does not include raw scheduler lines, job names, process names, command paths, environment values, host details, or private paths.",
-            "Does not start services, install hooks, mutate schedulers, mutate remotes, ingest memory, migrate secrets, or rotate credentials.",
+            "Does not start services, activate hooks, mutate schedulers, mutate remotes, ingest memory, migrate secrets, or rotate credentials.",
         ],
     }
 
@@ -559,7 +559,7 @@ def surfaces_capture_payload(target: Path) -> dict[str, Any]:
         "source_fingerprint": _surface_capture_fingerprint(capture),
         "boundaries": [
             "Reads external scheduler and process surfaces only when the operator runs this command.",
-            "Does not start services, install hooks, install schedulers, kill processes, or mutate remotes.",
+            "Does not start services, activate hooks, install schedulers, kill processes, or mutate remotes.",
             "Does not include raw crontab lines, job names, process names, command paths, environment values, hostnames, or private paths.",
         ],
     }
@@ -2385,7 +2385,7 @@ def doctor_payload(target: Path, *, profile: str = "internal-dogfood") -> dict[s
         },
         "local_only_notes": [
             ".brigade/ stores local config, receipts, scans, reports, waivers, and run artifacts.",
-            "Brigade does not run automatically, start daemons, install hooks, send notifications, publish, push, tag, or mutate remotes.",
+            "Brigade does not run automatically, start daemons, activate hooks, send notifications, publish, push, tag, or mutate remotes.",
         ],
         "tracked_vs_generated": [
             "Track reviewed cross-harness source docs under tools/.",
@@ -2795,6 +2795,7 @@ def quickstart(
             "depth": depth,
             "harnesses": selected_harnesses,
             "owner": memory_owner,
+            "owner_override": owner is not None,
             "dry_run": dry_run,
             "force": force,
             "steps": steps,
@@ -2845,6 +2846,7 @@ def quickstart(
         "depth": depth,
         "harnesses": selected_harnesses,
         "owner": memory_owner,
+        "owner_override": owner is not None,
         "dry_run": dry_run,
         "force": force,
         "steps": steps,
@@ -2877,7 +2879,7 @@ def _quickstart_local_notes() -> list[str]:
     return [
         ".brigade/ stores local config, receipts, scans, reports, waivers, and run artifacts.",
         "Generated harness projections and handoff inboxes are local ignored state.",
-        "Brigade does not start daemons, install hooks, publish, push, tag, or mutate remotes from quickstart.",
+        "Brigade does not start daemons, activate hooks (the pre-push hook file ships inactive), publish, push, tag, or mutate remotes from quickstart.",
     ]
 
 
@@ -2921,7 +2923,8 @@ def _print_quickstart(payload: dict[str, Any]) -> None:
     print(f"operator quickstart: {payload['target']}")
     print(f"depth: {payload['depth']}")
     print(f"harnesses: {','.join(payload['harnesses']) or 'none'}")
-    print(f"owner: {payload['owner']}")
+    owner_note = "" if payload.get("owner_override") else " (auto-selected; override with --owner)"
+    print(f"owner: {payload['owner']}{owner_note}")
     print(f"dry_run: {payload['dry_run']}")
     for step in payload["steps"]:
         print(f"[{step.get('status')}] {step.get('id')}")

@@ -89,7 +89,18 @@ from `operator doctor`, every `handoff doctor` line prefixed `[ok]`, `findings: 
 
 `operator doctor` may suggest `brigade daily plan --target .` as the next command. That is normal. It means setup is ready and Brigade can now show the local daily loop.
 
-## 6. What To Commit
+## 6. Handoff Concepts In 60 Seconds
+
+A handoff is a note an agent writes for the memory owner to file later. Four things decide where it lands:
+
+- **Inbox**: each harness writes to its own folder (`.codex/memory-handoffs/` for Codex sessions, `.claude/memory-handoffs/` for Claude Code). Use the inbox matching the tool that learned the fact; the ingester watches every inbox you selected at quickstart.
+- **Type** (`--type`): what kind of note this is - `decision`, `workflow`, `gotcha`, and friends. It helps the reviewer, not the router.
+- **Action**: `no-card` (the default) appends a short fact to a shared document such as `.learnings/LEARNINGS.md` or `TOOLS.md`. `create-card`/`update-card` proposes a standalone memory card for bigger durable topics, and requires `--target-card` plus card content starting with YAML frontmatter.
+- **Content** (`--content` or `--content-file`): the durable note itself, required. The title and summary are the envelope; the content is what gets filed.
+
+When unsure, `no-card` with a two-sentence content is the right default. `brigade handoff-template` prints the full format.
+
+## 7. What To Commit
 
 Usually safe to commit after review:
 
@@ -118,7 +129,7 @@ Usually local-only:
 
 If the target is a local operator workspace rather than a git repo, treat the same split as a backup rule: durable reviewed memory can be synced, generated host wiring should stay local.
 
-## 7. If It Fails
+## 8. If It Fails
 
 Collect redacted machine-readable output:
 

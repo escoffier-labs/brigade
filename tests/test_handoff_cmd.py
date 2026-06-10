@@ -1731,3 +1731,28 @@ def test_openclaw_ingest_receipt_contract_updates_handoff_status(tmp_path, capsy
     assert handoff_cmd.show_draft(target=tmp_path, draft_id="20260603-210000-hermes-note", json_output=True) == 0
     draft_payload = json.loads(capsys.readouterr().out)
     assert draft_payload["draft"]["ingestion_status"] == "ingested"
+
+
+def test_handoff_sources_init_scopes_to_configured_selection(tmp_path, capsys):
+    from brigade.install import install_selection
+    from brigade.selection import Selection
+
+    install_selection(tmp_path, Selection(depth="repo", harnesses=["codex"], owner="codex", includes=[]))
+    capsys.readouterr()
+    assert handoff_cmd.sources_init(target=tmp_path, force=True, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["inboxes"] == [".codex/memory-handoffs"]
+
+
+def test_handoff_doctor_collapses_absent_unwatched_inboxes(tmp_path, capsys):
+    from brigade.install import install_selection
+    from brigade.selection import Selection
+
+    install_selection(tmp_path, Selection(depth="repo", harnesses=["codex"], owner="codex", includes=[]))
+    capsys.readouterr()
+    assert handoff_cmd.doctor(target=tmp_path) == 0
+    out = capsys.readouterr().out
+    assert "handoff_watch: .codex/memory-handoffs" in out
+    # absent, unwatched inboxes collapse to one summary line instead of 14 rows
+    assert ".qwen/memory-handoffs" not in out
+    assert "absent and unwatched" in out

@@ -16,6 +16,7 @@ WARN = "warn"
 FAIL = "fail"
 
 from . import scrub
+from .config import load_config as load_brigade_config
 from .selection import WRITER_INBOXES as _WRITER_INBOX_MAP
 
 WRITER_INBOXES = tuple(_WRITER_INBOX_MAP.values())
@@ -320,11 +321,16 @@ def doctor_checks(target: Path, sources: Path | None = None) -> list[tuple[str, 
         level = WARN if pending_total else OK
         checks.append((level, "handoff_sources", "not configured; no pending handoffs" if not pending_total else "not configured"))
 
+    quiet_inboxes = [
+        inbox
+        for inbox in health.inboxes
+        if not inbox.exists and not inbox.watched and not inbox.pending and not inbox.processed
+    ]
     for inbox in health.inboxes:
+        if inbox in quiet_inboxes:
+            continue
         if inbox.pending and not inbox.watched:
             level = WARN
-        elif not inbox.exists:
-            level = OK
         else:
             level = OK
         watched = "yes" if inbox.watched else "no"
@@ -334,6 +340,14 @@ def doctor_checks(target: Path, sources: Path | None = None) -> list[tuple[str, 
             f"(exists={exists}, pending={inbox.pending}, processed={inbox.processed}, watched={watched})"
         )
         checks.append((level, f"handoff_watch: {inbox.inbox}", detail))
+    if quiet_inboxes:
+        checks.append(
+            (
+                OK,
+                "handoff_watch: other inboxes",
+                f"{len(quiet_inboxes)} writer inbox(es) absent and unwatched",
+            )
+        )
 
     stale_backlog = [
         inbox
@@ -2220,7 +2234,22 @@ def sources_init(*, target: Path, force: bool = False, inboxes: list[str] | None
     if path.exists() and not force:
         print(f"error: handoff source config already exists: {path}", file=sys.stderr)
         return 2
-    inbox_values = list(inboxes) if inboxes is not None else list(WRITER_INBOXES)
+    if inboxes is not None:
+        inbox_values = list(inboxes)
+    else:
+        inbox_values = list(WRITER_INBOXES)
+        try:
+            config = load_brigade_config(target)
+        except Exception:
+            config = None
+        if config is not None and config.selection.harnesses:
+            selected = [
+                _WRITER_INBOX_MAP[h]
+                for h in config.selection.harnesses
+                if h in _WRITER_INBOX_MAP
+            ]
+            if selected:
+                inbox_values = selected
     payload = {
         "_description": "Local handoff source coverage. Relative roots resolve from this repo or workspace target.",
         "canonical_owner": "openclaw",

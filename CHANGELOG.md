@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.2] - 2026-06-09
+
+### Fixed
+- `brigade handoff sources init` now scopes the default watched inboxes to the workspace's configured harness selection instead of enrolling all fifteen writer inboxes; explicit `--inboxes` values are unchanged.
+- `brigade untrusted scan` refuses a bare file path as positional text (it was silently scanning the path string itself) and points at `--from-file`.
+- `brigade handoff doctor` collapses absent, unwatched writer inboxes into a single summary line instead of printing one row per unselected harness.
+- `brigade operator quickstart` says when the memory owner was auto-selected and how to override it, and operator boundary text now says Brigade never *activates* hooks (the templates ship an inactive `hooks/pre-push` file).
+
+### Documentation
+- `docs/first-10-minutes.md` gains a "Handoff Concepts In 60 Seconds" section covering inbox choice, types, card versus no-card actions, and the required content flags.
+
 ## [0.9.1] - 2026-06-09
 
 ### Fixed
