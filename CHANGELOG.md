@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.3] - 2026-06-10
+
+### Fixed
+- `brigade operator verify-harness` treats warn-status checks (host advisories like a global gitignore shadowing an inbox template) as informational: `ready` now flips only on failures, a new `warning_count` reports advisories, and quickstart consequently returns `status: ok` on such hosts while surfacing the advisory count and the verify command on the step line.
+- `docs/first-10-minutes.md` explains the `status: warn` / exit-code semantics on first apply and warns that activating the repo hooks path would override an existing global `core.hooksPath` that already runs content-guard.
+
 ## [0.10.2] - 2026-06-10
 
 ### Added

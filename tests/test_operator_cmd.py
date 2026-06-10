@@ -1441,6 +1441,10 @@ def test_verify_harness_warns_when_inbox_template_shadowed_by_external_ignore(tm
     shadow = [c for c in payload["checks"] if c["name"] == "handoff_template_shadowed"]
     assert shadow and shadow[0]["status"] == "warn"
     assert "shadow" in shadow[0]["detail"] or "global" in shadow[0]["detail"]
+    # A portability advisory must not flip readiness: warns inform, fails block.
+    assert payload["ready"] is True
+    assert payload["issue_count"] == 0
+    assert payload["warning_count"] >= 1
 
 
 def test_local_operator_doctor_does_not_block_on_inactive_content_guard_hook(tmp_path, capsys, monkeypatch):

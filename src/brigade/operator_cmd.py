@@ -2754,7 +2754,11 @@ def verify_harness_payload(target: Path, *, harness: str) -> dict[str, Any]:
     else:
         checks.append({"status": "ok", "name": "handoff_lint", "detail": f"no pending {harness} handoffs"})
 
-    issue_count = sum(1 for item in checks if item.get("status") in {"fail", "warn"})
+    # Fails block readiness; warns are advisories (host conditions like a
+    # global gitignore shadowing an inbox template) and stay visible without
+    # flipping ready to no.
+    issue_count = sum(1 for item in checks if item.get("status") == "fail")
+    warning_count = sum(1 for item in checks if item.get("status") == "warn")
     hermes_adapter_issues = [
         item
         for item in checks
@@ -2790,6 +2794,7 @@ def verify_harness_payload(target: Path, *, harness: str) -> dict[str, Any]:
         },
         "checks": checks,
         "issue_count": issue_count,
+        "warning_count": warning_count,
         "ready": issue_count == 0,
         "next_command": next_command,
         "local_only_notes": [
@@ -3096,14 +3101,17 @@ def quickstart(
                 )
                 continue
             verify_rc, verify_payload = _capture_json_call(verify_harness, target=target, harness=harness)
-            steps.append(
-                {
-                    "id": f"verify-{harness}",
-                    "status": "ok" if verify_rc == 0 else "warn",
-                    "return_code": verify_rc,
-                    "payload": verify_payload,
-                }
-            )
+            step = {
+                "id": f"verify-{harness}",
+                "status": "ok" if verify_rc == 0 else "warn",
+                "return_code": verify_rc,
+                "payload": verify_payload,
+            }
+            advisories = int(verify_payload.get("warning_count") or 0) if isinstance(verify_payload, dict) else 0
+            if verify_rc == 0 and advisories:
+                step["advisory_count"] = advisories
+                step["advisory_next_command"] = f"brigade operator verify-harness --harness {harness} --target ."
+            steps.append(step)
 
     ok = all(step.get("return_code", 0) == 0 for step in steps if step.get("status") not in {"skipped", "planned"})
     if dry_run:
@@ -3198,7 +3206,8 @@ def _print_quickstart(payload: dict[str, Any]) -> None:
     print(f"owner: {payload['owner']}{owner_note}")
     print(f"dry_run: {payload['dry_run']}")
     for step in payload["steps"]:
-        print(f"[{step.get('status')}] {step.get('id')}")
+        advisory = f" ({step['advisory_count']} advisory, see {step['advisory_next_command']})" if step.get("advisory_count") else ""
+        print(f"[{step.get('status')}] {step.get('id')}{advisory}")
     print(f"status: {payload['status']}")
     print("next:")
     for command in payload["next_commands"]:

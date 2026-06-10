@@ -67,6 +67,8 @@ Expected shape:
 status: ok
 ```
 
+A `status: warn` (with exit code 1) means setup completed but a step has a host-specific advisory, most commonly a global gitignore or hooks path interacting with the new files; the step output names the `verify-harness` command that explains it. Warnings inform, they do not block.
+
 Quickstart scopes handoff source coverage to the writer harnesses you selected. A `--harnesses codex` setup watches `.codex/memory-handoffs/` and leaves Claude, OpenCode, Hermes, and OpenClaw paths quiet until you add them.
 
 ## 5. Check Health
@@ -112,7 +114,7 @@ Usually safe to commit after review:
 - `MEMORY.md` and reviewed memory cards if this repo owns memory
 - `rules/`
 - `tools/`
-- `hooks/` (the pre-push content-guard hook; activate it with `git config core.hooksPath hooks`)
+- `hooks/` (the pre-push content-guard hook; activate it with `git config core.hooksPath hooks`, but skip that if a global `core.hooksPath` already runs content-guard, since the repo setting would override it)
 - public docs
 
 Inbox folders stay local except each inbox's `TEMPLATE.md`, which is deliberately un-ignored so the handoff format travels with the repo. A `?? .codex/` in `git status` is just that template.
