@@ -31,8 +31,20 @@ $ brigade init --target ~/agent-kitchen
 Which harnesses do you use? (type numbers separated by space/comma to toggle, enter to confirm)
   [x] 1. Claude Code
   [ ] 2. Codex
-  [ ] 3. OpenClaw
-  [ ] 4. Hermes (experimental)
+  [ ] 3. OpenCode
+  [ ] 4. Antigravity
+  [ ] 5. Pi
+  [ ] 6. Cursor
+  [ ] 7. Aider
+  [ ] 8. Goose
+  [ ] 9. Continue
+  [ ] 10. GitHub Copilot CLI
+  [ ] 11. Qwen Code
+  [ ] 12. Kimi Code
+  [ ] 13. AdaL
+  [ ] 14. OpenHands
+  [ ] 15. OpenClaw
+  [ ] 16. Hermes (experimental)
 
 Depth? (type a number, enter for default)
   * 1. repo       (handoff flow + publish guard)
@@ -103,6 +115,6 @@ See the [Solo Cookbook](https://github.com/escoffier-labs/solos-cookbook) for th
 - Read [the cookbook](https://github.com/escoffier-labs/solos-cookbook) for the deep version of every concept here.
 - Customize `USER.md` and `TOOLS.md` with your real preferences and runbooks (kept private; do not commit personal details).
 - Wire the ingester on a cron or a manual end-of-day workflow.
-- Add a memory-care staleness scan when your card set starts to matter. See `memory/cards/memory-care-staleness.md`.
-- If you use TokenJuice, wire Claude Code and Codex hooks deliberately and tell agents what the wrapper means. See `memory/cards/tokenjuice-output-compaction.md`.
+- Add a memory-care staleness scan when your card set starts to matter. See [docs/memory-care.md](docs/memory-care.md).
+- If you use TokenJuice, wire Claude Code and Codex hooks deliberately and tell agents what the wrapper means. See the tokens station in [docs/technical-guide.md](docs/technical-guide.md#managed-stations).
 - Run `brigade work bootstrap` inside active repos when you want the dogfood-backed daily work loop, scanner inbox, and local evidence receipts.
