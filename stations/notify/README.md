@@ -1,5 +1,12 @@
 # agent-notify
 
+<p>
+  <a href="https://github.com/escoffier-labs/agent-notify/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/escoffier-labs/agent-notify/ci.yml?branch=main&style=for-the-badge&label=ci" alt="CI status"></a>
+  <a href="https://github.com/escoffier-labs/agent-notify/releases"><img src="https://img.shields.io/github/v/release/escoffier-labs/agent-notify?style=for-the-badge&label=release" alt="Latest release"></a>
+  <img src="https://img.shields.io/badge/go-1.22%2B-00ADD8?style=for-the-badge&logo=go&logoColor=white" alt="Go 1.22+">
+  <img src="https://img.shields.io/badge/license-MIT-green?style=for-the-badge" alt="MIT license">
+</p>
+
 A privacy-first notification dispatcher for AI coding agents and any other host process. Sends to Discord, Telegram, and Signal - no telemetry, no third-party push infrastructure, no Anthropic / OpenAI involvement.
 
 Built for engineers running an always-on agent stack who want push notifications when the agent finishes or needs input, without routing real-time session activity through a vendor's notification service.
@@ -18,13 +25,26 @@ If you set `DISABLE_TELEMETRY=1` to keep your agent harness from phoning home, y
 
 ## Install
 
+Install the latest tagged release with `go install`:
+
 ```bash
-git clone https://github.com/solomonneas/agent-notify.git
+go install github.com/escoffier-labs/agent-notify/cmd/agent-notify@latest
+```
+
+Or build from source:
+
+```bash
+git clone https://github.com/escoffier-labs/agent-notify.git
 cd agent-notify
 make install   # builds and copies to ~/bin/agent-notify
 ```
 
-Or download a prebuilt binary from the releases page (when available) and drop it in `~/bin/` or `/usr/local/bin/`.
+Prebuilt binaries (linux, macOS, windows for amd64 and arm64) plus a `checksums.txt` are attached to each [release](https://github.com/escoffier-labs/agent-notify/releases). Download the archive for your platform, verify the checksum, extract, and drop the binary in `~/bin/` or `/usr/local/bin/`:
+
+```bash
+tar -xzf agent-notify_*_linux_amd64.tar.gz
+install -m 0755 agent-notify_*_linux_amd64/agent-notify ~/bin/agent-notify
+```
 
 Confirm the installed binary:
 
