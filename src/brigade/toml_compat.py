@@ -200,3 +200,12 @@ def _split_top_level(value: str) -> list[str]:
             start = index + 1
     parts.append(value[start:])
     return parts
+
+
+def format_toml_value(value: object) -> str:
+    """Render a scalar as a single-line TOML value."""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        return f"{value:g}"
+    return repr(str(value))

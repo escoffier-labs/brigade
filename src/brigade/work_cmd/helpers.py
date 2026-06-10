@@ -9,7 +9,7 @@ import subprocess
 from datetime import datetime, time, timezone
 from pathlib import Path
 from typing import Any
-from .. import dogfood_cmd
+from .. import dogfood_cmd, localio
 from ..selection import Selection
 from . import constants
 
@@ -191,17 +191,8 @@ def _session_sort_key(item: tuple[Path, dict[str, Any]]) -> str:
     return str(payload.get("ended_at") or payload.get("started_at") or path.name)
 
 
-def _parse_iso_datetime(value: object) -> datetime | None:
-    if not isinstance(value, str) or not value:
-        return None
-    normalized = value.replace("Z", "+00:00")
-    try:
-        parsed = datetime.fromisoformat(normalized)
-    except ValueError:
-        return None
-    if parsed.tzinfo is None:
-        return parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc)
+# Facade contract: re-exported by work_cmd for cross-station callers.
+_parse_iso_datetime = localio.parse_iso_datetime
 
 
 def _parse_since(value: str | None) -> datetime | None:

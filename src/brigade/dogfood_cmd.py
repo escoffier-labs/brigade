@@ -6,13 +6,12 @@ import ast
 import json
 import re
 import shutil
-import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import aboyeur
+from . import aboyeur, localio, toml_compat
 from . import agents
 from . import runs_cmd
 from .roster import Agent, Roster
@@ -65,14 +64,6 @@ def _dogfood_roster(timeout_seconds: float, agent_cli: str = DEFAULT_AGENT_CLI) 
         allow_models=(agent_cli,),
         timeout_seconds=timeout_seconds,
     )
-
-
-def _format_toml_value(value: object) -> str:
-    if isinstance(value, bool):
-        return "true" if value else "false"
-    if isinstance(value, (int, float)):
-        return f"{value:g}"
-    return repr(str(value))
 
 
 def _parse_toml_value(raw: str) -> object:
@@ -164,27 +155,6 @@ def load_config(target: Path) -> DogfoodConfig | None:
         ),
         timeout_seconds=_as_positive_float(data.get("timeout_seconds", DEFAULT_TIMEOUT_SECONDS), "timeout_seconds"),
     )
-
-
-def _check_git_ignored(repo: Path, path: Path) -> str:
-    try:
-        relative = path.expanduser().resolve().relative_to(repo)
-    except ValueError:
-        return "outside-target"
-    try:
-        result = subprocess.run(
-            ["git", "-C", str(repo), "check-ignore", "-q", str(relative)],
-            check=False,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-    except OSError:
-        return "unknown"
-    if result.returncode == 0:
-        return "yes"
-    if result.returncode == 1:
-        return "no"
-    return "unknown"
 
 
 def _latest_run(runs_dir: Path) -> tuple[Path, dict[str, Any]] | None:
@@ -412,8 +382,8 @@ def status(*, target: Path) -> int:
     _setting_line("timeout_seconds", f"{timeout:g}")
     _setting_line(agent_command, agent_path or "missing")
     _setting_line("brigade", brigade_path or "missing")
-    _setting_line("config_ignored", _check_git_ignored(effective_target, path))
-    _setting_line("artifacts_ignored", _check_git_ignored(effective_target, artifacts_dir))
+    _setting_line("config_ignored", localio.check_git_ignored(effective_target, path))
+    _setting_line("artifacts_ignored", localio.check_git_ignored(effective_target, artifacts_dir))
     latest = _latest_run(artifacts_dir)
     if latest is not None:
         latest_path, latest_meta = latest
@@ -484,7 +454,7 @@ def init(
         "native_read_only_sandbox": native_read_only_sandbox,
         "timeout_seconds": timeout_seconds,
     }
-    body = "\n".join(f"{key} = {_format_toml_value(value)}" for key, value in payload.items()) + "\n"
+    body = "\n".join(f"{key} = {toml_compat.format_toml_value(value)}" for key, value in payload.items()) + "\n"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(body)
     print(f"wrote {path}")

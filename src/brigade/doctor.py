@@ -15,6 +15,7 @@ from .budgets import (
     MEMORY_CARD_BUDGET_BYTES,
     MEMORY_CARE_SCAN_STALE_DAYS,
 )
+from . import localio
 from .selection import WRITER_INBOXES
 from .station import DoctorContext
 
@@ -99,7 +100,7 @@ def evidence_station_checks(ctx: DoctorContext) -> List[CheckResult]:
 
 
 def security_station_checks(ctx: DoctorContext) -> List[CheckResult]:
-    from . import dogfood_cmd, security_cmd
+    from . import security_cmd
 
     results: List[CheckResult] = [(OK, "security: built-in scanner", "available")]
     config = security_cmd.config_path(ctx.target)
@@ -158,7 +159,7 @@ def security_station_checks(ctx: DoctorContext) -> List[CheckResult]:
             )
         )
 
-    ignored = dogfood_cmd._check_git_ignored(ctx.target, artifacts_dir)
+    ignored = localio.check_git_ignored(ctx.target, artifacts_dir)
     level = OK if ignored in {"yes", "outside-target"} else WARN
     results.append((level, "security: evidence ignored", ignored))
     return results
@@ -626,7 +627,6 @@ def _format_schedule(schedule) -> str:
 
 
 def _check_hermes(target: Path) -> List[CheckResult]:
-    from . import dogfood_cmd
     from .hermes_adapter import inspect_hermes_adapter
 
     results: List[CheckResult] = []
@@ -636,7 +636,7 @@ def _check_hermes(target: Path) -> List[CheckResult]:
 
     inbox_path = target / inbox_rel
     gitignore_probe = inbox_path / ".brigade-ignore-probe"
-    gitignored = dogfood_cmd._check_git_ignored(target, gitignore_probe)
+    gitignored = localio.check_git_ignored(target, gitignore_probe)
     if gitignored == "no":
         results.append((FAIL, "hermes: handoff inbox ignored", f"{inbox_rel} is not ignored by git"))
     elif gitignored in {"yes", "unknown"}:

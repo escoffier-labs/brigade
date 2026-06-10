@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -76,3 +77,39 @@ def slugify(value: str, *, fallback: str) -> str:
     """Lowercase value, collapse runs outside [a-z0-9._-] to hyphens, or fallback."""
     slug = re.sub(r"[^a-z0-9._-]+", "-", value.strip().lower()).strip("-")
     return slug or fallback
+
+
+def check_git_ignored(repo: Path, path: Path) -> str:
+    """Report whether path is git-ignored inside repo: yes/no/outside-target/unknown."""
+    try:
+        relative = path.expanduser().resolve().relative_to(repo)
+    except ValueError:
+        return "outside-target"
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(repo), "check-ignore", "-q", str(relative)],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except OSError:
+        return "unknown"
+    if result.returncode == 0:
+        return "yes"
+    if result.returncode == 1:
+        return "no"
+    return "unknown"
+
+
+def parse_iso_datetime(value: object) -> datetime | None:
+    """Parse an ISO-8601 string (Z accepted) into an aware UTC datetime, or None."""
+    if not isinstance(value, str) or not value:
+        return None
+    normalized = value.replace("Z", "+00:00")
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)

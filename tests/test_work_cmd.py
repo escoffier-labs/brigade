@@ -10,6 +10,7 @@ from brigade import cli
 from brigade import chat_cmd
 from brigade import center_cmd
 from brigade import dogfood_cmd
+from brigade import localio
 from brigade import release_cmd
 from brigade import repos_cmd
 from brigade import roadmap_cmd
@@ -98,7 +99,7 @@ def test_work_doctor_reports_ready_repo(tmp_path, monkeypatch, capsys):
     _write_json(run_dir / "run.json", {"started_at": "2026-05-26T12:00:00Z", "status": "ok", "task": "review"})
     (run_dir / "final.txt").write_text("Done.\n\nNext step: Build doctor.\n")
     monkeypatch.setattr(work_cmd.helpers.shutil, "which", lambda name: f"/usr/bin/{name}" if name == "codex" else None)
-    monkeypatch.setattr(dogfood_cmd, "_check_git_ignored", lambda repo, path: "yes")
+    monkeypatch.setattr(localio, "check_git_ignored", lambda repo, path: "yes")
 
     assert work_cmd.doctor(target=tmp_path) == 0
     out = capsys.readouterr().out
@@ -117,7 +118,7 @@ def test_work_doctor_warns_for_task_acceptance_gh_and_stale_session(tmp_path, mo
     _init_git_repo(tmp_path)
     dogfood_cmd.init(target=tmp_path)
     monkeypatch.setattr(work_cmd.helpers.shutil, "which", lambda name: "/usr/bin/codex" if name == "codex" else None)
-    monkeypatch.setattr(dogfood_cmd, "_check_git_ignored", lambda repo, path: "yes")
+    monkeypatch.setattr(localio, "check_git_ignored", lambda repo, path: "yes")
     monkeypatch.setattr(
         work_cmd.helpers,
         "_now",
@@ -169,7 +170,7 @@ def test_work_doctor_reports_workflow_rule_template_visibility(tmp_path, monkeyp
     _init_git_repo(tmp_path)
     dogfood_cmd.init(target=tmp_path)
     monkeypatch.setattr(work_cmd.helpers.shutil, "which", lambda name: "/usr/bin/codex" if name == "codex" else None)
-    monkeypatch.setattr(dogfood_cmd, "_check_git_ignored", lambda repo, path: "yes")
+    monkeypatch.setattr(localio, "check_git_ignored", lambda repo, path: "yes")
 
     assert work_cmd.doctor(target=tmp_path) == 0
     out = capsys.readouterr().out
@@ -195,7 +196,7 @@ def test_work_doctor_warns_when_issue_backed_task_is_closed(tmp_path, monkeypatc
         "which",
         lambda name: f"/usr/bin/{name}" if name in {"codex", "gh"} else None,
     )
-    monkeypatch.setattr(dogfood_cmd, "_check_git_ignored", lambda repo, path: "yes")
+    monkeypatch.setattr(localio, "check_git_ignored", lambda repo, path: "yes")
     (tmp_path / ".brigade" / "work").mkdir(parents=True)
     _write_json(
         tmp_path / ".brigade" / "work" / "tasks.json",
@@ -495,7 +496,7 @@ def test_work_doctor_warns_for_scanner_queue_health(tmp_path, monkeypatch, capsy
     _init_git_repo(tmp_path)
     dogfood_cmd.init(target=tmp_path)
     monkeypatch.setattr(work_cmd.helpers.shutil, "which", lambda name: "/usr/bin/codex" if name == "codex" else None)
-    monkeypatch.setattr(dogfood_cmd, "_check_git_ignored", lambda repo, path: "yes")
+    monkeypatch.setattr(localio, "check_git_ignored", lambda repo, path: "yes")
     monkeypatch.setattr(
         work_cmd.helpers,
         "_now",
@@ -539,7 +540,7 @@ def test_work_doctor_fails_invalid_security_config(tmp_path, monkeypatch, capsys
     security_config = tmp_path / ".brigade" / "security.toml"
     security_config.write_text('policy = "not-real"\n')
     monkeypatch.setattr(work_cmd.helpers.shutil, "which", lambda name: f"/usr/bin/{name}" if name == "codex" else None)
-    monkeypatch.setattr(dogfood_cmd, "_check_git_ignored", lambda repo, path: "yes")
+    monkeypatch.setattr(localio, "check_git_ignored", lambda repo, path: "yes")
 
     assert work_cmd.doctor(target=tmp_path) == 1
     out = capsys.readouterr().out
@@ -568,7 +569,7 @@ def test_work_doctor_warns_on_stale_security_suppressions(tmp_path, monkeypatch,
         )
     )
     monkeypatch.setattr(work_cmd.helpers.shutil, "which", lambda name: f"/usr/bin/{name}" if name == "codex" else None)
-    monkeypatch.setattr(dogfood_cmd, "_check_git_ignored", lambda repo, path: "yes")
+    monkeypatch.setattr(localio, "check_git_ignored", lambda repo, path: "yes")
 
     assert work_cmd.doctor(target=tmp_path) == 0
     out = capsys.readouterr().out
@@ -1433,7 +1434,7 @@ def test_work_doctor_warns_for_plan_coverage(tmp_path, monkeypatch, capsys):
     _init_git_repo(tmp_path)
     dogfood_cmd.init(target=tmp_path)
     monkeypatch.setattr(work_cmd.helpers.shutil, "which", lambda name: "/usr/bin/codex" if name == "codex" else None)
-    monkeypatch.setattr(dogfood_cmd, "_check_git_ignored", lambda repo, path: "yes")
+    monkeypatch.setattr(localio, "check_git_ignored", lambda repo, path: "yes")
     task_id = _plan_task_id(tmp_path, capsys)
     capsys.readouterr()
 
@@ -2540,7 +2541,7 @@ def test_work_inbox_groups_scanner_imports_and_reports_candidate(tmp_path, monke
 
 def test_work_scanners_init_list_show_plan_and_json(tmp_path, monkeypatch, capsys):
     _init_git_repo(tmp_path)
-    monkeypatch.setattr(dogfood_cmd, "_check_git_ignored", lambda repo, path: "yes")
+    monkeypatch.setattr(localio, "check_git_ignored", lambda repo, path: "yes")
 
     assert work_cmd.scanners_init(target=tmp_path) == 0
     out = capsys.readouterr().out
@@ -2581,7 +2582,7 @@ def test_work_scanners_init_list_show_plan_and_json(tmp_path, monkeypatch, capsy
 
 def test_tools_init_list_show_search_doctor_and_json(tmp_path, monkeypatch, capsys):
     _init_git_repo(tmp_path)
-    monkeypatch.setattr(dogfood_cmd, "_check_git_ignored", lambda repo, path: "yes")
+    monkeypatch.setattr(localio, "check_git_ignored", lambda repo, path: "yes")
 
     assert tools_cmd.init(target=tmp_path) == 0
     out = capsys.readouterr().out
@@ -2635,7 +2636,7 @@ def test_tools_init_list_show_search_doctor_and_json(tmp_path, monkeypatch, caps
 
 def test_tools_defaults_merges_builtins_and_preserves_custom_tools(tmp_path, monkeypatch, capsys):
     _init_git_repo(tmp_path)
-    monkeypatch.setattr(dogfood_cmd, "_check_git_ignored", lambda repo, path: "yes")
+    monkeypatch.setattr(localio, "check_git_ignored", lambda repo, path: "yes")
     tools_dir = tmp_path / "tools"
     tools_dir.mkdir()
     for name in ("simplify", "superpowers", "frontend", "antislop", "custom"):
@@ -2926,7 +2927,7 @@ def test_work_brief_and_doctor_include_tool_catalog_health(tmp_path, monkeypatch
     _init_git_repo(tmp_path)
     dogfood_cmd.init(target=tmp_path)
     monkeypatch.setattr(work_cmd.helpers.shutil, "which", lambda name: f"/usr/bin/{name}")
-    monkeypatch.setattr(dogfood_cmd, "_check_git_ignored", lambda repo, path: "yes")
+    monkeypatch.setattr(localio, "check_git_ignored", lambda repo, path: "yes")
     source = tmp_path / "tools" / "portable.md"
     source.parent.mkdir()
     source.write_text("Portable source.\n")
@@ -2961,7 +2962,7 @@ def test_work_brief_and_doctor_include_roadmap_and_repo_fleet_health(tmp_path, m
     _init_git_repo(tmp_path)
     dogfood_cmd.init(target=tmp_path)
     monkeypatch.setattr(work_cmd.helpers.shutil, "which", lambda name: f"/usr/bin/{name}")
-    monkeypatch.setattr(dogfood_cmd, "_check_git_ignored", lambda repo, path: "yes")
+    monkeypatch.setattr(localio, "check_git_ignored", lambda repo, path: "yes")
     monkeypatch.setattr(
         roadmap_cmd,
         "health",
@@ -3637,7 +3638,7 @@ def test_tools_import_issues_and_work_brief_surface_contract_health(tmp_path, mo
     dogfood_cmd.init(target=tmp_path)
     capsys.readouterr()
     monkeypatch.setattr(work_cmd.helpers.shutil, "which", lambda name: f"/usr/bin/{name}")
-    monkeypatch.setattr(dogfood_cmd, "_check_git_ignored", lambda repo, path: "yes")
+    monkeypatch.setattr(localio, "check_git_ignored", lambda repo, path: "yes")
     config = tmp_path / ".brigade" / "tools.toml"
     config.write_text(
         """
@@ -3826,7 +3827,7 @@ def test_tools_call_queue_health_brief_and_import_issues(tmp_path, monkeypatch, 
     dogfood_cmd.init(target=tmp_path)
     capsys.readouterr()
     monkeypatch.setattr(work_cmd.helpers.shutil, "which", lambda name: f"/usr/bin/{name}")
-    monkeypatch.setattr(dogfood_cmd, "_check_git_ignored", lambda repo, path: "yes")
+    monkeypatch.setattr(localio, "check_git_ignored", lambda repo, path: "yes")
     tools_dir = tmp_path / "tools"
     tools_dir.mkdir()
     schema = tools_dir / "input.schema.json"
@@ -4093,7 +4094,7 @@ def test_tools_call_run_next_failure_timeout_health_and_imports(tmp_path, monkey
     dogfood_cmd.init(target=tmp_path)
     capsys.readouterr()
     monkeypatch.setattr(work_cmd.helpers.shutil, "which", lambda name: f"/usr/bin/{name}")
-    monkeypatch.setattr(dogfood_cmd, "_check_git_ignored", lambda repo, path: "yes")
+    monkeypatch.setattr(localio, "check_git_ignored", lambda repo, path: "yes")
     _write_script_tool_config(
         tmp_path,
         script='import sys\nprint("api_token=secret-value")\nsys.exit(7)\n',
@@ -4274,7 +4275,7 @@ def test_tools_run_history_integrates_with_brief_and_imports(tmp_path, monkeypat
     dogfood_cmd.init(target=tmp_path)
     capsys.readouterr()
     monkeypatch.setattr(work_cmd.helpers.shutil, "which", lambda name: f"/usr/bin/{name}")
-    monkeypatch.setattr(dogfood_cmd, "_check_git_ignored", lambda repo, path: "yes")
+    monkeypatch.setattr(localio, "check_git_ignored", lambda repo, path: "yes")
     _write_script_tool_config(tmp_path, script="import sys\nsys.exit(6)\n")
     failed = _queue_and_approve_runner(tmp_path, capsys)
 
@@ -4472,7 +4473,7 @@ def test_tools_checkpoint_resume_failure_health_brief_and_imports(tmp_path, monk
     dogfood_cmd.init(target=tmp_path)
     capsys.readouterr()
     monkeypatch.setattr(work_cmd.helpers.shutil, "which", lambda name: f"/usr/bin/{name}")
-    monkeypatch.setattr(dogfood_cmd, "_check_git_ignored", lambda repo, path: "yes")
+    monkeypatch.setattr(localio, "check_git_ignored", lambda repo, path: "yes")
     _, checkpoint_id, _ = _create_waiting_checkpoint(tmp_path, capsys, script=_checkpoint_script(fail_on_resume=True))
     assert (
         tools_cmd.checkpoint_approve(target=tmp_path, checkpoint_id=checkpoint_id, choice="continue", json_output=True)
@@ -4769,7 +4770,7 @@ def test_tools_call_run_mcp_health_brief_and_imports(tmp_path, monkeypatch, caps
     dogfood_cmd.init(target=tmp_path)
     capsys.readouterr()
     monkeypatch.setattr(work_cmd.helpers.shutil, "which", lambda name: f"/usr/bin/{name}")
-    monkeypatch.setattr(dogfood_cmd, "_check_git_ignored", lambda repo, path: "yes")
+    monkeypatch.setattr(localio, "check_git_ignored", lambda repo, path: "yes")
     _write_mcp_tool_config(tmp_path, server_script=_fake_mcp_server_script(malformed=True))
     _write_runtime_config(tmp_path)
     _write_policy_config(tmp_path, allowed_families=["mcp"], allowed_runtimes=["helper"])
@@ -4946,7 +4947,7 @@ def test_tools_runtime_health_integrates_with_doctor_brief_and_imports(tmp_path,
     dogfood_cmd.init(target=tmp_path)
     capsys.readouterr()
     monkeypatch.setattr(work_cmd.helpers.shutil, "which", lambda name: f"/usr/bin/{name}")
-    monkeypatch.setattr(dogfood_cmd, "_check_git_ignored", lambda repo, path: "yes")
+    monkeypatch.setattr(localio, "check_git_ignored", lambda repo, path: "yes")
     _write_script_tool_config(tmp_path, script='print("ok")\n')
     _write_runtime_config(tmp_path, runtime_id="other")
     config = tmp_path / ".brigade" / "tools.toml"
@@ -5104,7 +5105,7 @@ def test_tools_policy_health_integrates_with_doctor_brief_and_imports(tmp_path, 
     dogfood_cmd.init(target=tmp_path)
     capsys.readouterr()
     monkeypatch.setattr(work_cmd.helpers.shutil, "which", lambda name: f"/usr/bin/{name}")
-    monkeypatch.setattr(dogfood_cmd, "_check_git_ignored", lambda repo, path: "yes")
+    monkeypatch.setattr(localio, "check_git_ignored", lambda repo, path: "yes")
     _write_script_tool_config(tmp_path, script='print("ok")\n')
     _write_policy_config(tmp_path, denied_effects=["local-read"])
 
@@ -5124,7 +5125,7 @@ def test_tools_policy_health_integrates_with_doctor_brief_and_imports(tmp_path, 
 
 def test_work_backup_init_status_doctor_and_json(tmp_path, monkeypatch, capsys):
     _init_git_repo(tmp_path)
-    monkeypatch.setattr(dogfood_cmd, "_check_git_ignored", lambda repo, path: "yes")
+    monkeypatch.setattr(localio, "check_git_ignored", lambda repo, path: "yes")
     now = datetime(2026, 5, 30, 12, 0, 0, tzinfo=timezone.utc)
     monkeypatch.setattr(work_cmd.helpers, "_now", lambda: now)
 
@@ -5175,7 +5176,7 @@ def test_work_backup_init_status_doctor_and_json(tmp_path, monkeypatch, capsys):
 
 def test_work_backup_contract_reports_summary_producer_shape(tmp_path, monkeypatch, capsys):
     _init_git_repo(tmp_path)
-    monkeypatch.setattr(dogfood_cmd, "_check_git_ignored", lambda repo, path: "yes")
+    monkeypatch.setattr(localio, "check_git_ignored", lambda repo, path: "yes")
 
     assert work_cmd.backup_contract(target=tmp_path, json_output=True) == 0
     payload = json.loads(capsys.readouterr().out)
@@ -5493,7 +5494,7 @@ def test_work_brief_and_doctor_include_backup_health(tmp_path, monkeypatch, caps
     _init_git_repo(tmp_path)
     dogfood_cmd.init(target=tmp_path)
     monkeypatch.setattr(work_cmd.helpers.shutil, "which", lambda name: f"/usr/bin/{name}")
-    monkeypatch.setattr(dogfood_cmd, "_check_git_ignored", lambda repo, path: "yes")
+    monkeypatch.setattr(localio, "check_git_ignored", lambda repo, path: "yes")
     monkeypatch.setattr(
         work_cmd.helpers,
         "_now",
@@ -6723,7 +6724,7 @@ def test_work_doctor_warns_on_unclosed_review_run(tmp_path, monkeypatch, capsys)
     _init_git_repo(tmp_path)
     dogfood_cmd.init(target=tmp_path)
     monkeypatch.setattr(work_cmd.helpers.shutil, "which", lambda name: f"/usr/bin/{name}" if name == "codex" else None)
-    monkeypatch.setattr(dogfood_cmd, "_check_git_ignored", lambda repo, path: "yes")
+    monkeypatch.setattr(localio, "check_git_ignored", lambda repo, path: "yes")
     run_dir = tmp_path / ".brigade" / "reviews" / "runs" / "run-unclosed"
     run_dir.mkdir(parents=True)
     _write_json(
@@ -7257,7 +7258,7 @@ def test_work_brief_and_doctor_include_scanner_health(tmp_path, monkeypatch, cap
     _init_git_repo(tmp_path)
     dogfood_cmd.init(target=tmp_path)
     monkeypatch.setattr(work_cmd.helpers.shutil, "which", lambda name: f"/usr/bin/{name}")
-    monkeypatch.setattr(dogfood_cmd, "_check_git_ignored", lambda repo, path: "yes")
+    monkeypatch.setattr(localio, "check_git_ignored", lambda repo, path: "yes")
     assert work_cmd.scanners_init(target=tmp_path, update_gitignore=False) == 0
     capsys.readouterr()
 
@@ -7278,7 +7279,7 @@ def test_work_brief_and_doctor_include_security_health(tmp_path, monkeypatch, ca
     _init_git_repo(tmp_path)
     dogfood_cmd.init(target=tmp_path)
     monkeypatch.setattr(work_cmd.helpers.shutil, "which", lambda name: f"/usr/bin/{name}")
-    monkeypatch.setattr(dogfood_cmd, "_check_git_ignored", lambda repo, path: "yes")
+    monkeypatch.setattr(localio, "check_git_ignored", lambda repo, path: "yes")
     assert security_cmd.init(target=tmp_path) == 0
     (tmp_path / ".env").write_text("SERVICE_TOKEN=abcd1234abcd1234abcd1234\n")
     assert security_cmd.scan(target=tmp_path, fail_on="none") == 0
@@ -7301,7 +7302,7 @@ def test_work_brief_and_doctor_include_memory_care_health(tmp_path, monkeypatch,
     _init_git_repo(tmp_path)
     dogfood_cmd.init(target=tmp_path)
     monkeypatch.setattr(work_cmd.helpers.shutil, "which", lambda name: f"/usr/bin/{name}")
-    monkeypatch.setattr(dogfood_cmd, "_check_git_ignored", lambda repo, path: "yes")
+    monkeypatch.setattr(localio, "check_git_ignored", lambda repo, path: "yes")
     monkeypatch.setattr(memory_cmd, "_today", lambda: date(2026, 5, 28))
     assert memory_cmd.init(target=tmp_path, update_gitignore=False) == 0
     cards = tmp_path / "memory" / "cards"

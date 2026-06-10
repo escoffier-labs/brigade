@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
-from .. import dogfood_cmd
+from .. import dogfood_cmd, localio
 from ..install import apply_gitignore
 from . import constants, helpers, ledger as ledger_mod, config as config_mod, services as services_mod
 from . import scanners as scanners_mod, reviews as reviews_mod
@@ -2148,11 +2148,11 @@ def bootstrap(
     else:
         _print_bootstrap_line(constants.OK, "codex", codex_path)
 
-    config_ignored = dogfood_cmd._check_git_ignored(effective_target, config)
-    artifacts_ignored = dogfood_cmd._check_git_ignored(effective_target, effective_artifacts_dir)
-    work_ignored = dogfood_cmd._check_git_ignored(effective_target, work_root)
+    config_ignored = localio.check_git_ignored(effective_target, config)
+    artifacts_ignored = localio.check_git_ignored(effective_target, effective_artifacts_dir)
+    work_ignored = localio.check_git_ignored(effective_target, work_root)
     handoff_ignored = (
-        dogfood_cmd._check_git_ignored(effective_target, effective_handoff_inbox) if effective_handoff else "disabled"
+        localio.check_git_ignored(effective_target, effective_handoff_inbox) if effective_handoff else "disabled"
     )
     ignore_values = {
         "config_ignored": config_ignored,
@@ -2754,25 +2754,21 @@ def doctor(*, target: Path) -> int:
         constants.OK if handoff_inbox.parent.exists() else constants.WARN, "handoff_inbox", handoff_inbox
     )
 
-    config_ignored = dogfood_cmd._check_git_ignored(effective_target, config)
+    config_ignored = localio.check_git_ignored(effective_target, config)
     helpers._doctor_line(_doctor_ignore_level(config_ignored), "config_ignored", config_ignored)
-    artifacts_ignored = dogfood_cmd._check_git_ignored(effective_target, artifacts_dir)
+    artifacts_ignored = localio.check_git_ignored(effective_target, artifacts_dir)
     helpers._doctor_line(_doctor_ignore_level(artifacts_ignored), "artifacts_ignored", artifacts_ignored)
-    security_ignored = dogfood_cmd._check_git_ignored(effective_target, security_artifacts)
+    security_ignored = localio.check_git_ignored(effective_target, security_artifacts)
     helpers._doctor_line(_doctor_ignore_level(security_ignored), "security_ignored", security_ignored)
-    backup_config_ignored = dogfood_cmd._check_git_ignored(
-        effective_target, helpers._backup_config_path(effective_target)
-    )
+    backup_config_ignored = localio.check_git_ignored(effective_target, helpers._backup_config_path(effective_target))
     helpers._doctor_line(_doctor_ignore_level(backup_config_ignored), "backup_config_ignored", backup_config_ignored)
-    scanner_config_ignored = dogfood_cmd._check_git_ignored(
-        effective_target, helpers._scanner_config_path(effective_target)
-    )
+    scanner_config_ignored = localio.check_git_ignored(effective_target, helpers._scanner_config_path(effective_target))
     helpers._doctor_line(_doctor_ignore_level(scanner_config_ignored), "scanner_config_ignored", scanner_config_ignored)
-    tools_config_ignored = dogfood_cmd._check_git_ignored(effective_target, tools_cmd.config_path(effective_target))
+    tools_config_ignored = localio.check_git_ignored(effective_target, tools_cmd.config_path(effective_target))
     helpers._doctor_line(_doctor_ignore_level(tools_config_ignored), "tools_config_ignored", tools_config_ignored)
-    work_ignored = dogfood_cmd._check_git_ignored(effective_target, work_root)
+    work_ignored = localio.check_git_ignored(effective_target, work_root)
     helpers._doctor_line(_doctor_ignore_level(work_ignored), "work_ignored", work_ignored)
-    handoff_ignored = dogfood_cmd._check_git_ignored(effective_target, handoff_inbox)
+    handoff_ignored = localio.check_git_ignored(effective_target, handoff_inbox)
     helpers._doctor_line(_doctor_ignore_level(handoff_ignored), "handoff_ignored", handoff_ignored)
 
     for status, name, detail in handoff_cmd.doctor_checks(effective_target):

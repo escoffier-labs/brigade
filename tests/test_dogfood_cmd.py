@@ -3,6 +3,7 @@ import json
 from brigade import aboyeur
 from brigade import cli
 from brigade import dogfood_cmd
+from brigade import localio
 from brigade import runs_cmd
 
 
@@ -267,7 +268,7 @@ def test_dogfood_status_reports_config_and_latest_run(tmp_path, monkeypatch, cap
     (run_dir / "final.txt").write_text("Done.\n\nSmallest follow-up slice: Ship the status command.\n")
 
     monkeypatch.setattr(dogfood_cmd.shutil, "which", lambda name: f"/usr/bin/{name}")
-    monkeypatch.setattr(dogfood_cmd, "_check_git_ignored", lambda repo, path: "yes")
+    monkeypatch.setattr(localio, "check_git_ignored", lambda repo, path: "yes")
 
     assert dogfood_cmd.status(target=tmp_path) == 0
     captured = capsys.readouterr()
@@ -286,7 +287,7 @@ def test_dogfood_status_reports_config_and_latest_run(tmp_path, monkeypatch, cap
 
 def test_dogfood_status_reports_missing_codex(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(dogfood_cmd.shutil, "which", lambda name: None)
-    monkeypatch.setattr(dogfood_cmd, "_check_git_ignored", lambda repo, path: "no")
+    monkeypatch.setattr(localio, "check_git_ignored", lambda repo, path: "no")
 
     assert dogfood_cmd.status(target=tmp_path) == 1
     captured = capsys.readouterr()

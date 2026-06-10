@@ -9,7 +9,6 @@ import shutil
 from datetime import datetime
 from pathlib import Path
 from typing import Any
-from .. import dogfood_cmd
 from .. import toml_compat as tomllib
 from . import constants, helpers, ledger as ledger_mod
 
@@ -32,7 +31,7 @@ def _format_backup_toml(destinations: tuple[dict[str, Any], ...] = constants.BAC
             "restore_rehearsal_stale_days",
             "enabled",
         ):
-            lines.append(f"{key} = {dogfood_cmd._format_toml_value(destination[key])}")
+            lines.append(f"{key} = {tomllib.format_toml_value(destination[key])}")
         lines.append("")
     return "\n".join(lines)
 
@@ -545,7 +544,7 @@ def _format_scanner_toml(scanners: tuple[dict[str, Any], ...] = constants.SCANNE
         lines.append("[[scanner]]")
         for key in ("id", "source", "command", "cadence", "enabled", "timeout", "output_path", "conflict_window"):
             value = scanner[key]
-            lines.append(f"{key} = {dogfood_cmd._format_toml_value(value)}")
+            lines.append(f"{key} = {tomllib.format_toml_value(value)}")
         lines.append("")
     return "\n".join(lines)
 
@@ -553,7 +552,7 @@ def _format_scanner_toml(scanners: tuple[dict[str, Any], ...] = constants.SCANNE
 def _format_toml_array(values: object) -> str:
     if not isinstance(values, list):
         return "[]"
-    return "[" + ", ".join(dogfood_cmd._format_toml_value(item) for item in values) + "]"
+    return "[" + ", ".join(tomllib.format_toml_value(item) for item in values) + "]"
 
 
 def _format_review_toml(reviewers: tuple[dict[str, Any], ...] = constants.REVIEW_DEFAULTS) -> str:
@@ -575,7 +574,7 @@ def _format_review_toml(reviewers: tuple[dict[str, Any], ...] = constants.REVIEW
             "findings_path",
             "privacy_mode",
         ):
-            lines.append(f"{key} = {dogfood_cmd._format_toml_value(reviewer[key])}")
+            lines.append(f"{key} = {tomllib.format_toml_value(reviewer[key])}")
         lines.append(f"target_paths = {_format_toml_array(reviewer.get('target_paths'))}")
         lines.append(f"supported_modes = {_format_toml_array(reviewer.get('supported_modes'))}")
         lines.append("")

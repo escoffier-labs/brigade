@@ -14,6 +14,7 @@ from .. import (
     daily_cmd,
     dogfood_cmd,
     handoff_cmd,
+    localio,
     notifications_cmd,
     scrub,
     security_cmd,
@@ -33,7 +34,7 @@ def status_payload(target: Path, *, profile: str = "internal-dogfood") -> dict[s
                 "id": step["id"],
                 "path": str(path),
                 "exists": path.exists(),
-                "gitignored": dogfood_cmd._check_git_ignored(target, path),
+                "gitignored": localio.check_git_ignored(target, path),
             }
         )
     codex_path = shutil.which("codex")
@@ -365,7 +366,7 @@ def verify_harness_payload(target: Path, *, harness: str) -> dict[str, Any]:
         checks.extend(_hermes_adapter_checks(target, inbox_rel))
 
     gitignore_probe = inbox_path / ".brigade-ignore-probe"
-    gitignored = dogfood_cmd._check_git_ignored(target, gitignore_probe)
+    gitignored = localio.check_git_ignored(target, gitignore_probe)
     if gitignored == "no":
         checks.append(
             {"status": "fail", "name": "handoff_inbox_gitignored", "detail": f"{inbox_rel} is not ignored by git"}
@@ -383,7 +384,7 @@ def verify_harness_payload(target: Path, *, harness: str) -> dict[str, Any]:
     # `.claude/` or `.codex/` entry), and that shadowing is otherwise silent.
     template_path = inbox_path / "TEMPLATE.md"
     if template_path.is_file():
-        template_ignored = dogfood_cmd._check_git_ignored(target, template_path)
+        template_ignored = localio.check_git_ignored(target, template_path)
         if template_ignored == "yes":
             inbox_root = inbox_rel.split("/")[0]
             checks.append(

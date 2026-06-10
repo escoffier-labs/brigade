@@ -34,6 +34,7 @@ from . import (
     work_cmd,
 )
 from .localio import (
+    parse_iso_datetime,
     read_json_dict as _read_json,
     read_jsonl_dicts as _read_jsonl,
     utc_now as _now,
@@ -2632,7 +2633,7 @@ def report_review(*, target: Path, report_id: str = "latest", json_output: bool 
 def _receipt_newer_than_report(receipt: dict[str, Any] | None, report_created: datetime | None) -> bool:
     if receipt is None or report_created is None:
         return False
-    stamp = work_cmd._parse_iso_datetime(
+    stamp = parse_iso_datetime(
         receipt.get("completed_at")
         or receipt.get("created_at")
         or receipt.get("started_at")
@@ -2850,7 +2851,7 @@ def report_compare(*, target: Path, report_id: str = "latest", json_output: bool
     ):
         if _receipt_newer_than_report(receipt if isinstance(receipt, dict) else None, report_created):
             issues.append({"status": "warn", "name": name, "detail": str((receipt or {}).get(key))})
-    security_generated = work_cmd._parse_iso_datetime(
+    security_generated = parse_iso_datetime(
         (latest_security or {}).get("generated_at") if isinstance(latest_security, dict) else None
     )
     if report_created and security_generated and security_generated > report_created:

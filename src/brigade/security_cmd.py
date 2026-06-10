@@ -18,6 +18,7 @@ from urllib.parse import urlparse
 from . import work_cmd
 from .selection import WRITER_INBOXES
 from .untrusted import PROMPT_INJECTION_RE, scan_untrusted
+from . import localio
 from .localio import read_json_dict as _read_json, utc_now_iso_z as _utc_iso, write_json as _write_json
 
 SEVERITY_ORDER = {
@@ -610,7 +611,6 @@ def _gitignore_selection(target: Path):
 
 
 def fix(*, target: Path, dry_run: bool = False) -> int:
-    from . import dogfood_cmd
     from .install import apply_gitignore
 
     target = target.expanduser().resolve()
@@ -633,8 +633,8 @@ def fix(*, target: Path, dry_run: bool = False) -> int:
 
     artifacts_root.mkdir(parents=True, exist_ok=True)
     result = apply_gitignore(target, selection)
-    config_ignored = dogfood_cmd._check_git_ignored(target, config_path(target))
-    artifacts_ignored = dogfood_cmd._check_git_ignored(target, artifacts_root)
+    config_ignored = localio.check_git_ignored(target, config_path(target))
+    artifacts_ignored = localio.check_git_ignored(target, artifacts_root)
     print(f"security_artifacts_dir: {artifacts_root}")
     print(f"gitignore: {result}")
     print(f"security_config_ignored: {config_ignored}")
