@@ -43,7 +43,7 @@ def test_work_status_reports_repo_and_dogfood_state(tmp_path, monkeypatch, capsy
         },
     )
     (run_dir / "final.txt").write_text("Done.\n\nNext step: Build work start.\n")
-    monkeypatch.setattr(work_cmd.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(work_cmd.helpers.shutil, "which", lambda name: f"/usr/bin/{name}")
 
     assert work_cmd.status(target=tmp_path) == 0
     out = capsys.readouterr().out
@@ -63,7 +63,7 @@ def test_work_status_reports_repo_and_dogfood_state(tmp_path, monkeypatch, capsy
 
 def test_work_status_runs_without_dogfood_config(tmp_path, monkeypatch, capsys):
     _init_git_repo(tmp_path)
-    monkeypatch.setattr(work_cmd.shutil, "which", lambda name: None)
+    monkeypatch.setattr(work_cmd.helpers.shutil, "which", lambda name: None)
 
     assert work_cmd.status(target=tmp_path) == 0
     out = capsys.readouterr().out
@@ -97,7 +97,7 @@ def test_work_doctor_reports_ready_repo(tmp_path, monkeypatch, capsys):
     run_dir.mkdir(parents=True)
     _write_json(run_dir / "run.json", {"started_at": "2026-05-26T12:00:00Z", "status": "ok", "task": "review"})
     (run_dir / "final.txt").write_text("Done.\n\nNext step: Build doctor.\n")
-    monkeypatch.setattr(work_cmd.shutil, "which", lambda name: f"/usr/bin/{name}" if name == "codex" else None)
+    monkeypatch.setattr(work_cmd.helpers.shutil, "which", lambda name: f"/usr/bin/{name}" if name == "codex" else None)
     monkeypatch.setattr(dogfood_cmd, "_check_git_ignored", lambda repo, path: "yes")
 
     assert work_cmd.doctor(target=tmp_path) == 0
@@ -116,10 +116,10 @@ def test_work_doctor_reports_ready_repo(tmp_path, monkeypatch, capsys):
 def test_work_doctor_warns_for_task_acceptance_gh_and_stale_session(tmp_path, monkeypatch, capsys):
     _init_git_repo(tmp_path)
     dogfood_cmd.init(target=tmp_path)
-    monkeypatch.setattr(work_cmd.shutil, "which", lambda name: "/usr/bin/codex" if name == "codex" else None)
+    monkeypatch.setattr(work_cmd.helpers.shutil, "which", lambda name: "/usr/bin/codex" if name == "codex" else None)
     monkeypatch.setattr(dogfood_cmd, "_check_git_ignored", lambda repo, path: "yes")
     monkeypatch.setattr(
-        work_cmd,
+        work_cmd.helpers,
         "_now",
         lambda: datetime(2026, 5, 25, 8, 0, 0, tzinfo=timezone.utc),
     )
@@ -153,7 +153,7 @@ def test_work_doctor_warns_for_task_acceptance_gh_and_stale_session(tmp_path, mo
     assert work_cmd.start(target=tmp_path, title="Old active session") == 0
     capsys.readouterr()
     monkeypatch.setattr(
-        work_cmd,
+        work_cmd.helpers,
         "_now",
         lambda: datetime(2026, 5, 27, 10, 0, 0, tzinfo=timezone.utc),
     )
@@ -168,7 +168,7 @@ def test_work_doctor_warns_for_task_acceptance_gh_and_stale_session(tmp_path, mo
 def test_work_doctor_reports_workflow_rule_template_visibility(tmp_path, monkeypatch, capsys):
     _init_git_repo(tmp_path)
     dogfood_cmd.init(target=tmp_path)
-    monkeypatch.setattr(work_cmd.shutil, "which", lambda name: "/usr/bin/codex" if name == "codex" else None)
+    monkeypatch.setattr(work_cmd.helpers.shutil, "which", lambda name: "/usr/bin/codex" if name == "codex" else None)
     monkeypatch.setattr(dogfood_cmd, "_check_git_ignored", lambda repo, path: "yes")
 
     assert work_cmd.doctor(target=tmp_path) == 0
@@ -191,7 +191,7 @@ def test_work_doctor_warns_when_issue_backed_task_is_closed(tmp_path, monkeypatc
     _init_git_repo(tmp_path)
     dogfood_cmd.init(target=tmp_path)
     monkeypatch.setattr(
-        work_cmd.shutil,
+        work_cmd.helpers.shutil,
         "which",
         lambda name: f"/usr/bin/{name}" if name in {"codex", "gh"} else None,
     )
@@ -243,7 +243,7 @@ def test_work_doctor_warns_when_issue_backed_task_is_closed(tmp_path, monkeypatc
             stderr="",
         )
 
-    monkeypatch.setattr(work_cmd.subprocess, "run", fake_run)
+    monkeypatch.setattr(work_cmd.helpers.subprocess, "run", fake_run)
 
     assert work_cmd.doctor(target=tmp_path) == 0
     out = capsys.readouterr().out
@@ -314,7 +314,7 @@ def test_work_import_issue_repairs_for_closed_remote_issue_without_github_mutati
         },
     )
     calls = []
-    monkeypatch.setattr(work_cmd.shutil, "which", lambda name: "/usr/bin/gh" if name == "gh" else None)
+    monkeypatch.setattr(work_cmd.helpers.shutil, "which", lambda name: "/usr/bin/gh" if name == "gh" else None)
 
     def fake_run(args, **kwargs):
         calls.append(args)
@@ -338,7 +338,7 @@ def test_work_import_issue_repairs_for_closed_remote_issue_without_github_mutati
             stderr="",
         )
 
-    monkeypatch.setattr(work_cmd.subprocess, "run", fake_run)
+    monkeypatch.setattr(work_cmd.helpers.subprocess, "run", fake_run)
 
     assert work_cmd.import_issue_repairs(target=tmp_path, json_output=True) == 0
     payload = json.loads(capsys.readouterr().out)
@@ -377,7 +377,7 @@ def test_work_import_issue_repairs_for_unavailable_gh(tmp_path, monkeypatch, cap
             ],
         },
     )
-    monkeypatch.setattr(work_cmd.shutil, "which", lambda name: None)
+    monkeypatch.setattr(work_cmd.helpers.shutil, "which", lambda name: None)
 
     assert work_cmd.import_issue_repairs(target=tmp_path, json_output=True) == 0
     payload = json.loads(capsys.readouterr().out)
@@ -494,10 +494,10 @@ def test_work_acceptance_rollup_covers_completion_review_and_closeout(tmp_path, 
 def test_work_doctor_warns_for_scanner_queue_health(tmp_path, monkeypatch, capsys):
     _init_git_repo(tmp_path)
     dogfood_cmd.init(target=tmp_path)
-    monkeypatch.setattr(work_cmd.shutil, "which", lambda name: "/usr/bin/codex" if name == "codex" else None)
+    monkeypatch.setattr(work_cmd.helpers.shutil, "which", lambda name: "/usr/bin/codex" if name == "codex" else None)
     monkeypatch.setattr(dogfood_cmd, "_check_git_ignored", lambda repo, path: "yes")
     monkeypatch.setattr(
-        work_cmd,
+        work_cmd.helpers,
         "_now",
         lambda: datetime(2026, 5, 30, 12, 0, 0, tzinfo=timezone.utc),
     )
@@ -538,7 +538,7 @@ def test_work_doctor_fails_invalid_security_config(tmp_path, monkeypatch, capsys
     dogfood_cmd.init(target=tmp_path)
     security_config = tmp_path / ".brigade" / "security.toml"
     security_config.write_text('policy = "not-real"\n')
-    monkeypatch.setattr(work_cmd.shutil, "which", lambda name: f"/usr/bin/{name}" if name == "codex" else None)
+    monkeypatch.setattr(work_cmd.helpers.shutil, "which", lambda name: f"/usr/bin/{name}" if name == "codex" else None)
     monkeypatch.setattr(dogfood_cmd, "_check_git_ignored", lambda repo, path: "yes")
 
     assert work_cmd.doctor(target=tmp_path) == 1
@@ -567,7 +567,7 @@ def test_work_doctor_warns_on_stale_security_suppressions(tmp_path, monkeypatch,
             ]
         )
     )
-    monkeypatch.setattr(work_cmd.shutil, "which", lambda name: f"/usr/bin/{name}" if name == "codex" else None)
+    monkeypatch.setattr(work_cmd.helpers.shutil, "which", lambda name: f"/usr/bin/{name}" if name == "codex" else None)
     monkeypatch.setattr(dogfood_cmd, "_check_git_ignored", lambda repo, path: "yes")
 
     assert work_cmd.doctor(target=tmp_path) == 0
@@ -578,7 +578,7 @@ def test_work_doctor_warns_on_stale_security_suppressions(tmp_path, monkeypatch,
 
 def test_work_doctor_reports_blockers(tmp_path, monkeypatch, capsys):
     _init_git_repo(tmp_path)
-    monkeypatch.setattr(work_cmd.shutil, "which", lambda name: None)
+    monkeypatch.setattr(work_cmd.helpers.shutil, "which", lambda name: None)
 
     assert work_cmd.doctor(target=tmp_path) == 1
     out = capsys.readouterr().out
@@ -596,7 +596,7 @@ def test_work_doctor_rejects_missing_target(tmp_path, capsys):
 def test_work_start_creates_active_session(tmp_path, monkeypatch, capsys):
     _init_git_repo(tmp_path)
     monkeypatch.setattr(
-        work_cmd,
+        work_cmd.helpers,
         "_now",
         lambda: datetime(2026, 5, 26, 12, 0, 0, tzinfo=timezone.utc),
     )
@@ -616,7 +616,7 @@ def test_work_start_creates_active_session(tmp_path, monkeypatch, capsys):
 def test_work_start_refuses_existing_session_without_force(tmp_path, monkeypatch, capsys):
     _init_git_repo(tmp_path)
     monkeypatch.setattr(
-        work_cmd,
+        work_cmd.helpers,
         "_now",
         lambda: datetime(2026, 5, 26, 12, 0, 0, tzinfo=timezone.utc),
     )
@@ -635,7 +635,7 @@ def test_work_note_appends_to_active_session(tmp_path, monkeypatch, capsys):
             datetime(2026, 5, 26, 12, 45, 0, tzinfo=timezone.utc),
         ]
     )
-    monkeypatch.setattr(work_cmd, "_now", lambda: next(times))
+    monkeypatch.setattr(work_cmd.helpers, "_now", lambda: next(times))
     assert work_cmd.start(target=tmp_path, title="Build Work Loop") == 0
 
     assert work_cmd.note(target=tmp_path, text="wired parser") == 0
@@ -678,7 +678,7 @@ def test_work_end_closes_active_session(tmp_path, monkeypatch, capsys):
             datetime(2026, 5, 26, 13, 0, 0, tzinfo=timezone.utc),
         ]
     )
-    monkeypatch.setattr(work_cmd, "_now", lambda: next(times))
+    monkeypatch.setattr(work_cmd.helpers, "_now", lambda: next(times))
     assert work_cmd.start(target=tmp_path, title="Build Work Loop") == 0
 
     assert work_cmd.end(target=tmp_path, note="done for now") == 0
@@ -702,7 +702,7 @@ def test_work_end_can_write_handoff(tmp_path, monkeypatch, capsys):
             datetime(2026, 5, 26, 13, 0, 0, tzinfo=timezone.utc),
         ]
     )
-    monkeypatch.setattr(work_cmd, "_now", lambda: next(times))
+    monkeypatch.setattr(work_cmd.helpers, "_now", lambda: next(times))
     assert work_cmd.start(target=tmp_path, title="Build Work Loop") == 0
 
     inbox = tmp_path / "handoffs"
@@ -728,7 +728,7 @@ def test_work_end_defaults_handoff_to_codex_inbox(tmp_path, monkeypatch):
             datetime(2026, 5, 26, 13, 0, 0, tzinfo=timezone.utc),
         ]
     )
-    monkeypatch.setattr(work_cmd, "_now", lambda: next(times))
+    monkeypatch.setattr(work_cmd.helpers, "_now", lambda: next(times))
     assert work_cmd.start(target=tmp_path, title="Build Work Loop") == 0
 
     assert work_cmd.end(target=tmp_path, note="done for now", handoff=True) == 0
@@ -754,7 +754,7 @@ def test_work_list_prints_recent_sessions(tmp_path, monkeypatch, capsys):
             datetime(2026, 5, 26, 13, 30, 0, tzinfo=timezone.utc),
         ]
     )
-    monkeypatch.setattr(work_cmd, "_now", lambda: next(times))
+    monkeypatch.setattr(work_cmd.helpers, "_now", lambda: next(times))
     assert work_cmd.start(target=tmp_path, title="Older Session") == 0
     assert work_cmd.end(target=tmp_path) == 0
     assert work_cmd.start(target=tmp_path, title="Newer Session") == 0
@@ -775,7 +775,7 @@ def test_work_latest_shows_latest_session(tmp_path, monkeypatch, capsys):
             datetime(2026, 5, 26, 13, 0, 0, tzinfo=timezone.utc),
         ]
     )
-    monkeypatch.setattr(work_cmd, "_now", lambda: next(times))
+    monkeypatch.setattr(work_cmd.helpers, "_now", lambda: next(times))
     assert work_cmd.start(target=tmp_path, title="Build Work Loop") == 0
     assert work_cmd.end(target=tmp_path, note="done") == 0
 
@@ -792,7 +792,7 @@ def test_work_latest_shows_latest_session(tmp_path, monkeypatch, capsys):
 def test_work_show_accepts_session_id(tmp_path, monkeypatch, capsys):
     _init_git_repo(tmp_path)
     monkeypatch.setattr(
-        work_cmd,
+        work_cmd.helpers,
         "_now",
         lambda: datetime(2026, 5, 26, 12, 0, 0, tzinfo=timezone.utc),
     )
@@ -821,7 +821,7 @@ def test_work_recap_summarizes_recent_sessions(tmp_path, monkeypatch, capsys):
             datetime(2026, 5, 26, 13, 0, 0, tzinfo=timezone.utc),
         ]
     )
-    monkeypatch.setattr(work_cmd, "_now", lambda: next(times))
+    monkeypatch.setattr(work_cmd.helpers, "_now", lambda: next(times))
     dogfood_cmd.init(target=tmp_path)
     run_dir = tmp_path / ".brigade" / "runs" / "latest"
     run_dir.mkdir(parents=True)
@@ -861,7 +861,7 @@ def test_work_resume_reports_active_session(tmp_path, monkeypatch, capsys):
     _write_json(run_dir / "run.json", {"started_at": "2026-05-26T12:10:00Z", "status": "ok", "task": "review"})
     (run_dir / "final.txt").write_text("Done.\n\nNext step: Build resume.\n")
     monkeypatch.setattr(
-        work_cmd,
+        work_cmd.helpers,
         "_now",
         lambda: datetime(2026, 5, 26, 12, 0, 0, tzinfo=timezone.utc),
     )
@@ -890,7 +890,7 @@ def test_work_resume_suggests_work_run_from_latest_next(tmp_path, monkeypatch, c
             datetime(2026, 5, 26, 13, 0, 0, tzinfo=timezone.utc),
         ]
     )
-    monkeypatch.setattr(work_cmd, "_now", lambda: next(times))
+    monkeypatch.setattr(work_cmd.helpers, "_now", lambda: next(times))
     assert work_cmd.start(target=tmp_path, title="Ended Work") == 0
     assert work_cmd.end(target=tmp_path, note="done", handoff=True, handoff_inbox=tmp_path / "handoffs") == 0
 
@@ -918,8 +918,8 @@ def test_work_brief_reports_morning_entrypoint(tmp_path, monkeypatch, capsys):
             datetime(2026, 5, 26, 13, 0, 0, tzinfo=timezone.utc),
         ]
     )
-    monkeypatch.setattr(work_cmd, "_now", lambda: next(times))
-    monkeypatch.setattr(work_cmd.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(work_cmd.helpers, "_now", lambda: next(times))
+    monkeypatch.setattr(work_cmd.helpers.shutil, "which", lambda name: f"/usr/bin/{name}")
     assert work_cmd.start(target=tmp_path, title="Ended Work") == 0
     assert work_cmd.end(target=tmp_path, note="done", handoff=True, handoff_inbox=tmp_path / "handoffs") == 0
 
@@ -945,11 +945,11 @@ def test_work_brief_json_reports_recent_sessions(tmp_path, monkeypatch, capsys):
     _write_json(run_dir / "run.json", {"started_at": "2026-05-26T12:10:00Z", "status": "ok", "task": "review"})
     (run_dir / "final.txt").write_text("Done.\n\n## Next\n\nBuild JSON brief.\n")
     monkeypatch.setattr(
-        work_cmd,
+        work_cmd.helpers,
         "_now",
         lambda: datetime(2026, 5, 26, 12, 0, 0, tzinfo=timezone.utc),
     )
-    monkeypatch.setattr(work_cmd.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(work_cmd.helpers.shutil, "which", lambda name: f"/usr/bin/{name}")
     assert work_cmd.start(target=tmp_path, title="Active Work") == 0
     capsys.readouterr()
 
@@ -967,7 +967,7 @@ def test_work_brief_json_compacts_heavy_report_and_fleet_health(tmp_path, monkey
     _init_git_repo(tmp_path)
     dogfood_cmd.init(target=tmp_path)
     capsys.readouterr()
-    monkeypatch.setattr(work_cmd.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(work_cmd.helpers.shutil, "which", lambda name: f"/usr/bin/{name}")
     monkeypatch.setattr(
         center_cmd,
         "report_health",
@@ -1043,7 +1043,7 @@ def test_work_task_ledger_add_list_show_and_done(tmp_path, monkeypatch, capsys):
             datetime(2026, 5, 26, 12, 30, 0, tzinfo=timezone.utc),
         ]
     )
-    monkeypatch.setattr(work_cmd, "_now", lambda: next(times))
+    monkeypatch.setattr(work_cmd.helpers, "_now", lambda: next(times))
 
     assert work_cmd.task_add(target=tmp_path, text="Build task ledger") == 0
     out = capsys.readouterr().out
@@ -1083,7 +1083,7 @@ def test_work_task_add_from_next_deduplicates_pending_task(tmp_path, monkeypatch
     _write_json(run_dir / "run.json", {"started_at": "2026-05-26T12:10:00Z", "status": "ok", "task": "review"})
     (run_dir / "final.txt").write_text("Done.\n\nNext step: Build from extracted next.\n")
     monkeypatch.setattr(
-        work_cmd,
+        work_cmd.helpers,
         "_now",
         lambda: datetime(2026, 5, 26, 12, 0, 0, tzinfo=timezone.utc),
     )
@@ -1107,7 +1107,7 @@ def test_work_task_add_from_next_deduplicates_pending_task(tmp_path, monkeypatch
 def test_work_task_add_stores_metadata_acceptance_and_plan(tmp_path, monkeypatch, capsys):
     _init_git_repo(tmp_path)
     monkeypatch.setattr(
-        work_cmd,
+        work_cmd.helpers,
         "_now",
         lambda: datetime(2026, 5, 26, 12, 0, 0, tzinfo=timezone.utc),
     )
@@ -1148,7 +1148,7 @@ def test_work_task_add_stores_metadata_acceptance_and_plan(tmp_path, monkeypatch
 def test_work_task_add_template_preserves_explicit_acceptance_and_plan(tmp_path, monkeypatch, capsys):
     _init_git_repo(tmp_path)
     monkeypatch.setattr(
-        work_cmd,
+        work_cmd.helpers,
         "_now",
         lambda: datetime(2026, 5, 26, 12, 0, 0, tzinfo=timezone.utc),
     )
@@ -1432,7 +1432,7 @@ def test_significant_pending_without_plan_ignores_insignificant_task(tmp_path, c
 def test_work_doctor_warns_for_plan_coverage(tmp_path, monkeypatch, capsys):
     _init_git_repo(tmp_path)
     dogfood_cmd.init(target=tmp_path)
-    monkeypatch.setattr(work_cmd.shutil, "which", lambda name: "/usr/bin/codex" if name == "codex" else None)
+    monkeypatch.setattr(work_cmd.helpers.shutil, "which", lambda name: "/usr/bin/codex" if name == "codex" else None)
     monkeypatch.setattr(dogfood_cmd, "_check_git_ignored", lambda repo, path: "yes")
     task_id = _plan_task_id(tmp_path, capsys)
     capsys.readouterr()
@@ -1981,11 +1981,11 @@ def test_extract_issue_acceptance_returns_empty_for_missing_body():
 def test_work_task_add_from_issue_preserves_github_metadata(tmp_path, monkeypatch, capsys):
     _init_git_repo(tmp_path)
     monkeypatch.setattr(
-        work_cmd,
+        work_cmd.helpers,
         "_now",
         lambda: datetime(2026, 5, 26, 12, 0, 0, tzinfo=timezone.utc),
     )
-    monkeypatch.setattr(work_cmd.shutil, "which", lambda name: "/usr/bin/gh" if name == "gh" else None)
+    monkeypatch.setattr(work_cmd.helpers.shutil, "which", lambda name: "/usr/bin/gh" if name == "gh" else None)
 
     def fake_run(args, **kwargs):
         assert args[:3] == ["gh", "issue", "view"]
@@ -2004,7 +2004,7 @@ def test_work_task_add_from_issue_preserves_github_metadata(tmp_path, monkeypatc
             stderr="",
         )
 
-    monkeypatch.setattr(work_cmd.subprocess, "run", fake_run)
+    monkeypatch.setattr(work_cmd.helpers.subprocess, "run", fake_run)
 
     assert work_cmd.task_add(target=tmp_path, from_issue="42", template="red-green-refactor") == 0
     out = capsys.readouterr().out
@@ -2027,11 +2027,11 @@ def test_work_task_add_from_issue_preserves_github_metadata(tmp_path, monkeypatc
 def test_work_task_add_from_issue_imports_body_acceptance(tmp_path, monkeypatch, capsys):
     _init_git_repo(tmp_path)
     monkeypatch.setattr(
-        work_cmd,
+        work_cmd.helpers,
         "_now",
         lambda: datetime(2026, 5, 26, 12, 0, 0, tzinfo=timezone.utc),
     )
-    monkeypatch.setattr(work_cmd.shutil, "which", lambda name: "/usr/bin/gh" if name == "gh" else None)
+    monkeypatch.setattr(work_cmd.helpers.shutil, "which", lambda name: "/usr/bin/gh" if name == "gh" else None)
 
     def fake_run(args, **kwargs):
         assert args[:3] == ["gh", "issue", "view"]
@@ -2059,7 +2059,7 @@ def test_work_task_add_from_issue_imports_body_acceptance(tmp_path, monkeypatch,
             stderr="",
         )
 
-    monkeypatch.setattr(work_cmd.subprocess, "run", fake_run)
+    monkeypatch.setattr(work_cmd.helpers.subprocess, "run", fake_run)
 
     assert work_cmd.task_add(target=tmp_path, from_issue="43", acceptance=["Manual criterion"]) == 0
     out = capsys.readouterr().out
@@ -2087,8 +2087,8 @@ def test_work_run_uses_issue_imported_acceptance(tmp_path, monkeypatch):
             datetime(2026, 5, 26, 13, 0, 1, tzinfo=timezone.utc),
         ]
     )
-    monkeypatch.setattr(work_cmd, "_now", lambda: next(times))
-    monkeypatch.setattr(work_cmd.shutil, "which", lambda name: "/usr/bin/gh" if name == "gh" else None)
+    monkeypatch.setattr(work_cmd.helpers, "_now", lambda: next(times))
+    monkeypatch.setattr(work_cmd.helpers.shutil, "which", lambda name: "/usr/bin/gh" if name == "gh" else None)
 
     def fake_gh_run(args, **kwargs):
         return subprocess.CompletedProcess(
@@ -2107,7 +2107,7 @@ def test_work_run_uses_issue_imported_acceptance(tmp_path, monkeypatch):
             stderr="",
         )
 
-    monkeypatch.setattr(work_cmd.subprocess, "run", fake_gh_run)
+    monkeypatch.setattr(work_cmd.helpers.subprocess, "run", fake_gh_run)
     assert work_cmd.task_add(target=tmp_path, from_issue="44") == 0
     seen = {}
 
@@ -2128,7 +2128,7 @@ def test_work_run_uses_issue_imported_acceptance(tmp_path, monkeypatch):
 
 def test_work_task_add_from_issue_fails_without_partial_task(tmp_path, monkeypatch, capsys):
     _init_git_repo(tmp_path)
-    monkeypatch.setattr(work_cmd.shutil, "which", lambda name: None)
+    monkeypatch.setattr(work_cmd.helpers.shutil, "which", lambda name: None)
 
     assert work_cmd.task_add(target=tmp_path, from_issue="42") == 1
     assert "gh CLI is not available" in capsys.readouterr().err
@@ -2137,12 +2137,12 @@ def test_work_task_add_from_issue_fails_without_partial_task(tmp_path, monkeypat
 
 def test_work_task_add_from_issue_rejects_malformed_gh_output_without_partial_task(tmp_path, monkeypatch, capsys):
     _init_git_repo(tmp_path)
-    monkeypatch.setattr(work_cmd.shutil, "which", lambda name: "/usr/bin/gh" if name == "gh" else None)
+    monkeypatch.setattr(work_cmd.helpers.shutil, "which", lambda name: "/usr/bin/gh" if name == "gh" else None)
 
     def fake_run(args, **kwargs):
         return subprocess.CompletedProcess(args, 0, stdout="{bad json", stderr="")
 
-    monkeypatch.setattr(work_cmd.subprocess, "run", fake_run)
+    monkeypatch.setattr(work_cmd.helpers.subprocess, "run", fake_run)
 
     assert work_cmd.task_add(target=tmp_path, from_issue="42") == 1
     assert "returned invalid JSON" in capsys.readouterr().err
@@ -2152,7 +2152,7 @@ def test_work_task_add_from_issue_rejects_malformed_gh_output_without_partial_ta
 def test_work_brief_includes_pending_tasks(tmp_path, monkeypatch, capsys):
     _init_git_repo(tmp_path)
     monkeypatch.setattr(
-        work_cmd,
+        work_cmd.helpers,
         "_now",
         lambda: datetime(2026, 5, 26, 12, 0, 0, tzinfo=timezone.utc),
     )
@@ -2172,7 +2172,7 @@ def test_work_brief_includes_pending_tasks(tmp_path, monkeypatch, capsys):
 def test_work_brief_reports_next_task_acceptance(tmp_path, monkeypatch, capsys):
     _init_git_repo(tmp_path)
     monkeypatch.setattr(
-        work_cmd,
+        work_cmd.helpers,
         "_now",
         lambda: datetime(2026, 5, 26, 12, 0, 0, tzinfo=timezone.utc),
     )
@@ -2199,11 +2199,11 @@ def test_work_brief_reports_next_task_acceptance(tmp_path, monkeypatch, capsys):
 def test_work_brief_surfaces_issue_backed_next_task_context(tmp_path, monkeypatch, capsys):
     _init_git_repo(tmp_path)
     monkeypatch.setattr(
-        work_cmd,
+        work_cmd.helpers,
         "_now",
         lambda: datetime(2026, 5, 26, 12, 0, 0, tzinfo=timezone.utc),
     )
-    monkeypatch.setattr(work_cmd.shutil, "which", lambda name: "/usr/bin/gh" if name == "gh" else None)
+    monkeypatch.setattr(work_cmd.helpers.shutil, "which", lambda name: "/usr/bin/gh" if name == "gh" else None)
 
     def fake_run(args, **kwargs):
         return subprocess.CompletedProcess(
@@ -2221,7 +2221,7 @@ def test_work_brief_surfaces_issue_backed_next_task_context(tmp_path, monkeypatc
             stderr="",
         )
 
-    monkeypatch.setattr(work_cmd.subprocess, "run", fake_run)
+    monkeypatch.setattr(work_cmd.helpers.subprocess, "run", fake_run)
     assert work_cmd.task_add(target=tmp_path, from_issue="7") == 0
     capsys.readouterr()
 
@@ -2246,7 +2246,7 @@ def test_work_import_add_list_show_and_promote(tmp_path, monkeypatch, capsys):
             datetime(2026, 5, 26, 12, 30, 1, tzinfo=timezone.utc),
         ]
     )
-    monkeypatch.setattr(work_cmd, "_now", lambda: next(times))
+    monkeypatch.setattr(work_cmd.helpers, "_now", lambda: next(times))
 
     assert (
         work_cmd.import_add(
@@ -2311,7 +2311,7 @@ def test_work_import_promote_reuses_existing_pending_task(tmp_path, monkeypatch,
             datetime(2026, 5, 26, 12, 2, 0, tzinfo=timezone.utc),
         ]
     )
-    monkeypatch.setattr(work_cmd, "_now", lambda: next(times))
+    monkeypatch.setattr(work_cmd.helpers, "_now", lambda: next(times))
     assert work_cmd.task_add(target=tmp_path, text="Refresh stale card") == 0
     task_id = capsys.readouterr().out.split("task: ", 1)[1].splitlines()[0]
     assert work_cmd.import_add(target=tmp_path, text=" refresh  stale   card ", source="memory-care") == 0
@@ -2328,7 +2328,7 @@ def test_work_import_promote_reuses_existing_pending_task(tmp_path, monkeypatch,
 def test_work_import_validate_and_ingest_jsonl(tmp_path, monkeypatch, capsys):
     _init_git_repo(tmp_path)
     monkeypatch.setattr(
-        work_cmd,
+        work_cmd.helpers,
         "_now",
         lambda: datetime(2026, 5, 26, 12, 0, 0, tzinfo=timezone.utc),
     )
@@ -2376,7 +2376,7 @@ def test_work_import_validate_ingest_and_promote_task_metadata(tmp_path, monkeyp
             datetime(2026, 5, 26, 12, 1, 1, tzinfo=timezone.utc),
         ]
     )
-    monkeypatch.setattr(work_cmd, "_now", lambda: next(times))
+    monkeypatch.setattr(work_cmd.helpers, "_now", lambda: next(times))
     import_file = tmp_path / "task-imports.jsonl"
     import_file.write_text(
         json.dumps(
@@ -2493,7 +2493,7 @@ conflict_window = "02:00-02:10"
 def test_work_inbox_groups_scanner_imports_and_reports_candidate(tmp_path, monkeypatch, capsys):
     _init_git_repo(tmp_path)
     monkeypatch.setattr(
-        work_cmd,
+        work_cmd.helpers,
         "_now",
         lambda: datetime(2026, 5, 29, 12, 0, 0, tzinfo=timezone.utc),
     )
@@ -2935,7 +2935,7 @@ supported_harnesses = []
 def test_work_brief_and_doctor_include_tool_catalog_health(tmp_path, monkeypatch, capsys):
     _init_git_repo(tmp_path)
     dogfood_cmd.init(target=tmp_path)
-    monkeypatch.setattr(work_cmd.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(work_cmd.helpers.shutil, "which", lambda name: f"/usr/bin/{name}")
     monkeypatch.setattr(dogfood_cmd, "_check_git_ignored", lambda repo, path: "yes")
     source = tmp_path / "tools" / "portable.md"
     source.parent.mkdir()
@@ -2970,7 +2970,7 @@ projections = { codex = ".codex/skills/portable/SKILL.md" }
 def test_work_brief_and_doctor_include_roadmap_and_repo_fleet_health(tmp_path, monkeypatch, capsys):
     _init_git_repo(tmp_path)
     dogfood_cmd.init(target=tmp_path)
-    monkeypatch.setattr(work_cmd.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(work_cmd.helpers.shutil, "which", lambda name: f"/usr/bin/{name}")
     monkeypatch.setattr(dogfood_cmd, "_check_git_ignored", lambda repo, path: "yes")
     monkeypatch.setattr(
         roadmap_cmd,
@@ -3627,7 +3627,7 @@ def test_tools_import_issues_and_work_brief_surface_contract_health(tmp_path, mo
     _init_git_repo(tmp_path)
     dogfood_cmd.init(target=tmp_path)
     capsys.readouterr()
-    monkeypatch.setattr(work_cmd.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(work_cmd.helpers.shutil, "which", lambda name: f"/usr/bin/{name}")
     monkeypatch.setattr(dogfood_cmd, "_check_git_ignored", lambda repo, path: "yes")
     config = tmp_path / ".brigade" / "tools.toml"
     config.write_text(
@@ -3802,7 +3802,7 @@ def test_tools_call_queue_health_brief_and_import_issues(tmp_path, monkeypatch, 
     _init_git_repo(tmp_path)
     dogfood_cmd.init(target=tmp_path)
     capsys.readouterr()
-    monkeypatch.setattr(work_cmd.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(work_cmd.helpers.shutil, "which", lambda name: f"/usr/bin/{name}")
     monkeypatch.setattr(dogfood_cmd, "_check_git_ignored", lambda repo, path: "yes")
     tools_dir = tmp_path / "tools"
     tools_dir.mkdir()
@@ -4063,7 +4063,7 @@ def test_tools_call_run_next_failure_timeout_health_and_imports(tmp_path, monkey
     _init_git_repo(tmp_path)
     dogfood_cmd.init(target=tmp_path)
     capsys.readouterr()
-    monkeypatch.setattr(work_cmd.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(work_cmd.helpers.shutil, "which", lambda name: f"/usr/bin/{name}")
     monkeypatch.setattr(dogfood_cmd, "_check_git_ignored", lambda repo, path: "yes")
     _write_script_tool_config(
         tmp_path,
@@ -4244,7 +4244,7 @@ def test_tools_run_history_integrates_with_brief_and_imports(tmp_path, monkeypat
     _init_git_repo(tmp_path)
     dogfood_cmd.init(target=tmp_path)
     capsys.readouterr()
-    monkeypatch.setattr(work_cmd.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(work_cmd.helpers.shutil, "which", lambda name: f"/usr/bin/{name}")
     monkeypatch.setattr(dogfood_cmd, "_check_git_ignored", lambda repo, path: "yes")
     _write_script_tool_config(tmp_path, script='import sys\nsys.exit(6)\n')
     failed = _queue_and_approve_runner(tmp_path, capsys)
@@ -4416,7 +4416,7 @@ def test_tools_checkpoint_resume_failure_health_brief_and_imports(tmp_path, monk
     _init_git_repo(tmp_path)
     dogfood_cmd.init(target=tmp_path)
     capsys.readouterr()
-    monkeypatch.setattr(work_cmd.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(work_cmd.helpers.shutil, "which", lambda name: f"/usr/bin/{name}")
     monkeypatch.setattr(dogfood_cmd, "_check_git_ignored", lambda repo, path: "yes")
     _, checkpoint_id, _ = _create_waiting_checkpoint(tmp_path, capsys, script=_checkpoint_script(fail_on_resume=True))
     assert tools_cmd.checkpoint_approve(target=tmp_path, checkpoint_id=checkpoint_id, choice="continue", json_output=True) == 0
@@ -4702,7 +4702,7 @@ def test_tools_call_run_mcp_health_brief_and_imports(tmp_path, monkeypatch, caps
     _init_git_repo(tmp_path)
     dogfood_cmd.init(target=tmp_path)
     capsys.readouterr()
-    monkeypatch.setattr(work_cmd.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(work_cmd.helpers.shutil, "which", lambda name: f"/usr/bin/{name}")
     monkeypatch.setattr(dogfood_cmd, "_check_git_ignored", lambda repo, path: "yes")
     _write_mcp_tool_config(tmp_path, server_script=_fake_mcp_server_script(malformed=True))
     _write_runtime_config(tmp_path)
@@ -4879,7 +4879,7 @@ def test_tools_runtime_health_integrates_with_doctor_brief_and_imports(tmp_path,
     _init_git_repo(tmp_path)
     dogfood_cmd.init(target=tmp_path)
     capsys.readouterr()
-    monkeypatch.setattr(work_cmd.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(work_cmd.helpers.shutil, "which", lambda name: f"/usr/bin/{name}")
     monkeypatch.setattr(dogfood_cmd, "_check_git_ignored", lambda repo, path: "yes")
     _write_script_tool_config(tmp_path, script='print("ok")\n')
     _write_runtime_config(tmp_path, runtime_id="other")
@@ -5026,7 +5026,7 @@ def test_tools_policy_health_integrates_with_doctor_brief_and_imports(tmp_path, 
     _init_git_repo(tmp_path)
     dogfood_cmd.init(target=tmp_path)
     capsys.readouterr()
-    monkeypatch.setattr(work_cmd.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(work_cmd.helpers.shutil, "which", lambda name: f"/usr/bin/{name}")
     monkeypatch.setattr(dogfood_cmd, "_check_git_ignored", lambda repo, path: "yes")
     _write_script_tool_config(tmp_path, script='print("ok")\n')
     _write_policy_config(tmp_path, denied_effects=["local-read"])
@@ -5049,7 +5049,7 @@ def test_work_backup_init_status_doctor_and_json(tmp_path, monkeypatch, capsys):
     _init_git_repo(tmp_path)
     monkeypatch.setattr(dogfood_cmd, "_check_git_ignored", lambda repo, path: "yes")
     now = datetime(2026, 5, 30, 12, 0, 0, tzinfo=timezone.utc)
-    monkeypatch.setattr(work_cmd, "_now", lambda: now)
+    monkeypatch.setattr(work_cmd.helpers, "_now", lambda: now)
 
     assert work_cmd.backup_init(target=tmp_path) == 0
     out = capsys.readouterr().out
@@ -5130,7 +5130,7 @@ def test_work_backup_contract_reports_summary_producer_shape(tmp_path, monkeypat
 def test_work_backup_doctor_warns_for_backup_health_issues(tmp_path, monkeypatch, capsys):
     _init_git_repo(tmp_path)
     monkeypatch.setattr(
-        work_cmd,
+        work_cmd.helpers,
         "_now",
         lambda: datetime(2026, 5, 30, 12, 0, 0, tzinfo=timezone.utc),
     )
@@ -5204,7 +5204,7 @@ enabled = true
 def test_work_backup_import_issues_dedupes_and_respects_dismissed_until_change(tmp_path, monkeypatch, capsys):
     _init_git_repo(tmp_path)
     monkeypatch.setattr(
-        work_cmd,
+        work_cmd.helpers,
         "_now",
         lambda: datetime(2026, 5, 30, 12, 0, 0, tzinfo=timezone.utc),
     )
@@ -5273,7 +5273,7 @@ enabled = true
 def test_work_backup_closeout_quiets_reviewed_risk_and_resurfaces_changed_fingerprints(tmp_path, monkeypatch, capsys):
     _init_git_repo(tmp_path)
     monkeypatch.setattr(
-        work_cmd,
+        work_cmd.helpers,
         "_now",
         lambda: datetime(2026, 5, 30, 12, 0, 0, tzinfo=timezone.utc),
     )
@@ -5350,7 +5350,7 @@ enabled = true
 def test_release_evidence_includes_restore_rehearsal_backup_summary(tmp_path, monkeypatch, capsys):
     _init_git_repo(tmp_path)
     monkeypatch.setattr(
-        work_cmd,
+        work_cmd.helpers,
         "_now",
         lambda: datetime(2026, 5, 30, 12, 0, 0, tzinfo=timezone.utc),
     )
@@ -5412,10 +5412,10 @@ enabled = true
 def test_work_brief_and_doctor_include_backup_health(tmp_path, monkeypatch, capsys):
     _init_git_repo(tmp_path)
     dogfood_cmd.init(target=tmp_path)
-    monkeypatch.setattr(work_cmd.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(work_cmd.helpers.shutil, "which", lambda name: f"/usr/bin/{name}")
     monkeypatch.setattr(dogfood_cmd, "_check_git_ignored", lambda repo, path: "yes")
     monkeypatch.setattr(
-        work_cmd,
+        work_cmd.helpers,
         "_now",
         lambda: datetime(2026, 5, 30, 12, 0, 0, tzinfo=timezone.utc),
     )
@@ -5801,9 +5801,9 @@ conflict_window = "04:00-04:10"
 
 def test_work_scanners_execution_health_surfaces_and_imports_issues(tmp_path, monkeypatch, capsys):
     _init_git_repo(tmp_path)
-    monkeypatch.setattr(work_cmd.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(work_cmd.helpers.shutil, "which", lambda name: f"/usr/bin/{name}")
     monkeypatch.setattr(
-        work_cmd,
+        work_cmd.helpers,
         "_now",
         lambda: datetime(2026, 5, 30, 12, 0, 0, tzinfo=timezone.utc),
     )
@@ -5888,9 +5888,9 @@ conflict_window = "02:00-02:10"
 def test_work_inbox_doctor_reports_hygiene_issues_and_daily_loop(tmp_path, monkeypatch, capsys):
     _init_git_repo(tmp_path)
     dogfood_cmd.init(target=tmp_path)
-    monkeypatch.setattr(work_cmd.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(work_cmd.helpers.shutil, "which", lambda name: f"/usr/bin/{name}")
     monkeypatch.setattr(
-        work_cmd,
+        work_cmd.helpers,
         "_now",
         lambda: datetime(2026, 5, 30, 12, 0, 0, tzinfo=timezone.utc),
     )
@@ -5987,7 +5987,7 @@ conflict_window = "02:00-02:10"
 def test_work_inbox_archive_preserves_pending_and_archives_closed(tmp_path, monkeypatch, capsys):
     _init_git_repo(tmp_path)
     monkeypatch.setattr(
-        work_cmd,
+        work_cmd.helpers,
         "_now",
         lambda: datetime(2026, 5, 30, 12, 0, 0, tzinfo=timezone.utc),
     )
@@ -6110,7 +6110,7 @@ privacy_mode = "safe-summary"
 
 def test_work_review_run_covers_timeout_nonzero_and_malformed_findings(tmp_path, monkeypatch, capsys):
     _init_git_repo(tmp_path)
-    monkeypatch.setattr(work_cmd.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(work_cmd.helpers.shutil, "which", lambda name: f"/usr/bin/{name}")
     script = tmp_path / "reviewer.py"
     script.write_text(
         """
@@ -6581,7 +6581,7 @@ def test_work_closeout_blocks_failed_verification(tmp_path, capsys):
 def test_work_doctor_warns_on_unclosed_review_run(tmp_path, monkeypatch, capsys):
     _init_git_repo(tmp_path)
     dogfood_cmd.init(target=tmp_path)
-    monkeypatch.setattr(work_cmd.shutil, "which", lambda name: f"/usr/bin/{name}" if name == "codex" else None)
+    monkeypatch.setattr(work_cmd.helpers.shutil, "which", lambda name: f"/usr/bin/{name}" if name == "codex" else None)
     monkeypatch.setattr(dogfood_cmd, "_check_git_ignored", lambda repo, path: "yes")
     run_dir = tmp_path / ".brigade" / "reviews" / "runs" / "run-unclosed"
     run_dir.mkdir(parents=True)
@@ -6605,7 +6605,7 @@ def test_work_doctor_warns_on_unclosed_review_run(tmp_path, monkeypatch, capsys)
 
 def test_work_brief_reports_code_review_status_and_top_finding(tmp_path, monkeypatch, capsys):
     _init_git_repo(tmp_path)
-    monkeypatch.setattr(work_cmd.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(work_cmd.helpers.shutil, "which", lambda name: f"/usr/bin/{name}")
     config = tmp_path / ".brigade" / "reviews.toml"
     config.parent.mkdir(parents=True)
     config.write_text(
@@ -6929,9 +6929,9 @@ conflict_window = "02:00-02:10"
 def test_work_brief_and_doctor_include_scanner_sweep_health(tmp_path, monkeypatch, capsys):
     _init_git_repo(tmp_path)
     dogfood_cmd.init(target=tmp_path)
-    monkeypatch.setattr(work_cmd.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(work_cmd.helpers.shutil, "which", lambda name: f"/usr/bin/{name}")
     monkeypatch.setattr(
-        work_cmd,
+        work_cmd.helpers,
         "_now",
         lambda: datetime(2026, 5, 30, 12, 0, 0, tzinfo=timezone.utc),
     )
@@ -6981,9 +6981,9 @@ def test_work_sweep_review_health_reports_missing_provenance_and_stale_review(tm
     _init_git_repo(tmp_path)
     dogfood_cmd.init(target=tmp_path)
     capsys.readouterr()
-    monkeypatch.setattr(work_cmd.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(work_cmd.helpers.shutil, "which", lambda name: f"/usr/bin/{name}")
     monkeypatch.setattr(
-        work_cmd,
+        work_cmd.helpers,
         "_now",
         lambda: datetime(2026, 5, 30, 12, 0, 0, tzinfo=timezone.utc),
     )
@@ -7070,7 +7070,7 @@ conflict_window = "02:00-02:10"
 def test_work_scanners_doctor_warns_for_missing_stale_bad_and_imports_issues(tmp_path, monkeypatch, capsys):
     _init_git_repo(tmp_path)
     monkeypatch.setattr(
-        work_cmd,
+        work_cmd.helpers,
         "_now",
         lambda: datetime(2026, 5, 30, 12, 0, 0, tzinfo=timezone.utc),
     )
@@ -7113,7 +7113,7 @@ conflict_window = "02:00-02:30"
 def test_work_brief_and_doctor_include_scanner_health(tmp_path, monkeypatch, capsys):
     _init_git_repo(tmp_path)
     dogfood_cmd.init(target=tmp_path)
-    monkeypatch.setattr(work_cmd.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(work_cmd.helpers.shutil, "which", lambda name: f"/usr/bin/{name}")
     monkeypatch.setattr(dogfood_cmd, "_check_git_ignored", lambda repo, path: "yes")
     assert work_cmd.scanners_init(target=tmp_path, update_gitignore=False) == 0
     capsys.readouterr()
@@ -7134,7 +7134,7 @@ def test_work_brief_and_doctor_include_scanner_health(tmp_path, monkeypatch, cap
 def test_work_brief_and_doctor_include_security_health(tmp_path, monkeypatch, capsys):
     _init_git_repo(tmp_path)
     dogfood_cmd.init(target=tmp_path)
-    monkeypatch.setattr(work_cmd.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(work_cmd.helpers.shutil, "which", lambda name: f"/usr/bin/{name}")
     monkeypatch.setattr(dogfood_cmd, "_check_git_ignored", lambda repo, path: "yes")
     assert security_cmd.init(target=tmp_path) == 0
     (tmp_path / ".env").write_text("SERVICE_TOKEN=abcd1234abcd1234abcd1234\n")
@@ -7157,7 +7157,7 @@ def test_work_brief_and_doctor_include_memory_care_health(tmp_path, monkeypatch,
 
     _init_git_repo(tmp_path)
     dogfood_cmd.init(target=tmp_path)
-    monkeypatch.setattr(work_cmd.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(work_cmd.helpers.shutil, "which", lambda name: f"/usr/bin/{name}")
     monkeypatch.setattr(dogfood_cmd, "_check_git_ignored", lambda repo, path: "yes")
     monkeypatch.setattr(memory_cmd, "_today", lambda: date(2026, 5, 28))
     assert memory_cmd.init(target=tmp_path, update_gitignore=False) == 0
@@ -7195,7 +7195,7 @@ def test_work_brief_and_doctor_include_memory_care_health(tmp_path, monkeypatch,
 def test_work_import_plan_previews_promoted_task(tmp_path, monkeypatch, capsys):
     _init_git_repo(tmp_path)
     monkeypatch.setattr(
-        work_cmd,
+        work_cmd.helpers,
         "_now",
         lambda: datetime(2026, 5, 26, 12, 0, 0, tzinfo=timezone.utc),
     )
@@ -7303,7 +7303,7 @@ def test_work_import_validate_rejects_bad_task_fields(tmp_path, capsys):
 def test_work_import_memory_care_reads_refresh_queue(tmp_path, monkeypatch, capsys):
     _init_git_repo(tmp_path)
     monkeypatch.setattr(
-        work_cmd,
+        work_cmd.helpers,
         "_now",
         lambda: datetime(2026, 5, 26, 12, 0, 0, tzinfo=timezone.utc),
     )
@@ -7345,7 +7345,7 @@ def test_work_import_memory_care_reads_refresh_queue(tmp_path, monkeypatch, caps
 def test_work_import_chat_sweep_reads_issues(tmp_path, monkeypatch, capsys):
     _init_git_repo(tmp_path)
     monkeypatch.setattr(
-        work_cmd,
+        work_cmd.helpers,
         "_now",
         lambda: datetime(2026, 5, 26, 12, 0, 0, tzinfo=timezone.utc),
     )
@@ -7404,7 +7404,7 @@ def test_work_import_chat_sweep_actionable_task_privacy_and_idempotency(tmp_path
             datetime(2026, 5, 26, 12, 3, 0, tzinfo=timezone.utc),
         ]
     )
-    monkeypatch.setattr(work_cmd, "_now", lambda: next(times))
+    monkeypatch.setattr(work_cmd.helpers, "_now", lambda: next(times))
     sweep = tmp_path / ".brigade" / "chat-memory-sweeps" / "latest.json"
     sweep.parent.mkdir(parents=True)
     _write_json(
@@ -7608,7 +7608,7 @@ def test_chat_sweep_provider_aliases_ingest_import_review_and_promote(tmp_path, 
     _init_git_repo(tmp_path)
     dogfood_cmd.init(target=tmp_path)
     capsys.readouterr()
-    monkeypatch.setattr(work_cmd.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(work_cmd.helpers.shutil, "which", lambda name: f"/usr/bin/{name}")
 
     alias_cases = [
         ("discord-alias", "discord", "discord"),
@@ -7824,7 +7824,7 @@ def test_chat_surfaces_integrate_with_work_brief_doctor_and_scanner_sweep(tmp_pa
     _init_git_repo(tmp_path)
     dogfood_cmd.init(target=tmp_path)
     capsys.readouterr()
-    monkeypatch.setattr(work_cmd.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(work_cmd.helpers.shutil, "which", lambda name: f"/usr/bin/{name}")
     export = tmp_path / ".brigade" / "chat-surfaces" / "discord.json"
     export.parent.mkdir(parents=True)
     _write_json(export, {"findings": [_chat_finding("discord-export", "discord-export")]})
@@ -7892,7 +7892,7 @@ conflict_window = "02:00-02:10"
 def test_work_import_memory_refresh_reads_candidates(tmp_path, monkeypatch, capsys):
     _init_git_repo(tmp_path)
     monkeypatch.setattr(
-        work_cmd,
+        work_cmd.helpers,
         "_now",
         lambda: datetime(2026, 5, 26, 12, 0, 0, tzinfo=timezone.utc),
     )
@@ -7949,7 +7949,7 @@ def test_work_chat_sweep_flows_through_inbox_plan_promote_run_completion(tmp_pat
             datetime(2026, 5, 26, 12, 7, 0, tzinfo=timezone.utc),
         ]
     )
-    monkeypatch.setattr(work_cmd, "_now", lambda: next(times))
+    monkeypatch.setattr(work_cmd.helpers, "_now", lambda: next(times))
     sweep = tmp_path / ".brigade" / "chat-memory-sweeps" / "latest.json"
     sweep.parent.mkdir(parents=True)
     _write_json(
@@ -8036,7 +8036,7 @@ def test_work_import_content_guard_creates_review_import(tmp_path, capsys, monke
 def test_work_import_triage_groups_pending_imports(tmp_path, monkeypatch, capsys):
     _init_git_repo(tmp_path)
     monkeypatch.setattr(
-        work_cmd,
+        work_cmd.helpers,
         "_now",
         lambda: datetime(2026, 5, 26, 12, 0, 0, tzinfo=timezone.utc),
     )
@@ -8066,7 +8066,7 @@ def test_work_import_triage_groups_pending_imports(tmp_path, monkeypatch, capsys
 def test_work_import_list_and_triage_filter_by_metadata(tmp_path, monkeypatch, capsys):
     _init_git_repo(tmp_path)
     monkeypatch.setattr(
-        work_cmd,
+        work_cmd.helpers,
         "_now",
         lambda: datetime(2026, 5, 26, 12, 0, 0, tzinfo=timezone.utc),
     )
@@ -8122,7 +8122,7 @@ def test_work_import_list_and_triage_filter_by_metadata(tmp_path, monkeypatch, c
 def test_work_import_promote_all_filters_by_source_and_kind(tmp_path, monkeypatch, capsys):
     _init_git_repo(tmp_path)
     monkeypatch.setattr(
-        work_cmd,
+        work_cmd.helpers,
         "_now",
         lambda: datetime(2026, 5, 26, 12, 0, 0, tzinfo=timezone.utc),
     )
@@ -8156,7 +8156,7 @@ def test_work_import_promote_all_filters_by_source_and_kind(tmp_path, monkeypatc
 def test_work_import_plan_handoff_covers_durable_kinds(tmp_path, monkeypatch, capsys):
     _init_git_repo(tmp_path)
     monkeypatch.setattr(
-        work_cmd,
+        work_cmd.helpers,
         "_now",
         lambda: datetime(2026, 5, 26, 12, 0, 0, tzinfo=timezone.utc),
     )
@@ -8208,7 +8208,7 @@ def test_work_import_promote_handoff_writes_valid_draft_and_completion_metadata(
             datetime(2026, 5, 26, 12, 1, 3, tzinfo=timezone.utc),
         ]
     )
-    monkeypatch.setattr(work_cmd, "_now", lambda: next(times))
+    monkeypatch.setattr(work_cmd.helpers, "_now", lambda: next(times))
     import_file = tmp_path / "handoff-import.jsonl"
     import_file.write_text(
         json.dumps(
@@ -8258,7 +8258,7 @@ def test_work_import_promote_handoff_lint_failure_does_not_promote(tmp_path, mon
     from brigade import handoff_cmd
 
     monkeypatch.setattr(
-        work_cmd,
+        work_cmd.helpers,
         "_now",
         lambda: datetime(2026, 5, 26, 12, 0, 0, tzinfo=timezone.utc),
     )
@@ -8288,7 +8288,7 @@ def test_work_import_promote_handoff_lint_failure_does_not_promote(tmp_path, mon
 def test_work_import_promote_handoff_rejects_raw_private_chat_fields(tmp_path, monkeypatch, capsys):
     _init_git_repo(tmp_path)
     monkeypatch.setattr(
-        work_cmd,
+        work_cmd.helpers,
         "_now",
         lambda: datetime(2026, 5, 26, 12, 0, 0, tzinfo=timezone.utc),
     )
@@ -8326,7 +8326,7 @@ def test_work_import_promote_handoff_rejects_raw_private_chat_fields(tmp_path, m
 def test_work_handoff_ready_imports_surface_in_inbox_sweep_brief_and_doctor(tmp_path, monkeypatch, capsys):
     _init_git_repo(tmp_path)
     monkeypatch.setattr(
-        work_cmd,
+        work_cmd.helpers,
         "_now",
         lambda: datetime(2026, 5, 28, 12, 0, 0, tzinfo=timezone.utc),
     )
@@ -8400,7 +8400,7 @@ def test_work_import_handoff_dedupe_respects_promoted_and_changed_fingerprints(t
             datetime(2026, 5, 26, 12, 5, 0, tzinfo=timezone.utc),
         ]
     )
-    monkeypatch.setattr(work_cmd, "_now", lambda: next(times))
+    monkeypatch.setattr(work_cmd.helpers, "_now", lambda: next(times))
     base = {
         "text": "Remember durable scanner preference",
         "kind": "preference",
@@ -8445,7 +8445,7 @@ def test_work_import_promote_all_preserves_task_metadata(tmp_path, monkeypatch, 
             datetime(2026, 5, 26, 12, 1, 4, tzinfo=timezone.utc),
         ]
     )
-    monkeypatch.setattr(work_cmd, "_now", lambda: next(times))
+    monkeypatch.setattr(work_cmd.helpers, "_now", lambda: next(times))
     import_file = tmp_path / "task-imports.jsonl"
     records = [
         {
@@ -8494,7 +8494,7 @@ def test_work_run_uses_promoted_import_acceptance(tmp_path, monkeypatch, capsys)
             datetime(2026, 5, 26, 13, 0, 2, tzinfo=timezone.utc),
         ]
     )
-    monkeypatch.setattr(work_cmd, "_now", lambda: next(times))
+    monkeypatch.setattr(work_cmd.helpers, "_now", lambda: next(times))
     import_file = tmp_path / "task-imports.jsonl"
     import_file.write_text(
         json.dumps(
@@ -8542,7 +8542,7 @@ def test_work_import_promote_run_success_records_completion(tmp_path, monkeypatc
             datetime(2026, 5, 26, 13, 0, 3, tzinfo=timezone.utc),
         ]
     )
-    monkeypatch.setattr(work_cmd, "_now", lambda: next(times))
+    monkeypatch.setattr(work_cmd.helpers, "_now", lambda: next(times))
     import_file = tmp_path / "task-imports.jsonl"
     import_file.write_text(
         json.dumps(
@@ -8591,7 +8591,7 @@ def test_work_import_promote_run_failure_leaves_task_pending(tmp_path, monkeypat
             datetime(2026, 5, 26, 13, 0, 1, tzinfo=timezone.utc),
         ]
     )
-    monkeypatch.setattr(work_cmd, "_now", lambda: next(times))
+    monkeypatch.setattr(work_cmd.helpers, "_now", lambda: next(times))
     assert work_cmd.import_add(target=tmp_path, text="Promote run failure", kind="task", source="repo-scan") == 0
     import_id = capsys.readouterr().out.split("import: ", 1)[1].splitlines()[0]
     monkeypatch.setattr(dogfood_cmd, "run", lambda task, **kwargs: 7)
@@ -8608,7 +8608,7 @@ def test_work_import_promote_run_failure_leaves_task_pending(tmp_path, monkeypat
 def test_work_import_promote_all_filters_by_metadata(tmp_path, monkeypatch, capsys):
     _init_git_repo(tmp_path)
     monkeypatch.setattr(
-        work_cmd,
+        work_cmd.helpers,
         "_now",
         lambda: datetime(2026, 5, 26, 12, 0, 0, tzinfo=timezone.utc),
     )
@@ -8655,7 +8655,7 @@ def test_work_import_promote_all_filters_by_metadata(tmp_path, monkeypatch, caps
 def test_work_import_dismiss_marks_import_not_pending(tmp_path, monkeypatch, capsys):
     _init_git_repo(tmp_path)
     monkeypatch.setattr(
-        work_cmd,
+        work_cmd.helpers,
         "_now",
         lambda: datetime(2026, 5, 26, 12, 0, 0, tzinfo=timezone.utc),
     )
@@ -8677,7 +8677,7 @@ def test_work_import_dismiss_marks_import_not_pending(tmp_path, monkeypatch, cap
 def test_work_import_dismiss_all_filters_by_source_kind_and_metadata(tmp_path, monkeypatch, capsys):
     _init_git_repo(tmp_path)
     monkeypatch.setattr(
-        work_cmd,
+        work_cmd.helpers,
         "_now",
         lambda: datetime(2026, 5, 26, 12, 0, 0, tzinfo=timezone.utc),
     )
@@ -8739,7 +8739,7 @@ def test_work_import_dismiss_all_requires_id_or_all(tmp_path, capsys):
 def test_work_import_promote_rejects_non_pending_import(tmp_path, monkeypatch, capsys):
     _init_git_repo(tmp_path)
     monkeypatch.setattr(
-        work_cmd,
+        work_cmd.helpers,
         "_now",
         lambda: datetime(2026, 5, 26, 12, 0, 0, tzinfo=timezone.utc),
     )
@@ -8759,7 +8759,7 @@ def test_work_import_promote_rejects_non_pending_import(tmp_path, monkeypatch, c
 def test_work_import_dismiss_rejects_non_pending_import(tmp_path, monkeypatch, capsys):
     _init_git_repo(tmp_path)
     monkeypatch.setattr(
-        work_cmd,
+        work_cmd.helpers,
         "_now",
         lambda: datetime(2026, 5, 26, 12, 0, 0, tzinfo=timezone.utc),
     )
@@ -8779,7 +8779,7 @@ def test_work_import_dismiss_rejects_non_pending_import(tmp_path, monkeypatch, c
 def test_work_brief_includes_pending_imports(tmp_path, monkeypatch, capsys):
     _init_git_repo(tmp_path)
     monkeypatch.setattr(
-        work_cmd,
+        work_cmd.helpers,
         "_now",
         lambda: datetime(2026, 5, 26, 12, 0, 0, tzinfo=timezone.utc),
     )
@@ -8815,7 +8815,7 @@ def test_work_brief_includes_pending_imports(tmp_path, monkeypatch, capsys):
 
 def test_work_brief_includes_handoff_ingest_issues(tmp_path, monkeypatch, capsys):
     _init_git_repo(tmp_path)
-    monkeypatch.setattr(work_cmd.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(work_cmd.helpers.shutil, "which", lambda name: f"/usr/bin/{name}")
     log = tmp_path / ".brigade" / "handoff-ingest" / "latest.log"
     log.parent.mkdir(parents=True)
     log.write_text("SKIP bad.md: no recognizable markdown sections found\n")
@@ -8845,7 +8845,7 @@ def test_work_brief_includes_handoff_ingest_issues(tmp_path, monkeypatch, capsys
 
 def test_work_brief_and_doctor_include_handoff_draft_queue(tmp_path, monkeypatch, capsys):
     _init_git_repo(tmp_path)
-    monkeypatch.setattr(work_cmd.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(work_cmd.helpers.shutil, "which", lambda name: f"/usr/bin/{name}")
     inbox = tmp_path / ".codex" / "memory-handoffs"
     inbox.mkdir(parents=True)
     (inbox / "reviewed.md").write_text(
@@ -8938,7 +8938,7 @@ def test_work_inbox_doctor_reports_promoted_import_missing_handoff_draft(tmp_pat
 
 def test_work_brief_suppresses_known_handoff_ingest_issues(tmp_path, monkeypatch, capsys):
     _init_git_repo(tmp_path)
-    monkeypatch.setattr(work_cmd.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(work_cmd.helpers.shutil, "which", lambda name: f"/usr/bin/{name}")
     log = tmp_path / ".brigade" / "handoff-ingest" / "latest.log"
     log.parent.mkdir(parents=True)
     log.write_text("SKIP bad.md: no recognizable markdown sections found\n")
@@ -8982,7 +8982,7 @@ def test_work_next_reports_latest_next_as_default_task(tmp_path, monkeypatch, ca
     run_dir.mkdir(parents=True)
     _write_json(run_dir / "run.json", {"started_at": "2026-05-26T12:10:00Z", "status": "ok", "task": "review"})
     (run_dir / "final.txt").write_text("Done.\n\nNext step: Build next command.\n")
-    monkeypatch.setattr(work_cmd.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(work_cmd.helpers.shutil, "which", lambda name: f"/usr/bin/{name}")
 
     assert work_cmd.next(target=tmp_path) == 0
     out = capsys.readouterr().out
@@ -9002,7 +9002,7 @@ def test_work_next_json_reports_resolved_task(tmp_path, monkeypatch, capsys):
     run_dir.mkdir(parents=True)
     _write_json(run_dir / "run.json", {"started_at": "2026-05-26T12:10:00Z", "status": "ok", "task": "review"})
     (run_dir / "final.txt").write_text("Done.\n\nNext step: Build JSON output.\n")
-    monkeypatch.setattr(work_cmd.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(work_cmd.helpers.shutil, "which", lambda name: f"/usr/bin/{name}")
     capsys.readouterr()
 
     assert work_cmd.next(target=tmp_path, json_output=True) == 0
@@ -9029,7 +9029,7 @@ def test_work_next_falls_back_to_default_review(tmp_path, capsys):
 
 def test_work_bootstrap_prepares_daily_loop(tmp_path, monkeypatch, capsys):
     _init_git_repo(tmp_path)
-    monkeypatch.setattr(work_cmd.shutil, "which", lambda name: f"/usr/bin/{name}" if name == "codex" else None)
+    monkeypatch.setattr(work_cmd.helpers.shutil, "which", lambda name: f"/usr/bin/{name}" if name == "codex" else None)
 
     assert work_cmd.bootstrap(target=tmp_path, timeout_seconds=44) == 0
     out = capsys.readouterr().out
@@ -9058,7 +9058,7 @@ def test_work_bootstrap_preserves_existing_config_without_force(tmp_path, monkey
         handoff_inbox=tmp_path / ".claude" / "memory-handoffs",
         timeout_seconds=12,
     )
-    monkeypatch.setattr(work_cmd.shutil, "which", lambda name: f"/usr/bin/{name}" if name == "codex" else None)
+    monkeypatch.setattr(work_cmd.helpers.shutil, "which", lambda name: f"/usr/bin/{name}" if name == "codex" else None)
 
     assert work_cmd.bootstrap(target=tmp_path, timeout_seconds=44) == 0
     out = capsys.readouterr().out
@@ -9072,7 +9072,7 @@ def test_work_bootstrap_preserves_existing_config_without_force(tmp_path, monkey
 
 def test_work_bootstrap_reports_missing_codex(tmp_path, monkeypatch, capsys):
     _init_git_repo(tmp_path)
-    monkeypatch.setattr(work_cmd.shutil, "which", lambda name: None)
+    monkeypatch.setattr(work_cmd.helpers.shutil, "which", lambda name: None)
 
     assert work_cmd.bootstrap(target=tmp_path) == 1
     out = capsys.readouterr().out
@@ -9102,7 +9102,7 @@ def test_work_run_wraps_dogfood_session(tmp_path, monkeypatch, capsys):
             datetime(2026, 5, 26, 13, 0, 0, tzinfo=timezone.utc),
         ]
     )
-    monkeypatch.setattr(work_cmd, "_now", lambda: next(times))
+    monkeypatch.setattr(work_cmd.helpers, "_now", lambda: next(times))
     seen = {}
 
     def fake_dogfood_run(task, **kwargs):
@@ -9167,7 +9167,7 @@ def test_work_run_uses_latest_next_when_task_is_omitted(tmp_path, monkeypatch):
             datetime(2026, 5, 26, 13, 0, 0, tzinfo=timezone.utc),
         ]
     )
-    monkeypatch.setattr(work_cmd, "_now", lambda: next(times))
+    monkeypatch.setattr(work_cmd.helpers, "_now", lambda: next(times))
     seen = {}
 
     def fake_dogfood_run(task, **kwargs):
@@ -9209,7 +9209,7 @@ def test_work_run_consumes_pending_task_before_latest_next(tmp_path, monkeypatch
             datetime(2026, 5, 26, 13, 0, 1, tzinfo=timezone.utc),
         ]
     )
-    monkeypatch.setattr(work_cmd, "_now", lambda: next(times))
+    monkeypatch.setattr(work_cmd.helpers, "_now", lambda: next(times))
     assert work_cmd.task_add(target=tmp_path, text="Build queued task") == 0
     seen = {}
 
@@ -9244,7 +9244,7 @@ def test_work_run_records_task_snapshot_and_completion_metadata(tmp_path, monkey
             datetime(2026, 5, 26, 13, 0, 1, tzinfo=timezone.utc),
         ]
     )
-    monkeypatch.setattr(work_cmd, "_now", lambda: next(times))
+    monkeypatch.setattr(work_cmd.helpers, "_now", lambda: next(times))
     work_cmd._write_task_ledger(
         tmp_path,
         {
@@ -9351,7 +9351,7 @@ def test_work_run_passes_acceptance_criteria_for_pending_task(tmp_path, monkeypa
             datetime(2026, 5, 26, 13, 0, 1, tzinfo=timezone.utc),
         ]
     )
-    monkeypatch.setattr(work_cmd, "_now", lambda: next(times))
+    monkeypatch.setattr(work_cmd.helpers, "_now", lambda: next(times))
     assert (
         work_cmd.task_add(
             target=tmp_path,
@@ -9399,7 +9399,7 @@ def test_work_run_queue_next_adds_extracted_followup(tmp_path, monkeypatch, caps
             datetime(2026, 5, 26, 13, 0, 1, tzinfo=timezone.utc),
         ]
     )
-    monkeypatch.setattr(work_cmd, "_now", lambda: next(times))
+    monkeypatch.setattr(work_cmd.helpers, "_now", lambda: next(times))
 
     def fake_dogfood_run(task, **kwargs):
         run_dir = kwargs["output_dir"]
@@ -9445,7 +9445,7 @@ def test_work_run_queue_next_reuses_existing_pending_task(tmp_path, monkeypatch,
             datetime(2026, 5, 26, 13, 0, 0, tzinfo=timezone.utc),
         ]
     )
-    monkeypatch.setattr(work_cmd, "_now", lambda: next(times))
+    monkeypatch.setattr(work_cmd.helpers, "_now", lambda: next(times))
     assert work_cmd.task_add(target=tmp_path, text="Build queued follow-up.") == 0
     capsys.readouterr()
 
@@ -9486,7 +9486,7 @@ def test_work_run_closes_session_when_dogfood_fails(tmp_path, monkeypatch):
             datetime(2026, 5, 26, 13, 0, 0, tzinfo=timezone.utc),
         ]
     )
-    monkeypatch.setattr(work_cmd, "_now", lambda: next(times))
+    monkeypatch.setattr(work_cmd.helpers, "_now", lambda: next(times))
     monkeypatch.setattr(dogfood_cmd, "run", lambda task, **kwargs: 7)
 
     assert work_cmd.run("review the repo", target=tmp_path, handoff=False) == 7
@@ -9508,7 +9508,7 @@ def test_work_run_leaves_consumed_task_pending_when_dogfood_fails(tmp_path, monk
             datetime(2026, 5, 26, 13, 0, 1, tzinfo=timezone.utc),
         ]
     )
-    monkeypatch.setattr(work_cmd, "_now", lambda: next(times))
+    monkeypatch.setattr(work_cmd.helpers, "_now", lambda: next(times))
     assert work_cmd.task_add(target=tmp_path, text="Build pending failure", acceptance=["Do not complete on failure"]) == 0
     monkeypatch.setattr(dogfood_cmd, "run", lambda task, **kwargs: 7)
 

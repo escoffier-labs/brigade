@@ -210,7 +210,7 @@ def test_memory_care_plan_fixes_reports_blockers_and_writes_nothing(tmp_path, mo
 
 def test_memory_care_imports_autofix_plan_and_brief_visibility(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(memory_cmd, "_today", lambda: date(2026, 5, 28))
-    monkeypatch.setattr(work_cmd, "_now", lambda: datetime(2026, 5, 28, 12, 0, tzinfo=timezone.utc))
+    monkeypatch.setattr(work_cmd.helpers, "_now", lambda: datetime(2026, 5, 28, 12, 0, tzinfo=timezone.utc))
     cards = tmp_path / "memory" / "cards"
     _write_card(cards / "missing-reviewed.md", {"topic": "missing-reviewed", "fresh_until": "2026-12-01", "confidence": "high", "evidence": ["README.md"]})
     (tmp_path / "MEMORY.md").write_text("- [missing-reviewed](memory/cards/missing-reviewed.md)\n")
@@ -236,7 +236,7 @@ def test_memory_care_imports_autofix_plan_and_brief_visibility(tmp_path, monkeyp
 
 def test_memory_care_imports_dedupe_and_respect_dismissed(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(memory_cmd, "_today", lambda: date(2026, 5, 28))
-    monkeypatch.setattr(work_cmd, "_now", lambda: datetime(2026, 5, 28, 12, 0, tzinfo=timezone.utc))
+    monkeypatch.setattr(work_cmd.helpers, "_now", lambda: datetime(2026, 5, 28, 12, 0, tzinfo=timezone.utc))
     cards = tmp_path / "memory" / "cards"
     _write_card(cards / "stale.md", {"topic": "stale", "last_reviewed": "2026-01-01", "fresh_until": "2026-12-01", "confidence": "high", "evidence": ["README.md"]})
     (tmp_path / "MEMORY.md").write_text("- [stale](memory/cards/stale.md)\n")
@@ -279,7 +279,7 @@ def test_memory_care_promoted_task_reaches_work_run_acceptance(tmp_path, monkeyp
             datetime(2026, 5, 28, 12, 5, tzinfo=timezone.utc),
         ]
     )
-    monkeypatch.setattr(work_cmd, "_now", lambda: next(times))
+    monkeypatch.setattr(work_cmd.helpers, "_now", lambda: next(times))
     cards = tmp_path / "memory" / "cards"
     _write_card(cards / "stale.md", {"topic": "stale", "last_reviewed": "2026-01-01", "fresh_until": "2026-12-01", "confidence": "high", "evidence": ["README.md"]})
     (tmp_path / "MEMORY.md").write_text("- [stale](memory/cards/stale.md)\n")
