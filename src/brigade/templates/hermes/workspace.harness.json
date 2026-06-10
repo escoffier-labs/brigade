@@ -8,7 +8,7 @@
     "",
     "Replace <hermes-config-path> with your Hermes config location."
   ],
-  "_brigade_version": "0.10.2",
+  "_brigade_version": "0.10.3",
   "_brigade_status": "experimental",
   "workspace": {
     "root": "<workspace-root>",
