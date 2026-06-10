@@ -20,6 +20,10 @@ import (
 type Options struct {
 	Limit int
 	Since string
+	// Skip reports whether a file is unchanged since a prior import and can be
+	// skipped without reading or hashing it. Size and mtime come from the
+	// caller's scan manifest. Nil means import everything (full scan).
+	Skip func(path string, size int64, mtime string) bool
 }
 
 type Result struct {
@@ -37,6 +41,10 @@ type FileScan struct {
 	ContentHash string `json:"content_hash"`
 	Records     int    `json:"records_generated"`
 	Warnings    int    `json:"warnings"`
+	// Skipped is true when an incremental import recognized the file as
+	// unchanged and did not read or hash it. ContentHash stays empty in that
+	// case so callers know not to overwrite the manifest's good hash.
+	Skipped bool `json:"skipped,omitempty"`
 }
 
 type RawEvent struct {
@@ -138,32 +146,77 @@ func DefaultInclude(path string) bool {
 
 type FileScanSet struct {
 	files map[string]*FileScan
+	order []string
 }
 
+// NewFileScanSet stats every candidate file but does NOT hash them. Hashing
+// reads the whole file, so it is deferred to Walk and done only for files that
+// are actually scanned. An incremental import can then skip an unchanged file
+// without ever reading it.
 func NewFileScanSet(root string, include func(string) bool) (*FileScanSet, error) {
 	paths, err := ListJSONLFiles(root, include)
 	if err != nil {
 		return nil, err
 	}
-	set := &FileScanSet{files: map[string]*FileScan{}}
+	set := &FileScanSet{files: map[string]*FileScan{}, order: paths}
 	for _, path := range paths {
 		info, err := os.Stat(path)
 		if err != nil {
 			return nil, err
 		}
-		hash, err := FileHash(path)
-		if err != nil {
-			return nil, err
-		}
 		set.files[path] = &FileScan{
-			Path:        path,
-			Size:        info.Size(),
-			MTime:       info.ModTime().UTC().Format(time.RFC3339Nano),
-			ContentHash: "sha256:" + hash,
+			Path:  path,
+			Size:  info.Size(),
+			MTime: info.ModTime().UTC().Format(time.RFC3339Nano),
 		}
 	}
 	return set, nil
 }
+
+// Walk scans each file in path order, emitting its events via each. When
+// opts.Skip recognizes a file as unchanged it is marked skipped and neither
+// read nor hashed; otherwise the file is hashed (recording its ContentHash for
+// the manifest) and streamed.
+func (s *FileScanSet) Walk(opts Options, each func(RawEvent) error) error {
+	for _, path := range s.order {
+		skip, err := s.Prepare(path, opts)
+		if err != nil {
+			return err
+		}
+		if skip {
+			continue
+		}
+		if err := scanJSONL(path, each); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// Prepare applies the incremental-skip decision for one file. If opts.Skip
+// recognizes it as unchanged the file is marked skipped and skip=true is
+// returned without reading it. Otherwise the file is hashed (recording its
+// ContentHash) and skip=false is returned so the caller reads it. Generators
+// that consume whole files (rather than line-by-line) call this directly.
+func (s *FileScanSet) Prepare(path string, opts Options) (skip bool, err error) {
+	sc := s.files[path]
+	if sc == nil {
+		return false, nil
+	}
+	if opts.Skip != nil && opts.Skip(path, sc.Size, sc.MTime) {
+		sc.Skipped = true
+		return true, nil
+	}
+	hash, err := FileHash(path)
+	if err != nil {
+		return false, err
+	}
+	sc.ContentHash = "sha256:" + hash
+	return false, nil
+}
+
+// Paths returns the candidate files in stable path order.
+func (s *FileScanSet) Paths() []string { return s.order }
 
 func (s *FileScanSet) Record(path string) {
 	if scan := s.files[path]; scan != nil {

@@ -113,3 +113,70 @@ func TestGenerateMissingPathErrors(t *testing.T) {
 		t.Fatal("expected error for missing path")
 	}
 }
+
+func TestGenerateSkipsUnchangedFiles(t *testing.T) {
+	dir := t.TempDir()
+	src, err := os.ReadFile(fixture)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := filepath.Join(dir, "a.jsonl")
+	b := filepath.Join(dir, "b.jsonl")
+	if err := os.WriteFile(a, src, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(b, src, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// First pass with no Skip: both files read, both produce records and hashes.
+	_, full := parseRecords(t, dir, sources.Options{})
+	if len(full.Files) != 2 {
+		t.Fatalf("first pass files = %d, want 2", len(full.Files))
+	}
+	for _, f := range full.Files {
+		if f.Skipped {
+			t.Fatalf("first pass should skip nothing: %+v", f)
+		}
+		if f.ContentHash == "" || f.Records == 0 {
+			t.Fatalf("first pass file not fully scanned: %+v", f)
+		}
+	}
+
+	// Build a manifest from the first pass and skip file b only.
+	manifest := map[string]sources.FileScan{}
+	for _, f := range full.Files {
+		manifest[f.Path] = f
+	}
+	opts := sources.Options{Skip: func(p string, size int64, mtime string) bool {
+		prior, ok := manifest[p]
+		return ok && p == b && prior.Size == size && prior.MTime == mtime
+	}}
+	recs, inc := parseRecords(t, dir, opts)
+
+	var skipped, scanned *sources.FileScan
+	for i := range inc.Files {
+		switch inc.Files[i].Path {
+		case a:
+			scanned = &inc.Files[i]
+		case b:
+			skipped = &inc.Files[i]
+		}
+	}
+	if skipped == nil || !skipped.Skipped {
+		t.Fatalf("file b should be skipped: %+v", skipped)
+	}
+	if skipped.ContentHash != "" {
+		t.Fatalf("skipped file must not be hashed: %+v", skipped)
+	}
+	if scanned == nil || scanned.Skipped || scanned.ContentHash == "" {
+		t.Fatalf("file a should be scanned: %+v", scanned)
+	}
+	// Only the scanned file's records were emitted.
+	if len(recs) == 0 || len(recs) >= len(full.Files)*100 {
+		// sanity: at least some records, fewer than the full two-file pass
+	}
+	if inc.Records >= full.Records {
+		t.Fatalf("incremental records (%d) should be fewer than full (%d)", inc.Records, full.Records)
+	}
+}

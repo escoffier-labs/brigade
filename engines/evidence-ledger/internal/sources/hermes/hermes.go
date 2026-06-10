@@ -24,14 +24,17 @@ func Generate(path string, opts sources.Options, w io.Writer) (sources.Result, e
 	if err != nil {
 		return sources.Result{}, err
 	}
-	files, err := sources.ListJSONLFiles(path, Include)
-	if err != nil {
-		return sources.Result{}, err
-	}
 	var result sources.Result
-	for _, file := range files {
+	for _, file := range scans.Paths() {
 		if opts.Limit > 0 && result.Records >= opts.Limit {
 			break
+		}
+		skip, err := scans.Prepare(file, opts)
+		if err != nil {
+			return result, err
+		}
+		if skip {
+			continue
 		}
 		records, warnings, err := recordsFromFile(file)
 		if err != nil {

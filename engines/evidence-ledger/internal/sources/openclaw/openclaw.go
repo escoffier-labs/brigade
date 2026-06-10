@@ -20,7 +20,7 @@ func Generate(path string, opts sources.Options, w io.Writer) (sources.Result, e
 		return sources.Result{}, err
 	}
 	var result sources.Result
-	err = sources.WalkJSONL(path, sources.DefaultInclude, func(ev sources.RawEvent) error {
+	err = scans.Walk(opts, func(ev sources.RawEvent) error {
 		if opts.Limit > 0 && result.Records >= opts.Limit {
 			return nil
 		}

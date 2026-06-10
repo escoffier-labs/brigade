@@ -168,6 +168,33 @@ where target_item_id is null
 	return n, nil
 }
 
+// ScanRecord is a file's prior import state from the source_scans manifest.
+type ScanRecord struct {
+	Size        int64
+	MTime       string
+	ContentHash string
+}
+
+// LoadSourceScans returns the manifest for a source kind keyed by file path,
+// so an incremental import can skip files whose size and mtime are unchanged.
+func LoadSourceScans(db *sql.DB, sourceKind string) (map[string]ScanRecord, error) {
+	rows, err := db.Query(`select path, size, mtime, content_hash from source_scans where source_kind = ?`, sourceKind)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]ScanRecord{}
+	for rows.Next() {
+		var path, mtime, hash string
+		var size int64
+		if err := rows.Scan(&path, &size, &mtime, &hash); err != nil {
+			return nil, err
+		}
+		out[path] = ScanRecord{Size: size, MTime: mtime, ContentHash: hash}
+	}
+	return out, rows.Err()
+}
+
 func RecordSourceScans(db *sql.DB, sourceKind, generatedHash string, files []sources.FileScan, imported bool) error {
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	importedAt := any(nil)
@@ -175,6 +202,11 @@ func RecordSourceScans(db *sql.DB, sourceKind, generatedHash string, files []sou
 		importedAt = now
 	}
 	for _, file := range files {
+		// A skipped file was never read; leave its manifest row (size, mtime,
+		// hash, record count) intact rather than overwriting with zeroes.
+		if file.Skipped {
+			continue
+		}
 		id := stableID("scan", sourceKind, file.Path)
 		_, err := db.Exec(`insert into source_scans(id, source_kind, path, size, mtime, content_hash, generated_hash, first_seen_at, last_seen_at, last_imported_at, records_generated, warnings)
 values(?,?,?,?,?,?,?,?,?,?,?,?)

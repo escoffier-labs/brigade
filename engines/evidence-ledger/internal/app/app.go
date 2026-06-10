@@ -837,12 +837,12 @@ func cmdAdapterGenerate(name string, generator sources.Generator, args []string,
 }
 
 func cmdImportNative(name string, generator sources.Generator, args []string, out, errw io.Writer) int {
-	values, bools, rest, err := splitFlags(args, map[string]bool{"limit": true, "since": true}, map[string]bool{"json": true, "dry-run": true})
+	values, bools, rest, err := splitFlags(args, map[string]bool{"limit": true, "since": true}, map[string]bool{"json": true, "dry-run": true, "full": true})
 	if err != nil {
 		return fatalf(errw, "import %s: %s", name, err)
 	}
 	if len(rest) != 1 {
-		return fatalf(errw, "usage: miseledger import %s <path-or-dir> [--json] [--dry-run] [--limit N] [--since DATE]", name)
+		return fatalf(errw, "usage: miseledger import %s <path-or-dir> [--json] [--dry-run] [--full] [--limit N] [--since DATE]", name)
 	}
 	limit, err := parseLimit(values["limit"], 0)
 	if err != nil {
@@ -861,7 +861,12 @@ func cmdImportNative(name string, generator sources.Generator, args []string, ou
 		return fatalf(errw, "import %s: %s", name, err)
 	}
 	defer db.Close()
-	result, generated, err := runNativeImport(db, name, generator, rest[0], limit, values["since"], true)
+	opts := sources.Options{Limit: limit, Since: values["since"]}
+	if bools["full"] {
+		// Force a complete re-scan that ignores the manifest.
+		opts.Skip = func(string, int64, string) bool { return false }
+	}
+	result, generated, err := runNativeImportOpts(db, name, generator, rest[0], opts, true)
 	if err != nil {
 		return fatalf(errw, "import %s: %s", name, err)
 	}
@@ -874,6 +879,25 @@ func cmdImportNative(name string, generator sources.Generator, args []string, ou
 }
 
 func runNativeImport(db *sql.DB, name string, generator sources.Generator, path string, limit int, since string, recordScans bool) (ingest.AdapterResult, sources.Result, error) {
+	return runNativeImportOpts(db, name, generator, path, sources.Options{Limit: limit, Since: since}, recordScans)
+}
+
+func runNativeImportOpts(db *sql.DB, name string, generator sources.Generator, path string, opts sources.Options, recordScans bool) (ingest.AdapterResult, sources.Result, error) {
+	// Incremental skip: unchanged files (same size and mtime as the manifest)
+	// are never read or hashed. A full re-scan happens when opts.Skip is
+	// already set by the caller or the manifest is empty.
+	if opts.Skip == nil {
+		manifest, err := ingest.LoadSourceScans(db, name)
+		if err != nil {
+			return ingest.AdapterResult{}, sources.Result{}, err
+		}
+		if len(manifest) > 0 {
+			opts.Skip = func(p string, size int64, mtime string) bool {
+				prior, ok := manifest[p]
+				return ok && prior.Size == size && prior.MTime == mtime
+			}
+		}
+	}
 	pr, pw := io.Pipe()
 	type genResult struct {
 		result sources.Result
@@ -881,7 +905,7 @@ func runNativeImport(db *sql.DB, name string, generator sources.Generator, path 
 	}
 	done := make(chan genResult, 1)
 	go func() {
-		generated, err := generator(path, sources.Options{Limit: limit, Since: since}, pw)
+		generated, err := generator(path, opts, pw)
 		if err != nil {
 			_ = pw.CloseWithError(err)
 		} else {
