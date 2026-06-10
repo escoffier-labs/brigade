@@ -15,6 +15,7 @@ from typing import Any
 from uuid import uuid4
 
 from .install import apply_gitignore
+from .localio import read_json_dict as _read_json, read_jsonl_dicts as _read_jsonl, utc_now as _now, write_json as _write_json
 from .selection import Selection, WRITER_INBOXES
 from . import toml_compat as tomllib, work_cmd
 
@@ -82,43 +83,6 @@ class DiscoveryRoot:
 
 def config_path(target: Path) -> Path:
     return target / CONFIG_REL_PATH
-
-
-def _now() -> datetime:
-    return datetime.now(timezone.utc)
-
-
-def _read_json(path: Path) -> dict[str, Any] | None:
-    try:
-        payload = json.loads(path.read_text())
-    except (OSError, json.JSONDecodeError):
-        return None
-    return payload if isinstance(payload, dict) else None
-
-
-def _write_json(path: Path, payload: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
-
-
-def _read_jsonl(path: Path) -> list[dict[str, Any]]:
-    if not path.is_file():
-        return []
-    records: list[dict[str, Any]] = []
-    try:
-        lines = path.read_text().splitlines()
-    except OSError:
-        return records
-    for line in lines:
-        if not line.strip():
-            continue
-        try:
-            payload = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(payload, dict):
-            records.append(payload)
-    return records
 
 
 def _parse_time(value: object) -> datetime | None:

@@ -1,7 +1,6 @@
 """Daily work session helpers."""
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import re
@@ -20,6 +19,7 @@ from . import toml_compat as tomllib
 from .install import apply_gitignore
 from .selection import Selection
 from .untrusted import scan_untrusted, wrap_untrusted
+from .localio import read_json_dict as _read_json, stable_hash as _stable_hash, utc_now as _now, write_json as _write_json
 
 OK = "ok"
 WARN = "warn"
@@ -454,10 +454,6 @@ def _count_status(count: object, label: str = "issue") -> str:
     return "ok" if count == 0 else f"{count} {label}(s)"
 
 
-def _now() -> datetime:
-    return datetime.now(timezone.utc)
-
-
 def _slug(text: str) -> str:
     value = re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
     return value[:48].strip("-") or "work-session"
@@ -584,19 +580,6 @@ def _session_snapshot(target: Path) -> dict[str, Any]:
     }
 
 
-def _write_json(path: Path, payload: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
-
-
-def _read_json(path: Path) -> dict[str, Any] | None:
-    try:
-        payload = json.loads(path.read_text())
-    except (OSError, json.JSONDecodeError):
-        return None
-    return payload if isinstance(payload, dict) else None
-
-
 def _read_task_ledger(target: Path) -> dict[str, Any]:
     path = _tasks_path(target)
     if not path.exists():
@@ -669,11 +652,6 @@ def _import_sort_key(item: dict[str, Any]) -> str:
 
 def _task_text_key(text: str) -> str:
     return " ".join(text.casefold().split())
-
-
-def _stable_hash(value: object) -> str:
-    rendered = json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
-    return hashlib.sha256(rendered.encode("utf-8")).hexdigest()[:16]
 
 
 def _string_field(value: object) -> str | None:

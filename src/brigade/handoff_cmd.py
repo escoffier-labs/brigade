@@ -17,6 +17,7 @@ FAIL = "fail"
 
 from . import scrub
 from .config import load_config as load_brigade_config
+from .localio import write_json as _write_json
 from .selection import WRITER_INBOXES as _WRITER_INBOX_MAP
 
 WRITER_INBOXES = tuple(_WRITER_INBOX_MAP.values())
@@ -682,11 +683,6 @@ def _handoff_ingest_runs_root(target: Path) -> Path:
 
 def _handoff_closeouts_root(target: Path) -> Path:
     return _handoff_state_root(target) / "closeouts"
-
-
-def _write_json(path: Path, payload: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
 
 
 def _load_source_config_for_drafts(target: Path, sources: Path | None = None) -> tuple[SourceConfig, Path | None, list[str], bool]:

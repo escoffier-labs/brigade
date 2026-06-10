@@ -8,12 +8,13 @@ import re
 import shutil
 import subprocess
 import sys
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
 from . import chat_cmd, context_cmd, handoff_cmd, learn_cmd, memory_cmd, notifications_cmd, pantry_cmd, phases_cmd, projects_cmd, release_cmd, repos_cmd, research_cmd, roadmap_cmd, security_cmd, tools_cmd, work_cmd
+from .localio import read_json_dict as _read_json, read_jsonl_dicts as _read_jsonl, utc_now as _now, write_json as _write_json
 
 SCHEMA_VERSION = 1
 SCHEMA_MANIFEST_VERSION = 1
@@ -44,23 +45,6 @@ CENTER_REQUIRED_ITEM_FIELDS = {
     "safe_summary",
     "suggested_next_command",
 }
-
-
-def _read_json(path: Path) -> dict[str, Any] | None:
-    try:
-        payload = json.loads(path.read_text())
-    except (OSError, json.JSONDecodeError):
-        return None
-    return payload if isinstance(payload, dict) else None
-
-
-def _write_json(path: Path, payload: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
-
-
-def _now() -> datetime:
-    return datetime.now(timezone.utc)
 
 
 def _parse_time(value: object) -> datetime | None:
@@ -569,26 +553,6 @@ def _iter_json_files(root: Path, pattern: str) -> list[dict[str, Any]]:
     return items
 
 
-def _read_jsonl(path: Path) -> list[dict[str, Any]]:
-    if not path.is_file():
-        return []
-    records: list[dict[str, Any]] = []
-    try:
-        lines = path.read_text().splitlines()
-    except OSError:
-        return []
-    for line in lines:
-        if not line.strip():
-            continue
-        try:
-            payload = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(payload, dict):
-            records.append(payload)
-    return records
-
-
 def _actions_root(target: Path) -> Path:
     return target / ".brigade" / "center" / "actions"
 
@@ -1063,22 +1027,6 @@ def _readiness_archive_root(target: Path) -> Path:
 
 def _readiness_waivers_path(target: Path) -> Path:
     return _readiness_root(target) / "waivers.jsonl"
-
-
-def _read_jsonl(path: Path) -> list[dict[str, Any]]:
-    if not path.is_file():
-        return []
-    records: list[dict[str, Any]] = []
-    for line in path.read_text().splitlines():
-        if not line.strip():
-            continue
-        try:
-            item = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(item, dict):
-            records.append(item)
-    return records
 
 
 def _write_jsonl(path: Path, records: list[dict[str, Any]]) -> None:

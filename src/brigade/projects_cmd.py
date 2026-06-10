@@ -3,22 +3,18 @@ from __future__ import annotations
 
 import json
 import sys
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from . import toml_compat as tomllib
 from . import work_cmd
+from .localio import read_json_dict as _read_json, utc_now as _now, write_json as _write_json
 
 OK = "ok"
 WARN = "warn"
 DECISIONS = {"bake-in", "integrate", "catalog-only", "move-candidate", "leave-alone"}
 PROJECT_CLOSEOUT_STATUSES = {"reviewed", "deferred", "superseded", "archived"}
 QUIETING_PROJECT_CLOSEOUT_STATUSES = {"reviewed", "deferred", "archived"}
-
-
-def _now() -> datetime:
-    return datetime.now(timezone.utc)
 
 
 def config_path(target: Path) -> Path:
@@ -31,19 +27,6 @@ def readiness_root(target: Path) -> Path:
 
 def closeout_root(target: Path) -> Path:
     return target / ".brigade" / "projects" / "closeouts"
-
-
-def _write_json(path: Path, payload: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
-
-
-def _read_json(path: Path) -> dict[str, Any] | None:
-    try:
-        payload = json.loads(path.read_text())
-    except (OSError, json.JSONDecodeError):
-        return None
-    return payload if isinstance(payload, dict) else None
 
 
 def _as_list(value: object) -> list[str]:

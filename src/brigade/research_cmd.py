@@ -13,6 +13,7 @@ from .research.sources import local as localsrc
 from .research.sources import cli as clisrc
 from .research import report as reportmod, handoff as handoffmod
 from .selection import WRITER_INBOXES
+from .localio import utc_now_iso as _now
 
 def _resolve_backend(target: Path):
     from . import roster as roster_mod
@@ -168,11 +169,6 @@ def resume(*, target: Path, run_id: str, overrides: Dict[str, Any]) -> str:
 
 def cancel(*, target: Path, run_id: str) -> None:
     registry.set_status(target, run_id, "cancelled")
-
-
-def _now() -> str:
-    from datetime import datetime, timezone
-    return datetime.now(timezone.utc).isoformat()
 
 
 def _fingerprint_text(text: str) -> str:

@@ -21,6 +21,7 @@ from . import toml_compat as tomllib
 from .config import load_config as load_brigade_config
 from .install import apply_gitignore
 from .selection import Selection
+from .localio import stable_hash as _stable_hash, utc_now as _now, write_json as _write_json
 
 OK = "ok"
 WARN = "warn"
@@ -400,10 +401,6 @@ def parity_closeouts_path(target: Path) -> Path:
     return target / PARITY_CLOSEOUTS_REL_PATH
 
 
-def _now() -> datetime:
-    return datetime.now(timezone.utc)
-
-
 def _parse_iso_datetime(value: object) -> datetime | None:
     if not isinstance(value, str) or not value.strip():
         return None
@@ -417,11 +414,6 @@ def _parse_iso_datetime(value: object) -> datetime | None:
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
     return parsed.astimezone(timezone.utc)
-
-
-def _stable_hash(value: object) -> str:
-    rendered = json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
-    return hashlib.sha256(rendered.encode("utf-8")).hexdigest()[:16]
 
 
 def _file_hash(path: Path) -> str | None:
@@ -1398,11 +1390,6 @@ def _read_json(path: Path) -> tuple[object | None, str | None]:
     except json.JSONDecodeError as exc:
         return None, f"invalid JSON: {exc.msg}"
     return payload, None
-
-
-def _write_json(path: Path, payload: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
 
 
 def _redact_value(key: str, value: object) -> object:

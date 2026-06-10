@@ -6,19 +6,15 @@ secret material, mutate auth files, or start services.
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from . import proc
+from .localio import utc_now_iso as _now
 
 
 DEFAULT_CONFIG_PATH = "~/.config/agentpantry/config.toml"
 DEFAULT_KEY_PATH = "~/.config/agentpantry/psk.key"
-
-
-def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
 
 
 def _safe_slug(value: str) -> str:

@@ -19,6 +19,7 @@ from typing import Any
 from uuid import uuid4
 
 from . import center_cmd, context_cmd, handoff_cmd, memory_cmd, notifications_cmd, phases_cmd, security_cmd, toml_compat as tomllib, tools_cmd, work_cmd
+from .localio import read_json_dict as _read_json, utc_now as _now, write_json as _write_json
 
 SCHEMA_VERSION = 1
 RUN_STATUSES = {"reviewed", "deferred", "blocked", "archived"}
@@ -49,10 +50,6 @@ class _DailyStatusSectionTimeout(Exception):
     def __init__(self, label: str):
         super().__init__(label)
         self.label = label
-
-
-def _now() -> datetime:
-    return datetime.now(timezone.utc)
 
 
 def _daily_root(target: Path) -> Path:
@@ -208,19 +205,6 @@ def _hardening_phases() -> list[dict[str, Any]]:
                 }
             )
     return phases
-
-
-def _read_json(path: Path) -> dict[str, Any] | None:
-    try:
-        payload = json.loads(path.read_text())
-    except (OSError, json.JSONDecodeError):
-        return None
-    return payload if isinstance(payload, dict) else None
-
-
-def _write_json(path: Path, payload: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
 
 
 def _schema(name: str) -> dict[str, Any]:

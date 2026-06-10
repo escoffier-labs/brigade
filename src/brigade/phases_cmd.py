@@ -10,6 +10,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
+from .localio import read_json_dict as _read_json, utc_now as _now, write_json as _write_json
 
 SCHEMA_VERSION = 1
 PHASE_STATUSES = {"pending", "in-progress", "implemented", "verified", "committed", "pushed", "deferred", "blocked"}
@@ -30,10 +31,6 @@ PRIVACY_PATTERNS = {
         r"host|127\.0\.0\.1|10\.|192\.168\.|172\.(?:1[6-9]|2\d|3[01])|[^/\s`\"'<>]*(?:internal|private|corp|lan|local|nas)[^/\s`\"'<>]*)[^\s`\"'<>]*"
     ),
 }
-
-
-def _now() -> datetime:
-    return datetime.now(timezone.utc)
 
 
 def _root(target: Path) -> Path:
@@ -82,19 +79,6 @@ def _goals_root(target: Path) -> Path:
 
 def _index_path(target: Path) -> Path:
     return _root(target) / "index.json"
-
-
-def _write_json(path: Path, payload: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
-
-
-def _read_json(path: Path) -> dict[str, Any] | None:
-    try:
-        payload = json.loads(path.read_text())
-    except (OSError, json.JSONDecodeError):
-        return None
-    return payload if isinstance(payload, dict) else None
 
 
 def _append_jsonl(path: Path, payload: dict[str, Any]) -> None:

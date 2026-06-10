@@ -6,9 +6,9 @@ import re
 import shlex
 import subprocess
 import sys
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from .localio import utc_now_iso as _now, write_json as _write_json
 
 DANGEROUS_PATTERNS = (
     re.compile(r"\brm\s+-[^;\n]*[rf][^;\n]*[rf]"),
@@ -21,21 +21,12 @@ DANGEROUS_PATTERNS = (
 )
 
 
-def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
 def _runbooks_root(target: Path) -> Path:
     return target / ".brigade" / "runbooks"
 
 
 def _runs_root(target: Path) -> Path:
     return _runbooks_root(target) / "runs"
-
-
-def _write_json(path: Path, payload: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
 
 
 def _unique_run_dir(target: Path, run_id_base: str) -> tuple[str, Path]:

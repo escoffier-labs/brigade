@@ -7,13 +7,14 @@ import re
 import shutil
 import subprocess
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
 from . import context_cmd, handoff_cmd, learn_cmd, memory_cmd, phases_cmd, projects_cmd, repos_cmd, research_cmd, roadmap_cmd, security_cmd, tools_cmd, work_cmd
 from .selection import KNOWN_HARNESSES
+from .localio import read_json_dict as _read_json, read_jsonl_dicts as _read_jsonl, utc_now as _now, write_json as _write_json
 
 OK = "ok"
 WARN = "warn"
@@ -59,10 +60,6 @@ def _field(name: str, field_type: str, detail: str) -> dict[str, str]:
     return {"name": name, "type": field_type, "detail": detail}
 
 
-def _now() -> datetime:
-    return datetime.now(timezone.utc)
-
-
 def _release_root(target: Path) -> Path:
     return target / ".brigade" / "release"
 
@@ -77,31 +74,6 @@ def _release_candidates_root(target: Path) -> Path:
 
 def _release_candidates_archive_root(target: Path) -> Path:
     return _release_candidates_root(target) / "archive"
-
-
-def _write_json(path: Path, payload: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
-
-
-def _read_jsonl(path: Path) -> list[dict[str, Any]]:
-    if not path.is_file():
-        return []
-    records: list[dict[str, Any]] = []
-    try:
-        lines = path.read_text().splitlines()
-    except OSError:
-        return records
-    for line in lines:
-        if not line.strip():
-            continue
-        try:
-            payload = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(payload, dict):
-            records.append(payload)
-    return records
 
 
 def _git(target: Path, *args: str) -> subprocess.CompletedProcess[str]:
@@ -147,14 +119,6 @@ def _git_state(target: Path) -> dict[str, Any]:
         }
     )
     return snapshot
-
-
-def _read_json(path: Path) -> dict[str, Any] | None:
-    try:
-        payload = json.loads(path.read_text())
-    except (OSError, json.JSONDecodeError):
-        return None
-    return payload if isinstance(payload, dict) else None
 
 
 def _latest_work_closeout(target: Path) -> dict[str, Any] | None:

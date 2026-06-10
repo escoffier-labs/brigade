@@ -7,7 +7,6 @@ import json
 import os
 import re
 import sys
-from datetime import datetime, timezone
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -18,6 +17,7 @@ from urllib.parse import urlparse
 from . import work_cmd
 from .selection import WRITER_INBOXES
 from .untrusted import PROMPT_INJECTION_RE, scan_untrusted
+from .localio import read_json_dict as _read_json, utc_now_iso_z as _utc_iso, write_json as _write_json
 
 SEVERITY_ORDER = {
     "info": 0,
@@ -263,14 +263,6 @@ def _closeouts_root(target: Path) -> Path:
     return target / ".brigade" / "security" / "closeouts"
 
 
-def _read_json(path: Path) -> dict[str, Any] | None:
-    try:
-        payload = json.loads(path.read_text())
-    except (OSError, json.JSONDecodeError):
-        return None
-    return payload if isinstance(payload, dict) else None
-
-
 def _read_closeouts(target: Path) -> list[dict[str, Any]]:
     root = _closeouts_root(target.expanduser().resolve())
     receipts: list[dict[str, Any]] = []
@@ -284,11 +276,6 @@ def _read_closeouts(target: Path) -> list[dict[str, Any]]:
         payload.setdefault("path", str(path))
         receipts.append(payload)
     return sorted(receipts, key=lambda item: str(item.get("created_at") or item.get("closeout_id") or ""), reverse=True)
-
-
-def _write_json(path: Path, payload: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
 
 
 def inspect_evidence_bundle(path: Path) -> dict[str, Any]:
@@ -2645,10 +2632,6 @@ def _import_findings(
     skipped.extend(duplicate_records)
     skipped.extend(dismissed_records)
     return imported, skipped
-
-
-def _utc_iso() -> str:
-    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 def _render_markdown_report(report: dict[str, Any]) -> str:

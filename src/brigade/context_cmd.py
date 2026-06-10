@@ -10,6 +10,7 @@ from typing import Any
 from uuid import uuid4
 
 from . import work_cmd
+from .localio import read_json_dict as _read_json, stable_hash as _stable_hash, utc_now as _now, write_json as _write_json
 
 OK = "ok"
 WARN = "warn"
@@ -17,10 +18,6 @@ CONTEXT_KINDS = {"task", "repo", "release", "tool-use"}
 SYNC_MARKER = "brigade-context-sync:"
 SYNC_CONFIG_REL_PATH = ".brigade/context/sync-targets.json"
 CONTEXT_PACK_STALE_HOURS = 72
-
-
-def _now() -> datetime:
-    return datetime.now(timezone.utc)
 
 
 def _context_root(target: Path) -> Path:
@@ -41,26 +38,6 @@ def _sync_config_path(target: Path) -> Path:
 
 def _sync_plans_root(target: Path) -> Path:
     return _context_root(target) / "sync-plans"
-
-
-def _write_json(path: Path, payload: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
-
-
-def _read_json(path: Path) -> dict[str, Any] | None:
-    try:
-        payload = json.loads(path.read_text())
-    except (OSError, json.JSONDecodeError):
-        return None
-    return payload if isinstance(payload, dict) else None
-
-
-def _stable_hash(value: object) -> str:
-    rendered = json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
-    import hashlib
-
-    return hashlib.sha256(rendered.encode("utf-8")).hexdigest()[:16]
 
 
 def _parse_iso_datetime(value: object) -> datetime | None:

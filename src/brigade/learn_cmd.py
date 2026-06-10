@@ -5,13 +5,13 @@ import json
 import re
 import sys
 from contextlib import redirect_stdout
-from datetime import datetime, timezone
 from io import StringIO
 from pathlib import Path
 from typing import Any
 
 from . import work_cmd
 from .untrusted import PROMPT_INJECTION_RE, scan_untrusted
+from .localio import read_json_dict as _read_json, slugify, utc_now as _now, write_json as _write_json
 
 OK = "ok"
 WARN = "warn"
@@ -26,10 +26,6 @@ LEARNING_IMPORT_SOURCES = {
     "security-scan",
     "tool-catalog",
 }
-
-
-def _now() -> datetime:
-    return datetime.now(timezone.utc)
 
 
 def _learning_root(target: Path) -> Path:
@@ -50,19 +46,6 @@ def _skill_workshop_root(target: Path) -> Path:
 
 def _closeouts_root(target: Path) -> Path:
     return _learning_root(target) / "closeouts"
-
-
-def _write_json(path: Path, payload: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
-
-
-def _read_json(path: Path) -> dict[str, Any] | None:
-    try:
-        payload = json.loads(path.read_text())
-    except (OSError, json.JSONDecodeError):
-        return None
-    return payload if isinstance(payload, dict) else None
 
 
 def _redact_text(value: str) -> str:
@@ -108,8 +91,7 @@ def _safe_payload(value: Any) -> Any:
 
 
 def _slug(value: str) -> str:
-    slug = re.sub(r"[^a-z0-9._-]+", "-", value.strip().lower()).strip("-")
-    return slug or "skill"
+    return slugify(value, fallback="skill")
 
 
 def _short(value: str, limit: int = 160) -> str:

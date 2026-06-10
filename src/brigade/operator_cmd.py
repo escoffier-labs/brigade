@@ -16,6 +16,7 @@ from typing import Any
 from . import __version__, center_cmd, chat_cmd, daily_cmd, dogfood_cmd, handoff_cmd, memory_cmd, notifications_cmd, repos_cmd, scrub, security_cmd, skills_cmd, tools_cmd, work_cmd
 from .install import install_selection
 from .selection import KNOWN_HARNESSES, WRITER_INBOXES, Selection, resolve_owner
+from .localio import write_json as _write_json
 
 PROFILES = {"local-operator", "internal-dogfood"}
 
@@ -1683,11 +1684,6 @@ def _adoption_latest_path(target: Path) -> Path:
 
 def _adoption_snapshot_path(target: Path, fingerprint: str) -> Path:
     return _adoption_dir(target) / "snapshots" / f"{fingerprint}.json"
-
-
-def _write_json(path: Path, payload: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
 
 
 def _read_latest_adoption_capture(target: Path) -> dict[str, Any] | None:

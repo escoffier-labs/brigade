@@ -9,7 +9,6 @@ from __future__ import annotations
 import hashlib
 import difflib
 import json
-import re
 import shutil
 import sys
 from datetime import datetime, timezone
@@ -17,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from .untrusted import scan_untrusted
+from .localio import slugify, utc_now_iso as _now, write_json as _write_json
 
 OK = "ok"
 WARN = "warn"
@@ -46,13 +46,8 @@ INSTALL_TARGETS = (*HARNESS_TARGETS, "all")
 TRUST_LEVELS = ("unreviewed", "workspace", "team", "public")
 
 
-def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
 def _slug(value: str) -> str:
-    slug = re.sub(r"[^a-z0-9._-]+", "-", value.strip().lower()).strip("-")
-    return slug or "skill"
+    return slugify(value, fallback="skill")
 
 
 def _registry_root(target: Path) -> Path:
@@ -198,11 +193,6 @@ def _read_json(path: Path) -> dict[str, Any]:
     except (OSError, json.JSONDecodeError):
         return {}
     return data if isinstance(data, dict) else {}
-
-
-def _write_json(path: Path, payload: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
 
 
 def _fingerprint(skill_dir: Path) -> str:

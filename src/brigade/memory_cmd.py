@@ -14,6 +14,7 @@ from typing import Any
 from . import dogfood_cmd, toml_compat as tomllib, work_cmd
 from .install import apply_gitignore
 from .selection import Selection
+from .localio import utc_now_iso_z as _utc_iso
 
 CONFIG_REL_PATH = ".brigade/memory-care.toml"
 DEFAULT_OUTPUT_PATH = ".brigade/memory-care/decay"
@@ -84,10 +85,6 @@ def _queue_path(target: Path, config: MemoryCareConfig) -> Path:
 
 def _today() -> date:
     return datetime.now(timezone.utc).date()
-
-
-def _utc_iso() -> str:
-    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 def _stable_hash(value: object) -> str:

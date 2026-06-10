@@ -12,6 +12,7 @@ from typing import Any
 from . import toml_compat as tomllib
 from .install import apply_gitignore
 from .selection import Selection
+from .localio import utc_now as _now
 
 CONFIG_REL_PATH = ".brigade/chat-surfaces.toml"
 OUTPUT_ROOT_REL_PATH = ".brigade/chat-memory-sweeps"
@@ -138,10 +139,6 @@ DEFAULT_SURFACES = (
     },
 )
 CONFIDENCE_RANK = {"high": 0, "medium": 1, "normal": 1, "low": 2}
-
-
-def _now() -> datetime:
-    return datetime.now(timezone.utc)
 
 
 def _config_path(target: Path) -> Path:
