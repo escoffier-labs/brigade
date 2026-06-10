@@ -812,3 +812,156 @@ def test_center_views_and_cli_dispatch(tmp_path, capsys):
     assert cli.main(["projects", "audit", "--target", str(tmp_path), "--json"]) == 1
     assert cli.main(["learn", "plan", "--target", str(tmp_path), "--json"]) == 0
     assert cli.main(["center", "reviews", "--target", str(tmp_path), "--json"]) == 0
+
+
+_LEARNINGS_ERRORS = """# Errors Log
+
+## [ERR-20260220-001] Port conflict on dev server startup
+
+**Logged**: 2026-02-20 16:45
+**Priority**: medium
+**Status**: resolved
+**Area**: infra
+
+### Summary
+Dev server failed to bind to port because a previous instance was still running.
+
+### Action
+Check the port before starting and kill zombie processes.
+
+## [ERR-20260221-001] SSH host key rotation broke connections
+
+**Priority**: high
+**Status**: resolved
+**Area**: infra
+
+### Action
+Remove the stale known_hosts entry and reconnect.
+
+## [ERR-20260222-001] Build host ran out of disk
+
+**Priority**: high
+**Status**: pending
+**Area**: infra
+
+### Action
+Prune the build cache on a schedule.
+"""
+
+_LEARNINGS_FEATURES = """# Feature Requests
+
+## FEAT-20260228-001: Auto-promote recurring error patterns
+
+**Priority**: high
+**Status**: pending
+**Area**: config
+
+### Summary
+Suggest promotion when the same error repeats.
+"""
+
+
+def _write_learnings(target: Path) -> None:
+    learnings = target / ".learnings"
+    learnings.mkdir(parents=True, exist_ok=True)
+    (learnings / "ERRORS.md").write_text(_LEARNINGS_ERRORS)
+    (learnings / "FEATURE_REQUESTS.md").write_text(_LEARNINGS_FEATURES)
+
+
+def test_import_learnings_parses_structured_entries_into_work_imports(tmp_path, capsys):
+    _write_learnings(tmp_path)
+
+    assert learn_cmd.import_learnings(target=tmp_path, dry_run=True, json_output=True) == 0
+    dry = json.loads(capsys.readouterr().out)
+    assert dry["dry_run"] is True
+    assert dry["parsed_entries"] == 4
+    assert dry["created"] == 4
+    imports_path = tmp_path / ".brigade" / "work" / "imports" / "inbox.jsonl"
+    assert not imports_path.exists()
+
+    assert learn_cmd.import_learnings(target=tmp_path, json_output=True) == 0
+    created = json.loads(capsys.readouterr().out)
+    assert created["created"] == 4
+    assert set(created["scanned_files"]) == {".learnings/ERRORS.md", ".learnings/FEATURE_REQUESTS.md"}
+
+    by_entry = {item["metadata"]["entry_id"]: item for item in created["imports"]}
+    err = by_entry["ERR-20260220-001"]
+    assert err["kind"] == "incident"
+    assert err["source"] == "learnings-import"
+    assert err["metadata"]["area"] == "infra"
+    assert err["metadata"]["safe_summary"] == "Port conflict on dev server startup"
+    feat = by_entry["FEAT-20260228-001"]
+    assert feat["kind"] == "task"
+    assert feat["type"] == "feature"
+    assert feat["priority"] == "high"
+    assert feat["metadata"]["safe_summary"] == "Auto-promote recurring error patterns"
+    assert feat["acceptance"]
+
+    # Re-running is idempotent: unchanged entries skip.
+    assert learn_cmd.import_learnings(target=tmp_path, json_output=True) == 0
+    second = json.loads(capsys.readouterr().out)
+    assert second["created"] == 0
+    assert second["skipped"] == 4
+
+
+def test_import_learnings_feeds_plan_and_recurrence_detection(tmp_path, capsys):
+    _write_learnings(tmp_path)
+    assert cli.main(["learn", "import-learnings", "--target", str(tmp_path), "--json"]) == 0
+    capsys.readouterr()
+
+    assert learn_cmd.plan(target=tmp_path, json_output=True) == 0
+    plan = json.loads(capsys.readouterr().out)
+    assert plan["candidate_count"] == 4
+    assert all(
+        candidate["subsystem"] == "learnings-import"
+        for candidate in plan["candidates"]
+    )
+
+    assert learn_cmd.skill_candidates(target=tmp_path, min_count=3, json_output=True) == 0
+    skills = json.loads(capsys.readouterr().out)
+    assert skills["candidate_count"] == 1
+    candidate = skills["candidates"][0]
+    assert candidate["occurrence_count"] == 3
+    assert candidate["pattern_key"] == "learnings:err:infra"
+
+
+def test_import_learnings_supports_file_override_and_missing_files(tmp_path, capsys):
+    _write_learnings(tmp_path)
+    assert (
+        learn_cmd.import_learnings(
+            target=tmp_path,
+            files=[".learnings/FEATURE_REQUESTS.md"],
+            json_output=True,
+        )
+        == 0
+    )
+    only_features = json.loads(capsys.readouterr().out)
+    assert only_features["created"] == 1
+    assert only_features["scanned_files"] == [".learnings/FEATURE_REQUESTS.md"]
+
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    assert learn_cmd.import_learnings(target=empty, json_output=True) == 0
+    none = json.loads(capsys.readouterr().out)
+    assert none["created"] == 0
+    assert none["scanned_files"] == []
+
+
+def test_import_learnings_redacts_secrets_and_urls(tmp_path, capsys):
+    learnings = tmp_path / ".learnings"
+    learnings.mkdir(parents=True)
+    (learnings / "LEARNINGS.md").write_text(
+        "# Learnings Log\n\n"
+        "## [LRN-20260301-001] Token leaked in config\n\n"
+        "**Priority**: high\n"
+        "**Status**: pending\n"
+        "**Area**: config\n\n"
+        "### Details\n"
+        "Set API_TOKEN=sk-secret123 and visit https://internal.example.com/admin to rotate.\n"
+    )
+    assert learn_cmd.import_learnings(target=tmp_path, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    detail = payload["imports"][0]["metadata"]["safe_detail"]
+    assert "sk-secret123" not in detail
+    assert "internal.example.com" not in detail
+    assert "<redacted>" in detail

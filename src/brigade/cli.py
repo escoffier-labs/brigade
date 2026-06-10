@@ -2147,6 +2147,11 @@ def _build_parser() -> argparse.ArgumentParser:
     p_learn_import.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
     p_learn_import.add_argument("--dry-run", action="store_true", help="Report without writing imports.")
     p_learn_import.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_learn_import_learnings = learn_sub.add_parser("import-learnings", help="Import structured .learnings/ markdown log entries into the work inbox.")
+    p_learn_import_learnings.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
+    p_learn_import_learnings.add_argument("--file", action="append", default=[], help="Override the .learnings file to read. May be repeated.")
+    p_learn_import_learnings.add_argument("--dry-run", action="store_true", help="Report without writing imports.")
+    p_learn_import_learnings.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_learn_skill_candidates = learn_sub.add_parser("skill-candidates", help="Find repeatable learning patterns that could become reviewed skills.")
     p_learn_skill_candidates.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
     p_learn_skill_candidates.add_argument("--min-count", type=int, default=2, help="Minimum repeated evidence count required.")
@@ -3876,6 +3881,8 @@ def main(argv=None) -> int:
             return learn_cmd.doctor(target=args.target, json_output=args.json)
         if args.learn_command == "import-issues":
             return learn_cmd.import_issues(target=args.target, dry_run=args.dry_run, json_output=args.json)
+        if args.learn_command == "import-learnings":
+            return learn_cmd.import_learnings(target=args.target, files=args.file or None, dry_run=args.dry_run, json_output=args.json)
         if args.learn_command == "skill-candidates":
             return learn_cmd.skill_candidates(target=args.target, min_count=args.min_count, source=args.source, json_output=args.json)
         if args.learn_command == "propose-skill":
