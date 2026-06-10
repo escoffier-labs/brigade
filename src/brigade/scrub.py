@@ -27,6 +27,7 @@ def hook_status(target: Path, policy: str = "public-repo") -> dict[str, Any]:
     target = target.expanduser().resolve()
     hook = target / "hooks" / "pre-push"
     hooks_path = _git_config(target, "core.hooksPath")
+    local_hooks_path = _git_config(target, "core.hooksPath", local_only=True)
     git_hook = _git_pre_push_hook(target)
     configured_hook = _configured_pre_push_hook(target, hooks_path)
     active_hook = configured_hook if hooks_path else git_hook
@@ -40,6 +41,15 @@ def hook_status(target: Path, policy: str = "public-repo") -> dict[str, Any]:
         hook_mode = "configured-hooks-path"
     elif hook_enabled:
         hook_mode = "git-hooks"
+    # A core.hooksPath inherited from global/system git config can point at a
+    # personal pre-push that has nothing to do with content-guard. Reporting
+    # that as "installed" is a false positive; only trust an inherited hook
+    # when it actually runs content-guard.
+    hook_inherited = bool(hooks_path) and not local_hooks_path
+    if hook_mode == "configured-hooks-path" and hook_inherited and active_hook is not None:
+        if not _hook_runs_content_guard(active_hook):
+            hook_mode = "external-hooks-path"
+            hook_enabled = False
     try:
         resolved_policy = str(policy_path(target, policy))
     except ValueError as exc:
@@ -53,7 +63,17 @@ def hook_status(target: Path, policy: str = "public-repo") -> dict[str, Any]:
     if not policy_exists:
         checks.append({"status": "warn", "name": "content_guard_policy_missing", "detail": f"policy not found: {resolved_policy}"})
         suggestions.append(f"brigade scrub --target . --policy {policy} --dry-run")
-    if not hook_enabled:
+    if hook_mode == "external-hooks-path":
+        checks.append(
+            {
+                "status": "warn",
+                "name": "content_guard_hook_unrelated",
+                "detail": "the active pre-push comes from a global core.hooksPath outside this repo and does not run content-guard; the repo's hook is not active",
+            }
+        )
+        if hook.is_file():
+            suggestions.append("git config core.hooksPath hooks")
+    elif not hook_enabled:
         checks.append({"status": "warn", "name": "content_guard_hook_not_enabled", "detail": "no executable pre-push hook found in the active Git hooks path"})
         if hook.is_file():
             suggestions.append("git config core.hooksPath hooks")
@@ -85,10 +105,19 @@ def hook_status(target: Path, policy: str = "public-repo") -> dict[str, Any]:
     }
 
 
-def _git_config(target: Path, key: str) -> str | None:
+def _hook_runs_content_guard(path: Path) -> bool:
+    try:
+        text = path.read_text(errors="replace")
+    except OSError:
+        return False
+    return any(marker in text for marker in ("content-guard", "content_guard", "brigade scrub"))
+
+
+def _git_config(target: Path, key: str, *, local_only: bool = False) -> str | None:
+    scope = ["--local"] if local_only else []
     try:
         result = subprocess.run(
-            ["git", "-C", str(target), "config", "--get", key],
+            ["git", "-C", str(target), "config", *scope, "--get", key],
             check=False,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,

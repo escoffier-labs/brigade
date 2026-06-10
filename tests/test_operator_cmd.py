@@ -1259,3 +1259,23 @@ def test_operator_quickstart_gitignore_covers_all_selected_inboxes(tmp_path, cap
     gitignore = (tmp_path / ".gitignore").read_text()
     assert ".codex/memory-handoffs/*" in gitignore
     assert ".claude/memory-handoffs/*" in gitignore
+
+
+def test_verify_harness_warns_when_inbox_template_shadowed_by_external_ignore(tmp_path, capsys):
+    import subprocess
+
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    assert cli.main(["operator", "quickstart", "--target", str(tmp_path), "--harnesses", "codex", "--json"]) == 0
+    capsys.readouterr()
+
+    cli.main(["operator", "verify-harness", "--target", str(tmp_path), "--harness", "codex", "--json"])
+    payload = json.loads(capsys.readouterr().out)
+    shadow = [c for c in payload["checks"] if c["name"] == "handoff_template_shadowed"]
+    assert shadow and shadow[0]["status"] == "ok"
+
+    (tmp_path / ".git" / "info" / "exclude").write_text(".codex/\n")
+    cli.main(["operator", "verify-harness", "--target", str(tmp_path), "--harness", "codex", "--json"])
+    payload = json.loads(capsys.readouterr().out)
+    shadow = [c for c in payload["checks"] if c["name"] == "handoff_template_shadowed"]
+    assert shadow and shadow[0]["status"] == "warn"
+    assert "shadow" in shadow[0]["detail"] or "global" in shadow[0]["detail"]

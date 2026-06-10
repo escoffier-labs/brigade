@@ -2505,6 +2505,35 @@ def verify_harness_payload(target: Path, *, harness: str) -> dict[str, Any]:
     else:
         checks.append({"status": "warn", "name": "handoff_inbox_gitignored", "detail": f"gitignore status: {gitignored}"})
 
+    # The managed .gitignore un-ignores each inbox's TEMPLATE.md so the format
+    # travels with the repo. Git cannot re-include a file whose parent dir is
+    # excluded by another source (commonly a global gitignore with a bare
+    # `.claude/` or `.codex/` entry), and that shadowing is otherwise silent.
+    template_path = inbox_path / "TEMPLATE.md"
+    if template_path.is_file():
+        template_ignored = dogfood_cmd._check_git_ignored(target, template_path)
+        if template_ignored == "yes":
+            inbox_root = inbox_rel.split("/")[0]
+            checks.append(
+                {
+                    "status": "warn",
+                    "name": "handoff_template_shadowed",
+                    "detail": (
+                        f"{inbox_rel}/TEMPLATE.md is gitignored despite the managed un-ignore rule; "
+                        f"an external ignore source (often a global gitignore entry like `{inbox_root}/`) "
+                        "is shadowing it, so the template will not travel with the repo"
+                    ),
+                }
+            )
+        else:
+            checks.append(
+                {
+                    "status": "ok",
+                    "name": "handoff_template_shadowed",
+                    "detail": f"{inbox_rel}/TEMPLATE.md is visible to git",
+                }
+            )
+
     lint_results = [
         result
         for result in health.lint

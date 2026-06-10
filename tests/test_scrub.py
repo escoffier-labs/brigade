@@ -134,3 +134,60 @@ def test_scrub_returns_4_on_unsafe_bare_name(tmp_path: Path, monkeypatch):
     monkeypatch.setenv("CONTENT_GUARD_DIR", str(scanner))
     rc = scrub_mod.run(target=target, policy="..", dry_run=True)
     assert rc == 4
+
+
+def _fake_git_run(target, *, global_hooks, local_hooks_path=None):
+    def fake_run(argv, **kwargs):
+        if argv[:3] == ["git", "-C", str(target)] and argv[-1] == "core.hooksPath":
+            if "--local" in argv:
+                class Result:
+                    returncode = 0 if local_hooks_path else 1
+                    stdout = local_hooks_path or ""
+                return Result()
+
+            class Result:
+                returncode = 0
+                stdout = str(global_hooks)
+            return Result()
+        if argv[:3] == ["git", "-C", str(target)] and argv[-1] == "--git-dir":
+            class Result:
+                returncode = 0
+                stdout = ".git"
+            return Result()
+        raise AssertionError(argv)
+    return fake_run
+
+
+def test_hook_status_flags_inherited_hookspath_without_content_guard(tmp_path: Path, monkeypatch):
+    target = tmp_path / "repo"
+    target.mkdir()
+    hooks = tmp_path / "global-hooks"
+    hooks.mkdir()
+    hook = hooks / "pre-push"
+    hook.write_text("#!/usr/bin/env bash\necho unrelated personal hook\n")
+    hook.chmod(0o755)
+    monkeypatch.setenv("CONTENT_GUARD_DIR", str(tmp_path / "content-guard"))
+    monkeypatch.setattr(scrub_mod.subprocess, "run", _fake_git_run(target, global_hooks=hooks))
+
+    status = scrub_mod.hook_status(target, policy="personal")
+
+    assert status["pre_push_hook_enabled"] is False
+    assert status["pre_push_hook_mode"] == "external-hooks-path"
+    assert any(check["name"] == "content_guard_hook_unrelated" for check in status["checks"])
+
+
+def test_hook_status_accepts_inherited_hookspath_running_content_guard(tmp_path: Path, monkeypatch):
+    target = tmp_path / "repo"
+    target.mkdir()
+    hooks = tmp_path / "global-hooks"
+    hooks.mkdir()
+    hook = hooks / "pre-push"
+    hook.write_text("#!/usr/bin/env bash\nexec content-guard scan --policy public-repo\n")
+    hook.chmod(0o755)
+    monkeypatch.setenv("CONTENT_GUARD_DIR", str(tmp_path / "content-guard"))
+    monkeypatch.setattr(scrub_mod.subprocess, "run", _fake_git_run(target, global_hooks=hooks))
+
+    status = scrub_mod.hook_status(target, policy="personal")
+
+    assert status["pre_push_hook_enabled"] is True
+    assert status["pre_push_hook_mode"] == "configured-hooks-path"

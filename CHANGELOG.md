@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.3] - 2026-06-09
+
+### Fixed
+- Content Guard hook detection no longer reports "installed" when `core.hooksPath` is inherited from global or system git config and points at a pre-push that does not run content-guard. Inherited hooks that do run content-guard stay green; unrelated ones report a new `external-hooks-path` mode with a `content_guard_hook_unrelated` warning and the activation command.
+- `brigade operator verify-harness` now detects when an inbox's deliberately un-ignored `TEMPLATE.md` is shadowed by an external ignore source (commonly a global gitignore entry like `.claude/`), which git cannot override and which was previously silent.
+
 ## [0.9.2] - 2026-06-09
 
 ### Fixed
