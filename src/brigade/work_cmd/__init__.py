@@ -1,74 +1,188 @@
-"""Daily work session helpers."""
+"""Work command package facade.
+
+Re-exports the full work_cmd surface so external callers and tests can keep
+using flat ``work_cmd.X`` attribute access. Implementation lives in the
+family submodules; shared symbols are accessed there via module attributes
+so monkeypatching a submodule attribute (e.g. ``work_cmd.helpers._now``)
+affects every caller.
+"""
+
 from __future__ import annotations
 
-import json
-import os
-import re
-import shlex
-import shutil
-import subprocess
-import sys
-from collections import Counter
-from datetime import datetime, time, timezone
-from pathlib import Path
-from typing import Any
-from uuid import uuid4
-
-from .. import dogfood_cmd, scrub
-from .. import toml_compat as tomllib
-from ..install import apply_gitignore
-from ..selection import Selection
-from ..untrusted import scan_untrusted, wrap_untrusted
-from . import session as session_mod
-from . import session
-from .session import (
-    _latest_run_next_metadata,
-    _queue_latest_next,
-    _latest_completed_run_path,
-    _resolve_next_task,
-    _render_task_run_prompt,
-    _task_plan_payload,
-    _display_session,
-    _session_task_markdown,
-    _write_session_markdown,
-    _write_work_handoff,
-    _print_dirty,
-    _doctor_ignore_level,
-    _workflow_rule_health,
-    _next_payload,
-    _suggested_command,
-    _pick_fields,
-    _compact_top,
-    _compact_operator_report_latest,
-    _compact_repo_fleet_latest,
-    _compact_health_section,
-    _compact_repo_fleet_health,
-    _brief_payload,
-    _print_bootstrap_line,
-    start,
-    end,
-    note,
-    list_sessions,
-    latest,
-    show,
-    recap,
-    _print_resume_session,
-    resume,
-    brief,
-    tasks,
-    task_add,
-    task_show,
-    task_plan,
-    task_done,
-    next,
-    bootstrap,
-    run,
-    status,
-    doctor,
-)  # noqa: F401
-from . import services as services_mod
-from . import services
-from .services import (
+from . import config, constants, helpers, ledger, services, session  # noqa: F401
+from .constants import *  # noqa: F401,F403
+from .constants import _PROPOSAL_KINDS  # noqa: F401
+from .helpers import (  # noqa: F401
+    _git,
+    _git_value,
+    _short,
+    _count_status,
+    _slug,
+    _work_root,
+    _current_path,
+    _tasks_path,
+    _plans_dir,
+    _plan_paths,
+    _imports_path,
+    _imports_archive_path,
+    _backup_config_path,
+    _scanner_config_path,
+    _scanner_runs_root,
+    _scanner_sweeps_root,
+    _review_config_path,
+    _review_runs_root,
+    _verify_runs_root,
+    _work_closeouts_root,
+    _git_snapshot,
+    _dogfood_snapshot,
+    _session_snapshot,
+    _read_session,
+    _session_sort_key,
+    _parse_iso_datetime,
+    _parse_since,
+    _collect_sessions,
+    _resolve_session,
+    _dirty_count,
+    _snapshot,
+    _branch,
+    _next_step,
+    _session_info,
+    _handoff_inbox,
+    _doctor_line,
+    _active_session_info,
+    _active_session_dir,
+    _work_selection,
+    _now,
+    _read_json,
+    _stable_hash,
+    _write_json,
+)
+from .ledger import (  # noqa: F401
+    _read_task_ledger,
+    _write_task_ledger,
+    _read_imports,
+    _write_imports,
+    _append_archived_imports,
+    _task_sort_key,
+    _import_sort_key,
+    _task_text_key,
+    _string_field,
+    _confidence_rank,
+    _normalize_task_type,
+    _normalize_task_priority,
+    _normalize_acceptance,
+    _task_acceptance,
+    _task_summary,
+    _import_task_acceptance,
+    _import_task_type,
+    _import_task_priority,
+    _import_task_template,
+    _import_context,
+    _import_summary,
+    _task_preview_from_import,
+    _scanner_candidate,
+    _handoff_ready_imports,
+    _handoff_candidate,
+    _task_snapshot,
+    _template_acceptance,
+    _combined_acceptance,
+    _normalize_issue_heading,
+    _is_issue_acceptance_heading,
+    _issue_heading,
+    _issue_list_item,
+    _extract_issue_acceptance,
+    _task_issue_metadata,
+    _github_issue_ref,
+    _read_github_issue,
+    _safe_issue_task_id,
+    _issue_repair_record,
+    _issue_repair_records,
+    _import_record_key,
+    _import_source_key,
+    _import_fingerprint,
+    _import_source_identity,
+    _validate_import_record,
+    _load_import_jsonl,
+    _append_import_records,
+    _pending_tasks,
+    _pending_imports,
+    _import_counts,
+    _matching_pending_imports,
+    _import_metadata_matches,
+    _parse_metadata_filters,
+    _parse_or_report_metadata_filters,
+    _find_pending_task_by_text,
+    _find_import,
+    _mark_import_promoted,
+    _handoff_is_document_target,
+    _handoff_target_document,
+    _handoff_type,
+    _handoff_private_fields,
+    _handoff_redact_value,
+    _handoff_render_value,
+    _handoff_provenance,
+    _handoff_safe_text,
+    _handoff_title,
+    _handoff_suggested_document_content,
+    _render_import_handoff,
+    _import_handoff_plan_payload,
+    _write_import_handoff,
+    _mark_import_handoff_promoted,
+    _find_task,
+    _make_task,
+    _parse_metadata,
+    _make_import,
+    _add_task,
+    _plan_rel_path,
+    _append_dedupe,
+    _read_plan_receipt,
+    _build_plan_receipt,
+    _render_plan_md,
+    _plan_artifact_summary,
+    _significant_pending_without_plan,
+    _plan_coverage_payload,
+    _write_plan_artifact,
+)
+from .config import (  # noqa: F401
+    _format_backup_toml,
+    _load_backup_config,
+    _backup_summary_path,
+    _backup_summary_unsafe_fields,
+    _backup_result_ok,
+    _backup_summary_example,
+    _backup_contract_destination,
+    _backup_contract_payload,
+    _backup_age_hours,
+    _backup_issue,
+    _backup_destination_checks,
+    _backup_health,
+    _backup_closeouts_root,
+    _backup_latest_closeout,
+    _backup_issue_fingerprint,
+    _backup_issue_records,
+    _format_scanner_toml,
+    _format_toml_array,
+    _format_review_toml,
+    _load_scanner_config,
+    _string_list,
+    _safe_relative_path,
+    _load_review_config,
+    _parse_clock_minutes,
+    _format_clock_minutes,
+    _scanner_start_minute,
+    _scanner_window_minutes,
+    _scanner_duration_minutes,
+    _scanner_command_ok,
+    _scanner_argv,
+    _scanner_output_path,
+    _scanner_import_path,
+    _scanner_cwd,
+    _review_output_path,
+    _review_findings_path,
+    _review_cwd,
+    _review_argv,
+)
+from .services import (  # noqa: F401
     _scanner_read_receipt,
     _scanner_receipts,
     _review_read_receipt,
@@ -230,913 +344,49 @@ from .services import (
     _sweep_review_payload,
     sweep_review,
     sweep_closeout,
-)  # noqa: F401
-from . import config as config_mod
-from . import config
-from .config import (
-    _format_backup_toml,
-    _load_backup_config,
-    _backup_summary_path,
-    _backup_summary_unsafe_fields,
-    _backup_result_ok,
-    _backup_summary_example,
-    _backup_contract_destination,
-    _backup_contract_payload,
-    _backup_age_hours,
-    _backup_issue,
-    _backup_destination_checks,
-    _backup_health,
-    _backup_closeouts_root,
-    _backup_latest_closeout,
-    _backup_issue_fingerprint,
-    _backup_issue_records,
-    _format_scanner_toml,
-    _format_toml_array,
-    _format_review_toml,
-    _load_scanner_config,
-    _string_list,
-    _safe_relative_path,
-    _load_review_config,
-    _parse_clock_minutes,
-    _format_clock_minutes,
-    _scanner_start_minute,
-    _scanner_window_minutes,
-    _scanner_duration_minutes,
-    _scanner_command_ok,
-    _scanner_argv,
-    _scanner_output_path,
-    _scanner_import_path,
-    _scanner_cwd,
-    _review_output_path,
-    _review_findings_path,
-    _review_cwd,
-    _review_argv,
-)  # noqa: F401
-from . import ledger as ledger_mod
-from . import ledger
-from .ledger import (
-    _read_task_ledger,
-    _write_task_ledger,
-    _read_imports,
-    _write_imports,
-    _append_archived_imports,
-    _task_sort_key,
-    _import_sort_key,
-    _task_text_key,
-    _string_field,
-    _confidence_rank,
-    _normalize_task_type,
-    _normalize_task_priority,
-    _normalize_acceptance,
-    _task_acceptance,
-    _task_summary,
-    _import_task_acceptance,
-    _import_task_type,
-    _import_task_priority,
-    _import_task_template,
-    _import_context,
-    _import_summary,
-    _task_preview_from_import,
-    _scanner_candidate,
-    _handoff_ready_imports,
-    _handoff_candidate,
-    _task_snapshot,
-    _template_acceptance,
-    _combined_acceptance,
-    _normalize_issue_heading,
-    _is_issue_acceptance_heading,
-    _issue_heading,
-    _issue_list_item,
-    _extract_issue_acceptance,
-    _task_issue_metadata,
-    _github_issue_ref,
-    _read_github_issue,
-    _safe_issue_task_id,
-    _issue_repair_record,
-    _issue_repair_records,
-    _import_record_key,
-    _import_source_key,
-    _import_fingerprint,
-    _import_source_identity,
-    _validate_import_record,
-    _load_import_jsonl,
-    _append_import_records,
-    _pending_tasks,
-    _pending_imports,
-    _import_counts,
-    _matching_pending_imports,
-    _import_metadata_matches,
-    _parse_metadata_filters,
-    _parse_or_report_metadata_filters,
-    _find_pending_task_by_text,
-    _find_import,
-    _mark_import_promoted,
-    _handoff_is_document_target,
-    _handoff_target_document,
-    _handoff_type,
-    _handoff_private_fields,
-    _handoff_redact_value,
-    _handoff_render_value,
-    _handoff_provenance,
-    _handoff_safe_text,
-    _handoff_title,
-    _handoff_suggested_document_content,
-    _render_import_handoff,
-    _import_handoff_plan_payload,
-    _write_import_handoff,
-    _mark_import_handoff_promoted,
-    _find_task,
-    _make_task,
-    _parse_metadata,
-    _make_import,
-    _add_task,
-    _plan_rel_path,
-    _append_dedupe,
-    _read_plan_receipt,
-    _build_plan_receipt,
-    _render_plan_md,
-    _plan_artifact_summary,
-    _significant_pending_without_plan,
-    _plan_coverage_payload,
-    _write_plan_artifact,
-)  # noqa: F401
-from . import helpers
-from .helpers import (
-    _git,
-    _git_value,
-    _short,
-    _count_status,
-    _slug,
-    _work_root,
-    _current_path,
-    _tasks_path,
-    _plans_dir,
-    _plan_paths,
-    _imports_path,
-    _imports_archive_path,
-    _backup_config_path,
-    _scanner_config_path,
-    _scanner_runs_root,
-    _scanner_sweeps_root,
-    _review_config_path,
-    _review_runs_root,
-    _verify_runs_root,
-    _work_closeouts_root,
-    _git_snapshot,
-    _dogfood_snapshot,
-    _session_snapshot,
-    _read_session,
-    _session_sort_key,
-    _parse_iso_datetime,
-    _parse_since,
-    _collect_sessions,
-    _resolve_session,
-    _dirty_count,
-    _snapshot,
-    _branch,
-    _next_step,
-    _session_info,
-    _handoff_inbox,
-    _doctor_line,
-    _active_session_info,
-    _active_session_dir,
-    _work_selection,
-    _now,
-    _read_json,
-    _stable_hash,
-    _write_json,
-)  # noqa: F401
-from . import constants
-from .constants import *  # noqa: F401,F403
-from .constants import _PROPOSAL_KINDS  # noqa: F401
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+)
+from .session import (  # noqa: F401
+    _latest_run_next_metadata,
+    _queue_latest_next,
+    _latest_completed_run_path,
+    _resolve_next_task,
+    _render_task_run_prompt,
+    _task_plan_payload,
+    _display_session,
+    _session_task_markdown,
+    _write_session_markdown,
+    _write_work_handoff,
+    _print_dirty,
+    _doctor_ignore_level,
+    _workflow_rule_health,
+    _next_payload,
+    _suggested_command,
+    _pick_fields,
+    _compact_top,
+    _compact_operator_report_latest,
+    _compact_repo_fleet_latest,
+    _compact_health_section,
+    _compact_repo_fleet_health,
+    _brief_payload,
+    _print_bootstrap_line,
+    start,
+    end,
+    note,
+    list_sessions,
+    latest,
+    show,
+    recap,
+    _print_resume_session,
+    resume,
+    brief,
+    tasks,
+    task_add,
+    task_show,
+    task_plan,
+    task_done,
+    next,
+    bootstrap,
+    run,
+    status,
+    doctor,
+)
