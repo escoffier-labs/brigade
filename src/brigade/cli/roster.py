@@ -1,0 +1,47 @@
+"""brigade roster command group."""
+
+from __future__ import annotations
+
+import argparse
+from pathlib import Path
+
+
+def register(sub: argparse._SubParsersAction) -> None:
+    # roster
+    p_roster = sub.add_parser("roster", help="Create and check aboyeur rosters.")
+    roster_sub = p_roster.add_subparsers(dest="roster_command", metavar="<roster-command>")
+    roster_sub.required = True
+    p_roster_init = roster_sub.add_parser("init", help="Write a starter .brigade/roster.toml.")
+    p_roster_init.add_argument("--target", "-t", type=Path, default=Path("."))
+    p_roster_init.add_argument("--force", action="store_true", help="Overwrite an existing roster.")
+    p_roster_init.add_argument(
+        "--ollama-model",
+        default="llama3.3",
+        help="Default local researcher model for the starter roster.",
+    )
+    p_roster_init.add_argument("--max-workers", type=int, default=4)
+    p_roster_doctor = roster_sub.add_parser("doctor", help="Validate roster syntax and installed CLIs.")
+    p_roster_doctor.add_argument("--target", "-t", type=Path, default=Path("."))
+    p_roster_doctor.add_argument(
+        "--roster",
+        type=Path,
+        default=None,
+        help="Path to roster.toml. Defaults to .brigade/roster.toml under --target.",
+    )
+    p_roster.set_defaults(func=dispatch)
+
+
+def dispatch(args) -> int:
+    from .. import roster_cmd
+
+    if args.roster_command == "init":
+        return roster_cmd.init(
+            target=args.target,
+            force=args.force,
+            ollama_model=args.ollama_model,
+            max_workers=args.max_workers,
+        )
+    if args.roster_command == "doctor":
+        return roster_cmd.doctor(target=args.target, roster_path=args.roster)
+    args._brigade_parser.error(f"unknown roster command: {args.roster_command}")
+    return 2
