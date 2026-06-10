@@ -51,7 +51,7 @@ For an OpenClaw or Hermes workspace:
 brigade operator quickstart --target . --depth workspace --harnesses openclaw,hermes --owner openclaw --dry-run
 ```
 
-Dry-run should show planned local files only. It should not start services, install schedulers, publish, push, tag, or mutate remotes.
+Quickstart's dry-run lists the planned steps. For the file-by-file preview of what would be written, use `brigade init --target . --harnesses codex --dry-run` (init is the template-install step that quickstart runs first). Neither writes anything, starts services, installs schedulers, publishes, pushes, tags, or mutates remotes.
 
 ## 4. Apply
 
@@ -93,12 +93,14 @@ from `operator doctor`, every `handoff doctor` line prefixed `[ok]`, `findings: 
 
 A handoff is a note an agent writes for the memory owner to file later. Four things decide where it lands:
 
-- **Inbox**: each harness writes to its own folder (`.codex/memory-handoffs/` for Codex sessions, `.claude/memory-handoffs/` for Claude Code). Use the inbox matching the tool that learned the fact; the ingester watches every inbox you selected at quickstart.
-- **Type** (`--type`): what kind of note this is - `decision`, `workflow`, `gotcha`, and friends. It helps the reviewer, not the router.
+- **Inbox**: each harness writes to its own folder (`.codex/memory-handoffs/` for Codex sessions, `.claude/memory-handoffs/` for Claude Code). Use the inbox matching the tool that learned the fact; for a note you are writing yourself, any selected inbox works - the ingester watches all of them.
+- **Type** (`--type`): what kind of note this is - `decision`, `workflow`, `gotcha`, and more (`brigade handoff draft --help` lists the valid values). It helps the reviewer, not the router.
 - **Action**: `no-card` (the default) appends a short fact to a shared document such as `.learnings/LEARNINGS.md` or `TOOLS.md`. `create-card`/`update-card` proposes a standalone memory card for bigger durable topics, and requires `--target-card` plus card content starting with YAML frontmatter.
 - **Content** (`--content` or `--content-file`): the durable note itself, required. The title and summary are the envelope; the content is what gets filed.
 
 When unsure, `no-card` with a two-sentence content is the right default. `brigade handoff-template` prints the full format.
+
+One more concept: the **memory owner**. Quickstart auto-selects which harness owns durable memory (it prints the pick and `--owner` overrides it). In a code repo this mostly decides which tool's conventions the ingest docs assume; the auto-pick is fine until you have an opinion.
 
 ## 7. What To Commit
 
