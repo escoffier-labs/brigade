@@ -3206,7 +3206,11 @@ def _print_quickstart(payload: dict[str, Any]) -> None:
     print(f"owner: {payload['owner']}{owner_note}")
     print(f"dry_run: {payload['dry_run']}")
     for step in payload["steps"]:
-        advisory = f" ({step['advisory_count']} advisory, see {step['advisory_next_command']})" if step.get("advisory_count") else ""
+        advisory = (
+            f" ({step['advisory_count']} advisory, see {step['advisory_next_command']})"
+            if step.get("advisory_count")
+            else ""
+        )
         print(f"[{step.get('status')}] {step.get('id')}{advisory}")
     print(f"status: {payload['status']}")
     print("next:")
