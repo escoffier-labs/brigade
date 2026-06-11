@@ -13,6 +13,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Internal restructuring with no command surface changes: `operator_cmd` and `work_cmd/services` split into focused modules, the CLI moved to per-command dispatch modules, and shared git-ignore/TOML/datetime helpers moved to neutral homes. The lint gate now includes ruff bugbear (B).
 
+### Documentation
+- README opens with a "Try it in 60 seconds" block (install, wire one repo, verify) above the project story, so a first-time visitor reaches a runnable command without scrolling.
+- Added `.github/PULL_REQUEST_TEMPLATE.md` covering the contributor checklist already documented in CONTRIBUTING.md: tests, changelog discipline, the content-guard PII gate, zero-runtime-deps, and conventional commits.
+
 ## [0.10.3] - 2026-06-10
 
 ### Fixed

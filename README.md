@@ -17,6 +17,16 @@
 
 Your agents run loops. Brigade keeps the receipts.
 
+## Try it in 60 seconds
+
+```bash
+pipx install brigade-cli
+brigade operator quickstart --target ./my-repo --harnesses codex      # wire one repo
+brigade operator doctor --target ./my-repo --profile local-operator   # verify
+```
+
+That installs the CLI, wires memory, handoffs, and local guardrails into one repo for a single harness, and prints a readiness check. Nothing leaves your machine and no daemon is started. Add `--dry-run` to preview the file-by-file plan before anything is written. More harnesses, workspace setups, and the homegrown-adoption path are under [Install](#install).
+
 ## Why I built this
 
 I run an always-on OpenClaw agent next to daily Codex and Claude Code sessions, and I have since January. Every one of those tools wakes up empty. Whatever a session learned about my machine, my rules, or yesterday's dead ends scattered across tool-specific folders and died there.
