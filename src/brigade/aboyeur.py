@@ -302,6 +302,8 @@ def _run_orchestrator(
     }
     if sandbox is not None:
         kwargs["sandbox"] = sandbox
+    if orchestrator.model is not None:
+        kwargs["model"] = orchestrator.model
     return agents.run_agent(orchestrator.cli, prompt, **kwargs)
 
 
@@ -392,6 +394,8 @@ def dispatch(
         }
         if sandbox is not None:
             kwargs["sandbox"] = sandbox
+        if agent.model is not None:
+            kwargs["model"] = agent.model
         result = agents.run_agent(agent.cli, _worker_prompt(agent, assignment, read_only=read_only), **kwargs)
         return WorkerResult(
             worker=assignment.worker,
@@ -507,6 +511,7 @@ def _roster_payload(roster: Roster) -> dict[str, object]:
         "agents": {
             name: {
                 "cli": agent.cli,
+                "model": agent.model,
                 "role": agent.role,
                 "timeout_seconds": agent.timeout_seconds,
             }

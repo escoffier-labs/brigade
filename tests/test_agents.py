@@ -93,6 +93,56 @@ def test_build_argv_unknown_raises():
         agents.build_argv("nope", "hi")
 
 
+def test_build_argv_pins_model_for_claude_and_codex():
+    assert agents.build_argv("claude", "hi", model="claude-fable-5") == [
+        "claude",
+        "--model",
+        "claude-fable-5",
+        "-p",
+        "hi",
+    ]
+    assert agents.build_argv("codex", "hi", model="gpt-5.5-codex") == [
+        "codex",
+        "exec",
+        "-m",
+        "gpt-5.5-codex",
+        "hi",
+    ]
+    assert agents.build_argv("codex", "hi", read_only=True, model="gpt-5.5-codex") == [
+        "codex",
+        "exec",
+        "--sandbox",
+        "read-only",
+        "-m",
+        "gpt-5.5-codex",
+        "hi",
+    ]
+    assert agents.build_argv("codex", "hi", sandbox="workspace-write", model="gpt-5.5-codex") == [
+        "codex",
+        "exec",
+        "--sandbox",
+        "workspace-write",
+        "-m",
+        "gpt-5.5-codex",
+        "hi",
+    ]
+
+
+def test_build_argv_without_model_is_unchanged():
+    assert agents.build_argv("claude", "hi", model=None) == ["claude", "-p", "hi"]
+    assert agents.build_argv("codex", "hi", model=None) == ["codex", "exec", "hi"]
+
+
+def test_build_argv_model_on_unsupported_cli_raises():
+    with pytest.raises(ValueError, match="model"):
+        agents.build_argv("opencode", "hi", model="anything")
+
+
+def test_build_argv_model_on_ollama_ref_raises():
+    with pytest.raises(ValueError, match="model"):
+        agents.build_argv("ollama:llama3.3", "hi", model="mistral")
+
+
 def test_command_for_returns_binary():
     assert agents.command_for("claude") == "claude"
     assert agents.command_for("codex") == "codex"
@@ -143,6 +193,20 @@ def test_run_agent_captures_output(monkeypatch):
     res = agents.run_agent("codex", "do it")
     assert res.ok is True
     assert res.text == "answer"
+
+
+def test_run_agent_forwards_model_to_argv(monkeypatch):
+    captured = {}
+
+    def fake_run(argv, **kw):
+        captured["argv"] = argv
+        return agents.proc.Result(0, "answer", "")
+
+    monkeypatch.setattr(agents.proc, "which", lambda c: "/x/" + c)
+    monkeypatch.setattr(agents.proc, "run", fake_run)
+    res = agents.run_agent("claude", "hi", model="claude-fable-5")
+    assert res.ok is True
+    assert captured["argv"] == ["claude", "--model", "claude-fable-5", "-p", "hi"]
 
 
 def test_run_agent_nonzero_is_not_ok(monkeypatch):

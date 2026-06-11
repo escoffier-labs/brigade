@@ -34,6 +34,22 @@ role = "Research locally and summarize useful findings."
 max_workers = {max_workers}
 timeout_seconds = 600
 allow_models = ["codex", "ollama:*"]
+
+# Cross-model example: pin a model per agent with `model = ...` (claude and codex only).
+# Fable 5 plans and synthesizes, GPT 5.5 executes, the handoff records the run.
+# Use a model id your CLI account supports (ChatGPT-account codex takes "gpt-5.5").
+#
+# orchestrator = "architect"
+#
+# [agents.architect]
+# cli = "claude"
+# model = "claude-fable-5"
+# role = "Plan the work, choose useful workers, and synthesize the final answer."
+#
+# [agents.builder]
+# cli = "codex"
+# model = "gpt-5.5"
+# role = "Make precise code changes and report what changed."
 """
 
 

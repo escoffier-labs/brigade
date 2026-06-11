@@ -24,9 +24,23 @@ class FakeRoster:
 
 def test_resolve_cli_backend(monkeypatch):
     r = FakeRoster([FakeAgent("chef", cli="codex", role="researcher")])
-    monkeypatch.setattr(llm, "_run_cli", lambda cli, prompt, timeout: f"[{cli}] ok")
+    monkeypatch.setattr(llm, "_run_cli", lambda cli, prompt, timeout, model=None: f"[{cli}] ok")
     backend = llm.resolve_backend(r)
     assert backend.complete([{"role": "user", "content": "hi"}]) == "[codex] ok"
+
+
+def test_resolve_cli_backend_passes_model(monkeypatch):
+    r = FakeRoster([FakeAgent("architect", cli="claude", model="claude-fable-5", role="researcher")])
+    captured = {}
+
+    def fake_run_cli(cli, prompt, timeout, model=None):
+        captured["model"] = model
+        return f"[{cli}] ok"
+
+    monkeypatch.setattr(llm, "_run_cli", fake_run_cli)
+    backend = llm.resolve_backend(r)
+    assert backend.complete([{"role": "user", "content": "hi"}]) == "[claude] ok"
+    assert captured["model"] == "claude-fable-5"
 
 
 def test_resolve_http_backend(monkeypatch):

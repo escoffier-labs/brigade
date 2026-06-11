@@ -9,10 +9,10 @@ class NoResearcherError(RuntimeError):
     pass
 
 
-def _run_cli(cli: str, prompt: str, timeout: int) -> str:
+def _run_cli(cli: str, prompt: str, timeout: int, model: Optional[str] = None) -> str:
     from brigade import agents  # same dispatch brigade run uses
 
-    return agents.run_agent(cli, prompt, timeout=timeout)
+    return agents.run_agent(cli, prompt, timeout=timeout, model=model)
 
 
 def _http_post_json(url: str, payload: Dict[str, Any], headers: Dict[str, str], timeout: int) -> Dict[str, Any]:
@@ -27,11 +27,12 @@ def _messages_to_prompt(messages: List[Dict[str, str]]) -> str:
 
 
 class CliBackend:
-    def __init__(self, cli: str) -> None:
+    def __init__(self, cli: str, model: Optional[str] = None) -> None:
         self.cli = cli
+        self.model = model
 
     def complete(self, messages, *, max_tokens=2048, temperature=0.3, timeout=60) -> str:
-        return _run_cli(self.cli, _messages_to_prompt(messages), timeout)
+        return _run_cli(self.cli, _messages_to_prompt(messages), timeout, model=self.model)
 
 
 class HttpBackend:
@@ -54,5 +55,5 @@ def resolve_backend(roster: Any):
     if getattr(agent, "endpoint", None) and getattr(agent, "model", None):
         return HttpBackend(agent.endpoint, agent.model, getattr(agent, "headers", None))
     if getattr(agent, "cli", None):
-        return CliBackend(agent.cli)
+        return CliBackend(agent.cli, getattr(agent, "model", None))
     raise NoResearcherError("researcher agent needs either cli or endpoint+model")

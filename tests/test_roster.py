@@ -136,6 +136,18 @@ def test_researcher_headers_via_fallback_parser(monkeypatch, tmp_path):
     assert loaded.find_role("researcher").headers == {"Authorization": "Bearer t"}
 
 
+def test_cli_agent_accepts_model_pin(tmp_path):
+    text = (
+        'orchestrator = "architect"\n'
+        '[agents.architect]\ncli = "claude"\nmodel = "claude-fable-5"\nrole = "plan"\n'
+        '[agents.builder]\ncli = "codex"\nmodel = "gpt-5.5-codex"\nrole = "build"\n'
+    )
+    loaded = roster_mod.load_roster(_write(tmp_path, text))
+    assert loaded.agents["architect"].cli == "claude"
+    assert loaded.agents["architect"].model == "claude-fable-5"
+    assert loaded.agents["builder"].model == "gpt-5.5-codex"
+
+
 def test_cli_agent_still_requires_cli_or_endpoint(tmp_path):
     text = 'orchestrator = "chef"\n[agents.chef]\nrole = "plan"\n'
     with pytest.raises(ValueError):

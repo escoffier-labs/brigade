@@ -138,17 +138,30 @@ def command_for(cli_ref: str) -> str:
     return cli_ref
 
 
+def _with_model(cli_ref: str, argv: List[str], model: str) -> List[str]:
+    if cli_ref == "claude":
+        # claude --model <id> -p <prompt>
+        return [argv[0], "--model", model, *argv[1:]]
+    if cli_ref == "codex":
+        # codex exec [--sandbox <mode>] -m <id> <prompt>
+        return [*argv[:-1], "-m", model, argv[-1]]
+    raise ValueError(f"{cli_ref!r} does not support model pinning (supported: claude, codex)")
+
+
 def build_argv(
     cli_ref: str,
     prompt: str,
     read_only: bool = False,
     sandbox: str | None = None,
+    model: str | None = None,
 ) -> List[str]:
     if cli_ref.startswith(_OLLAMA_PREFIX):
-        model = cli_ref[len(_OLLAMA_PREFIX) :]
-        if not model:
+        ollama_model = cli_ref[len(_OLLAMA_PREFIX) :]
+        if not ollama_model:
             raise ValueError(f"ollama reference needs a model: {cli_ref!r}")
-        return ["ollama", "run", model, prompt]
+        if model is not None:
+            raise ValueError(f"{cli_ref!r} already names a model; drop the separate model setting")
+        return ["ollama", "run", ollama_model, prompt]
 
     builder = _ADAPTERS.get(cli_ref)
     if builder is None:
@@ -157,7 +170,10 @@ def build_argv(
             "(known: claude, codex, opencode, antigravity, pi, cursor, aider, goose, continue, "
             "copilot, qwen, kimi, adal, openhands, ollama:<model>)"
         )
-    return builder(prompt, read_only, sandbox)
+    argv = builder(prompt, read_only, sandbox)
+    if model is not None:
+        argv = _with_model(cli_ref, argv, model)
+    return argv
 
 
 def detect(cli_ref: str) -> bool:
@@ -171,11 +187,16 @@ def run_agent(
     cwd: Path | None = None,
     read_only: bool = False,
     sandbox: str | None = None,
+    model: str | None = None,
 ) -> AgentResult:
     if not detect(cli_ref):
         return AgentResult(text="", ok=False, detail=f"{command_for(cli_ref)} not installed")
 
-    result = proc.run(build_argv(cli_ref, prompt, read_only=read_only, sandbox=sandbox), timeout=timeout, cwd=cwd)
+    result = proc.run(
+        build_argv(cli_ref, prompt, read_only=read_only, sandbox=sandbox, model=model),
+        timeout=timeout,
+        cwd=cwd,
+    )
     text = result.stdout.strip()
     if result.code != 0:
         detail = result.stderr.strip() or f"exit {result.code}"

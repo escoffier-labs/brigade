@@ -17,6 +17,13 @@ def test_roster_init_writes_default_roster(tmp_target, capsys):
     assert str(path) in out
 
 
+def test_roster_template_documents_model_pinning(tmp_target):
+    assert roster_cmd.init(tmp_target) == 0
+    text = (tmp_target / ".brigade" / "roster.toml").read_text()
+    assert '# model = "claude-fable-5"' in text
+    assert '# model = "gpt-5.5"' in text
+
+
 def test_roster_init_refuses_overwrite_without_force(tmp_target, capsys):
     assert roster_cmd.init(tmp_target) == 0
     assert roster_cmd.init(tmp_target) == 2

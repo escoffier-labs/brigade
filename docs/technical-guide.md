@@ -256,6 +256,38 @@ allow_models = ["codex", "ollama:*"]
 Edit the roles, CLI refs, and timeouts to match the tools on your machine.
 `limits.timeout_seconds` is the default per-agent timeout.
 `agents.<name>.timeout_seconds` overrides it for one agent.
+
+### Pin a model per agent
+
+`agents.<name>.model` pins the model a CLI agent runs, instead of relying on that CLI's
+global default. Brigade passes it through the adapter (`claude --model <id>`,
+`codex exec -m <id>`); pinning is supported for the `claude` and `codex` adapters, and
+`ollama:<model>` refs already name their model. The pinned model is recorded in each
+run's `roster.json` artifact.
+
+The classic split is a strong planner orchestrating a cheaper executor: the architect
+plans and synthesizes, the builder does the token-heavy work, and the run handoff is the
+record you judge.
+
+```toml
+orchestrator = "architect"
+
+[agents.architect]
+cli = "claude"
+model = "claude-fable-5"
+role = "Plan the work, choose useful workers, and synthesize the final answer."
+
+[agents.builder]
+cli = "codex"
+model = "gpt-5.5"
+role = "Make precise code changes and report what changed."
+```
+
+Use a model id your CLI account supports; ChatGPT-account codex takes `gpt-5.5`, while
+API-backed setups may use other ids. The loop: `brigade run "<task>" --handoff`, review
+the handoff and artifacts, refine the task, run again. Each orchestrator call is
+stateless; durable context lives in the repo and the handoffs.
+
 Then run:
 
 ```bash
@@ -505,6 +537,15 @@ Durable non-task imports such as decisions, preferences, links, commands, findin
 Scanner producer imports use source item keys and fingerprints when available. Repeated ingestion skips equivalent pending or promoted imports, and dismissed imports stay dismissed unless the source item changes materially. Imports created during scanner runs carry provenance metadata when Brigade can attach it, including scanner id, source, run id, receipt path, output snapshot, import path, and source fingerprint.
 `brigade work doctor` warns when scanner queues go stale, task imports lack acceptance criteria, or a source produces many dismissed imports.
 For handoff-ingest issues, prefer `brigade handoff sync-issues` over repeated raw imports. It imports only issue ids that have not already been seen locally and marks stale handoff-ingest imports/tasks resolved when the latest log no longer contains them.
+
+Friction-log commands:
+
+- `brigade friction scan --days 30` scans recent local work artifacts, notes, memory logs, handoffs, and `.learnings` for candidate workflow friction.
+- `brigade friction scan --include-agent-logs` also scans local Codex and Claude Code session/log directories.
+- `brigade friction scan --import-candidates` appends candidates to the work import inbox with `source=friction-scan`.
+- `brigade friction add "..."` manually captures a friction item as a reviewable work import.
+
+Friction scan output is local and review-first. It writes `.brigade/friction/latest.json` and `.brigade/friction/latest.md`, and it does not create GitHub issues, edit memory, publish reports, or promote findings automatically.
 
 Handoff draft queue commands:
 

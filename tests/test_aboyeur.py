@@ -29,6 +29,17 @@ def _timeout_roster():
     )
 
 
+def _model_roster():
+    return Roster(
+        orchestrator="architect",
+        agents={
+            "architect": Agent("architect", "claude", "plan and synthesize", model="claude-fable-5"),
+            "builder": Agent("builder", "codex", "write code", model="gpt-5.5-codex"),
+        },
+        max_workers=1,
+    )
+
+
 def _restricted_roster():
     return Roster(
         orchestrator="chef",
@@ -131,6 +142,35 @@ def test_run_uses_roster_timeouts(monkeypatch):
     monkeypatch.setattr(aboyeur.agents, "run_agent", fake_run_agent)
     assert aboyeur.run("build feature", _timeout_roster()) == 0
     assert calls == [("codex", 45.0), ("ollama:llama3.3", 12.0), ("codex", 45.0)]
+
+
+def test_run_passes_agent_models(monkeypatch):
+    calls = []
+
+    def fake_run_agent(cli_ref, prompt, timeout=600.0, cwd=None, read_only=False, model=None):
+        calls.append((cli_ref, model))
+        if len(calls) == 1:
+            return agents.AgentResult(
+                text=json.dumps({"assignments": [{"worker": "builder", "task": "implement it"}]}),
+                ok=True,
+            )
+        if cli_ref == "codex":
+            return agents.AgentResult(text="worker output", ok=True)
+        return agents.AgentResult(text="final answer", ok=True)
+
+    monkeypatch.setattr(aboyeur.agents, "run_agent", fake_run_agent)
+    assert aboyeur.run("build feature", _model_roster()) == 0
+    assert calls == [
+        ("claude", "claude-fable-5"),
+        ("codex", "gpt-5.5-codex"),
+        ("claude", "claude-fable-5"),
+    ]
+
+
+def test_roster_payload_includes_model():
+    payload = aboyeur._roster_payload(_model_roster())
+    assert payload["agents"]["architect"]["model"] == "claude-fable-5"
+    assert payload["agents"]["builder"]["model"] == "gpt-5.5-codex"
 
 
 def test_read_only_mode_is_in_all_prompts_and_artifacts(monkeypatch, tmp_path):
