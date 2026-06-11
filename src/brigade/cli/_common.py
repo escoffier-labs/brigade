@@ -13,7 +13,7 @@ import argparse
 # one group; tests/test_cli_help.py enforces full coverage.
 COMMAND_GROUPS: list[tuple[str, list[str]]] = [
     ("Core memory loop", ["init", "handoff", "handoff-template", "ingest", "memory", "doctor", "status"]),
-    ("Daily operator loop", ["operator", "daily", "work", "center", "runbook", "budgets", "notifications"]),
+    ("Daily operator loop", ["operator", "daily", "work", "friction", "center", "runbook", "budgets", "notifications"]),
     ("Stations and tools", ["add", "skills", "tools", "pantry", "roster", "run", "runs", "dogfood"]),
     (
         "Review, security, and research",

@@ -42,6 +42,7 @@ from . import (
     handoff as _handoff_group,
     memory as _memory_group,
     work as _work_group,
+    friction as _friction_group,
     chat as _chat_group,
     context as _context_group,
     projects as _projects_group,
@@ -93,6 +94,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     _memory_group.register(sub)
     _work_group.register(sub)
+    _friction_group.register(sub)
 
     _chat_group.register(sub)
 

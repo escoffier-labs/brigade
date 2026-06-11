@@ -130,6 +130,7 @@ All of them get handoff templates, ingest source coverage, and projected tools/s
 The memory loop is the core. Around it, the same review-and-receipt pattern covers the rest of an operator's day, and you can ignore all of it until you need it:
 
 - **Daily loop**: `brigade work brief` shows pending work, imports, and warnings; `brigade daily status` keeps it bounded and cheap.
+- **Friction logs**: `brigade friction scan --days 30 --import-candidates` mines recent notes, handoffs, session artifacts, and optional local agent logs for reviewable workflow friction.
 - **Security**: `brigade security scan` is a local read-only scanner for agent workspaces (secrets, risky hooks, MCP configs, prompt-injection patterns); `brigade scrub` gates content before it leaves the machine.
 - **Tools and skills**: one reviewed catalog projected into every harness's native format, with approval gates for anything that executes.
 - **Research**: `brigade research run` turns a question into a cited local report and a reviewable memory handoff.

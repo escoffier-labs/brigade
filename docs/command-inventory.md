@@ -20,6 +20,7 @@ brigade roadmap commands --write
 - `brigade daily`: 26 command path(s)
 - `brigade doctor`: 1 command path(s)
 - `brigade dogfood`: 1 command path(s)
+- `brigade friction`: 2 command path(s)
 - `brigade handoff`: 17 command path(s)
 - `brigade handoff-template`: 1 command path(s)
 - `brigade hermes-fragments`: 1 command path(s)
@@ -126,6 +127,8 @@ brigade roadmap commands --write
 - `brigade daily unblock`
 - `brigade doctor`
 - `brigade dogfood`
+- `brigade friction add`
+- `brigade friction scan`
 - `brigade handoff archive`
 - `brigade handoff closeout`
 - `brigade handoff doctor`
