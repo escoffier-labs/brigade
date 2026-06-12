@@ -97,6 +97,21 @@ def _openhands_argv(prompt: str, read_only: bool, sandbox: str | None) -> List[s
     return ["openhands", "--headless", "-t", task]
 
 
+def _grok_argv(prompt: str, read_only: bool, sandbox: str | None) -> List[str]:
+    task = _read_only_prompt(prompt) if read_only or sandbox == "read-only" else prompt
+    return ["grok", "--prompt", task]
+
+
+def _amp_argv(prompt: str, read_only: bool, sandbox: str | None) -> List[str]:
+    task = _read_only_prompt(prompt) if read_only or sandbox == "read-only" else prompt
+    return ["amp", "--prompt", task]
+
+
+def _crush_argv(prompt: str, read_only: bool, sandbox: str | None) -> List[str]:
+    task = _read_only_prompt(prompt) if read_only or sandbox == "read-only" else prompt
+    return ["crush", "--prompt", task]
+
+
 _ADAPTERS: dict[str, Callable[[str, bool, str | None], List[str]]] = {
     "claude": _claude_argv,
     "codex": _codex_argv,
@@ -112,6 +127,9 @@ _ADAPTERS: dict[str, Callable[[str, bool, str | None], List[str]]] = {
     "kimi": _kimi_argv,
     "adal": _adal_argv,
     "openhands": _openhands_argv,
+    "grok": _grok_argv,
+    "amp": _amp_argv,
+    "crush": _crush_argv,
 }
 
 
@@ -168,7 +186,7 @@ def build_argv(
         raise ValueError(
             f"unknown agent cli: {cli_ref!r} "
             "(known: claude, codex, opencode, antigravity, pi, cursor, aider, goose, continue, "
-            "copilot, qwen, kimi, adal, openhands, ollama:<model>)"
+            "copilot, qwen, kimi, adal, openhands, grok, amp, crush, ollama:<model>)"
         )
     argv = builder(prompt, read_only, sandbox)
     if model is not None:

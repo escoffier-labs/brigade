@@ -34,7 +34,7 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_init.add_argument(
         "--harnesses",
         default=None,
-        help="Comma-separated harness ids: claude, codex, opencode, antigravity, pi, cursor, aider, goose, continue, copilot, qwen, kimi, adal, openhands, openclaw, hermes. "
+        help="Comma-separated harness ids: claude, codex, opencode, antigravity, pi, cursor, aider, goose, continue, copilot, qwen, kimi, adal, openhands, grok, amp, crush, openclaw, hermes. "
         "Pass 'none' for a generic install with no harness-specific files.",
     )
     p_init.add_argument(

@@ -82,4 +82,3 @@ def dispatch(args) -> int:
     if parser is not None:
         parser.error(f"unknown friction command: {args.friction_command}")
     return 2
-

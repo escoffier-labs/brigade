@@ -5,7 +5,7 @@
 <h1 align="center">Brigade CLI</h1>
 
 <p align="center">
-  <strong>AI agent memory, handoffs, and local guardrails for Codex, Claude Code, OpenCode, and a dozen other harnesses.</strong>
+  <strong>AI agent memory, handoffs, and local guardrails for Codex, Claude Code, OpenCode, and over a dozen other harnesses.</strong>
 </p>
 
 <p align="center">
@@ -120,6 +120,9 @@ Each writer gets its own local inbox; one canonical owner ingests. Brigade keeps
 | Kimi Code | `kimi` | `.kimi/memory-handoffs/` |
 | AdaL | `adal` | `.adal/memory-handoffs/` |
 | OpenHands | `openhands` | `.openhands/memory-handoffs/` |
+| Grok CLI | `grok` | `.grok/memory-handoffs/` |
+| Amp | `amp` | `.amp/memory-handoffs/` |
+| Crush | `crush` | `.crush/memory-handoffs/` |
 | Hermes | `hermes` | `.hermes/memory-handoffs/` |
 | OpenClaw | `openclaw` | usually the memory owner, not a writer |
 

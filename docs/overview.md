@@ -19,7 +19,7 @@ flowchart TB
         CODEX["<b>Codex CLI</b><br/>handoff writer"]
         CLAUDE["<b>Claude Code</b><br/>handoff writer"]
         OPEN["<b>OpenCode</b><br/>handoff writer"]
-        MORE["<b>more CLI writers</b><br/>Antigravity · Pi · Cursor<br/>Aider · Goose · Continue<br/>Copilot · Qwen · Kimi · AdaL · OpenHands"]
+        MORE["<b>more CLI writers</b><br/>Antigravity · Pi · Cursor<br/>Aider · Goose · Continue<br/>Copilot · Qwen · Kimi · AdaL · OpenHands<br/>Grok · Amp · Crush"]
         HERMES["<b>Hermes</b><br/>writer or owner"]
     end
 
@@ -57,7 +57,7 @@ Agent tools are getting good enough that people use more than one of them. That 
 Brigade gives the setup a home base.
 
 - OpenClaw or Hermes can be the main memory owner.
-- Codex, Claude Code, OpenCode, Antigravity, Pi, Cursor, Aider, Goose, Continue, GitHub Copilot CLI, Qwen Code, Kimi Code, AdaL, OpenHands, and Hermes can write handoff notes.
+- Codex, Claude Code, OpenCode, Antigravity, Pi, Cursor, Aider, Goose, Continue, GitHub Copilot CLI, Qwen Code, Kimi Code, AdaL, OpenHands, Grok, Amp, Crush, and Hermes can write handoff notes.
 - You can inspect and lint those notes before saving them.
 - Local receipts show what happened during work, scans, and reviews.
 - Risky actions stay manual.
@@ -94,7 +94,7 @@ brigade operator quickstart --target ~/agent-workspace --depth workspace --harne
 brigade operator doctor --target ~/agent-workspace --profile local-operator
 ```
 
-Use `--dry-run` first if you want to preview the local files Brigade will write. To wire more than one agent surface, pass a comma-separated list such as `--harnesses codex,claude,opencode,antigravity,pi,cursor,aider,goose,continue,copilot,qwen,kimi,adal,openhands`.
+Use `--dry-run` first if you want to preview the local files Brigade will write. To wire more than one agent surface, pass a comma-separated list such as `--harnesses codex,claude,opencode,antigravity,pi,cursor,aider,goose,continue,copilot,qwen,kimi,adal,openhands,grok,amp,crush`.
 
 If you already have a homegrown setup with scripts, handoff folders, crons, or process managers, use the adoption loop before changing it:
 
@@ -153,6 +153,9 @@ Each writer harness gets its own local inbox. Use `brigade handoff draft --inbox
 | Kimi Code | `kimi` | `.kimi/memory-handoffs/` | handoff template, ingest source, dogfood adapter, tools, skills |
 | AdaL | `adal` | `.adal/memory-handoffs/` | handoff template, ingest source, dogfood adapter, tools, skills |
 | OpenHands | `openhands` | `.openhands/memory-handoffs/` | handoff template, ingest source, dogfood adapter, instructions, skills |
+| Grok CLI | `grok` | `.grok/memory-handoffs/` | handoff template, ingest source, dogfood adapter, instructions, skills |
+| Amp | `amp` | `.amp/memory-handoffs/` | handoff template, ingest source, dogfood adapter, instructions, skills |
+| Crush | `crush` | `.crush/memory-handoffs/` | handoff template, ingest source, dogfood adapter, instructions, skills |
 | Hermes | `hermes` | `.hermes/memory-handoffs/` | handoff template, ingest source, owner adapter fragments |
 
 OpenClaw is usually the canonical memory owner rather than a writer inbox. Add it with `--harnesses openclaw,...` when the workspace should own durable memory.
@@ -176,6 +179,9 @@ flowchart LR
         K[".kimi/memory-handoffs/"]
         AD[".adal/memory-handoffs/"]
         OH[".openhands/memory-handoffs/"]
+        GR[".grok/memory-handoffs/"]
+        AM[".amp/memory-handoffs/"]
+        CR[".crush/memory-handoffs/"]
         H[".hermes/memory-handoffs/"]
     end
 
@@ -294,7 +300,7 @@ For memory:
 - scan handoff drafts with Content Guard before they become durable memory
 - track which local inboxes the ingestor should watch
 - reconcile ingester receipts so skipped, failed, routed, and promoted notes stay visible
-- support OpenClaw, Hermes, Codex, Claude Code, OpenCode, Antigravity, Pi, Cursor, Aider, Goose, Continue, GitHub Copilot CLI, Qwen Code, Kimi Code, AdaL, and OpenHands conventions
+- support OpenClaw, Hermes, Codex, Claude Code, OpenCode, Antigravity, Pi, Cursor, Aider, Goose, Continue, GitHub Copilot CLI, Qwen Code, Kimi Code, AdaL, OpenHands, Grok, Amp, and Crush conventions
 
 For local work:
 
@@ -422,7 +428,7 @@ flowchart LR
 
     SOURCE --> CATALOG --> PROJECT
     CATALOG --> APPROVAL --> RUN
-    PROJECT -. local generated .-> HARNESSES[".codex · .claude<br/>.opencode · .antigravity · .pi · .cursor<br/>.aider · .goose · .continue · .copilot<br/>.qwen · .kimi · .adal · .openhands · .mcp"]
+    PROJECT -. local generated .-> HARNESSES[".codex · .claude<br/>.opencode · .antigravity · .pi · .cursor<br/>.aider · .goose · .continue · .copilot<br/>.qwen · .kimi · .adal · .openhands<br/>.grok · .amp · .crush · .mcp"]
 
     classDef source fill:#ecfdf5,stroke:#059669,color:#064e3b;
     classDef local fill:#eff6ff,stroke:#2563eb,color:#1e3a8a;
@@ -540,7 +546,7 @@ flowchart LR
 A repo-adjacent setup is:
 
 ```bash
-brigade init --target ./my-repo --depth repo --harnesses openclaw,codex,claude,opencode,antigravity,pi,cursor,aider,goose,continue,copilot,qwen,kimi,adal,openhands
+brigade init --target ./my-repo --depth repo --harnesses openclaw,codex,claude,opencode,antigravity,pi,cursor,aider,goose,continue,copilot,qwen,kimi,adal,openhands,grok,amp,crush
 brigade handoff sources init --target ./my-repo
 brigade handoff doctor --target ./my-repo
 ```

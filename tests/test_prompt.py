@@ -19,14 +19,14 @@ def test_prompt_returns_defaults_on_empty_input(monkeypatch, capsys):
 
 
 def test_prompt_toggles_codex_and_openclaw(monkeypatch):
-    """User types '2 15' to toggle codex and openclaw on (claude was default on)."""
+    """User types '2 18' to toggle codex and openclaw on (claude was default on)."""
     # Toggle loop re-prompts after each non-empty input; blank line confirms.
-    # Harness: '2 15' toggles codex+openclaw on, blank line confirms.
+    # Harness: '2 18' toggles codex+openclaw on, blank line confirms.
     # (order is claude, codex, opencode, antigravity, pi, cursor, aider,
-    # goose, continue, copilot, qwen, kimi, adal, openhands, openclaw, hermes)
+    # goose, continue, copilot, qwen, kimi, adal, openhands, grok, amp, crush, openclaw, hermes)
     # Depth: '2' picks workspace.
     # Includes: blank line confirms empty selection.
-    monkeypatch.setattr("sys.stdin", io.StringIO("2 15\n\n2\n\n"))
+    monkeypatch.setattr("sys.stdin", io.StringIO("2 18\n\n2\n\n"))
     monkeypatch.setattr("sys.stdin.isatty", lambda: True, raising=False)
     sel = prompt_for_selection()
     assert set(sel.harnesses) == {"claude", "codex", "openclaw"}

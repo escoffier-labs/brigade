@@ -64,6 +64,7 @@ If a session changes how Brigade should be used in this repo, write that durable
 - Kimi Code uses `.kimi/memory-handoffs/`.
 - AdaL uses `.adal/memory-handoffs/`.
 - OpenHands uses `.openhands/memory-handoffs/`.
+- Grok CLI uses `.grok/memory-handoffs/`.
 - Hermes uses `.hermes/memory-handoffs/`.
 
 Prefer the writer command so the draft matches Brigade's expected section style and lints before handoff:

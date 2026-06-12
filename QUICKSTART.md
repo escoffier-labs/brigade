@@ -55,8 +55,11 @@ Which harnesses do you use? (type numbers separated by space/comma to toggle, en
   [ ] 12. Kimi Code
   [ ] 13. AdaL
   [ ] 14. OpenHands
-  [ ] 15. OpenClaw
-  [ ] 16. Hermes (experimental)
+  [ ] 15. Grok CLI
+  [ ] 16. Amp
+  [ ] 17. Crush
+  [ ] 18. OpenClaw
+  [ ] 19. Hermes (experimental)
 
 Depth? (type a number, enter for default)
   * 1. repo       (handoff flow + publish guard)

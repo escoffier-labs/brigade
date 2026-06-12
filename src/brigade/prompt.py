@@ -33,6 +33,9 @@ _HARNESS_ORDER = [
     "kimi",
     "adal",
     "openhands",
+    "grok",
+    "amp",
+    "crush",
     "openclaw",
     "hermes",
 ]
@@ -54,6 +57,9 @@ _HARNESS_LABELS = {
     "kimi": "Kimi Code",
     "adal": "AdaL",
     "openhands": "OpenHands",
+    "grok": "Grok CLI",
+    "amp": "Amp",
+    "crush": "Crush",
     "openclaw": "OpenClaw",
     "hermes": "Hermes (experimental)",
 }

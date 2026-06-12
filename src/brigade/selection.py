@@ -22,6 +22,9 @@ KNOWN_HARNESSES = (
     "kimi",
     "adal",
     "openhands",
+    "grok",
+    "amp",
+    "crush",
     "openclaw",
     "hermes",
 )
@@ -42,6 +45,9 @@ WRITER_INBOXES = {
     "kimi": ".kimi/memory-handoffs",
     "adal": ".adal/memory-handoffs",
     "openhands": ".openhands/memory-handoffs",
+    "grok": ".grok/memory-handoffs",
+    "amp": ".amp/memory-handoffs",
+    "crush": ".crush/memory-handoffs",
     "hermes": ".hermes/memory-handoffs",
 }
 KNOWN_INCLUDES = ("publisher",)
