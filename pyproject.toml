@@ -9,7 +9,7 @@ description = "AI agent memory, handoffs, and local guardrails for Codex, Claude
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
-authors = [{ name = "Solomon Neas", email = "srneas@gmail.com" }] # content-guard: allow email
+authors = [{ name = "Solomon Neas", email = "me@solomonneas.dev" }] # content-guard: allow email
 keywords = ["agents", "ai-agents", "agent-memory", "agent-handoffs", "ai-memory", "openclaw", "claude-code", "codex", "opencode", "memory", "bootstrap", "brigade", "brigade-cli", "operator", "local-first", "guardrails", "agents-md"]
 classifiers = [
     "Development Status :: 3 - Alpha",

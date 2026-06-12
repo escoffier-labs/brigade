@@ -169,6 +169,7 @@ That pause is the point. Agent memory should be useful, not noisy.
 - [Handoff promotion](docs/handoff-promotion.md): how notes move toward memory.
 - [Repo fleet](docs/repo-fleet.md) and [Tool catalog](docs/tool-catalog.md).
 - [Command inventory](docs/command-inventory.md): every public CLI command.
+- [Maintainers](MAINTAINERS.md), [Governance](GOVERNANCE.md), [Security](SECURITY.md), and [Contributing](CONTRIBUTING.md).
 - [Roadmap](ROADMAP.md) and [roadmap archive](docs/roadmap-archive.md).
 
 Project identity: GitHub [`escoffier-labs/brigade`](https://github.com/escoffier-labs/brigade), website [brigade.tools](https://brigade.tools), PyPI [`brigade-cli`](https://pypi.org/project/brigade-cli/), command `brigade`. The name comes from the kitchen: a *brigade de cuisine* runs the line, and *mise en place* means the station is prepped before service. Set up the rules, memory, tools, and receipts before the session gets expensive.

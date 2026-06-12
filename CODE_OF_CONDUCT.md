@@ -10,7 +10,7 @@ The Code of Conduct applies to all project spaces: GitHub issues and pull reques
 
 ## Reporting
 
-If you experience or witness a violation, please email **srneas@gmail.com**. Reports are confidential. You should get an acknowledgment within 72 hours. <!-- content-guard: allow pii/email -->
+If you experience or witness a violation, please email **me@solomonneas.dev**. Reports are confidential. You should get an acknowledgment within 72 hours. <!-- content-guard: allow pii/email -->
 
 
 The maintainer is also the recipient of security reports - see `SECURITY.md`. Please tag the subject line so it is easy to route (e.g. "CoC report" vs "security report").
