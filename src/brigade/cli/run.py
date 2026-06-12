@@ -26,6 +26,15 @@ def register(sub: argparse._SubParsersAction) -> None:
         help="Tell agents to inspect and recommend only, without modifying files or external state.",
     )
     p_run.add_argument(
+        "--sandbox",
+        choices=["read-only", "workspace-write", "danger-full-access"],
+        default=None,
+        help=(
+            "Native sandbox mode for codex agents. Combine with --read-only to keep prompt-level "
+            "read-only rules while overriding the native sandbox."
+        ),
+    )
+    p_run.add_argument(
         "--inspect",
         action="store_true",
         help="Print a readable artifact summary after the run completes.",
@@ -99,6 +108,7 @@ def dispatch(args) -> int:
         output_dir=output_dir,
         handoff_inbox=handoff_inbox,
         read_only=args.read_only,
+        sandbox=args.sandbox,
     )
     if output_dir is not None:
         print(f"artifacts: {output_dir}", file=sys.stderr)

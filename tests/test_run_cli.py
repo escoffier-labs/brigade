@@ -1,5 +1,7 @@
 import json
 
+import pytest
+
 from brigade import aboyeur
 from brigade import cli
 from brigade import runs_cmd
@@ -45,6 +47,7 @@ role = "code"
         output_dir=None,
         handoff_inbox=None,
         read_only=False,
+        sandbox=None,
     ):
         seen["task"] = task
         seen["orchestrator"] = loaded_roster.orchestrator
@@ -55,6 +58,7 @@ role = "code"
         seen["output_dir"] = output_dir
         seen["handoff_inbox"] = handoff_inbox
         seen["read_only"] = read_only
+        seen["sandbox"] = sandbox
         return 0
 
     monkeypatch.setattr(aboyeur, "run", fake_run)
@@ -87,7 +91,94 @@ role = "code"
         "output_dir": tmp_path / "runs" / "one",
         "handoff_inbox": tmp_path / "handoffs",
         "read_only": True,
+        "sandbox": None,
     }
+
+
+def test_run_cli_default_sandbox_is_none(tmp_path, monkeypatch):
+    config_dir = tmp_path / ".brigade"
+    config_dir.mkdir()
+    (config_dir / "roster.toml").write_text(
+        """
+orchestrator = "chef"
+
+[agents.chef]
+cli = "codex"
+role = "plan"
+
+[agents.coder]
+cli = "codex"
+role = "code"
+"""
+    )
+    seen = {}
+
+    def fake_run(
+        task,
+        loaded_roster,
+        dry_run=False,
+        show_plan=False,
+        verbose=False,
+        cwd=None,
+        output_dir=None,
+        handoff_inbox=None,
+        read_only=False,
+        sandbox="unset",
+    ):
+        seen["sandbox"] = sandbox
+        return 0
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(aboyeur, "run", fake_run)
+    assert cli.main(["run", "x", "--no-artifacts"]) == 0
+    assert seen["sandbox"] is None
+
+
+def test_run_cli_passes_sandbox_to_aboyeur(tmp_path, monkeypatch):
+    config_dir = tmp_path / ".brigade"
+    config_dir.mkdir()
+    (config_dir / "roster.toml").write_text(
+        """
+orchestrator = "chef"
+
+[agents.chef]
+cli = "codex"
+role = "plan"
+
+[agents.coder]
+cli = "codex"
+role = "code"
+"""
+    )
+    seen = {}
+
+    def fake_run(
+        task,
+        loaded_roster,
+        dry_run=False,
+        show_plan=False,
+        verbose=False,
+        cwd=None,
+        output_dir=None,
+        handoff_inbox=None,
+        read_only=False,
+        sandbox=None,
+    ):
+        seen["sandbox"] = sandbox
+        return 0
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(aboyeur, "run", fake_run)
+    assert cli.main(["run", "x", "--sandbox", "danger-full-access", "--no-artifacts"]) == 0
+    assert seen["sandbox"] == "danger-full-access"
+
+
+def test_run_cli_rejects_invalid_sandbox(capsys):
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["run", "x", "--sandbox", "none"])
+
+    assert exc.value.code == 2
+    assert "invalid choice" in capsys.readouterr().err
 
 
 def test_run_cli_default_roster_path(tmp_path, monkeypatch):
@@ -110,7 +201,7 @@ role = "code"
     monkeypatch.setattr(
         aboyeur,
         "run",
-        lambda task, loaded_roster, dry_run=False, show_plan=False, verbose=False, cwd=None, output_dir=None, handoff_inbox=None, read_only=False: (
+        lambda task, loaded_roster, dry_run=False, show_plan=False, verbose=False, cwd=None, output_dir=None, handoff_inbox=None, read_only=False, sandbox=None: (
             0
         ),
     )
@@ -167,6 +258,7 @@ role = "code"
         output_dir=None,
         handoff_inbox=None,
         read_only=False,
+        sandbox=None,
     ):
         seen["output_dir"] = output_dir
         return 0
@@ -211,6 +303,7 @@ role = "code"
         output_dir=None,
         handoff_inbox=None,
         read_only=False,
+        sandbox=None,
     ):
         seen["output_dir"] = output_dir
         return 2

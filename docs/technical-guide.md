@@ -312,8 +312,10 @@ Common `brigade run` flags:
 - `--handoff` writes a Memory Handoff for a successful non-dry run.
 - `--inspect` prints the same artifact summary as `brigade runs show`.
 - `--read-only` tells the orchestrator and workers to inspect and recommend only.
+- `--sandbox {read-only,workspace-write,danger-full-access}` overrides the native Codex sandbox mode.
 
 For `codex` agents, `--read-only` also passes `codex exec --sandbox read-only`.
+Combine `--sandbox` with `--read-only` to keep prompt-level read-only rules while overriding native sandbox behavior.
 Other adapters receive the prompt policy only.
 
 The `cli` values are adapters for installed command-line tools:

@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `brigade run --sandbox` to override the native Codex sandbox mode while keeping `--read-only` available for prompt-level review rules.
 - Three new writer harnesses: Grok CLI (`grok`), Amp (`amp`), and Crush (`crush`), each with its own `.{harness}/memory-handoffs` inbox, tool projections, skills adapter, and agent argv, bringing the writer-harness total to eighteen.
 
 ### Fixed
