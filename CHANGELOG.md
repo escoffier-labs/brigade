@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Three new writer harnesses: Grok CLI (`grok`), Amp (`amp`), and Crush (`crush`), each with its own `.{harness}/memory-handoffs` inbox, tool projections, skills adapter, and agent argv, bringing the writer-harness total to eighteen.
+
 ### Fixed
 - `brigade research sources` no longer misreports route status when a configured source adapter is missing its `type`: the malformed entry previously shifted every following source's executable check onto the wrong adapter.
 

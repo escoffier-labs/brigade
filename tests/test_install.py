@@ -137,7 +137,9 @@ def test_cursor_install_creates_inbox_and_gitignore(tmp_path):
     assert "!.cursor/memory-handoffs/TEMPLATE.md" in block
 
 
-@pytest.mark.parametrize("harness", ["aider", "goose", "continue", "copilot", "qwen", "kimi", "adal", "openhands"])
+@pytest.mark.parametrize(
+    "harness", ["aider", "goose", "continue", "copilot", "qwen", "kimi", "adal", "openhands", "grok", "amp", "crush"]
+)
 def test_expanded_cli_harness_install_creates_inbox_and_gitignore(tmp_path, harness):
     from brigade.install import install_selection, build_gitignore_block
     from brigade.selection import Selection

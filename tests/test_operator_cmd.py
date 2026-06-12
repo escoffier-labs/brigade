@@ -1264,13 +1264,13 @@ def test_operator_sync_tools_projects_tracked_sources(tmp_path, capsys):
     assert cli.main(["operator", "sync-tools", "--target", str(tmp_path), "--dry-run", "--json"]) == 0
     dry_run = json.loads(capsys.readouterr().out)
     assert dry_run["dry_run"] is True
-    assert dry_run["apply"]["applied_count"] == 72
+    assert dry_run["apply"]["applied_count"] == 84
     assert not (tmp_path / ".claude" / "commands" / "simplify.md").exists()
 
     assert cli.main(["operator", "sync-tools", "--target", str(tmp_path), "--json"]) == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["status"] == "ok"
-    assert payload["apply"]["applied_count"] == 72
+    assert payload["apply"]["applied_count"] == 84
     assert payload["tool_health"]["issue_count"] == 0
     assert (tmp_path / ".claude" / "commands" / "simplify.md").is_file()
     assert (tmp_path / ".claude" / "commands" / "superpowers.md").is_file()
@@ -1335,7 +1335,7 @@ projections = { claude = ".claude/commands/simplify.md" }
     payload = json.loads(capsys.readouterr().out)
     assert payload["defaults"]["updated"] == ["simplify"]
     assert set(payload["defaults"]["added"]) == {"superpowers", "frontend", "antislop"}
-    assert payload["apply"]["applied_count"] == 72
+    assert payload["apply"]["applied_count"] == 84
     assert (tmp_path / ".codex" / "skills" / "frontend" / "SKILL.md").is_file()
     assert (tmp_path / ".codex" / "skills" / "antislop" / "SKILL.md").is_file()
 
@@ -1374,7 +1374,7 @@ def test_internal_dogfood_fresh_repo_onboarding_loop(tmp_path, capsys, monkeypat
     assert cli.main(["operator", "sync-tools", "--target", str(tmp_path), "--json"]) == 0
     sync_payload = json.loads(capsys.readouterr().out)
     assert sync_payload["status"] == "ok"
-    assert sync_payload["apply"]["applied_count"] == 72
+    assert sync_payload["apply"]["applied_count"] == 84
 
     assert cli.main(["operator", "status", "--profile", "internal-dogfood", "--target", str(tmp_path), "--json"]) == 0
     status = json.loads(capsys.readouterr().out)

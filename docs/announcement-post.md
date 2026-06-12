@@ -18,7 +18,7 @@ That system now runs ~500 memory cards across six months of daily multi-agent wo
 
 Deliberate non-features: no daemon, no server, no hosted anything, no auto-publish, no silent memory writes. Your memory is markdown in your repo, readable without Brigade.
 
-It supports 15+ writer harnesses (Codex, Claude Code, OpenCode, Cursor, Aider, Goose, Copilot CLI, ...) with one shared note format, and it has an adoption path that inventories an existing homegrown setup read-only before changing anything. I cut my own production workspace over to it this week using that path.
+It supports 18+ writer harnesses (Codex, Claude Code, OpenCode, Cursor, Aider, Goose, Copilot CLI, ...) with one shared note format, and it has an adoption path that inventories an existing homegrown setup read-only before changing anything. I cut my own production workspace over to it this week using that path.
 
 Install: `pipx install brigade-cli` - then `brigade operator quickstart --target ./my-repo --harnesses codex`
 

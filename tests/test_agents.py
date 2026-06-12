@@ -18,6 +18,9 @@ def test_build_argv_for_known_clis():
     assert agents.build_argv("kimi", "hi") == ["kimi", "--print", "-p", "hi", "--final-message-only"]
     assert agents.build_argv("adal", "hi") == ["adal", "-q", "hi"]
     assert agents.build_argv("openhands", "hi") == ["openhands", "--headless", "-t", "hi"]
+    assert agents.build_argv("grok", "hi") == ["grok", "--prompt", "hi"]
+    assert agents.build_argv("amp", "hi") == ["amp", "--prompt", "hi"]
+    assert agents.build_argv("crush", "hi") == ["crush", "--prompt", "hi"]
     assert agents.build_argv("ollama:llama3.3", "hi") == ["ollama", "run", "llama3.3", "hi"]
 
 
@@ -63,6 +66,9 @@ def test_build_argv_for_read_only_codex():
     assert agents.build_argv("copilot", "hi", read_only=True)[-1].startswith("Read-only planning run.")
     assert agents.build_argv("adal", "hi", read_only=True)[-1].startswith("Read-only planning run.")
     assert agents.build_argv("openhands", "hi", read_only=True)[-1].startswith("Read-only planning run.")
+    assert agents.build_argv("grok", "hi", read_only=True)[-1].startswith("Read-only planning run.")
+    assert agents.build_argv("amp", "hi", read_only=True)[-1].startswith("Read-only planning run.")
+    assert agents.build_argv("crush", "hi", read_only=True)[-1].startswith("Read-only planning run.")
     assert agents.build_argv("ollama:llama3.3", "hi", read_only=True) == [
         "ollama",
         "run",
@@ -158,6 +164,9 @@ def test_command_for_returns_binary():
     assert agents.command_for("kimi") == "kimi"
     assert agents.command_for("adal") == "adal"
     assert agents.command_for("openhands") == "openhands"
+    assert agents.command_for("grok") == "grok"
+    assert agents.command_for("amp") == "amp"
+    assert agents.command_for("crush") == "crush"
     assert agents.command_for("ollama:llama3.3") == "ollama"
 
 
@@ -176,6 +185,9 @@ def test_is_known():
     assert agents.is_known("kimi")
     assert agents.is_known("adal")
     assert agents.is_known("openhands")
+    assert agents.is_known("grok")
+    assert agents.is_known("amp")
+    assert agents.is_known("crush")
     assert agents.is_known("ollama:anything")
     assert not agents.is_known("bogus")
 

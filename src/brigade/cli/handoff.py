@@ -56,7 +56,7 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_handoff_draft.add_argument(
         "--inbox",
         default="codex",
-        help="Writer inbox path or alias: claude, codex, opencode, antigravity, pi, cursor, aider, goose, continue, copilot, qwen, kimi, adal, openhands, hermes.",
+        help="Writer inbox path or alias: claude, codex, opencode, antigravity, pi, cursor, aider, goose, continue, copilot, qwen, kimi, adal, openhands, grok, amp, crush, hermes.",
     )
     p_handoff_draft.add_argument(
         "--type", default="workflow", help="Handoff type, such as workflow, decision, setup, or bugfix."

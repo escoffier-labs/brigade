@@ -93,9 +93,7 @@ PATTERNS: tuple[tuple[str, str, str, str], ...] = (
         r"\b(slow|latency|took ages|too long|long-running|expensive)\b",
     ),
 )
-SECRET_RE = re.compile(
-    r"(?i)\b(api[_-]?key|token|secret|password|authorization|bearer)\b\s*[:=]\s*['\"]?[^'\"\s]+"
-)
+SECRET_RE = re.compile(r"(?i)\b(api[_-]?key|token|secret|password|authorization|bearer)\b\s*[:=]\s*['\"]?[^'\"\s]+")
 IGNORED_ATTACHMENT_TYPES = {"hook_success", "hook_additional_context", "skill_listing"}
 
 

@@ -97,6 +97,9 @@ SKIP_PREFIXES = (
     (".kimi", "memory-handoffs"),
     (".adal", "memory-handoffs"),
     (".openhands", "memory-handoffs"),
+    (".grok", "memory-handoffs"),
+    (".amp", "memory-handoffs"),
+    (".crush", "memory-handoffs"),
     (".hermes", "memory-handoffs"),
 )
 
@@ -180,6 +183,9 @@ HARNESS_ROOTS = {
     ".kimi",
     ".adal",
     ".openhands",
+    ".grok",
+    ".amp",
+    ".crush",
     ".openclaw",
     ".hermes",
 }

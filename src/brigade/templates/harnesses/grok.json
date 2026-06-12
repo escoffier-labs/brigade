@@ -1,0 +1,11 @@
+{
+  "id": "grok",
+  "role": "writer",
+  "description": "Grok CLI handoff inbox. (AGENTS.md is in the depth baseline; portable tools can project into .grok/instructions/.)",
+  "files": [
+    {"src": "grok/memory-handoffs/TEMPLATE.md", "dst": ".grok/memory-handoffs/TEMPLATE.md"}
+  ],
+  "dirs": [
+    ".grok/memory-handoffs/processed"
+  ]
+}

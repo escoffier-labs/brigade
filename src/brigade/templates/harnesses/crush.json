@@ -1,0 +1,11 @@
+{
+  "id": "crush",
+  "role": "writer",
+  "description": "Crush handoff inbox. (AGENTS.md is in the depth baseline; portable tools can project into .crush/instructions/.)",
+  "files": [
+    {"src": "crush/memory-handoffs/TEMPLATE.md", "dst": ".crush/memory-handoffs/TEMPLATE.md"}
+  ],
+  "dirs": [
+    ".crush/memory-handoffs/processed"
+  ]
+}

@@ -2697,7 +2697,7 @@ def test_tools_defaults_creates_missing_builtin_source_files(tmp_path, capsys):
 
     assert tools_cmd.doctor(target=tmp_path, json_output=True) == 0
     doctor = json.loads(capsys.readouterr().out)
-    assert doctor["issue_count"] == 72
+    assert doctor["issue_count"] == 84
     assert {issue["issue_type"] for issue in doctor["issues"]} == {"missing_projection"}
 
 

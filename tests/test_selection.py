@@ -41,7 +41,19 @@ def test_cursor_is_a_known_harness():
 def test_expanded_cli_harnesses_are_known_writers():
     from brigade.selection import KNOWN_HARNESSES
 
-    for harness in ("aider", "goose", "continue", "copilot", "qwen", "kimi", "adal", "openhands"):
+    for harness in (
+        "aider",
+        "goose",
+        "continue",
+        "copilot",
+        "qwen",
+        "kimi",
+        "adal",
+        "openhands",
+        "grok",
+        "amp",
+        "crush",
+    ):
         assert harness in KNOWN_HARNESSES
         assert WRITER_INBOXES[harness] == f".{harness}/memory-handoffs"
 
@@ -60,6 +72,9 @@ def test_writer_inboxes_cover_known_writers():
     assert WRITER_INBOXES["kimi"] == ".kimi/memory-handoffs"
     assert WRITER_INBOXES["adal"] == ".adal/memory-handoffs"
     assert WRITER_INBOXES["openhands"] == ".openhands/memory-handoffs"
+    assert WRITER_INBOXES["grok"] == ".grok/memory-handoffs"
+    assert WRITER_INBOXES["amp"] == ".amp/memory-handoffs"
+    assert WRITER_INBOXES["crush"] == ".crush/memory-handoffs"
     assert WRITER_INBOXES["hermes"] == ".hermes/memory-handoffs"
 
 
@@ -140,6 +155,9 @@ def test_known_constants():
         "kimi",
         "adal",
         "openhands",
+        "grok",
+        "amp",
+        "crush",
         "openclaw",
         "hermes",
     }

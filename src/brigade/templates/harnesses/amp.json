@@ -1,0 +1,11 @@
+{
+  "id": "amp",
+  "role": "writer",
+  "description": "Amp handoff inbox. (AGENTS.md is in the depth baseline; portable tools can project into .amp/instructions/.)",
+  "files": [
+    {"src": "amp/memory-handoffs/TEMPLATE.md", "dst": ".amp/memory-handoffs/TEMPLATE.md"}
+  ],
+  "dirs": [
+    ".amp/memory-handoffs/processed"
+  ]
+}
