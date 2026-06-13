@@ -8,10 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `brigade run` plans can stage worker assignments so dependent workers receive earlier-stage results while same-stage workers still run in parallel.
 - `brigade run --sandbox` to override the native Codex sandbox mode while keeping `--read-only` available for prompt-level review rules.
 - Three new writer harnesses: Grok CLI (`grok`), Amp (`amp`), and Crush (`crush`), each with its own `.{harness}/memory-handoffs` inbox, tool projections, skills adapter, and agent argv, bringing the writer-harness total to eighteen.
 
 ### Fixed
+- Agent subprocesses now run with stdin closed, so `codex exec` no longer hangs until the roster timeout when brigade itself runs with a piped, never-closing stdin (background launchers, CI wrappers).
 - `brigade research sources` no longer misreports route status when a configured source adapter is missing its `type`: the malformed entry previously shifted every following source's executable check onto the wrong adapter.
 
 ### Changed

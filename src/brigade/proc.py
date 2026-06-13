@@ -42,6 +42,7 @@ def run(
             env=env,
             cwd=cwd,
             check=False,
+            stdin=subprocess.DEVNULL,
         )
         return Result(code=cp.returncode, stdout=cp.stdout, stderr=cp.stderr)
     except FileNotFoundError:
