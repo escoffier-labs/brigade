@@ -80,7 +80,22 @@ def dispatch(args) -> int:
     if args.inspect and args.no_artifacts:
         print("error: --inspect cannot be used with --no-artifacts", file=sys.stderr)
         return 2
-    roster_path = args.roster or (run_cwd / ".brigade" / "roster.toml")
+    cwd_roster_path = run_cwd / ".brigade" / "roster.toml"
+    if args.roster is not None:
+        roster_path = args.roster.expanduser()
+    elif cwd_roster_path.exists():
+        roster_path = cwd_roster_path
+    else:
+        home_roster_path = Path.home() / ".brigade" / "roster.toml"
+        if home_roster_path.exists():
+            roster_path = home_roster_path
+        else:
+            print(
+                f"error: roster not found: checked {cwd_roster_path} and {home_roster_path}. "
+                "Create .brigade/roster.toml or pass --roster.",
+                file=sys.stderr,
+            )
+            return 2
     try:
         loaded_roster = roster_mod.load_roster(roster_path)
     except FileNotFoundError:
@@ -98,6 +113,7 @@ def dispatch(args) -> int:
     handoff_inbox = None
     if args.handoff:
         handoff_inbox = args.handoff_inbox or (run_cwd / ".claude" / "memory-handoffs")
+    effective_sandbox = args.sandbox if args.sandbox is not None else loaded_roster.sandbox
     rc = aboyeur_mod.run(
         args.task,
         loaded_roster,
@@ -108,7 +124,7 @@ def dispatch(args) -> int:
         output_dir=output_dir,
         handoff_inbox=handoff_inbox,
         read_only=args.read_only,
-        sandbox=args.sandbox,
+        sandbox=effective_sandbox,
     )
     if output_dir is not None:
         print(f"artifacts: {output_dir}", file=sys.stderr)

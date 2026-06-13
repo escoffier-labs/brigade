@@ -572,6 +572,7 @@ def _roster_payload(roster: Roster) -> dict[str, object]:
         "max_workers": roster.max_workers,
         "timeout_seconds": roster.timeout_seconds,
         "allow_models": list(roster.allow_models),
+        "sandbox": roster.sandbox,
         "agents": {
             name: {
                 "cli": agent.cli,

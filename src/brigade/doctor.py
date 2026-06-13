@@ -24,6 +24,7 @@ OK = "OK"
 WARN = "WARN"
 FAIL = "FAIL"
 MANUAL = "MANUAL"
+INFO = "INFO"
 
 
 def build_context(target: Path, harness: str = "generic") -> DoctorContext:
@@ -679,6 +680,7 @@ def _report(checks: List[CheckResult]) -> int:
             WARN: "  [warn]",
             FAIL: "  [fail]",
             MANUAL: "  [todo]",
+            INFO: "  [info]",
         }[status]
         print(f"{marker} {name.ljust(width)}  {detail}")
         if status == FAIL:

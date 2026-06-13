@@ -9,6 +9,8 @@ from pathlib import Path
 from . import agents as agent_adapters
 from . import toml_compat
 
+SANDBOX_CHOICES = ("read-only", "workspace-write", "danger-full-access")
+
 
 @dataclass(frozen=True)
 class Agent:
@@ -28,6 +30,7 @@ class Roster:
     max_workers: int = 4
     allow_models: tuple[str, ...] = ()
     timeout_seconds: float = 600.0
+    sandbox: str | None = None
 
     def find_role(self, role: str) -> Agent | None:
         return next((a for a in self.agents.values() if a.role == role), None)
@@ -43,6 +46,15 @@ def _as_positive_number(value: object, field: str) -> float:
     if not isinstance(value, (int, float)) or isinstance(value, bool) or value <= 0:
         raise ValueError(f"{field} must be a positive number")
     return float(value)
+
+
+def _as_sandbox(value: object) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str) or value not in SANDBOX_CHOICES:
+        choices = ", ".join(SANDBOX_CHOICES)
+        raise ValueError(f"limits.sandbox must be one of: {choices}")
+    return value
 
 
 def is_cli_allowed(cli_ref: str, roster: Roster) -> bool:
@@ -82,6 +94,7 @@ def load_roster(path: Path) -> Roster:
     if not isinstance(max_workers, int) or max_workers < 1:
         raise ValueError("limits.max_workers must be a positive integer")
     timeout_seconds = _as_positive_number(limits.get("timeout_seconds", 600.0), "limits.timeout_seconds")
+    sandbox = _as_sandbox(limits.get("sandbox"))
 
     raw_allow_models = limits.get("allow_models", [])
     if raw_allow_models is None:
@@ -143,6 +156,7 @@ def load_roster(path: Path) -> Roster:
         max_workers=max_workers,
         allow_models=allow_models,
         timeout_seconds=timeout_seconds,
+        sandbox=sandbox,
     )
 
 

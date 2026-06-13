@@ -301,6 +301,15 @@ def test_roster_payload_includes_model():
     assert payload["agents"]["builder"]["model"] == "gpt-5.5-codex"
 
 
+def test_roster_payload_includes_sandbox():
+    roster = Roster(
+        orchestrator="chef",
+        agents={"chef": Agent("chef", "codex", "plan")},
+        sandbox="workspace-write",
+    )
+    assert aboyeur._roster_payload(roster)["sandbox"] == "workspace-write"
+
+
 def test_read_only_mode_is_in_all_prompts_and_artifacts(monkeypatch, tmp_path):
     calls = []
 

@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 
 import pytest
 
@@ -9,9 +10,13 @@ from brigade import runs_cmd
 
 def test_run_cli_missing_roster_errors(tmp_path, capsys, monkeypatch):
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
     rc = cli.main(["run", "do something"])
     assert rc == 2
-    assert "roster not found" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert "roster not found" in err
+    assert str(tmp_path / ".brigade" / "roster.toml") in err
+    assert str(tmp_path / "home" / ".brigade" / "roster.toml") in err
 
 
 def test_run_cli_rejects_missing_cwd(tmp_path, capsys):
@@ -173,6 +178,90 @@ role = "code"
     assert seen["sandbox"] == "danger-full-access"
 
 
+def test_run_cli_uses_roster_sandbox_when_flag_absent(tmp_path, monkeypatch):
+    config_dir = tmp_path / ".brigade"
+    config_dir.mkdir()
+    (config_dir / "roster.toml").write_text(
+        """
+orchestrator = "chef"
+
+[agents.chef]
+cli = "codex"
+role = "plan"
+
+[agents.coder]
+cli = "codex"
+role = "code"
+
+[limits]
+sandbox = "workspace-write"
+"""
+    )
+    seen = {}
+
+    def fake_run(
+        task,
+        loaded_roster,
+        dry_run=False,
+        show_plan=False,
+        verbose=False,
+        cwd=None,
+        output_dir=None,
+        handoff_inbox=None,
+        read_only=False,
+        sandbox=None,
+    ):
+        seen["sandbox"] = sandbox
+        return 0
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(aboyeur, "run", fake_run)
+    assert cli.main(["run", "x", "--no-artifacts"]) == 0
+    assert seen["sandbox"] == "workspace-write"
+
+
+def test_run_cli_sandbox_flag_overrides_roster_sandbox(tmp_path, monkeypatch):
+    config_dir = tmp_path / ".brigade"
+    config_dir.mkdir()
+    (config_dir / "roster.toml").write_text(
+        """
+orchestrator = "chef"
+
+[agents.chef]
+cli = "codex"
+role = "plan"
+
+[agents.coder]
+cli = "codex"
+role = "code"
+
+[limits]
+sandbox = "workspace-write"
+"""
+    )
+    seen = {}
+
+    def fake_run(
+        task,
+        loaded_roster,
+        dry_run=False,
+        show_plan=False,
+        verbose=False,
+        cwd=None,
+        output_dir=None,
+        handoff_inbox=None,
+        read_only=False,
+        sandbox=None,
+    ):
+        seen["sandbox"] = sandbox
+        return 0
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(aboyeur, "run", fake_run)
+    assert cli.main(["run", "x", "--sandbox", "read-only", "--no-artifacts"]) == 0
+    assert seen["sandbox"] == "read-only"
+
+
 def test_run_cli_rejects_invalid_sandbox(capsys):
     with pytest.raises(SystemExit) as exc:
         cli.main(["run", "x", "--sandbox", "none"])
@@ -206,6 +295,71 @@ role = "code"
         ),
     )
     assert cli.main(["run", json.dumps({"task": "x"}), "--dry-run"]) == 0
+
+
+def test_run_cli_falls_back_to_home_roster_when_cwd_roster_missing(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    config_dir = home / ".brigade"
+    config_dir.mkdir(parents=True)
+    (config_dir / "roster.toml").write_text(
+        """
+orchestrator = "chef"
+
+[agents.chef]
+cli = "codex"
+role = "plan"
+
+[agents.coder]
+cli = "codex"
+role = "code"
+"""
+    )
+    seen = {}
+
+    def fake_run(
+        task,
+        loaded_roster,
+        dry_run=False,
+        show_plan=False,
+        verbose=False,
+        cwd=None,
+        output_dir=None,
+        handoff_inbox=None,
+        read_only=False,
+        sandbox=None,
+    ):
+        seen["orchestrator"] = loaded_roster.orchestrator
+        return 0
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(Path, "home", lambda: home)
+    monkeypatch.setattr(aboyeur, "run", fake_run)
+    assert cli.main(["run", "x", "--no-artifacts"]) == 0
+    assert seen["orchestrator"] == "chef"
+
+
+def test_run_cli_explicit_roster_does_not_fall_back_to_home(tmp_path, monkeypatch, capsys):
+    home = tmp_path / "home"
+    config_dir = home / ".brigade"
+    config_dir.mkdir(parents=True)
+    (config_dir / "roster.toml").write_text(
+        """
+orchestrator = "chef"
+
+[agents.chef]
+cli = "codex"
+role = "plan"
+"""
+    )
+    missing = tmp_path / "missing.toml"
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(Path, "home", lambda: home)
+    rc = cli.main(["run", "x", "--roster", str(missing), "--no-artifacts"])
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert str(missing) in err
+    assert str(config_dir / "roster.toml") not in err
 
 
 def test_run_cli_rejects_handoff_with_dry_run(tmp_path, capsys, monkeypatch):

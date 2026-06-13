@@ -1,5 +1,6 @@
 import pytest
 
+from brigade import cli
 from brigade import roster as roster_mod
 
 VALID = """
@@ -32,6 +33,7 @@ def test_load_valid_roster(tmp_path):
     assert r.orchestrator == "chef"
     assert set(r.agents) == {"chef", "coder"}
     assert r.max_workers == 4
+    assert r.sandbox is None
     assert r.timeout_seconds == 300.0
     assert r.agents["coder"].cli == "ollama:llama3.3"
     assert r.agents["coder"].timeout_seconds == 120.0
@@ -72,6 +74,35 @@ def test_load_rejects_bad_limits(tmp_path):
     text = VALID.replace("max_workers = 4", "max_workers = 0")
     with pytest.raises(ValueError, match="positive"):
         roster_mod.load_roster(_write(tmp_path, text))
+
+
+def test_load_accepts_valid_sandbox_limits(tmp_path):
+    for sandbox in ("read-only", "workspace-write", "danger-full-access"):
+        text = VALID.replace("[limits]\n", f'[limits]\nsandbox = "{sandbox}"\n')
+        assert roster_mod.load_roster(_write(tmp_path, text)).sandbox == sandbox
+
+
+def test_load_rejects_invalid_sandbox_limit(tmp_path):
+    text = VALID.replace("[limits]\n", '[limits]\nsandbox = "none"\n')
+    with pytest.raises(ValueError) as exc:
+        roster_mod.load_roster(_write(tmp_path, text))
+
+    message = str(exc.value)
+    assert "limits.sandbox" in message
+    assert "read-only" in message
+    assert "workspace-write" in message
+    assert "danger-full-access" in message
+
+
+def test_roster_doctor_prints_sandbox_info(tmp_path, capsys):
+    text = VALID.replace("[limits]\n", '[limits]\nsandbox = "workspace-write"\n')
+    _write(tmp_path, text)
+
+    assert cli.main(["roster", "doctor", "--roster", str(tmp_path / "roster.toml")]) == 0
+    out = capsys.readouterr().out
+    assert "[info]" in out
+    assert "roster: sandbox" in out
+    assert "workspace-write" in out
 
 
 def test_load_rejects_bad_timeout(tmp_path):

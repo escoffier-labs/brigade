@@ -91,6 +91,8 @@ def doctor(target: Path, *, roster_path: Path | None = None) -> int:
     checks.append((doctor_mod.OK, "roster: orchestrator", loaded.orchestrator))
     checks.append((doctor_mod.OK, "roster: max_workers", str(loaded.max_workers)))
     checks.append((doctor_mod.OK, "roster: timeout_seconds", str(loaded.timeout_seconds)))
+    if loaded.sandbox is not None:
+        checks.append((doctor_mod.INFO, "roster: sandbox", loaded.sandbox))
     if loaded.allow_models:
         checks.append((doctor_mod.OK, "roster: allow_models", ", ".join(loaded.allow_models)))
     else:

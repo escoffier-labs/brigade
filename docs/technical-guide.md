@@ -253,11 +253,15 @@ role = "Make precise code changes and report what changed."
 max_workers = 4
 timeout_seconds = 600
 allow_models = ["codex", "ollama:*"]
+sandbox = "workspace-write"
 ```
 
 Edit the roles, CLI refs, and timeouts to match the tools on your machine.
 `limits.timeout_seconds` is the default per-agent timeout.
 `agents.<name>.timeout_seconds` overrides it for one agent.
+`limits.sandbox` is optional. When set to `read-only`, `workspace-write`, or
+`danger-full-access`, `brigade run` uses it as the native Codex sandbox mode
+unless the run also passes `--sandbox`.
 
 ### Pin a model per agent
 
@@ -314,7 +318,7 @@ Common `brigade run` flags:
 - `--handoff` writes a Memory Handoff for a successful non-dry run.
 - `--inspect` prints the same artifact summary as `brigade runs show`.
 - `--read-only` tells the orchestrator and workers to inspect and recommend only.
-- `--sandbox {read-only,workspace-write,danger-full-access}` overrides the native Codex sandbox mode.
+- `--sandbox {read-only,workspace-write,danger-full-access}` overrides the native Codex sandbox mode from the roster.
 
 For `codex` agents, `--read-only` also passes `codex exec --sandbox read-only`.
 Combine `--sandbox` with `--read-only` to keep prompt-level read-only rules while overriding native sandbox behavior.
@@ -323,6 +327,9 @@ Other adapters receive the prompt policy only.
 The `cli` values are adapters for installed command-line tools:
 `codex`, `claude`, `opencode`, `antigravity`, `pi`, `cursor`, and `ollama:<model>`. Brigade shells out to those tools and keeps no provider keys. The Antigravity adapter uses the installed `agy --print` non-interactive CLI path, the Pi adapter uses `pi -p`, and the Cursor adapter uses `cursor-agent -p --output-format text`.
 Run `brigade roster doctor` to validate roster syntax and check which CLIs are on `PATH`.
+When `--roster` is omitted, `brigade run` first reads `--cwd/.brigade/roster.toml`;
+if that file is missing, it falls back to `Path.home()/.brigade/roster.toml`.
+Passing `--roster` keeps using exactly that file.
 
 ### Dogfood
 

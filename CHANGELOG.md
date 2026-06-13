@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - `brigade run` plans can stage worker assignments so dependent workers receive earlier-stage results while same-stage workers still run in parallel.
+- Rosters can set `limits.sandbox` (`read-only`, `workspace-write`, or `danger-full-access`) as the default native Codex sandbox for `brigade run`, and runs without a repo roster now fall back to `Path.home()/.brigade/roster.toml`.
 - `brigade run --sandbox` to override the native Codex sandbox mode while keeping `--read-only` available for prompt-level review rules.
 - Three new writer harnesses: Grok CLI (`grok`), Amp (`amp`), and Crush (`crush`), each with its own `.{harness}/memory-handoffs` inbox, tool projections, skills adapter, and agent argv, bringing the writer-harness total to eighteen.
 
