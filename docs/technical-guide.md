@@ -224,6 +224,17 @@ It is intentionally bounded: two orchestrator calls plus the worker calls in the
 
 Plans may include integer `stage` values. Assignments in the same stage run in parallel, stages run from lowest to highest, and later-stage workers receive earlier-stage worker results in their prompt. Plans that omit `stage` remain compatible and run as stage 1.
 
+When `--cwd` is a git worktree, write runs refuse to start on a dirty tree
+unless `--allow-dirty` is passed; dry, read-only, and `--worktree` runs are
+exempt, and Brigade's own `.brigade/` state never counts as dirty. Every run
+takes a local `.brigade/run.lock` (stale locks from dead processes are
+replaced automatically) so two runs do not mutate the same checkout at once.
+Use `--worktree` to run agents in a detached checkout from `HEAD` under
+`~/.cache/brigade/worktrees/`; Brigade writes the resulting diff to
+`changes.patch` in the run artifacts, removes the temporary checkout, and
+leaves the original checkout unchanged. `--worktree` requires run artifacts,
+so it cannot be combined with `--no-artifacts`.
+
 Start with a roster:
 
 ```bash
@@ -305,13 +316,17 @@ brigade run "review this repo" --cwd /path/to/repo
 brigade run "review this repo" --handoff
 brigade run "review this repo" --read-only
 brigade run "review this repo" --read-only --inspect
+brigade run "make the change" --allow-dirty
+brigade run "make the change" --worktree
 ```
 
-The eight examples above all drive the same `brigade run` command to show its main flags. Brigade's full surface (work loop, scanners, handoffs, tools, release gates, repo fleet, and more) is documented section by section below. For the complete, auto-generated list of every command, see [`docs/command-inventory.md`](command-inventory.md), and regenerate it with `brigade roadmap commands --write`.
+The examples above all drive the same `brigade run` command to show its main flags. Brigade's full surface (work loop, scanners, handoffs, tools, release gates, repo fleet, and more) is documented section by section below. For the complete, auto-generated list of every command, see [`docs/command-inventory.md`](command-inventory.md), and regenerate it with `brigade roadmap commands --write`.
 
 Common `brigade run` flags:
 
 - `--dry-run` prints planned assignments as JSON and stops before worker dispatch.
+- `--allow-dirty` bypasses the default dirty-git-worktree guard.
+- `--worktree` runs agents in a detached git worktree and captures `changes.patch`.
 - `--show-plan` prints assignments before a normal run.
 - `--verbose` prints the plan, worker statuses, and synthesis status.
 - `--cwd` sets the working directory for agent CLI calls.

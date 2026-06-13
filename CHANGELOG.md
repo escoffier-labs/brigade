@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `brigade run` now guards dirty git worktrees by default, supports `--allow-dirty`, prevents concurrent runs with a local lock, and can run agents in a detached `--worktree` while capturing the resulting `changes.patch`.
 - `brigade run` plans can stage worker assignments so dependent workers receive earlier-stage results while same-stage workers still run in parallel.
 - Rosters can set `limits.sandbox` (`read-only`, `workspace-write`, or `danger-full-access`) as the default native Codex sandbox for `brigade run`, and runs without a repo roster now fall back to `Path.home()/.brigade/roster.toml`.
 - `brigade run --sandbox` to override the native Codex sandbox mode while keeping `--read-only` available for prompt-level review rules.

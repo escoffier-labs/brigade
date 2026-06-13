@@ -5,6 +5,7 @@ import pytest
 
 from brigade import aboyeur
 from brigade import cli
+from brigade import proc
 from brigade import runs_cmd
 
 
@@ -489,3 +490,199 @@ role = "code"
     assert seen == {"output_dir": output_dir, "inspect_dir": output_dir}
     assert f"summary for {output_dir}" in captured.out
     assert f"artifacts: {output_dir}" in captured.err
+
+
+def _git(repo, *args):
+    result = proc.run(["git", *args], cwd=repo)
+    assert result.code == 0, result.stderr
+    return result
+
+
+def _git_repo_with_roster(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init")
+    _git(repo, "config", "user.email", "test@example.invalid")
+    _git(repo, "config", "user.name", "Test User")
+    (repo / "tracked.txt").write_text("base\n")
+    (repo / ".brigade").mkdir()
+    (repo / ".brigade" / "roster.toml").write_text(
+        """
+orchestrator = "chef"
+
+[agents.chef]
+cli = "codex"
+role = "plan"
+
+[agents.coder]
+cli = "codex"
+role = "code"
+"""
+    )
+    _git(repo, "add", "tracked.txt", ".brigade/roster.toml")
+    _git(repo, "commit", "-m", "initial")
+    return repo
+
+
+def test_run_cli_dirty_guard_blocks_by_default(tmp_path, monkeypatch, capsys):
+    repo = _git_repo_with_roster(tmp_path)
+    (repo / "tracked.txt").write_text("dirty\n")
+
+    def fail_run(*args, **kwargs):
+        raise AssertionError("aboyeur.run should not be called")
+
+    monkeypatch.setattr(aboyeur, "run", fail_run)
+
+    rc = cli.main(["run", "x", "--cwd", str(repo), "--no-artifacts"])
+
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "dirty worktree" in err
+    assert "tracked.txt" in err
+    assert "--allow-dirty" in err
+
+
+def test_run_cli_allow_dirty_passes_dirty_guard(tmp_path, monkeypatch):
+    repo = _git_repo_with_roster(tmp_path)
+    (repo / "tracked.txt").write_text("dirty\n")
+    seen = {}
+
+    def fake_run(
+        task,
+        loaded_roster,
+        dry_run=False,
+        show_plan=False,
+        verbose=False,
+        cwd=None,
+        output_dir=None,
+        handoff_inbox=None,
+        read_only=False,
+        sandbox=None,
+    ):
+        seen["cwd"] = cwd
+        return 0
+
+    monkeypatch.setattr(aboyeur, "run", fake_run)
+
+    assert cli.main(["run", "x", "--cwd", str(repo), "--allow-dirty", "--no-artifacts"]) == 0
+    assert seen["cwd"] == repo
+
+
+def test_run_cli_lock_conflict_errors(tmp_path, monkeypatch, capsys):
+    import os
+
+    repo = _git_repo_with_roster(tmp_path)
+    (repo / ".brigade" / "run.lock").mkdir()
+    (repo / ".brigade" / "run.lock" / "pid").write_text(f"{os.getpid()}\n")
+
+    def fail_run(*args, **kwargs):
+        raise AssertionError("aboyeur.run should not be called")
+
+    monkeypatch.setattr(aboyeur, "run", fail_run)
+
+    rc = cli.main(["run", "x", "--cwd", str(repo), "--no-artifacts"])
+
+    assert rc == 2
+    assert "another brigade run appears active" in capsys.readouterr().err
+
+
+def test_run_cli_worktree_passes_detached_cwd_and_writes_changes_patch(tmp_path, monkeypatch):
+    repo = _git_repo_with_roster(tmp_path)
+    output_dir = tmp_path / "run"
+    seen = {}
+
+    def fake_run(
+        task,
+        loaded_roster,
+        dry_run=False,
+        show_plan=False,
+        verbose=False,
+        cwd=None,
+        output_dir=None,
+        handoff_inbox=None,
+        read_only=False,
+        sandbox=None,
+    ):
+        seen["cwd"] = cwd
+        seen["output_dir"] = output_dir
+        assert cwd != repo
+        assert (cwd / "tracked.txt").read_text() == "base\n"
+        assert proc.run(["git", "symbolic-ref", "-q", "HEAD"], cwd=cwd).code == 1
+        (cwd / "tracked.txt").write_text("changed in worktree\n")
+        (cwd / "created.txt").write_text("created\n")
+        return 0
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
+    monkeypatch.setattr(aboyeur, "run", fake_run)
+
+    rc = cli.main(["run", "x", "--cwd", str(repo), "--output-dir", str(output_dir), "--worktree"])
+
+    assert rc == 0
+    assert seen["output_dir"] == output_dir
+    expected_checkout = tmp_path / "home" / ".cache" / "brigade" / "worktrees" / f"{repo.name}-{output_dir.name}"
+    assert seen["cwd"] == expected_checkout
+    assert not expected_checkout.exists()
+    assert (repo / "tracked.txt").read_text() == "base\n"
+    patch = (output_dir / "changes.patch").read_text()
+    assert "tracked.txt" in patch
+    assert "created.txt" in patch
+    assert "+changed in worktree" in patch
+    assert "+created" in patch
+
+
+def test_run_cli_rejects_worktree_with_no_artifacts(tmp_path, capsys):
+    rc = cli.main(["run", "x", "--cwd", str(tmp_path), "--worktree", "--no-artifacts"])
+    assert rc == 2
+    assert "--worktree cannot be used with --no-artifacts" in capsys.readouterr().err
+
+
+def test_run_cli_dirty_guard_skips_dry_and_read_only_runs(tmp_path, monkeypatch):
+    repo = _git_repo_with_roster(tmp_path)
+    (repo / "tracked.txt").write_text("dirty\n")
+    calls = []
+
+    def fake_run(
+        task,
+        loaded_roster,
+        dry_run=False,
+        show_plan=False,
+        verbose=False,
+        cwd=None,
+        output_dir=None,
+        handoff_inbox=None,
+        read_only=False,
+        sandbox=None,
+    ):
+        calls.append({"dry_run": dry_run, "read_only": read_only})
+        return 0
+
+    monkeypatch.setattr(aboyeur, "run", fake_run)
+
+    assert cli.main(["run", "x", "--cwd", str(repo), "--dry-run", "--no-artifacts"]) == 0
+    assert cli.main(["run", "x", "--cwd", str(repo), "--read-only", "--no-artifacts"]) == 0
+    assert cli.main(["run", "x", "--cwd", str(repo), "--sandbox", "read-only", "--no-artifacts"]) == 0
+    assert len(calls) == 3
+
+
+def test_run_cli_normal_runs_write_no_changes_patch(tmp_path, monkeypatch):
+    repo = _git_repo_with_roster(tmp_path)
+    output_dir = tmp_path / "run"
+
+    def fake_run(
+        task,
+        loaded_roster,
+        dry_run=False,
+        show_plan=False,
+        verbose=False,
+        cwd=None,
+        output_dir=None,
+        handoff_inbox=None,
+        read_only=False,
+        sandbox=None,
+    ):
+        return 0
+
+    monkeypatch.setattr(aboyeur, "run", fake_run)
+
+    assert cli.main(["run", "x", "--cwd", str(repo), "--output-dir", str(output_dir)]) == 0
+    assert not (output_dir / "changes.patch").exists()

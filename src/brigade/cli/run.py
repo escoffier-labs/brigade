@@ -18,6 +18,16 @@ def register(sub: argparse._SubParsersAction) -> None:
         help="Path to roster.toml. Defaults to .brigade/roster.toml under the current directory.",
     )
     p_run.add_argument("--dry-run", action="store_true", help="Print the plan without dispatching workers.")
+    p_run.add_argument(
+        "--allow-dirty",
+        action="store_true",
+        help="Allow running when --cwd has uncommitted git changes.",
+    )
+    p_run.add_argument(
+        "--worktree",
+        action="store_true",
+        help="Run agents in a detached git worktree and write changes.patch to the run artifacts.",
+    )
     p_run.add_argument("--show-plan", action="store_true", help="Print parsed assignments before dispatch.")
     p_run.add_argument("--verbose", action="store_true", help="Print plan, worker status, and synthesis status.")
     p_run.add_argument(
@@ -68,6 +78,7 @@ def register(sub: argparse._SubParsersAction) -> None:
 
 def dispatch(args) -> int:
     from .. import aboyeur as aboyeur_mod
+    from .. import runguard
     from .. import roster as roster_mod
 
     run_cwd = args.cwd.expanduser().resolve()
@@ -79,6 +90,16 @@ def dispatch(args) -> int:
         return 2
     if args.inspect and args.no_artifacts:
         print("error: --inspect cannot be used with --no-artifacts", file=sys.stderr)
+        return 2
+    if args.worktree and args.no_artifacts:
+        print(
+            "error: --worktree cannot be used with --no-artifacts; "
+            "the worktree is removed after the run and changes.patch is its only output.",
+            file=sys.stderr,
+        )
+        return 2
+    if args.worktree and not runguard.is_git_worktree(run_cwd):
+        print(f"error: --worktree requires a git worktree: {run_cwd}", file=sys.stderr)
         return 2
     cwd_roster_path = run_cwd / ".brigade" / "roster.toml"
     if args.roster is not None:
@@ -114,18 +135,52 @@ def dispatch(args) -> int:
     if args.handoff:
         handoff_inbox = args.handoff_inbox or (run_cwd / ".claude" / "memory-handoffs")
     effective_sandbox = args.sandbox if args.sandbox is not None else loaded_roster.sandbox
-    rc = aboyeur_mod.run(
-        args.task,
-        loaded_roster,
-        dry_run=args.dry_run,
-        show_plan=args.show_plan,
-        verbose=args.verbose,
-        cwd=run_cwd,
-        output_dir=output_dir,
-        handoff_inbox=handoff_inbox,
-        read_only=args.read_only,
-        sandbox=effective_sandbox,
-    )
+    # The dirty guard protects write runs from mixing agent edits with uncommitted
+    # work. Dry, read-only, and worktree runs never edit the tree, so reviewing
+    # uncommitted changes stays possible without --allow-dirty.
+    write_run = not args.dry_run and not args.read_only and effective_sandbox != "read-only"
+    try:
+        if write_run and not args.worktree and not args.allow_dirty and runguard.is_git_worktree(run_cwd):
+            runguard.require_clean_worktree(run_cwd)
+    except runguard.RunGuardError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+    worktree_cwd = None
+    effective_cwd = run_cwd
+    try:
+        with runguard.run_lock(run_cwd):
+            if args.worktree:
+                worktree_cwd = _worktree_checkout_path(runguard.git_root(run_cwd), output_dir)
+                effective_cwd = runguard.create_detached_worktree(run_cwd, worktree_cwd)
+                print(f"worktree: {effective_cwd}", file=sys.stderr)
+            rc = aboyeur_mod.run(
+                args.task,
+                loaded_roster,
+                dry_run=args.dry_run,
+                show_plan=args.show_plan,
+                verbose=args.verbose,
+                cwd=effective_cwd,
+                output_dir=output_dir,
+                handoff_inbox=handoff_inbox,
+                read_only=args.read_only,
+                sandbox=effective_sandbox,
+            )
+            if args.worktree and output_dir is not None:
+                summary = runguard.collect_changes_patch(effective_cwd, output_dir / "changes.patch")
+                if summary.changed:
+                    print(
+                        f"changes: {summary.path} ({summary.tracked_count + summary.untracked_count} file(s))",
+                        file=sys.stderr,
+                    )
+                else:
+                    print(f"changes: none ({summary.path})", file=sys.stderr)
+    except runguard.RunGuardError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    finally:
+        if worktree_cwd is not None:
+            runguard.remove_worktree(run_cwd, worktree_cwd)
     if output_dir is not None:
         print(f"artifacts: {output_dir}", file=sys.stderr)
         if args.inspect:
@@ -133,3 +188,8 @@ def dispatch(args) -> int:
 
             runs_cmd.show(output_dir)
     return rc
+
+
+def _worktree_checkout_path(repo_root: Path, output_dir: Path) -> Path:
+    run_id = output_dir.expanduser().resolve().name
+    return Path.home() / ".cache" / "brigade" / "worktrees" / f"{repo_root.name}-{run_id}"
