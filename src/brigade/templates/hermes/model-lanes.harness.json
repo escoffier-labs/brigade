@@ -5,7 +5,7 @@
     "Suggested model lane names. Same shape as the OpenClaw alias map so",
     "knowledge cards and runbooks can talk about lanes without naming providers."
   ],
-  "_brigade_version": "0.10.3",
+  "_brigade_version": "0.11.0",
   "_brigade_status": "experimental",
   "model_lanes": {
     "main": "<provider/main-model-id>",

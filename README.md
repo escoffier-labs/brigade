@@ -137,6 +137,7 @@ The memory loop is the core. Around it, the same review-and-receipt pattern cove
 - **Security**: `brigade security scan` is a local read-only scanner for agent workspaces (secrets, risky hooks, MCP configs, prompt-injection patterns); `brigade scrub` gates content before it leaves the machine.
 - **Tools and skills**: one reviewed catalog projected into every harness's native format, with approval gates for anything that executes.
 - **Research**: `brigade research run` turns a question into a cited local report and a reviewable memory handoff.
+- **Cross-model runs**: `brigade run "<task>"` plans, dispatches, and synthesizes one bounded task across the agent CLIs in your roster, so an expensive model can think while cheaper ones do the grunt work. Rosters pin a model per agent, plans can stage dependent workers, and `--worktree` runs everything in a detached git checkout that comes back as a reviewable `changes.patch`. A dirty-tree guard and a run lock keep agents away from your work in progress.
 - **Fleet and release**: health evidence across your local repos and release-readiness receipts, with no publish step.
 
 The full tour of every station lives in [docs/overview.md](docs/overview.md).
