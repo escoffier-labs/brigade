@@ -60,6 +60,24 @@ def test_parse_plan_accepts_plain_json():
     assert plan == [aboyeur.Assignment(worker="coder", task="implement it")]
 
 
+def test_parse_plan_accepts_staged_json_and_defaults_missing_stage():
+    plan = aboyeur.parse_plan(
+        json.dumps(
+            {
+                "assignments": [
+                    {"stage": 2, "worker": "reviewer", "task": "review it"},
+                    {"worker": "coder", "task": "implement it"},
+                ]
+            }
+        ),
+        _roster(),
+    )
+    assert plan == [
+        aboyeur.Assignment(worker="coder", task="implement it", stage=1),
+        aboyeur.Assignment(worker="reviewer", task="review it", stage=2),
+    ]
+
+
 def test_parse_plan_accepts_fenced_json():
     plan = aboyeur.parse_plan(
         'Here is the plan:\n```json\n{"assignments":[{"worker":"reviewer","task":"check it"}]}\n```\nDone.',
@@ -83,6 +101,80 @@ def test_parse_plan_rejects_orchestrator_assignment():
         assert "orchestrator" in str(exc)
     else:
         raise AssertionError("expected ValueError")
+
+
+def test_parse_plan_rejects_invalid_stage():
+    for stage in (0, -1, "2", True):
+        try:
+            aboyeur.parse_plan(
+                json.dumps({"assignments": [{"stage": stage, "worker": "coder", "task": "implement it"}]}),
+                _roster(),
+            )
+        except ValueError as exc:
+            assert "assignment.stage" in str(exc)
+        else:
+            raise AssertionError(f"expected ValueError for stage {stage!r}")
+
+
+def test_parse_plan_deduplicates_by_stage_and_limits_each_stage():
+    plan = aboyeur.parse_plan(
+        json.dumps(
+            {
+                "assignments": [
+                    {"stage": 1, "worker": "coder", "task": "implement it"},
+                    {"stage": 1, "worker": "coder", "task": "implement it"},
+                    {"stage": 2, "worker": "coder", "task": "implement it"},
+                    {"stage": 2, "worker": "reviewer", "task": "review it"},
+                ]
+            }
+        ),
+        _roster(),
+    )
+    assert plan == [
+        aboyeur.Assignment(worker="coder", task="implement it", stage=1),
+        aboyeur.Assignment(worker="coder", task="implement it", stage=2),
+        aboyeur.Assignment(worker="reviewer", task="review it", stage=2),
+    ]
+
+    try:
+        aboyeur.parse_plan(
+            json.dumps(
+                {
+                    "assignments": [
+                        {"stage": 1, "worker": "coder", "task": "implement it"},
+                        {"stage": 1, "worker": "reviewer", "task": "review it"},
+                        {"stage": 1, "worker": "coder", "task": "test it"},
+                    ]
+                }
+            ),
+            _roster(),
+        )
+    except ValueError as exc:
+        assert "stage 1" in str(exc)
+        assert "limit is 2" in str(exc)
+    else:
+        raise AssertionError("expected ValueError")
+
+
+def test_build_plan_prompt_describes_stage_contract():
+    prompt = aboyeur.build_plan_prompt("build feature", _roster())
+    assert '"stage":1' in prompt
+    assert "stage 1" in prompt
+    assert "same stage run in parallel" in prompt
+    assert "later stages receive earlier-stage worker results" in prompt
+
+
+def test_worker_prompt_without_prior_context_keeps_original_contract():
+    assignment = aboyeur.Assignment(worker="coder", task="implement it")
+    prompt = aboyeur._worker_prompt(_roster().agents["coder"], assignment)
+    assert "Sub-task:\nimplement it" in prompt
+    assert "Return a concise, complete result for the orchestrator to synthesize." in prompt
+    assert "Earlier-stage context" not in prompt
+
+
+def test_assignment_payload_serializes_stage():
+    payload = aboyeur._assignment_payload([aboyeur.Assignment(worker="coder", task="implement it", stage=2)])
+    assert payload == [{"stage": 2, "worker": "coder", "task": "implement it"}]
 
 
 def test_run_dry_run_stops_after_plan(monkeypatch, capsys):
@@ -123,6 +215,42 @@ def test_run_dispatches_and_synthesizes(monkeypatch, capsys):
     assert rc == 0
     assert out.strip() == "final answer"
     assert [call[0] for call in calls] == ["codex", "ollama:llama3.3", "codex"]
+
+
+def test_run_dispatches_stages_in_order_with_earlier_context(monkeypatch):
+    calls = []
+
+    def fake_run_agent(cli_ref, prompt, timeout=600.0, cwd=None, read_only=False):
+        calls.append((cli_ref, prompt))
+        if len(calls) == 1:
+            return agents.AgentResult(
+                text=json.dumps(
+                    {
+                        "assignments": [
+                            {"stage": 2, "worker": "reviewer", "task": "review it"},
+                            {"stage": 1, "worker": "coder", "task": "implement it"},
+                        ]
+                    }
+                ),
+                ok=True,
+            )
+        if cli_ref == "ollama:llama3.3":
+            return agents.AgentResult(text="implementation output", ok=True)
+        if "Sub-task:\nreview it" in prompt:
+            return agents.AgentResult(text="review output", ok=True)
+        return agents.AgentResult(text="final answer", ok=True)
+
+    monkeypatch.setattr(aboyeur.agents, "run_agent", fake_run_agent)
+    assert aboyeur.run("build feature", _roster()) == 0
+
+    worker_calls = [call for call in calls if "You are Brigade worker" in call[1]]
+    assert [call[0] for call in worker_calls] == ["ollama:llama3.3", "codex"]
+    assert "Earlier-stage context" not in worker_calls[0][1]
+    assert "Earlier-stage context" in worker_calls[1][1]
+    assert "implementation output" in worker_calls[1][1]
+    assert calls[-1][0] == "codex"
+    assert "implementation output" in calls[-1][1]
+    assert "review output" in calls[-1][1]
 
 
 def test_run_uses_roster_timeouts(monkeypatch):

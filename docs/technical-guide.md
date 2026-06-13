@@ -222,6 +222,8 @@ Use `brigade work import issue-repairs` when issue-backed local tasks need revie
 One orchestrator plans the work, Brigade dispatches assigned workers through their own CLIs, then the orchestrator synthesizes the final answer.
 It is intentionally bounded: two orchestrator calls plus the worker calls in the plan.
 
+Plans may include integer `stage` values. Assignments in the same stage run in parallel, stages run from lowest to highest, and later-stage workers receive earlier-stage worker results in their prompt. Plans that omit `stage` remain compatible and run as stage 1.
+
 Start with a roster:
 
 ```bash

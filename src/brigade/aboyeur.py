@@ -20,6 +20,7 @@ from .roster import Agent, Roster, is_cli_allowed, timeout_for, workers
 class Assignment:
     worker: str
     task: str
+    stage: int = 1
 
 
 @dataclass(frozen=True)
@@ -46,11 +47,14 @@ def build_plan_prompt(
     return (
         "You are the Brigade aboyeur. Split the user's task across the available workers.\n"
         "Return exactly one JSON object, with no prose outside JSON:\n"
-        '{"assignments":[{"worker":"<worker-name>","task":"<specific sub-task>"}]}\n'
+        '{"assignments":[{"stage":1,"worker":"<worker-name>","task":"<specific sub-task>"}]}\n'
         f"{note}\n"
         f"User task:\n{task}\n\n"
         f"Available workers, excluding you:\n{worker_lines}\n\n"
-        f"Rules:\n- Use at most {roster.max_workers} assignments.\n"
+        f"Rules:\n- Use at most {roster.max_workers} assignments per stage.\n"
+        "- Stage must be a positive integer starting at stage 1.\n"
+        "- Assignments in the same stage run in parallel; later stages receive earlier-stage worker results.\n"
+        "- Omit stage only for backwards-compatible stage 1 assignments.\n"
         "- Assign only listed workers.\n"
         "- Use zero assignments only if no worker is useful."
         f"{policy}"
@@ -147,7 +151,10 @@ def write_run_handoff(
         or "- no workers dispatched"
     )
     assignment_summary = (
-        "\n".join(f"- {assignment.worker}: {_one_line(assignment.task)}" for assignment in assignments)
+        "\n".join(
+            f"- stage {assignment.stage} -> {assignment.worker}: {_one_line(assignment.task)}"
+            for assignment in assignments
+        )
         or "- no worker assignments"
     )
     artifact_line = f"- artifacts: `{output_dir}`" if output_dir is not None else "- artifacts: none"
@@ -232,30 +239,38 @@ def parse_plan(text: str, roster: Roster) -> list[Assignment]:
     raw_assignments = payload.get("assignments")
     if not isinstance(raw_assignments, list):
         raise ValueError("plan JSON needs an assignments list")
-    if len(raw_assignments) > roster.max_workers:
-        raise ValueError(f"plan has {len(raw_assignments)} assignments, limit is {roster.max_workers}")
 
     assignments: list[Assignment] = []
-    seen: set[tuple[str, str]] = set()
+    seen: set[tuple[int, str, str]] = set()
+    stage_counts: dict[int, int] = {}
     for item in raw_assignments:
         if not isinstance(item, dict):
             raise ValueError("each assignment must be an object")
-        worker = item.get("worker")
+        stage = item.get("stage", 1)
+        if isinstance(stage, bool) or not isinstance(stage, int) or stage < 1:
+            raise ValueError("assignment.stage must be a positive integer")
+        raw_worker = item.get("worker")
         subtask = item.get("task")
-        if not isinstance(worker, str) or not worker.strip():
+        if not isinstance(raw_worker, str) or not raw_worker.strip():
             raise ValueError("assignment.worker must be a non-empty string")
+        worker = raw_worker.strip()
         if worker not in roster.agents:
             raise ValueError(f"assignment references unknown worker: {worker!r}")
         if worker == roster.orchestrator:
             raise ValueError("assignment cannot target the orchestrator")
         if not isinstance(subtask, str) or not subtask.strip():
             raise ValueError("assignment.task must be a non-empty string")
-        assignment = Assignment(worker=worker.strip(), task=subtask.strip())
-        key = (assignment.worker, assignment.task)
+        assignment = Assignment(worker=worker, task=subtask.strip(), stage=stage)
+        key = (assignment.stage, assignment.worker, assignment.task)
         if key not in seen:
             assignments.append(assignment)
             seen.add(key)
-    return assignments
+            stage_counts[assignment.stage] = stage_counts.get(assignment.stage, 0) + 1
+
+    for stage, count in stage_counts.items():
+        if count > roster.max_workers:
+            raise ValueError(f"plan has {count} assignments in stage {stage}, limit is {roster.max_workers}")
+    return sorted(assignments, key=lambda assignment: assignment.stage)
 
 
 def _record_plan_attempt(
@@ -358,13 +373,39 @@ def plan(
             raise RuntimeError(f"orchestrator returned an invalid plan: {second_exc}") from second_exc
 
 
-def _worker_prompt(agent: Agent, assignment: Assignment, read_only: bool = False) -> str:
+def _render_prior_results(results: list[WorkerResult]) -> str:
+    return "\n\n".join(
+        "\n".join(
+            [
+                f"Worker: {result.worker}",
+                f"Sub-task: {result.task}",
+                f"Status: {'ok' if result.ok else 'failed'}",
+                f"Detail: {result.detail}" if result.detail else "Detail:",
+                "Output:",
+                result.text or "(no output)",
+            ]
+        )
+        for result in results
+    )
+
+
+def _worker_prompt(
+    agent: Agent,
+    assignment: Assignment,
+    *,
+    prior_results: list[WorkerResult] | None = None,
+    read_only: bool = False,
+) -> str:
+    prior_context = ""
+    if prior_results:
+        prior_context = f"\n\nEarlier-stage context:\n{_render_prior_results(prior_results)}"
     policy = f"\n\n{_read_only_rules()}" if read_only else ""
     return (
         f"You are Brigade worker {agent.name}.\n"
         f"Role:\n{agent.role}\n\n"
         f"Sub-task:\n{assignment.task}\n\n"
         "Return a concise, complete result for the orchestrator to synthesize."
+        f"{prior_context}"
         f"{policy}"
     )
 
@@ -377,7 +418,7 @@ def dispatch(
     sandbox_read_only: bool | None = None,
     sandbox: str | None = None,
 ) -> list[WorkerResult]:
-    def run_one(assignment: Assignment) -> WorkerResult:
+    def run_one(assignment: Assignment, prior_results: list[WorkerResult]) -> WorkerResult:
         agent = roster.agents[assignment.worker]
         if not is_cli_allowed(agent.cli, roster):
             return WorkerResult(
@@ -396,7 +437,11 @@ def dispatch(
             kwargs["sandbox"] = sandbox
         if agent.model is not None:
             kwargs["model"] = agent.model
-        result = agents.run_agent(agent.cli, _worker_prompt(agent, assignment, read_only=read_only), **kwargs)
+        result = agents.run_agent(
+            agent.cli,
+            _worker_prompt(agent, assignment, prior_results=prior_results, read_only=read_only),
+            **kwargs,
+        )
         return WorkerResult(
             worker=assignment.worker,
             task=assignment.task,
@@ -408,25 +453,34 @@ def dispatch(
     if not assignments:
         return []
 
-    results_by_index: dict[int, WorkerResult] = {}
-    max_workers = min(roster.max_workers, len(assignments))
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        future_to_index = {executor.submit(run_one, assignment): index for index, assignment in enumerate(assignments)}
-        for future in as_completed(future_to_index):
-            index = future_to_index[future]
-            try:
-                results_by_index[index] = future.result()
-            except Exception as exc:  # pragma: no cover - defensive boundary
-                assignment = assignments[index]
-                results_by_index[index] = WorkerResult(
-                    worker=assignment.worker,
-                    task=assignment.task,
-                    text="",
-                    ok=False,
-                    detail=str(exc)[:200],
-                )
+    all_results: list[WorkerResult] = []
+    stages = sorted({assignment.stage for assignment in assignments})
+    for stage in stages:
+        stage_assignments = [assignment for assignment in assignments if assignment.stage == stage]
+        stage_results_by_index: dict[int, WorkerResult] = {}
+        prior_results = list(all_results)
+        max_workers = min(roster.max_workers, len(stage_assignments))
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_to_index = {
+                executor.submit(run_one, assignment, prior_results): index
+                for index, assignment in enumerate(stage_assignments)
+            }
+            for future in as_completed(future_to_index):
+                index = future_to_index[future]
+                try:
+                    stage_results_by_index[index] = future.result()
+                except Exception as exc:  # pragma: no cover - defensive boundary
+                    assignment = stage_assignments[index]
+                    stage_results_by_index[index] = WorkerResult(
+                        worker=assignment.worker,
+                        task=assignment.task,
+                        text="",
+                        ok=False,
+                        detail=str(exc)[:200],
+                    )
+        all_results.extend(stage_results_by_index[index] for index in range(len(stage_assignments)))
 
-    return [results_by_index[index] for index in range(len(assignments))]
+    return all_results
 
 
 def build_synth_prompt(task: str, results: list[WorkerResult], read_only: bool = False) -> str:
@@ -462,8 +516,16 @@ def _print_plan(assignments: list[Assignment]) -> None:
     if not assignments:
         print("  (no worker assignments)")
         return
-    for assignment in assignments:
-        print(f"  -> {assignment.worker}: {assignment.task}")
+    stages = sorted({assignment.stage for assignment in assignments})
+    if len(stages) == 1:
+        for assignment in assignments:
+            print(f"  -> {assignment.worker}: {assignment.task}")
+        return
+    for stage in stages:
+        print(f"  stage {stage}:")
+        for assignment in assignments:
+            if assignment.stage == stage:
+                print(f"    -> {assignment.worker}: {assignment.task}")
 
 
 def _print_worker_status(results: list[WorkerResult]) -> None:
@@ -477,8 +539,10 @@ def _print_worker_status(results: list[WorkerResult]) -> None:
         print(f"  [{marker}] {result.worker}{detail}")
 
 
-def _assignment_payload(assignments: list[Assignment]) -> list[dict[str, str]]:
-    return [{"worker": assignment.worker, "task": assignment.task} for assignment in assignments]
+def _assignment_payload(assignments: list[Assignment]) -> list[dict[str, object]]:
+    return [
+        {"stage": assignment.stage, "worker": assignment.worker, "task": assignment.task} for assignment in assignments
+    ]
 
 
 def _worker_payload(results: list[WorkerResult]) -> list[dict[str, object]]:
