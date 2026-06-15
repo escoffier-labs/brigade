@@ -194,7 +194,7 @@
       "width": 520,
       "height": 30,
       "strokeColor": "#334155",
-      "text": "Everything stays local until you approve the next step.",
+      "text": "Everything stays local. The safe notes file themselves.",
       "fontSize": 18
     }
   ],

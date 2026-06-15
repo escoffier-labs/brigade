@@ -129,9 +129,9 @@ brigade handoff draft \
 Put the durable note here."
 ```
 
-Then run your memory owner's ingester. Safe targeted notes can be filed into long-term memory; ambiguous or risky notes stay visible for review.
+Then run your memory owner's ingester. Safe targeted notes file themselves into long-term memory automatically; only ambiguous or risky notes stay visible for review.
 
-That is the simplest useful version of Brigade: shared handoffs, local review, durable memory.
+That is the simplest useful version of Brigade: shared handoffs, automatic filing, durable memory.
 
 ## How Memory Handoffs Work
 
@@ -185,20 +185,20 @@ flowchart LR
         H[".hermes/memory-handoffs/"]
     end
 
-    DRAFT["Brigade handoff draft<br/>lint · guard · route"]
-    REVIEW["operator review<br/>safe · ambiguous · risky"]
+    DRAFT["Brigade handoff draft<br/>lint · guard · classify"]
     OWNER["OpenClaw / Hermes<br/>memory owner"]
     MEM["durable memory<br/>cards · docs · learnings"]
+    INBOX["review inbox<br/>ambiguous · risky"]
 
-    C & CL & O & A & P & CU & AI & G & CO & GH & Q & K & AD & OH & H --> DRAFT --> REVIEW
-    REVIEW -->|safe targeted note| OWNER --> MEM
-    REVIEW -->|needs judgment| INBOX["review inbox"]
+    C & CL & O & A & P & CU & AI & G & CO & GH & Q & K & AD & OH & H --> DRAFT --> OWNER
+    OWNER -->|safe targeted, auto-filed| MEM
+    OWNER -.->|needs judgment| INBOX
 
     classDef local fill:#eff6ff,stroke:#2563eb,color:#1e3a8a;
     classDef review fill:#fff7ed,stroke:#ea580c,color:#7c2d12;
     classDef memory fill:#ecfdf5,stroke:#059669,color:#064e3b;
     class C,CL,O,A,P,CU,AI,G,CO,GH,Q,K,AD,OH,H,DRAFT local;
-    class REVIEW,INBOX review;
+    class INBOX review;
     class OWNER,MEM memory;
 ```
 
@@ -262,28 +262,30 @@ Brigade is built around a simple daily loop:
 
 1. set up the repo or operator workspace
 2. let agents work
-3. run the memory ingester
-4. review anything skipped, flagged, or ambiguous
-5. save only the parts worth remembering
+3. run the memory ingester; it auto-files the safe notes
+4. glance at anything it flagged as ambiguous or risky
+5. durable memory grows with only the parts worth keeping
 
 ```mermaid
 flowchart LR
     SETUP["quickstart<br/>local files"]
     WORK["agents work<br/>sessions & tasks"]
     HANDOFF["handoffs<br/>draft & lint"]
-    REVIEW["operator review<br/>promote or defer"]
+    INGEST["brigade ingest<br/>auto-files the safe ones"]
     MEMORY["durable memory<br/>only what is worth keeping"]
+    REVIEW["review inbox<br/>ambiguous · risky"]
     RECEIPTS["receipts<br/>what happened"]
 
-    SETUP --> WORK --> HANDOFF --> REVIEW --> MEMORY
+    SETUP --> WORK --> HANDOFF --> INGEST --> MEMORY
+    INGEST -.->|needs judgment| REVIEW
     WORK --> RECEIPTS
-    REVIEW --> RECEIPTS
+    INGEST --> RECEIPTS
     RECEIPTS -. better context .-> WORK
 
     classDef step fill:#f1f5f9,stroke:#64748b,color:#334155;
     classDef gate fill:#fff7ed,stroke:#ea580c,color:#7c2d12;
     classDef memory fill:#ecfdf5,stroke:#059669,color:#064e3b;
-    class SETUP,WORK,HANDOFF,RECEIPTS step;
+    class SETUP,WORK,HANDOFF,INGEST,RECEIPTS step;
     class REVIEW gate;
     class MEMORY memory;
 ```
@@ -559,7 +561,7 @@ brigade handoff sources init --target ~/agent-workspace
 brigade handoff doctor --target ~/agent-workspace
 ```
 
-Then writer tools leave handoffs in their own inboxes, and the memory owner ingests the safe targeted notes while Brigade keeps receipts for promoted, routed, skipped, failed, malformed, and warning outcomes.
+Then writer tools leave handoffs in their own inboxes, the memory owner's ingester files the safe targeted notes automatically, and Brigade keeps receipts for promoted, routed, skipped, failed, malformed, and warning outcomes.
 
 ## For Hermes Users
 

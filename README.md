@@ -33,30 +33,31 @@ I run an always-on OpenClaw agent next to daily Codex and Claude Code sessions, 
 
 So I hand-rolled the fixes, one incident at a time: a slim `MEMORY.md` index pointing at small memory cards instead of one giant file, a handoff note format every harness could write, an ingest cron that filed the good notes into durable memory every 30 minutes, staleness checks so old cards stopped being trusted forever.
 
-Two incidents shaped the design more than anything I planned. First, a nightly "dreaming" job that auto-promoted session fragments bloated `MEMORY.md` to 41KB, way past the 12KB bootstrap budget, so every session started with truncated memory and nobody noticed for weeks. Auto-promotion died that day. Everything goes through review now. Second, I found 195 handoff notes sitting unread across 35 repos because the ingester had a hardcoded three-repo allowlist and nothing warned about the coverage gap. Silence is the failure mode. Every part of Brigade that lints, warns, or writes a receipt exists because something once failed in silence.
+Two incidents shaped the design more than anything I planned. First, a nightly "dreaming" job that promoted raw session fragments straight into memory bloated `MEMORY.md` to 41KB, way past the 12KB bootstrap budget, so every session started with truncated memory and nobody noticed for weeks. Blind auto-promotion died that day. Now nothing reaches memory unlinted: a note has to name a target and clear the guards, the safe ones file themselves, and only the risky few wait for review. Second, I found 195 handoff notes sitting unread across 35 repos because the ingester had a hardcoded three-repo allowlist and nothing warned about the coverage gap. Silence is the failure mode. Every part of Brigade that lints, warns, or writes a receipt exists because something once failed in silence.
 
-That system now runs 482 memory cards and survives daily multi-agent work. But explaining it to anyone meant: clone six repos, write these crons, keep your index slim, watch for staleness, and whatever you do, turn auto-promotion off. Brigade is that setup packaged as one installable CLI. The full production stack is documented in the [solos-cookbook](https://github.com/escoffier-labs/solos-cookbook) if you want to see where it came from.
+That system now runs 482 memory cards and survives daily multi-agent work. But explaining it to anyone meant: clone six repos, write these crons, keep your index slim, watch for staleness, and never let a note reach memory unlinted. Brigade is that setup packaged as one installable CLI. The full production stack is documented in the [solos-cookbook](https://github.com/escoffier-labs/solos-cookbook) if you want to see where it came from.
 
 ## The loop
 
-Writer harnesses leave handoff notes as they work. A memory owner (OpenClaw, Hermes, or just you) ingests the ones worth keeping. Brigade lints, guards, and routes everything in between, and every consequential action lands a receipt in a plain file you can grep, diff, and prune.
+Writer harnesses leave handoff notes as they work. Brigade lints, guards, and classifies each one, then files the safe, targeted notes into durable memory on its own. A memory owner (OpenClaw, Hermes, or just you) only steps in for the ambiguous few. Every consequential action lands a receipt in a plain file you can grep, diff, and prune.
 
 1. agents write handoff notes into their own local inboxes
-2. Brigade lints and scans them before they can become memory
-3. safe targeted notes get filed into durable memory by the owner
-4. ambiguous or risky notes wait for your review
+2. Brigade lints and classifies each one before it can become memory
+3. safe, targeted notes file themselves into durable memory automatically
+4. only the ambiguous or risky few wait for your review
 5. future sessions start with better context, and receipts show what happened
 
 ```mermaid
 flowchart LR
     WRITERS["writer harnesses<br/>Codex · Claude Code · OpenCode · ..."]
-    BRIGADE["Brigade<br/>lint · guard · route · receipts"]
-    REVIEW["operator review<br/>safe · ambiguous · risky"]
+    BRIGADE["Brigade<br/>lint · guard · classify · receipts"]
     OWNER["memory owner<br/>OpenClaw / Hermes / you"]
     MEM["durable memory<br/>MEMORY.md index · memory cards"]
+    REVIEW["review inbox<br/>ambiguous · risky"]
 
-    WRITERS -- handoff notes --> BRIGADE --> REVIEW
-    REVIEW -- safe targeted notes --> OWNER --> MEM
+    WRITERS -- handoff notes --> BRIGADE --> OWNER
+    OWNER -- safe targeted, auto-filed --> MEM
+    OWNER -. ambiguous or risky .-> REVIEW
     MEM -. context .-> WRITERS
 
     classDef brigade fill:#2563eb,stroke:#1d4ed8,color:#fff;
