@@ -133,6 +133,29 @@ def build_gitignore_block(selection: Selection) -> str:
     return "\n".join(lines)
 
 
+def _git_info_dir(target: Path) -> Path | None:
+    """Resolve the git `info/` dir that holds `exclude`, or None when there is no git dir.
+
+    Handles both a normal `.git` directory and a linked-worktree `.git` file
+    ("gitdir: <path>"), whose exclude lives under the worktree's own git dir.
+    """
+    git_path = target / ".git"
+    if git_path.is_dir():
+        return git_path / "info"
+    if git_path.is_file():
+        try:
+            content = git_path.read_text().strip()
+        except OSError:
+            return None
+        if content.startswith("gitdir:"):
+            gitdir = Path(content.split(":", 1)[1].strip())
+            if not gitdir.is_absolute():
+                gitdir = (target / gitdir).resolve()
+            if gitdir.is_dir():
+                return gitdir / "info"
+    return None
+
+
 def apply_gitignore(target: Path, selection: Selection, *, use_git_exclude: bool = False) -> str:
     """Insert or replace the managed ignore block. Returns a 'created/updated (<file>)' label.
 
@@ -142,10 +165,11 @@ def apply_gitignore(target: Path, selection: Selection, *, use_git_exclude: bool
     when there is no `.git` directory to hold it.
     """
     block = build_gitignore_block(selection)
-    if use_git_exclude and (target / ".git").is_dir():
-        gi = target / ".git" / "info" / "exclude"
+    exclude_dir = _git_info_dir(target) if use_git_exclude else None
+    if exclude_dir is not None:
+        gi = exclude_dir / "exclude"
         gi.parent.mkdir(parents=True, exist_ok=True)
-        location = ".git/info/exclude"
+        location = "git info/exclude"
     else:
         gi = target / ".gitignore"
         location = ".gitignore"
@@ -247,6 +271,7 @@ def install_selection(
     dry_run: bool = False,
     allow_home: bool = False,
     use_git_exclude: bool = False,
+    update_gitignore: bool = True,
 ) -> int:
     """Install a Selection into `target`. Returns process exit code."""
     selection.validate()
@@ -325,8 +350,11 @@ def install_selection(
     # Persist config.json.
     write_config(target, Config(version=1, selection=selection))
 
-    result = apply_gitignore(target, selection, use_git_exclude=use_git_exclude)
-    print(f"brigade: gitignore {result}")
+    if update_gitignore:
+        result = apply_gitignore(target, selection, use_git_exclude=use_git_exclude)
+        print(f"brigade: gitignore {result}")
+    else:
+        print("brigade: gitignore skipped (--no-gitignore)")
 
     # Post-install output.
     print(

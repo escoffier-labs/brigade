@@ -30,6 +30,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `brigade init --git-exclude` writes Brigade's ignore block to the local-only `.git/info/exclude` instead of the tracked `.gitignore`, for third-party clones you do not want to commit Brigade ignores into (issue #81). Automatic detection of a third-party clone is intentionally deferred: there is no reliable repo-owner signal, and a guess would false-positive on your own published repos.
 
 ### Fixed
+- `brigade init --no-gitignore` is now honored. The flag was parsed but never forwarded to the installer, so a `.gitignore` was written anyway; `install_selection` now takes `update_gitignore` and skips the write when asked.
+- `brigade init --git-exclude` now resolves a linked-worktree `.git` file (`gitdir: <path>`) to write the exclude under the worktree's own git dir, instead of silently falling back to a tracked `.gitignore`.
 - The seeded `pre-push` content-guard hook no longer reports a scanner error as a content leak. It now discriminates content-guard's exit codes: exit 1 (findings) blocks with the leak message, any other nonzero exit is reported as "scanner failed to run" rather than mislabeled as violations (issue #82).
 - `brigade doctor` memory-care freshness no longer reports a same-day scan as "in the future". The scanner stamps `scan_date` in UTC, but doctor compared it against the host's local date, so an evening run in a behind-UTC timezone warned falsely (issue #83). Doctor now compares in UTC.
 - `brigade init --depth workspace` now creates `.brigade/memory-care/decay`, the directory doctor actually checks, instead of the legacy `memory/cards/decay`. A fresh workspace no longer draws a "staleness scanner not wired" warning on first contact (issue #79).

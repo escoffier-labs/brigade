@@ -88,6 +88,7 @@ def dispatch(args) -> int:
             dry_run=getattr(args, "dry_run", False),
             allow_home=getattr(args, "allow_home", False),
             use_git_exclude=getattr(args, "git_exclude", False),
+            update_gitignore=getattr(args, "update_gitignore", True),
         )
 
     # No selection flags: interactive prompt.
@@ -107,4 +108,5 @@ def dispatch(args) -> int:
         dry_run=getattr(args, "dry_run", False),
         allow_home=getattr(args, "allow_home", False),
         use_git_exclude=getattr(args, "git_exclude", False),
+        update_gitignore=getattr(args, "update_gitignore", True),
     )
