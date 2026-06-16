@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - `brigade doctor --json` and `brigade status --json` emit machine-readable output (target, harnesses, owner, depth, per-check status/name/detail, summary counts, and a `ready` flag), so the two most diagnostic surfaces can feed scripts and a future fleet aggregation instead of being text-only.
 - `brigade security diff --base <dir> --against <dir> [--json]` compares two security reports and reports new, resolved, and persisting findings (matched by the scan's stable per-finding fingerprint). It returns nonzero when there are new findings, so a change that introduces a finding can be caught in review or CI.
+- `brigade operator checkup [--json]` runs every read-only first-run doctor (`doctor`, `operator doctor`, `handoff doctor`, `tools doctor`, `skills doctor`, `security doctor`) in one pass and rolls them up to a single `ready` / `blocking_surfaces` verdict with the next command to run, so a new operator no longer has to copy-paste each doctor from the first-10-minutes guide.
 
 ### Changed
 - The repo fleet scan now summarizes repos on a small thread pool instead of serially. Each summary is independent and IO-bound (git calls plus file stats), so a multi-repo fleet scans noticeably faster while output stays in config order; a single-repo fleet is unchanged.
