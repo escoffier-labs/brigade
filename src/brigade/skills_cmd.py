@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from . import mcp_server
 from .untrusted import scan_untrusted
 from .localio import slugify, utc_now_iso as _now, write_json as _write_json
 
@@ -1278,89 +1279,14 @@ def _mcp_tool_call(target: Path, name: str, arguments: dict[str, Any]) -> tuple[
     return {"error": f"unknown read-only skill tool: {name}"}, True
 
 
-def _mcp_response(
-    request_id: object, *, result: object | None = None, error: dict[str, Any] | None = None
-) -> dict[str, Any]:
-    response: dict[str, Any] = {"jsonrpc": "2.0", "id": request_id}
-    if error is not None:
-        response["error"] = error
-    else:
-        response["result"] = result if result is not None else {}
-    return response
-
-
 def _run_mcp_stdio(target: Path) -> int:
-    for line in sys.stdin:
-        if not line.strip():
-            continue
-        try:
-            request = json.loads(line)
-        except json.JSONDecodeError:
-            print(json.dumps(_mcp_response(None, error={"code": -32700, "message": "parse error"})), flush=True)
-            continue
-        if not isinstance(request, dict):
-            print(json.dumps(_mcp_response(None, error={"code": -32600, "message": "invalid request"})), flush=True)
-            continue
-        request_id = request.get("id")
-        method = str(request.get("method") or "")
-        params = request.get("params") if isinstance(request.get("params"), dict) else {}
-        if request_id is None and method.startswith("notifications/"):
-            continue
-        if method == "initialize":
-            result = {
-                "protocolVersion": "2024-11-05",
-                "capabilities": {"resources": {}, "tools": {}},
-                "serverInfo": {"name": "brigade-skills-readonly", "version": "0"},
-            }
-            print(json.dumps(_mcp_response(request_id, result=result), sort_keys=True), flush=True)
-        elif method == "resources/list":
-            print(
-                json.dumps(
-                    _mcp_response(request_id, result={"resources": _mcp_resource_items(target)}), sort_keys=True
-                ),
-                flush=True,
-            )
-        elif method == "resources/read":
-            uri = str(params.get("uri") or "")
-            text, mime_type = _mcp_read_resource(target, uri)
-            if text is None:
-                print(
-                    json.dumps(
-                        _mcp_response(request_id, error={"code": -32004, "message": f"resource not found: {uri}"}),
-                        sort_keys=True,
-                    ),
-                    flush=True,
-                )
-            else:
-                print(
-                    json.dumps(
-                        _mcp_response(
-                            request_id, result={"contents": [{"uri": uri, "mimeType": mime_type, "text": text}]}
-                        ),
-                        sort_keys=True,
-                    ),
-                    flush=True,
-                )
-        elif method == "tools/list":
-            print(
-                json.dumps(_mcp_response(request_id, result={"tools": _mcp_tool_specs()}), sort_keys=True), flush=True
-            )
-        elif method == "tools/call":
-            name = str(params.get("name") or "")
-            arguments = params.get("arguments") if isinstance(params.get("arguments"), dict) else {}
-            payload, failed = _mcp_tool_call(target, name, arguments)
-            text = payload if isinstance(payload, str) else json.dumps(payload, indent=2, sort_keys=True)
-            result = {"content": [{"type": "text", "text": text}], "isError": failed}
-            print(json.dumps(_mcp_response(request_id, result=result), sort_keys=True), flush=True)
-        else:
-            print(
-                json.dumps(
-                    _mcp_response(request_id, error={"code": -32601, "message": f"method not found: {method}"}),
-                    sort_keys=True,
-                ),
-                flush=True,
-            )
-    return 0
+    return mcp_server.serve_stdio(
+        server_name="brigade-skills-readonly",
+        list_resources=lambda: _mcp_resource_items(target),
+        read_resource=lambda uri: _mcp_read_resource(target, uri),
+        list_tools=_mcp_tool_specs,
+        call_tool=lambda name, arguments: _mcp_tool_call(target, name, arguments),
+    )
 
 
 def serve_mcp(*, target: Path, json_output: bool = False, stdio: bool = False) -> int:
