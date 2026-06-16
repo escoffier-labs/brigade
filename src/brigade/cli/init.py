@@ -24,6 +24,12 @@ def register(sub: argparse._SubParsersAction) -> None:
         default=True,
         help="Do not create or update the target's .gitignore.",
     )
+    p_init.add_argument(
+        "--git-exclude",
+        action="store_true",
+        help="Write Brigade ignores to .git/info/exclude (local-only) instead of the tracked .gitignore. "
+        "Use this in a third-party clone you do not want to commit Brigade ignores into.",
+    )
     p_init.add_argument("--dry-run", action="store_true", help="Show what would happen.")
     p_init.add_argument(
         "--depth",
@@ -99,4 +105,5 @@ def dispatch(args) -> int:
         force=getattr(args, "force", False),
         dry_run=getattr(args, "dry_run", False),
         allow_home=getattr(args, "allow_home", False),
+        use_git_exclude=getattr(args, "git_exclude", False),
     )
