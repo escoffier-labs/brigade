@@ -49,6 +49,7 @@ def build_context(target: Path, harness: str = "generic") -> DoctorContext:
 def core_station_checks(ctx: DoctorContext) -> List[CheckResult]:
     checks: List[CheckResult] = []
     checks.extend(_check_workspace_files(ctx.target))
+    checks.extend(_check_agents_quality(ctx.target))
     if "openclaw" in ctx.harnesses:
         checks.extend(_check_openclaw())
     if "hermes" in ctx.harnesses:
@@ -235,6 +236,36 @@ def _check_workspace_files(target: Path) -> List[CheckResult]:
             results.append((WARN, f"bootstrap: {name}", f"not present at {path}"))
     results.extend(_check_bootstrap_budgets(target))
     return results
+
+
+def _check_agents_quality(target: Path) -> List[CheckResult]:
+    """Nudge AGENTS.md toward the sections agents actually rely on.
+
+    Existence is already a required check; this is a quality lint (WARN only, so
+    it never blocks): a useful AGENTS.md states a definition of done and points
+    at a memory-handoff path. The Brigade-seeded template satisfies both.
+    """
+    path = target / "AGENTS.md"
+    if not path.is_file():
+        return []  # absence is already a FAIL in _check_workspace_files
+    try:
+        text = path.read_text(errors="replace").lower()
+    except OSError:
+        return []
+    missing: list[str] = []
+    if "definition of done" not in text:
+        missing.append("a 'Definition of Done' section")
+    if "handoff" not in text:
+        missing.append("a memory-handoff section")
+    if not missing:
+        return [(OK, "agents-quality: AGENTS.md", "states a definition of done and a handoff path")]
+    return [
+        (
+            WARN,
+            "agents-quality: AGENTS.md",
+            f"missing {', '.join(missing)}; agents work better with explicit done criteria and a handoff footer",
+        )
+    ]
 
 
 def _check_bootstrap_budgets(target: Path) -> List[CheckResult]:
@@ -680,26 +711,44 @@ def _doctor_hermes_result(item: dict) -> CheckResult:
     return (status, name, str(item.get("detail", "")))
 
 
+_MARKERS = {
+    OK: "  [ok]  ",
+    WARN: "  [warn]",
+    FAIL: "  [fail]",
+    MANUAL: "  [todo]",
+    INFO: "  [info]",
+}
+
+# Checks about host-global state rather than this specific repo. Grouping them
+# under their own header keeps a single-repo run from reading as if the repo
+# itself is responsible for an unrelated OpenClaw config or content-guard clone.
+_MACHINE_LEVEL_PREFIXES = ("openclaw:",)
+_MACHINE_LEVEL_NAMES = {"publish: content-guard", "managed tools"}
+
+
+def _is_machine_level(name: str) -> bool:
+    return name.startswith(_MACHINE_LEVEL_PREFIXES) or name in _MACHINE_LEVEL_NAMES
+
+
 def _report(checks: List[CheckResult]) -> int:
     width = max((len(name) for _, name, _ in checks), default=20)
-    failed = 0
-    manual = 0
-    for status, name, detail in checks:
-        marker = {
-            OK: "  [ok]  ",
-            WARN: "  [warn]",
-            FAIL: "  [fail]",
-            MANUAL: "  [todo]",
-            INFO: "  [info]",
-        }[status]
-        print(f"{marker} {name.ljust(width)}  {detail}")
-        if status == FAIL:
-            failed += 1
-        elif status == MANUAL:
-            manual += 1
+    repo_checks = [check for check in checks if not _is_machine_level(check[1])]
+    machine_checks = [check for check in checks if _is_machine_level(check[1])]
+
+    def _emit(items: List[CheckResult]) -> None:
+        for status, name, detail in items:
+            print(f"{_MARKERS[status]} {name.ljust(width)}  {detail}")
+
+    _emit(repo_checks)
+    if machine_checks:
+        print()
+        print("machine-level (not specific to this repo):")
+        _emit(machine_checks)
+
+    failed = sum(1 for status, _, _ in checks if status == FAIL)
+    manual = sum(1 for status, _, _ in checks if status == MANUAL)
     print()
-    summary = f"summary: {len(checks)} checks, {failed} failed, {manual} manual"
-    print(summary)
+    print(f"summary: {len(checks)} checks, {failed} failed, {manual} manual")
     return 1 if failed else 0
 
 
@@ -713,7 +762,15 @@ def _report_json(ctx: DoctorContext, checks: List[CheckResult]) -> int:
         "harnesses": list(ctx.harnesses),
         "owner": getattr(sel, "owner", None),
         "depth": getattr(sel, "depth", None),
-        "checks": [{"status": status, "name": name, "detail": detail} for status, name, detail in checks],
+        "checks": [
+            {
+                "status": status,
+                "name": name,
+                "detail": detail,
+                "scope": "machine" if _is_machine_level(name) else "repo",
+            }
+            for status, name, detail in checks
+        ],
         "summary": {
             "total": len(checks),
             "ok": counts[OK],
