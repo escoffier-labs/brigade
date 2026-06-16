@@ -16,6 +16,7 @@ brigade roadmap commands --write
 - `brigade budgets`: 2 command path(s)
 - `brigade center`: 29 command path(s)
 - `brigade chat`: 7 command path(s)
+- `brigade completions`: 1 command path(s)
 - `brigade context`: 8 command path(s)
 - `brigade daily`: 26 command path(s)
 - `brigade doctor`: 1 command path(s)
@@ -91,6 +92,7 @@ brigade roadmap commands --write
 - `brigade chat sweep import-issues`
 - `brigade chat sweep ingest`
 - `brigade chat sweep validate`
+- `brigade completions`
 - `brigade context archive`
 - `brigade context build`
 - `brigade context doctor`
