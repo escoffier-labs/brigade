@@ -7,11 +7,11 @@ from io import StringIO
 from pathlib import Path
 from typing import Any
 
-from .. import center_cmd, security_cmd, skills_cmd, tools_cmd
+from .. import center_cmd, doctor as core_doctor, handoff_cmd, security_cmd, skills_cmd, tools_cmd
 from ..install import install_selection
 from ..selection import KNOWN_HARNESSES, WRITER_INBOXES, Selection, resolve_owner
 from .guide import _steps, _validate_profile, plan_payload
-from .health import verify_harness
+from .health import doctor as operator_doctor, verify_harness
 
 
 def init(
@@ -626,3 +626,80 @@ def bootstrap_portable(
         for command in payload["next_commands"]:
             print(f"- {command}")
     return 0 if ok else 1
+
+
+def _surface_issue_count(payload: dict[str, Any]) -> int | None:
+    for key in ("blocking_issue_count", "issue_count"):
+        value = payload.get(key)
+        if isinstance(value, int):
+            return value
+    summary = payload.get("summary")
+    if isinstance(summary, dict) and isinstance(summary.get("failed"), int):
+        return summary["failed"]
+    return None
+
+
+def checkup_payload(target: Path, *, profile: str = "internal-dogfood") -> dict[str, Any]:
+    """Run every read-only first-run doctor once and roll the verdicts up.
+
+    The first-10-minutes path has an operator run several separate doctors by
+    hand. checkup runs them in one pass, captures each one's JSON, and reports a
+    single ready/blocking verdict. Each surface's exit code is the source of
+    truth for readiness; the issue count is informational. Nothing here writes
+    files (security scan and verify-harness are deliberately excluded).
+    """
+    target = target.expanduser().resolve()
+    spec = [
+        ("doctor", "brigade doctor --target .", core_doctor.run, {"target": target}),
+        ("operator", "brigade operator doctor --target .", operator_doctor, {"target": target, "profile": profile}),
+        ("handoff", "brigade handoff doctor --target .", handoff_cmd.doctor, {"target": target}),
+        ("tools", "brigade tools doctor --target .", tools_cmd.doctor, {"target": target}),
+        ("skills", "brigade skills doctor --target .", skills_cmd.doctor, {"target": target}),
+        ("security", "brigade security doctor --target .", security_cmd.doctor, {"target": target}),
+    ]
+    surfaces: list[dict[str, Any]] = []
+    blocking = 0
+    for name, command, func, kwargs in spec:
+        rc, payload = _capture_json_call(func, **kwargs)
+        surface_ready = rc == 0
+        if not surface_ready:
+            blocking += 1
+        surfaces.append(
+            {
+                "name": name,
+                "command": command,
+                "ready": surface_ready,
+                "exit_code": rc,
+                "issue_count": _surface_issue_count(payload),
+            }
+        )
+    ready = blocking == 0
+    next_command = next((surface["command"] for surface in surfaces if not surface["ready"]), None)
+    return {
+        "target": str(target),
+        "profile": profile,
+        "ready": ready,
+        "blocking_surface_count": blocking,
+        "surfaces": surfaces,
+        "next_command": next_command,
+    }
+
+
+def checkup(*, target: Path, profile: str = "internal-dogfood", json_output: bool = False) -> int:
+    payload = checkup_payload(target, profile=profile)
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0 if payload["ready"] else 1
+
+    print(f"operator checkup: {payload['target']}")
+    print(f"profile: {payload['profile']}")
+    for surface in payload["surfaces"]:
+        mark = "ok" if surface["ready"] else "fail"
+        count = surface["issue_count"]
+        suffix = f" ({count} issue{'s' if count != 1 else ''})" if isinstance(count, int) and count else ""
+        print(f"  [{mark}] {surface['name']}{suffix}")
+    print(f"ready: {'yes' if payload['ready'] else 'no'}")
+    print(f"blocking_surfaces: {payload['blocking_surface_count']}")
+    if payload["next_command"]:
+        print(f"next: {payload['next_command']}")
+    return 0 if payload["ready"] else 1

@@ -213,6 +213,19 @@ def register(sub: argparse._SubParsersAction) -> None:
         help="Operator profile to inspect.",
     )
     p_operator_doctor.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_operator_checkup = operator_sub.add_parser(
+        "checkup", help="Run every read-only first-run doctor at once and roll up the verdict."
+    )
+    p_operator_checkup.add_argument(
+        "--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect."
+    )
+    p_operator_checkup.add_argument(
+        "--profile",
+        choices=["local-operator", "internal-dogfood"],
+        default="internal-dogfood",
+        help="Operator profile to inspect.",
+    )
+    p_operator_checkup.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_operator_verify_harness = operator_sub.add_parser(
         "verify-harness", help="Verify repo-local wiring for one harness."
     )
@@ -373,6 +386,8 @@ def dispatch(args) -> int:
         return operator_cmd.status(target=args.target, profile=args.profile, json_output=args.json)
     if args.operator_command == "doctor":
         return operator_cmd.doctor(target=args.target, profile=args.profile, json_output=args.json)
+    if args.operator_command == "checkup":
+        return operator_cmd.checkup(target=args.target, profile=args.profile, json_output=args.json)
     if args.operator_command == "verify-harness":
         return operator_cmd.verify_harness(target=args.target, harness=args.harness, json_output=args.json)
     if args.operator_command == "sync-tools":

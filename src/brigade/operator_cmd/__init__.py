@@ -27,6 +27,8 @@ from .health import (
 )
 from .lifecycle import (
     bootstrap_portable,
+    checkup,
+    checkup_payload,
     init,
     quickstart,
     sync_tools,
@@ -61,6 +63,8 @@ __all__ = [
     "adoption_plan",
     "adoption_plan_payload",
     "bootstrap_portable",
+    "checkup",
+    "checkup_payload",
     "doctor",
     "doctor_payload",
     "guide",
