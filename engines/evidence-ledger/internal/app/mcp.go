@@ -318,10 +318,38 @@ func argInt(args map[string]any, key string) int {
 	}
 }
 
+const (
+	maxMCPHeaderLine  = 8 << 10 // 8 KiB per header line
+	maxMCPHeaderLines = 64      // bound the number of header lines
+)
+
+// readMCPHeaderLine reads a single '\n'-terminated header line, bounded to
+// limit bytes so a hostile client cannot force unbounded buffering with a
+// header line that never terminates.
+func readMCPHeaderLine(r *bufio.Reader, limit int) (string, error) {
+	var sb strings.Builder
+	for {
+		b, err := r.ReadByte()
+		if err != nil {
+			return "", err
+		}
+		if b == '\n' {
+			return sb.String(), nil
+		}
+		if sb.Len() >= limit {
+			return "", fmt.Errorf("MCP header line exceeds %d bytes", limit)
+		}
+		sb.WriteByte(b)
+	}
+}
+
 func readMCPFrame(r *bufio.Reader) ([]byte, error) {
 	contentLength := -1
-	for {
-		line, err := r.ReadString('\n')
+	for i := 0; ; i++ {
+		if i >= maxMCPHeaderLines {
+			return nil, fmt.Errorf("MCP headers exceed %d lines", maxMCPHeaderLines)
+		}
+		line, err := readMCPHeaderLine(r, maxMCPHeaderLine)
 		if err != nil {
 			return nil, err
 		}
@@ -343,6 +371,9 @@ func readMCPFrame(r *bufio.Reader) ([]byte, error) {
 	}
 	if contentLength < 0 {
 		return nil, errors.New("missing Content-Length")
+	}
+	if contentLength > maxMCPFrame {
+		return nil, fmt.Errorf("Content-Length %d exceeds maximum frame size %d", contentLength, maxMCPFrame)
 	}
 	buf := make([]byte, contentLength)
 	if _, err := io.ReadFull(r, buf); err != nil {

@@ -16,6 +16,10 @@ import (
 // hostile local client cannot stream an unbounded payload.
 const maxRequestBody = 1 << 20 // 1 MiB
 
+// maxMCPFrame caps the Content-Length of a single stdio MCP frame so a
+// malformed or hostile client cannot drive an unbounded allocation.
+const maxMCPFrame = 8 << 20 // 8 MiB
+
 func cmdServe(args []string, out, errw io.Writer) int {
 	values, bools, rest, err := splitFlags(args, map[string]bool{"addr": true}, map[string]bool{"json": true})
 	if err != nil {

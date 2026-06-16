@@ -1996,7 +1996,20 @@ func cmdSQL(args []string, out, errw io.Writer) int {
 		return fatalf(errw, "sql: %s", err)
 	}
 	defer db.Close()
-	rows, err := db.Query(query)
+	// Defense in depth: the regex blocklist above is a usability filter, but
+	// the engine itself should reject writes. query_only is a connection-level
+	// pragma, so grab one dedicated connection, set it there, and run the query
+	// on that same connection.
+	ctx := context.Background()
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return fatalf(errw, "sql: %s", err)
+	}
+	defer conn.Close()
+	if _, err := conn.ExecContext(ctx, "PRAGMA query_only = ON"); err != nil {
+		return fatalf(errw, "sql: %s", err)
+	}
+	rows, err := conn.QueryContext(ctx, query)
 	if err != nil {
 		return fatalf(errw, "sql: %s", err)
 	}
@@ -2085,10 +2098,6 @@ func writeCSV(w io.Writer, rows []map[string]any) {
 		_ = cw.Write(vals)
 	}
 	cw.Flush()
-}
-
-func _now() string {
-	return time.Now().UTC().Format(time.RFC3339Nano)
 }
 
 func splitFlags(args []string, valueFlags, boolFlags map[string]bool) (map[string]string, map[string]bool, []string, error) {

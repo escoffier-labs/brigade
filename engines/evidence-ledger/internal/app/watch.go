@@ -346,11 +346,16 @@ func dryRunStationTrail(sourceKind, root string, values map[string]string) (stat
 	if values["redact"] != "" {
 		cmdArgs = append(cmdArgs, "--redact", values["redact"])
 	}
-	cmd := exec.Command("stationtrail", cmdArgs...)
+	ctx, cancel := context.WithTimeout(context.Background(), externalScannerTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "stationtrail", cmdArgs...)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	b, err := cmd.Output()
 	if err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			return stationTrailSummary{}, fmt.Errorf("stationtrail timed out after %s", externalScannerTimeout)
+		}
 		msg := stderr.String()
 		if msg == "" {
 			msg = err.Error()
