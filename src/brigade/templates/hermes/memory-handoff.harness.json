@@ -5,7 +5,7 @@
     "Describes the handoff inbox + routing targets that Hermes should treat",
     "as the canonical memory contract."
   ],
-  "_brigade_version": "0.11.0",
+  "_brigade_version": "0.12.0",
   "_brigade_status": "experimental",
   "memory_handoff": {
     "inbox_dir": ".hermes/memory-handoffs",
