@@ -135,6 +135,23 @@ def dispatch(args) -> int:
     if args.handoff:
         handoff_inbox = args.handoff_inbox or (run_cwd / ".claude" / "memory-handoffs")
     effective_sandbox = args.sandbox if args.sandbox is not None else loaded_roster.sandbox
+    if args.read_only:
+        advisory = _read_only_advisory(loaded_roster, effective_sandbox)
+        if advisory:
+            print("warning: --read-only is best-effort for some agents in this run:", file=sys.stderr)
+            for line in advisory:
+                print(f"  - {line}", file=sys.stderr)
+            print(
+                "  brigade cannot guarantee these agents leave the tree untouched; review the run output.",
+                file=sys.stderr,
+            )
+            if output_dir is not None:
+                from .. import localio
+
+                localio.write_json(
+                    output_dir / "read-only-enforcement.json",
+                    {"read_only": True, "sandbox": effective_sandbox, "best_effort_agents": advisory},
+                )
     # The dirty guard protects write runs from mixing agent edits with uncommitted
     # work. Dry, read-only, and worktree runs never edit the tree, so reviewing
     # uncommitted changes stays possible without --allow-dirty.
@@ -193,3 +210,26 @@ def dispatch(args) -> int:
 def _worktree_checkout_path(repo_root: Path, output_dir: Path) -> Path:
     run_id = output_dir.expanduser().resolve().name
     return Path.home() / ".cache" / "brigade" / "worktrees" / f"{repo_root.name}-{run_id}"
+
+
+def _read_only_advisory(roster, effective_sandbox) -> list[str]:
+    """Lines describing which worker agents do not hard-enforce read-only.
+
+    A writable --sandbox override downgrades even natively-sandboxed CLIs to
+    prompt-only, so the advisory reflects the sandbox actually in effect.
+    """
+    from .. import agents as agents_mod
+    from .. import roster as roster_mod
+
+    sandbox_overrides_native = effective_sandbox in ("workspace-write", "danger-full-access")
+    lines: list[str] = []
+    for agent in roster_mod.workers(roster):
+        cli = agent.cli or ""
+        enforcement = agents_mod.read_only_enforcement(cli)
+        if sandbox_overrides_native and enforcement == "hard":
+            enforcement = "soft"
+        if enforcement == "hard":
+            continue
+        how = "prompt-only (the model may ignore it)" if enforcement == "soft" else "not applied for this CLI"
+        lines.append(f"{agent.name} ({cli or 'unknown'}): read-only is {how}")
+    return lines
