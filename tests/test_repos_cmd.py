@@ -290,6 +290,17 @@ def test_repo_summary_counts_opencode_inbox(tmp_path):
     assert ".opencode/memory-handoffs" in summary["handoff_inboxes"]
 
 
+def test_repo_summaries_preserve_config_order_and_skip_disabled(tmp_path, monkeypatch):
+    # The fleet sweep runs summaries on a thread pool; output must stay in config
+    # order and exclude disabled repos regardless of which thread finishes first.
+    entries = [
+        repos_cmd.RepoEntry(repo_id=f"r{i}", label=f"R{i}", path=tmp_path, enabled=(i % 4 != 0)) for i in range(1, 9)
+    ]
+    monkeypatch.setattr(repos_cmd, "_repo_summary", lambda entry: {"id": entry.repo_id})
+    result = repos_cmd._repo_summaries(entries)
+    assert [row["id"] for row in result] == [entry.repo_id for entry in entries if entry.enabled]
+
+
 def test_repo_summary_counts_antigravity_inbox(tmp_path):
     from brigade import repos_cmd
 
