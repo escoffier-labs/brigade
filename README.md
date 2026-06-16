@@ -127,7 +127,7 @@ Each writer gets its own local inbox; one canonical owner ingests. Brigade keeps
 | Hermes | `hermes` | `.hermes/memory-handoffs/` |
 | OpenClaw | `openclaw` | usually the memory owner, not a writer |
 
-All of them get handoff templates, ingest source coverage, and projected tools/skills. Per-harness details are in the [technical guide](docs/technical-guide.md).
+All of them get handoff templates and ingest source coverage. Most also get projected tools and skills in their native format (some as `rules` or `instructions`, a few not yet); the per-harness matrix is in the [technical guide](docs/technical-guide.md).
 
 ## Beyond memory
 

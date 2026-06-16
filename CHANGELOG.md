@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-06-16
+
 ### Added
 - `brigade doctor --json` and `brigade status --json` emit machine-readable output (target, harnesses, owner, depth, per-check status/name/detail, summary counts, and a `ready` flag), so the two most diagnostic surfaces can feed scripts and a future fleet aggregation instead of being text-only.
 - `brigade security diff --base <dir> --against <dir> [--json]` compares two security reports and reports new, resolved, and persisting findings (matched by the scan's stable per-finding fingerprint). It returns nonzero when there are new findings, so a change that introduces a finding can be caught in review or CI.
