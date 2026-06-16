@@ -1217,3 +1217,263 @@ def closeout(*, target: Path, reason: str | None = None, defer: bool = False, js
     print(f"status: {payload['status']}")
     print(f"candidates: {payload['candidate_count']}")
     return 0
+
+
+# --- memory search (deterministic keyword search over cards) ---
+
+
+def _card_search_fields(path: Path, target: Path) -> dict[str, Any]:
+    try:
+        text = path.read_text(errors="replace")
+    except OSError:
+        return {}
+    frontmatter, _ = _parse_frontmatter(text)
+    tags = frontmatter.get("tags")
+    tags_list = [str(t) for t in tags] if isinstance(tags, list) else ([str(tags)] if tags else [])
+    return {
+        "rel": str(path.relative_to(target)),
+        "title": str(frontmatter.get("title") or path.stem),
+        "tags": tags_list,
+        "summary": str(frontmatter.get("description") or frontmatter.get("summary") or ""),
+        "body": text,
+    }
+
+
+def search_cards_payload(target: Path, query: str, *, limit: int = 20) -> dict[str, Any]:
+    target = target.expanduser().resolve()
+    config = load_config(target) or MemoryCareConfig()
+    terms = [term for term in query.lower().split() if term]
+    matches: list[dict[str, Any]] = []
+    for path in _iter_cards(target, config):
+        fields = _card_search_fields(path, target)
+        if not fields:
+            continue
+        heading = f"{fields['title']} {' '.join(fields['tags'])} {fields['summary']}".lower()
+        body = fields["body"].lower()
+        score = 0
+        for term in terms:
+            if term in heading:
+                score += 3
+            elif term in body:
+                score += 1
+        if not terms or score == 0:
+            continue
+        matches.append(
+            {
+                "path": fields["rel"],
+                "title": fields["title"],
+                "tags": fields["tags"],
+                "summary": fields["summary"],
+                "score": score,
+            }
+        )
+    matches.sort(key=lambda item: (-item["score"], item["path"]))
+    return {
+        "target": str(target),
+        "query": query,
+        "match_count": len(matches),
+        "matches": matches[:limit],
+    }
+
+
+def search(*, target: Path, query: str, limit: int = 20, json_output: bool = False) -> int:
+    payload = search_cards_payload(target, query, limit=limit)
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+    print(f"memory search: {payload['query']} ({payload['match_count']} match(es))")
+    for match in payload["matches"]:
+        print(f"- {match['path']}  [{match['score']}]  {match['title']}")
+    return 0
+
+
+# --- read-only MCP server exposing memory cards over card:// ---
+
+_CARD_URI_PREFIX = "card://"
+
+
+def _card_uri(rel: str) -> str:
+    return f"{_CARD_URI_PREFIX}{rel}"
+
+
+def _mcp_card_resources(target: Path, config: MemoryCareConfig) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    for path in _iter_cards(target, config):
+        fields = _card_search_fields(path, target)
+        if not fields:
+            continue
+        items.append(
+            {
+                "uri": _card_uri(fields["rel"]),
+                "name": fields["title"],
+                "mimeType": "text/markdown",
+                "description": fields["summary"],
+            }
+        )
+    return items
+
+
+def _mcp_read_card(target: Path, config: MemoryCareConfig, uri: str) -> tuple[str, str] | tuple[None, None]:
+    ref = uri[len(_CARD_URI_PREFIX) :] if uri.startswith(_CARD_URI_PREFIX) else uri
+    candidate = (target / ref).resolve()
+    # Only serve files inside the configured card roots; never traverse outside.
+    for path in _iter_cards(target, config):
+        if path.resolve() == candidate:
+            try:
+                return path.read_text(errors="replace"), "text/markdown"
+            except OSError:
+                return None, None
+    return None, None
+
+
+def _mcp_card_tool_specs() -> list[dict[str, Any]]:
+    return [
+        {
+            "name": "list_cards",
+            "description": "List memory cards (path and title).",
+            "inputSchema": {"type": "object", "properties": {}},
+        },
+        {
+            "name": "get_card",
+            "description": "Read one memory card by repo-relative path or card:// uri.",
+            "inputSchema": {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]},
+        },
+        {
+            "name": "search_cards",
+            "description": "Keyword-search memory cards; returns ranked path/title matches.",
+            "inputSchema": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]},
+        },
+    ]
+
+
+def _mcp_card_tool_call(
+    target: Path, config: MemoryCareConfig, name: str, arguments: dict[str, Any]
+) -> tuple[object, bool]:
+    if name == "list_cards":
+        return (
+            [
+                {"path": str(p.relative_to(target)), "uri": _card_uri(str(p.relative_to(target)))}
+                for p in _iter_cards(target, config)
+            ],
+            False,
+        )
+    if name == "get_card":
+        ref = str(arguments.get("path") or "")
+        text, _ = _mcp_read_card(target, config, ref)
+        if text is None:
+            return (f"card not found: {ref}", True)
+        return (text, False)
+    if name == "search_cards":
+        return (search_cards_payload(target, str(arguments.get("query") or ""))["matches"], False)
+    return (f"unknown tool: {name}", True)
+
+
+def _mcp_response(
+    request_id: object, *, result: object | None = None, error: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    response: dict[str, Any] = {"jsonrpc": "2.0", "id": request_id}
+    if error is not None:
+        response["error"] = error
+    else:
+        response["result"] = result if result is not None else {}
+    return response
+
+
+def _run_card_mcp_stdio(target: Path) -> int:
+    config = load_config(target) or MemoryCareConfig()
+    for line in sys.stdin:
+        if not line.strip():
+            continue
+        try:
+            request = json.loads(line)
+        except json.JSONDecodeError:
+            print(json.dumps(_mcp_response(None, error={"code": -32700, "message": "parse error"})), flush=True)
+            continue
+        if not isinstance(request, dict):
+            print(json.dumps(_mcp_response(None, error={"code": -32600, "message": "invalid request"})), flush=True)
+            continue
+        request_id = request.get("id")
+        method = str(request.get("method") or "")
+        params = request.get("params") if isinstance(request.get("params"), dict) else {}
+        if request_id is None and method.startswith("notifications/"):
+            continue
+        if method == "initialize":
+            result = {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {"resources": {}, "tools": {}},
+                "serverInfo": {"name": "brigade-memory-readonly", "version": "0"},
+            }
+            print(json.dumps(_mcp_response(request_id, result=result), sort_keys=True), flush=True)
+        elif method == "resources/list":
+            print(
+                json.dumps(
+                    _mcp_response(request_id, result={"resources": _mcp_card_resources(target, config)}), sort_keys=True
+                ),
+                flush=True,
+            )
+        elif method == "resources/read":
+            uri = str(params.get("uri") or "")
+            text, mime_type = _mcp_read_card(target, config, uri)
+            if text is None:
+                print(
+                    json.dumps(
+                        _mcp_response(request_id, error={"code": -32004, "message": f"resource not found: {uri}"}),
+                        sort_keys=True,
+                    ),
+                    flush=True,
+                )
+            else:
+                print(
+                    json.dumps(
+                        _mcp_response(
+                            request_id, result={"contents": [{"uri": uri, "mimeType": mime_type, "text": text}]}
+                        ),
+                        sort_keys=True,
+                    ),
+                    flush=True,
+                )
+        elif method == "tools/list":
+            print(
+                json.dumps(_mcp_response(request_id, result={"tools": _mcp_card_tool_specs()}), sort_keys=True),
+                flush=True,
+            )
+        elif method == "tools/call":
+            name = str(params.get("name") or "")
+            arguments = params.get("arguments") if isinstance(params.get("arguments"), dict) else {}
+            payload, failed = _mcp_card_tool_call(target, config, name, arguments)
+            text = payload if isinstance(payload, str) else json.dumps(payload, indent=2, sort_keys=True)
+            result = {"content": [{"type": "text", "text": text}], "isError": failed}
+            print(json.dumps(_mcp_response(request_id, result=result), sort_keys=True), flush=True)
+        else:
+            print(
+                json.dumps(
+                    _mcp_response(request_id, error={"code": -32601, "message": f"method not found: {method}"}),
+                    sort_keys=True,
+                ),
+                flush=True,
+            )
+    return 0
+
+
+def serve_mcp(*, target: Path, stdio: bool = False, json_output: bool = False) -> int:
+    target = target.expanduser().resolve()
+    if stdio:
+        return _run_card_mcp_stdio(target)
+    config = load_config(target) or MemoryCareConfig()
+    resources = _mcp_card_resources(target, config)
+    payload = {
+        "target": str(target),
+        "read_only": True,
+        "resource_scheme": "card://<repo-relative-path>",
+        "tools": [spec["name"] for spec in _mcp_card_tool_specs()],
+        "registered_resources": len(resources),
+    }
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+    print("memory MCP resources: ready read_only=true")
+    print("resources: card://<repo-relative-path>")
+    print(f"tools: {', '.join(payload['tools'])}")
+    print(f"registered_resources: {payload['registered_resources']}")
+    print("run the stdio server with: brigade memory serve-mcp --stdio")
+    return 0

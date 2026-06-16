@@ -28,7 +28,7 @@ brigade roadmap commands --write
 - `brigade ingest`: 1 command path(s)
 - `brigade init`: 1 command path(s)
 - `brigade learn`: 13 command path(s)
-- `brigade memory`: 8 command path(s)
+- `brigade memory`: 10 command path(s)
 - `brigade notifications`: 4 command path(s)
 - `brigade openclaw-fragments`: 1 command path(s)
 - `brigade operator`: 23 command path(s)
@@ -173,6 +173,8 @@ brigade roadmap commands --write
 - `brigade memory care plan-fixes`
 - `brigade memory care scan`
 - `brigade memory care status`
+- `brigade memory search`
+- `brigade memory serve-mcp`
 - `brigade notifications event plan`
 - `brigade notifications event record`
 - `brigade notifications setup plan`

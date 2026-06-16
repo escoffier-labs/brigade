@@ -67,6 +67,21 @@ def register(sub: argparse._SubParsersAction) -> None:
         "--defer", action="store_true", help="Mark current queue deferred instead of reviewed."
     )
     p_memory_care_closeout.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_memory_search = memory_sub.add_parser("search", help="Keyword-search local memory cards.")
+    p_memory_search.add_argument("query", help="Search terms (matched against title, tags, summary, and body).")
+    p_memory_search.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to search.")
+    p_memory_search.add_argument("--limit", type=int, default=20, help="Maximum matches to show.")
+    p_memory_search.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_memory_serve_mcp = memory_sub.add_parser(
+        "serve-mcp", help="Expose memory cards over a read-only MCP stdio server (card:// scheme)."
+    )
+    p_memory_serve_mcp.add_argument(
+        "--target", "-t", type=Path, default=Path("."), help="Repo or workspace whose cards to serve."
+    )
+    p_memory_serve_mcp.add_argument(
+        "--stdio", action="store_true", help="Run the JSON-RPC stdio server (otherwise print the contract)."
+    )
+    p_memory_serve_mcp.add_argument("--json", action="store_true", help="Print the contract as JSON.")
     p_memory.set_defaults(func=dispatch)
 
 
@@ -105,5 +120,9 @@ def dispatch(args) -> int:
             )
         args._brigade_parser.error(f"unknown memory care command: {args.memory_care_command}")
         return 2
+    if args.memory_command == "search":
+        return memory_cmd.search(target=args.target, query=args.query, limit=args.limit, json_output=args.json)
+    if args.memory_command == "serve-mcp":
+        return memory_cmd.serve_mcp(target=args.target, stdio=args.stdio, json_output=args.json)
     args._brigade_parser.error(f"unknown memory command: {args.memory_command}")
     return 2
