@@ -1277,7 +1277,11 @@ def search_cards_payload(target: Path, query: str, *, limit: int = 20) -> dict[s
 
 
 def search(*, target: Path, query: str, limit: int = 20, json_output: bool = False) -> int:
-    payload = search_cards_payload(target, query, limit=limit)
+    try:
+        payload = search_cards_payload(target, query, limit=limit)
+    except ValueError as exc:
+        print(f"error: invalid memory-care config: {exc}", file=sys.stderr)
+        return 2
     if json_output:
         print(json.dumps(payload, indent=2, sort_keys=True))
         return 0
@@ -1315,9 +1319,15 @@ def _mcp_card_resources(target: Path, config: MemoryCareConfig) -> list[dict[str
 
 def _mcp_read_card(target: Path, config: MemoryCareConfig, uri: str) -> tuple[str, str] | tuple[None, None]:
     ref = uri[len(_CARD_URI_PREFIX) :] if uri.startswith(_CARD_URI_PREFIX) else uri
-    candidate = (target / ref).resolve()
-    # Only serve files inside the configured card roots; never traverse outside.
+    target_resolved = target.expanduser().resolve()
+    candidate = (target_resolved / ref).resolve()
+    # Only serve files whose real path stays inside the workspace; a `.md` symlink
+    # pointing outside a card root must not become a read primitive.
+    if not candidate.is_relative_to(target_resolved):
+        return None, None
     for path in _iter_cards(target, config):
+        if path.is_symlink():
+            continue
         if path.resolve() == candidate:
             try:
                 return path.read_text(errors="replace"), "text/markdown"
@@ -1457,9 +1467,13 @@ def _run_card_mcp_stdio(target: Path) -> int:
 
 def serve_mcp(*, target: Path, stdio: bool = False, json_output: bool = False) -> int:
     target = target.expanduser().resolve()
+    try:
+        config = load_config(target) or MemoryCareConfig()
+    except ValueError as exc:
+        print(f"error: invalid memory-care config: {exc}", file=sys.stderr)
+        return 2
     if stdio:
         return _run_card_mcp_stdio(target)
-    config = load_config(target) or MemoryCareConfig()
     resources = _mcp_card_resources(target, config)
     payload = {
         "target": str(target),

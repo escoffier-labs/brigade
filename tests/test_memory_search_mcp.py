@@ -47,6 +47,20 @@ def test_card_mcp_resources_and_read_are_scoped(tmp_path: Path):
     assert _mcp_read_card(tmp_path, config, "card://../secret.md") == (None, None)
 
 
+def test_card_mcp_read_refuses_symlink_escape(tmp_path: Path):
+    target = tmp_path / "ws"
+    _card(target, "real.md", "Real", "ok content")
+    secret = tmp_path / "secret.txt"  # outside the workspace
+    secret.write_text("TOPSECRET")
+    (target / "memory" / "cards" / "evil.md").symlink_to(secret)
+    config = load_config(target) or MemoryCareConfig()
+    # a .md symlink pointing outside the card root is not a read primitive
+    assert _mcp_read_card(target, config, "card://memory/cards/evil.md") == (None, None)
+    # the real card still reads fine
+    text, _ = _mcp_read_card(target, config, "card://memory/cards/real.md")
+    assert text is not None and "ok content" in text
+
+
 def test_card_mcp_stdio_roundtrip(tmp_path: Path, monkeypatch, capsys):
     _card(tmp_path, "a.md", "Card A", "hello mcp")
     requests = (

@@ -30,13 +30,13 @@ def _roster() -> Roster:
     )
 
 
-def test_advisory_lists_only_non_hard_workers():
+def test_advisory_lists_non_hard_agents_including_orchestrator():
     lines = run_cli._read_only_advisory(_roster(), None)
     joined = "\n".join(lines)
     assert "soft (goose)" in joined
     assert "open (opencode)" in joined
     assert "safe (codex)" not in joined  # natively sandboxed, hard-enforced
-    assert "lead" not in joined  # orchestrator is not a worker
+    assert "lead (claude)" in joined  # the orchestrator runs too and claude does not enforce read-only
 
 
 def test_writable_sandbox_override_downgrades_hard_agents():

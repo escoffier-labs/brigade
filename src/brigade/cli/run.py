@@ -223,7 +223,10 @@ def _read_only_advisory(roster, effective_sandbox) -> list[str]:
 
     sandbox_overrides_native = effective_sandbox in ("workspace-write", "danger-full-access")
     lines: list[str] = []
-    for agent in roster_mod.workers(roster):
+    # The orchestrator runs too (it plans), so include it alongside the workers.
+    orchestrator = roster.agents.get(roster.orchestrator)
+    agents_to_check = [orchestrator, *roster_mod.workers(roster)] if orchestrator else roster_mod.workers(roster)
+    for agent in agents_to_check:
         cli = agent.cli or ""
         enforcement = agents_mod.read_only_enforcement(cli)
         if sandbox_overrides_native and enforcement == "hard":

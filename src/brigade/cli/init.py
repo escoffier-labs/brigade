@@ -87,6 +87,7 @@ def dispatch(args) -> int:
             force=getattr(args, "force", False),
             dry_run=getattr(args, "dry_run", False),
             allow_home=getattr(args, "allow_home", False),
+            use_git_exclude=getattr(args, "git_exclude", False),
         )
 
     # No selection flags: interactive prompt.
