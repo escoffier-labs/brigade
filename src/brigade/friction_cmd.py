@@ -384,6 +384,33 @@ def _default_markdown_path(target: Path) -> Path:
     return target / ".brigade" / "friction" / "latest.md"
 
 
+def show(*, target: Path, severity: str | None = None, json_output: bool = False) -> int:
+    target = target.expanduser().resolve()
+    path = _default_json_path(target)
+    data = work_cmd._read_json(path)
+    if data is None:
+        print(f"error: no friction scan found at {path}; run `brigade friction scan` first", file=sys.stderr)
+        return 2
+    candidates = data.get("candidates") if isinstance(data.get("candidates"), list) else []
+    if severity:
+        candidates = [c for c in candidates if isinstance(c, dict) and c.get("severity") == severity]
+    payload = {
+        "source": str(path),
+        "generated_at": data.get("generated_at"),
+        "candidate_count": len(candidates),
+        "candidates": candidates,
+    }
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+    print(f"friction show: {path}")
+    print(f"candidates: {len(candidates)}")
+    for candidate in candidates:
+        if isinstance(candidate, dict):
+            print(f"- [{candidate.get('severity', '?')}] {candidate.get('workflow', '?')}: {candidate.get('text', '')}")
+    return 0
+
+
 def _write_payload(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")

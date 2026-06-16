@@ -16,6 +16,9 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_projects_audit = projects_sub.add_parser("audit", help="Audit configured project consolidation records.")
     p_projects_audit.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
     p_projects_audit.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_projects_doctor = projects_sub.add_parser("doctor", help="Check local project consolidation health.")
+    p_projects_doctor.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_projects_doctor.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_projects_import = projects_sub.add_parser(
         "import-issues", help="Import project consolidation issues into the work inbox."
     )
@@ -91,6 +94,8 @@ def dispatch(args) -> int:
 
     if args.projects_command == "audit":
         return projects_cmd.audit(target=args.target, json_output=args.json)
+    if args.projects_command == "doctor":
+        return projects_cmd.doctor(target=args.target, json_output=args.json)
     if args.projects_command == "import-issues":
         return projects_cmd.import_issues(target=args.target, dry_run=args.dry_run, json_output=args.json)
     if args.projects_command == "closeout":

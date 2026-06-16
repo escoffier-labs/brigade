@@ -1330,7 +1330,7 @@ def enrich(
     return 1 if payload["error_count"] else 0
 
 
-def suppress(*, target: Path, fingerprint: str, reason: str) -> int:
+def suppress(*, target: Path, fingerprint: str, reason: str, json_output: bool = False) -> int:
     target = target.expanduser().resolve()
     if not target.is_dir():
         print(f"error: --target is not a directory: {target}", file=sys.stderr)
@@ -1373,13 +1373,27 @@ def suppress(*, target: Path, fingerprint: str, reason: str) -> int:
             enrichment=config.enrichment,
         ),
     )
+    if json_output:
+        print(
+            json.dumps(
+                {
+                    "config": str(path),
+                    "fingerprint": fingerprint,
+                    "reason": cleaned_reason,
+                    "suppressed_count": len(suppressions),
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return 0
     print(f"security_config: {path}")
     print(f"suppressed: {fingerprint}")
     print(f"reason: {cleaned_reason}")
     return 0
 
 
-def unsuppress(*, target: Path, fingerprint: str) -> int:
+def unsuppress(*, target: Path, fingerprint: str, json_output: bool = False) -> int:
     target = target.expanduser().resolve()
     if not target.is_dir():
         print(f"error: --target is not a directory: {target}", file=sys.stderr)
@@ -1419,6 +1433,15 @@ def unsuppress(*, target: Path, fingerprint: str) -> int:
             enrichment=config.enrichment,
         ),
     )
+    if json_output:
+        print(
+            json.dumps(
+                {"config": str(path), "fingerprint": fingerprint, "suppressed_count": len(suppressions)},
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return 0
     print(f"security_config: {path}")
     print(f"unsuppressed: {fingerprint}")
     return 0

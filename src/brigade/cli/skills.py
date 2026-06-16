@@ -59,6 +59,11 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_skills_diff.add_argument("--target", "-t", type=Path, default=Path("."), help="Workspace registry to inspect.")
     p_skills_diff.add_argument("--harness", required=True, help="Harness target to compare.")
     p_skills_diff.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_skills_uninstall = skills_sub.add_parser("uninstall", help="Remove an installed skill from one or all harnesses.")
+    p_skills_uninstall.add_argument("skill", help="Installed skill id.")
+    p_skills_uninstall.add_argument("--workspace", type=Path, default=Path("."), help="Workspace to update.")
+    p_skills_uninstall.add_argument("--target", dest="install_target", required=True, help="Harness target or all.")
+    p_skills_uninstall.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_skills_rollback = skills_sub.add_parser(
         "rollback", help="Rollback one installed skill target to the latest snapshot."
     )
@@ -192,6 +197,13 @@ def dispatch(args) -> int:
             skill=args.skill,
             harness=args.install_target,
             force=args.force,
+            json_output=args.json,
+        )
+    if args.skills_command == "uninstall":
+        return skills_cmd.uninstall(
+            workspace=args.workspace,
+            skill=args.skill,
+            harness=args.install_target,
             json_output=args.json,
         )
     if args.skills_command == "compatibility":

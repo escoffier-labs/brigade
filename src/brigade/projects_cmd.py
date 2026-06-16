@@ -650,6 +650,21 @@ def import_issues(*, target: Path, dry_run: bool = False, json_output: bool = Fa
     return 0
 
 
+def doctor(*, target: Path, json_output: bool = False) -> int:
+    payload = health(target)
+    issue_count = int(payload.get("issue_count") or 0)
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0 if issue_count == 0 else 1
+    print(f"projects doctor: {payload['target']}")
+    print(f"projects: {payload['project_count']}")
+    print(f"issues: {issue_count}")
+    for check in payload["checks"]:
+        if isinstance(check, dict):
+            print(f"[{check.get('status', 'WARN')}] {check.get('name')}: {check.get('detail')}")
+    return 0 if issue_count == 0 else 1
+
+
 def health(target: Path) -> dict[str, Any]:
     payload = audit_payload(target)
     readiness = readiness_payload(target)

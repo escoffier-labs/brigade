@@ -17,10 +17,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `brigade completions bash|zsh|fish` prints a static shell completion script generated from the CLI's own command tree (zero runtime dependencies; the tree is embedded, not shelled out). bash completes the full command tree, zsh reuses it via bashcompinit, and fish completes the top level plus one subcommand level (issue #89).
 - `brigade memory search <query> [--json]` runs a deterministic keyword search over memory cards, ranking title, tag, and summary matches above body matches (the stdlib precursor to the roadmapped on-device semantic retrieval) (issue #90).
 - `brigade memory serve-mcp --stdio` exposes memory cards over a read-only MCP stdio server under a `card://` scheme (resources plus `list_cards` / `get_card` / `search_cards` tools), reusing the proven skills MCP pattern; reads are scoped to the configured card roots and it never edits canonical memory (issue #88).
+- `brigade projects doctor` adds the station doctor that every peer station already has, reporting project-consolidation health and exiting nonzero on issues (issue #90).
+- `brigade skills uninstall <skill> --target <harness|all>` removes an installed skill (the inverse of `skills install`), records an uninstall receipt in the install history, and refuses cleanly when nothing is installed (issue #90).
+- `brigade friction show [--severity] [--json]` reads back the latest friction scan, which previously could only be written (issue #90).
 
 ### Changed
 - The repo fleet scan now summarizes repos on a small thread pool instead of serially. Each summary is independent and IO-bound (git calls plus file stats), so a multi-repo fleet scans noticeably faster while output stays in config order; a single-repo fleet is unchanged.
 - `brigade doctor` now groups host-global findings (OpenClaw config, the content-guard clone, uninstalled managed tools) under a "machine-level (not specific to this repo)" header in text output and tags each check with a `scope` of `repo` or `machine` in `--json`, so a single-repo run no longer reads as if the repo is responsible for machine-wide state (issue #80).
+- `brigade security suppress` and `brigade security unsuppress` gain `--json`, so an agent or CI step can parse the suppression result (issue #90).
+- `brigade scrub` gains `--json` and now writes a summary-only `.brigade/scrub/latest.json` receipt (verdict, policy, exit code, never the matched snippets), with `--no-receipt` to opt out, giving the egress gate the audit trail every other station already has (issue #90).
 
 ### Fixed
 - The seeded `pre-push` content-guard hook no longer reports a scanner error as a content leak. It now discriminates content-guard's exit codes: exit 1 (findings) blocks with the leak message, any other nonzero exit is reported as "scanner failed to run" rather than mislabeled as violations (issue #82).
