@@ -24,13 +24,20 @@ from ..localio import (  # noqa: F401
 
 
 def _git(target: Path, *args: str) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        ["git", "-C", str(target), *args],
-        check=False,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-    )
+    try:
+        return subprocess.run(
+            ["git", "-C", str(target), *args],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            stdin=subprocess.DEVNULL,
+            timeout=30,
+        )
+    except subprocess.TimeoutExpired as exc:
+        # Preserve the CompletedProcess contract callers rely on; a timed-out git
+        # call reads as a failure (nonzero) instead of hanging forever.
+        return subprocess.CompletedProcess(exc.cmd, 124, stdout="", stderr=f"git timed out after {exc.timeout:g}s")
 
 
 def _git_value(target: Path, *args: str) -> str | None:

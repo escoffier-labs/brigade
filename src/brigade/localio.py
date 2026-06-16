@@ -91,8 +91,10 @@ def check_git_ignored(repo: Path, path: Path) -> str:
             check=False,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL,
+            timeout=10,
         )
-    except OSError:
+    except (OSError, subprocess.TimeoutExpired):
         return "unknown"
     if result.returncode == 0:
         return "yes"
