@@ -43,7 +43,7 @@ brigade roadmap commands --write
 - `brigade runbook`: 4 command path(s)
 - `brigade runs`: 3 command path(s)
 - `brigade scrub`: 1 command path(s)
-- `brigade security`: 14 command path(s)
+- `brigade security`: 15 command path(s)
 - `brigade skills`: 26 command path(s)
 - `brigade status`: 1 command path(s)
 - `brigade tools`: 48 command path(s)
@@ -331,6 +331,7 @@ brigade roadmap commands --write
 - `brigade scrub`
 - `brigade security closeout`
 - `brigade security config`
+- `brigade security diff`
 - `brigade security doctor`
 - `brigade security enrich`
 - `brigade security findings`

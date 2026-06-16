@@ -42,6 +42,23 @@ def register(sub: argparse._SubParsersAction) -> None:
         "--output-dir", type=Path, default=None, help="Security evidence bundle directory."
     )
     p_security_findings.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_security_diff = security_sub.add_parser(
+        "diff", help="Compare two security reports (new/resolved/persisting findings)."
+    )
+    p_security_diff.add_argument(
+        "--target", "-t", type=Path, default=Path("."), help="Repo or workspace for config and the default --against."
+    )
+    p_security_diff.add_argument(
+        "--base", dest="base_dir", type=Path, required=True, help="Baseline security evidence bundle directory."
+    )
+    p_security_diff.add_argument(
+        "--against",
+        dest="against_dir",
+        type=Path,
+        default=None,
+        help="Bundle to compare against. Defaults to .brigade/security/latest.",
+    )
+    p_security_diff.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_security_sarif = security_sub.add_parser("sarif", help="Write SARIF for an existing security report.")
     p_security_sarif.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to review.")
     p_security_sarif.add_argument("--output-dir", type=Path, default=None, help="Security evidence bundle directory.")
@@ -158,6 +175,13 @@ def dispatch(args) -> int:
         return security_cmd.review(target=args.target, output_dir=args.output_dir, json_output=args.json)
     if args.security_command == "findings":
         return security_cmd.findings(target=args.target, output_dir=args.output_dir, json_output=args.json)
+    if args.security_command == "diff":
+        return security_cmd.diff(
+            target=args.target,
+            base_dir=args.base_dir,
+            against_dir=args.against_dir,
+            json_output=args.json,
+        )
     if args.security_command == "sarif":
         return security_cmd.sarif(
             target=args.target, output_dir=args.output_dir, output_path=args.output_path, json_output=args.json

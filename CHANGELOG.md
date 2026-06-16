@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `brigade security diff --base <dir> --against <dir> [--json]` compares two security reports and reports new, resolved, and persisting findings (matched by the scan's stable per-finding fingerprint). It returns nonzero when there are new findings, so a change that introduces a finding can be caught in review or CI.
+
+### Fixed
+- Apply the v0.11.0 subprocess hang-guard (closed stdin plus a timeout) to the remaining direct `subprocess.run` sites that lacked it: `localio.check_git_ignored`, the work-family `_git` helper, and scrub's git probes. A stuck git call now fails fast instead of hanging the command.
+- `brigade scrub` fails closed when the content-guard scan times out: a hung scanner is reported as `blocked` (exit 124) instead of being able to let content past the egress gate.
+
 ## [0.11.0] - 2026-06-13
 
 ### Added
