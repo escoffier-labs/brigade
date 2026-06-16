@@ -17,6 +17,49 @@ def _workspace_sel() -> Selection:
     return Selection(depth="workspace", harnesses=["claude"], owner="claude", includes=[])
 
 
+def test_init_no_gitignore_skips_gitignore(tmp_target: Path):
+    tmp_target.mkdir(parents=True, exist_ok=True)
+    assert install_selection(tmp_target, _workspace_sel(), update_gitignore=False) == 0
+    gitignore = tmp_target / ".gitignore"
+    assert not gitignore.exists() or "brigade gitignore block" not in gitignore.read_text()
+
+
+def test_init_cli_no_gitignore_flag_reaches_install(monkeypatch, tmp_path: Path):
+    # Regression: the --no-gitignore flag was parsed but never forwarded.
+    seen: dict = {}
+
+    def fake_install(**kwargs):
+        seen.update(kwargs)
+        return 0
+
+    monkeypatch.setattr("brigade.install.install_selection", fake_install)
+    from brigade import cli
+
+    assert (
+        cli.main(["init", "--target", str(tmp_path), "--depth", "repo", "--harnesses", "claude", "--no-gitignore"]) == 0
+    )
+    assert seen["update_gitignore"] is False
+
+
+def test_git_info_dir_resolves_dir_file_and_absent(tmp_path: Path):
+    from brigade.install import _git_info_dir
+
+    repo = tmp_path / "repo"
+    (repo / ".git" / "info").mkdir(parents=True)
+    assert _git_info_dir(repo) == repo / ".git" / "info"
+
+    worktree = tmp_path / "wt"
+    worktree.mkdir()
+    real_gitdir = tmp_path / "realgit"
+    (real_gitdir / "info").mkdir(parents=True)
+    (worktree / ".git").write_text(f"gitdir: {real_gitdir}\n")
+    assert _git_info_dir(worktree) == real_gitdir / "info"
+
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    assert _git_info_dir(plain) is None
+
+
 def test_init_git_exclude_writes_to_git_info_exclude(tmp_target: Path):
     # issue #81: in a third-party clone, write ignores to .git/info/exclude
     # (local-only) instead of the tracked .gitignore.
