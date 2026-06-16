@@ -32,7 +32,7 @@ import (
 
 var stdin io.Reader = os.Stdin
 
-const Version = "0.1.5"
+const Version = "0.2.0"
 
 const externalScannerTimeout = 30 * time.Minute
 
