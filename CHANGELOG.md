@@ -8,9 +8,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `brigade doctor --json` and `brigade status --json` emit machine-readable output (target, harnesses, owner, depth, per-check status/name/detail, summary counts, and a `ready` flag), so the two most diagnostic surfaces can feed scripts and a future fleet aggregation instead of being text-only.
 - `brigade security diff --base <dir> --against <dir> [--json]` compares two security reports and reports new, resolved, and persisting findings (matched by the scan's stable per-finding fingerprint). It returns nonzero when there are new findings, so a change that introduces a finding can be caught in review or CI.
 
 ### Fixed
+- `brigade doctor` memory-care freshness no longer reports a same-day scan as "in the future". The scanner stamps `scan_date` in UTC, but doctor compared it against the host's local date, so an evening run in a behind-UTC timezone warned falsely (issue #83). Doctor now compares in UTC.
+- `brigade init --depth workspace` now creates `.brigade/memory-care/decay`, the directory doctor actually checks, instead of the legacy `memory/cards/decay`. A fresh workspace no longer draws a "staleness scanner not wired" warning on first contact (issue #79).
+- `localio.write_json` now writes receipts atomically (temp file plus `os.replace`), so a reader or a crashed writer never observes a half-written JSON receipt; on failure the original file is left intact and the temp file is removed.
 - Apply the v0.11.0 subprocess hang-guard (closed stdin plus a timeout) to the remaining direct `subprocess.run` sites that lacked it: `localio.check_git_ignored`, the work-family `_git` helper, and scrub's git probes. A stuck git call now fails fast instead of hanging the command.
 - `brigade scrub` fails closed when the content-guard scan times out: a hung scanner is reported as `blocked` (exit 124) instead of being able to let content past the egress gate.
 

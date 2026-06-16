@@ -9,8 +9,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import subprocess
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -41,9 +43,26 @@ def read_json_dict(path: Path) -> dict[str, Any] | None:
 
 
 def write_json(path: Path, payload: dict[str, Any]) -> None:
-    """Write payload as indented, key-sorted JSON, creating parent directories."""
+    """Write payload as indented, key-sorted JSON, atomically, creating parents.
+
+    The write goes to a temp file in the same directory and is swapped in with
+    os.replace, so a reader (or a crashed writer) never observes a half-written
+    receipt: it sees either the old file or the complete new one. On failure the
+    temp file is removed and the existing file is left untouched.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+    data = json.dumps(payload, indent=2, sort_keys=True) + "\n"
+    fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    tmp_path = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_path, path)
+    except BaseException:
+        tmp_path.unlink(missing_ok=True)
+        raise
 
 
 def read_jsonl_dicts(path: Path) -> list[dict[str, Any]]:

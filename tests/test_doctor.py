@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime, timezone
 from pathlib import Path
 import json
 
@@ -22,6 +22,59 @@ def test_doctor_passes_against_workspace_profile(tmp_target: Path, capsys):
     out = capsys.readouterr().out
     assert "[ok]" in out
     assert "[fail]" not in out
+
+
+def test_doctor_memory_care_freshness_compares_in_utc(monkeypatch):
+    # Regression for issue #83: the scanner stamps scan_date in UTC, but doctor
+    # compared it against the host's LOCAL date. Run in the evening in a timezone
+    # behind UTC, a same-day scan then read as "in the future". Pin the wall clock
+    # to an instant that is already the 14th in UTC; doctor must read the same UTC
+    # date (not the host's local date), so a 14th-stamped scan reads as today.
+    fixed_utc = datetime(2026, 5, 14, 1, 0, tzinfo=timezone.utc)
+
+    class _FixedClock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return fixed_utc if tz is not None else fixed_utc.replace(tzinfo=None)
+
+    monkeypatch.setattr(doctor_mod, "datetime", _FixedClock)
+    assert doctor_mod._memory_care_today() == date(2026, 5, 14)
+
+    status, name, detail = doctor_mod._check_memory_care_scan_freshness(Path("decay/scan-latest.json"), "2026-05-14")
+    assert name == "memory-care: scan freshness"
+    assert "in the future" not in detail
+    assert status == doctor_mod.OK
+
+
+def test_doctor_workspace_profile_wires_memory_care_decay_dir(tmp_target: Path, capsys):
+    # Regression for issue #79: a fresh workspace init must create the decay dir
+    # doctor actually looks for (.brigade/memory-care/decay), so first contact does
+    # not warn "staleness scanner not wired" about a dir init was meant to create.
+    install_selection(
+        tmp_target,
+        Selection(depth="workspace", harnesses=["claude"], owner="claude", includes=[]),
+    )
+    assert (tmp_target / ".brigade" / "memory-care" / "decay").is_dir()
+    doctor_mod.run(target=tmp_target, harness="generic")
+    out = capsys.readouterr().out
+    assert "staleness scanner not wired" not in out
+
+
+def test_doctor_json_output_is_structured(tmp_target: Path, capsys):
+    install_selection(
+        tmp_target,
+        Selection(depth="workspace", harnesses=["claude"], owner="claude", includes=[]),
+    )
+    capsys.readouterr()  # drain install output so only the doctor JSON remains
+    rc = doctor_mod.run(target=tmp_target, harness="generic", json_output=True)
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["target"].endswith("ws")
+    assert payload["harnesses"] == ["claude"]
+    assert payload["owner"] == "claude"
+    assert payload["depth"] == "workspace"
+    assert payload["checks"] and {"status", "name", "detail"} <= set(payload["checks"][0])
+    assert payload["summary"]["total"] == len(payload["checks"])
+    assert payload["ready"] is (rc == 0)
 
 
 def test_doctor_reports_failures_on_empty_dir(tmp_target: Path, capsys):
