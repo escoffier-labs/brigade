@@ -79,6 +79,16 @@ func TestTelegram_Send_ReturnsErrorOnNonOK(t *testing.T) {
 	}
 }
 
+func TestTelegram_EscapeMDV2_EscapesBackslashFirst(t *testing.T) {
+	// A literal backslash must be escaped to "\\", and a following special
+	// must not get its escape backslash double-escaped.
+	got := escapeMDV2(`a\b.c`)
+	want := `a\\b\.c`
+	if got != want {
+		t.Fatalf("escapeMDV2(%q) = %q, want %q", `a\b.c`, got, want)
+	}
+}
+
 func TestTelegram_NameAndType(t *testing.T) {
 	tg := NewTelegram("foo", "http://x", "tok", "123", time.Second)
 	if tg.Name() != "foo" {

@@ -96,7 +96,9 @@ func formatTelegram(m canonical.Message) string {
 // escapeMDV2 escapes the characters Telegram MarkdownV2 requires escaping
 // when they appear in text (per Bot API docs).
 func escapeMDV2(s string) string {
-	special := []string{"_", "*", "[", "]", "(", ")", "~", "`", ">", "#", "+", "-", "=", "|", "{", "}", ".", "!"}
+	// Escape the backslash first so the escapes added below for the other
+	// special characters are not themselves double-escaped.
+	special := []string{"\\", "_", "*", "[", "]", "(", ")", "~", "`", ">", "#", "+", "-", "=", "|", "{", "}", ".", "!"}
 	for _, c := range special {
 		s = strings.ReplaceAll(s, c, "\\"+c)
 	}

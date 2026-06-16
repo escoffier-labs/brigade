@@ -64,7 +64,7 @@ func TestRun_NoChannelsConfigured_Exit2(t *testing.T) {
 	}
 }
 
-func TestRun_OneChannelFails_ExitsOne(t *testing.T) {
+func TestRun_OneChannelFails_ExitsSendFailureCode(t *testing.T) {
 	failingSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 	}))
@@ -75,8 +75,10 @@ func TestRun_OneChannelFails_ExitsOne(t *testing.T) {
 		"",
 		map[string]string{"DISCORD_WEBHOOK_URL": failingSrv.URL},
 	)
-	if code != 1 {
-		t.Fatalf("expected exit 1 for one failing channel, got %d (stderr: %s)", code, stderr)
+	// Send failures use exitFailures (3), kept distinct from the config
+	// error code (2) so the two cases never collide.
+	if code != 3 {
+		t.Fatalf("expected exit 3 for a failing channel, got %d (stderr: %s)", code, stderr)
 	}
 	if !strings.Contains(stderr, "FAIL channel=discord") {
 		t.Errorf("expected FAIL line in stderr, got %q", stderr)
@@ -302,6 +304,64 @@ default = true
 	}
 	if payload["warn_count"].(float64) == 0 {
 		t.Fatalf("expected inactive channel warning: %#v", payload)
+	}
+}
+
+func TestRun_CodexNotifyFromArg_UsesPositionalEventJSON(t *testing.T) {
+	var got map[string]interface{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(body, &got)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	// Codex passes the event JSON as the last positional argv argument and
+	// nothing on stdin. Body should come from the arg payload, not stdin.
+	event := `{"type":"agent-turn-complete","turn-id":"turn-99","last-assistant-message":"all green from arg"}`
+	code, _, stderr := runMain(t,
+		[]string{"agent-notify", "--hook", "codex-notify", event},
+		"",
+		map[string]string{"DISCORD_WEBHOOK_URL": srv.URL},
+	)
+	if code != 0 {
+		t.Fatalf("exit = %d, stderr = %s", code, stderr)
+	}
+	embeds, _ := got["embeds"].([]interface{})
+	if len(embeds) != 1 {
+		t.Fatalf("expected one embed, got %#v", got["embeds"])
+	}
+	embed, _ := embeds[0].(map[string]interface{})
+	if embed["description"] != "all green from arg" {
+		t.Fatalf("description = %#v, want body parsed from positional arg", embed["description"])
+	}
+	if title, _ := embed["title"].(string); title != "Codex (turn-99)" {
+		t.Fatalf("title = %#v, want Codex (turn-99)", embed["title"])
+	}
+}
+
+func TestRun_CodexNotifyNoArgs_FallsBackToStdin(t *testing.T) {
+	var got map[string]interface{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(body, &got)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	event := `{"type":"agent-turn-complete","last-assistant-message":"from stdin"}`
+	code, _, stderr := runMain(t,
+		[]string{"agent-notify", "--hook", "codex-notify"},
+		event,
+		map[string]string{"DISCORD_WEBHOOK_URL": srv.URL},
+	)
+	if code != 0 {
+		t.Fatalf("exit = %d, stderr = %s", code, stderr)
+	}
+	embeds, _ := got["embeds"].([]interface{})
+	embed, _ := embeds[0].(map[string]interface{})
+	if embed["description"] != "from stdin" {
+		t.Fatalf("description = %#v, want body parsed from stdin", embed["description"])
 	}
 }
 

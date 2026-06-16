@@ -26,8 +26,8 @@ import (
 
 const (
 	exitOK       = 0
-	exitFailures = 1 // returned when N>0 channel sends failed; exact count returned
 	exitConfig   = 2 // returned for config / setup errors before any send is attempted
+	exitFailures = 3 // returned when one or more channel sends failed (count logged to stderr)
 )
 
 var (
@@ -127,7 +127,9 @@ func runSend(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	// Fan out, best-effort.
 	failed := dispatch(reg, names, msg, stderr, time.Duration(cfg.Defaults.TimeoutSeconds)*time.Second)
 	if failed > 0 {
-		return failed // exit code = number of failures (>= 1)
+		// Distinct from exitConfig (2): the failure count is logged per
+		// channel on stderr; the exit code only signals that sends failed.
+		return exitFailures
 	}
 	return exitOK
 }
@@ -287,6 +289,14 @@ func buildMessage(hook string, posArgs []string, stdin io.Reader) (canonical.Mes
 	case "claude-code-notification":
 		return adapter.ClaudeCodeNotification(stdin)
 	case "codex-notify":
+		// Codex CLI passes the event JSON as the last positional argv
+		// argument, not on stdin. Use the last positional arg when present
+		// (it is the single JSON payload Codex appends) so an unrelated
+		// leading arg cannot corrupt the JSON; fall back to stdin only when
+		// no positional args were given.
+		if len(posArgs) > 0 {
+			return adapter.CodexNotifyFromBytes([]byte(posArgs[len(posArgs)-1]))
+		}
 		return adapter.CodexNotify(stdin)
 	case "", "custom":
 		// Prefer positional arg; otherwise read stdin.

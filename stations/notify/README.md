@@ -220,8 +220,8 @@ Then point the upstream tool's hook config at `my-tool-notify.sh` instead.
 ## Exit codes
 
 - `0` - all sends succeeded
-- `1+` - number of channel sends that failed (other channels still received the message)
 - `2` - config or input error before any send was attempted
+- `3` - one or more channel sends failed (other channels still received the message; the per-channel failure count is logged to stderr)
 
 ## Channel formatting
 

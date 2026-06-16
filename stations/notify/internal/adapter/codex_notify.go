@@ -16,6 +16,13 @@ func CodexNotify(r io.Reader) (canonical.Message, error) {
 	if err != nil {
 		return canonical.Message{}, fmt.Errorf("read input: %w", err)
 	}
+	return CodexNotifyFromBytes(raw)
+}
+
+// CodexNotifyFromBytes parses a Codex CLI notify event JSON from a byte slice.
+// Codex passes the event JSON as the last positional argv argument rather than
+// on stdin, so the command layer can reach this directly with the arg payload.
+func CodexNotifyFromBytes(raw []byte) (canonical.Message, error) {
 	var ev map[string]interface{}
 	if err := json.Unmarshal(raw, &ev); err != nil {
 		return canonical.Message{}, fmt.Errorf("parse codex event: %w", err)
