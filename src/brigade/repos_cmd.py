@@ -9,6 +9,7 @@ import subprocess
 import sys
 import shutil
 import fnmatch
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -753,6 +754,20 @@ def _repo_summary(entry: RepoEntry) -> dict[str, Any]:
     }
 
 
+def _repo_summaries(entries: list[RepoEntry]) -> list[dict[str, Any]]:
+    """Summarize every enabled repo, in config order.
+
+    Each summary is independent and IO-bound (git calls plus file stats), so a
+    multi-repo fleet runs them on a small thread pool; executor.map preserves the
+    config order the rest of the scan depends on. A single repo stays serial.
+    """
+    enabled = [entry for entry in entries if entry.enabled]
+    if len(enabled) <= 1:
+        return [_repo_summary(entry) for entry in enabled]
+    with ThreadPoolExecutor(max_workers=min(8, len(enabled))) as executor:
+        return list(executor.map(_repo_summary, enabled))
+
+
 def _repo_checks(summary: dict[str, Any]) -> list[dict[str, Any]]:
     repo_id = str(summary.get("id") or "unknown")
     checks: list[dict[str, Any]] = []
@@ -841,7 +856,7 @@ def _repo_checks(summary: dict[str, Any]) -> list[dict[str, Any]]:
 def scan_payload(target: Path) -> dict[str, Any]:
     target = target.expanduser().resolve()
     entries, errors, config_loaded = _load_config(target)
-    repos = [_repo_summary(entry) for entry in entries if entry.enabled]
+    repos = _repo_summaries(entries)
     checks: list[dict[str, Any]] = []
     if errors:
         checks.extend({"status": WARN, "name": "repo_fleet_config", "detail": error} for error in errors)
