@@ -22,6 +22,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `brigade friction show [--severity] [--json]` reads back the latest friction scan, which previously could only be written (issue #90).
 
 ### Changed
+- Internal: the skills and memory MCP stdio servers now share one harness (`mcp_server.serve_stdio`) instead of carrying near-identical JSON-RPC loops. No command surface or protocol change; a new read-only MCP surface is now a few callbacks.
 - The repo fleet scan now summarizes repos on a small thread pool instead of serially. Each summary is independent and IO-bound (git calls plus file stats), so a multi-repo fleet scans noticeably faster while output stays in config order; a single-repo fleet is unchanged.
 - `brigade doctor` now groups host-global findings (OpenClaw config, the content-guard clone, uninstalled managed tools) under a "machine-level (not specific to this repo)" header in text output and tags each check with a `scope` of `repo` or `machine` in `--json`, so a single-repo run no longer reads as if the repo is responsible for machine-wide state (issue #80).
 - `brigade security suppress` and `brigade security unsuppress` gain `--json`, so an agent or CI step can parse the suppression result (issue #90).
