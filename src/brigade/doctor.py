@@ -6,7 +6,7 @@ import json
 import os
 import re
 import shutil
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import List, Tuple
 
@@ -166,17 +166,24 @@ def security_station_checks(ctx: DoctorContext) -> List[CheckResult]:
     return results
 
 
-def run(target: Path, harness: str = "generic") -> int:
-    from .registry import all_stations
-    from . import managed
-
+def run(target: Path, harness: str = "generic", *, json_output: bool = False) -> int:
     ctx = build_context(target, harness)
+    checks = _gather_checks(ctx)
+    if json_output:
+        return _report_json(ctx, checks)
+
     print(f"brigade doctor: target {ctx.target}")
     if ctx.selection is not None:
         sel = ctx.selection
         print(f"  harnesses: {', '.join(sel.harnesses) or '(none)'} (owner={sel.owner}, depth={sel.depth})")
     else:
         print(f"  harnesses: (legacy target, no config; assuming {', '.join(ctx.harnesses)})")
+    return _report(checks)
+
+
+def _gather_checks(ctx: DoctorContext) -> List[CheckResult]:
+    from .registry import all_stations
+    from . import managed
 
     checks: List[CheckResult] = []
     missing_tools: List[Tuple[str, str]] = []
@@ -200,7 +207,7 @@ def run(target: Path, harness: str = "generic") -> int:
                 f"{len(missing_tools)} managed tools not installed ({', '.join(stations)}); optional, install with `brigade add <station>`",
             )
         )
-    return _report(checks)
+    return checks
 
 
 def _check_workspace_files(target: Path) -> List[CheckResult]:
@@ -504,7 +511,10 @@ def _parse_memory_care_scan_date(value: object) -> date | None:
 
 
 def _memory_care_today() -> date:
-    return date.today()
+    # The scanner stamps scan_date in UTC (memory_cmd._today), so the freshness
+    # comparison must also be in UTC. Comparing against a local date made an
+    # evening run in a behind-UTC timezone read a same-day scan as the future.
+    return datetime.now(timezone.utc).date()
 
 
 def _check_publish_gate(target: Path) -> List[CheckResult]:
@@ -691,3 +701,27 @@ def _report(checks: List[CheckResult]) -> int:
     summary = f"summary: {len(checks)} checks, {failed} failed, {manual} manual"
     print(summary)
     return 1 if failed else 0
+
+
+def _report_json(ctx: DoctorContext, checks: List[CheckResult]) -> int:
+    counts = {OK: 0, WARN: 0, FAIL: 0, MANUAL: 0, INFO: 0}
+    for status, _, _ in checks:
+        counts[status] = counts.get(status, 0) + 1
+    sel = ctx.selection
+    payload = {
+        "target": str(ctx.target),
+        "harnesses": list(ctx.harnesses),
+        "owner": getattr(sel, "owner", None),
+        "depth": getattr(sel, "depth", None),
+        "checks": [{"status": status, "name": name, "detail": detail} for status, name, detail in checks],
+        "summary": {
+            "total": len(checks),
+            "ok": counts[OK],
+            "warn": counts[WARN],
+            "manual": counts[MANUAL],
+            "failed": counts[FAIL],
+        },
+        "ready": counts[FAIL] == 0,
+    }
+    print(json.dumps(payload, indent=2, sort_keys=True))
+    return 1 if counts[FAIL] else 0

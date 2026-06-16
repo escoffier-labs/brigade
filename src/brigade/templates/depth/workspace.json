@@ -26,7 +26,7 @@
     {"src": "scripts/backup-restic.sh", "dst": "scripts/backup-restic.sh", "mode": "0755"}
   ],
   "dirs": [
-    "memory/cards/decay",
+    ".brigade/memory-care/decay",
     "memory/handoff-inbox"
   ]
 }

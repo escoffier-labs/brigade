@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `brigade doctor --json` and `brigade status --json` emit machine-readable output (target, harnesses, owner, depth, per-check status/name/detail, summary counts, and a `ready` flag), so the two most diagnostic surfaces can feed scripts and a future fleet aggregation instead of being text-only.
+
+### Fixed
+- `brigade doctor` memory-care freshness no longer reports a same-day scan as "in the future". The scanner stamps `scan_date` in UTC, but doctor compared it against the host's local date, so an evening run in a behind-UTC timezone warned falsely (issue #83). Doctor now compares in UTC.
+- `brigade init --depth workspace` now creates `.brigade/memory-care/decay`, the directory doctor actually checks, instead of the legacy `memory/cards/decay`. A fresh workspace no longer draws a "staleness scanner not wired" warning on first contact (issue #79).
+- `localio.write_json` now writes receipts atomically (temp file plus `os.replace`), so a reader or a crashed writer never observes a half-written JSON receipt; on failure the original file is left intact and the temp file is removed.
+
 ## [0.11.0] - 2026-06-13
 
 ### Added

@@ -15,10 +15,11 @@ def register(sub: argparse._SubParsersAction) -> None:
         choices=["generic", "openclaw", "hermes"],
         default="generic",
     )
+    p_doctor.add_argument("--json", action="store_true", help="Emit machine-readable JSON instead of text.")
     p_doctor.set_defaults(func=dispatch)
 
 
 def dispatch(args) -> int:
     from .. import doctor as doctor_mod
 
-    return doctor_mod.run(target=args.target, harness=args.harness)
+    return doctor_mod.run(target=args.target, harness=args.harness, json_output=args.json)
