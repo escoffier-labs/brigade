@@ -31,6 +31,11 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_repos_doctor = repos_sub.add_parser("doctor", help="Report repo fleet health.")
     p_repos_doctor.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
     p_repos_doctor.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_repos_doctor.add_argument(
+        "--deep",
+        action="store_true",
+        help="Run the operator checkup (every first-run doctor) in each enabled repo and aggregate.",
+    )
     p_repos_import = repos_sub.add_parser("import-issues", help="Import repo fleet health issues into the work inbox.")
     p_repos_import.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
     p_repos_import.add_argument("--dry-run", action="store_true", help="Show counts without writing imports.")
@@ -562,7 +567,7 @@ def dispatch(args) -> int:
     if args.repos_command == "scan":
         return repos_cmd.scan(target=args.target, json_output=args.json)
     if args.repos_command == "doctor":
-        return repos_cmd.doctor(target=args.target, json_output=args.json)
+        return repos_cmd.doctor(target=args.target, json_output=args.json, deep=args.deep)
     if args.repos_command == "import-issues":
         return repos_cmd.import_issues(target=args.target, dry_run=args.dry_run, json_output=args.json)
     if args.repos_command == "first-run":

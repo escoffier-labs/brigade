@@ -198,7 +198,7 @@ def test_repos_cli_dispatch(tmp_path, monkeypatch):
         ("list", {"target": tmp_path, "json_output": True}),
         ("show", {"target": tmp_path, "repo_id": "current", "json_output": True}),
         ("scan", {"target": tmp_path, "json_output": True}),
-        ("doctor", {"target": tmp_path, "json_output": True}),
+        ("doctor", {"target": tmp_path, "json_output": True, "deep": False}),
         ("import-issues", {"target": tmp_path, "dry_run": True, "json_output": True}),
         ("health-commands", {"target": tmp_path, "json_output": True}),
         ("discover-plan", {"target": tmp_path, "json_output": True}),
@@ -299,6 +299,35 @@ def test_repo_summaries_preserve_config_order_and_skip_disabled(tmp_path, monkey
     monkeypatch.setattr(repos_cmd, "_repo_summary", lambda entry: {"id": entry.repo_id})
     result = repos_cmd._repo_summaries(entries)
     assert [row["id"] for row in result] == [entry.repo_id for entry in entries if entry.enabled]
+
+
+def test_repos_doctor_deep_aggregates_checkup(tmp_path, monkeypatch, capsys):
+    # issue #78: `repos doctor --deep` runs the operator checkup in each enabled
+    # repo and rolls the per-repo verdicts up to a fleet verdict.
+    from brigade import operator_cmd
+
+    (tmp_path / "r1").mkdir()
+    (tmp_path / "r2").mkdir()
+    config = tmp_path / ".brigade" / "repos.toml"
+    config.parent.mkdir(parents=True)
+    config.write_text(
+        '[[repo]]\nid = "r1"\npath = "r1"\n\n'
+        '[[repo]]\nid = "r2"\npath = "r2"\n\n'
+        '[[repo]]\nid = "r3"\npath = "r3"\nenabled = false\n'
+    )
+
+    def fake_checkup(target, **kwargs):
+        ready = target.name == "r1"
+        return {"ready": ready, "blocking_surface_count": 0 if ready else 2, "surfaces": []}
+
+    monkeypatch.setattr(operator_cmd, "checkup_payload", fake_checkup)
+    rc = repos_cmd.doctor(target=tmp_path, json_output=True, deep=True)
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["repo_count"] == 2  # r3 is disabled
+    assert {r["id"] for r in payload["repos"]} == {"r1", "r2"}
+    assert payload["blocking_repo_count"] == 1
+    assert payload["ready"] is False
+    assert rc == 1
 
 
 def test_repo_summary_counts_antigravity_inbox(tmp_path):

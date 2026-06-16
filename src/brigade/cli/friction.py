@@ -51,6 +51,14 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_friction_add.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_friction_add.set_defaults(func=dispatch)
 
+    p_friction_show = friction_sub.add_parser("show", help="Show the latest friction scan results.")
+    p_friction_show.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_friction_show.add_argument(
+        "--severity", choices=["low", "medium", "high"], default=None, help="Only show this severity."
+    )
+    p_friction_show.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_friction_show.set_defaults(func=dispatch)
+
 
 def dispatch(args) -> int:
     from .. import friction_cmd
@@ -68,6 +76,8 @@ def dispatch(args) -> int:
             dry_run=args.dry_run,
             json_output=args.json,
         )
+    if args.friction_command == "show":
+        return friction_cmd.show(target=args.target, severity=args.severity, json_output=args.json)
     if args.friction_command == "add":
         return friction_cmd.add(
             target=args.target,

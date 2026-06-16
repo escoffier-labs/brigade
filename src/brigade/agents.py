@@ -133,6 +133,40 @@ _ADAPTERS: dict[str, Callable[[str, bool, str | None], List[str]]] = {
 }
 
 
+# How strongly each adapter enforces a read-only run:
+#   hard - a native sandbox or tool allowlist the model cannot escape
+#   soft - read-only is only a prompt instruction the model may ignore
+#   none - read_only is not applied to this CLI at all
+# Brigade is "loud about exceptions", so `brigade run --read-only` warns when an
+# assigned harness is soft or none rather than implying a guarantee it cannot make.
+READ_ONLY_ENFORCEMENT: dict[str, str] = {
+    "codex": "hard",
+    "antigravity": "hard",
+    "pi": "hard",
+    "cursor": "hard",
+    "aider": "hard",
+    "continue": "hard",
+    "qwen": "hard",
+    "kimi": "hard",
+    "goose": "soft",
+    "copilot": "soft",
+    "adal": "soft",
+    "openhands": "soft",
+    "grok": "soft",
+    "amp": "soft",
+    "crush": "soft",
+    "claude": "none",
+    "opencode": "none",
+}
+
+
+def read_only_enforcement(cli_ref: str) -> str:
+    """Return how strongly cli_ref enforces read-only: 'hard', 'soft', or 'none'."""
+    if cli_ref.startswith(_OLLAMA_PREFIX):
+        return "none"
+    return READ_ONLY_ENFORCEMENT.get(cli_ref, "none")
+
+
 @dataclass(frozen=True)
 class AgentResult:
     text: str

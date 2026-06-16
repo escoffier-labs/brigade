@@ -9,6 +9,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from . import localio
 from .templates import template_root
 
 
@@ -294,6 +295,8 @@ def run(
     target: Path,
     policy: str = "public-repo",
     dry_run: bool = False,
+    json_output: bool = False,
+    write_receipt: bool = True,
 ) -> int:
     target = target.expanduser().resolve()
     scanner_dir = globals()["scanner_dir"]()
@@ -320,16 +323,45 @@ def run(
 
     cmd = [sys.executable, "-m", "content_guard", "scan", str(target), "--policy", str(policy_path)]
     if dry_run:
+        if json_output:
+            print(
+                json.dumps(
+                    {"target": str(target), "dry_run": True, "policy": policy, "argv": cmd}, indent=2, sort_keys=True
+                )
+            )
+            return 0
         print("brigade scrub: would run:")
         print(" ", " ".join(cmd))
         print(f"  PYTHONPATH={scanner_dir / 'src'}")
         return 0
 
     result = run_scan(target, policy=policy)
+    # Summary-only receipt: never persist stdout/stderr, which can echo the very
+    # secrets this egress gate exists to keep on the machine.
+    summary = {
+        "target": str(target),
+        "policy": result.get("policy"),
+        "policy_path": result.get("policy_path"),
+        "status": result.get("status"),
+        "exit_code": int(result["exit_code"]),
+        "detail": result.get("detail"),
+        "generated_at": localio.utc_now_iso_z(),
+    }
+    receipt_path = target / ".brigade" / "scrub" / "latest.json"
+    if write_receipt:
+        localio.write_json(receipt_path, summary)
+    if json_output:
+        payload = dict(summary)
+        if write_receipt:
+            payload["receipt"] = str(receipt_path)
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return int(result["exit_code"])
     if result.get("stdout"):
         print(result["stdout"], end="")
     if result.get("stderr"):
         print(result["stderr"], end="", file=sys.stderr)
+    if write_receipt:
+        print(f"brigade scrub: receipt {receipt_path}", file=sys.stderr)
     return int(result["exit_code"])
 
 

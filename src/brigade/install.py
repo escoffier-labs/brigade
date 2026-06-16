@@ -133,13 +133,25 @@ def build_gitignore_block(selection: Selection) -> str:
     return "\n".join(lines)
 
 
-def apply_gitignore(target: Path, selection: Selection) -> str:
-    """Insert or replace the managed block in target's .gitignore. Returns 'created' or 'updated'."""
-    gi = target / ".gitignore"
+def apply_gitignore(target: Path, selection: Selection, *, use_git_exclude: bool = False) -> str:
+    """Insert or replace the managed ignore block. Returns a 'created/updated (<file>)' label.
+
+    By default the block goes in the tracked `.gitignore`. With use_git_exclude
+    (for a third-party clone you do not want to commit Brigade ignores into) it
+    goes in the untracked `.git/info/exclude` instead, falling back to `.gitignore`
+    when there is no `.git` directory to hold it.
+    """
     block = build_gitignore_block(selection)
+    if use_git_exclude and (target / ".git").is_dir():
+        gi = target / ".git" / "info" / "exclude"
+        gi.parent.mkdir(parents=True, exist_ok=True)
+        location = ".git/info/exclude"
+    else:
+        gi = target / ".gitignore"
+        location = ".gitignore"
     if not gi.exists():
         gi.write_text(block)
-        return "created"
+        return f"created ({location})"
     existing = gi.read_text()
     markers = (
         (GITIGNORE_BEGIN, GITIGNORE_END),
@@ -148,10 +160,10 @@ def apply_gitignore(target: Path, selection: Selection) -> str:
     new_text, replaced = _replace_managed_gitignore_blocks(existing, block, markers)
     if replaced:
         gi.write_text(new_text)
-        return "updated"
+        return f"updated ({location})"
     sep = "" if existing.endswith("\n") else "\n"
     gi.write_text(existing + sep + "\n" + block)
-    return "updated"
+    return f"updated ({location})"
 
 
 def _replace_managed_gitignore_blocks(
@@ -234,6 +246,7 @@ def install_selection(
     force: bool = False,
     dry_run: bool = False,
     allow_home: bool = False,
+    use_git_exclude: bool = False,
 ) -> int:
     """Install a Selection into `target`. Returns process exit code."""
     selection.validate()
@@ -312,7 +325,7 @@ def install_selection(
     # Persist config.json.
     write_config(target, Config(version=1, selection=selection))
 
-    result = apply_gitignore(target, selection)
+    result = apply_gitignore(target, selection, use_git_exclude=use_git_exclude)
     print(f"brigade: gitignore {result}")
 
     # Post-install output.

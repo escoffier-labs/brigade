@@ -1048,7 +1048,68 @@ def scan(*, target: Path, json_output: bool = False) -> int:
     return 0 if payload["config_loaded"] else 1
 
 
-def doctor(*, target: Path, json_output: bool = False) -> int:
+def deep_payload(target: Path) -> dict[str, Any]:
+    """Run the operator checkup in each enabled repo and aggregate a fleet verdict.
+
+    Each repo's checkup runs the read-only first-run doctors in-process. The loop
+    is intentionally serial: the checkup captures stdout via redirect_stdout, which
+    is process-global and not safe to run from multiple threads at once.
+    """
+    from . import operator_cmd
+
+    target = target.expanduser().resolve()
+    entries, errors, _config_loaded = _load_config(target)
+    repos: list[dict[str, Any]] = []
+    blocking = 0
+    for entry in entries:
+        if not entry.enabled:
+            continue
+        if not entry.path.is_dir():
+            repos.append({"id": entry.repo_id, "ready": False, "blocking_surface_count": None, "error": "missing"})
+            blocking += 1
+            continue
+        checkup = operator_cmd.checkup_payload(entry.path)
+        ready = bool(checkup.get("ready"))
+        if not ready:
+            blocking += 1
+        repos.append(
+            {
+                "id": entry.repo_id,
+                "ready": ready,
+                "blocking_surface_count": checkup.get("blocking_surface_count"),
+                "surfaces": [{"name": s.get("name"), "ready": s.get("ready")} for s in checkup.get("surfaces", [])],
+            }
+        )
+    return {
+        "target": str(target),
+        "deep": True,
+        "ready": blocking == 0 and bool(repos),
+        "repo_count": len(repos),
+        "blocking_repo_count": blocking,
+        "repos": repos,
+        "errors": errors,
+    }
+
+
+def doctor(*, target: Path, json_output: bool = False, deep: bool = False) -> int:
+    if deep:
+        payload = deep_payload(target)
+        if json_output:
+            print(json.dumps(payload, indent=2, sort_keys=True))
+            return 0 if payload["ready"] else 1
+        print(f"repos doctor --deep: {payload['target']}")
+        for error in payload["errors"]:
+            print(f"[WARN] repo_fleet_config: {error}")
+        for repo in payload["repos"]:
+            mark = "ok" if repo["ready"] else "fail"
+            if repo.get("error") == "missing":
+                print(f"  [{mark}] {repo['id']}: repo path is missing")
+            else:
+                print(f"  [{mark}] {repo['id']}: {repo['blocking_surface_count']} blocking surface(s)")
+        print(f"ready: {'yes' if payload['ready'] else 'no'}")
+        print(f"repos: {payload['repo_count']}, blocking: {payload['blocking_repo_count']}")
+        return 0 if payload["ready"] else 1
+
     payload = health(target)
     scan_issue_count = sum(1 for check in payload["checks"] if isinstance(check, dict) and check.get("status") != OK)
     health_issue_count = int(payload.get("issue_count") or 0)

@@ -9,7 +9,7 @@ import subprocess
 import sys
 from pathlib import Path
 from typing import Any
-from .localio import utc_now_iso as _now, write_json as _write_json
+from .localio import stable_hash as _stable_hash, utc_now_iso as _now, write_json as _write_json
 
 DANGEROUS_PATTERNS = (
     re.compile(r"\brm\s+-[^;\n]*[rf][^;\n]*[rf]"),
@@ -367,12 +367,44 @@ def retry(
     )
 
 
+def _failed_step_import_records(receipt: dict[str, Any], run_id: str) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    for step in receipt.get("steps", []):
+        if not isinstance(step, dict) or step.get("status") == "completed":
+            continue
+        step_id = str(step.get("id") or step.get("index") or "step")
+        records.append(
+            {
+                "text": f"Resolve failed runbook step '{step_id}' in run {run_id}",
+                "kind": "task",
+                "source": "runbook",
+                "type": "docs",
+                "priority": "normal",
+                "template": "docs",
+                "acceptance": [
+                    "The failed runbook step is fixed or explicitly deferred.",
+                    "No private contents or paths are copied into public artifacts.",
+                ],
+                "metadata": {
+                    "run_id": run_id,
+                    "step_id": step_id,
+                    "safe_summary": f"runbook step {step_id} failed",
+                    "source_item_key": f"{run_id}:{step_id}",
+                    "source_fingerprint": _stable_hash({"run_id": run_id, "step_id": step_id}),
+                },
+            }
+        )
+    return records
+
+
 def closeout(
     *,
     target: Path,
     run_id: str = "latest",
     status: str = "reviewed",
     reason: str | None = None,
+    import_issues: bool = False,
+    dry_run: bool = False,
     json_output: bool = False,
 ) -> int:
     target = target.expanduser().resolve()
@@ -380,6 +412,7 @@ def closeout(
     if receipt is None:
         print(f"error: {error}", file=sys.stderr)
         return 2
+    resolved_run_id = str(receipt.get("run_id"))
     closeout_payload = {
         "run_id": receipt.get("run_id"),
         "runbook_id": receipt.get("runbook_id"),
@@ -387,13 +420,28 @@ def closeout(
         "reason": reason or "",
         "created_at": _now(),
     }
-    closeout_path = _runs_root(target) / str(receipt.get("run_id")) / "closeout.json"
+    closeout_path = _runs_root(target) / resolved_run_id / "closeout.json"
     _write_json(closeout_path, closeout_payload)
     closeout_payload["closeout_path"] = str(closeout_path)
+    if import_issues:
+        from .work_cmd import ledger as ledger_mod
+
+        records = _failed_step_import_records(receipt, resolved_run_id)
+        imported, skipped, skipped_dismissed = ledger_mod._append_import_records(target, records, dry_run=dry_run)
+        closeout_payload["import_issues"] = {
+            "failed_step_count": len(records),
+            "created": len(imported),
+            "skipped": len(skipped),
+            "skipped_dismissed": len(skipped_dismissed),
+            "dry_run": dry_run,
+        }
     if json_output:
         print(json.dumps(closeout_payload, indent=2, sort_keys=True))
         return 0
-    print(f"runbook_closeout: {receipt.get('run_id')}")
+    print(f"runbook_closeout: {resolved_run_id}")
     print(f"status: {status}")
     print(f"closeout: {closeout_path}")
+    if import_issues:
+        info = closeout_payload["import_issues"]
+        print(f"import_issues: {info['created']} created from {info['failed_step_count']} failed step(s)")
     return 0

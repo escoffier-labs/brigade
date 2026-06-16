@@ -16,23 +16,24 @@ brigade roadmap commands --write
 - `brigade budgets`: 2 command path(s)
 - `brigade center`: 29 command path(s)
 - `brigade chat`: 7 command path(s)
+- `brigade completions`: 1 command path(s)
 - `brigade context`: 8 command path(s)
 - `brigade daily`: 26 command path(s)
 - `brigade doctor`: 1 command path(s)
 - `brigade dogfood`: 1 command path(s)
-- `brigade friction`: 2 command path(s)
+- `brigade friction`: 3 command path(s)
 - `brigade handoff`: 17 command path(s)
 - `brigade handoff-template`: 1 command path(s)
 - `brigade hermes-fragments`: 1 command path(s)
 - `brigade ingest`: 1 command path(s)
 - `brigade init`: 1 command path(s)
 - `brigade learn`: 13 command path(s)
-- `brigade memory`: 8 command path(s)
+- `brigade memory`: 10 command path(s)
 - `brigade notifications`: 4 command path(s)
 - `brigade openclaw-fragments`: 1 command path(s)
 - `brigade operator`: 23 command path(s)
 - `brigade pantry`: 3 command path(s)
-- `brigade projects`: 9 command path(s)
+- `brigade projects`: 10 command path(s)
 - `brigade reconfigure`: 1 command path(s)
 - `brigade release`: 22 command path(s)
 - `brigade repos`: 70 command path(s)
@@ -44,7 +45,7 @@ brigade roadmap commands --write
 - `brigade runs`: 3 command path(s)
 - `brigade scrub`: 1 command path(s)
 - `brigade security`: 15 command path(s)
-- `brigade skills`: 26 command path(s)
+- `brigade skills`: 27 command path(s)
 - `brigade status`: 1 command path(s)
 - `brigade tools`: 48 command path(s)
 - `brigade untrusted`: 2 command path(s)
@@ -91,6 +92,7 @@ brigade roadmap commands --write
 - `brigade chat sweep import-issues`
 - `brigade chat sweep ingest`
 - `brigade chat sweep validate`
+- `brigade completions`
 - `brigade context archive`
 - `brigade context build`
 - `brigade context doctor`
@@ -129,6 +131,7 @@ brigade roadmap commands --write
 - `brigade dogfood`
 - `brigade friction add`
 - `brigade friction scan`
+- `brigade friction show`
 - `brigade handoff archive`
 - `brigade handoff closeout`
 - `brigade handoff doctor`
@@ -171,6 +174,8 @@ brigade roadmap commands --write
 - `brigade memory care plan-fixes`
 - `brigade memory care scan`
 - `brigade memory care status`
+- `brigade memory search`
+- `brigade memory serve-mcp`
 - `brigade notifications event plan`
 - `brigade notifications event record`
 - `brigade notifications setup plan`
@@ -206,6 +211,7 @@ brigade roadmap commands --write
 - `brigade projects closeout`
 - `brigade projects closeout-show`
 - `brigade projects closeouts`
+- `brigade projects doctor`
 - `brigade projects import-issues`
 - `brigade projects readiness list`
 - `brigade projects readiness plan`
@@ -371,6 +377,7 @@ brigade roadmap commands --write
 - `brigade skills rollback`
 - `brigade skills search`
 - `brigade skills serve-mcp`
+- `brigade skills uninstall`
 - `brigade status`
 - `brigade tools apply`
 - `brigade tools call approve`

@@ -60,6 +60,7 @@ from . import (
     openclaw_fragments as _openclaw_fragments_group,
     hermes_fragments as _hermes_fragments_group,
     reconfigure as _reconfigure_group,
+    completions as _completions_group,
 )
 
 
@@ -115,6 +116,7 @@ def _build_parser() -> argparse.ArgumentParser:
     _openclaw_fragments_group.register(sub)
     _hermes_fragments_group.register(sub)
     _reconfigure_group.register(sub)
+    _completions_group.register(sub)
 
     parser.epilog = _grouped_epilog(sub)
     return parser

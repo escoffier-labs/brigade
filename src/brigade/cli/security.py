@@ -99,11 +99,13 @@ def register(sub: argparse._SubParsersAction) -> None:
         "--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update."
     )
     p_security_suppress.add_argument("--reason", required=True, help="Required suppression reason.")
+    p_security_suppress.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_security_unsuppress = security_sub.add_parser("unsuppress", help="Remove a security finding suppression.")
     p_security_unsuppress.add_argument("fingerprint", help="Finding id, id prefix, or fingerprint to unsuppress.")
     p_security_unsuppress.add_argument(
         "--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update."
     )
+    p_security_unsuppress.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_security_closeout = security_sub.add_parser("closeout", help="Write local security review closeout metadata.")
     p_security_closeout.add_argument(
         "--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update."
@@ -202,9 +204,11 @@ def dispatch(args) -> int:
             json_output=args.json,
         )
     if args.security_command == "suppress":
-        return security_cmd.suppress(target=args.target, fingerprint=args.fingerprint, reason=args.reason)
+        return security_cmd.suppress(
+            target=args.target, fingerprint=args.fingerprint, reason=args.reason, json_output=args.json
+        )
     if args.security_command == "unsuppress":
-        return security_cmd.unsuppress(target=args.target, fingerprint=args.fingerprint)
+        return security_cmd.unsuppress(target=args.target, fingerprint=args.fingerprint, json_output=args.json)
     if args.security_command == "closeout":
         return security_cmd.closeout(
             target=args.target,

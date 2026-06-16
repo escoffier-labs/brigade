@@ -17,6 +17,19 @@ def _workspace_sel() -> Selection:
     return Selection(depth="workspace", harnesses=["claude"], owner="claude", includes=[])
 
 
+def test_init_git_exclude_writes_to_git_info_exclude(tmp_target: Path):
+    # issue #81: in a third-party clone, write ignores to .git/info/exclude
+    # (local-only) instead of the tracked .gitignore.
+    tmp_target.mkdir(parents=True, exist_ok=True)
+    (tmp_target / ".git" / "info").mkdir(parents=True)
+    assert install_selection(tmp_target, _workspace_sel(), use_git_exclude=True) == 0
+    exclude = tmp_target / ".git" / "info" / "exclude"
+    assert exclude.is_file()
+    assert "brigade gitignore block" in exclude.read_text()
+    gitignore = tmp_target / ".gitignore"
+    assert not gitignore.exists() or "brigade gitignore block" not in gitignore.read_text()
+
+
 def _openclaw_sel() -> Selection:
     return Selection(
         depth="workspace",

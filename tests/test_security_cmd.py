@@ -988,7 +988,7 @@ def test_security_suppress_cli(tmp_path, monkeypatch):
     assert (
         cli.main(["security", "suppress", "0123456789abcdef", "--target", str(tmp_path), "--reason", "reviewed"]) == 0
     )
-    assert seen == {"target": tmp_path, "fingerprint": "0123456789abcdef", "reason": "reviewed"}
+    assert seen == {"target": tmp_path, "fingerprint": "0123456789abcdef", "reason": "reviewed", "json_output": False}
 
 
 def test_security_unsuppress_cli(tmp_path, monkeypatch):
@@ -1000,7 +1000,7 @@ def test_security_unsuppress_cli(tmp_path, monkeypatch):
 
     monkeypatch.setattr(security_cmd, "unsuppress", fake_unsuppress)
     assert cli.main(["security", "unsuppress", "0123456789abcdef", "--target", str(tmp_path)]) == 0
-    assert seen == {"target": tmp_path, "fingerprint": "0123456789abcdef"}
+    assert seen == {"target": tmp_path, "fingerprint": "0123456789abcdef", "json_output": False}
 
 
 def test_security_fix_cli(tmp_path, monkeypatch):

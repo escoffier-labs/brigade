@@ -724,6 +724,53 @@ def install(
     return 0
 
 
+def uninstall(*, workspace: Path, skill: str, harness: str, json_output: bool = False) -> int:
+    """Remove an installed skill from one or all harnesses, the inverse of install."""
+    workspace = workspace.expanduser().resolve()
+    install_targets = _install_targets(workspace)
+    if harness not in (*install_targets, "all"):
+        print(f"error: unknown skill install target: {harness}", file=sys.stderr)
+        return 2
+    skill_id = _slug(skill)
+    targets = install_targets if harness == "all" else (harness,)
+    removed: list[dict[str, Any]] = []
+    for install_target in targets:
+        try:
+            dest = _install_dir(workspace, install_target, skill_id)
+        except ValueError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+        receipt_path = _installs_root(workspace) / f"{skill_id}-{install_target}.json"
+        if not dest.exists() and not receipt_path.is_file():
+            continue
+        if dest.exists():
+            shutil.rmtree(dest)
+        if receipt_path.is_file():
+            receipt_path.unlink()
+        _append_jsonl(
+            _install_history_path(workspace),
+            {
+                "action": "uninstall",
+                "skill_id": skill_id,
+                "harness": install_target,
+                "workspace": str(workspace),
+                "uninstalled_at": _now(),
+            },
+        )
+        removed.append({"harness": install_target, "path": str(dest)})
+    if not removed:
+        print(f"error: skill not installed: {skill} ({harness})", file=sys.stderr)
+        return 1
+    payload = {"workspace": str(workspace), "skill_id": skill_id, "uninstalled": removed, "count": len(removed)}
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+    print(f"skills uninstall: {skill_id}")
+    for record in removed:
+        print(f"removed: {record['harness']} -> {record['path']}")
+    return 0
+
+
 def rollback(*, workspace: Path, skill: str, harness: str, json_output: bool = False) -> int:
     workspace = workspace.expanduser().resolve()
     skill_id = _slug(skill)

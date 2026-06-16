@@ -19,7 +19,10 @@ COMMAND_GROUPS: list[tuple[str, list[str]]] = [
         "Review, security, and research",
         ["security", "scrub", "untrusted", "research", "learn", "chat", "context", "projects"],
     ),
-    ("Wiring and advanced", ["release", "roadmap", "repos", "reconfigure", "openclaw-fragments", "hermes-fragments"]),
+    (
+        "Wiring and advanced",
+        ["release", "roadmap", "repos", "reconfigure", "completions", "openclaw-fragments", "hermes-fragments"],
+    ),
 ]
 
 _START_HERE = """Brigade: run your agent brigade. Operator-system CLI for agent workspaces.

@@ -37,6 +37,15 @@ def register(sub: argparse._SubParsersAction) -> None:
         "--status", choices=["reviewed", "deferred", "blocked", "archived"], default="reviewed"
     )
     p_runbook_closeout.add_argument("--reason", default=None, help="Closeout reason.")
+    p_runbook_closeout.add_argument(
+        "--import-issues",
+        dest="import_issues",
+        action="store_true",
+        help="Route each failed step into the work import inbox for review.",
+    )
+    p_runbook_closeout.add_argument(
+        "--dry-run", action="store_true", help="With --import-issues, report records without writing imports."
+    )
     p_runbook_closeout.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_runbook.set_defaults(func=dispatch)
 
@@ -69,7 +78,13 @@ def dispatch(args) -> int:
         return runbook_cmd.resume(target=args.target, run_id=args.run_id, json_output=args.json)
     if args.runbook_command == "closeout":
         return runbook_cmd.closeout(
-            target=args.target, run_id=args.run_id, status=args.status, reason=args.reason, json_output=args.json
+            target=args.target,
+            run_id=args.run_id,
+            status=args.status,
+            reason=args.reason,
+            import_issues=args.import_issues,
+            dry_run=args.dry_run,
+            json_output=args.json,
         )
     args._brigade_parser.error(f"unknown runbook command: {args.runbook_command}")
     return 2
