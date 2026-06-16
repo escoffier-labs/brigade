@@ -139,8 +139,10 @@ def _git_config(target: Path, key: str, *, local_only: bool = False) -> str | No
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
             text=True,
+            stdin=subprocess.DEVNULL,
+            timeout=10,
         )
-    except OSError:
+    except (OSError, subprocess.TimeoutExpired):
         return None
     value = result.stdout.strip()
     return value or None
@@ -154,8 +156,10 @@ def _git_pre_push_hook(target: Path) -> Path | None:
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
             text=True,
+            stdin=subprocess.DEVNULL,
+            timeout=10,
         )
-    except OSError:
+    except (OSError, subprocess.TimeoutExpired):
         return None
     if result.returncode != 0:
         return None
@@ -247,7 +251,31 @@ def run_scan(scan_target: Path, *, repo_target: Path | None = None, policy: str 
     env = os.environ.copy()
     existing_pp = env.get("PYTHONPATH", "")
     env["PYTHONPATH"] = f"{scanner / 'src'}{os.pathsep}{existing_pp}" if existing_pp else str(scanner / "src")
-    result = subprocess.run(cmd, env=env, check=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    try:
+        result = subprocess.run(
+            cmd,
+            env=env,
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            stdin=subprocess.DEVNULL,
+            timeout=120,
+        )
+    except subprocess.TimeoutExpired as exc:
+        # Fail closed: a scanner that hangs must not let content past the egress gate.
+        return {
+            "available": True,
+            "status": "blocked",
+            "exit_code": 124,
+            "detail": f"content-guard timed out after {exc.timeout:g}s",
+            "stdout": exc.stdout.decode() if isinstance(exc.stdout, bytes) else (exc.stdout or ""),
+            "stderr": exc.stderr.decode() if isinstance(exc.stderr, bytes) else (exc.stderr or ""),
+            "policy": policy,
+            "policy_path": str(resolved_policy),
+            "target": str(scan_target),
+            "argv": cmd,
+        }
     return {
         "available": True,
         "status": "ok" if result.returncode == 0 else "blocked",

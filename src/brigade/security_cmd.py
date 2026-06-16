@@ -762,6 +762,84 @@ def findings(*, target: Path, output_dir: Path | None = None, json_output: bool 
     return review(target=target, output_dir=output_dir, json_output=json_output)
 
 
+def _diff_finding_key(record: dict[str, Any]) -> str:
+    fingerprint = str(record.get("fingerprint") or "")
+    if fingerprint:
+        return fingerprint
+    # Fall back to a stable composite when a report predates fingerprints, so
+    # unkeyed findings are not all collapsed into a single bucket.
+    return "|".join(str(record.get(field) or "") for field in ("category", "path", "line", "title"))
+
+
+def diff(
+    *,
+    target: Path,
+    base_dir: Path,
+    against_dir: Path | None = None,
+    json_output: bool = False,
+) -> int:
+    """Compare two security reports: what is new, resolved, or persisting.
+
+    Findings are matched by fingerprint (the scan's stable per-finding hash), so
+    this answers "did my change add or fix a finding" without eyeballing two
+    reports. Returns nonzero when there are new findings.
+    """
+    target = target.expanduser().resolve()
+    if not target.is_dir():
+        print(f"error: --target is not a directory: {target}", file=sys.stderr)
+        return 2
+    base_dir = base_dir.expanduser().resolve()
+    against_dir = against_dir.expanduser().resolve() if against_dir is not None else default_artifacts_dir(target)
+    try:
+        base_report = _load_report(base_dir)
+        against_report = _load_report(against_dir)
+    except FileNotFoundError as exc:
+        print(f"error: security report not found: {exc}", file=sys.stderr)
+        return 2
+    except (ValueError, json.JSONDecodeError) as exc:
+        print(f"error: invalid security report: {exc}", file=sys.stderr)
+        return 2
+
+    base_records = _report_findings_for_review(target, base_report)
+    against_records = _report_findings_for_review(target, against_report)
+    base_keys = {_diff_finding_key(record) for record in base_records}
+    against_keys = {_diff_finding_key(record) for record in against_records}
+
+    new = [record for record in against_records if _diff_finding_key(record) not in base_keys]
+    resolved = [record for record in base_records if _diff_finding_key(record) not in against_keys]
+    persisting = [record for record in against_records if _diff_finding_key(record) in base_keys]
+
+    payload = {
+        "base": str(base_dir),
+        "against": str(against_dir),
+        "base_generated_at": base_report.get("generated_at"),
+        "against_generated_at": against_report.get("generated_at"),
+        "new": new,
+        "resolved": resolved,
+        "persisting": persisting,
+        "new_count": len(new),
+        "resolved_count": len(resolved),
+        "persisting_count": len(persisting),
+    }
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 1 if new else 0
+
+    print(f"security diff: {base_dir} -> {against_dir}")
+    print(f"new: {len(new)}  resolved: {len(resolved)}  persisting: {len(persisting)}")
+    for label, records in (("new", new), ("resolved", resolved), ("persisting", persisting)):
+        if not records:
+            continue
+        print(f"{label}:")
+        for finding in records:
+            print(
+                f"- [{finding.get('severity')}] {finding.get('category')} "
+                f"{finding.get('path')}:{finding.get('line')} {finding.get('title')} "
+                f"({finding.get('fingerprint')})"
+            )
+    return 1 if new else 0
+
+
 def sarif(
     *, target: Path, output_dir: Path | None = None, output_path: Path | None = None, json_output: bool = False
 ) -> int:
