@@ -27,10 +27,24 @@ fi
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 echo "pre-push: scanning $REPO_ROOT against $(basename "$POLICY")"
 
-if ! PYTHONPATH="$SCANNER_DIR/src" python3 -m content_guard scan "$REPO_ROOT" --policy "$POLICY"; then
+rc=0
+PYTHONPATH="$SCANNER_DIR/src" python3 -m content_guard scan "$REPO_ROOT" --policy "$POLICY" || rc=$?
+
+if [[ "$rc" -eq 0 ]]; then
+  exit 0
+fi
+
+if [[ "$rc" -eq 1 ]]; then
   echo >&2
   echo "pre-push: BLOCKED. content-guard found violations." >&2
   echo "pre-push: fix the leak, or add an inline allow-tag on the offending line:" >&2
   echo "pre-push:   <!-- content-guard: allow <rule-id> -->" >&2
   exit 1
 fi
+
+# Any other exit code is the scanner failing to run (missing deps, bad policy,
+# crash), not a leak verdict. Do not mislabel it as found violations.
+echo >&2
+echo "pre-push: content-guard failed to run (exit code $rc); this is a scanner error, not a leak verdict." >&2
+echo "pre-push: re-run it directly to see the error, then push again once the scanner works." >&2
+exit 1

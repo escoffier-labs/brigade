@@ -77,6 +77,56 @@ def test_doctor_json_output_is_structured(tmp_target: Path, capsys):
     assert payload["ready"] is (rc == 0)
 
 
+def test_doctor_agents_quality_warns_without_definition_of_done(tmp_target: Path, capsys):
+    # issue #84: AGENTS.md existing is not enough; nudge toward a definition of done.
+    tmp_target.mkdir(parents=True, exist_ok=True)
+    (tmp_target / "AGENTS.md").write_text("# AGENTS\n\nsome guidance, but no done criteria here\n")
+    doctor_mod.run(target=tmp_target, harness="generic")
+    out = capsys.readouterr().out
+    assert "agents-quality: AGENTS.md" in out
+    assert "Definition of Done" in out
+
+
+def test_doctor_agents_quality_ok_for_seeded_workspace(tmp_target: Path, capsys):
+    install_selection(
+        tmp_target,
+        Selection(depth="workspace", harnesses=["claude"], owner="claude", includes=[]),
+    )
+    capsys.readouterr()
+    doctor_mod.run(target=tmp_target, harness="generic", json_output=True)
+    payload = json.loads(capsys.readouterr().out)
+    agents = [c for c in payload["checks"] if c["name"] == "agents-quality: AGENTS.md"]
+    assert agents and agents[0]["status"] == "OK"
+
+
+def test_doctor_groups_machine_level_findings(tmp_target: Path, capsys):
+    # issue #80: host-global findings (a content-guard clone) must not read as
+    # this repo's responsibility; they go under a machine-level header.
+    install_selection(
+        tmp_target,
+        Selection(depth="workspace", harnesses=["claude"], owner="claude", includes=[]),
+    )
+    capsys.readouterr()
+    doctor_mod.run(target=tmp_target, harness="generic")
+    out = capsys.readouterr().out
+    assert "machine-level (not specific to this repo):" in out
+    header_idx = out.index("machine-level (not specific to this repo):")
+    assert "publish: content-guard" in out[header_idx:]
+
+
+def test_doctor_json_tags_machine_scope(tmp_target: Path, capsys):
+    install_selection(
+        tmp_target,
+        Selection(depth="workspace", harnesses=["claude"], owner="claude", includes=[]),
+    )
+    capsys.readouterr()
+    doctor_mod.run(target=tmp_target, harness="generic", json_output=True)
+    payload = json.loads(capsys.readouterr().out)
+    scopes = {c["name"]: c["scope"] for c in payload["checks"]}
+    assert scopes.get("publish: content-guard") == "machine"
+    assert any(scope == "repo" for scope in scopes.values())
+
+
 def test_doctor_reports_failures_on_empty_dir(tmp_target: Path, capsys):
     tmp_target.mkdir()
     rc = doctor_mod.run(target=tmp_target, harness="generic")

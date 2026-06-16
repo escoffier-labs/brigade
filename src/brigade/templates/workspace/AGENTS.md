@@ -14,6 +14,15 @@ For substantial work, first gather the workspace context:
 
 For tiny read-only commands, do the command directly and avoid loading unrelated context. Do not ask permission for normal context gathering. **Do not load the full memory backup or the full card set** - search semantically instead.
 
+## Definition of Done
+
+Before you report work as complete:
+
+1. Run the project's checks (tests, linters, type checks, build). If you do not know them, look in `README`, `CONTRIBUTING`, `pyproject.toml` / `package.json`, or the CI config before guessing.
+2. Report the actual result. Never claim success you did not observe; paste the command you ran and its output.
+3. If a check could not run, say so and name the blocker instead of guessing.
+4. If the session produced durable knowledge, confirm a Memory Handoff was written (see below).
+
 ## Memory Owner
 
 The configured memory owner is **{{memory_owner_name}}**. Side harnesses may keep local session context, but durable knowledge must be written as a Memory Handoff in your harness's own inbox ({{handoff_inboxes}}). The memory owner ingests those handoffs into canonical durable memory. Full contract: `memory/cards/memory-architecture.md` and `memory/cards/handoff-flow.md`.
