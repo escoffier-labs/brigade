@@ -5,11 +5,13 @@ import (
 	"io"
 	"path/filepath"
 	"strings"
+
+	"github.com/escoffier-labs/miseledger/internal/sources/cursor"
 )
 
 func cmdCrawl(args []string, out, errw io.Writer) int {
 	if len(args) == 0 {
-		return fatalf(errw, "usage: miseledger crawl sessions|docs|files|repo|markdown|html|gitlog|json|jsonl|adapter|chatgpt-export|claude-export <path> [options]")
+		return fatalf(errw, "usage: miseledger crawl sessions|docs|files|repo|markdown|html|gitlog|json|jsonl|adapter|cursor|chatgpt-export|claude-export <path> [options]")
 	}
 	switch args[0] {
 	case "sessions":
@@ -24,10 +26,12 @@ func cmdCrawl(args []string, out, errw io.Writer) int {
 		return cmdCrawlSourceHarvest(args[0], args[0], args[1:], out, errw)
 	case "adapter":
 		return cmdImportAdapter(args[1:], out, errw)
+	case "cursor":
+		return cmdCrawlCursor(args[1:], out, errw)
 	case "chatgpt-export", "claude-export":
 		return cmdImport(args, out, errw)
 	default:
-		return fatalf(errw, "usage: miseledger crawl sessions|docs|files|repo|markdown|html|gitlog|json|jsonl|adapter|chatgpt-export|claude-export <path> [options]")
+		return fatalf(errw, "usage: miseledger crawl sessions|docs|files|repo|markdown|html|gitlog|json|jsonl|adapter|cursor|chatgpt-export|claude-export <path> [options]")
 	}
 }
 
@@ -37,6 +41,19 @@ func cmdCrawlSessions(args []string, out, errw io.Writer) int {
 		return 0
 	}
 	return cmdImportDiscovered(args, out, errw)
+}
+
+// cmdCrawlCursor imports the local Cursor Agent history. With no path it
+// defaults to the standard Cursor config root so the common case is one word.
+func cmdCrawlCursor(args []string, out, errw io.Writer) int {
+	if hasBoolFlag(args, "help") || hasBoolFlag(args, "h") {
+		fmt.Fprintln(out, "usage: miseledger crawl cursor [path] [--json] [--dry-run] [--limit N] [--since DATE]")
+		return 0
+	}
+	if firstPositional(args) == "" {
+		args = append([]string{cursor.DefaultRoot()}, args...)
+	}
+	return cmdImportNative("cursor", cursor.Generate, args, out, errw)
 }
 
 func cmdCrawlSourceHarvest(mode, defaultSource string, args []string, out, errw io.Writer) int {

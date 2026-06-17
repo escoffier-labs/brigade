@@ -233,6 +233,7 @@ miseledger adapter codex ~/.codex/sessions --out codex.adapter.jsonl --limit 100
 miseledger adapter openclaw ~/.openclaw/agents --out openclaw.adapter.jsonl --since 2026-06-01
 miseledger adapter claude ~/.claude/projects --out claude.adapter.jsonl --limit 100
 miseledger adapter hermes ~/.hermes/sessions --out hermes.adapter.jsonl --limit 100
+miseledger adapter cursor ~/.config/cursor --out cursor.adapter.jsonl
 ```
 
 Native import commands stream generated adapter records into the same adapter ingest path:
@@ -242,6 +243,7 @@ miseledger import codex ~/.codex/sessions --json
 miseledger import openclaw ~/.openclaw/agents --json
 miseledger import claude ~/.claude/projects --json
 miseledger import hermes ~/.hermes/sessions --json
+miseledger import cursor ~/.config/cursor --json
 miseledger import codex testdata/harnesses/malformed-unknown.fixture.jsonl --dry-run --json
 miseledger import discovered --json
 miseledger watch once --json
@@ -268,6 +270,18 @@ miseledger import claude-export conversations.json --json
 ```
 
 These imports normalize provider conversations into local `conversation` collections with `message` items tagged as `ai-chat`.
+
+## Cursor Agent
+
+MiseLedger imports local Cursor Agent CLI history from its config root (`$XDG_CONFIG_HOME/cursor` or `~/.config/cursor` on Linux, `~/.cursor` on macOS):
+
+```bash
+miseledger crawl cursor --json            # defaults to the standard Cursor root
+miseledger crawl cursor ~/.config/cursor --json
+miseledger import cursor ~/.config/cursor --json
+```
+
+Two stable, plain-JSON surfaces are indexed: `prompt_history.json` (the prompts you typed, the primary "what did I ask?" lookup) and each chat's `meta.json` (title, timestamps, workspace), which becomes an `agent_session` collection so it appears in `miseledger sessions`. Cursor message bodies live in a per-chat binary `store.db` and are intentionally not decoded; a chat that has a `store.db` but no `meta.json` is still surfaced as a resumable session with a warning. `miseledger crawl sessions` and `miseledger import discovered` pick Cursor up automatically alongside the other native sources.
 
 ## Session Locator
 
@@ -394,6 +408,17 @@ miseledger sources discover --json
 
 It checks Codex sessions, OpenClaw agents, Claude projects, and Hermes session files without printing private transcript content.
 
+## Browser UI
+
+`miseledger serve` also hosts a single-page browser UI at the server root, a search box for sessions and conversations when terminal Ctrl+F is not an option:
+
+```bash
+miseledger serve --addr 127.0.0.1:8765
+# open http://127.0.0.1:8765/
+```
+
+It offers live full-text search in two modes (Sessions, which groups hits by session and shows the raw path plus a harness resume hint; and Everything, which searches all imported items), a source filter, and a detail pane. Press `/` or Ctrl+F to focus the search box. The page is served from the same loopback binding and talks only to the local `/search`, `/sessions`, `/items/`, and `/status` endpoints.
+
 ## Local API and MCP
 
 The local HTTP API binds to loopback only by default:
@@ -401,6 +426,7 @@ The local HTTP API binds to loopback only by default:
 ```bash
 miseledger serve --addr 127.0.0.1:8765
 curl "http://127.0.0.1:8765/search?q=auth+timeout"
+curl "http://127.0.0.1:8765/sessions?q=auth+timeout&source=cursor"
 curl "http://127.0.0.1:8765/items/<item-id>"
 curl -X POST http://127.0.0.1:8765/evidence -d '{"query":"auth timeout","limit":10}'
 ```

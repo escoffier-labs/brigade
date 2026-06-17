@@ -425,6 +425,33 @@ func TestSessionsListAndSearch(t *testing.T) {
 	}
 }
 
+func TestCrawlCursorImportsFromDefaultRoot(t *testing.T) {
+	withTempHome(t)
+	runOK(t, "init")
+	// withTempHome points XDG_CONFIG_HOME at <home>/.config, so the default
+	// Cursor root is <home>/.config/cursor; `crawl cursor` finds it with no path.
+	root := filepath.Join(os.Getenv("XDG_CONFIG_HOME"), "cursor")
+	mustWrite(t, filepath.Join(root, "prompt_history.json"), `["fix the auth timeout bug","release audit checklist"]`)
+	mustWrite(t, filepath.Join(root, "chats", "abc123", "meta.json"), `{"id":"abc123","title":"Auth timeout investigation","createdAt":"2026-06-01T00:00:00Z"}`)
+
+	runOK(t, "crawl", "cursor", "--json")
+
+	sessions := runJSON(t, "sessions", "search", "auth timeout", "--source", "cursor", "--json")
+	hits := sessions["sessions"].([]any)
+	if len(hits) != 1 {
+		t.Fatalf("cursor session search = %v", sessions)
+	}
+	hit := hits[0].(map[string]any)
+	if hit["raw_path"] == "" || !strings.Contains(hit["snippet"].(string), "Auth") {
+		t.Fatalf("cursor session hit missing locator/snippet: %v", hit)
+	}
+
+	prompts := runJSON(t, "search", "release audit", "--source", "cursor", "--json")
+	if len(prompts["results"].([]any)) == 0 {
+		t.Fatalf("cursor prompt-history search returned nothing: %v", prompts)
+	}
+}
+
 func TestCrawlChatGPTExportZip(t *testing.T) {
 	withTempHome(t)
 	runOK(t, "init")
@@ -892,6 +919,35 @@ func TestHTTPAPIAndMCPTools(t *testing.T) {
 		t.Fatalf("show http status=%d body=%s", rec.Code, rec.Body.String())
 	}
 
+	// The browser UI is served at the root; unknown paths stay 404.
+	req = httptest.NewRequest(http.MethodGet, "/", nil)
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `id="q"`) {
+		t.Fatalf("ui http status=%d (want 200 with search box)", rec.Code)
+	}
+	req = httptest.NewRequest(http.MethodGet, "/does-not-exist", nil)
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("unknown path status=%d (want 404)", rec.Code)
+	}
+
+	// The session finder endpoint backs the UI Sessions mode.
+	req = httptest.NewRequest(http.MethodGet, "/sessions?q=adapter+contract&source=discrawl", nil)
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("sessions http status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var sessionsBody map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &sessionsBody); err != nil {
+		t.Fatalf("bad sessions body: %v", err)
+	}
+	if _, ok := sessionsBody["sessions"]; !ok {
+		t.Fatalf("sessions body missing sessions key: %v", sessionsBody)
+	}
+
 	req = httptest.NewRequest(http.MethodPost, "/evidence", strings.NewReader(`{"query":"adapter contract","source":"discrawl","limit":5,"include_related":true,"include_artifact_text":true}`))
 	rec = httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
@@ -961,6 +1017,16 @@ func run(args ...string) (int, string, string) {
 	var out, errb bytes.Buffer
 	code := Run(args, &out, &errb)
 	return code, out.String(), errb.String()
+}
+
+func mustWrite(t *testing.T, path, body string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func withTempHome(t *testing.T) {

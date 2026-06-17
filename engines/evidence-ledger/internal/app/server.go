@@ -72,12 +72,51 @@ func validateLocalAddr(addr string) error {
 
 func newHTTPHandler() http.Handler {
 	mux := http.NewServeMux()
+	mux.HandleFunc("/", handleUI)
+	mux.HandleFunc("/favicon.ico", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusNoContent) })
 	mux.HandleFunc("/status", handleStatus)
 	mux.HandleFunc("/sources", handleSources)
 	mux.HandleFunc("/search", handleSearch)
+	mux.HandleFunc("/sessions", handleSessions)
 	mux.HandleFunc("/items/", handleItem)
 	mux.HandleFunc("/evidence", handleEvidence)
 	return mux
+}
+
+// handleSessions powers the browser session finder. With ?q it searches and
+// groups by session; without ?q it lists recent sessions. Optional ?source
+// and ?limit narrow the result set.
+func handleSessions(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		httpError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	q := r.URL.Query()
+	query := strings.TrimSpace(q.Get("q"))
+	source := q.Get("source")
+	limit := 50
+	if raw := firstQuery(q, "limit"); raw != "" {
+		if parsed, err := strconv.Atoi(raw); err == nil && parsed > 0 {
+			limit = parsed
+		}
+	}
+	db, _, err := openMigrated()
+	if err != nil {
+		httpError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	defer db.Close()
+	var rows []SessionResult
+	if query == "" {
+		rows, err = listSessions(db, source, limit)
+	} else {
+		rows, err = searchSessions(db, query, source, limit)
+	}
+	if err != nil {
+		httpError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	httpJSON(w, map[string]any{"query": query, "sessions": rows})
 }
 
 func handleStatus(w http.ResponseWriter, r *http.Request) {

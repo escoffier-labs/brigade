@@ -36,6 +36,7 @@ User-facing archive crawl:
 
 ```bash
 miseledger crawl sessions --json
+miseledger crawl cursor --json
 miseledger crawl chatgpt-export ~/Downloads/chatgpt-export.zip --json
 miseledger crawl claude-export ~/Downloads/claude-export.zip --json
 ```
@@ -47,6 +48,7 @@ miseledger import codex ~/.codex/sessions --json
 miseledger import openclaw ~/.openclaw/agents --json
 miseledger import claude ~/.claude/projects --json
 miseledger import hermes ~/.hermes/sessions --json
+miseledger import cursor ~/.config/cursor --json
 ```
 
 StationTrail imports:
@@ -148,6 +150,15 @@ miseledger explain "auth timeout" --project ops-deck --json
 ```
 
 Evidence bundles include a stable bundle ID, `miseledger://evidence/<id>` URI, provenance, raw refs, source and collection context, actors, snippets, artifacts, warnings, and `untrusted_context: true`.
+
+## Browser UI
+
+```bash
+miseledger serve --addr 127.0.0.1:8765
+# open http://127.0.0.1:8765/ and search; press / or Ctrl+F to focus the box
+```
+
+The served page is a loopback-only search box for sessions and conversations, with Sessions and Everything modes, a source filter, and a detail pane that shows the raw path and a harness resume hint.
 
 ## Agent Access
 

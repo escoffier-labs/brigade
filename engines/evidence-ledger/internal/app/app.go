@@ -26,6 +26,7 @@ import (
 	"github.com/escoffier-labs/miseledger/internal/sources"
 	"github.com/escoffier-labs/miseledger/internal/sources/claude"
 	"github.com/escoffier-labs/miseledger/internal/sources/codex"
+	"github.com/escoffier-labs/miseledger/internal/sources/cursor"
 	"github.com/escoffier-labs/miseledger/internal/sources/hermes"
 	"github.com/escoffier-labs/miseledger/internal/sources/openclaw"
 	"github.com/escoffier-labs/miseledger/internal/sources/providerexports"
@@ -345,6 +346,7 @@ func discoverSources() []map[string]any {
 		{"openclaw", filepath.Join(home, ".openclaw", "agents"), "native-jsonl"},
 		{"claude", filepath.Join(home, ".claude", "projects"), "native-jsonl"},
 		{"hermes", filepath.Join(home, ".hermes", "sessions"), "native-json"},
+		{"cursor", cursor.DefaultRoot(), "native-cursor"},
 	}
 	out := make([]map[string]any, 0, len(candidates))
 	for _, c := range candidates {
@@ -353,12 +355,16 @@ func discoverSources() []map[string]any {
 		if c.root != "" {
 			if _, err := os.Stat(c.root); err == nil {
 				exists = true
-				include := sources.DefaultInclude
-				if c.kind == "hermes" {
-					include = hermes.Include
-				}
-				if files, err := sources.ListJSONLFiles(c.root, include); err == nil {
-					count = len(files)
+				if c.kind == "cursor" {
+					count = countCursorSessions(c.root)
+				} else {
+					include := sources.DefaultInclude
+					if c.kind == "hermes" {
+						include = hermes.Include
+					}
+					if files, err := sources.ListJSONLFiles(c.root, include); err == nil {
+						count = len(files)
+					}
 				}
 			}
 		}
@@ -371,6 +377,27 @@ func discoverSources() []map[string]any {
 		})
 	}
 	return out
+}
+
+// countCursorSessions counts discoverable Cursor chat directories plus a
+// prompt-history file, for the informational `sources discover` view.
+func countCursorSessions(root string) int {
+	count := 0
+	if fileExists(filepath.Join(root, "prompt_history.json")) {
+		count++
+	}
+	for _, sub := range []string{"chats", "acp-sessions"} {
+		entries, err := os.ReadDir(filepath.Join(root, sub))
+		if err != nil {
+			continue
+		}
+		for _, e := range entries {
+			if e.IsDir() {
+				count++
+			}
+		}
+	}
+	return count
 }
 
 func cmdScans(args []string, out, errw io.Writer) int {
@@ -607,7 +634,7 @@ func checkPrivate(path string) bool {
 
 func cmdImport(args []string, out, errw io.Writer) int {
 	if len(args) == 0 {
-		return fatalf(errw, "usage: miseledger import adapter|stationtrail|codex|openclaw|claude|hermes|chatgpt-export|claude-export <path>")
+		return fatalf(errw, "usage: miseledger import adapter|stationtrail|codex|openclaw|claude|hermes|cursor|chatgpt-export|claude-export <path>")
 	}
 	switch args[0] {
 	case "adapter":
@@ -626,12 +653,14 @@ func cmdImport(args []string, out, errw io.Writer) int {
 		return cmdImportNative("claude", claude.Generate, args[1:], out, errw)
 	case "hermes":
 		return cmdImportNative("hermes", hermes.Generate, args[1:], out, errw)
+	case "cursor":
+		return cmdImportNative("cursor", cursor.Generate, args[1:], out, errw)
 	case "chatgpt-export":
 		return cmdImportNative("chatgpt", providerexports.GenerateChatGPT, args[1:], out, errw)
 	case "claude-export":
 		return cmdImportNative("claude-export", providerexports.GenerateClaude, args[1:], out, errw)
 	default:
-		return fatalf(errw, "usage: miseledger import adapter|discovered|stationtrail|sourceharvest|codex|openclaw|claude|hermes|chatgpt-export|claude-export <path>")
+		return fatalf(errw, "usage: miseledger import adapter|discovered|stationtrail|sourceharvest|codex|openclaw|claude|hermes|cursor|chatgpt-export|claude-export <path>")
 	}
 }
 
@@ -846,7 +875,7 @@ func runStationTrailImport(db *sql.DB, sourceKind, sourcePath string, values map
 
 func cmdAdapter(args []string, out, errw io.Writer) int {
 	if len(args) == 0 {
-		return fatalf(errw, "usage: miseledger adapter codex|openclaw|claude|hermes <path-or-dir> --out <file|->")
+		return fatalf(errw, "usage: miseledger adapter codex|openclaw|claude|hermes|cursor <path-or-dir> --out <file|->")
 	}
 	switch args[0] {
 	case "codex":
@@ -857,8 +886,10 @@ func cmdAdapter(args []string, out, errw io.Writer) int {
 		return cmdAdapterGenerate("claude", claude.Generate, args[1:], out, errw)
 	case "hermes":
 		return cmdAdapterGenerate("hermes", hermes.Generate, args[1:], out, errw)
+	case "cursor":
+		return cmdAdapterGenerate("cursor", cursor.Generate, args[1:], out, errw)
 	default:
-		return fatalf(errw, "usage: miseledger adapter codex|openclaw|claude|hermes <path-or-dir> --out <file|->")
+		return fatalf(errw, "usage: miseledger adapter codex|openclaw|claude|hermes|cursor <path-or-dir> --out <file|->")
 	}
 }
 
