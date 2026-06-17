@@ -21,6 +21,7 @@ Your agents run loops. Brigade keeps the receipts.
 
 ```bash
 pipx install brigade-cli
+pipx ensurepath          # then open a new shell so `brigade` is on PATH
 brigade operator quickstart --target ./my-repo --harnesses codex      # wire one repo
 brigade operator doctor --target ./my-repo --profile local-operator   # verify
 ```
@@ -76,6 +77,7 @@ It all runs on the machine you control: laptop, workstation, or VPS. Local by de
 
 ```bash
 pipx install brigade-cli
+pipx ensurepath          # then open a new shell so `brigade` is on PATH
 brigade operator quickstart --target ./my-repo --harnesses codex
 brigade operator doctor --target ./my-repo --profile local-operator
 ```
