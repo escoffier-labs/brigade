@@ -9,7 +9,7 @@
 
 MiseLedger turns scattered AI work history into a local searchable evidence graph.
 
-The MVP is a local-first CLI named `miseledger`. It imports `miseledger.adapter.v1` JSONL records into SQLite, preserves raw payload references, searches with SQLite FTS5, shows normalized items, exports Markdown, emits Brigade-ready evidence bundles, and allows read-only SQL inspection.
+The MVP is a local-first CLI named `miseledger`. It crawls agent sessions and local project artifacts, imports `miseledger.adapter.v1` JSONL records into SQLite, preserves raw payload references, searches with SQLite FTS5, shows normalized items, exports Markdown, emits Brigade-ready evidence bundles, and allows read-only SQL inspection.
 
 Each source system is best at its native domain:
 
@@ -150,12 +150,27 @@ Crawler tools keep their native sync/query behavior. Their local exports, snapsh
 
 ```bash
 go build -o bin/miseledger ./cmd/miseledger
+go build -o bin/sessionfind ./cmd/sessionfind
 ```
 
 You can also run commands with:
 
 ```bash
 go run ./cmd/miseledger --help
+```
+
+First archive:
+
+```bash
+miseledger init
+miseledger crawl sessions --json
+miseledger crawl chatgpt-export ~/Downloads/chatgpt-export.zip --json
+miseledger crawl claude-export ~/Downloads/claude-export.zip --json
+miseledger crawl docs ./notes --json
+miseledger crawl repo . --json
+miseledger sessions search "release audit" --source codex --json
+miseledger search "auth timeout" --json
+miseledger evidence "auth timeout" --markdown
 ```
 
 Install from a release:
@@ -233,6 +248,41 @@ miseledger watch once --json
 miseledger watch once --if-changed --json
 ```
 
+For the normal user-facing archive-crawler lane, prefer:
+
+```bash
+miseledger crawl sessions --json
+```
+
+That imports discovered local session roots through the same idempotent archive path.
+
+## Provider Exports
+
+MiseLedger can also import official AI chat exports directly from a `.zip`, a directory containing `conversations.json`, or the JSON file itself:
+
+```bash
+miseledger crawl chatgpt-export ~/Downloads/chatgpt-export.zip --json
+miseledger crawl claude-export ~/Downloads/claude-export.zip --json
+miseledger import chatgpt-export conversations.json --json
+miseledger import claude-export conversations.json --json
+```
+
+These imports normalize provider conversations into local `conversation` collections with `message` items tagged as `ai-chat`.
+
+## Session Locator
+
+For harness-style "find the session I was working in" workflows, use the session-level commands:
+
+```bash
+miseledger sessions list --source codex --json
+miseledger sessions search "release audit" --source codex --json
+miseledger sessions search "auth timeout" --source claude --json
+sessionfind list --source codex --json
+sessionfind "release audit" --source codex --json
+```
+
+`sessions search` groups matching item hits by session/conversation collection and returns the source kind, collection ID, item count, match count, sample item ID, raw source path, raw ordinal, and a snippet. It is meant for quickly finding the local harness session to inspect or resume.
+
 The scanners accept a file or directory, walk relevant JSON and JSONL files recursively, skip obvious backups and sidecars, preserve raw refs, and warn rather than crash on malformed or unknown events. Hermes native support covers `session_*.json` snapshots and trajectory JSONL under `~/.hermes/sessions`; Hermes `state.db` is not parsed directly.
 
 ## External StationTrail Scanner
@@ -282,6 +332,16 @@ miseledger import sourceharvest files ./notes --source notes --collection notes:
 miseledger import sourceharvest html ./site-export --source docs --collection docs:html --json
 miseledger import sourceharvest gitlog . --source gitlog --collection repo:miseledger --json
 miseledger import sourceharvest json export.json --source export --collection export:records --records-path records --json
+```
+
+The user-facing crawl shortcuts add defaults for common local archive sources:
+
+```bash
+miseledger crawl docs ./notes --json
+miseledger crawl files ./logs --glob "*.md,*.txt,*.log" --json
+miseledger crawl repo . --json
+miseledger crawl json export.json --records-path records --json
+miseledger crawl adapter export.adapter.jsonl --source export --json
 ```
 
 Use StationTrail for agent-session logs. Use SourceHarvest for other local source-system exports. MiseLedger remains the archive, search, relation, and evidence layer for both.

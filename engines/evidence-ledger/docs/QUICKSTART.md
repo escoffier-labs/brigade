@@ -32,6 +32,14 @@ MiseLedger uses local XDG runtime paths and private permissions. The MCP doctor 
 
 ## Import Agent Sessions
 
+User-facing archive crawl:
+
+```bash
+miseledger crawl sessions --json
+miseledger crawl chatgpt-export ~/Downloads/chatgpt-export.zip --json
+miseledger crawl claude-export ~/Downloads/claude-export.zip --json
+```
+
 Native imports:
 
 ```bash
@@ -53,7 +61,44 @@ miseledger import stationtrail hermes ~/.hermes/sessions --json
 
 Use `stationtrail all --out - | miseledger import adapter -` for mixed-source imports because each adapter record carries its own `source.kind`.
 
+## Import Provider Chat Exports
+
+MiseLedger accepts official ChatGPT and Claude conversation exports as `.zip` files, directories containing `conversations.json`, or direct JSON files:
+
+```bash
+miseledger crawl chatgpt-export ~/Downloads/chatgpt-export.zip --json
+miseledger crawl claude-export ~/Downloads/claude-export.zip --json
+miseledger import chatgpt-export conversations.json --json
+miseledger import claude-export conversations.json --json
+```
+
+Provider export imports are local-only and normalize conversations into searchable `ai-chat` message records.
+
+## Find A Prior Session
+
+Use `sessions` when the goal is to locate a resumable harness session rather than inspect individual evidence items:
+
+```bash
+miseledger sessions list --source codex --json
+miseledger sessions search "release audit" --source codex --json
+miseledger sessions search "auth timeout" --source claude --json
+sessionfind list --source codex --json
+sessionfind "release audit" --source codex --json
+```
+
+The search output is grouped by session/conversation and includes raw source path, raw ordinal, sample item ID, match count, and snippet.
+
 ## Import Local Sources
+
+User-facing local artifact crawls:
+
+```bash
+miseledger crawl docs ./notes --json
+miseledger crawl files ./notes --glob "*.md,*.txt" --json
+miseledger crawl repo . --json
+miseledger crawl json export.json --records-path records --json
+miseledger crawl adapter export.adapter.jsonl --source export --json
+```
 
 SourceHarvest examples:
 

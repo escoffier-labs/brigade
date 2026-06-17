@@ -4,7 +4,11 @@ set -eu
 ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 TMP_HOME="$(mktemp -d)"
 TMP_WORK="$(mktemp -d)"
-trap 'rm -rf "$TMP_HOME" "$TMP_WORK"' EXIT
+cleanup() {
+  chmod -R u+w "$TMP_HOME" "$TMP_WORK" 2>/dev/null || true
+  rm -rf "$TMP_HOME" "$TMP_WORK"
+}
+trap cleanup EXIT
 
 export HOME="$TMP_HOME"
 export XDG_CONFIG_HOME="$TMP_HOME/.config"
@@ -14,6 +18,10 @@ export XDG_CACHE_HOME="$TMP_HOME/.cache"
 MISELEDGER="${MISELEDGER:-$ROOT/bin/miseledger}"
 if [ ! -x "$MISELEDGER" ]; then
   (cd "$ROOT" && go build -o bin/miseledger ./cmd/miseledger)
+fi
+SESSIONFIND="${SESSIONFIND:-$ROOT/bin/sessionfind}"
+if [ ! -x "$SESSIONFIND" ]; then
+  (cd "$ROOT" && go build -o bin/sessionfind ./cmd/sessionfind)
 fi
 
 "$MISELEDGER" init >/dev/null
@@ -31,6 +39,7 @@ fi
 "$MISELEDGER" prune imports --before 2000-01-01 --dry-run --json >"$TMP_WORK/prune-imports.json"
 "$MISELEDGER" prune scans --missing --dry-run --json >"$TMP_WORK/prune-scans.json"
 "$MISELEDGER" search "Hermes snapshots" --source hermes --json >"$TMP_WORK/search-hermes.json"
+"$SESSIONFIND" search "exec_command" --source codex --json >"$TMP_WORK/sessionfind-codex.json"
 "$MISELEDGER" evidence "Hermes snapshots" --source hermes --json >"$TMP_WORK/evidence-hermes.json"
 "$MISELEDGER" explain "Hermes snapshots" --source hermes --json >"$TMP_WORK/explain-hermes.json"
 bundle_id="$(python3 - "$TMP_WORK/evidence-hermes.json" <<'PY'
@@ -71,6 +80,10 @@ assert load("prune-scans.json")["dry_run"] is True
 
 search = load("search-hermes.json")
 assert len(search["results"]) >= 1, search
+
+sessionfind = load("sessionfind-codex.json")
+assert len(sessionfind["sessions"]) >= 1, sessionfind
+assert sessionfind["sessions"][0]["raw_path"], sessionfind
 
 evidence = load("evidence-hermes.json")
 assert evidence["untrusted_context"] is True, evidence

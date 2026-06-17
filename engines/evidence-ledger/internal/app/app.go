@@ -28,6 +28,7 @@ import (
 	"github.com/escoffier-labs/miseledger/internal/sources/codex"
 	"github.com/escoffier-labs/miseledger/internal/sources/hermes"
 	"github.com/escoffier-labs/miseledger/internal/sources/openclaw"
+	"github.com/escoffier-labs/miseledger/internal/sources/providerexports"
 )
 
 var stdin io.Reader = os.Stdin
@@ -55,12 +56,16 @@ func Run(args []string, out, errw io.Writer) int {
 		return cmdSources(args[1:], out, errw)
 	case "scans":
 		return cmdScans(args[1:], out, errw)
+	case "sessions":
+		return cmdSessions(args[1:], out, errw)
 	case "serve":
 		return cmdServe(args[1:], out, errw)
 	case "mcp":
 		return cmdMCP(args[1:], out, errw)
 	case "watch":
 		return cmdWatch(args[1:], out, errw)
+	case "crawl":
+		return cmdCrawl(args[1:], out, errw)
 	case "adapter":
 		return cmdAdapter(args[1:], out, errw)
 	case "import":
@@ -91,7 +96,7 @@ func Run(args []string, out, errw io.Writer) int {
 }
 
 func usage(w io.Writer) {
-	fmt.Fprintln(w, "miseledger version | init | status | sources discover | scans | serve | mcp | watch | adapter | import | search | show | evidence | explain | export markdown | relations | stats | compact | prune | sql | doctor")
+	fmt.Fprintln(w, "miseledger version | init | status | sources discover | scans | sessions | serve | mcp | watch | crawl | adapter | import | search | show | evidence | explain | export markdown | relations | stats | compact | prune | sql | doctor")
 }
 
 func openMigrated() (*sql.DB, Paths, error) {
@@ -602,7 +607,7 @@ func checkPrivate(path string) bool {
 
 func cmdImport(args []string, out, errw io.Writer) int {
 	if len(args) == 0 {
-		return fatalf(errw, "usage: miseledger import adapter|stationtrail|codex|openclaw|claude|hermes <path>")
+		return fatalf(errw, "usage: miseledger import adapter|stationtrail|codex|openclaw|claude|hermes|chatgpt-export|claude-export <path>")
 	}
 	switch args[0] {
 	case "adapter":
@@ -621,8 +626,12 @@ func cmdImport(args []string, out, errw io.Writer) int {
 		return cmdImportNative("claude", claude.Generate, args[1:], out, errw)
 	case "hermes":
 		return cmdImportNative("hermes", hermes.Generate, args[1:], out, errw)
+	case "chatgpt-export":
+		return cmdImportNative("chatgpt", providerexports.GenerateChatGPT, args[1:], out, errw)
+	case "claude-export":
+		return cmdImportNative("claude-export", providerexports.GenerateClaude, args[1:], out, errw)
 	default:
-		return fatalf(errw, "usage: miseledger import adapter|discovered|stationtrail|sourceharvest|codex|openclaw|claude|hermes <path>")
+		return fatalf(errw, "usage: miseledger import adapter|discovered|stationtrail|sourceharvest|codex|openclaw|claude|hermes|chatgpt-export|claude-export <path>")
 	}
 }
 

@@ -1,6 +1,7 @@
 package app
 
 import (
+	"archive/zip"
 	"bytes"
 	"encoding/json"
 	"net/http"
@@ -8,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"testing"
 )
@@ -292,6 +294,158 @@ printf '{"source":"notes","path":"%s","records":1,"files":1,"warnings":[],"gener
 	scans := runJSON(t, "scans", "list", "--source", "notes", "--json")
 	if len(scans["scans"].([]any)) != 1 {
 		t.Fatalf("expected sourceharvest scan manifest: %v", scans)
+	}
+}
+
+func TestCrawlSessionsImportsDiscoveredNativeRoots(t *testing.T) {
+	withTempHome(t)
+	runOK(t, "init")
+	codexRoot := filepath.Join(os.Getenv("HOME"), ".codex", "sessions")
+	if err := os.MkdirAll(codexRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	copyFixture(t, repoPath(t, "testdata/harnesses/codex-session.fixture.jsonl"), filepath.Join(codexRoot, "codex-session.fixture.jsonl"))
+
+	out := runJSON(t, "crawl", "sessions", "--json")
+	if out["inserted_items"].(float64) == 0 {
+		t.Fatalf("crawl sessions inserted no items: %v", out)
+	}
+	search := runJSON(t, "search", "exec_command", "--source", "codex", "--json")
+	if len(search["results"].([]any)) == 0 {
+		t.Fatalf("crawl sessions did not index codex fixture: %v", search)
+	}
+}
+
+func TestCrawlDocsWrapsSourceHarvestWithDefaults(t *testing.T) {
+	withTempHome(t)
+	runOK(t, "init")
+	sourceharvestDir := t.TempDir()
+	script := filepath.Join(sourceharvestDir, "sourceharvest")
+	body := `#!/bin/sh
+mode="$1"
+path="$2"
+source=''
+collection=''
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --source) shift; source="$1" ;;
+    --collection) shift; collection="$1" ;;
+  esac
+  shift || true
+done
+if [ -z "$source" ] || [ -z "$collection" ]; then
+  echo "missing source or collection" >&2
+  exit 1
+fi
+printf '{"schema":"miseledger.adapter.v1","source":{"kind":"%s","name":"SourceHarvest Fixture"},"collection":{"external_id":"%s","kind":"notes","name":"notes"},"item":{"external_id":"%s:item:%s","kind":"note","created_at":"2026-06-03T00:00:00Z","text":"Crawl docs wrapper fixture evidence","tags":["%s","%s"]},"actor":{"external_id":"%s:system:fixture","type":"system","name":"fixture"},"artifacts":[],"links":[],"relations":[],"raw":{"format":"json","hash":"sha256:test","path":"%s","ordinal":1}}\n' "$source" "$collection" "$source" "$mode" "$source" "$mode" "$source" "$path"
+printf '{"source":"%s","path":"%s","records":1,"files":1,"warnings":[],"generated_at":"2026-06-03T00:00:00Z"}\n' "$source" "$path" >&2
+`
+	if err := os.WriteFile(script, []byte(body), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	oldPath := os.Getenv("PATH")
+	t.Setenv("PATH", sourceharvestDir+string(os.PathListSeparator)+oldPath)
+	docsDir := filepath.Join(t.TempDir(), "docs")
+	if err := os.MkdirAll(docsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(docsDir, "note.md"), []byte("crawl docs fixture"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	out := runJSON(t, "crawl", "docs", docsDir, "--json")
+	if out["inserted_items"].(float64) != 1 {
+		t.Fatalf("crawl docs inserted = %v, want 1: %v", out["inserted_items"], out)
+	}
+	search := runJSON(t, "search", "Crawl docs wrapper", "--source", "docs", "--json")
+	if len(search["results"].([]any)) != 1 {
+		t.Fatalf("crawl docs search failed: %v", search)
+	}
+	scans := runJSON(t, "scans", "list", "--source", "docs", "--json")
+	if len(scans["scans"].([]any)) != 1 {
+		t.Fatalf("crawl docs scan manifest missing: %v", scans)
+	}
+}
+
+func TestCrawlProviderExports(t *testing.T) {
+	withTempHome(t)
+	runOK(t, "init")
+	chatGPTFixture := repoPath(t, "testdata/exports/chatgpt-conversations.json")
+	claudeFixture := repoPath(t, "testdata/exports/claude-conversations.json")
+
+	chatGPTOut := runJSON(t, "crawl", "chatgpt-export", chatGPTFixture, "--json")
+	if chatGPTOut["inserted_items"].(float64) != 2 {
+		t.Fatalf("chatgpt inserted = %v, want 2: %v", chatGPTOut["inserted_items"], chatGPTOut)
+	}
+	claudeOut := runJSON(t, "crawl", "claude-export", claudeFixture, "--json")
+	if claudeOut["inserted_items"].(float64) != 2 {
+		t.Fatalf("claude inserted = %v, want 2: %v", claudeOut["inserted_items"], claudeOut)
+	}
+	chatGPTSearch := runJSON(t, "search", "archive crawler", "--source", "chatgpt", "--json")
+	if len(chatGPTSearch["results"].([]any)) != 1 {
+		t.Fatalf("chatgpt search failed: %v", chatGPTSearch)
+	}
+	claudeSearch := runJSON(t, "search", "local evidence records", "--source", "claude-export", "--json")
+	if len(claudeSearch["results"].([]any)) != 1 {
+		t.Fatalf("claude search failed: %v", claudeSearch)
+	}
+}
+
+func TestSessionsListAndSearch(t *testing.T) {
+	withTempHome(t)
+	runOK(t, "init")
+	codexFixture := repoPath(t, "testdata/harnesses/codex-session.fixture.jsonl")
+	chatGPTFixture := repoPath(t, "testdata/exports/chatgpt-conversations.json")
+	runOK(t, "import", "codex", codexFixture, "--json")
+	runOK(t, "crawl", "chatgpt-export", chatGPTFixture, "--json")
+
+	listed := runJSON(t, "sessions", "list", "--source", "codex", "--json")
+	listSessions := listed["sessions"].([]any)
+	if len(listSessions) != 1 {
+		t.Fatalf("codex session list = %v", listed)
+	}
+	codexSession := listSessions[0].(map[string]any)
+	if codexSession["source_kind"] != "codex" || codexSession["raw_path"] == "" || codexSession["sample_item_id"] == "" {
+		t.Fatalf("codex session missing locator fields: %v", codexSession)
+	}
+
+	found := runJSON(t, "sessions", "search", "exec_command", "--source", "codex", "--json")
+	foundSessions := found["sessions"].([]any)
+	if len(foundSessions) != 1 {
+		t.Fatalf("codex session search = %v", found)
+	}
+	hit := foundSessions[0].(map[string]any)
+	if hit["match_count"].(float64) == 0 || !strings.Contains(hit["snippet"].(string), "exec_command") {
+		t.Fatalf("codex session hit missing search context: %v", hit)
+	}
+
+	chatFound := runJSON(t, "sessions", "search", "archive crawler", "--source", "chatgpt", "--json")
+	if len(chatFound["sessions"].([]any)) != 1 {
+		t.Fatalf("chatgpt session search = %v", chatFound)
+	}
+}
+
+func TestCrawlChatGPTExportZip(t *testing.T) {
+	withTempHome(t)
+	runOK(t, "init")
+	raw, err := os.ReadFile(repoPath(t, "testdata/exports/chatgpt-conversations.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	zipPath := filepath.Join(t.TempDir(), "chatgpt-export.zip")
+	writeTestZip(t, zipPath, map[string][]byte{"export/conversations.json": raw})
+
+	out := runJSON(t, "crawl", "chatgpt-export", zipPath, "--json")
+	if out["inserted_items"].(float64) != 2 {
+		t.Fatalf("zip inserted = %v, want 2: %v", out["inserted_items"], out)
+	}
+	scans := runJSON(t, "scans", "list", "--source", "chatgpt", "--json")
+	if len(scans["scans"].([]any)) != 1 {
+		t.Fatalf("expected zip scan manifest: %v", scans)
+	}
+	first := scans["scans"].([]any)[0].(map[string]any)
+	if !strings.Contains(first["path"].(string), "!/export/conversations.json") {
+		t.Fatalf("scan path does not preserve zip member: %v", first)
 	}
 }
 
@@ -845,6 +999,38 @@ func copyFixture(t *testing.T, from, to string) {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(to, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func writeTestZip(t *testing.T, path string, files map[string][]byte) {
+	t.Helper()
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	zw := zip.NewWriter(f)
+	names := make([]string, 0, len(files))
+	for name := range files {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		w, err := zw.Create(name)
+		if err != nil {
+			_ = f.Close()
+			t.Fatal(err)
+		}
+		if _, err := w.Write(files[name]); err != nil {
+			_ = f.Close()
+			t.Fatal(err)
+		}
+	}
+	if err := zw.Close(); err != nil {
+		_ = f.Close()
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
 		t.Fatal(err)
 	}
 }

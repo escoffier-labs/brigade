@@ -25,6 +25,7 @@ jobs:
             suffix=""
             if [ "$goos" = "windows" ]; then suffix=".exe"; fi
             GOOS="$goos" GOARCH="$goarch" go build -o "dist/miseledger-${goos}-${goarch}${suffix}" ./cmd/miseledger
+            GOOS="$goos" GOARCH="$goarch" go build -o "dist/sessionfind-${goos}-${goarch}${suffix}" ./cmd/sessionfind
           done
           (cd dist && sha256sum * > checksums.txt)
       - name: Publish release
@@ -36,8 +37,10 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           mkdir -p verify
-          gh release download "$GITHUB_REF_NAME" --pattern miseledger-linux-amd64 --pattern checksums.txt --dir verify
+          gh release download "$GITHUB_REF_NAME" --pattern miseledger-linux-amd64 --pattern sessionfind-linux-amd64 --pattern checksums.txt --dir verify
           (cd verify && sha256sum -c checksums.txt --ignore-missing)
           chmod +x verify/miseledger-linux-amd64
+          chmod +x verify/sessionfind-linux-amd64
           ./verify/miseledger-linux-amd64 version
+          ./verify/sessionfind-linux-amd64 version
           MISELEDGER="$PWD/verify/miseledger-linux-amd64" scripts/smoke_archive.sh
