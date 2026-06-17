@@ -948,6 +948,14 @@ func TestHTTPAPIAndMCPTools(t *testing.T) {
 		t.Fatalf("sessions body missing sessions key: %v", sessionsBody)
 	}
 
+	// The transcript endpoint backs the detail pane; it needs collection+source.
+	req = httptest.NewRequest(http.MethodGet, "/session/items", nil)
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("session/items without params status=%d (want 400)", rec.Code)
+	}
+
 	req = httptest.NewRequest(http.MethodPost, "/evidence", strings.NewReader(`{"query":"adapter contract","source":"discrawl","limit":5,"include_related":true,"include_artifact_text":true}`))
 	rec = httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)

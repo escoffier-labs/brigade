@@ -20,6 +20,9 @@ type SessionResult struct {
 	RawPath              string `json:"raw_path,omitempty"`
 	RawOrdinal           int64  `json:"raw_ordinal,omitempty"`
 	Snippet              string `json:"snippet,omitempty"`
+	// Preview is a short excerpt of the session's opening human message (or
+	// first item), so a row conveys what the session is about at a glance.
+	Preview string `json:"preview,omitempty"`
 }
 
 func cmdSessions(args []string, out, errw io.Writer) int {
@@ -136,7 +139,63 @@ limit ?`
 		if err := rows.Scan(&row.SourceKind, &row.CollectionExternalID, &row.CollectionName, &row.CollectionKind, &row.ItemCount, &row.FirstSeen, &row.LastSeen, &row.SampleItemID, &row.RawPath, &row.RawOrdinal); err != nil {
 			return nil, err
 		}
+		row.Preview = sessionPreview(db, row.CollectionExternalID, row.SourceKind)
 		out = append(out, row)
+	}
+	return out, rows.Err()
+}
+
+// sessionPreview returns a short excerpt of a session's opening human message,
+// falling back to its first item, so callers can show what a session contains
+// without opening it. It returns "" on any error.
+func sessionPreview(db *sql.DB, externalID, sourceKind string) string {
+	var text string
+	err := db.QueryRow(`select i.text
+from items i
+join collections c on c.id = i.collection_id
+join sources s on s.id = i.source_id
+left join actors a on a.id = i.actor_id
+where c.external_id = ? and s.kind = ?
+order by (case when a.type = 'human' then 0 else 1 end), coalesce(i.created_at,''), i.id
+limit 1`, externalID, sourceKind).Scan(&text)
+	if err != nil {
+		return ""
+	}
+	text = strings.Join(strings.Fields(text), " ")
+	if len(text) > 200 {
+		text = text[:200] + "…"
+	}
+	return text
+}
+
+// sessionItems returns the ordered items of one session collection so the UI
+// can show a transcript. It is a non-FTS browse path (no query required).
+func sessionItems(db *sql.DB, externalID, sourceKind string, limit int) ([]map[string]any, error) {
+	if limit <= 0 || limit > 500 {
+		limit = 200
+	}
+	rows, err := db.Query(`select i.id, i.kind, coalesce(a.type,''), coalesce(a.name,''), coalesce(i.created_at,''), i.text
+from items i
+join collections c on c.id = i.collection_id
+join sources s on s.id = i.source_id
+left join actors a on a.id = i.actor_id
+where c.external_id = ? and s.kind = ?
+order by coalesce(i.created_at,''), i.id
+limit ?`, externalID, sourceKind, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []map[string]any{}
+	for rows.Next() {
+		var id, kind, actorType, actorName, createdAt, text string
+		if err := rows.Scan(&id, &kind, &actorType, &actorName, &createdAt, &text); err != nil {
+			return nil, err
+		}
+		out = append(out, map[string]any{
+			"id": id, "kind": kind, "actor_type": actorType,
+			"actor_name": actorName, "created_at": createdAt, "text": text,
+		})
 	}
 	return out, rows.Err()
 }
@@ -196,6 +255,7 @@ limit ?`
 				RawOrdinal:           h.rawOrdinal,
 				Snippet:              h.snippet,
 			}
+			row.Preview = sessionPreview(db, h.externalID, h.sourceKind)
 			grouped[h.collectionID] = row
 			order = append(order, h.collectionID)
 		}

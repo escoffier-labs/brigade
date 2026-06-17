@@ -78,9 +78,44 @@ func newHTTPHandler() http.Handler {
 	mux.HandleFunc("/sources", handleSources)
 	mux.HandleFunc("/search", handleSearch)
 	mux.HandleFunc("/sessions", handleSessions)
+	mux.HandleFunc("/session/items", handleSessionItems)
 	mux.HandleFunc("/items/", handleItem)
 	mux.HandleFunc("/evidence", handleEvidence)
 	return mux
+}
+
+// handleSessionItems returns the ordered transcript of one session collection
+// so the UI can show what a session actually contains.
+func handleSessionItems(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		httpError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	q := r.URL.Query()
+	collection := strings.TrimSpace(q.Get("collection"))
+	source := strings.TrimSpace(q.Get("source"))
+	if collection == "" || source == "" {
+		httpError(w, http.StatusBadRequest, "missing collection or source")
+		return
+	}
+	limit := 200
+	if raw := firstQuery(q, "limit"); raw != "" {
+		if parsed, err := strconv.Atoi(raw); err == nil && parsed > 0 {
+			limit = parsed
+		}
+	}
+	db, _, err := openMigrated()
+	if err != nil {
+		httpError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	defer db.Close()
+	items, err := sessionItems(db, collection, source, limit)
+	if err != nil {
+		httpError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	httpJSON(w, map[string]any{"collection": collection, "source": source, "items": items})
 }
 
 // handleSessions powers the browser session finder. With ?q it searches and
