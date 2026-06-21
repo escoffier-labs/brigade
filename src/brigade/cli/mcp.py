@@ -69,6 +69,11 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_import.add_argument("harness", help="Source harness to import from (e.g. claude, cursor, codex).")
     p_import.add_argument("--merge", action="store_true", help="Write discovered servers into .brigade/mcp.json.")
     p_import.add_argument("--user-scope", action="store_true", help="Allow importing a user-scoped target.")
+    p_import.add_argument(
+        "--keep-secrets",
+        action="store_true",
+        help="Keep literal env secrets verbatim instead of demoting to ${VAR} refs (for syncing working configs).",
+    )
     p_import.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
 
     p_mcp.set_defaults(func=dispatch)
@@ -124,6 +129,7 @@ def dispatch(args) -> int:
             harness=args.harness,
             merge=args.merge,
             user_scope=args.user_scope,
+            keep_secrets=args.keep_secrets,
             json_output=args.json,
         )
     args._brigade_parser.error(f"unknown mcp command: {args.mcp_command}")

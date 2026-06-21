@@ -537,7 +537,13 @@ def doctor(*, target: Path, json_output: bool = False) -> int:
 
 
 def import_servers(
-    *, target: Path, harness: str, merge: bool = False, user_scope: bool = False, json_output: bool = False
+    *,
+    target: Path,
+    harness: str,
+    merge: bool = False,
+    user_scope: bool = False,
+    keep_secrets: bool = False,
+    json_output: bool = False,
 ) -> int:
     target = target.expanduser().resolve()
     adapter = ADAPTERS.get(harness)
@@ -564,7 +570,7 @@ def import_servers(
     skipped_existing: list[str] = []
     to_add: dict[str, CanonicalServer] = {}
     for srv_name, raw in sorted(live.items()):
-        server, demoted = adapter.from_provider(srv_name, raw)
+        server, demoted = adapter.from_provider(srv_name, raw, keep_secrets=keep_secrets)
         discovered.append(srv_name)
         secrets_demoted.extend(f"{srv_name}.{d}" for d in demoted)
         if srv_name in existing:

@@ -184,10 +184,12 @@ def _emit_env(mapping: dict[str, dict[str, str]], env_style: str) -> dict[str, s
     return out
 
 
-def _parse_env(raw: object) -> tuple[dict[str, dict[str, str]], list[str]]:
-    """Reverse of _emit_env for import; demotes literal-looking secrets to refs.
+def _parse_env(raw: object, *, keep_secrets: bool = False) -> tuple[dict[str, dict[str, str]], list[str]]:
+    """Reverse of _emit_env for import. By default demotes literal-looking secrets to refs.
 
-    Returns (canonical_env, demoted_keys).
+    With keep_secrets=True, secret-looking literals are kept verbatim instead (used when
+    syncing existing working configs whose tools do not expand ``${VAR}``, where dropping
+    the value would break the server). Returns (canonical_env, demoted_keys).
     """
     out: dict[str, dict[str, str]] = {}
     demoted: list[str] = []
@@ -200,7 +202,7 @@ def _parse_env(raw: object) -> tuple[dict[str, dict[str, str]], list[str]]:
         match = _REF_RE.match(value)
         if match:
             out[key] = {"ref": match.group(1)}
-        elif UNSAFE_FIELD_PATTERN.search(key):
+        elif UNSAFE_FIELD_PATTERN.search(key) and not keep_secrets:
             out[key] = {"ref": key}
             demoted.append(key)
         else:
@@ -233,6 +235,16 @@ class McpAdapter:
 # --------------------------------------------------------------------------- #
 
 
+def _dig(doc: dict[str, Any], top_key: str) -> dict[str, Any] | None:
+    """Navigate a dotted top_key (e.g. ``mcp.servers``); return the server map or None."""
+    node: Any = doc
+    for part in top_key.split("."):
+        if not isinstance(node, dict):
+            return None
+        node = node.get(part)
+    return node if isinstance(node, dict) else None
+
+
 def _json_read_file(text: str | None, top_key: str) -> dict[str, dict[str, Any]]:
     if not text:
         return {}
@@ -242,7 +254,7 @@ def _json_read_file(text: str | None, top_key: str) -> dict[str, dict[str, Any]]
         return {}
     if not isinstance(doc, dict):
         return {}
-    section = doc.get(top_key)
+    section = _dig(doc, top_key)
     if not isinstance(section, dict):
         return {}
     return {str(k): v for k, v in section.items() if isinstance(v, dict)}
@@ -264,17 +276,29 @@ def _json_write_file(
                 doc = loaded
         except json.JSONDecodeError:
             doc = {}
-    section = doc.get(top_key)
+    # Navigate/create the (possibly nested) server map, preserving every sibling key.
+    parts = top_key.split(".")
+    node = doc
+    for part in parts[:-1]:
+        child = node.get(part)
+        if not isinstance(child, dict):
+            child = {}
+            node[part] = child
+        node = child
+    leaf = parts[-1]
+    section = node.get(leaf)
     if not isinstance(section, dict):
         section = {}
     for name in remove:
         section.pop(name, None)
     for name, server_dict in owned.items():
         section[name] = server_dict
-    doc[top_key] = section
+    node[leaf] = section
     if collect_inputs:
         _merge_vscode_inputs(doc, section)
-    return json.dumps(doc, indent=2, sort_keys=True) + "\n"
+    # sort_keys=False preserves the order of co-owned files (e.g. ~/.claude.json,
+    # ~/.openclaw/openclaw.json) so a sync produces a minimal, readable diff.
+    return json.dumps(doc, indent=2, sort_keys=False) + "\n"
 
 
 def _merge_vscode_inputs(doc: dict[str, Any], servers: dict[str, Any]) -> None:
@@ -429,14 +453,14 @@ def _mcpservers_to_provider(server: CanonicalServer, env_style: str, *, remote_u
 
 
 def _mcpservers_from_provider(
-    name: str, raw: dict[str, Any], *, remote_url_key: str = "url"
+    name: str, raw: dict[str, Any], *, remote_url_key: str = "url", keep_secrets: bool = False
 ) -> tuple[CanonicalServer, list[str]]:
     url = raw.get(remote_url_key) or raw.get("url") or raw.get("serverUrl")
     if url:
-        headers, demoted = _parse_env(raw.get("headers"))
+        headers, demoted = _parse_env(raw.get("headers"), keep_secrets=keep_secrets)
         transport = raw.get("type") if raw.get("type") in ("http", "sse") else "http"
         return CanonicalServer(name=name, transport=transport, url=str(url), headers=headers), demoted
-    env, demoted = _parse_env(raw.get("env"))
+    env, demoted = _parse_env(raw.get("env"), keep_secrets=keep_secrets)
     timeout = raw.get("timeout")
     return (
         CanonicalServer(
@@ -470,21 +494,53 @@ def _opencode_to_provider(server: CanonicalServer) -> dict[str, Any]:
     return out
 
 
-def _opencode_from_provider(name: str, raw: dict[str, Any]) -> tuple[CanonicalServer, list[str]]:
+def _opencode_from_provider(
+    name: str, raw: dict[str, Any], *, keep_secrets: bool = False
+) -> tuple[CanonicalServer, list[str]]:
     if raw.get("type") == "remote" or raw.get("url"):
-        headers, demoted = _parse_env(raw.get("headers"))
+        headers, demoted = _parse_env(raw.get("headers"), keep_secrets=keep_secrets)
         return CanonicalServer(name=name, transport="http", url=str(raw.get("url")), headers=headers), demoted
-    env, demoted = _parse_env(raw.get("environment"))
+    env, demoted = _parse_env(raw.get("environment"), keep_secrets=keep_secrets)
     command_list = raw.get("command") or []
     command = str(command_list[0]) if command_list else None
     args = tuple(str(a) for a in command_list[1:])
     return CanonicalServer(name=name, transport="stdio", command=command, args=args, env=env), demoted
 
 
-def _vscode_from_provider(name: str, raw: dict[str, Any]) -> tuple[CanonicalServer, list[str]]:
+def _vscode_from_provider(
+    name: str, raw: dict[str, Any], *, keep_secrets: bool = False
+) -> tuple[CanonicalServer, list[str]]:
     if raw.get("url"):
         return CanonicalServer(name=name, transport=str(raw.get("type") or "http"), url=str(raw["url"])), []
-    env, demoted = _parse_env(raw.get("env"))
+    env, demoted = _parse_env(raw.get("env"), keep_secrets=keep_secrets)
+    return (
+        CanonicalServer(
+            name=name,
+            transport="stdio",
+            command=str(raw["command"]) if raw.get("command") else None,
+            args=tuple(str(a) for a in (raw.get("args") or [])),
+            env=env,
+        ),
+        demoted,
+    )
+
+
+def _openclaw_to_provider(server: CanonicalServer) -> dict[str, Any]:
+    """OpenClaw mcp.servers shape: stdio {command,args,env} (no type); remote {url,transport}."""
+    if server.is_remote:
+        return {"url": server.url, "transport": server.transport}
+    out: dict[str, Any] = {"command": server.command, "args": list(server.args)}
+    if server.env:
+        out["env"] = _emit_env(server.env, "expand")
+    return out
+
+
+def _openclaw_from_provider(
+    name: str, raw: dict[str, Any], *, keep_secrets: bool = False
+) -> tuple[CanonicalServer, list[str]]:
+    if raw.get("url"):
+        return CanonicalServer(name=name, transport=str(raw.get("transport") or "http"), url=str(raw["url"])), []
+    env, demoted = _parse_env(raw.get("env"), keep_secrets=keep_secrets)
     return (
         CanonicalServer(
             name=name,
@@ -515,7 +571,9 @@ def _make_json_mcpservers(
         supports_remote=True,
         env_style=env_style,
         to_provider=lambda s: _mcpservers_to_provider(s, env_style, remote_url_key=remote_url_key),
-        from_provider=lambda n, r: _mcpservers_from_provider(n, r, remote_url_key=remote_url_key),
+        from_provider=lambda n, r, keep_secrets=False: _mcpservers_from_provider(
+            n, r, remote_url_key=remote_url_key, keep_secrets=keep_secrets
+        ),
         read_file=lambda t: _json_read_file(t, "mcpServers"),
         write_file=lambda t, o, r: _json_write_file(t, o, r, "mcpServers"),
     )
@@ -533,7 +591,7 @@ ADAPTERS: dict[str, McpAdapter] = {
         supports_remote=True,
         env_style="passthrough",
         to_provider=lambda s: _mcpservers_to_provider(s, "passthrough"),
-        from_provider=lambda n, r: _mcpservers_from_provider(n, r),
+        from_provider=lambda n, r, keep_secrets=False: _mcpservers_from_provider(n, r, keep_secrets=keep_secrets),
         read_file=_codex_read_file,
         write_file=_codex_write_file,
     ),
@@ -565,6 +623,35 @@ ADAPTERS: dict[str, McpAdapter] = {
         from_provider=_opencode_from_provider,
         read_file=lambda t: _json_read_file(t, "mcp"),
         write_file=lambda t, o, r: _json_write_file(t, o, r, "mcp"),
+    ),
+    # User-global scopes: these write the per-user config the tool reads everywhere,
+    # not a per-repo file. Gated behind --user-scope. Used to sync a machine's daily tools.
+    "claude-user": _make_json_mcpservers("claude-user", "~/.claude.json", user_scope=True),
+    "codex-user": McpAdapter(
+        harness="codex-user",
+        path="~/.codex/config.toml",
+        fmt="toml",
+        top_key="mcp_servers",
+        user_scope=True,
+        supports_remote=True,
+        env_style="passthrough",
+        to_provider=lambda s: _mcpservers_to_provider(s, "passthrough"),
+        from_provider=lambda n, r, keep_secrets=False: _mcpservers_from_provider(n, r, keep_secrets=keep_secrets),
+        read_file=_codex_read_file,
+        write_file=_codex_write_file,
+    ),
+    "openclaw": McpAdapter(
+        harness="openclaw",
+        path="~/.openclaw/openclaw.json",
+        fmt="json",
+        top_key="mcp.servers",
+        user_scope=True,
+        supports_remote=True,
+        env_style="expand",
+        to_provider=_openclaw_to_provider,
+        from_provider=_openclaw_from_provider,
+        read_file=lambda t: _json_read_file(t, "mcp.servers"),
+        write_file=lambda t, o, r: _json_write_file(t, o, r, "mcp.servers"),
     ),
 }
 
