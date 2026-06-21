@@ -61,7 +61,7 @@ _HARNESS_LABELS = {
     "amp": "Amp",
     "crush": "Crush",
     "openclaw": "OpenClaw",
-    "hermes": "Hermes (experimental)",
+    "hermes": "Hermes",
 }
 
 _DEPTH_LABELS = {

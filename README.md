@@ -73,6 +73,19 @@ Memory has two layers: knowledge cards under `memory/cards/` hold the detail, an
 
 It all runs on the machine you control: laptop, workstation, or VPS. Local by default, loud about the exceptions.
 
+## Verified learning
+
+The loop above files notes. The next loop earns trust. Brigade can promote a learned skill on its own, but only when a real signal proves it helped, and it rolls one back the moment a signal says it broke. The model never grades its own work.
+
+- `brigade outcome capture` records the result of a verify run (a real exit code, not an opinion) against the skill that produced it.
+- `brigade outcome score` ranks each skill by a Wilson lower bound, so something that passed twice never outranks something vetted across twenty runs.
+- `brigade outcome reconcile` is the gate. Dry-run by default: it shows what it would promote or revert and writes nothing. With `--apply` it installs a skill that earned it across your harnesses, or rolls a regressed one back to its last good version (and uninstalls a bad first install that has nothing to fall back to).
+- `brigade outcome explain` prints the full signal trail behind any decision: which run produced each result, the threshold it crossed, and the reversible action taken.
+
+The whole ledger is plain JSON and markdown under `memory/outcome/`, tracked in git and readable without Brigade. Promotion you can audit, reversal you can trust, learned skills you can take anywhere. This is the same lesson as the 41KB incident, finished: blind auto-promotion was the bug, verified and reversible and receipted promotion is the fix.
+
+To run it hands-off, schedule `brigade outcome reconcile` in your own cron. Keep it in dry-run for a week and read the receipts, then add `--apply`. Brigade still installs no daemon; the loop runs on the scheduler you already have. `brigade outcome rank` lists the most-proven skills first, so retrieval can surface what worked rather than just what matched.
+
 ## Install
 
 ```bash
@@ -129,7 +142,7 @@ Each writer gets its own local inbox; one canonical owner ingests. Brigade keeps
 | Hermes | `hermes` | `.hermes/memory-handoffs/` |
 | OpenClaw | `openclaw` | usually the memory owner, not a writer |
 
-All of them get handoff templates and ingest source coverage. Most also get projected tools and skills in their native format (some as `rules` or `instructions`, a few not yet); the per-harness matrix is in the [technical guide](docs/technical-guide.md).
+All of them get handoff templates and ingest source coverage. Most also get projected tools and skills in their native format (some as `rules` or `instructions`, a few not yet); the per-harness matrix is in the [technical guide](docs/technical-guide.md). Hermes is validated against a real Hermes install: handoffs land in `.hermes/memory-handoffs/`, and reviewed skills install into your Hermes store (`~/.hermes/skills`), where Hermes discovers them.
 
 ## Beyond memory
 
@@ -150,6 +163,7 @@ The full tour of every station lives in [docs/overview.md](docs/overview.md).
 
 - **mem0, Letta, and friends** are memory layers for apps you are building, usually behind an API or a server. Brigade is for the agent CLIs you already run, and it is file-first: your memory is markdown in your repo, reviewable in git, readable without Brigade.
 - **Native harness memory** (each tool's own auto-memory) is a per-tool silo. It does not cross harnesses, and it writes without review. Brigade gives every tool one shared format and one canonical owner, with a review gate in between.
+- **Already running Hermes, or any self-improving agent?** Keep it. Brigade is not a replacement, it is the verification layer on top. A built-in learning loop grades its own work and keeps what it learns inside one tool. Brigade promotes a skill only when a real signal confirms it, keeps every learned skill as portable markdown in your git, and runs one loop across your whole fleet instead of one agent.
 - **A plain CLAUDE.md / AGENTS.md** works great until it bloats past the context budget and goes stale. Brigade exists because mine hit 41KB. It keeps bootstrap files slim, moves detail into indexed cards, and flags staleness instead of trusting last month's facts forever.
 - **A daemon or hosted service** would be simpler to demo and worse to trust. Brigade writes local files when you run a command, and that is all it does.
 

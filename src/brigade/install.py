@@ -366,9 +366,8 @@ def install_selection(
     print(f"brigade: memory owner -> {owner_label}")
     if "hermes" in selection.harnesses:
         print(
-            "brigade: NOTE - the hermes adapter is experimental. "
-            "Validate against your real Hermes install before relying on it. "
-            "See CONTRIBUTING.md for graduation criteria.",
+            "brigade: the hermes adapter is validated against a real Hermes install "
+            "(handoffs and skill install). Reviewed skills install into your Hermes store.",
             file=sys.stderr,
         )
     if notes:

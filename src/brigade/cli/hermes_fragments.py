@@ -8,7 +8,7 @@ from pathlib import Path
 
 def register(sub: argparse._SubParsersAction) -> None:
     # hermes-fragments
-    p_hf = sub.add_parser("hermes-fragments", help="Write Hermes adapter fragments (experimental).")
+    p_hf = sub.add_parser("hermes-fragments", help="Write Hermes adapter fragments.")
     p_hf.add_argument("--out", "-o", type=Path, required=True, help="Output directory.")
     p_hf.set_defaults(func=dispatch)
 

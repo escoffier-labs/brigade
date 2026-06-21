@@ -17,7 +17,7 @@ COMMAND_GROUPS: list[tuple[str, list[str]]] = [
     ("Stations and tools", ["add", "skills", "tools", "mcp", "pantry", "roster", "run", "runs", "dogfood"]),
     (
         "Review, security, and research",
-        ["security", "scrub", "untrusted", "research", "learn", "chat", "context", "projects"],
+        ["security", "scrub", "untrusted", "research", "learn", "outcome", "chat", "context", "projects"],
     ),
     (
         "Wiring and advanced",

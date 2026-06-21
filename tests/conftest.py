@@ -8,6 +8,17 @@ def tmp_target(tmp_path):
 
 
 @pytest.fixture(autouse=True)
+def _isolate_hermes_home(tmp_path_factory, monkeypatch):
+    """Point HERMES_HOME at a dedicated temp dir (outside the test's tmp_path so
+    it never pollutes workspace assertions) so hermes-harness skill installs
+    never touch the real ~/.hermes. The dir exists, so the 'Hermes is installed'
+    gate passes for tests that exercise hermes installs; tests that need the
+    absent-Hermes case re-point HERMES_HOME in their own body."""
+    home = tmp_path_factory.mktemp("hermes_home")
+    monkeypatch.setenv("HERMES_HOME", str(home))
+
+
+@pytest.fixture(autouse=True)
 def _no_managed_tools_on_path(monkeypatch, request):
     """Default to the bare-host baseline: no managed tool detected on PATH.
 

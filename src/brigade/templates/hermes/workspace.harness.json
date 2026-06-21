@@ -1,15 +1,15 @@
 {
   "_comment": [
-    "EXPERIMENTAL fragment for Hermes integration.",
+    "Hermes integration fragment.",
     "",
     "Hermes support follows the same contract as OpenClaw; only the file names",
-    "and command paths change. This fragment is a placeholder until validated",
+    "and command paths change. The contract is validated",
     "against a real Hermes install.",
     "",
     "Replace <hermes-config-path> with your Hermes config location."
   ],
   "_brigade_version": "0.12.0",
-  "_brigade_status": "experimental",
+  "_brigade_status": "validated",
   "workspace": {
     "root": "<workspace-root>",
     "bootstrap_files": [

@@ -22,7 +22,7 @@ Any harness that wants to plug into `brigade` must answer six questions.
 | `doctor_checks` | Existence of bootstrap files + jq queries against `openclaw.json` |
 | `publish_gate` | `content-guard` via `hooks/pre-push` |
 
-## Reference mapping (Hermes - experimental)
+## Reference mapping (Hermes)
 
 Same shape; map `memory_owner` to your Hermes config root and `doctor_checks` to whatever Hermes exposes.
 
