@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `brigade mcp` syncs one canonical MCP server catalog (`.brigade/mcp.json`) into each tool's native MCP config file. `init`/`add`/`list` build the catalog; `plan` previews; `sync` (dry-run unless `--write`) merges into Claude (`.mcp.json`), Cursor (`.cursor/mcp.json`), Codex (`.codex/config.toml`), VS Code (`.vscode/mcp.json`, with `inputs`), OpenCode (`opencode.json`), and Antigravity (`~/.gemini/config/mcp_config.json`, user-scoped via `--user-scope`); `doctor` validates; `import` reads an existing tool's config back into the catalog. The merge is by server key with ownership tracked in the gitignored `.brigade/mcp/state.json`: servers the user added are preserved, a server edited outside Brigade is a conflict (skipped unless `--force`), orphans are removed only with `--prune` and only when still pristine, and env values are always written as `${VAR}` references (or VS Code `${input:VAR}`), never inlined secrets. `brigade operator sync-mcp` wraps it with a validate->sync->summary receipt. New `mcp` station (alias `brigadier`).
+
+### Changed
+- The "Brigade does not write runtime MCP configs / auto-sync harness configs" statements in the tool catalog and technical guide are reworded: runtime MCP *server* config sync is now an explicit, bounded capability provided by `brigade mcp` (dry-run by default, merge-by-key, never inlines secrets, never automatic). The tool-catalog `mcp` *family* projection remains a documentation stub.
+
 ## [0.12.0] - 2026-06-16
 
 ### Added

@@ -70,7 +70,14 @@ EVIDENCE = Station(
     tools=("miseledger", "stationtrail", "sourceharvest"),
 )
 
-_BUILTIN: Tuple[Station, ...] = (CORE, MEMORY, GUARD, TOKENS, SEARCH, SECURITY, PANTRY, NOTIFICATIONS, EVIDENCE)
+MCP = Station(
+    name="mcp",
+    summary="canonical MCP server config sync",
+    aliases=("brigadier",),
+    doctor=_doctor.mcp_station_checks,
+)
+
+_BUILTIN: Tuple[Station, ...] = (CORE, MEMORY, GUARD, TOKENS, SEARCH, SECURITY, PANTRY, NOTIFICATIONS, EVIDENCE, MCP)
 
 
 def all_stations() -> Tuple[Station, ...]:

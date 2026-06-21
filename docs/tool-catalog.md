@@ -1,6 +1,6 @@
 # Brigade Tool Catalog
 
-`brigade tools` describes local callable tools, slash commands, skills, superpowers, scripts, and MCP configs across agent harnesses. It inspects local files, reports health, can explicitly write reviewed harness projection files, and can explicitly supervise local runtimes for approved script calls. It does not start MCP servers, auto-sync harness configs, fetch schemas, store auth, install schedulers, or auto-start runtimes.
+`brigade tools` describes local callable tools, slash commands, skills, superpowers, scripts, and MCP configs across agent harnesses. It inspects local files, reports health, can explicitly write reviewed harness projection files, and can explicitly supervise local runtimes for approved script calls. It does not start MCP servers, fetch schemas, store auth, install schedulers, or auto-start runtimes. (Runtime MCP server configs are a separate concern, managed explicitly by `brigade mcp` - see [mcp-sync.md](mcp-sync.md).)
 
 ![Tool catalog separates discovery, projection, and execution](assets/tool-catalog-flow.svg)
 
@@ -271,7 +271,7 @@ Managed projection files start with a Brigade metadata header containing:
 - projection fingerprint
 - generated-at timestamp
 
-For `slash-command`, `skill`, and `superpower` entries, Brigade writes the source content behind that metadata header. For `script` entries, Brigade writes a safe reference projection with the command label and source excerpt. For `mcp` entries, Brigade writes a documentation stub only. It does not write runtime MCP server configs.
+For `slash-command`, `skill`, and `superpower` entries, Brigade writes the source content behind that metadata header. For `script` entries, Brigade writes a safe reference projection with the command label and source excerpt. For `mcp` entries in the tool catalog, Brigade writes a documentation stub only. Runtime MCP server configs are written by the separate `brigade mcp` subsystem (see [mcp-sync.md](mcp-sync.md)), not by tool projection.
 
 ## Contracts And Call Planning
 

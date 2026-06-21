@@ -31,6 +31,7 @@ from .lifecycle import (
     checkup_payload,
     init,
     quickstart,
+    sync_mcp,
     sync_tools,
 )
 from .migration import (
@@ -89,6 +90,7 @@ __all__ = [
     "surfaces_list",
     "surfaces_review",
     "surfaces_reviews",
+    "sync_mcp",
     "sync_tools",
     "verify_harness",
     "verify_harness_payload",

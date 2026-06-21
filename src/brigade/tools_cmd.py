@@ -2041,7 +2041,7 @@ def _render_projection_body(tool: dict[str, Any], harness: str, source_text: str
             f"- harness: `{harness}`",
             f"- source: `{source_ref}`",
             "",
-            "This projection documents the local MCP catalog entry. Brigade does not start MCP servers or write runtime MCP configs from this file.",
+            "This projection documents the catalog entry only. Runtime MCP server configs are managed separately by `brigade mcp` (see `.brigade/mcp.json`); Brigade does not start MCP servers.",
         ]
         if description:
             lines.extend(["", description])

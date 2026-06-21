@@ -1,0 +1,126 @@
+#!/usr/bin/env bash
+# End-to-end smoke for `brigade mcp`. Separate from scripts/verify because it shells
+# out to a real installed brigade and (best-effort) to external tool CLIs that CI lacks.
+#
+# Layer 1: file-shape across all adapters in a throwaway repo (tool-independent; the
+#          authoritative cross-provider check, covers tools that are not installed).
+# Layer 2: live CLI checks for tools that ARE installed here (skip-if-missing).
+#
+# Usage: ./scripts/smoke-mcp            (uses .venv/bin/brigade)
+#        BRIGADE=brigade ./scripts/smoke-mcp   (e.g. a pipx install in the Hermes LXC)
+set -uo pipefail
+cd "$(dirname "$0")/.."
+
+BRIGADE=${BRIGADE:-.venv/bin/brigade}
+PY=${PY:-python3}
+PASS=0
+FAIL=0
+ok() {
+  echo "  ok:   $1"
+  PASS=$((PASS + 1))
+}
+bad() {
+  echo "  FAIL: $1" >&2
+  FAIL=$((FAIL + 1))
+}
+have() { command -v "$1" >/dev/null 2>&1; }
+
+T=$(mktemp -d)
+HOME_SANDBOX="$T/home"
+mkdir -p "$HOME_SANDBOX"
+trap 'rm -rf "$T"' EXIT
+
+echo "brigade: $($BRIGADE --version 2>/dev/null || echo "MISSING ($BRIGADE)")"
+echo
+echo "== Layer 1: file-shape across all adapters (tool-independent) =="
+
+$BRIGADE mcp init --target "$T" >/dev/null || bad "init"
+$BRIGADE mcp add --target "$T" --name github --command npx \
+  --args "-y @modelcontextprotocol/server-github" \
+  --env GITHUB_TOKEN=ref:GITHUB_TOKEN --timeout 60 >/dev/null || bad "add github"
+$BRIGADE mcp add --target "$T" --name docs --transport http \
+  --url https://mcp.example.com/v1 --timeout 30 >/dev/null || bad "add docs"
+$BRIGADE mcp sync --target "$T" --write >/dev/null || bad "sync --write"
+
+assert() { # assert <label> <python-expr-file> <true|false-expected>
+  local label="$1" file="$2"
+  shift 2
+  if "$PY" - "$file" "$@" <<'PYEOF'
+import json, sys
+path, *checks = sys.argv[1:]
+doc = json.load(open(path))
+import functools, operator
+def dig(d, dotted):
+    for part in dotted.split("."):
+        d = d[part]
+    return d
+for check in checks:
+    key, _, expected = check.partition("==")
+    val = dig(doc, key)
+    assert str(val) == expected, f"{key} = {val!r} != {expected!r}"
+PYEOF
+  then ok "$label"; else bad "$label"; fi
+}
+
+# Claude / Cursor: mcpServers, env ref, remote type+url
+assert "claude .mcp.json shape" "$T/.mcp.json" \
+  "mcpServers.github.command==npx" "mcpServers.github.env.GITHUB_TOKEN==\${GITHUB_TOKEN}" "mcpServers.docs.type==http"
+assert "cursor .cursor/mcp.json shape" "$T/.cursor/mcp.json" "mcpServers.github.command==npx"
+# VS Code: servers key + ${input:VAR} + inputs[]
+assert "vscode servers key + input ref" "$T/.vscode/mcp.json" \
+  "servers.github.env.GITHUB_TOKEN==\${input:GITHUB_TOKEN}" "servers.github.type==stdio"
+grep -q '"id": "GITHUB_TOKEN"' "$T/.vscode/mcp.json" && ok "vscode inputs[] entry" || bad "vscode inputs[] entry"
+# OpenCode: mcp key, command array, environment
+assert "opencode command-array shape" "$T/opencode.json" \
+  "mcp.github.type==local" "mcp.docs.type==remote"
+"$PY" -c "import json,sys; d=json.load(open('$T/opencode.json')); sys.exit(0 if d['mcp']['github']['command']==['npx','-y','@modelcontextprotocol/server-github'] else 1)" \
+  && ok "opencode command list" || bad "opencode command list"
+# Codex: TOML tables
+grep -q '^\[mcp_servers.github\]' "$T/.codex/config.toml" && ok "codex [mcp_servers.github] table" || bad "codex table"
+grep -q "GITHUB_TOKEN = '\${GITHUB_TOKEN}'" "$T/.codex/config.toml" && ok "codex env ref" || bad "codex env ref"
+
+# No literal secret anywhere (we only ever used a ref)
+if grep -rIns "ghp_\|sk-\|secret-value" "$T" --include="*.json" --include="*.toml" >/dev/null 2>&1; then
+  bad "no literal secrets in any written config"
+else
+  ok "no literal secrets in any written config"
+fi
+
+# Antigravity is user-scoped: run with a sandbox HOME so we never touch the real one.
+HOME="$HOME_SANDBOX" $BRIGADE mcp sync --target "$T" --harness antigravity --user-scope --write >/dev/null || bad "antigravity sync"
+AG="$HOME_SANDBOX/.gemini/config/mcp_config.json"
+[ -f "$AG" ] && grep -q '"serverUrl"' "$AG" && ok "antigravity serverUrl + user-scope path" || bad "antigravity user-scope write"
+
+# Idempotency: a second write reports zero creates.
+CREATES=$($BRIGADE mcp sync --target "$T" --write --json | "$PY" -c "import json,sys; print(json.load(sys.stdin)['counts']['create'])")
+[ "$CREATES" = "0" ] && ok "idempotent re-sync (0 creates)" || bad "idempotent re-sync (got $CREATES creates)"
+
+# Foreign server is preserved.
+"$PY" -c "import json; p='$T/.mcp.json'; d=json.load(open(p)); d['mcpServers']['handrolled']={'command':'mine'}; json.dump(d,open(p,'w'))"
+$BRIGADE mcp sync --target "$T" --harness claude --write >/dev/null
+grep -q '"handrolled"' "$T/.mcp.json" && ok "foreign server preserved" || bad "foreign server preserved"
+
+# User edit to a managed server conflicts (skipped) without --force.
+"$PY" -c "import json; p='$T/.mcp.json'; d=json.load(open(p)); d['mcpServers']['github']['command']='edited'; json.dump(d,open(p,'w'))"
+$BRIGADE mcp sync --target "$T" --harness claude --write >/dev/null
+"$PY" -c "import json,sys; sys.exit(0 if json.load(open('$T/.mcp.json'))['mcpServers']['github']['command']=='edited' else 1)" \
+  && ok "user edit preserved (conflict, no --force)" || bad "user edit clobbered"
+$BRIGADE mcp sync --target "$T" --harness claude --write --force >/dev/null
+"$PY" -c "import json,sys; sys.exit(0 if json.load(open('$T/.mcp.json'))['mcpServers']['github']['command']=='npx' else 1)" \
+  && ok "--force overwrites conflict" || bad "--force did not overwrite"
+
+echo
+echo "== Layer 2: live CLI checks (installed tools only) =="
+if have claude; then
+  if (cd "$T" && claude mcp list 2>/dev/null | grep -qi github); then ok "claude mcp list sees github"; else echo "  warn: claude installed but 'claude mcp list' did not list github (auth/offline?)"; fi
+else
+  echo "  skip: claude not installed"
+fi
+for tool in codex opencode cursor-agent; do
+  if have "$tool"; then echo "  info: $tool installed (config written; Layer 1 verified its shape)"; else echo "  skip: $tool not installed"; fi
+done
+for tool in cursor code antigravity; do have "$tool" || echo "  skip: $tool not installed (Layer 1 covers it)"; done
+
+echo
+echo "smoke-mcp: $PASS passed, $FAIL failed"
+[ "$FAIL" -eq 0 ]

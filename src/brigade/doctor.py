@@ -101,6 +101,30 @@ def evidence_station_checks(ctx: DoctorContext) -> List[CheckResult]:
     return []
 
 
+def mcp_station_checks(ctx: DoctorContext) -> List[CheckResult]:
+    from . import mcp_cmd
+
+    path = mcp_cmd.canonical_path(ctx.target)
+    if not path.exists():
+        # Optional station: no canonical catalog means MCP sync is simply not in use.
+        return [(INFO, "mcp: catalog", "no .brigade/mcp.json (run `brigade mcp init` to start)")]
+    servers, errors, warnings = mcp_cmd.load_canonical(ctx.target)
+    if errors:
+        return [(FAIL, "mcp: catalog", "; ".join(errors))]
+    results: List[CheckResult] = [(OK, "mcp: catalog", f"{path} ({len(servers)} server(s))")]
+    from . import mcp_adapters
+
+    for server in servers.values():
+        for severity, message in mcp_adapters.validate_server(server):
+            results.append((FAIL if severity == "error" else WARN, "mcp: server", message))
+    for w in warnings:
+        results.append((WARN, "mcp: catalog", w))
+    unsupported = sorted(h for h in ctx.harnesses if h not in mcp_adapters.ADAPTERS and h != "this-repo")
+    if unsupported:
+        results.append((INFO, "mcp: targets", f"no MCP adapter for: {', '.join(unsupported)}"))
+    return results
+
+
 def security_station_checks(ctx: DoctorContext) -> List[CheckResult]:
     from . import security_cmd
 

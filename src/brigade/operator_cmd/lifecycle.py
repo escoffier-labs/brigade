@@ -269,6 +269,73 @@ def sync_tools(*, target: Path, dry_run: bool = False, force: bool = False, json
     return 0 if payload["status"] == "ok" else 1
 
 
+def sync_mcp(
+    *,
+    target: Path,
+    write: bool = False,
+    force: bool = False,
+    prune: bool = False,
+    adopt: bool = False,
+    user_scope: bool = False,
+    json_output: bool = False,
+) -> int:
+    """Validate the canonical MCP catalog, then sync it into each tool's config.
+
+    Three phases: doctor (validate the catalog) -> sync (dry-run unless --write) ->
+    summary. Kept separate from sync-tools because it writes shared config files the
+    user co-owns, so it deserves its own auditable receipt. Dry-run by default.
+    """
+    from .. import mcp_cmd
+
+    target = target.expanduser().resolve()
+    if not target.is_dir():
+        print(f"error: --target is not a directory: {target}", file=sys.stderr)
+        return 2
+    doctor_rc, doctor_payload = _capture_json_call(mcp_cmd.doctor, target=target)
+    if doctor_rc != 0:
+        payload = {
+            "target": str(target),
+            "write": write,
+            "doctor": doctor_payload,
+            "sync": None,
+            "status": "warn",
+        }
+        if json_output:
+            print(json.dumps(payload, indent=2, sort_keys=True))
+        else:
+            print(f"operator sync-mcp: {target}")
+            print("doctor: failed")
+            for issue in doctor_payload.get("issues") or []:
+                if isinstance(issue, dict) and issue.get("severity") == "error":
+                    print(f"error: {issue.get('message')}")
+        return 1
+    sync_rc, sync_payload = _capture_json_call(
+        mcp_cmd.sync, target=target, write=write, force=force, prune=prune, adopt=adopt, user_scope=user_scope
+    )
+    counts = sync_payload.get("counts") or {}
+    ok = sync_rc == 0
+    payload = {
+        "target": str(target),
+        "write": write,
+        "doctor": {"valid": doctor_payload.get("valid"), "server_count": doctor_payload.get("server_count")},
+        "sync": sync_payload,
+        "status": "ok" if ok else "warn",
+    }
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0 if ok else 1
+    print(f"operator sync-mcp: {target}")
+    print(f"write: {write}")
+    print(f"servers: {doctor_payload.get('server_count')}")
+    print(f"created: {counts.get('create', 0)}")
+    print(f"updated: {counts.get('update', 0)}")
+    print(f"conflicts: {counts.get('conflict', 0)}")
+    print(f"removed: {counts.get('remove', 0)}")
+    for path in sync_payload.get("files_written") or []:
+        print(f"- wrote: {path}")
+    return 0 if ok else 1
+
+
 def _capture_json_call(func, **kwargs: Any) -> tuple[int, dict[str, Any]]:
     output = StringIO()
     with redirect_stdout(output):

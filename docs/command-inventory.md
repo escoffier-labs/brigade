@@ -28,10 +28,11 @@ brigade roadmap commands --write
 - `brigade ingest`: 1 command path(s)
 - `brigade init`: 1 command path(s)
 - `brigade learn`: 13 command path(s)
+- `brigade mcp`: 7 command path(s)
 - `brigade memory`: 10 command path(s)
 - `brigade notifications`: 4 command path(s)
 - `brigade openclaw-fragments`: 1 command path(s)
-- `brigade operator`: 23 command path(s)
+- `brigade operator`: 24 command path(s)
 - `brigade outcome`: 6 command path(s)
 - `brigade pantry`: 3 command path(s)
 - `brigade projects`: 10 command path(s)
@@ -167,6 +168,13 @@ brigade roadmap commands --write
 - `brigade learn replay list`
 - `brigade learn replay show`
 - `brigade learn skill-candidates`
+- `brigade mcp add`
+- `brigade mcp doctor`
+- `brigade mcp import`
+- `brigade mcp init`
+- `brigade mcp list`
+- `brigade mcp plan`
+- `brigade mcp sync`
 - `brigade memory care backfill`
 - `brigade memory care closeout`
 - `brigade memory care doctor`
@@ -203,6 +211,7 @@ brigade roadmap commands --write
 - `brigade operator surfaces list`
 - `brigade operator surfaces review`
 - `brigade operator surfaces reviews`
+- `brigade operator sync-mcp`
 - `brigade operator sync-tools`
 - `brigade operator verify-harness`
 - `brigade outcome capture`
