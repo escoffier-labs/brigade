@@ -1,23 +1,22 @@
-//! GraphTrail MCP server binary: a read-only stdio JSON-RPC server over a synced graph db.
+//! GraphTrail MCP server binary: a read-only stdio JSON-RPC server over graph databases.
 //!
-//! Pick the database via `--db <path>`, `--db=<path>`, the `GRAPHTRAIL_DB` env var, or the
-//! default `.graphtrail/graphtrail.db` in the working directory.
+//! The default database comes from `--db <path>`, `--db=<path>`, the `GRAPHTRAIL_DB` env var, or
+//! `.graphtrail/graphtrail.db` in the working directory. Individual tool calls may override it with
+//! a `repo`/`db` argument, so one server can answer for any indexed repo. The database is opened
+//! lazily per call, so the server starts even if the default db does not exist yet.
 
 use std::io;
 use std::path::PathBuf;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 
 use graphtrail::mcp::serve;
-use graphtrail::store::open_read_only;
 
 fn main() -> Result<()> {
-    let db = resolve_db();
-    let conn =
-        open_read_only(&db).with_context(|| format!("failed to open graph db {}", db.display()))?;
+    let default_db = resolve_db();
     let stdin = io::stdin();
     let stdout = io::stdout();
-    serve(&conn, stdin.lock(), stdout.lock())
+    serve(&default_db, stdin.lock(), stdout.lock())
 }
 
 fn resolve_db() -> PathBuf {

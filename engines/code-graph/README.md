@@ -53,8 +53,13 @@ cargo run -- --db /path/to/repo/.graphtrail/graphtrail.db stats --json
 
 `graphtrail-mcp` is a read-only MCP server (newline-delimited JSON-RPC over stdio) that
 exposes the query commands as tools: `search`, `callers`, `callees`, `impact`, `context`,
-and `stats`. It opens the database with `SQLITE_OPEN_READ_ONLY`, so it can never mutate the
-graph. Point it at a synced db via `--db`, `--db=<path>`, or the `GRAPHTRAIL_DB` env var.
+and `stats`. Connections are always opened `SQLITE_OPEN_READ_ONLY`, so it can never mutate
+the graph. The default db comes from `--db`, `--db=<path>`, or the `GRAPHTRAIL_DB` env var.
+
+It is multi-repo: every tool also accepts an optional `repo` (uses
+`<repo>/.graphtrail/graphtrail.db`) or `db` (explicit path) argument, so a single running
+server can answer for any indexed repository. The db is opened lazily per call, so the
+server starts even before the default db exists.
 
 ```bash
 cargo build --release   # produces target/release/graphtrail-mcp
