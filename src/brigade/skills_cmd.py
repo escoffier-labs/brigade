@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import difflib
 import json
+import os
 import shutil
 import sys
 from datetime import datetime, timezone
@@ -73,6 +74,16 @@ def _adapters_config_path(target: Path) -> Path:
 
 def _rollback_root(target: Path, skill_id: str, harness: str) -> Path:
     return target / ".brigade" / "skills" / "rollback" / _slug(skill_id) / harness
+
+
+def _hermes_home() -> Path:
+    """Hermes data dir (HERMES_HOME, default ~/.hermes). Its existence proxies 'Hermes is installed'."""
+    return Path(os.environ.get("HERMES_HOME") or (Path.home() / ".hermes")).expanduser()
+
+
+def _hermes_skills_root() -> Path:
+    """Where real Hermes auto-discovers Brigade-installed skills (a 'local' skill category)."""
+    return _hermes_home() / "skills" / "brigade-imports"
 
 
 def _installs_root(target: Path) -> Path:
@@ -156,10 +167,54 @@ def _ensure_codex_frontmatter(text: str, metadata: dict[str, Any], skill_id: str
     return "".join(lines[:closing_index] + additions + lines[closing_index:])
 
 
+def _hermes_frontmatter_values(metadata: dict[str, Any], skill_id: str) -> dict[str, str]:
+    name = _slug(str(metadata.get("id") or skill_id))
+    description = str(metadata.get("description") or metadata.get("title") or f"Reviewed Brigade skill for {name}.")
+    version = str(metadata.get("version") or "0.1.0")
+    return {"name": name, "description": description, "version": version}
+
+
+def _hermes_frontmatter(metadata: dict[str, Any], skill_id: str) -> str:
+    values = _hermes_frontmatter_values(metadata, skill_id)
+    return "\n".join(
+        [
+            "---",
+            f"name: {_json_string(values['name'])}",
+            f"description: {_json_string(values['description'])}",
+            f"version: {_json_string(values['version'])}",
+            "---",
+            "",
+        ]
+    )
+
+
+def _ensure_hermes_frontmatter(text: str, metadata: dict[str, Any], skill_id: str) -> str:
+    if not _has_yaml_frontmatter(text):
+        return _hermes_frontmatter(metadata, skill_id) + text
+    lines = text.splitlines(keepends=True)
+    closing_index = next(index for index, line in enumerate(lines[1:], start=1) if line.strip() == "---")
+    existing_keys = {
+        line.split(":", 1)[0].strip()
+        for line in lines[1:closing_index]
+        if ":" in line and not line.lstrip().startswith("#")
+    }
+    values = _hermes_frontmatter_values(metadata, skill_id)
+    additions = [
+        f"{key}: {_json_string(values[key])}\n"
+        for key in ("name", "description", "version")
+        if key not in existing_keys
+    ]
+    if not additions:
+        return text
+    return "".join(lines[:closing_index] + additions + lines[closing_index:])
+
+
 def _render_skill_text_for_harness(text: str, metadata: dict[str, Any], skill_id: str, harness: str) -> str:
     rendered = text if text.endswith("\n") else text + "\n"
     if harness == "codex":
         rendered = _ensure_codex_frontmatter(rendered, metadata, skill_id)
+    elif harness == "hermes":
+        rendered = _ensure_hermes_frontmatter(rendered, metadata, skill_id)
     return rendered
 
 
@@ -180,6 +235,8 @@ def _rendered_skill_validation(text: str, harness: str) -> list[str]:
         for key in ("name", "description"):
             if key not in existing_keys:
                 errors.append(f"codex SKILL.md frontmatter missing {key}")
+    if harness == "hermes" and not _has_yaml_frontmatter(text):
+        errors.append("hermes SKILL.md missing YAML frontmatter")
     return errors
 
 
@@ -547,6 +604,10 @@ def lint(*, target: Path, skill: str, harness: str | None = None, json_output: b
 
 
 def _install_dir(workspace: Path, harness: str, skill_id: str) -> Path:
+    if harness == "hermes":
+        # Real Hermes reads skills from its own data dir (auto-discovered as a
+        # local skill), not the repo. Install there so it actually takes effect.
+        return _hermes_skills_root() / _slug(skill_id)
     adapter = _adapter_map(workspace)[harness]
     install_dir = workspace / str(adapter["install_path"]).format(skill_id=skill_id)
     workspace_resolved = workspace.resolve()
@@ -636,7 +697,12 @@ def install(
     source_path = str(metadata.get("source") or source_dir)
     targets = install_targets if harness == "all" else (harness,)
     receipts: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
     for install_target in targets:
+        if install_target == "hermes" and not _hermes_home().exists():
+            # Do not create ~/.hermes for someone who does not run Hermes.
+            skipped.append({"target": "hermes", "reason": "Hermes home not found (is Hermes installed?)"})
+            continue
         dest = _install_dir(workspace, install_target, skill_id)
         source_text = _skill_md_path(source_dir).read_text(errors="replace")
         rendered_text = _render_skill_text_for_harness(source_text, metadata, skill_id, install_target)
@@ -712,6 +778,7 @@ def install(
         "fingerprint": lint_payload.get("fingerprint"),
         "targets": list(targets),
         "receipts": receipts,
+        "skipped": skipped,
     }
     payload = {"installed": True, "receipt": receipt}
     if json_output:
@@ -722,6 +789,8 @@ def install(
     for item in receipts:
         print(f"- {item['target']}: {item['installed_dir']}")
         print(f"  receipt: {item['receipt_path']}")
+    for item in skipped:
+        print(f"- {item['target']}: skipped ({item['reason']})")
     return 0
 
 

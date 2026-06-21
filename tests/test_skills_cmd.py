@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import contextlib
 import io
 import json
+import os
 import sys
+from pathlib import Path
 
 from brigade import cli, skills_cmd
 
@@ -88,7 +91,9 @@ def test_skills_import_lint_search_and_install_all(tmp_path, capsys):
     assert (tmp_path / ".cursor" / "skills" / "security-review" / "SKILL.md").is_file()
     assert not (tmp_path / ".agents" / "skills" / "security-review" / "SKILL.md").exists()
     assert (tmp_path / ".openclaw" / "skills" / "security-review" / "SKILL.md").is_file()
-    assert (tmp_path / ".hermes" / "skills" / "security-review" / "SKILL.md").is_file()
+    # hermes installs into the user's Hermes store (where Hermes actually reads), not repo-local
+    assert (Path(os.environ["HERMES_HOME"]) / "skills" / "brigade-imports" / "security-review" / "SKILL.md").is_file()
+    assert not (tmp_path / ".hermes" / "skills" / "security-review").exists()
     assert (tmp_path / ".brigade" / "skills" / "mcp-resources" / "security-review" / "SKILL.md").is_file()
 
 
@@ -102,6 +107,45 @@ def test_skills_cli_install_uses_target_for_harness(tmp_path):
     )
 
     assert (tmp_path / ".codex" / "skills" / "security-review" / "SKILL.md").is_file()
+
+
+def test_hermes_skill_installs_into_global_hermes_home_for_real_discovery(tmp_path):
+    source = _write_skill(tmp_path / "source")
+    with contextlib.redirect_stdout(io.StringIO()):
+        assert skills_cmd.import_skill(target=tmp_path, source=source, json_output=True) == 0
+        assert skills_cmd.install(workspace=tmp_path, skill="security-review", harness="hermes", json_output=True) == 0
+    hermes_home = Path(os.environ["HERMES_HOME"])
+    assert (hermes_home / "skills" / "brigade-imports" / "security-review" / "SKILL.md").is_file()
+    # the repo-local .hermes/skills path, which real Hermes ignores, is NOT used
+    assert not (tmp_path / ".hermes" / "skills" / "security-review").exists()
+
+
+def test_hermes_skill_install_skipped_when_hermes_not_installed(tmp_path, monkeypatch):
+    absent = tmp_path / "no-hermes-here"
+    monkeypatch.setenv("HERMES_HOME", str(absent))
+    source = _write_skill(tmp_path / "source")
+    with contextlib.redirect_stdout(io.StringIO()):
+        assert skills_cmd.import_skill(target=tmp_path, source=source, json_output=True) == 0
+        rc = skills_cmd.install(workspace=tmp_path, skill="security-review", harness="hermes", json_output=True)
+    assert rc == 0
+    # no ~/.hermes is created for a user who does not run Hermes
+    assert not absent.exists()
+    # and nothing is projected repo-local either
+    assert not (tmp_path / ".hermes" / "skills" / "security-review").exists()
+
+
+def test_hermes_install_adds_hermes_frontmatter_so_hermes_discovers_it(tmp_path):
+    source = _write_skill(tmp_path / "source")
+    with contextlib.redirect_stdout(io.StringIO()):
+        assert skills_cmd.import_skill(target=tmp_path, source=source, json_output=True) == 0
+        assert skills_cmd.install(workspace=tmp_path, skill="security-review", harness="hermes", json_output=True) == 0
+    installed = Path(os.environ["HERMES_HOME"]) / "skills" / "brigade-imports" / "security-review" / "SKILL.md"
+    text = installed.read_text()
+    # real Hermes only lists a local skill whose SKILL.md has YAML frontmatter
+    assert text.startswith("---\n")
+    assert 'name: "security-review"' in text
+    assert "version:" in text
+    assert "# Security Review" in text
 
 
 def test_skills_serve_mcp_reports_resource_contract(capsys, tmp_path):
