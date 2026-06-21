@@ -272,6 +272,22 @@ def register(sub: argparse._SubParsersAction) -> None:
         "--force", action="store_true", help="Overwrite unmanaged or locally edited projection files."
     )
     p_operator_sync_tools.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_operator_sync_mcp = operator_sub.add_parser(
+        "sync-mcp", help="Merge the canonical MCP catalog into each tool's native config (dry-run by default)."
+    )
+    p_operator_sync_mcp.add_argument(
+        "--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update."
+    )
+    p_operator_sync_mcp.add_argument("--write", action="store_true", help="Write files (otherwise dry-run).")
+    p_operator_sync_mcp.add_argument("--force", action="store_true", help="Overwrite servers edited outside Brigade.")
+    p_operator_sync_mcp.add_argument("--prune", action="store_true", help="Remove pristine orphans.")
+    p_operator_sync_mcp.add_argument(
+        "--adopt", action="store_true", help="Take ownership of same-named foreign servers."
+    )
+    p_operator_sync_mcp.add_argument(
+        "--user-scope", action="store_true", help="Include user-scoped targets (e.g. antigravity)."
+    )
+    p_operator_sync_mcp.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_operator_quickstart = operator_sub.add_parser(
         "quickstart", help="Prepare a new user workspace with Brigade configs, portable tools, and harness checks."
     )
@@ -393,6 +409,16 @@ def dispatch(args) -> int:
     if args.operator_command == "sync-tools":
         return operator_cmd.sync_tools(
             target=args.target, dry_run=args.dry_run, force=args.force, json_output=args.json
+        )
+    if args.operator_command == "sync-mcp":
+        return operator_cmd.sync_mcp(
+            target=args.target,
+            write=args.write,
+            force=args.force,
+            prune=args.prune,
+            adopt=args.adopt,
+            user_scope=args.user_scope,
+            json_output=args.json,
         )
     if args.operator_command == "quickstart":
         return operator_cmd.quickstart(

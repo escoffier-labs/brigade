@@ -685,6 +685,8 @@ Replay creates a pending call from redacted receipt arguments and never recovers
 
 Execution policy is host-local and gitignored; environment values come only from the current process and are not stored in calls, checkpoints, receipts, logs, imports, or docs. Brigade does not connect to remote MCP servers, fetch OpenAPI or GraphQL schemas, store auth, install schedulers, send approval notifications, or auto-sync harness configs from `doctor`, `brief`, or `work run`. Keep tokens, secrets, private URLs, and host-private paths out of public catalog templates.
 
+Runtime MCP *server* config sync is the one explicit exception, and it is bounded. `brigade mcp sync` (dry-run by default; `operator sync-mcp` wraps it) merges a canonical catalog (`.brigade/mcp.json`) into each tool's native config file by server key: it preserves servers the user added, treats a server edited outside Brigade as a conflict (skipped unless `--force`), removes orphans only with `--prune` and only when still pristine, and never inlines secrets (env values are written as `${VAR}` references, never literals). It still never runs automatically from `doctor`, `brief`, or `work run`. See [mcp-sync.md](mcp-sync.md).
+
 Operator notification commands:
 
 - `brigade add notifications` installs `agent-notify` when missing and reports manual wiring steps.

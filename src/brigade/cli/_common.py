@@ -14,7 +14,7 @@ import argparse
 COMMAND_GROUPS: list[tuple[str, list[str]]] = [
     ("Core memory loop", ["init", "handoff", "handoff-template", "ingest", "memory", "doctor", "status"]),
     ("Daily operator loop", ["operator", "daily", "work", "friction", "center", "runbook", "budgets", "notifications"]),
-    ("Stations and tools", ["add", "skills", "tools", "pantry", "roster", "run", "runs", "dogfood"]),
+    ("Stations and tools", ["add", "skills", "tools", "mcp", "pantry", "roster", "run", "runs", "dogfood"]),
     (
         "Review, security, and research",
         ["security", "scrub", "untrusted", "research", "learn", "chat", "context", "projects"],
