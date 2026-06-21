@@ -49,6 +49,11 @@ pub fn init_schema(conn: &Connection) -> Result<()> {
             line INTEGER NOT NULL
         );
 
+        CREATE TABLE IF NOT EXISTS meta (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        );
+
         CREATE VIRTUAL TABLE IF NOT EXISTS symbols_fts USING fts5(
             symbol_id UNINDEXED,
             name,

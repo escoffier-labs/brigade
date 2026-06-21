@@ -64,6 +64,8 @@ pub struct SearchRow {
 
 #[derive(Debug, Serialize)]
 pub struct ContextPack {
+    /// Version of the JSON pack shape, so consumers can detect format changes.
+    pub schema_version: u32,
     pub task: String,
     pub entry_points: Vec<SearchRow>,
     pub callers: Vec<EdgeRow>,

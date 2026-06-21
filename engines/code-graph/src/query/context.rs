@@ -8,6 +8,7 @@ use rusqlite::Connection;
 use crate::model::{ContextPack, Direction};
 use crate::query::graph::edges_for_symbol_id;
 use crate::query::search::search_symbols;
+use crate::store::SCHEMA_VERSION;
 
 pub fn build_context_pack(conn: &Connection, task: String, limit: usize) -> Result<ContextPack> {
     let entry_points = search_symbols(conn, &task, limit)?;
@@ -26,6 +27,7 @@ pub fn build_context_pack(conn: &Connection, task: String, limit: usize) -> Resu
     let mut related_files: Vec<String> = files.into_iter().collect();
     related_files.sort();
     Ok(ContextPack {
+        schema_version: SCHEMA_VERSION,
         task,
         entry_points,
         callers,

@@ -129,6 +129,7 @@ pub fn sync_repo(conn: &Connection, root: &Path) -> Result<SyncSummary> {
             }
         }
     }
+    crate::store::meta::write_sync_meta(&tx)?;
     tx.commit()?;
 
     Ok(SyncSummary {

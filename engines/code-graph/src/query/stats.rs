@@ -5,6 +5,8 @@ use std::collections::BTreeMap;
 use anyhow::Result;
 use rusqlite::Connection;
 
+use crate::store::SCHEMA_VERSION;
+
 pub fn stats(conn: &Connection) -> Result<BTreeMap<String, i64>> {
     let mut map = BTreeMap::new();
     for (key, sql) in [
@@ -16,5 +18,6 @@ pub fn stats(conn: &Connection) -> Result<BTreeMap<String, i64>> {
         let count: i64 = conn.query_row(sql, [], |row| row.get(0))?;
         map.insert(key.to_string(), count);
     }
+    map.insert("schema_version".to_string(), SCHEMA_VERSION as i64);
     Ok(map)
 }

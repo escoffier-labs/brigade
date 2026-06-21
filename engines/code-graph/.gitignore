@@ -1,2 +1,5 @@
 /target
 .graphtrail/
+
+# Agent session + handoff artifacts
+.claude/
