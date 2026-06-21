@@ -1,6 +1,6 @@
 # Hermes Adapter
 
-`brigade` supports Hermes as a local Memory Handoff writer. Runtime validation against live Hermes installs is still experimental, but the repo-local handoff contract is stable and tested by Brigade.
+`brigade` supports Hermes as a local Memory Handoff writer, validated against a real Hermes install (Hermes v0.17). Reviewed skills also install into your Hermes store (`$HERMES_HOME/skills`), where Hermes discovers them.
 
 ## What this gives you
 
@@ -38,10 +38,10 @@ brigade handoff archive --target . <draft-id> --reason "reviewed"
 
 ## Contributing
 
-If you run Hermes and have working config, open an issue at <https://github.com/escoffier-labs/brigade/issues> with:
+If your Hermes config layout differs, open an issue at <https://github.com/escoffier-labs/brigade/issues> with:
 
 - the file Hermes loads as its primary bootstrap file
 - the path where Hermes expects memory handoffs (if any)
 - the command that ingests handoffs into canonical memory
 
-That lets the adapter be promoted from experimental to tested.
+That helps keep the adapter working across Hermes versions.

@@ -59,7 +59,7 @@ Which harnesses do you use? (type numbers separated by space/comma to toggle, en
   [ ] 16. Amp
   [ ] 17. Crush
   [ ] 18. OpenClaw
-  [ ] 19. Hermes (experimental)
+  [ ] 19. Hermes
 
 Depth? (type a number, enter for default)
   * 1. repo       (handoff flow + publish guard)
@@ -108,7 +108,7 @@ brigade doctor: target /home/you/agent-kitchen
   ...
 ```
 
-A `[fail]` line means the install is incomplete; `[warn]` is informational; `[todo]` means the check needs your attention (e.g. Hermes is experimental).
+A `[fail]` line means the install is incomplete; `[warn]` is informational; `[todo]` means the check needs your attention.
 
 ## Reconfiguring
 

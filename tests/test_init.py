@@ -179,7 +179,7 @@ def test_openclaw_install_extends_workspace(tmp_target: Path):
     assert (fragments_dir / "memory-sweep-cron.openclaw.json").is_file()
 
 
-def test_hermes_install_writes_experimental_fragments(tmp_target: Path):
+def test_hermes_install_writes_fragments(tmp_target: Path):
     rc = install_selection(tmp_target, _hermes_sel())
     assert rc == 0
     fragments_dir = tmp_target / ".brigade" / "hermes"

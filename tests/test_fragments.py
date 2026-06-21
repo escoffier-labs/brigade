@@ -42,7 +42,7 @@ def test_hermes_fragments(tmp_path: Path):
     ):
         assert (out / name).is_file()
     data = json.loads((out / "workspace.harness.json").read_text())
-    assert data.get("_brigade_status") == "experimental"
+    assert data.get("_brigade_status") == "validated"
     assert data["workspace"]["handoff_inbox"] == ".hermes/memory-handoffs"
     handoff = json.loads((out / "memory-handoff.harness.json").read_text())
     assert handoff["memory_handoff"]["inbox_dir"] == ".hermes/memory-handoffs"
