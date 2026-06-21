@@ -32,6 +32,7 @@ brigade roadmap commands --write
 - `brigade notifications`: 4 command path(s)
 - `brigade openclaw-fragments`: 1 command path(s)
 - `brigade operator`: 23 command path(s)
+- `brigade outcome`: 6 command path(s)
 - `brigade pantry`: 3 command path(s)
 - `brigade projects`: 10 command path(s)
 - `brigade reconfigure`: 1 command path(s)
@@ -204,6 +205,12 @@ brigade roadmap commands --write
 - `brigade operator surfaces reviews`
 - `brigade operator sync-tools`
 - `brigade operator verify-harness`
+- `brigade outcome capture`
+- `brigade outcome explain`
+- `brigade outcome rank`
+- `brigade outcome reconcile`
+- `brigade outcome record`
+- `brigade outcome score`
 - `brigade pantry service plan`
 - `brigade pantry setup plan`
 - `brigade pantry status`
