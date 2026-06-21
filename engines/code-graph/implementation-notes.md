@@ -65,3 +65,22 @@ Replaced regex `collect_calls` + regex import scanners with one `LangSpec`-drive
 - Verified end-to-end by piping a real JSON-RPC session into the binary against a brigade db.
 - NOT auto-registered in ~/.claude.json: registration is repo-specific (needs a --db) and editing
   the live Claude config mid-session is risky. README documents the mcpServers snippet instead.
+
+## Phases 4-6: integration adapters
+Contracts mapped from the live systems first (code-search-api FastAPI, brigade handoff markdown,
+miseledger Go SQLite). Design choices:
+- **Phase 5 (Brigade)** is built in, no feature gate: `query::context::render_markdown` + a
+  `context --markdown` flag emit a Brigade-friendly markdown context pack. Self-contained; Brigade
+  consumes markdown handoffs, so a clean markdown pack drops straight into an evidence section.
+- **Phase 4 (Code Search)**: pure `query::blend::blend` (always built + unit-tested) combines
+  embedding hits (per file) with each symbol's normalized call-edge degree. The HTTP client lives in
+  `adapters::codesearch` behind the `codesearch` feature (adds optional `ureq`). `blend` CLI command
+  is feature-gated. Response parsing/dedup is unit-tested against the documented payload; a live call
+  needs CODE_SEARCH_API_KEY (the running service is key-protected; key not in workspace .env).
+- **Phase 6 (MiseLedger)**: `adapters::miseledger` behind the `miseledger` feature opens the Go
+  tool's SQLite db `SQLITE_OPEN_READ_ONLY` and FTS-searches `item_fts` for a term, returning
+  evidence items with snippets. `links` CLI command is feature-gated. Smoke-tested live against the
+  7.4GB db (returned highlighted snippets for "dispatch"). Note: `items.raw_path` points at session
+  transcripts, not project source, so linking is by FTS body match (the symbol name), not raw_path.
+- Guardrail honored: default build has NO ureq and NO network (verified via `cargo tree`). 22 tests
+  pass across default + all-features; clippy clean both ways.

@@ -84,9 +84,27 @@ Next:
 3. ~~Add stable JSON schemas for graph context packs.~~
 4. ~~Add read-only MCP tools after the CLI surface settles.~~
 
-5. Add a Code Search adapter that blends graph scores with embedding scores.
-6. Add a Brigade context-pack adapter.
-7. Add MiseLedger receipt links from symbols/files to prior sessions and diffs.
+5. ~~Add a Code Search adapter that blends graph scores with embedding scores.~~
+6. ~~Add a Brigade context-pack adapter.~~
+7. ~~Add MiseLedger receipt links from symbols/files to prior sessions and diffs.~~
+
+## Integrations
+
+The Brigade adapter is built in: `context --markdown` renders a context pack as a
+Brigade-friendly markdown document (droppable into a handoff's evidence section).
+
+The Code Search and MiseLedger adapters are **optional cargo features** so the default
+binary stays free of network and cross-tool dependencies:
+
+```bash
+# Blend Code Search embedding hits with graph centrality (POST localhost:5204/api/search).
+# Honors CODE_SEARCH_URL and CODE_SEARCH_API_KEY.
+cargo run --features codesearch -- --db <db> blend "rate limiting" --json
+
+# Surface MiseLedger evidence items (read-only FTS) mentioning a symbol/term.
+# Honors MISELEDGER_DB (defaults to ~/.local/share/miseledger/miseledger.db).
+cargo run --features miseledger -- links "dispatch" --json
+```
 
 ## Architecture Notes
 

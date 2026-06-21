@@ -6,7 +6,7 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 
 use crate::model::{ContextPack, Direction, EdgeRow, SearchRow};
-use crate::query::{build_context_pack, graph_edges, search_symbols, stats};
+use crate::query::{build_context_pack, graph_edges, render_markdown, search_symbols, stats};
 use crate::store::{db_path, init_schema, open_db, open_default, sync_repo};
 
 #[derive(Parser)]
@@ -57,8 +57,33 @@ enum Command {
         limit: usize,
         #[arg(long)]
         json: bool,
+        /// Render the pack as Brigade-friendly markdown.
+        #[arg(long)]
+        markdown: bool,
     },
     Stats {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Blend Code Search embedding hits with graph centrality (feature: codesearch).
+    #[cfg(feature = "codesearch")]
+    Blend {
+        query: String,
+        #[arg(long, default_value_t = 10)]
+        limit: usize,
+        #[arg(long, default_value_t = 0.6)]
+        embed_weight: f64,
+        #[arg(long, default_value_t = 0.4)]
+        graph_weight: f64,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Surface MiseLedger evidence items mentioning a symbol/term (feature: miseledger).
+    #[cfg(feature = "miseledger")]
+    Links {
+        term: String,
+        #[arg(long, default_value_t = 10)]
+        limit: usize,
         #[arg(long)]
         json: bool,
     },
@@ -113,11 +138,18 @@ pub fn run(cli: Cli) -> Result<()> {
             });
             print_json_or_edges(json, &edges)?;
         }
-        Command::Context { task, limit, json } => {
+        Command::Context {
+            task,
+            limit,
+            json,
+            markdown,
+        } => {
             let conn = open_default(cli.db)?;
             let pack = build_context_pack(&conn, task, limit)?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&pack)?);
+            } else if markdown {
+                print!("{}", render_markdown(&pack));
             } else {
                 print_context(&pack);
             }
@@ -130,6 +162,46 @@ pub fn run(cli: Cli) -> Result<()> {
             } else {
                 for (key, value) in stats {
                     println!("{key}: {value}");
+                }
+            }
+        }
+        #[cfg(feature = "codesearch")]
+        Command::Blend {
+            query,
+            limit,
+            embed_weight,
+            graph_weight,
+            json,
+        } => {
+            let conn = open_default(cli.db)?;
+            let client = crate::adapters::codesearch::CodeSearchClient::from_env();
+            let hits = client.search(&query, limit.max(20))?;
+            let rows = crate::query::blend(&conn, &hits, embed_weight, graph_weight, limit)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&rows)?);
+            } else {
+                for row in &rows {
+                    println!(
+                        "{:.3} {} {}:{} (embed {:.3}, graph {:.3})",
+                        row.blended_score,
+                        row.symbol.qualified_name,
+                        row.symbol.file_path,
+                        row.symbol.start_line,
+                        row.embedding_score,
+                        row.graph_score
+                    );
+                }
+            }
+        }
+        #[cfg(feature = "miseledger")]
+        Command::Links { term, limit, json } => {
+            let db = crate::adapters::miseledger::default_db_path();
+            let hits = crate::adapters::miseledger::search_evidence(&db, &term, limit)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&hits)?);
+            } else {
+                for hit in &hits {
+                    println!("[{}] {} — {}", hit.source_kind, hit.item_id, hit.snippet);
                 }
             }
         }
