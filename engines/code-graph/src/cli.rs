@@ -7,7 +7,7 @@ use clap::{Parser, Subcommand};
 
 use crate::model::{ContextPack, Direction, EdgeRow, SearchRow};
 use crate::query::{build_context_pack, graph_edges, render_markdown, search_symbols, stats};
-use crate::store::{db_path, init_schema, open_db, open_default, sync_repo};
+use crate::store::{db_path, init_schema, open_db, open_default, sync_repo_force};
 
 #[derive(Parser)]
 #[command(version, about)]
@@ -28,6 +28,9 @@ enum Command {
     Sync {
         #[arg(default_value = ".")]
         root: PathBuf,
+        /// Rebuild every file even if nothing changed.
+        #[arg(long)]
+        force: bool,
     },
     Search {
         query: String,
@@ -97,19 +100,31 @@ pub fn run(cli: Cli) -> Result<()> {
             init_schema(&conn)?;
             println!("initialized {}", db_path.display());
         }
-        Command::Sync { root } => {
+        Command::Sync { root, force } => {
             let db_path = db_path(cli.db, &root);
             let conn = open_db(&db_path)?;
             init_schema(&conn)?;
-            let summary = sync_repo(&conn, &root)?;
-            println!(
-                "indexed files={} symbols={} calls={} imports={} db={}",
-                summary.files,
-                summary.symbols,
-                summary.calls,
-                summary.imports,
-                db_path.display()
-            );
+            let summary = sync_repo_force(&conn, &root, force)?;
+            if summary.unchanged {
+                println!(
+                    "unchanged: files={} symbols={} edges={} imports={} db={}",
+                    summary.files,
+                    summary.symbols,
+                    summary.calls,
+                    summary.imports,
+                    db_path.display()
+                );
+            } else {
+                println!(
+                    "indexed files={} symbols={} calls={} imports={} deleted={} db={}",
+                    summary.files,
+                    summary.symbols,
+                    summary.calls,
+                    summary.imports,
+                    summary.deleted,
+                    db_path.display()
+                );
+            }
         }
         Command::Search { query, limit, json } => {
             let conn = open_default(cli.db)?;

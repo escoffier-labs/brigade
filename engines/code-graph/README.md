@@ -38,7 +38,8 @@ The code is split into focused modules: `model` (shared types), `extractors`
 cargo build
 
 cargo run -- init /path/to/repo
-cargo run -- sync /path/to/repo
+cargo run -- sync /path/to/repo          # incremental: a no-op when nothing changed
+cargo run -- sync /path/to/repo --force  # rebuild every file
 
 cargo run -- --db /path/to/repo/.graphtrail/graphtrail.db search "handoff lint"
 cargo run -- --db /path/to/repo/.graphtrail/graphtrail.db callers lint
