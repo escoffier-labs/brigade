@@ -46,3 +46,22 @@ Replaced regex `collect_calls` + regex import scanners with one `LangSpec`-drive
 - Recursion produces a self-call PendingCall but is dropped at resolution (`target == source_id`),
   same net effect as the old `target == source.name` skip.
 - 11 unit tests + `tests/resolution.rs` (same-file-first) pass; clippy clean; fmt clean.
+
+## Phase 2: versioned JSON + meta (commit 28712fb)
+- `meta(key,value)` table; `store::meta` upsert/read + `write_sync_meta` (schema_version,
+  tool_version, synced_at) inside the sync transaction.
+- `ContextPack` and `stats` JSON now carry `schema_version`. `tests/json_schema.rs` is the contract.
+- Kept array-shaped outputs (search/callers/...) unchanged to avoid breaking the CLI contract;
+  versioning rides on the pack + stats + the meta table.
+
+## Phase 3: read-only MCP server
+- Decision: NO `rmcp`/`tokio`. Hand-rolled newline-delimited JSON-RPC 2.0 in `src/mcp.rs`
+  (zero new deps, no async runtime) keeps the sidecar small and dependency-light, matching the
+  project's non-goals. `handle_request` is pure and unit-testable; `serve` is the stdio loop.
+- `src/bin/graphtrail-mcp.rs` resolves the db from `--db`/`--db=`/`GRAPHTRAIL_DB`/default and opens
+  it with `open_read_only` (`SQLITE_OPEN_READ_ONLY`) so the server cannot mutate the graph.
+- Tools: search/callers/callees/impact/context/stats. `tests/mcp.rs` covers initialize echo,
+  notification-no-response, tools/list, tools/call (success + unknown), unknown-method error.
+- Verified end-to-end by piping a real JSON-RPC session into the binary against a brigade db.
+- NOT auto-registered in ~/.claude.json: registration is repo-specific (needs a --db) and editing
+  the live Claude config mid-session is risky. README documents the mcpServers snippet instead.

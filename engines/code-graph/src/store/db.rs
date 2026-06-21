@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
-use rusqlite::Connection;
+use rusqlite::{Connection, OpenFlags};
 
 /// Resolve the db path: an explicit `--db` wins, else `<root>/.graphtrail/graphtrail.db`.
 pub fn db_path(explicit: Option<PathBuf>, root: &Path) -> PathBuf {
@@ -27,6 +27,16 @@ pub fn open_db(path: &Path) -> Result<Connection> {
     let conn =
         Connection::open(path).with_context(|| format!("failed to open {}", path.display()))?;
     conn.pragma_update(None, "journal_mode", "WAL")?;
+    Ok(conn)
+}
+
+/// Open an existing db read-only. Used by the MCP server so it can never mutate the graph.
+pub fn open_read_only(path: &Path) -> Result<Connection> {
+    let conn = Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .with_context(|| format!("failed to open {} read-only", path.display()))?;
     Ok(conn)
 }
 

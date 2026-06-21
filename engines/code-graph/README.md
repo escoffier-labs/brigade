@@ -48,6 +48,30 @@ cargo run -- --db /path/to/repo/.graphtrail/graphtrail.db context "handoff lint"
 cargo run -- --db /path/to/repo/.graphtrail/graphtrail.db stats --json
 ```
 
+## MCP server
+
+`graphtrail-mcp` is a read-only MCP server (newline-delimited JSON-RPC over stdio) that
+exposes the query commands as tools: `search`, `callers`, `callees`, `impact`, `context`,
+and `stats`. It opens the database with `SQLITE_OPEN_READ_ONLY`, so it can never mutate the
+graph. Point it at a synced db via `--db`, `--db=<path>`, or the `GRAPHTRAIL_DB` env var.
+
+```bash
+cargo build --release   # produces target/release/graphtrail-mcp
+```
+
+Register it with an MCP client (e.g. Claude Code `.mcp.json` / `~/.claude.json`):
+
+```json
+{
+  "mcpServers": {
+    "graphtrail": {
+      "command": "/abs/path/to/target/release/graphtrail-mcp",
+      "args": ["--db", "/abs/path/to/repo/.graphtrail/graphtrail.db"]
+    }
+  }
+}
+```
+
 ## Near-Term Plan
 
 Done:
@@ -57,8 +81,9 @@ Done:
 
 Next:
 
-3. Add stable JSON schemas for graph context packs.
-4. Add read-only MCP tools after the CLI surface settles.
+3. ~~Add stable JSON schemas for graph context packs.~~
+4. ~~Add read-only MCP tools after the CLI surface settles.~~
+
 5. Add a Code Search adapter that blends graph scores with embedding scores.
 6. Add a Brigade context-pack adapter.
 7. Add MiseLedger receipt links from symbols/files to prior sessions and diffs.

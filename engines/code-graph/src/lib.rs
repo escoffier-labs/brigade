@@ -3,6 +3,7 @@
 
 pub mod cli;
 pub mod extractors;
+pub mod mcp;
 pub mod model;
 pub mod query;
 pub mod store;
