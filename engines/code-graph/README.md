@@ -13,8 +13,8 @@ This repo is intentionally narrower than TraceDecay:
 
 ## Current MVP
 
-GraphTrail currently supports Python and TypeScript/JavaScript. Symbols, imports,
-and call edges are all extracted from the tree-sitter AST in a single pass per file
+GraphTrail currently supports Python, TypeScript/JavaScript, Rust, and Go. Symbols,
+imports, and call edges are all extracted from the tree-sitter AST in a single pass per file
 (`extractors/`), organized as per-language providers behind a `LangSpec` trait. Call
 edges are resolved by name, preferring same-file targets before falling back to a
 capped cross-file match.

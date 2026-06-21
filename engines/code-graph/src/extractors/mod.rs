@@ -1,7 +1,9 @@
 //! File indexing: language detection and per-file extraction dispatch.
 
 pub mod common;
+pub mod go;
 pub mod python;
+pub mod rust;
 pub mod typescript;
 
 use std::fs;
@@ -18,6 +20,8 @@ pub fn language_for(path: &Path) -> Option<Lang> {
     match path.extension().and_then(|e| e.to_str())? {
         "py" => Some(Lang::Python),
         "js" | "jsx" | "ts" | "tsx" => Some(Lang::TypeScript),
+        "rs" => Some(Lang::Rust),
+        "go" => Some(Lang::Go),
         _ => None,
     }
 }
@@ -42,6 +46,8 @@ pub fn index_file(root: &Path, path: &Path, lang: Lang) -> Result<FileGraph> {
     let mut graph = match lang {
         Lang::Python => python::extract_python(&rel, &content, &hash)?,
         Lang::TypeScript => typescript::extract_typescript(&rel, &content, &hash)?,
+        Lang::Rust => rust::extract_rust(&rel, &content, &hash)?,
+        Lang::Go => go::extract_go(&rel, &content, &hash)?,
     };
     graph.language = lang.db_label().to_string();
     graph.size = metadata.len();
