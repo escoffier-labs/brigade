@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import sys
 from datetime import datetime, timezone
@@ -10,7 +11,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from . import work_cmd
+from . import proc, work_cmd
 from .localio import (
     read_json_dict as _read_json,
     stable_hash as _stable_hash,
@@ -98,6 +99,69 @@ def _latest_json(root: Path, filename: str) -> dict[str, Any] | None:
     return _read_json(candidates[0]) if candidates else None
 
 
+def _graphtrail_bin() -> str | None:
+    """Resolve the graphtrail binary: $GRAPHTRAIL_BIN, then PATH, then ~/.cargo/bin (so it
+    works even when the spawning environment's PATH omits the cargo bin dir)."""
+    override = os.environ.get("GRAPHTRAIL_BIN")
+    if override and Path(override).is_file():
+        return override
+    found = proc.which("graphtrail")
+    if found:
+        return found
+    fallback = Path.home() / ".cargo" / "bin" / "graphtrail"
+    return str(fallback) if fallback.is_file() else None
+
+
+def _code_graph_summary(target: Path, selected_task: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Structural code context for the task from GraphTrail, or None when unavailable.
+
+    Reads the repo's ``.graphtrail/graphtrail.db`` (built by ``graphtrail sync``) via the
+    read-only ``graphtrail context`` command. Returns None and never raises when GraphTrail
+    is not installed, the db is absent, or there is no task to query, so pack building is
+    never blocked by this optional integration.
+    """
+    if not isinstance(selected_task, dict):
+        return None
+    query = selected_task.get("text") or selected_task.get("id")
+    if not isinstance(query, str) or not query.strip():
+        return None
+    db_path = target / ".graphtrail" / "graphtrail.db"
+    binary = _graphtrail_bin()
+    if not db_path.is_file() or binary is None:
+        return None
+
+    result = proc.run(
+        [binary, "--db", str(db_path), "context", query, "--json", "--limit", "8"],
+        timeout=10.0,
+        cwd=target,
+    )
+    if result.code != 0:
+        return None
+    data = result.json()
+    if not isinstance(data, dict):
+        return None
+
+    entry_points = data.get("entry_points") if isinstance(data.get("entry_points"), list) else []
+    related_files = data.get("related_files") if isinstance(data.get("related_files"), list) else []
+    return {
+        "schema_version": data.get("schema_version"),
+        "query": query,
+        "entry_points": [
+            {
+                "qualified_name": ep.get("qualified_name"),
+                "kind": ep.get("kind"),
+                "file_path": ep.get("file_path"),
+                "start_line": ep.get("start_line"),
+            }
+            for ep in entry_points
+            if isinstance(ep, dict)
+        ][:8],
+        "related_files": related_files[:20],
+        "caller_count": len(data.get("callers")) if isinstance(data.get("callers"), list) else 0,
+        "callee_count": len(data.get("callees")) if isinstance(data.get("callees"), list) else 0,
+    }
+
+
 def _context_payload(
     target: Path,
     *,
@@ -131,6 +195,7 @@ def _context_payload(
         checks.append({"status": WARN, "name": "context_task", "detail": "no matching task"})
     latest_closeout = _latest_json(target / ".brigade" / "work" / "closeouts", "closeout.json")
     latest_security = _latest_json(target / ".brigade" / "security", "security-report.json")
+    code_graph = _code_graph_summary(target, selected_task)
     return {
         "target": str(target),
         "kind": kind,
@@ -149,6 +214,7 @@ def _context_payload(
             "finding_count": latest_security.get("finding_count") if isinstance(latest_security, dict) else None,
             "summary": latest_security.get("summary") if isinstance(latest_security, dict) else None,
         },
+        "code_graph": code_graph,
         "recent_review_findings": [
             work_cmd._import_summary(item)
             for item in work_cmd._read_imports(target)
@@ -209,6 +275,7 @@ def build(
         f"- kind: {kind}",
         f"- task: {payload['task'].get('id') or 'none'}",
         f"- issues: {len(payload['issues'])}",
+        f"- code graph: {len((payload.get('code_graph') or {}).get('entry_points') or [])} entry points",
         "",
         "## Excluded Private Evidence",
         *[f"- {item}" for item in payload["excluded_private_evidence"]],
