@@ -13,9 +13,11 @@ This repo is intentionally narrower than TraceDecay:
 
 ## Current MVP
 
-GraphTrail currently supports Python and TypeScript/JavaScript. Symbol
-extraction is tree-sitter backed; import and call-edge extraction remain a
-conservative second pass while the graph model settles:
+GraphTrail currently supports Python and TypeScript/JavaScript. Symbols, imports,
+and call edges are all extracted from the tree-sitter AST in a single pass per file
+(`extractors/`), organized as per-language providers behind a `LangSpec` trait. Call
+edges are resolved by name, preferring same-file targets before falling back to a
+capped cross-file match.
 
 - `files`
 - `symbols`
@@ -23,8 +25,12 @@ conservative second pass while the graph model settles:
 - `imports`
 - `symbols_fts`
 
-The first implementation is read-only after indexing. It installs no hooks,
-starts no daemon, and makes no network calls.
+The implementation is read-only after indexing. It installs no hooks, starts no
+daemon, and makes no network calls.
+
+The code is split into focused modules: `model` (shared types), `extractors`
+(language providers + traversal), `store` (`db`/`schema`/`sync`), `query`
+(`search`/`graph`/`context`/`stats`), and a thin `cli`.
 
 ## Commands
 
@@ -44,8 +50,13 @@ cargo run -- --db /path/to/repo/.graphtrail/graphtrail.db stats --json
 
 ## Near-Term Plan
 
-1. Move tree-sitter extraction into per-language provider modules.
-2. Replace regex call/import extraction with AST-based edge extraction.
+Done:
+
+1. ~~Move tree-sitter extraction into per-language provider modules.~~
+2. ~~Replace regex call/import extraction with AST-based edge extraction.~~
+
+Next:
+
 3. Add stable JSON schemas for graph context packs.
 4. Add read-only MCP tools after the CLI surface settles.
 5. Add a Code Search adapter that blends graph scores with embedding scores.

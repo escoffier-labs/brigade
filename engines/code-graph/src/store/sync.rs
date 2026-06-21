@@ -103,17 +103,29 @@ pub fn sync_repo(conn: &Connection, root: &Path) -> Result<SyncSummary> {
     let mut inserted_calls = 0;
     for graph in &graphs {
         for call in &graph.calls {
-            if let Some(targets) = name_index.get(&call.target_name) {
-                for target in targets.iter().take(8) {
-                    if target == &call.source_id {
-                        continue;
-                    }
-                    tx.execute(
-                        "INSERT OR IGNORE INTO edges(source, target, kind, line) VALUES (?1, ?2, 'calls', ?3)",
-                        params![call.source_id, target, call.line as i64],
-                    )?;
-                    inserted_calls += 1;
+            let Some(candidates) = name_index.get(&call.target_name) else {
+                continue;
+            };
+            // Prefer same-file candidates (precise, low fan-out); else fall back to cross-file capped.
+            let same_file: Vec<&String> = candidates
+                .iter()
+                .filter(|(_, file)| *file == call.source_file)
+                .map(|(id, _)| id)
+                .collect();
+            let chosen: Vec<&String> = if same_file.is_empty() {
+                candidates.iter().map(|(id, _)| id).take(8).collect()
+            } else {
+                same_file
+            };
+            for target in chosen {
+                if target == &call.source_id {
+                    continue;
                 }
+                tx.execute(
+                    "INSERT OR IGNORE INTO edges(source, target, kind, line) VALUES (?1, ?2, 'calls', ?3)",
+                    params![call.source_id, target, call.line as i64],
+                )?;
+                inserted_calls += 1;
             }
         }
     }
@@ -144,15 +156,20 @@ fn keep_entry(entry: &DirEntry) -> bool {
     )
 }
 
-fn load_name_index(conn: &Connection) -> Result<HashMap<String, Vec<String>>> {
-    let mut stmt = conn.prepare("SELECT name, id FROM symbols")?;
+/// Map symbol name -> list of (symbol id, file path), used to resolve call targets.
+fn load_name_index(conn: &Connection) -> Result<HashMap<String, Vec<(String, String)>>> {
+    let mut stmt = conn.prepare("SELECT name, id, file_path FROM symbols")?;
     let rows = stmt.query_map([], |row| {
-        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+        ))
     })?;
-    let mut map: HashMap<String, Vec<String>> = HashMap::new();
+    let mut map: HashMap<String, Vec<(String, String)>> = HashMap::new();
     for row in rows {
-        let (name, id) = row?;
-        map.entry(name).or_default().push(id);
+        let (name, id, file) = row?;
+        map.entry(name).or_default().push((id, file));
     }
     Ok(map)
 }

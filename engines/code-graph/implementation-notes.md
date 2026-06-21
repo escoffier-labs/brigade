@@ -25,3 +25,24 @@ Decisions:
 - `SCHEMA_VERSION` const added in `store/schema.rs` (no on-disk change yet; the `meta` table lands in Phase 2).
 - Tests relocated beside their code: python/typescript extractor tests -> `extractors/*.rs`;
   `fts_query` test -> `query/search.rs`.
+
+### Chunk 1 result (commit 5a3fef3)
+Pure split compiled first try; 3 tests pass; brigade smoke IDENTICAL to baseline
+(`files=240 symbols=4313 edges=32164 imports=1669`) confirming behavior preserved.
+
+### Chunk 2 result (AST edges)
+Replaced regex `collect_calls` + regex import scanners with one `LangSpec`-driven AST pass
+(`extractors/common.rs::extract_with`). `regex` dropped from `[dependencies]`.
+- New brigade smoke: `files=240 symbols=4313 edges=26646 imports=1471`.
+  - `files`/`symbols` UNCHANGED (symbol layer untouched) = no regression.
+  - `edges` 32164 -> 26646: AST excludes regex false positives (keyword-paren, names inside
+    strings/comments) and same-file-first resolution trims homonym fan-out. Higher precision.
+  - `imports` 1669 -> 1471: AST no longer matches `import`/`from` text inside docstrings/strings;
+    multi-name `import a, b` and `require()` are now counted. Net more correct.
+- **Behavior change worth noting:** the old regex `collect_calls` attributed a call to the FIRST
+  symbol whose line-range contained it = the OUTERMOST enclosing symbol (parent class), a quirk of
+  pre-order `Vec::find`. The AST pass attributes to the INNERMOST enclosing symbol (the actual
+  method/function) via the frame stack. This is more correct and shifts some `source` ids.
+- Recursion produces a self-call PendingCall but is dropped at resolution (`target == source_id`),
+  same net effect as the old `target == source.name` skip.
+- 11 unit tests + `tests/resolution.rs` (same-file-first) pass; clippy clean; fmt clean.

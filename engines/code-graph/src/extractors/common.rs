@@ -1,170 +1,161 @@
-//! Shared extraction scaffolding: tree-sitter symbol traversal and helpers used by every
-//! per-language extractor.
-
-use std::collections::HashSet;
+//! Shared extraction scaffolding: a single tree-sitter traversal that yields a file's symbols,
+//! imports, and call edges together, parameterized by a per-language [`LangSpec`].
 
 use anyhow::{Result, anyhow};
-use regex::Regex;
 use sha2::{Digest, Sha256};
 use tree_sitter::{Language, Node as TsNode, Parser as TsParser};
 
-use crate::model::{Lang, PendingCall, Symbol};
+use crate::model::{FileGraph, PendingCall, Symbol};
 
-/// Parse `content` with the given tree-sitter `language` and collect symbol definitions.
-pub fn extract_tree_sitter_symbols(
+/// Per-language plugin describing how to recognize symbols, imports, and calls in an AST.
+pub trait LangSpec {
+    /// Return `(kind, name_node)` when `node` defines a symbol (class/function/method).
+    fn symbol_candidate<'t>(&self, node: TsNode<'t>) -> Option<(&'static str, TsNode<'t>)>;
+    /// Append any module imports declared by `node` to `out`.
+    fn collect_import(&self, node: TsNode<'_>, source: &[u8], out: &mut Vec<(String, usize)>);
+    /// Resolve the callee name if `node` is a call expression, else `None` (builtins filtered here).
+    fn call_target(&self, node: TsNode<'_>, source: &[u8]) -> Option<String>;
+}
+
+struct Frame {
+    qualified_name: String,
+    symbol_id: String,
+}
+
+struct Ctx<'a> {
+    path: &'a str,
+    content_hash: &'a str,
+    source: &'a [u8],
+    lines: &'a [&'a str],
+}
+
+/// Parse `content` and extract symbols, imports, and pending calls in one pass.
+pub fn extract_with<L: LangSpec>(
+    spec: &L,
     path: &str,
     content: &str,
     content_hash: &str,
-    language: Language,
-    symbol_language: Lang,
-) -> Result<Vec<Symbol>> {
+    ts_language: Language,
+) -> Result<FileGraph> {
     let mut parser = TsParser::new();
     parser
-        .set_language(&language)
+        .set_language(&ts_language)
         .map_err(|err| anyhow!("failed to set tree-sitter language: {err}"))?;
     let tree = parser
         .parse(content, None)
         .ok_or_else(|| anyhow!("tree-sitter returned no parse tree for {path}"))?;
+
     let lines: Vec<&str> = content.lines().collect();
-    let mut symbols = Vec::new();
-    let mut stack = Vec::new();
-    visit_symbol_node(
-        tree.root_node(),
+    let ctx = Ctx {
         path,
         content_hash,
-        content.as_bytes(),
-        &lines,
-        symbol_language,
+        source: content.as_bytes(),
+        lines: &lines,
+    };
+
+    let mut symbols = Vec::new();
+    let mut imports = Vec::new();
+    let mut calls = Vec::new();
+    let mut stack: Vec<Frame> = Vec::new();
+    visit(
+        spec,
+        &ctx,
+        tree.root_node(),
         &mut stack,
         &mut symbols,
+        &mut imports,
+        &mut calls,
     );
-    Ok(symbols)
+
+    Ok(FileGraph {
+        path: path.to_string(),
+        language: String::new(),
+        hash: content_hash.to_string(),
+        size: 0,
+        modified_at: 0,
+        symbols,
+        imports,
+        calls,
+    })
 }
 
-#[allow(clippy::too_many_arguments)]
-fn visit_symbol_node(
+fn visit<L: LangSpec>(
+    spec: &L,
+    ctx: &Ctx,
     node: TsNode<'_>,
-    path: &str,
-    content_hash: &str,
-    source: &[u8],
-    lines: &[&str],
-    language: Lang,
-    stack: &mut Vec<String>,
+    stack: &mut Vec<Frame>,
     symbols: &mut Vec<Symbol>,
+    imports: &mut Vec<(String, usize)>,
+    calls: &mut Vec<PendingCall>,
 ) {
-    if let Some((kind, name_node)) = symbol_candidate(node, language) {
-        let name = node_text(name_node, source);
+    spec.collect_import(node, ctx.source, imports);
+
+    if let Some(target) = spec.call_target(node, ctx.source) {
+        // Attribute the call to the innermost enclosing symbol; module-level calls are dropped.
+        if let Some(frame) = stack.last() {
+            calls.push(PendingCall {
+                source_id: frame.symbol_id.clone(),
+                target_name: target,
+                line: node.start_position().row + 1,
+                source_file: ctx.path.to_string(),
+            });
+        }
+    }
+
+    if let Some((kind, name_node)) = spec.symbol_candidate(node) {
+        let name = node_text(name_node, ctx.source);
         if !name.is_empty() {
             let start_line = node.start_position().row + 1;
             let end_line = node.end_position().row + 1;
-            let signature = lines
+            let signature = ctx
+                .lines
                 .get(start_line.saturating_sub(1))
                 .map_or("", |line| *line)
                 .trim()
                 .to_string();
-            let container = stack.last().cloned();
+            let container = stack.last().map(|frame| frame.qualified_name.clone());
             let qualified_name = container
                 .as_ref()
                 .map_or_else(|| name.clone(), |parent| format!("{parent}.{name}"));
-            let id = symbol_id(path, &qualified_name, start_line, kind);
+            let id = symbol_id(ctx.path, &qualified_name, start_line, kind);
             symbols.push(Symbol {
-                id,
+                id: id.clone(),
                 kind: kind.to_string(),
                 name: name.clone(),
                 qualified_name: qualified_name.clone(),
-                file_path: path.to_string(),
+                file_path: ctx.path.to_string(),
                 start_line,
                 end_line,
                 signature,
                 container,
-                content_hash: content_hash.to_string(),
+                content_hash: ctx.content_hash.to_string(),
             });
 
-            stack.push(qualified_name);
-            visit_symbol_children(
-                node,
-                path,
-                content_hash,
-                source,
-                lines,
-                language,
-                stack,
-                symbols,
-            );
+            stack.push(Frame {
+                qualified_name,
+                symbol_id: id,
+            });
+            visit_children(spec, ctx, node, stack, symbols, imports, calls);
             stack.pop();
             return;
         }
     }
 
-    visit_symbol_children(
-        node,
-        path,
-        content_hash,
-        source,
-        lines,
-        language,
-        stack,
-        symbols,
-    );
+    visit_children(spec, ctx, node, stack, symbols, imports, calls);
 }
 
-#[allow(clippy::too_many_arguments)]
-fn visit_symbol_children(
+fn visit_children<L: LangSpec>(
+    spec: &L,
+    ctx: &Ctx,
     node: TsNode<'_>,
-    path: &str,
-    content_hash: &str,
-    source: &[u8],
-    lines: &[&str],
-    language: Lang,
-    stack: &mut Vec<String>,
+    stack: &mut Vec<Frame>,
     symbols: &mut Vec<Symbol>,
+    imports: &mut Vec<(String, usize)>,
+    calls: &mut Vec<PendingCall>,
 ) {
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
-        visit_symbol_node(
-            child,
-            path,
-            content_hash,
-            source,
-            lines,
-            language,
-            stack,
-            symbols,
-        );
-    }
-}
-
-fn symbol_candidate(node: TsNode<'_>, language: Lang) -> Option<(&'static str, TsNode<'_>)> {
-    match language {
-        Lang::Python => match node.kind() {
-            "class_definition" => node.child_by_field_name("name").map(|name| ("class", name)),
-            "function_definition" => node
-                .child_by_field_name("name")
-                .map(|name| ("function", name)),
-            _ => None,
-        },
-        Lang::TypeScript => match node.kind() {
-            "class_declaration" => node.child_by_field_name("name").map(|name| ("class", name)),
-            "function_declaration" => node
-                .child_by_field_name("name")
-                .map(|name| ("function", name)),
-            "method_definition" => node
-                .child_by_field_name("name")
-                .map(|name| ("method", name)),
-            "variable_declarator" => {
-                let value = node.child_by_field_name("value")?;
-                if matches!(
-                    value.kind(),
-                    "arrow_function" | "function" | "function_expression"
-                ) {
-                    node.child_by_field_name("name")
-                        .map(|name| ("function", name))
-                } else {
-                    None
-                }
-            }
-            _ => None,
-        },
+        visit(spec, ctx, child, stack, symbols, imports, calls);
     }
 }
 
@@ -172,38 +163,19 @@ pub fn node_text(node: TsNode<'_>, source: &[u8]) -> String {
     node.utf8_text(source).unwrap_or("").to_string()
 }
 
-/// Regex-based call collection (chunk-1 behavior; replaced by AST extraction in chunk 2).
-pub fn collect_calls(
-    _path: &str,
-    lines: &[&str],
-    symbols: &[Symbol],
-    call_re: &Regex,
-    skip: HashSet<&'static str>,
-) -> Vec<PendingCall> {
-    let mut calls = Vec::new();
-    for (idx, line) in lines.iter().enumerate() {
-        let line_no = idx + 1;
-        let Some(source) = symbols
-            .iter()
-            .find(|s| s.start_line <= line_no && s.end_line >= line_no)
-        else {
-            continue;
-        };
-        for cap in call_re.captures_iter(line) {
-            let raw = cap.get(1).map_or("", |m| m.as_str());
-            let target = raw.rsplit('.').next().unwrap_or(raw);
-            if target.is_empty() || skip.contains(target) || target == source.name {
-                continue;
-            }
-            calls.push(PendingCall {
-                source_id: source.id.clone(),
-                target_name: target.to_string(),
-                line: line_no,
-                source_file: source.file_path.clone(),
-            });
+/// Text of a tree-sitter `string` node with quotes removed (prefers the `string_fragment` child).
+pub fn string_literal_text(node: TsNode<'_>, source: &[u8]) -> Option<String> {
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        if child.kind() == "string_fragment" {
+            return Some(node_text(child, source));
         }
     }
-    calls
+    let raw = node_text(node, source);
+    Some(
+        raw.trim_matches(|c| c == '"' || c == '\'' || c == '`')
+            .to_string(),
+    )
 }
 
 pub fn symbol_id(path: &str, qualified_name: &str, line: usize, kind: &str) -> String {
