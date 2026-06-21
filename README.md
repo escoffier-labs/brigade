@@ -142,7 +142,7 @@ Each writer gets its own local inbox; one canonical owner ingests. Brigade keeps
 | Hermes | `hermes` | `.hermes/memory-handoffs/` |
 | OpenClaw | `openclaw` | usually the memory owner, not a writer |
 
-All of them get handoff templates and ingest source coverage. Most also get projected tools and skills in their native format (some as `rules` or `instructions`, a few not yet); the per-harness matrix is in the [technical guide](docs/technical-guide.md).
+All of them get handoff templates and ingest source coverage. Most also get projected tools and skills in their native format (some as `rules` or `instructions`, a few not yet); the per-harness matrix is in the [technical guide](docs/technical-guide.md). Hermes is validated against a real Hermes install: handoffs land in `.hermes/memory-handoffs/`, and reviewed skills install into your Hermes store (`~/.hermes/skills`), where Hermes discovers them.
 
 ## Beyond memory
 

@@ -290,7 +290,7 @@ def test_doctor_openclaw_reports_manual_when_config_missing(tmp_target: Path, mo
     assert "[todo]" in out
 
 
-def test_doctor_hermes_flags_experimental(tmp_target: Path, capsys):
+def test_doctor_hermes_runtime_validation(tmp_target: Path, capsys):
     install_selection(
         tmp_target,
         Selection(depth="workspace", harnesses=["claude", "hermes"], owner="hermes", includes=[]),

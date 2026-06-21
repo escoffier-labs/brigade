@@ -1,7 +1,7 @@
 {
   "id": "hermes",
   "role": "writer",
-  "description": "Hermes adapter fragments, handoff inbox, and doctor checks. Experimental runtime validation.",
+  "description": "Hermes adapter fragments, handoff inbox, skill install, and doctor checks. Validated against a real Hermes install.",
   "files": [
     {"src": "hermes/workspace.harness.json", "dst": ".brigade/hermes/workspace.harness.json"},
     {"src": "hermes/memory-handoff.harness.json", "dst": ".brigade/hermes/memory-handoff.harness.json"},
@@ -13,7 +13,7 @@
     ".hermes/memory-handoffs/processed"
   ],
   "post_install_notes": [
-    "Hermes support is experimental. Validate against your real Hermes install before relying on it.",
-    "Open an issue with your config layout to help promote the adapter from experimental to tested."
+    "Hermes support is validated against a real Hermes install (Hermes v0.17): handoffs and reviewed skills both work.",
+    "Reviewed skills install into your Hermes store ($HERMES_HOME/skills); handoffs land in .hermes/memory-handoffs/."
   ]
 }

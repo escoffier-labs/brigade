@@ -54,5 +54,5 @@ def write_fragments(out: Path, harness: str) -> int:
         print(f"  - merge with: jq -s '.[0] * .[1]' ~/.openclaw/openclaw.json {out}/<fragment>.json > /tmp/merged.json")
         print("  - verify with: brigade doctor --target ~/.openclaw/workspace --harness openclaw")
     elif harness == "hermes":
-        print("  - the Hermes adapter is experimental; validate against your real Hermes install")
+        print("  - the Hermes adapter is validated against a real Hermes install (handoffs and skills)")
     return 0
