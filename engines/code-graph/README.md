@@ -13,8 +13,9 @@ This repo is intentionally narrower than TraceDecay:
 
 ## Current MVP
 
-GraphTrail currently supports Python and TypeScript/JavaScript with conservative
-heuristic extraction:
+GraphTrail currently supports Python and TypeScript/JavaScript. Symbol
+extraction is tree-sitter backed; import and call-edge extraction remain a
+conservative second pass while the graph model settles:
 
 - `files`
 - `symbols`
@@ -43,12 +44,29 @@ cargo run -- --db /path/to/repo/.graphtrail/graphtrail.db stats --json
 
 ## Near-Term Plan
 
-1. Replace heuristic extraction internals with tree-sitter providers.
-2. Add stable JSON schemas for graph context packs.
-3. Add read-only MCP tools after the CLI surface settles.
-4. Add a Code Search adapter that blends graph scores with embedding scores.
-5. Add a Brigade context-pack adapter.
-6. Add MiseLedger receipt links from symbols/files to prior sessions and diffs.
+1. Move tree-sitter extraction into per-language provider modules.
+2. Replace regex call/import extraction with AST-based edge extraction.
+3. Add stable JSON schemas for graph context packs.
+4. Add read-only MCP tools after the CLI surface settles.
+5. Add a Code Search adapter that blends graph scores with embedding scores.
+6. Add a Brigade context-pack adapter.
+7. Add MiseLedger receipt links from symbols/files to prior sessions and diffs.
+
+## Architecture Notes
+
+TraceDecay's useful architectural lesson is the separation between language
+providers, graph storage, and agent-facing query tools. GraphTrail is adopting
+that shape without copying TraceDecay's implementation or product scope.
+
+Near-term module boundaries should be:
+
+- `extractors/` for per-language tree-sitter providers
+- `store/` for SQLite schema and graph writes
+- `query/` for search, callers, callees, impact, and context packs
+- `mcp/` only after the CLI and JSON contracts are stable
+
+GraphTrail should stay small enough to be a sidecar. It should not grow memory,
+LCM, hooks, install automation, dashboards, or receipt ownership.
 
 ## Non-Goals
 

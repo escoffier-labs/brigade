@@ -9,6 +9,7 @@ use regex::Regex;
 use rusqlite::{Connection, params};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
+use tree_sitter::{Language, Node as TsNode, Parser as TsParser};
 use walkdir::{DirEntry, WalkDir};
 
 #[derive(Parser)]
@@ -480,12 +481,10 @@ fn index_file(root: &Path, path: &Path, language: &str) -> Result<FileGraph> {
 }
 
 fn extract_python(path: &str, content: &str, content_hash: &str) -> Result<FileGraph> {
-    let symbol_re = Regex::new(r"^(\s*)(async\s+def|def|class)\s+([A-Za-z_][A-Za-z0-9_]*)[^\n]*")?;
     let import_re =
         Regex::new(r"^\s*(?:from\s+([A-Za-z0-9_\.]+)\s+import|import\s+([A-Za-z0-9_\.]+))")?;
     let call_re = Regex::new(r"\b([A-Za-z_][A-Za-z0-9_\.]*)\s*\(")?;
     let lines: Vec<&str> = content.lines().collect();
-    let mut raw = Vec::new();
     let mut imports = Vec::new();
 
     for (idx, line) in lines.iter().enumerate() {
@@ -500,26 +499,15 @@ fn extract_python(path: &str, content: &str, content_hash: &str) -> Result<FileG
                 imports.push((module, line_no));
             }
         }
-        if let Some(cap) = symbol_re.captures(line) {
-            let indent = cap.get(1).map_or(0, |m| m.as_str().chars().count());
-            let keyword = cap.get(2).map_or("", |m| m.as_str()).trim();
-            let name = cap.get(3).map_or("", |m| m.as_str()).to_string();
-            let kind = if keyword == "class" {
-                "class"
-            } else {
-                "function"
-            };
-            raw.push((
-                indent,
-                kind.to_string(),
-                name,
-                line_no,
-                line.trim().to_string(),
-            ));
-        }
     }
 
-    let symbols = materialize_symbols(path, content_hash, &raw, lines.len());
+    let symbols = extract_tree_sitter_symbols(
+        path,
+        content,
+        content_hash,
+        tree_sitter_python::LANGUAGE.into(),
+        SymbolLanguage::Python,
+    )?;
     let calls = collect_calls(path, &lines, &symbols, &call_re, python_call_skip());
     Ok(FileGraph {
         path: path.to_string(),
@@ -534,14 +522,10 @@ fn extract_python(path: &str, content: &str, content_hash: &str) -> Result<FileG
 }
 
 fn extract_typescript(path: &str, content: &str, content_hash: &str) -> Result<FileGraph> {
-    let function_re = Regex::new(
-        r"^\s*(?:export\s+)?(?:async\s+)?function\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*\(|^\s*(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*=\s*(?:async\s*)?(?:\([^)]*\)|[A-Za-z_$][A-Za-z0-9_$]*)\s*=>|^\s*(?:export\s+)?class\s+([A-Za-z_$][A-Za-z0-9_$]*)",
-    )?;
     let import_re =
         Regex::new(r#"^\s*import.*?from\s+['"]([^'"]+)['"]|^\s*import\s+['"]([^'"]+)['"]"#)?;
     let call_re = Regex::new(r"\b([A-Za-z_$][A-Za-z0-9_$\.]*)\s*\(")?;
     let lines: Vec<&str> = content.lines().collect();
-    let mut raw = Vec::new();
     let mut imports = Vec::new();
 
     for (idx, line) in lines.iter().enumerate() {
@@ -556,33 +540,22 @@ fn extract_typescript(path: &str, content: &str, content_hash: &str) -> Result<F
                 imports.push((module, line_no));
             }
         }
-        if let Some(cap) = function_re.captures(line) {
-            let name = cap
-                .get(1)
-                .or_else(|| cap.get(2))
-                .or_else(|| cap.get(3))
-                .map(|m| m.as_str().to_string())
-                .unwrap_or_default();
-            if name.is_empty() {
-                continue;
-            }
-            let kind = if cap.get(3).is_some() {
-                "class"
-            } else {
-                "function"
-            };
-            let indent = line.chars().take_while(|c| c.is_whitespace()).count();
-            raw.push((
-                indent,
-                kind.to_string(),
-                name,
-                line_no,
-                line.trim().to_string(),
-            ));
-        }
     }
 
-    let symbols = materialize_symbols(path, content_hash, &raw, lines.len());
+    let language = if path.ends_with(".tsx") {
+        tree_sitter_typescript::LANGUAGE_TSX.into()
+    } else if path.ends_with(".ts") {
+        tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()
+    } else {
+        tree_sitter_javascript::LANGUAGE.into()
+    };
+    let symbols = extract_tree_sitter_symbols(
+        path,
+        content,
+        content_hash,
+        language,
+        SymbolLanguage::TypeScript,
+    )?;
     let calls = collect_calls(path, &lines, &symbols, &call_re, js_call_skip());
     Ok(FileGraph {
         path: path.to_string(),
@@ -596,45 +569,169 @@ fn extract_typescript(path: &str, content: &str, content_hash: &str) -> Result<F
     })
 }
 
-fn materialize_symbols(
+#[derive(Clone, Copy)]
+enum SymbolLanguage {
+    Python,
+    TypeScript,
+}
+
+fn extract_tree_sitter_symbols(
+    path: &str,
+    content: &str,
+    content_hash: &str,
+    language: Language,
+    symbol_language: SymbolLanguage,
+) -> Result<Vec<Symbol>> {
+    let mut parser = TsParser::new();
+    parser
+        .set_language(&language)
+        .map_err(|err| anyhow!("failed to set tree-sitter language: {err}"))?;
+    let tree = parser
+        .parse(content, None)
+        .ok_or_else(|| anyhow!("tree-sitter returned no parse tree for {path}"))?;
+    let lines: Vec<&str> = content.lines().collect();
+    let mut symbols = Vec::new();
+    let mut stack = Vec::new();
+    visit_symbol_node(
+        tree.root_node(),
+        path,
+        content_hash,
+        content.as_bytes(),
+        &lines,
+        symbol_language,
+        &mut stack,
+        &mut symbols,
+    );
+    Ok(symbols)
+}
+
+fn visit_symbol_node(
+    node: TsNode<'_>,
     path: &str,
     content_hash: &str,
-    raw: &[(usize, String, String, usize, String)],
-    line_count: usize,
-) -> Vec<Symbol> {
-    let mut symbols = Vec::new();
-    let mut stack: Vec<(usize, String)> = Vec::new();
-    for (idx, (indent, kind, name, start_line, signature)) in raw.iter().enumerate() {
-        while stack.last().is_some_and(|(level, _)| level >= indent) {
+    source: &[u8],
+    lines: &[&str],
+    language: SymbolLanguage,
+    stack: &mut Vec<String>,
+    symbols: &mut Vec<Symbol>,
+) {
+    if let Some((kind, name_node)) = symbol_candidate(node, language) {
+        let name = node_text(name_node, source);
+        if !name.is_empty() {
+            let start_line = node.start_position().row + 1;
+            let end_line = node.end_position().row + 1;
+            let signature = lines
+                .get(start_line.saturating_sub(1))
+                .map_or("", |line| *line)
+                .trim()
+                .to_string();
+            let container = stack.last().cloned();
+            let qualified_name = container
+                .as_ref()
+                .map_or_else(|| name.clone(), |parent| format!("{parent}.{name}"));
+            let id = symbol_id(path, &qualified_name, start_line, kind);
+            symbols.push(Symbol {
+                id,
+                kind: kind.to_string(),
+                name: name.clone(),
+                qualified_name: qualified_name.clone(),
+                file_path: path.to_string(),
+                start_line,
+                end_line,
+                signature,
+                container,
+                content_hash: content_hash.to_string(),
+            });
+
+            stack.push(qualified_name);
+            visit_symbol_children(
+                node,
+                path,
+                content_hash,
+                source,
+                lines,
+                language,
+                stack,
+                symbols,
+            );
             stack.pop();
-        }
-        let container = stack.last().map(|(_, q)| q.clone());
-        let qualified_name = container
-            .as_ref()
-            .map_or_else(|| name.clone(), |parent| format!("{parent}.{name}"));
-        let end_line = raw
-            .iter()
-            .skip(idx + 1)
-            .find(|(next_indent, _, _, _, _)| next_indent <= indent)
-            .map_or(line_count, |(_, _, _, line, _)| line.saturating_sub(1));
-        let id = symbol_id(path, &qualified_name, *start_line, kind);
-        symbols.push(Symbol {
-            id,
-            kind: kind.clone(),
-            name: name.clone(),
-            qualified_name: qualified_name.clone(),
-            file_path: path.to_string(),
-            start_line: *start_line,
-            end_line,
-            signature: signature.clone(),
-            container,
-            content_hash: content_hash.to_string(),
-        });
-        if kind == "class" {
-            stack.push((*indent, qualified_name));
+            return;
         }
     }
-    symbols
+
+    visit_symbol_children(
+        node,
+        path,
+        content_hash,
+        source,
+        lines,
+        language,
+        stack,
+        symbols,
+    );
+}
+
+fn visit_symbol_children(
+    node: TsNode<'_>,
+    path: &str,
+    content_hash: &str,
+    source: &[u8],
+    lines: &[&str],
+    language: SymbolLanguage,
+    stack: &mut Vec<String>,
+    symbols: &mut Vec<Symbol>,
+) {
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        visit_symbol_node(
+            child,
+            path,
+            content_hash,
+            source,
+            lines,
+            language,
+            stack,
+            symbols,
+        );
+    }
+}
+
+fn symbol_candidate(
+    node: TsNode<'_>,
+    language: SymbolLanguage,
+) -> Option<(&'static str, TsNode<'_>)> {
+    match language {
+        SymbolLanguage::Python => match node.kind() {
+            "class_definition" => node.child_by_field_name("name").map(|name| ("class", name)),
+            "function_definition" => node
+                .child_by_field_name("name")
+                .map(|name| ("function", name)),
+            _ => None,
+        },
+        SymbolLanguage::TypeScript => match node.kind() {
+            "class_declaration" => node.child_by_field_name("name").map(|name| ("class", name)),
+            "function_declaration" => node
+                .child_by_field_name("name")
+                .map(|name| ("function", name)),
+            "method_definition" => node
+                .child_by_field_name("name")
+                .map(|name| ("method", name)),
+            "variable_declarator" => {
+                let value = node.child_by_field_name("value")?;
+                if matches!(value.kind(), "arrow_function" | "function") {
+                    node.child_by_field_name("name")
+                        .map(|name| ("function", name))
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        },
+    }
+}
+
+fn node_text(node: TsNode<'_>, source: &[u8]) -> String {
+    node.utf8_text(source).unwrap_or("").to_string()
 }
 
 fn collect_calls(
