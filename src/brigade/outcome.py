@@ -94,10 +94,24 @@ def signal_value(source: str, status: str) -> int:
 
 
 def score_records(artifact_id: str, records: list[OutcomeRecord]) -> OutcomeScore:
-    """Fold an artifact's records into counts plus a Wilson lower-bound score."""
-    helped = sum(1 for r in records if r.signal_value > 0)
-    hurt = sum(1 for r in records if r.signal_value < 0)
-    neutral = sum(1 for r in records if r.signal_value == 0)
+    """Fold an artifact's records into counts plus a Wilson lower-bound score.
+
+    Counts DISTINCT verified evidence, not raw rows. A re-captured or retried run
+    yields a byte-identical record (same source, evidence_ref, task_id), and the
+    same physical receipt must contribute at most one signal, or a single trial
+    could cross install_min_helped and auto-install with no independent evidence.
+    """
+    seen: set[tuple[str, str, str]] = set()
+    deduped: list[OutcomeRecord] = []
+    for r in records:
+        key = (r.source, r.evidence_ref, r.task_id)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(r)
+    helped = sum(1 for r in deduped if r.signal_value > 0)
+    hurt = sum(1 for r in deduped if r.signal_value < 0)
+    neutral = sum(1 for r in deduped if r.signal_value == 0)
     total = helped + hurt
     last_ts = max((r.ts for r in records), default=None)
     return OutcomeScore(

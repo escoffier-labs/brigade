@@ -50,6 +50,30 @@ def test_score_records_folds_counts_wilson_and_last_signal():
     assert score.last_signal_ts == "2026-06-20T02:00:00+00:00"
 
 
+def test_score_records_dedups_identical_signals():
+    # A re-captured/retried verify run produces a byte-identical record; the same
+    # physical receipt must not be counted twice (P1: double-count auto-installs).
+    duplicate = outcome.OutcomeRecord("skill-x", "skill", "t1", "verify", 1, "ref1", "2026-06-20T00:00:00+00:00")
+    score = outcome.score_records("skill-x", [duplicate, duplicate])
+    assert score.helped == 1
+
+
+def test_score_records_dedup_does_not_promote_a_single_genuine_positive():
+    # Two identical positives are one signal, which is below install_min_helped=2,
+    # so a clean candidate must NOT be promoted off a single genuine trial.
+    duplicate = outcome.OutcomeRecord("skill-x", "skill", "t1", "verify", 1, "ref1", "2026-06-20T00:00:00+00:00")
+    score = outcome.score_records("skill-x", [duplicate, duplicate])
+    decision = outcome.decide(
+        score,
+        current_status="candidate",
+        last_action_ts=None,
+        now=dt.datetime(2026, 6, 21),
+        config=outcome.ReconcileConfig(),
+    )
+    assert decision.action == "hold"
+    assert decision.new_status == "candidate"
+
+
 def test_score_records_empty_is_zero():
     score = outcome.score_records("skill-x", [])
     assert (score.helped, score.hurt, score.neutral) == (0, 0, 0)
