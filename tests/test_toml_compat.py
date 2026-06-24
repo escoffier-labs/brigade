@@ -58,3 +58,17 @@ def test_fallback_reports_invalid_values(monkeypatch):
 
     with pytest.raises(toml_compat.TOMLDecodeError):
         toml_compat.loads("enabled = maybe\n")
+
+
+def test_fallback_parses_quoted_dotted_table_key(monkeypatch):
+    # On Python 3.10 the fallback reader handles codex configs. A quoted dotted
+    # server name (mcp_servers."io.github.example") must stay one segment instead
+    # of fragmenting into nested io/github/example tables.
+    monkeypatch.setattr(toml_compat, "_stdlib_tomllib", None)
+
+    payload = toml_compat.loads(
+        '[mcp_servers."io.github.example"]\ncommand = "npx"\n\n[mcp_servers.github]\ncommand = "plain"\n'
+    )
+
+    assert payload["mcp_servers"]["io.github.example"]["command"] == "npx"
+    assert payload["mcp_servers"]["github"]["command"] == "plain"

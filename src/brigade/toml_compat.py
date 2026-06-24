@@ -72,7 +72,27 @@ def _strip_comment(line: str) -> str:
 
 
 def _path(value: str, line_number: int) -> list[str]:
-    parts = [part.strip() for part in value.split(".") if part.strip()]
+    # Split a dotted table path on UNQUOTED dots only, stripping the surrounding
+    # quotes per segment, so a quoted dotted key like mcp_servers."io.github.x"
+    # stays a single segment instead of fragmenting into io/github/x.
+    parts: list[str] = []
+    current: list[str] = []
+    quote = ""
+    for char in value:
+        if quote:
+            if char == quote:
+                quote = ""
+            else:
+                current.append(char)
+        elif char in ("'", '"'):
+            quote = char
+        elif char == ".":
+            parts.append("".join(current).strip())
+            current = []
+        else:
+            current.append(char)
+    parts.append("".join(current).strip())
+    parts = [part for part in parts if part]
     if not parts:
         raise TOMLDecodeError(f"invalid TOML table on line {line_number}")
     return parts
