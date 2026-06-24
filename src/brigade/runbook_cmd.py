@@ -11,6 +11,10 @@ from pathlib import Path
 from typing import Any
 from .localio import stable_hash as _stable_hash, utc_now_iso as _now, write_json as _write_json
 
+# ADVISORY ONLY. This deny-list catches a few obviously destructive shapes, but
+# it is trivially bypassable (e.g. `find / -delete`, `dd`, `curl ... | sh`) and
+# must never be treated as a security boundary. The real boundary is the human
+# operator reading the steps before passing --approved. See SECURITY.md.
 DANGEROUS_PATTERNS = (
     re.compile(r"\brm\s+-[^;\n]*[rf][^;\n]*[rf]"),
     re.compile(r"\bgit\s+reset\s+--hard\b"),
@@ -20,6 +24,11 @@ DANGEROUS_PATTERNS = (
     re.compile(r"\breboot\b"),
     re.compile(r":\s*\(\s*\)\s*\{"),
 )
+
+# Interpreters that, with an inline-script flag, run an arbitrary embedded
+# command and so defeat a first-token (or even whole-command) allowlist.
+_SHELL_INTERPRETERS = frozenset({"bash", "sh", "dash", "zsh", "ksh", "fish"})
+_INLINE_SCRIPT_FLAGS = frozenset({"-c"})
 
 
 def _runbooks_root(target: Path) -> Path:
@@ -60,12 +69,25 @@ def _read_runbook(path: Path) -> tuple[dict[str, Any] | None, str | None]:
     return payload, None
 
 
-def _command_name(command: str) -> str:
+def _command_tokens(command: str) -> list[str] | None:
     try:
-        parts = shlex.split(command)
+        return shlex.split(command)
     except ValueError:
-        return ""
+        return None
+
+
+def _command_name(command: str) -> str:
+    parts = _command_tokens(command)
     return Path(parts[0]).name if parts else ""
+
+
+def _is_shell_wrapper(tokens: list[str]) -> bool:
+    """True when the command shells out to an inline script and so negates the allowlist."""
+    if not tokens:
+        return False
+    if Path(tokens[0]).name not in _SHELL_INTERPRETERS:
+        return False
+    return any(token in _INLINE_SCRIPT_FLAGS for token in tokens[1:])
 
 
 def _policy_for_step(payload: dict[str, Any], step: dict[str, Any]) -> dict[str, Any]:
@@ -74,17 +96,32 @@ def _policy_for_step(payload: dict[str, Any], step: dict[str, Any]) -> dict[str,
     if allowed is None:
         allowed = step.get("allowed_commands")
     allowed_list = [str(item) for item in allowed] if isinstance(allowed, list) else []
-    command_name = _command_name(command)
+    tokens = _command_tokens(command)
+    command_name = Path(tokens[0]).name if tokens else ""
     failures: list[str] = []
     warnings: list[str] = []
     if any(pattern.search(command) for pattern in DANGEROUS_PATTERNS):
-        failures.append("command matches a destructive default-deny pattern")
-    if allowed_list and command_name not in allowed_list:
-        failures.append(f"command {command_name!r} is not in allowed_commands")
+        # Advisory deny-list. It is not a security boundary (see SECURITY.md);
+        # it only catches a handful of obviously destructive shapes.
+        failures.append("command matches an advisory destructive deny-list pattern")
     if not command_name:
         failures.append("command could not be parsed")
-    if not allowed_list:
-        warnings.append("allowed_commands not configured; default destructive deny-list only")
+    shell_wrapper = tokens is not None and _is_shell_wrapper(tokens)
+    if allowed_list:
+        # Validate the WHOLE command, not just the first token. A first-token
+        # match (e.g. allowed_commands:['bash'] for `bash -c "..."`) does not
+        # constrain what actually runs, so an inline-script shell wrapper is
+        # rejected outright even when its interpreter is allow-listed.
+        if shell_wrapper:
+            failures.append(
+                f"command {command_name!r} runs an inline script (-c), which negates the allowed_commands allowlist"
+            )
+        elif command_name not in allowed_list:
+            failures.append(f"command {command_name!r} is not in allowed_commands")
+    else:
+        warnings.append("allowed_commands not configured; advisory destructive deny-list only")
+    if shell_wrapper:
+        warnings.append("command runs an inline shell script (-c); the allowed_commands allowlist cannot constrain it")
     return {
         "command": command,
         "command_name": command_name,
@@ -117,14 +154,17 @@ def _plan_payload(target: Path, runbook: Path) -> tuple[dict[str, Any] | None, s
         "runbook_path": str(runbook),
         "runbook_id": str(payload.get("id") or runbook.stem),
         "description": str(payload.get("description") or ""),
-        "approved": bool(payload.get("approved")),
+        # file_approved is informational only. It does NOT authorize execution;
+        # the operator must pass --approved. A file-embedded flag is ignored.
+        "file_approved": bool(payload.get("approved")),
         "policy_valid": not policy_failures,
         "policy_failures": policy_failures,
         "step_count": len(steps),
         "steps": steps,
         "boundaries": [
-            "Runs only when the operator calls brigade runbook run.",
-            "Executes foreground shell commands from the reviewed runbook file.",
+            "Runs only when the operator passes --approved on the command line; an approved=true baked into the runbook file is ignored.",
+            "Executes arbitrary foreground shell commands from the runbook file, which is only as trustworthy as whoever wrote it. Review every step before approving.",
+            "The destructive deny-list is advisory, not a security boundary; it is trivially bypassable.",
             "Writes stdout, stderr, and JSON receipts under .brigade/runbooks/runs/.",
         ],
     }, None
@@ -169,7 +209,13 @@ def _execute_plan(
         else:
             print("error: runbook policy failed", file=sys.stderr)
         return 2
-    if not (approved or bool(plan_payload.get("approved"))):
+    # Approval is a human-in-the-loop gate. It is satisfied ONLY by the operator
+    # passing --approved (or the equivalent `approved` argument), never by an
+    # "approved": true baked into the runbook file. Brigade is driven by agents
+    # that write files, so honoring a file-embedded flag would let any file
+    # author authorize arbitrary shell execution without an operator ever seeing
+    # the commands. A file-embedded approved=true is intentionally ignored.
+    if not approved:
         if json_output:
             print(
                 json.dumps(
@@ -179,7 +225,11 @@ def _execute_plan(
                 )
             )
         else:
-            print("error: runbook execution requires --approved or approved=true in the runbook", file=sys.stderr)
+            print(
+                "error: runbook execution requires the operator to pass --approved; "
+                "approved=true inside the runbook file is ignored",
+                file=sys.stderr,
+            )
         return 1
     steps = [step for step in plan_payload["steps"] if int(step["index"]) >= start_index]
     if dry_run:

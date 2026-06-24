@@ -23,6 +23,14 @@ You should get an acknowledgment within 72 hours. If you do not, please follow u
 - Public-leak guard bypasses (cases where the content-guard pre-push hook fails to flag content it is configured to catch).
 - Profile manifests that write outside `--target` (the manifest validator should reject these).
 
+## Runbooks execute arbitrary shell
+
+`brigade runbook run` executes the `run` string of every step as a shell command on the operator's machine. Treat a runbook file as **arbitrary shell that is only as trustworthy as whoever wrote it** - including any agent that can write a `.json` file into the workspace.
+
+- Execution requires the **operator** to pass `--approved` on the command line. An `"approved": true` baked into the runbook file is **ignored** and never authorizes execution. This keeps a human in the loop: run `brigade runbook plan <file>` (or `runbook run <file> --dry-run`) to read every command before approving.
+- The `allowed_commands` allowlist validates the whole command, not just the first token, and refuses an inline-script shell wrapper (for example `bash -c "..."`) because such a wrapper can run anything regardless of the allowlist.
+- The built-in destructive-pattern deny-list is **advisory only**. It catches a few obvious shapes but is trivially bypassable (`find / -delete`, `dd`, `curl ... | sh`, and so on). Do not rely on it as a security boundary; the boundary is the operator reviewing the steps before approving.
+
 ## Out of scope
 
 - Bugs in `content-guard` itself - please report those upstream at
