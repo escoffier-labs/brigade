@@ -450,6 +450,8 @@ def quickstart(
         {"id": "portable-bootstrap", "status": portable_status, "return_code": portable_rc, "payload": portable_payload}
     )
 
+    steps.append(_quickstart_mcp_onramp(target, dry_run=dry_run, force=force))
+
     if dry_run:
         for harness in selected_harnesses:
             if harness in WRITER_INBOXES:
@@ -509,6 +511,41 @@ def quickstart(
     return 0 if ok else 1
 
 
+def _quickstart_mcp_onramp(target: Path, *, dry_run: bool, force: bool) -> dict[str, Any]:
+    """Scaffold the canonical MCP catalog and preview the projection plan.
+
+    The README leads with MCP/tool sync, so quickstart must put that feature on
+    the golden path. This writes only `.brigade/mcp.json` (local owned state) and
+    runs `mcp plan` as a dry-run summary. It never writes harness MCP configs,
+    matching the dry-run-by-default, no-auto-write contract for shared config.
+    """
+    from .. import mcp_cmd
+
+    if dry_run:
+        return {
+            "id": "mcp-init",
+            "status": "planned",
+            "return_code": 0,
+            "next_command": "brigade mcp init --target .",
+        }
+    init_rc, init_payload = _capture_json_call(mcp_cmd.init, target=target, force=force)
+    # init returns 3 when the catalog already exists; that is a benign skip here.
+    if init_rc == 3:
+        step: dict[str, Any] = {"id": "mcp-init", "status": "skipped", "return_code": 0, "payload": init_payload}
+    else:
+        step = {
+            "id": "mcp-init",
+            "status": "ok" if init_rc == 0 else "error",
+            "return_code": init_rc,
+            "payload": init_payload,
+        }
+    if init_rc in {0, 3}:
+        _, plan_payload = _capture_json_call(mcp_cmd.plan, target=target)
+        if isinstance(plan_payload, dict):
+            step["plan"] = {"counts": plan_payload.get("counts"), "server_count": len(plan_payload.get("items") or [])}
+    return step
+
+
 def _quickstart_next_commands(harnesses: list[str], *, dry_run: bool) -> list[str]:
     if dry_run:
         return ["rerun without --dry-run after reviewing planned writes"]
@@ -516,6 +553,8 @@ def _quickstart_next_commands(harnesses: list[str], *, dry_run: bool) -> list[st
         "brigade operator doctor --target . --profile local-operator",
         "brigade tools list --target .",
         "brigade skills doctor --target .",
+        "brigade mcp init --target .",
+        "brigade mcp sync --write --target .",
         "brigade security scan --target . --output-dir .brigade/security/latest",
     ]
     commands.extend(
