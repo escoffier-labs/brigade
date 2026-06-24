@@ -1235,6 +1235,34 @@ def test_operator_quickstart_prepares_new_user_workspace(tmp_path, capsys):
     assert handoff_doctor["warnings"] == []
 
 
+def test_operator_quickstart_scaffolds_mcp_onramp(tmp_path, capsys):
+    assert cli.main(["operator", "quickstart", "--target", str(tmp_path), "--harnesses", "codex", "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == "ok"
+    # The README leads with MCP/tool sync, so quickstart must scaffold the
+    # canonical catalog and surface the MCP commands on the golden path.
+    assert (tmp_path / ".brigade" / "mcp.json").is_file()
+    mcp_step = next((step for step in payload["steps"] if step["id"] == "mcp-init"), None)
+    assert mcp_step is not None
+    assert mcp_step["status"] == "ok"
+    assert any("brigade mcp init" in command for command in payload["next_commands"])
+    assert any("brigade mcp sync --write" in command for command in payload["next_commands"])
+
+
+def test_operator_quickstart_mcp_onramp_does_not_write_tool_configs(tmp_path, capsys):
+    assert cli.main(["operator", "quickstart", "--target", str(tmp_path), "--harnesses", "codex", "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == "ok"
+    # The on-ramp is dry-run by default: it scaffolds the canonical catalog but
+    # must never write a harness MCP config automatically.
+    assert (tmp_path / ".brigade" / "mcp.json").is_file()
+    assert not (tmp_path / ".mcp.json").exists()
+    # codex's real MCP target is .codex/config.toml; the on-ramp must not write
+    # mcp_servers into it (sync is never invoked, only init + a read-only plan).
+    codex_cfg = tmp_path / ".codex" / "config.toml"
+    assert not codex_cfg.exists() or "mcp_servers" not in codex_cfg.read_text()
+
+
 def test_operator_quickstart_dry_run_does_not_write(tmp_path, capsys):
     assert (
         cli.main(
