@@ -71,9 +71,7 @@ def test_code_graph_summary_none_on_nonzero_exit(tmp_target, monkeypatch):
     tmp_target.mkdir(parents=True)
     _make_db(tmp_target)
     monkeypatch.setattr(context_cmd.proc, "which", lambda c: "/x/" + c)
-    monkeypatch.setattr(
-        context_cmd.proc, "run", lambda args, **kw: proc.Result(code=1, stdout="", stderr="boom")
-    )
+    monkeypatch.setattr(context_cmd.proc, "run", lambda args, **kw: proc.Result(code=1, stdout="", stderr="boom"))
     assert context_cmd._code_graph_summary(tmp_target, {"text": "x"}) is None
 
 
