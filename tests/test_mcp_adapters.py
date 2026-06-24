@@ -23,6 +23,15 @@ def _remote(name="docs"):
     return CanonicalServer(name=name, transport="http", url="https://mcp.example.com/v1")
 
 
+def _remote_with_headers(name="docs"):
+    return CanonicalServer(
+        name=name,
+        transport="http",
+        url="https://mcp.example.com/v1",
+        headers={"Authorization": {"ref": "TOKEN"}},
+    )
+
+
 def test_claude_cursor_share_mcpservers_shape():
     for harness in ("claude", "cursor"):
         adapter = A.ADAPTERS[harness]
@@ -132,6 +141,91 @@ def test_import_demotes_literal_secret_to_ref():
     assert server.env["GITHUB_TOKEN"] == {"ref": "GITHUB_TOKEN"}  # value dropped
     assert server.env["HOME_DIR"] == {"literal": "/tmp"}  # non-secret literal kept
     assert demoted == ["GITHUB_TOKEN"]
+
+
+def test_claude_remote_roundtrip_is_idempotent():
+    """A remote server projected then re-read yields the same provider dict."""
+    adapter = A.ADAPTERS["claude"]
+    projected = adapter.to_provider(_remote())
+    back, _ = adapter.from_provider("docs", projected)
+    reprojected = adapter.to_provider(back)
+    assert projected == reprojected
+
+
+def test_codex_remote_roundtrip_is_idempotent():
+    """BUG 1: codex remote tables must render type/transport so a re-sync is a no-op.
+
+    The projected dict (from to_provider) carries ``type``; the table written to disk
+    must round-trip back through read_file to the same dict, else mcp_cmd flags the
+    server "conflicted" on every sync.
+    """
+    adapter = A.ADAPTERS["codex"]
+    projected = adapter.to_provider(_remote())
+    assert projected["type"] == "http"
+    text = adapter.write_file(None, {"docs": projected}, set())
+    round_tripped = adapter.read_file(text)["docs"]
+    assert round_tripped == projected
+
+
+def test_codex_dotted_server_name_is_idempotent_and_valid_toml():
+    """BUG 2: a dotted/quoted server name synced twice stays one valid table."""
+    adapter = A.ADAPTERS["codex"]
+    server = CanonicalServer(
+        name="io.github.example",
+        transport="stdio",
+        command="npx",
+        args=("-y", "@mcp/server"),
+        timeout=60,
+    )
+    projected = adapter.to_provider(server)
+    first = adapter.write_file(None, {"io.github.example": projected}, set())
+    # Re-syncing the same server must not append a duplicate table.
+    second = adapter.write_file(first, {"io.github.example": projected}, set())
+    assert second.count("[mcp_servers.") == 1
+    parsed = toml_loads(second)
+    assert parsed["mcp_servers"]["io.github.example"]["command"] == "npx"
+    # And it can be removed.
+    pruned = adapter.write_file(second, {}, {"io.github.example"})
+    assert "mcp_servers" not in toml_loads(pruned)
+
+
+def test_codex_remote_headers_roundtrip():
+    """BUG 3: codex remote tables must render and parse Authorization headers."""
+    adapter = A.ADAPTERS["codex"]
+    projected = adapter.to_provider(_remote_with_headers())
+    assert projected["headers"] == {"Authorization": "${TOKEN}"}
+    text = adapter.write_file(None, {"docs": projected}, set())
+    round_tripped = adapter.read_file(text)["docs"]
+    assert round_tripped == projected
+    back, _ = adapter.from_provider("docs", round_tripped)
+    assert back.headers == {"Authorization": {"ref": "TOKEN"}}
+
+
+def test_vscode_remote_headers_roundtrip():
+    """BUG 3: vscode remote must emit and parse headers (as ${input:VAR})."""
+    adapter = A.ADAPTERS["vscode"]
+    d = adapter.to_provider(_remote_with_headers())
+    assert d["headers"] == {"Authorization": "${input:TOKEN}"}
+    back, _ = adapter.from_provider("docs", d)
+    assert back.headers == {"Authorization": {"ref": "TOKEN"}}
+
+
+def test_opencode_remote_headers_roundtrip():
+    """BUG 3: opencode remote must emit and parse headers."""
+    adapter = A.ADAPTERS["opencode"]
+    d = adapter.to_provider(_remote_with_headers())
+    assert d["headers"] == {"Authorization": "${TOKEN}"}
+    back, _ = adapter.from_provider("docs", d)
+    assert back.headers == {"Authorization": {"ref": "TOKEN"}}
+
+
+def test_openclaw_remote_headers_roundtrip():
+    """BUG 3: openclaw remote must emit and parse headers."""
+    adapter = A.ADAPTERS["openclaw"]
+    d = adapter.to_provider(_remote_with_headers())
+    assert d["headers"] == {"Authorization": "${TOKEN}"}
+    back, _ = adapter.from_provider("docs", d)
+    assert back.headers == {"Authorization": {"ref": "TOKEN"}}
 
 
 def test_server_dict_roundtrip():

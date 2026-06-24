@@ -363,13 +363,39 @@ def _toml_blocks(text: str) -> tuple[str, list[tuple[str | None, str]]]:
     return "".join(preamble), [(p, "".join(b)) for p, b in blocks]
 
 
+def _split_toml_path(path: str) -> list[str]:
+    """Split a TOML table path on UNQUOTED dots, stripping quotes per segment.
+
+    ``mcp_servers."my.server"`` -> ``["mcp_servers", "my.server"]`` (the dotted name
+    stays one segment). Plain ``mcp_servers.github`` -> ``["mcp_servers", "github"]``.
+    """
+    parts: list[str] = []
+    current: list[str] = []
+    quote = ""
+    for char in path:
+        if quote:
+            if char == quote:
+                quote = ""
+            else:
+                current.append(char)
+        elif char in ("'", '"'):
+            quote = char
+        elif char == ".":
+            parts.append("".join(current).strip())
+            current = []
+        else:
+            current.append(char)
+    parts.append("".join(current).strip())
+    return parts
+
+
 def _codex_server_name(path: str | None) -> str | None:
     """Return server name if a table path is mcp_servers.<name>[.sub], else None."""
     if not path:
         return None
-    parts = [p.strip() for p in path.split(".")]
+    parts = _split_toml_path(path.strip())
     if len(parts) >= 2 and parts[0] == "mcp_servers":
-        return parts[1].strip('"').strip("'")
+        return parts[1]
     return None
 
 
@@ -379,7 +405,7 @@ def _codex_render_table(name: str, server_dict: dict[str, Any]) -> str:
 
     key = _format_toml_key(name)
     out = [f"[mcp_servers.{key}]\n"]
-    for field_name in ("command", "url"):
+    for field_name in ("command", "url", "type"):
         value = server_dict.get(field_name)
         if isinstance(value, str) and value:
             out.append(f"{field_name} = {tomllib.format_toml_value(value)}\n")
@@ -392,6 +418,9 @@ def _codex_render_table(name: str, server_dict: dict[str, Any]) -> str:
     env = server_dict.get("env")
     if isinstance(env, dict) and env:
         out.append(f"env = {_format_inline_table({str(k): str(v) for k, v in env.items()})}\n")
+    headers = server_dict.get("headers")
+    if isinstance(headers, dict) and headers:
+        out.append(f"headers = {_format_inline_table({str(k): str(v) for k, v in headers.items()})}\n")
     return "".join(out)
 
 
@@ -477,8 +506,11 @@ def _mcpservers_from_provider(
 
 def _vscode_to_provider(server: CanonicalServer) -> dict[str, Any]:
     if server.is_remote:
-        return {"type": server.transport, "url": server.url}
-    out: dict[str, Any] = {"type": "stdio", "command": server.command, "args": list(server.args)}
+        out: dict[str, Any] = {"type": server.transport, "url": server.url}
+        if server.headers:
+            out["headers"] = _emit_env(server.headers, "vscode-inputs")
+        return out
+    out = {"type": "stdio", "command": server.command, "args": list(server.args)}
     if server.env:
         out["env"] = _emit_env(server.env, "vscode-inputs")
     return out
@@ -486,7 +518,10 @@ def _vscode_to_provider(server: CanonicalServer) -> dict[str, Any]:
 
 def _opencode_to_provider(server: CanonicalServer) -> dict[str, Any]:
     if server.is_remote:
-        return {"type": "remote", "url": server.url, "enabled": server.enabled}
+        remote: dict[str, Any] = {"type": "remote", "url": server.url, "enabled": server.enabled}
+        if server.headers:
+            remote["headers"] = _emit_env(server.headers, "expand")
+        return remote
     command = [server.command, *server.args] if server.command else list(server.args)
     out: dict[str, Any] = {"type": "local", "command": command, "enabled": server.enabled}
     if server.env:
@@ -511,7 +546,11 @@ def _vscode_from_provider(
     name: str, raw: dict[str, Any], *, keep_secrets: bool = False
 ) -> tuple[CanonicalServer, list[str]]:
     if raw.get("url"):
-        return CanonicalServer(name=name, transport=str(raw.get("type") or "http"), url=str(raw["url"])), []
+        headers, demoted = _parse_env(raw.get("headers"), keep_secrets=keep_secrets)
+        return (
+            CanonicalServer(name=name, transport=str(raw.get("type") or "http"), url=str(raw["url"]), headers=headers),
+            demoted,
+        )
     env, demoted = _parse_env(raw.get("env"), keep_secrets=keep_secrets)
     return (
         CanonicalServer(
@@ -528,7 +567,10 @@ def _vscode_from_provider(
 def _openclaw_to_provider(server: CanonicalServer) -> dict[str, Any]:
     """OpenClaw mcp.servers shape: stdio {command,args,env} (no type); remote {url,transport}."""
     if server.is_remote:
-        return {"url": server.url, "transport": server.transport}
+        remote: dict[str, Any] = {"url": server.url, "transport": server.transport}
+        if server.headers:
+            remote["headers"] = _emit_env(server.headers, "expand")
+        return remote
     out: dict[str, Any] = {"command": server.command, "args": list(server.args)}
     if server.env:
         out["env"] = _emit_env(server.env, "expand")
@@ -539,7 +581,13 @@ def _openclaw_from_provider(
     name: str, raw: dict[str, Any], *, keep_secrets: bool = False
 ) -> tuple[CanonicalServer, list[str]]:
     if raw.get("url"):
-        return CanonicalServer(name=name, transport=str(raw.get("transport") or "http"), url=str(raw["url"])), []
+        headers, demoted = _parse_env(raw.get("headers"), keep_secrets=keep_secrets)
+        return (
+            CanonicalServer(
+                name=name, transport=str(raw.get("transport") or "http"), url=str(raw["url"]), headers=headers
+            ),
+            demoted,
+        )
     env, demoted = _parse_env(raw.get("env"), keep_secrets=keep_secrets)
     return (
         CanonicalServer(
