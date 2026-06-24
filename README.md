@@ -5,7 +5,7 @@
 <h1 align="center">Brigade CLI</h1>
 
 <p align="center">
-  <strong>AI agent memory, handoffs, and local guardrails for Codex, Claude Code, OpenCode, and over a dozen other harnesses.</strong>
+  <strong>One canonical source for the MCP servers, tools, and memory your AI coding agents share, merged into each tool's native config with a review gate and a receipt for every change. Local files, no daemon, no lock-in.</strong>
 </p>
 
 <p align="center">
@@ -16,6 +16,10 @@
 </p>
 
 Your agents run loops. Brigade keeps the receipts.
+
+## What it does
+
+You run more than one agent CLI. Each one keeps its MCP servers in its own config file, its memory in its own silo, and writes to both without review. Brigade is the local layer that fixes that. You keep one canonical source for your MCP servers, your tool and skill catalog, and your memory, and Brigade merges each into the tools you actually use: MCP servers into each tool's native config, tools and skills projected into each harness, and one shared memory owned in one place. A review gate sits in front of anything that gets written, and every consequential change lands a receipt you can grep, diff, and roll back. No daemon, no hosted service, no vendor lock-in: it writes plain files in your repo when you run a command, and that is all it does.
 
 ## Try it in 60 seconds
 
@@ -28,17 +32,37 @@ brigade operator doctor --target ./my-repo --profile local-operator   # verify
 
 That installs the CLI, wires memory, handoffs, and local guardrails into one repo for a single harness, and prints a readiness check. Nothing leaves your machine and no daemon is started. Add `--dry-run` to preview the file-by-file plan before anything is written. More harnesses, workspace setups, and the homegrown-adoption path are under [Install](#install).
 
-## Why I built this
+## One MCP catalog, synced into every tool
 
-I run an always-on OpenClaw agent next to daily Codex and Claude Code sessions, and I have since January. Every one of those tools wakes up empty. Whatever a session learned about my machine, my rules, or yesterday's dead ends scattered across tool-specific folders and died there.
+Every agent tool reads its MCP servers from a different file in a different shape. The same servers wired across Claude Code, Cursor, Codex, VS Code, OpenCode, and Antigravity means hand-editing six configs and keeping them in sync forever. Brigade keeps one canonical catalog and merges it into each tool's native config for you.
 
-So I hand-rolled the fixes, one incident at a time: a slim `MEMORY.md` index pointing at small memory cards instead of one giant file, a handoff note format every harness could write, an ingest cron that filed the good notes into durable memory every 30 minutes, staleness checks so old cards stopped being trusted forever.
+```bash
+brigade mcp init                  # scaffold .brigade/mcp.json
+brigade mcp add --name github --command npx \
+  --args "-y @modelcontextprotocol/server-github" \
+  --env GITHUB_TOKEN=ref:GITHUB_TOKEN
+brigade mcp sync                  # dry-run: show the diff for every tool
+brigade mcp sync --write          # merge into each tool's config
+```
 
-Two incidents shaped the design more than anything I planned. First, a nightly "dreaming" job that promoted raw session fragments straight into memory bloated `MEMORY.md` to 41KB, way past the 12KB bootstrap budget, so every session started with truncated memory and nobody noticed for weeks. Blind auto-promotion died that day. Now nothing reaches memory unlinted: a note has to name a target and clear the guards, the safe ones file themselves, and only the risky few wait for review. Second, I found 195 handoff notes sitting unread across 35 repos because the ingester had a hardcoded three-repo allowlist and nothing warned about the coverage gap. Silence is the failure mode. Every part of Brigade that lints, warns, or writes a receipt exists because something once failed in silence.
+One catalog (`.brigade/mcp.json`), six native targets:
 
-That system now runs 482 memory cards and survives daily multi-agent work. But explaining it to anyone meant: clone six repos, write these crons, keep your index slim, watch for staleness, and never let a note reach memory unlinted. Brigade is that setup packaged as one installable CLI. The full production stack is documented in the [solos-cookbook](https://github.com/escoffier-labs/solos-cookbook) if you want to see where it came from.
+| Tool | File it writes |
+|---|---|
+| Claude Code | `.mcp.json` |
+| Cursor | `.cursor/mcp.json` |
+| Codex CLI | `.codex/config.toml` (merged surgically, other tables preserved) |
+| VS Code | `.vscode/mcp.json` (secrets become `inputs[]`) |
+| OpenCode | `opencode.json` |
+| Antigravity | `~/.gemini/config/mcp_config.json` (user-scoped, `--user-scope`) |
 
-## The loop
+It is dry-run by default and never runs from `doctor` or `brief`. It merges by server key, so servers you added by hand are never touched, and ones you edited are left alone unless you pass `--force`. Secrets are written as `${VAR}` references (or VS Code `${input:VAR}`), never inlined. Ownership is tracked in a gitignored sidecar, so re-syncing on a fresh clone does not spuriously conflict. Full behavior in [docs/mcp-sync.md](docs/mcp-sync.md).
+
+Tools and skills get the same treatment: `brigade tools sync` projects one reviewed catalog into each harness's native format.
+
+> `brigade mcp` is on `main` now and ships in the next release. Until then, install from source: `pipx install git+https://github.com/escoffier-labs/brigade`.
+
+## Shared memory, with a guard in front
 
 Writer harnesses leave handoff notes as they work. Brigade lints, guards, and classifies each one, then files the safe, targeted notes into durable memory on its own. A memory owner (OpenClaw, Hermes, or just you) only steps in for the ambiguous few. Every consequential action lands a receipt in a plain file you can grep, diff, and prune.
 
@@ -69,52 +93,31 @@ flowchart LR
     class REVIEW gate;
 ```
 
-Memory has two layers: knowledge cards under `memory/cards/` hold the detail, and `MEMORY.md` stays a slim one-line-per-card index that loads every session. `brigade memory care scan` flags stale, contradictory, or undersourced cards for review instead of letting them rot. Brigade never edits canonical memory itself; the owner does the writing.
-
-It all runs on the machine you control: laptop, workstation, or VPS. Local by default, loud about the exceptions.
+Memory has two layers: knowledge cards under `memory/cards/` hold the detail, and `MEMORY.md` stays a slim one-line-per-card index that loads every session. `brigade memory care scan` flags stale, contradictory, or undersourced cards for review instead of letting them rot. Brigade never edits canonical memory itself; the owner does the writing. It all runs on the machine you control: laptop, workstation, or VPS.
 
 ## Verified learning
 
-The loop above files notes. The next loop earns trust. Brigade can promote a learned skill on its own, but only when a real signal proves it helped, and it rolls one back the moment a signal says it broke. The model never grades its own work.
+Filing notes is the first loop. The second loop earns trust. Brigade can promote a learned skill on its own, but only when a real signal proves it helped, and it rolls one back the moment a signal says it broke. The model never grades its own work.
 
 - `brigade outcome capture` records the result of a verify run (a real exit code, not an opinion) against the skill that produced it.
 - `brigade outcome score` ranks each skill by a Wilson lower bound, so something that passed twice never outranks something vetted across twenty runs.
-- `brigade outcome reconcile` is the gate. Dry-run by default: it shows what it would promote or revert and writes nothing. With `--apply` it installs a skill that earned it across your harnesses, or rolls a regressed one back to its last good version (and uninstalls a bad first install that has nothing to fall back to).
+- `brigade outcome reconcile` is the gate. Dry-run by default; with `--apply` it installs a skill that earned it across your harnesses, or rolls a regressed one back to its last good version.
 - `brigade outcome explain` prints the full signal trail behind any decision: which run produced each result, the threshold it crossed, and the reversible action taken.
 
-The whole ledger is plain JSON and markdown under `memory/outcome/`, tracked in git and readable without Brigade. Promotion you can audit, reversal you can trust, learned skills you can take anywhere. This is the same lesson as the 41KB incident, finished: blind auto-promotion was the bug, verified and reversible and receipted promotion is the fix.
+The whole ledger is plain JSON and markdown under `memory/outcome/`, tracked in git and readable without Brigade. Schedule `brigade outcome reconcile` in your own cron to run it hands-off; Brigade still installs no daemon.
 
-To run it hands-off, schedule `brigade outcome reconcile` in your own cron. Keep it in dry-run for a week and read the receipts, then add `--apply`. Brigade still installs no daemon; the loop runs on the scheduler you already have. `brigade outcome rank` lists the most-proven skills first, so retrieval can surface what worked rather than just what matched.
+## Sidecars
 
-## Install
+Brigade is the hub. Each station wires an optional standalone tool, installed with `brigade add <station>` and health-checked by `brigade status` and `brigade doctor`. Every tool is its own repo, independently installable, with no library coupling back into Brigade.
 
-```bash
-pipx install brigade-cli
-pipx ensurepath          # then open a new shell so `brigade` is on PATH
-brigade operator quickstart --target ./my-repo --harnesses codex
-brigade operator doctor --target ./my-repo --profile local-operator
-```
-
-For an OpenClaw or Hermes workspace instead of a code repo:
-
-```bash
-brigade operator quickstart --target ~/agent-workspace --depth workspace --harnesses openclaw,hermes --owner openclaw
-```
-
-Use `--dry-run` first to preview the planned steps without writing anything; `brigade init --target ./my-repo --harnesses codex --dry-run` shows the full file-by-file list. Pass more harnesses as a comma-separated list. Quickstart only wires the harnesses you select and leaves the rest alone.
-
-Write a handoff and check the wiring:
-
-```bash
-brigade handoff draft --target ./my-repo --inbox codex \
-  --title "What changed" \
-  --summary "Short note future agents should know." \
-  --content "The durable note itself goes here."
-brigade handoff lint --target ./my-repo
-brigade handoff doctor --target ./my-repo
-```
-
-New here? Start with [QUICKSTART.md](QUICKSTART.md) for the five-minute install, then [docs/first-10-minutes.md](docs/first-10-minutes.md) for the guided first session. Already have a homegrown setup with scripts, crons, and handoff folders? Brigade has an adoption path that inventories what you have before changing anything: start with `brigade operator adopt plan` and see the [technical guide](docs/technical-guide.md). Want an agent to set this up for you? Point it at this repo; [AGENTS.md](AGENTS.md) tells it exactly what to do and where to stop.
+| `brigade add` | Tool | What it does |
+|---|---|---|
+| `guard` | content-guard | scans handoffs and content for secrets and PII before anything leaves the machine |
+| `tokens` | tokenjuice | tracks token spend across your harnesses and compacts noisy output |
+| `memory` | memory-doctor, bootstrap-doctor | validates memory cards and bootstrap files for staleness and contradictions |
+| `pantry` | agentpantry | syncs browser sessions and auth across an agent's machine |
+| `search` | code-search | local semantic code search over your repos |
+| `evidence` | miseledger | a local-first evidence ledger with receipts and source exporters |
 
 ## Harness support
 
@@ -142,19 +145,17 @@ Each writer gets its own local inbox; one canonical owner ingests. Brigade keeps
 | Hermes | `hermes` | `.hermes/memory-handoffs/` |
 | OpenClaw | `openclaw` | usually the memory owner, not a writer |
 
-All of them get handoff templates and ingest source coverage. Most also get projected tools and skills in their native format (some as `rules` or `instructions`, a few not yet); the per-harness matrix is in the [technical guide](docs/technical-guide.md). Hermes is validated against a real Hermes install: handoffs land in `.hermes/memory-handoffs/`, and reviewed skills install into your Hermes store (`~/.hermes/skills`), where Hermes discovers them.
+All of them get handoff templates and ingest source coverage. Most also get projected tools and skills in their native format; the per-harness matrix is in the [technical guide](docs/technical-guide.md). Hermes is validated against a real install: handoffs land in `.hermes/memory-handoffs/`, and reviewed skills install into your Hermes store (`~/.hermes/skills`).
 
-## Beyond memory
+## More
 
-The memory loop is the core. Around it, the same review-and-receipt pattern covers the rest of an operator's day, and you can ignore all of it until you need it:
+The same review-and-receipt pattern covers the rest of an operator's day, and you can ignore all of it until you need it.
 
+- **Cross-model runs**: `brigade run "<task>"` plans, dispatches, and synthesizes one bounded task across the agent CLIs in your roster, so an expensive model can think while cheaper ones do the grunt work. `--worktree` runs everything in a detached git checkout that comes back as a reviewable `changes.patch`.
 - **Daily loop**: `brigade work brief` shows pending work, imports, and warnings; `brigade daily status` keeps it bounded and cheap.
-- **Friction logs**: `brigade friction scan --days 30 --import-candidates` mines recent notes, handoffs, session artifacts, and optional local agent logs for reviewable workflow friction.
-- **Security**: `brigade security scan` is a local read-only scanner for agent workspaces (secrets, risky hooks, MCP configs, prompt-injection patterns); `brigade scrub` gates content before it leaves the machine.
-- **Tools and skills**: one reviewed catalog projected into every harness's native format, with approval gates for anything that executes.
-- **MCP server sync**: `brigade mcp sync` merges one canonical MCP catalog (`.brigade/mcp.json`) into each tool's native config - Claude `.mcp.json`, Cursor `.cursor/mcp.json`, Codex `config.toml`, VS Code, OpenCode, Antigravity. Dry-run by default, merges by server key (servers you added by hand are preserved), and writes secrets as `${VAR}` references, never literals. See [docs/mcp-sync.md](docs/mcp-sync.md).
+- **Friction logs**: `brigade friction scan` mines recent notes, handoffs, and session artifacts for reviewable workflow friction.
+- **Security and scrub**: `brigade security scan` is a local read-only scanner for agent workspaces; `brigade scrub` gates content before it leaves the machine.
 - **Research**: `brigade research run` turns a question into a cited local report and a reviewable memory handoff.
-- **Cross-model runs**: `brigade run "<task>"` plans, dispatches, and synthesizes one bounded task across the agent CLIs in your roster, so an expensive model can think while cheaper ones do the grunt work. Rosters pin a model per agent, plans can stage dependent workers, and `--worktree` runs everything in a detached git checkout that comes back as a reviewable `changes.patch`. A dirty-tree guard and a run lock keep agents away from your work in progress.
 - **Fleet and release**: health evidence across your local repos and release-readiness receipts, with no publish step.
 
 The full tour of every station lives in [docs/overview.md](docs/overview.md).
@@ -163,8 +164,8 @@ The full tour of every station lives in [docs/overview.md](docs/overview.md).
 
 - **mem0, Letta, and friends** are memory layers for apps you are building, usually behind an API or a server. Brigade is for the agent CLIs you already run, and it is file-first: your memory is markdown in your repo, reviewable in git, readable without Brigade.
 - **Native harness memory** (each tool's own auto-memory) is a per-tool silo. It does not cross harnesses, and it writes without review. Brigade gives every tool one shared format and one canonical owner, with a review gate in between.
-- **Already running Hermes, or any self-improving agent?** Keep it. Brigade is not a replacement, it is the verification layer on top. A built-in learning loop grades its own work and keeps what it learns inside one tool. Brigade promotes a skill only when a real signal confirms it, keeps every learned skill as portable markdown in your git, and runs one loop across your whole fleet instead of one agent.
-- **A plain CLAUDE.md / AGENTS.md** works great until it bloats past the context budget and goes stale. Brigade exists because mine hit 41KB. It keeps bootstrap files slim, moves detail into indexed cards, and flags staleness instead of trusting last month's facts forever.
+- **Already running Hermes, or any self-improving agent?** Keep it. Brigade is not a replacement, it is the verification layer on top. A built-in learning loop grades its own work and keeps what it learns inside one tool. Brigade promotes a skill only when a real signal confirms it, keeps every learned skill as portable markdown in your git, and runs one loop across your whole fleet.
+- **A plain CLAUDE.md / AGENTS.md** works great until it bloats past the context budget and goes stale. Brigade keeps bootstrap files slim, moves detail into indexed cards, and flags staleness instead of trusting last month's facts forever.
 - **A daemon or hosted service** would be simpler to demo and worse to trust. Brigade writes local files when you run a command, and that is all it does.
 
 ## What Brigade is not
@@ -182,11 +183,39 @@ It does not:
 
 That pause is the point. Agent memory should be useful, not noisy.
 
+## Install
+
+`brigade operator quickstart` (in [Try it in 60 seconds](#try-it-in-60-seconds)) wires one code repo for one harness. For an OpenClaw or Hermes workspace instead:
+
+```bash
+brigade operator quickstart --target ~/agent-workspace --depth workspace --harnesses openclaw,hermes --owner openclaw
+```
+
+Use `--dry-run` first to preview the planned steps without writing anything. Pass more harnesses as a comma-separated list; quickstart only wires the harnesses you select and leaves the rest alone.
+
+Write a handoff and check the wiring:
+
+```bash
+brigade handoff draft --target ./my-repo --inbox codex \
+  --title "What changed" \
+  --summary "Short note future agents should know." \
+  --content "The durable note itself goes here."
+brigade handoff lint --target ./my-repo
+brigade handoff doctor --target ./my-repo
+```
+
+New here? Start with [QUICKSTART.md](QUICKSTART.md) for the five-minute install, then [docs/first-10-minutes.md](docs/first-10-minutes.md) for the guided first session. Already have a homegrown setup with scripts, crons, and handoff folders? Brigade has an adoption path that inventories what you have before changing anything: start with `brigade operator adopt plan` and see the [technical guide](docs/technical-guide.md). Want an agent to set this up for you? Point it at this repo; [AGENTS.md](AGENTS.md) tells it exactly what to do and where to stop.
+
+## Why I built this
+
+I run an always-on OpenClaw agent next to daily Codex and Claude Code sessions. Every one of those tools wakes up empty, and whatever a session learned scattered across tool-specific folders and died there. Two incidents shaped the design: a "dreaming" job that promoted raw session fragments straight into memory bloated `MEMORY.md` past the bootstrap budget, so every session started truncated and nobody noticed for weeks; and 195 handoff notes that sat unread across 35 repos because an ingester had a hardcoded allowlist and nothing warned about the gap. Silence is the failure mode. Every part of Brigade that lints, warns, or writes a receipt exists because something once failed in silence. The full production stack, now 482 cards across daily multi-agent work, is documented in the [solos-cookbook](https://github.com/escoffier-labs/solos-cookbook).
+
 ## Docs
 
 - [First 10 minutes](docs/first-10-minutes.md): shortest path from install to healthy setup.
 - [Overview](docs/overview.md): the full tour of every station and diagram.
 - [Technical guide](docs/technical-guide.md): the detailed command walkthrough.
+- [MCP sync](docs/mcp-sync.md): the canonical catalog, supported tools, and merge rules.
 - [Security and Content Guard](docs/security.md): scanner policies, handoff guards, import flow.
 - [Handoff promotion](docs/handoff-promotion.md): how notes move toward memory.
 - [Repo fleet](docs/repo-fleet.md) and [Tool catalog](docs/tool-catalog.md).
