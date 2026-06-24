@@ -60,7 +60,7 @@ It is dry-run by default and never runs from `doctor` or `brief`. It merges by s
 
 Tools and skills get the same treatment: `brigade tools sync` projects one reviewed catalog into each harness's native format.
 
-> `brigade mcp` is on `main` now and ships in the next release. Until then, install from source: `pipx install git+https://github.com/escoffier-labs/brigade`.
+> `brigade mcp` requires brigade 0.13.0 or newer (`pipx upgrade brigade-cli`).
 
 ## Shared memory, with a guard in front
 

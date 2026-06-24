@@ -7,11 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-06-23
+
 ### Added
 - `brigade mcp` syncs one canonical MCP server catalog (`.brigade/mcp.json`) into each tool's native MCP config file. `init`/`add`/`list` build the catalog; `plan` previews; `sync` (dry-run unless `--write`) merges into Claude (`.mcp.json`), Cursor (`.cursor/mcp.json`), Codex (`.codex/config.toml`), VS Code (`.vscode/mcp.json`, with `inputs`), OpenCode (`opencode.json`), and Antigravity (`~/.gemini/config/mcp_config.json`, user-scoped via `--user-scope`); `doctor` validates; `import` reads an existing tool's config back into the catalog. The merge is by server key with ownership tracked in the gitignored `.brigade/mcp/state.json`: servers the user added are preserved, a server edited outside Brigade is a conflict (skipped unless `--force`), orphans are removed only with `--prune` and only when still pristine, and env values are always written as `${VAR}` references (or VS Code `${input:VAR}`), never inlined secrets. `brigade operator sync-mcp` wraps it with a validate->sync->summary receipt. New `mcp` station (alias `brigadier`).
+- `brigade mcp` user-global adapters `codex-user` (`~/.codex/config.toml`), `claude-user` (`~/.claude.json`), and `openclaw` (`~/.openclaw/openclaw.json`), so a machine's daily tools can be synced alongside repo-local configs. `brigade mcp import --keep-secrets` keeps literal env secrets verbatim instead of demoting them to `${VAR}` references, for unioning existing working configs whose tools do not expand `${VAR}`.
+- `brigade outcome` verified-autonomous learning loop (`capture`/`record`/`score`/`explain`/`reconcile`/`rank`): a learned skill is promoted only when a model-unauthored signal (verify exit codes, friction/learnings deltas) confirms it helped, Wilson-scored so thin evidence never out-ranks vetted skills. `reconcile` is dry-run by default; with `--apply` it installs across harnesses or rolls back on a measured regression. The durable ledger is git-tracked under `memory/outcome/`, readable without Brigade.
+- `brigade context` packs now carry a `code_graph` section from GraphTrail's read-only `graphtrail context` (entry points, related files, caller/callee counts for the selected task). The binary resolves via `$GRAPHTRAIL_BIN`, PATH, then `~/.cargo/bin`, and the section is skipped gracefully when the binary, the repo's `.graphtrail` db, or a task is absent.
+- `brigade operator quickstart` now scaffolds the MCP on-ramp: it creates the canonical `.brigade/mcp.json`, previews the projection with a read-only `mcp plan`, and surfaces `brigade mcp init` / `sync --write` in the printed next steps. It never writes harness MCP configs automatically and respects `--dry-run`.
 
 ### Changed
 - The "Brigade does not write runtime MCP configs / auto-sync harness configs" statements in the tool catalog and technical guide are reworded: runtime MCP *server* config sync is now an explicit, bounded capability provided by `brigade mcp` (dry-run by default, merge-by-key, never inlines secrets, never automatic). The tool-catalog `mcp` *family* projection remains a documentation stub.
+- The Hermes adapter is graduated from experimental to validated (verified against a real Hermes v0.17 install): the handoff contract and reviewed skill install both work, and the "experimental" framing is dropped across the harness picker, doctor, install/fragment notices, templates, README, and QUICKSTART.
+
+### Fixed
+- MCP sync is now idempotent for remote (http/sse) servers on Codex (`_codex_render_table` renders the `type`/transport, so a re-sync no longer falsely reports a `conflict`). Dotted/quoted server names (e.g. `io.github.example`) round-trip without duplicating into invalid TOML, and the Python 3.10 `toml_compat` fallback reader now parses quoted dotted table keys. Authorization headers for remote servers are emitted and parsed for codex, vscode, opencode, and openclaw (previously dropped), kept as `${VAR}` references.
+- `brigade outcome` no longer double-counts a re-captured or retried verify run: scoring counts distinct verified evidence keyed on `(source, evidence_ref, task_id)`, so an identical receipt cannot cross the auto-install threshold on its own.
+- `brigade runbook run` honors only an operator-supplied `--approved`; a file-embedded `approved: true` no longer authorizes shell execution. Commands are validated whole (not just the first token), inline-script shell wrappers that negate the allowlist are rejected with a warning, and `SECURITY.md` documents that runbook steps are arbitrary shell, as trustworthy as the file author.
+- Hermes skill installs now reach the real Hermes store (`$HERMES_HOME/skills/brigade-imports/<id>`) with rendered frontmatter, gated on the Hermes home existing, so reviewed skills appear in `hermes skills list` instead of an unread repo-local path.
 
 ## [0.12.0] - 2026-06-16
 
