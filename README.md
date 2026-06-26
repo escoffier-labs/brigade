@@ -23,6 +23,10 @@ You run more than one agent CLI. Each one keeps its MCP servers in its own confi
 
 ## Try it in 60 seconds
 
+<p align="center">
+  <img src="docs/assets/quickstart.svg" alt="Recording: brigade operator quickstart wires a repo and brigade operator doctor reports ready, in seconds" width="760">
+</p>
+
 ```bash
 pipx install brigade-cli
 pipx ensurepath          # then open a new shell so `brigade` is on PATH
@@ -31,6 +35,17 @@ brigade operator doctor --target ./my-repo --profile local-operator   # verify
 ```
 
 That installs the CLI, wires memory, handoffs, and local guardrails into one repo for a single harness, and prints a readiness check. Nothing leaves your machine and no daemon is started. Add `--dry-run` to preview the file-by-file plan before anything is written. More harnesses, workspace setups, and the homegrown-adoption path are under [Install](#install).
+
+The run ends with a readiness verdict (the recording above shows the full report):
+
+```
+operator doctor: ~/my-repo
+profile: local-operator
+ready: yes
+blocking_issues: 0
+next: brigade daily plan --target .
+content_guard: installed hook=configured-hooks-path policy=public-repo
+```
 
 ## One MCP catalog, synced into every tool
 
@@ -43,6 +58,22 @@ brigade mcp add --name github --command npx \
   --env GITHUB_TOKEN=ref:GITHUB_TOKEN
 brigade mcp sync                  # dry-run: show the diff for every tool
 brigade mcp sync --write          # merge into each tool's config
+```
+
+Run `brigade mcp sync` and you get the per-tool plan, server by server, before a single file changes. Two servers in the catalog, projected across the harnesses wired in this repo:
+
+```
+brigade mcp sync (dry-run): ~/my-repo
+claude       github               missing        -> create
+claude       sentry               missing        -> create
+cursor       github               missing        -> create
+cursor       sentry               missing        -> create
+codex        github               missing        -> create
+codex        sentry               missing        -> create
+vscode       github               missing        -> create
+vscode       sentry               missing        -> create
+opencode     github               missing        -> create
+opencode     sentry               missing        -> create
 ```
 
 One catalog (`.brigade/mcp.json`), six native targets:
