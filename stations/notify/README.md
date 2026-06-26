@@ -1,5 +1,7 @@
 <div align="center">
 
+<img src="docs/assets/agent-notify-social-preview.jpg" alt="agent-notify banner" width="900">
+
 # agent-notify
 
 **Privacy-first push notifications for AI coding agents. No telemetry, no vendor push service.**
