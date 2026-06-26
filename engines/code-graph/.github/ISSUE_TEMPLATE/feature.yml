@@ -1,0 +1,48 @@
+name: Feature request
+description: Suggest an improvement to GraphTrail's extractors, queries, CLI, or MCP server.
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem does this solve
+      description: Describe the structural question you cannot answer today, or the friction you hit.
+      placeholder: |
+        When I ask for callers of X, cross-file edges in language Y are missed because ...
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: What should GraphTrail do? Include the command, MCP tool, or output shape if relevant.
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Extractor / language coverage
+        - Graph queries (search, callers, callees, impact, context)
+        - CLI surface
+        - MCP server / tools
+        - Optional integration (codesearch, miseledger, Brigade)
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: grep, an embedding index, an LSP, or another tool. Why does GraphTrail need to do this?
+    validations:
+      required: false
+  - type: checkboxes
+    id: scope
+    attributes:
+      label: Scope check
+      description: GraphTrail is a small read-only sidecar by design.
+      options:
+        - label: This keeps the default build network-free and the MCP server read-only.
+          required: false
