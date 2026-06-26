@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Documentation
 - README leads with a what / why / how-it-differs opening, a centered title and badge row, a prominent Website link, a keyword-rich "What it does" section, verified `doctor` and `status` output blocks, and "Why not <alternatives>?" plus "What agent-notify is not" sections.
 - Added maintainer-health files: `SECURITY.md` (trust model and report path), `CONTRIBUTING.md` (contribution scope and channel/hook adapter guides), `CODE_OF_CONDUCT.md`, GitHub issue templates (`bug.yml`, `feature.yml`, `config.yml` with blank issues disabled and contact links), a pull request template with a no-PII checklist, and this changelog.
+- Added a recorded terminal demo near the top of the README (`docs/assets/agentnotify-wiring.svg`, reproducible from the committed `.cast`): `init` scaffolds a config, `doctor` flags the unconfigured channels, and after the channel env is set `doctor` reports every channel ready, all without sending a notification.
 
 ## [0.1.1] - 2026-05
 

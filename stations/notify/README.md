@@ -19,6 +19,12 @@
 
 Built for engineers running an always-on agent stack who want push notifications without routing real-time session activity through a vendor's notification service.
 
+<p align="center">
+  <img src="docs/assets/agentnotify-wiring.svg" alt="Recording: agent-notify init scaffolds a config, doctor flags the unconfigured channels, then after the channel env is set doctor reports every channel ready, all without sending a notification" width="820">
+</p>
+
+Scaffold a config, then let `doctor` verify your channel wiring before anything goes out. Nothing is sent: it only checks that each channel's env is present.
+
 ## What it does
 
 `agent-notify` is a privacy-first notification dispatcher for AI coding agents and any other host process. It reads a message from stdin or a positional argument, applies routing rules, and fans the notification out to one or more configured channels (Discord webhooks, the Telegram Bot API, or a self-hosted Signal CLI) concurrently and best-effort. Built-in hook adapters parse the event JSON that Claude Code, Codex CLI, and similar agents emit, so you wire it once and forget it. There is no daemon, no account, and no cloud service: the binary runs, sends, and exits.
