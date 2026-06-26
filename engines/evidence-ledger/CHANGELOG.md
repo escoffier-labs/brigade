@@ -18,6 +18,9 @@ Releases before this changelog was started are on the [releases page](https://gi
 - README now leads with a recorded terminal demo (`docs/assets/miseledger-ledger.svg`,
   reproducible from `miseledger-ledger.cast`): `init`, `import adapter`, `search`,
   and `stats` against a synthetic session.
+- README opening now states what / why / how-it-differs in the first three sentences,
+  adds a top-of-page Website link, a keyword-rich `What it does` section, a real-output
+  proof block, and `Why not something else?` and `What MiseLedger is not` sections.
 
 ### Fixed
 

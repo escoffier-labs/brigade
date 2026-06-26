@@ -15,9 +15,21 @@
   <img src="https://img.shields.io/badge/license-MIT-green?style=for-the-badge" alt="MIT license">
 </p>
 
-MiseLedger turns scattered AI work history into a local searchable evidence graph.
+<p align="center">
+  <a href="https://miseledger.escoffierlabs.dev"><strong>Website</strong></a>
+  &nbsp;·&nbsp;
+  <a href="docs/QUICKSTART.md">Quickstart</a>
+  &nbsp;·&nbsp;
+  <a href="docs/MCP.md">MCP</a>
+  &nbsp;·&nbsp;
+  <a href="docs/EXAMPLES.md">Examples</a>
+</p>
 
-The MVP is a local-first CLI named `miseledger`. It crawls agent sessions and local project artifacts, imports `miseledger.adapter.v1` JSONL records into SQLite, preserves raw payload references, searches with SQLite FTS5, shows normalized items, exports Markdown, emits Brigade-ready evidence bundles, and allows read-only SQL inspection.
+MiseLedger is a local-first CLI that turns scattered AI work history into one searchable SQLite evidence graph you can grep, cite, and export. It exists because your prompts, agent sessions, chat exports, and project notes are smeared across a dozen tools and folders, so the answer to "where did I figure that out?" is lost. Unlike a cloud memory service or a single tool's built-in history, MiseLedger keeps everything on your machine, normalizes every source into one `adapter.v1` contract, and treats imported text as untrusted evidence rather than executable instructions.
+
+## What it does
+
+MiseLedger builds a **local-first evidence ledger** of your AI work history: agent sessions, chat exports, notes, and project artifacts, all normalized into one SQLite archive with **full-text search**. It crawls local agent sessions and project files, imports `miseledger.adapter.v1` JSONL records into SQLite, preserves raw payload references for audit, searches with SQLite FTS5, shows normalized items, exports Markdown, emits Brigade-ready evidence bundles, and allows read-only SQL inspection. Everything runs offline on your machine, with no network calls in the core path and no transcript text leaving the box.
 
 Each source system is best at its native domain:
 
@@ -37,6 +49,19 @@ MiseLedger is the normalized evidence layer above those systems, not a replaceme
 </p>
 
 Initialize a local SQLite ledger, import `adapter.v1` records from your sources, then search them with FTS5 and roll them up with `stats` (or export Brigade-ready evidence bundles). Everything stays on your machine.
+
+The same loop on the bundled fixtures, real output:
+
+```console
+$ miseledger import adapter testdata/adapters/discrawl.fixture.jsonl --source discrawl
+imported=2 warnings=0 already_known=false source=discrawl
+
+$ miseledger search "adapter contract"
+811f62fc16aead90dfecac7b [discrawl/message] We need the [adapter] [contract] normalized and easy to hook into crawler apps.
+
+$ miseledger stats
+sources=1 collections=1 items=2 artifacts=0 relations=0 unresolved_relations=0 db=~/.local/share/miseledger/miseledger.db
+```
 
 ## How It Works
 
@@ -488,6 +513,27 @@ MiseLedger resolves shallow relations during import when the target item already
 - OpenClaw session/run events preserve `belongs_to_session` and `belongs_to_run` relations when session or run identifiers are present.
 
 If a target is not present yet, MiseLedger preserves `target_external_id` for later inspection.
+
+## Why not something else?
+
+- **A cloud memory service (mem0, Letta, and friends)** is built for apps you ship, usually behind an API or a server, and your history lives on someone else's machine. MiseLedger is for the local agent CLIs and exports you already have. The archive is a plain SQLite file on your disk, queryable with `sqlite3` and the read-only `sql` command even without MiseLedger.
+- **A single tool's built-in history** (Codex, Claude, Cursor, ChatGPT export) is a silo. It does not cross harnesses, and there is no shared search. MiseLedger normalizes every source into one `adapter.v1` contract and one FTS5 index, so one query spans Codex, Claude, OpenClaw, Cursor, chat exports, notes, and git history at once.
+- **`grep` over raw session folders** works until the formats diverge, the JSONL nests, and binary stores like Cursor's `store.db` are unreadable. MiseLedger parses each harness, dedupes by stable external IDs, preserves raw refs for audit, and warns rather than crashing on malformed records.
+- **A vector database or RAG stack** adds embeddings, a server, and a model dependency for what is mostly an exact-recall problem. MiseLedger stays lexical and deterministic: FTS5 search, shallow relations, and reproducible evidence bundles, with no embeddings, no model calls, and no network.
+- **StationTrail and SourceHarvest** are the source exporters, not the archive. They scan and emit `adapter.v1` records. MiseLedger is the layer above them that ingests, normalizes, indexes, and serves. Use them together.
+
+## What MiseLedger is not
+
+MiseLedger is not a hosted service, a memory daemon, or an agent framework.
+
+It does not:
+
+- make network calls in its core path or send your transcripts anywhere
+- run in the background, watch files continuously, or install schedulers
+- execute imported text; every imported record is treated as untrusted evidence, not instructions
+- replace StationTrail, SourceHarvest, or the upstream crawlers; it is the archive and evidence layer above them
+- embed, rank with a model, or call an LLM to answer a query
+- mutate or delete your normalized evidence on `prune` or `compact` (those touch import metadata, scan rows, and SQLite housekeeping only)
 
 ## Privacy
 
