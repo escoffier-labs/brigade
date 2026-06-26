@@ -24,6 +24,12 @@ Each source system is best at its native domain:
 
 MiseLedger is the normalized evidence layer above those systems, not a replacement for them.
 
+<p align="center">
+  <img src="docs/assets/miseledger-ledger.svg" alt="Recording: miseledger init creates a local ledger, import loads adapter records, search runs FTS5, and stats summarizes the evidence graph" width="760">
+</p>
+
+Initialize a local SQLite ledger, import `adapter.v1` records from your sources, then search them with FTS5 and roll them up with `stats` (or export Brigade-ready evidence bundles). Everything stays on your machine.
+
 ## How It Works
 
 ```mermaid

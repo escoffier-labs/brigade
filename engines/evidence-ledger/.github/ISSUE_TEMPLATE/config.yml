@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/escoffier-labs/miseledger/security/policy
+    about: Report data-exfiltration or ledger-corruption issues privately, not as a public issue.

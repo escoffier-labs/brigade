@@ -1,0 +1,37 @@
+[
+  {
+    "id": "chatgpt-conv-1",
+    "title": "MiseLedger export planning",
+    "create_time": 1781690000.0,
+    "mapping": {
+      "root": {
+        "id": "root",
+        "message": null,
+        "parent": null,
+        "children": ["msg-user"]
+      },
+      "msg-user": {
+        "id": "msg-user",
+        "message": {
+          "id": "msg-user",
+          "author": {"role": "user"},
+          "create_time": 1781690001.0,
+          "content": {"content_type": "text", "parts": ["Can MiseLedger import ChatGPT exports?"]}
+        },
+        "parent": "root",
+        "children": ["msg-assistant"]
+      },
+      "msg-assistant": {
+        "id": "msg-assistant",
+        "message": {
+          "id": "msg-assistant",
+          "author": {"role": "assistant"},
+          "create_time": 1781690002.0,
+          "content": {"content_type": "text", "parts": ["Yes. The archive crawler can normalize ChatGPT conversation exports."]}
+        },
+        "parent": "msg-user",
+        "children": []
+      }
+    }
+  }
+]

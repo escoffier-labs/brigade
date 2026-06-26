@@ -3,6 +3,7 @@ bin/
 *.db-shm
 *.db-wal
 exports/
+!testdata/exports/
 
 # Local brigade memory (cards are local-only, never committed)
 /memory/
