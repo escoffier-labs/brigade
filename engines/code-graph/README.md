@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/assets/graphtrail-social-preview.jpg" alt="GraphTrail banner" width="900">
+</p>
+
 <h1 align="center">GraphTrail</h1>
 
 <p align="center">
