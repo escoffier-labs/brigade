@@ -2,6 +2,23 @@
 
 Channel-ready text, rewritten 2026-06-09 in the README's voice. The origin story is the hook; lead with it, not the feature list. Numbers below are real and public-safe. Update version numbers before posting.
 
+## Relaunch post (v0.13 - lead with the recording)
+
+> Refreshed 2026-06-26 for the v0.13 relaunch. Lead with the recording, not the feature list. The quickstart was re-verified on a clean machine the day this was written.
+
+**The hook:** the 60-second quickstart, recorded on a clean machine. `brigade operator quickstart` wires a repo and `brigade operator doctor` reports `ready: yes`, nothing hidden. Embed `docs/assets/quickstart.svg` (or a GIF render of it) at the top of the post.
+
+**One-sentence re-explanation (every post re-explains the project):** Brigade is a local CLI that gives your AI coding agents one shared memory and one MCP catalog across every tool, with a review gate and a receipt for every change. No daemon, no server.
+
+**What's new in this wave (v0.13):** one MCP catalog synced into every tool's native config (Claude Code, Cursor, Codex, VS Code, OpenCode, Antigravity), dry-run by default, with a server-by-server diff before anything is written. Plus a verified 60-second quickstart.
+
+**Why it exists (the proof):** a nightly auto-promotion job bloated the always-loaded memory index to 41KB past a 12KB budget, and 195 handoff notes sat unread across 35 repos behind a hardcoded allowlist. Every lint, warning, and receipt is scar tissue from something that once failed in silence. That system now runs ~500 memory cards across six months of daily multi-agent work.
+
+**Install:** `pipx install brigade-cli` then `brigade operator quickstart --target ./my-repo --harnesses codex`
+**Repo:** https://github.com/escoffier-labs/brigade  ·  **Site:** https://brigade.tools
+
+**Social one-liner (X / Bluesky / Discord):** Brigade v0.13: one shared memory and MCP catalog for every AI coding agent you run, with a review gate and receipts. Local files, no daemon. Watch it wire a repo in 60s. `pipx install brigade-cli` 🦞 built on @openclaw
+
 ## Show HN
 
 **Title:** Show HN: Brigade - local memory, handoffs, and guardrails for AI coding agents
@@ -50,8 +67,9 @@ Six months of hand-rolled agent-memory infrastructure (OpenClaw + Codex + Claude
 
 ## Posting checklist
 
-- [ ] Update version references if newer than 0.9.1
-- [ ] Confirm `pipx install brigade-cli` works from a clean machine
-- [ ] Run `brigade scrub --policy public-content` over this file before posting
+- [ ] Update version references if newer than 0.13.0
+- [x] Confirm `pipx install brigade-cli` works from a clean machine (re-verified 2026-06-26: isolated install, quickstart + doctor `ready: yes`)
+- [ ] Attach `docs/assets/quickstart.svg` (or a GIF render) as the lead media
+- [ ] Run `brigade scrub --policy public-content` over this file before posting; run grill before HN/Lobsters
 - [ ] Post HN morning US time midweek; Reddit separately, not the same day
 - [ ] Watch the repo issues; the README promises fast responses

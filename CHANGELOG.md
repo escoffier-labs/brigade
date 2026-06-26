@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- README now leads the quickstart with a recorded, clean-machine demo (`docs/assets/quickstart.svg`, reproducible from `docs/assets/quickstart.cast`) and adds real `operator doctor` readiness output plus a real `brigade mcp sync` dry-run diff, so the headline claims are shown working, not just described.
+
 ## [0.13.0] - 2026-06-23
 
 ### Added
