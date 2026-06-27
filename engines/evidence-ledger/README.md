@@ -9,13 +9,6 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/github/actions/workflow/status/escoffier-labs/miseledger/ci.yml?branch=master&style=for-the-badge&label=ci" alt="CI status">
-  <img src="https://img.shields.io/github/v/release/escoffier-labs/miseledger?style=for-the-badge&label=release" alt="Latest release">
-  <img src="https://img.shields.io/badge/go-1.22%2B-00ADD8?style=for-the-badge&logo=go&logoColor=white" alt="Go 1.22+">
-  <img src="https://img.shields.io/badge/license-MIT-green?style=for-the-badge" alt="MIT license">
-</p>
-
-<p align="center">
   <a href="https://miseledger.escoffierlabs.dev"><strong>Website</strong></a>
   &nbsp;·&nbsp;
   <a href="docs/QUICKSTART.md">Quickstart</a>
@@ -25,7 +18,20 @@
   <a href="docs/EXAMPLES.md">Examples</a>
 </p>
 
+<p align="center">
+  <img src="https://img.shields.io/github/actions/workflow/status/escoffier-labs/miseledger/ci.yml?branch=master&style=for-the-badge&label=ci" alt="CI status">
+  <img src="https://img.shields.io/github/v/release/escoffier-labs/miseledger?style=for-the-badge&label=release" alt="Latest release">
+  <img src="https://img.shields.io/badge/go-1.22%2B-00ADD8?style=for-the-badge&logo=go&logoColor=white" alt="Go 1.22+">
+  <img src="https://img.shields.io/badge/license-MIT-green?style=for-the-badge" alt="MIT license">
+</p>
+
 MiseLedger is a local-first CLI that turns scattered AI work history into one searchable SQLite evidence graph you can grep, cite, and export. It exists because your prompts, agent sessions, chat exports, and project notes are smeared across a dozen tools and folders, so the answer to "where did I figure that out?" is lost. Unlike a cloud memory service or a single tool's built-in history, MiseLedger keeps everything on your machine, normalizes every source into one `adapter.v1` contract, and treats imported text as untrusted evidence rather than executable instructions.
+
+<p align="center">
+  <img src="docs/assets/miseledger-ledger.svg" alt="Recording: miseledger init creates a local ledger, import loads adapter records, search runs FTS5, and stats summarizes the evidence graph" width="760">
+</p>
+
+<p align="center"><em>Initialize a local SQLite ledger, import `adapter.v1` records from your sources, then search them with FTS5 and roll them up with `stats` (or export Brigade-ready evidence bundles). Everything stays on your machine.</em></p>
 
 ## What it does
 
@@ -44,12 +50,6 @@ Each source system is best at its native domain:
 
 MiseLedger is the normalized evidence layer above those systems, not a replacement for them.
 
-<p align="center">
-  <img src="docs/assets/miseledger-ledger.svg" alt="Recording: miseledger init creates a local ledger, import loads adapter records, search runs FTS5, and stats summarizes the evidence graph" width="760">
-</p>
-
-Initialize a local SQLite ledger, import `adapter.v1` records from your sources, then search them with FTS5 and roll them up with `stats` (or export Brigade-ready evidence bundles). Everything stays on your machine.
-
 The same loop on the bundled fixtures, real output:
 
 ```console
@@ -62,6 +62,41 @@ $ miseledger search "adapter contract"
 $ miseledger stats
 sources=1 collections=1 items=2 artifacts=0 relations=0 unresolved_relations=0 db=~/.local/share/miseledger/miseledger.db
 ```
+
+## Build
+
+```bash
+go build -o bin/miseledger ./cmd/miseledger
+go build -o bin/sessionfind ./cmd/sessionfind
+```
+
+You can also run commands with:
+
+```bash
+go run ./cmd/miseledger --help
+```
+
+First archive:
+
+```bash
+miseledger init
+miseledger crawl sessions --json
+miseledger crawl chatgpt-export ~/Downloads/chatgpt-export.zip --json
+miseledger crawl claude-export ~/Downloads/claude-export.zip --json
+miseledger crawl docs ./notes --json
+miseledger crawl repo . --json
+miseledger sessions search "release audit" --source codex --json
+miseledger search "auth timeout" --json
+miseledger evidence "auth timeout" --markdown
+```
+
+Install from a release:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/escoffier-labs/miseledger/HEAD/install.sh | sh
+```
+
+For a first archive and agent integration path, see [docs/QUICKSTART.md](docs/QUICKSTART.md). For MCP client configuration, see [docs/MCP.md](docs/MCP.md). For roadmap and cookbook material, see [docs/ROADMAP.md](docs/ROADMAP.md), [docs/EXAMPLES.md](docs/EXAMPLES.md), [docs/QUERY_COOKBOOK.md](docs/QUERY_COOKBOOK.md), [docs/STATIONTRAIL_PARITY.md](docs/STATIONTRAIL_PARITY.md), [docs/LIVE_DRY_RUN_CHECKLIST.md](docs/LIVE_DRY_RUN_CHECKLIST.md), and [docs/INSTALL_SMOKE.md](docs/INSTALL_SMOKE.md).
 
 ## How It Works
 
@@ -184,41 +219,6 @@ flowchart TB
 StationTrail owns local agent-session scanning. SourceHarvest owns non-agent local source export normalization. MiseLedger owns archive ingest, SQLite, FTS, relations, scan manifests, reader APIs, and evidence bundles.
 
 Crawler tools keep their native sync/query behavior. Their local exports, snapshots, or databases should flow through SourceHarvest before entering MiseLedger.
-
-## Build
-
-```bash
-go build -o bin/miseledger ./cmd/miseledger
-go build -o bin/sessionfind ./cmd/sessionfind
-```
-
-You can also run commands with:
-
-```bash
-go run ./cmd/miseledger --help
-```
-
-First archive:
-
-```bash
-miseledger init
-miseledger crawl sessions --json
-miseledger crawl chatgpt-export ~/Downloads/chatgpt-export.zip --json
-miseledger crawl claude-export ~/Downloads/claude-export.zip --json
-miseledger crawl docs ./notes --json
-miseledger crawl repo . --json
-miseledger sessions search "release audit" --source codex --json
-miseledger search "auth timeout" --json
-miseledger evidence "auth timeout" --markdown
-```
-
-Install from a release:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/escoffier-labs/miseledger/HEAD/install.sh | sh
-```
-
-For a first archive and agent integration path, see [docs/QUICKSTART.md](docs/QUICKSTART.md). For MCP client configuration, see [docs/MCP.md](docs/MCP.md). For roadmap and cookbook material, see [docs/ROADMAP.md](docs/ROADMAP.md), [docs/EXAMPLES.md](docs/EXAMPLES.md), [docs/QUERY_COOKBOOK.md](docs/QUERY_COOKBOOK.md), [docs/STATIONTRAIL_PARITY.md](docs/STATIONTRAIL_PARITY.md), [docs/LIVE_DRY_RUN_CHECKLIST.md](docs/LIVE_DRY_RUN_CHECKLIST.md), and [docs/INSTALL_SMOKE.md](docs/INSTALL_SMOKE.md).
 
 ## Runtime Paths
 
