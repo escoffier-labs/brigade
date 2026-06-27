@@ -136,6 +136,17 @@ cargo run --features codesearch -- --db <db> blend "rate limiting" --json
 cargo run --features miseledger -- links "dispatch" --json
 ```
 
+## How the pieces fit
+
+GraphTrail is one station in a small set of focused tools:
+
+- **Code Search** keeps semantic chunks, summaries, and embeddings.
+- **GraphTrail** owns symbols, imports, call edges, and graph context.
+- **MiseLedger** owns session and evidence archives and JSON receipts.
+- **Brigade** owns operator workflow, handoffs, context packs, and guardrails.
+
+Internally the code is split into focused modules: `model` (shared types), `extractors` (per-language tree-sitter providers plus traversal), `store` (`db`, `schema`, `sync`), `query` (`search`, `graph`, `context`, `stats`), and a thin `cli`.
+
 ## Why not just grep or an embedding index?
 
 - **grep / ripgrep** find text, not structure. They will show you every line where a name appears, but they do not know that one function calls another, so they cannot answer "who calls this" or "what breaks if I change it." GraphTrail walks real tree-sitter call edges and answers those directly.
@@ -154,17 +165,6 @@ GraphTrail is a sidecar, not a platform. It does not:
 - mutate your code or your graph after indexing (the MCP server is read-only by construction)
 
 It indexes source into a graph and answers structural questions. That is the whole job.
-
-## How the pieces fit
-
-GraphTrail is one station in a small set of focused tools:
-
-- **Code Search** keeps semantic chunks, summaries, and embeddings.
-- **GraphTrail** owns symbols, imports, call edges, and graph context.
-- **MiseLedger** owns session and evidence archives and JSON receipts.
-- **Brigade** owns operator workflow, handoffs, context packs, and guardrails.
-
-Internally the code is split into focused modules: `model` (shared types), `extractors` (per-language tree-sitter providers plus traversal), `store` (`db`, `schema`, `sync`), `query` (`search`, `graph`, `context`, `stats`), and a thin `cli`.
 
 ## Contributing
 
