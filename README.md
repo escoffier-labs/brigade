@@ -21,6 +21,29 @@ Your agents run loops. Brigade keeps the receipts.
 
 You run more than one agent CLI. Each one keeps its MCP servers in its own config file, its memory in its own silo, and writes to both without review. Brigade is the local layer that fixes that. You keep one canonical source for your MCP servers, your tool and skill catalog, and your memory, and Brigade merges each into the tools you actually use: MCP servers into each tool's native config, tools and skills projected into each harness, and one shared memory owned in one place. A review gate sits in front of anything that gets written, and every consequential change lands a receipt you can grep, diff, and roll back. No daemon, no hosted service, no vendor lock-in: it writes plain files in your repo when you run a command, and that is all it does.
 
+## Install
+
+`brigade operator quickstart` (in [Try it in 60 seconds](#try-it-in-60-seconds)) wires one code repo for one harness. For an OpenClaw or Hermes workspace instead:
+
+```bash
+brigade operator quickstart --target ~/agent-workspace --depth workspace --harnesses openclaw,hermes --owner openclaw
+```
+
+Use `--dry-run` first to preview the planned steps without writing anything. Pass more harnesses as a comma-separated list; quickstart only wires the harnesses you select and leaves the rest alone.
+
+Write a handoff and check the wiring:
+
+```bash
+brigade handoff draft --target ./my-repo --inbox codex \
+  --title "What changed" \
+  --summary "Short note future agents should know." \
+  --content "The durable note itself goes here."
+brigade handoff lint --target ./my-repo
+brigade handoff doctor --target ./my-repo
+```
+
+New here? Start with [QUICKSTART.md](QUICKSTART.md) for the five-minute install, then [docs/first-10-minutes.md](docs/first-10-minutes.md) for the guided first session. Already have a homegrown setup with scripts, crons, and handoff folders? Brigade has an adoption path that inventories what you have before changing anything: start with `brigade operator adopt plan` and see the [technical guide](docs/technical-guide.md). Want an agent to set this up for you? Point it at this repo; [AGENTS.md](AGENTS.md) tells it exactly what to do and where to stop.
+
 ## Try it in 60 seconds
 
 <p align="center">
@@ -213,29 +236,6 @@ It does not:
 - skip review for ambiguous, risky, or failed notes
 
 That pause is the point. Agent memory should be useful, not noisy.
-
-## Install
-
-`brigade operator quickstart` (in [Try it in 60 seconds](#try-it-in-60-seconds)) wires one code repo for one harness. For an OpenClaw or Hermes workspace instead:
-
-```bash
-brigade operator quickstart --target ~/agent-workspace --depth workspace --harnesses openclaw,hermes --owner openclaw
-```
-
-Use `--dry-run` first to preview the planned steps without writing anything. Pass more harnesses as a comma-separated list; quickstart only wires the harnesses you select and leaves the rest alone.
-
-Write a handoff and check the wiring:
-
-```bash
-brigade handoff draft --target ./my-repo --inbox codex \
-  --title "What changed" \
-  --summary "Short note future agents should know." \
-  --content "The durable note itself goes here."
-brigade handoff lint --target ./my-repo
-brigade handoff doctor --target ./my-repo
-```
-
-New here? Start with [QUICKSTART.md](QUICKSTART.md) for the five-minute install, then [docs/first-10-minutes.md](docs/first-10-minutes.md) for the guided first session. Already have a homegrown setup with scripts, crons, and handoff folders? Brigade has an adoption path that inventories what you have before changing anything: start with `brigade operator adopt plan` and see the [technical guide](docs/technical-guide.md). Want an agent to set this up for you? Point it at this repo; [AGENTS.md](AGENTS.md) tells it exactly what to do and where to stop.
 
 ## Why I built this
 
