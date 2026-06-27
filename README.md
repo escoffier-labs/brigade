@@ -1,11 +1,15 @@
 <p align="center">
-  <img src="docs/assets/brigade-social-preview.jpg" alt="Brigade" width="900">
+  <img src="docs/assets/brigade-social-preview.jpg" alt="Brigade banner" width="900">
 </p>
 
 <h1 align="center">Brigade CLI</h1>
 
 <p align="center">
   <strong>One canonical source for the MCP servers, tools, and memory your AI coding agents share, merged into each tool's native config with a review gate and a receipt for every change. Local files, no daemon, no lock-in.</strong>
+</p>
+
+<p align="center">
+  <a href="https://brigade.tools">Website</a> &middot; <a href="https://brigade.tools/docs">Docs</a> &middot; <a href="#try-it-in-60-seconds">Quickstart</a>
 </p>
 
 <p align="center">
@@ -16,6 +20,12 @@
 </p>
 
 Your agents run loops. Brigade keeps the receipts.
+
+<p align="center">
+  <img src="docs/assets/quickstart.svg" alt="Recording: brigade operator quickstart wires a repo and brigade operator doctor reports ready, in seconds" width="760">
+</p>
+
+<p align="center"><em><code>brigade operator quickstart</code> wires a repo and <code>operator doctor</code> reports ready, in seconds.</em></p>
 
 ## What it does
 
@@ -45,10 +55,6 @@ brigade handoff doctor --target ./my-repo
 New here? Start with [QUICKSTART.md](QUICKSTART.md) for the five-minute install, then [docs/first-10-minutes.md](docs/first-10-minutes.md) for the guided first session. Already have a homegrown setup with scripts, crons, and handoff folders? Brigade has an adoption path that inventories what you have before changing anything: start with `brigade operator adopt plan` and see the [technical guide](docs/technical-guide.md). Want an agent to set this up for you? Point it at this repo; [AGENTS.md](AGENTS.md) tells it exactly what to do and where to stop.
 
 ## Try it in 60 seconds
-
-<p align="center">
-  <img src="docs/assets/quickstart.svg" alt="Recording: brigade operator quickstart wires a repo and brigade operator doctor reports ready, in seconds" width="760">
-</p>
 
 ```bash
 pipx install brigade-cli
