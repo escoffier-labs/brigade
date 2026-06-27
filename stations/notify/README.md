@@ -1,21 +1,19 @@
-<div align="center">
+<p align="center">
+  <img src="docs/assets/agent-notify-social-preview.jpg" alt="agent-notify banner" width="900">
+</p>
 
-<img src="docs/assets/agent-notify-social-preview.jpg" alt="agent-notify banner" width="900">
+<h1 align="center">agent-notify</h1>
 
-# agent-notify
+<p align="center"><strong>Privacy-first push notifications for AI coding agents. No telemetry, no vendor push service.</strong></p>
 
-**Privacy-first push notifications for AI coding agents. No telemetry, no vendor push service.**
+<p align="center"><a href="https://agent-notify.escoffierlabs.dev">Website</a> &nbsp;&middot;&nbsp; <a href="#install">Install</a> &nbsp;&middot;&nbsp; <a href="#quickstart-no-config-file">Quickstart</a> &nbsp;&middot;&nbsp; <a href="#hook-integrations">Hook integrations</a></p>
 
-<p>
+<p align="center">
   <a href="https://github.com/escoffier-labs/agent-notify/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/escoffier-labs/agent-notify/ci.yml?branch=main&style=for-the-badge&label=ci" alt="CI status"></a>
   <a href="https://github.com/escoffier-labs/agent-notify/releases"><img src="https://img.shields.io/github/v/release/escoffier-labs/agent-notify?style=for-the-badge&label=release" alt="Latest release"></a>
   <img src="https://img.shields.io/badge/go-1.22%2B-00ADD8?style=for-the-badge&logo=go&logoColor=white" alt="Go 1.22+">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green?style=for-the-badge" alt="MIT license"></a>
 </p>
-
-**[Website](https://agent-notify.escoffierlabs.dev)** &nbsp;·&nbsp; [Install](#install) &nbsp;·&nbsp; [Quickstart](#quickstart-no-config-file) &nbsp;·&nbsp; [Hook integrations](#hook-integrations)
-
-</div>
 
 `agent-notify` is a single-binary CLI that sends push notifications to Discord, Telegram, and Signal when your AI coding agent finishes a task or needs input. It exists because the built-in mobile push in most agent harnesses rides the same telemetry plumbing you turned off, so killing the data exhaust also kills your notifications. Unlike a hosted notification service, every message goes straight from your machine to the channel API you configured and nowhere else: no telemetry, no third-party push infrastructure, no Anthropic or OpenAI involvement.
 
@@ -25,25 +23,13 @@ Built for engineers running an always-on agent stack who want push notifications
   <img src="docs/assets/agentnotify-wiring.svg" alt="Recording: agent-notify init scaffolds a config, doctor flags the unconfigured channels, then after the channel env is set doctor reports every channel ready, all without sending a notification" width="820">
 </p>
 
-Scaffold a config, then let `doctor` verify your channel wiring before anything goes out. Nothing is sent: it only checks that each channel's env is present.
+<p align="center"><em>Scaffold a config, then let `doctor` verify your channel wiring before anything goes out. Nothing is sent: it only checks that each channel's env is present.</em></p>
 
 ## What it does
 
 `agent-notify` is a privacy-first notification dispatcher for AI coding agents and any other host process. It reads a message from stdin or a positional argument, applies routing rules, and fans the notification out to one or more configured channels (Discord webhooks, the Telegram Bot API, or a self-hosted Signal CLI) concurrently and best-effort. Built-in hook adapters parse the event JSON that Claude Code, Codex CLI, and similar agents emit, so you wire it once and forget it. There is no daemon, no account, and no cloud service: the binary runs, sends, and exits.
 
 Keywords this tool covers: agent notifications, Claude Code Stop hook, Codex notify hook, Discord webhook CLI, Telegram bot notifications, Signal CLI alerts, privacy-first push, no-telemetry notifier.
-
-## Why this exists
-
-If you set `DISABLE_TELEMETRY=1` to keep your agent harness from phoning home, you've also disabled the harness's built-in mobile push feature (which routes through the same telemetry plumbing). `agent-notify` gives you the same UX with zero data flow you didn't ask for: messages go from your machine directly to Discord's API, the Telegram Bot API, or your self-hosted Signal CLI, and nowhere else.
-
-## Privacy posture
-
-- No telemetry endpoints. Ever.
-- No update checks at startup or runtime.
-- No persistent state. No state file. No log file. No cache.
-- Outbound HTTP only to channel URLs you configured.
-- Test `cmd/agent-notify/privacy_test.go` asserts the above.
 
 ## Install
 
@@ -98,31 +84,6 @@ export TELEGRAM_CHAT_ID='...'
 agent-notify "build finished"   # fans out to both
 ```
 
-## Verify the wiring (no live send)
-
-`doctor` checks your config and channel env vars without sending a notification. With a config and the `agent-stop` profile's env vars set, it reads:
-
-```console
-$ agent-notify doctor
-[OK  ] config: loaded
-[OK  ] routing: 2 channel(s) selected
-[OK  ] channel:discord-main: env present
-[WARN] channel:signal-personal: inactive channel: url/from/to env missing or empty
-[OK  ] channel:telegram-personal: env present
-```
-
-`status` prints the resolved routing for the active profile:
-
-```console
-$ agent-notify status
-configured: true
-config:     ~/.config/agent-notify/config.toml
-profile:    agent-stop
-channels:   [telegram-personal discord-main]
-```
-
-Add `--json` to either command for machine-readable output you can pipe into a script.
-
 ## Config file (when you outgrow env-only)
 
 Generate a starter config:
@@ -167,6 +128,43 @@ agent-notify status --json
 agent-notify doctor
 agent-notify doctor --json
 ```
+
+## Why this exists
+
+If you set `DISABLE_TELEMETRY=1` to keep your agent harness from phoning home, you've also disabled the harness's built-in mobile push feature (which routes through the same telemetry plumbing). `agent-notify` gives you the same UX with zero data flow you didn't ask for: messages go from your machine directly to Discord's API, the Telegram Bot API, or your self-hosted Signal CLI, and nowhere else.
+
+## Privacy posture
+
+- No telemetry endpoints. Ever.
+- No update checks at startup or runtime.
+- No persistent state. No state file. No log file. No cache.
+- Outbound HTTP only to channel URLs you configured.
+- Test `cmd/agent-notify/privacy_test.go` asserts the above.
+
+## Verify the wiring (no live send)
+
+`doctor` checks your config and channel env vars without sending a notification. With a config and the `agent-stop` profile's env vars set, it reads:
+
+```console
+$ agent-notify doctor
+[OK  ] config: loaded
+[OK  ] routing: 2 channel(s) selected
+[OK  ] channel:discord-main: env present
+[WARN] channel:signal-personal: inactive channel: url/from/to env missing or empty
+[OK  ] channel:telegram-personal: env present
+```
+
+`status` prints the resolved routing for the active profile:
+
+```console
+$ agent-notify status
+configured: true
+config:     ~/.config/agent-notify/config.toml
+profile:    agent-stop
+channels:   [telegram-personal discord-main]
+```
+
+Add `--json` to either command for machine-readable output you can pipe into a script.
 
 ## Routing precedence
 
