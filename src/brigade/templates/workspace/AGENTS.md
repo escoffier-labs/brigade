@@ -68,6 +68,16 @@ Write the handoff to your harness's inbox ({{handoff_inboxes}}) as `<YYYY-MM-DD-
 
 Do not wait to be reminded. Do not edit canonical memory directly unless this is the memory owner.
 
+## Daily Work Loop (Mandatory)
+
+This repo or workspace is Brigade-wired, so real work flows THROUGH Brigade and its outcome ledger and learning ratchet fill instead of sitting empty. Invoke the `brigade-work` skill and follow it:
+- **Start:** `brigade work brief --target .` (or `brigade daily status --target .`) to see pending work before deciding what to do.
+- **Verify through Brigade, not raw:** when a test or check result should count, run `brigade work verify run --target . --command "<your test>"` instead of running it bare. This writes a receipt with the real exit code.
+- **Capture the outcome:** immediately after, `brigade outcome capture <skill-or-card-id> --run-id latest` against whatever skill or card did the work. A failure is signal too.
+- **Finish:** write the Memory Handoff (above).
+
+Running tests raw produces no signal. If `brigade outcome rank --target .` ever says "ranking: none", the loop is not being fed - this is the difference between Brigade installed and Brigade used.
+
 ## Self-Improvement
 
 When the user corrects you: if you are the memory owner, save a card to `memory/cards/` capturing the correction and *why*. If you are a side harness, write a Memory Handoff for the correction. Search memory for past corrections before similar tasks. The point is to stop re-making the same mistake, not to accept blame.
@@ -131,30 +141,9 @@ If the harness sends a heartbeat poll, do not just reply `HEARTBEAT_OK` every ti
 - Never mention AI tools, model vendors, or bot identities in commit messages.
 - Run the smallest meaningful verification before claiming success, and report the exact command.
 
-## Brigade Repo Loop
+## Brigade operator setup (advanced)
 
-When a repo is wired for Brigade internal dogfood, use the explicit local loop before substantial changes:
-
-```bash
-brigade operator guide
-brigade operator doctor --profile internal-dogfood --target .
-brigade operator status --profile internal-dogfood --target .
-brigade operator sync-tools --target .
-brigade daily status --target .
-brigade daily plan --target .
-```
-
-Use `brigade daily run --target .` only when the selected action is a safe bounded adapter. Otherwise do the selected setup or repair manually, then rerun `brigade daily status --target .` to confirm the signal moved.
-
-Onboard a repo with:
-
-```bash
-brigade operator init --profile internal-dogfood --target .
-brigade operator sync-tools --target .
-brigade operator doctor --profile internal-dogfood --target .
-```
-
-Keep `.brigade/` local and gitignored. Keep tracked cross-harness tool sources under `tools/`; `brigade operator sync-tools --target .` writes local ignored projections for installed harnesses. If the session changes Brigade usage, setup, readiness waivers, or repo workflow, write a Memory Handoff with `brigade handoff draft --title "..." --summary "..." --content "..."` and include the concrete commands and remaining manual steps. Brigade does not run automatically, start daemons, install hooks, send notifications, publish, push, tag, or mutate remotes.
+Beyond the daily work loop above, an operator sets up readiness and tool sync with `brigade operator guide`, `brigade operator doctor --profile internal-dogfood --target .`, and `brigade operator sync-tools --target .`; onboard a repo with `brigade operator init --profile internal-dogfood --target .`. Use `brigade daily run --target .` only for a safe bounded adapter. Keep `.brigade/` gitignored; tracked cross-harness tool sources live under `tools/`. Brigade does not run automatically, start daemons, install hooks, send notifications, publish, push, tag, or mutate remotes.
 
 ## Goal Workflow
 

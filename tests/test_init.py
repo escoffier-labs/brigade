@@ -17,6 +17,36 @@ def _workspace_sel() -> Selection:
     return Selection(depth="workspace", harnesses=["claude"], owner="claude", includes=[])
 
 
+def test_init_wires_brigade_work_skill_into_harnesses(tmp_path: Path):
+    target = tmp_path / "ws"
+    sel = Selection(
+        depth="workspace",
+        harnesses=["claude", "codex", "openclaw"],
+        owner="openclaw",
+        includes=[],
+    )
+    assert install_selection(target, sel) == 0
+    # The brigade-work skill is wired into each harness's skills dir so the agent
+    # actually uses Brigade (verify-run + outcome capture), not just installs it.
+    for rel in (".claude/skills", ".codex/skills", ".openclaw/skills"):
+        skill = target / rel / "brigade-work" / "SKILL.md"
+        assert skill.is_file(), f"brigade-work not wired into {rel}"
+        assert "brigade work verify run" in skill.read_text()
+
+
+def test_init_no_wire_skips_skill_install(tmp_path: Path):
+    target = tmp_path / "ws"
+    sel = Selection(
+        depth="workspace",
+        harnesses=["claude", "codex", "openclaw"],
+        owner="openclaw",
+        includes=[],
+    )
+    assert install_selection(target, sel, wire_skills=False) == 0
+    assert not (target / ".claude" / "skills" / "brigade-work").exists()
+    assert not (target / ".openclaw" / "skills" / "brigade-work").exists()
+
+
 def test_init_no_gitignore_skips_gitignore(tmp_target: Path):
     tmp_target.mkdir(parents=True, exist_ok=True)
     assert install_selection(tmp_target, _workspace_sel(), update_gitignore=False) == 0

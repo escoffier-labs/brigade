@@ -11,6 +11,10 @@ The canonical memory owner on this workspace is **{{memory_owner_name}}**. Claud
 
 At the end of any substantial task, check whether the session produced durable knowledge. If yes, write a handoff using `.claude/memory-handoffs/TEMPLATE.md`. Do not wait to be reminded.
 
+## Brigade work loop (Mandatory)
+
+This workspace is Brigade-wired. Route real work through Brigade so its outcome ledger fills. Invoke the `brigade-work` skill: `brigade work brief` at the start; run verifications via `brigade work verify run --target . --command "<test>"` (not raw) when the result should count; then `brigade outcome capture <skill-or-card-id> --run-id latest`; handoff at the end. If `brigade outcome rank` says "ranking: none", work is not flowing through Brigade. Full contract in `AGENTS.md`.
+
 ## Closeout
 
 - Report the exact verification command you ran.

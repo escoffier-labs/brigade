@@ -20,6 +20,17 @@ Do not edit `memory/cards/*.md`, `TOOLS.md`, `USER.md`, `rules/*.md`, or `.learn
 
 Full contract: `memory/cards/memory-architecture.md` and `memory/cards/handoff-flow.md`.
 
+## Work loop (use Brigade, do not just sit next to it)
+
+Brigade is dormant until real work flows through it: installed-and-unused, its outcome ledger never fills and `brigade outcome rank` says "ranking: none". Do not leave it that way. Invoke the `brigade-work` skill and follow it every session:
+
+- `brigade work brief --target .` at the start, to see pending work before deciding what to do.
+- When a test or check result should count, run it through Brigade: `brigade work verify run --target . --command "<your test>"` (not raw).
+- Right after, `brigade outcome capture <skill-or-card-id> --run-id latest` against whatever skill or card did the work. Failures are signal too.
+- Memory Handoff at the end (above).
+
+Make sure the `brigade-work` skill is actually loaded in your harness. It ships at `skills/brigade-work/SKILL.md`; install it into your harness's skills directory (`brigade skills install brigade-work --target all`, or copy the file into `.claude/skills/`, `.codex/skills/`, `.openclaw/skills/`). This is the difference between Brigade installed and Brigade used.
+
 ## Daily rhythm
 
 This workspace runs three short cron-driven sessions per day:

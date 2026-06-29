@@ -23,6 +23,7 @@
     {"src": "memory/memory-care.example.json", "dst": ".brigade/memory-care.example.json"},
     {"src": "memory/chat-memory-sweep.example.json", "dst": ".brigade/chat-memory-sweep.example.json"},
     {"src": "skills/note/SKILL.md", "dst": "skills/note/SKILL.md"},
+    {"src": "skills/brigade-work/SKILL.md", "dst": "skills/brigade-work/SKILL.md"},
     {"src": "scripts/backup-restic.sh", "dst": "scripts/backup-restic.sh", "mode": "0755"}
   ],
   "dirs": [

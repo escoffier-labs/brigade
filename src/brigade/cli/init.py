@@ -25,6 +25,14 @@ def register(sub: argparse._SubParsersAction) -> None:
         help="Do not create or update the target's .gitignore.",
     )
     p_init.add_argument(
+        "--no-wire",
+        dest="wire_skills",
+        action="store_false",
+        default=True,
+        help="Do not install the brigade-work skill into harness skill dirs "
+        "(leaves Brigade installed but not wired into the agent's work loop).",
+    )
+    p_init.add_argument(
         "--git-exclude",
         action="store_true",
         help="Write Brigade ignores to .git/info/exclude (local-only) instead of the tracked .gitignore. "
@@ -89,6 +97,7 @@ def dispatch(args) -> int:
             allow_home=getattr(args, "allow_home", False),
             use_git_exclude=getattr(args, "git_exclude", False),
             update_gitignore=getattr(args, "update_gitignore", True),
+            wire_skills=getattr(args, "wire_skills", True),
         )
 
     # No selection flags: interactive prompt.
@@ -109,4 +118,5 @@ def dispatch(args) -> int:
         allow_home=getattr(args, "allow_home", False),
         use_git_exclude=getattr(args, "git_exclude", False),
         update_gitignore=getattr(args, "update_gitignore", True),
+        wire_skills=getattr(args, "wire_skills", True),
     )

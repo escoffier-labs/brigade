@@ -275,6 +275,7 @@ def install_selection(
     allow_home: bool = False,
     use_git_exclude: bool = False,
     update_gitignore: bool = True,
+    wire_skills: bool = True,
 ) -> int:
     """Install a Selection into `target`. Returns process exit code."""
     selection.validate()
@@ -353,6 +354,28 @@ def install_selection(
     # Persist config.json.
     write_config(target, Config(version=1, selection=selection))
 
+    # Wire the brigade-work skill into each harness's skills directory so agents
+    # actually USE Brigade (run verifications through it, capture outcomes) instead
+    # of leaving it installed-but-dormant. Skipped with --no-wire.
+    wired_harnesses: list[str] = []
+    if wire_skills:
+        from .skills_cmd import HARNESS_ADAPTERS
+
+        skill_src = root / "skills" / "brigade-work" / "SKILL.md"
+        if skill_src.is_file():
+            for h in selection.harnesses:
+                adapter = HARNESS_ADAPTERS.get(h)
+                if not adapter:
+                    continue
+                rel = str(adapter.get("install_path", "")).format(skill_id="brigade-work")
+                if not rel.startswith("."):
+                    # user-scoped/absolute adapters (e.g. hermes): use `brigade skills install`.
+                    continue
+                dst = target / rel / "SKILL.md"
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                dst.write_text(skill_src.read_text())
+                wired_harnesses.append(h)
+
     if update_gitignore:
         result = apply_gitignore(target, selection, use_git_exclude=use_git_exclude)
         print(f"brigade: gitignore {result}")
@@ -364,6 +387,18 @@ def install_selection(
         f"brigade: installed depth={selection.depth} harnesses={','.join(selection.harnesses) or '(none)'} -> {target}"
     )
     print(f"brigade: memory owner -> {owner_label}")
+    if wired_harnesses:
+        print()
+        print(
+            f"brigade: wired the `brigade-work` skill into {', '.join(wired_harnesses)} "
+            "so your agent USES Brigade, not just installs it."
+        )
+        print("Agent: each work session, follow the `brigade-work` skill -")
+        print("  1. `brigade work brief --target .`                                  (see pending work)")
+        print('  2. `brigade work verify run --target . --command "<test>"`          (verify THROUGH brigade, not raw)')
+        print("  3. `brigade outcome capture <skill-or-card-id> --run-id latest`     (record the result)")
+        print("  4. write a Memory Handoff at the end.")
+        print('  If `brigade outcome rank` ever says "ranking: none", work is not flowing through Brigade.')
     if "hermes" in selection.harnesses:
         print(
             "brigade: the hermes adapter is validated against a real Hermes install "
