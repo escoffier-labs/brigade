@@ -2,7 +2,7 @@
   <img src="docs/assets/brigade-social-preview.jpg" alt="Brigade banner" width="900">
 </p>
 
-<h1 align="center">Brigade CLI</h1>
+<h1 align="center">Brigade</h1>
 
 <p align="center">
   <strong>One canonical source for the MCP servers, tools, and memory your AI coding agents share, merged into each tool's native config with a review gate and a receipt for every change. Local files, no daemon, no lock-in.</strong>
@@ -222,11 +222,21 @@ The full tour of every station lives in [docs/overview.md](docs/overview.md).
 
 ## Why not something else?
 
-- **mem0, Letta, and friends** are memory layers for apps you are building, usually behind an API or a server. Brigade is for the agent CLIs you already run, and it is file-first: your memory is markdown in your repo, reviewable in git, readable without Brigade.
+- **mem0, Letta, agentmemory, and friends** are memory layers for apps you are building, usually behind an API or a server. Brigade is for the agent CLIs you already run, and it is file-first: your memory is markdown in your repo, reviewable in git, readable without Brigade.
+- **add-mcp, chezmoi, and config-sync scripts** move MCP or dotfiles around, but they sync one thing with no review gate and no receipt, and they do not touch memory or skills. Brigade keeps one canonical source for MCP servers, tools, skills, and memory together, shows the per-tool diff before any write, and leaves a receipt you can roll back.
 - **Native harness memory** (each tool's own auto-memory) is a per-tool silo. It does not cross harnesses, and it writes without review. Brigade gives every tool one shared format and one canonical owner, with a review gate in between.
 - **Already running Hermes, or any self-improving agent?** Keep it. Brigade is not a replacement, it is the verification layer on top. A built-in learning loop grades its own work and keeps what it learns inside one tool. Brigade promotes a skill only when a real signal confirms it, keeps every learned skill as portable markdown in your git, and runs one loop across your whole fleet.
 - **A plain CLAUDE.md / AGENTS.md** works great until it bloats past the context budget and goes stale. Brigade keeps bootstrap files slim, moves detail into indexed cards, and flags staleness instead of trusting last month's facts forever.
 - **A daemon or hosted service** would be simpler to demo and worse to trust. Brigade writes local files when you run a command, and that is all it does.
+
+At a glance, against the tools people reach for first:
+
+| | Across harnesses | MCP, tools, and memory in one source | Review gate + receipts | Local files, no daemon |
+|---|:---:|:---:|:---:|:---:|
+| **Brigade** | yes | yes | yes | yes |
+| mem0 / Letta / agentmemory | per-SDK | memory only | no | usually hosted or a server |
+| add-mcp / chezmoi / config-sync | partial | MCP or dotfiles only | no | yes |
+| Native harness memory | no | memory only | no | yes |
 
 ## What Brigade is not
 
@@ -242,6 +252,8 @@ It does not:
 - skip review for ambiguous, risky, or failed notes
 
 That pause is the point. Agent memory should be useful, not noisy.
+
+And it is not the other projects that share the name. This Brigade is the AI-agent operator CLI, installed with `pipx install brigade-cli` from [`escoffier-labs/brigade`](https://github.com/escoffier-labs/brigade). It is not the CNCF/Microsoft **Brigade** for event-driven scripting on Kubernetes (archived in 2022), the Spinabot **Brigade** agent crew, or the 2017 `brigade` Python package that became Nornir. Same word, different tool.
 
 ## Why I built this
 
@@ -263,6 +275,10 @@ I run an always-on OpenClaw agent next to daily Codex and Claude Code sessions. 
 - [Command inventory](docs/command-inventory.md): every public CLI command.
 - [Maintainers](MAINTAINERS.md), [Governance](GOVERNANCE.md), [Security](SECURITY.md), and [Contributing](CONTRIBUTING.md).
 - [Roadmap](ROADMAP.md) and [roadmap archive](docs/roadmap-archive.md).
+
+## License
+
+MIT. See [LICENSE](LICENSE).
 
 Project identity: GitHub [`escoffier-labs/brigade`](https://github.com/escoffier-labs/brigade), website [brigade.tools](https://brigade.tools), PyPI [`brigade-cli`](https://pypi.org/project/brigade-cli/), command `brigade`. The name comes from the kitchen: a *brigade de cuisine* runs the line, and *mise en place* means the station is prepped before service. Set up the rules, memory, tools, and receipts before the session gets expensive.
 

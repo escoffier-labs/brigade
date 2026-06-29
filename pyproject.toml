@@ -5,12 +5,12 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "brigade-cli"
 version = "0.13.0"
-description = "AI agent memory, handoffs, and local guardrails for Codex, Claude Code, OpenCode, Hermes, and OpenClaw."
+description = "One local source for the MCP servers, tools, and memory your AI coding agents share (Codex, Claude Code, OpenCode, Hermes, OpenClaw), merged into each tool's native config with a review gate and a receipt for every change."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
 authors = [{ name = "Solomon Neas", email = "me@solomonneas.dev" }] # content-guard: allow email
-keywords = ["agents", "ai-agents", "agent-memory", "agent-handoffs", "ai-memory", "openclaw", "claude-code", "codex", "opencode", "memory", "bootstrap", "brigade", "brigade-cli", "operator", "local-first", "guardrails", "agents-md"]
+keywords = ["agents", "ai-agents", "agent-memory", "agent-handoffs", "ai-memory", "mcp", "mcp-config", "mcp-sync", "model-context-protocol", "openclaw", "claude-code", "codex", "opencode", "memory", "bootstrap", "brigade", "brigade-cli", "operator", "local-first", "guardrails", "agents-md"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "License :: OSI Approved :: MIT License",
@@ -27,6 +27,7 @@ research = ["playwright>=1.40"]
 
 [project.urls]
 Homepage = "https://brigade.tools"
+Documentation = "https://brigade.tools/docs"
 Repository = "https://github.com/escoffier-labs/brigade"
 Cookbook = "https://github.com/escoffier-labs/solos-cookbook"
 OpenClaw = "https://github.com/solomonneas/openclaw"
