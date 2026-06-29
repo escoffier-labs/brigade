@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-06-29
+
+### Added
+- `brigade init` and `operator quickstart` now wire the new `brigade-work` skill into each selected harness's skills directory by default (`--no-wire` to opt out) and print agent-facing onboarding, so a fresh install is actually used by the agent's work loop instead of sitting dormant. The skill teaches the loop: `brigade work brief` at the start, verify THROUGH `brigade work verify run` (not raw), `brigade outcome capture <skill-or-card-id> --run-id latest` after each verify, and a handoff at the end. Mandatory "Daily Work Loop" directives were added to the `AGENTS.md` and `CLAUDE.md` templates (replacing the conditional internal-dogfood block, keeping `AGENTS.md` under the bootstrap budget), plus a "use it, don't just sit next to it" section in `INSTALL_FOR_AGENTS.md`.
+
 ### Changed
 - README now leads the quickstart with a recorded, clean-machine demo (`docs/assets/quickstart.svg`, reproducible from `docs/assets/quickstart.cast`) and adds real `operator doctor` readiness output plus a real `brigade mcp sync` dry-run diff, so the headline claims are shown working, not just described.
 
