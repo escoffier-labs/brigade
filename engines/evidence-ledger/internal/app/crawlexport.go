@@ -18,9 +18,19 @@ import (
 // router that maps to such a crawler shares cmdCrawlExporter, so MiseLedger
 // never duplicates a crawler's SQLite schema; the crawler owns its own mapping.
 type nativeExporter struct {
-	binary     string // executable on PATH, e.g. "discrawl"
-	sourceKind string // adapter source kind recorded on import, e.g. "discord"
-	usage      string // one-line usage shown for --help
+	binary     string   // executable on PATH, e.g. "discrawl"
+	sourceKind string   // adapter source kind recorded on import, e.g. "discord"
+	exportCmd  []string // subcommand that emits adapter JSONL; nil => ["export", "adapter"]
+	usage      string   // one-line usage shown for --help
+}
+
+// adapterCmd is the subcommand prefix that emits adapter JSONL. Most crawlers
+// expose `<binary> export adapter`; a few (e.g. mailcrawl) use their own verb.
+func (e nativeExporter) adapterCmd() []string {
+	if len(e.exportCmd) == 0 {
+		return []string{"export", "adapter"}
+	}
+	return e.exportCmd
 }
 
 var nativeExporters = map[string]nativeExporter{
@@ -28,6 +38,7 @@ var nativeExporters = map[string]nativeExporter{
 	"slack":   {binary: "slacrawl", sourceKind: "slack", usage: "miseledger crawl slack [--workspace ID] [--channel ID] [--limit N] [--json] [--dry-run]"},
 	"granola": {binary: "graincrawl", sourceKind: "granola", usage: "miseledger crawl granola [--limit N] [--json] [--dry-run]"},
 	"notion":  {binary: "notcrawl", sourceKind: "notion", usage: "miseledger crawl notion [--limit N] [--json] [--dry-run]"},
+	"gmail":   {binary: "mailcrawl", sourceKind: "gmail", exportCmd: []string{"gmail", "export"}, usage: "miseledger crawl gmail --account EMAIL --query QUERY [--limit N] [--metadata-only] [--json] [--dry-run]"},
 }
 
 // cmdCrawlExporter shells out to a crawler's `export adapter` subcommand and
@@ -41,7 +52,7 @@ func cmdCrawlExporter(ex nativeExporter, args []string, out, errw io.Writer) int
 		return 0
 	}
 	asJSON, dryRun, passArgs := splitWrapperFlags(args)
-	exportArgs := append([]string{"export", "adapter", "--out", "-"}, passArgs...)
+	exportArgs := append(append(ex.adapterCmd(), "--out", "-"), passArgs...)
 
 	if dryRun {
 		records, warnings, err := dryRunExporter(ex.binary, exportArgs)
@@ -74,7 +85,7 @@ func cmdCrawlExporter(ex nativeExporter, args []string, out, errw io.Writer) int
 	if err := cmd.Start(); err != nil {
 		return fatalf(errw, "crawl %s: %s", ex.sourceKind, err)
 	}
-	sourceURI := ex.binary + "://export/adapter"
+	sourceURI := ex.binary + "://" + strings.Join(ex.adapterCmd(), "/")
 	result, importErr := ingest.ImportAdapterReader(db, stdout, sourceURI, ex.sourceKind)
 	waitErr := cmd.Wait()
 	if ctx.Err() == context.DeadlineExceeded {
