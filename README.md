@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/assets/brigade-social-preview.jpg" alt="Brigade banner" width="900">
+  <img src="docs/assets/brigade-kitchen-scene.jpg" alt="Brigade - the brigade at the pass" width="900">
 </p>
 
 <h1 align="center">Brigade</h1>
@@ -268,7 +268,7 @@ And it is not the other projects that share the name. This Brigade is the AI-age
 ## Why I built this
 
 <p align="center">
-  <img src="docs/assets/brigade-kitchen-scene.jpg" alt="The brigade at the pass" width="900">
+  <img src="docs/assets/brigade-social-preview.jpg" alt="Brigade - le chef de cuisine" width="900">
 </p>
 
 I run an always-on OpenClaw agent next to daily Codex and Claude Code sessions. Every one of those tools wakes up empty, and whatever a session learned scattered across tool-specific folders and died there. Two incidents shaped the design: a "dreaming" job that promoted raw session fragments straight into memory bloated `MEMORY.md` past the bootstrap budget, so every session started truncated and nobody noticed for weeks; and 195 handoff notes that sat unread across 35 repos because an ingester had a hardcoded allowlist and nothing warned about the gap. Silence is the failure mode. Every part of Brigade that lints, warns, or writes a receipt exists because something once failed in silence. The full production stack, now 482 cards across daily multi-agent work, is documented in the [solos-cookbook](https://github.com/escoffier-labs/solos-cookbook).
