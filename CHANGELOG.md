@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.1] - 2026-06-29
+
+### Changed
+- `brigade init` is now additive on an existing target instead of aborting: it keeps existing files (never clobbers without `--force`), writes only the missing ones, and **always wires the `brigade-work` skill into the harness skill dirs**. This fixes the upgrade/brownfield gap found in onboarding smoke tests, where a repo that already had `AGENTS.md`/`CLAUDE.md` (every previously-onboarded repo, and most real projects) got nothing wired because `init` refused to overwrite and exited. Re-running `init` after upgrading now wires the work loop without losing local edits; `--force` still overwrites to refresh the bootstrap directives.
+
 ## [0.14.0] - 2026-06-29
 
 ### Added

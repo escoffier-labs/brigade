@@ -302,20 +302,12 @@ def install_selection(
         for entry in files:
             dst = target / entry["dst"]
             if dst.exists():
-                print(f"  file  {dst} (exists; refused without --force)")
+                print(f"  file  {dst} (exists; kept unless --force)")
             else:
                 print(f"  file  {dst}")
         return 0
 
     target.mkdir(parents=True, exist_ok=True)
-
-    if not force:
-        conflicts = [target / f["dst"] for f in files if (target / f["dst"]).exists()]
-        if conflicts:
-            print("error: refusing to overwrite existing files (use --force):", file=sys.stderr)
-            for c in conflicts:
-                print(f"  {c}", file=sys.stderr)
-            return 3
 
     for d in dirs:
         (target / d).mkdir(parents=True, exist_ok=True)
@@ -336,12 +328,19 @@ def install_selection(
     }
 
     root = template_root()
+    kept_files: list[Path] = []
     for entry in files:
         src = root / entry["src"]
         dst = target / entry["dst"]
         if not src.is_file():
             print(f"error: template missing: {src}", file=sys.stderr)
             return 4
+        if dst.exists() and not force:
+            # Never clobber an existing file without --force. Keep it; the
+            # additive brigade-work skill wiring below still runs, so an upgrade
+            # or a brownfield repo still gets wired without losing local edits.
+            kept_files.append(dst)
+            continue
         dst.parent.mkdir(parents=True, exist_ok=True)
         if is_text(entry["src"]):
             dst.write_text(render(src.read_text(), context))
@@ -387,6 +386,11 @@ def install_selection(
         f"brigade: installed depth={selection.depth} harnesses={','.join(selection.harnesses) or '(none)'} -> {target}"
     )
     print(f"brigade: memory owner -> {owner_label}")
+    if kept_files:
+        print(
+            f"brigade: kept {len(kept_files)} existing file(s); run with --force to overwrite "
+            "(e.g. to refresh AGENTS.md / CLAUDE.md with the latest directives)."
+        )
     if wired_harnesses:
         print()
         print(

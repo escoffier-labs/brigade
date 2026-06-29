@@ -177,11 +177,19 @@ def test_hermes_install_creates_adapter_inbox_and_gitignore(tmp_path):
     assert "!.hermes/memory-handoffs/TEMPLATE.md" in block
 
 
-def test_install_selection_refuses_overwrite_without_force(tmp_path):
+def test_install_selection_reinstall_keeps_existing_and_rewires(tmp_path):
+    # Re-running install (brownfield / upgrade) keeps existing files instead of
+    # clobbering them, succeeds (rc 0), and re-wires the additive brigade-work skill.
     sel = Selection(depth="repo", harnesses=["claude"], owner="claude", includes=[])
-    install_selection(tmp_path, sel)
+    assert install_selection(tmp_path, sel) == 0
+    agents_before = (tmp_path / "AGENTS.md").read_text()
+    (tmp_path / "AGENTS.md").write_text(agents_before + "\n# local edit\n")
     code = install_selection(tmp_path, sel)
-    assert code == 3  # matches existing init refuse-overwrite exit code
+    assert code == 0
+    # local edit preserved (no clobber without --force)
+    assert "# local edit" in (tmp_path / "AGENTS.md").read_text()
+    # brigade-work still wired
+    assert (tmp_path / ".claude" / "skills" / "brigade-work" / "SKILL.md").is_file()
 
 
 def test_install_renders_selected_writer_inboxes_in_agent_docs(tmp_path):

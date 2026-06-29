@@ -261,13 +261,20 @@ def test_install_allow_home_overrides(tmp_path: Path, monkeypatch):
     assert (tmp_path / "AGENTS.md").exists()
 
 
-def test_install_refuses_overwrite_without_force(tmp_target: Path):
+def test_keeps_existing_files_without_force_and_still_wires(tmp_target: Path):
+    # Brownfield / upgrade: a repo that already has AGENTS.md keeps it (no clobber
+    # without --force) but STILL gets the brigade-work skill wired, so upgrading
+    # users are not left dormant.
     tmp_target.mkdir()
     (tmp_target / "AGENTS.md").write_text("# pre-existing\n")
     rc = install_selection(tmp_target, _repo_sel())
-    assert rc == 3
-    # original content untouched
+    assert rc == 0
+    # existing file kept verbatim (never clobbered without --force)
     assert (tmp_target / "AGENTS.md").read_text() == "# pre-existing\n"
+    # the additive brigade-work skill wiring still happened
+    assert (tmp_target / ".claude" / "skills" / "brigade-work" / "SKILL.md").is_file()
+    # a missing file got added
+    assert (tmp_target / "INSTALL_FOR_AGENTS.md").is_file()
 
 
 def test_force_overwrites_existing(tmp_target: Path):
