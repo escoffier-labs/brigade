@@ -363,10 +363,7 @@ def reconcile(
         # On --apply, surface the physical execution so the output is never
         # byte-identical to a dry-run that did nothing.
         tail = f" -> {executions[decision.artifact_id]}" if apply and decision.artifact_id in executions else ""
-        print(
-            f"- {decision.artifact_id} {prior_status} -> {shown_status} "
-            f"[{decision.action}] {decision.reason}{tail}"
-        )
+        print(f"- {decision.artifact_id} {prior_status} -> {shown_status} [{decision.action}] {decision.reason}{tail}")
     return 0
 
 
