@@ -11,7 +11,7 @@ import (
 
 func cmdCrawl(args []string, out, errw io.Writer) int {
 	if len(args) == 0 {
-		return fatalf(errw, "usage: miseledger crawl sessions|docs|files|repo|markdown|html|gitlog|json|jsonl|adapter|cursor|chatgpt-export|claude-export <path> [options]")
+		return fatalf(errw, "usage: miseledger crawl sessions|docs|files|repo|markdown|html|gitlog|json|jsonl|adapter|cursor|discord|slack|granola|notion|chatgpt-export|claude-export <path> [options]")
 	}
 	switch args[0] {
 	case "sessions":
@@ -28,10 +28,12 @@ func cmdCrawl(args []string, out, errw io.Writer) int {
 		return cmdImportAdapter(args[1:], out, errw)
 	case "cursor":
 		return cmdCrawlCursor(args[1:], out, errw)
+	case "discord", "slack", "granola", "notion":
+		return cmdCrawlExporter(nativeExporters[args[0]], args[1:], out, errw)
 	case "chatgpt-export", "claude-export":
 		return cmdImport(args, out, errw)
 	default:
-		return fatalf(errw, "usage: miseledger crawl sessions|docs|files|repo|markdown|html|gitlog|json|jsonl|adapter|cursor|chatgpt-export|claude-export <path> [options]")
+		return fatalf(errw, "usage: miseledger crawl sessions|docs|files|repo|markdown|html|gitlog|json|jsonl|adapter|cursor|discord|slack|granola|notion|chatgpt-export|claude-export <path> [options]")
 	}
 }
 
