@@ -55,6 +55,30 @@ def _verify_parse_command(command: str) -> tuple[list[str] | None, dict[str, str
     return argv, env, None
 
 
+VERIFY_RUNS_KEEP = 50
+
+
+def _prune_verify_runs(target: Path, keep: int = VERIFY_RUNS_KEEP) -> int:
+    """Cap retained verify-run directories so receipts + raw logs don't grow without bound.
+
+    Run dirs are timestamp-prefixed (sortable by name); the newest ``keep`` are
+    retained and older ones removed. Best-effort: a removal error never aborts a
+    verify run.
+    """
+    root = helpers._verify_runs_root(target)
+    if not root.is_dir():
+        return 0
+    run_dirs = sorted((child for child in root.iterdir() if child.is_dir()), key=lambda p: p.name, reverse=True)
+    removed = 0
+    for stale in run_dirs[keep:]:
+        try:
+            shutil.rmtree(stale)
+            removed += 1
+        except OSError:
+            continue
+    return removed
+
+
 def _latest_verify_receipt(target: Path) -> dict[str, Any] | None:
     receipts = _verify_receipts(target)
     return receipts[0] if receipts else None
@@ -223,9 +247,14 @@ def _run_verify_commands(target: Path, commands: list[str], timeout: int) -> tup
         stdout_path = run_dir / f"command-{index}-stdout.log"
         stderr_path = run_dir / f"command-{index}-stderr.log"
         if error or argv is None:
+            # The command never ran - Brigade's own parser refused it (shell
+            # metacharacters, a high-risk executable, or an unresolvable binary).
+            # Mark it 'rejected', not 'failed': a malformed command is invalid
+            # input, not a verified regression, so `outcome capture` must read it
+            # as neutral (0), never -1.
             command_result.update(
                 {
-                    "status": "failed",
+                    "status": "rejected",
                     "exit_code": 2,
                     "stderr_summary": error,
                     "stdout_summary": "",
@@ -235,7 +264,8 @@ def _run_verify_commands(target: Path, commands: list[str], timeout: int) -> tup
             )
             stdout_path.write_text("")
             stderr_path.write_text(str(error or "invalid command") + "\n")
-            rc = 2
+            if rc == 0:
+                rc = 2
             receipt["commands"].append(command_result)
             continue
         run_env = os.environ.copy()
@@ -297,9 +327,19 @@ def _run_verify_commands(target: Path, commands: list[str], timeout: int) -> tup
     completed_at = helpers._now()
     receipt["completed_at"] = completed_at.isoformat()
     receipt["duration_seconds"] = (completed_at - started).total_seconds()
-    receipt["status"] = "completed" if rc == 0 else "failed"
+    command_statuses = [c.get("status") for c in receipt["commands"] if isinstance(c, dict)]
+    if rc == 0:
+        receipt["status"] = "completed"
+    elif any(status in ("failed", "timed_out") for status in command_statuses):
+        # At least one command actually ran and failed/timed out: a real, verified
+        # regression. Otherwise the only non-zero outcome was a parser rejection,
+        # which is invalid input (neutral), not a regression.
+        receipt["status"] = "failed"
+    else:
+        receipt["status"] = "rejected"
     helpers._write_json(run_dir / "receipt.json", receipt)
     _write_verify_markdown(run_dir, receipt)
+    _prune_verify_runs(target)
     return receipt, rc
 
 
@@ -481,6 +521,8 @@ def verify_run(
     commands: list[str] | None = None,
     timeout: int = 900,
     json_output: bool = False,
+    capture: str | None = None,
+    capture_kind: str = "skill",
 ) -> int:
     target = target.expanduser().resolve()
     if not target.is_dir():
@@ -495,6 +537,23 @@ def verify_run(
         return 2
     receipt, rc = _run_verify_commands(target, planned, timeout)
     if json_output:
+        if capture:
+            # Record the outcome in the same command (closes the loop without a
+            # second manual step) while keeping stdout valid JSON.
+            import contextlib
+            import io
+
+            from .. import outcome_cmd
+
+            sink = io.StringIO()
+            with contextlib.redirect_stdout(sink), contextlib.redirect_stderr(sink):
+                outcome_cmd.capture(
+                    target=target,
+                    artifact_id=capture,
+                    artifact_kind=capture_kind,
+                    run_id=receipt["run_id"],
+                    json_output=False,
+                )
         print(json.dumps(receipt, indent=2, sort_keys=True))
         return rc
     print(f"work verify run: {target}")
@@ -505,6 +564,16 @@ def verify_run(
         if isinstance(command, dict):
             print(f"- {command.get('command')} [{command.get('status')}] exit={command.get('exit_code')}")
     print(f"receipt: {Path(str(receipt['path'])) / 'receipt.json'}")
+    if capture:
+        from .. import outcome_cmd
+
+        outcome_cmd.capture(
+            target=target,
+            artifact_id=capture,
+            artifact_kind=capture_kind,
+            run_id=receipt["run_id"],
+            json_output=False,
+        )
     return rc
 
 

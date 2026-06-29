@@ -159,6 +159,16 @@ Memory has two layers: knowledge cards under `memory/cards/` hold the detail, an
 
 Filing notes is the first loop. The second loop earns trust. Brigade can promote a learned skill on its own, but only when a real signal proves it helped, and it rolls one back the moment a signal says it broke. The model never grades its own work.
 
+**Your daily loop.** `brigade init` wires a `brigade-work` skill into each harness so your agent runs this without being told, but it is three commands by hand:
+
+```bash
+brigade work brief --target .                                  # 1. what's pending (+ whether the loop is being fed)
+brigade work verify run --target . --command "pytest -q" --capture <skill-or-card>   # 2. verify + capture in one step
+# 3. write a Memory Handoff for anything durable, then let the ratchet run on its own
+```
+
+Skip this and Brigade is installed-but-dormant: the brief is empty and `outcome rank` says "ranking: none". `brigade work brief` reports the loop's own health, so you can see at a glance whether verify runs are piling up while the ledger stays empty.
+
 - `brigade outcome capture` records the result of a verify run (a real exit code, not an opinion) against the skill that produced it.
 - `brigade outcome score` ranks each skill by a Wilson lower bound, so something that passed twice never outranks something vetted across twenty runs.
 - `brigade outcome reconcile` is the gate. Dry-run by default; with `--apply` it installs a skill that earned it across your harnesses, or rolls a regressed one back to its last good version.

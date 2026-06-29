@@ -100,11 +100,18 @@ def score_records(artifact_id: str, records: list[OutcomeRecord]) -> OutcomeScor
     yields a byte-identical record (same source, evidence_ref, task_id), and the
     same physical receipt must contribute at most one signal, or a single trial
     could cross install_min_helped and auto-install with no independent evidence.
+
+    Dedup keys on ``evidence_ref`` (the physical proof, e.g. a receipt path). A
+    record with NO evidence_ref - an explicit ``outcome record`` written without
+    ``--evidence`` - cannot be proven a duplicate of another, so it is kept as a
+    distinct signal (keyed by row position). Otherwise N genuinely-distinct manual
+    signals for one artifact would all collapse to the empty key and the artifact
+    could never reach install_min_helped no matter how many real clears occurred.
     """
-    seen: set[tuple[str, str, str]] = set()
+    seen: set[tuple] = set()
     deduped: list[OutcomeRecord] = []
-    for r in records:
-        key = (r.source, r.evidence_ref, r.task_id)
+    for idx, r in enumerate(records):
+        key: tuple = (r.source, r.evidence_ref, r.task_id) if r.evidence_ref else ("__unkeyed__", idx)
         if key in seen:
             continue
         seen.add(key)

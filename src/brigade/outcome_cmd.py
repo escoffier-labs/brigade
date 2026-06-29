@@ -38,6 +38,32 @@ def load_status(target: Path) -> dict[str, dict]:
     return artifacts if isinstance(artifacts, dict) else {}
 
 
+def _known_skill_names(target: Path) -> list[str]:
+    """Skill ids the target actually has: wired into a harness or in the registry."""
+    names: set[str] = set()
+    for skill_md in target.glob(".*/skills/*/SKILL.md"):
+        names.add(skill_md.parent.name)
+    registry = target / ".brigade" / "skills" / "registry"
+    if registry.is_dir():
+        for child in registry.iterdir():
+            if child.is_dir():
+                names.add(child.name)
+    return sorted(names)
+
+
+def _known_card_names(target: Path) -> list[str]:
+    cards = target / "memory" / "cards"
+    if not cards.is_dir():
+        return []
+    return sorted(p.stem for p in cards.glob("*.md"))
+
+
+def _artifact_known(target: Path, artifact_id: str, kind: str) -> bool:
+    if kind == "card":
+        return artifact_id in _known_card_names(target)
+    return artifact_id in _known_skill_names(target)
+
+
 def _record_from_dict(payload: dict) -> core.OutcomeRecord | None:
     try:
         return core.OutcomeRecord(
@@ -149,6 +175,15 @@ def capture(
     if receipt is None:
         print(f"error: {error}", file=sys.stderr)
         return 1
+    if not _artifact_known(target, artifact_id, artifact_kind):
+        known = _known_skill_names(target) if artifact_kind == "skill" else _known_card_names(target)
+        hint = ", ".join(known) if known else "none"
+        print(
+            f"warning: '{artifact_id}' is not a known installed {artifact_kind}; recording anyway. "
+            f"Capture against a real {artifact_kind} id (or `brigade-work` itself) to keep ranking "
+            f"trustworthy. known {artifact_kind}s: {hint}",
+            file=sys.stderr,
+        )
     status = str(receipt.get("status") or "")
     record = core.OutcomeRecord(
         artifact_id=artifact_id,
@@ -188,6 +223,11 @@ def _execute_skill_decision(target: Path, artifact_id: str, action: str) -> str:
 
     try:
         if action == "install":
+            if not skills_cmd._skill_path(target, artifact_id).is_dir():
+                # The ledger named an artifact that was never accepted into the
+                # registry, so there is nothing to install. Report it distinctly
+                # instead of a generic rc failure; reconcile keeps it a candidate.
+                return "install-skipped: not in registry"
             rc = _silently(
                 skills_cmd.install, workspace=target, skill=artifact_id, harness="all", force=True, json_output=True
             )
@@ -252,6 +292,7 @@ def reconcile(
 
     applied: list[str] = []
     executions: dict[str, str] = {}
+    effective_status: dict[str, str] = {}
     if apply and results:
         for decision, score_obj, prior_status in results:
             execution = "noop"
@@ -261,19 +302,34 @@ def reconcile(
                 else:
                     execution = "skipped: card execution is v1.1"
             executions[decision.artifact_id] = execution
+            # An install that did not physically install must not advance status to
+            # 'promoted'. The forward-only ratchet never re-emits install for a
+            # 'promoted' artifact, so a false promotion would permanently hide the
+            # failure. Keep it a 'candidate' (stamp last_action_ts for cooldown) so a
+            # later accept + reconcile retries. Cards are exempt: their promotion is
+            # status-only (physical card execution is v1.1), so a card never "fails".
+            install_failed = (
+                decision.action == "install"
+                and kinds.get(decision.artifact_id, "skill") == "skill"
+                and execution != "installed"
+            )
+            new_status = prior_status if install_failed else decision.new_status
+            effective_status[decision.artifact_id] = new_status
             receipt = {
                 "artifact_id": decision.artifact_id,
                 "action": decision.action,
                 "prior_status": prior_status,
-                "new_status": decision.new_status,
+                "new_status": new_status,
+                "decided_status": decision.new_status,
                 "reason": decision.reason,
                 "score": dataclasses.asdict(score_obj),
                 "execution": execution,
                 "created_at": now.isoformat(),
             }
             localio.write_json(_decision_path(target, now, decision.artifact_id), receipt)
-            status_map[decision.artifact_id] = {"status": decision.new_status, "last_action_ts": now.isoformat()}
-            applied.append(decision.artifact_id)
+            status_map[decision.artifact_id] = {"status": new_status, "last_action_ts": now.isoformat()}
+            if not install_failed:
+                applied.append(decision.artifact_id)
         localio.write_json(_status_path(target), {"version": 1, "artifacts": status_map})
 
     payload = {
@@ -284,7 +340,8 @@ def reconcile(
                 "artifact_id": decision.artifact_id,
                 "action": decision.action,
                 "prior_status": prior_status,
-                "new_status": decision.new_status,
+                "new_status": effective_status.get(decision.artifact_id, decision.new_status),
+                "decided_status": decision.new_status,
                 "reason": decision.reason,
                 "score": score_obj.score,
                 "execution": executions.get(decision.artifact_id, "dry-run"),
@@ -302,7 +359,14 @@ def reconcile(
         print("decisions: none")
         return 0
     for decision, _score_obj, prior_status in results:
-        print(f"- {decision.artifact_id} {prior_status} -> {decision.new_status} [{decision.action}] {decision.reason}")
+        shown_status = effective_status.get(decision.artifact_id, decision.new_status)
+        # On --apply, surface the physical execution so the output is never
+        # byte-identical to a dry-run that did nothing.
+        tail = f" -> {executions[decision.artifact_id]}" if apply and decision.artifact_id in executions else ""
+        print(
+            f"- {decision.artifact_id} {prior_status} -> {shown_status} "
+            f"[{decision.action}] {decision.reason}{tail}"
+        )
     return 0
 
 
@@ -378,3 +442,52 @@ def record(
     print(f"outcome record: {artifact_id}")
     print(f"source: {source} [{status}] signal={new_record.signal_value:+d}")
     return 0
+
+
+def health(target: Path) -> dict:
+    """Surface whether the verified-learning loop is actually being fed.
+
+    The loop is invisible in ``brigade work brief`` otherwise: an adopter cannot
+    tell that verify runs are piling up while the outcome ledger stays empty
+    (loop half-fed) or that neither exists yet (loop dormant).
+    """
+    target = target.expanduser().resolve()
+    from .work_cmd import helpers as work_helpers
+
+    records = load_records(target)
+    scores = _scores_by_artifact(records)
+    runs_root = work_helpers._verify_runs_root(target)
+    verify_run_count = sum(1 for child in runs_root.iterdir() if child.is_dir()) if runs_root.is_dir() else 0
+    record_count = len(records)
+    promoted_count = sum(1 for entry in load_status(target).values() if entry.get("status") == "promoted")
+
+    issues: list[dict] = []
+    if verify_run_count > 0 and record_count == 0:
+        issues.append(
+            {
+                "status": "warn",
+                "name": "outcome_loop_half_fed",
+                "detail": (
+                    f"{verify_run_count} verify run(s) but 0 outcome record(s); "
+                    "run `brigade outcome capture <skill>` (or `verify run --capture <skill>`) after verifying"
+                ),
+            }
+        )
+    elif verify_run_count == 0 and record_count == 0:
+        issues.append(
+            {
+                "status": "warn",
+                "name": "outcome_loop_dormant",
+                "detail": "no verify runs or outcome records yet; the verified-learning loop is not running",
+            }
+        )
+    return {
+        "records_path": str(_records_path(target)),
+        "verify_run_count": verify_run_count,
+        "record_count": record_count,
+        "scored_artifact_count": len(scores),
+        "promoted_count": promoted_count,
+        "issue_count": len(issues),
+        "top_issue": issues[0] if issues else None,
+        "issues": issues,
+    }

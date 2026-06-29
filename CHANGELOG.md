@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-06-29
+
+The verified-learning loop can no longer silently mislead. An onboarding audit
+adversarially traced the loop end to end and found several ways it reported
+success while doing nothing, or quietly poisoned its own ranking. This release
+closes them and makes the loop's own health visible.
+
+### Fixed
+- `outcome reconcile --apply` no longer marks a skill `promoted` when the physical install fails. The forward-only ratchet never re-emits install for a `promoted` artifact, so a false promotion was permanent and invisible; a failed install now keeps the skill a `candidate` (with cooldown) so a later `skills inbox accept` + reconcile retries. `--apply` output surfaces the execution result so it is never byte-identical to a dry-run that did nothing, and a skill missing from the registry reports `install-skipped: not in registry`. Cards (status-only promotion) are unaffected.
+- A verify command rejected by Brigade's own parser (shell metacharacters, a high-risk executable, an unresolvable binary) is recorded with status `rejected`, not `failed`. Invalid input is neutral (0) to `outcome capture`, never a verified regression (-1). The overall receipt is `failed` only when a command actually ran and failed or timed out.
+- `outcome` no longer collapses distinct manual signals. A record written without `--evidence` cannot be proven a duplicate, so it counts as its own signal instead of merging into one, and manual `friction`/`learnings` producers can reach the install threshold. Records that carry an `evidence_ref` still dedup as before.
+
+### Added
+- `brigade work verify run --capture <id> [--capture-kind skill|card]` captures the run's outcome in the same command, so the loop closes without a separate manual `outcome capture` step.
+- `brigade work brief` reports `outcome_loop` health: verify-run, record, scored, and promoted counts, plus a warning when verify runs exist but the ledger is empty (loop half-fed) or neither exists (loop dormant).
+- `outcome capture` warns when the artifact id is not a known installed skill or memory card, naming what is available, so a hallucinated id stops silently poisoning the ranking (the record is still written).
+- `.brigade/work/verify-runs/` is capped (newest 50 retained) so receipts and raw command logs no longer grow without bound.
+
+### Changed
+- The `brigade-work` skill, README, and QUICKSTART teach the daily loop directly: capture against an id you actually have (a real skill, a memory card, or `brigade-work` itself), the one-step `--capture` form, and the registry-accept prerequisite for autonomous promotion.
+
 ## [0.14.1] - 2026-06-29
 
 ### Changed

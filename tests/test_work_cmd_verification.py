@@ -10,6 +10,64 @@ from tests.work_cmd_test_helpers import (
 )
 
 
+def test_verify_run_marks_parser_rejected_command_as_rejected_not_failed(tmp_path, capsys):
+    # A command Brigade's own parser refuses (shell metacharacters here) never runs;
+    # it is invalid input, not a verified regression, so the receipt status must be
+    # 'rejected' (neutral for outcome capture), never 'failed' (-1).
+    _init_git_repo(tmp_path)
+    rc = work_cmd.verify_run(target=tmp_path, commands=["echo hi && echo bye"], json_output=True)
+    payload = json.loads(capsys.readouterr().out)
+    assert rc != 0
+    assert payload["status"] == "rejected"
+    assert payload["commands"][0]["status"] == "rejected"
+
+    from brigade import outcome_cmd
+
+    assert outcome_cmd.capture(target=tmp_path, artifact_id="brigade-work", json_output=True) == 0
+    record = json.loads(capsys.readouterr().out)["record"]
+    assert record["signal_value"] == 0
+
+
+def test_verify_run_capture_records_outcome_in_one_step(tmp_path, capsys):
+    _init_git_repo(tmp_path)
+    from brigade import outcome_cmd
+
+    rc = work_cmd.verify_run(
+        target=tmp_path, commands=["python3 -c \"print('ok')\""], capture="skill-x", capture_kind="skill"
+    )
+    assert rc == 0
+    capsys.readouterr()
+    records = outcome_cmd.load_records(tmp_path)
+    assert len(records) == 1
+    assert records[0].artifact_id == "skill-x" and records[0].signal_value == 1
+
+
+def test_prune_verify_runs_keeps_newest(tmp_path):
+    from brigade.work_cmd import helpers, verification
+
+    root = helpers._verify_runs_root(tmp_path)
+    root.mkdir(parents=True)
+    for name in ("20260101-000001-a", "20260101-000002-b", "20260101-000003-c"):
+        (root / name).mkdir()
+    removed = verification._prune_verify_runs(tmp_path, keep=2)
+    assert removed == 1
+    assert sorted(p.name for p in root.iterdir()) == ["20260101-000002-b", "20260101-000003-c"]
+
+
+def test_outcome_health_flags_dormant_then_half_fed(tmp_path):
+    from brigade import outcome_cmd
+
+    dormant = outcome_cmd.health(tmp_path)
+    assert dormant["record_count"] == 0 and dormant["verify_run_count"] == 0
+    assert dormant["top_issue"]["name"] == "outcome_loop_dormant"
+
+    _init_git_repo(tmp_path)
+    assert work_cmd.verify_run(target=tmp_path, commands=["python3 -c \"print('ok')\""]) == 0
+    half_fed = outcome_cmd.health(tmp_path)
+    assert half_fed["verify_run_count"] >= 1 and half_fed["record_count"] == 0
+    assert half_fed["top_issue"]["name"] == "outcome_loop_half_fed"
+
+
 def test_work_acceptance_rollup_covers_completion_review_and_closeout(tmp_path, capsys):
     _init_git_repo(tmp_path)
     ledger = {
@@ -252,7 +310,17 @@ def test_work_verify_and_closeout_cli(tmp_path, monkeypatch):
     assert cli.main(["work", "closeout", "latest", "--target", str(tmp_path), "--json"]) == 0
     assert seen == [
         ("verify-plan", {"target": tmp_path, "commands": ["python3 -m pytest -q"], "json_output": True}),
-        ("verify-run", {"target": tmp_path, "commands": ["python3 -m pytest -q"], "timeout": 12, "json_output": True}),
+        (
+            "verify-run",
+            {
+                "target": tmp_path,
+                "commands": ["python3 -m pytest -q"],
+                "timeout": 12,
+                "json_output": True,
+                "capture": None,
+                "capture_kind": "skill",
+            },
+        ),
         ("verify-runs", {"target": tmp_path, "limit": 3, "json_output": True}),
         ("verify-show", {"target": tmp_path, "run_id": "latest", "json_output": True}),
         ("closeout", {"target": tmp_path, "session_id": "latest", "json_output": True}),

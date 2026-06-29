@@ -562,6 +562,7 @@ def _brief_payload(target: Path, *, limit: int = 3) -> dict[str, Any]:
         learn_cmd,
         memory_cmd,
         notifications_cmd,
+        outcome_cmd,
         pantry_cmd,
         phases_cmd,
         projects_cmd,
@@ -607,6 +608,7 @@ def _brief_payload(target: Path, *, limit: int = 3) -> dict[str, Any]:
     center_actions_health = center_cmd.actions_health(target)
     daily_health = daily_cmd.health(target)
     phase_health = phases_cmd.health(target)
+    outcome_health = outcome_cmd.health(target)
     handoff_issues = handoff_cmd.collect_issues(target)
     known_handoff_issue_ids = handoff_cmd._known_local_issue_ids(target)
     new_handoff_issues = [issue for issue in handoff_issues if issue.id not in known_handoff_issue_ids]
@@ -787,6 +789,15 @@ def _brief_payload(target: Path, *, limit: int = 3) -> dict[str, Any]:
             "top_issue": handoff_drafts["top_issue"],
             "latest_ingest_run": handoff_drafts.get("latest_ingest_run"),
             "drafts": handoff_drafts["drafts"][:limit],
+        },
+        "outcome_loop": {
+            "records_path": outcome_health["records_path"],
+            "verify_run_count": outcome_health["verify_run_count"],
+            "record_count": outcome_health["record_count"],
+            "scored_artifact_count": outcome_health["scored_artifact_count"],
+            "promoted_count": outcome_health["promoted_count"],
+            "issue_count": outcome_health["issue_count"],
+            "top_issue": outcome_health["top_issue"],
         },
         "dogfood": resolved["dogfood"],
         "next_source": resolved["source"],
@@ -1210,6 +1221,19 @@ def brief(*, target: Path, limit: int = 3, json_output: bool = False) -> int:
             print(f"latest_task: {helpers._short(str(latest_run['task']))}")
     else:
         print("latest_run: none")
+
+    outcome_loop = payload.get("outcome_loop") if isinstance(payload.get("outcome_loop"), dict) else {}
+    if outcome_loop:
+        print(
+            "outcome_loop: "
+            f"verify_runs={outcome_loop.get('verify_run_count')} "
+            f"records={outcome_loop.get('record_count')} "
+            f"scored={outcome_loop.get('scored_artifact_count')} "
+            f"promoted={outcome_loop.get('promoted_count')}"
+        )
+        top_outcome = outcome_loop.get("top_issue") if isinstance(outcome_loop.get("top_issue"), dict) else None
+        if top_outcome:
+            print(f"outcome_loop_issue: {top_outcome.get('name')} {helpers._short(str(top_outcome.get('detail', '')))}")
 
     pantry = payload.get("pantry") if isinstance(payload.get("pantry"), dict) else {}
     if pantry:

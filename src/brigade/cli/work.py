@@ -129,6 +129,15 @@ def register(sub: argparse._SubParsersAction) -> None:
         help="Verification command. May be repeated.",
     )
     p_work_verify_run.add_argument("--timeout", type=int, default=900, help="Timeout per command in seconds.")
+    p_work_verify_run.add_argument(
+        "--capture",
+        default=None,
+        metavar="ARTIFACT_ID",
+        help="Capture this run's outcome for ARTIFACT_ID in the same step (closes the loop; no separate capture).",
+    )
+    p_work_verify_run.add_argument(
+        "--capture-kind", default="skill", choices=["skill", "card"], help="Artifact kind for --capture."
+    )
     p_work_verify_run.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_work_verify_runs = verify_sub.add_parser("runs", help="List local work verification receipts.")
     p_work_verify_runs.add_argument(
@@ -1431,6 +1440,8 @@ def dispatch(args) -> int:
                 commands=args.verify_commands,
                 timeout=args.timeout,
                 json_output=args.json,
+                capture=args.capture,
+                capture_kind=args.capture_kind,
             )
         if args.verify_command == "runs":
             return work_cmd.verify_runs(target=args.target, limit=args.limit, json_output=args.json)

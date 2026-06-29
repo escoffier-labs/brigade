@@ -144,7 +144,17 @@ def test_reconcile_dry_run_reports_install_without_writing(tmp_path, capsys):
     assert not _decisions_dir(tmp_path).exists()
 
 
-def test_reconcile_apply_installs_and_persists_status_and_receipt(tmp_path, capsys):
+def _stub_execute(monkeypatch, *, install="installed"):
+    """Isolate the status state machine from the physical skills side effect."""
+
+    def _fake(target, artifact_id, action):
+        return install if action == "install" else "reverted:claude:uninstall"
+
+    monkeypatch.setattr(outcome_cmd, "_execute_skill_decision", _fake)
+
+
+def test_reconcile_apply_installs_and_persists_status_and_receipt(tmp_path, capsys, monkeypatch):
+    _stub_execute(monkeypatch)
     _seed(tmp_path, _helped("skill-x", 2))
     assert outcome_cmd.reconcile(target=tmp_path, apply=True, json_output=True) == 0
     payload = json.loads(capsys.readouterr().out)
@@ -154,7 +164,25 @@ def test_reconcile_apply_installs_and_persists_status_and_receipt(tmp_path, caps
     assert list(_decisions_dir(tmp_path).glob("*.json"))
 
 
-def test_reconcile_holds_inside_cooldown_after_apply(tmp_path, capsys):
+def test_reconcile_apply_does_not_promote_when_install_fails(tmp_path, capsys, monkeypatch):
+    # A skill that crosses the threshold but cannot physically install must NOT be
+    # marked promoted (the forward-only ratchet would hide the failure forever).
+    _stub_execute(monkeypatch, install="install-skipped: not in registry")
+    _seed(tmp_path, _helped("skill-x", 2))
+    assert outcome_cmd.reconcile(target=tmp_path, apply=True, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    # not counted as applied, and the surfaced status stays candidate
+    assert payload["applied"] == []
+    decision = {d["artifact_id"]: d for d in payload["decisions"]}["skill-x"]
+    assert decision["new_status"] == "candidate"
+    assert decision["decided_status"] == "promoted"
+    assert decision["execution"] == "install-skipped: not in registry"
+    status = json.loads(_status_file(tmp_path).read_text())
+    assert status["artifacts"]["skill-x"]["status"] == "candidate"
+
+
+def test_reconcile_holds_inside_cooldown_after_apply(tmp_path, capsys, monkeypatch):
+    _stub_execute(monkeypatch)
     _seed(tmp_path, _helped("skill-x", 2))
     assert outcome_cmd.reconcile(target=tmp_path, apply=True, json_output=True) == 0
     capsys.readouterr()
@@ -163,7 +191,8 @@ def test_reconcile_holds_inside_cooldown_after_apply(tmp_path, capsys):
     assert payload["decisions"] == []
 
 
-def test_reconcile_rolls_back_promoted_artifact_on_regression(tmp_path, capsys):
+def test_reconcile_rolls_back_promoted_artifact_on_regression(tmp_path, capsys, monkeypatch):
+    _stub_execute(monkeypatch)
     cfg = outcome.ReconcileConfig(cooldown_seconds=0)
     _seed(tmp_path, _helped("skill-x", 2))
     assert outcome_cmd.reconcile(target=tmp_path, apply=True, config=cfg, json_output=True) == 0

@@ -58,6 +58,15 @@ def test_score_records_dedups_identical_signals():
     assert score.helped == 1
 
 
+def test_score_records_keeps_distinct_evidenceless_manual_signals():
+    # Two `outcome record` signals written WITHOUT --evidence cannot be proven
+    # duplicates, so they must count as 2 (not collapse to 1) or a manual producer
+    # could never reach install_min_helped no matter how many real clears occur.
+    a = outcome.OutcomeRecord("skill-x", "skill", "", "friction", 1, "", "2026-06-20T00:00:00+00:00")
+    b = outcome.OutcomeRecord("skill-x", "skill", "", "friction", 1, "", "2026-06-20T01:00:00+00:00")
+    assert outcome.score_records("skill-x", [a, b]).helped == 2
+
+
 def test_score_records_dedup_does_not_promote_a_single_genuine_positive():
     # Two identical positives are one signal, which is below install_min_helped=2,
     # so a clean candidate must NOT be promoted off a single genuine trial.

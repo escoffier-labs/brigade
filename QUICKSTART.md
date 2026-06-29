@@ -131,6 +131,18 @@ The starter handoff template lives at `<inbox>/TEMPLATE.md`. Copy it to a new da
 
 See the [Solo Cookbook](https://github.com/escoffier-labs/solos-cookbook) for the longer-form guidance on what makes a good handoff and when to use which routing.
 
+## Your daily loop
+
+Handoffs are one half. The other half is routing your actual work through Brigade so it produces a real signal, instead of leaving Brigade installed-but-dormant. `brigade init` wires a `brigade-work` skill into each harness so your agent does this automatically; by hand it is three steps:
+
+```bash
+brigade work brief --target .                                  # 1. what's pending (and whether the loop is being fed)
+brigade work verify run --target . --command "pytest -q" --capture <skill-or-card>   # 2. verify + capture in one step
+# 3. write a Memory Handoff for anything durable; the ratchet (outcome reconcile) runs hands-off on your cron
+```
+
+Capture against an id you actually have: a skill you followed, a memory card (`--kind card`), or `brigade-work` itself when nothing else applies. `brigade work brief` surfaces the loop's own health so an empty ledger never goes unnoticed.
+
 ## Next steps
 
 - Read [the cookbook](https://github.com/escoffier-labs/solos-cookbook) for the deep version of every concept here.
