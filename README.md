@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <a href="https://brigade.tools">Website</a> &middot; <a href="https://brigade.tools/docs">Docs</a> &middot; <a href="#try-it-in-60-seconds">Quickstart</a> &middot; <a href="https://github.com/escoffier-labs/solos-cookbook">Cookbook</a>
+  <a href="https://brigade.tools">Website</a> &middot; <a href="https://brigade.tools/docs">Docs</a> &middot; <a href="#try-it-in-60-seconds">Quickstart</a> &middot; <a href="https://escoffierlabs.dev/cookbook/">Cookbook</a>
 </p>
 
 <p align="center">
