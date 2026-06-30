@@ -501,7 +501,7 @@ In `src/brigade/managed.py`, inside the `_TOOLS` tuple, fix the two stale Python
     ),
 ```
 
-Append after the `tokenjuice` entry, before the closing `)`:
+Append after the Token Glace entry, before the closing `)`:
 
 ```python
     ManagedTool(

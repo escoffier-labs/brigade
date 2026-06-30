@@ -35,6 +35,7 @@ brigade roadmap commands --write
 - `brigade operator`: 24 command path(s)
 - `brigade outcome`: 6 command path(s)
 - `brigade pantry`: 3 command path(s)
+- `brigade profiles`: 2 command path(s)
 - `brigade projects`: 10 command path(s)
 - `brigade reconfigure`: 1 command path(s)
 - `brigade release`: 22 command path(s)
@@ -48,6 +49,7 @@ brigade roadmap commands --write
 - `brigade scrub`: 1 command path(s)
 - `brigade security`: 15 command path(s)
 - `brigade skills`: 27 command path(s)
+- `brigade stations`: 1 command path(s)
 - `brigade status`: 1 command path(s)
 - `brigade tools`: 48 command path(s)
 - `brigade untrusted`: 2 command path(s)
@@ -223,6 +225,8 @@ brigade roadmap commands --write
 - `brigade pantry service plan`
 - `brigade pantry setup plan`
 - `brigade pantry status`
+- `brigade profiles list`
+- `brigade profiles show`
 - `brigade projects audit`
 - `brigade projects closeout`
 - `brigade projects closeout-show`
@@ -394,6 +398,7 @@ brigade roadmap commands --write
 - `brigade skills search`
 - `brigade skills serve-mcp`
 - `brigade skills uninstall`
+- `brigade stations list`
 - `brigade status`
 - `brigade tools apply`
 - `brigade tools call approve`

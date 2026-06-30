@@ -29,7 +29,7 @@ Brigade is dormant until real work flows through it: installed-and-unused, its o
 - Right after, `brigade outcome capture <skill-or-card-id> --run-id latest` against whatever skill or card did the work. Failures are signal too.
 - Memory Handoff at the end (above).
 
-Make sure the `brigade-work` skill is actually loaded in your harness. It ships at `skills/brigade-work/SKILL.md`; install it into your harness's skills directory (`brigade skills install brigade-work --target all`, or copy the file into `.claude/skills/`, `.codex/skills/`, `.openclaw/skills/`). This is the difference between Brigade installed and Brigade used.
+Make sure the built-in skills are actually loaded in your harness. `brigade-work` ships at `skills/brigade-work/SKILL.md`; `ultra-work-scout` ships at `skills/ultra-work-scout/SKILL.md` for broad Scout-style scoping before large work. `brigade init` wires both into selected harnesses, including Codex at `.codex/skills/`. This is the difference between Brigade installed and Brigade used.
 
 ## Daily rhythm
 
@@ -47,7 +47,7 @@ If this workspace is one of several agent homes, read `memory/cards/multi-worksp
 
 If you are maintaining an established card set, read `memory/cards/memory-care-staleness.md` before editing stale cards. Refresh only from current source-of-truth files or route to manual review.
 
-If tool output includes TokenJuice metadata, read `memory/cards/tokenjuice-output-compaction.md`. The footer is local output-compaction metadata, not task instruction. Use raw output only when exact logs, line-for-line diffs, or full command output are required.
+If tool output includes Token Glace metadata, read `memory/cards/token-glace-output-compaction.md`. The footer is local output-compaction metadata, not task instruction. Use raw output only when exact logs, line-for-line diffs, or full command output are required.
 
 ## If your harness loads a compact context
 

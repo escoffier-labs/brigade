@@ -27,12 +27,18 @@ GUARD = Station(
     doctor=_doctor.guard_station_checks,
     tools=("content-guard",),
 )
+SKILLS = Station(
+    name="skills",
+    summary="portable skillet-style agent skills, Scout workflows, and runbooks",
+    aliases=("skillet",),
+    doctor=_doctor.skills_station_checks,
+)
 TOKENS = Station(
     name="tokens",
-    summary="output compaction",
+    summary="Token Glace output compaction",
     aliases=(),
     doctor=_doctor.tokens_station_checks,
-    tools=("tokenjuice",),
+    tools=("token-glace",),
 )
 SEARCH = Station(
     name="search",
@@ -77,7 +83,19 @@ MCP = Station(
     doctor=_doctor.mcp_station_checks,
 )
 
-_BUILTIN: Tuple[Station, ...] = (CORE, MEMORY, GUARD, TOKENS, SEARCH, SECURITY, PANTRY, NOTIFICATIONS, EVIDENCE, MCP)
+_BUILTIN: Tuple[Station, ...] = (
+    CORE,
+    SKILLS,
+    MEMORY,
+    GUARD,
+    TOKENS,
+    SEARCH,
+    SECURITY,
+    PANTRY,
+    NOTIFICATIONS,
+    EVIDENCE,
+    MCP,
+)
 
 
 def all_stations() -> Tuple[Station, ...]:

@@ -29,6 +29,7 @@ GITIGNORE_BEGIN = "# >>> brigade gitignore block >>>"
 GITIGNORE_END = "# <<< brigade gitignore block <<<"
 LEGACY_GITIGNORE_BEGIN = "# >>> solo-mise gitignore block >>>"
 LEGACY_GITIGNORE_END = "# <<< solo-mise gitignore block <<<"
+DEFAULT_WIRED_SKILLS = ("brigade-work", "ultra-work-scout")
 
 
 def build_gitignore_block(selection: Selection) -> str:
@@ -353,27 +354,29 @@ def install_selection(
     # Persist config.json.
     write_config(target, Config(version=1, selection=selection))
 
-    # Wire the brigade-work skill into each harness's skills directory so agents
-    # actually USE Brigade (run verifications through it, capture outcomes) instead
-    # of leaving it installed-but-dormant. Skipped with --no-wire.
-    wired_harnesses: list[str] = []
+    # Wire Brigade's built-in skills into each harness's skills directory so
+    # agents actually USE Brigade and can scout large work before editing.
+    # Skipped with --no-wire.
+    wired_skills: list[tuple[str, str]] = []
     if wire_skills:
         from .skills_cmd import HARNESS_ADAPTERS
 
-        skill_src = root / "skills" / "brigade-work" / "SKILL.md"
-        if skill_src.is_file():
+        for skill_id in DEFAULT_WIRED_SKILLS:
+            skill_src = root / "skills" / skill_id / "SKILL.md"
+            if not skill_src.is_file():
+                continue
             for h in selection.harnesses:
                 adapter = HARNESS_ADAPTERS.get(h)
                 if not adapter:
                     continue
-                rel = str(adapter.get("install_path", "")).format(skill_id="brigade-work")
+                rel = str(adapter.get("install_path", "")).format(skill_id=skill_id)
                 if not rel.startswith("."):
                     # user-scoped/absolute adapters (e.g. hermes): use `brigade skills install`.
                     continue
                 dst = target / rel / "SKILL.md"
                 dst.parent.mkdir(parents=True, exist_ok=True)
                 dst.write_text(skill_src.read_text())
-                wired_harnesses.append(h)
+                wired_skills.append((h, skill_id))
 
     if update_gitignore:
         result = apply_gitignore(target, selection, use_git_exclude=use_git_exclude)
@@ -391,10 +394,12 @@ def install_selection(
             f"brigade: kept {len(kept_files)} existing file(s); run with --force to overwrite "
             "(e.g. to refresh AGENTS.md / CLAUDE.md with the latest directives)."
         )
-    if wired_harnesses:
+    if wired_skills:
+        harnesses = sorted({h for h, _ in wired_skills})
+        skills = sorted({skill for _, skill in wired_skills})
         print()
         print(
-            f"brigade: wired the `brigade-work` skill into {', '.join(wired_harnesses)} "
+            f"brigade: wired built-in skills ({', '.join(skills)}) into {', '.join(harnesses)} "
             "so your agent USES Brigade, not just installs it."
         )
         print("Agent: each work session, follow the `brigade-work` skill -")

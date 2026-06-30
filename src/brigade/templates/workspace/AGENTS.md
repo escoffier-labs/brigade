@@ -78,6 +78,8 @@ This repo or workspace is Brigade-wired, so real work flows THROUGH Brigade and 
 
 Running tests raw produces no signal. If `brigade outcome rank --target .` ever says "ranking: none", the loop is not being fed - this is the difference between Brigade installed and Brigade used.
 
+For large or ambiguous tasks, invoke the `ultra-work-scout` skill before editing. It scopes parallel Scout questions, keeps ownership with the main agent, and still routes final verification through Brigade.
+
 ## Self-Improvement
 
 When the user corrects you: if you are the memory owner, save a card to `memory/cards/` capturing the correction and *why*. If you are a side harness, write a Memory Handoff for the correction. Search memory for past corrections before similar tasks. The point is to stop re-making the same mistake, not to accept blame.

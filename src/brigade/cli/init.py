@@ -29,7 +29,7 @@ def register(sub: argparse._SubParsersAction) -> None:
         dest="wire_skills",
         action="store_false",
         default=True,
-        help="Do not install the brigade-work skill into harness skill dirs "
+        help="Do not install built-in work-loop skills into harness skill dirs "
         "(leaves Brigade installed but not wired into the agent's work loop).",
     )
     p_init.add_argument(

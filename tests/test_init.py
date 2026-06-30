@@ -26,12 +26,17 @@ def test_init_wires_brigade_work_skill_into_harnesses(tmp_path: Path):
         includes=[],
     )
     assert install_selection(target, sel) == 0
-    # The brigade-work skill is wired into each harness's skills dir so the agent
-    # actually uses Brigade (verify-run + outcome capture), not just installs it.
+    # Built-in skills are wired into each harness's skills dir so the agent
+    # actually uses Brigade and can scout large work, not just installs it.
     for rel in (".claude/skills", ".codex/skills", ".openclaw/skills"):
-        skill = target / rel / "brigade-work" / "SKILL.md"
-        assert skill.is_file(), f"brigade-work not wired into {rel}"
-        assert "brigade work verify run" in skill.read_text()
+        work_skill = target / rel / "brigade-work" / "SKILL.md"
+        scout_skill = target / rel / "ultra-work-scout" / "SKILL.md"
+        assert work_skill.is_file(), f"brigade-work not wired into {rel}"
+        assert scout_skill.is_file(), f"ultra-work-scout not wired into {rel}"
+        assert "brigade work verify run" in work_skill.read_text()
+        scout_text = scout_skill.read_text()
+        assert "name: ultra-work-scout" in scout_text
+        assert "Default Scout Set" in scout_text
 
 
 def test_init_no_wire_skips_skill_install(tmp_path: Path):
@@ -44,7 +49,11 @@ def test_init_no_wire_skips_skill_install(tmp_path: Path):
     )
     assert install_selection(target, sel, wire_skills=False) == 0
     assert not (target / ".claude" / "skills" / "brigade-work").exists()
+    assert not (target / ".claude" / "skills" / "ultra-work-scout").exists()
+    assert not (target / ".codex" / "skills" / "brigade-work").exists()
+    assert not (target / ".codex" / "skills" / "ultra-work-scout").exists()
     assert not (target / ".openclaw" / "skills" / "brigade-work").exists()
+    assert not (target / ".openclaw" / "skills" / "ultra-work-scout").exists()
 
 
 def test_init_no_gitignore_skips_gitignore(tmp_target: Path):
@@ -175,7 +184,7 @@ def test_workspace_install_includes_memory_cards(tmp_target: Path):
         "memory-scanner.md",
         "memory-care-staleness.md",
         "multi-workspace-handoff-admin.md",
-        "tokenjuice-output-compaction.md",
+        "token-glace-output-compaction.md",
         "chat-surface-crawlers.md",
         "pipeline-standups.md",
         "obsidian-notes.md",
@@ -191,6 +200,7 @@ def test_workspace_install_includes_memory_cards(tmp_target: Path):
     assert (tmp_target / "rules" / "acceptance-driven-work.md").is_file()
     # skill + script land at the right paths, executable bit on the script
     assert (tmp_target / "skills" / "note" / "SKILL.md").is_file()
+    assert (tmp_target / "skills" / "ultra-work-scout" / "SKILL.md").is_file()
     backup = tmp_target / "scripts" / "backup-restic.sh"
     assert backup.is_file()
     assert backup.stat().st_mode & 0o111, "backup-restic.sh should be executable"
@@ -271,8 +281,9 @@ def test_keeps_existing_files_without_force_and_still_wires(tmp_target: Path):
     assert rc == 0
     # existing file kept verbatim (never clobbered without --force)
     assert (tmp_target / "AGENTS.md").read_text() == "# pre-existing\n"
-    # the additive brigade-work skill wiring still happened
+    # the additive built-in skill wiring still happened
     assert (tmp_target / ".claude" / "skills" / "brigade-work" / "SKILL.md").is_file()
+    assert (tmp_target / ".claude" / "skills" / "ultra-work-scout" / "SKILL.md").is_file()
     # a missing file got added
     assert (tmp_target / "INSTALL_FOR_AGENTS.md").is_file()
 

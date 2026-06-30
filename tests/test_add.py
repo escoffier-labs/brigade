@@ -39,3 +39,12 @@ def test_add_skips_install_when_already_present(monkeypatch, tmp_target):
     add_mod.run(target=tmp_target, station="guard")
     # no install argv (pipx/npm) should have run, only wire
     assert not any(a[:1] in (["pipx"], ["npm"], ["pip"]) for a in calls)
+
+
+def test_add_skills_explains_builtin_and_skillet_paths(tmp_target, capsys):
+    rc = add_mod.run(target=tmp_target, station="skills")
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "ultra-work-scout" in out
+    assert "brigade-work" in out
+    assert "npx skills add escoffier-labs/skillet" in out

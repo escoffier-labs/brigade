@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-06-30
+
+### Added
+- Built-in station profiles with `brigade profiles list/show` and `brigade stations list`, so new installs can see the default repo, workspace, and fleet station bundles before adding sidecars.
+- A default `skills` station that wires `brigade-work` and `ultra-work-scout` into selected harnesses during `brigade init`. `ultra-work-scout` gives agents a broad Scout workflow for large or ambiguous work, and `brigade add skills` now points users at the optional Skillet roster instead of pretending Skillet is a local binary.
+
+### Changed
+- The token sidecar is now Token Glace throughout live templates, managed-tool wiring, docs, and tests. `brigade add tokens` installs and doctors `token-glace`.
+- The default repo profile now selects the core sidecar set for memory, guard, security, tokens, evidence, search, and skills while leaving host-global or heavier stations such as MCP, pantry, and notifications opt-in.
+
 ## [0.15.0] - 2026-06-29
 
 The verified-learning loop can no longer silently mislead. An onboarding audit
@@ -525,7 +535,7 @@ closes them and makes the loop's own health visible.
 - Managed tools: external CLIs that Brigade can install and wire per station via `brigade add <station>`. Brigade shells out to each tool, never importing it in process.
 - `memory-doctor` and `bootstrap-doctor` attached to the `memory` station.
 - `content-guard` attached to the `guard` station.
-- New `tokens` station with `tokenjuice` for output compaction.
+- New `tokens` station with Token Glace for output compaction.
 - `brigade doctor` folds installed managed tools into its report and surfaces each tool's own health. Tools that are not installed are reported as non-failing `[todo]` hints, so doctor stays green on a bare host.
 - `memory-doctor` and `bootstrap-doctor` inspect the operator's canonical memory and bootstrap files (host-global), so their findings are labeled operator-scoped and treated as advisory `[warn]`, never failing a workspace `brigade doctor` run.
 

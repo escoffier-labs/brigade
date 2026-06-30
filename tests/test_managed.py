@@ -43,11 +43,12 @@ def test_memory_doctor_doctor_parses_status(monkeypatch):
     assert any(status == "OK" and "memory-doctor" in name for status, name, _ in results)
 
 
-def test_tokenjuice_doctor_reads_status_field_not_exit(monkeypatch):
-    t = managed.resolve("tokenjuice")
+def test_token_glace_doctor_reads_status_field_not_exit(monkeypatch):
+    t = managed.resolve("token-glace")
     monkeypatch.setattr(managed.proc, "which", lambda c: "/x/" + c)
 
     def fake_run(args, **kw):
+        assert args == ["token-glace", "doctor", "hooks", "--format", "json"]
         # exit 0 but status warn -> must surface as WARN, not OK
         return managed.proc.Result(code=0, stdout='{"status": "warn", "integrations": {}}', stderr="")
 

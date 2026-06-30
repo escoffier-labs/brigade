@@ -180,10 +180,15 @@ The whole ledger is plain JSON and markdown under `memory/outcome/`, tracked in 
 
 Brigade is the hub. Each station wires an optional standalone tool, installed with `brigade add <station>` and health-checked by `brigade status` and `brigade doctor`. Every tool is its own repo, independently installable, with no library coupling back into Brigade.
 
+Use `brigade profiles list` to see built-in station bundles and `brigade stations list` to see which stations are selected by the default repo profile before installing any sidecar tools.
+
+Fresh repo installs use the `repo` profile: core, skills, memory, guard, security, tokens, evidence, and search are selected up front. `brigade init` wires the built-in skills immediately, including `brigade-work` and `ultra-work-scout`, so new Codex users can run the Brigade work loop and broad Scout scoping from the start. External sidecars stay in their own repos and install only when you run `brigade add <station>`.
+
 | `brigade add` | Tool | What it does |
 |---|---|---|
+| `skills` | built-in Scout skills; optional Skillet roster | wires `brigade-work` and `ultra-work-scout` on init; use `npx skills add escoffier-labs/skillet` for the full sidecar skill roster |
 | `guard` | content-guard | scans handoffs and content for secrets and PII before anything leaves the machine |
-| `tokens` | tokenjuice | tracks token spend across your harnesses and compacts noisy output |
+| `tokens` | token-glace | tracks token spend across your harnesses and compacts noisy output |
 | `memory` | memory-doctor, bootstrap-doctor | validates memory cards and bootstrap files for staleness and contradictions |
 | `pantry` | agentpantry | syncs browser sessions and auth across an agent's machine |
 | `search` | code-search | local semantic code search over your repos |

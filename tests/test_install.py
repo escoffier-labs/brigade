@@ -179,7 +179,7 @@ def test_hermes_install_creates_adapter_inbox_and_gitignore(tmp_path):
 
 def test_install_selection_reinstall_keeps_existing_and_rewires(tmp_path):
     # Re-running install (brownfield / upgrade) keeps existing files instead of
-    # clobbering them, succeeds (rc 0), and re-wires the additive brigade-work skill.
+    # clobbering them, succeeds (rc 0), and re-wires the additive built-in skills.
     sel = Selection(depth="repo", harnesses=["claude"], owner="claude", includes=[])
     assert install_selection(tmp_path, sel) == 0
     agents_before = (tmp_path / "AGENTS.md").read_text()
@@ -188,8 +188,9 @@ def test_install_selection_reinstall_keeps_existing_and_rewires(tmp_path):
     assert code == 0
     # local edit preserved (no clobber without --force)
     assert "# local edit" in (tmp_path / "AGENTS.md").read_text()
-    # brigade-work still wired
+    # built-in skills still wired
     assert (tmp_path / ".claude" / "skills" / "brigade-work" / "SKILL.md").is_file()
+    assert (tmp_path / ".claude" / "skills" / "ultra-work-scout" / "SKILL.md").is_file()
 
 
 def test_install_renders_selected_writer_inboxes_in_agent_docs(tmp_path):

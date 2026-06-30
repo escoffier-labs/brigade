@@ -83,7 +83,7 @@ That keeps agents informed without creating multiple canonical memories.
 
 Token-heavy terminal work gets the same treatment.
 Make the wrapper explicit, make the escape hatch obvious, and tell every harness what is happening.
-The TokenJuice starter card documents Claude Code's PreToolUse wrapper path, Codex's hook setup, and the savings model.
+The Token Glace starter card documents Claude Code's PreToolUse wrapper path, Codex's hook setup, and the savings model.
 
 ## What you get
 
@@ -1034,7 +1034,8 @@ Tools are never imported in process; Brigade shells out to each CLI, so the boun
 ```bash
 brigade add memory   # memory-doctor + bootstrap-doctor
 brigade add guard    # content-guard
-brigade add tokens   # tokenjuice
+brigade add tokens   # token-glace
+brigade add skills   # built-in skills + optional Skillet roster
 brigade add pantry   # agentpantry
 ```
 
@@ -1108,7 +1109,8 @@ The current managed tools:
 | `memory` | `memory-doctor` | memory index health, dead-link lint, handoff counts |
 | `memory` | `bootstrap-doctor` | bootstrap-file size and limit audit |
 | `guard` | `content-guard` | policy-driven content scanning |
-| `tokens` | `tokenjuice` | output compaction via host hooks |
+| `tokens` | `token-glace` | output compaction via host hooks |
+| `skills` | `brigade-work`, `ultra-work-scout`; optional Skillet roster | default work-loop skills and broad Scout scoping for agent harnesses |
 | `pantry` | `agentpantry` | browser session and secret sync for agent hosts |
 
 `brigade doctor` folds installed tools into its report and surfaces each tool's own health.

@@ -15,7 +15,7 @@
     {"src": "memory/cards/memory-scanner.md", "dst": "memory/cards/memory-scanner.md"},
     {"src": "memory/cards/memory-care-staleness.md", "dst": "memory/cards/memory-care-staleness.md"},
     {"src": "memory/cards/multi-workspace-handoff-admin.md", "dst": "memory/cards/multi-workspace-handoff-admin.md"},
-    {"src": "memory/cards/tokenjuice-output-compaction.md", "dst": "memory/cards/tokenjuice-output-compaction.md"},
+    {"src": "memory/cards/token-glace-output-compaction.md", "dst": "memory/cards/token-glace-output-compaction.md"},
     {"src": "memory/cards/chat-surface-crawlers.md", "dst": "memory/cards/chat-surface-crawlers.md"},
     {"src": "memory/cards/pipeline-standups.md", "dst": "memory/cards/pipeline-standups.md"},
     {"src": "memory/cards/obsidian-notes.md", "dst": "memory/cards/obsidian-notes.md"},
@@ -24,6 +24,7 @@
     {"src": "memory/chat-memory-sweep.example.json", "dst": ".brigade/chat-memory-sweep.example.json"},
     {"src": "skills/note/SKILL.md", "dst": "skills/note/SKILL.md"},
     {"src": "skills/brigade-work/SKILL.md", "dst": "skills/brigade-work/SKILL.md"},
+    {"src": "skills/ultra-work-scout/SKILL.md", "dst": "skills/ultra-work-scout/SKILL.md"},
     {"src": "scripts/backup-restic.sh", "dst": "scripts/backup-restic.sh", "mode": "0755"}
   ],
   "dirs": [

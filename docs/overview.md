@@ -340,7 +340,7 @@ flowchart TB
         GUARD["Content Guard"]
         PANTRY["Agent Pantry"]
         NOTIFY["agent-notify"]
-        TOKEN["tokenjuice"]
+        TOKEN["token-glace"]
         SEARCH["code-search"]
     end
 
@@ -373,7 +373,8 @@ Safety and operations tools:
 - [Content Guard](https://github.com/escoffier-labs/content-guard): policy-driven content scanning and publish checks.
 - [Agent Pantry](https://github.com/escoffier-labs/agentpantry): encrypted browser session, cookie, and secret sync for agent machines.
 - [agent-notify](https://github.com/escoffier-labs/agent-notify): optional notification hooks for long-running agent work.
-- [tokenjuice](https://github.com/vincentkoc/tokenjuice): output compaction for terminal-heavy agent workflows. Third-party tool by Vincent Koc; Brigade integrates with it but does not maintain it.
+- [Token Glace](https://github.com/escoffier-labs/token-glace): output compaction for terminal-heavy agent workflows.
+- Built-in Scout skills: Brigade wires `brigade-work` and `ultra-work-scout` during `brigade init`; use Skillet when you want the full optional skill roster.
 
 Evidence ledger tools:
 

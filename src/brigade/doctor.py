@@ -72,6 +72,10 @@ def guard_station_checks(ctx: DoctorContext) -> List[CheckResult]:
     return _check_publish_gate(ctx.target)
 
 
+def skills_station_checks(ctx: DoctorContext) -> List[CheckResult]:
+    return [(OK, "skills: built-in templates", "portable Brigade skills available")]
+
+
 def tokens_station_checks(ctx: DoctorContext) -> List[CheckResult]:
     return []
 

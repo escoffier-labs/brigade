@@ -12,9 +12,12 @@ import argparse
 # Top-level help groups. Every sub.add_parser command must appear in exactly
 # one group; tests/test_cli_help.py enforces full coverage.
 COMMAND_GROUPS: list[tuple[str, list[str]]] = [
-    ("Core memory loop", ["init", "handoff", "handoff-template", "ingest", "memory", "doctor", "status"]),
+    (
+        "Core memory loop",
+        ["init", "handoff", "handoff-template", "ingest", "memory", "doctor", "status", "profiles"],
+    ),
     ("Daily operator loop", ["operator", "daily", "work", "friction", "center", "runbook", "budgets", "notifications"]),
-    ("Stations and tools", ["add", "skills", "tools", "mcp", "pantry", "roster", "run", "runs", "dogfood"]),
+    ("Stations and tools", ["add", "stations", "skills", "tools", "mcp", "pantry", "roster", "run", "runs", "dogfood"]),
     (
         "Review, security, and research",
         ["security", "scrub", "untrusted", "research", "learn", "outcome", "chat", "context", "projects"],

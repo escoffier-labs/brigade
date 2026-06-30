@@ -83,7 +83,7 @@ Add categories as the workspace grows. One topic per card; one card per topic.
 - [memory-scanner](memory/cards/memory-scanner.md) - session-review pass that promotes durable findings
 - [memory-care-staleness](memory/cards/memory-care-staleness.md) - card decay scans and safe refresh rules
 - [multi-workspace-handoff-admin](memory/cards/multi-workspace-handoff-admin.md) - pulling remote setup handoffs into one canonical owner
-- [tokenjuice-output-compaction](memory/cards/tokenjuice-output-compaction.md) - Claude Code and Codex output compaction setup, wrapper notes, and savings expectations
+- [token-glace-output-compaction](memory/cards/token-glace-output-compaction.md) - Claude Code and Codex output compaction setup, wrapper notes, and savings expectations
 - [pipeline-standups](memory/cards/pipeline-standups.md) - nightshift + morning cross-harness recaps
 - [chat-surface-crawlers](memory/cards/chat-surface-crawlers.md) - discrawl-shaped local archives for Discord, Slack, WhatsApp, etc.
 - [content-safety](memory/cards/content-safety.md) - publish gates and what they block

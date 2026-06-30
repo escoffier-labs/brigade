@@ -1,5 +1,6 @@
 import json
 import subprocess
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from brigade import center_cmd
@@ -296,7 +297,7 @@ def test_release_matrix_writes_markdown_json_and_surfaces_health(tmp_path, monke
             scope="blocked-evidence",
             repo_id="blocked",
             reason="reviewed blocker",
-            expires_at="2026-06-30T00:00:00+00:00",
+            expires_at=(datetime.now(timezone.utc) + timedelta(days=7)).isoformat(),
             json_output=True,
         )
         == 0

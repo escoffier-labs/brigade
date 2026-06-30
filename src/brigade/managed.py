@@ -86,14 +86,14 @@ def _content_guard_wire(ctx: DoctorContext) -> List[CheckResult]:
     return [(OK, "content-guard: policy", "using bundled public-repo policy")]
 
 
-def _tokenjuice_doctor(ctx: DoctorContext) -> List[CheckResult]:
-    r = proc.run(["tokenjuice", "doctor", "hooks", "--format", "json"])
+def _token_glace_doctor(ctx: DoctorContext) -> List[CheckResult]:
+    r = proc.run(["token-glace", "doctor", "hooks", "--format", "json"])
     data = r.json()
     if data is None:
-        return [(WARN, "tokenjuice", f"installed but doctor output unreadable (exit {r.code})")]
+        return [(WARN, "token-glace", f"installed but doctor output unreadable (exit {r.code})")]
     status = data.get("status", "unknown")
     mapping = {"ok": OK, "warn": WARN, "disabled": MANUAL, "broken": FAIL}
-    return [(mapping.get(status, WARN), "tokenjuice", f"hook status: {status}")]
+    return [(mapping.get(status, WARN), "token-glace", f"hook status: {status}")]
 
 
 def _code_search_url() -> str:
@@ -264,16 +264,20 @@ def _sourceharvest_doctor(ctx: DoctorContext) -> List[CheckResult]:
     return [(OK, name, f"installed; {r.stdout.strip() or 'version ok'}")]
 
 
-def _tokenjuice_wire(ctx: DoctorContext) -> List[CheckResult]:
+def _token_glace_wire(ctx: DoctorContext) -> List[CheckResult]:
     # Wiring installs a host hook; which host depends on the workspace's harnesses.
     hosts = [h for h in ctx.harnesses if h in ("claude", "codex", "cursor")]
     if not hosts:
-        return [(MANUAL, "tokenjuice: wire", "no hookable harness selected; run `tokenjuice install <host>` manually")]
+        return [
+            (MANUAL, "token-glace: wire", "no hookable harness selected; run `token-glace install <host>` manually")
+        ]
     notes: List[CheckResult] = []
     for h in hosts:
         host = "claude-code" if h == "claude" else h
-        r = proc.run(["tokenjuice", "install", host])
-        notes.append((OK if r.code == 0 else WARN, f"tokenjuice: install {host}", r.stderr.strip()[:80] or "installed"))
+        r = proc.run(["token-glace", "install", host])
+        notes.append(
+            (OK if r.code == 0 else WARN, f"token-glace: install {host}", r.stderr.strip()[:80] or "installed")
+        )
     return notes
 
 
@@ -308,13 +312,13 @@ _TOOLS: Tuple[ManagedTool, ...] = (
         doctor=_content_guard_doctor,
     ),
     ManagedTool(
-        name="tokenjuice",
+        name="token-glace",
         station="tokens",
-        command="tokenjuice",
+        command="token-glace",
         summary="output compaction via host hooks",
-        install_args=["npm", "install", "-g", "tokenjuice"],
-        wire=_tokenjuice_wire,
-        doctor=_tokenjuice_doctor,
+        install_args=["npm", "install", "-g", "token-glace"],
+        wire=_token_glace_wire,
+        doctor=_token_glace_doctor,
     ),
     ManagedTool(
         name="code-search-api",

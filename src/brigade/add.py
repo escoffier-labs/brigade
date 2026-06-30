@@ -7,6 +7,7 @@ from pathlib import Path
 
 from . import doctor as _doctor
 from . import managed
+from .install import DEFAULT_WIRED_SKILLS
 from .registry import resolve as resolve_station
 
 
@@ -18,6 +19,17 @@ def run(target: Path, station: str) -> int:
 
     tools = managed.for_station(st.name)
     if not tools:
+        if st.name == "skills":
+            print("station 'skills' ships built-in Brigade skills:")
+            for skill_id in DEFAULT_WIRED_SKILLS:
+                print(f"  [built-in] {skill_id}")
+            print()
+            print("Optional Skillet sidecar roster:")
+            print("  npx skills add escoffier-labs/skillet")
+            print("  npx skills add escoffier-labs/skillet --list")
+            print()
+            print("Run `brigade init --harnesses codex` to wire the built-in skills into Codex.")
+            return 0
         print(f"station {st.name!r} has no managed tools to add.")
         return 0
 

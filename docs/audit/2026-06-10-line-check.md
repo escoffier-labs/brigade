@@ -29,7 +29,7 @@ Brigade is healthy. CI is green on main, all 1038 tests pass locally in 101 seco
 ### [MEDIUM] Refresh or retire the stale QUICKSTART.md
 - **Station:** Docs and onboarding
 - **Where:** `QUICKSTART.md` (lines 106-107, interactive example block)
-- **What:** The `brigade init` prompt example shows only 4 harnesses while `src/brigade/prompt.py` now offers 16; lines 106-107 point readers at `memory/cards/memory-care-staleness.md` and `memory/cards/tokenjuice-output-compaction.md`, which are gitignored (`/memory/`) and do not exist in a public clone. QUICKSTART.md is also not linked from README (only `docs/technical-guide.md:951` references it) and overlaps `docs/first-10-minutes.md`.
+- **What:** The `brigade init` prompt example shows only 4 harnesses while `src/brigade/prompt.py` now offers 16; lines 106-107 point readers at `memory/cards/memory-care-staleness.md` and `memory/cards/token-glace-output-compaction.md`, which are gitignored (`/memory/`) and do not exist in a public clone. QUICKSTART.md is also not linked from README (only `docs/technical-guide.md:951` references it) and overlaps `docs/first-10-minutes.md`.
 - **Why it matters:** It is a top-level file new users will open first by filename convention, and it teaches an outdated UI and dead links, undercutting an otherwise polished first-contact story.
 - **Fix:** Either update the prompt example and replace the two `memory/cards/` references with links to docs that exist, or fold QUICKSTART.md into `docs/first-10-minutes.md` and update the technical-guide link.
 - **Effort:** S
