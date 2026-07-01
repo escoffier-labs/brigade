@@ -1272,6 +1272,32 @@ def test_operator_quickstart_scaffolds_mcp_onramp(tmp_path, capsys):
     assert any("brigade mcp sync --write" in command for command in payload["next_commands"])
 
 
+def test_operator_quickstart_arms_dogfood_loop(tmp_path, capsys):
+    assert cli.main(["operator", "quickstart", "--target", str(tmp_path), "--harnesses", "codex", "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == "ok"
+    # Without a dogfood config the work station is wired but dormant, so a fresh
+    # repo never captures runs or feeds its outcome ledger. Quickstart must arm it.
+    assert (tmp_path / ".brigade" / "dogfood.toml").is_file()
+    dogfood_step = next((step for step in payload["steps"] if step["id"] == "dogfood-init"), None)
+    assert dogfood_step is not None
+    assert dogfood_step["status"] == "ok"
+
+
+def test_operator_quickstart_dry_run_plans_dogfood_without_writing(tmp_path, capsys):
+    assert (
+        cli.main(
+            ["operator", "quickstart", "--target", str(tmp_path), "--harnesses", "codex", "--dry-run", "--json"]
+        )
+        == 0
+    )
+    payload = json.loads(capsys.readouterr().out)
+    dogfood_step = next((step for step in payload["steps"] if step["id"] == "dogfood-init"), None)
+    assert dogfood_step is not None
+    assert dogfood_step["status"] == "planned"
+    assert not (tmp_path / ".brigade" / "dogfood.toml").exists()
+
+
 def test_operator_quickstart_mcp_onramp_does_not_write_tool_configs(tmp_path, capsys):
     assert cli.main(["operator", "quickstart", "--target", str(tmp_path), "--harnesses", "codex", "--json"]) == 0
     payload = json.loads(capsys.readouterr().out)
