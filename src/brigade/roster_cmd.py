@@ -36,7 +36,7 @@ timeout_seconds = 600
 allow_models = ["codex", "ollama:*"]
 
 # Cross-model example: pin a model per agent with `model = ...`
-# (supported: claude, codex, grok, opencode, pi, kimi, cursor).
+# (supported: claude, codex, grok, opencode, pi, kimi, cursor, antigravity).
 # Fable 5 plans and synthesizes, GPT 5.5 executes, the handoff records the run.
 # Use a model id your CLI account supports (ChatGPT-account codex takes "gpt-5.5").
 #
