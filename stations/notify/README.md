@@ -9,10 +9,10 @@
 <p align="center"><a href="https://agent-notify.escoffierlabs.dev">Website</a> &nbsp;&middot;&nbsp; <a href="#install">Install</a> &nbsp;&middot;&nbsp; <a href="#quickstart-no-config-file">Quickstart</a> &nbsp;&middot;&nbsp; <a href="#hook-integrations">Hook integrations</a></p>
 
 <p align="center">
-  <a href="https://github.com/escoffier-labs/agent-notify/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/escoffier-labs/agent-notify/ci.yml?branch=main&style=for-the-badge&label=ci" alt="CI status"></a>
-  <a href="https://github.com/escoffier-labs/agent-notify/releases"><img src="https://img.shields.io/github/v/release/escoffier-labs/agent-notify?style=for-the-badge&label=release" alt="Latest release"></a>
-  <img src="https://img.shields.io/badge/go-1.22%2B-00ADD8?style=for-the-badge&logo=go&logoColor=white" alt="Go 1.22+">
-  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green?style=for-the-badge" alt="MIT license"></a>
+  <a href="https://github.com/escoffier-labs/agent-notify/actions/workflows/ci.yml"><img src="https://shieldcn.dev/github/ci/escoffier-labs/agent-notify.svg?branch=main&workflow=ci.yml" alt="CI status"></a>
+  <a href="https://github.com/escoffier-labs/agent-notify/releases"><img src="https://shieldcn.dev/github/release/escoffier-labs/agent-notify.svg" alt="Latest release"></a>
+  <img src="https://shieldcn.dev/badge/go-1.22%2B-00ADD8.svg?logo=go&logoColor=white" alt="Go 1.22+">
+  <a href="LICENSE"><img src="https://shieldcn.dev/badge/license-MIT-green.svg" alt="MIT license"></a>
 </p>
 
 `agent-notify` is a single-binary CLI that sends push notifications to Discord, Telegram, and Signal when your AI coding agent finishes a task or needs input. It exists because the built-in mobile push in most agent harnesses rides the same telemetry plumbing you turned off, so killing the data exhaust also kills your notifications. Unlike a hosted notification service, every message goes straight from your machine to the channel API you configured and nowhere else: no telemetry, no third-party push infrastructure, no Anthropic or OpenAI involvement.
