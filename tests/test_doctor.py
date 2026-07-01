@@ -9,6 +9,7 @@ import json
 
 from brigade import doctor as doctor_mod
 from brigade.install import install_selection
+from brigade.memory_cmd import MemoryCareConfig
 from brigade.selection import Selection
 
 
@@ -405,7 +406,7 @@ def test_doctor_fails_when_memory_card_exceeds_budget(tmp_target: Path, capsys):
         tmp_target,
         Selection(depth="workspace", harnesses=["claude"], owner="claude", includes=[]),
     )
-    limit = doctor_mod.MEMORY_CARD_BUDGET_BYTES
+    limit = MemoryCareConfig().max_card_bytes
     oversized = tmp_target / "memory" / "cards" / "oversized.md"
     oversized.write_text("x" * (limit + 1))
 
@@ -415,6 +416,29 @@ def test_doctor_fails_when_memory_card_exceeds_budget(tmp_target: Path, capsys):
     assert "memory-card: budget" in out
     assert "over hard limit" in out
     assert "memory/cards/oversized.md" in out
+
+
+def test_doctor_memory_card_budget_honors_config(tmp_path: Path):
+    # doctor's card-budget check must honor .brigade/memory-care.toml the same way
+    # `brigade memory care` does: custom max_card_bytes and exclude_paths.
+    target = tmp_path
+    (target / ".brigade").mkdir(parents=True)
+    (target / ".brigade" / "memory-care.toml").write_text(
+        'exclude_paths = ["memory/cards/archive"]\nmax_card_bytes = 500\n'
+    )
+    cards = target / "memory" / "cards"
+    (cards / "archive").mkdir(parents=True)
+    (cards / "big-active.md").write_text("y" * 800)  # over 500 -> flagged
+    (cards / "small.md").write_text("ok\n")  # under -> fine
+    (cards / "archive" / "big-archived.md").write_text("x" * 800)  # over but excluded
+
+    results = doctor_mod._check_memory_cards(target)
+    budget = [r for r in results if r[1] == "memory-card: budget"]
+    assert budget, "expected a memory-card: budget result"
+    status, _, detail = budget[0]
+    assert status == doctor_mod.FAIL
+    assert "memory/cards/big-active.md" in detail
+    assert "big-archived.md" not in detail  # excluded path not counted
 
 
 def test_doctor_warns_when_memory_card_is_empty(tmp_target: Path, capsys):

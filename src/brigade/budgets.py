@@ -42,7 +42,10 @@ DEFAULT_BOOTSTRAP_HARD_LIMIT = 11_500
 BOOTSTRAP_HARD_LIMIT_CEILING = 12_000
 
 # --- Memory cards ----------------------------------------------------------
-MEMORY_CARD_BUDGET_BYTES = 8_000
+# Default card size budget. Per-workspace override lives in
+# .brigade/memory-care.toml (max_card_bytes); MemoryCareConfig and `doctor`
+# both read that, so this is only the fallback default when no config is set.
+MEMORY_CARD_BUDGET_BYTES = 12_000
 
 # --- MEMORY.md index -------------------------------------------------------
 # The flat index should stay short; detail belongs in topic cards.
