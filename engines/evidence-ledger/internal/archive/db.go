@@ -21,9 +21,14 @@ func Open(path string) (*sql.DB, error) {
 	// cross-connection or cross-process lock contention failed instantly
 	// with SQLITE_BUSY. WAL lets readers (stats, search, a second CLI
 	// invocation) coexist with a long-running import.
+	// synchronous(NORMAL) is the recommended pairing with WAL: fsync happens at
+	// checkpoint rather than on every commit, which is a large speedup for
+	// batched bulk imports and is still crash-safe (a power loss can lose the
+	// last unsynced transactions but cannot corrupt the database).
 	dsn := "file:" + path +
 		"?_pragma=busy_timeout(10000)" +
 		"&_pragma=journal_mode(WAL)" +
+		"&_pragma=synchronous(NORMAL)" +
 		"&_pragma=foreign_keys(1)"
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {

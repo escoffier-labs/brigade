@@ -37,29 +37,44 @@ type doctorCheck struct {
 	Detail string
 }
 
+// mcpFraming is the stdio transport framing in use for a session.
+type mcpFraming int
+
+const (
+	framingUnknown       mcpFraming = iota
+	framingNewline                  // newline-delimited JSON-RPC: the ratified MCP stdio spec, used by Claude Desktop, MCP Inspector, Glama, and most clients
+	framingContentLength            // LSP-style Content-Length headers (also accepted for compatibility)
+)
+
 func cmdMCP(args []string, out, errw io.Writer) int {
 	if len(args) != 0 {
 		return fatalf(errw, "usage: miseledger mcp")
 	}
 	reader := bufio.NewReader(stdin)
+	framing := framingUnknown
 	for {
-		frame, err := readMCPFrame(reader)
+		frame, detected, err := readMCPFrame(reader, framing)
 		if err != nil {
 			if errors.Is(err, io.EOF) {
 				return 0
 			}
 			return fatalf(errw, "mcp: %s", err)
 		}
+		// Lock onto whatever framing the client used for its first message and
+		// reply in the same framing for the rest of the session.
+		if framing == framingUnknown {
+			framing = detected
+		}
 		var req mcpRequest
 		if err := json.Unmarshal(frame, &req); err != nil {
-			_ = writeMCPFrame(out, mcpResponse{JSONRPC: "2.0", Error: &mcpErrorBody{Code: -32700, Message: err.Error()}})
+			_ = writeMCPFrame(out, framing, mcpResponse{JSONRPC: "2.0", Error: &mcpErrorBody{Code: -32700, Message: err.Error()}})
 			continue
 		}
 		resp := handleMCPRequest(req)
 		if req.ID == nil {
 			continue
 		}
-		if err := writeMCPFrame(out, resp); err != nil {
+		if err := writeMCPFrame(out, framing, resp); err != nil {
 			return fatalf(errw, "mcp: %s", err)
 		}
 	}
@@ -343,7 +358,88 @@ func readMCPHeaderLine(r *bufio.Reader, limit int) (string, error) {
 	}
 }
 
-func readMCPFrame(r *bufio.Reader) ([]byte, error) {
+// readMCPFrame reads one JSON-RPC message and reports the framing it used.
+// It accepts both transports: newline-delimited JSON (the MCP stdio spec, used
+// by Claude Desktop, MCP Inspector, Glama, and most clients) and LSP-style
+// Content-Length headers. Pass the session's known framing back in so later
+// reads skip re-detection.
+func readMCPFrame(r *bufio.Reader, framing mcpFraming) ([]byte, mcpFraming, error) {
+	if framing == framingUnknown {
+		c, err := peekSignificantByte(r)
+		if err != nil {
+			return nil, framingUnknown, err
+		}
+		if c == '{' || c == '[' {
+			framing = framingNewline
+		} else {
+			framing = framingContentLength
+		}
+	}
+	if framing == framingNewline {
+		frame, err := readNewlineFrame(r)
+		return frame, framingNewline, err
+	}
+	frame, err := readContentLengthFrame(r)
+	return frame, framingContentLength, err
+}
+
+// peekSignificantByte consumes leading inter-frame whitespace and returns the
+// next significant byte without consuming it.
+func peekSignificantByte(r *bufio.Reader) (byte, error) {
+	for {
+		bs, err := r.Peek(1)
+		if err != nil {
+			return 0, err
+		}
+		switch bs[0] {
+		case ' ', '\t', '\r', '\n':
+			if _, err := r.ReadByte(); err != nil {
+				return 0, err
+			}
+		default:
+			return bs[0], nil
+		}
+	}
+}
+
+// readNewlineFrame reads one newline-delimited JSON message, skipping blank
+// lines, bounded to maxMCPFrame bytes.
+func readNewlineFrame(r *bufio.Reader) ([]byte, error) {
+	for {
+		line, err := readLineBounded(r, maxMCPFrame)
+		if trimmed := bytes.TrimSpace(line); len(trimmed) > 0 {
+			return trimmed, nil
+		}
+		if err != nil {
+			return nil, err
+		}
+	}
+}
+
+// readLineBounded reads through the next '\n' (dropped), bounded to limit bytes.
+// A final line with no trailing newline before EOF is returned with a nil error.
+func readLineBounded(r *bufio.Reader, limit int) ([]byte, error) {
+	buf := make([]byte, 0, 256)
+	for {
+		b, err := r.ReadByte()
+		if err != nil {
+			if errors.Is(err, io.EOF) && len(buf) > 0 {
+				return buf, nil
+			}
+			return buf, err
+		}
+		if b == '\n' {
+			return buf, nil
+		}
+		if len(buf) >= limit {
+			return nil, fmt.Errorf("MCP line exceeds %d bytes", limit)
+		}
+		buf = append(buf, b)
+	}
+}
+
+// readContentLengthFrame reads one LSP-style Content-Length-framed message.
+func readContentLengthFrame(r *bufio.Reader) ([]byte, error) {
 	contentLength := -1
 	for i := 0; ; i++ {
 		if i >= maxMCPHeaderLines {
@@ -382,12 +478,19 @@ func readMCPFrame(r *bufio.Reader) ([]byte, error) {
 	return buf, nil
 }
 
-func writeMCPFrame(w io.Writer, v any) error {
+// writeMCPFrame writes a response in the session's framing. Newline-delimited
+// JSON is the default (MCP stdio spec); Content-Length is used only when the
+// client framed its request that way.
+func writeMCPFrame(w io.Writer, framing mcpFraming, v any) error {
 	var b bytes.Buffer
 	if err := json.NewEncoder(&b).Encode(v); err != nil {
 		return err
 	}
 	payload := bytes.TrimSpace(b.Bytes())
-	_, err := fmt.Fprintf(w, "Content-Length: %d\r\n\r\n%s", len(payload), payload)
+	if framing == framingContentLength {
+		_, err := fmt.Fprintf(w, "Content-Length: %d\r\n\r\n%s", len(payload), payload)
+		return err
+	}
+	_, err := fmt.Fprintf(w, "%s\n", payload)
 	return err
 }

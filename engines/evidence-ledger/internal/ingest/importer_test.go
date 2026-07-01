@@ -41,6 +41,48 @@ func TestImportAdapterReaderIdempotent(t *testing.T) {
 	}
 }
 
+func TestReimportSkipsWritesForKnownItems(t *testing.T) {
+	// Re-importing already-known items must not re-run the sources/collections
+	// upserts (which bump updated_at). A partial import that is retried should
+	// fast-path over the committed prefix instead of rewriting it, so a capped
+	// retry makes real forward progress instead of grinding the prefix.
+	db, err := archive.Open(t.TempDir() + "/miseledger.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := archive.Migrate(db); err != nil {
+		t.Fatal(err)
+	}
+	jsonl := `{"schema":"miseledger.adapter.v1","source":{"kind":"skip-test","name":"Skip Test"},"collection":{"external_id":"skip:collection","kind":"agent_session","name":"skip"},"item":{"external_id":"skip:item:1","kind":"message","created_at":"2026-06-03T00:00:00Z","text":"skip write test","tags":["skip"]},"actor":{"external_id":"skip:actor","type":"human","name":"skip"},"artifacts":[],"links":[],"relations":[],"raw":{"format":"json","path":"skip.jsonl","ordinal":1}}` + "\n"
+	if _, err := ImportAdapterReader(db, strings.NewReader(jsonl), "skip://fixture", "skip-test"); err != nil {
+		t.Fatal(err)
+	}
+	var srcUpdated, colUpdated string
+	if err := db.QueryRow(`select updated_at from sources limit 1`).Scan(&srcUpdated); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`select updated_at from collections limit 1`).Scan(&colUpdated); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ImportAdapterReader(db, strings.NewReader(jsonl), "skip://fixture", "skip-test"); err != nil {
+		t.Fatal(err)
+	}
+	var srcUpdated2, colUpdated2 string
+	if err := db.QueryRow(`select updated_at from sources limit 1`).Scan(&srcUpdated2); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`select updated_at from collections limit 1`).Scan(&colUpdated2); err != nil {
+		t.Fatal(err)
+	}
+	if srcUpdated2 != srcUpdated {
+		t.Fatalf("sources.updated_at changed on re-import (%q -> %q); known items should skip the source upsert", srcUpdated, srcUpdated2)
+	}
+	if colUpdated2 != colUpdated {
+		t.Fatalf("collections.updated_at changed on re-import (%q -> %q); known items should skip the collection upsert", colUpdated, colUpdated2)
+	}
+}
+
 func TestImportAdapterReaderLargeImportDoesNotSelfDeadlock(t *testing.T) {
 	// Regression: imports large enough to spill SQLite's page cache made the
 	// write transaction take an exclusive lock; the already-known check then

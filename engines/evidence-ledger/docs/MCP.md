@@ -8,6 +8,15 @@ miseledger mcp
 
 The server does not make network calls. It reads the local MiseLedger SQLite archive and returns imported content as untrusted evidence.
 
+## Transport
+
+The server speaks JSON-RPC 2.0 over stdio and accepts both framings clients use:
+
+- **Newline-delimited JSON** (the MCP stdio spec): one JSON message per line. This is what Claude Desktop, the MCP Inspector, Glama, and most clients send, and it is the default.
+- **LSP-style `Content-Length` headers**: also accepted for compatibility.
+
+MiseLedger detects the framing from the first message and replies in the same framing, so no client configuration is needed.
+
 ## Install Check
 
 Run:

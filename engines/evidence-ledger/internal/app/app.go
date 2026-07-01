@@ -677,11 +677,22 @@ func cmdImportAdapter(args []string, out, errw io.Writer) int {
 		return fatalf(errw, "import: %s", err)
 	}
 	defer db.Close()
+	// Progress goes to stderr so --json stdout stays a single clean object. It is
+	// silenced under --json to keep machine output uncluttered.
+	var progress func(int)
+	if !bools["json"] {
+		progress = func(inserted int) {
+			fmt.Fprintf(errw, "\rimporting... %d records committed", inserted)
+		}
+	}
 	var result ingest.AdapterResult
 	if rest[0] == "-" {
-		result, err = ingest.ImportAdapterReader(db, stdin, "stdin://adapter", values["source"])
+		result, err = ingest.ImportAdapterReaderProgress(db, stdin, "stdin://adapter", values["source"], progress)
 	} else {
-		result, err = ingest.ImportAdapterFile(db, rest[0], values["source"])
+		result, err = ingest.ImportAdapterFileProgress(db, rest[0], values["source"], progress)
+	}
+	if progress != nil {
+		fmt.Fprint(errw, "\r\033[K")
 	}
 	if err != nil {
 		return fatalf(errw, "import: %s", err)

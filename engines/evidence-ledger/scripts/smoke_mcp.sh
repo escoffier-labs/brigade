@@ -25,21 +25,14 @@ import json, subprocess, sys
 miseledger = sys.argv[1]
 proc = subprocess.Popen([miseledger, "mcp"], stdin=subprocess.PIPE, stdout=subprocess.PIPE)
 
+# Newline-delimited JSON-RPC: the MCP stdio spec, the framing Claude Desktop,
+# the MCP Inspector, and Glama use. (The server also accepts Content-Length.)
 def send(obj):
-    payload = json.dumps(obj).encode()
-    proc.stdin.write(b"Content-Length: " + str(len(payload)).encode() + b"\r\n\r\n" + payload)
+    proc.stdin.write(json.dumps(obj).encode() + b"\n")
     proc.stdin.flush()
 
 def recv():
-    headers = {}
-    while True:
-        line = proc.stdout.readline()
-        if line in (b"\r\n", b"\n", b""):
-            break
-        key, value = line.decode().split(":", 1)
-        headers[key.lower()] = value.strip()
-    length = int(headers["content-length"])
-    return json.loads(proc.stdout.read(length))
+    return json.loads(proc.stdout.readline())
 
 send({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}})
 assert recv()["result"]["serverInfo"]["name"] == "miseledger"

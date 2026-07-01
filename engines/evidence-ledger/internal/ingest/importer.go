@@ -29,6 +29,13 @@ type AdapterResult struct {
 }
 
 func ImportAdapterFile(db *sql.DB, path, sourceOverride string) (AdapterResult, error) {
+	return ImportAdapterFileProgress(db, path, sourceOverride, nil)
+}
+
+// ImportAdapterFileProgress is ImportAdapterFile with a progress callback
+// invoked (if non-nil) with the running inserted count after each committed
+// batch.
+func ImportAdapterFileProgress(db *sql.DB, path, sourceOverride string, progress func(inserted int)) (AdapterResult, error) {
 	abs, err := filepath.Abs(path)
 	if err != nil {
 		return AdapterResult{}, err
@@ -38,7 +45,7 @@ func ImportAdapterFile(db *sql.DB, path, sourceOverride string) (AdapterResult, 
 		return AdapterResult{}, err
 	}
 	defer f.Close()
-	return ImportAdapterReader(db, f, abs, sourceOverride)
+	return ImportAdapterReaderProgress(db, f, abs, sourceOverride, progress)
 }
 
 // importBatchSize is how many records are committed per transaction. Batching
@@ -298,6 +305,19 @@ func upsertRecord(tx *sql.Tx, rec adapter.Record, sourcePath string, ordinal int
 		rawOrdinal = *rec.Raw.Ordinal
 	}
 	collectionMeta := rawOrEmptyObject(rec.Collection.Metadata)
+
+	// Fast-path already-imported items. Items are content-addressed (itemID
+	// includes the content hash), so an existing row means this exact record is
+	// already stored. Short-circuit before the sources/collections/actors
+	// upserts: those bump updated_at on every call, so without this probe a
+	// re-run (or a retry after a timeout) rewrites the whole committed prefix
+	// row by row and makes no forward progress within a time budget.
+	var known int
+	if err := tx.QueryRow(`select 1 from items where id = ?`, itemID).Scan(&known); err == nil {
+		return false, nil
+	} else if err != sql.ErrNoRows {
+		return false, err
+	}
 
 	if _, err := tx.Exec(`insert into sources(id, kind, name, version, created_at, updated_at) values(?,?,?,?,?,?)
 on conflict(id) do update set name=excluded.name, version=excluded.version, updated_at=excluded.updated_at`, sourceID, rec.Source.Kind, rec.Source.Name, rec.Source.Version, now, now); err != nil {
