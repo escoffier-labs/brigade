@@ -105,7 +105,7 @@ opencode     github               missing        -> create
 opencode     sentry               missing        -> create
 ```
 
-One catalog (`.brigade/mcp.json`), six native targets:
+One catalog (`.brigade/mcp.json`), six native targets. If you are evaluating options first, read the focused comparison page: [sync MCP servers across coding agents](https://brigade.tools/compare/sync-mcp-servers-across-coding-agents).
 
 | Tool | File it writes |
 |---|---|

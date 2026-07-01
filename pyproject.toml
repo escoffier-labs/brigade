@@ -28,6 +28,7 @@ research = ["playwright>=1.40"]
 [project.urls]
 Homepage = "https://brigade.tools"
 Documentation = "https://brigade.tools/docs"
+Compare = "https://brigade.tools/compare/sync-mcp-servers-across-coding-agents"
 Repository = "https://github.com/escoffier-labs/brigade"
 Cookbook = "https://github.com/escoffier-labs/solos-cookbook"
 OpenClaw = "https://github.com/solomonneas/openclaw"

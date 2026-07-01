@@ -5,6 +5,9 @@ the same servers wired across Claude Code, Cursor, Codex, VS Code, OpenCode, and
 means hand-editing six configs. `brigade mcp` keeps one canonical catalog and merges it into
 each tool's native config.
 
+If you are comparing approaches before adopting Brigade, start here:
+[sync MCP servers across coding agents](https://brigade.tools/compare/sync-mcp-servers-across-coding-agents).
+
 This is the one place Brigade writes runtime config into tool-owned files, so it is bounded
 on purpose: it is **explicit** (never runs from `doctor`/`brief`/`work run`), **dry-run by
 default**, **merges by server key** (servers you added by hand are never touched), and
