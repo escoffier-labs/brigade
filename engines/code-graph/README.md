@@ -13,10 +13,10 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/github/actions/workflow/status/escoffier-labs/graphtrail/ci.yml?branch=master&style=for-the-badge&label=ci" alt="CI status">
-  <img src="https://img.shields.io/badge/crate-v0.1.0-orange?style=for-the-badge&logo=rust&logoColor=white" alt="Crate version 0.1.0">
-  <img src="https://img.shields.io/badge/license-MIT-green?style=for-the-badge" alt="MIT license">
-  <img src="https://img.shields.io/badge/MCP-server-8A2BE2?style=for-the-badge" alt="MCP server">
+  <img src="https://shieldcn.dev/github/ci/escoffier-labs/graphtrail.svg?branch=master&workflow=ci.yml" alt="CI status">
+  <img src="https://shieldcn.dev/badge/crate-v0.1.0-orange.svg?logo=rust&logoColor=white" alt="Crate version 0.1.0">
+  <img src="https://shieldcn.dev/badge/license-MIT-green.svg" alt="MIT license">
+  <img src="https://shieldcn.dev/badge/MCP-server-8A2BE2.svg" alt="MCP server">
 </p>
 
 GraphTrail indexes your code once, stays incremental after that, and answers structural questions before an agent touches a line.
