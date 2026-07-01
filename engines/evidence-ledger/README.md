@@ -19,10 +19,10 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/github/actions/workflow/status/escoffier-labs/miseledger/ci.yml?branch=master&style=for-the-badge&label=ci" alt="CI status">
-  <img src="https://img.shields.io/github/v/release/escoffier-labs/miseledger?style=for-the-badge&label=release" alt="Latest release">
-  <img src="https://img.shields.io/badge/go-1.22%2B-00ADD8?style=for-the-badge&logo=go&logoColor=white" alt="Go 1.22+">
-  <img src="https://img.shields.io/badge/license-MIT-green?style=for-the-badge" alt="MIT license">
+  <img src="https://shieldcn.dev/github/ci/escoffier-labs/miseledger.svg?branch=master&workflow=ci.yml" alt="CI status">
+  <img src="https://shieldcn.dev/github/release/escoffier-labs/miseledger.svg" alt="Latest release">
+  <img src="https://shieldcn.dev/badge/go-1.22%2B-00ADD8.svg?logo=go&logoColor=white" alt="Go 1.22+">
+  <img src="https://shieldcn.dev/badge/license-MIT-green.svg" alt="MIT license">
 </p>
 
 MiseLedger is a local-first CLI that turns scattered AI work history into one searchable SQLite evidence graph you can grep, cite, and export. It exists because your prompts, agent sessions, chat exports, and project notes are smeared across a dozen tools and folders, so the answer to "where did I figure that out?" is lost. Unlike a cloud memory service or a single tool's built-in history, MiseLedger keeps everything on your machine, normalizes every source into one `adapter.v1` contract, and treats imported text as untrusted evidence rather than executable instructions.
