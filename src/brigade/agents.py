@@ -99,17 +99,17 @@ def _openhands_argv(prompt: str, read_only: bool, sandbox: str | None) -> List[s
 
 def _grok_argv(prompt: str, read_only: bool, sandbox: str | None) -> List[str]:
     task = _read_only_prompt(prompt) if read_only or sandbox == "read-only" else prompt
-    return ["grok", "--prompt", task]
+    return ["grok", "-p", task]
 
 
 def _amp_argv(prompt: str, read_only: bool, sandbox: str | None) -> List[str]:
     task = _read_only_prompt(prompt) if read_only or sandbox == "read-only" else prompt
-    return ["amp", "--prompt", task]
+    return ["amp", "-x", task]
 
 
 def _crush_argv(prompt: str, read_only: bool, sandbox: str | None) -> List[str]:
     task = _read_only_prompt(prompt) if read_only or sandbox == "read-only" else prompt
-    return ["crush", "--prompt", task]
+    return ["crush", "run", task]
 
 
 _ADAPTERS: dict[str, Callable[[str, bool, str | None], List[str]]] = {
@@ -190,14 +190,49 @@ def command_for(cli_ref: str) -> str:
     return cli_ref
 
 
+def _pin_after_cmd(argv: List[str], flag: str, model: str) -> List[str]:
+    """Insert `flag model` right after the command (argv[0])."""
+    return [argv[0], flag, model, *argv[1:]]
+
+
+def _pin_after_subcmd(argv: List[str], flag: str, model: str) -> List[str]:
+    """Insert `flag model` after a subcommand (argv[1], e.g. `run`)."""
+    return [argv[0], argv[1], flag, model, *argv[2:]]
+
+
+def _pin_before_prompt(argv: List[str], flag: str, model: str) -> List[str]:
+    """Insert `flag model` before the final positional (the prompt)."""
+    return [*argv[:-1], flag, model, argv[-1]]
+
+
+# Adapters that accept a per-invocation model flag, with the flag and where it is
+# placed in that adapter's argv. Each entry is verified against the CLI's --help.
+# claude/codex outputs stay byte-identical to their pre-registry form.
+_MODEL_PIN: dict[str, tuple[str, Callable[[List[str], str, str], List[str]]]] = {
+    "claude": ("--model", _pin_after_cmd),  # claude --model X -p <prompt>
+    "codex": ("-m", _pin_before_prompt),  # codex exec [--sandbox M] -m X <prompt>
+    "grok": ("-m", _pin_after_cmd),  # grok -m X -p <prompt>
+    "opencode": ("-m", _pin_after_subcmd),  # opencode run -m X <prompt>   (X = provider/model)
+    "pi": ("--model", _pin_after_cmd),  # pi --model X [--tools ...] -p <prompt>
+    "kimi": ("-m", _pin_after_cmd),  # kimi -m X [--plan] --print -p <prompt> --final-message-only
+    "cursor": ("--model", _pin_after_cmd),  # cursor-agent --model X -p --output-format text <prompt>
+    "antigravity": ("--model", _pin_after_cmd),  # agy --model X [--sandbox] --print <prompt>
+}
+
+
+def supports_model_pinning(cli_ref: str) -> bool:
+    """True if cli_ref accepts a per-agent `model=` pin. Ollama refs name their
+    own model and return False here."""
+    return cli_ref in _MODEL_PIN
+
+
 def _with_model(cli_ref: str, argv: List[str], model: str) -> List[str]:
-    if cli_ref == "claude":
-        # claude --model <id> -p <prompt>
-        return [argv[0], "--model", model, *argv[1:]]
-    if cli_ref == "codex":
-        # codex exec [--sandbox <mode>] -m <id> <prompt>
-        return [*argv[:-1], "-m", model, argv[-1]]
-    raise ValueError(f"{cli_ref!r} does not support model pinning (supported: claude, codex)")
+    entry = _MODEL_PIN.get(cli_ref)
+    if entry is None:
+        supported = ", ".join(sorted(_MODEL_PIN))
+        raise ValueError(f"{cli_ref!r} does not support model pinning (supported: {supported})")
+    flag, placer = entry
+    return placer(argv, flag, model)
 
 
 def build_argv(

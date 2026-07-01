@@ -96,3 +96,61 @@ def test_roster_cli_init_and_doctor(monkeypatch, tmp_target, capsys):
     assert cli.main(["roster", "doctor", "--target", str(tmp_target)]) == 0
     out = capsys.readouterr().out
     assert "ollama:mistral" in out
+
+
+def _write_roster(tmp_target, body: str) -> None:
+    path = tmp_target / ".brigade" / "roster.toml"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(body)
+
+
+def test_roster_doctor_ok_for_supported_model_pin(monkeypatch, tmp_target, capsys):
+    _write_roster(
+        tmp_target,
+        'orchestrator = "chef"\n[agents.chef]\ncli = "grok"\nmodel = "grok-composer-2.5-fast"\nrole = "plan"\n',
+    )
+    monkeypatch.setattr(agents.proc, "which", lambda cmd: "/x/" + cmd)
+    rc = roster_cmd.doctor(tmp_target)
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "grok-composer-2.5-fast via grok" in out
+
+
+def test_roster_doctor_fails_pin_on_unsupported_cli(monkeypatch, tmp_target, capsys):
+    _write_roster(
+        tmp_target,
+        'orchestrator = "chef"\n[agents.chef]\ncli = "goose"\nmodel = "whatever"\nrole = "plan"\n',
+    )
+    monkeypatch.setattr(agents.proc, "which", lambda cmd: "/x/" + cmd)
+    rc = roster_cmd.doctor(tmp_target)
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "[fail]" in out
+    assert "does not support model pinning" in out
+
+
+def test_roster_doctor_fails_pin_on_ollama_ref(monkeypatch, tmp_target, capsys):
+    _write_roster(
+        tmp_target,
+        'orchestrator = "chef"\n[agents.chef]\ncli = "ollama:llama3.3"\nmodel = "mistral"\nrole = "plan"\n',
+    )
+    monkeypatch.setattr(agents.proc, "which", lambda cmd: "/x/" + cmd)
+    rc = roster_cmd.doctor(tmp_target)
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "ollama names its model in the cli ref" in out
+
+
+def test_roster_doctor_endpoint_agent_skips_pin_check(tmp_target, capsys):
+    _write_roster(
+        tmp_target,
+        'orchestrator = "chef"\n'
+        "[agents.chef]\n"
+        'endpoint = "https://example.test/v1/chat"\n'
+        'model = "some-hosted-model"\n'
+        'role = "plan"\n',
+    )
+    rc = roster_cmd.doctor(tmp_target)
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "endpoint https://example.test/v1/chat" in out
