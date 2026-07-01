@@ -18,9 +18,9 @@ def test_build_argv_for_known_clis():
     assert agents.build_argv("kimi", "hi") == ["kimi", "--print", "-p", "hi", "--final-message-only"]
     assert agents.build_argv("adal", "hi") == ["adal", "-q", "hi"]
     assert agents.build_argv("openhands", "hi") == ["openhands", "--headless", "-t", "hi"]
-    assert agents.build_argv("grok", "hi") == ["grok", "--prompt", "hi"]
-    assert agents.build_argv("amp", "hi") == ["amp", "--prompt", "hi"]
-    assert agents.build_argv("crush", "hi") == ["crush", "--prompt", "hi"]
+    assert agents.build_argv("grok", "hi") == ["grok", "-p", "hi"]
+    assert agents.build_argv("amp", "hi") == ["amp", "-x", "hi"]
+    assert agents.build_argv("crush", "hi") == ["crush", "run", "hi"]
     assert agents.build_argv("ollama:llama3.3", "hi") == ["ollama", "run", "llama3.3", "hi"]
 
 
@@ -141,7 +141,7 @@ def test_build_argv_without_model_is_unchanged():
 
 def test_build_argv_model_on_unsupported_cli_raises():
     with pytest.raises(ValueError, match="model"):
-        agents.build_argv("opencode", "hi", model="anything")
+        agents.build_argv("goose", "hi", model="anything")
 
 
 def test_build_argv_model_on_ollama_ref_raises():

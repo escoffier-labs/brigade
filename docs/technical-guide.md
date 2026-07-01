@@ -278,8 +278,12 @@ unless the run also passes `--sandbox`.
 
 `agents.<name>.model` pins the model a CLI agent runs, instead of relying on that CLI's
 global default. Brigade passes it through the adapter (`claude --model <id>`,
-`codex exec -m <id>`); pinning is supported for the `claude` and `codex` adapters, and
-`ollama:<model>` refs already name their model. The pinned model is recorded in each
+`codex exec -m <id>`, `grok -m <id>`, and so on); pinning is supported for the `claude`,
+`codex`, `grok`, `opencode`, `pi`, `kimi`, `cursor`, and `antigravity` adapters. Each
+adapter's model flag is placed where that CLI expects it. `ollama:<model>` refs already
+name their model, including cloud models such as `ollama:qwen3-coder-next:cloud`. An
+unsupported adapter with a `model =` pin fails `brigade roster doctor` before any run
+dispatches, so a bad pin never reaches a worker. The pinned model is recorded in each
 run's `roster.json` artifact.
 
 The classic split is a strong planner orchestrating a cheaper executor: the architect

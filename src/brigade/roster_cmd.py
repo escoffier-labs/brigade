@@ -35,7 +35,8 @@ max_workers = {max_workers}
 timeout_seconds = 600
 allow_models = ["codex", "ollama:*"]
 
-# Cross-model example: pin a model per agent with `model = ...` (claude and codex only).
+# Cross-model example: pin a model per agent with `model = ...`
+# (supported: claude, codex, grok, opencode, pi, kimi, cursor).
 # Fable 5 plans and synthesizes, GPT 5.5 executes, the handoff records the run.
 # Use a model id your CLI account supports (ChatGPT-account codex takes "gpt-5.5").
 #
@@ -50,6 +51,11 @@ allow_models = ["codex", "ollama:*"]
 # cli = "codex"
 # model = "gpt-5.5"
 # role = "Make precise code changes and report what changed."
+#
+# [agents.composer]
+# cli = "grok"
+# model = "grok-composer-2.5-fast"
+# role = "Draft fast first-pass changes for the architect to review."
 """
 
 
@@ -99,8 +105,18 @@ def doctor(target: Path, *, roster_path: Path | None = None) -> int:
         checks.append((doctor_mod.WARN, "roster: allow_models", "not set; explicit model allow-list recommended"))
 
     for name, agent in loaded.agents.items():
-        binary = agents.command_for(agent.cli)
         timeout = roster_mod.timeout_for(agent, loaded)
+        if agent.cli is None:
+            # Endpoint-mode agent: model is the HTTP model, not a CLI model pin.
+            checks.append(
+                (
+                    doctor_mod.OK,
+                    f"agent: {name}",
+                    f"endpoint {agent.endpoint} model={agent.model}; timeout={timeout:g}s",
+                )
+            )
+            continue
+        binary = agents.command_for(agent.cli)
         if agents.detect(agent.cli):
             checks.append((doctor_mod.OK, f"agent: {name}", f"{agent.cli} via {binary}; timeout={timeout:g}s"))
         else:
@@ -108,5 +124,20 @@ def doctor(target: Path, *, roster_path: Path | None = None) -> int:
             if agent.cli == "claude":
                 detail += "; Claude is optional, edit the roster if you are not using it"
             checks.append((doctor_mod.WARN, f"agent: {name}", detail))
+        if agent.model is not None:
+            if agent.cli.startswith("ollama:"):
+                checks.append(
+                    (doctor_mod.FAIL, f"agent: {name} model", "ollama names its model in the cli ref; drop model=")
+                )
+            elif agents.supports_model_pinning(agent.cli):
+                checks.append((doctor_mod.OK, f"agent: {name} model", f"{agent.model} via {agent.cli}"))
+            else:
+                checks.append(
+                    (
+                        doctor_mod.FAIL,
+                        f"agent: {name} model",
+                        f"{agent.cli} does not support model pinning; drop model= or switch cli",
+                    )
+                )
 
     return doctor_mod._report(checks)

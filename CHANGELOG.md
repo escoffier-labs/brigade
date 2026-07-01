@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.17.0] - 2026-07-01
+
+### Added
+- Per-adapter model pinning: `agents.<name>.model` now pins a model on `grok`, `opencode`, `pi`, `kimi`, `cursor`, and `antigravity`, in addition to `claude` and `codex`. A registry places each adapter's model flag where that CLI expects it, so `model = "grok-composer-2.5-fast"` on a `grok` agent runs Grok Composer under a Brigade run. `brigade roster doctor` validates every pin and fails before dispatch when an adapter can't pin a model or when an `ollama:` ref carries a stray `model =`. Ollama cloud models run through the existing `ollama:<model>` ref, e.g. `ollama:qwen3-coder-next:cloud`.
+
+### Fixed
+- The `grok`, `amp`, and `crush` writer adapters invoked a `--prompt` flag that none of those CLIs accept, so every run through them failed at argument parsing. They now use each CLI's real one-shot form: `grok -p`, `amp -x`, and `crush run`.
+- `brigade roster doctor` no longer crashes on endpoint-mode agents (`endpoint` + `model`, no `cli`); it reports the endpoint and skips the CLI model-pin check.
+
 ## [0.16.0] - 2026-06-30
 
 ### Added

@@ -4,7 +4,7 @@
     "It blocks secrets and attribution trailers, while warning on personal or infrastructure-like context.",
     "Use via: brigade handoff lint --content-guard --guard-policy personal"
   ],
-  "_brigade_version": "0.16.0",
+  "_brigade_version": "0.17.0",
   "categories": {
     "secret": "block",
     "private-network": "warn",
