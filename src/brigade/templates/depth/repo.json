@@ -2,9 +2,9 @@
   "id": "repo",
   "description": "Repo-local baseline: harness-neutral bootstrap files + publish guard.",
   "files": [
-    {"src": "workspace/AGENTS.md", "dst": "AGENTS.md"},
+    {"src": "repo/AGENTS.md", "dst": "AGENTS.md"},
     {"src": "workspace/SAFETY_RULES.md", "dst": "SAFETY_RULES.md"},
-    {"src": "workspace/INSTALL_FOR_AGENTS.md", "dst": "INSTALL_FOR_AGENTS.md"},
+    {"src": "repo/INSTALL_FOR_AGENTS.md", "dst": "INSTALL_FOR_AGENTS.md"},
     {"src": "workspace/rules/issue-tdd-loop.md", "dst": "rules/issue-tdd-loop.md"},
     {"src": "workspace/rules/acceptance-driven-work.md", "dst": "rules/acceptance-driven-work.md"},
     {"src": "handoff/handoff-sources.example.json", "dst": ".brigade/handoff-sources.example.json"},

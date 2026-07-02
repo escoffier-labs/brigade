@@ -258,6 +258,10 @@ def resolve_manifests(selection: Selection) -> Tuple[List[dict], List[str], List
         dirs.extend(m.get("dirs", []))
         notes.extend(m.get("post_install_notes", []))
 
+    # A file entry may carry an optional "depth" key to select a
+    # depth-specific variant (e.g. repo/CLAUDE.md vs workspace/CLAUDE.md).
+    files = [entry for entry in files if entry.get("depth") in (None, selection.depth)]
+
     # Dedupe files by dst (last-wins).
     seen: dict[str, dict] = {}
     for entry in files:

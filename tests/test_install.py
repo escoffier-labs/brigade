@@ -237,3 +237,39 @@ def test_install_workspace_owner_without_writer_inbox_uses_writer_harness(tmp_pa
     assert ".hermes/memory-handoffs/" in card
     assert ".claude/memory-handoffs" not in card
     assert "{{" not in card
+
+
+WORKSPACE_ONLY_REFS = (
+    "SOUL.md",
+    "USER.md",
+    "MEMORY.md",
+    "TOOLS.md",
+    "IDENTITY.md",
+    "HEARTBEAT.md",
+    "memory/cards/",
+)
+
+
+def test_repo_depth_bootstrap_docs_reference_only_installed_files(tmp_path):
+    # Repo-depth installs must not point agents at workspace-only files
+    # that the install never creates (audit 2026-07-02, backlog item 1).
+    sel = Selection(depth="repo", harnesses=["claude", "codex"], owner="claude", includes=[])
+    assert install_selection(tmp_path, sel) == 0
+    for doc in ("AGENTS.md", "INSTALL_FOR_AGENTS.md", "CLAUDE.md"):
+        text = (tmp_path / doc).read_text()
+        for ref in WORKSPACE_ONLY_REFS:
+            assert ref not in text, f"{doc} references workspace-only {ref}"
+        assert "{{" not in text, f"{doc} has unrendered placeholders"
+    agents = (tmp_path / "AGENTS.md").read_text()
+    assert ".claude/memory-handoffs/" in agents
+    assert ".codex/memory-handoffs/" in agents
+    assert "Memory Handoff" in agents
+    assert "brigade work brief" in agents
+
+
+def test_workspace_depth_keeps_workspace_bootstrap_docs(tmp_path):
+    sel = Selection(depth="workspace", harnesses=["claude"], owner="claude", includes=[])
+    assert install_selection(tmp_path, sel) == 0
+    assert "SOUL.md" in (tmp_path / "AGENTS.md").read_text()
+    assert "SOUL.md" in (tmp_path / "CLAUDE.md").read_text()
+    assert (tmp_path / "SOUL.md").is_file()

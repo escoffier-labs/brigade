@@ -3,7 +3,8 @@
   "role": "writer",
   "description": "Claude Code bridge + handoff inbox.",
   "files": [
-    {"src": "workspace/CLAUDE.md", "dst": "CLAUDE.md"},
+    {"src": "repo/CLAUDE.md", "dst": "CLAUDE.md", "depth": "repo"},
+    {"src": "workspace/CLAUDE.md", "dst": "CLAUDE.md", "depth": "workspace"},
     {"src": "claude/memory-handoffs/TEMPLATE.md", "dst": ".claude/memory-handoffs/TEMPLATE.md"}
   ],
   "dirs": [
