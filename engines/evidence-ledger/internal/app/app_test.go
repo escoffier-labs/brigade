@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestInitCreatesPrivateDirsAndDoctorJSON(t *testing.T) {
@@ -796,6 +797,107 @@ func TestDirectoryImportRecordsEachScannedFile(t *testing.T) {
 	}
 }
 
+func TestNativeImportFastPathSkipsSecondRun(t *testing.T) {
+	withTempHome(t)
+	runOK(t, "init")
+	dir := t.TempDir()
+	copyFixture(t, repoPath(t, "testdata/harnesses/codex-session.fixture.jsonl"), filepath.Join(dir, "one.jsonl"))
+
+	first := runJSON(t, "import", "codex", dir, "--json")
+	if first["files_parsed"].(float64) != 1 || first["files_skipped"].(float64) != 0 {
+		t.Fatalf("first import counters = %v", first)
+	}
+	second := runJSON(t, "import", "codex", dir, "--json")
+	if second["files_parsed"].(float64) != 0 || second["files_skipped"].(float64) != 1 {
+		t.Fatalf("second import counters = %v", second)
+	}
+	if second["inserted_items"].(float64) != 0 {
+		t.Fatalf("second import inserted items despite skip: %v", second)
+	}
+	normal := runOK(t, "import", "codex", dir)
+	if !strings.Contains(normal, "files_parsed=0") || !strings.Contains(normal, "files_skipped=1") {
+		t.Fatalf("normal output missing file counters: %s", normal)
+	}
+	when := time.Now().Add(2 * time.Second)
+	if err := os.Chtimes(filepath.Join(dir, "one.jsonl"), when, when); err != nil {
+		t.Fatal(err)
+	}
+	touched := runJSON(t, "import", "codex", dir, "--json")
+	if touched["files_parsed"].(float64) != 0 || touched["files_skipped"].(float64) != 1 {
+		t.Fatalf("mtime-only change should use hash fallback skip: %v", touched)
+	}
+	withSince := runJSON(t, "import", "codex", dir, "--since", "2030-01-01", "--json")
+	if withSince["files_parsed"].(float64) != 1 || withSince["files_skipped"].(float64) != 0 || withSince["inserted_items"].(float64) != 0 {
+		t.Fatalf("--since import should parse and filter records: %v", withSince)
+	}
+}
+
+func TestNativeImportFastPathReparsesSameSizeChangedFile(t *testing.T) {
+	withTempHome(t)
+	runOK(t, "init")
+	path := filepath.Join(t.TempDir(), "session.jsonl")
+	writeCodexFixture(t, path, "alpha")
+	first := runJSON(t, "import", "codex", path, "--json")
+	if first["files_parsed"].(float64) != 1 || first["files_skipped"].(float64) != 0 {
+		t.Fatalf("first import counters = %v", first)
+	}
+
+	writeCodexFixture(t, path, "bravo")
+	when := time.Now().Add(2 * time.Second)
+	if err := os.Chtimes(path, when, when); err != nil {
+		t.Fatal(err)
+	}
+	second := runJSON(t, "import", "codex", path, "--json")
+	if second["files_parsed"].(float64) != 1 || second["files_skipped"].(float64) != 0 {
+		t.Fatalf("changed file should be reparsed: %v", second)
+	}
+	if second["inserted_items"].(float64) == 0 {
+		t.Fatalf("changed file import inserted no new item: %v", second)
+	}
+}
+
+func TestNativeImportDryRunDoesNotWriteSourceScans(t *testing.T) {
+	withTempHome(t)
+	runOK(t, "init")
+	dir := t.TempDir()
+	copyFixture(t, repoPath(t, "testdata/harnesses/codex-session.fixture.jsonl"), filepath.Join(dir, "one.jsonl"))
+
+	dry := runJSON(t, "import", "codex", dir, "--dry-run", "--json")
+	if dry["files_parsed"].(float64) != 1 || dry["files_skipped"].(float64) != 0 {
+		t.Fatalf("dry-run counters = %v", dry)
+	}
+	scans := runJSON(t, "scans", "list", "--source", "codex", "--json")
+	if raw := scans["scans"]; raw != nil {
+		if got := len(raw.([]any)); got != 0 {
+			t.Fatalf("dry-run wrote %d source_scans rows: %v", got, scans)
+		}
+	}
+}
+
+func TestCrawlSessionsUsesNativeFastPath(t *testing.T) {
+	withTempHome(t)
+	runOK(t, "init")
+	root := filepath.Join(os.Getenv("HOME"), ".codex", "sessions", "2026", "06", "03")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	copyFixture(t, repoPath(t, "testdata/harnesses/codex-session.fixture.jsonl"), filepath.Join(root, "codex.jsonl"))
+
+	first := runJSON(t, "crawl", "sessions", "--json")
+	firstCodex := discoveredSource(t, first, "codex")
+	if firstCodex["files_parsed"].(float64) != 1 || firstCodex["files_skipped"].(float64) != 0 {
+		t.Fatalf("first crawl counters = %v", first)
+	}
+	second := runJSON(t, "crawl", "sessions", "--json")
+	secondCodex := discoveredSource(t, second, "codex")
+	if secondCodex["files_parsed"].(float64) != 0 || secondCodex["files_skipped"].(float64) != 1 {
+		t.Fatalf("second crawl counters = %v", second)
+	}
+	if second["files_skipped"].(float64) == 0 {
+		t.Fatalf("crawl summary did not report skipped files: %v", second)
+	}
+}
+
 func TestArchiveOperations(t *testing.T) {
 	withTempHome(t)
 	runOK(t, "init")
@@ -1179,6 +1281,30 @@ func explainPlan(t *testing.T, db *sql.DB, sqlText string, args ...any) string {
 		t.Fatal(err)
 	}
 	return strings.Join(details, "\n")
+}
+
+func writeCodexFixture(t *testing.T, path, text string) {
+	t.Helper()
+	quoted, err := json.Marshal(text)
+	if err != nil {
+		t.Fatal(err)
+	}
+	line := `{"type":"event_msg","timestamp":"2026-06-03T15:00:30Z","payload":{"session_id":"fastpath-demo","type":"message","role":"assistant","text":` + string(quoted) + `}}` + "\n"
+	if err := os.WriteFile(path, []byte(line), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func discoveredSource(t *testing.T, result map[string]any, sourceKind string) map[string]any {
+	t.Helper()
+	for _, raw := range result["sources"].([]any) {
+		row := raw.(map[string]any)
+		if row["source_kind"] == sourceKind {
+			return row
+		}
+	}
+	t.Fatalf("missing discovered source %q in %v", sourceKind, result)
+	return nil
 }
 
 func writeTestZip(t *testing.T, path string, files map[string][]byte) {

@@ -275,21 +275,14 @@ func (g *generator) writeSession(sessionDir, sessionID, text, createdAt, workspa
 // openScan stats a file and applies the incremental-skip decision. A skipped
 // file is recorded in the manifest and reported via skip=true.
 func (g *generator) openScan(path string) (*sources.FileScan, bool, error) {
-	info, err := os.Stat(path)
+	scan, skip, err := sources.PrepareFileScan(path, g.opts)
 	if err != nil {
 		return nil, false, err
 	}
-	scan := &sources.FileScan{
-		Path:  path,
-		Size:  info.Size(),
-		MTime: info.ModTime().UTC().Format(time.RFC3339Nano),
+	if skip {
+		g.scans = append(g.scans, scan)
 	}
-	if g.opts.Skip != nil && g.opts.Skip(scan.Path, scan.Size, scan.MTime) {
-		scan.Skipped = true
-		g.scans = append(g.scans, *scan)
-		return scan, true, nil
-	}
-	return scan, false, nil
+	return &scan, skip, nil
 }
 
 func (g *generator) warn(scan *sources.FileScan, msg string) {

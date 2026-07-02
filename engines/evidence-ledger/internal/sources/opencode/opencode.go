@@ -162,21 +162,7 @@ func prepareScan(input string, opts sources.Options) (sources.FileScan, bool, er
 	if err != nil || info.IsDir() {
 		return sources.FileScan{Path: input}, false, nil
 	}
-	scan := sources.FileScan{
-		Path:  input,
-		Size:  info.Size(),
-		MTime: info.ModTime().UTC().Format(time.RFC3339Nano),
-	}
-	if opts.Skip != nil && opts.Skip(scan.Path, scan.Size, scan.MTime) {
-		scan.Skipped = true
-		return scan, true, nil
-	}
-	hash, err := sources.FileHash(input)
-	if err != nil {
-		return scan, false, err
-	}
-	scan.ContentHash = "sha256:" + hash
-	return scan, false, nil
+	return sources.PrepareFileScan(input, opts)
 }
 
 func readExport(input string) (exportFile, []byte, error) {

@@ -26,6 +26,8 @@ type AdapterResult struct {
 	Inserted     int      `json:"inserted_items"`
 	Warnings     []string `json:"warnings"`
 	AlreadyKnown bool     `json:"already_known"`
+	FilesParsed  int      `json:"files_parsed"`
+	FilesSkipped int      `json:"files_skipped"`
 }
 
 func ImportAdapterFile(db *sql.DB, path, sourceOverride string) (AdapterResult, error) {
@@ -252,14 +254,17 @@ func RecordSourceScans(db *sql.DB, sourceKind, generatedHash string, files []sou
 	if imported {
 		importedAt = now
 	}
-	for _, file := range files {
-		// A skipped file was never read; leave its manifest row (size, mtime,
-		// hash, record count) intact rather than overwriting with zeroes.
-		if file.Skipped {
-			continue
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
 		}
-		id := stableID("scan", sourceKind, file.Path)
-		_, err := db.Exec(`insert into source_scans(id, source_kind, path, size, mtime, content_hash, generated_hash, first_seen_at, last_seen_at, last_imported_at, records_generated, warnings)
+	}()
+	upsert, err := tx.Prepare(`insert into source_scans(id, source_kind, path, size, mtime, content_hash, generated_hash, first_seen_at, last_seen_at, last_imported_at, records_generated, warnings)
 values(?,?,?,?,?,?,?,?,?,?,?,?)
 on conflict(source_kind, path) do update set
   size=excluded.size,
@@ -269,12 +274,45 @@ on conflict(source_kind, path) do update set
   last_seen_at=excluded.last_seen_at,
   last_imported_at=coalesce(excluded.last_imported_at, source_scans.last_imported_at),
   records_generated=excluded.records_generated,
-  warnings=excluded.warnings`, id, sourceKind, file.Path, file.Size, file.MTime, file.ContentHash, generatedHash, now, now, importedAt, file.Records, file.Warnings)
+  warnings=excluded.warnings`)
+	if err != nil {
+		return err
+	}
+	defer upsert.Close()
+	touchSkipped, err := tx.Prepare(`update source_scans set last_seen_at = ? where source_kind = ? and path = ?`)
+	if err != nil {
+		return err
+	}
+	defer touchSkipped.Close()
+	refreshSkipped, err := tx.Prepare(`update source_scans set size = ?, mtime = ?, content_hash = ?, last_seen_at = ? where source_kind = ? and path = ?`)
+	if err != nil {
+		return err
+	}
+	defer refreshSkipped.Close()
+	for _, file := range files {
+		// A pure size+mtime skip was never read, so only touch last_seen_at.
+		// A hash-fallback skip was read for hashing but not parsed, so refresh
+		// file metadata while preserving record counts and generated hash.
+		if file.Skipped {
+			if file.ContentHash != "" {
+				if _, err := refreshSkipped.Exec(file.Size, file.MTime, file.ContentHash, now, sourceKind, file.Path); err != nil {
+					return err
+				}
+			} else {
+				if _, err := touchSkipped.Exec(now, sourceKind, file.Path); err != nil {
+					return err
+				}
+			}
+			continue
+		}
+		id := stableID("scan", sourceKind, file.Path)
+		_, err := upsert.Exec(id, sourceKind, file.Path, file.Size, file.MTime, file.ContentHash, generatedHash, now, now, importedAt, file.Records, file.Warnings)
 		if err != nil {
 			return err
 		}
 	}
-	return nil
+	committed = true
+	return tx.Commit()
 }
 
 func upsertRecord(tx *sql.Tx, rec adapter.Record, sourcePath string, ordinal int64, raw []byte) (bool, error) {

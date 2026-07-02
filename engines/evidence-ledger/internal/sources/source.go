@@ -30,6 +30,10 @@ type Options struct {
 	// skipped without reading or hashing it. Size and mtime come from the
 	// caller's scan manifest. Nil means import everything (full scan).
 	Skip func(path string, size int64, mtime string) bool
+	// Scan decides whether a file can be skipped or can reuse a hash already
+	// computed while checking the manifest. It is used by archive-backed native
+	// imports; Skip remains for tests and callers that only need size+mtime.
+	Scan func(path string, size int64, mtime string) (ScanDecision, error)
 }
 
 type Result struct {
@@ -51,6 +55,11 @@ type FileScan struct {
 	// unchanged and did not read or hash it. ContentHash stays empty in that
 	// case so callers know not to overwrite the manifest's good hash.
 	Skipped bool `json:"skipped,omitempty"`
+}
+
+type ScanDecision struct {
+	Skip        bool
+	ContentHash string
 }
 
 type RawEvent struct {
@@ -209,16 +218,7 @@ func (s *FileScanSet) Prepare(path string, opts Options) (skip bool, err error) 
 	if sc == nil {
 		return false, nil
 	}
-	if opts.Skip != nil && opts.Skip(path, sc.Size, sc.MTime) {
-		sc.Skipped = true
-		return true, nil
-	}
-	hash, err := FileHash(path)
-	if err != nil {
-		return false, err
-	}
-	sc.ContentHash = "sha256:" + hash
-	return false, nil
+	return sc.Prepare(opts)
 }
 
 // Paths returns the candidate files in stable path order.
@@ -243,6 +243,56 @@ func (s *FileScanSet) List() []FileScan {
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Path < out[j].Path })
 	return out
+}
+
+func NewFileScan(path string) (FileScan, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return FileScan{}, err
+	}
+	return FileScan{
+		Path:  path,
+		Size:  info.Size(),
+		MTime: info.ModTime().UTC().Format(time.RFC3339Nano),
+	}, nil
+}
+
+func PrepareFileScan(path string, opts Options) (FileScan, bool, error) {
+	scan, err := NewFileScan(path)
+	if err != nil {
+		return FileScan{}, false, err
+	}
+	skip, err := scan.Prepare(opts)
+	return scan, skip, err
+}
+
+func (sc *FileScan) Prepare(opts Options) (bool, error) {
+	if opts.Scan != nil {
+		decision, err := opts.Scan(sc.Path, sc.Size, sc.MTime)
+		if err != nil {
+			return false, err
+		}
+		if decision.ContentHash != "" {
+			sc.ContentHash = decision.ContentHash
+		}
+		if decision.Skip {
+			sc.Skipped = true
+			return true, nil
+		}
+	}
+	if opts.Skip != nil && opts.Skip(sc.Path, sc.Size, sc.MTime) {
+		sc.Skipped = true
+		return true, nil
+	}
+	if sc.ContentHash != "" {
+		return false, nil
+	}
+	hash, err := FileHash(sc.Path)
+	if err != nil {
+		return false, err
+	}
+	sc.ContentHash = "sha256:" + hash
+	return false, nil
 }
 
 func FileHash(path string) (string, error) {

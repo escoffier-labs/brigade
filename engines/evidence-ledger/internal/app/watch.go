@@ -41,6 +41,8 @@ type discoveredImportRow struct {
 	DryRun           bool     `json:"dry_run,omitempty"`
 	GeneratedRecords int      `json:"generated_records"`
 	InsertedItems    int      `json:"inserted_items"`
+	FilesParsed      int      `json:"files_parsed"`
+	FilesSkipped     int      `json:"files_skipped"`
 	AlreadyKnown     bool     `json:"already_known"`
 	Warnings         []string `json:"warnings"`
 	// Failed marks a hard error (generator or import failed) as distinct from
@@ -231,11 +233,15 @@ func cmdImportDiscovered(args []string, out, errw io.Writer) int {
 	}
 	totalInserted := 0
 	totalGenerated := 0
+	totalFilesParsed := 0
+	totalFilesSkipped := 0
 	warnings := []string{}
 	failures := []string{}
 	for _, row := range rows {
 		totalInserted += row.InsertedItems
 		totalGenerated += row.GeneratedRecords
+		totalFilesParsed += row.FilesParsed
+		totalFilesSkipped += row.FilesSkipped
 		// Attribute every warning to its source so a flat list is still
 		// traceable (skip reasons were already prefixed; parse warnings were not).
 		for _, w := range row.Warnings {
@@ -252,6 +258,8 @@ func cmdImportDiscovered(args []string, out, errw io.Writer) int {
 		"dry_run":           bools["dry-run"],
 		"generated_records": totalGenerated,
 		"inserted_items":    totalInserted,
+		"files_parsed":      totalFilesParsed,
+		"files_skipped":     totalFilesSkipped,
 		"warnings":          warnings,
 		"failures":          failures,
 		"sources":           rows,
@@ -259,7 +267,7 @@ func cmdImportDiscovered(args []string, out, errw io.Writer) int {
 	if bools["json"] {
 		writeJSON(out, result)
 	} else {
-		fmt.Fprintf(out, "generated=%d imported=%d warnings=%d failures=%d\n", totalGenerated, totalInserted, len(warnings), len(failures))
+		fmt.Fprintf(out, "generated=%d imported=%d warnings=%d failures=%d files_parsed=%d files_skipped=%d\n", totalGenerated, totalInserted, len(warnings), len(failures), totalFilesParsed, totalFilesSkipped)
 		for _, f := range failures {
 			fmt.Fprintf(errw, "import failed: %s\n", f)
 		}
@@ -324,6 +332,7 @@ func importDiscoveredRoot(db *sql.DB, root discoveredRoot, values map[string]str
 			return row
 		}
 		row.GeneratedRecords = generated.Records
+		row.FilesParsed, row.FilesSkipped = fileScanCounts(generated.Files)
 		row.Warnings = append(row.Warnings, generated.Warnings...)
 		return row
 	}
@@ -341,6 +350,8 @@ func importDiscoveredRoot(db *sql.DB, root discoveredRoot, values map[string]str
 	}
 	row.GeneratedRecords = generated.Records
 	row.InsertedItems = result.Inserted
+	row.FilesParsed = result.FilesParsed
+	row.FilesSkipped = result.FilesSkipped
 	row.AlreadyKnown = result.AlreadyKnown
 	row.Warnings = append(row.Warnings, result.Warnings...)
 	return row

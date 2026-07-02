@@ -985,7 +985,8 @@ func cmdImportNative(name string, generator sources.Generator, args []string, ou
 		if err != nil {
 			return fatalf(errw, "import %s: %s", name, err)
 		}
-		writeJSON(out, map[string]any{"source_kind": name, "dry_run": true, "generated_records": generated.Records, "warnings": generated.Warnings, "files": generated.Files})
+		filesParsed, filesSkipped := fileScanCounts(generated.Files)
+		writeJSON(out, map[string]any{"source_kind": name, "dry_run": true, "generated_records": generated.Records, "warnings": generated.Warnings, "files": generated.Files, "files_parsed": filesParsed, "files_skipped": filesSkipped})
 		return 0
 	}
 	db, paths, err := openMigrated()
@@ -1005,7 +1006,7 @@ func cmdImportNative(name string, generator sources.Generator, args []string, ou
 	if bools["json"] {
 		writeJSON(out, result)
 	} else {
-		fmt.Fprintf(out, "generated=%d imported=%d warnings=%d already_known=%v source=%s\n", generated.Records, result.Inserted, len(result.Warnings), result.AlreadyKnown, result.SourceKind)
+		fmt.Fprintf(out, "generated=%d imported=%d warnings=%d already_known=%v source=%s files_parsed=%d files_skipped=%d\n", generated.Records, result.Inserted, len(result.Warnings), result.AlreadyKnown, result.SourceKind, result.FilesParsed, result.FilesSkipped)
 	}
 	return 0
 }
@@ -1015,20 +1016,10 @@ func runNativeImport(db *sql.DB, name string, generator sources.Generator, path 
 }
 
 func runNativeImportOpts(db *sql.DB, name string, generator sources.Generator, path string, opts sources.Options, recordScans bool, progress io.Writer) (ingest.AdapterResult, sources.Result, error) {
-	// Incremental skip: unchanged files (same size and mtime as the manifest)
-	// are never read or hashed. A full re-scan happens when opts.Skip is
-	// already set by the caller or the manifest is empty.
-	if opts.Skip == nil {
-		manifest, err := ingest.LoadSourceScans(db, name)
-		if err != nil {
-			return ingest.AdapterResult{}, sources.Result{}, err
-		}
-		if len(manifest) > 0 {
-			opts.Skip = func(p string, size int64, mtime string) bool {
-				prior, ok := manifest[p]
-				return ok && prior.Size == size && prior.MTime == mtime
-			}
-		}
+	var err error
+	opts, err = nativeFastPathOptions(db, name, opts)
+	if err != nil {
+		return ingest.AdapterResult{}, sources.Result{}, err
 	}
 	pr, pw := io.Pipe()
 	type genResult struct {
@@ -1063,12 +1054,65 @@ func runNativeImportOpts(db *sql.DB, name string, generator sources.Generator, p
 		return ingest.AdapterResult{}, sources.Result{}, err
 	}
 	result.Warnings = append(generated.result.Warnings, result.Warnings...)
+	result.FilesParsed, result.FilesSkipped = fileScanCounts(generated.result.Files)
 	if recordScans {
 		if err := ingest.RecordSourceScans(db, name, result.SourceHash, generated.result.Files, true); err != nil {
 			return ingest.AdapterResult{}, sources.Result{}, err
 		}
 	}
 	return result, generated.result, nil
+}
+
+func nativeFastPathOptions(db *sql.DB, name string, opts sources.Options) (sources.Options, error) {
+	if opts.Scan != nil || opts.Skip != nil || strings.TrimSpace(opts.Since) != "" || !supportsNativeFastPath(name) {
+		return opts, nil
+	}
+	manifest, err := ingest.LoadSourceScans(db, name)
+	if err != nil {
+		return sources.Options{}, err
+	}
+	if len(manifest) == 0 {
+		return opts, nil
+	}
+	opts.Scan = func(p string, size int64, mtime string) (sources.ScanDecision, error) {
+		prior, ok := manifest[p]
+		if !ok || prior.Size != size {
+			return sources.ScanDecision{}, nil
+		}
+		if prior.MTime == mtime {
+			return sources.ScanDecision{Skip: true}, nil
+		}
+		hash, err := sources.FileHash(p)
+		if err != nil {
+			return sources.ScanDecision{}, err
+		}
+		contentHash := "sha256:" + hash
+		if prior.ContentHash == contentHash {
+			return sources.ScanDecision{Skip: true, ContentHash: contentHash}, nil
+		}
+		return sources.ScanDecision{ContentHash: contentHash}, nil
+	}
+	return opts, nil
+}
+
+func supportsNativeFastPath(name string) bool {
+	switch name {
+	case "codex", "openclaw", "claude", "hermes", "opencode", "cursor":
+		return true
+	default:
+		return false
+	}
+}
+
+func fileScanCounts(files []sources.FileScan) (parsed, skipped int) {
+	for _, file := range files {
+		if file.Skipped {
+			skipped++
+		} else {
+			parsed++
+		}
+	}
+	return parsed, skipped
 }
 
 func parseLimit(value string, fallback int) (int, error) {
