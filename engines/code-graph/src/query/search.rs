@@ -19,7 +19,7 @@ pub fn search_symbols(conn: &Connection, query: &str, limit: usize) -> Result<Ve
             LIMIT ?2
         "#;
         let mut stmt = conn.prepare(sql)?;
-        let mapped = stmt.query_map(params![fts, limit as i64], search_row_from_sql)?;
+        let mapped = stmt.query_map(params![fts, sqlite_limit(limit)], search_row_from_sql)?;
         for row in mapped {
             rows.push(row?);
         }
@@ -37,7 +37,7 @@ pub fn search_symbols(conn: &Connection, query: &str, limit: usize) -> Result<Ve
             LIMIT ?2
             "#,
         )?;
-        let mapped = stmt.query_map(params![like, limit as i64], search_row_from_sql)?;
+        let mapped = stmt.query_map(params![like, sqlite_limit(limit)], search_row_from_sql)?;
         for row in mapped {
             rows.push(row?);
         }
@@ -58,6 +58,10 @@ fn search_row_from_sql(row: &rusqlite::Row<'_>) -> rusqlite::Result<SearchRow> {
         signature: row.get(7)?,
         score: if rank < 0.0 { -rank } else { rank },
     })
+}
+
+fn sqlite_limit(limit: usize) -> i64 {
+    i64::try_from(limit).unwrap_or(i64::MAX)
 }
 
 pub fn fts_query(query: &str) -> String {
@@ -85,5 +89,10 @@ mod tests {
     #[test]
     fn fts_query_quotes_terms_and_strips_punctuation() {
         assert_eq!(fts_query("handoff lint!"), "\"handoff\"* OR \"lint\"*");
+    }
+
+    #[test]
+    fn sqlite_limit_clamps_before_integer_cast() {
+        assert_eq!(sqlite_limit(usize::MAX), i64::MAX);
     }
 }

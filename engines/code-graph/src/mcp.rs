@@ -16,7 +16,7 @@ use serde::Serialize;
 use serde_json::{Value, json};
 
 use crate::model::Direction;
-use crate::query::{build_context_pack, graph_edges, search_symbols, stats};
+use crate::query::{build_context_pack, graph_edges, render_markdown, search_symbols, stats};
 use crate::store::open_read_only;
 
 const PROTOCOL_VERSION: &str = "2024-11-05";
@@ -29,8 +29,17 @@ pub fn serve(default_db: &Path, input: impl BufRead, mut output: impl Write) -> 
         if line.trim().is_empty() {
             continue;
         }
-        let Ok(req) = serde_json::from_str::<Value>(&line) else {
-            continue;
+        let req = match serde_json::from_str::<Value>(&line) {
+            Ok(req) => req,
+            Err(_) => {
+                writeln!(
+                    output,
+                    "{}",
+                    serde_json::to_string(&error(None, -32700, "parse error"))?
+                )?;
+                output.flush()?;
+                continue;
+            }
         };
         if let Some(resp) = handle_request(default_db, &req) {
             writeln!(output, "{}", serde_json::to_string(&resp)?)?;
@@ -42,8 +51,16 @@ pub fn serve(default_db: &Path, input: impl BufRead, mut output: impl Write) -> 
 
 /// Handle one JSON-RPC message. Returns `None` for notifications (no response expected).
 pub fn handle_request(default_db: &Path, req: &Value) -> Option<Value> {
+    if !req.is_object() {
+        return Some(error(None, -32600, "invalid request"));
+    }
     let id = req.get("id").cloned();
-    let method = req.get("method").and_then(|m| m.as_str()).unwrap_or("");
+    if req.get("jsonrpc").and_then(|v| v.as_str()) != Some("2.0") {
+        return Some(error(id, -32600, "invalid request"));
+    }
+    let Some(method) = req.get("method").and_then(|m| m.as_str()) else {
+        return Some(error(id, -32600, "invalid request"));
+    };
     match method {
         "initialize" => {
             let pv = req
@@ -63,16 +80,23 @@ pub fn handle_request(default_db: &Path, req: &Value) -> Option<Value> {
         "ping" => Some(ok(id, json!({}))),
         "tools/list" => Some(ok(id, json!({ "tools": tool_defs() }))),
         "tools/call" => {
-            let name = req
-                .pointer("/params/name")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            let args = req
-                .pointer("/params/arguments")
-                .cloned()
-                .unwrap_or_else(|| json!({}));
+            let params = match req.get("params") {
+                Some(params) if params.is_object() => params,
+                _ => return Some(error(id, -32602, "invalid params")),
+            };
+            let Some(name) = params.get("name").and_then(|v| v.as_str()) else {
+                return Some(error(id, -32602, "invalid params"));
+            };
+            let args = match params.get("arguments") {
+                Some(args) if args.is_object() => args.clone(),
+                None => json!({}),
+                _ => return Some(error(id, -32602, "invalid params")),
+            };
             let db = resolve_db(default_db, &args);
-            let result = open_read_only(&db).and_then(|conn| call_tool(&conn, name, &args));
+            let result = match validate_tool_args(name, &args) {
+                Ok(()) => open_read_only(&db).and_then(|conn| call_tool(&conn, name, &args)),
+                Err(err) => return Some(error(id, -32602, &err)),
+            };
             Some(match result {
                 Ok(text) => ok(
                     id,
@@ -106,33 +130,59 @@ fn call_tool(conn: &Connection, name: &str, args: &Value) -> Result<String> {
     match name {
         "search" => to_pretty(&search_symbols(
             conn,
-            &str_arg(args, "query")?,
+            &str_arg(args, "query"),
             usize_arg(args, "limit", 20),
         )?),
         "callers" => to_pretty(&graph_edges(
             conn,
-            &str_arg(args, "symbol")?,
+            &str_arg(args, "symbol"),
             Direction::Incoming,
         )?),
         "callees" => to_pretty(&graph_edges(
             conn,
-            &str_arg(args, "symbol")?,
+            &str_arg(args, "symbol"),
             Direction::Outgoing,
         )?),
         "impact" => {
-            let symbol = str_arg(args, "symbol")?;
+            let symbol = str_arg(args, "symbol");
             let mut edges = graph_edges(conn, &symbol, Direction::Incoming)?;
             edges.extend(graph_edges(conn, &symbol, Direction::Outgoing)?);
             to_pretty(&edges)
         }
-        "context" => to_pretty(&build_context_pack(
-            conn,
-            str_arg(args, "task")?,
-            usize_arg(args, "limit", 12),
-        )?),
+        "context" => {
+            let pack =
+                build_context_pack(conn, str_arg(args, "task"), usize_arg(args, "limit", 12))?;
+            match str_arg(args, "format").as_str() {
+                "" | "json" => to_pretty(&pack),
+                "markdown" => Ok(render_markdown(&pack)),
+                other => Err(anyhow!("unknown context format '{other}'")),
+            }
+        }
         "stats" => to_pretty(&stats(conn)?),
         other => Err(anyhow!("unknown tool '{other}'")),
     }
+}
+
+fn validate_tool_args(name: &str, args: &Value) -> std::result::Result<(), String> {
+    optional_string(args, "db")?;
+    optional_string(args, "repo")?;
+    match name {
+        "search" => {
+            require_string(args, "query")?;
+            require_usize(args, "limit")?;
+        }
+        "callers" | "callees" | "impact" => {
+            require_string(args, "symbol")?;
+        }
+        "context" => {
+            require_string(args, "task")?;
+            require_usize(args, "limit")?;
+            require_format(args)?;
+        }
+        "stats" => {}
+        _ => {}
+    }
+    Ok(())
 }
 
 fn tool_defs() -> Value {
@@ -177,7 +227,12 @@ fn tool_defs() -> Value {
             "inputSchema": with_location(
                 json!({
                     "task": { "type": "string", "description": "Task or feature description to gather context for." },
-                    "limit": { "type": "integer", "description": "Max entry points (default 12)." }
+                    "limit": { "type": "integer", "description": "Max entry points (default 12)." },
+                    "format": {
+                        "type": "string",
+                        "enum": ["json", "markdown"],
+                        "description": "Response format (default json)."
+                    }
                 }),
                 json!(["task"])
             )
@@ -190,17 +245,55 @@ fn to_pretty<T: Serialize>(value: &T) -> Result<String> {
     Ok(serde_json::to_string_pretty(value)?)
 }
 
-fn str_arg(args: &Value, key: &str) -> Result<String> {
+fn str_arg(args: &Value, key: &str) -> String {
     args.get(key)
         .and_then(|v| v.as_str())
         .map(|s| s.to_string())
-        .ok_or_else(|| anyhow!("missing string argument '{key}'"))
+        .unwrap_or_default()
 }
 
 fn usize_arg(args: &Value, key: &str, default: usize) -> usize {
     args.get(key)
         .and_then(|v| v.as_u64())
-        .map_or(default, |n| n as usize)
+        .and_then(|n| usize::try_from(n).ok())
+        .unwrap_or(default)
+}
+
+fn optional_string(args: &Value, key: &str) -> std::result::Result<(), String> {
+    match args.get(key) {
+        None => Ok(()),
+        Some(value) if value.as_str().is_some() => Ok(()),
+        _ => Err(format!("invalid string argument '{key}'")),
+    }
+}
+
+fn require_string(args: &Value, key: &str) -> std::result::Result<(), String> {
+    match args.get(key) {
+        Some(value) if value.as_str().is_some() => Ok(()),
+        _ => Err(format!("missing string argument '{key}'")),
+    }
+}
+
+fn require_usize(args: &Value, key: &str) -> std::result::Result<(), String> {
+    match args.get(key) {
+        Some(value) if value.as_u64().is_none() => Err(format!("invalid integer argument '{key}'")),
+        Some(value) => usize::try_from(value.as_u64().unwrap())
+            .map(|_| ())
+            .map_err(|_| format!("integer argument '{key}' is too large")),
+        None => Ok(()),
+    }
+}
+
+fn require_format(args: &Value) -> std::result::Result<(), String> {
+    match args.get("format") {
+        Some(value) if matches!(value.as_str(), Some("json" | "markdown")) => Ok(()),
+        Some(value) if value.as_str().is_some() => Err(format!(
+            "invalid context format '{}'",
+            value.as_str().unwrap()
+        )),
+        Some(_) => Err("invalid string argument 'format'".to_string()),
+        _ => Ok(()),
+    }
 }
 
 fn ok(id: Option<Value>, result: Value) -> Value {

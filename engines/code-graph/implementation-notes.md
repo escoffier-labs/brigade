@@ -2,6 +2,33 @@
 
 Running log of decisions/deviations not captured in the spec. Newest first.
 
+## Audit slices integration (2026-07-02)
+
+Integrated the stage 1 sync, read-only query, context rendering, and MCP protocol slices together.
+No git merge conflicts were present on `fix/audit-slices-sync-mcp`; the integration point was making
+the combined behavior pass the full Rust checks.
+
+Decisions:
+- Incremental sync keeps unchanged repositories cheap: it skips parsing and file row rewrites, but
+  still commits a meta-only transaction so `synced_at` reflects the latest successful sync attempt.
+- Cross-file fallback call resolution sorts candidates by `(file_path, symbol_id)` before applying
+  the existing cap, so ambiguous fallback edges are stable across filesystem traversal order.
+- Query-style CLI commands and the MCP server use read-only SQLite opens. An earlier draft used an
+  `immutable=1` URI for clean DB files to avoid sidecar creation, but immutable connections skip
+  locking entirely and these DBs are rewritten by a 15-minute background sync (and the no-op meta
+  write above means EVERY sync now writes), so a concurrent write could serve torn reads. Reverted
+  to plain `SQLITE_OPEN_READ_ONLY` everywhere; the read-only test ignores SQLite's own `-wal`/`-shm`
+  sidecars, which a read-only WAL connection may legitimately (re)create.
+- Post-review fix: MCP `db`/`repo` selector args are now type-checked (`-32602` on non-string)
+  instead of being silently ignored and falling back to the default DB.
+- Context output has one location contract across CLI markdown, CLI plain text, and MCP markdown:
+  symbols render as `file:start-end`, and edges render as `source_file:line -> target_file`.
+- MCP keeps protocol errors separate from tool execution failures: JSON parse, invalid request, and
+  invalid params return JSON-RPC errors; valid tool calls that fail at execution still return MCP
+  tool results with `isError: true`.
+- Search and context limits clamp before SQLite integer binding, avoiding lossy `usize` to `i64`
+  casts on wide platforms.
+
 ## Phase 1: module refactor + AST edges (2026-06-20)
 
 Baseline before any change (brigade smoke, `target/release/graphtrail`):

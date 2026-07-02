@@ -1,9 +1,9 @@
 //! Repository sync: walk files, extract graphs, and write them transactionally.
 //!
 //! Sync is incremental: a stat pass (size + mtime, confirmed by content hash when those differ)
-//! decides whether anything actually changed. If nothing did, sync is a no-op and skips all
-//! parsing. When something changed (or `force`), it rebuilds the present files and purges rows for
-//! files that were deleted from disk.
+//! decides whether anything actually changed. If nothing did, sync skips all parsing and only
+//! refreshes sync metadata. When something changed (or `force`), it rebuilds the present files and
+//! purges rows for files that were deleted from disk.
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -25,7 +25,7 @@ pub struct SyncSummary {
     pub symbols: usize,
     pub calls: usize,
     pub imports: usize,
-    /// True when nothing changed and the sync was a no-op (no parsing, no writes).
+    /// True when nothing changed and the sync was a no-op (no parsing, meta write only).
     pub unchanged: bool,
     /// Files removed from the index because they no longer exist on disk.
     pub deleted: usize,
@@ -89,6 +89,10 @@ pub fn sync_repo_force(conn: &Connection, root: &Path, force: bool) -> Result<Sy
 
     let changed = force || !deleted.is_empty() || has_real_change(&entries, &db_files)?;
     if !changed {
+        let tx = conn.unchecked_transaction()?;
+        crate::store::meta::write_sync_meta(&tx)?;
+        tx.commit()?;
+
         let counts = table_counts(conn)?;
         return Ok(SyncSummary {
             files: counts.0,
@@ -302,6 +306,13 @@ fn load_name_index(conn: &Connection) -> Result<HashMap<String, Vec<(String, Str
     for row in rows {
         let (name, id, file) = row?;
         map.entry(name).or_default().push((id, file));
+    }
+    for candidates in map.values_mut() {
+        candidates.sort_by(|(left_id, left_file), (right_id, right_file)| {
+            left_file
+                .cmp(right_file)
+                .then_with(|| left_id.cmp(right_id))
+        });
     }
     Ok(map)
 }

@@ -18,6 +18,12 @@ pub fn open_default(explicit: Option<PathBuf>) -> Result<Connection> {
     open_db(&db)
 }
 
+/// Open the db read-only for a query command, defaulting to `.graphtrail/graphtrail.db`.
+pub fn open_default_read_only(explicit: Option<PathBuf>) -> Result<Connection> {
+    let db = explicit.unwrap_or_else(|| PathBuf::from(".graphtrail/graphtrail.db"));
+    open_read_only(&db)
+}
+
 /// Open (creating parent dirs) a WAL-mode SQLite connection.
 pub fn open_db(path: &Path) -> Result<Connection> {
     if let Some(parent) = path.parent() {
@@ -30,7 +36,10 @@ pub fn open_db(path: &Path) -> Result<Connection> {
     Ok(conn)
 }
 
-/// Open an existing db read-only. Used by the MCP server so it can never mutate the graph.
+/// Open an existing db read-only. Used by the MCP server and query commands so they can never
+/// mutate the graph. Deliberately NOT `immutable=1`: these dbs are rewritten by a background
+/// sync, and immutable connections skip locking entirely, so a concurrent write could serve
+/// torn reads. SQLite (3.22+) reads a quiescent WAL db without creating sidecar files.
 pub fn open_read_only(path: &Path) -> Result<Connection> {
     let conn = Connection::open_with_flags(
         path,

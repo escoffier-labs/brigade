@@ -52,3 +52,66 @@ def helper():
 
     assert_eq!(target_file, "caller.py");
 }
+
+#[test]
+fn cross_file_fallback_edges_are_capped_in_stable_order() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+
+    fs::write(
+        root.join("caller.py"),
+        r#"
+def run():
+    return target()
+"#,
+    )
+    .unwrap();
+
+    for i in (0..10).rev() {
+        fs::write(
+            root.join(format!("target_{i:02}.py")),
+            r#"
+def target():
+    return 1
+"#,
+        )
+        .unwrap();
+    }
+
+    let db = root.join("graphtrail.db");
+    let conn = open_db(&db).unwrap();
+    init_schema(&conn).unwrap();
+    sync_repo(&conn, root).unwrap();
+
+    let mut stmt = conn
+        .prepare(
+            r#"
+            SELECT dst.file_path
+            FROM edges e
+            JOIN symbols src ON src.id = e.source
+            JOIN symbols dst ON dst.id = e.target
+            WHERE src.name = 'run' AND dst.name = 'target'
+            ORDER BY dst.file_path
+            "#,
+        )
+        .unwrap();
+    let target_files: Vec<String> = stmt
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .map(|row| row.unwrap())
+        .collect();
+
+    assert_eq!(
+        target_files,
+        vec![
+            "target_00.py",
+            "target_01.py",
+            "target_02.py",
+            "target_03.py",
+            "target_04.py",
+            "target_05.py",
+            "target_06.py",
+            "target_07.py",
+        ]
+    );
+}
