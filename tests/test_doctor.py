@@ -536,6 +536,52 @@ def test_doctor_checks_codex_inbox_when_selected(tmp_target: Path, capsys):
     assert ".codex/memory-handoffs" in out
 
 
+def test_doctor_reports_default_wired_skills_for_selected_harnesses(tmp_target: Path, capsys):
+    sel = Selection(
+        depth="repo",
+        harnesses=["claude", "codex"],
+        owner="claude",
+        includes=[],
+    )
+    install_selection(tmp_target, sel)
+    capsys.readouterr()
+
+    rc = doctor_mod.run(tmp_target, json_output=True)
+    payload = json.loads(capsys.readouterr().out)
+    checks = {item["name"]: item for item in payload["checks"]}
+
+    assert rc == 0
+    assert checks["skills: claude default wired"]["status"] == "OK"
+    assert "brigade-work" in checks["skills: claude default wired"]["detail"]
+    assert checks["skills: codex default wired"]["status"] == "OK"
+    assert ".codex/skills" in checks["skills: codex default wired"]["detail"]
+
+
+def test_doctor_warns_when_default_wired_skill_is_missing(tmp_target: Path, capsys):
+    sel = Selection(
+        depth="repo",
+        harnesses=["codex"],
+        owner="codex",
+        includes=[],
+    )
+    install_selection(tmp_target, sel)
+    (tmp_target / ".codex" / "skills" / "ultra-work-scout" / "SKILL.md").unlink()
+    capsys.readouterr()
+
+    rc = doctor_mod.run(tmp_target, json_output=True)
+    payload = json.loads(capsys.readouterr().out)
+    checks = {item["name"]: item for item in payload["checks"]}
+    skill_check = checks["skills: codex default wired: ultra-work-scout"]
+
+    assert rc == 0
+    assert skill_check["status"] == "WARN"
+    assert "harness=codex" in skill_check["detail"]
+    assert "skill=ultra-work-scout" in skill_check["detail"]
+    assert ".codex/skills/ultra-work-scout/SKILL.md" in skill_check["detail"]
+    assert f"brigade skills install ultra-work-scout --workspace {tmp_target} --target codex" in skill_check["detail"]
+    assert "brigade-work" not in skill_check["detail"]
+
+
 def test_doctor_warns_when_pending_handoff_is_not_watched(tmp_target: Path, capsys):
     sel = Selection(
         depth="repo",

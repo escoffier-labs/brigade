@@ -1,4 +1,5 @@
 import pytest
+from brigade import install as install_mod
 from brigade.install import resolve_manifests, install_selection
 from brigade.selection import Selection
 
@@ -191,6 +192,18 @@ def test_install_selection_reinstall_keeps_existing_and_rewires(tmp_path):
     # built-in skills still wired
     assert (tmp_path / ".claude" / "skills" / "brigade-work" / "SKILL.md").is_file()
     assert (tmp_path / ".claude" / "skills" / "ultra-work-scout" / "SKILL.md").is_file()
+
+
+def test_install_warns_when_default_wired_skill_template_is_missing(tmp_path, monkeypatch, capsys):
+    sel = Selection(depth="repo", harnesses=["claude"], owner="claude", includes=[])
+    monkeypatch.setattr(install_mod, "DEFAULT_WIRED_SKILLS", ("missing-default-skill",))
+
+    code = install_selection(tmp_path, sel)
+
+    captured = capsys.readouterr()
+    assert code == 0
+    assert "warning: built-in skill template missing" in captured.err
+    assert "missing-default-skill" in captured.err
 
 
 def test_install_renders_selected_writer_inboxes_in_agent_docs(tmp_path):

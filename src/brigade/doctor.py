@@ -50,6 +50,7 @@ def core_station_checks(ctx: DoctorContext) -> List[CheckResult]:
     checks: List[CheckResult] = []
     checks.extend(_check_workspace_files(ctx.target))
     checks.extend(_check_agents_quality(ctx.target))
+    checks.extend(_check_default_wired_skills(ctx.target, ctx.harnesses))
     if "openclaw" in ctx.harnesses:
         checks.extend(_check_openclaw())
     if "hermes" in ctx.harnesses:
@@ -294,6 +295,55 @@ def _check_agents_quality(target: Path) -> List[CheckResult]:
             f"missing {', '.join(missing)}; agents work better with explicit done criteria and a handoff footer",
         )
     ]
+
+
+def _check_default_wired_skills(target: Path, selected_harnesses: List[str]) -> List[CheckResult]:
+    from .install import DEFAULT_WIRED_SKILLS
+    from .skills_cmd import HARNESS_ADAPTERS
+
+    results: List[CheckResult] = []
+    for harness in selected_harnesses:
+        adapter = HARNESS_ADAPTERS.get(harness)
+        if not adapter:
+            continue
+        present: list[str] = []
+        missing: list[tuple[str, str]] = []
+        for skill_id in DEFAULT_WIRED_SKILLS:
+            rel_dir = _repo_relative_skill_install_dir(adapter, skill_id)
+            if rel_dir is None:
+                continue
+            rel_file = rel_dir / "SKILL.md"
+            if (target / rel_file).is_file():
+                present.append(str(rel_dir))
+            else:
+                missing.append((skill_id, str(rel_file)))
+        if not present and not missing:
+            continue
+        name = f"skills: {harness} default wired"
+        if missing:
+            for skill_id, rel_file in missing:
+                results.append(
+                    (
+                        WARN,
+                        f"{name}: {skill_id}",
+                        f"harness={harness} skill={skill_id} missing {rel_file}; "
+                        f"fix: brigade skills install {skill_id} --workspace {target} --target {harness}",
+                    )
+                )
+        else:
+            results.append((OK, name, f"{len(present)} skill(s): {', '.join(present)}"))
+    return results
+
+
+def _repo_relative_skill_install_dir(adapter: dict, skill_id: str) -> Path | None:
+    template = str(adapter.get("install_path", ""))
+    if not template:
+        return None
+    rel = template.format(skill_id=skill_id)
+    path = Path(rel)
+    if path.is_absolute() or not rel.startswith("."):
+        return None
+    return path
 
 
 def _check_bootstrap_budgets(target: Path) -> List[CheckResult]:

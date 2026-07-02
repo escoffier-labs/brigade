@@ -364,6 +364,7 @@ def install_selection(
         for skill_id in DEFAULT_WIRED_SKILLS:
             skill_src = root / "skills" / skill_id / "SKILL.md"
             if not skill_src.is_file():
+                print(f"warning: built-in skill template missing: {skill_src}", file=sys.stderr)
                 continue
             for h in selection.harnesses:
                 adapter = HARNESS_ADAPTERS.get(h)
