@@ -36,6 +36,13 @@ class Manifest:
     locations: tuple[Location, ...]
 
 
+@dataclass(frozen=True)
+class LocationResult:
+    path: str
+    status: str  # "ok" | "mismatch" | "missing"
+    found: tuple[str, ...]
+
+
 def _as_str(value: object, field: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"{field} must be a non-empty string")
@@ -101,3 +108,72 @@ def load_manifest(target: Path) -> Manifest:
         raise ValueError("at least one [[location]] is required")
     locations = tuple(_parse_location(item, i) for i, item in enumerate(raw))
     return Manifest(source=Source(file, key, regex), locations=locations)
+
+
+def resolve_source(manifest: Manifest, target: Path) -> str:
+    src_path = target / manifest.source.file
+    if not src_path.is_file():
+        raise ValueError(f"source file not found: {manifest.source.file}")
+    text = src_path.read_text()
+    if manifest.source.regex is not None:
+        match = re.search(manifest.source.regex, text)
+        if not match:
+            raise ValueError(f"source regex found no version in {manifest.source.file}")
+        return match.group(1)
+    data = toml_compat.loads(text) if src_path.suffix == ".toml" else json.loads(text)
+    value: object = data
+    for part in manifest.source.key.split("."):
+        if not isinstance(value, dict) or part not in value:
+            raise ValueError(f"source key `{manifest.source.key}` not found in {manifest.source.file}")
+        value = value[part]
+    if not isinstance(value, str):
+        raise ValueError(f"source key `{manifest.source.key}` is not a string")
+    return value
+
+
+def _resolve_files(location: Location, target: Path) -> list[Path]:
+    if location.path is not None:
+        return [target / location.path]
+    return sorted(target.glob(location.glob))
+
+
+def scan(manifest: Manifest, target: Path, expected: str) -> list[LocationResult]:
+    results: list[LocationResult] = []
+    for location in manifest.locations:
+        for file in _resolve_files(location, target):
+            rel = file.relative_to(target).as_posix()
+            if not file.is_file():
+                if location.path is not None:
+                    results.append(LocationResult(rel, "missing", ()))
+                continue
+            text = file.read_text()
+            if location.guard is not None and location.guard not in text:
+                continue
+            found = tuple(re.findall(location.pattern, text))
+            if not found:
+                if location.required:
+                    results.append(LocationResult(rel, "missing", ()))
+                continue
+            bad = any(v != expected for v in found)
+            results.append(LocationResult(rel, "mismatch" if bad else "ok", found))
+    return results
+
+
+def _rewrite(text: str, pattern: str, expected: str) -> str:
+    return re.sub(pattern, lambda m: m.group(0).replace(m.group(1), expected), text)
+
+
+def apply(manifest: Manifest, target: Path, expected: str) -> list[str]:
+    changed: list[str] = []
+    for location in manifest.locations:
+        for file in _resolve_files(location, target):
+            if not file.is_file():
+                continue
+            text = file.read_text()
+            if location.guard is not None and location.guard not in text:
+                continue
+            new_text = _rewrite(text, location.pattern, expected)
+            if new_text != text:
+                file.write_text(new_text)
+                changed.append(file.relative_to(target).as_posix())
+    return changed

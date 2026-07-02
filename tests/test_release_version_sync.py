@@ -69,3 +69,106 @@ def test_load_manifest_invalid(tmp_path, body, needle):
     with pytest.raises(ValueError) as exc:
         vs.load_manifest(tmp_path)
     assert needle in str(exc.value)
+
+
+FULL_MANIFEST = """
+[source]
+file = "pyproject.toml"
+key = "project.version"
+
+[[location]]
+path = "src/pkg/__init__.py"
+pattern = '__version__ = "([^"]+)"'
+
+[[location]]
+glob = "src/pkg/templates/**/*.json"
+guard = '"_v"'
+pattern = '"_v"\\s*:\\s*"([^"]+)"'
+
+[[location]]
+path = "docs/quickstart.cast"
+pattern = 'pkg (\\d+\\.\\d+\\.\\d+)'
+
+[[location]]
+path = "docs/quickstart.svg"
+pattern = '>pkg</text><text[^>]*>(\\d+\\.\\d+\\.\\d+)</text>'
+"""
+
+
+def _repo(tmp_path, version="0.17.0", cast_version="0.17.0", svg_version="0.17.0"):
+    (tmp_path / "pyproject.toml").write_text(f'[project]\nname = "pkg"\nversion = "{version}"\n')
+    (tmp_path / "src" / "pkg").mkdir(parents=True)
+    (tmp_path / "src" / "pkg" / "__init__.py").write_text(f'__version__ = "{version}"\n')
+    tpl = tmp_path / "src" / "pkg" / "templates" / "a"
+    tpl.mkdir(parents=True)
+    (tpl / "with.json").write_text(f'{{"_v": "{version}"}}\n')
+    (tpl / "without.json").write_text('{"other": "x"}\n')
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "docs" / "quickstart.cast").write_text(f'[2.0, "o", "pkg {cast_version}\\r\\n"]\n')
+    (tmp_path / "docs" / "quickstart.svg").write_text(f'<text>pkg</text><text class="g">{svg_version}</text>')
+    _manifest(tmp_path, FULL_MANIFEST)
+    return tmp_path
+
+
+def test_resolve_source_key(tmp_path):
+    _repo(tmp_path)
+    m = vs.load_manifest(tmp_path)
+    assert vs.resolve_source(m, tmp_path) == "0.17.0"
+
+
+def test_resolve_source_regex(tmp_path):
+    (tmp_path / "VERSION").write_text("v = 1.2.3\n")
+    _manifest(
+        tmp_path,
+        "[source]\nfile='VERSION'\nregex='v = (\\S+)'\n[[location]]\npath='VERSION'\npattern='v = (\\S+)'\n",
+    )
+    m = vs.load_manifest(tmp_path)
+    assert vs.resolve_source(m, tmp_path) == "1.2.3"
+
+
+def test_scan_all_ok(tmp_path):
+    _repo(tmp_path)
+    m = vs.load_manifest(tmp_path)
+    results = vs.scan(m, tmp_path, "0.17.0")
+    assert all(r.status == "ok" for r in results)
+    # without.json (no guard) is skipped, not reported
+    assert not any("without.json" in r.path for r in results)
+
+
+def test_scan_detects_drift(tmp_path):
+    _repo(tmp_path, cast_version="0.13.0")
+    m = vs.load_manifest(tmp_path)
+    results = vs.scan(m, tmp_path, "0.17.0")
+    bad = [r for r in results if r.status == "mismatch"]
+    assert [r.path for r in bad] == ["docs/quickstart.cast"]
+    assert bad[0].found == ("0.13.0",)
+
+
+def test_scan_missing_required_token(tmp_path):
+    _repo(tmp_path)
+    (tmp_path / "docs" / "quickstart.cast").write_text('[2.0, "o", "no version here\\r\\n"]\n')
+    m = vs.load_manifest(tmp_path)
+    results = vs.scan(m, tmp_path, "0.17.0")
+    assert any(r.path == "docs/quickstart.cast" and r.status == "missing" for r in results)
+
+
+def test_apply_fixes_only_drifted(tmp_path):
+    _repo(tmp_path, cast_version="0.13.0")
+    init_before = (tmp_path / "src" / "pkg" / "__init__.py").read_text()
+    m = vs.load_manifest(tmp_path)
+    changed = vs.apply(m, tmp_path, "0.17.0")
+    assert changed == ["docs/quickstart.cast"]
+    # untouched file is byte-identical
+    assert (tmp_path / "src" / "pkg" / "__init__.py").read_text() == init_before
+    # drifted file now matches and surrounding bytes preserved
+    assert (tmp_path / "docs" / "quickstart.cast").read_text() == '[2.0, "o", "pkg 0.17.0\\r\\n"]\n'
+    assert all(r.status == "ok" for r in vs.scan(m, tmp_path, "0.17.0"))
+
+
+def test_recording_svg_roundtrip(tmp_path):
+    # The .svg glyph-adjacent pattern must round-trip through scan + apply.
+    _repo(tmp_path, svg_version="0.9.9")
+    m = vs.load_manifest(tmp_path)
+    assert any(r.path == "docs/quickstart.svg" and r.status == "mismatch" for r in vs.scan(m, tmp_path, "0.17.0"))
+    assert "docs/quickstart.svg" in vs.apply(m, tmp_path, "0.17.0")
+    assert all(r.status == "ok" for r in vs.scan(m, tmp_path, "0.17.0"))
