@@ -1279,6 +1279,19 @@ def test_operator_quickstart_dry_run_does_not_write(tmp_path, capsys):
     assert not (tmp_path / ".codex").exists()
 
 
+def test_operator_quickstart_dry_run_prints_planned_files(tmp_path, capsys):
+    # The README promises a file-by-file plan; step names alone are not one
+    # (audit 2026-07-02, backlog item 4).
+    assert cli.main(["operator", "quickstart", "--target", str(tmp_path), "--harnesses", "codex", "--dry-run"]) == 0
+    out = capsys.readouterr().out
+    assert str(tmp_path / "AGENTS.md") in out
+    assert str(tmp_path / "SAFETY_RULES.md") in out
+    assert str(tmp_path / ".codex/memory-handoffs/TEMPLATE.md") in out
+    assert str(tmp_path / ".brigade/mcp.json") in out
+    # operator-init planned artifacts are listed too
+    assert ".brigade/config.json" in out or "handoff-sources" in out
+
+
 def test_operator_sync_tools_projects_tracked_sources(tmp_path, capsys):
     tools_dir = tmp_path / "tools"
     tools_dir.mkdir()
