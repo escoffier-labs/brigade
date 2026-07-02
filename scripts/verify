@@ -8,23 +8,7 @@ cd "$(dirname "$0")/.."
 PY=${PY:-.venv/bin}
 "$PY/ruff" check .
 "$PY/ruff" format --check .
-"$PY/python" - <<'EOF'
-import json, pathlib, re, sys, tomllib
-
-expected = tomllib.loads(pathlib.Path("pyproject.toml").read_text())["project"]["version"]
-versions = {
-    "src/brigade/__init__.py": re.search(
-        r'__version__ = "([^"]+)"', pathlib.Path("src/brigade/__init__.py").read_text()
-    ).group(1),
-}
-for path in sorted(pathlib.Path("src/brigade/templates").rglob("*.json")):
-    fields = json.loads(path.read_text())
-    if "_brigade_version" in fields:
-        versions[str(path)] = fields["_brigade_version"]
-mismatched = {p: v for p, v in versions.items() if v != expected}
-print(f"version={expected} checked={len(versions) + 1} locations")
-for p, v in mismatched.items():
-    print(f"version sync: {p} declares {v}, pyproject.toml says {expected}", file=sys.stderr)
-sys.exit(1 if mismatched else 0)
-EOF
+# Version sync covers __init__.py, template JSONs, and the recorded demo assets.
+# Run `python scripts/version_sync.py --write` to fix drift in one shot.
+"$PY/python" scripts/version_sync.py --check
 "$PY/pytest" -q
