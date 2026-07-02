@@ -165,6 +165,7 @@ def dispatch(args) -> int:
 
     worktree_cwd = None
     effective_cwd = run_cwd
+    keep_worktree = False
     try:
         with runguard.run_lock(run_cwd):
             if args.worktree:
@@ -185,7 +186,17 @@ def dispatch(args) -> int:
             )
             if args.worktree and output_dir is not None:
                 summary = runguard.collect_changes_patch(effective_cwd, output_dir / "changes.patch")
-                if summary.changed:
+                if summary.changed and not runguard.verify_changes_patch(effective_cwd, summary.path):
+                    # A corrupt patch must never be the run's silent primary
+                    # deliverable; keep the worktree as the recoverable copy.
+                    keep_worktree = True
+                    print(
+                        f"error: changes.patch failed validation ({summary.path}); "
+                        f"worktree kept for recovery: {effective_cwd}",
+                        file=sys.stderr,
+                    )
+                    rc = max(rc, 2)
+                elif summary.changed:
                     print(
                         f"changes: {summary.path} ({summary.tracked_count + summary.untracked_count} file(s))",
                         file=sys.stderr,
@@ -196,7 +207,7 @@ def dispatch(args) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 2
     finally:
-        if worktree_cwd is not None:
+        if worktree_cwd is not None and not keep_worktree:
             runguard.remove_worktree(run_cwd, worktree_cwd)
     if output_dir is not None:
         print(f"artifacts: {output_dir}", file=sys.stderr)

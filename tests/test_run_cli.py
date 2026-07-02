@@ -6,6 +6,7 @@ import pytest
 from brigade import aboyeur
 from brigade import cli
 from brigade import proc
+from brigade import runguard
 from brigade import runs_cmd
 
 
@@ -628,6 +629,29 @@ def test_run_cli_worktree_passes_detached_cwd_and_writes_changes_patch(tmp_path,
     assert "created.txt" in patch
     assert "+changed in worktree" in patch
     assert "+created" in patch
+
+
+def test_run_cli_worktree_keeps_checkout_when_patch_invalid(tmp_path, monkeypatch, capsys):
+    repo = _git_repo_with_roster(tmp_path)
+    output_dir = tmp_path / "run"
+
+    def fake_run(task, loaded_roster, **kwargs):
+        cwd = kwargs["cwd"]
+        (cwd / "tracked.txt").write_text("changed in worktree\n")
+        return 0
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
+    monkeypatch.setattr(aboyeur, "run", fake_run)
+    monkeypatch.setattr(runguard, "verify_changes_patch", lambda cwd, patch_path: False)
+
+    rc = cli.main(["run", "x", "--cwd", str(repo), "--output-dir", str(output_dir), "--worktree"])
+
+    err = capsys.readouterr().err
+    checkout = tmp_path / "home" / ".cache" / "brigade" / "worktrees" / f"{repo.name}-{output_dir.name}"
+    assert rc == 2
+    assert "changes.patch failed validation" in err
+    assert str(checkout) in err
+    assert checkout.exists()
 
 
 def test_run_cli_rejects_worktree_with_no_artifacts(tmp_path, capsys):

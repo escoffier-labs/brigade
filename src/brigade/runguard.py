@@ -182,11 +182,31 @@ def collect_changes_patch(cwd: Path, patch_path: Path) -> PatchSummary:
     untracked = _untracked_files(cwd)
     pieces = [tracked_patch] if tracked_patch else []
     pieces.extend(_untracked_diff(cwd, path) for path in untracked)
-    content = "\n".join(piece.rstrip("\n") for piece in pieces if piece).strip()
-    patch_path.write_text((content + "\n") if content else "")
+    # Diff bytes are newline-sensitive: a hunk whose last line is a blank
+    # context line ends in " \n", and trimming it corrupts the patch
+    # (issue #124). Keep each piece verbatim, only guaranteeing the single
+    # trailing newline git already emits.
+    content = "".join(piece if piece.endswith("\n") else piece + "\n" for piece in pieces if piece)
+    patch_path.write_text(content)
     return PatchSummary(
         path=patch_path,
         changed=bool(content),
         tracked_count=tracked_count,
         untracked_count=len(untracked),
     )
+
+
+def verify_changes_patch(cwd: Path, patch_path: Path) -> bool:
+    """Check the written patch is one git can actually apply.
+
+    The worktree still holds the changes the patch describes, so a valid
+    patch must reverse-apply cleanly against it. An empty patch is valid.
+    """
+    patch_path = patch_path.expanduser().resolve()
+    try:
+        if patch_path.stat().st_size == 0:
+            return True
+    except FileNotFoundError:
+        return False
+    result = proc.run(["git", "apply", "--check", "--reverse", str(patch_path)], cwd=cwd)
+    return result.code == 0
