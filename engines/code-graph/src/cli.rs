@@ -308,10 +308,11 @@ fn render_context(pack: &ContextPack) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::store::SCHEMA_VERSION;
 
     fn sample_pack() -> ContextPack {
         ContextPack {
-            schema_version: 1,
+            schema_version: SCHEMA_VERSION,
             task: "wire context".to_string(),
             entry_points: vec![SearchRow {
                 id: "sym-run".to_string(),

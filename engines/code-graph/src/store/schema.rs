@@ -4,7 +4,7 @@ use anyhow::Result;
 use rusqlite::Connection;
 
 /// Bumped when the on-disk schema changes; surfaced in JSON packs from Phase 2 on.
-pub const SCHEMA_VERSION: u32 = 1;
+pub const SCHEMA_VERSION: u32 = 2;
 
 pub fn init_schema(conn: &Connection) -> Result<()> {
     conn.execute_batch(
@@ -46,6 +46,9 @@ pub fn init_schema(conn: &Connection) -> Result<()> {
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             file_path TEXT NOT NULL,
             module TEXT NOT NULL,
+            local_name TEXT,
+            imported_name TEXT,
+            alias TEXT,
             line INTEGER NOT NULL
         );
 
@@ -68,5 +71,19 @@ pub fn init_schema(conn: &Connection) -> Result<()> {
         CREATE INDEX IF NOT EXISTS idx_edges_target ON edges(target);
         "#,
     )?;
+    ensure_import_columns(conn)?;
+    Ok(())
+}
+
+fn ensure_import_columns(conn: &Connection) -> Result<()> {
+    let mut stmt = conn.prepare("PRAGMA table_info(imports)")?;
+    let columns = stmt
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    for column in ["local_name", "imported_name", "alias"] {
+        if !columns.iter().any(|existing| existing == column) {
+            conn.execute(&format!("ALTER TABLE imports ADD COLUMN {column} TEXT"), [])?;
+        }
+    }
     Ok(())
 }

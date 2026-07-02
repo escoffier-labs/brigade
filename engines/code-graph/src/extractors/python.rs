@@ -4,7 +4,7 @@ use anyhow::Result;
 use tree_sitter::Node as TsNode;
 
 use crate::extractors::common::{LangSpec, extract_with, node_text};
-use crate::model::FileGraph;
+use crate::model::{CallTarget, FileGraph, Import};
 
 /// Ubiquitous builtins that would only ever produce noise edges; AST already excludes keywords.
 const PY_SKIP: &[&str] = &[
@@ -36,30 +36,75 @@ impl LangSpec for PythonSpec {
         }
     }
 
-    fn collect_import(&self, node: TsNode<'_>, source: &[u8], out: &mut Vec<(String, usize)>) {
+    fn collect_import(&self, node: TsNode<'_>, source: &[u8], out: &mut Vec<Import>) {
         let line = node.start_position().row + 1;
         match node.kind() {
             "import_statement" => {
                 let mut cursor = node.walk();
                 for child in node.named_children(&mut cursor) {
-                    let module = match child.kind() {
-                        "dotted_name" => node_text(child, source),
-                        "aliased_import" => child
-                            .child_by_field_name("name")
-                            .map(|name| node_text(name, source))
-                            .unwrap_or_default(),
+                    let (module, alias) = match child.kind() {
+                        "dotted_name" => (node_text(child, source), None),
+                        "aliased_import" => {
+                            let module = child
+                                .child_by_field_name("name")
+                                .map(|name| node_text(name, source))
+                                .unwrap_or_default();
+                            let alias = child
+                                .child_by_field_name("alias")
+                                .map(|alias| node_text(alias, source));
+                            (module, alias)
+                        }
                         _ => continue,
                     };
                     if !module.is_empty() {
-                        out.push((module, line));
+                        let local_name = alias
+                            .clone()
+                            .or_else(|| module.split('.').next().map(str::to_string));
+                        out.push(Import {
+                            module,
+                            local_name,
+                            imported_name: None,
+                            alias,
+                            line,
+                        });
                     }
                 }
             }
             "import_from_statement" => {
                 if let Some(module) = node.child_by_field_name("module_name") {
-                    let text = node_text(module, source);
-                    if !text.is_empty() {
-                        out.push((text, line));
+                    let module_text = node_text(module, source);
+                    if module_text.is_empty() {
+                        return;
+                    }
+                    let mut cursor = node.walk();
+                    for child in node.named_children(&mut cursor) {
+                        if child == module {
+                            continue;
+                        }
+                        let (imported_name, alias) = match child.kind() {
+                            "dotted_name" | "identifier" => (node_text(child, source), None),
+                            "aliased_import" => {
+                                let imported = child
+                                    .child_by_field_name("name")
+                                    .map(|name| node_text(name, source))
+                                    .unwrap_or_default();
+                                let alias = child
+                                    .child_by_field_name("alias")
+                                    .map(|alias| node_text(alias, source));
+                                (imported, alias)
+                            }
+                            _ => continue,
+                        };
+                        if imported_name.is_empty() {
+                            continue;
+                        }
+                        out.push(Import {
+                            module: module_text.clone(),
+                            local_name: alias.clone().or_else(|| Some(imported_name.clone())),
+                            imported_name: Some(imported_name),
+                            alias,
+                            line,
+                        });
                     }
                 }
             }
@@ -67,20 +112,24 @@ impl LangSpec for PythonSpec {
         }
     }
 
-    fn call_target(&self, node: TsNode<'_>, source: &[u8]) -> Option<String> {
+    fn call_target(&self, node: TsNode<'_>, source: &[u8]) -> Option<CallTarget> {
         if node.kind() != "call" {
             return None;
         }
         let func = node.child_by_field_name("function")?;
-        let name = match func.kind() {
-            "identifier" => node_text(func, source),
-            "attribute" => node_text(func.child_by_field_name("attribute")?, source),
+        let target = match func.kind() {
+            "identifier" => CallTarget::bare(node_text(func, source)),
+            "attribute" => CallTarget::member(
+                node_text(func.child_by_field_name("attribute")?, source),
+                func.child_by_field_name("object")
+                    .map(|object| node_text(object, source)),
+            ),
             _ => return None,
         };
-        if name.is_empty() || PY_SKIP.contains(&name.as_str()) {
+        if target.name.is_empty() || PY_SKIP.contains(&target.name.as_str()) {
             return None;
         }
-        Some(name)
+        Some(target)
     }
 }
 
@@ -120,7 +169,7 @@ def helper():
         assert!(names.contains(&"Runner"));
         assert!(names.contains(&"start"));
         assert!(names.contains(&"helper"));
-        assert_eq!(g.imports[0].0, "os");
+        assert_eq!(g.imports[0].module, "os");
         assert!(g.calls.iter().any(|c| c.target_name == "helper"));
     }
 
@@ -133,10 +182,43 @@ import os
 import numpy as np
 "#,
         );
-        let modules: Vec<&str> = g.imports.iter().map(|(m, _)| m.as_str()).collect();
+        let modules: Vec<&str> = g
+            .imports
+            .iter()
+            .map(|import| import.module.as_str())
+            .collect();
         assert!(modules.contains(&"a.b"));
         assert!(modules.contains(&"os"));
         assert!(modules.contains(&"numpy"));
+    }
+
+    #[test]
+    fn python_preserves_import_aliases_and_attribute_qualifiers() {
+        let g = graph(
+            r#"
+from services.email import send as send_email
+import json as js
+
+def run():
+    send_email()
+    js.dumps({})
+"#,
+        );
+        let send_import = g
+            .imports
+            .iter()
+            .find(|import| import.local_name.as_deref() == Some("send_email"))
+            .expect("aliased from import");
+        assert_eq!(send_import.module, "services.email");
+        assert_eq!(send_import.imported_name.as_deref(), Some("send"));
+        assert_eq!(send_import.alias.as_deref(), Some("send_email"));
+
+        let dumps = g
+            .calls
+            .iter()
+            .find(|call| call.target_name == "dumps")
+            .expect("qualified attribute call");
+        assert_eq!(dumps.qualifier.as_deref(), Some("js"));
     }
 
     #[test]

@@ -5,16 +5,20 @@ use anyhow::{Result, anyhow};
 use sha2::{Digest, Sha256};
 use tree_sitter::{Language, Node as TsNode, Parser as TsParser};
 
-use crate::model::{FileGraph, PendingCall, Symbol};
+use crate::model::{CallTarget, FileGraph, Import, PendingCall, Symbol};
 
 /// Per-language plugin describing how to recognize symbols, imports, and calls in an AST.
 pub trait LangSpec {
     /// Return `(kind, name_node)` when `node` defines a symbol (class/function/method).
     fn symbol_candidate<'t>(&self, node: TsNode<'t>) -> Option<(&'static str, TsNode<'t>)>;
+    /// Override the symbol container when a language encodes it outside normal lexical nesting.
+    fn symbol_container(&self, _node: TsNode<'_>, _source: &[u8]) -> Option<String> {
+        None
+    }
     /// Append any module imports declared by `node` to `out`.
-    fn collect_import(&self, node: TsNode<'_>, source: &[u8], out: &mut Vec<(String, usize)>);
+    fn collect_import(&self, node: TsNode<'_>, source: &[u8], out: &mut Vec<Import>);
     /// Resolve the callee name if `node` is a call expression, else `None` (builtins filtered here).
-    fn call_target(&self, node: TsNode<'_>, source: &[u8]) -> Option<String>;
+    fn call_target(&self, node: TsNode<'_>, source: &[u8]) -> Option<CallTarget>;
 }
 
 struct Frame {
@@ -85,7 +89,7 @@ fn visit<L: LangSpec>(
     node: TsNode<'_>,
     stack: &mut Vec<Frame>,
     symbols: &mut Vec<Symbol>,
-    imports: &mut Vec<(String, usize)>,
+    imports: &mut Vec<Import>,
     calls: &mut Vec<PendingCall>,
 ) {
     spec.collect_import(node, ctx.source, imports);
@@ -95,7 +99,9 @@ fn visit<L: LangSpec>(
         if let Some(frame) = stack.last() {
             calls.push(PendingCall {
                 source_id: frame.symbol_id.clone(),
-                target_name: target,
+                target_name: target.name,
+                qualifier: target.qualifier,
+                kind: target.kind,
                 line: node.start_position().row + 1,
                 source_file: ctx.path.to_string(),
             });
@@ -113,7 +119,9 @@ fn visit<L: LangSpec>(
                 .map_or("", |line| *line)
                 .trim()
                 .to_string();
-            let container = stack.last().map(|frame| frame.qualified_name.clone());
+            let container = spec
+                .symbol_container(node, ctx.source)
+                .or_else(|| stack.last().map(|frame| frame.qualified_name.clone()));
             let qualified_name = container
                 .as_ref()
                 .map_or_else(|| name.clone(), |parent| format!("{parent}.{name}"));
@@ -150,7 +158,7 @@ fn visit_children<L: LangSpec>(
     node: TsNode<'_>,
     stack: &mut Vec<Frame>,
     symbols: &mut Vec<Symbol>,
-    imports: &mut Vec<(String, usize)>,
+    imports: &mut Vec<Import>,
     calls: &mut Vec<PendingCall>,
 ) {
     let mut cursor = node.walk();

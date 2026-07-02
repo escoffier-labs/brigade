@@ -16,10 +16,61 @@ pub struct Symbol {
     pub content_hash: String,
 }
 
+#[derive(Debug, Clone)]
+pub struct Import {
+    pub module: String,
+    pub local_name: Option<String>,
+    pub imported_name: Option<String>,
+    pub alias: Option<String>,
+    pub line: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CallKind {
+    Bare,
+    Member,
+    Scoped,
+}
+
+#[derive(Debug)]
+pub struct CallTarget {
+    pub name: String,
+    pub qualifier: Option<String>,
+    pub kind: CallKind,
+}
+
+impl CallTarget {
+    pub fn bare(name: String) -> Self {
+        Self {
+            name,
+            qualifier: None,
+            kind: CallKind::Bare,
+        }
+    }
+
+    pub fn member(name: String, qualifier: Option<String>) -> Self {
+        Self {
+            name,
+            qualifier,
+            kind: CallKind::Member,
+        }
+    }
+
+    pub fn scoped(name: String, qualifier: Option<String>) -> Self {
+        Self {
+            name,
+            qualifier,
+            kind: CallKind::Scoped,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct PendingCall {
     pub source_id: String,
     pub target_name: String,
+    pub qualifier: Option<String>,
+    pub kind: CallKind,
     pub line: usize,
     /// File of the calling symbol; used for same-file-first edge resolution.
     pub source_file: String,
@@ -33,7 +84,7 @@ pub struct FileGraph {
     pub size: u64,
     pub modified_at: i64,
     pub symbols: Vec<Symbol>,
-    pub imports: Vec<(String, usize)>,
+    pub imports: Vec<Import>,
     pub calls: Vec<PendingCall>,
 }
 

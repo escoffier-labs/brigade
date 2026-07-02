@@ -2,6 +2,29 @@
 
 Running log of decisions/deviations not captured in the spec. Newest first.
 
+## Phase 2 import-aware resolver review fixes (2026-07-02)
+
+Addressed reviewer findings from the Slice A/B implementation pass.
+
+Decisions:
+- Import resolution now has three states: no matching import, resolved import, and matched-but-unresolved import. Matched-but-unresolved imports return no edge and do not fall through to global bare-name fanout.
+- Relative TypeScript/JavaScript/Python module paths are normalized component-by-component, so `../util` from `src/app/caller.ts` maps to `src/util.*`, not `src/app/util.*`.
+- Python source files also resolve bare local modules such as `from b import helper` to `b.py`; this is limited to `.py` callers to avoid treating package imports in other languages as local files.
+- Rust grouped `use` imports are expanded through the same single-import parser, covering `use crate::factory::{build as make};`.
+- `Cargo.toml` now sets `default-run = "graphtrail"` so `cargo run --release -- sync ...` selects the CLI binary even though `graphtrail-mcp` also exists.
+
+Final acceptance numbers:
+- Before review fixes, immutable read of `~/repos/brigade/.graphtrail/graphtrail.db`: `files=262 symbols=4581 edges=29141 imports=1583`.
+- After stage 2 review fixes, forced release sync of `~/repos/brigade` into `/tmp/p2-stage2-brigade-20260702-175348.db`: `files=262 symbols=4581 calls=9580 imports=2481 deleted=0`, with DB rows `edges=9534` and `cross_file_edges=3767`.
+- The Python repro row is present in the Brigade sync DB: `src/brigade/cli/handoff.py|dispatch|268|src/brigade/handoff_cmd.py|lint`.
+- The Rust MCP repro row lives in GraphTrail, not Brigade. A forced release self-sync into `/tmp/p2-stage2-graphtrail-20260702-175348.db` produced `src/bin/graphtrail-mcp.rs|main|19|src/mcp.rs|serve`.
+- The exact default DB sync command reached the CLI but failed under this sandbox with SQLite error 14 because writes outside `~/repos/graphtrail` and `/tmp` are blocked. The `/tmp` DB run used the same source root and release binary.
+
+Concrete edge changes from the Brigade smoke diff:
+- Before wrong: `tests/test_work_cmd_backup.py:test_work_backup_init_status_doctor_and_json` line 33 fanned out to many `_write_json` symbols, including `src/brigade/aboyeur.py:_write_json` and `src/brigade/research/registry.py:_write_json`. After right: line 33 resolves only to `tests/work_cmd_test_helpers.py:_write_json`.
+- Before wrong: `src/brigade/cli/work.py:dispatch` line 698 fanned out to unrelated `status` functions across `center_cmd.py`, `daily_cmd.py`, `dogfood_cmd.py`, and others. After right: no edge is emitted for that qualified call unless the import/module target can be proven.
+- Before wrong: `src/brigade/work_cmd/session.py:brief` emitted repeated edges to unrelated `src/brigade/context_cmd.py:_short` at many call lines. After right: those `_short` fanout edges are gone; the remaining precise edge is `brief -> src/brigade/work_cmd/session.py:_brief_payload` at line 1168.
+
 ## Audit slices integration (2026-07-02)
 
 Integrated the stage 1 sync, read-only query, context rendering, and MCP protocol slices together.
