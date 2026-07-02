@@ -168,7 +168,7 @@ jobs:
           python -m pip install --upgrade pip pipx
           pipx install .
           brigade --version
-      - name: Quickstart
+      - name: Quickstart (minimal default)
         run: |
           target="$(mktemp -d)"
           git init -q -b main "$target"
@@ -176,4 +176,18 @@ jobs:
           brigade operator doctor --target "$target" --profile local-operator --json
           test -f "$target/.brigade/config.json"
           test -d "$target/.codex/memory-handoffs"
+          test -f "$target/.codex/skills/brigade-work/SKILL.md"
+          test -f "$target/AGENTS.md"
+          test ! -e "$target/tools"
+          test ! -e "$target/rules"
+          test ! -e "$target/INSTALL_FOR_AGENTS.md"
+      - name: Quickstart (--full)
+        run: |
+          target="$(mktemp -d)"
+          git init -q -b main "$target"
+          brigade operator quickstart --target "$target" --harnesses codex --full --json
+          brigade operator doctor --target "$target" --profile local-operator --json
           test -f "$target/.codex/skills/frontend/SKILL.md"
+          test -f "$target/tools/antislop.md"
+          test -f "$target/INSTALL_FOR_AGENTS.md"
+          test -f "$target/rules/issue-tdd-loop.md"
