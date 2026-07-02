@@ -3,6 +3,11 @@
   "description": "Full agent kitchen: extends repo baseline + memory folders + starter cards + safety files.",
   "extends": "repo",
   "files": [
+    {"src": "workspace/AGENTS.md", "dst": "AGENTS.md"},
+    {"src": "workspace/INSTALL_FOR_AGENTS.md", "dst": "INSTALL_FOR_AGENTS.md"},
+    {"src": "workspace/rules/issue-tdd-loop.md", "dst": "rules/issue-tdd-loop.md"},
+    {"src": "workspace/rules/acceptance-driven-work.md", "dst": "rules/acceptance-driven-work.md"},
+    {"src": "hooks/pre-push", "dst": "hooks/pre-push", "mode": "0755"},
     {"src": "workspace/MEMORY.md", "dst": "MEMORY.md"},
     {"src": "workspace/TOOLS.md", "dst": "TOOLS.md"},
     {"src": "workspace/USER.md", "dst": "USER.md"},

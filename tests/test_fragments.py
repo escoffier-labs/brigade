@@ -62,8 +62,9 @@ def test_load_depth_repo():
     dsts = [f["dst"] for f in m["files"]]
     assert "AGENTS.md" in dsts
     assert "SAFETY_RULES.md" in dsts
-    assert "INSTALL_FOR_AGENTS.md" in dsts
-    assert "hooks/pre-push" in dsts
+    # the full kit moved to the repo-extras include
+    assert "INSTALL_FOR_AGENTS.md" not in dsts
+    assert "hooks/pre-push" not in dsts
     assert ".brigade/policies/public-repo.json" in dsts
     assert ".brigade/policies/personal.json" in dsts
     # depth baseline does NOT install harness-specific bridge files

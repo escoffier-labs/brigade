@@ -76,7 +76,11 @@ def guide(*, profile: str = "internal-dogfood", json_output: bool = False) -> in
 
 
 def _steps(
-    target: Path, *, profile: str = "local-operator", handoff_inboxes: list[str] | None = None
+    target: Path,
+    *,
+    profile: str = "local-operator",
+    handoff_inboxes: list[str] | None = None,
+    default_tools: bool = True,
 ) -> list[dict[str, Any]]:
     steps = [
         {"id": "daily", "path": daily_cmd._config_path(target), "command": daily_cmd.init, "kwargs": {}},
@@ -127,7 +131,7 @@ def _steps(
             "id": "tools",
             "path": tools_cmd.config_path(target),
             "command": tools_cmd.init,
-            "kwargs": {"update_gitignore": False},
+            "kwargs": {"update_gitignore": False, "default_tools": default_tools},
         },
     ]
     if profile == "internal-dogfood":

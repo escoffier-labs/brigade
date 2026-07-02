@@ -70,6 +70,7 @@ def test_sync_dry_run_writes_nothing(tmp_path):
 def test_sync_write_creates_all_repo_scoped_targets(tmp_path):
     _init(tmp_path)
     _add_github(tmp_path)
+    (tmp_path / ".vscode").mkdir()
     assert mcp_cmd.sync(target=tmp_path, write=True, json_output=True) == 0
     claude = json.loads((tmp_path / ".mcp.json").read_text())
     assert "github" in claude["mcpServers"]
@@ -80,6 +81,25 @@ def test_sync_write_creates_all_repo_scoped_targets(tmp_path):
     assert (tmp_path / "opencode.json").is_file()
     # user-scoped antigravity is NOT written without --user-scope
     assert "antigravity" not in json.loads((tmp_path / ".brigade/mcp/state.json").read_text())["ownership"]
+
+
+def test_sync_skips_vscode_when_repo_has_no_vscode_dir(tmp_path, capsys):
+    # A repo that never used VS Code must not grow a .vscode/ directory
+    # from a plain sync (audit 2026-07-02, backlog item 2).
+    _init(tmp_path)
+    _add_github(tmp_path)
+    capsys.readouterr()
+    assert mcp_cmd.sync(target=tmp_path, write=True, json_output=True) == 0
+    payload = _payload(capsys)
+    assert not (tmp_path / ".vscode").exists()
+    assert any("vscode" in note for note in payload["notes"])
+
+
+def test_sync_explicit_vscode_harness_still_writes(tmp_path):
+    _init(tmp_path)
+    _add_github(tmp_path)
+    assert mcp_cmd.sync(target=tmp_path, harness="vscode", write=True, json_output=True) == 0
+    assert (tmp_path / ".vscode/mcp.json").is_file()
 
 
 def test_sync_is_idempotent(tmp_path, capsys):

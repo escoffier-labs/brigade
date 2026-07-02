@@ -22,6 +22,7 @@ from ._common import (
 # Migrated command-group modules. Each exposes register(sub) and dispatch(args).
 # They are registered in _build_parser in the same order the inline parser
 # blocks were originally added.
+from .. import extras as _extras_mod
 from . import (
     init as _init_group,
     doctor as _doctor_group,
@@ -65,7 +66,38 @@ from . import (
     hermes_fragments as _hermes_fragments_group,
     reconfigure as _reconfigure_group,
     completions as _completions_group,
+    extras as _extras_group,
 )
+
+# Extras command name -> group module. Every name must appear in
+# brigade.extras.EXTRAS_COMMANDS; the gate below keys off that list.
+_EXTRAS_MODULES = {
+    "budgets": _budgets_group,
+    "center": _center_group,
+    "chat": _chat_group,
+    "context": _context_group,
+    "dogfood": _dogfood_group,
+    "friction": _friction_group,
+    "hermes-fragments": _hermes_fragments_group,
+    "learn": _learn_group,
+    "notifications": _notifications_group,
+    "openclaw-fragments": _openclaw_fragments_group,
+    "pantry": _pantry_group,
+    "projects": _projects_group,
+    "release": _release_group,
+    "repos": _repos_group,
+    "research": _research_group,
+    "roadmap": _roadmap_group,
+    "runbook": _runbook_group,
+    "untrusted": _untrusted_group,
+}
+
+
+def _register_extras(sub: argparse._SubParsersAction, name: str, extras_enabled: bool) -> None:
+    if extras_enabled:
+        _EXTRAS_MODULES[name].register(sub)
+    else:
+        _extras_group.register_stub(sub, name)
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -78,6 +110,8 @@ def _build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", metavar="<command>")
     sub.required = True
 
+    extras_enabled = _extras_mod.enabled()
+
     _init_group.register(sub)
     _doctor_group.register(sub)
     _status_group.register(sub)
@@ -85,32 +119,32 @@ def _build_parser() -> argparse.ArgumentParser:
     _daily_group.register(sub)
     _add_group.register(sub)
     _stations_group.register(sub)
-    _pantry_group.register(sub)
-    _notifications_group.register(sub)
-    _budgets_group.register(sub)
-    _untrusted_group.register(sub)
+    _register_extras(sub, "pantry", extras_enabled)
+    _register_extras(sub, "notifications", extras_enabled)
+    _register_extras(sub, "budgets", extras_enabled)
+    _register_extras(sub, "untrusted", extras_enabled)
 
     _skills_group.register(sub)
     _operator_group.register(sub)
-    _runbook_group.register(sub)
-    _dogfood_group.register(sub)
-    _release_group.register(sub)
-    _roadmap_group.register(sub)
-    _repos_group.register(sub)
+    _register_extras(sub, "runbook", extras_enabled)
+    _register_extras(sub, "dogfood", extras_enabled)
+    _register_extras(sub, "release", extras_enabled)
+    _register_extras(sub, "roadmap", extras_enabled)
+    _register_extras(sub, "repos", extras_enabled)
     _handoff_group.register(sub)
 
     _memory_group.register(sub)
     _work_group.register(sub)
-    _friction_group.register(sub)
+    _register_extras(sub, "friction", extras_enabled)
 
-    _chat_group.register(sub)
+    _register_extras(sub, "chat", extras_enabled)
 
-    _context_group.register(sub)
-    _projects_group.register(sub)
-    _learn_group.register(sub)
+    _register_extras(sub, "context", extras_enabled)
+    _register_extras(sub, "projects", extras_enabled)
+    _register_extras(sub, "learn", extras_enabled)
     _outcome_group.register(sub)
-    _research_group.register(sub)
-    _center_group.register(sub)
+    _register_extras(sub, "research", extras_enabled)
+    _register_extras(sub, "center", extras_enabled)
     _run_group.register(sub)
     _roster_group.register(sub)
 
@@ -121,12 +155,13 @@ def _build_parser() -> argparse.ArgumentParser:
     _mcp_group.register(sub)
     _handoff_template_group.register(sub)
     _ingest_group.register(sub)
-    _openclaw_fragments_group.register(sub)
-    _hermes_fragments_group.register(sub)
+    _register_extras(sub, "openclaw-fragments", extras_enabled)
+    _register_extras(sub, "hermes-fragments", extras_enabled)
     _reconfigure_group.register(sub)
     _completions_group.register(sub)
+    _extras_group.register(sub)
 
-    parser.epilog = _grouped_epilog(sub)
+    parser.epilog = _grouped_epilog(sub, extras_enabled=extras_enabled)
     return parser
 
 

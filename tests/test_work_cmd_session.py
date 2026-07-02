@@ -168,7 +168,7 @@ def test_work_doctor_reports_workflow_rule_template_visibility(tmp_path, monkeyp
 
     rc = install_selection(
         tmp_path,
-        Selection(depth="repo", harnesses=[], owner="this-repo", includes=[]),
+        Selection(depth="repo", harnesses=[], owner="this-repo", includes=["repo-extras"]),
         force=True,
     )
     assert rc == 0

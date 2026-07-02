@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Breaking
+- The CLI surface is now split into core and extras. 18 operator-suite command groups (`release`, `center`, `repos`, `research`, `roadmap`, `friction`, `chat`, `context`, `projects`, `learn`, `runbook`, `dogfood`, `pantry`, `notifications`, `budgets`, `untrusted`, `openclaw-fragments`, `hermes-fragments`) register only when extras are enabled. Enable once with `brigade extras on`, per invocation with `BRIGADE_EXTRAS=1`, and check with `brigade extras status`. A disabled extras command exits 2 with that guidance instead of a parse error. The 24 core groups (init, mcp, tools, skills, handoff, ingest, memory, work, outcome, operator, run, roster, runs, daily, security, scrub, doctor, status, add, stations, profiles, reconfigure, completions, extras) are unchanged.
+- Repo-depth installs default to a minimal footprint: `AGENTS.md` and `SAFETY_RULES.md` plus gitignored `.brigade/` state and the selected harness inboxes and skills. The full kit (`rules/`, the inactive `hooks/pre-push`, `INSTALL_FOR_AGENTS.md`, and the four default tool packs projected into `tools/` and `scripts/`) moved behind `--full` on `brigade init` and `operator quickstart`, or the `repo-extras` include. Workspace-depth installs are unchanged and always get the full kitchen.
+
+### Fixed
+- `brigade run --worktree` could write a corrupt `changes.patch`: trailing-whitespace trimming dropped a diff's final blank context line, and `git apply` rejected the file (issue #124). Patches are now written byte-faithful, validated with `git apply --check --reverse` before the run is declared done, and a failed validation keeps the worktree as the recoverable copy and exits nonzero.
+- Repo-depth installs no longer point agents at files that do not exist: the generated `AGENTS.md`, `CLAUDE.md`, and `INSTALL_FOR_AGENTS.md` referenced `SOUL.md`, `USER.md`, `MEMORY.md`, and `memory/cards/`, none of which a repo-depth install creates. Repo depth now gets repo-scoped variants; manifest file entries accept an optional `depth` key for per-depth template selection.
+- `brigade mcp sync` no longer grows a `.vscode/` directory unasked. VS Code is included only when the repo already has `.vscode/`; the skip is reported in the plan notes and `--harness vscode` still forces it.
+- An empty tool catalog (`.brigade/tools.toml` with no `[[tool]]` entries) is now valid, and default tools that were never projected no longer block `operator doctor` readiness. Once tracked sources exist under `tools/`, a missing projection blocks again as drift.
+
+### Added
+- `brigade operator quickstart --dry-run` prints the file-by-file plan the README always promised: each planned step lists its dir and file writes, including the operator-init artifacts and the MCP catalog path.
+- `brigade extras on|off|status` manages the extras surface via a user-level marker under `$XDG_CONFIG_HOME/brigade/extras`.
+
+### Documentation
+- README: the sample doctor output now matches a fresh install (content-guard reported missing until `brigade add guard`), and the no-background-process claim names its one scoped exception (`brigade tools runtime start`).
+
 ## [0.17.0] - 2026-07-01
 
 ### Added

@@ -189,15 +189,23 @@ def doctor_payload(target: Path, *, profile: str = "internal-dogfood") -> dict[s
         if isinstance(item, dict):
             blockers.append(item)
     if int(tool_health.get("issue_count") or 0) > 0:
-        top = tool_health.get("top_issue") if isinstance(tool_health.get("top_issue"), dict) else {}
-        blockers.append(
-            {
-                "status": "warn",
-                "name": "tool_projection_health",
-                "detail": str(top.get("detail") or "portable tool catalog needs sync or review"),
-                "suggested_next_command": "brigade operator sync-tools --target .",
-            }
-        )
+        issues = [i for i in tool_health.get("issues") or [] if isinstance(i, dict)]
+        pending_only = bool(issues) and all(i.get("issue_type") == "missing_projection" for i in issues)
+        tools_dir = target_path / "tools"
+        has_tracked_sources = tools_dir.is_dir() and any(tools_dir.glob("*.md"))
+        # Never-projected default tools on a minimal install are an optional
+        # next step, not a readiness blocker. Once tracked sources exist,
+        # a missing projection is drift and blocks again.
+        if not pending_only or has_tracked_sources:
+            top = tool_health.get("top_issue") if isinstance(tool_health.get("top_issue"), dict) else {}
+            blockers.append(
+                {
+                    "status": "warn",
+                    "name": "tool_projection_health",
+                    "detail": str(top.get("detail") or "portable tool catalog needs sync or review"),
+                    "suggested_next_command": "brigade operator sync-tools --target .",
+                }
+            )
     ready = not blockers
     if not ready:
         first = blockers[0]

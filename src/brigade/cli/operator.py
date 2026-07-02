@@ -309,6 +309,12 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_operator_quickstart.add_argument(
         "--force", action="store_true", help="Overwrite existing generated local setup files when supported."
     )
+    p_operator_quickstart.add_argument(
+        "--full",
+        action="store_true",
+        help="Repo depth: install the full kit (rules/, hooks/pre-push, INSTALL_FOR_AGENTS.md) and project "
+        "the default tool packs into tools/ and scripts/. Default is the minimal footprint.",
+    )
     p_operator_quickstart.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_operator_bootstrap_portable = operator_sub.add_parser(
         "bootstrap-portable", help="Import optional portable packs and sync tools across local harnesses."
@@ -430,6 +436,7 @@ def dispatch(args) -> int:
             skill_pack=args.skill_pack,
             dry_run=args.dry_run,
             force=args.force,
+            full=args.full,
             json_output=args.json,
         )
     if args.operator_command == "bootstrap-portable":

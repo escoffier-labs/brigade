@@ -3,7 +3,7 @@ import json
 from brigade import cli
 from brigade import repos_cmd
 
-from tests.test_phase44_cmd import _build_train
+from tests.test_release_train_evidence_cmd import _build_train
 
 
 def _reviewed_train(tmp_path, monkeypatch, capsys):

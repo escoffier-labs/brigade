@@ -22,6 +22,7 @@ def init(
     force: bool = False,
     dry_run: bool = False,
     waive_public_release: bool = False,
+    default_tools: bool = True,
     json_output: bool = False,
 ) -> int:
     target = target.expanduser().resolve()
@@ -47,7 +48,7 @@ def init(
         return 0
 
     results: list[dict[str, Any]] = []
-    for step in _steps(target, profile=profile, handoff_inboxes=handoff_inboxes):
+    for step in _steps(target, profile=profile, handoff_inboxes=handoff_inboxes, default_tools=default_tools):
         path = step["path"]
         if path.exists() and not force:
             results.append({"id": step["id"], "path": str(path), "status": "skipped", "reason": "already exists"})
@@ -381,21 +382,24 @@ def quickstart(
     skill_pack: Path | None = None,
     dry_run: bool = False,
     force: bool = False,
+    full: bool = False,
     json_output: bool = False,
 ) -> int:
     target = target.expanduser().resolve()
     if depth not in {"repo", "workspace"}:
         print("error: --depth must be repo or workspace", file=sys.stderr)
         return 2
+    includes = ["repo-extras"] if full and depth == "repo" else []
     try:
         selected_harnesses = _parse_harnesses(harnesses)
         memory_owner = resolve_owner(selected_harnesses, override=owner)
-        selection = Selection(depth=depth, harnesses=selected_harnesses, owner=memory_owner, includes=[])
+        selection = Selection(depth=depth, harnesses=selected_harnesses, owner=memory_owner, includes=includes)
         selection.validate()
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
 
+    run_portable_defaults = full or depth == "workspace"
     steps: list[dict[str, Any]] = []
     install_rc, install_output = _capture_text_call(
         install_selection,
@@ -432,23 +436,46 @@ def quickstart(
 
     selected_inboxes = [WRITER_INBOXES[harness] for harness in selected_harnesses if harness in WRITER_INBOXES]
     init_rc, init_payload = _capture_json_call(
-        init, target=target, profile="local-operator", handoff_inboxes=selected_inboxes, force=force, dry_run=dry_run
+        init,
+        target=target,
+        profile="local-operator",
+        handoff_inboxes=selected_inboxes,
+        force=force,
+        dry_run=dry_run,
+        default_tools=run_portable_defaults,
     )
     init_status = "planned" if dry_run and init_rc == 0 else "ok" if init_rc == 0 else "error"
     steps.append({"id": "operator-init", "status": init_status, "return_code": init_rc, "payload": init_payload})
 
-    portable_rc, portable_payload = _capture_json_call(
-        bootstrap_portable,
-        target=target,
-        tool_pack=tool_pack,
-        skill_pack=skill_pack,
-        dry_run=dry_run,
-        force=force,
-    )
-    portable_status = "planned" if dry_run and portable_rc == 0 else "ok" if portable_rc == 0 else "error"
-    steps.append(
-        {"id": "portable-bootstrap", "status": portable_status, "return_code": portable_rc, "payload": portable_payload}
-    )
+    run_portable = full or depth == "workspace" or tool_pack is not None or skill_pack is not None
+    if run_portable:
+        portable_rc, portable_payload = _capture_json_call(
+            bootstrap_portable,
+            target=target,
+            tool_pack=tool_pack,
+            skill_pack=skill_pack,
+            dry_run=dry_run,
+            force=force,
+        )
+        portable_status = "planned" if dry_run and portable_rc == 0 else "ok" if portable_rc == 0 else "error"
+        steps.append(
+            {
+                "id": "portable-bootstrap",
+                "status": portable_status,
+                "return_code": portable_rc,
+                "payload": portable_payload,
+            }
+        )
+    else:
+        portable_rc = 0
+        steps.append(
+            {
+                "id": "portable-bootstrap",
+                "status": "skipped",
+                "return_code": 0,
+                "reason": "minimal install; pass --full to project the default tool packs",
+            }
+        )
 
     steps.append(_quickstart_mcp_onramp(target, dry_run=dry_run, force=force))
 
@@ -522,10 +549,14 @@ def _quickstart_mcp_onramp(target: Path, *, dry_run: bool, force: bool) -> dict[
     from .. import mcp_cmd
 
     if dry_run:
+        catalog = target / ".brigade" / "mcp.json"
         return {
             "id": "mcp-init",
             "status": "planned",
             "return_code": 0,
+            "planned_writes": [
+                {"path": str(catalog), "action": "skip" if catalog.exists() else "write"},
+            ],
             "next_command": "brigade mcp init --target .",
         }
     init_rc, init_payload = _capture_json_call(mcp_cmd.init, target=target, force=force)
@@ -611,6 +642,30 @@ def _quickstart_issue_report(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _planned_write_lines(step: dict[str, Any]) -> list[str]:
+    """File-by-file preview lines for one dry-run quickstart step."""
+    step_id = step.get("id")
+    if step_id == "brigade-init":
+        return [line.strip() for line in step.get("output") or [] if line.startswith(("  dir", "  file"))]
+    if step.get("planned_writes"):
+        return [f"{row.get('action', 'write'):<5} {row.get('path')}" for row in step["planned_writes"]]
+    payload = step.get("payload")
+    if not isinstance(payload, dict):
+        return []
+    if step_id == "operator-init":
+        return [f"{row.get('action', 'write'):<5} {row.get('path')}" for row in payload.get("steps") or []]
+    if step_id == "portable-bootstrap":
+        lines: list[str] = []
+        for sub in payload.get("steps") or []:
+            sub_payload = sub.get("payload") if isinstance(sub, dict) else None
+            if not isinstance(sub_payload, dict):
+                continue
+            for path in sub_payload.get("projection_paths") or []:
+                lines.append(f"write {path}")
+        return lines
+    return []
+
+
 def _print_quickstart(payload: dict[str, Any]) -> None:
     print(f"operator quickstart: {payload['target']}")
     print(f"depth: {payload['depth']}")
@@ -625,6 +680,9 @@ def _print_quickstart(payload: dict[str, Any]) -> None:
             else ""
         )
         print(f"[{step.get('status')}] {step.get('id')}{advisory}")
+        if payload.get("dry_run"):
+            for line in _planned_write_lines(step):
+                print(f"  {line}")
     print(f"status: {payload['status']}")
     print("next:")
     for command in payload["next_commands"]:

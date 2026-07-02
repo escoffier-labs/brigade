@@ -16,6 +16,7 @@ from typing import Any
 
 from . import localio, mcp_adapters
 from .mcp_adapters import ADAPTERS, MCP_TARGETS, CanonicalServer
+from .render import emit as _emit
 
 CANONICAL_REL = ".brigade/mcp.json"
 STATE_REL = ".brigade/mcp/state.json"
@@ -113,8 +114,14 @@ def active_targets(target: Path, *, harness: str | None, user_scope: bool) -> tu
         adapter = ADAPTERS[name]
         if adapter.user_scope and not user_scope:
             continue
-        # vscode is not a Brigade harness; always eligible. Others honor the Selection.
-        if configured is not None and not adapter.user_scope and name != "vscode" and name not in configured:
+        if name == "vscode":
+            # vscode is not a Brigade harness. Only include it when the repo
+            # already carries a .vscode/ directory, so a sync never grows one
+            # unasked; --harness vscode still forces it.
+            if not (target / ".vscode").is_dir():
+                notes.append("vscode: skipped (no .vscode/ directory; run --harness vscode to include)")
+                continue
+        elif configured is not None and not adapter.user_scope and name not in configured:
             continue
         result.append(name)
     return result, notes
@@ -268,15 +275,6 @@ def _public_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
 # --------------------------------------------------------------------------- #
 # Commands
 # --------------------------------------------------------------------------- #
-
-
-def _emit(payload: dict[str, Any], json_output: bool, text_lines: list[str], rc: int) -> int:
-    if json_output:
-        print(json.dumps(payload, indent=2, sort_keys=True))
-    else:
-        for line in text_lines:
-            print(line)
-    return rc
 
 
 def _ensure_gitignore(target: Path) -> bool:

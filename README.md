@@ -63,7 +63,7 @@ brigade operator quickstart --target ./my-repo --harnesses codex      # wire one
 brigade operator doctor --target ./my-repo --profile local-operator   # verify
 ```
 
-That installs the CLI, wires memory, handoffs, and local guardrails into one repo for a single harness, and prints a readiness check. Nothing leaves your machine and no daemon is started. Add `--dry-run` to preview the file-by-file plan before anything is written. More harnesses, workspace setups, and the homegrown-adoption path are under [Install](#install).
+That installs the CLI, wires memory, handoffs, and local guardrails into one repo for a single harness, and prints a readiness check. The default footprint is deliberately small: two tracked files (`AGENTS.md`, `SAFETY_RULES.md`) plus gitignored local state. Pass `--full` for the whole kit (workflow rules, the inactive pre-push hook, the agent install doc, and the default tool packs); workspace-depth installs always get the full kitchen. Nothing leaves your machine and no daemon is started. Add `--dry-run` to preview the file-by-file plan before anything is written. More harnesses, workspace setups, and the homegrown-adoption path are under [Install](#install).
 
 The run ends with a readiness verdict (the recording above shows the full report):
 
@@ -73,8 +73,10 @@ profile: local-operator
 ready: yes
 blocking_issues: 0
 next: brigade daily plan --target .
-content_guard: installed hook=configured-hooks-path policy=public-repo
+content_guard: missing hook=not-enabled policy=public-repo
 ```
+
+content-guard is an optional sidecar in its own repo; doctor reports it missing until you install it (`brigade add guard`) and stays ready regardless.
 
 ## One MCP catalog, synced into every tool
 
@@ -224,7 +226,7 @@ All of them get handoff templates and ingest source coverage. Most also get proj
 
 ## More
 
-The same review-and-receipt pattern covers the rest of an operator's day, and you can ignore all of it until you need it.
+The same review-and-receipt pattern covers the rest of an operator's day, and you can ignore all of it until you need it. Most of these live behind `brigade extras on`, one command that adds the 18 operator-suite groups (release trains, fleet health, mission control, research, chat archives) to the CLI; until then `brigade --help` stays at the 24 core groups.
 
 - **Cross-model runs**: `brigade run "<task>"` plans, dispatches, and synthesizes one bounded task across the agent CLIs in your roster, so an expensive model can think while cheaper ones do the grunt work. `--worktree` runs everything in a detached git checkout that comes back as a reviewable `changes.patch`.
 - **Daily loop**: `brigade work brief` shows pending work, imports, and warnings; `brigade daily status` keeps it bounded and cheap.
@@ -259,7 +261,7 @@ Brigade is not a hosted memory service, a daemon, or an automatic release bot.
 
 It does not:
 
-- run in the background or install schedulers
+- run in the background or install schedulers (one scoped exception: `brigade tools runtime start` launches a local runtime process, only when you start it, until you stop it)
 - push to GitHub or publish packages
 - send notifications by default
 - save every note automatically

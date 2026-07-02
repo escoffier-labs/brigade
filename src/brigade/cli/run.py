@@ -165,6 +165,7 @@ def dispatch(args) -> int:
 
     worktree_cwd = None
     effective_cwd = run_cwd
+    keep_worktree = False
     try:
         with runguard.run_lock(run_cwd):
             if args.worktree:
@@ -184,19 +185,36 @@ def dispatch(args) -> int:
                 sandbox=effective_sandbox,
             )
             if args.worktree and output_dir is not None:
+                # Until the patch is proven good, the worktree is the only
+                # recoverable copy of the agents' edits; a collection failure
+                # must not let cleanup destroy it.
+                keep_worktree = True
                 summary = runguard.collect_changes_patch(effective_cwd, output_dir / "changes.patch")
-                if summary.changed:
+                if summary.changed and not runguard.verify_changes_patch(effective_cwd, summary.path):
+                    # A corrupt patch must never be the run's silent primary
+                    # deliverable; keep the worktree as the recoverable copy.
+                    print(
+                        f"error: changes.patch failed validation ({summary.path}); "
+                        f"worktree kept for recovery: {effective_cwd}",
+                        file=sys.stderr,
+                    )
+                    rc = max(rc, 2)
+                elif summary.changed:
+                    keep_worktree = False
                     print(
                         f"changes: {summary.path} ({summary.tracked_count + summary.untracked_count} file(s))",
                         file=sys.stderr,
                     )
                 else:
+                    keep_worktree = False
                     print(f"changes: none ({summary.path})", file=sys.stderr)
     except runguard.RunGuardError as exc:
         print(f"error: {exc}", file=sys.stderr)
+        if worktree_cwd is not None and keep_worktree:
+            print(f"worktree kept for recovery: {worktree_cwd}", file=sys.stderr)
         return 2
     finally:
-        if worktree_cwd is not None:
+        if worktree_cwd is not None and not keep_worktree:
             runguard.remove_worktree(run_cwd, worktree_cwd)
     if output_dir is not None:
         print(f"artifacts: {output_dir}", file=sys.stderr)

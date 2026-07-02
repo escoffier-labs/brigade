@@ -4,7 +4,7 @@ from brigade import cli
 from brigade import repos_cmd
 from brigade import work_cmd
 
-from tests.test_phase44_cmd import (
+from tests.test_release_train_evidence_cmd import (
     _build_train,
     _init_repo,
     _patch_quiet,
@@ -12,7 +12,7 @@ from tests.test_phase44_cmd import (
     _seed_release_ready,
     _seed_workspace,
 )
-from tests.test_phase45_cmd import _record_required_evidence
+from tests.test_release_reconcile_evidence_cmd import _record_required_evidence
 
 
 def _ready_train(tmp_path, monkeypatch, capsys):
