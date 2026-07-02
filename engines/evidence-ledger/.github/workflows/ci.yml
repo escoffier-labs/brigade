@@ -2,8 +2,18 @@ name: ci
 
 on:
   push:
+    paths-ignore:
+      - 'docs/**'
+      - '*.md'
+      - 'LICENSE'
+      - '.gitignore'
     branches: [master]
   pull_request:
+    paths-ignore:
+      - 'docs/**'
+      - '*.md'
+      - 'LICENSE'
+      - '.gitignore'
 
 jobs:
   test:
