@@ -40,6 +40,7 @@ from .localio import (
     utc_now as _now,
     write_json as _write_json,
 )
+from .render import emit
 
 SCHEMA_VERSION = 1
 SCHEMA_MANIFEST_VERSION = 1
@@ -1393,46 +1394,50 @@ def status_payload(target: Path) -> dict[str, Any]:
 def status(*, target: Path, json_output: bool = False) -> int:
     payload = status_payload(target)
     if json_output:
-        print(json.dumps(payload, indent=2, sort_keys=True))
-        return 0
-    print(f"center status: {payload['target']}")
-    print(f"pending_tasks: {payload['pending_task_count']}")
-    print(f"pending_imports: {payload['pending_import_count']}")
-    print(f"reviews: {payload['review_queue_count']}")
-    print(f"actions: {payload['action_queue']['open_count']}")
-    print(f"context_packs: {payload['context']['pack_count']}")
+        return emit(payload, json_output, [], 0)
+    text_lines = [
+        f"center status: {payload['target']}",
+        f"pending_tasks: {payload['pending_task_count']}",
+        f"pending_imports: {payload['pending_import_count']}",
+        f"reviews: {payload['review_queue_count']}",
+        f"actions: {payload['action_queue']['open_count']}",
+        f"context_packs: {payload['context']['pack_count']}",
+    ]
     pantry = payload.get("pantry") if isinstance(payload.get("pantry"), dict) else {}
     if pantry:
-        print(f"pantry: {pantry.get('summary')}")
+        text_lines.append(f"pantry: {pantry.get('summary')}")
     notifications = payload.get("notifications") if isinstance(payload.get("notifications"), dict) else {}
     if notifications:
-        print(f"notifications: {notifications.get('status')} configured={notifications.get('configured')}")
+        text_lines.append(f"notifications: {notifications.get('status')} configured={notifications.get('configured')}")
     phase_ledger = payload.get("phase_ledger") if isinstance(payload.get("phase_ledger"), dict) else {}
     if phase_ledger:
-        print(f"phase_records: {phase_ledger.get('record_count', 0)}")
-        print(f"phase_issues: {phase_ledger.get('issue_count', 0)}")
-        print(f"phase_actions: {phase_ledger.get('open_action_count', 0)}")
+        text_lines.append(f"phase_records: {phase_ledger.get('record_count', 0)}")
+        text_lines.append(f"phase_issues: {phase_ledger.get('issue_count', 0)}")
+        text_lines.append(f"phase_actions: {phase_ledger.get('open_action_count', 0)}")
         latest_phase_session = (
             phase_ledger.get("latest_session") if isinstance(phase_ledger.get("latest_session"), dict) else None
         )
         if latest_phase_session:
-            print(f"phase_session: {latest_phase_session.get('session_id')} [{latest_phase_session.get('status')}]")
-    return 0
+            text_lines.append(
+                f"phase_session: {latest_phase_session.get('session_id')} [{latest_phase_session.get('status')}]"
+            )
+    return emit(payload, json_output, text_lines, 0)
 
 
 def schema(*, target: Path, json_output: bool = False) -> int:
     payload = _center_schema_manifest(target)
     if json_output:
-        print(json.dumps(payload, indent=2, sort_keys=True))
-        return 0
-    print(f"center schema manifest: {payload['target']}")
-    print(f"schemas: {payload['schema_count']}")
-    print("read_only: true")
+        return emit(payload, json_output, [], 0)
+    text_lines = [
+        f"center schema manifest: {payload['target']}",
+        f"schemas: {payload['schema_count']}",
+        "read_only: true",
+    ]
     for schema_item in payload["schemas"]:
-        print(f"- {schema_item['id']}: {schema_item['command']}")
+        text_lines.append(f"- {schema_item['id']}: {schema_item['command']}")
     for check in payload["checks"]:
-        print(f"[{check['status']}] {check['name']}: {check['detail']}")
-    return 0
+        text_lines.append(f"[{check['status']}] {check['name']}: {check['detail']}")
+    return emit(payload, json_output, text_lines, 0)
 
 
 def activity(*, target: Path, json_output: bool = False, limit: int = 50) -> int:
@@ -1446,12 +1451,11 @@ def activity(*, target: Path, json_output: bool = False, limit: int = 50) -> int
         "activity_count": len(items),
     }
     if json_output:
-        print(json.dumps(payload, indent=2, sort_keys=True))
-        return 0
-    print(f"center activity: {target}")
+        return emit(payload, json_output, [], 0)
+    text_lines = [f"center activity: {target}"]
     for item in items:
-        print(f"- {item['subsystem']} {item['id']} [{item['status']}] {item['safe_summary']}")
-    return 0
+        text_lines.append(f"- {item['subsystem']} {item['id']} [{item['status']}] {item['safe_summary']}")
+    return emit(payload, json_output, text_lines, 0)
 
 
 def reviews(*, target: Path, json_output: bool = False, limit: int = 50) -> int:
@@ -1465,13 +1469,12 @@ def reviews(*, target: Path, json_output: bool = False, limit: int = 50) -> int:
         "review_count": len(items),
     }
     if json_output:
-        print(json.dumps(payload, indent=2, sort_keys=True))
-        return 0
-    print(f"center reviews: {target}")
+        return emit(payload, json_output, [], 0)
+    text_lines = [f"center reviews: {target}"]
     for item in items:
-        print(f"- {item['subsystem']} {item['id']} [{item['status']}] {item['safe_summary']}")
-        print(f"  next: {item['suggested_next_command']}")
-    return 0
+        text_lines.append(f"- {item['subsystem']} {item['id']} [{item['status']}] {item['safe_summary']}")
+        text_lines.append(f"  next: {item['suggested_next_command']}")
+    return emit(payload, json_output, text_lines, 0)
 
 
 def templates(*, target: Path, json_output: bool = False) -> int:
@@ -1501,12 +1504,11 @@ def templates(*, target: Path, json_output: bool = False) -> int:
         "template_count": len(items),
     }
     if json_output:
-        print(json.dumps(payload, indent=2, sort_keys=True))
-        return 0
-    print(f"center templates: {target}")
+        return emit(payload, json_output, [], 0)
+    text_lines = [f"center templates: {target}"]
     for item in items:
-        print(f"- {item['subsystem']}:{item['id']} {item['safe_summary']}")
-    return 0
+        text_lines.append(f"- {item['subsystem']}:{item['id']} {item['safe_summary']}")
+    return emit(payload, json_output, text_lines, 0)
 
 
 def _readiness_root(target: Path) -> Path:
@@ -1780,18 +1782,20 @@ def readiness_health(target: Path) -> dict[str, Any]:
 
 def readiness_plan(*, target: Path, json_output: bool = False) -> int:
     payload = _readiness_payload(target)
+    rc = 0 if payload["ready"] else 1
     if json_output:
-        print(json.dumps(payload, indent=2, sort_keys=True))
-        return 0 if payload["ready"] else 1
-    print(f"center readiness plan: {payload['target']}")
-    print(f"status: {payload['status']}")
-    print(f"blockers: {payload['blocker_count']}")
-    print(f"warnings: {payload['warning_count']}")
+        return emit(payload, json_output, [], rc)
+    text_lines = [
+        f"center readiness plan: {payload['target']}",
+        f"status: {payload['status']}",
+        f"blockers: {payload['blocker_count']}",
+        f"warnings: {payload['warning_count']}",
+    ]
     for finding in payload["findings"][:20]:
         waived = " waived" if finding.get("waived") else ""
-        print(f"- {finding['finding_id']} {finding['severity']}{waived}: {finding['safe_summary']}")
-        print(f"  next: {finding['suggested_next_command']}")
-    return 0 if payload["ready"] else 1
+        text_lines.append(f"- {finding['finding_id']} {finding['severity']}{waived}: {finding['safe_summary']}")
+        text_lines.append(f"  next: {finding['suggested_next_command']}")
+    return emit(payload, json_output, text_lines, rc)
 
 
 def readiness_closeout(
@@ -1888,12 +1892,11 @@ def readiness_list(*, target: Path, limit: int = 20, json_output: bool = False) 
         "readiness_count": len(receipts),
     }
     if json_output:
-        print(json.dumps(payload, indent=2, sort_keys=True))
-        return 0
-    print(f"center readiness list: {target}")
+        return emit(payload, json_output, [], 0)
+    text_lines = [f"center readiness list: {target}"]
     for receipt in receipts:
-        print(f"- {receipt.get('readiness_id')} [{receipt.get('status')}] {receipt.get('review_status')}")
-    return 0
+        text_lines.append(f"- {receipt.get('readiness_id')} [{receipt.get('status')}] {receipt.get('review_status')}")
+    return emit(payload, json_output, text_lines, 0)
 
 
 def _resolve_readiness(target: Path, readiness_id: str) -> tuple[dict[str, Any] | None, str | None]:
@@ -3151,16 +3154,17 @@ def actions_doctor(*, target: Path, json_output: bool = False) -> int:
         "health": actions_health(target),
     }
     if json_output:
-        print(json.dumps(payload, indent=2, sort_keys=True))
-        return 0
-    print(f"center actions doctor: {target}")
+        return emit(payload, json_output, [], 0)
     health = payload["health"]
-    print(f"actions: {health['action_count']}")
-    print(f"open: {health['open_count']}")
-    print(f"policy_issues: {health['policy_issue_count']}")
+    text_lines = [
+        f"center actions doctor: {target}",
+        f"actions: {health['action_count']}",
+        f"open: {health['open_count']}",
+        f"policy_issues: {health['policy_issue_count']}",
+    ]
     for issue in health["policy_issues"]:
-        print(f"[{issue['status']}] {issue['name']}: {issue['detail']}")
-    return 0
+        text_lines.append(f"[{issue['status']}] {issue['name']}: {issue['detail']}")
+    return emit(payload, json_output, text_lines, 0)
 
 
 def _action_policy_import_record(issue: dict[str, Any], actions_by_id: dict[str, dict[str, Any]]) -> dict[str, Any]:
