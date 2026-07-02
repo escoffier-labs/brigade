@@ -18,7 +18,7 @@ do not have one):
   "tailwind": { "config": "", "css": "app.css", "baseColor": "neutral", "cssVariables": true },
   "aliases": { "components": "components", "utils": "lib/utils" },
   "registries": {
-    "@brigade": "REGISTRY_URL_PLACEHOLDER/r/{name}.json"
+    "@brigade": "https://brigade.tools/r/{name}.json"
   }
 }
 ```
