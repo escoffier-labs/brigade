@@ -44,6 +44,16 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_release_schema = release_sub.add_parser("schema", help="Show local release evidence schema manifest.")
     p_release_schema.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
     p_release_schema.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_release_version_sync = release_sub.add_parser(
+        "version-sync", help="Check or fix in-tree version stamps against the source of truth."
+    )
+    p_release_version_sync.add_argument(
+        "--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect."
+    )
+    vs_mode = p_release_version_sync.add_mutually_exclusive_group()
+    vs_mode.add_argument("--check", action="store_true", help="Verify stamps match the source (default).")
+    vs_mode.add_argument("--write", action="store_true", help="Rewrite stamps to the source version.")
+    p_release_version_sync.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_release_ci = release_sub.add_parser("ci", help="Inspect local CI platform deprecation evidence.")
     release_ci_sub = p_release_ci.add_subparsers(dest="release_ci_command", metavar="<release-ci-command>")
     release_ci_sub.required = True
@@ -216,6 +226,10 @@ def dispatch(args) -> int:
         return release_cmd.show(target=args.target, run_id=args.run_id, json_output=args.json)
     if args.release_command == "schema":
         return release_cmd.schema(target=args.target, json_output=args.json)
+    if args.release_command == "version-sync":
+        from .. import release_version_sync
+
+        return release_version_sync.version_sync(target=args.target, write=args.write, json_output=args.json)
     if args.release_command == "ci":
         if args.release_ci_command == "doctor":
             return release_cmd.ci_doctor(target=args.target, summary_path=args.summary_path, json_output=args.json)

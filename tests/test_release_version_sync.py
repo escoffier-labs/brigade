@@ -212,3 +212,21 @@ def test_version_sync_json(tmp_path, capsys):
     assert payload["version"] == "0.17.0"
     assert payload["ok"] is False
     assert any(r["status"] == "mismatch" for r in payload["results"])
+
+
+def test_cli_check(tmp_path):
+    _repo(tmp_path)
+    assert cli.main(["release", "version-sync", "--target", str(tmp_path)]) == 0
+
+
+def test_cli_write_then_check(tmp_path):
+    _repo(tmp_path, cast_version="0.13.0")
+    assert cli.main(["release", "version-sync", "--target", str(tmp_path), "--write"]) == 0
+    assert cli.main(["release", "version-sync", "--target", str(tmp_path)]) == 0
+
+
+def test_cli_check_write_mutually_exclusive(tmp_path):
+    _repo(tmp_path)
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["release", "version-sync", "--target", str(tmp_path), "--check", "--write"])
+    assert exc.value.code == 2
