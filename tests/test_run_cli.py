@@ -654,6 +654,33 @@ def test_run_cli_worktree_keeps_checkout_when_patch_invalid(tmp_path, monkeypatc
     assert checkout.exists()
 
 
+def test_run_cli_worktree_kept_when_patch_collection_raises(tmp_path, monkeypatch, capsys):
+    # If patch collection itself dies after agents edited the worktree, the
+    # worktree is the only copy of the work and must survive cleanup.
+    repo = _git_repo_with_roster(tmp_path)
+    output_dir = tmp_path / "run"
+
+    def fake_run(task, loaded_roster, **kwargs):
+        (kwargs["cwd"] / "tracked.txt").write_text("changed in worktree\n")
+        return 0
+
+    def raising_collect(cwd, patch_path):
+        raise runguard.RunGuardError("failed to collect tracked diff: boom")
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
+    monkeypatch.setattr(aboyeur, "run", fake_run)
+    monkeypatch.setattr(runguard, "collect_changes_patch", raising_collect)
+
+    rc = cli.main(["run", "x", "--cwd", str(repo), "--output-dir", str(output_dir), "--worktree"])
+
+    err = capsys.readouterr().err
+    checkout = tmp_path / "home" / ".cache" / "brigade" / "worktrees" / f"{repo.name}-{output_dir.name}"
+    assert rc == 2
+    assert checkout.exists()
+    assert (checkout / "tracked.txt").read_text() == "changed in worktree\n"
+    assert str(checkout) in err
+
+
 def test_run_cli_rejects_worktree_with_no_artifacts(tmp_path, capsys):
     rc = cli.main(["run", "x", "--cwd", str(tmp_path), "--worktree", "--no-artifacts"])
     assert rc == 2

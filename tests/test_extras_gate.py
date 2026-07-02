@@ -64,6 +64,13 @@ def test_extras_commands_work_when_enabled(extras_off, monkeypatch, capsys):
     assert "release" in out
 
 
+def test_disabled_extras_help_shows_guidance_not_empty_parser(extras_off, capsys):
+    rc = cli.main(["pantry", "--help"])
+    err = capsys.readouterr().err
+    assert rc == 2
+    assert "brigade extras on" in err
+
+
 def test_extras_cli_group_toggles(extras_off, capsys):
     assert cli.main(["extras", "status"]) == 0
     assert "disabled" in capsys.readouterr().out

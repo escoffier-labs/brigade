@@ -44,9 +44,21 @@ def dispatch(args) -> int:
 
 
 def register_stub(sub: argparse._SubParsersAction, name: str) -> None:
-    """Register a disabled extras command so it fails with guidance, not a parse error."""
-    p = sub.add_parser(name, help="(extras, disabled) enable with `brigade extras on`")
-    p.add_argument("stub_args", nargs=argparse.REMAINDER, help=argparse.SUPPRESS)
+    """Register a disabled extras command so it fails with guidance, not a parse error.
+
+    The stub swallows every argument (including -h/--help, which argparse
+    would otherwise answer with an empty help page or reject) so the user
+    always sees the enable guidance instead.
+    """
+    p = sub.add_parser(name, help="(extras, disabled) enable with `brigade extras on`", add_help=False)
+
+    def _swallow_all(args=None, namespace=None, *, _name=name):
+        ns = namespace or argparse.Namespace()
+        ns.stub_args = list(args or [])
+        ns.func = lambda parsed, _n=_name: _stub_dispatch(_n)
+        return ns, []
+
+    p.parse_known_args = _swallow_all  # type: ignore[method-assign]
     p.set_defaults(func=lambda args, _name=name: _stub_dispatch(_name))
 
 
