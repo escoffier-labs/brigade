@@ -73,8 +73,10 @@ profile: local-operator
 ready: yes
 blocking_issues: 0
 next: brigade daily plan --target .
-content_guard: installed hook=configured-hooks-path policy=public-repo
+content_guard: missing hook=not-enabled policy=public-repo
 ```
+
+content-guard is an optional sidecar in its own repo; doctor reports it missing until you install it (`brigade add guard`) and stays ready regardless.
 
 ## One MCP catalog, synced into every tool
 
@@ -259,7 +261,7 @@ Brigade is not a hosted memory service, a daemon, or an automatic release bot.
 
 It does not:
 
-- run in the background or install schedulers
+- run in the background or install schedulers (one scoped exception: `brigade tools runtime start` launches a local runtime process, only when you start it, until you stop it)
 - push to GitHub or publish packages
 - send notifications by default
 - save every note automatically
