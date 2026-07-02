@@ -1,0 +1,72 @@
+{
+  "$schema": "https://ui.shadcn.com/schema/registry.json",
+  "name": "brigade",
+  "homepage": "https://brigade.tools",
+  "items": [
+    {
+      "name": "check",
+      "type": "registry:item",
+      "title": "check",
+      "description": "Use when about to claim anything works, is fixed, is complete, or passes - before committing, replying to the user, or moving to the next task. Also use when relaying a subagent's or tool's success report, and especially at the end of a long session when the pull to say \"done\" is strongest.",
+      "files": [
+        {
+          "path": "registry/skills/check/SKILL.md",
+          "type": "registry:file",
+          "target": ".claude/skills/check/SKILL.md"
+        }
+      ]
+    },
+    {
+      "name": "refire",
+      "type": "registry:item",
+      "title": "refire",
+      "description": "Use when anything misbehaves - a failing test, a production bug, a build break, flaky or unexpected behavior - before proposing or attempting any fix. Especially under pressure (\"CI is blocking everyone\", \"just get it green\") and after a previous fix didn't hold.",
+      "files": [
+        {
+          "path": "registry/skills/refire/SKILL.md",
+          "type": "registry:file",
+          "target": ".claude/skills/refire/SKILL.md"
+        }
+      ]
+    },
+    {
+      "name": "bug-hunt",
+      "type": "registry:item",
+      "title": "bug-hunt",
+      "description": "Use when asked to find bugs, hunt for correctness issues, sweep a codebase for defects, or verify a repo behaves as intended. Not for style or architecture review; this is defect-finding only.",
+      "files": [
+        {
+          "path": "registry/skills/bug-hunt/SKILL.md",
+          "type": "registry:file",
+          "target": ".claude/skills/bug-hunt/SKILL.md"
+        }
+      ]
+    },
+    {
+      "name": "reduce",
+      "type": "registry:item",
+      "title": "reduce",
+      "description": "Use when asked to simplify, clean up, tidy, or refactor code for clarity without changing what it does, or when the user says \"simplify this\", \"clean this up\", \"make it readable\", \"reduce the complexity\", or \"tidy this\". Behavior-preserving only; not a bug or security audit (use bug-hunt or security-sweep for those).",
+      "files": [
+        {
+          "path": "registry/skills/reduce/SKILL.md",
+          "type": "registry:file",
+          "target": ".claude/skills/reduce/SKILL.md"
+        }
+      ]
+    },
+    {
+      "name": "taste",
+      "type": "registry:item",
+      "title": "taste",
+      "description": "Use when implementing any feature, bugfix, or behavior change, before writing the implementation code. Especially use under pressure - production is down, \"just make it work\", \"quick fix\" - which is when it gets skipped.",
+      "files": [
+        {
+          "path": "registry/skills/taste/SKILL.md",
+          "type": "registry:file",
+          "target": ".claude/skills/taste/SKILL.md"
+        }
+      ]
+    }
+  ]
+}
