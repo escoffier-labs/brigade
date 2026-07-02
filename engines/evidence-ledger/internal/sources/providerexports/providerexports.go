@@ -171,6 +171,7 @@ func emitChatGPTConversation(conv map[string]any, rawPath string, opts sources.O
 				Ordinal: &ordinal,
 			},
 		}
+		sources.ApplyRedaction(&rec, opts)
 		if err := sources.WriteRecord(w, rec); err != nil {
 			return records, warnings, err
 		}
@@ -245,6 +246,7 @@ func emitClaudeConversation(conv map[string]any, rawPath string, opts sources.Op
 				Ordinal: &ordinal,
 			},
 		}
+		sources.ApplyRedaction(&rec, opts)
 		if err := sources.WriteRecord(w, rec); err != nil {
 			return records, warnings, err
 		}

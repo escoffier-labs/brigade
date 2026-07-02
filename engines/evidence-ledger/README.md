@@ -107,7 +107,7 @@ flowchart TB
     subgraph SOURCES [" source exporters "]
         STATIONTRAIL["<b>StationTrail</b><br/>agent-session logs"]
         SOURCEHARVEST["<b>SourceHarvest</b><br/>files, notes, exports, git"]
-        NATIVE["<b>Native adapters</b><br/>Codex, OpenClaw, Claude, Hermes"]
+        NATIVE["<b>Native adapters</b><br/>Codex, OpenClaw, Claude, Hermes, OpenCode"]
     end
 
     STATIONTRAIL & SOURCEHARVEST & NATIVE --> ADAPTER
@@ -238,10 +238,12 @@ miseledger import adapter testdata/adapters/discrawl.fixture.jsonl --source disc
 miseledger import adapter testdata/adapters/agent-session.fixture.jsonl --source codex
 miseledger adapter codex testdata/harnesses/codex-session.fixture.jsonl --out -
 miseledger adapter hermes testdata/harnesses/session_hermes-demo.fixture.json --out -
+miseledger adapter opencode testdata/harnesses/opencode-export.fixture.json --out -
 miseledger import codex testdata/harnesses/codex-session.fixture.jsonl --json
 miseledger import openclaw testdata/harnesses/openclaw-session.fixture.jsonl --json
 miseledger import claude testdata/harnesses/claude-project.fixture.jsonl --json
 miseledger import hermes testdata/harnesses/session_hermes-demo.fixture.json --json
+miseledger import opencode testdata/harnesses/opencode-export.fixture.json --json
 miseledger status --json
 miseledger scans list --json
 miseledger sources discover --json
@@ -272,6 +274,7 @@ miseledger adapter codex ~/.codex/sessions --out codex.adapter.jsonl --limit 100
 miseledger adapter openclaw ~/.openclaw/agents --out openclaw.adapter.jsonl --since 2026-06-01
 miseledger adapter claude ~/.claude/projects --out claude.adapter.jsonl --limit 100
 miseledger adapter hermes ~/.hermes/sessions --out hermes.adapter.jsonl --limit 100
+miseledger adapter opencode ~/.local/share/opencode --out opencode.adapter.jsonl --limit 100
 miseledger adapter cursor ~/.config/cursor --out cursor.adapter.jsonl
 ```
 
@@ -282,6 +285,7 @@ miseledger import codex ~/.codex/sessions --json
 miseledger import openclaw ~/.openclaw/agents --json
 miseledger import claude ~/.claude/projects --json
 miseledger import hermes ~/.hermes/sessions --json
+miseledger import opencode ~/.local/share/opencode --json
 miseledger import cursor ~/.config/cursor --json
 miseledger import codex testdata/harnesses/malformed-unknown.fixture.jsonl --dry-run --json
 miseledger import discovered --json
@@ -336,7 +340,7 @@ sessionfind "release audit" --source codex --json
 
 `sessions search` groups matching item hits by session/conversation collection and returns the source kind, collection ID, item count, match count, sample item ID, raw source path, raw ordinal, and a snippet. It is meant for quickly finding the local harness session to inspect or resume.
 
-The scanners accept a file or directory, walk relevant JSON and JSONL files recursively, skip obvious backups and sidecars, preserve raw refs, and warn rather than crash on malformed or unknown events. Hermes native support covers `session_*.json` snapshots and trajectory JSONL under `~/.hermes/sessions`; Hermes `state.db` is not parsed directly.
+The scanners accept a file or directory, walk relevant JSON and JSONL files recursively, skip obvious backups and sidecars, preserve raw refs, and warn rather than crash on malformed or unknown events. Hermes native support covers `session_*.json` snapshots and trajectory JSONL under `~/.hermes/sessions`; Hermes `state.db` is not parsed directly. OpenCode native support reads sanitized `opencode export` JSON files under `~/.local/share/opencode` by default.
 
 ## External StationTrail Scanner
 
@@ -350,6 +354,7 @@ stationtrail codex ~/.codex/sessions --dry-run --json
 stationtrail all --out - --redact paths,secrets | miseledger import adapter -
 stationtrail claude ~/.claude/projects --out - | miseledger import adapter -
 stationtrail openclaw ~/.openclaw/agents --out openclaw.adapter.jsonl
+stationtrail opencode ~/.local/share/opencode --out - | miseledger import adapter -
 stationtrail hermes ~/.hermes/sessions --out - | miseledger import adapter -
 miseledger import adapter openclaw.adapter.jsonl --json
 ```
@@ -366,7 +371,7 @@ miseledger import stationtrail hermes ~/.hermes/sessions --json
 
 The wrapper streams StationTrail output through adapter ingest and records StationTrail scan manifests from its summary output. For mixed-source imports, use `stationtrail all --out - | miseledger import adapter -`; each adapter record still carries its own `source.kind`.
 
-MiseLedger native adapters remain available for compatibility. Long term, source-specific agent-session parser ownership should live in StationTrail while MiseLedger owns archive ingest, SQLite, FTS, relations, scan manifests, and evidence bundles.
+MiseLedger native adapters remain available for compatibility, including OpenCode sanitized export JSON. Long term, source-specific agent-session parser ownership should live in StationTrail while MiseLedger owns archive ingest, SQLite, FTS, relations, scan manifests, and evidence bundles.
 
 ## External SourceHarvest Scanner
 
@@ -517,7 +522,7 @@ If a target is not present yet, MiseLedger preserves `target_external_id` for la
 ## Why not something else?
 
 - **A cloud memory service (mem0, Letta, and friends)** is built for apps you ship, usually behind an API or a server, and your history lives on someone else's machine. MiseLedger is for the local agent CLIs and exports you already have. The archive is a plain SQLite file on your disk, queryable with `sqlite3` and the read-only `sql` command even without MiseLedger.
-- **A single tool's built-in history** (Codex, Claude, Cursor, ChatGPT export) is a silo. It does not cross harnesses, and there is no shared search. MiseLedger normalizes every source into one `adapter.v1` contract and one FTS5 index, so one query spans Codex, Claude, OpenClaw, Cursor, chat exports, notes, and git history at once.
+- **A single tool's built-in history** (Codex, Claude, OpenCode, Cursor, ChatGPT export) is a silo. It does not cross harnesses, and there is no shared search. MiseLedger normalizes every source into one `adapter.v1` contract and one FTS5 index, so one query spans Codex, Claude, OpenClaw, OpenCode, Cursor, chat exports, notes, and git history at once.
 - **`grep` over raw session folders** works until the formats diverge, the JSONL nests, and binary stores like Cursor's `store.db` are unreadable. MiseLedger parses each harness, dedupes by stable external IDs, preserves raw refs for audit, and warns rather than crashing on malformed records.
 - **A vector database or RAG stack** adds embeddings, a server, and a model dependency for what is mostly an exact-recall problem. MiseLedger stays lexical and deterministic: FTS5 search, shallow relations, and reproducible evidence bundles, with no embeddings, no model calls, and no network.
 - **StationTrail and SourceHarvest** are the source exporters, not the archive. They scan and emit `adapter.v1` records. MiseLedger is the layer above them that ingests, normalizes, indexes, and serves. Use them together.

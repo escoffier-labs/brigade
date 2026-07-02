@@ -145,6 +145,7 @@ func (g *generator) emitPromptHistory(path string) error {
 				Ordinal: &ordinal,
 			},
 		}
+		sources.ApplyRedaction(&rec, g.opts)
 		if err := sources.WriteRecord(g.w, rec); err != nil {
 			return err
 		}
@@ -263,6 +264,7 @@ func (g *generator) writeSession(sessionDir, sessionID, text, createdAt, workspa
 			Ordinal: &ordinal,
 		},
 	}
+	sources.ApplyRedaction(&rec, g.opts)
 	if err := sources.WriteRecord(g.w, rec); err != nil {
 		return err
 	}

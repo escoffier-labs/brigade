@@ -46,6 +46,7 @@ miseledger adapter codex <path-or-dir> --out <file|->
 miseledger adapter openclaw <path-or-dir> --out <file|->
 miseledger adapter claude <path-or-dir> --out <file|->
 miseledger adapter hermes <path-or-dir> --out <file|->
+miseledger adapter opencode <path-or-dir> --out <file|->
 ```
 
 They emit the same `miseledger.adapter.v1` JSONL contract as external tools. Native import commands generate adapter records and reuse the adapter import path internally:
@@ -55,6 +56,7 @@ miseledger import codex <path-or-dir> --json
 miseledger import openclaw <path-or-dir> --json
 miseledger import claude <path-or-dir> --json
 miseledger import hermes <path-or-dir> --json
+miseledger import opencode <path-or-dir> --json
 miseledger import discovered --json
 miseledger watch once --json
 miseledger watch once --if-changed --json
@@ -99,7 +101,7 @@ miseledger import stationtrail opencode opencode-session.json --json
 miseledger import stationtrail hermes ~/.hermes/sessions --json
 ```
 
-Use StationTrail when source-specific harness parsing should live outside MiseLedger or when exporting OpenCode. MiseLedger also has native parsers for Codex, Claude, OpenClaw, and Hermes snapshot or trajectory files. Keep MiseLedger focused on ingest, normalized storage, FTS, scan manifests, relation resolution, and evidence output.
+Use StationTrail when source-specific harness parsing should live outside MiseLedger. MiseLedger also has native parsers for Codex, Claude, OpenClaw, OpenCode sanitized export JSON, and Hermes snapshot or trajectory files. Keep MiseLedger focused on ingest, normalized storage, FTS, scan manifests, relation resolution, and evidence output.
 
 StationTrail `discover`, `doctor`, `doctor --live`, `inspect`, and `--dry-run --json` modes report roots, structural keys, counts, records, and warnings without printing transcript content. MiseLedger's `import stationtrail` wrapper records StationTrail scan manifests when StationTrail writes summary output. For `stationtrail all`, prefer piping to `miseledger import adapter -` so mixed-source records retain their individual `source.kind`.
 

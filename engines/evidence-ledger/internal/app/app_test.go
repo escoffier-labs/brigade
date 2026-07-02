@@ -316,6 +316,25 @@ func TestCrawlSessionsImportsDiscoveredNativeRoots(t *testing.T) {
 	}
 }
 
+func TestCrawlSessionsImportsDiscoveredOpenCodeRoot(t *testing.T) {
+	withTempHome(t)
+	runOK(t, "init")
+	opencodeRoot := filepath.Join(os.Getenv("HOME"), ".local", "share", "opencode")
+	if err := os.MkdirAll(opencodeRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	copyFixture(t, repoPath(t, "testdata/harnesses/opencode-export.fixture.json"), filepath.Join(opencodeRoot, "opencode-export.fixture.json"))
+
+	out := runJSON(t, "crawl", "sessions", "--json")
+	if out["inserted_items"].(float64) == 0 {
+		t.Fatalf("crawl sessions inserted no items: %v", out)
+	}
+	search := runJSON(t, "search", "OpenCode adapter contract", "--source", "opencode", "--json")
+	if len(search["results"].([]any)) == 0 {
+		t.Fatalf("crawl sessions did not index opencode fixture: %v", search)
+	}
+}
+
 func TestCrawlDocsWrapsSourceHarvestWithDefaults(t *testing.T) {
 	withTempHome(t)
 	runOK(t, "init")
@@ -493,6 +512,13 @@ func TestSourceDiscoveryDoesNotPrintTranscriptContent(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(hermesPath, "session_demo.json"), []byte(`{"messages":[{"role":"user","content":"`+secret+`"}]}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	opencodePath := filepath.Join(os.Getenv("HOME"), ".local", "share", "opencode")
+	if err := os.MkdirAll(opencodePath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(opencodePath, "session_demo.json"), []byte(`{"messages":[{"parts":[{"type":"text","text":"`+secret+`"}]}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	out := runOK(t, "sources", "discover", "--json")
 	if strings.Contains(out, secret) || strings.Contains(out, "event_msg") {
 		t.Fatalf("source discovery leaked content: %s", out)
@@ -505,11 +531,18 @@ func TestSourceDiscoveryDoesNotPrintTranscriptContent(t *testing.T) {
 		t.Fatalf("expected discovery candidates")
 	}
 	foundHermes := false
+	foundOpenCode := false
 	for _, item := range discovered {
 		if item["source_kind"] == "hermes" {
 			foundHermes = true
 			if item["status"] != "native-json" || item["count"].(float64) != 1 {
 				t.Fatalf("unexpected Hermes discovery row: %v", item)
+			}
+		}
+		if item["source_kind"] == "opencode" {
+			foundOpenCode = true
+			if item["status"] != "native-json" || item["count"].(float64) != 1 {
+				t.Fatalf("unexpected OpenCode discovery row: %v", item)
 			}
 		}
 		for key := range item {
@@ -522,6 +555,9 @@ func TestSourceDiscoveryDoesNotPrintTranscriptContent(t *testing.T) {
 	}
 	if !foundHermes {
 		t.Fatalf("expected Hermes discovery row: %v", discovered)
+	}
+	if !foundOpenCode {
+		t.Fatalf("expected OpenCode discovery row: %v", discovered)
 	}
 }
 
@@ -536,6 +572,7 @@ func TestNativeAdaptersImportAndEvidence(t *testing.T) {
 	trajectoryFixture := repoPath(t, "testdata/harnesses/openclaw-trajectory.fixture.jsonl")
 	hermesSnapshotFixture := repoPath(t, "testdata/harnesses/session_hermes-demo.fixture.json")
 	hermesTrajectoryFixture := repoPath(t, "testdata/harnesses/hermes-trajectory.fixture.jsonl")
+	opencodeFixture := repoPath(t, "testdata/harnesses/opencode-export.fixture.json")
 	malformedFixture := repoPath(t, "testdata/harnesses/malformed-unknown.fixture.jsonl")
 
 	adapterJSONL := runOK(t, "adapter", "codex", codexFixture, "--out", "-")
@@ -558,6 +595,10 @@ func TestNativeAdaptersImportAndEvidence(t *testing.T) {
 	hermesAdapterJSONL := runOK(t, "adapter", "hermes", hermesSnapshotFixture, "--out", "-")
 	if !strings.Contains(hermesAdapterJSONL, "miseledger.adapter.v1") || !strings.Contains(hermesAdapterJSONL, "Hermes snapshots") {
 		t.Fatalf("hermes adapter did not emit expected records: %s", hermesAdapterJSONL)
+	}
+	opencodeAdapterJSONL := runOK(t, "adapter", "opencode", opencodeFixture, "--out", "-")
+	if !strings.Contains(opencodeAdapterJSONL, "miseledger.adapter.v1") || !strings.Contains(opencodeAdapterJSONL, "OpenCode adapter contract") {
+		t.Fatalf("opencode adapter did not emit expected records: %s", opencodeAdapterJSONL)
 	}
 
 	runOK(t, "import", "adapter", crawler, "--source", "discrawl")
@@ -582,6 +623,10 @@ func TestNativeAdaptersImportAndEvidence(t *testing.T) {
 	if hermesTrajectoryImport["inserted_items"].(float64) == 0 {
 		t.Fatalf("hermes trajectory import inserted no items: %v", hermesTrajectoryImport)
 	}
+	opencodeImport := runJSON(t, "import", "opencode", opencodeFixture, "--json")
+	if opencodeImport["inserted_items"].(float64) == 0 {
+		t.Fatalf("opencode import inserted no items: %v", opencodeImport)
+	}
 
 	before := runJSON(t, "status", "--json")
 	runOK(t, "import", "codex", codexFixture, "--json")
@@ -589,6 +634,7 @@ func TestNativeAdaptersImportAndEvidence(t *testing.T) {
 	runOK(t, "import", "claude", claudeFixture, "--json")
 	runOK(t, "import", "hermes", hermesSnapshotFixture, "--json")
 	runOK(t, "import", "hermes", hermesTrajectoryFixture, "--json")
+	runOK(t, "import", "opencode", opencodeFixture, "--json")
 	after := runJSON(t, "status", "--json")
 	if before["items"] != after["items"] {
 		t.Fatalf("reimport changed item count: before=%v after=%v", before["items"], after["items"])
@@ -627,6 +673,10 @@ func TestNativeAdaptersImportAndEvidence(t *testing.T) {
 	hermesTrajectorySearch := runJSON(t, "search", "trajectory adapter", "--source", "hermes", "--json")
 	if len(hermesTrajectorySearch["results"].([]any)) == 0 {
 		t.Fatalf("hermes trajectory search returned no results")
+	}
+	opencodeSearch := runJSON(t, "search", "OpenCode adapter contract", "--source", "opencode", "--json")
+	if len(opencodeSearch["results"].([]any)) == 0 {
+		t.Fatalf("opencode search returned no results")
 	}
 	commandSearch := runJSON(t, "search", "exec_command", "--source", "codex", "--kind", "command", "--json")
 	commandResults := commandSearch["results"].([]any)
@@ -1169,7 +1219,7 @@ func TestSearchMultiTermAndPrefix(t *testing.T) {
 }
 
 func TestEvalStationTrailCompat(t *testing.T) {
-	good := stationTrailCapabilities{Version: "0.1.5", Schema: "miseledger.adapter.v1", Sources: []string{"codex", "claude", "openclaw", "hermes"}}
+	good := stationTrailCapabilities{Version: "0.1.5", Schema: "miseledger.adapter.v1", Sources: []string{"codex", "claude", "openclaw", "opencode", "hermes"}}
 	cases := []struct {
 		name    string
 		caps    stationTrailCapabilities
@@ -1179,8 +1229,9 @@ func TestEvalStationTrailCompat(t *testing.T) {
 	}{
 		{"old binary tolerated", stationTrailCapabilities{}, false, "codex", false},
 		{"compatible", good, true, "codex", false},
+		{"opencode compatible", good, true, "opencode", false},
 		{"schema mismatch", stationTrailCapabilities{Version: "9", Schema: "other.v2", Sources: []string{"codex"}}, true, "codex", true},
-		{"unsupported source", good, true, "opencode", true},
+		{"unsupported source", good, true, "aicrawl", true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

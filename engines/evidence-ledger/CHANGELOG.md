@@ -8,12 +8,42 @@ Releases before this changelog was started are on the [releases page](https://gi
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-07-02
+
+MiseLedger absorbs its StationTrail and SourceHarvest exporter siblings: session
+logs, files, notes, git history, and crawler exports all flow in through one
+binary, with the `miseledger.adapter.v1` JSONL contract unchanged as the
+integration surface for external exporters.
+
 ### Added
 
+- `miseledger crawl` front door: `sessions`, `docs`, `files`, `repo`, `markdown`,
+  `html`, `gitlog`, `json`, `jsonl`, and `adapter` cover what SourceHarvest
+  exported, and `discord`, `slack`, `granola`, `notion`, and `gmail` wrap the
+  adapter-emitting crawler binaries (discrawl, slacrawl, graincrawl, notcrawl,
+  mailcrawl) so their archives stream straight into the ledger.
+- Native OpenCode session adapter (`import opencode`, `crawl sessions`, and
+  `sources discover` coverage), closing the last session-source gap StationTrail
+  covered.
+- Cursor adapter, provider exports (`chatgpt-export`, `claude-export`), session
+  previews/transcript view, and a browser session finder.
+- Redaction classes `paths`, `secrets`, `emails`, `urls`, `hostnames` (plus
+  `safe`/`none`/`all` shorthands) on import and crawl, applied to every
+  text-bearing adapter field: item text and summaries, tags, collection and
+  actor names, artifact text/paths/URLs, links, relation metadata, and raw
+  paths.
+- `import stationtrail` and `import sourceharvest` accept the retired
+  exporters' JSONL output unchanged.
 - `Dockerfile` and `.dockerignore` that build the static, CGO-free binary and run
   `miseledger mcp` over stdio, so the MCP server can be containerized for registries.
 - Project governance: `CONTRIBUTING.md`, `SECURITY.md`, `CODE_OF_CONDUCT.md`, and
   issue / pull-request templates.
+
+### Performance
+
+- Import fast-paths already-known items, prints progress, and runs SQLite with
+  `synchronous=NORMAL`, keeping daily incremental refreshes cheap on multi-GB
+  archives.
 
 ### Changed
 

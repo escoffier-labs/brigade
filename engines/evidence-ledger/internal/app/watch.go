@@ -22,6 +22,7 @@ import (
 	"github.com/escoffier-labs/miseledger/internal/sources/cursor"
 	"github.com/escoffier-labs/miseledger/internal/sources/hermes"
 	"github.com/escoffier-labs/miseledger/internal/sources/openclaw"
+	"github.com/escoffier-labs/miseledger/internal/sources/opencode"
 )
 
 type discoveredRoot struct {
@@ -310,7 +311,13 @@ func importDiscoveredRoot(db *sql.DB, root discoveredRoot, values map[string]str
 		return row
 	}
 	if dryRun {
-		generated, err := root.Generator(root.Root, sources.Options{Limit: limit, Since: values["since"]}, io.Discard)
+		opts, err := sourceOptions(limit, values["since"], values["redact"])
+		if err != nil {
+			row.Failed = true
+			row.Error = err.Error()
+			return row
+		}
+		generated, err := root.Generator(root.Root, opts, io.Discard)
 		if err != nil {
 			row.Failed = true
 			row.Error = err.Error()
@@ -320,7 +327,13 @@ func importDiscoveredRoot(db *sql.DB, root discoveredRoot, values map[string]str
 		row.Warnings = append(row.Warnings, generated.Warnings...)
 		return row
 	}
-	result, generated, err := runNativeImport(db, root.Kind, root.Generator, root.Root, limit, values["since"], true)
+	opts, err := sourceOptions(limit, values["since"], values["redact"])
+	if err != nil {
+		row.Failed = true
+		row.Error = err.Error()
+		return row
+	}
+	result, generated, err := runNativeImportOpts(db, root.Kind, root.Generator, root.Root, opts, true, nil)
 	if err != nil {
 		row.Failed = true
 		row.Error = err.Error()
@@ -377,6 +390,7 @@ func discoveredRoots() []discoveredRoot {
 		{Kind: "openclaw", Root: filepath.Join(home, ".openclaw", "agents"), Generator: openclaw.Generate},
 		{Kind: "claude", Root: filepath.Join(home, ".claude", "projects"), Generator: claude.Generate},
 		{Kind: "hermes", Root: filepath.Join(home, ".hermes", "sessions"), Generator: hermes.Generate},
+		{Kind: "opencode", Root: opencode.DefaultRoot(), Generator: opencode.Generate},
 		{Kind: "cursor", Root: cursor.DefaultRoot(), Generator: cursor.Generate},
 	}
 }

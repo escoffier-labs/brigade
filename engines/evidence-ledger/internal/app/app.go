@@ -29,12 +29,13 @@ import (
 	"github.com/escoffier-labs/miseledger/internal/sources/cursor"
 	"github.com/escoffier-labs/miseledger/internal/sources/hermes"
 	"github.com/escoffier-labs/miseledger/internal/sources/openclaw"
+	"github.com/escoffier-labs/miseledger/internal/sources/opencode"
 	"github.com/escoffier-labs/miseledger/internal/sources/providerexports"
 )
 
 var stdin io.Reader = os.Stdin
 
-const Version = "0.2.0"
+const Version = "0.3.0"
 
 const externalScannerTimeout = 30 * time.Minute
 
@@ -346,6 +347,7 @@ func discoverSources() []map[string]any {
 		{"openclaw", filepath.Join(home, ".openclaw", "agents"), "native-jsonl"},
 		{"claude", filepath.Join(home, ".claude", "projects"), "native-jsonl"},
 		{"hermes", filepath.Join(home, ".hermes", "sessions"), "native-json"},
+		{"opencode", opencode.DefaultRoot(), "native-json"},
 		{"cursor", cursor.DefaultRoot(), "native-cursor"},
 	}
 	out := make([]map[string]any, 0, len(candidates))
@@ -357,6 +359,8 @@ func discoverSources() []map[string]any {
 				exists = true
 				if c.kind == "cursor" {
 					count = countCursorSessions(c.root)
+				} else if c.kind == "opencode" {
+					count = countOpenCodeExports(c.root)
 				} else {
 					include := sources.DefaultInclude
 					if c.kind == "hermes" {
@@ -398,6 +402,14 @@ func countCursorSessions(root string) int {
 		}
 	}
 	return count
+}
+
+func countOpenCodeExports(root string) int {
+	files, err := opencode.InputsForDiscovery(root)
+	if err != nil {
+		return 0
+	}
+	return len(files)
 }
 
 func cmdScans(args []string, out, errw io.Writer) int {
@@ -634,7 +646,7 @@ func checkPrivate(path string) bool {
 
 func cmdImport(args []string, out, errw io.Writer) int {
 	if len(args) == 0 {
-		return fatalf(errw, "usage: miseledger import adapter|stationtrail|codex|openclaw|claude|hermes|cursor|chatgpt-export|claude-export <path>")
+		return fatalf(errw, "usage: miseledger import adapter|stationtrail|codex|openclaw|claude|hermes|opencode|cursor|chatgpt-export|claude-export <path>")
 	}
 	switch args[0] {
 	case "adapter":
@@ -653,6 +665,8 @@ func cmdImport(args []string, out, errw io.Writer) int {
 		return cmdImportNative("claude", claude.Generate, args[1:], out, errw)
 	case "hermes":
 		return cmdImportNative("hermes", hermes.Generate, args[1:], out, errw)
+	case "opencode":
+		return cmdImportNative("opencode", opencode.Generate, args[1:], out, errw)
 	case "cursor":
 		return cmdImportNative("cursor", cursor.Generate, args[1:], out, errw)
 	case "chatgpt-export":
@@ -660,7 +674,7 @@ func cmdImport(args []string, out, errw io.Writer) int {
 	case "claude-export":
 		return cmdImportNative("claude-export", providerexports.GenerateClaude, args[1:], out, errw)
 	default:
-		return fatalf(errw, "usage: miseledger import adapter|discovered|stationtrail|sourceharvest|codex|openclaw|claude|hermes|cursor|chatgpt-export|claude-export <path>")
+		return fatalf(errw, "usage: miseledger import adapter|discovered|stationtrail|sourceharvest|codex|openclaw|claude|hermes|opencode|cursor|chatgpt-export|claude-export <path>")
 	}
 }
 
@@ -886,7 +900,7 @@ func runStationTrailImport(db *sql.DB, sourceKind, sourcePath string, values map
 
 func cmdAdapter(args []string, out, errw io.Writer) int {
 	if len(args) == 0 {
-		return fatalf(errw, "usage: miseledger adapter codex|openclaw|claude|hermes|cursor <path-or-dir> --out <file|->")
+		return fatalf(errw, "usage: miseledger adapter codex|openclaw|claude|hermes|opencode|cursor <path-or-dir> --out <file|->")
 	}
 	switch args[0] {
 	case "codex":
@@ -897,22 +911,28 @@ func cmdAdapter(args []string, out, errw io.Writer) int {
 		return cmdAdapterGenerate("claude", claude.Generate, args[1:], out, errw)
 	case "hermes":
 		return cmdAdapterGenerate("hermes", hermes.Generate, args[1:], out, errw)
+	case "opencode":
+		return cmdAdapterGenerate("opencode", opencode.Generate, args[1:], out, errw)
 	case "cursor":
 		return cmdAdapterGenerate("cursor", cursor.Generate, args[1:], out, errw)
 	default:
-		return fatalf(errw, "usage: miseledger adapter codex|openclaw|claude|hermes|cursor <path-or-dir> --out <file|->")
+		return fatalf(errw, "usage: miseledger adapter codex|openclaw|claude|hermes|opencode|cursor <path-or-dir> --out <file|->")
 	}
 }
 
 func cmdAdapterGenerate(name string, generator sources.Generator, args []string, out, errw io.Writer) int {
-	values, bools, rest, err := splitFlags(args, map[string]bool{"out": true, "limit": true, "since": true}, map[string]bool{"json": true})
+	values, bools, rest, err := splitFlags(args, map[string]bool{"out": true, "limit": true, "since": true, "redact": true}, map[string]bool{"json": true})
 	if err != nil {
 		return fatalf(errw, "adapter %s: %s", name, err)
 	}
 	if len(rest) != 1 || values["out"] == "" {
-		return fatalf(errw, "usage: miseledger adapter %s <path-or-dir> --out <file|-> [--limit N] [--since DATE] [--json]", name)
+		return fatalf(errw, "usage: miseledger adapter %s <path-or-dir> --out <file|-> [--limit N] [--since DATE] [--redact LIST] [--json]", name)
 	}
 	limit, err := parseLimit(values["limit"], 0)
+	if err != nil {
+		return fatalf(errw, "adapter %s: %s", name, err)
+	}
+	opts, err := sourceOptions(limit, values["since"], values["redact"])
 	if err != nil {
 		return fatalf(errw, "adapter %s: %s", name, err)
 	}
@@ -926,7 +946,7 @@ func cmdAdapterGenerate(name string, generator sources.Generator, args []string,
 		}
 		w = output.File
 	}
-	result, err := generator(rest[0], sources.Options{Limit: limit, Since: values["since"]}, w)
+	result, err := generator(rest[0], opts, w)
 	if err != nil {
 		return fatalf(errw, "adapter %s: %s", name, err)
 	}
@@ -945,19 +965,23 @@ func cmdAdapterGenerate(name string, generator sources.Generator, args []string,
 }
 
 func cmdImportNative(name string, generator sources.Generator, args []string, out, errw io.Writer) int {
-	values, bools, rest, err := splitFlags(args, map[string]bool{"limit": true, "since": true}, map[string]bool{"json": true, "dry-run": true, "full": true})
+	values, bools, rest, err := splitFlags(args, map[string]bool{"limit": true, "since": true, "redact": true}, map[string]bool{"json": true, "dry-run": true, "full": true})
 	if err != nil {
 		return fatalf(errw, "import %s: %s", name, err)
 	}
 	if len(rest) != 1 {
-		return fatalf(errw, "usage: miseledger import %s <path-or-dir> [--json] [--dry-run] [--full] [--limit N] [--since DATE]", name)
+		return fatalf(errw, "usage: miseledger import %s <path-or-dir> [--json] [--dry-run] [--full] [--limit N] [--since DATE] [--redact LIST]", name)
 	}
 	limit, err := parseLimit(values["limit"], 0)
 	if err != nil {
 		return fatalf(errw, "import %s: %s", name, err)
 	}
+	opts, err := sourceOptions(limit, values["since"], values["redact"])
+	if err != nil {
+		return fatalf(errw, "import %s: %s", name, err)
+	}
 	if bools["dry-run"] {
-		generated, err := generator(rest[0], sources.Options{Limit: limit, Since: values["since"]}, io.Discard)
+		generated, err := generator(rest[0], opts, io.Discard)
 		if err != nil {
 			return fatalf(errw, "import %s: %s", name, err)
 		}
@@ -969,7 +993,6 @@ func cmdImportNative(name string, generator sources.Generator, args []string, ou
 		return fatalf(errw, "import %s: %s", name, err)
 	}
 	defer db.Close()
-	opts := sources.Options{Limit: limit, Since: values["since"]}
 	if bools["full"] {
 		// Force a complete re-scan that ignores the manifest.
 		opts.Skip = func(string, int64, string) bool { return false }
@@ -1057,6 +1080,49 @@ func parseLimit(value string, fallback int) (int, error) {
 		return 0, errors.New("invalid --limit")
 	}
 	return limit, nil
+}
+
+func sourceOptions(limit int, since, redact string) (sources.Options, error) {
+	opts := sources.Options{Limit: limit, Since: since}
+	redactions, err := parseRedactions(redact)
+	if err != nil {
+		return sources.Options{}, err
+	}
+	opts.RedactPaths = redactions["paths"]
+	opts.RedactSecrets = redactions["secrets"]
+	opts.RedactEmails = redactions["emails"]
+	opts.RedactURLs = redactions["urls"]
+	opts.RedactHostnames = redactions["hostnames"]
+	return opts, nil
+}
+
+func parseRedactions(raw string) (map[string]bool, error) {
+	out := map[string]bool{}
+	for _, part := range strings.Split(raw, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		switch part {
+		case "none":
+			return map[string]bool{}, nil
+		case "safe":
+			out["paths"] = true
+			out["secrets"] = true
+			out["emails"] = true
+		case "all":
+			out["paths"] = true
+			out["secrets"] = true
+			out["emails"] = true
+			out["urls"] = true
+			out["hostnames"] = true
+		case "paths", "secrets", "emails", "urls", "hostnames":
+			out[part] = true
+		default:
+			return nil, fmt.Errorf("unsupported redaction %q", part)
+		}
+	}
+	return out, nil
 }
 
 func cmdSearch(args []string, out, errw io.Writer) int {

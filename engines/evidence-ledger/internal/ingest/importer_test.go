@@ -1,11 +1,14 @@
 package ingest
 
 import (
+	"bytes"
 	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/escoffier-labs/miseledger/internal/archive"
+	"github.com/escoffier-labs/miseledger/internal/sources"
+	"github.com/escoffier-labs/miseledger/internal/sources/opencode"
 )
 
 func TestImportAdapterReaderIdempotent(t *testing.T) {
@@ -174,5 +177,38 @@ func TestImportAdapterReaderBatchedProgressAndResume(t *testing.T) {
 	}
 	if items != 2500 {
 		t.Fatalf("items = %d, want 2500 (no duplication across batches)", items)
+	}
+}
+
+func TestImportOpenCodeGeneratedAdapterRecords(t *testing.T) {
+	db, err := archive.Open(t.TempDir() + "/miseledger.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := archive.Migrate(db); err != nil {
+		t.Fatal(err)
+	}
+	var adapterJSONL bytes.Buffer
+	generated, err := opencode.Generate("../../testdata/harnesses/opencode-export.fixture.json", sources.Options{}, &adapterJSONL)
+	if err != nil {
+		t.Fatalf("generate opencode fixture: %v", err)
+	}
+	if generated.Records != 2 {
+		t.Fatalf("generated records = %d, want 2", generated.Records)
+	}
+	result, err := ImportAdapterReader(db, &adapterJSONL, "opencode://fixture", "opencode")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Inserted != 2 || result.SourceKind != "opencode" {
+		t.Fatalf("import result = %+v, want 2 opencode items", result)
+	}
+	var sources int
+	if err := db.QueryRow(`select count(*) from sources where kind = 'opencode'`).Scan(&sources); err != nil {
+		t.Fatal(err)
+	}
+	if sources != 1 {
+		t.Fatalf("opencode sources = %d, want 1", sources)
 	}
 }

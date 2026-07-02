@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -18,8 +19,13 @@ import (
 )
 
 type Options struct {
-	Limit int
-	Since string
+	Limit           int
+	Since           string
+	RedactPaths     bool
+	RedactSecrets   bool
+	RedactEmails    bool
+	RedactURLs      bool
+	RedactHostnames bool
 	// Skip reports whether a file is unchanged since a prior import and can be
 	// skipped without reading or hashing it. Size and mtime come from the
 	// caller's scan manifest. Nil means import everything (full scan).
@@ -253,12 +259,216 @@ func FileHash(path string) (string, error) {
 }
 
 func WriteRecord(w io.Writer, rec adapter.Record) error {
+	if rec.Artifacts == nil {
+		rec.Artifacts = []adapter.Artifact{}
+	}
+	if rec.Links == nil {
+		rec.Links = []adapter.Link{}
+	}
+	if rec.Relations == nil {
+		rec.Relations = []adapter.Relation{}
+	}
 	b, err := json.Marshal(rec)
 	if err != nil {
 		return err
 	}
 	_, err = fmt.Fprintf(w, "%s\n", b)
 	return err
+}
+
+func ApplyRedaction(rec *adapter.Record, opts Options) {
+	if rec == nil || !opts.HasRedactions() {
+		return
+	}
+	if opts.RedactPaths {
+		rec.Raw.Path = RedactPath(rec.Raw.Path)
+		// Session sources routinely use a project directory as the collection
+		// name, so path redaction covers name fields too.
+		rec.Collection.Name = RedactPath(rec.Collection.Name)
+		rec.Collection.Metadata = redactMetadata(rec.Collection.Metadata, opts)
+		rec.Item.Metadata = redactMetadata(rec.Item.Metadata, opts)
+		if rec.Actor != nil {
+			rec.Actor.Metadata = redactMetadata(rec.Actor.Metadata, opts)
+		}
+		for i := range rec.Artifacts {
+			rec.Artifacts[i].Path = RedactPath(rec.Artifacts[i].Path)
+			rec.Artifacts[i].Metadata = redactMetadata(rec.Artifacts[i].Metadata, opts)
+		}
+		for i := range rec.Relations {
+			rec.Relations[i].Metadata = redactMetadata(rec.Relations[i].Metadata, opts)
+		}
+	}
+	if opts.RedactSecrets || opts.RedactEmails || opts.RedactURLs || opts.RedactHostnames {
+		rec.Item.Text = RedactText(rec.Item.Text, opts)
+		rec.Collection.Name = RedactText(rec.Collection.Name, opts)
+		if rec.Item.Summary != nil {
+			redacted := RedactText(*rec.Item.Summary, opts)
+			rec.Item.Summary = &redacted
+		}
+		for i := range rec.Item.Tags {
+			rec.Item.Tags[i] = RedactText(rec.Item.Tags[i], opts)
+		}
+		if rec.Actor != nil {
+			rec.Actor.Name = RedactText(rec.Actor.Name, opts)
+		}
+		for i := range rec.Artifacts {
+			rec.Artifacts[i].Text = RedactText(rec.Artifacts[i].Text, opts)
+			rec.Artifacts[i].URL = RedactText(rec.Artifacts[i].URL, opts)
+		}
+		for i := range rec.Links {
+			rec.Links[i].URL = RedactText(rec.Links[i].URL, opts)
+			rec.Links[i].Text = RedactText(rec.Links[i].Text, opts)
+		}
+		rec.Collection.Metadata = redactMetadata(rec.Collection.Metadata, opts)
+		rec.Item.Metadata = redactMetadata(rec.Item.Metadata, opts)
+		if rec.Actor != nil {
+			rec.Actor.Metadata = redactMetadata(rec.Actor.Metadata, opts)
+		}
+		for i := range rec.Artifacts {
+			rec.Artifacts[i].Metadata = redactMetadata(rec.Artifacts[i].Metadata, opts)
+		}
+		for i := range rec.Relations {
+			rec.Relations[i].Metadata = redactMetadata(rec.Relations[i].Metadata, opts)
+		}
+	}
+}
+
+func (o Options) HasRedactions() bool {
+	return o.RedactPaths || o.RedactSecrets || o.RedactEmails || o.RedactURLs || o.RedactHostnames
+}
+
+func RedactPath(path string) string {
+	if strings.TrimSpace(path) == "" {
+		return path
+	}
+	home, err := os.UserHomeDir()
+	if err == nil && home != "" && (path == home || strings.HasPrefix(path, home+string(filepath.Separator))) {
+		return "[redacted-home]" + strings.TrimPrefix(path, home)
+	}
+	if filepath.IsAbs(path) {
+		return "[redacted-path]/" + filepath.Base(path)
+	}
+	if strings.Contains(path, "/") || strings.Contains(path, string(filepath.Separator)) {
+		return "[redacted-path]/" + filepath.Base(path)
+	}
+	return path
+}
+
+type secretPattern struct {
+	re          *regexp.Regexp
+	replacement string
+}
+
+var secretPatterns = []secretPattern{
+	{regexp.MustCompile(`(?s)-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?-----END [A-Z0-9 ]*PRIVATE KEY-----`), `[redacted-secret]`},
+	{regexp.MustCompile(`(?i)(api[_-]?key|token|secret|password|authorization|bearer)(["'\s:=]+)[^"'\s,}]+`), `$1$2[redacted-secret]`},
+	{regexp.MustCompile(`\bAKIA[0-9A-Z]{16}\b`), `[redacted-secret]`},
+	{regexp.MustCompile(`\bgh[pousr]_[A-Za-z0-9]{36,}\b`), `[redacted-secret]`},
+	{regexp.MustCompile(`\beyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+`), `[redacted-secret]`},
+	{regexp.MustCompile(`(?i)sk-[A-Za-z0-9_-]{16,}`), `[redacted-secret]`},
+	{regexp.MustCompile(`(?i)xox[baprs]-[A-Za-z0-9-]+`), `[redacted-secret]`},
+}
+
+var hostnameTLDs = strings.Join([]string{
+	"local", "internal", "lan", "corp", "home", "intranet", "localdomain", "localhost", "invalid",
+	"com", "org", "net", "edu", "gov", "mil", "int", "info", "biz", "io", "dev", "app", "cloud", "co", "ai", "xyz",
+	"us", "uk", "ca", "de", "fr", "jp", "cn", "au", "ru", "br", "in", "nl", "se", "es", "it", "ch", "eu",
+}, "|")
+
+var (
+	emailPattern    = regexp.MustCompile(`(?i)\b[A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,}\b`)
+	urlPattern      = regexp.MustCompile(`(?i)\bhttps?://[^\s"'<>]+`)
+	hostnamePattern = regexp.MustCompile(`(?i)\b([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+(` + hostnameTLDs + `)\b`)
+)
+
+func RedactText(text string, opts Options) string {
+	out := text
+	if opts.RedactSecrets {
+		out = RedactSecrets(out)
+	}
+	if opts.RedactEmails {
+		out = emailPattern.ReplaceAllString(out, "[redacted-email]")
+	}
+	if opts.RedactURLs {
+		out = urlPattern.ReplaceAllString(out, "[redacted-url]")
+	}
+	if opts.RedactHostnames {
+		out = hostnamePattern.ReplaceAllString(out, "[redacted-host]")
+	}
+	return out
+}
+
+func RedactSecrets(text string) string {
+	if text == "" {
+		return text
+	}
+	out := text
+	for _, pattern := range secretPatterns {
+		out = pattern.re.ReplaceAllString(out, pattern.replacement)
+	}
+	return out
+}
+
+func redactMetadata(raw json.RawMessage, opts Options) json.RawMessage {
+	if len(raw) == 0 {
+		return raw
+	}
+	var value any
+	if err := json.Unmarshal(raw, &value); err != nil {
+		if opts.RedactSecrets || opts.RedactEmails || opts.RedactURLs || opts.RedactHostnames {
+			return json.RawMessage(jsonString(RedactText(string(raw), opts)))
+		}
+		return raw
+	}
+	value = redactAny(value, opts, "")
+	b, err := json.Marshal(value)
+	if err != nil {
+		return raw
+	}
+	return b
+}
+
+func redactAny(value any, opts Options, key string) any {
+	switch v := value.(type) {
+	case map[string]any:
+		out := make(map[string]any, len(v))
+		for k, child := range v {
+			out[k] = redactAny(child, opts, k)
+		}
+		return out
+	case []any:
+		out := make([]any, len(v))
+		for i, child := range v {
+			out[i] = redactAny(child, opts, key)
+		}
+		return out
+	case string:
+		out := v
+		if opts.RedactPaths && pathLikeKey(key) {
+			out = RedactPath(out)
+		}
+		if opts.RedactSecrets || opts.RedactEmails || opts.RedactURLs || opts.RedactHostnames {
+			out = RedactText(out, opts)
+		}
+		return out
+	default:
+		return value
+	}
+}
+
+func pathLikeKey(key string) bool {
+	key = strings.ToLower(key)
+	for _, part := range []string{"path", "cwd", "dir", "workspace", "file"} {
+		if strings.Contains(key, part) {
+			return true
+		}
+	}
+	return false
+}
+
+func jsonString(s string) string {
+	b, _ := json.Marshal(s)
+	return string(b)
 }
 
 func RawRef(ev RawEvent) adapter.RawRef {

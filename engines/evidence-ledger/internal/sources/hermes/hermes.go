@@ -53,6 +53,7 @@ func Generate(path string, opts sources.Options, w io.Writer) (sources.Result, e
 			if !sources.KeepTimestamp(rec.Item.CreatedAt, since, hasSince) {
 				continue
 			}
+			sources.ApplyRedaction(&rec, opts)
 			if err := sources.WriteRecord(w, rec); err != nil {
 				return result, err
 			}
