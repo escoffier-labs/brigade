@@ -44,10 +44,10 @@ def test_pantry_station_declares_agentpantry():
     assert callable(pantry.doctor)
 
 
-def test_evidence_station_declares_miseledger_family():
+def test_evidence_station_declares_miseledger():
     evidence = registry.resolve("evidence")
     assert evidence is not None
-    assert set(evidence.tools) == {"miseledger", "stationtrail", "sourceharvest"}
+    assert set(evidence.tools) == {"miseledger"}
     assert callable(evidence.doctor)
 
 

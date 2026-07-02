@@ -70,10 +70,10 @@ NOTIFICATIONS = Station(
 
 EVIDENCE = Station(
     name="evidence",
-    summary="local-first evidence ledger and source exporters",
+    summary="local-first evidence ledger with built-in session and source crawlers",
     aliases=("ledger",),
     doctor=_doctor.evidence_station_checks,
-    tools=("miseledger", "stationtrail", "sourceharvest"),
+    tools=("miseledger",),
 )
 
 MCP = Station(

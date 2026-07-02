@@ -216,9 +216,9 @@ def _agent_notify_wire(ctx: DoctorContext) -> List[CheckResult]:
     ]
 
 
-# The miseledger family (miseledger + its stationtrail/sourceharvest exporters)
+# miseledger (which absorbed the stationtrail/sourceharvest exporters in v0.3.0)
 # operates on the operator's host-global evidence archive and local session logs,
-# not a per-target workspace. Like the memory and pantry satellites, their findings
+# not a per-target workspace. Like the memory and pantry satellites, its findings
 # are advisory: they never FAIL a workspace doctor run.
 def _miseledger_doctor(ctx: DoctorContext) -> List[CheckResult]:
     name = "miseledger (evidence archive)"
@@ -243,33 +243,6 @@ def _miseledger_doctor(ctx: DoctorContext) -> List[CheckResult]:
     fts = data.get("fts") or "?"
     status = WARN if fts != "ok" else OK
     return [(status, name, f"schema={schema}, items={items}, sources={sources}, fts={fts}")]
-
-
-def _stationtrail_doctor(ctx: DoctorContext) -> List[CheckResult]:
-    name = "stationtrail (session exporter)"
-    # `doctor --json` discovers local harness session roots; ok=false means a
-    # source could not be read, which is advisory (operator local state).
-    r = proc.run(["stationtrail", "doctor", "--json"])
-    data = r.json()
-    if data is None:
-        return [(WARN, name, f"installed but doctor output unreadable (exit {r.code})")]
-    if not isinstance(data, dict):
-        return [(WARN, name, f"unexpected doctor output (exit {r.code})")]
-    sources = data.get("sources") if isinstance(data.get("sources"), list) else []
-    ready = [s for s in sources if isinstance(s, dict) and s.get("status") == "ready"]
-    warnings = data.get("warnings") if isinstance(data.get("warnings"), list) else []
-    status = WARN if (data.get("ok") is False or warnings) else OK
-    return [(status, name, f"sources={len(sources)}, ready={len(ready)}, warnings={len(warnings)}")]
-
-
-def _sourceharvest_doctor(ctx: DoctorContext) -> List[CheckResult]:
-    name = "sourceharvest (source exporter)"
-    # sourceharvest is a stateless adapter emitter with no archive to inspect;
-    # presence + a runnable `version` is the most we can advisively assert.
-    r = proc.run(["sourceharvest", "version"])
-    if r.code != 0:
-        return [(WARN, name, f"installed but not runnable (exit {r.code})")]
-    return [(OK, name, f"installed; {r.stdout.strip() or 'version ok'}")]
 
 
 def _token_glace_wire(ctx: DoctorContext) -> List[CheckResult]:
@@ -380,24 +353,6 @@ _TOOLS: Tuple[ManagedTool, ...] = (
         install_args=["go", "install", "github.com/escoffier-labs/miseledger/cmd/miseledger@latest"],
         wire=_noop_wire,
         doctor=_miseledger_doctor,
-    ),
-    ManagedTool(
-        name="stationtrail",
-        station="evidence",
-        command="stationtrail",
-        summary="agent-session log exporter to miseledger.adapter.v1 JSONL",
-        install_args=["go", "install", "github.com/escoffier-labs/stationtrail/cmd/stationtrail@latest"],
-        wire=_noop_wire,
-        doctor=_stationtrail_doctor,
-    ),
-    ManagedTool(
-        name="sourceharvest",
-        station="evidence",
-        command="sourceharvest",
-        summary="source-system record exporter to miseledger.adapter.v1 JSONL",
-        install_args=["go", "install", "github.com/escoffier-labs/sourceharvest/cmd/sourceharvest@latest"],
-        wire=_noop_wire,
-        doctor=_sourceharvest_doctor,
     ),
 )
 

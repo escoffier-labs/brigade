@@ -379,8 +379,7 @@ Safety and operations tools:
 Evidence ledger tools:
 
 - [MiseLedger](https://github.com/escoffier-labs/miseledger): local-first evidence ledger that imports `miseledger.adapter.v1` JSONL into SQLite, searches with FTS5, and emits Brigade-ready evidence bundles.
-- [StationTrail](https://github.com/escoffier-labs/stationtrail): agent-session log exporter that normalizes Codex, Claude, OpenClaw, OpenCode, and Hermes sessions into adapter JSONL for MiseLedger.
-- [SourceHarvest](https://github.com/escoffier-labs/sourceharvest): source-system record exporter that normalizes notes, files, git history, and generic exports into adapter JSONL for MiseLedger.
+- Session and source exporters live inside MiseLedger since v0.3.0 (`miseledger crawl sessions|files|gitlog|...`); the archived [StationTrail](https://github.com/escoffier-labs/stationtrail) and [SourceHarvest](https://github.com/escoffier-labs/sourceharvest) repos document the retired standalone exporters.
 
 Search and context tools:
 

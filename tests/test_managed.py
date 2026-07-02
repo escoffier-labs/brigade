@@ -168,18 +168,16 @@ def test_agentpantry_doctor_falls_back_to_status_for_old_binary(monkeypatch):
 
 
 def test_evidence_tools_attach_to_evidence_station():
-    for name in ("miseledger", "stationtrail", "sourceharvest"):
-        t = managed.resolve(name)
-        assert t is not None and t.station == "evidence", name
+    t = managed.resolve("miseledger")
+    assert t is not None and t.station == "evidence"
     names = {t.name for t in managed.for_station("evidence")}
-    assert names == {"miseledger", "stationtrail", "sourceharvest"}
+    assert names == {"miseledger"}
 
 
 def test_evidence_install_args_use_escoffier_labs():
-    for name in ("miseledger", "stationtrail", "sourceharvest"):
-        t = managed.resolve(name)
-        joined = " ".join(t.install_args)
-        assert f"github.com/escoffier-labs/{name}/cmd/{name}@latest" in joined, name
+    t = managed.resolve("miseledger")
+    joined = " ".join(t.install_args)
+    assert "github.com/escoffier-labs/miseledger/cmd/miseledger@latest" in joined
 
 
 def test_search_tools_attach_to_search_station():
@@ -305,83 +303,6 @@ def test_miseledger_doctor_warns_distinctly_on_timeout(monkeypatch):
     ctx = DoctorContext(target=Path("/tmp/ws"), selection=None, harnesses=[])
     results = t.doctor(ctx)
     assert any(status == "WARN" and "timed out" in detail and "120s" in detail for status, _, detail in results)
-    assert all(status != "FAIL" for status, _, _ in results)
-
-
-def test_stationtrail_doctor_parses_report(monkeypatch):
-    t = managed.resolve("stationtrail")
-
-    def fake_run(args, **kw):
-        assert args == ["stationtrail", "doctor", "--json"]
-        return managed.proc.Result(
-            code=0,
-            stdout='{"ok": true, "warnings": [],'
-            ' "sources": [{"kind": "codex", "status": "ready"},'
-            ' {"kind": "claude", "status": "missing"}]}',
-            stderr="",
-        )
-
-    monkeypatch.setattr(managed.proc, "run", fake_run)
-    ctx = DoctorContext(target=Path("/tmp/ws"), selection=None, harnesses=[])
-    results = t.doctor(ctx)
-    assert any(status == "OK" and "sources=2" in detail and "ready=1" in detail for status, _, detail in results)
-
-
-def test_stationtrail_doctor_warns_but_never_fails(monkeypatch):
-    # ok=false (a source could not be read) is advisory, not a workspace failure.
-    t = managed.resolve("stationtrail")
-
-    def fake_run(args, **kw):
-        return managed.proc.Result(
-            code=0,
-            stdout='{"ok": false, "warnings": ["codex status is error"],'
-            ' "sources": [{"kind": "codex", "status": "error"}]}',
-            stderr="",
-        )
-
-    monkeypatch.setattr(managed.proc, "run", fake_run)
-    ctx = DoctorContext(target=Path("/tmp/ws"), selection=None, harnesses=[])
-    results = t.doctor(ctx)
-    assert any(status == "WARN" for status, _, _ in results)
-    assert all(status != "FAIL" for status, _, _ in results)
-
-
-def test_stationtrail_doctor_handles_garbage_output(monkeypatch):
-    t = managed.resolve("stationtrail")
-
-    def fake_run(args, **kw):
-        return managed.proc.Result(code=2, stdout="not json", stderr="flag provided but not defined")
-
-    monkeypatch.setattr(managed.proc, "run", fake_run)
-    ctx = DoctorContext(target=Path("/tmp/ws"), selection=None, harnesses=[])
-    results = t.doctor(ctx)
-    assert any(status == "WARN" and "unreadable" in detail for status, _, detail in results)
-    assert all(status != "FAIL" for status, _, _ in results)
-
-
-def test_sourceharvest_doctor_present(monkeypatch):
-    t = managed.resolve("sourceharvest")
-
-    def fake_run(args, **kw):
-        assert args == ["sourceharvest", "version"]
-        return managed.proc.Result(code=0, stdout="sourceharvest 0.1.0", stderr="")
-
-    monkeypatch.setattr(managed.proc, "run", fake_run)
-    ctx = DoctorContext(target=Path("/tmp/ws"), selection=None, harnesses=[])
-    results = t.doctor(ctx)
-    assert any(status == "OK" and "sourceharvest 0.1.0" in detail for status, _, detail in results)
-
-
-def test_sourceharvest_doctor_warns_when_not_runnable(monkeypatch):
-    t = managed.resolve("sourceharvest")
-
-    def fake_run(args, **kw):
-        return managed.proc.Result(code=127, stdout="", stderr="boom")
-
-    monkeypatch.setattr(managed.proc, "run", fake_run)
-    ctx = DoctorContext(target=Path("/tmp/ws"), selection=None, harnesses=[])
-    results = t.doctor(ctx)
-    assert any(status == "WARN" and "not runnable" in detail for status, _, detail in results)
     assert all(status != "FAIL" for status, _, _ in results)
 
 
