@@ -165,9 +165,12 @@ def _rewrite(text: str, pattern: str, expected: str) -> str:
 
 def apply(manifest: Manifest, target: Path, expected: str) -> list[str]:
     changed: list[str] = []
+    source_path = (target / manifest.source.file).resolve()
     for location in manifest.locations:
         for file in _resolve_files(location, target):
             if not file.is_file():
+                continue
+            if file.resolve() == source_path:
                 continue
             text = file.read_text()
             if location.guard is not None and location.guard not in text:

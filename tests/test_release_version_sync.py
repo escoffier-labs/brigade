@@ -165,6 +165,17 @@ def test_apply_fixes_only_drifted(tmp_path):
     assert all(r.status == "ok" for r in vs.scan(m, tmp_path, "0.17.0"))
 
 
+def test_apply_never_rewrites_source_file(tmp_path):
+    (tmp_path / "VERSION").write_text("v = 0.13.0\n")
+    _manifest(
+        tmp_path,
+        "[source]\nfile='VERSION'\nregex='v = (\\S+)'\n[[location]]\npath='VERSION'\npattern='v = (\\S+)'\n",
+    )
+    m = vs.load_manifest(tmp_path)
+    assert vs.apply(m, tmp_path, "0.17.0") == []
+    assert (tmp_path / "VERSION").read_text() == "v = 0.13.0\n"
+
+
 def test_recording_svg_roundtrip(tmp_path):
     # The .svg glyph-adjacent pattern must round-trip through scan + apply.
     _repo(tmp_path, svg_version="0.9.9")
