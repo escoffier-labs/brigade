@@ -113,8 +113,14 @@ def active_targets(target: Path, *, harness: str | None, user_scope: bool) -> tu
         adapter = ADAPTERS[name]
         if adapter.user_scope and not user_scope:
             continue
-        # vscode is not a Brigade harness; always eligible. Others honor the Selection.
-        if configured is not None and not adapter.user_scope and name != "vscode" and name not in configured:
+        if name == "vscode":
+            # vscode is not a Brigade harness. Only include it when the repo
+            # already carries a .vscode/ directory, so a sync never grows one
+            # unasked; --harness vscode still forces it.
+            if not (target / ".vscode").is_dir():
+                notes.append("vscode: skipped (no .vscode/ directory; run --harness vscode to include)")
+                continue
+        elif configured is not None and not adapter.user_scope and name not in configured:
             continue
         result.append(name)
     return result, notes

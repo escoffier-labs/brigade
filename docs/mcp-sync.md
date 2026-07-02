@@ -59,9 +59,10 @@ tool expands at launch.
 | Antigravity | `~/.gemini/config/mcp_config.json` | JSON `mcpServers`; remote uses `serverUrl`. **User-scoped** (`--user-scope`) |
 
 By default a repo's sync targets the tools in its Brigade selection (`.brigade/config.json`)
-that have an adapter, plus VS Code. A tool with no adapter is reported as `unsupported` by
-`brigade mcp doctor` rather than silently skipped. New adapters are added in
-`src/brigade/mcp_adapters.py`.
+that have an adapter. VS Code is not a Brigade harness: it is included only when the repo
+already has a `.vscode/` directory, so a sync never creates one unasked (`--harness vscode`
+forces it). A tool with no adapter is reported as `unsupported` by `brigade mcp doctor`
+rather than silently skipped. New adapters are added in `src/brigade/mcp_adapters.py`.
 
 ## Commands
 
