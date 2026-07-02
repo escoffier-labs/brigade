@@ -71,6 +71,23 @@ def test_disabled_extras_help_shows_guidance_not_empty_parser(extras_off, capsys
     assert "brigade extras on" in err
 
 
+def test_work_phases_gated_behind_extras(extras_off, capsys):
+    # The phase-execution ledger is operator-suite surface inside the core
+    # work group; it stubs out like a top-level extras command.
+    rc = cli.main(["work", "phases", "list"])
+    err = capsys.readouterr().err
+    assert rc == 2
+    assert "brigade extras on" in err
+
+
+def test_work_phases_available_when_extras_enabled(extras_off, monkeypatch, capsys):
+    monkeypatch.setenv("BRIGADE_EXTRAS", "1")
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["work", "phases", "--help"])
+    assert exc.value.code == 0
+    assert "plan" in capsys.readouterr().out
+
+
 def test_extras_cli_group_toggles(extras_off, capsys):
     assert cli.main(["extras", "status"]) == 0
     assert "disabled" in capsys.readouterr().out

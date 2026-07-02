@@ -43,30 +43,33 @@ def dispatch(args) -> int:
     return 2
 
 
-def register_stub(sub: argparse._SubParsersAction, name: str) -> None:
+def register_stub(sub: argparse._SubParsersAction, name: str, *, invocation: str | None = None) -> None:
     """Register a disabled extras command so it fails with guidance, not a parse error.
 
     The stub swallows every argument (including -h/--help, which argparse
     would otherwise answer with an empty help page or reject) so the user
-    always sees the enable guidance instead.
+    always sees the enable guidance instead. `invocation` is the full command
+    path for the guidance text when the stub sits below the top level
+    (e.g. "work phases").
     """
+    shown = invocation or name
     p = sub.add_parser(name, help="(extras, disabled) enable with `brigade extras on`", add_help=False)
 
-    def _swallow_all(args=None, namespace=None, *, _name=name):
+    def _swallow_all(args=None, namespace=None, *, _shown=shown):
         ns = namespace or argparse.Namespace()
         ns.stub_args = list(args or [])
-        ns.func = lambda parsed, _n=_name: _stub_dispatch(_n)
+        ns.func = lambda parsed, _s=_shown: _stub_dispatch(_s)
         return ns, []
 
     p.parse_known_args = _swallow_all  # type: ignore[method-assign]
-    p.set_defaults(func=lambda args, _name=name: _stub_dispatch(_name))
+    p.set_defaults(func=lambda args, _shown=shown: _stub_dispatch(_shown))
 
 
-def _stub_dispatch(name: str) -> int:
+def _stub_dispatch(invocation: str) -> int:
     print(
-        f"error: '{name}' is part of the brigade extras surface, which is disabled.\n"
+        f"error: '{invocation}' is part of the brigade extras surface, which is disabled.\n"
         f"Enable it once with: brigade extras on\n"
-        f"Or per invocation:   BRIGADE_EXTRAS=1 brigade {name} ...",
+        f"Or per invocation:   BRIGADE_EXTRAS=1 brigade {invocation} ...",
         file=sys.stderr,
     )
     return 2
