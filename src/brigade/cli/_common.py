@@ -24,7 +24,16 @@ COMMAND_GROUPS: list[tuple[str, list[str]]] = [
     ),
     (
         "Wiring and advanced",
-        ["release", "roadmap", "repos", "reconfigure", "completions", "openclaw-fragments", "hermes-fragments"],
+        [
+            "release",
+            "roadmap",
+            "repos",
+            "reconfigure",
+            "completions",
+            "extras",
+            "openclaw-fragments",
+            "hermes-fragments",
+        ],
     ),
 ]
 
@@ -50,13 +59,24 @@ class _TopLevelHelpFormatter(argparse.RawDescriptionHelpFormatter):
         return super()._iter_indented_subactions(action)
 
 
-def _grouped_epilog(sub: argparse._SubParsersAction) -> str:
+def _grouped_epilog(sub: argparse._SubParsersAction, *, extras_enabled: bool = True) -> str:
+    from ..extras import EXTRAS_COMMANDS
+
     helps = {action.dest: (action.help or "") for action in sub._choices_actions}
     lines = ["commands:"]
+    gated: list[str] = []
     for title, names in COMMAND_GROUPS:
+        shown = names if extras_enabled else [n for n in names if n not in EXTRAS_COMMANDS]
+        gated.extend(n for n in names if not extras_enabled and n in EXTRAS_COMMANDS)
+        if not shown:
+            continue
         lines.append("")
         lines.append(f"{title}:")
-        lines.extend(f"  {name:<22}{helps.get(name, '')}" for name in names)
+        lines.extend(f"  {name:<22}{helps.get(name, '')}" for name in shown)
+    if gated:
+        lines.append("")
+        lines.append("Extras (disabled; run 'brigade extras on' to enable):")
+        lines.append("  " + ", ".join(sorted(gated)))
     lines.append("")
     lines.append("Run 'brigade <command> --help' for details on any command.")
     return "\n".join(lines)

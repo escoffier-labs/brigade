@@ -8,6 +8,18 @@ def tmp_target(tmp_path):
 
 
 @pytest.fixture(autouse=True)
+def _extras_enabled_for_suite(monkeypatch, request):
+    """The suite exercises the full command surface, so extras default on.
+
+    The extras gate itself is tested in tests/test_extras_gate.py, which
+    opts out by clearing BRIGADE_EXTRAS in its own fixture.
+    """
+    if request.module.__name__.rsplit(".", 1)[-1] == "test_extras_gate":
+        return
+    monkeypatch.setenv("BRIGADE_EXTRAS", "1")
+
+
+@pytest.fixture(autouse=True)
 def _isolate_hermes_home(tmp_path_factory, monkeypatch):
     """Point HERMES_HOME at a dedicated temp dir (outside the test's tmp_path so
     it never pollutes workspace assertions) so hermes-harness skill installs

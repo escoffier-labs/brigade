@@ -226,7 +226,7 @@ All of them get handoff templates and ingest source coverage. Most also get proj
 
 ## More
 
-The same review-and-receipt pattern covers the rest of an operator's day, and you can ignore all of it until you need it.
+The same review-and-receipt pattern covers the rest of an operator's day, and you can ignore all of it until you need it. Most of these live behind `brigade extras on`, one command that adds the 18 operator-suite groups (release trains, fleet health, mission control, research, chat archives) to the CLI; until then `brigade --help` stays at the 24 core groups.
 
 - **Cross-model runs**: `brigade run "<task>"` plans, dispatches, and synthesizes one bounded task across the agent CLIs in your roster, so an expensive model can think while cheaper ones do the grunt work. `--worktree` runs everything in a detached git checkout that comes back as a reviewable `changes.patch`.
 - **Daily loop**: `brigade work brief` shows pending work, imports, and warnings; `brigade daily status` keeps it bounded and cheap.
