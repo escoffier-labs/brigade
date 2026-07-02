@@ -34,6 +34,11 @@ func Generate(path string, opts sources.Options, w io.Writer) (sources.Result, e
 			return result, err
 		}
 		if skip {
+			if opts.AfterFile != nil {
+				if err := opts.AfterFile(scanByPath(scans.List(), file)); err != nil {
+					return result, err
+				}
+			}
 			continue
 		}
 		records, warnings, err := recordsFromFile(file)
@@ -60,9 +65,23 @@ func Generate(path string, opts sources.Options, w io.Writer) (sources.Result, e
 			result.Records++
 			scans.Record(file)
 		}
+		if opts.AfterFile != nil {
+			if err := opts.AfterFile(scanByPath(scans.List(), file)); err != nil {
+				return result, err
+			}
+		}
 	}
 	result.Files = scans.List()
 	return result, nil
+}
+
+func scanByPath(files []sources.FileScan, path string) sources.FileScan {
+	for _, file := range files {
+		if file.Path == path {
+			return file
+		}
+	}
+	return sources.FileScan{Path: path}
 }
 
 func Include(path string) bool {

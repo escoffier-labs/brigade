@@ -2,6 +2,7 @@ package ingest
 
 import (
 	"bytes"
+	"fmt"
 	"strconv"
 	"strings"
 	"testing"
@@ -180,6 +181,121 @@ func TestImportAdapterReaderBatchedProgressAndResume(t *testing.T) {
 	}
 }
 
+func TestNativeReaderRecordsCommittedFileScanBeforeInterruptedImport(t *testing.T) {
+	db, err := archive.Open(t.TempDir() + "/miseledger.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := archive.Migrate(db); err != nil {
+		t.Fatal(err)
+	}
+	var b strings.Builder
+	b.WriteString(adapterRecord("native-scan", "file1:item:1", "first file committed before interruption", "file1.jsonl", 1))
+	if err := WriteSourceScanSentinel(&b, sources.FileScan{
+		Path:        "file1.jsonl",
+		Size:        100,
+		MTime:       "2026-06-03T00:00:00Z",
+		ContentHash: "sha256:file1",
+		Records:     1,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	b.WriteString(strings.Repeat("x", 11*1024*1024))
+
+	_, err = ImportNativeReaderProgress(db, strings.NewReader(b.String()), "native://fixture", "native-scan", nil, func(sourceKind, generatedHash string, file sources.FileScan) error {
+		return RecordSourceScans(db, sourceKind, generatedHash, []sources.FileScan{file}, true)
+	})
+	if err == nil {
+		t.Fatal("interrupted import returned nil error")
+	}
+	var scans int
+	if err := db.QueryRow(`select count(*) from source_scans where source_kind = 'native-scan' and path = 'file1.jsonl' and records_generated = 1`).Scan(&scans); err != nil {
+		t.Fatal(err)
+	}
+	if scans != 1 {
+		t.Fatalf("committed file scan rows = %d, want 1", scans)
+	}
+	var items int
+	if err := db.QueryRow(`select count(*) from items`).Scan(&items); err != nil {
+		t.Fatal(err)
+	}
+	if items != 1 {
+		t.Fatalf("items = %d, want the sentinel-flushed record to survive interruption", items)
+	}
+}
+
+func TestNativeReaderDoesNotRecordScanForUncommittedFile(t *testing.T) {
+	db, err := archive.Open(t.TempDir() + "/miseledger.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := archive.Migrate(db); err != nil {
+		t.Fatal(err)
+	}
+	stream := adapterRecord("native-uncommitted", "file1:item:1", "uncommitted file record", "file1.jsonl", 1) + strings.Repeat("x", 11*1024*1024)
+	_, err = ImportNativeReaderProgress(db, strings.NewReader(stream), "native://fixture", "native-uncommitted", nil, func(sourceKind, generatedHash string, file sources.FileScan) error {
+		return RecordSourceScans(db, sourceKind, generatedHash, []sources.FileScan{file}, true)
+	})
+	if err == nil {
+		t.Fatal("interrupted import returned nil error")
+	}
+	var scans int
+	if err := db.QueryRow(`select count(*) from source_scans where source_kind = 'native-uncommitted'`).Scan(&scans); err != nil {
+		t.Fatal(err)
+	}
+	if scans != 0 {
+		t.Fatalf("source_scans = %d, want 0 for records that never reached a file-complete sentinel", scans)
+	}
+	var items int
+	if err := db.QueryRow(`select count(*) from items`).Scan(&items); err != nil {
+		t.Fatal(err)
+	}
+	if items != 0 {
+		t.Fatalf("items = %d, want open batch rolled back", items)
+	}
+}
+
+func TestExternalAdapterReaderDoesNotHonorSourceScanSentinel(t *testing.T) {
+	db, err := archive.Open(t.TempDir() + "/miseledger.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := archive.Migrate(db); err != nil {
+		t.Fatal(err)
+	}
+	var b strings.Builder
+	b.WriteString(adapterRecord("external-sentinel", "item:1", "external adapter record", "adapter.jsonl", 1))
+	if err := WriteSourceScanSentinel(&b, sources.FileScan{
+		Path:        "injected.jsonl",
+		Size:        1,
+		MTime:       "2026-06-03T00:00:00Z",
+		ContentHash: "sha256:injected",
+		Records:     1,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	result, err := ImportAdapterReader(db, strings.NewReader(b.String()), "adapter://fixture", "external-sentinel")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Inserted != 1 {
+		t.Fatalf("inserted = %d, want 1", result.Inserted)
+	}
+	if len(result.Warnings) == 0 {
+		t.Fatalf("external sentinel produced no warning: %+v", result)
+	}
+	var scans int
+	if err := db.QueryRow(`select count(*) from source_scans`).Scan(&scans); err != nil {
+		t.Fatal(err)
+	}
+	if scans != 0 {
+		t.Fatalf("external adapter created %d source scan rows, want 0", scans)
+	}
+}
+
 func TestImportOpenCodeGeneratedAdapterRecords(t *testing.T) {
 	db, err := archive.Open(t.TempDir() + "/miseledger.db")
 	if err != nil {
@@ -211,4 +327,8 @@ func TestImportOpenCodeGeneratedAdapterRecords(t *testing.T) {
 	if sources != 1 {
 		t.Fatalf("opencode sources = %d, want 1", sources)
 	}
+}
+
+func adapterRecord(sourceKind, externalID, text, rawPath string, ordinal int) string {
+	return fmt.Sprintf(`{"schema":"miseledger.adapter.v1","source":{"kind":%q,"name":"Test"},"collection":{"external_id":"collection","kind":"agent_session","name":"collection"},"item":{"external_id":%q,"kind":"message","created_at":"2026-06-03T00:00:00Z","text":%q,"tags":["test"]},"actor":{"external_id":"actor","type":"human","name":"actor"},"artifacts":[],"links":[],"relations":[],"raw":{"format":"json","path":%q,"ordinal":%d}}`+"\n", sourceKind, externalID, text, rawPath, ordinal)
 }

@@ -1022,6 +1022,20 @@ func runNativeImportOpts(db *sql.DB, name string, generator sources.Generator, p
 		return ingest.AdapterResult{}, sources.Result{}, err
 	}
 	pr, pw := io.Pipe()
+	flushedScans := map[string]bool{}
+	var recordScan ingest.ScanRecorder
+	if recordScans {
+		opts.AfterFile = func(file sources.FileScan) error {
+			return ingest.WriteSourceScanSentinel(pw, file)
+		}
+		recordScan = func(sourceKind, generatedHash string, file sources.FileScan) error {
+			if err := ingest.RecordSourceScans(db, sourceKind, generatedHash, []sources.FileScan{file}, true); err != nil {
+				return err
+			}
+			flushedScans[file.Path] = true
+			return nil
+		}
+	}
 	type genResult struct {
 		result sources.Result
 		err    error
@@ -1042,7 +1056,7 @@ func runNativeImportOpts(db *sql.DB, name string, generator sources.Generator, p
 			fmt.Fprintf(progress, "\rimport %s: %d records committed...", name, inserted)
 		}
 	}
-	result, err := ingest.ImportAdapterReaderProgress(db, pr, path, name, progressFn)
+	result, err := ingest.ImportNativeReaderProgress(db, pr, path, name, progressFn, recordScan)
 	if progress != nil && result.Inserted >= 1000 {
 		fmt.Fprintf(progress, "\rimport %s: %d records committed.\n", name, result.Inserted)
 	}
@@ -1056,11 +1070,25 @@ func runNativeImportOpts(db *sql.DB, name string, generator sources.Generator, p
 	result.Warnings = append(generated.result.Warnings, result.Warnings...)
 	result.FilesParsed, result.FilesSkipped = fileScanCounts(generated.result.Files)
 	if recordScans {
-		if err := ingest.RecordSourceScans(db, name, result.SourceHash, generated.result.Files, true); err != nil {
+		unflushed := unflushedFileScans(generated.result.Files, flushedScans)
+		if err := ingest.RecordSourceScans(db, name, result.SourceHash, unflushed, true); err != nil {
 			return ingest.AdapterResult{}, sources.Result{}, err
 		}
 	}
 	return result, generated.result, nil
+}
+
+func unflushedFileScans(files []sources.FileScan, flushed map[string]bool) []sources.FileScan {
+	if len(flushed) == 0 {
+		return files
+	}
+	out := make([]sources.FileScan, 0, len(files))
+	for _, file := range files {
+		if !flushed[file.Path] {
+			out = append(out, file)
+		}
+	}
+	return out
 }
 
 func nativeFastPathOptions(db *sql.DB, name string, opts sources.Options) (sources.Options, error) {

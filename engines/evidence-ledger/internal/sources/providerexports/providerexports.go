@@ -23,6 +23,11 @@ func GenerateChatGPT(path string, opts sources.Options, w io.Writer) (sources.Re
 	}
 	if opts.Skip != nil && opts.Skip(scan.Path, scan.Size, scan.MTime) {
 		scan.Skipped = true
+		if opts.AfterFile != nil {
+			if err := opts.AfterFile(scan); err != nil {
+				return sources.Result{}, err
+			}
+		}
 		return sources.Result{Files: []sources.FileScan{scan}}, nil
 	}
 	scan.ContentHash = "sha256:" + sources.HashBytes(raw)
@@ -52,6 +57,11 @@ func GenerateChatGPT(path string, opts sources.Options, w io.Writer) (sources.Re
 		}
 	}
 	result.Files = []sources.FileScan{scan}
+	if opts.AfterFile != nil {
+		if err := opts.AfterFile(scan); err != nil {
+			return sources.Result{}, err
+		}
+	}
 	return result, nil
 }
 
@@ -62,6 +72,11 @@ func GenerateClaude(path string, opts sources.Options, w io.Writer) (sources.Res
 	}
 	if opts.Skip != nil && opts.Skip(scan.Path, scan.Size, scan.MTime) {
 		scan.Skipped = true
+		if opts.AfterFile != nil {
+			if err := opts.AfterFile(scan); err != nil {
+				return sources.Result{}, err
+			}
+		}
 		return sources.Result{Files: []sources.FileScan{scan}}, nil
 	}
 	scan.ContentHash = "sha256:" + sources.HashBytes(raw)
@@ -87,6 +102,11 @@ func GenerateClaude(path string, opts sources.Options, w io.Writer) (sources.Res
 		}
 	}
 	result.Files = []sources.FileScan{scan}
+	if opts.AfterFile != nil {
+		if err := opts.AfterFile(scan); err != nil {
+			return sources.Result{}, err
+		}
+	}
 	return result, nil
 }
 

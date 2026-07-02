@@ -99,6 +99,9 @@ func (g *generator) emitPromptHistory(path string) error {
 		return err
 	}
 	if skip {
+		if err := g.afterFile(*scan); err != nil {
+			return err
+		}
 		return nil
 	}
 	raw, err := os.ReadFile(path)
@@ -110,6 +113,9 @@ func (g *generator) emitPromptHistory(path string) error {
 	if err := json.Unmarshal(raw, &prompts); err != nil {
 		g.warn(scan, fmt.Sprintf("%s: prompt_history.json is not a JSON string array: %s", path, err))
 		g.scans = append(g.scans, *scan)
+		if err := g.afterFile(*scan); err != nil {
+			return err
+		}
 		return nil
 	}
 	for idx, prompt := range prompts {
@@ -153,6 +159,9 @@ func (g *generator) emitPromptHistory(path string) error {
 		scan.Records++
 	}
 	g.scans = append(g.scans, *scan)
+	if err := g.afterFile(*scan); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -197,6 +206,9 @@ func (g *generator) emitSession(sessionDir, id string) error {
 		return err
 	}
 	if skip {
+		if err := g.afterFile(*scan); err != nil {
+			return err
+		}
 		return nil
 	}
 	raw, err := os.ReadFile(metaPath)
@@ -208,6 +220,9 @@ func (g *generator) emitSession(sessionDir, id string) error {
 	if err := json.Unmarshal(raw, &meta); err != nil {
 		g.warn(scan, fmt.Sprintf("%s: meta.json is not a JSON object: %s", metaPath, err))
 		g.scans = append(g.scans, *scan)
+		if err := g.afterFile(*scan); err != nil {
+			return err
+		}
 		return nil
 	}
 	sessionID := firstString(meta, "id", "chatId", "sessionId", "uuid")
@@ -220,6 +235,9 @@ func (g *generator) emitSession(sessionDir, id string) error {
 	body := sessionText(meta, title, sessionID)
 	if !sources.KeepTimestamp(createdAt, g.since, g.hasSince) {
 		g.scans = append(g.scans, *scan)
+		if err := g.afterFile(*scan); err != nil {
+			return err
+		}
 		return nil
 	}
 	rawPath := storePath
@@ -231,6 +249,9 @@ func (g *generator) emitSession(sessionDir, id string) error {
 	}
 	scan.Records++
 	g.scans = append(g.scans, *scan)
+	if err := g.afterFile(*scan); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -290,6 +311,13 @@ func (g *generator) warn(scan *sources.FileScan, msg string) {
 	if scan != nil {
 		scan.Warnings++
 	}
+}
+
+func (g *generator) afterFile(scan sources.FileScan) error {
+	if g.opts.AfterFile == nil {
+		return nil
+	}
+	return g.opts.AfterFile(scan)
 }
 
 func sessionText(meta map[string]any, title, sessionID string) string {

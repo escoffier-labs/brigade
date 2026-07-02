@@ -34,6 +34,10 @@ type Options struct {
 	// computed while checking the manifest. It is used by archive-backed native
 	// imports; Skip remains for tests and callers that only need size+mtime.
 	Scan func(path string, size int64, mtime string) (ScanDecision, error)
+	// AfterFile is called after one input file has been fully generated or
+	// skipped. Native imports use it to emit an internal file-complete marker
+	// into the same stream as the records.
+	AfterFile func(FileScan) error
 }
 
 type Result struct {
@@ -199,9 +203,15 @@ func (s *FileScanSet) Walk(opts Options, each func(RawEvent) error) error {
 			return err
 		}
 		if skip {
+			if err := s.afterFile(path, opts); err != nil {
+				return err
+			}
 			continue
 		}
 		if err := scanJSONL(path, each); err != nil {
+			return err
+		}
+		if err := s.afterFile(path, opts); err != nil {
 			return err
 		}
 	}
@@ -243,6 +253,17 @@ func (s *FileScanSet) List() []FileScan {
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Path < out[j].Path })
 	return out
+}
+
+func (s *FileScanSet) afterFile(path string, opts Options) error {
+	if opts.AfterFile == nil {
+		return nil
+	}
+	scan := s.files[path]
+	if scan == nil {
+		return nil
+	}
+	return opts.AfterFile(*scan)
 }
 
 func NewFileScan(path string) (FileScan, error) {

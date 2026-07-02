@@ -49,6 +49,11 @@ func Generate(path string, opts sources.Options, w io.Writer) (sources.Result, e
 		}
 		if skip {
 			result.Files = append(result.Files, scan)
+			if opts.AfterFile != nil {
+				if err := opts.AfterFile(scan); err != nil {
+					return result, err
+				}
+			}
 			continue
 		}
 		export, raw, err := readExport(input)
@@ -61,6 +66,11 @@ func Generate(path string, opts sources.Options, w io.Writer) (sources.Result, e
 			result.Warnings = append(result.Warnings, fmt.Sprintf("%s: %s", input, err))
 			scan.Warnings++
 			result.Files = append(result.Files, scan)
+			if opts.AfterFile != nil {
+				if err := opts.AfterFile(scan); err != nil {
+					return result, err
+				}
+			}
 			continue
 		}
 		records, warnings := normalizeExport(input, export)
@@ -83,6 +93,11 @@ func Generate(path string, opts sources.Options, w io.Writer) (sources.Result, e
 			scan.Records++
 		}
 		result.Files = append(result.Files, scan)
+		if opts.AfterFile != nil {
+			if err := opts.AfterFile(scan); err != nil {
+				return result, err
+			}
+		}
 	}
 	return result, nil
 }

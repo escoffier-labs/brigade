@@ -30,6 +30,24 @@ type AdapterResult struct {
 	FilesSkipped int      `json:"files_skipped"`
 }
 
+const sourceScanSentinelSchema = "miseledger.internal.source_scan.v1"
+
+type sourceScanSentinel struct {
+	Schema string           `json:"schema"`
+	File   sources.FileScan `json:"file"`
+}
+
+// WriteSourceScanSentinel writes an internal control line used only by native
+// imports. The public adapter importer does not honor these lines.
+func WriteSourceScanSentinel(w io.Writer, file sources.FileScan) error {
+	line, err := json.Marshal(sourceScanSentinel{Schema: sourceScanSentinelSchema, File: file})
+	if err != nil {
+		return err
+	}
+	_, err = w.Write(append(line, '\n'))
+	return err
+}
+
 func ImportAdapterFile(db *sql.DB, path, sourceOverride string) (AdapterResult, error) {
 	return ImportAdapterFileProgress(db, path, sourceOverride, nil)
 }
@@ -59,12 +77,26 @@ func ImportAdapterReader(db *sql.DB, r io.Reader, sourcePath, sourceOverride str
 	return ImportAdapterReaderProgress(db, r, sourcePath, sourceOverride, nil)
 }
 
+type ScanRecorder func(sourceKind, generatedHash string, file sources.FileScan) error
+
 // ImportAdapterReaderProgress imports adapter JSONL, committing every
 // importBatchSize records and invoking progress (if non-nil) with the running
 // inserted count after each committed batch. Inserts are idempotent
 // (INSERT OR IGNORE), so a crash mid-import loses at most the open batch and a
 // re-run safely resumes.
 func ImportAdapterReaderProgress(db *sql.DB, r io.Reader, sourcePath, sourceOverride string, progress func(inserted int)) (AdapterResult, error) {
+	return importAdapterReaderProgress(db, r, sourcePath, sourceOverride, progress, nil)
+}
+
+// ImportNativeReaderProgress is ImportAdapterReaderProgress plus an
+// internal-only source-scan control line. Native generators write a sentinel
+// after each source file; the reader commits all records seen so far before
+// calling recordScan, so a scan row never gets ahead of its records.
+func ImportNativeReaderProgress(db *sql.DB, r io.Reader, sourcePath, sourceOverride string, progress func(inserted int), recordScan ScanRecorder) (AdapterResult, error) {
+	return importAdapterReaderProgress(db, r, sourcePath, sourceOverride, progress, recordScan)
+}
+
+func importAdapterReaderProgress(db *sql.DB, r io.Reader, sourcePath, sourceOverride string, progress func(inserted int), recordScan ScanRecorder) (AdapterResult, error) {
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	sourceKind := sourceOverride
 
@@ -85,11 +117,11 @@ func ImportAdapterReaderProgress(db *sql.DB, r io.Reader, sourcePath, sourceOver
 		}
 	}()
 	batchCount := 0
-	flush := func() error {
+	flush := func(report bool) error {
 		if err := tx.Commit(); err != nil {
 			return err
 		}
-		if progress != nil {
+		if report && progress != nil {
 			progress(result.Inserted)
 		}
 		next, err := db.Begin()
@@ -103,12 +135,32 @@ func ImportAdapterReaderProgress(db *sql.DB, r io.Reader, sourcePath, sourceOver
 
 	for scanner.Scan() {
 		line := append([]byte(nil), scanner.Bytes()...)
-		_, _ = h.Write(line)
-		_, _ = h.Write([]byte("\n"))
 		ordinal++
 		if len(strings.TrimSpace(string(line))) == 0 {
 			continue
 		}
+		if recordScan != nil {
+			file, ok, err := parseSourceScanSentinel(line)
+			if err != nil {
+				return AdapterResult{}, err
+			}
+			if ok {
+				if sourceKind == "" {
+					sourceKind = "adapter"
+					result.SourceKind = sourceKind
+				}
+				if err := flush(batchCount > 0); err != nil {
+					return AdapterResult{}, err
+				}
+				generatedHash := "sha256:" + hex.EncodeToString(h.Sum(nil))
+				if err := recordScan(sourceKind, generatedHash, file); err != nil {
+					return AdapterResult{}, err
+				}
+				continue
+			}
+		}
+		_, _ = h.Write(line)
+		_, _ = h.Write([]byte("\n"))
 		rec, err := adapter.Parse(line)
 		if err != nil {
 			result.Warnings = append(result.Warnings, fmt.Sprintf("line %d: %s", ordinal, err))
@@ -131,7 +183,7 @@ func ImportAdapterReaderProgress(db *sql.DB, r io.Reader, sourcePath, sourceOver
 		}
 		batchCount++
 		if batchCount >= importBatchSize {
-			if err := flush(); err != nil {
+			if err := flush(true); err != nil {
 				return AdapterResult{}, err
 			}
 		}
@@ -177,6 +229,26 @@ func ImportAdapterReaderProgress(db *sql.DB, r io.Reader, sourcePath, sourceOver
 	}
 	committed = true
 	return result, tx.Commit()
+}
+
+func parseSourceScanSentinel(line []byte) (sources.FileScan, bool, error) {
+	var head struct {
+		Schema string `json:"schema"`
+	}
+	if err := json.Unmarshal(line, &head); err != nil {
+		return sources.FileScan{}, false, nil
+	}
+	if head.Schema != sourceScanSentinelSchema {
+		return sources.FileScan{}, false, nil
+	}
+	var sentinel sourceScanSentinel
+	if err := json.Unmarshal(line, &sentinel); err != nil {
+		return sources.FileScan{}, false, err
+	}
+	if strings.TrimSpace(sentinel.File.Path) == "" {
+		return sources.FileScan{}, false, fmt.Errorf("source scan sentinel missing file path")
+	}
+	return sentinel.File, true, nil
 }
 
 func BackfillRelations(db *sql.DB) (int64, error) {
