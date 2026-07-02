@@ -8,6 +8,24 @@ Releases before this changelog was started are on the [releases page](https://gi
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-07-02
+
+### Fixed
+
+- Multi-term search no longer pegs a CPU for minutes on large archives: FTS
+  ranking runs first in a bounded, materialized candidate pool, the relations
+  boost applies only to that pool, and relations gained source/target-item
+  indexes. A query that previously never returned on a 1.4M-item archive now
+  answers in seconds (#9).
+- Native imports and `crawl sessions` skip files whose size and mtime match the
+  scan manifest (content-hash fallback when only mtime differs), report
+  `files_parsed`/`files_skipped`, and persist each file's scan row as soon as
+  its records are committed, so interrupted catch-up runs on large archives
+  make durable progress instead of restarting from zero. `--since` and `--full`
+  bypass the fast path; dry runs record nothing (#10).
+- The OpenCode adapter skips `session_diff` JSON arrays instead of emitting a
+  parse warning for every file (#11).
+
 ## [0.3.0] - 2026-07-02
 
 MiseLedger absorbs its StationTrail and SourceHarvest exporter siblings: session
