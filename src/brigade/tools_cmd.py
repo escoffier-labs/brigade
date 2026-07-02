@@ -20,8 +20,9 @@ from typing import Any
 from . import toml_compat as tomllib
 from .config import load_config as load_brigade_config
 from .install import apply_gitignore
-from .selection import Selection
 from .localio import stable_hash as _stable_hash, utc_now as _now, write_json as _write_json
+from .render import emit
+from .selection import Selection
 
 OK = "ok"
 WARN = "warn"
@@ -4540,27 +4541,26 @@ def defaults(
         "gitignore": gitignore_result,
         "next_command": "brigade tools apply --target . --all",
     }
-    if json_output:
-        print(json.dumps(payload, indent=2, sort_keys=True))
-        return 0 if payload["valid"] else 1
-    print(f"tools defaults: {target}")
-    print(f"config_path: {path}")
-    print(f"dry_run: {dry_run}")
-    print(f"created: {'yes' if created else 'no'}")
-    print(f"added: {len(added)}")
-    print(f"updated: {len(updated)}")
-    print(f"skipped: {len(skipped)}")
-    print(f"conflicts: {len(conflicts)}")
-    print(f"sources_created: {payload['source_created_count']}")
-    print(f"gitignore: {gitignore_result}")
+    text_lines = [
+        f"tools defaults: {target}",
+        f"config_path: {path}",
+        f"dry_run: {dry_run}",
+        f"created: {'yes' if created else 'no'}",
+        f"added: {len(added)}",
+        f"updated: {len(updated)}",
+        f"skipped: {len(skipped)}",
+        f"conflicts: {len(conflicts)}",
+        f"sources_created: {payload['source_created_count']}",
+        f"gitignore: {gitignore_result}",
+    ]
     for tool_id in added:
-        print(f"- added: {tool_id}")
+        text_lines.append(f"- added: {tool_id}")
     for tool_id in updated:
-        print(f"- updated: {tool_id}")
+        text_lines.append(f"- updated: {tool_id}")
     for conflict in conflicts:
-        print(f"- conflict: {conflict['tool_id']} {conflict['detail']}")
-    print(f"next_command: {payload['next_command']}")
-    return 0 if payload["valid"] else 1
+        text_lines.append(f"- conflict: {conflict['tool_id']} {conflict['detail']}")
+    text_lines.append(f"next_command: {payload['next_command']}")
+    return emit(payload, json_output, text_lines, 0 if payload["valid"] else 1)
 
 
 def runtime_init(*, target: Path, force: bool = False) -> int:
@@ -4712,21 +4712,17 @@ def runtime_doctor(*, target: Path, json_output: bool = False) -> int:
         print(f"error: --target is not a directory: {target}", file=sys.stderr)
         return 2
     payload = _runtime_payload(target)
-    if json_output:
-        print(json.dumps(payload, indent=2, sort_keys=True))
-        return 0 if payload["valid"] else 1
-    print(f"tools runtime doctor: {target}")
-    print(f"config_path: {payload['config_path']}")
+    text_lines = [f"tools runtime doctor: {target}", f"config_path: {payload['config_path']}"]
     if payload["errors"]:
         for error in payload["errors"]:
-            print(f"[warn] runtime_config: {error}")
+            text_lines.append(f"[warn] runtime_config: {error}")
     if payload["issues"]:
         for issue in payload["issues"]:
-            print(f"[{issue.get('status', WARN)}] {issue.get('name')}: {issue.get('detail')}")
+            text_lines.append(f"[{issue.get('status', WARN)}] {issue.get('name')}: {issue.get('detail')}")
     else:
-        print("[ok] tool_runtimes: no issues")
-    print(f"runtime_issues: {payload['issue_count']}")
-    return 0 if payload["valid"] else 1
+        text_lines.append("[ok] tool_runtimes: no issues")
+    text_lines.append(f"runtime_issues: {payload['issue_count']}")
+    return emit(payload, json_output, text_lines, 0 if payload["valid"] else 1)
 
 
 def policy_init(*, target: Path, force: bool = False) -> int:
@@ -4787,20 +4783,16 @@ def policy_doctor(*, target: Path, json_output: bool = False) -> int:
     payload = _policy_health(target, tools)
     payload["target"] = str(target)
     payload["tool_errors"] = tool_errors
-    if json_output:
-        print(json.dumps(payload, indent=2, sort_keys=True))
-        return 0 if payload["enabled"] and payload["valid"] else 1
-    print(f"tools policy doctor: {target}")
-    print(f"policy_path: {payload['policy_path']}")
+    text_lines = [f"tools policy doctor: {target}", f"policy_path: {payload['policy_path']}"]
     for error in payload.get("errors", []):
-        print(f"[warn] tool_policy: {error}")
+        text_lines.append(f"[warn] tool_policy: {error}")
     if payload["issues"]:
         for issue in payload["issues"]:
-            print(f"[{issue.get('status', WARN)}] {issue.get('name')}: {issue.get('detail')}")
+            text_lines.append(f"[{issue.get('status', WARN)}] {issue.get('name')}: {issue.get('detail')}")
     else:
-        print("[ok] tool_policy: no issues")
-    print(f"policy_issues: {payload['issue_count']}")
-    return 0 if payload["enabled"] and payload["valid"] else 1
+        text_lines.append("[ok] tool_policy: no issues")
+    text_lines.append(f"policy_issues: {payload['issue_count']}")
+    return emit(payload, json_output, text_lines, 0 if payload["enabled"] and payload["valid"] else 1)
 
 
 def list_tools(*, target: Path, json_output: bool = False) -> int:
@@ -5004,22 +4996,21 @@ def call_queue(
         args_json=args_json,
         include_blocked=include_blocked,
     )
-    if json_output:
-        print(json.dumps(payload, indent=2, sort_keys=True))
-        return rc
-    print(f"tools call queue: {tool_id}")
-    print(f"calls_path: {payload['calls_path']}")
-    print(f"created: {payload['created']}")
-    print(f"skipped: {payload['skipped']}")
-    print(f"blocked: {payload['blocked']}")
+    text_lines = [
+        f"tools call queue: {tool_id}",
+        f"calls_path: {payload['calls_path']}",
+        f"created: {payload['created']}",
+        f"skipped: {payload['skipped']}",
+        f"blocked: {payload['blocked']}",
+    ]
     if payload.get("reason"):
-        print(f"reason: {payload['reason']}")
+        text_lines.append(f"reason: {payload['reason']}")
     call = payload.get("call") if isinstance(payload.get("call"), dict) else {}
     if call:
-        print(f"call: {call.get('id')}")
-        print(f"status: {call.get('status')}")
-        print(f"blockers: {len(call.get('blockers', [])) if isinstance(call.get('blockers'), list) else 0}")
-    return rc
+        text_lines.append(f"call: {call.get('id')}")
+        text_lines.append(f"status: {call.get('status')}")
+        text_lines.append(f"blockers: {len(call.get('blockers', [])) if isinstance(call.get('blockers'), list) else 0}")
+    return emit(payload, json_output, text_lines, rc)
 
 
 def call_list(*, target: Path, json_output: bool = False) -> int:
@@ -5033,19 +5024,14 @@ def call_list(*, target: Path, json_output: bool = False) -> int:
         status = str(call.get("status") or "unknown")
         counts[status] = counts.get(status, 0) + 1
     payload = {"target": str(target), "calls_path": str(calls_path(target)), "calls": calls, "counts": counts}
-    if json_output:
-        print(json.dumps(payload, indent=2, sort_keys=True))
-        return 0
-    print(f"tools call list: {target}")
-    print(f"calls_path: {calls_path(target)}")
-    print(f"calls: {len(calls)}")
+    text_lines = [f"tools call list: {target}", f"calls_path: {calls_path(target)}", f"calls: {len(calls)}"]
     for status, count in sorted(counts.items()):
-        print(f"{status}: {count}")
+        text_lines.append(f"{status}: {count}")
     for call in calls:
-        print(
+        text_lines.append(
             f"- {call.get('id')} [{call.get('status')}] {call.get('tool_id')} blockers={len(call.get('blockers', []))}"
         )
-    return 0
+    return emit(payload, json_output, text_lines, 0)
 
 
 def call_show(*, target: Path, call_id: str, json_output: bool = False) -> int:
@@ -5163,19 +5149,16 @@ def run_list(*, target: Path, json_output: bool = False) -> int:
         print(f"error: --target is not a directory: {target}", file=sys.stderr)
         return 2
     payload = _run_history_payload(target)
-    if json_output:
-        print(json.dumps(payload, indent=2, sort_keys=True))
-        return 0
-    print(f"tools run list: {target}")
-    print(f"runs_path: {payload['runs_path']}")
-    print(f"runs: {payload['run_count']}")
+    text_lines = [f"tools run list: {target}", f"runs_path: {payload['runs_path']}", f"runs: {payload['run_count']}"]
     for status, count in sorted(payload["counts"].items()):
-        print(f"{status}: {count}")
+        text_lines.append(f"{status}: {count}")
     for error in payload["errors"]:
-        print(f"[warn] run_receipt_invalid: {error.get('receipt_path')} {error.get('error')}")
+        text_lines.append(f"[warn] run_receipt_invalid: {error.get('receipt_path')} {error.get('error')}")
     for run in payload["runs"]:
-        print(f"- {run.get('id')} [{run.get('status')}] {run.get('tool_id')} exit_code={run.get('exit_code')}")
-    return 0
+        text_lines.append(
+            f"- {run.get('id')} [{run.get('status')}] {run.get('tool_id')} exit_code={run.get('exit_code')}"
+        )
+    return emit(payload, json_output, text_lines, 0)
 
 
 def run_show(*, target: Path, run_id: str, json_output: bool = False) -> int:
@@ -5267,21 +5250,20 @@ def checkpoint_list(*, target: Path, json_output: bool = False) -> int:
         print(f"error: --target is not a directory: {target}", file=sys.stderr)
         return 2
     payload = _checkpoint_payload(target)
-    if json_output:
-        print(json.dumps(payload, indent=2, sort_keys=True))
-        return 0
-    print(f"tools checkpoint list: {target}")
-    print(f"checkpoints_path: {payload['checkpoints_path']}")
-    print(f"checkpoints: {payload['checkpoint_count']}")
+    text_lines = [
+        f"tools checkpoint list: {target}",
+        f"checkpoints_path: {payload['checkpoints_path']}",
+        f"checkpoints: {payload['checkpoint_count']}",
+    ]
     for status, count in sorted(payload["counts"].items()):
-        print(f"{status}: {count}")
+        text_lines.append(f"{status}: {count}")
     for error in payload["errors"]:
-        print(f"[warn] checkpoint_invalid: {error.get('checkpoint_path')} {error.get('error')}")
+        text_lines.append(f"[warn] checkpoint_invalid: {error.get('checkpoint_path')} {error.get('error')}")
     for checkpoint in payload["checkpoints"]:
-        print(
+        text_lines.append(
             f"- {checkpoint.get('id')} [{checkpoint.get('status')}] {checkpoint.get('tool_id')} {checkpoint.get('requested_action')}"
         )
-    return 0
+    return emit(payload, json_output, text_lines, 0)
 
 
 def checkpoint_show(*, target: Path, checkpoint_id: str, json_output: bool = False) -> int:
@@ -5669,14 +5651,13 @@ def pack_build(*, target: Path, json_output: bool = False) -> int:
         f"- import: brigade tools pack import {pack_dir}\n"
     )
     payload["path"] = str(pack_dir)
-    if json_output:
-        print(json.dumps(payload, indent=2, sort_keys=True))
-        return 0
-    print(f"tool_pack: {pack_id}")
-    print(f"path: {pack_dir}")
-    print(f"tools: {payload['tool_count']}")
-    print(f"issues: {payload['issue_count']}")
-    return 0
+    text_lines = [
+        f"tool_pack: {pack_id}",
+        f"path: {pack_dir}",
+        f"tools: {payload['tool_count']}",
+        f"issues: {payload['issue_count']}",
+    ]
+    return emit(payload, json_output, text_lines, 0)
 
 
 def _tool_packs(target: Path) -> list[dict[str, Any]]:
@@ -5766,13 +5747,10 @@ def pack_list(*, target: Path, json_output: bool = False, limit: int = 20) -> in
     target = target.expanduser().resolve()
     packs = _tool_packs(target)[:limit]
     payload = {"target": str(target), "packs": packs, "pack_count": len(packs)}
-    if json_output:
-        print(json.dumps(payload, indent=2, sort_keys=True))
-        return 0
-    print(f"tool packs: {target}")
+    text_lines = [f"tool packs: {target}"]
     for pack in packs:
-        print(f"- {pack.get('pack_id')} tools={pack.get('tool_count')} issues={pack.get('issue_count')}")
-    return 0
+        text_lines.append(f"- {pack.get('pack_id')} tools={pack.get('tool_count')} issues={pack.get('issue_count')}")
+    return emit(payload, json_output, text_lines, 0)
 
 
 def _find_tool_pack(target: Path, pack_id: str) -> tuple[dict[str, Any] | None, str | None]:
@@ -5821,12 +5799,7 @@ def pack_archive(*, target: Path, pack_id: str, json_output: bool = False) -> in
         "status": "archived",
         "archive_path": str(destination),
     }
-    if json_output:
-        print(json.dumps(payload, indent=2, sort_keys=True))
-        return 0
-    print(f"archived: {pack.get('pack_id')}")
-    print(f"path: {destination}")
-    return 0
+    return emit(payload, json_output, [f"archived: {pack.get('pack_id')}", f"path: {destination}"], 0)
 
 
 def pack_import(*, target: Path, pack: Path, force: bool = False, json_output: bool = False) -> int:
@@ -5895,12 +5868,8 @@ def pack_import(*, target: Path, pack: Path, force: bool = False, json_output: b
             "skipped_existing": skipped_existing,
             "conflicts": conflicts,
         }
-        if json_output:
-            print(json.dumps(payload, indent=2, sort_keys=True))
-            return 1
-        for conflict in conflicts:
-            print(f"conflict: {conflict.get('tool_id')} {conflict.get('reason')}")
-        return 1
+        text_lines = [f"conflict: {conflict.get('tool_id')} {conflict.get('reason')}" for conflict in conflicts]
+        return emit(payload, json_output, text_lines, 1)
     merged_by_id = {str(entry.get("id")): dict(entry) for entry in current_entries if entry.get("id")}
     imported: list[dict[str, Any]] = []
     for entry in entries:
@@ -5946,27 +5915,25 @@ def pack_import(*, target: Path, pack: Path, force: bool = False, json_output: b
         "gitignore": result,
         "next_command": "brigade tools plan --target .",
     }
-    if json_output:
-        print(json.dumps(payload, indent=2, sort_keys=True))
-        return 0
-    print(f"tool_pack_import: {manifest.get('pack_id') or pack.name}")
-    print(f"imported: {len(imported)}")
-    print("next_command: brigade tools plan --target .")
-    return 0
+    text_lines = [
+        f"tool_pack_import: {manifest.get('pack_id') or pack.name}",
+        f"imported: {len(imported)}",
+        "next_command: brigade tools plan --target .",
+    ]
+    return emit(payload, json_output, text_lines, 0)
 
 
 def sync_plan(*, target: Path, tool_id: str | None = None, json_output: bool = False) -> int:
     target = target.expanduser().resolve()
     payload = _projection_plan_payload(target, tool_id=tool_id)
     payload.update({"mode": "sync-plan", "dry_run_default": True, "delete_supported": False, "add_only": True})
-    if json_output:
-        print(json.dumps(payload, indent=2, sort_keys=True))
-        return 0 if payload["valid"] else 1
-    print(f"tools sync plan: {target}")
-    print(f"projections: {len(payload['projections'])}")
-    print("dry_run_default: true")
-    print("delete_supported: false")
-    return 0 if payload["valid"] else 1
+    text_lines = [
+        f"tools sync plan: {target}",
+        f"projections: {len(payload['projections'])}",
+        "dry_run_default: true",
+        "delete_supported: false",
+    ]
+    return emit(payload, json_output, text_lines, 0 if payload["valid"] else 1)
 
 
 def sync_apply(
@@ -6002,23 +5969,19 @@ def doctor(*, target: Path, json_output: bool = False) -> int:
         print(f"error: --target is not a directory: {target}", file=sys.stderr)
         return 2
     payload = _catalog_payload(target)
-    if json_output:
-        print(json.dumps(payload, indent=2, sort_keys=True))
-        return 0 if payload["valid"] else 1
-    print(f"tools doctor: {target}")
-    print(f"config_path: {payload['config_path']}")
+    text_lines = [f"tools doctor: {target}", f"config_path: {payload['config_path']}"]
     if payload["errors"]:
         for error in payload["errors"]:
-            print(f"[warn] tool_config: {error}")
+            text_lines.append(f"[warn] tool_config: {error}")
     else:
-        print(f"[ok] tool_config: {payload['config_path']}")
+        text_lines.append(f"[ok] tool_config: {payload['config_path']}")
     if payload["issues"]:
         for issue in payload["issues"]:
-            print(f"[{issue.get('status', WARN)}] {issue.get('name')}: {issue.get('detail')}")
+            text_lines.append(f"[{issue.get('status', WARN)}] {issue.get('name')}: {issue.get('detail')}")
     else:
-        print("[ok] tool_catalog: no issues")
-    print(f"tool_issues: {payload['issue_count']}")
-    return 0 if payload["valid"] else 1
+        text_lines.append("[ok] tool_catalog: no issues")
+    text_lines.append(f"tool_issues: {payload['issue_count']}")
+    return emit(payload, json_output, text_lines, 0 if payload["valid"] else 1)
 
 
 def import_issues(*, target: Path, json_output: bool = False) -> int:
@@ -6039,18 +6002,17 @@ def import_issues(*, target: Path, json_output: bool = False) -> int:
         "dismissed": len(skipped_dismissed),
         "imports": imported,
     }
-    if json_output:
-        print(json.dumps(payload, indent=2, sort_keys=True))
-        return 0
-    print(f"tool issue imports: {target}")
-    print(f"imports_path: {payload['imports_path']}")
-    print(f"issues: {len(records)}")
-    print(f"created: {len(imported)}")
-    print(f"skipped: {len(skipped)}")
-    print(f"dismissed: {len(skipped_dismissed)}")
+    text_lines = [
+        f"tool issue imports: {target}",
+        f"imports_path: {payload['imports_path']}",
+        f"issues: {len(records)}",
+        f"created: {len(imported)}",
+        f"skipped: {len(skipped)}",
+        f"dismissed: {len(skipped_dismissed)}",
+    ]
     for item in imported:
-        print(f"- {item.get('id')} [{item.get('kind')}] {_short(str(item.get('text', '')))}")
-    return 0
+        text_lines.append(f"- {item.get('id')} [{item.get('kind')}] {_short(str(item.get('text', '')))}")
+    return emit(payload, json_output, text_lines, 0)
 
 
 def parity_status(*, target: Path, json_output: bool = False) -> int:

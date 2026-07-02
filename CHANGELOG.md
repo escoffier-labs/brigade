@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- `brigade work phases` (the phase-execution ledger) moved behind the extras wall with the other operator-suite surface; it stubs out with enable guidance when extras are disabled.
+- The shared `render.emit` renderer now backs the mechanical output sites in `tools_cmd`, `daily_cmd`, `center_cmd`, and `phases_cmd` (110 sites converted, byte-identical output); sites with interleaved logic or stderr remain on direct prints.
+
 ### Breaking
 - The CLI surface is now split into core and extras. 18 operator-suite command groups (`release`, `center`, `repos`, `research`, `roadmap`, `friction`, `chat`, `context`, `projects`, `learn`, `runbook`, `dogfood`, `pantry`, `notifications`, `budgets`, `untrusted`, `openclaw-fragments`, `hermes-fragments`) register only when extras are enabled. Enable once with `brigade extras on`, per invocation with `BRIGADE_EXTRAS=1`, and check with `brigade extras status`. A disabled extras command exits 2 with that guidance instead of a parse error. The 24 core groups (init, mcp, tools, skills, handoff, ingest, memory, work, outcome, operator, run, roster, runs, daily, security, scrub, doctor, status, add, stations, profiles, reconfigure, completions, extras) are unchanged.
 - Repo-depth installs default to a minimal footprint: `AGENTS.md` and `SAFETY_RULES.md` plus gitignored `.brigade/` state and the selected harness inboxes and skills. The full kit (`rules/`, the inactive `hooks/pre-push`, `INSTALL_FOR_AGENTS.md`, and the four default tool packs projected into `tools/` and `scripts/`) moved behind `--full` on `brigade init` and `operator quickstart`, or the `repo-extras` include. Workspace-depth installs are unchanged and always get the full kitchen.

@@ -32,6 +32,7 @@ from . import (
     work_cmd,
 )
 from .localio import read_json_dict as _read_json, utc_now as _now, write_json as _write_json
+from .render import emit
 
 SCHEMA_VERSION = 1
 RUN_STATUSES = {"reviewed", "deferred", "blocked", "archived"}
@@ -1725,33 +1726,32 @@ def status_payload(target: Path) -> dict[str, Any]:
 
 def status(*, target: Path, json_output: bool = False) -> int:
     payload = status_payload(target)
-    if json_output:
-        print(json.dumps(payload, indent=2, sort_keys=True))
-        return 0
-    print(f"daily status: {payload['target']}")
-    print(f"pending_tasks: {payload['pending_task_count']}")
-    print(f"pending_imports: {payload['pending_import_count']}")
-    print(f"center_reviews: {payload['center_review_count']}")
-    print(f"open_actions: {payload['open_daily_action_count']}")
+    lines: list[str] = [
+        f"daily status: {payload['target']}",
+        f"pending_tasks: {payload['pending_task_count']}",
+        f"pending_imports: {payload['pending_import_count']}",
+        f"center_reviews: {payload['center_review_count']}",
+        f"open_actions: {payload['open_daily_action_count']}",
+    ]
     notifications = payload.get("notifications") if isinstance(payload.get("notifications"), dict) else {}
     if notifications:
-        print(f"notifications: {notifications.get('status')} configured={notifications.get('configured')}")
+        lines.append(f"notifications: {notifications.get('status')} configured={notifications.get('configured')}")
     if payload.get("status_section_issue_count"):
-        print(f"status_section_issues: {payload['status_section_issue_count']}")
+        lines.append(f"status_section_issues: {payload['status_section_issue_count']}")
         top = payload.get("top_status_section_issue")
         if isinstance(top, dict):
-            print(f"top_status_section_issue: {top.get('name')} {top.get('detail')}")
+            lines.append(f"top_status_section_issue: {top.get('name')} {top.get('detail')}")
     phase_ledger = payload.get("phase_ledger") if isinstance(payload.get("phase_ledger"), dict) else {}
     if phase_ledger:
-        print(f"phase_records: {phase_ledger.get('record_count', 0)}")
-        print(f"phase_issues: {phase_ledger.get('issue_count', 0)}")
+        lines.append(f"phase_records: {phase_ledger.get('record_count', 0)}")
+        lines.append(f"phase_issues: {phase_ledger.get('issue_count', 0)}")
     phase_session = payload.get("phase_session") if isinstance(payload.get("phase_session"), dict) else None
     if phase_session:
-        print(f"phase_session: {phase_session.get('session_id')} [{phase_session.get('status')}]")
+        lines.append(f"phase_session: {phase_session.get('session_id')} [{phase_session.get('status')}]")
     blocker = payload.get("top_readiness_blocker")
-    print(f"top_readiness_blocker: {blocker.get('safe_summary') if isinstance(blocker, dict) else 'none'}")
-    print(f"next: {payload['next_recommended_command']}")
-    return 0
+    lines.append(f"top_readiness_blocker: {blocker.get('safe_summary') if isinstance(blocker, dict) else 'none'}")
+    lines.append(f"next: {payload['next_recommended_command']}")
+    return emit(payload, json_output, lines, 0)
 
 
 def plan_payload(target: Path, *, record: bool = False) -> dict[str, Any]:
@@ -1815,22 +1815,21 @@ def plan_payload(target: Path, *, record: bool = False) -> dict[str, Any]:
 
 def plan(*, target: Path, record: bool = False, json_output: bool = False) -> int:
     payload = plan_payload(target, record=record)
-    if json_output:
-        print(json.dumps(payload, indent=2, sort_keys=True))
-        return 0
-    print(f"daily plan: {payload['target']}")
-    print(f"candidates: {payload['candidate_count']}")
+    lines: list[str] = [
+        f"daily plan: {payload['target']}",
+        f"candidates: {payload['candidate_count']}",
+    ]
     selected = payload.get("selected_action")
     if isinstance(selected, dict):
-        print(f"selected: {selected['action_id']}")
-        print(f"summary: {selected['safe_summary']}")
-        print(f"approval_required: {selected['approval_required']}")
-        print(f"next: {selected['suggested_next_command']}")
+        lines.append(f"selected: {selected['action_id']}")
+        lines.append(f"summary: {selected['safe_summary']}")
+        lines.append(f"approval_required: {selected['approval_required']}")
+        lines.append(f"next: {selected['suggested_next_command']}")
     else:
-        print("selected: none")
+        lines.append("selected: none")
     if record:
-        print(f"recorded: {payload.get('path')}")
-    return 0
+        lines.append(f"recorded: {payload.get('path')}")
+    return emit(payload, json_output, lines, 0)
 
 
 def _review_payload(target: Path, selected: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -1893,24 +1892,21 @@ def _review_payload(target: Path, selected: dict[str, Any] | None = None) -> dic
 
 def review(*, target: Path, json_output: bool = False) -> int:
     payload = _review_payload(target)
-    if json_output:
-        print(json.dumps(payload, indent=2, sort_keys=True))
-        return 0
-    print(f"daily review: {payload['target']}")
+    lines: list[str] = [f"daily review: {payload['target']}"]
     if payload.get("selected_action"):
-        print(f"selected: {payload['selected_action']['action_id']}")
-        print(f"summary: {payload['safe_summary']}")
-        print(f"risk: {payload['risk_level']}")
-        print(f"adapter: {payload['selected_adapter']}")
-        print(f"approval: {payload['approval_boundary']}")
+        lines.append(f"selected: {payload['selected_action']['action_id']}")
+        lines.append(f"summary: {payload['safe_summary']}")
+        lines.append(f"risk: {payload['risk_level']}")
+        lines.append(f"adapter: {payload['selected_adapter']}")
+        lines.append(f"approval: {payload['approval_boundary']}")
         if payload.get("config_blockers"):
-            print(f"config_blockers: {len(payload['config_blockers'])}")
+            lines.append(f"config_blockers: {len(payload['config_blockers'])}")
         if payload.get("evidence_blockers"):
-            print(f"evidence_blockers: {len(payload['evidence_blockers'])}")
-        print(f"next: {payload['likely_next_command']}")
+            lines.append(f"evidence_blockers: {len(payload['evidence_blockers'])}")
+        lines.append(f"next: {payload['likely_next_command']}")
     else:
-        print("selected: none")
-    return 0
+        lines.append("selected: none")
+    return emit(payload, json_output, lines, 0)
 
 
 def _latest_run(target: Path) -> dict[str, Any] | None:
@@ -2073,14 +2069,12 @@ def _blocked_run(
             "approval_id": receipt.get("approval_id"),
         },
     )
-    if json_output:
-        print(json.dumps(receipt, indent=2, sort_keys=True))
-    else:
-        print(f"daily run: {receipt['run_id']}")
-        print("status: blocked")
-        for blocker in blockers:
-            print(f"blocker: {blocker}")
-    return 1
+    lines: list[str] = [
+        f"daily run: {receipt['run_id']}",
+        "status: blocked",
+    ]
+    lines.extend(f"blocker: {blocker}" for blocker in blockers)
+    return emit(receipt, json_output, lines, 1)
 
 
 def run(
@@ -2338,14 +2332,13 @@ def run(
             "approval_id": receipt.get("approval_id"),
         },
     )
-    if json_output:
-        print(json.dumps(receipt, indent=2, sort_keys=True))
-    else:
-        print(f"daily run: {run_id}")
-        print(f"status: {receipt['status']}")
-        print(f"selected: {receipt['selected_action_id']}")
-        print(f"next: {receipt['next_recommended_command']}")
-    return rc
+    lines: list[str] = [
+        f"daily run: {run_id}",
+        f"status: {receipt['status']}",
+        f"selected: {receipt['selected_action_id']}",
+        f"next: {receipt['next_recommended_command']}",
+    ]
+    return emit(receipt, json_output, lines, rc)
 
 
 def approvals_payload(target: Path, *, limit: int = 50) -> dict[str, Any]:
@@ -2363,13 +2356,12 @@ def approvals_payload(target: Path, *, limit: int = 50) -> dict[str, Any]:
 
 def approvals_list(*, target: Path, limit: int = 50, json_output: bool = False) -> int:
     payload = approvals_payload(target, limit=limit)
-    if json_output:
-        print(json.dumps(payload, indent=2, sort_keys=True))
-    else:
-        print(f"daily approvals: {payload['target']}")
-        for approval in payload["approvals"]:
-            print(f"- {approval.get('approval_id')} [{approval.get('status')}] {approval.get('safe_summary')}")
-    return 0
+    lines: list[str] = [f"daily approvals: {payload['target']}"]
+    lines.extend(
+        f"- {approval.get('approval_id')} [{approval.get('status')}] {approval.get('safe_summary')}"
+        for approval in payload["approvals"]
+    )
+    return emit(payload, json_output, lines, 0)
 
 
 def approvals_show(*, target: Path, approval_id: str, json_output: bool = False) -> int:
@@ -2476,14 +2468,12 @@ def approvals_compare_payload(target: Path, approval_id: str) -> dict[str, Any]:
 
 def approvals_compare(*, target: Path, approval_id: str, json_output: bool = False) -> int:
     payload = approvals_compare_payload(target, approval_id)
-    if json_output:
-        print(json.dumps(payload, indent=2, sort_keys=True))
-    else:
-        print(f"daily approval compare: {approval_id}")
-        print(f"issues: {payload['issue_count']}")
-        for issue in payload["issues"]:
-            print(f"[{issue.get('status')}] {issue.get('name')}: {issue.get('detail')}")
-    return 0 if payload["ok"] else 1
+    lines: list[str] = [
+        f"daily approval compare: {approval_id}",
+        f"issues: {payload['issue_count']}",
+    ]
+    lines.extend(f"[{issue.get('status')}] {issue.get('name')}: {issue.get('detail')}" for issue in payload["issues"])
+    return emit(payload, json_output, lines, 0 if payload["ok"] else 1)
 
 
 def approvals_archive(*, target: Path, consumed: bool = False, json_output: bool = False) -> int:
@@ -2517,12 +2507,11 @@ def approvals_archive(*, target: Path, consumed: bool = False, json_output: bool
         "archived_count": len(archived),
         "parse_errors": errors,
     }
-    if json_output:
-        print(json.dumps(payload, indent=2, sort_keys=True))
-    else:
-        print(f"daily approval archive: {target}")
-        print(f"archived: {len(archived)}")
-    return 0
+    lines: list[str] = [
+        f"daily approval archive: {target}",
+        f"archived: {len(archived)}",
+    ]
+    return emit(payload, json_output, lines, 0)
 
 
 def init(*, target: Path, force: bool = False, json_output: bool = False) -> int:
@@ -2545,23 +2534,18 @@ def init(*, target: Path, force: bool = False, json_output: bool = False) -> int
             "written": True,
             "config": DEFAULT_CONFIG,
         }
-    if json_output:
-        print(json.dumps(payload, indent=2, sort_keys=True))
-    else:
-        print(f"daily config: {path}")
-        print(f"written: {payload['written']}")
-    return 0
+    lines: list[str] = [
+        f"daily config: {path}",
+        f"written: {payload['written']}",
+    ]
+    return emit(payload, json_output, lines, 0)
 
 
 def schema(*, target: Path, json_output: bool = False) -> int:
     payload = {"schema_version": SCHEMA_VERSION, "target": str(target.expanduser().resolve()), **_schemas()}
-    if json_output:
-        print(json.dumps(payload, indent=2, sort_keys=True))
-    else:
-        print(f"daily schema: {payload['target']}")
-        for item in payload["schemas"]:
-            print(f"- {item['name']}")
-    return 0
+    lines: list[str] = [f"daily schema: {payload['target']}"]
+    lines.extend(f"- {item['name']}" for item in payload["schemas"])
+    return emit(payload, json_output, lines, 0)
 
 
 def history_payload(target: Path, *, limit: int = 20) -> dict[str, Any]:
@@ -2582,15 +2566,13 @@ def history_payload(target: Path, *, limit: int = 20) -> dict[str, Any]:
 
 def history(*, target: Path, limit: int = 20, json_output: bool = False) -> int:
     payload = history_payload(target, limit=limit)
-    if json_output:
-        print(json.dumps(payload, indent=2, sort_keys=True))
-    else:
-        print(f"daily history: {payload['target']}")
-        print(f"runs: {payload['run_count']}")
-        for item in payload["runs"]:
-            print(f"- {item.get('run_id')} [{item.get('status')}] {item.get('started_at')}")
-        print(f"plans: {payload['plan_count']}")
-    return 0
+    lines: list[str] = [
+        f"daily history: {payload['target']}",
+        f"runs: {payload['run_count']}",
+    ]
+    lines.extend(f"- {item.get('run_id')} [{item.get('status')}] {item.get('started_at')}" for item in payload["runs"])
+    lines.append(f"plans: {payload['plan_count']}")
+    return emit(payload, json_output, lines, 0)
 
 
 def show(*, target: Path, run_id: str = "latest", json_output: bool = False) -> int:
@@ -2762,13 +2744,11 @@ def doctor(*, target: Path, json_output: bool = False) -> int:
     payload["checks"] = payload["health"]["checks"]
     payload["issue_count"] = payload["health"]["issue_count"]
     payload["top_issue"] = payload["health"]["top_issue"]
-    if json_output:
-        print(json.dumps(payload, indent=2, sort_keys=True))
-    else:
-        print(f"daily doctor: {target}")
-        for check in payload["checks"]:
-            print(f"[{check.get('status')}] {check.get('name')}: {check.get('detail')}")
-    return 1 if any(check.get("status") == "fail" for check in payload["checks"]) else 0
+    lines: list[str] = [f"daily doctor: {target}"]
+    lines.extend(f"[{check.get('status')}] {check.get('name')}: {check.get('detail')}" for check in payload["checks"])
+    return emit(
+        payload, json_output, lines, 1 if any(check.get("status") == "fail" for check in payload["checks"]) else 0
+    )
 
 
 def protocol_payload(target: Path) -> dict[str, Any]:
@@ -2815,13 +2795,9 @@ def protocol_payload(target: Path) -> dict[str, Any]:
 
 def protocol(*, target: Path, json_output: bool = False) -> int:
     payload = protocol_payload(target)
-    if json_output:
-        print(json.dumps(payload, indent=2, sort_keys=True))
-    else:
-        print(f"daily protocol: {payload['target']}")
-        for step in payload["steps"]:
-            print(f"- {step['step']}: {step['command']}")
-    return 0
+    lines: list[str] = [f"daily protocol: {payload['target']}"]
+    lines.extend(f"- {step['step']}: {step['command']}" for step in payload["steps"])
+    return emit(payload, json_output, lines, 0)
 
 
 def _repair_suggestions(target: Path) -> list[dict[str, Any]]:
@@ -2865,13 +2841,11 @@ def repair_payload(target: Path, *, write: bool = True) -> dict[str, Any]:
 
 def repair(*, target: Path, json_output: bool = False) -> int:
     payload = repair_payload(target, write=True)
-    if json_output:
-        print(json.dumps(payload, indent=2, sort_keys=True))
-    else:
-        print(f"daily repair: {payload['repair_id']}")
-        for suggestion in payload["suggestions"]:
-            print(f"- {suggestion.get('name')}: {suggestion.get('suggested_command')}")
-    return 0
+    lines: list[str] = [f"daily repair: {payload['repair_id']}"]
+    lines.extend(
+        f"- {suggestion.get('name')}: {suggestion.get('suggested_command')}" for suggestion in payload["suggestions"]
+    )
+    return emit(payload, json_output, lines, 0)
 
 
 def unblock_payload(target: Path, *, dry_run: bool = False) -> dict[str, Any]:
@@ -2934,14 +2908,13 @@ def unblock_payload(target: Path, *, dry_run: bool = False) -> dict[str, Any]:
 
 def unblock(*, target: Path, dry_run: bool = False, json_output: bool = False) -> int:
     payload = unblock_payload(target, dry_run=dry_run)
-    if json_output:
-        print(json.dumps(payload, indent=2, sort_keys=True))
-    else:
-        print(f"daily unblock: {payload['unblock_id']}")
-        print(f"created_imports: {len(payload['created_imports'])}")
-        if payload.get("approval_request"):
-            print(f"approval: {payload['approval_request'].get('approval_id')}")
-    return 1 if payload.get("blockers") else 0
+    lines: list[str] = [
+        f"daily unblock: {payload['unblock_id']}",
+        f"created_imports: {len(payload['created_imports'])}",
+    ]
+    if payload.get("approval_request"):
+        lines.append(f"approval: {payload['approval_request'].get('approval_id')}")
+    return emit(payload, json_output, lines, 1 if payload.get("blockers") else 0)
 
 
 def resume(*, target: Path, json_output: bool = False) -> int:
@@ -3065,25 +3038,22 @@ def telemetry_payload(target: Path) -> dict[str, Any]:
 
 def telemetry(*, target: Path, json_output: bool = False) -> int:
     payload = telemetry_payload(target)
-    if json_output:
-        print(json.dumps(payload, indent=2, sort_keys=True))
-    else:
-        print(f"daily telemetry: {payload['target']}")
-        print(f"runs: {payload['metrics']['run_count']}")
-        print(f"approvals: {payload['metrics']['approval_frequency']}")
-        print(f"issues: {payload['issue_count']}")
-    return 0
+    lines: list[str] = [
+        f"daily telemetry: {payload['target']}",
+        f"runs: {payload['metrics']['run_count']}",
+        f"approvals: {payload['metrics']['approval_frequency']}",
+        f"issues: {payload['issue_count']}",
+    ]
+    return emit(payload, json_output, lines, 0)
 
 
 def telemetry_doctor(*, target: Path, json_output: bool = False) -> int:
     payload = telemetry_payload(target)
-    if json_output:
-        print(json.dumps(payload, indent=2, sort_keys=True))
-    else:
-        print(f"daily telemetry doctor: {payload['target']}")
-        for check in payload["checks"]:
-            print(f"[{check.get('status')}] {check.get('name')}: {check.get('detail')}")
-    return 1 if any(check.get("status") == "fail" for check in payload["checks"]) else 0
+    lines: list[str] = [f"daily telemetry doctor: {payload['target']}"]
+    lines.extend(f"[{check.get('status')}] {check.get('name')}: {check.get('detail')}" for check in payload["checks"])
+    return emit(
+        payload, json_output, lines, 1 if any(check.get("status") == "fail" for check in payload["checks"]) else 0
+    )
 
 
 def hardening_plan_payload(target: Path) -> dict[str, Any]:
@@ -3120,14 +3090,12 @@ def hardening_plan_payload(target: Path) -> dict[str, Any]:
 
 def hardening_plan(*, target: Path, json_output: bool = False) -> int:
     payload = hardening_plan_payload(target)
-    if json_output:
-        print(json.dumps(payload, indent=2, sort_keys=True))
-    else:
-        print(f"daily hardening plan: {payload['target']}")
-        print(f"phases: {payload['phase_count']}")
-        for stream in payload["workstreams"]:
-            print(f"- {stream['phase_start']}-{stream['phase_end']} {stream['id']}")
-    return 0
+    lines: list[str] = [
+        f"daily hardening plan: {payload['target']}",
+        f"phases: {payload['phase_count']}",
+    ]
+    lines.extend(f"- {stream['phase_start']}-{stream['phase_end']} {stream['id']}" for stream in payload["workstreams"])
+    return emit(payload, json_output, lines, 0)
 
 
 def _hardening_finding(
@@ -3716,14 +3684,15 @@ def hardening_audit_payload(target: Path) -> dict[str, Any]:
 
 def hardening_audit(*, target: Path, json_output: bool = False) -> int:
     payload = hardening_audit_payload(target)
-    if json_output:
-        print(json.dumps(payload, indent=2, sort_keys=True))
-    else:
-        print(f"daily hardening audit: {payload['target']}")
-        print(f"findings: {payload['finding_count']}")
-        for finding in payload["findings"][:10]:
-            print(f"- [{finding['severity']}] {finding['finding_id']}: {finding['safe_summary']}")
-    return 0
+    lines: list[str] = [
+        f"daily hardening audit: {payload['target']}",
+        f"findings: {payload['finding_count']}",
+    ]
+    lines.extend(
+        f"- [{finding['severity']}] {finding['finding_id']}: {finding['safe_summary']}"
+        for finding in payload["findings"][:10]
+    )
+    return emit(payload, json_output, lines, 0)
 
 
 def hardening_import_issues(*, target: Path, dry_run: bool = False, json_output: bool = False) -> int:
@@ -3771,14 +3740,13 @@ def hardening_import_issues(*, target: Path, dry_run: bool = False, json_output:
         "skipped_count": len(skipped),
         "dismissed_count": len(skipped_dismissed),
     }
-    if json_output:
-        print(json.dumps(payload, indent=2, sort_keys=True))
-    else:
-        print(f"daily hardening import-issues: {target}")
-        print(f"created: {len(created)}")
-        print(f"skipped: {len(skipped)}")
-        print(f"dismissed: {len(skipped_dismissed)}")
-    return 0
+    lines: list[str] = [
+        f"daily hardening import-issues: {target}",
+        f"created: {len(created)}",
+        f"skipped: {len(skipped)}",
+        f"dismissed: {len(skipped_dismissed)}",
+    ]
+    return emit(payload, json_output, lines, 0)
 
 
 def hardening_closeout(
