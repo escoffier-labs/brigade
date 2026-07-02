@@ -25,6 +25,7 @@ from .localio import (
     write_json as _write_json,
 )
 from .selection import Selection, WRITER_INBOXES
+from .render import emit
 from . import actionqueue, reportstore, toml_compat as tomllib, work_cmd
 
 OK = "ok"
@@ -421,18 +422,20 @@ def discover_plan(*, target: Path, json_output: bool = False) -> int:
         },
         "suggested_next_commands": ["edit .brigade/repos.toml manually to add reviewed candidates"],
     }
-    if json_output:
-        print(json.dumps(payload, indent=2, sort_keys=True))
-        return 0 if config_loaded else 1
-    print("repo discovery plan")
-    print("dry_run: true")
-    print(f"roots: {payload['root_count']}")
-    print(f"candidates: {payload['candidate_count']}")
-    print("would_clone: false")
-    print("would_write: false")
-    for candidate in candidates:
-        print(f"- {candidate['candidate_id']} {candidate['path_label']} depth={candidate['depth']}")
-    return 0 if config_loaded else 1
+    rc = 0 if config_loaded else 1
+    text_lines = [
+        "repo discovery plan",
+        "dry_run: true",
+        f"roots: {payload['root_count']}",
+        f"candidates: {payload['candidate_count']}",
+        "would_clone: false",
+        "would_write: false",
+        *[
+            f"- {candidate['candidate_id']} {candidate['path_label']} depth={candidate['depth']}"
+            for candidate in candidates
+        ],
+    ]
+    return emit(payload, json_output, text_lines, rc)
 
 
 def _git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
@@ -955,24 +958,20 @@ def ingest_fleet(
             "skipped": stats.skipped,
         },
     }
-    if json_output:
-        print(json.dumps(payload, indent=2, sort_keys=True))
-        return 0
     mode = "DRY-RUN (pass --apply to write)" if dry_run else "applied"
-    print(f"repos ingest [{mode}] -> owner {target}")
-    for repo in per_repo:
-        print(
+    totals = payload["totals"]
+    text_lines = [
+        f"repos ingest [{mode}] -> owner {target}",
+        *[
             f"- {repo['repo_id']}: processed={repo['processed']} promoted={repo['promoted']} "
             f"routed={repo['routed']} inboxed={repo['inboxed']}"
-        )
-    for item in skipped:
-        print(f"- {item['repo_id']}: skipped ({item['reason']})")
-    totals = payload["totals"]
-    print(
+            for repo in per_repo
+        ],
+        *[f"- {item['repo_id']}: skipped ({item['reason']})" for item in skipped],
         f"totals: processed={totals['processed']} promoted={totals['promoted']} "
-        f"routed={totals['routed']} inboxed={totals['inboxed']} skipped={totals['skipped']}"
-    )
-    return 0
+        f"routed={totals['routed']} inboxed={totals['inboxed']} skipped={totals['skipped']}",
+    ]
+    return emit(payload, json_output, text_lines, 0)
 
 
 def init(*, target: Path, force: bool = False, update_gitignore: bool = True, json_output: bool = False) -> int:
@@ -990,25 +989,22 @@ def init(*, target: Path, force: bool = False, update_gitignore: bool = True, js
     if update_gitignore:
         gitignore = apply_gitignore(target, Selection(depth="repo", harnesses=["codex"], owner="codex", includes=[]))
     payload = {"target": str(target), "config_path": str(path), "gitignore": gitignore, "repo_count": 1}
-    if json_output:
-        print(json.dumps(payload, indent=2, sort_keys=True))
-        return 0
-    print(f"repos_config: {path}")
-    print(f"gitignore: {gitignore}")
-    print("next_command: brigade repos scan")
-    return 0
+    text_lines = [f"repos_config: {path}", f"gitignore: {gitignore}", "next_command: brigade repos scan"]
+    return emit(payload, json_output, text_lines, 0)
 
 
 def list_repos(*, target: Path, json_output: bool = False) -> int:
     payload = scan_payload(target)
-    if json_output:
-        print(json.dumps(payload, indent=2, sort_keys=True))
-        return 0 if payload["config_loaded"] else 1
-    print(f"repos: {payload['target']}")
-    print(f"config_path: {payload['config_path']}")
-    for repo in payload["repos"]:
-        print(f"- {repo['id']} [{repo['branch'] or 'unknown'}] dirty={repo['dirty_tracked_count']}")
-    return 0 if payload["config_loaded"] else 1
+    rc = 0 if payload["config_loaded"] else 1
+    text_lines = [
+        f"repos: {payload['target']}",
+        f"config_path: {payload['config_path']}",
+        *[
+            f"- {repo['id']} [{repo['branch'] or 'unknown'}] dirty={repo['dirty_tracked_count']}"
+            for repo in payload["repos"]
+        ],
+    ]
+    return emit(payload, json_output, text_lines, rc)
 
 
 def show(*, target: Path, repo_id: str, json_output: bool = False) -> int:
@@ -1019,33 +1015,30 @@ def show(*, target: Path, repo_id: str, json_output: bool = False) -> int:
         return 1
     checks = [check for check in payload["checks"] if check.get("repo_id") == repo_id]
     output = {"target": payload["target"], "repo": repo, "checks": checks}
-    if json_output:
-        print(json.dumps(output, indent=2, sort_keys=True))
-        return 0
-    print(f"repo: {repo['id']}")
-    print(f"label: {repo['label']}")
-    print(f"branch: {repo.get('branch') or 'unknown'}")
-    print(f"guidance: {repo.get('guidance_source') or 'none'}")
-    print(f"tests: {', '.join(repo.get('test_hints') or []) or 'none'}")
-    for check in checks:
-        if check["status"] != OK:
-            print(f"[{check['status']}] {check['name']}: {check['detail']}")
-    return 0
+    text_lines = [
+        f"repo: {repo['id']}",
+        f"label: {repo['label']}",
+        f"branch: {repo.get('branch') or 'unknown'}",
+        f"guidance: {repo.get('guidance_source') or 'none'}",
+        f"tests: {', '.join(repo.get('test_hints') or []) or 'none'}",
+        *[f"[{check['status']}] {check['name']}: {check['detail']}" for check in checks if check["status"] != OK],
+    ]
+    return emit(output, json_output, text_lines, 0)
 
 
 def scan(*, target: Path, json_output: bool = False) -> int:
     payload = scan_payload(target)
-    if json_output:
-        print(json.dumps(payload, indent=2, sort_keys=True))
-        return 0 if payload["config_loaded"] else 1
-    print(f"repos scan: {payload['target']}")
-    print(f"repos: {payload['repo_count']}")
-    print(f"issues: {payload['issue_count']}")
-    for repo in payload["repos"]:
-        print(
+    rc = 0 if payload["config_loaded"] else 1
+    text_lines = [
+        f"repos scan: {payload['target']}",
+        f"repos: {payload['repo_count']}",
+        f"issues: {payload['issue_count']}",
+        *[
             f"- {repo['id']} guidance={repo.get('guidance_source') or 'none'} tests={len(repo.get('test_hints') or [])}"
-        )
-    return 0 if payload["config_loaded"] else 1
+            for repo in payload["repos"]
+        ],
+    ]
+    return emit(payload, json_output, text_lines, rc)
 
 
 def deep_payload(target: Path) -> dict[str, Any]:
@@ -1094,21 +1087,22 @@ def deep_payload(target: Path) -> dict[str, Any]:
 def doctor(*, target: Path, json_output: bool = False, deep: bool = False) -> int:
     if deep:
         payload = deep_payload(target)
-        if json_output:
-            print(json.dumps(payload, indent=2, sort_keys=True))
-            return 0 if payload["ready"] else 1
-        print(f"repos doctor --deep: {payload['target']}")
-        for error in payload["errors"]:
-            print(f"[WARN] repo_fleet_config: {error}")
+        rc = 0 if payload["ready"] else 1
+        repo_lines = []
         for repo in payload["repos"]:
             mark = "ok" if repo["ready"] else "fail"
             if repo.get("error") == "missing":
-                print(f"  [{mark}] {repo['id']}: repo path is missing")
+                repo_lines.append(f"  [{mark}] {repo['id']}: repo path is missing")
             else:
-                print(f"  [{mark}] {repo['id']}: {repo['blocking_surface_count']} blocking surface(s)")
-        print(f"ready: {'yes' if payload['ready'] else 'no'}")
-        print(f"repos: {payload['repo_count']}, blocking: {payload['blocking_repo_count']}")
-        return 0 if payload["ready"] else 1
+                repo_lines.append(f"  [{mark}] {repo['id']}: {repo['blocking_surface_count']} blocking surface(s)")
+        text_lines = [
+            f"repos doctor --deep: {payload['target']}",
+            *[f"[WARN] repo_fleet_config: {error}" for error in payload["errors"]],
+            *repo_lines,
+            f"ready: {'yes' if payload['ready'] else 'no'}",
+            f"repos: {payload['repo_count']}, blocking: {payload['blocking_repo_count']}",
+        ]
+        return emit(payload, json_output, text_lines, rc)
 
     payload = health(target)
     scan_issue_count = sum(1 for check in payload["checks"] if isinstance(check, dict) and check.get("status") != OK)
@@ -1118,13 +1112,12 @@ def doctor(*, target: Path, json_output: bool = False, deep: bool = False) -> in
         bucket = payload.get(bucket_name) if isinstance(payload.get(bucket_name), dict) else {}
         checks.extend(bucket.get("checks") if isinstance(bucket.get("checks"), list) else [])
     payload = {**payload, "checks": checks, "issue_count": scan_issue_count, "health_issue_count": health_issue_count}
-    if json_output:
-        print(json.dumps(payload, indent=2, sort_keys=True))
-        return 0 if scan_issue_count == 0 else 1
-    print(f"repos doctor: {payload['target']}")
-    for check in checks:
-        print(f"[{check['status']}] {check['name']}: {check['detail']}")
-    return 0 if scan_issue_count == 0 else 1
+    rc = 0 if scan_issue_count == 0 else 1
+    text_lines = [
+        f"repos doctor: {payload['target']}",
+        *[f"[{check['status']}] {check['name']}: {check['detail']}" for check in checks],
+    ]
+    return emit(payload, json_output, text_lines, rc)
 
 
 def _import_records(payload: dict[str, Any]) -> list[dict[str, Any]]:
@@ -1174,16 +1167,15 @@ def import_issues(*, target: Path, json_output: bool = False, dry_run: bool = Fa
         "dry_run": dry_run,
         "issue_count": payload["issue_count"],
     }
-    if json_output:
-        print(json.dumps(output, indent=2, sort_keys=True))
-        return 0
-    print(f"repo_fleet_imports: {payload['target']}")
-    print(f"created: {len(imported)}")
-    print(f"skipped: {len(skipped)}")
-    print(f"dismissed: {len(dismissed)}")
+    text_lines = [
+        f"repo_fleet_imports: {payload['target']}",
+        f"created: {len(imported)}",
+        f"skipped: {len(skipped)}",
+        f"dismissed: {len(dismissed)}",
+    ]
     if dry_run:
-        print("dry_run: true")
-    return 0
+        text_lines.append("dry_run: true")
+    return emit(output, json_output, text_lines, 0)
 
 
 def _sweeps_root(target: Path) -> Path:
@@ -1396,20 +1388,20 @@ def _health_command_registry_payload(target: Path) -> dict[str, Any]:
 
 def health_commands(*, target: Path, json_output: bool = False) -> int:
     payload = _health_command_registry_payload(target)
-    if json_output:
-        print(json.dumps(payload, indent=2, sort_keys=True))
-        return 0 if payload["config_loaded"] and not payload["issues"] else 1
-    print("repo health commands: repo-fleet")
-    print(f"commands: {payload['health_command_count']}")
-    print(f"issues: {payload['issue_count']}")
-    for repo in payload["repos"]:
-        for command in repo.get("health_commands", []):
-            print(
-                f"- {repo['repo_id']}:{command['label']} timeout={command['timeout']} receipt={command['receipt_status']}"
-            )
-    for issue in payload["issues"]:
-        print(f"[{issue['status']}] {issue['name']}: {issue['detail']}")
-    return 0 if payload["config_loaded"] and not payload["issues"] else 1
+    rc = 0 if payload["config_loaded"] and not payload["issues"] else 1
+    command_lines = [
+        f"- {repo['repo_id']}:{command['label']} timeout={command['timeout']} receipt={command['receipt_status']}"
+        for repo in payload["repos"]
+        for command in repo.get("health_commands", [])
+    ]
+    text_lines = [
+        "repo health commands: repo-fleet",
+        f"commands: {payload['health_command_count']}",
+        f"issues: {payload['issue_count']}",
+        *command_lines,
+        *[f"[{issue['status']}] {issue['name']}: {issue['detail']}" for issue in payload["issues"]],
+    ]
+    return emit(payload, json_output, text_lines, rc)
 
 
 def _latest_sweep_for_repo(target: Path, repo_id: str) -> dict[str, Any] | None:
@@ -1505,17 +1497,18 @@ def sweep_plan(
         force=force,
         all_repos=all_repos,
     )
-    if json_output:
-        print(json.dumps(payload, indent=2, sort_keys=True))
-        return 0 if payload["config_loaded"] and not payload["errors"] else 1
-    print(f"repo fleet sweep plan: {payload['target_label']}")
-    print(f"repos: {payload['repo_count']}")
+    rc = 0 if payload["config_loaded"] and not payload["errors"] else 1
+    repo_lines = []
     for repo in payload["repos"]:
         labels = ",".join(command["label"] for command in repo.get("commands", []))
-        print(f"- {repo['repo_id']} {repo['repo_label']} commands={labels}")
-    for error in payload["errors"]:
-        print(f"[warn] {error}")
-    return 0 if payload["config_loaded"] and not payload["errors"] else 1
+        repo_lines.append(f"- {repo['repo_id']} {repo['repo_label']} commands={labels}")
+    text_lines = [
+        f"repo fleet sweep plan: {payload['target_label']}",
+        f"repos: {payload['repo_count']}",
+        *repo_lines,
+        *[f"[warn] {error}" for error in payload["errors"]],
+    ]
+    return emit(payload, json_output, text_lines, rc)
 
 
 def _summarize_output(text: str, repo_path: Path, repo_id: str, label: str, limit: int = 240) -> str:
@@ -1689,15 +1682,15 @@ def sweep_run(
         ],
     }
     _write_json(sweep_dir / "sweep.json", payload)
-    if json_output:
-        print(json.dumps(payload, indent=2, sort_keys=True))
-        return 0 if payload["status"] == "completed" else 1
-    print(f"repo fleet sweep: {sweep_id}")
-    print(f"status: {payload['status']}")
-    print(f"repos: {payload['repo_count']}")
-    print(f"failed: {failed_count}")
-    print(f"path_label: {sweep_id}")
-    return 0 if payload["status"] == "completed" else 1
+    rc = 0 if payload["status"] == "completed" else 1
+    text_lines = [
+        f"repo fleet sweep: {sweep_id}",
+        f"status: {payload['status']}",
+        f"repos: {payload['repo_count']}",
+        f"failed: {failed_count}",
+        f"path_label: {sweep_id}",
+    ]
+    return emit(payload, json_output, text_lines, rc)
 
 
 def sweep_runs(*, target: Path, limit: int = 20, json_output: bool = False) -> int:
@@ -1712,15 +1705,14 @@ def sweep_runs(*, target: Path, limit: int = 20, json_output: bool = False) -> i
         "sweeps": sweeps,
         "sweep_count": len(sweeps),
     }
-    if json_output:
-        print(json.dumps(payload, indent=2, sort_keys=True))
-        return 0
-    print("repo fleet sweeps: repo-fleet")
-    for sweep in sweeps:
-        print(
+    text_lines = [
+        "repo fleet sweeps: repo-fleet",
+        *[
             f"- {sweep.get('sweep_id')} [{sweep.get('status')}] repos={sweep.get('repo_count')} {sweep.get('started_at')}"
-        )
-    return 0
+            for sweep in sweeps
+        ],
+    ]
+    return emit(payload, json_output, text_lines, 0)
 
 
 def sweep_show(*, target: Path, sweep_id: str, json_output: bool = False) -> int:
@@ -1729,14 +1721,14 @@ def sweep_show(*, target: Path, sweep_id: str, json_output: bool = False) -> int
     if sweep is None:
         print(f"error: {error}", file=sys.stderr)
         return 1 if error and "not found" in error else 2
-    if json_output:
-        print(json.dumps({"target_label": "repo-fleet", "sweep": sweep}, indent=2, sort_keys=True))
-        return 0
-    print(f"repo fleet sweep: {sweep.get('sweep_id')}")
-    print(f"status: {sweep.get('status')}")
-    print(f"repos: {sweep.get('repo_count')}")
-    print(f"path_label: {sweep.get('path_label')}")
-    return 0
+    payload = {"target_label": "repo-fleet", "sweep": sweep}
+    text_lines = [
+        f"repo fleet sweep: {sweep.get('sweep_id')}",
+        f"status: {sweep.get('status')}",
+        f"repos: {sweep.get('repo_count')}",
+        f"path_label: {sweep.get('path_label')}",
+    ]
+    return emit(payload, json_output, text_lines, 0)
 
 
 def sweep_closeout(
@@ -1772,12 +1764,8 @@ def sweep_closeout(
     _write_json(closeout_path, payload)
     sweep["closeout"] = payload
     _write_json(sweep_path / "sweep.json", sweep)
-    if json_output:
-        print(json.dumps(payload, indent=2, sort_keys=True))
-        return 0
-    print(f"repo fleet sweep closeout: {sweep.get('sweep_id')}")
-    print(f"status: {status}")
-    return 0
+    text_lines = [f"repo fleet sweep closeout: {sweep.get('sweep_id')}", f"status: {status}"]
+    return emit(payload, json_output, text_lines, 0)
 
 
 def sweep_health(target: Path) -> dict[str, Any]:
@@ -1969,14 +1957,14 @@ def report_plan(*, target: Path, json_output: bool = False) -> int:
             "bundle_files": ["FLEET_REPORT.md", "FLEET_EVIDENCE.json"],
         }
     )
-    if json_output:
-        print(json.dumps(payload, indent=2, sort_keys=True))
-        return 0 if payload["config_loaded"] else 1
-    print(f"repo fleet report plan: {target}")
-    print(f"repos: {payload['repo_count']}")
-    print(f"warnings: {payload['warning_count']}")
-    print(f"reports_root: {payload['reports_root']}")
-    return 0 if payload["config_loaded"] else 1
+    rc = 0 if payload["config_loaded"] else 1
+    text_lines = [
+        f"repo fleet report plan: {target}",
+        f"repos: {payload['repo_count']}",
+        f"warnings: {payload['warning_count']}",
+        f"reports_root: {payload['reports_root']}",
+    ]
+    return emit(payload, json_output, text_lines, rc)
 
 
 def report_build(*, target: Path, json_output: bool = False) -> int:
@@ -1994,14 +1982,14 @@ def report_build(*, target: Path, json_output: bool = False) -> int:
         }
     )
     _write_report_bundle(report_dir, payload)
-    if json_output:
-        print(json.dumps(payload, indent=2, sort_keys=True))
-        return 0 if payload["config_loaded"] else 1
-    print(f"repo fleet report: {report_id}")
-    print(f"repos: {payload['repo_count']}")
-    print(f"warnings: {payload['warning_count']}")
-    print(f"path: {report_dir}")
-    return 0 if payload["config_loaded"] else 1
+    rc = 0 if payload["config_loaded"] else 1
+    text_lines = [
+        f"repo fleet report: {report_id}",
+        f"repos: {payload['repo_count']}",
+        f"warnings: {payload['warning_count']}",
+        f"path: {report_dir}",
+    ]
+    return emit(payload, json_output, text_lines, rc)
 
 
 def report_list(*, target: Path, limit: int = 20, json_output: bool = False) -> int:
@@ -2016,15 +2004,14 @@ def report_list(*, target: Path, limit: int = 20, json_output: bool = False) -> 
         "reports": reports,
         "report_count": len(reports),
     }
-    if json_output:
-        print(json.dumps(payload, indent=2, sort_keys=True))
-        return 0
-    print(f"repo fleet reports: {target}")
-    for report in reports:
-        print(
+    text_lines = [
+        f"repo fleet reports: {target}",
+        *[
             f"- {report.get('report_id')} repos={report.get('repo_count')} warnings={report.get('warning_count')} {report.get('created_at')}"
-        )
-    return 0
+            for report in reports
+        ],
+    ]
+    return emit(payload, json_output, text_lines, 0)
 
 
 def report_show(*, target: Path, report_id: str, json_output: bool = False) -> int:
@@ -2033,14 +2020,14 @@ def report_show(*, target: Path, report_id: str, json_output: bool = False) -> i
     if report is None:
         print(f"error: {error}", file=sys.stderr)
         return 1 if error and "not found" in error else 2
-    if json_output:
-        print(json.dumps({"target": str(target), "report": report}, indent=2, sort_keys=True))
-        return 0
-    print(f"repo fleet report: {report.get('report_id')}")
-    print(f"repos: {report.get('repo_count')}")
-    print(f"warnings: {report.get('warning_count')}")
-    print(f"path: {report.get('path')}")
-    return 0
+    payload = {"target": str(target), "report": report}
+    text_lines = [
+        f"repo fleet report: {report.get('report_id')}",
+        f"repos: {report.get('repo_count')}",
+        f"warnings: {report.get('warning_count')}",
+        f"path: {report.get('path')}",
+    ]
+    return emit(payload, json_output, text_lines, 0)
 
 
 def report_archive(*, target: Path, report_id: str, json_output: bool = False) -> int:
@@ -2063,12 +2050,8 @@ def report_archive(*, target: Path, report_id: str, json_output: bool = False) -
         "status": "archived",
         "archive_path": str(destination),
     }
-    if json_output:
-        print(json.dumps(payload, indent=2, sort_keys=True))
-        return 0
-    print(f"archived repo fleet report: {report.get('report_id')}")
-    print(f"path: {destination}")
-    return 0
+    text_lines = [f"archived repo fleet report: {report.get('report_id')}", f"path: {destination}"]
+    return emit(payload, json_output, text_lines, 0)
 
 
 def report_closeout(
@@ -2102,12 +2085,8 @@ def report_closeout(
     reportstore.write_closeout(report_path, payload)
     report["closeout"] = payload
     _write_json(report_path / "FLEET_EVIDENCE.json", report)
-    if json_output:
-        print(json.dumps(payload, indent=2, sort_keys=True))
-        return 0
-    print(f"repo fleet report closeout: {report.get('report_id')}")
-    print(f"status: {status}")
-    return 0
+    text_lines = [f"repo fleet report closeout: {report.get('report_id')}", f"status: {status}"]
+    return emit(payload, json_output, text_lines, 0)
 
 
 def _actions_root(target: Path) -> Path:
@@ -2354,14 +2333,16 @@ def actions_dispatch_plan(
         "plan_count": len(plans),
         "blocker_count": sum(len(plan["blockers"]) for plan in plans),
     }
-    if json_output:
-        print(json.dumps(payload, indent=2, sort_keys=True))
-        return 0 if payload["blocker_count"] == 0 else 2
-    print("repo fleet action dispatch plan")
-    print(f"actions: {len(plans)}")
-    for plan in plans:
-        print(f"- {plan.get('fleet_action_id')} {plan.get('repo_id')} dispatchable={plan.get('dispatchable')}")
-    return 0 if payload["blocker_count"] == 0 else 2
+    rc = 0 if payload["blocker_count"] == 0 else 2
+    text_lines = [
+        "repo fleet action dispatch plan",
+        f"actions: {len(plans)}",
+        *[
+            f"- {plan.get('fleet_action_id')} {plan.get('repo_id')} dispatchable={plan.get('dispatchable')}"
+            for plan in plans
+        ],
+    ]
+    return emit(payload, json_output, text_lines, rc)
 
 
 def actions_dispatch_apply(
@@ -2443,14 +2424,14 @@ def actions_dispatch_apply(
         "blocked_count": sum(1 for item in results if item.get("status") == "blocked"),
         "results": results,
     }
-    if json_output:
-        print(json.dumps(payload, indent=2, sort_keys=True))
-        return 0 if payload["blocked_count"] == 0 else 2
-    print("repo fleet action dispatch apply")
-    print(f"results: {len(results)}")
-    print(f"created: {payload['created_count']}")
-    print(f"blocked: {payload['blocked_count']}")
-    return 0 if payload["blocked_count"] == 0 else 2
+    rc = 0 if payload["blocked_count"] == 0 else 2
+    text_lines = [
+        "repo fleet action dispatch apply",
+        f"results: {len(results)}",
+        f"created: {payload['created_count']}",
+        f"blocked: {payload['blocked_count']}",
+    ]
+    return emit(payload, json_output, text_lines, rc)
 
 
 def _dispatch_import_summary(entry: RepoEntry, action: dict[str, Any], item: dict[str, Any]) -> dict[str, Any]:
@@ -2699,17 +2680,15 @@ def actions_dispatch_report(
         )
         _write_json(report_dir / "DISPATCH_REPORT.json", payload)
         (report_dir / "DISPATCH_REPORT.md").write_text(_dispatch_report_markdown(payload))
-    if json_output:
-        print(json.dumps(payload, indent=2, sort_keys=True))
-        return 0
-    print("repo fleet dispatch report")
-    print(f"actions: {payload['action_count']}")
-    print(f"issues: {payload['issue_count']}")
+    text_lines = [
+        "repo fleet dispatch report",
+        f"actions: {payload['action_count']}",
+        f"issues: {payload['issue_count']}",
+    ]
     if record:
-        print(f"path_label: {payload.get('path_label')}")
-    for report in reports:
-        print(f"- {report.get('fleet_action_id')} issues={report.get('issue_count')}")
-    return 0
+        text_lines.append(f"path_label: {payload.get('path_label')}")
+    text_lines.extend(f"- {report.get('fleet_action_id')} issues={report.get('issue_count')}" for report in reports)
+    return emit(payload, json_output, text_lines, 0)
 
 
 def _latest_safe_receipts(repo_path: Path, repo_id: str, label: str) -> list[dict[str, Any]]:
@@ -2779,13 +2758,12 @@ def actions_context_plan(*, target: Path, action_id: str, json_output: bool = Fa
     if context_error or payload is None:
         print(f"error: {context_error}", file=sys.stderr)
         return 2
-    if json_output:
-        print(json.dumps(payload, indent=2, sort_keys=True))
-        return 0
-    print(f"repo fleet action context plan: {payload.get('fleet_action_id')}")
-    print(f"repo: {payload.get('repo_id')} {payload.get('repo_label')}")
-    print("writes: 0")
-    return 0
+    text_lines = [
+        f"repo fleet action context plan: {payload.get('fleet_action_id')}",
+        f"repo: {payload.get('repo_id')} {payload.get('repo_label')}",
+        "writes: 0",
+    ]
+    return emit(payload, json_output, text_lines, 0)
 
 
 def actions_context_build(*, target: Path, action_id: str, json_output: bool = False) -> int:
@@ -2833,12 +2811,8 @@ def actions_context_build(*, target: Path, action_id: str, json_output: bool = F
     }
     action["updated_at"] = payload["created_at"]
     _write_actions(target, actions)
-    if json_output:
-        print(json.dumps(payload, indent=2, sort_keys=True))
-        return 0
-    print(f"repo fleet action context: {pack_id}")
-    print(f"path_label: {payload['path_label']}")
-    return 0
+    text_lines = [f"repo fleet action context: {pack_id}", f"path_label: {payload['path_label']}"]
+    return emit(payload, json_output, text_lines, 0)
 
 
 def _task_by_id(repo_path: Path, task_id: str | None) -> dict[str, Any] | None:
@@ -2948,13 +2922,11 @@ def actions_reconcile(*, target: Path, action_id: str | None = None, json_output
     results = [_reconcile_one(target, action) for action in selected]
     _write_actions(target, actions)
     payload = {"target": str(target), "results": results, "result_count": len(results)}
-    if json_output:
-        print(json.dumps(payload, indent=2, sort_keys=True))
-        return 0
-    print("repo fleet actions reconcile")
-    for result in results:
-        print(f"- {result.get('fleet_action_id')} [{result.get('status')}]")
-    return 0
+    text_lines = [
+        "repo fleet actions reconcile",
+        *[f"- {result.get('fleet_action_id')} [{result.get('status')}]" for result in results],
+    ]
+    return emit(payload, json_output, text_lines, 0)
 
 
 def _release_trains_root(target: Path) -> Path:
@@ -3309,15 +3281,14 @@ def _write_release_train_bundle(train_dir: Path, train: dict[str, Any]) -> None:
 def release_plan(*, target: Path, json_output: bool = False) -> int:
     payload = _release_train_payload(target)
     payload.update({"train_id": "planned", "status": "planned", "release_train_root_label": ".brigade/repos/releases"})
-    if json_output:
-        print(json.dumps(payload, indent=2, sort_keys=True))
-        return 0 if payload["config_loaded"] else 1
-    print("repo fleet release plan")
-    print(f"repos: {payload['repo_count']}")
-    print(f"blockers: {payload['blocker_count']}")
-    for repo in payload["repos"]:
-        print(f"- {repo.get('repo_id')} [{repo.get('classification')}]")
-    return 0 if payload["config_loaded"] else 1
+    rc = 0 if payload["config_loaded"] else 1
+    text_lines = [
+        "repo fleet release plan",
+        f"repos: {payload['repo_count']}",
+        f"blockers: {payload['blocker_count']}",
+        *[f"- {repo.get('repo_id')} [{repo.get('classification')}]" for repo in payload["repos"]],
+    ]
+    return emit(payload, json_output, text_lines, rc)
 
 
 def release_build(*, target: Path, json_output: bool = False) -> int:
@@ -3335,13 +3306,8 @@ def release_build(*, target: Path, json_output: bool = False) -> int:
         }
     )
     _write_release_train_bundle(train_dir, payload)
-    if json_output:
-        print(json.dumps(payload, indent=2, sort_keys=True))
-        return 0
-    print(f"repo fleet release train: {train_id}")
-    print(f"status: {payload['status']}")
-    print(f"path_label: {train_id}")
-    return 0
+    text_lines = [f"repo fleet release train: {train_id}", f"status: {payload['status']}", f"path_label: {train_id}"]
+    return emit(payload, json_output, text_lines, 0)
 
 
 def release_list(*, target: Path, limit: int = 20, json_output: bool = False) -> int:
@@ -3356,15 +3322,14 @@ def release_list(*, target: Path, limit: int = 20, json_output: bool = False) ->
         "trains": trains,
         "train_count": len(trains),
     }
-    if json_output:
-        print(json.dumps(payload, indent=2, sort_keys=True))
-        return 0
-    print("repo fleet release trains")
-    for train in trains:
-        print(
+    text_lines = [
+        "repo fleet release trains",
+        *[
             f"- {train.get('train_id')} [{train.get('status')}] repos={train.get('repo_count')} {train.get('created_at')}"
-        )
-    return 0
+            for train in trains
+        ],
+    ]
+    return emit(payload, json_output, text_lines, 0)
 
 
 def release_show(*, target: Path, train_id: str, json_output: bool = False) -> int:
@@ -3373,14 +3338,14 @@ def release_show(*, target: Path, train_id: str, json_output: bool = False) -> i
     if train is None:
         print(f"error: {error}", file=sys.stderr)
         return 1 if error and "not found" in error else 2
-    if json_output:
-        print(json.dumps({"target_label": "repo-fleet", "train": train}, indent=2, sort_keys=True))
-        return 0
-    print(f"repo fleet release train: {train.get('train_id')}")
-    print(f"status: {train.get('status')}")
-    print(f"repos: {train.get('repo_count')}")
-    print(f"path_label: {train.get('path_label')}")
-    return 0
+    payload = {"target_label": "repo-fleet", "train": train}
+    text_lines = [
+        f"repo fleet release train: {train.get('train_id')}",
+        f"status: {train.get('status')}",
+        f"repos: {train.get('repo_count')}",
+        f"path_label: {train.get('path_label')}",
+    ]
+    return emit(payload, json_output, text_lines, 0)
 
 
 def release_compare(*, target: Path, train_id: str = "latest", json_output: bool = False) -> int:
@@ -3477,14 +3442,12 @@ def release_compare(*, target: Path, train_id: str = "latest", json_output: bool
             f"brigade repos release closeout {train.get('train_id')} --status superseded",
         ],
     }
-    if json_output:
-        print(json.dumps(payload, indent=2, sort_keys=True))
-        return 0
-    print(f"repo fleet release compare: {train.get('train_id')}")
-    print(f"issues: {len(issues)}")
-    for issue in issues:
-        print(f"[{issue.get('status')}] {issue.get('name')}: {issue.get('detail')}")
-    return 0
+    text_lines = [
+        f"repo fleet release compare: {train.get('train_id')}",
+        f"issues: {len(issues)}",
+        *[f"[{issue.get('status')}] {issue.get('name')}: {issue.get('detail')}" for issue in issues],
+    ]
+    return emit(payload, json_output, text_lines, 0)
 
 
 def release_closeout(
@@ -3538,12 +3501,8 @@ def release_closeout(
     train["closeout"] = payload
     train["status"] = status
     _write_json(train_path / "FLEET_RELEASE_EVIDENCE.json", train)
-    if json_output:
-        print(json.dumps(payload, indent=2, sort_keys=True))
-        return 0
-    print(f"repo fleet release closeout: {train.get('train_id')}")
-    print(f"status: {status}")
-    return 0
+    text_lines = [f"repo fleet release closeout: {train.get('train_id')}", f"status: {status}"]
+    return emit(payload, json_output, text_lines, 0)
 
 
 def release_archive(*, target: Path, train_id: str, json_output: bool = False) -> int:
@@ -3566,11 +3525,8 @@ def release_archive(*, target: Path, train_id: str, json_output: bool = False) -
         "status": "archived",
         "archive_path_label": train.get("train_id"),
     }
-    if json_output:
-        print(json.dumps(payload, indent=2, sort_keys=True))
-        return 0
-    print(f"archived repo fleet release train: {train.get('train_id')}")
-    return 0
+    text_lines = [f"archived repo fleet release train: {train.get('train_id')}"]
+    return emit(payload, json_output, text_lines, 0)
 
 
 def _release_actions_path(target: Path) -> Path:
