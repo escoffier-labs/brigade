@@ -1729,7 +1729,7 @@ def test_tools_runtime_start_stop_restart_with_pid_logs_and_unmanaged_refusal(tm
         process.wait(timeout=5)
 
 
-def test_tools_runtime_doctor_safety_warnings(tmp_path, capsys):
+def test_tools_runtime_doctor_safety_warnings(tmp_path, capsys, monkeypatch):
     _init_git_repo(tmp_path)
     _write_runtime_config(
         tmp_path,
@@ -1748,6 +1748,14 @@ def test_tools_runtime_doctor_safety_warnings(tmp_path, capsys):
     stale_pid = tmp_path / ".brigade" / "tools" / "runtime" / "stale.pid"
     stale_pid.parent.mkdir(parents=True, exist_ok=True)
     stale_pid.write_text("999999\n")
+    # A live process can legitimately hold pid 999999 on the test host; pin the
+    # sentinel dead so the stale-pid branch is deterministic.
+    real_process_alive = tools_cmd._process_alive
+    monkeypatch.setattr(
+        tools_cmd,
+        "_process_alive",
+        lambda pid: False if pid == 999999 else real_process_alive(pid),
+    )
     assert tools_cmd.runtime_doctor(target=tmp_path) == 0
     out = capsys.readouterr().out
     assert "[warn] tool_runtime_stale_pid:" in out
