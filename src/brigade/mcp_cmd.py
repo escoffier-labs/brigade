@@ -16,6 +16,7 @@ from typing import Any
 
 from . import localio, mcp_adapters
 from .mcp_adapters import ADAPTERS, MCP_TARGETS, CanonicalServer
+from .render import emit as _emit
 
 CANONICAL_REL = ".brigade/mcp.json"
 STATE_REL = ".brigade/mcp/state.json"
@@ -274,15 +275,6 @@ def _public_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
 # --------------------------------------------------------------------------- #
 # Commands
 # --------------------------------------------------------------------------- #
-
-
-def _emit(payload: dict[str, Any], json_output: bool, text_lines: list[str], rc: int) -> int:
-    if json_output:
-        print(json.dumps(payload, indent=2, sort_keys=True))
-    else:
-        for line in text_lines:
-            print(line)
-    return rc
 
 
 def _ensure_gitignore(target: Path) -> bool:
