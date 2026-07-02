@@ -207,7 +207,7 @@ def test_install_warns_when_default_wired_skill_template_is_missing(tmp_path, mo
 
 
 def test_install_renders_selected_writer_inboxes_in_agent_docs(tmp_path):
-    sel = Selection(depth="repo", harnesses=["codex"], owner="codex", includes=[])
+    sel = Selection(depth="repo", harnesses=["codex"], owner="codex", includes=["repo-extras"])
     assert install_selection(tmp_path, sel) == 0
     agents = (tmp_path / "AGENTS.md").read_text()
     assert ".codex/memory-handoffs/" in agents
@@ -253,7 +253,7 @@ WORKSPACE_ONLY_REFS = (
 def test_repo_depth_bootstrap_docs_reference_only_installed_files(tmp_path):
     # Repo-depth installs must not point agents at workspace-only files
     # that the install never creates (audit 2026-07-02, backlog item 1).
-    sel = Selection(depth="repo", harnesses=["claude", "codex"], owner="claude", includes=[])
+    sel = Selection(depth="repo", harnesses=["claude", "codex"], owner="claude", includes=["repo-extras"])
     assert install_selection(tmp_path, sel) == 0
     for doc in ("AGENTS.md", "INSTALL_FOR_AGENTS.md", "CLAUDE.md"):
         text = (tmp_path / doc).read_text()

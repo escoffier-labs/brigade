@@ -1,0 +1,11 @@
+{
+  "id": "repo-extras",
+  "description": "Full repo kit: workflow rules, inactive pre-push hook, and the agent install doc. Installed by --full; the minimal repo baseline skips them.",
+  "files": [
+    {"src": "repo/INSTALL_FOR_AGENTS.md", "dst": "INSTALL_FOR_AGENTS.md"},
+    {"src": "workspace/rules/issue-tdd-loop.md", "dst": "rules/issue-tdd-loop.md"},
+    {"src": "workspace/rules/acceptance-driven-work.md", "dst": "rules/acceptance-driven-work.md"},
+    {"src": "hooks/pre-push", "dst": "hooks/pre-push", "mode": "0755"}
+  ],
+  "dirs": []
+}

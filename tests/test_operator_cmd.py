@@ -1197,9 +1197,32 @@ def test_operator_bootstrap_portable_syncs_builtins(tmp_path, capsys):
     assert (tmp_path / "tools" / "antislop.md").is_file()
 
 
+def test_operator_quickstart_minimal_default_footprint(tmp_path, capsys):
+    # Repo depth defaults to the minimal footprint (audit 2026-07-02, item 6):
+    # no rules/, hooks/, tools/, scripts/, or INSTALL_FOR_AGENTS.md unless --full.
+    assert cli.main(["operator", "quickstart", "--target", str(tmp_path), "--harnesses", "codex", "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == "ok"
+    portable = next(step for step in payload["steps"] if step["id"] == "portable-bootstrap")
+    assert portable["status"] == "skipped"
+    assert (tmp_path / "AGENTS.md").is_file()
+    assert (tmp_path / "SAFETY_RULES.md").is_file()
+    for extra in ("rules", "hooks", "tools", "scripts", "INSTALL_FOR_AGENTS.md"):
+        assert not (tmp_path / extra).exists(), f"{extra} should need --full"
+    # the work-loop skills are still wired
+    assert (tmp_path / ".codex" / "skills" / "brigade-work" / "SKILL.md").is_file()
+
+    assert cli.main(["operator", "doctor", "--target", str(tmp_path), "--profile", "local-operator", "--json"]) == 0
+    doctor = json.loads(capsys.readouterr().out)
+    assert doctor["ready"] is True
+
+
 def test_operator_quickstart_prepares_new_user_workspace(tmp_path, capsys):
     assert (
-        cli.main(["operator", "quickstart", "--target", str(tmp_path), "--harnesses", "codex,opencode", "--json"]) == 0
+        cli.main(
+            ["operator", "quickstart", "--target", str(tmp_path), "--harnesses", "codex,opencode", "--full", "--json"]
+        )
+        == 0
     )
     payload = json.loads(capsys.readouterr().out)
     assert payload["status"] == "ok"
@@ -1447,7 +1470,9 @@ def test_tools_defaults_scopes_projections_to_configured_selection(tmp_path, cap
 
 
 def test_operator_quickstart_scopes_projections_to_selected_harnesses(tmp_path, capsys):
-    assert cli.main(["operator", "quickstart", "--target", str(tmp_path), "--harnesses", "codex", "--json"]) == 0
+    assert (
+        cli.main(["operator", "quickstart", "--target", str(tmp_path), "--harnesses", "codex", "--full", "--json"]) == 0
+    )
     payload = json.loads(capsys.readouterr().out)
     assert payload["status"] == "ok"
     assert (tmp_path / ".codex" / "skills" / "simplify" / "SKILL.md").is_file()

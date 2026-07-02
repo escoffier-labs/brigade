@@ -162,4 +162,4 @@ def test_known_constants():
         "hermes",
     }
     assert set(KNOWN_DEPTHS) == {"repo", "workspace"}
-    assert set(KNOWN_INCLUDES) == {"publisher"}
+    assert set(KNOWN_INCLUDES) == {"publisher", "repo-extras"}

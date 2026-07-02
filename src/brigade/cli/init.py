@@ -61,7 +61,13 @@ def register(sub: argparse._SubParsersAction) -> None:
         dest="includes",
         action="append",
         default=[],
-        help="Optional add-on (currently: 'publisher'). May be repeated.",
+        help="Optional add-on ('publisher', 'repo-extras'). May be repeated.",
+    )
+    p_init.add_argument(
+        "--full",
+        action="store_true",
+        help="Repo depth: also install the full kit (rules/, hooks/pre-push, INSTALL_FOR_AGENTS.md). "
+        "Workspace depth always installs it.",
     )
     p_init.set_defaults(func=dispatch)
 
@@ -88,7 +94,10 @@ def dispatch(args) -> int:
         except ValueError as exc:
             print(f"error: {exc}", file=sys.stderr)
             return 2
-        sel = Selection(depth=depth, harnesses=harnesses, owner=owner, includes=list(args.includes))
+        includes = list(args.includes)
+        if getattr(args, "full", False) and depth == "repo" and "repo-extras" not in includes:
+            includes.append("repo-extras")
+        sel = Selection(depth=depth, harnesses=harnesses, owner=owner, includes=includes)
         return install_selection(
             target=args.target,
             selection=sel,

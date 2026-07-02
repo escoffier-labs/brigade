@@ -757,6 +757,9 @@ def _load_config(target: Path) -> tuple[list[dict[str, Any]], list[str]]:
     except (OSError, tomllib.TOMLDecodeError) as exc:  # type: ignore[union-attr]
         return [], [f"invalid tool catalog config: {exc}"]
     values = payload.get("tool")
+    if values is None:
+        # An empty catalog is valid: minimal installs start with no tools.
+        return [], []
     if not isinstance(values, list):
         return [], ["tool catalog must contain [[tool]] entries"]
     tools: list[dict[str, Any]] = []
@@ -4347,7 +4350,7 @@ def _issue_records(target: Path) -> list[dict[str, Any]]:
     return records
 
 
-def init(*, target: Path, force: bool = False, update_gitignore: bool = True) -> int:
+def init(*, target: Path, force: bool = False, update_gitignore: bool = True, default_tools: bool = True) -> int:
     target = target.expanduser().resolve()
     if not target.is_dir():
         print(f"error: --target is not a directory: {target}", file=sys.stderr)
@@ -4357,10 +4360,12 @@ def init(*, target: Path, force: bool = False, update_gitignore: bool = True) ->
         print(f"error: tool catalog config already exists: {path}", file=sys.stderr)
         return 2
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(_format_tools_toml())
-    source_results = _ensure_default_tool_sources(target)
+    # A minimal install gets an empty catalog: no default tools and no
+    # tracked tools/*.md sources until the user opts in (--full).
+    path.write_text(_format_tools_toml() if default_tools else _format_tool_entries([]))
+    source_results = _ensure_default_tool_sources(target) if default_tools else []
     print(f"tools_config: {path}")
-    print(f"tools: {len(DEFAULT_TOOLS)}")
+    print(f"tools: {len(DEFAULT_TOOLS) if default_tools else 0}")
     print(f"sources: {sum(1 for item in source_results if item['action'] == 'create')}")
     if update_gitignore:
         result = apply_gitignore(target, _gitignore_selection(target))

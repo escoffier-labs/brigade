@@ -148,8 +148,20 @@ def test_repo_install_lays_down_expected_files(tmp_target: Path):
     assert rc == 0
     assert (tmp_target / "AGENTS.md").is_file()
     assert (tmp_target / "CLAUDE.md").is_file()
+    assert (tmp_target / "SAFETY_RULES.md").is_file()
     assert (tmp_target / ".claude" / "memory-handoffs" / "TEMPLATE.md").is_file()
     assert (tmp_target / ".brigade" / "handoff-sources.example.json").is_file()
+    # the minimal repo baseline stops there; rules/ + hooks/ need repo-extras
+    assert not (tmp_target / "rules").exists()
+    assert not (tmp_target / "hooks").exists()
+    assert not (tmp_target / "INSTALL_FOR_AGENTS.md").exists()
+
+
+def test_repo_extras_include_lays_down_full_kit(tmp_target: Path):
+    sel = Selection(depth="repo", harnesses=["claude"], owner="claude", includes=["repo-extras"])
+    rc = install_selection(tmp_target, sel)
+    assert rc == 0
+    assert (tmp_target / "INSTALL_FOR_AGENTS.md").is_file()
     assert (tmp_target / "rules" / "issue-tdd-loop.md").is_file()
     assert (tmp_target / "rules" / "acceptance-driven-work.md").is_file()
     rules = (tmp_target / "rules" / "issue-tdd-loop.md").read_text()
@@ -244,7 +256,6 @@ def test_generic_install_writes_baseline_workspace(tmp_target: Path):
 def test_publisher_include_writes_policies(tmp_target: Path):
     rc = install_selection(tmp_target, _publisher_sel())
     assert rc == 0
-    assert (tmp_target / "hooks" / "pre-push").is_file()
     assert (tmp_target / ".brigade" / "policies" / "public-repo.json").is_file()
     assert (tmp_target / ".brigade" / "policies" / "personal.json").is_file()
     assert (tmp_target / ".brigade" / "policies" / "public-content.json").is_file()
@@ -285,7 +296,7 @@ def test_keeps_existing_files_without_force_and_still_wires(tmp_target: Path):
     assert (tmp_target / ".claude" / "skills" / "brigade-work" / "SKILL.md").is_file()
     assert (tmp_target / ".claude" / "skills" / "ultra-work-scout" / "SKILL.md").is_file()
     # a missing file got added
-    assert (tmp_target / "INSTALL_FOR_AGENTS.md").is_file()
+    assert (tmp_target / "SAFETY_RULES.md").is_file()
 
 
 def test_force_overwrites_existing(tmp_target: Path):

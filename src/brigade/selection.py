@@ -50,7 +50,7 @@ WRITER_INBOXES = {
     "crush": ".crush/memory-handoffs",
     "hermes": ".hermes/memory-handoffs",
 }
-KNOWN_INCLUDES = ("publisher",)
+KNOWN_INCLUDES = ("publisher", "repo-extras")
 
 # Higher priority owners come first. The first harness in this list that
 # also appears in the selection becomes the canonical memory owner unless

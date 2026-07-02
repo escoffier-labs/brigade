@@ -1,14 +1,10 @@
 {
   "id": "repo",
-  "description": "Repo-local baseline: harness-neutral bootstrap files + publish guard.",
+  "description": "Minimal repo baseline: AGENTS.md, safety rules, and gitignored .brigade/ state. The repo-extras include (--full) adds rules/, hooks/, and the agent install doc.",
   "files": [
     {"src": "repo/AGENTS.md", "dst": "AGENTS.md"},
     {"src": "workspace/SAFETY_RULES.md", "dst": "SAFETY_RULES.md"},
-    {"src": "repo/INSTALL_FOR_AGENTS.md", "dst": "INSTALL_FOR_AGENTS.md"},
-    {"src": "workspace/rules/issue-tdd-loop.md", "dst": "rules/issue-tdd-loop.md"},
-    {"src": "workspace/rules/acceptance-driven-work.md", "dst": "rules/acceptance-driven-work.md"},
     {"src": "handoff/handoff-sources.example.json", "dst": ".brigade/handoff-sources.example.json"},
-    {"src": "hooks/pre-push", "dst": "hooks/pre-push", "mode": "0755"},
     {"src": "policies/public-repo.json", "dst": ".brigade/policies/public-repo.json"},
     {"src": "policies/personal.json", "dst": ".brigade/policies/personal.json"}
   ],
