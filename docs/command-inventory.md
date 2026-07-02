@@ -38,7 +38,7 @@ brigade roadmap commands --write
 - `brigade profiles`: 2 command path(s)
 - `brigade projects`: 10 command path(s)
 - `brigade reconfigure`: 1 command path(s)
-- `brigade release`: 22 command path(s)
+- `brigade release`: 23 command path(s)
 - `brigade repos`: 70 command path(s)
 - `brigade research`: 11 command path(s)
 - `brigade roadmap`: 4 command path(s)
@@ -260,6 +260,7 @@ brigade roadmap commands --write
 - `brigade release smoke plan`
 - `brigade release smoke record`
 - `brigade release smoke show`
+- `brigade release version-sync`
 - `brigade repos actions archive`
 - `brigade repos actions build`
 - `brigade repos actions context`
