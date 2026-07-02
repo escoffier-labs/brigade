@@ -1180,12 +1180,51 @@ type SearchResult struct {
 	ContentHash    string `json:"-"`
 }
 
-func search(db *sql.DB, opts SearchOpts) ([]SearchResult, error) {
-	if opts.Limit <= 0 || opts.Limit > 200 {
-		opts.Limit = 20
+func normalizedSearchLimit(limit int) int {
+	if limit <= 0 || limit > 200 {
+		return 20
 	}
-	where := []string{"item_fts match ?"}
+	return limit
+}
+
+func searchCandidateLimit(limit int) int {
+	limit = normalizedSearchLimit(limit)
+	candidates := limit * 50
+	if candidates < 1000 {
+		return 1000
+	}
+	if candidates > 10000 {
+		return 10000
+	}
+	return candidates
+}
+
+// buildSearchQuery ranks FTS matches first in a bounded, materialized
+// candidate pool, then joins and applies the remaining filters and the
+// relations boost over that pool only. On large archives this bounds the
+// per-row relations probe that previously ran for every FTS match. The
+// tradeoff: filters applied only after pooling (collection, from/to, project,
+// tags) can miss rows whose bm25 rank falls below the candidate cap, so a
+// heavily filtered query may return fewer results than an exhaustive scan.
+func buildSearchQuery(opts SearchOpts) (string, []any) {
+	limit := normalizedSearchLimit(opts.Limit)
+	candidateWhere := []string{"item_fts match ?"}
 	params := []any{ftsQuery(opts.Query)}
+	if opts.Source != "" {
+		candidateWhere = append(candidateWhere, "source_kind = ?")
+		params = append(params, opts.Source)
+	}
+	if opts.Kind != "" {
+		candidateWhere = append(candidateWhere, "item_kind = ?")
+		params = append(params, opts.Kind)
+	}
+	if opts.ActorType != "" {
+		candidateWhere = append(candidateWhere, "actor_type = ?")
+		params = append(params, opts.ActorType)
+	}
+	params = append(params, searchCandidateLimit(limit))
+
+	where := []string{"1=1"}
 	if opts.Source != "" {
 		where = append(where, "s.kind = ?")
 		params = append(params, opts.Source)
@@ -1224,16 +1263,30 @@ func search(db *sql.DB, opts SearchOpts) ([]SearchResult, error) {
 			params = append(params, tag)
 		}
 	}
-	params = append(params, opts.Limit)
-	sqlText := `select i.id, s.kind, c.name, c.kind, i.kind, coalesce(a.type,''), coalesce(a.name,''), coalesce(i.created_at,''), snippet(item_fts, 5, '[', ']', '...', 20), printf('%.6f', bm25(item_fts)), i.content_hash
-from item_fts
-join items i on i.id = item_fts.item_id
+	params = append(params, limit)
+
+	sqlText := `with fts_candidates as materialized (
+  select item_id, snippet(item_fts, 5, '[', ']', '...', 20) as snippet, bm25(item_fts) as fts_score
+  from item_fts
+  where ` + strings.Join(candidateWhere, " and ") + `
+  order by fts_score, item_id
+  limit ?
+)
+select i.id, s.kind, c.name, c.kind, i.kind, coalesce(a.type,''), coalesce(a.name,''), coalesce(i.created_at,''), fc.snippet, printf('%.6f', fc.fts_score), i.content_hash
+from fts_candidates fc
+join items i on i.id = fc.item_id
 join sources s on s.id = i.source_id
 join collections c on c.id = i.collection_id
 left join actors a on a.id = i.actor_id
 where ` + strings.Join(where, " and ") + `
-order by (bm25(item_fts) - case when exists(select 1 from relations rr where rr.source_item_id = i.id or rr.target_item_id = i.id) then 0.25 else 0 end), i.created_at desc, i.id
+order by (fc.fts_score - case when exists(select 1 from relations rr where rr.source_item_id = i.id or rr.target_item_id = i.id) then 0.25 else 0 end), i.created_at desc, i.id
 limit ?`
+	return sqlText, params
+}
+
+func search(db *sql.DB, opts SearchOpts) ([]SearchResult, error) {
+	opts.Limit = normalizedSearchLimit(opts.Limit)
+	sqlText, params := buildSearchQuery(opts)
 	rows, err := db.Query(sqlText, params...)
 	if err != nil {
 		return nil, err

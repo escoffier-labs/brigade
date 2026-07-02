@@ -126,6 +126,12 @@ func TestGenerateMalformedInput(t *testing.T) {
 			wantRecords: false,
 			wantWarning: true,
 		},
+		{
+			name:        "top-level array outside session_diff warns",
+			content:     `[]`,
+			wantRecords: false,
+			wantWarning: true,
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -162,6 +168,48 @@ func TestGenerateDirectoryScansJSONFiles(t *testing.T) {
 	}
 	if len(result.Files) != 2 {
 		t.Fatalf("result.Files = %d, want 2", len(result.Files))
+	}
+}
+
+func TestGenerateDirectorySkipsSessionDiffArraysSilently(t *testing.T) {
+	dir := t.TempDir()
+	validExport := filepath.Join(dir, "opencode-export.fixture.json")
+	validBytes, err := os.ReadFile(fixturePath("opencode-export.fixture.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(validExport, validBytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sessionDiffDir := filepath.Join(dir, "storage", "session_diff")
+	if err := os.MkdirAll(sessionDiffDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	sessionDiff := filepath.Join(sessionDiffDir, "ses_fixture.json")
+	sessionDiffBytes, err := os.ReadFile(fixturePath("opencode-session_diff.fixture.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(sessionDiff, sessionDiffBytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	records, result := generate(t, dir, sources.Options{})
+	if len(records) != 2 {
+		t.Fatalf("records = %d, want 2", len(records))
+	}
+	if len(result.Warnings) != 0 {
+		t.Fatalf("unexpected warnings: %v", result.Warnings)
+	}
+	if len(result.Files) != 1 || result.Files[0].Path != validExport {
+		t.Fatalf("result.Files = %#v, want only %s", result.Files, validExport)
+	}
+	inputs, err := InputsForDiscovery(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(inputs) != 1 || inputs[0] != validExport {
+		t.Fatalf("InputsForDiscovery = %#v, want only %s", inputs, validExport)
 	}
 }
 

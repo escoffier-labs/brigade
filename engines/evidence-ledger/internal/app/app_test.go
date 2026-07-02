@@ -3,7 +3,9 @@ package app
 import (
 	"archive/zip"
 	"bytes"
+	"database/sql"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -1127,6 +1129,58 @@ func copyFixture(t *testing.T, from, to string) {
 	}
 }
 
+func insertSyntheticSearchArchive(t *testing.T, db *sql.DB, n int) {
+	t.Helper()
+	if _, err := db.Exec(`insert into sources(id, kind, name, created_at, updated_at) values('source-1','synthetic','Synthetic','2026-07-02T00:00:00Z','2026-07-02T00:00:00Z')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`insert into collections(id, source_id, external_id, kind, name) values('collection-1','source-1','collection:synthetic','agent_session','Synthetic')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`insert into actors(id, source_id, external_id, type, name) values('actor-1','source-1','actor:synthetic','agent','Synthetic')`); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < n; i++ {
+		id := fmt.Sprintf("item-%03d", i)
+		createdAt := fmt.Sprintf("2026-07-02T00:%02d:00Z", i)
+		text := fmt.Sprintf("needle synthetic search row %03d", i)
+		if _, err := db.Exec(`insert into items(id, source_id, collection_id, actor_id, external_id, kind, created_at, text, content_hash, raw_json)
+values(?,?,?,?,?,?,?,?,?,?)`, id, "source-1", "collection-1", "actor-1", id, "message", createdAt, text, "hash-"+id, "{}"); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Exec(`insert into item_fts(item_id, source_kind, collection_kind, item_kind, actor_type, body) values(?,?,?,?,?,?)`, id, "synthetic", "agent_session", "message", "agent", text); err != nil {
+			t.Fatal(err)
+		}
+		if i%10 == 0 {
+			if _, err := db.Exec(`insert into relations(id, source_item_id, target_item_id, target_external_id, relation_type, confidence) values(?,?,?,?,?,?)`, "rel-"+id, id, "item-001", "item-001", "derived_from", 1.0); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+}
+
+func explainPlan(t *testing.T, db *sql.DB, sqlText string, args ...any) string {
+	t.Helper()
+	rows, err := db.Query("explain query plan "+sqlText, args...)
+	if err != nil {
+		t.Fatalf("explain query plan: %v", err)
+	}
+	defer rows.Close()
+	var details []string
+	for rows.Next() {
+		var id, parent, notUsed int
+		var detail string
+		if err := rows.Scan(&id, &parent, &notUsed, &detail); err != nil {
+			t.Fatal(err)
+		}
+		details = append(details, detail)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	return strings.Join(details, "\n")
+}
+
 func writeTestZip(t *testing.T, path string, files map[string][]byte) {
 	t.Helper()
 	f, err := os.Create(path)
@@ -1215,6 +1269,62 @@ func TestSearchMultiTermAndPrefix(t *testing.T) {
 		if code, _, errb := run("search", q, "--json"); code != 0 {
 			t.Fatalf("search %q crashed: code=%d err=%s", q, code, errb)
 		}
+	}
+}
+
+func TestSearchPlanBoundsFTSCandidatesBeforeJoins(t *testing.T) {
+	withTempHome(t)
+	runOK(t, "init")
+	db, _, err := openMigrated()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	insertSyntheticSearchArchive(t, db, 40)
+
+	opts := SearchOpts{Query: "needle", Limit: 5}
+	sqlText, params := buildSearchQuery(opts)
+	plan := explainPlan(t, db, sqlText, params...)
+	for _, want := range []string{
+		"MATERIALIZE fts_candidates",
+		"SCAN item_fts",
+		"idx_relations_source_item",
+		"idx_relations_target_item",
+	} {
+		if !strings.Contains(plan, want) {
+			t.Fatalf("search plan missing %q:\n%s", want, plan)
+		}
+	}
+
+	results, err := search(db, opts)
+	if err != nil {
+		t.Fatalf("search: %v", err)
+	}
+	if len(results) != opts.Limit {
+		t.Fatalf("results = %d, want %d: %#v", len(results), opts.Limit, results)
+	}
+	if results[0].ID != "item-030" {
+		t.Fatalf("relation boost/order changed: first result = %s, want item-030", results[0].ID)
+	}
+
+	explained, err := explainSearch(db, opts)
+	if err != nil {
+		t.Fatalf("explainSearch: %v", err)
+	}
+	if explained["result_count"] != opts.Limit {
+		t.Fatalf("explainSearch result_count = %v, want %d", explained["result_count"], opts.Limit)
+	}
+
+	bundle, err := evidenceBundle(db, SearchOpts{Query: "needle", Limit: 5, IncludeRelated: true})
+	if err != nil {
+		t.Fatalf("evidenceBundle: %v", err)
+	}
+	items := bundle["results"].([]map[string]any)
+	if len(items) != opts.Limit {
+		t.Fatalf("evidence results = %d, want %d", len(items), opts.Limit)
+	}
+	if related, ok := items[0]["related"].([]map[string]any); !ok || len(related) == 0 {
+		t.Fatalf("first evidence item missing related rows: %#v", items[0])
 	}
 }
 

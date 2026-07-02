@@ -39,6 +39,23 @@ func TestMigrateIsIdempotent(t *testing.T) {
 	}
 }
 
+func TestMigrateCreatesRelationLookupIndexes(t *testing.T) {
+	db := openMigrated(t)
+	for _, name := range []string{"idx_relations_source_item", "idx_relations_target_item"} {
+		var got string
+		err := db.QueryRow(
+			"select name from sqlite_master where type = 'index' and name = ?",
+			name,
+		).Scan(&got)
+		if err != nil {
+			t.Fatalf("relation index %q not found after migrate: %v", name, err)
+		}
+	}
+	if err := Migrate(db); err != nil {
+		t.Fatalf("second Migrate failed: %v", err)
+	}
+}
+
 func TestCoreTablesExist(t *testing.T) {
 	db := openMigrated(t)
 	for _, table := range []string{"sources", "collections", "actors", "items", "events", "artifacts", "relations", "imports", "item_fts"} {

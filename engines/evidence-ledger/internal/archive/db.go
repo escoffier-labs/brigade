@@ -249,6 +249,8 @@ create virtual table if not exists item_fts using fts5(
 create index if not exists idx_items_source_kind on items(source_id, kind, created_at);
 create index if not exists idx_events_item on events(item_id);
 create index if not exists idx_artifacts_item on artifacts(item_id);
+create index if not exists idx_relations_source_item on relations(source_item_id);
+create index if not exists idx_relations_target_item on relations(target_item_id);
 create index if not exists idx_item_tags_tag on item_tags(tag);
 create index if not exists idx_item_metadata_key_value on item_metadata(key, value);
 create index if not exists idx_source_scans_kind on source_scans(source_kind, last_seen_at);

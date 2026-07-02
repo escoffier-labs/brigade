@@ -106,6 +106,9 @@ func inputs(path string) ([]string, error) {
 		return []string{path}, nil
 	}
 	if !info.IsDir() {
+		if isIgnoredOpenCodePath(path) {
+			return nil, nil
+		}
 		return []string{path}, nil
 	}
 	var out []string
@@ -115,9 +118,12 @@ func inputs(path string) ([]string, error) {
 		}
 		if d.IsDir() {
 			name := strings.ToLower(d.Name())
-			if name == "backup" || name == "backups" || name == "deleted" {
+			if name == "backup" || name == "backups" || name == "deleted" || name == "session_diff" {
 				return filepath.SkipDir
 			}
+			return nil
+		}
+		if isIgnoredOpenCodePath(p) {
 			return nil
 		}
 		name := strings.ToLower(filepath.Base(p))
@@ -133,6 +139,18 @@ func inputs(path string) ([]string, error) {
 	}
 	sort.Strings(out)
 	return out, nil
+}
+
+func isIgnoredOpenCodePath(path string) bool {
+	for p := filepath.Clean(path); ; p = filepath.Dir(p) {
+		if strings.ToLower(filepath.Base(p)) == "session_diff" {
+			return true
+		}
+		parent := filepath.Dir(p)
+		if parent == p || parent == "." {
+			return false
+		}
+	}
 }
 
 func InputsForDiscovery(path string) ([]string, error) {
