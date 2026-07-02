@@ -250,6 +250,7 @@ def test_miseledger_doctor_parses_status(monkeypatch):
 
     def fake_run(args, **kw):
         assert args == ["miseledger", "status", "--json"]
+        assert kw == {"timeout": 120.0}
         return managed.proc.Result(
             code=0,
             stdout='{"schema_version": 7, "items": 42, "sources": 3, "artifacts": 5, "fts": "ok", "source_counts": {}}',
@@ -289,6 +290,21 @@ def test_miseledger_doctor_handles_garbage_output(monkeypatch):
     ctx = DoctorContext(target=Path("/tmp/ws"), selection=None, harnesses=[])
     results = t.doctor(ctx)
     assert any(status == "WARN" and "unwired or errored" in detail for status, _, detail in results)
+    assert all(status != "FAIL" for status, _, _ in results)
+
+
+def test_miseledger_doctor_warns_distinctly_on_timeout(monkeypatch):
+    t = managed.resolve("miseledger")
+
+    def fake_run(args, **kw):
+        assert args == ["miseledger", "status", "--json"]
+        assert kw == {"timeout": 120.0}
+        return managed.proc.Result(code=124, stdout="", stderr="timeout after 120.0s")
+
+    monkeypatch.setattr(managed.proc, "run", fake_run)
+    ctx = DoctorContext(target=Path("/tmp/ws"), selection=None, harnesses=[])
+    results = t.doctor(ctx)
+    assert any(status == "WARN" and "timed out" in detail and "120s" in detail for status, _, detail in results)
     assert all(status != "FAIL" for status, _, _ in results)
 
 

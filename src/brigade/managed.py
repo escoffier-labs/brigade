@@ -223,7 +223,15 @@ def _agent_notify_wire(ctx: DoctorContext) -> List[CheckResult]:
 def _miseledger_doctor(ctx: DoctorContext) -> List[CheckResult]:
     name = "miseledger (evidence archive)"
     # `status --json` opens (and migrates) the local archive and reports counts.
-    r = proc.run(["miseledger", "status", "--json"])
+    r = proc.run(["miseledger", "status", "--json"], timeout=120.0)
+    if r.code == 124:
+        return [
+            (
+                WARN,
+                name,
+                "status check timed out after 120s (large archive, not an error); run `miseledger status` manually",
+            )
+        ]
     data = r.json()
     if data is None:
         return [(WARN, name, f"installed but unwired or errored (exit {r.code})")]
