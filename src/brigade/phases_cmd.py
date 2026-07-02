@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 from .localio import read_json_dict as _read_json, utc_now as _now, write_json as _write_json
+from .render import emit
 
 SCHEMA_VERSION = 1
 PHASE_STATUSES = {"pending", "in-progress", "implemented", "verified", "committed", "pushed", "deferred", "blocked"}
@@ -399,14 +400,12 @@ def schema(*, target: Path, json_output: bool = False) -> int:
         "completion_rule": "A phase is complete only with evidence or an explicit deferral.",
         "no_silent_compression": True,
     }
-    if json_output:
-        print(json.dumps(payload, indent=2, sort_keys=True))
-    else:
-        print(f"phase ledger schema: {target}")
-        print("no_silent_compression: true")
-        for item in payload["schemas"]:
-            print(f"- {item['name']}")
-    return 0
+    lines = []
+    lines.append(f"phase ledger schema: {target}")
+    lines.append("no_silent_compression: true")
+    for item in payload["schemas"]:
+        lines.append(f"- {item['name']}")
+    return emit(payload, json_output, lines, 0)
 
 
 def init(*, target: Path, json_output: bool = False) -> int:
@@ -432,12 +431,10 @@ def init(*, target: Path, json_output: bool = False) -> int:
         "path": str(_root(target)),
         "written": written,
     }
-    if json_output:
-        print(json.dumps(payload, indent=2, sort_keys=True))
-    else:
-        print(f"phase ledger: {_root(target)}")
-        print(f"written: {str(written).lower()}")
-    return 0
+    lines = []
+    lines.append(f"phase ledger: {_root(target)}")
+    lines.append(f"written: {str(written).lower()}")
+    return emit(payload, json_output, lines, 0)
 
 
 def plan(
@@ -521,14 +518,12 @@ def plan(
         "skipped_count": len(skipped),
         "suggested_next_command": "brigade work phases list",
     }
-    if json_output:
-        print(json.dumps(payload, indent=2, sort_keys=True))
-    else:
-        print(f"planned: {len(created)}")
-        print(f"skipped: {len(skipped)}")
-        for item in created:
-            print(f"- {item['phase_id']} [{item['status']}] {item['title']}")
-    return 0
+    lines = []
+    lines.append(f"planned: {len(created)}")
+    lines.append(f"skipped: {len(skipped)}")
+    for item in created:
+        lines.append(f"- {item['phase_id']} [{item['status']}] {item['title']}")
+    return emit(payload, json_output, lines, 0)
 
 
 def list_phases(*, target: Path, json_output: bool = False) -> int:
@@ -541,13 +536,11 @@ def list_phases(*, target: Path, json_output: bool = False) -> int:
         "records": records,
         "record_count": len(records),
     }
-    if json_output:
-        print(json.dumps(payload, indent=2, sort_keys=True))
-    else:
-        print(f"phase ledger: {target}")
-        for record in records:
-            print(f"- {record.get('phase_id')} [{record.get('status')}] {record.get('title')}")
-    return 0
+    lines = []
+    lines.append(f"phase ledger: {target}")
+    for record in records:
+        lines.append(f"- {record.get('phase_id')} [{record.get('status')}] {record.get('title')}")
+    return emit(payload, json_output, lines, 0)
 
 
 def status_payload(target: Path, *, phase_range: str | None = None) -> dict[str, Any]:
@@ -628,11 +621,9 @@ def next_phase(*, target: Path, phase_range: str | None = None, json_output: boo
     payload = status_payload(target, phase_range=phase_range)
     next_record = payload.get("next_phase")
     if not isinstance(next_record, dict):
-        if json_output:
-            print(json.dumps({**payload, "found": False}, indent=2, sort_keys=True))
-        else:
-            print("next phase: none")
-        return 1
+        lines = []
+        lines.append("next phase: none")
+        return emit({**payload, "found": False}, json_output, lines, 1)
     out = {
         "schema_version": SCHEMA_VERSION,
         "schema": _schema("phase-ledger-next"),
@@ -641,13 +632,11 @@ def next_phase(*, target: Path, phase_range: str | None = None, json_output: boo
         "phase": next_record,
         "suggested_next_command": payload["suggested_next_command"],
     }
-    if json_output:
-        print(json.dumps(out, indent=2, sort_keys=True))
-    else:
-        print(f"next phase: {next_record.get('phase_id')}")
-        print(f"status: {next_record.get('status')}")
-        print(f"next: {out['suggested_next_command']}")
-    return 0
+    lines = []
+    lines.append(f"next phase: {next_record.get('phase_id')}")
+    lines.append(f"status: {next_record.get('status')}")
+    lines.append(f"next: {out['suggested_next_command']}")
+    return emit(out, json_output, lines, 0)
 
 
 def show(*, target: Path, phase_id: str, json_output: bool = False) -> int:
@@ -657,15 +646,13 @@ def show(*, target: Path, phase_id: str, json_output: bool = False) -> int:
         print(f"error: phase record not found: {phase_id}", file=sys.stderr)
         return 1
     record["path"] = str(path)
-    if json_output:
-        print(json.dumps(record, indent=2, sort_keys=True))
-    else:
-        print(f"phase: {record.get('phase_id')}")
-        print(f"status: {record.get('status')}")
-        print(f"title: {record.get('title')}")
-        print(f"summary: {record.get('implementation_summary') or 'none'}")
-        print(f"next: {record.get('next_phase_recommendation') or 'none'}")
-    return 0
+    lines = []
+    lines.append(f"phase: {record.get('phase_id')}")
+    lines.append(f"status: {record.get('status')}")
+    lines.append(f"title: {record.get('title')}")
+    lines.append(f"summary: {record.get('implementation_summary') or 'none'}")
+    lines.append(f"next: {record.get('next_phase_recommendation') or 'none'}")
+    return emit(record, json_output, lines, 0)
 
 
 def start(*, target: Path, phase_id: str, json_output: bool = False) -> int:
@@ -679,12 +666,10 @@ def start(*, target: Path, phase_id: str, json_output: bool = False) -> int:
     record["updated_at"] = _now().isoformat()
     record["path"] = str(path)
     _write_json(path, record)
-    if json_output:
-        print(json.dumps(record, indent=2, sort_keys=True))
-    else:
-        print(f"phase: {record.get('phase_id')}")
-        print("status: in-progress")
-    return 0
+    lines = []
+    lines.append(f"phase: {record.get('phase_id')}")
+    lines.append("status: in-progress")
+    return emit(record, json_output, lines, 0)
 
 
 def complete(
@@ -731,13 +716,11 @@ def complete(
         record["next_phase_recommendation"] = next_phase_recommendation
     record["path"] = str(path)
     _write_json(path, record)
-    if json_output:
-        print(json.dumps(record, indent=2, sort_keys=True))
-    else:
-        print(f"phase: {record.get('phase_id')}")
-        print(f"status: {status}")
-        print(f"tests: {len(record.get('tests_run') or [])}")
-    return 0
+    lines = []
+    lines.append(f"phase: {record.get('phase_id')}")
+    lines.append(f"status: {status}")
+    lines.append(f"tests: {len(record.get('tests_run') or [])}")
+    return emit(record, json_output, lines, 0)
 
 
 def defer(
@@ -759,13 +742,11 @@ def defer(
         record["next_phase_recommendation"] = next_phase_recommendation
     record["path"] = str(path)
     _write_json(path, record)
-    if json_output:
-        print(json.dumps(record, indent=2, sort_keys=True))
-    else:
-        print(f"phase: {record.get('phase_id')}")
-        print("status: deferred")
-        print(f"reason: {reason}")
-    return 0
+    lines = []
+    lines.append(f"phase: {record.get('phase_id')}")
+    lines.append("status: deferred")
+    lines.append(f"reason: {reason}")
+    return emit(record, json_output, lines, 0)
 
 
 def _parse_time(value: object) -> datetime | None:
@@ -1238,14 +1219,12 @@ def session_start(*, target: Path, phase_range: str, source_goal: str | None = N
     path = _sessions_root(target) / f"{payload['session_id']}.json"
     payload["path"] = str(path)
     _write_json(path, payload)
-    if json_output:
-        print(json.dumps(payload, indent=2, sort_keys=True))
-    else:
-        print(f"phase session: {payload['session_id']}")
-        print(f"range: {payload['phase_range']}")
-        print(f"current: {payload.get('current_phase_id') or 'none'}")
-        print(f"next: {payload['next_recommended_command']}")
-    return 0
+    lines = []
+    lines.append(f"phase session: {payload['session_id']}")
+    lines.append(f"range: {payload['phase_range']}")
+    lines.append(f"current: {payload.get('current_phase_id') or 'none'}")
+    lines.append(f"next: {payload['next_recommended_command']}")
+    return emit(payload, json_output, lines, 0)
 
 
 def session_list(*, target: Path, limit: int = 20, json_output: bool = False) -> int:
@@ -1258,13 +1237,11 @@ def session_list(*, target: Path, limit: int = 20, json_output: bool = False) ->
         "sessions": sessions,
         "session_count": len(sessions),
     }
-    if json_output:
-        print(json.dumps(payload, indent=2, sort_keys=True))
-    else:
-        print(f"phase sessions: {len(sessions)}")
-        for session in sessions:
-            print(f"- {session.get('session_id')} [{session.get('status')}] range={session.get('phase_range')}")
-    return 0
+    lines = []
+    lines.append(f"phase sessions: {len(sessions)}")
+    for session in sessions:
+        lines.append(f"- {session.get('session_id')} [{session.get('status')}] range={session.get('phase_range')}")
+    return emit(payload, json_output, lines, 0)
 
 
 def session_show(*, target: Path, session_id: str, json_output: bool = False) -> int:
@@ -1273,15 +1250,13 @@ def session_show(*, target: Path, session_id: str, json_output: bool = False) ->
     if session is None:
         print(f"error: {error}", file=sys.stderr)
         return 1
-    if json_output:
-        print(json.dumps(session, indent=2, sort_keys=True))
-    else:
-        print(f"phase session: {session.get('session_id')}")
-        print(f"status: {session.get('status')}")
-        print(f"range: {session.get('phase_range')}")
-        print(f"current: {session.get('current_phase_id') or 'none'}")
-        print(f"next: {session.get('next_recommended_command') or 'none'}")
-    return 0
+    lines = []
+    lines.append(f"phase session: {session.get('session_id')}")
+    lines.append(f"status: {session.get('status')}")
+    lines.append(f"range: {session.get('phase_range')}")
+    lines.append(f"current: {session.get('current_phase_id') or 'none'}")
+    lines.append(f"next: {session.get('next_recommended_command') or 'none'}")
+    return emit(session, json_output, lines, 0)
 
 
 def session_checkpoint(
@@ -1346,15 +1321,13 @@ def session_checkpoint(
     session["updated_at"] = created_at
     session["path"] = str(path)
     _write_json(path, session)
-    if json_output:
-        print(json.dumps(record, indent=2, sort_keys=True))
-    else:
-        print(f"phase session checkpoint: {checkpoint_id}")
-        print(f"session: {session.get('session_id')}")
-        print(f"phase: {selected_phase_id or 'none'}")
-        print(f"status: {status}")
-        print(f"next: {record['suggested_next_command']}")
-    return 0
+    lines = []
+    lines.append(f"phase session checkpoint: {checkpoint_id}")
+    lines.append(f"session: {session.get('session_id')}")
+    lines.append(f"phase: {selected_phase_id or 'none'}")
+    lines.append(f"status: {status}")
+    lines.append(f"next: {record['suggested_next_command']}")
+    return emit(record, json_output, lines, 0)
 
 
 def session_checkpoint_list(
@@ -1383,15 +1356,13 @@ def session_checkpoint_list(
         if summaries
         else "brigade work phases session checkpoint latest",
     }
-    if json_output:
-        print(json.dumps(payload, indent=2, sort_keys=True))
-    else:
-        print(f"phase session checkpoints: {len(summaries)}")
-        for checkpoint in summaries:
-            print(
-                f"- {checkpoint.get('checkpoint_id')} [{checkpoint.get('status')}] phase={checkpoint.get('phase_id') or 'none'}"
-            )
-    return 0
+    lines = []
+    lines.append(f"phase session checkpoints: {len(summaries)}")
+    for checkpoint in summaries:
+        lines.append(
+            f"- {checkpoint.get('checkpoint_id')} [{checkpoint.get('status')}] phase={checkpoint.get('phase_id') or 'none'}"
+        )
+    return emit(payload, json_output, lines, 0)
 
 
 def session_checkpoint_show(*, target: Path, checkpoint_id: str, json_output: bool = False) -> int:
@@ -1400,16 +1371,14 @@ def session_checkpoint_show(*, target: Path, checkpoint_id: str, json_output: bo
     if checkpoint is None:
         print(f"error: {error}", file=sys.stderr)
         return 1
-    if json_output:
-        print(json.dumps(checkpoint, indent=2, sort_keys=True))
-    else:
-        print(f"phase session checkpoint: {checkpoint.get('checkpoint_id')}")
-        print(f"session: {checkpoint.get('session_id')}")
-        print(f"phase: {checkpoint.get('phase_id') or 'none'}")
-        print(f"status: {checkpoint.get('status')}")
-        print(f"summary: {checkpoint.get('summary')}")
-        print(f"next: {checkpoint.get('suggested_next_command') or 'none'}")
-    return 0
+    lines = []
+    lines.append(f"phase session checkpoint: {checkpoint.get('checkpoint_id')}")
+    lines.append(f"session: {checkpoint.get('session_id')}")
+    lines.append(f"phase: {checkpoint.get('phase_id') or 'none'}")
+    lines.append(f"status: {checkpoint.get('status')}")
+    lines.append(f"summary: {checkpoint.get('summary')}")
+    lines.append(f"next: {checkpoint.get('suggested_next_command') or 'none'}")
+    return emit(checkpoint, json_output, lines, 0)
 
 
 def _session_checkpoint_compare_payload(target: Path, checkpoint: dict[str, Any]) -> dict[str, Any]:
@@ -1519,15 +1488,13 @@ def session_checkpoint_compare(*, target: Path, checkpoint_id: str, json_output:
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
-    if json_output:
-        print(json.dumps(payload, indent=2, sort_keys=True))
-    else:
-        print(f"phase session checkpoint compare: {payload['checkpoint_id']}")
-        print(f"issues: {payload['issue_count']}")
-        if payload.get("top_issue"):
-            print(f"top: {payload['top_issue']['name']}")
-        print(f"next: {payload['suggested_next_command']}")
-    return 0
+    lines = []
+    lines.append(f"phase session checkpoint compare: {payload['checkpoint_id']}")
+    lines.append(f"issues: {payload['issue_count']}")
+    if payload.get("top_issue"):
+        lines.append(f"top: {payload['top_issue']['name']}")
+    lines.append(f"next: {payload['suggested_next_command']}")
+    return emit(payload, json_output, lines, 0)
 
 
 def _checkpoint_issue_import_records(
@@ -1638,14 +1605,12 @@ def session_checkpoint_import_issues(
         if records
         else "brigade work phases session checkpoints show latest",
     }
-    if json_output:
-        print(json.dumps(payload, indent=2, sort_keys=True))
-    else:
-        print(f"phase session checkpoint imports: {payload['checkpoint_id']}")
-        print(f"created: {payload['created_count']}")
-        print(f"skipped: {payload['skipped_count']}")
-        print(f"dismissed: {payload['dismissed_count']}")
-    return 0
+    lines = []
+    lines.append(f"phase session checkpoint imports: {payload['checkpoint_id']}")
+    lines.append(f"created: {payload['created_count']}")
+    lines.append(f"skipped: {payload['skipped_count']}")
+    lines.append(f"dismissed: {payload['dismissed_count']}")
+    return emit(payload, json_output, lines, 0)
 
 
 def session_recovery_note(
@@ -1712,14 +1677,12 @@ def session_recovery_note(
     session["updated_at"] = created_at
     session["path"] = str(path)
     _write_json(path, session)
-    if json_output:
-        print(json.dumps(record, indent=2, sort_keys=True))
-    else:
-        print(f"phase session recovery note: {note_id}")
-        print(f"session: {session.get('session_id')}")
-        print(f"phase: {selected_phase_id or 'none'}")
-        print(f"summary: {record['summary']}")
-    return 0
+    lines = []
+    lines.append(f"phase session recovery note: {note_id}")
+    lines.append(f"session: {session.get('session_id')}")
+    lines.append(f"phase: {selected_phase_id or 'none'}")
+    lines.append(f"summary: {record['summary']}")
+    return emit(record, json_output, lines, 0)
 
 
 def session_recovery_note_list(
@@ -1748,13 +1711,11 @@ def session_recovery_note_list(
         if summaries
         else "brigade work phases session recovery-note latest",
     }
-    if json_output:
-        print(json.dumps(payload, indent=2, sort_keys=True))
-    else:
-        print(f"phase session recovery notes: {len(summaries)}")
-        for note in summaries:
-            print(f"- {note.get('note_id')} [{note.get('status')}] phase={note.get('phase_id') or 'none'}")
-    return 0
+    lines = []
+    lines.append(f"phase session recovery notes: {len(summaries)}")
+    for note in summaries:
+        lines.append(f"- {note.get('note_id')} [{note.get('status')}] phase={note.get('phase_id') or 'none'}")
+    return emit(payload, json_output, lines, 0)
 
 
 def session_recovery_note_show(*, target: Path, note_id: str, json_output: bool = False) -> int:
@@ -1763,15 +1724,13 @@ def session_recovery_note_show(*, target: Path, note_id: str, json_output: bool 
     if note is None:
         print(f"error: {error}", file=sys.stderr)
         return 1
-    if json_output:
-        print(json.dumps(note, indent=2, sort_keys=True))
-    else:
-        print(f"phase session recovery note: {note.get('note_id')}")
-        print(f"session: {note.get('session_id')}")
-        print(f"phase: {note.get('phase_id') or 'none'}")
-        print(f"status: {note.get('status')}")
-        print(f"summary: {note.get('summary')}")
-    return 0
+    lines = []
+    lines.append(f"phase session recovery note: {note.get('note_id')}")
+    lines.append(f"session: {note.get('session_id')}")
+    lines.append(f"phase: {note.get('phase_id') or 'none'}")
+    lines.append(f"status: {note.get('status')}")
+    lines.append(f"summary: {note.get('summary')}")
+    return emit(note, json_output, lines, 0)
 
 
 def session_recovery_note_closeout(
@@ -1820,13 +1779,11 @@ def session_recovery_note_closeout(
         "closeout": closeout,
         "suggested_next_command": "brigade work phases session recovery-notes list",
     }
-    if json_output:
-        print(json.dumps(payload, indent=2, sort_keys=True))
-    else:
-        print(f"phase session recovery note closeout: {note.get('note_id')}")
-        print(f"status: {status}")
-        print(f"reason: {closeout['reason']}")
-    return 0
+    lines = []
+    lines.append(f"phase session recovery note closeout: {note.get('note_id')}")
+    lines.append(f"status: {status}")
+    lines.append(f"reason: {closeout['reason']}")
+    return emit(payload, json_output, lines, 0)
 
 
 def _session_risk_payload(target: Path, session: dict[str, Any]) -> dict[str, Any]:
@@ -1935,16 +1892,14 @@ def session_risk(*, target: Path, session_id: str, json_output: bool = False) ->
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
-    if json_output:
-        print(json.dumps(payload, indent=2, sort_keys=True))
-    else:
-        print(f"phase session risk: {payload['session_id']}")
-        print(f"risk: {payload['risk_level']}")
-        print(f"issues: {payload['risk_count']}")
-        if payload.get("top_risk"):
-            print(f"top: {payload['top_risk']['name']}")
-        print(f"next: {payload['suggested_next_command']}")
-    return 0
+    lines = []
+    lines.append(f"phase session risk: {payload['session_id']}")
+    lines.append(f"risk: {payload['risk_level']}")
+    lines.append(f"issues: {payload['risk_count']}")
+    if payload.get("top_risk"):
+        lines.append(f"top: {payload['top_risk']['name']}")
+    lines.append(f"next: {payload['suggested_next_command']}")
+    return emit(payload, json_output, lines, 0)
 
 
 def _session_verification_payload(target: Path, session: dict[str, Any]) -> dict[str, Any]:
@@ -1998,15 +1953,13 @@ def session_verification(*, target: Path, session_id: str, json_output: bool = F
         print(f"error: {error}", file=sys.stderr)
         return 1
     payload = _session_verification_payload(target, session)
-    if json_output:
-        print(json.dumps(payload, indent=2, sort_keys=True))
-    else:
-        print(f"phase session verification: {payload['session_id']}")
-        print(f"records: {payload['record_count']}")
-        print(f"issues: {payload['issue_count']}")
-        print(f"passed: {payload['status_counts'].get('passed', 0)}")
-        print(f"next: {payload['suggested_next_command']}")
-    return 0
+    lines = []
+    lines.append(f"phase session verification: {payload['session_id']}")
+    lines.append(f"records: {payload['record_count']}")
+    lines.append(f"issues: {payload['issue_count']}")
+    lines.append(f"passed: {payload['status_counts'].get('passed', 0)}")
+    lines.append(f"next: {payload['suggested_next_command']}")
+    return emit(payload, json_output, lines, 0)
 
 
 def _latest_privacy_check(record: dict[str, Any]) -> dict[str, Any] | None:
@@ -2076,15 +2029,13 @@ def session_privacy(*, target: Path, session_id: str, json_output: bool = False)
         print(f"error: {error}", file=sys.stderr)
         return 1
     payload = _session_privacy_payload(target, session)
-    if json_output:
-        print(json.dumps(payload, indent=2, sort_keys=True))
-    else:
-        print(f"phase session privacy: {payload['session_id']}")
-        print(f"records: {payload['record_count']}")
-        print(f"issues: {payload['issue_count']}")
-        print(f"clean: {payload['status_counts'].get('clean', 0)}")
-        print(f"next: {payload['suggested_next_command']}")
-    return 0
+    lines = []
+    lines.append(f"phase session privacy: {payload['session_id']}")
+    lines.append(f"records: {payload['record_count']}")
+    lines.append(f"issues: {payload['issue_count']}")
+    lines.append(f"clean: {payload['status_counts'].get('clean', 0)}")
+    lines.append(f"next: {payload['suggested_next_command']}")
+    return emit(payload, json_output, lines, 0)
 
 
 def _latest_phase_handoff(record: dict[str, Any]) -> dict[str, Any] | None:
@@ -2166,15 +2117,13 @@ def session_handoffs(*, target: Path, session_id: str, json_output: bool = False
         print(f"error: {error}", file=sys.stderr)
         return 1
     payload = _session_handoffs_payload(target, session)
-    if json_output:
-        print(json.dumps(payload, indent=2, sort_keys=True))
-    else:
-        print(f"phase session handoffs: {payload['session_id']}")
-        print(f"records: {payload['record_count']}")
-        print(f"issues: {payload['issue_count']}")
-        print(f"linted: {payload['status_counts'].get('linted', 0)}")
-        print(f"next: {payload['suggested_next_command']}")
-    return 0
+    lines = []
+    lines.append(f"phase session handoffs: {payload['session_id']}")
+    lines.append(f"records: {payload['record_count']}")
+    lines.append(f"issues: {payload['issue_count']}")
+    lines.append(f"linted: {payload['status_counts'].get('linted', 0)}")
+    lines.append(f"next: {payload['suggested_next_command']}")
+    return emit(payload, json_output, lines, 0)
 
 
 def _checkpoint_state_for_session_next(
@@ -2285,13 +2234,11 @@ def session_closeout(
     session["next_recommended_command"] = "brigade work phases session list"
     session["path"] = str(path)
     _write_json(path, session)
-    if json_output:
-        print(json.dumps(session, indent=2, sort_keys=True))
-    else:
-        print(f"phase session closeout: {session.get('session_id')}")
-        print(f"status: {status}")
-        print(f"unresolved: {doctor_data['issue_count']}")
-    return 0
+    lines = []
+    lines.append(f"phase session closeout: {session.get('session_id')}")
+    lines.append(f"status: {status}")
+    lines.append(f"unresolved: {doctor_data['issue_count']}")
+    return emit(session, json_output, lines, 0)
 
 
 def _session_next_payload(target: Path, session: dict[str, Any]) -> dict[str, Any]:
@@ -2590,15 +2537,13 @@ def session_protocol(*, target: Path, session_id: str, json_output: bool = False
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
-    if json_output:
-        print(json.dumps(payload, indent=2, sort_keys=True))
-    else:
-        print(f"phase session protocol: {payload['session_id']}")
-        print(f"safe_resume: {str(payload['safe_resume']).lower()}")
-        print(f"blockers: {payload['resume_blocker_count']}")
-        for step in payload["wrapper_steps"]:
-            print(f"- {step['step']}: {step['command']}")
-    return 0
+    lines = []
+    lines.append(f"phase session protocol: {payload['session_id']}")
+    lines.append(f"safe_resume: {str(payload['safe_resume']).lower()}")
+    lines.append(f"blockers: {payload['resume_blocker_count']}")
+    for step in payload["wrapper_steps"]:
+        lines.append(f"- {step['step']}: {step['command']}")
+    return emit(payload, json_output, lines, 0)
 
 
 def _session_audit_payload(target: Path, session: dict[str, Any]) -> dict[str, Any]:
@@ -2712,15 +2657,13 @@ def session_audit(*, target: Path, session_id: str, json_output: bool = False) -
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
-    if json_output:
-        print(json.dumps(payload, indent=2, sort_keys=True))
-    else:
-        print(f"phase session audit: {payload['session_id']}")
-        print(f"ready_for_resume: {str(payload['ready_for_resume']).lower()}")
-        print(f"ready_for_completion_claim: {str(payload['ready_for_completion_claim']).lower()}")
-        print(f"issues: {payload['issue_count']}")
-        print(f"next: {payload['suggested_next_command']}")
-    return 0
+    lines = []
+    lines.append(f"phase session audit: {payload['session_id']}")
+    lines.append(f"ready_for_resume: {str(payload['ready_for_resume']).lower()}")
+    lines.append(f"ready_for_completion_claim: {str(payload['ready_for_completion_claim']).lower()}")
+    lines.append(f"issues: {payload['issue_count']}")
+    lines.append(f"next: {payload['suggested_next_command']}")
+    return emit(payload, json_output, lines, 0)
 
 
 def session_resume(*, target: Path, session_id: str, json_output: bool = False) -> int:
@@ -2961,13 +2904,11 @@ def session_report_build(*, target: Path, session_id: str, json_output: bool = F
     payload["bundle_files"] = ["SESSION_REPORT.md", "SESSION_EVIDENCE.json"]
     _write_json(report_dir / "SESSION_EVIDENCE.json", payload)
     _write_session_report_markdown(report_dir / "SESSION_REPORT.md", payload)
-    if json_output:
-        print(json.dumps(payload, indent=2, sort_keys=True))
-    else:
-        print(f"phase session report: {payload['report_id']}")
-        print(f"session: {payload['session'].get('session_id')}")
-        print(f"issues: {payload['doctor']['issue_count']}")
-    return 0
+    lines = []
+    lines.append(f"phase session report: {payload['report_id']}")
+    lines.append(f"session: {payload['session'].get('session_id')}")
+    lines.append(f"issues: {payload['doctor']['issue_count']}")
+    return emit(payload, json_output, lines, 0)
 
 
 def session_report_list(*, target: Path, limit: int = 20, json_output: bool = False) -> int:
@@ -2994,13 +2935,13 @@ def session_report_list(*, target: Path, limit: int = 20, json_output: bool = Fa
         "reports": reports,
         "report_count": len(reports),
     }
-    if json_output:
-        print(json.dumps(payload, indent=2, sort_keys=True))
-    else:
-        print(f"phase session reports: {len(reports)}")
-        for report in reports:
-            print(f"- {report.get('report_id')} session={report.get('session_id')} issues={report.get('issue_count')}")
-    return 0
+    lines = []
+    lines.append(f"phase session reports: {len(reports)}")
+    for report in reports:
+        lines.append(
+            f"- {report.get('report_id')} session={report.get('session_id')} issues={report.get('issue_count')}"
+        )
+    return emit(payload, json_output, lines, 0)
 
 
 def session_report_show(*, target: Path, report_id: str, json_output: bool = False) -> int:
@@ -3009,17 +2950,15 @@ def session_report_show(*, target: Path, report_id: str, json_output: bool = Fal
     if report is None:
         print(f"error: {error}", file=sys.stderr)
         return 1
-    if json_output:
-        print(json.dumps(report, indent=2, sort_keys=True))
-    else:
-        print(f"phase session report: {report.get('report_id')}")
-        print(
-            f"session: {(report.get('session') or {}).get('session_id') if isinstance(report.get('session'), dict) else 'none'}"
-        )
-        print(
-            f"issues: {(report.get('doctor') or {}).get('issue_count') if isinstance(report.get('doctor'), dict) else 0}"
-        )
-    return 0
+    lines = []
+    lines.append(f"phase session report: {report.get('report_id')}")
+    lines.append(
+        f"session: {(report.get('session') or {}).get('session_id') if isinstance(report.get('session'), dict) else 'none'}"
+    )
+    lines.append(
+        f"issues: {(report.get('doctor') or {}).get('issue_count') if isinstance(report.get('doctor'), dict) else 0}"
+    )
+    return emit(report, json_output, lines, 0)
 
 
 def _activity_event(
@@ -3333,16 +3272,14 @@ def session_activity(*, target: Path, session_id: str, json_output: bool = False
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
-    if json_output:
-        print(json.dumps(payload, indent=2, sort_keys=True))
-    else:
-        print(f"phase session activity: {payload['session_id']}")
-        print(f"events: {payload['event_count']}")
-        for event in payload["events"][-20:]:
-            print(
-                f"- {event.get('timestamp')} {event.get('event_type')} {event.get('phase_id') or event.get('local_id')}: {event.get('safe_summary')}"
-            )
-    return 0
+    lines = []
+    lines.append(f"phase session activity: {payload['session_id']}")
+    lines.append(f"events: {payload['event_count']}")
+    for event in payload["events"][-20:]:
+        lines.append(
+            f"- {event.get('timestamp')} {event.get('event_type')} {event.get('phase_id') or event.get('local_id')}: {event.get('safe_summary')}"
+        )
+    return emit(payload, json_output, lines, 0)
 
 
 def _session_progress_payload(target: Path, session: dict[str, Any]) -> dict[str, Any]:
@@ -3406,15 +3343,13 @@ def session_progress(*, target: Path, session_id: str, json_output: bool = False
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
-    if json_output:
-        print(json.dumps(payload, indent=2, sort_keys=True))
-    else:
-        print(f"phase session progress: {payload['session_id']}")
-        print(f"complete: {payload['percent_complete']}%")
-        print(f"current: {payload['current_phase_id'] or 'none'}")
-        print(f"blockers: {payload['blocker_count']}")
-        print(f"next: {payload['suggested_next_command']}")
-    return 0
+    lines = []
+    lines.append(f"phase session progress: {payload['session_id']}")
+    lines.append(f"complete: {payload['percent_complete']}%")
+    lines.append(f"current: {payload['current_phase_id'] or 'none'}")
+    lines.append(f"blockers: {payload['blocker_count']}")
+    lines.append(f"next: {payload['suggested_next_command']}")
+    return emit(payload, json_output, lines, 0)
 
 
 def _session_blocker_fingerprint(*, session_id: object, phase_id: object, issue_type: object, detail: object) -> str:
@@ -3561,13 +3496,11 @@ def session_import_issues(*, target: Path, session_id: str, dry_run: bool = Fals
         "candidate_count": len(candidates),
         "suggested_next_command": "brigade work inbox",
     }
-    if json_output:
-        print(json.dumps(payload, indent=2, sort_keys=True))
-    else:
-        print(f"phase session imports: {session.get('session_id')}")
-        print(f"created: {len(created)}")
-        print(f"skipped: {len(skipped)}")
-    return 0
+    lines = []
+    lines.append(f"phase session imports: {session.get('session_id')}")
+    lines.append(f"created: {len(created)}")
+    lines.append(f"skipped: {len(skipped)}")
+    return emit(payload, json_output, lines, 0)
 
 
 def session_checkpoint_archive(*, target: Path, checkpoint_id: str, json_output: bool = False) -> int:
@@ -3604,12 +3537,10 @@ def session_checkpoint_archive(*, target: Path, checkpoint_id: str, json_output:
         "archive_path": str(_session_checkpoints_archive_path(target)),
         "suggested_next_command": "brigade work phases session checkpoints list",
     }
-    if json_output:
-        print(json.dumps(payload, indent=2, sort_keys=True))
-    else:
-        print(f"phase session checkpoint archived: {checkpoint.get('checkpoint_id')}")
-        print(f"archive: {_session_checkpoints_archive_path(target)}")
-    return 0
+    lines = []
+    lines.append(f"phase session checkpoint archived: {checkpoint.get('checkpoint_id')}")
+    lines.append(f"archive: {_session_checkpoints_archive_path(target)}")
+    return emit(payload, json_output, lines, 0)
 
 
 def _record_has_clean_privacy(record: dict[str, Any]) -> bool:
@@ -3814,16 +3745,14 @@ def session_gate(*, target: Path, session_id: str, json_output: bool = False) ->
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
-    if json_output:
-        print(json.dumps(payload, indent=2, sort_keys=True))
-    else:
-        print(f"phase session gate: {payload['session_id']}")
-        print(f"safe: {str(payload['safe_to_claim_complete']).lower()}")
-        print(f"blockers: {payload['blocker_count']}")
-        print(f"next: {payload['suggested_next_command']}")
-        for check in payload["checks"]:
-            print(f"[{check['status']}] {check['name']}: {check['detail']}")
-    return 0
+    lines = []
+    lines.append(f"phase session gate: {payload['session_id']}")
+    lines.append(f"safe: {str(payload['safe_to_claim_complete']).lower()}")
+    lines.append(f"blockers: {payload['blocker_count']}")
+    lines.append(f"next: {payload['suggested_next_command']}")
+    for check in payload["checks"]:
+        lines.append(f"[{check['status']}] {check['name']}: {check['detail']}")
+    return emit(payload, json_output, lines, 0)
 
 
 def _goal_scaffold_markdown(payload: dict[str, Any]) -> str:
@@ -3923,14 +3852,12 @@ def goal_scaffold(*, target: Path, phase_range: str, json_output: bool = False) 
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(_goal_scaffold_markdown(payload))
     payload["path"] = str(path)
-    if json_output:
-        print(json.dumps(payload, indent=2, sort_keys=True))
-    else:
-        print(f"phase goal scaffold: {goal_id}")
-        print(f"range: {rendered_range}")
-        print(f"path: {path}")
-        print(f"blockers: {payload['blocker_count']}")
-    return 0
+    lines = []
+    lines.append(f"phase goal scaffold: {goal_id}")
+    lines.append(f"range: {rendered_range}")
+    lines.append(f"path: {path}")
+    lines.append(f"blockers: {payload['blocker_count']}")
+    return emit(payload, json_output, lines, 0)
 
 
 def _find_action(target: Path, action_id: str) -> tuple[Path, dict[str, Any] | None]:
@@ -4390,13 +4317,13 @@ def doctor_payload(target: Path, *, phase_range: str | None = None) -> dict[str,
 
 def doctor(*, target: Path, phase_range: str | None = None, json_output: bool = False) -> int:
     payload = doctor_payload(target, phase_range=phase_range)
-    if json_output:
-        print(json.dumps(payload, indent=2, sort_keys=True))
-    else:
-        print(f"phase ledger doctor: {payload['target']}")
-        for check in payload["checks"]:
-            print(f"[{check['status']}] {check['name']}: {check['detail']}")
-    return 1 if any(check.get("status") == "fail" for check in payload["checks"]) else 0
+    lines = []
+    lines.append(f"phase ledger doctor: {payload['target']}")
+    for check in payload["checks"]:
+        lines.append(f"[{check['status']}] {check['name']}: {check['detail']}")
+    return emit(
+        payload, json_output, lines, 1 if any(check.get("status") == "fail" for check in payload["checks"]) else 0
+    )
 
 
 def health(target: Path) -> dict[str, Any]:
@@ -4537,14 +4464,12 @@ def closeout(
     path = _closeouts_root(target) / f"{closeout_id}.json"
     payload["path"] = str(path)
     _write_json(path, payload)
-    if json_output:
-        print(json.dumps(payload, indent=2, sort_keys=True))
-    else:
-        print(f"phase closeout: {closeout_id}")
-        print(f"status: {status}")
-        print(f"phases: {', '.join(phase_ids)}")
-        print(f"unresolved: {len(selected_issues)}")
-    return 0
+    lines = []
+    lines.append(f"phase closeout: {closeout_id}")
+    lines.append(f"status: {status}")
+    lines.append(f"phases: {', '.join(phase_ids)}")
+    lines.append(f"unresolved: {len(selected_issues)}")
+    return emit(payload, json_output, lines, 0)
 
 
 def evidence_add(
@@ -4585,12 +4510,10 @@ def evidence_add(
     record["updated_at"] = _now().isoformat()
     record["path"] = str(path)
     _write_json(path, record)
-    if json_output:
-        print(json.dumps(record, indent=2, sort_keys=True))
-    else:
-        print(f"phase evidence: {record.get('phase_id')}")
-        print(f"attachments: {len(attachments)}")
-    return 0
+    lines = []
+    lines.append(f"phase evidence: {record.get('phase_id')}")
+    lines.append(f"attachments: {len(attachments)}")
+    return emit(record, json_output, lines, 0)
 
 
 def _verification_entries(record: dict[str, Any]) -> list[dict[str, Any]]:
@@ -4657,14 +4580,12 @@ def verify_plan(*, target: Path, selector: str, json_output: bool = False) -> in
             if records
             else "brigade work phases status",
         }
-    if json_output:
-        print(json.dumps(payload, indent=2, sort_keys=True))
-    else:
-        print(f"phase verification plan: {selector}")
-        print(f"records: {payload['record_count']}")
-        for record in payload["records"]:
-            print(f"- {record.get('phase_id')} verification={len(record.get('verification') or [])}")
-    return 0
+    lines = []
+    lines.append(f"phase verification plan: {selector}")
+    lines.append(f"records: {payload['record_count']}")
+    for record in payload["records"]:
+        lines.append(f"- {record.get('phase_id')} verification={len(record.get('verification') or [])}")
+    return emit(payload, json_output, lines, 0)
 
 
 def verify_record(
@@ -4703,12 +4624,10 @@ def verify_record(
         "verification": entries,
         "suggested_next_command": f"brigade work phases verify plan {record.get('phase_id')}",
     }
-    if json_output:
-        print(json.dumps(payload, indent=2, sort_keys=True))
-    else:
-        print(f"phase verification: {record.get('phase_id')}")
-        print(f"status: {status}")
-    return 0
+    lines = []
+    lines.append(f"phase verification: {record.get('phase_id')}")
+    lines.append(f"status: {status}")
+    return emit(payload, json_output, lines, 0)
 
 
 def reconcile(*, target: Path, selector: str, json_output: bool = False) -> int:
@@ -4797,14 +4716,12 @@ def reconcile(*, target: Path, selector: str, json_output: bool = False) -> int:
         "top_issue": issues[0] if issues else None,
         "suggested_next_command": issues[0]["suggested_next_command"] if issues else "brigade work phases status",
     }
-    if json_output:
-        print(json.dumps(payload, indent=2, sort_keys=True))
-    else:
-        print(f"phase reconcile: {selector}")
-        print(f"records: {len(records)}")
-        for check in checks:
-            print(f"[{check['status']}] {check['name']}: {check['detail']}")
-    return 0
+    lines = []
+    lines.append(f"phase reconcile: {selector}")
+    lines.append(f"records: {len(records)}")
+    for check in checks:
+        lines.append(f"[{check['status']}] {check['name']}: {check['detail']}")
+    return emit(payload, json_output, lines, 0)
 
 
 def _privacy_findings_for_text(text: str, *, source: str) -> list[dict[str, Any]]:
@@ -4914,15 +4831,13 @@ def privacy(*, target: Path, selector: str, json_output: bool = False) -> int:
         "status": "blocked" if findings else "clean",
         "suggested_next_command": "brigade work phases privacy " + selector,
     }
-    if json_output:
-        print(json.dumps(payload, indent=2, sort_keys=True))
-    else:
-        print(f"phase privacy: {selector}")
-        print(f"status: {payload['status']}")
-        print(f"findings: {len(findings)}")
-        for finding in findings:
-            print(f"[{finding['status']}] {finding['name']}: {finding['source']}")
-    return 1 if findings else 0
+    lines = []
+    lines.append(f"phase privacy: {selector}")
+    lines.append(f"status: {payload['status']}")
+    lines.append(f"findings: {len(findings)}")
+    for finding in findings:
+        lines.append(f"[{finding['status']}] {finding['name']}: {finding['source']}")
+    return emit(payload, json_output, lines, 1 if findings else 0)
 
 
 def _handoff_root(target: Path) -> Path:
@@ -5050,13 +4965,11 @@ def handoff(*, target: Path, selector: str, lint: bool = False, json_output: boo
         "lint": lint_payload,
         "suggested_next_command": f"brigade handoff lint --target . {path}",
     }
-    if json_output:
-        print(json.dumps(payload, indent=2, sort_keys=True))
-    else:
-        print(f"phase handoff: {handoff_id}")
-        print(f"path: {path}")
-        print(f"lint: {lint_payload['status']}")
-    return 1 if lint_payload["status"] == "failed" else 0
+    lines = []
+    lines.append(f"phase handoff: {handoff_id}")
+    lines.append(f"path: {path}")
+    lines.append(f"lint: {lint_payload['status']}")
+    return emit(payload, json_output, lines, 1 if lint_payload["status"] == "failed" else 0)
 
 
 def compare(*, target: Path, selector: str, json_output: bool = False) -> int:
@@ -5180,14 +5093,12 @@ def compare(*, target: Path, selector: str, json_output: bool = False) -> int:
         "top_issue": issues[0] if issues else None,
         "suggested_next_command": issues[0]["suggested_next_command"] if issues else "brigade work phases doctor",
     }
-    if json_output:
-        print(json.dumps(payload, indent=2, sort_keys=True))
-    else:
-        print(f"phase compare: {selector}")
-        print(f"records: {len(records)}")
-        for check in checks:
-            print(f"[{check['status']}] {check['name']}: {check['detail']}")
-    return 0
+    lines = []
+    lines.append(f"phase compare: {selector}")
+    lines.append(f"records: {len(records)}")
+    for check in checks:
+        lines.append(f"[{check['status']}] {check['name']}: {check['detail']}")
+    return emit(payload, json_output, lines, 0)
 
 
 def actions_plan(*, target: Path, phase_range: str | None = None, json_output: bool = False) -> int:
@@ -5210,13 +5121,11 @@ def actions_plan(*, target: Path, phase_range: str | None = None, json_output: b
         "action_count": len(planned),
         "suggested_next_command": "brigade work phases actions build",
     }
-    if json_output:
-        print(json.dumps(payload, indent=2, sort_keys=True))
-    else:
-        print(f"phase actions planned: {len(planned)}")
-        for action in planned:
-            print(f"- {action.get('action_id')} [{action.get('status')}] {action.get('issue_type')}")
-    return 0
+    lines = []
+    lines.append(f"phase actions planned: {len(planned)}")
+    for action in planned:
+        lines.append(f"- {action.get('action_id')} [{action.get('status')}] {action.get('issue_type')}")
+    return emit(payload, json_output, lines, 0)
 
 
 def actions_build(*, target: Path, phase_range: str | None = None, json_output: bool = False) -> int:
@@ -5252,12 +5161,10 @@ def actions_build(*, target: Path, phase_range: str | None = None, json_output: 
         "skipped_count": len(skipped),
         "suggested_next_command": "brigade work phases actions list",
     }
-    if json_output:
-        print(json.dumps(payload, indent=2, sort_keys=True))
-    else:
-        print(f"phase actions created: {len(created)}")
-        print(f"phase actions skipped: {len(skipped)}")
-    return 0
+    lines = []
+    lines.append(f"phase actions created: {len(created)}")
+    lines.append(f"phase actions skipped: {len(skipped)}")
+    return emit(payload, json_output, lines, 0)
 
 
 def actions_list(*, target: Path, json_output: bool = False) -> int:
@@ -5270,13 +5177,11 @@ def actions_list(*, target: Path, json_output: bool = False) -> int:
         "actions": actions,
         "action_count": len(actions),
     }
-    if json_output:
-        print(json.dumps(payload, indent=2, sort_keys=True))
-    else:
-        print(f"phase actions: {len(actions)}")
-        for action in actions:
-            print(f"- {action.get('action_id')} [{action.get('status')}] {action.get('issue_type')}")
-    return 0
+    lines = []
+    lines.append(f"phase actions: {len(actions)}")
+    for action in actions:
+        lines.append(f"- {action.get('action_id')} [{action.get('status')}] {action.get('issue_type')}")
+    return emit(payload, json_output, lines, 0)
 
 
 def actions_show(*, target: Path, action_id: str, json_output: bool = False) -> int:
@@ -5286,14 +5191,12 @@ def actions_show(*, target: Path, action_id: str, json_output: bool = False) -> 
         print(f"error: phase action not found: {action_id}", file=sys.stderr)
         return 1
     action["path"] = str(path)
-    if json_output:
-        print(json.dumps(action, indent=2, sort_keys=True))
-    else:
-        print(f"phase action: {action.get('action_id')}")
-        print(f"status: {action.get('status')}")
-        print(f"issue: {action.get('issue_type')}")
-        print(f"next: {action.get('suggested_next_command')}")
-    return 0
+    lines = []
+    lines.append(f"phase action: {action.get('action_id')}")
+    lines.append(f"status: {action.get('status')}")
+    lines.append(f"issue: {action.get('issue_type')}")
+    lines.append(f"next: {action.get('suggested_next_command')}")
+    return emit(action, json_output, lines, 0)
 
 
 def _set_action_status(
@@ -5324,12 +5227,10 @@ def _actions_update_status(
     result, action = _set_action_status(target.expanduser().resolve(), action_id, status, reason)
     if result != 0 or action is None:
         return result
-    if json_output:
-        print(json.dumps(action, indent=2, sort_keys=True))
-    else:
-        print(f"phase action: {action.get('action_id')}")
-        print(f"status: {status}")
-    return 0
+    lines = []
+    lines.append(f"phase action: {action.get('action_id')}")
+    lines.append(f"status: {status}")
+    return emit(action, json_output, lines, 0)
 
 
 def actions_start(*, target: Path, action_id: str, json_output: bool = False) -> int:
@@ -5377,11 +5278,9 @@ def actions_archive(
         "archived": archived,
         "archived_count": len(archived),
     }
-    if json_output:
-        print(json.dumps(payload, indent=2, sort_keys=True))
-    else:
-        print(f"phase actions archived: {len(archived)}")
-    return 0
+    lines = []
+    lines.append(f"phase actions archived: {len(archived)}")
+    return emit(payload, json_output, lines, 0)
 
 
 def actions_import_issues(*, target: Path, dry_run: bool = False, json_output: bool = False) -> int:
@@ -5442,14 +5341,12 @@ def actions_import_issues(*, target: Path, dry_run: bool = False, json_output: b
         "dismissed_count": len(dismissed),
         "invalid_count": 0,
     }
-    if json_output:
-        print(json.dumps(payload, indent=2, sort_keys=True))
-    else:
-        print(f"phase action imports: {target}")
-        print(f"created: {payload['created_count']}")
-        print(f"skipped: {payload['skipped_count']}")
-        print(f"dismissed: {payload['dismissed_count']}")
-    return 0
+    lines = []
+    lines.append(f"phase action imports: {target}")
+    lines.append(f"created: {payload['created_count']}")
+    lines.append(f"skipped: {payload['skipped_count']}")
+    lines.append(f"dismissed: {payload['dismissed_count']}")
+    return emit(payload, json_output, lines, 0)
 
 
 def _report_payload(target: Path, *, phase_range: str | None = None) -> dict[str, Any]:
@@ -5519,13 +5416,11 @@ def report_build(*, target: Path, phase_range: str | None = None, json_output: b
     payload["bundle_files"] = ["PHASE_REPORT.md", "PHASE_EVIDENCE.json"]
     _write_json(report_dir / "PHASE_EVIDENCE.json", payload)
     _write_report_markdown(report_dir / "PHASE_REPORT.md", payload)
-    if json_output:
-        print(json.dumps(payload, indent=2, sort_keys=True))
-    else:
-        print(f"phase report: {payload['report_id']}")
-        print(f"path: {report_dir}")
-        print(f"issues: {payload['doctor']['issue_count']}")
-    return 0
+    lines = []
+    lines.append(f"phase report: {payload['report_id']}")
+    lines.append(f"path: {report_dir}")
+    lines.append(f"issues: {payload['doctor']['issue_count']}")
+    return emit(payload, json_output, lines, 0)
 
 
 def report_list(*, target: Path, limit: int = 20, json_output: bool = False) -> int:
@@ -5555,15 +5450,13 @@ def report_list(*, target: Path, limit: int = 20, json_output: bool = False) -> 
         "reports": reports,
         "report_count": len(reports),
     }
-    if json_output:
-        print(json.dumps(out, indent=2, sort_keys=True))
-    else:
-        print(f"phase reports: {target}")
-        for item in reports:
-            print(
-                f"- {item.get('report_id')} issues={item.get('issue_count')} range={item.get('phase_range') or 'all'}"
-            )
-    return 0
+    lines = []
+    lines.append(f"phase reports: {target}")
+    for item in reports:
+        lines.append(
+            f"- {item.get('report_id')} issues={item.get('issue_count')} range={item.get('phase_range') or 'all'}"
+        )
+    return emit(out, json_output, lines, 0)
 
 
 def report_show(*, target: Path, report_id: str, json_output: bool = False) -> int:
@@ -5622,13 +5515,11 @@ def report_closeout(
         "suggested_next_command": "brigade work phases report list",
     }
     _write_json(report_path / "CLOSEOUT.json", closeout)
-    if json_output:
-        print(json.dumps(closeout, indent=2, sort_keys=True))
-    else:
-        print(f"phase report closeout: {report.get('report_id')}")
-        print(f"status: {status}")
-        print(f"reason: {closeout['reason']}")
-    return 0
+    lines = []
+    lines.append(f"phase report closeout: {report.get('report_id')}")
+    lines.append(f"status: {status}")
+    lines.append(f"reason: {closeout['reason']}")
+    return emit(closeout, json_output, lines, 0)
 
 
 def report_compare(*, target: Path, report_id: str, json_output: bool = False) -> int:
@@ -5660,14 +5551,12 @@ def report_compare(*, target: Path, report_id: str, json_output: bool = False) -
         if issues
         else "brigade work phases report show latest",
     }
-    if json_output:
-        print(json.dumps(payload, indent=2, sort_keys=True))
-    else:
-        print(f"phase report compare: {report.get('report_id')}")
-        print(f"issues: {len(issues)}")
-        for check in summary["checks"]:
-            print(f"[{check['status']}] {check['name']}: {check['detail']}")
-    return 0 if not issues else 1
+    lines = []
+    lines.append(f"phase report compare: {report.get('report_id')}")
+    lines.append(f"issues: {len(issues)}")
+    for check in summary["checks"]:
+        lines.append(f"[{check['status']}] {check['name']}: {check['detail']}")
+    return emit(payload, json_output, lines, 0 if not issues else 1)
 
 
 def import_issues(
@@ -5724,11 +5613,9 @@ def import_issues(
         "dismissed_count": len(dismissed),
         "invalid_count": 0,
     }
-    if json_output:
-        print(json.dumps(payload, indent=2, sort_keys=True))
-    else:
-        print(f"phase ledger imports: {target}")
-        print(f"created: {payload['created_count']}")
-        print(f"skipped: {payload['skipped_count']}")
-        print(f"dismissed: {payload['dismissed_count']}")
-    return 0
+    lines = []
+    lines.append(f"phase ledger imports: {target}")
+    lines.append(f"created: {payload['created_count']}")
+    lines.append(f"skipped: {payload['skipped_count']}")
+    lines.append(f"dismissed: {payload['dismissed_count']}")
+    return emit(payload, json_output, lines, 0)
