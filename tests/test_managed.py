@@ -43,6 +43,15 @@ def test_memory_doctor_doctor_parses_status(monkeypatch):
     assert any(status == "OK" and "memory-doctor" in name for status, name, _ in results)
 
 
+def test_token_glace_installs_from_release_tarball():
+    # npm has no token-glace package and a git spec does not build; the
+    # GitHub release tarball is the only installable artifact.
+    t = managed.resolve("token-glace")
+    assert t.install_args[:3] == ["npm", "install", "-g"]
+    assert t.install_args[3].startswith("https://github.com/escoffier-labs/token-glace/releases/download/")
+    assert t.install_args[3].endswith(".tar.gz")
+
+
 def test_token_glace_doctor_reads_status_field_not_exit(monkeypatch):
     t = managed.resolve("token-glace")
     monkeypatch.setattr(managed.proc, "which", lambda c: "/x/" + c)

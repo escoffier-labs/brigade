@@ -316,7 +316,15 @@ _TOOLS: Tuple[ManagedTool, ...] = (
         station="tokens",
         command="token-glace",
         summary="output compaction via host hooks",
-        install_args=["npm", "install", "-g", "token-glace"],
+        # No npm registry package exists under this name, and a git spec does
+        # not build (pnpm-native repo, no prepare hook); the GitHub release
+        # tarball is the reviewed installable artifact.
+        install_args=[
+            "npm",
+            "install",
+            "-g",
+            "https://github.com/escoffier-labs/token-glace/releases/download/v0.8.3/token-glace-v0.8.3.tar.gz",
+        ],
         wire=_token_glace_wire,
         doctor=_token_glace_doctor,
     ),
