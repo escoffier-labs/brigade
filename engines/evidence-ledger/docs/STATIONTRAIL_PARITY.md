@@ -1,30 +1,29 @@
-# StationTrail Boundary
+# StationTrail Parity Archive
 
-StationTrail and MiseLedger are intended to work together, not compete for the same product surface.
+As of MiseLedger v0.3.0, the StationTrail parity effort was archived. The local agent-session export paths that StationTrail proved out now live in MiseLedger's built-in `crawl sessions`, native `import`, and `adapter` commands.
 
-StationTrail owns local harness export. MiseLedger owns durable archive ingest, SQLite storage, FTS, relations, scan manifests, evidence bundles, HTTP, and MCP.
+StationTrail was a separate local harness exporter. Its adapter JSONL output remains compatible with `miseledger import adapter`, but new documentation should point users to MiseLedger's built-in surfaces.
 
 ## Support Matrix
 
-| Source | StationTrail | MiseLedger native | Recommended path |
+| Source | Archived StationTrail parity | MiseLedger native | Recommended path |
 | --- | --- | --- | --- |
-| Codex sessions | yes | yes | Use StationTrail for scanner parity, use native MiseLedger for compatibility and fixture smoke. |
-| Claude project logs | yes | yes | Use StationTrail for scanner parity, use native MiseLedger for compatibility and fixture smoke. |
-| OpenClaw sessions and trajectories | yes | yes | Use StationTrail for scanner parity, use native MiseLedger for compatibility and fixture smoke. |
-| OpenCode sessions | yes | no | Export with StationTrail and import adapter JSONL into MiseLedger. |
-| Hermes sessions | yes | yes | Use either path for snapshots and trajectory JSONL. MiseLedger does not parse Hermes `state.db` directly. |
-| Future harnesses | preferred owner | sample-gated | Add parser support to StationTrail first unless MiseLedger needs a minimal compatibility adapter. |
+| Codex sessions | covered | yes | Use `miseledger crawl sessions` or `miseledger import codex`. |
+| Claude project logs | covered | yes | Use `miseledger crawl sessions` or `miseledger import claude`. |
+| OpenClaw sessions and trajectories | covered | yes | Use `miseledger crawl sessions` or `miseledger import openclaw`. |
+| OpenCode sessions | covered | yes | Use `miseledger crawl sessions` or `miseledger import opencode` with sanitized export JSON. |
+| Hermes sessions | covered | yes | Use `miseledger crawl sessions` or `miseledger import hermes`. MiseLedger does not parse Hermes `state.db` directly. |
+| Future harnesses | historical reference | sample-gated | Add native support only after redacted sample shapes exist. |
 
 ## Practical Split
 
-Use StationTrail when the task is:
+The old StationTrail work covered:
 
 - discover local harness roots
 - inspect live source shapes without transcript content
 - dry-run scanner coverage
 - redact paths or secret-like values during export
-- export OpenCode or future harness logs
-- keep parser-specific logic out of the archive layer
+- export harness logs as `miseledger.adapter.v1`
 
 Use MiseLedger when the task is:
 
@@ -39,26 +38,31 @@ Use MiseLedger when the task is:
 
 ## Commands
 
-StationTrail to MiseLedger:
+Built-in session crawl:
 
 ```bash
-stationtrail all --out - --redact paths,secrets | miseledger import adapter - --json
-stationtrail opencode ./session.jsonl --out - | miseledger import adapter - --json
-miseledger import stationtrail codex ~/.codex/sessions --json
-miseledger import stationtrail claude ~/.claude/projects --json
-miseledger import stationtrail openclaw ~/.openclaw/agents --json
-miseledger import stationtrail hermes ~/.hermes/sessions --json
+miseledger sources discover --json
+miseledger crawl sessions --dry-run --json
+miseledger crawl sessions --json
+miseledger crawl cursor --json
 ```
 
-MiseLedger compatibility adapters:
+MiseLedger compatibility imports:
 
 ```bash
 miseledger import codex ~/.codex/sessions --json
 miseledger import claude ~/.claude/projects --json
 miseledger import openclaw ~/.openclaw/agents --json
+miseledger import opencode ~/.local/share/opencode --json
 miseledger import hermes ~/.hermes/sessions --json
+```
+
+Archived StationTrail adapter JSONL:
+
+```bash
+miseledger import adapter stationtrail.adapter.jsonl --json
 ```
 
 ## Non-Goals
 
-MiseLedger should not chase session browser parity, resume workflows, GUI features, or every harness parser. It should keep native parsers conservative and sample-gated, while StationTrail can evolve as the dedicated harness exporter.
+MiseLedger should not chase session browser parity, resume workflows, GUI features, or every harness parser. Native parsers should stay conservative and sample-gated.

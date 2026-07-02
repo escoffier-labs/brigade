@@ -79,31 +79,40 @@ Claude support targets `~/.claude/projects/**/*.jsonl` style project logs. The M
 
 Hermes support targets `~/.hermes/sessions/session_*.json` snapshots and trajectory JSONL. MiseLedger does not parse Hermes `state.db` directly.
 
-## StationTrail External Scanner
+## Built-In Crawlers
 
-StationTrail is a separate scanner/exporter for local agent session logs. It emits this same `miseledger.adapter.v1` JSONL contract and can be piped directly into adapter ingest:
-
-```bash
-stationtrail codex ~/.codex/sessions --out - | miseledger import adapter -
-stationtrail claude ~/.claude/projects --out - | miseledger import adapter -
-stationtrail openclaw ~/.openclaw/agents --out - | miseledger import adapter -
-stationtrail hermes ~/.hermes/sessions --out - | miseledger import adapter -
-stationtrail all --out - --redact paths,secrets | miseledger import adapter -
-```
-
-Or let MiseLedger run StationTrail when the `stationtrail` binary is installed on `PATH`:
+MiseLedger's user-facing crawlers generate the same `miseledger.adapter.v1` records internally and stream them through normal ingest:
 
 ```bash
-miseledger import stationtrail codex ~/.codex/sessions --json
-miseledger import stationtrail claude ~/.claude/projects --json
-miseledger import stationtrail openclaw ~/.openclaw/agents --json
-miseledger import stationtrail opencode opencode-session.json --json
-miseledger import stationtrail hermes ~/.hermes/sessions --json
+miseledger crawl sessions --json
+miseledger crawl cursor --json
+miseledger crawl chatgpt-export ~/Downloads/chatgpt-export.zip --json
+miseledger crawl claude-export ~/Downloads/claude-export.zip --json
 ```
 
-Use StationTrail when source-specific harness parsing should live outside MiseLedger. MiseLedger also has native parsers for Codex, Claude, OpenClaw, OpenCode sanitized export JSON, and Hermes snapshot or trajectory files. Keep MiseLedger focused on ingest, normalized storage, FTS, scan manifests, relation resolution, and evidence output.
+For local artifacts and git history:
 
-StationTrail `discover`, `doctor`, `doctor --live`, `inspect`, and `--dry-run --json` modes report roots, structural keys, counts, records, and warnings without printing transcript content. MiseLedger's `import stationtrail` wrapper records StationTrail scan manifests when StationTrail writes summary output. For `stationtrail all`, prefer piping to `miseledger import adapter -` so mixed-source records retain their individual `source.kind`.
+```bash
+miseledger crawl docs ./notes --json
+miseledger crawl files ./notes --source notes --collection notes:files --glob "*.md,*.txt" --json
+miseledger crawl html ./site-export --source docs --collection docs:html --json
+miseledger crawl gitlog . --source gitlog --collection repo:miseledger --json
+miseledger crawl json export.json --source export --collection export:records --records-path records --json
+miseledger crawl jsonl export.jsonl --source notes --collection notes:local --json
+```
+
+External crawler binaries can emit adapter JSONL directly or run through MiseLedger domain wrappers:
+
+```bash
+miseledger crawl discord --limit 100 --json
+miseledger crawl slack --workspace T123 --json
+miseledger crawl granola --json
+miseledger crawl notion --json
+miseledger crawl gmail --account me@example.com --query "subject:miseledger" --json
+miseledger import adapter discrawl.adapter.jsonl --source discrawl --json
+```
+
+The archived StationTrail and SourceHarvest repositories previously emitted this same adapter contract. Already-generated adapter JSONL files from those tools remain importable with `miseledger import adapter`.
 
 Scan manifests can be compared without reading transcript content into output:
 
@@ -112,14 +121,4 @@ miseledger scans diff <path> --json
 miseledger scans changed --json
 ```
 
-SourceHarvest can be wrapped directly by MiseLedger when the `sourceharvest` binary is installed on `PATH`:
-
-```bash
-miseledger import sourceharvest markdown ./notes --source notes --collection notes:local --json
-miseledger import sourceharvest files ./notes --source notes --collection notes:files --glob "*.md,*.txt" --json
-miseledger import sourceharvest html ./site-export --source docs --collection docs:html --json
-miseledger import sourceharvest gitlog . --source gitlog --collection repo:miseledger --json
-miseledger import sourceharvest json export.json --source export --collection export:records --records-path records --json
-```
-
-The wrapper requests SourceHarvest's summary JSON internally, streams adapter JSONL through normal ingest, and records a lightweight scan manifest when the summary path can be statted locally. The manifest contains path, size, mtime, content hash for regular files or summary hash for directories, generated adapter hash, record count, and warning count. It does not contain harvested text.
+Crawler and native-import scan manifests contain path, size, mtime, content hash for regular files or summary hash for directories, generated adapter hash, record count, and warning count. They do not contain harvested text.

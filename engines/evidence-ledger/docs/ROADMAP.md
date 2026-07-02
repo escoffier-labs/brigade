@@ -6,8 +6,8 @@ MiseLedger is usable now as a local archive, search, and evidence layer for norm
 
 - Import `miseledger.adapter.v1` JSONL from source-specific exporters.
 - Import native Codex, OpenClaw, Claude, and Hermes session fixtures and local logs.
-- Import StationTrail exports for agent-session harnesses.
-- Import SourceHarvest exports for Markdown, files, HTML, JSON, JSONL, and git history.
+- Crawl local agent sessions with `miseledger crawl sessions`.
+- Crawl Markdown, files, HTML, JSON, JSONL, and git history with built-in local artifact crawlers.
 - Search one SQLite archive across crawler records, local source exports, and agent-session logs.
 - Produce evidence bundles with `untrusted_context: true`, raw refs, snippets, actors, collections, artifacts, and warnings.
 - Cache evidence bundles with stable local `miseledger://evidence/<id>` references.
@@ -19,7 +19,7 @@ MiseLedger is usable now as a local archive, search, and evidence layer for norm
 
 These are the next hardening steps before recommending MiseLedger broadly:
 
-- Keep release install smoke checks passing for MiseLedger, StationTrail, and SourceHarvest.
+- Keep release install smoke checks passing for MiseLedger.
 - Add more real redacted fixture shapes for each supported harness.
 - Add clearer diagnostics for missing external tools in wrapper imports.
 - Define item-level retention policies for long-running local stores. Current prune commands only remove old import metadata and missing scan manifests.
@@ -27,7 +27,7 @@ These are the next hardening steps before recommending MiseLedger broadly:
 ## Later
 
 - Optional read-only local API auth for multi-user hosts.
-- More SourceHarvest domain exporters as real local export shapes appear.
+- More external crawler domain wrappers as real local export shapes appear.
 - Direct Hermes `state.db` support only after real redacted samples and a stable schema need exist.
 - Native support for any future harness only after observed samples exist.
 

@@ -21,30 +21,32 @@ MiseLedger is different:
 
 Each source system is best at its native domain:
 
+- Built-in `miseledger crawl sessions`: Codex, Claude, OpenClaw, OpenCode, Hermes, and Cursor local history
+- Built-in `miseledger crawl docs/files/html/json/jsonl/gitlog`: local files, Markdown, HTML, JSON, JSONL, and git history
 - `discrawl`: Discord messages
 - `gitcrawl`: GitHub issues and pull requests
 - `notcrawl`: Notion pages
-- `stationtrail`: Codex, Claude, OpenClaw, OpenCode, Hermes, and related local session logs
-- `sourceharvest`: local files, Markdown, HTML, JSON, JSONL, and git history
+- `slacrawl`, `graincrawl`, `mailcrawl`, and `telecrawl`: domain-specific archives that can emit adapter JSONL
 
 ## Boundary
 
-Agent session scanning is in scope for MiseLedger, but the MVP starts with generic normalized adapter fixtures and conservative native JSON/JSONL generators rather than perfect per-harness parsers.
-
-StationTrail is the sibling tool for portable local agent-session export. It scans agent harness logs such as Codex, Claude project logs, and OpenClaw sessions, then emits `miseledger.adapter.v1` JSONL.
+Agent session scanning is in scope for MiseLedger through conservative native JSON/JSONL generators and `miseledger crawl sessions`.
 
 The intended split is:
 
-- StationTrail owns source-specific local harness parsing and privacy-conscious export.
-- MiseLedger owns adapter ingest, normalized SQLite storage, FTS, relations, scan manifests, search, show, and evidence bundles.
+- MiseLedger owns built-in local harness parsing, local artifact crawling, adapter ingest, normalized SQLite storage, FTS, relations, scan manifests, search, show, and evidence bundles.
+- External crawler binaries own their source-specific sync and query behavior, then hand MiseLedger adapter JSONL.
 
-When installed on `PATH`, StationTrail can be used through:
+The earlier StationTrail and SourceHarvest repos were archived once their portable export paths were absorbed into MiseLedger. Existing adapter JSONL from those tools can still be imported.
+
+Common paths:
 
 ```bash
-miseledger import stationtrail codex ~/.codex/sessions --json
+miseledger crawl sessions --json
+miseledger crawl docs ./notes --json
+miseledger crawl gitlog . --json
+miseledger import adapter discrawl.adapter.jsonl --source discrawl --json
 ```
-
-MiseLedger may keep native adapters as compatibility wrappers, but it should not become the long-term home for every harness parser.
 
 The minimum proof remains:
 

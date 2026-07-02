@@ -9,12 +9,10 @@ miseledger adapter hermes ~/.hermes/sessions --out -
 miseledger import hermes ~/.hermes/sessions --json
 ```
 
-StationTrail can still export the same records through the shared adapter contract:
+Archived StationTrail exports used the same shared adapter contract. If you already have one of those JSONL files, import it through the adapter path:
 
 ```bash
-stationtrail hermes ~/.hermes/sessions --out - | miseledger import adapter -
-miseledger import stationtrail hermes ~/.hermes/sessions --json
-stationtrail all --out - --redact paths,secrets | miseledger import adapter -
+miseledger import adapter hermes.adapter.jsonl --source hermes --json
 ```
 
 Hermes `state.db` remains an observed storage surface, but MiseLedger does not parse it directly. Native support is intentionally limited to readable snapshot and trajectory files with stable JSON shapes.

@@ -39,14 +39,12 @@ MiseLedger builds a **local-first evidence ledger** of your AI work history: age
 
 Each source system is best at its native domain:
 
-- [StationTrail](https://github.com/escoffier-labs/stationtrail): Codex, Claude, OpenClaw, OpenCode, Hermes, and related local session logs
-- [SourceHarvest](https://github.com/escoffier-labs/sourceharvest): local files, notes, generic exports, git history, and future crawler adapter exports
-- `discrawl`: Discord messages
-- `gitcrawl`: GitHub issues and pull requests
-- `graincrawl`: Granola notes and transcripts
-- `notcrawl`: Notion pages and databases
-- `slacrawl`: Slack messages and threads
-- `telecrawl`: Telegram Desktop archive data
+- Built-in session crawlers: Codex, Claude, OpenClaw, OpenCode, Hermes, and Cursor local history.
+- Built-in local artifact crawlers: Markdown, text files, HTML exports, JSON or JSONL exports, and git history.
+- Built-in provider export crawlers: official ChatGPT and Claude conversation exports.
+- External crawler binaries: `discrawl` for Discord, `gitcrawl` for GitHub issues and pull requests, `graincrawl` for Granola, `notcrawl` for Notion, `slacrawl` for Slack, `mailcrawl` for Gmail, and `telecrawl` for Telegram Desktop archive data.
+
+The earlier StationTrail and SourceHarvest repositories were archived after their portable export paths were absorbed into MiseLedger's built-in crawl and import surfaces.
 
 MiseLedger is the normalized evidence layer above those systems, not a replacement for them.
 
@@ -105,12 +103,13 @@ flowchart TB
     ADAPTER["<b>Adapter JSONL</b><br/>file, stdin, wrappers"]
 
     subgraph SOURCES [" source exporters "]
-        STATIONTRAIL["<b>StationTrail</b><br/>agent-session logs"]
-        SOURCEHARVEST["<b>SourceHarvest</b><br/>files, notes, exports, git"]
-        NATIVE["<b>Native adapters</b><br/>Codex, OpenClaw, Claude, Hermes, OpenCode"]
+        SESSIONS["<b>Built-in session crawlers</b><br/>Codex, Claude, OpenClaw, OpenCode, Hermes, Cursor"]
+        LOCAL["<b>Built-in artifact crawlers</b><br/>docs, files, HTML, JSON, JSONL, gitlog"]
+        PROVIDERS["<b>Provider export crawlers</b><br/>ChatGPT, Claude exports"]
+        EXTERNAL["<b>External crawler binaries</b><br/>discrawl, gitcrawl, graincrawl, notcrawl, slacrawl, mailcrawl, telecrawl"]
     end
 
-    STATIONTRAIL & SOURCEHARVEST & NATIVE --> ADAPTER
+    SESSIONS & LOCAL & PROVIDERS & EXTERNAL --> ADAPTER
 
     subgraph INGEST [" ingest path "]
         PARSE["<b>Parse and validate</b><br/>miseledger.adapter.v1"]
@@ -145,7 +144,7 @@ flowchart TB
     classDef archive fill:#2563eb,stroke:#1d4ed8,color:#fff;
     classDef surface fill:#f1f5f9,stroke:#94a3b8,color:#334155;
     classDef guard fill:#fff7ed,stroke:#ea580c,color:#7c2d12;
-    class STATIONTRAIL,SOURCEHARVEST,NATIVE,ADAPTER source;
+    class SESSIONS,LOCAL,PROVIDERS,EXTERNAL,ADAPTER source;
     class PARSE,NORMALIZE,DEDUPE,INDEX process;
     class ARCHIVE archive;
     class SEARCH,EXPORT,API,MAINTAIN surface;
@@ -154,7 +153,7 @@ flowchart TB
 
 MiseLedger follows one ingest path:
 
-1. Receive `miseledger.adapter.v1` JSONL from a file, stdin, StationTrail, SourceHarvest, or a native compatibility adapter.
+1. Receive `miseledger.adapter.v1` JSONL from a file, stdin, a built-in crawler, a native compatibility adapter, or an external crawler binary.
 2. Parse and validate each adapter record.
 3. Store normalized sources, collections, items, actors, artifacts, raw refs, tags, imports, warnings, and scan manifests in SQLite.
 4. Deduplicate repeat records and preserve raw payload references for audit.
@@ -169,28 +168,30 @@ flowchart TB
     SQLITE["<b>SQLite archive</b><br/>normalized records, FTS, relations, raw refs"]
     MISELEDGER -->|owns| SQLITE
 
-    subgraph AGENTS [" agent-session scanners "]
-        STATIONTRAIL["<b>StationTrail</b><br/>Codex, Claude, OpenClaw, OpenCode, Hermes"]
-        COMPAT["<b>Compatibility adapters</b><br/>native MiseLedger imports"]
+    subgraph AGENTS [" agent-session crawlers "]
+        SESSIONS["<b>miseledger crawl sessions</b><br/>Codex, Claude, OpenClaw, OpenCode, Hermes, Cursor"]
+        COMPAT["<b>Native imports</b><br/>source-specific compatibility commands"]
     end
 
-    subgraph LOCAL [" local source exporters "]
-        SOURCEHARVEST["<b>SourceHarvest</b><br/>Markdown, files, HTML, JSON, git history"]
+    subgraph LOCAL [" local artifact crawlers "]
+        ARTIFACTS["<b>miseledger crawl docs/files</b><br/>Markdown, text, logs, HTML"]
+        GITLOG["<b>miseledger crawl gitlog</b><br/>repository history"]
         GENERIC["<b>Generic adapter records</b><br/>normalized source exports"]
     end
 
-    subgraph CRAWLERS [" crawler tools "]
+    subgraph CRAWLERS [" external crawler binaries "]
         DISCRAWL["discrawl"]
         GITCRAWL["gitcrawl"]
         GRAINCRAWL["graincrawl"]
         NOTCRAWL["notcrawl"]
         SLACRAWL["slacrawl"]
+        MAILCRAWL["mailcrawl"]
         TELECRAWL["telecrawl"]
     end
 
-    STATIONTRAIL & COMPAT == adapter JSONL ==> MISELEDGER
-    SOURCEHARVEST & GENERIC == adapter JSONL ==> MISELEDGER
-    DISCRAWL & GITCRAWL & GRAINCRAWL & NOTCRAWL & SLACRAWL & TELECRAWL -. exports or snapshots .-> SOURCEHARVEST
+    SESSIONS & COMPAT == adapter JSONL ==> MISELEDGER
+    ARTIFACTS & GITLOG & GENERIC == adapter JSONL ==> MISELEDGER
+    DISCRAWL & GITCRAWL & GRAINCRAWL & NOTCRAWL & SLACRAWL & MAILCRAWL & TELECRAWL == adapter JSONL ==> MISELEDGER
 
     subgraph READERS [" reader workflows "]
         CLI["<b>miseledger CLI</b><br/>search, show, explain, export"]
@@ -211,14 +212,14 @@ flowchart TB
     classDef reader fill:#f1f5f9,stroke:#94a3b8,color:#334155;
     class MISELEDGER core;
     class SQLITE archive;
-    class STATIONTRAIL,COMPAT,SOURCEHARVEST,GENERIC source;
-    class DISCRAWL,GITCRAWL,GRAINCRAWL,NOTCRAWL,SLACRAWL,TELECRAWL crawler;
+    class SESSIONS,COMPAT,ARTIFACTS,GITLOG,GENERIC source;
+    class DISCRAWL,GITCRAWL,GRAINCRAWL,NOTCRAWL,SLACRAWL,MAILCRAWL,TELECRAWL crawler;
     class CLI,EVIDENCE,MCP,OPS reader;
 ```
 
-StationTrail owns local agent-session scanning. SourceHarvest owns non-agent local source export normalization. MiseLedger owns archive ingest, SQLite, FTS, relations, scan manifests, reader APIs, and evidence bundles.
+MiseLedger owns local agent-session crawling, local artifact crawling, archive ingest, SQLite, FTS, relations, scan manifests, reader APIs, and evidence bundles.
 
-Crawler tools keep their native sync/query behavior. Their local exports, snapshots, or databases should flow through SourceHarvest before entering MiseLedger.
+External crawler tools keep their native sync and query behavior. Their adapter JSONL exports can flow directly into MiseLedger through `miseledger crawl <domain>` wrappers or `miseledger import adapter`.
 
 ## Runtime Paths
 
@@ -342,74 +343,50 @@ sessionfind "release audit" --source codex --json
 
 The scanners accept a file or directory, walk relevant JSON and JSONL files recursively, skip obvious backups and sidecars, preserve raw refs, and warn rather than crash on malformed or unknown events. Hermes native support covers `session_*.json` snapshots and trajectory JSONL under `~/.hermes/sessions`; Hermes `state.db` is not parsed directly. OpenCode native support reads sanitized `opencode export` JSON files under `~/.local/share/opencode` by default.
 
-## External StationTrail Scanner
+## Built-In Crawlers
 
-StationTrail is the separate local agent-session scanner/exporter. It keeps source-specific harness parsing outside MiseLedger and emits the same `miseledger.adapter.v1` JSONL contract:
-
-```bash
-stationtrail discover --json
-stationtrail doctor --json
-stationtrail doctor --live --json
-stationtrail codex ~/.codex/sessions --dry-run --json
-stationtrail all --out - --redact paths,secrets | miseledger import adapter -
-stationtrail claude ~/.claude/projects --out - | miseledger import adapter -
-stationtrail openclaw ~/.openclaw/agents --out openclaw.adapter.jsonl
-stationtrail opencode ~/.local/share/opencode --out - | miseledger import adapter -
-stationtrail hermes ~/.hermes/sessions --out - | miseledger import adapter -
-miseledger import adapter openclaw.adapter.jsonl --json
-```
-
-When `stationtrail` is installed on `PATH`, MiseLedger can run it directly:
+`miseledger crawl sessions` imports discovered local agent-session roots through the same adapter ingest path:
 
 ```bash
-miseledger import stationtrail codex ~/.codex/sessions --json
-miseledger import stationtrail claude ~/.claude/projects --json
-miseledger import stationtrail openclaw ~/.openclaw/agents --json
-miseledger import stationtrail opencode opencode-session.json --json
-miseledger import stationtrail hermes ~/.hermes/sessions --json
+miseledger sources discover --json
+miseledger crawl sessions --dry-run --json
+miseledger crawl sessions --json
+miseledger crawl cursor --json
 ```
 
-The wrapper streams StationTrail output through adapter ingest and records StationTrail scan manifests from its summary output. For mixed-source imports, use `stationtrail all --out - | miseledger import adapter -`; each adapter record still carries its own `source.kind`.
-
-MiseLedger native adapters remain available for compatibility, including OpenCode sanitized export JSON. Long term, source-specific agent-session parser ownership should live in StationTrail while MiseLedger owns archive ingest, SQLite, FTS, relations, scan manifests, and evidence bundles.
-
-## External SourceHarvest Scanner
-
-SourceHarvest is the separate local source-system exporter for non-harness records such as notes, generic JSONL exports, local crawler outputs, and future domain harvesters:
+Native compatibility imports remain available when you want to point at one source explicitly:
 
 ```bash
-sourceharvest jsonl export.jsonl --source notes --collection notes:local --out - | miseledger import adapter -
-sourceharvest markdown ./notes --source notes --collection notes:local --out - | miseledger import adapter -
+miseledger import codex ~/.codex/sessions --json
+miseledger import claude ~/.claude/projects --json
+miseledger import openclaw ~/.openclaw/agents --json
+miseledger import opencode ~/.local/share/opencode --json
+miseledger import hermes ~/.hermes/sessions --json
 ```
 
-When `sourceharvest` is installed on `PATH`, MiseLedger can run it directly:
-
-```bash
-miseledger import sourceharvest markdown ./notes --source notes --collection notes:local --json
-miseledger import sourceharvest files ./notes --source notes --collection notes:files --glob "*.md,*.txt" --json
-miseledger import sourceharvest html ./site-export --source docs --collection docs:html --json
-miseledger import sourceharvest gitlog . --source gitlog --collection repo:miseledger --json
-miseledger import sourceharvest json export.json --source export --collection export:records --records-path records --json
-```
-
-The user-facing crawl shortcuts add defaults for common local archive sources:
+Local artifact crawls add defaults for common archive sources:
 
 ```bash
 miseledger crawl docs ./notes --json
 miseledger crawl files ./logs --glob "*.md,*.txt,*.log" --json
-miseledger crawl repo . --json
+miseledger crawl gitlog . --json
 miseledger crawl json export.json --records-path records --json
+miseledger crawl jsonl export.jsonl --source notes --collection notes:local --json
 miseledger crawl adapter export.adapter.jsonl --source export --json
 ```
 
-Use StationTrail for agent-session logs. Use SourceHarvest for other local source-system exports. MiseLedger remains the archive, search, relation, and evidence layer for both.
-
-Planned crawler adapter imports should keep this shape once SourceHarvest has real schema-backed adapters:
+External crawler binaries can be called through domain wrappers when installed on `PATH`, or through adapter JSONL files they produced earlier:
 
 ```bash
-miseledger import sourceharvest discrawl ~/.local/share/discrawl/discrawl.db --json
-miseledger import sourceharvest telecrawl ~/.local/share/telecrawl/telecrawl.db --json
+miseledger crawl discord --limit 100 --json
+miseledger crawl slack --workspace T123 --json
+miseledger crawl granola --json
+miseledger crawl notion --json
+miseledger crawl gmail --account me@example.com --query "subject:miseledger" --json
+miseledger import adapter discrawl.adapter.jsonl --source discrawl --json
 ```
+
+Archived StationTrail and SourceHarvest exports are still ordinary `miseledger.adapter.v1` JSONL, so already-generated files can be imported with `miseledger import adapter`.
 
 ## Scan Manifests
 
@@ -525,7 +502,7 @@ If a target is not present yet, MiseLedger preserves `target_external_id` for la
 - **A single tool's built-in history** (Codex, Claude, OpenCode, Cursor, ChatGPT export) is a silo. It does not cross harnesses, and there is no shared search. MiseLedger normalizes every source into one `adapter.v1` contract and one FTS5 index, so one query spans Codex, Claude, OpenClaw, OpenCode, Cursor, chat exports, notes, and git history at once.
 - **`grep` over raw session folders** works until the formats diverge, the JSONL nests, and binary stores like Cursor's `store.db` are unreadable. MiseLedger parses each harness, dedupes by stable external IDs, preserves raw refs for audit, and warns rather than crashing on malformed records.
 - **A vector database or RAG stack** adds embeddings, a server, and a model dependency for what is mostly an exact-recall problem. MiseLedger stays lexical and deterministic: FTS5 search, shallow relations, and reproducible evidence bundles, with no embeddings, no model calls, and no network.
-- **StationTrail and SourceHarvest** are the source exporters, not the archive. They scan and emit `adapter.v1` records. MiseLedger is the layer above them that ingests, normalizes, indexes, and serves. Use them together.
+- **The archived StationTrail and SourceHarvest repos** were earlier source-exporter experiments. Their adapter JSONL output still imports cleanly, but the day-to-day crawler paths now live under `miseledger crawl` and native `miseledger import` commands.
 
 ## What MiseLedger is not
 
@@ -536,7 +513,7 @@ It does not:
 - make network calls in its core path or send your transcripts anywhere
 - run in the background, watch files continuously, or install schedulers
 - execute imported text; every imported record is treated as untrusted evidence, not instructions
-- replace StationTrail, SourceHarvest, or the upstream crawlers; it is the archive and evidence layer above them
+- replace upstream crawler binaries for domain-specific sync and query behavior
 - embed, rank with a model, or call an LLM to answer a query
 - mutate or delete your normalized evidence on `prune` or `compact` (those touch import metadata, scan rows, and SQLite housekeeping only)
 
