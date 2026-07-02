@@ -172,3 +172,43 @@ def test_recording_svg_roundtrip(tmp_path):
     assert any(r.path == "docs/quickstart.svg" and r.status == "mismatch" for r in vs.scan(m, tmp_path, "0.17.0"))
     assert "docs/quickstart.svg" in vs.apply(m, tmp_path, "0.17.0")
     assert all(r.status == "ok" for r in vs.scan(m, tmp_path, "0.17.0"))
+
+
+def test_version_sync_check_ok(tmp_path, capsys):
+    _repo(tmp_path)
+    assert vs.version_sync(target=tmp_path, write=False) == 0
+    assert "checked=" in capsys.readouterr().out
+
+
+def test_version_sync_check_drift(tmp_path, capsys):
+    _repo(tmp_path, cast_version="0.13.0")
+    assert vs.version_sync(target=tmp_path, write=False) == 1
+    err = capsys.readouterr().err
+    assert "quickstart.cast declares 0.13.0" in err
+
+
+def test_version_sync_github_annotation(tmp_path, capsys, monkeypatch):
+    _repo(tmp_path, cast_version="0.13.0")
+    monkeypatch.setenv("GITHUB_ACTIONS", "true")
+    vs.version_sync(target=tmp_path, write=False)
+    assert "::error::" in capsys.readouterr().err
+
+
+def test_version_sync_write(tmp_path, capsys):
+    _repo(tmp_path, cast_version="0.13.0")
+    assert vs.version_sync(target=tmp_path, write=True) == 0
+    assert vs.version_sync(target=tmp_path, write=False) == 0
+
+
+def test_version_sync_missing_manifest(tmp_path, capsys):
+    assert vs.version_sync(target=tmp_path, write=False) == 2
+    assert "no version-sync manifest" in capsys.readouterr().err
+
+
+def test_version_sync_json(tmp_path, capsys):
+    _repo(tmp_path, cast_version="0.13.0")
+    assert vs.version_sync(target=tmp_path, write=False, json_output=True) == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["version"] == "0.17.0"
+    assert payload["ok"] is False
+    assert any(r["status"] == "mismatch" for r in payload["results"])

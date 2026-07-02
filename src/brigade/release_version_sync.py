@@ -177,3 +177,51 @@ def apply(manifest: Manifest, target: Path, expected: str) -> list[str]:
                 file.write_text(new_text)
                 changed.append(file.relative_to(target).as_posix())
     return changed
+
+
+def version_sync(*, target: Path, write: bool = False, json_output: bool = False) -> int:
+    try:
+        manifest = load_manifest(target)
+        expected = resolve_source(manifest, target)
+    except FileNotFoundError as exc:
+        print(f"error: no version-sync manifest: {exc}", file=sys.stderr)
+        return 2
+    except ValueError as exc:
+        print(f"error: invalid version-sync manifest: {exc}", file=sys.stderr)
+        return 2
+
+    if write:
+        changed = apply(manifest, target, expected)
+        if json_output:
+            print(json.dumps({"version": expected, "changed": changed}, indent=2, sort_keys=True))
+        elif changed:
+            print(f"version={expected} rewrote {len(changed)} file(s):")
+            for rel in changed:
+                print(f"  {rel}")
+        else:
+            print(f"version={expected} already in sync")
+        return 0
+
+    results = scan(manifest, target, expected)
+    problems = [r for r in results if r.status != "ok"]
+    if json_output:
+        payload = {
+            "version": expected,
+            "source": manifest.source.file,
+            "checked": len(results),
+            "results": [{"path": r.path, "status": r.status, "found": list(r.found)} for r in results],
+            "ok": not problems,
+        }
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 1 if problems else 0
+
+    print(f"version={expected} source={manifest.source.file} checked={len(results)} locations")
+    github = bool(os.environ.get("GITHUB_ACTIONS"))
+    for result in problems:
+        if result.status == "mismatch":
+            declared = ", ".join(sorted(set(result.found)))
+            msg = f"{result.path} declares {declared}, {manifest.source.file} says {expected}"
+        else:
+            msg = f"{result.path}: version token not found (pattern drifted or asset not re-rendered)"
+        print(f"{'::error::' if github else 'FAIL '}{msg}", file=sys.stderr)
+    return 1 if problems else 0
