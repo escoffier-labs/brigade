@@ -12,7 +12,9 @@ from . import roster as roster_mod
 DEFAULT_ROSTER_REL = ".brigade/roster.toml"
 
 
-def default_roster_text(*, ollama_model: str = "llama3.3", max_workers: int = 4) -> str:
+def default_roster_text(
+    *, ollama_model: str = "llama3.3", max_workers: int = 4, review_model: str | None = None
+) -> str:
     return f"""# Brigade aboyeur roster.
 # Edit agent roles and CLI refs to match the tools installed on this machine.
 
@@ -29,7 +31,7 @@ role = "Make precise code changes and report what changed."
 [agents.local_researcher]
 cli = "ollama:{ollama_model}"
 role = "Research locally and summarize useful findings."
-
+{_reviewer_seat(review_model)}
 [limits]
 max_workers = {max_workers}
 timeout_seconds = 600
@@ -59,12 +61,35 @@ allow_models = ["codex", "ollama:*"]
 """
 
 
-def init(target: Path, *, force: bool = False, ollama_model: str = "llama3.3", max_workers: int = 4) -> int:
+def _reviewer_seat(review_model: str | None) -> str:
+    if not review_model:
+        return ""
+    # A reviewer on a different model than the coder makes review
+    # independence structural instead of stylistic (issue #125).
+    return f"""
+[agents.reviewer]
+cli = "codex"
+model = "{review_model}"
+role = "Inspect code and reports, verify claims against the actual diff, and flag problems."
+"""
+
+
+def init(
+    target: Path,
+    *,
+    force: bool = False,
+    ollama_model: str = "llama3.3",
+    max_workers: int = 4,
+    review_model: str | None = None,
+) -> int:
     if max_workers < 1:
         print("error: --max-workers must be a positive integer", file=sys.stderr)
         return 2
     if not ollama_model.strip():
         print("error: --ollama-model must be non-empty", file=sys.stderr)
+        return 2
+    if review_model is not None and not review_model.strip():
+        print("error: --review-model must be non-empty when provided", file=sys.stderr)
         return 2
 
     target = target.expanduser()
@@ -74,7 +99,13 @@ def init(target: Path, *, force: bool = False, ollama_model: str = "llama3.3", m
         return 2
 
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(default_roster_text(ollama_model=ollama_model.strip(), max_workers=max_workers))
+    path.write_text(
+        default_roster_text(
+            ollama_model=ollama_model.strip(),
+            max_workers=max_workers,
+            review_model=review_model.strip() if review_model else None,
+        )
+    )
     print(f"wrote {path}")
     return 0
 

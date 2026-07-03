@@ -20,6 +20,12 @@ def register(sub: argparse._SubParsersAction) -> None:
         help="Default local researcher model for the starter roster.",
     )
     p_roster_init.add_argument("--max-workers", type=int, default=4)
+    p_roster_init.add_argument(
+        "--review-model",
+        default=None,
+        help="Add a reviewer seat pinned to this model (e.g. gpt-5.3-codex-spark) so review "
+        "independence is structural: the reviewer runs a different model than the coder.",
+    )
     p_roster_doctor = roster_sub.add_parser("doctor", help="Validate roster syntax and installed CLIs.")
     p_roster_doctor.add_argument("--target", "-t", type=Path, default=Path("."))
     p_roster_doctor.add_argument(
@@ -40,6 +46,7 @@ def dispatch(args) -> int:
             force=args.force,
             ollama_model=args.ollama_model,
             max_workers=args.max_workers,
+            review_model=args.review_model,
         )
     if args.roster_command == "doctor":
         return roster_cmd.doctor(target=args.target, roster_path=args.roster)

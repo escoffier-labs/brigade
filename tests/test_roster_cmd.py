@@ -1,5 +1,6 @@
 from brigade import agents
 from brigade import cli
+from brigade import roster
 from brigade import roster_cmd
 
 
@@ -154,3 +155,27 @@ def test_roster_doctor_endpoint_agent_skips_pin_check(tmp_target, capsys):
     out = capsys.readouterr().out
     assert rc == 0
     assert "endpoint https://example.test/v1/chat" in out
+
+
+def test_roster_init_review_model_adds_pinned_reviewer_seat(tmp_path):
+    # Structural review independence (issue #125): the reviewer seat runs a
+    # different model than the coder it checks.
+    rc = roster_cmd.init(tmp_path, review_model="gpt-5.3-codex-spark")
+    assert rc == 0
+    text = (tmp_path / ".brigade" / "roster.toml").read_text()
+    assert "[agents.reviewer]" in text
+    assert 'model = "gpt-5.3-codex-spark"' in text
+    # the generated roster stays loadable
+    loaded = roster.load_roster(tmp_path / ".brigade" / "roster.toml")
+    assert loaded.agents["reviewer"].model == "gpt-5.3-codex-spark"
+    assert loaded.agents["reviewer"].cli == "codex"
+
+
+def test_roster_init_without_review_model_has_no_reviewer_seat(tmp_path):
+    assert roster_cmd.init(tmp_path) == 0
+    assert "[agents.reviewer]" not in (tmp_path / ".brigade" / "roster.toml").read_text()
+
+
+def test_roster_init_rejects_blank_review_model(tmp_path, capsys):
+    assert roster_cmd.init(tmp_path, review_model="  ") == 2
+    assert "review-model" in capsys.readouterr().err
