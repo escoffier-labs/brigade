@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `brigade run` artifacts now carry brigade-computed ground truth (issue #125): `worker-results.json` and `synthesis.json` include a `ground_truth` block with `git diff --stat`, the changed and untracked file lists, a `changes.patch` reference, and verify exit codes parsed from the actual `.brigade/work/verify-runs` receipts. The synthesis prompt gets a compact brigade-computed facts section, so the chef synthesizes against facts instead of worker narration.
+
 ### Changed
 - `brigade work phases` (the phase-execution ledger) moved behind the extras wall with the other operator-suite surface; it stubs out with enable guidance when extras are disabled.
 - The shared `render.emit` renderer now backs the mechanical output sites in `tools_cmd`, `daily_cmd`, `center_cmd`, and `phases_cmd` (110 sites converted, byte-identical output); sites with interleaved logic or stderr remain on direct prints.
