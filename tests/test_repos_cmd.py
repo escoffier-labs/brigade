@@ -74,7 +74,7 @@ def test_repos_first_run_cli_dispatch(tmp_path, monkeypatch):
         seen.update(kwargs)
         return 0
 
-    monkeypatch.setattr(repos_cmd, "first_run_plan", fake_first_run_plan)
+    monkeypatch.setattr(repos_cmd.fleet_health, "first_run_plan", fake_first_run_plan)
     assert cli.main(["repos", "first-run", "plan", "--target", str(tmp_path), "--json"]) == 0
     assert seen == {"target": tmp_path, "json_output": True}
 
@@ -175,15 +175,15 @@ def test_repos_cli_dispatch(tmp_path, monkeypatch):
 
         return _fake
 
-    monkeypatch.setattr(repos_cmd, "init", record("init"))
-    monkeypatch.setattr(repos_cmd, "list_repos", record("list"))
-    monkeypatch.setattr(repos_cmd, "show", record("show"))
-    monkeypatch.setattr(repos_cmd, "scan", record("scan"))
-    monkeypatch.setattr(repos_cmd, "doctor", record("doctor"))
-    monkeypatch.setattr(repos_cmd, "import_issues", record("import-issues"))
-    monkeypatch.setattr(repos_cmd, "rearm", record("rearm"))
-    monkeypatch.setattr(repos_cmd, "health_commands", record("health-commands"))
-    monkeypatch.setattr(repos_cmd, "discover_plan", record("discover-plan"))
+    monkeypatch.setattr(repos_cmd.fleet, "init", record("init"))
+    monkeypatch.setattr(repos_cmd.fleet, "list_repos", record("list"))
+    monkeypatch.setattr(repos_cmd.fleet, "show", record("show"))
+    monkeypatch.setattr(repos_cmd.fleet, "scan", record("scan"))
+    monkeypatch.setattr(repos_cmd.fleet, "doctor", record("doctor"))
+    monkeypatch.setattr(repos_cmd.sweeps, "import_issues", record("import-issues"))
+    monkeypatch.setattr(repos_cmd.fleet, "rearm", record("rearm"))
+    monkeypatch.setattr(repos_cmd.fleet_health, "health_commands", record("health-commands"))
+    monkeypatch.setattr(repos_cmd.fleet, "discover_plan", record("discover-plan"))
 
     assert cli.main(["repos", "init", "--target", str(tmp_path), "--force", "--no-gitignore", "--json"]) == 0
     assert cli.main(["repos", "list", "--target", str(tmp_path), "--json"]) == 0
@@ -442,7 +442,7 @@ def test_repo_summaries_preserve_config_order_and_skip_disabled(tmp_path, monkey
     entries = [
         repos_cmd.RepoEntry(repo_id=f"r{i}", label=f"R{i}", path=tmp_path, enabled=(i % 4 != 0)) for i in range(1, 9)
     ]
-    monkeypatch.setattr(repos_cmd, "_repo_summary", lambda entry: {"id": entry.repo_id})
+    monkeypatch.setattr(repos_cmd.fleet, "_repo_summary", lambda entry: {"id": entry.repo_id})
     result = repos_cmd._repo_summaries(entries)
     assert [row["id"] for row in result] == [entry.repo_id for entry in entries if entry.enabled]
 
