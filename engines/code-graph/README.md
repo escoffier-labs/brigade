@@ -14,7 +14,7 @@
 
 <p align="center">
   <img src="https://shieldcn.dev/github/ci/escoffier-labs/graphtrail.svg?branch=master&workflow=ci.yml" alt="CI status">
-  <img src="https://shieldcn.dev/badge/crate-v0.1.0-orange.svg?logo=rust&logoColor=white" alt="Crate version 0.1.0">
+  <img src="https://shieldcn.dev/badge/crate-v0.2.0-orange.svg?logo=rust&logoColor=white" alt="Crate version 0.2.0">
   <img src="https://shieldcn.dev/badge/license-MIT-green.svg" alt="MIT license">
   <img src="https://shieldcn.dev/badge/MCP-server-8A2BE2.svg" alt="MCP server">
 </p>
@@ -35,7 +35,13 @@ It speaks two surfaces over the same graph. A command-line interface for humans 
 
 ## Install
 
-GraphTrail is a Rust crate with two binaries: `graphtrail` (the CLI) and `graphtrail-mcp` (the MCP server). Install both with cargo:
+GraphTrail is a Rust crate with two binaries: `graphtrail` (the CLI) and `graphtrail-mcp` (the MCP server). Install both from [crates.io](https://crates.io/crates/graphtrail):
+
+```bash
+cargo install graphtrail
+```
+
+Or track the repository head:
 
 ```bash
 cargo install --git https://github.com/escoffier-labs/graphtrail
@@ -127,7 +133,7 @@ A real `stats` tool call (the server indexed GraphTrail's own source first):
   "schema_version": 2,
   "symbols": 150,
   "synced_at": "1783099401",
-  "tool_version": "0.1.0"
+  "tool_version": "0.2.0"
 }
 ```
 
