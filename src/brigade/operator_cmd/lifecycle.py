@@ -478,6 +478,7 @@ def quickstart(
         )
 
     steps.append(_quickstart_mcp_onramp(target, dry_run=dry_run, force=force))
+    steps.append(_quickstart_dogfood(target, dry_run=dry_run, force=force))
 
     if dry_run:
         for harness in selected_harnesses:
@@ -575,6 +576,36 @@ def _quickstart_mcp_onramp(target: Path, *, dry_run: bool, force: bool) -> dict[
         if isinstance(plan_payload, dict):
             step["plan"] = {"counts": plan_payload.get("counts"), "server_count": len(plan_payload.get("items") or [])}
     return step
+
+
+def _quickstart_dogfood(target: Path, *, dry_run: bool, force: bool) -> dict[str, Any]:
+    """Arm the work/dogfood loop so a new repo captures runs from day one.
+
+    Without a dogfood config the `work` station is wired but dormant: `work
+    status` reports `dogfood: not ready` and no runs are ever captured, which is
+    the single most common reason a freshly set-up repo never feeds its outcome
+    ledger. This writes only `.brigade/dogfood.toml` (local owned state) and
+    starts no runs, matching the no-auto-run contract of the other steps.
+    """
+    from .. import dogfood_cmd
+
+    if dry_run:
+        return {
+            "id": "dogfood-init",
+            "status": "planned",
+            "return_code": 0,
+            "next_command": "brigade dogfood init --target .",
+        }
+    if dogfood_cmd.config_path(target).exists() and not force:
+        # A dogfood config already exists; keep it rather than clobber local edits.
+        return {"id": "dogfood-init", "status": "skipped", "return_code": 0}
+    init_rc, init_output = _capture_text_call(dogfood_cmd.init, target=target, force=force)
+    return {
+        "id": "dogfood-init",
+        "status": "ok" if init_rc == 0 else "error",
+        "return_code": init_rc,
+        "output": init_output,
+    }
 
 
 def _quickstart_next_commands(harnesses: list[str], *, dry_run: bool) -> list[str]:
