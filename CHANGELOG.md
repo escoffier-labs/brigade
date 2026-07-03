@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Migration
+Upgrading from 0.17.x, two breaking changes need one-time action:
+
+- **Extras surface.** If any script, cron, or habit runs `release`, `center`, `repos`, `research`, `roadmap`, `friction`, `chat`, `context`, `projects`, `learn`, `runbook`, `dogfood`, `pantry`, `notifications`, `budgets`, `untrusted`, either fragments group, or `work phases`, run `brigade extras on` once per machine before upgrading (or export `BRIGADE_EXTRAS=1` in that environment). Disabled commands exit 2 with this guidance rather than failing silently.
+- **Minimal repo installs.** `brigade init` and `operator quickstart` at repo depth now write only `AGENTS.md` and `SAFETY_RULES.md` plus gitignored state. If your setup expects `rules/`, `hooks/pre-push`, `INSTALL_FOR_AGENTS.md`, or the default tool packs, pass `--full` (or add the `repo-extras` include). Existing repos are untouched by the upgrade itself; re-running quickstart on an existing repo only adds missing files and never overwrites.
+
 ### Docs
 - README opening reframed: the one-liner now leads with the per-tool config and memory sprawl instead of abstract nouns, "What it does" defines a receipt as the file it is, and a sample verify-receipt ticket shows one. The receipts wording elsewhere in the opening was trimmed so the word appears where it is the feature, not as a refrain.
 

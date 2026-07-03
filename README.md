@@ -76,7 +76,7 @@ brigade operator quickstart --target ./my-repo --harnesses codex      # wire one
 brigade operator doctor --target ./my-repo --profile local-operator   # verify
 ```
 
-That installs the CLI, wires memory, handoffs, and local guardrails into one repo for a single harness, and prints a readiness check. The default footprint is deliberately small: two tracked files (`AGENTS.md`, `SAFETY_RULES.md`) plus gitignored local state. Pass `--full` for the whole kit (workflow rules, the inactive pre-push hook, the agent install doc, and the default tool packs); workspace-depth installs always get the full kitchen. Nothing leaves your machine and no daemon is started. Add `--dry-run` to preview the file-by-file plan before anything is written. More harnesses, workspace setups, and the homegrown-adoption path are under [Install](#install).
+That installs the CLI, wires memory, handoffs, a local MCP catalog, the dogfood/work-loop config, and local guardrails into one repo for a single harness, and prints a readiness check. The default footprint is deliberately small: `AGENTS.md`, `SAFETY_RULES.md`, the selected handoff template, and local `.brigade/` state. Pass `--full` for the whole kit (workflow rules, the inactive pre-push hook, the agent install doc, and the default tool packs); workspace-depth installs always get the full kitchen. Nothing leaves your machine and no daemon is started. Add `--dry-run` to preview the file-by-file plan before anything is written. More harnesses, workspace setups, and the homegrown-adoption path are under [Install](#install).
 
 The run ends with a readiness verdict (the recording above shows the full report):
 
