@@ -1,8 +1,10 @@
 import json
+import subprocess
 
 from brigade import aboyeur
 from brigade import agents
 from brigade.roster import Agent, Roster
+from tests.work_cmd_test_helpers import _init_git_repo
 
 
 def _roster():
@@ -49,6 +51,25 @@ def _restricted_roster():
         },
         max_workers=1,
         allow_models=("codex",),
+    )
+
+
+def _commit_all(repo):
+    subprocess.run(["git", "add", "."], cwd=repo, check=True, stdout=subprocess.DEVNULL)
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.name=Test User",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "-m",
+            "test fixture",
+        ],
+        cwd=repo,
+        check=True,
+        stdout=subprocess.DEVNULL,
     )
 
 
@@ -443,11 +464,15 @@ def test_run_writes_artifacts(monkeypatch, tmp_path):
                 ok=True,
             )
         if cli_ref == "ollama:llama3.3":
+            (cwd / "tracked.txt").write_text("changed by worker\n")
             return agents.AgentResult(text="worker output", ok=True)
         return agents.AgentResult(text="final answer", ok=True)
 
     run_cwd = tmp_path / "work"
     run_cwd.mkdir()
+    _init_git_repo(run_cwd)
+    (run_cwd / "tracked.txt").write_text("initial\n")
+    _commit_all(run_cwd)
     output_dir = tmp_path / "run"
     monkeypatch.setattr(aboyeur.agents, "run_agent", fake_run_agent)
 
@@ -478,7 +503,112 @@ def test_run_writes_artifacts(monkeypatch, tmp_path):
     assert synthesis["orchestrator"] == "chef"
     assert synthesis["result"]["ok"] is True
     assert synthesis["result"]["text"] == "final answer"
+    assert synthesis["ground_truth"]["changed_files"] == ["tracked.txt"]
+    worker_results = json.loads((output_dir / "worker-results.json").read_text())
+    ground_truth = worker_results["ground_truth"]
+    assert ground_truth["available"] is True
+    assert "tracked.txt" in ground_truth["changed_files"]
+    assert ground_truth["diffstat"]
+    assert "Brigade-computed facts:" in calls[-1][1]
+    assert "tracked.txt" in calls[-1][1]
     assert {call[2] for call in calls} == {run_cwd}
+
+
+def test_run_worker_results_include_latest_verification_receipt_commands(monkeypatch, tmp_path):
+    def fake_run_agent(cli_ref, prompt, timeout=600.0, cwd=None, read_only=False):
+        if "assignments" in prompt:
+            return agents.AgentResult(
+                text=json.dumps({"assignments": [{"worker": "coder", "task": "implement it"}]}),
+                ok=True,
+            )
+        if cli_ref == "ollama:llama3.3":
+            return agents.AgentResult(text="worker output", ok=True)
+        return agents.AgentResult(text="final answer", ok=True)
+
+    run_cwd = tmp_path / "work"
+    run_cwd.mkdir()
+    _init_git_repo(run_cwd)
+    (run_cwd / "tracked.txt").write_text("initial\n")
+    _commit_all(run_cwd)
+    stale_receipt_dir = run_cwd / ".brigade" / "work" / "verify-runs" / "20000101-000000-work-verify-old"
+    stale_receipt_dir.mkdir(parents=True)
+    (stale_receipt_dir / "receipt.json").write_text(
+        json.dumps(
+            {
+                "run_id": "20000101-000000-work-verify-old",
+                "status": "completed",
+                "started_at": "2000-01-01T00:00:00+00:00",
+                "commands": [{"command": "python -m pytest stale.py", "status": "completed", "exit_code": 0}],
+            }
+        )
+        + "\n"
+    )
+    receipt_dir = run_cwd / ".brigade" / "work" / "verify-runs" / "99990101-000000-work-verify-abc123"
+    receipt_dir.mkdir(parents=True)
+    (receipt_dir / "receipt.json").write_text(
+        json.dumps(
+            {
+                "run_id": "99990101-000000-work-verify-abc123",
+                "status": "failed",
+                "started_at": "9999-01-01T00:00:00+00:00",
+                "commands": [
+                    {
+                        "command": "python -m pytest tests/test_aboyeur.py -q",
+                        "status": "completed",
+                        "exit_code": 0,
+                    },
+                    {
+                        "command": "python -m ruff check src",
+                        "status": "failed",
+                        "exit_code": 2,
+                    },
+                ],
+            }
+        )
+        + "\n"
+    )
+    output_dir = tmp_path / "run"
+    monkeypatch.setattr(aboyeur.agents, "run_agent", fake_run_agent)
+
+    assert aboyeur.run("build feature", _roster(), cwd=run_cwd, output_dir=output_dir) == 0
+
+    ground_truth = json.loads((output_dir / "worker-results.json").read_text())["ground_truth"]
+    assert [receipt["run_id"] for receipt in ground_truth["verify_receipts"]] == ["99990101-000000-work-verify-abc123"]
+    assert ground_truth["latest_verify"]["status"] == "failed"
+    assert ground_truth["latest_verify"]["commands"] == [
+        {
+            "command": "python -m pytest tests/test_aboyeur.py -q",
+            "status": "completed",
+            "exit_code": 0,
+        },
+        {
+            "command": "python -m ruff check src",
+            "status": "failed",
+            "exit_code": 2,
+        },
+    ]
+
+
+def test_run_worker_results_ground_truth_unavailable_outside_git(monkeypatch, tmp_path):
+    def fake_run_agent(cli_ref, prompt, timeout=600.0, cwd=None, read_only=False):
+        if "assignments" in prompt:
+            return agents.AgentResult(
+                text=json.dumps({"assignments": [{"worker": "coder", "task": "implement it"}]}),
+                ok=True,
+            )
+        if cli_ref == "ollama:llama3.3":
+            return agents.AgentResult(text="worker output", ok=True)
+        return agents.AgentResult(text="final answer", ok=True)
+
+    run_cwd = tmp_path / "work"
+    run_cwd.mkdir()
+    output_dir = tmp_path / "run"
+    monkeypatch.setattr(aboyeur.agents, "run_agent", fake_run_agent)
+
+    assert aboyeur.run("build feature", _roster(), cwd=run_cwd, output_dir=output_dir) == 0
+
+    ground_truth = json.loads((output_dir / "worker-results.json").read_text())["ground_truth"]
+    assert ground_truth["available"] is False
 
 
 def test_dry_run_writes_plan_artifact(monkeypatch, tmp_path):
@@ -663,3 +793,25 @@ def test_disallowed_worker_is_recorded_not_run(monkeypatch):
     assert aboyeur.run("build feature", _restricted_roster()) == 0
     assert [call[0] for call in calls] == ["codex", "codex"]
     assert "not allowed by limits.allow_models" in calls[-1][1]
+
+
+def test_verify_receipts_sorted_chronologically_across_timezone_offsets(tmp_path):
+    # Lexical started_at ordering breaks with mixed offsets: 05:00+09:00 on
+    # Jan 2 is 20:00 UTC on Jan 1, chronologically BEFORE 23:00+00:00 on
+    # Jan 1, but lexically after it. latest_verify must follow real time.
+    from datetime import datetime, timezone
+
+    root = tmp_path / ".brigade" / "work" / "verify-runs"
+    for run_id, started_at in (
+        ("later-utc", "2030-01-01T23:00:00+00:00"),
+        ("earlier-but-lexically-larger", "2030-01-02T05:00:00+09:00"),
+    ):
+        d = root / run_id
+        d.mkdir(parents=True)
+        (d / "receipt.json").write_text(
+            json.dumps({"run_id": run_id, "status": "completed", "started_at": started_at, "commands": []}) + "\n"
+        )
+
+    receipts = aboyeur._verify_receipts_since(tmp_path, datetime(2020, 1, 1, tzinfo=timezone.utc))
+
+    assert [r["run_id"] for r in receipts] == ["later-utc", "earlier-but-lexically-larger"]

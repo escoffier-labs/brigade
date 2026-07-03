@@ -10,9 +10,11 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from json import JSONDecoder
 from pathlib import Path
+from typing import Any
 from uuid import uuid4
 
 from . import agents
+from . import proc, runguard
 from .roster import Agent, Roster, is_cli_allowed, timeout_for, workers
 
 
@@ -483,7 +485,12 @@ def dispatch(
     return all_results
 
 
-def build_synth_prompt(task: str, results: list[WorkerResult], read_only: bool = False) -> str:
+def build_synth_prompt(
+    task: str,
+    results: list[WorkerResult],
+    read_only: bool = False,
+    ground_truth: dict[str, object] | None = None,
+) -> str:
     if results:
         rendered = "\n\n".join(
             "\n".join(
@@ -502,9 +509,12 @@ def build_synth_prompt(task: str, results: list[WorkerResult], read_only: bool =
         rendered = "(No workers were assigned.)"
 
     policy = f"\n\n{_read_only_rules()}" if read_only else ""
+    facts = _ground_truth_facts(ground_truth)
+    facts_block = f"\n\n{facts}" if facts else ""
     return (
         "You are the Brigade orchestrator. Synthesize the final answer for the user.\n"
-        "Account for worker failures if any are present. Do not include implementation chatter.\n\n"
+        "Account for worker failures if any are present. Do not include implementation chatter."
+        f"{facts_block}\n\n"
         f"Original task:\n{task}\n\n"
         f"Worker results:\n{rendered}\n"
         f"{policy}"
@@ -564,6 +574,200 @@ def _agent_result_payload(result: agents.AgentResult) -> dict[str, object]:
         "detail": result.detail,
         "text": result.text,
     }
+
+
+def _parse_iso_datetime(value: object) -> datetime | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    raw = value.strip()
+    if raw.endswith("Z"):
+        raw = raw[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _git_stdout(cwd: Path, *args: str) -> tuple[str, str | None]:
+    result = proc.run(["git", *args], cwd=cwd)
+    if result.code == 0:
+        return result.stdout, None
+    detail = result.stderr.strip() or result.stdout.strip() or f"git {' '.join(args)} failed"
+    return "", detail
+
+
+def _receipt_command_payload(command: object) -> dict[str, object] | None:
+    if not isinstance(command, dict):
+        return None
+    raw_command = command.get("command")
+    if not isinstance(raw_command, str):
+        return None
+    payload: dict[str, object] = {"command": raw_command}
+    status = command.get("status")
+    if isinstance(status, str):
+        payload["status"] = status
+    exit_code = command.get("exit_code")
+    if isinstance(exit_code, int) and not isinstance(exit_code, bool):
+        payload["exit_code"] = exit_code
+    elif exit_code is None:
+        payload["exit_code"] = None
+    return payload
+
+
+def _verify_receipt_payload(data: dict[str, Any]) -> dict[str, object]:
+    payload: dict[str, object] = {}
+    for key in ("run_id", "status", "started_at", "completed_at"):
+        value = data.get(key)
+        if isinstance(value, str):
+            payload[key] = value
+    commands = data.get("commands")
+    if isinstance(commands, list):
+        payload["commands"] = [
+            command_payload for item in commands if (command_payload := _receipt_command_payload(item)) is not None
+        ]
+    else:
+        payload["commands"] = []
+    return payload
+
+
+def _verify_receipts_since(cwd: Path, started_at: datetime) -> list[dict[str, object]]:
+    root = cwd / ".brigade" / "work" / "verify-runs"
+    if not root.is_dir():
+        return []
+    receipts: list[dict[str, object]] = []
+    for receipt_path in sorted(root.glob("*/receipt.json")):
+        try:
+            data = json.loads(receipt_path.read_text())
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(data, dict):
+            continue
+        receipt_started_at = _parse_iso_datetime(data.get("started_at"))
+        if receipt_started_at is None or receipt_started_at < started_at:
+            continue
+        receipts.append(_verify_receipt_payload(data))
+
+    def _sort_key(item: dict[str, object]) -> tuple[datetime, str]:
+        # Sort by parsed UTC time: lexical started_at ordering misorders
+        # receipts with mixed timezone offsets.
+        parsed = _parse_iso_datetime(item.get("started_at"))
+        return (parsed or datetime.min.replace(tzinfo=timezone.utc), str(item.get("run_id") or ""))
+
+    receipts.sort(key=_sort_key, reverse=True)
+    return receipts
+
+
+def build_ground_truth(cwd: Path | None, started_at: datetime) -> dict[str, object]:
+    verify_receipts = _verify_receipts_since(cwd, started_at) if cwd is not None else []
+    payload: dict[str, object] = {
+        "available": False,
+        "cwd": str(cwd) if cwd is not None else None,
+        "diffstat": "",
+        "changed_files": [],
+        "untracked_files": [],
+        "patch_ref": None,
+        "verify_receipts": verify_receipts,
+        "latest_verify": verify_receipts[0] if verify_receipts else None,
+    }
+    if cwd is None:
+        payload["reason"] = "cwd not set"
+        return payload
+
+    inside, error = _git_stdout(cwd, "rev-parse", "--is-inside-work-tree")
+    if error is not None or inside.strip() != "true":
+        payload["reason"] = error or "not a git worktree"
+        return payload
+
+    diffstat, error = _git_stdout(cwd, "diff", "--stat", "HEAD")
+    if error is not None:
+        payload["reason"] = error
+        return payload
+    changed_names, error = _git_stdout(cwd, "diff", "--name-only", "HEAD")
+    if error is not None:
+        payload["reason"] = error
+        return payload
+    try:
+        untracked_files = runguard._untracked_files(cwd)
+    except runguard.RunGuardError as exc:
+        payload["reason"] = str(exc)
+        return payload
+
+    payload.update(
+        {
+            "available": True,
+            "diffstat": diffstat.strip(),
+            "changed_files": [line for line in changed_names.splitlines() if line.strip()],
+            "untracked_files": untracked_files,
+        }
+    )
+    return payload
+
+
+def _ground_truth_str_list(ground_truth: dict[str, object], key: str) -> list[str]:
+    value = ground_truth.get(key)
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, str)]
+
+
+def _ground_truth_facts(ground_truth: dict[str, object] | None) -> str:
+    if ground_truth is None:
+        return ""
+    lines = ["Brigade-computed facts:"]
+    if ground_truth.get("available") is not True:
+        reason = ground_truth.get("reason")
+        detail = f" ({_one_line(str(reason))})" if reason else ""
+        lines.append(f"- ground_truth: unavailable{detail}")
+    else:
+        changed_files = _ground_truth_str_list(ground_truth, "changed_files")
+        untracked_files = _ground_truth_str_list(ground_truth, "untracked_files")
+        diffstat = _one_line(str(ground_truth.get("diffstat") or "none"))
+        if len(diffstat) > 240:
+            diffstat = diffstat[:237] + "..."
+        lines.append(
+            f"- changed_files: {len(changed_files)}" + (f" ({', '.join(changed_files[:6])})" if changed_files else "")
+        )
+        lines.append(
+            f"- untracked_files: {len(untracked_files)}"
+            + (f" ({', '.join(untracked_files[:6])})" if untracked_files else "")
+        )
+        lines.append(f"- diffstat: {diffstat}")
+    patch_ref = ground_truth.get("patch_ref")
+    if isinstance(patch_ref, str) and patch_ref:
+        lines.append(f"- patch_ref: {patch_ref}")
+    verify_receipts = ground_truth.get("verify_receipts")
+    if isinstance(verify_receipts, list) and verify_receipts:
+        latest = verify_receipts[0] if isinstance(verify_receipts[0], dict) else {}
+        latest_status = latest.get("status") if isinstance(latest.get("status"), str) else "unknown"
+        latest_run = latest.get("run_id") if isinstance(latest.get("run_id"), str) else "unknown"
+        lines.append(f"- verify_receipts: {len(verify_receipts)} latest={latest_run} status={latest_status}")
+    else:
+        lines.append("- verify_receipts: 0")
+    return "\n".join(lines)
+
+
+def _with_patch_ref(ground_truth: object, patch_ref: str) -> object:
+    if not isinstance(ground_truth, dict):
+        return ground_truth
+    updated = dict(ground_truth)
+    updated["patch_ref"] = patch_ref
+    return updated
+
+
+def set_artifact_patch_ref(output_dir: Path, patch_ref: str = "changes.patch") -> None:
+    for filename in ("worker-results.json", "synthesis.json"):
+        path = output_dir / filename
+        try:
+            payload = json.loads(path.read_text())
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(payload, dict) or "ground_truth" not in payload:
+            continue
+        payload["ground_truth"] = _with_patch_ref(payload.get("ground_truth"), patch_ref)
+        _write_json(path, payload)
 
 
 def _roster_payload(roster: Roster) -> dict[str, object]:
@@ -724,8 +928,12 @@ def run(
         sandbox_read_only=sandbox_read_only,
         sandbox=sandbox,
     )
+    ground_truth = build_ground_truth(cwd, started_at)
     if output_dir is not None:
-        _write_json(output_dir / "worker-results.json", {"results": _worker_payload(worker_results)})
+        _write_json(
+            output_dir / "worker-results.json",
+            {"results": _worker_payload(worker_results), "ground_truth": ground_truth},
+        )
     if verbose:
         _print_worker_status(worker_results)
         print("synthesis:")
@@ -733,7 +941,7 @@ def run(
 
     final = _run_orchestrator(
         roster,
-        build_synth_prompt(task, worker_results, read_only=read_only),
+        build_synth_prompt(task, worker_results, read_only=read_only, ground_truth=ground_truth),
         cwd=cwd,
         read_only=read_only,
         sandbox_read_only=sandbox_read_only,
@@ -745,6 +953,7 @@ def run(
             {
                 "orchestrator": roster.orchestrator,
                 "result": _agent_result_payload(final),
+                "ground_truth": ground_truth,
             },
         )
     if not final.ok:

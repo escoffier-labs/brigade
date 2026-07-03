@@ -190,6 +190,8 @@ def dispatch(args) -> int:
                 # must not let cleanup destroy it.
                 keep_worktree = True
                 summary = runguard.collect_changes_patch(effective_cwd, output_dir / "changes.patch")
+                if summary.path.is_file():
+                    aboyeur_mod.set_artifact_patch_ref(output_dir, "changes.patch")
                 if summary.changed and not runguard.verify_changes_patch(effective_cwd, summary.path):
                     # A corrupt patch must never be the run's silent primary
                     # deliverable; keep the worktree as the recoverable copy.
