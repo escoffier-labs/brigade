@@ -50,6 +50,12 @@ def _load_args(args: str | None, args_json: Path | None) -> tuple[object | None,
     return {}, None
 
 
+def _dict_or_empty(value: object) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    return {}
+
+
 def _call_plan_payload(
     target: Path,
     tool_id: str,
@@ -219,7 +225,7 @@ def _call_fingerprint(plan_payload: dict[str, Any]) -> str:
 
 
 def _call_plan_from_record(call: dict[str, Any]) -> dict[str, Any]:
-    contract = call.get("contract") if isinstance(call.get("contract"), dict) else {}
+    contract = _dict_or_empty(call.get("contract"))
     return {
         "tool_id": call.get("tool_id"),
         "family": call.get("family"),
@@ -271,7 +277,7 @@ def _approval_fingerprint(call: dict[str, Any]) -> str:
 def _make_call_record(plan_payload: dict[str, Any]) -> dict[str, Any]:
     fingerprint = _call_fingerprint(plan_payload)
     now = helpers._now().isoformat()
-    plan = plan_payload.get("plan") if isinstance(plan_payload.get("plan"), dict) else {}
+    plan = _dict_or_empty(plan_payload.get("plan"))
     return {
         "id": f"call-{fingerprint}",
         "status": "pending",
@@ -412,7 +418,7 @@ def _call_projection_summary(target: Path, tool_id: str) -> dict[str, Any]:
 
 
 def _runtime_snapshot_for_call(target: Path, call: dict[str, Any], *, run_health: bool = True) -> dict[str, Any] | None:
-    contract = call.get("contract") if isinstance(call.get("contract"), dict) else {}
+    contract = _dict_or_empty(call.get("contract"))
     runtime_id = contract.get("runtime_id")
     if not isinstance(runtime_id, str) or not runtime_id.strip():
         return None
@@ -435,6 +441,7 @@ def _run_id_for_call(call: dict[str, Any], started_at: str) -> str:
 
 def _call_run_blockers(target: Path, call: dict[str, Any], *, expected_status: str = "approved") -> list[str]:
     blockers: list[str] = []
+    contract = _dict_or_empty(call.get("contract"))
     status = str(call.get("status") or "")
     if status != expected_status:
         if status == "completed":
@@ -482,13 +489,12 @@ def _call_run_blockers(target: Path, call: dict[str, Any], *, expected_status: s
             current_projection = _call_projection_summary(target, tool_id)
             if current_projection != call.get("projection_summary", {}):
                 blockers.append("projection summary is stale")
-            cwd_value = call.get("contract", {}).get("cwd") if isinstance(call.get("contract"), dict) else None
+            cwd_value = contract.get("cwd")
             cwd_path = helpers._as_path(target, cwd_value) if cwd_value else target
             if cwd_path is None or not cwd_path.is_dir():
                 blockers.append(f"cwd does not exist: {cwd_path}")
     if not safety._command_parts(call.get("command")):
         blockers.append("command could not be parsed")
-    contract = call.get("contract") if isinstance(call.get("contract"), dict) else {}
     if contract.get("requires_runtime"):
         runtime_snapshot = _runtime_snapshot_for_call(target, call)
         if runtime_snapshot is None:
@@ -738,6 +744,7 @@ def _call_review(
         print(f"error: --target is not a directory: {target}", file=sys.stderr)
         return 2
     call, calls, error = _resolve_call(target, call_id)
+    payload: dict[str, Any]
     if call is None:
         payload = {"target": str(target), "error": error}
         if json_output:
