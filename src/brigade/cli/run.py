@@ -50,6 +50,12 @@ def register(sub: argparse._SubParsersAction) -> None:
         ),
     )
     p_run.add_argument(
+        "--codex-transport",
+        choices=["exec", "app-server"],
+        default=None,
+        help="Transport for codex workers. Defaults to the roster's codex_transport (exec).",
+    )
+    p_run.add_argument(
         "--inspect",
         action="store_true",
         help="Print a readable artifact summary after the run completes.",
@@ -187,6 +193,8 @@ def dispatch(args) -> int:
                 "read_only": args.read_only,
                 "sandbox": effective_sandbox,
             }
+            if args.codex_transport is not None:
+                run_kwargs["codex_transport"] = args.codex_transport
             if args.no_code_graph:
                 run_kwargs["code_graph_enabled"] = False
             rc = aboyeur_mod.run(args.task, loaded_roster, **run_kwargs)
