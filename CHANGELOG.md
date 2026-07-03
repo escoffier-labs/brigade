@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Docs
+- README opening reframed: the one-liner now leads with the per-tool config and memory sprawl instead of abstract nouns, "What it does" defines a receipt as the file it is, and a sample verify-receipt ticket shows one. The receipts wording elsewhere in the opening was trimmed so the word appears where it is the feature, not as a refrain.
+
 ### Added
 - `brigade run` artifacts now carry brigade-computed ground truth (issue #125): `worker-results.json` and `synthesis.json` include a `ground_truth` block with `git diff --stat`, the changed and untracked file lists, a `changes.patch` reference, and verify exit codes parsed from the actual `.brigade/work/verify-runs` receipts. The synthesis prompt gets a compact brigade-computed facts section, so the chef synthesizes against facts instead of worker narration.
 

@@ -5,7 +5,7 @@
 <h1 align="center">Brigade</h1>
 
 <p align="center">
-  <strong>One canonical source for the MCP servers, tools, and memory your AI coding agents share, merged into each tool's native config with a review gate and a receipt for every change. Local files, no daemon, no lock-in.</strong>
+  <strong>Every agent CLI you run keeps its own MCP config and its own private memory, and writes to both without review. Brigade merges one reviewed catalog of MCP servers, tools, and memory into each tool's native config. Local files, no daemon, no lock-in.</strong>
 </p>
 
 <p align="center">
@@ -29,7 +29,20 @@ Your agents run loops. Brigade keeps the receipts.
 
 ## What it does
 
-You run more than one agent CLI. Each one keeps its MCP servers in its own config file, its memory in its own silo, and writes to both without review. Brigade is the local layer that fixes that. You keep one canonical source for your MCP servers, your tool and skill catalog, and your memory, and Brigade merges each into the tools you actually use: MCP servers into each tool's native config, tools and skills projected into each harness, and one shared memory owned in one place. A review gate sits in front of anything that gets written, and every consequential change lands a receipt you can grep, diff, and roll back. No daemon, no hosted service, no vendor lock-in: it writes plain files in your repo when you run a command, and that is all it does.
+You run more than one agent CLI. Each one keeps its MCP servers in its own config file, its memory in its own silo, and writes to both without review. Brigade is the local layer that fixes that. You keep one canonical source for your MCP servers, your tool and skill catalog, and your memory, and Brigade merges each into the tools you actually use: MCP servers into each tool's native config, tools and skills projected into each harness, and one shared memory owned in one place. A review gate sits in front of anything that gets written. And when Brigade says receipt, it means a file: every consequential change writes a plain record of what ran, what it touched, and how it exited, into your repo where you can grep it, diff it, and roll it back. No daemon, no hosted service, no vendor lock-in: it writes plain files in your repo when you run a command, and that is all it does.
+
+```text
+┌──────────────────────────────────────────────────┐
+│  BRIGADE · VERIFY RECEIPT         20260630-1906  │
+├──────────────────────────────────────────────────┤
+│  command    pytest -q                            │
+│  exit       0              status    passed      │
+│  captured   skill: taste                   +1    │
+│  on file    .brigade/work/verify-runs/           │
+└──────────────────────────────────────────────────┘
+```
+
+<p align="center"><em>One verify receipt: the command, the real exit code, and the skill it scores, filed under <code>.brigade/</code> in your repo.</em></p>
 
 ## Install
 
@@ -126,13 +139,13 @@ Tools and skills get the same treatment: `brigade tools sync` projects one revie
 
 ## Shared memory, with a guard in front
 
-Writer harnesses leave handoff notes as they work. Brigade lints, guards, and classifies each one, then files the safe, targeted notes into durable memory on its own. A memory owner (OpenClaw, Hermes, or just you) only steps in for the ambiguous few. Every consequential action lands a receipt in a plain file you can grep, diff, and prune.
+Writer harnesses leave handoff notes as they work. Brigade lints, guards, and classifies each one, then files the safe, targeted notes into durable memory on its own. A memory owner (OpenClaw, Hermes, or just you) only steps in for the ambiguous few. Every consequential action is logged to a plain file you can grep, diff, and prune.
 
 1. agents write handoff notes into their own local inboxes
 2. Brigade lints and classifies each one before it can become memory
 3. safe, targeted notes file themselves into durable memory automatically
 4. only the ambiguous or risky few wait for your review
-5. future sessions start with better context, and receipts show what happened
+5. future sessions start with better context, and the paper trail shows what happened
 
 ```mermaid
 flowchart LR
