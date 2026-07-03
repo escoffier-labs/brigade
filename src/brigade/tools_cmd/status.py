@@ -146,7 +146,8 @@ def parity_status(*, target: Path, json_output: bool = False) -> int:
         print(f"error: --target is not a directory: {target}", file=sys.stderr)
         return 2
     payload = catalog_health._catalog_payload(target)
-    parity = payload.get("parity") if isinstance(payload.get("parity"), dict) else {}
+    raw_parity = payload.get("parity")
+    parity = raw_parity if isinstance(raw_parity, dict) else {}
     projection_issues = [issue for issue in payload["issues"] if issues._is_parity_issue(issue)]
     response = {
         "target": str(target),

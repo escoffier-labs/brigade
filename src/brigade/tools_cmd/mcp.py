@@ -12,7 +12,8 @@ from . import helpers, paths, safety
 
 
 def _mcp_jsonrpc_requests(call: dict[str, Any]) -> list[dict[str, Any]]:
-    contract = call.get("contract") if isinstance(call.get("contract"), dict) else {}
+    raw_contract = call.get("contract")
+    contract = raw_contract if isinstance(raw_contract, dict) else {}
     tool_name = str(contract.get("mcp_tool_name") or call.get("tool_id") or "")
     args = call.get("args") if isinstance(call.get("args"), dict) else {}
     return [
@@ -83,8 +84,10 @@ def _run_mcp_call(
     policy_decision: dict[str, Any],
     timeout_value: float | None,
 ) -> tuple[object, object, int | None, bool, str, dict[str, Any]]:
-    contract = call.get("contract") if isinstance(call.get("contract"), dict) else {}
-    env_values = policy_decision.get("env") if isinstance(policy_decision.get("env"), dict) else {}
+    raw_contract = call.get("contract")
+    contract = raw_contract if isinstance(raw_contract, dict) else {}
+    raw_env_values = policy_decision.get("env")
+    env_values = raw_env_values if isinstance(raw_env_values, dict) else {}
     run_env = os.environ.copy()
     for label, value in env_values.items():
         run_env[str(label)] = str(value)

@@ -27,7 +27,8 @@ def _read_text(path: Path) -> str:
 def _chunk(text: str, chunk_chars: int) -> List[str]:
     if len(text) <= chunk_chars:
         return [text]
-    parts, cur = [], []
+    parts: List[str] = []
+    cur: List[str] = []
     size = 0
     for para in text.split("\n\n"):
         if size + len(para) > chunk_chars and cur:

@@ -55,6 +55,14 @@ def _write_actions(target: Path, actions: list[dict[str, Any]]) -> None:
     _write_json(_actions_path(target), {"updated_at": _now().isoformat(), "actions": actions})
 
 
+def _dict_or_empty(value: object) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def _list_or_empty(value: object) -> list[Any]:
+    return value if isinstance(value, list) else []
+
+
 def _read_action_archive(target: Path) -> list[dict[str, Any]]:
     return _read_jsonl(_actions_archive_path(target))
 
@@ -130,7 +138,7 @@ def _target_imports_for_action(repo_path: Path, action: dict[str, Any]) -> list[
     action_id = str(action.get("fleet_action_id") or "")
     matches: list[dict[str, Any]] = []
     for item in work_cmd._read_imports(repo_path):
-        metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+        metadata = _dict_or_empty(item.get("metadata"))
         if metadata.get("fleet_action_id") == action_id:
             matches.append(item)
     matches.sort(
@@ -148,7 +156,7 @@ def _supersede_prior_dispatch_imports(
     changed = False
     now = _now().isoformat()
     for item in imports:
-        metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+        metadata = _dict_or_empty(item.get("metadata"))
         if metadata.get("fleet_action_id") != action.get("fleet_action_id"):
             continue
         if item.get("id") in current_import_ids:
@@ -169,7 +177,7 @@ def _supersede_prior_dispatch_imports(
 
 
 def _dispatch_state(action: dict[str, Any], repo_path: Path | None = None) -> dict[str, Any]:
-    dispatch = action.get("dispatch") if isinstance(action.get("dispatch"), dict) else {}
+    dispatch = _dict_or_empty(action.get("dispatch"))
     return {
         "status": action.get("resolution_status") or dispatch.get("status"),
         "target_import_id": dispatch.get("target_import_id") or action.get("target_import_id"),
@@ -219,7 +227,7 @@ def _dispatch_plan_for_action(
         record["acceptance"] = [
             fleet._safe_text(item, entry.path, entry.repo_id, entry.label) for item in record.get("acceptance", [])
         ]
-        metadata = record.get("metadata") if isinstance(record.get("metadata"), dict) else {}
+        metadata = _dict_or_empty(record.get("metadata"))
         for key in ("safe_summary", "suggested_command"):
             if key in metadata:
                 metadata[key] = fleet._safe_text(metadata[key], entry.path, entry.repo_id, entry.label)
@@ -229,7 +237,7 @@ def _dispatch_plan_for_action(
     dismissed_same_fingerprint = []
     wanted_fingerprint = record["metadata"].get("source_fingerprint")
     for item in existing_imports:
-        metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+        metadata = _dict_or_empty(item.get("metadata"))
         if metadata.get("source_fingerprint") == wanted_fingerprint:
             if item.get("status") == "dismissed":
                 dismissed_same_fingerprint.append(item.get("id"))
@@ -379,7 +387,7 @@ def actions_dispatch_apply(
 def _dispatch_import_summary(
     entry: constants.RepoEntry, action: dict[str, Any], item: dict[str, Any]
 ) -> dict[str, Any]:
-    metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+    metadata = _dict_or_empty(item.get("metadata"))
     wanted_fingerprint = str(action.get("source_fingerprint") or "")
     source_fingerprint = str(metadata.get("source_fingerprint") or "")
     return {
@@ -400,7 +408,7 @@ def _dispatch_import_summary(
 
 def _dispatch_report_for_action(target: Path, action: dict[str, Any]) -> dict[str, Any]:
     entry, error = _action_target_entry(target, action)
-    dispatch = action.get("dispatch") if isinstance(action.get("dispatch"), dict) else {}
+    dispatch = _dict_or_empty(action.get("dispatch"))
     warnings: list[dict[str, Any]] = []
     imports: list[dict[str, Any]] = []
     if error or entry is None:
@@ -509,9 +517,7 @@ def _dispatch_report_for_action(target: Path, action: dict[str, Any]) -> dict[st
             "target_inbox_label": dispatch.get("target_inbox_label"),
             "dispatched_at": dispatch.get("dispatched_at"),
             "source_fingerprint": dispatch.get("source_fingerprint"),
-            "superseded_import_ids": dispatch.get("superseded_import_ids")
-            if isinstance(dispatch.get("superseded_import_ids"), list)
-            else [],
+            "superseded_import_ids": _list_or_empty(dispatch.get("superseded_import_ids")),
         },
         "target_repo": {
             "repo_id": entry.repo_id if entry is not None else action.get("repo_id"),
@@ -543,11 +549,11 @@ def _dispatch_report_markdown(payload: dict[str, Any]) -> str:
         "## Actions",
         "",
     ]
-    for action in payload.get("actions") if isinstance(payload.get("actions"), list) else []:
+    for action in _list_or_empty(payload.get("actions")):
         lines.append(
             f"- `{action.get('fleet_action_id')}` repo={action.get('repo_id')} status={action.get('resolution_status') or action.get('action_status')} issues={action.get('issue_count')}"
         )
-        for check in action.get("checks") if isinstance(action.get("checks"), list) else []:
+        for check in _list_or_empty(action.get("checks")):
             if check.get("status") != constants.OK:
                 lines.append(f"  - {check.get('name')}: {check.get('detail')}")
     if not payload.get("actions"):
@@ -786,7 +792,7 @@ def _reconcile_one(target: Path, action: dict[str, Any]) -> dict[str, Any]:
             "status": "broken-reference",
             "detail": error or "target repo missing",
         }
-    dispatch = action.get("dispatch") if isinstance(action.get("dispatch"), dict) else {}
+    dispatch = _dict_or_empty(action.get("dispatch"))
     imports = _target_imports_for_action(entry.path, action)
     target_import = None
     target_import_id = dispatch.get("target_import_id")

@@ -508,6 +508,8 @@ def _repo_brigade_state(entry: constants.RepoEntry) -> dict[str, Any]:
     work_closeout = _latest_json_payload(repo / ".brigade" / "work" / "closeouts", "closeout.json")
     review_health = work_cmd._review_health(repo)
     handoff_payload = handoff_cmd.draft_queue_payload(repo)
+    handoff_counts = handoff_payload.get("counts")
+    handoff_counts = handoff_counts if isinstance(handoff_counts, dict) else {}
     security_health = security_cmd.health(repo)
     sweep_health = work_cmd._scanner_sweep_health(repo)
     pending_imports = work_cmd._pending_imports(repo)
@@ -571,10 +573,7 @@ def _repo_brigade_state(entry: constants.RepoEntry) -> dict[str, Any]:
         "pending_task_count": len(pending_tasks),
         "review_finding_count": int(review_health.get("pending_finding_count") or 0)
         + int(review_health.get("unresolved_finding_count") or 0),
-        "handoff_draft_count": int(
-            (handoff_payload.get("counts") if isinstance(handoff_payload.get("counts"), dict) else {}).get("pending")
-            or 0
-        ),
+        "handoff_draft_count": int(handoff_counts.get("pending") or 0),
         "security_issue_count": security_count,
         "scanner_sweep_status": (sweep_health.get("latest") or {}).get("status")
         if isinstance(sweep_health.get("latest"), dict)
@@ -888,6 +887,13 @@ def ingest_fleet(
             }
         )
 
+    totals: dict[str, int] = {
+        "processed": stats.processed,
+        "promoted": stats.promoted,
+        "routed": stats.routed,
+        "inboxed": stats.inboxed,
+        "skipped": stats.skipped,
+    }
     payload = {
         "target": str(target),
         "owner": str(target),
@@ -896,16 +902,9 @@ def ingest_fleet(
         "config_errors": errors,
         "repos_ingested": per_repo,
         "skipped": skipped,
-        "totals": {
-            "processed": stats.processed,
-            "promoted": stats.promoted,
-            "routed": stats.routed,
-            "inboxed": stats.inboxed,
-            "skipped": stats.skipped,
-        },
+        "totals": totals,
     }
     mode = "DRY-RUN (pass --apply to write)" if dry_run else "applied"
-    totals = payload["totals"]
     text_lines = [
         f"repos ingest [{mode}] -> owner {target}",
         *[
@@ -1194,8 +1193,10 @@ def doctor(*, target: Path, json_output: bool = False, deep: bool = False) -> in
     health_issue_count = int(payload.get("issue_count") or 0)
     checks = [*payload["checks"]]
     for bucket_name in ("report", "actions", "sweep", "health_commands", "release_train"):
-        bucket = payload.get(bucket_name) if isinstance(payload.get(bucket_name), dict) else {}
-        checks.extend(bucket.get("checks") if isinstance(bucket.get("checks"), list) else [])
+        raw_bucket = payload.get(bucket_name)
+        bucket = raw_bucket if isinstance(raw_bucket, dict) else {}
+        raw_checks = bucket.get("checks")
+        checks.extend(raw_checks if isinstance(raw_checks, list) else [])
     payload = {**payload, "checks": checks, "issue_count": scan_issue_count, "health_issue_count": health_issue_count}
     rc = 0 if scan_issue_count == 0 else 1
     text_lines = [

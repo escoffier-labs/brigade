@@ -37,7 +37,8 @@ def _policy_decision(
     family = str(plan.get("family") or "")
     if policy["allowed_families"] and family not in policy["allowed_families"]:
         blockers.append(f"family is not allowed by policy: {family}")
-    effects = [str(effect) for effect in (plan.get("effects") if isinstance(plan.get("effects"), list) else [])]
+    raw_effects = plan.get("effects")
+    effects = [str(effect) for effect in (raw_effects if isinstance(raw_effects, list) else [])]
     for effect in effects:
         if effect in policy["denied_effects"]:
             blockers.append(f"effect is denied by policy: {effect}")
@@ -58,8 +59,10 @@ def _policy_decision(
         and runtime_id not in policy["allowed_runtimes"]
     ):
         blockers.append(f"runtime is not allowed by policy: {runtime_id}")
-    env_bindings = policy.get("env_bindings", {}) if isinstance(policy.get("env_bindings"), dict) else {}
-    env_labels = [str(label) for label in (plan.get("env_labels") if isinstance(plan.get("env_labels"), list) else [])]
+    raw_env_bindings = policy.get("env_bindings", {})
+    env_bindings = raw_env_bindings if isinstance(raw_env_bindings, dict) else {}
+    raw_env_labels = plan.get("env_labels")
+    env_labels = [str(label) for label in (raw_env_labels if isinstance(raw_env_labels, list) else [])]
     env: dict[str, str] = {}
     env_labels_used: list[str] = []
     for label in env_labels:
@@ -347,8 +350,10 @@ def _validate_json_value(value: object, schema: dict[str, Any], *, path: str = "
     if "enum" in schema and isinstance(schema["enum"], list) and value not in schema["enum"]:
         errors.append(f"{path}: expected one of {', '.join(repr(item) for item in schema['enum'])}")
     if (schema_type == "object" or "properties" in schema or "required" in schema) and isinstance(value, dict):
-        properties = schema.get("properties") if isinstance(schema.get("properties"), dict) else {}
-        required = schema.get("required") if isinstance(schema.get("required"), list) else []
+        raw_properties = schema.get("properties")
+        properties = raw_properties if isinstance(raw_properties, dict) else {}
+        raw_required = schema.get("required")
+        required = raw_required if isinstance(raw_required, list) else []
         for key in required:
             if key not in value:
                 errors.append(f"{path}.{key}: required")

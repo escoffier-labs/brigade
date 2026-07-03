@@ -179,13 +179,16 @@ def _resume_checkpoint_payload(target: Path, checkpoint_id: str) -> tuple[dict[s
             "blockers": blockers,
             "error": "checkpoint is not resumable",
         }, 1
-    contract = call.get("contract") if isinstance(call.get("contract"), dict) else {}
+    raw_contract = call.get("contract")
+    contract = raw_contract if isinstance(raw_contract, dict) else {}
     cwd_value = contract.get("cwd")
     cwd = helpers._as_path(target, cwd_value) if cwd_value else target
     assert cwd is not None
     argv = safety._command_parts(call.get("command"))
-    for key in sorted((call.get("arguments") if isinstance(call.get("arguments"), dict) else {}).keys()):
-        value = call["arguments"][key]
+    raw_arguments = call.get("arguments")
+    arguments = raw_arguments if isinstance(raw_arguments, dict) else {}
+    for key in sorted(arguments.keys()):
+        value = arguments[key]
         if value is None:
             continue
         argv.extend(shlex.split(str(value)))
@@ -204,7 +207,8 @@ def _resume_checkpoint_payload(target: Path, checkpoint_id: str) -> tuple[dict[s
     timeout_value = float(timeout) if isinstance(timeout, (int, float)) and not isinstance(timeout, bool) else None
     policy_decision = safety._policy_decision(target, calls_mod._call_plan_from_record(call), include_env_values=True)
     run_env = os.environ.copy()
-    env_values = policy_decision.get("env") if isinstance(policy_decision.get("env"), dict) else {}
+    raw_env_values = policy_decision.get("env")
+    env_values = raw_env_values if isinstance(raw_env_values, dict) else {}
     for label, value in env_values.items():
         run_env[str(label)] = str(value)
     run_env["BRIGADE_TOOL_CHECKPOINT_DIR"] = str(paths.checkpoints_path(target))
@@ -362,7 +366,7 @@ def _checkpoint_review(
         return 2
     checkpoint, error = checkpoint_store._resolve_checkpoint(target, checkpoint_id)
     if checkpoint is None:
-        payload = {"target": str(target), "error": error}
+        payload: dict[str, Any] = {"target": str(target), "error": error}
         if json_output:
             print(json.dumps(payload, indent=2, sort_keys=True))
         else:

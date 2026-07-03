@@ -14,6 +14,14 @@ from ..render import emit
 from . import catalog_health, catalog_manage, constants, helpers, paths, projections
 
 
+def _dict_or_empty(value: object) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def _list_or_empty(value: object) -> list[Any]:
+    return value if isinstance(value, list) else []
+
+
 def _packs_root(target: Path) -> Path:
     return target / ".brigade" / "tools" / "packs"
 
@@ -46,10 +54,10 @@ def _tool_pack_payload(target: Path) -> dict[str, Any]:
 
 
 def _tool_pack_evidence_fingerprint(payload: dict[str, Any]) -> str:
-    tools = payload.get("tools") if isinstance(payload.get("tools"), list) else []
-    issues = payload.get("issues") if isinstance(payload.get("issues"), list) else []
-    parity = payload.get("parity") if isinstance(payload.get("parity"), dict) else {}
-    latest_closeout = parity.get("latest_closeout") if isinstance(parity.get("latest_closeout"), dict) else {}
+    tools = _list_or_empty(payload.get("tools"))
+    issues = _list_or_empty(payload.get("issues"))
+    parity = _dict_or_empty(payload.get("parity"))
+    latest_closeout = _dict_or_empty(parity.get("latest_closeout"))
     return helpers._stable_hash(
         {
             "tool_ids": [tool.get("id") for tool in tools if isinstance(tool, dict)],
@@ -62,25 +70,15 @@ def _tool_pack_evidence_fingerprint(payload: dict[str, Any]) -> str:
                 for issue in issues
                 if isinstance(issue, dict)
             ],
-            "call_queue_counts": (payload.get("call_queue") or {}).get("counts")
-            if isinstance(payload.get("call_queue"), dict)
-            else {},
-            "run_history_counts": (payload.get("run_history") or {}).get("counts")
-            if isinstance(payload.get("run_history"), dict)
-            else {},
-            "checkpoint_counts": (payload.get("checkpoints") or {}).get("counts")
-            if isinstance(payload.get("checkpoints"), dict)
-            else {},
+            "call_queue_counts": _dict_or_empty(payload.get("call_queue")).get("counts"),
+            "run_history_counts": _dict_or_empty(payload.get("run_history")).get("counts"),
+            "checkpoint_counts": _dict_or_empty(payload.get("checkpoints")).get("counts"),
             "parity_closeout_id": latest_closeout.get("closeout_id"),
             "parity_closeout_status": latest_closeout.get("status"),
             "parity_quieted_count": parity.get("quieted_issue_count"),
             "parity_changed_count": parity.get("changed_issue_count"),
-            "policy_issue_count": (payload.get("policy") or {}).get("issue_count")
-            if isinstance(payload.get("policy"), dict)
-            else None,
-            "runtime_issue_count": (payload.get("runtimes") or {}).get("issue_count")
-            if isinstance(payload.get("runtimes"), dict)
-            else None,
+            "policy_issue_count": _dict_or_empty(payload.get("policy")).get("issue_count"),
+            "runtime_issue_count": _dict_or_empty(payload.get("runtimes")).get("issue_count"),
         }
     )
 
@@ -300,8 +298,8 @@ def pack_import(*, target: Path, pack: Path, force: bool = False, json_output: b
     if manifest_error is not None or not isinstance(manifest, dict):
         print(f"error: not a tool pack: {pack}", file=sys.stderr)
         return 2
-    portable_catalog = manifest.get("portable_catalog") if isinstance(manifest.get("portable_catalog"), dict) else {}
-    entries = portable_catalog.get("entries") if isinstance(portable_catalog.get("entries"), list) else []
+    portable_catalog = _dict_or_empty(manifest.get("portable_catalog"))
+    entries = _list_or_empty(portable_catalog.get("entries"))
     entries = [dict(entry) for entry in entries if isinstance(entry, dict)]
     if not entries and (pack / "portable-tools.toml").is_file():
         entries, _ = catalog_manage._read_tool_entries(pack / "portable-tools.toml")

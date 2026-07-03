@@ -37,18 +37,21 @@ def _write_run_receipt(
     run_dir.mkdir(parents=True, exist_ok=True)
     stdout_text = "" if stdout is None else str(stdout)
     stderr_text = "" if stderr is None else str(stderr)
-    contract = call.get("contract") if isinstance(call.get("contract"), dict) else {}
+    raw_contract = call.get("contract")
+    contract = raw_contract if isinstance(raw_contract, dict) else {}
     runtime_snapshot = calls_mod._runtime_snapshot_for_call(target, call, run_health=False)
     if policy_decision is None:
         policy_decision = safety._policy_decision(target, calls_mod._call_plan_from_record(call))
     safe_policy = {key: value for key, value in policy_decision.items() if key != "env"}
-    env_values = policy_decision.get("env") if isinstance(policy_decision.get("env"), dict) else {}
+    raw_env_values = policy_decision.get("env")
+    env_values = raw_env_values if isinstance(raw_env_values, dict) else {}
     for value in env_values.values():
         if value:
             stdout_text = stdout_text.replace(str(value), "[redacted]")
             stderr_text = stderr_text.replace(str(value), "[redacted]")
     if extra:
-        extra = safety._redact_known_values(extra, [str(value) for value in env_values.values() if value])
+        redacted_extra = safety._redact_known_values(extra, [str(value) for value in env_values.values() if value])
+        extra = redacted_extra if isinstance(redacted_extra, dict) else extra
     stdout_path = run_dir / f"{run_id}.stdout.log"
     stderr_path = run_dir / f"{run_id}.stderr.log"
     receipt_path = run_dir / f"{run_id}.json"
@@ -393,14 +396,17 @@ def _run_call_payload(
             "blockers": blockers,
             "error": "call is not runnable",
         }, 1
-    contract = call.get("contract") if isinstance(call.get("contract"), dict) else {}
+    raw_contract = call.get("contract")
+    contract = raw_contract if isinstance(raw_contract, dict) else {}
     cwd_value = contract.get("cwd")
     cwd = helpers._as_path(target, cwd_value) if cwd_value else target
     assert cwd is not None
     argv = safety._command_parts(call.get("command"))
     if call.get("family") != "mcp":
-        for key in sorted((call.get("arguments") if isinstance(call.get("arguments"), dict) else {}).keys()):
-            value = call["arguments"][key]
+        raw_arguments = call.get("arguments")
+        arguments = raw_arguments if isinstance(raw_arguments, dict) else {}
+        for key in sorted(arguments.keys()):
+            value = arguments[key]
             if value is None:
                 continue
             argv.extend(shlex.split(str(value)))
@@ -420,7 +426,8 @@ def _run_call_payload(
     timeout_value = float(timeout) if isinstance(timeout, (int, float)) and not isinstance(timeout, bool) else None
     policy_decision = safety._policy_decision(target, calls_mod._call_plan_from_record(call), include_env_values=True)
     run_env = os.environ.copy()
-    env_values = policy_decision.get("env") if isinstance(policy_decision.get("env"), dict) else {}
+    raw_env_values = policy_decision.get("env")
+    env_values = raw_env_values if isinstance(raw_env_values, dict) else {}
     for label, value in env_values.items():
         run_env[str(label)] = str(value)
     run_env["BRIGADE_TOOL_CHECKPOINT_DIR"] = str(paths.checkpoints_path(target))

@@ -492,6 +492,7 @@ def closeout(
     print(f"status: {status}")
     print(f"closeout: {closeout_path}")
     if import_issues:
-        info = closeout_payload["import_issues"]
-        print(f"import_issues: {info['created']} created from {info['failed_step_count']} failed step(s)")
+        info = closeout_payload.get("import_issues")
+        if isinstance(info, dict):
+            print(f"import_issues: {info['created']} created from {info['failed_step_count']} failed step(s)")
     return 0

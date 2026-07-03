@@ -337,7 +337,8 @@ def describe(*, target: Path, tool_id: str, json_output: bool = False) -> int:
         return 1
     tool = payload["tool"]
     assert isinstance(tool, dict)
-    contract = tool.get("contract") if isinstance(tool.get("contract"), dict) else {}
+    raw_contract = tool.get("contract")
+    contract = raw_contract if isinstance(raw_contract, dict) else {}
     print(f"tool: {tool.get('id')}")
     print(f"name: {tool.get('name')}")
     print(f"family: {tool.get('family')}")

@@ -105,6 +105,10 @@ def _read_sweep(path: Path) -> dict[str, Any] | None:
     return payload
 
 
+def _list_or_empty(value: object) -> list[Any]:
+    return value if isinstance(value, list) else []
+
+
 def _sweeps(target: Path) -> list[dict[str, Any]]:
     root = _sweeps_root(target)
     sweeps: list[dict[str, Any]] = []
@@ -153,11 +157,11 @@ def _commands_for_entry(entry: constants.RepoEntry) -> list[constants.SweepComma
 
 def _latest_command_receipt(target: Path, repo_id: str, label: str) -> dict[str, Any] | None:
     for sweep in _sweeps(target):
-        repos = sweep.get("repos") if isinstance(sweep.get("repos"), list) else []
+        repos = _list_or_empty(sweep.get("repos"))
         for repo in repos:
             if not isinstance(repo, dict) or repo.get("repo_id") != repo_id:
                 continue
-            commands = repo.get("commands") if isinstance(repo.get("commands"), list) else []
+            commands = _list_or_empty(repo.get("commands"))
             for command in commands:
                 if isinstance(command, dict) and command.get("label") == label:
                     return {
@@ -323,7 +327,7 @@ def health_commands(*, target: Path, json_output: bool = False) -> int:
 
 def _latest_sweep_for_repo(target: Path, repo_id: str) -> dict[str, Any] | None:
     for sweep in _sweeps(target):
-        for result in sweep.get("repos") if isinstance(sweep.get("repos"), list) else []:
+        for result in _list_or_empty(sweep.get("repos")):
             if isinstance(result, dict) and result.get("repo_id") == repo_id and result.get("status") == "completed":
                 return sweep
     return None
@@ -570,9 +574,9 @@ def sweep_run(
                 "completed_at": repo_completed.isoformat(),
                 "duration_seconds": round((repo_completed - repo_started).total_seconds(), 3),
                 "commands": command_results,
-                "warning_count": len(state.get("warnings") if isinstance(state.get("warnings"), list) else []),
-                "blocker_count": len(state.get("blockers") if isinstance(state.get("blockers"), list) else []),
-                "warnings": state.get("warnings") if isinstance(state.get("warnings"), list) else [],
+                "warning_count": len(_list_or_empty(state.get("warnings"))),
+                "blocker_count": len(_list_or_empty(state.get("blockers"))),
+                "warnings": _list_or_empty(state.get("warnings")),
                 "receipt_labels": receipt_labels,
             }
         )
@@ -833,7 +837,7 @@ def _report_markdown(payload: dict[str, Any]) -> str:
         "## Repos",
         "",
     ]
-    repos = payload.get("repos") if isinstance(payload.get("repos"), list) else []
+    repos = _list_or_empty(payload.get("repos"))
     for repo in repos:
         lines.append(
             f"- `{repo.get('repo_id')}` {repo.get('repo_label')} warnings={len(repo.get('warnings') if isinstance(repo.get('warnings'), list) else [])} blockers={len(repo.get('blockers') if isinstance(repo.get('blockers'), list) else [])}"

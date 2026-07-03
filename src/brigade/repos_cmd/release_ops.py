@@ -83,6 +83,10 @@ def _write_release_waivers(target: Path, waivers: list[dict[str, Any]]) -> None:
             handle.write(json.dumps(waiver, sort_keys=True) + "\n")
 
 
+def _list_or_empty(value: object) -> list[Any]:
+    return value if isinstance(value, list) else []
+
+
 def _release_waiver_expired(waiver: dict[str, Any]) -> bool:
     expires_at = fleet._parse_time(waiver.get("expires_at"))
     return bool(expires_at and expires_at < _now())
@@ -141,7 +145,7 @@ def release_waiver_record(
     if expires_at and fleet._parse_time(expires_at) is None:
         print("error: --expires-at must be an ISO timestamp", file=sys.stderr)
         return 2
-    train_repos = train.get("repos") if isinstance(train.get("repos"), list) else []
+    train_repos = _list_or_empty(train.get("repos"))
     repos = [repo for repo in train_repos if isinstance(repo, dict)]
     if repo_id and not any(repo.get("repo_id") == repo_id for repo in repos):
         print(f"error: repo is not in fleet release train: {repo_id}", file=sys.stderr)
@@ -328,7 +332,7 @@ def _release_waiver_health_payload(target: Path, train_id: str | None = None) ->
             continue
         scope = str(waiver.get("scope") or "")
         train, _ = release_train._resolve_release_train(target, str(waiver.get("train_id") or ""))
-        repos = train.get("repos") if isinstance(train, dict) and isinstance(train.get("repos"), list) else []
+        repos = _list_or_empty(train.get("repos")) if isinstance(train, dict) else []
         repo_ids = {str(repo.get("repo_id") or "") for repo in repos if isinstance(repo, dict)}
         if scope not in constants.RELEASE_WAIVER_SCOPES:
             issues.append(
@@ -509,7 +513,7 @@ def release_waiver_doctor(*, target: Path, train_id: str | None = None, json_out
 
 def _release_waiver_import_records(health: dict[str, Any]) -> list[dict[str, Any]]:
     records: list[dict[str, Any]] = []
-    for issue in health.get("issues") if isinstance(health.get("issues"), list) else []:
+    for issue in _list_or_empty(health.get("issues")):
         if not isinstance(issue, dict):
             continue
         waiver_id = str(issue.get("waiver_id") or "unknown")
@@ -595,7 +599,7 @@ def release_evidence_plan(*, target: Path, train_id: str = "latest", json_output
     records = _evidence_for_train(_read_release_evidence(target), str(train.get("train_id") or ""))
     by_repo_step = {(record.get("repo_id"), record.get("step")): record for record in records}
     planned: list[dict[str, Any]] = []
-    for repo in train.get("repos") if isinstance(train.get("repos"), list) else []:
+    for repo in _list_or_empty(train.get("repos")):
         if not isinstance(repo, dict):
             continue
         repo_id = str(repo.get("repo_id") or "unknown")
@@ -650,7 +654,7 @@ def release_evidence_record(
             f"error: --status must be one of {', '.join(sorted(constants.RELEASE_EVIDENCE_STATUSES))}", file=sys.stderr
         )
         return 2
-    train_repos = train.get("repos") if isinstance(train.get("repos"), list) else []
+    train_repos = _list_or_empty(train.get("repos"))
     repos = [repo for repo in train_repos if isinstance(repo, dict)]
     repo = next((item for item in repos if item.get("repo_id") == repo_id), None)
     if repo is None:
@@ -892,7 +896,7 @@ def _release_summary_payload(target: Path, train: dict[str, Any]) -> dict[str, A
     actions = [
         action for action in release_train._read_release_actions(target) if action.get("source_train_id") == train_id
     ]
-    train_repos = train.get("repos") if isinstance(train.get("repos"), list) else []
+    train_repos = _list_or_empty(train.get("repos"))
     repos = [_repo_release_summary(repo, train_id, records_by_step) for repo in train_repos if isinstance(repo, dict)]
     counts: dict[str, int] = {}
     for repo in repos:
@@ -965,11 +969,11 @@ def _release_report_markdown(summary: dict[str, Any]) -> str:
         "## Repo Evidence",
         "",
     ]
-    repos = summary.get("repos") if isinstance(summary.get("repos"), list) else []
+    repos = _list_or_empty(summary.get("repos"))
     for repo in repos:
         lines.append(f"- `{repo.get('repo_id')}` {repo.get('repo_label')} - {repo.get('evidence_status')}")
-        missing = repo.get("missing_evidence_steps") if isinstance(repo.get("missing_evidence_steps"), list) else []
-        blocked = repo.get("blocked_evidence_steps") if isinstance(repo.get("blocked_evidence_steps"), list) else []
+        missing = _list_or_empty(repo.get("missing_evidence_steps"))
+        blocked = _list_or_empty(repo.get("blocked_evidence_steps"))
         if missing:
             lines.append(f"  - missing: {', '.join(str(step) for step in missing)}")
         if blocked:
@@ -1050,8 +1054,10 @@ def _release_matrix_payload(target: Path, train: dict[str, Any]) -> dict[str, An
     ]
     waivers = _active_release_waivers(target, train_id)
     rows: list[dict[str, Any]] = []
-    summary_by_repo = {repo.get("repo_id"): repo for repo in summary.get("repos") if isinstance(repo, dict)}
-    for repo in train.get("repos") if isinstance(train.get("repos"), list) else []:
+    summary_by_repo = {
+        repo.get("repo_id"): repo for repo in _list_or_empty(summary.get("repos")) if isinstance(repo, dict)
+    }
+    for repo in _list_or_empty(train.get("repos")):
         if not isinstance(repo, dict):
             continue
         repo_id = str(repo.get("repo_id") or "")
@@ -1130,7 +1136,7 @@ def _release_matrix_markdown(matrix: dict[str, Any]) -> str:
         "| Repo | Classification | Evidence | Actions | Waivers | Ready |",
         "| --- | --- | --- | --- | --- | --- |",
     ]
-    for row in matrix.get("rows") if isinstance(matrix.get("rows"), list) else []:
+    for row in _list_or_empty(matrix.get("rows")):
         waivers = ", ".join(str(scope) for scope in row.get("waived_scopes") or []) or "none"
         lines.append(
             f"| `{row.get('repo_id')}` | {row.get('classification')} | {row.get('evidence_status')} | {row.get('unresolved_action_count')} | {waivers} | {str(bool(row.get('ready'))).lower()} |"
@@ -1188,7 +1194,7 @@ def release_matrix(*, target: Path, train_id: str = "latest", json_output: bool 
 def _release_import_records(summary: dict[str, Any]) -> list[dict[str, Any]]:
     train_id = str(summary.get("train_id") or "latest")
     records: list[dict[str, Any]] = []
-    for repo in summary.get("repos") if isinstance(summary.get("repos"), list) else []:
+    for repo in _list_or_empty(summary.get("repos")):
         if not isinstance(repo, dict):
             continue
         repo_id = str(repo.get("repo_id") or "unknown")
@@ -1449,7 +1455,7 @@ def _release_audit_payload(target: Path, train: dict[str, Any]) -> dict[str, Any
                 item["path_label"]: item
                 for item in [_release_bundle_file_entry(train_dir, name) for name in constants.RELEASE_BUNDLE_FILES]
             }
-            stored_files = manifest.get("files") if isinstance(manifest.get("files"), list) else []
+            stored_files = _list_or_empty(manifest.get("files"))
             for stored in stored_files:
                 if not isinstance(stored, dict):
                     continue
@@ -1512,7 +1518,7 @@ def _release_audit_payload(target: Path, train: dict[str, Any]) -> dict[str, Any
             }
         )
     waiver_health = _release_waiver_health_payload(target, train_id)
-    for issue in waiver_health.get("issues") if isinstance(waiver_health.get("issues"), list) else []:
+    for issue in _list_or_empty(waiver_health.get("issues")):
         if isinstance(issue, dict):
             issues.append(dict(issue))
     return {

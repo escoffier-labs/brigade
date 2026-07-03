@@ -180,7 +180,8 @@ def _projection_item(
     force: bool = False,
 ) -> dict[str, Any]:
     generated_at = generated_at or datetime.now(timezone.utc)
-    projections = tool.get("projections") if isinstance(tool.get("projections"), dict) else {}
+    raw_projections = tool.get("projections")
+    projections = raw_projections if isinstance(raw_projections, dict) else {}
     projection_value = projections.get(harness)
     source_path = helpers._as_path(target, tool.get("source_path"))
     projection_path = helpers._as_path(target, projection_value)

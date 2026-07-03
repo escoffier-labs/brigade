@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from typing import Any
 
 OK = "ok"
 WARN = "warn"
@@ -448,7 +449,7 @@ DEFAULT_RUNTIMES = (
         "timeout": 10,
     },
 )
-DEFAULT_POLICY = {
+DEFAULT_POLICY: dict[str, Any] = {
     "allowed_families": ["script"],
     "allowed_effects": ["local-read", "local-write"],
     "denied_effects": ["remote-mutation", "secret-read"],

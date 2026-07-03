@@ -33,6 +33,14 @@ from . import actions_dispatch, constants, fleet, release_ops, release_train, sw
 health_commands = sweeps.health_commands
 
 
+def _dict_or_empty(value: object) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def _list_or_empty(value: object) -> list[Any]:
+    return value if isinstance(value, list) else []
+
+
 def release_train_health(target: Path) -> dict[str, Any]:
     target = target.expanduser().resolve()
     latest = release_train.latest_release_train(target)
@@ -48,8 +56,8 @@ def release_train_health(target: Path) -> dict[str, Any]:
                 "suggested_next_command": "brigade repos release build",
             }
         )
-        checks.extend(actions.get("checks") if isinstance(actions.get("checks"), list) else [])
-        checks.extend(evidence.get("checks") if isinstance(evidence.get("checks"), list) else [])
+        checks.extend(_list_or_empty(actions.get("checks")))
+        checks.extend(_list_or_empty(evidence.get("checks")))
         return {
             "latest": None,
             "actions": actions,
@@ -97,8 +105,8 @@ def release_train_health(target: Path) -> dict[str, Any]:
                 "suggested_next_command": "brigade repos release build",
             }
         )
-    checks.extend(actions.get("checks") if isinstance(actions.get("checks"), list) else [])
-    checks.extend(evidence.get("checks") if isinstance(evidence.get("checks"), list) else [])
+    checks.extend(_list_or_empty(actions.get("checks")))
+    checks.extend(_list_or_empty(evidence.get("checks")))
     return {
         "latest": latest,
         "actions": actions,
@@ -124,7 +132,7 @@ def _dispatch_health_checks(target: Path, actions: list[dict[str, Any]]) -> list
             )
             continue
         if action.get("dispatch") and status in {None, "dispatched"}:
-            dispatch = action.get("dispatch") if isinstance(action.get("dispatch"), dict) else {}
+            dispatch = _dict_or_empty(action.get("dispatch"))
             entry, error = actions_dispatch._action_target_entry(target, action)
             if error or entry is None:
                 checks.append(
@@ -167,13 +175,15 @@ def _append_action_archive(target: Path, actions: list[dict[str, Any]]) -> None:
 
 
 def _report_review_status(report: dict[str, Any]) -> str | None:
-    closeout = report.get("closeout") if isinstance(report.get("closeout"), dict) else None
+    raw_closeout = report.get("closeout")
+    closeout = raw_closeout if isinstance(raw_closeout, dict) else None
     status = closeout.get("status") if isinstance(closeout, dict) else None
     return status if isinstance(status, str) else None
 
 
 def _report_reviewed_at(report: dict[str, Any]) -> str | None:
-    closeout = report.get("closeout") if isinstance(report.get("closeout"), dict) else None
+    raw_closeout = report.get("closeout")
+    closeout = raw_closeout if isinstance(raw_closeout, dict) else None
     reviewed_at = closeout.get("reviewed_at") if isinstance(closeout, dict) else None
     return reviewed_at if isinstance(reviewed_at, str) else None
 
@@ -193,13 +203,13 @@ def _planned_actions(report: dict[str, Any]) -> list[dict[str, Any]]:
     reviewed_at = _report_reviewed_at(report)
     created = _now().isoformat()
     actions: list[dict[str, Any]] = []
-    for repo in report.get("repos") if isinstance(report.get("repos"), list) else []:
+    for repo in _list_or_empty(report.get("repos")):
         if not isinstance(repo, dict):
             continue
         repo_id = str(repo.get("repo_id") or "unknown")
         repo_label = str(repo.get("repo_label") or repo_id)
         repo_items: list[dict[str, Any]] = []
-        for warning in repo.get("warnings") if isinstance(repo.get("warnings"), list) else []:
+        for warning in _list_or_empty(repo.get("warnings")):
             if isinstance(warning, dict):
                 repo_items.append(
                     {
@@ -210,7 +220,8 @@ def _planned_actions(report: dict[str, Any]) -> list[dict[str, Any]]:
                         "command": repo.get("suggested_command"),
                     }
                 )
-        top_action = (repo.get("action_queue") if isinstance(repo.get("action_queue"), dict) else {}).get("top_action")
+        action_queue = _dict_or_empty(repo.get("action_queue"))
+        top_action = action_queue.get("top_action")
         if isinstance(top_action, dict):
             repo_items.insert(
                 0,
@@ -519,12 +530,12 @@ def daily_use_health(target: Path) -> dict[str, Any]:
         "release_train": 148,
     }
     for bucket_name, phase in phase_by_bucket.items():
-        bucket = data.get(bucket_name) if isinstance(data.get(bucket_name), dict) else {}
-        for check in bucket.get("checks", []) if isinstance(bucket.get("checks"), list) else []:
+        bucket = _dict_or_empty(data.get(bucket_name))
+        for check in _list_or_empty(bucket.get("checks")):
             if not isinstance(check, dict) or check.get("status") == constants.OK:
                 continue
             checks.append({**check, "bucket": bucket_name, "phase": phase})
-    action_health = data.get("actions") if isinstance(data.get("actions"), dict) else {}
+    action_health = _dict_or_empty(data.get("actions"))
     if int(action_health.get("open_count") or 0):
         checks.append(
             {
@@ -536,7 +547,7 @@ def daily_use_health(target: Path) -> dict[str, Any]:
                 "suggested_next_command": "brigade repos actions list",
             }
         )
-    action_checks = action_health.get("checks") if isinstance(action_health.get("checks"), list) else []
+    action_checks = _list_or_empty(action_health.get("checks"))
     dispatch_checks = [
         check
         for check in action_checks
@@ -553,8 +564,8 @@ def daily_use_health(target: Path) -> dict[str, Any]:
                 "suggested_next_command": "brigade repos actions reconcile",
             }
         )
-    release_train_data = data.get("release_train") if isinstance(data.get("release_train"), dict) else {}
-    latest_train = release_train_data.get("latest") if isinstance(release_train_data.get("latest"), dict) else None
+    release_train_data = _dict_or_empty(data.get("release_train"))
+    latest_train = _dict_or_empty(release_train_data.get("latest")) or None
     if latest_train is not None:
         train_id = str(latest_train.get("train_id") or "")
         if (
@@ -590,21 +601,11 @@ def daily_use_health(target: Path) -> dict[str, Any]:
         "schema": {"name": "repo-fleet-daily-use-health", "version": 1},
         "target_label": "repo-fleet",
         "repo_count": data.get("repo_count"),
-        "report_issue_count": int((data.get("report") or {}).get("issue_count") or 0)
-        if isinstance(data.get("report"), dict)
-        else 0,
-        "action_issue_count": int((data.get("actions") or {}).get("issue_count") or 0)
-        if isinstance(data.get("actions"), dict)
-        else 0,
-        "sweep_issue_count": int((data.get("sweep") or {}).get("issue_count") or 0)
-        if isinstance(data.get("sweep"), dict)
-        else 0,
-        "release_train_issue_count": int((data.get("release_train") or {}).get("issue_count") or 0)
-        if isinstance(data.get("release_train"), dict)
-        else 0,
-        "health_command_issue_count": int((data.get("health_commands") or {}).get("issue_count") or 0)
-        if isinstance(data.get("health_commands"), dict)
-        else 0,
+        "report_issue_count": int(_dict_or_empty(data.get("report")).get("issue_count") or 0),
+        "action_issue_count": int(_dict_or_empty(data.get("actions")).get("issue_count") or 0),
+        "sweep_issue_count": int(_dict_or_empty(data.get("sweep")).get("issue_count") or 0),
+        "release_train_issue_count": int(_dict_or_empty(data.get("release_train")).get("issue_count") or 0),
+        "health_command_issue_count": int(_dict_or_empty(data.get("health_commands")).get("issue_count") or 0),
         "manual_only": True,
         "privacy": {
             "safe_labels_only": True,
@@ -628,12 +629,12 @@ def first_run_payload(target: Path) -> dict[str, Any]:
     target = target.expanduser().resolve()
     data = health(target)
     config_loaded = bool(data.get("repo_count"))
-    report = data.get("report") if isinstance(data.get("report"), dict) else {}
-    sweep = data.get("sweep") if isinstance(data.get("sweep"), dict) else {}
-    release_train_data = data.get("release_train") if isinstance(data.get("release_train"), dict) else {}
-    latest_report_value = report.get("latest") if isinstance(report.get("latest"), dict) else None
-    latest_sweep_value = sweep.get("latest") if isinstance(sweep.get("latest"), dict) else None
-    latest_train = release_train_data.get("latest") if isinstance(release_train_data.get("latest"), dict) else None
+    report = _dict_or_empty(data.get("report"))
+    sweep = _dict_or_empty(data.get("sweep"))
+    release_train_data = _dict_or_empty(data.get("release_train"))
+    latest_report_value = _dict_or_empty(report.get("latest")) or None
+    latest_sweep_value = _dict_or_empty(sweep.get("latest")) or None
+    latest_train = _dict_or_empty(release_train_data.get("latest")) or None
 
     def step(step_id: str, label: str, command: str, ready: bool, detail: str) -> dict[str, Any]:
         return {
@@ -719,9 +720,9 @@ def first_run_payload(target: Path) -> dict[str, Any]:
             "ready",
             "Check the manual release gate",
             "brigade repos release ready latest --target .",
-            latest_train is not None and not release_train.get("top_issue"),
+            latest_train is not None and not release_train_data.get("top_issue"),
             "release train has no fleet health issue"
-            if latest_train and not release_train.get("top_issue")
+            if latest_train and not release_train_data.get("top_issue")
             else "release train still has review work",
         ),
     ]
