@@ -7,16 +7,21 @@
 //! path) argument, so a single registered server can answer for any indexed repository. Connections
 //! are always opened `SQLITE_OPEN_READ_ONLY`, so the server can never mutate a graph.
 
+use std::collections::{BTreeMap, BTreeSet};
+use std::fs;
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Result, anyhow};
-use rusqlite::Connection;
+use rusqlite::{OptionalExtension, params};
 use serde::Serialize;
 use serde_json::{Value, json};
 
 use crate::model::Direction;
-use crate::query::{build_context_pack, graph_edges, render_markdown, search_symbols, stats};
+use crate::query::{
+    build_context_pack, file_neighbors, graph_edges, render_markdown, search_symbols_with_path,
+    stats,
+};
 use crate::store::open_read_only;
 
 const PROTOCOL_VERSION: &str = "2024-11-05";
@@ -92,9 +97,8 @@ pub fn handle_request(default_db: &Path, req: &Value) -> Option<Value> {
                 None => json!({}),
                 _ => return Some(error(id, -32602, "invalid params")),
             };
-            let db = resolve_db(default_db, &args);
             let result = match validate_tool_args(name, &args) {
-                Ok(()) => open_read_only(&db).and_then(|conn| call_tool(&conn, name, &args)),
+                Ok(()) => call_tool(default_db, name, &args),
                 Err(err) => return Some(error(id, -32602, &err)),
             };
             Some(match result {
@@ -126,39 +130,48 @@ fn resolve_db(default_db: &Path, args: &Value) -> PathBuf {
     }
 }
 
-fn call_tool(conn: &Connection, name: &str, args: &Value) -> Result<String> {
+fn call_tool(default_db: &Path, name: &str, args: &Value) -> Result<String> {
+    if name == "repos" {
+        let db = resolve_db(default_db, args);
+        return to_pretty(&repos_response(&db, args)?);
+    }
+
+    let db = resolve_db(default_db, args);
+    let conn = open_read_only(&db)?;
     match name {
-        "search" => to_pretty(&search_symbols(
-            conn,
+        "search" => to_pretty(&search_symbols_with_path(
+            &conn,
             &str_arg(args, "query"),
+            optional_str_arg(args, "path").as_deref(),
             usize_arg(args, "limit", 20),
         )?),
         "callers" => to_pretty(&graph_edges(
-            conn,
+            &conn,
             &str_arg(args, "symbol"),
             Direction::Incoming,
         )?),
         "callees" => to_pretty(&graph_edges(
-            conn,
+            &conn,
             &str_arg(args, "symbol"),
             Direction::Outgoing,
         )?),
         "impact" => {
             let symbol = str_arg(args, "symbol");
-            let mut edges = graph_edges(conn, &symbol, Direction::Incoming)?;
-            edges.extend(graph_edges(conn, &symbol, Direction::Outgoing)?);
+            let mut edges = graph_edges(&conn, &symbol, Direction::Incoming)?;
+            edges.extend(graph_edges(&conn, &symbol, Direction::Outgoing)?);
             to_pretty(&edges)
         }
         "context" => {
             let pack =
-                build_context_pack(conn, str_arg(args, "task"), usize_arg(args, "limit", 12))?;
+                build_context_pack(&conn, str_arg(args, "task"), usize_arg(args, "limit", 12))?;
             match str_arg(args, "format").as_str() {
                 "" | "json" => to_pretty(&pack),
                 "markdown" => Ok(render_markdown(&pack)),
                 other => Err(anyhow!("unknown context format '{other}'")),
             }
         }
-        "stats" => to_pretty(&stats(conn)?),
+        "file_neighbors" => to_pretty(&file_neighbors(&conn, &str_arg(args, "path"))?),
+        "stats" => to_pretty(&stats(&conn)?),
         other => Err(anyhow!("unknown tool '{other}'")),
     }
 }
@@ -169,6 +182,7 @@ fn validate_tool_args(name: &str, args: &Value) -> std::result::Result<(), Strin
     match name {
         "search" => {
             require_string(args, "query")?;
+            optional_string(args, "path")?;
             require_usize(args, "limit")?;
         }
         "callers" | "callees" | "impact" => {
@@ -178,6 +192,12 @@ fn validate_tool_args(name: &str, args: &Value) -> std::result::Result<(), Strin
             require_string(args, "task")?;
             require_usize(args, "limit")?;
             require_format(args)?;
+        }
+        "file_neighbors" => {
+            require_string(args, "path")?;
+        }
+        "repos" => {
+            require_roots(args)?;
         }
         "stats" => {}
         _ => {}
@@ -213,6 +233,7 @@ fn tool_defs() -> Value {
             "inputSchema": with_location(
                 json!({
                     "query": { "type": "string", "description": "Search terms." },
+                    "path": { "type": "string", "description": "Optional file path, directory prefix, or path fragment." },
                     "limit": { "type": "integer", "description": "Max results (default 20)." }
                 }),
                 json!(["query"])
@@ -237,7 +258,23 @@ fn tool_defs() -> Value {
                 json!(["task"])
             )
         },
-        { "name": "stats", "description": "Counts of files, symbols, edges, imports, and the schema version.", "inputSchema": with_location(json!({}), json!([])) }
+        { "name": "stats", "description": "Counts of files, symbols, edges, imports, sync metadata, and per-language file counts.", "inputSchema": with_location(json!({}), json!([])) },
+        {
+            "name": "file_neighbors",
+            "description": "Files connected to a file by incoming or outgoing call edges.",
+            "inputSchema": with_location(
+                json!({ "path": { "type": "string", "description": "Indexed file path to inspect." } }),
+                json!(["path"])
+            )
+        },
+        {
+            "name": "repos",
+            "description": "Default database metadata plus optional one-level scans for indexed repos under root directories.",
+            "inputSchema": with_location(
+                json!({ "roots": { "type": "array", "items": { "type": "string" }, "description": "Root directories to scan one level for .graphtrail/graphtrail.db." } }),
+                json!([])
+            )
+        }
     ])
 }
 
@@ -250,6 +287,12 @@ fn str_arg(args: &Value, key: &str) -> String {
         .and_then(|v| v.as_str())
         .map(|s| s.to_string())
         .unwrap_or_default()
+}
+
+fn optional_str_arg(args: &Value, key: &str) -> Option<String> {
+    args.get(key)
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
 }
 
 fn usize_arg(args: &Value, key: &str, default: usize) -> usize {
@@ -284,6 +327,20 @@ fn require_usize(args: &Value, key: &str) -> std::result::Result<(), String> {
     }
 }
 
+fn require_roots(args: &Value) -> std::result::Result<(), String> {
+    match args.get("roots") {
+        None => Ok(()),
+        Some(Value::Array(roots)) => {
+            if roots.iter().all(|root| root.as_str().is_some()) {
+                Ok(())
+            } else {
+                Err("invalid string array argument 'roots'".to_string())
+            }
+        }
+        Some(_) => Err("invalid string array argument 'roots'".to_string()),
+    }
+}
+
 fn require_format(args: &Value) -> std::result::Result<(), String> {
     match args.get("format") {
         Some(value) if matches!(value.as_str(), Some("json" | "markdown")) => Ok(()),
@@ -302,4 +359,119 @@ fn ok(id: Option<Value>, result: Value) -> Value {
 
 fn error(id: Option<Value>, code: i64, message: &str) -> Value {
     json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message } })
+}
+
+#[derive(Serialize)]
+struct ReposResponse {
+    default: RepoInfo,
+    repos: Vec<RepoInfo>,
+}
+
+#[derive(Serialize)]
+struct RepoInfo {
+    repo: Option<String>,
+    db: String,
+    exists: bool,
+    metadata: BTreeMap<String, String>,
+}
+
+fn repos_response(default_db: &Path, args: &Value) -> Result<ReposResponse> {
+    let mut seen = BTreeSet::new();
+    let mut repos = Vec::new();
+    for root in roots_arg(args) {
+        for db in graph_dbs_one_level(&root)? {
+            let key = db.to_string_lossy().to_string();
+            if seen.insert(key) {
+                repos.push(repo_info(&db)?);
+            }
+        }
+    }
+    Ok(ReposResponse {
+        default: repo_info(default_db)?,
+        repos,
+    })
+}
+
+fn roots_arg(args: &Value) -> Vec<PathBuf> {
+    args.get("roots")
+        .and_then(|v| v.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|v| v.as_str())
+        .map(expand_tilde)
+        .collect()
+}
+
+fn graph_dbs_one_level(root: &Path) -> Result<Vec<PathBuf>> {
+    let mut dbs = Vec::new();
+    let direct = root.join(".graphtrail").join("graphtrail.db");
+    if direct.exists() {
+        dbs.push(direct);
+    }
+    if !root.is_dir() {
+        return Ok(dbs);
+    }
+    for entry in fs::read_dir(root)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.is_dir() {
+            let db = path.join(".graphtrail").join("graphtrail.db");
+            if db.exists() {
+                dbs.push(db);
+            }
+        }
+    }
+    dbs.sort();
+    Ok(dbs)
+}
+
+fn repo_info(db: &Path) -> Result<RepoInfo> {
+    Ok(RepoInfo {
+        repo: repo_from_db(db).map(|path| path.to_string_lossy().to_string()),
+        db: db.to_string_lossy().to_string(),
+        exists: db.exists(),
+        metadata: db_metadata(db)?,
+    })
+}
+
+fn repo_from_db(db: &Path) -> Option<PathBuf> {
+    let graph_dir = db.parent()?;
+    if graph_dir.file_name()? != ".graphtrail" {
+        return None;
+    }
+    graph_dir.parent().map(|path| path.to_path_buf())
+}
+
+fn db_metadata(db: &Path) -> Result<BTreeMap<String, String>> {
+    let mut out = BTreeMap::new();
+    if !db.exists() {
+        return Ok(out);
+    }
+    let conn = open_read_only(db)?;
+    for key in ["schema_version", "tool_version", "synced_at"] {
+        if let Some(value) = conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = ?1",
+                params![key],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+        {
+            out.insert(key.to_string(), value);
+        }
+    }
+    Ok(out)
+}
+
+fn expand_tilde(path: &str) -> PathBuf {
+    if (path == "~" || path.starts_with("~/"))
+        && let Some(home) = std::env::var_os("HOME")
+    {
+        let mut expanded = PathBuf::from(home);
+        if path.len() > 2 {
+            expanded.push(&path[2..]);
+        }
+        return expanded;
+    }
+    PathBuf::from(path)
 }

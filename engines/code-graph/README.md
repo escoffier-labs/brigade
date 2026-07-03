@@ -95,16 +95,18 @@ Register it with an MCP client. For Claude Code, add to `.mcp.json` (project sco
 
 ### Tools
 
-The server exposes six tools, every one read-only. This list is verified against the live `tools/list` response from `graphtrail-mcp`:
+The server exposes eight tools, every one read-only. This list is verified against the live `tools/list` response from `graphtrail-mcp`:
 
 | Tool | Required args | What it returns |
 |---|---|---|
-| `search` | `query` (`limit` optional, default 20) | Full-text search of code symbols (functions, classes, methods) by name. |
+| `search` | `query` (`limit` optional, default 20, `path` optional) | Full-text search of code symbols (functions, classes, methods) by name, optionally filtered by indexed file path. |
 | `callers` | `symbol` | Symbols that call the given symbol (incoming call edges). |
 | `callees` | `symbol` | Symbols called by the given symbol (outgoing call edges). |
 | `impact` | `symbol` | Combined callers and callees of a symbol (the blast radius of a change). |
 | `context` | `task` (`limit` optional, default 12) | A context pack: matching entry points plus their caller/callee neighborhood and related files. |
-| `stats` | none | Counts of files, symbols, edges, imports, and the schema version. |
+| `stats` | none | Counts of files, symbols, edges, imports, schema version, sync metadata, and per-language file counts. |
+| `file_neighbors` | `path` | Files connected to an indexed file by incoming or outgoing call edges. |
+| `repos` | none (`roots` optional) | Default database metadata plus optional one-level scans for `.graphtrail/graphtrail.db` under root directories. |
 
 Every tool additionally accepts an optional `repo` or `db` selector for multi-repo use.
 
@@ -115,8 +117,16 @@ A real `stats` tool call (the server indexed GraphTrail's own source first):
   "edges": 168,
   "files": 26,
   "imports": 119,
-  "schema_version": 1,
-  "symbols": 150
+  "language_files": {
+    "go": 1,
+    "python": 3,
+    "rust": 18,
+    "typescript": 4
+  },
+  "schema_version": 2,
+  "symbols": 150,
+  "synced_at": "1783099401",
+  "tool_version": "0.1.0"
 }
 ```
 

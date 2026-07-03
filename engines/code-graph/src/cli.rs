@@ -9,7 +9,7 @@ use crate::model::{ContextPack, Direction, EdgeRow, SearchRow};
 use crate::query::{
     build_context_pack,
     context::{edge_location, symbol_location},
-    graph_edges, render_markdown, search_symbols, stats,
+    file_neighbors, graph_edges, render_markdown, search_symbols_with_path, stats,
 };
 use crate::store::{db_path, init_schema, open_db, open_default_read_only, sync_repo_force};
 
@@ -38,8 +38,15 @@ enum Command {
     },
     Search {
         query: String,
+        #[arg(long, value_name = "PATH")]
+        path: Option<String>,
         #[arg(long, default_value_t = 20)]
         limit: usize,
+        #[arg(long)]
+        json: bool,
+    },
+    Neighbors {
+        path: String,
         #[arg(long)]
         json: bool,
     },
@@ -130,10 +137,29 @@ pub fn run(cli: Cli) -> Result<()> {
                 );
             }
         }
-        Command::Search { query, limit, json } => {
+        Command::Search {
+            query,
+            path,
+            limit,
+            json,
+        } => {
             let conn = open_default_read_only(cli.db)?;
-            let rows = search_symbols(&conn, &query, limit)?;
+            let rows = search_symbols_with_path(&conn, &query, path.as_deref(), limit)?;
             print_json_or_symbols(json, &rows)?;
+        }
+        Command::Neighbors { path, json } => {
+            let conn = open_default_read_only(cli.db)?;
+            let rows = file_neighbors(&conn, &path)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&rows)?);
+            } else {
+                for row in &rows {
+                    println!(
+                        "{} incoming={} outgoing={}",
+                        row.file_path, row.incoming_edges, row.outgoing_edges
+                    );
+                }
+            }
         }
         Command::Callers { symbol, json } => {
             let conn = open_default_read_only(cli.db)?;
@@ -179,8 +205,19 @@ pub fn run(cli: Cli) -> Result<()> {
             if json {
                 println!("{}", serde_json::to_string_pretty(&stats)?);
             } else {
-                for (key, value) in stats {
-                    println!("{key}: {value}");
+                println!("schema_version: {}", stats.schema_version);
+                println!("files: {}", stats.files);
+                println!("symbols: {}", stats.symbols);
+                println!("edges: {}", stats.edges);
+                println!("imports: {}", stats.imports);
+                if let Some(synced_at) = stats.synced_at {
+                    println!("synced_at: {synced_at}");
+                }
+                if let Some(tool_version) = stats.tool_version {
+                    println!("tool_version: {tool_version}");
+                }
+                for (language, files) in stats.language_files {
+                    println!("language_files.{language}: {files}");
                 }
             }
         }

@@ -55,12 +55,21 @@ fn notifications_get_no_response() {
 }
 
 #[test]
-fn tools_list_exposes_the_six_query_tools_with_location_args() {
+fn tools_list_exposes_the_eight_query_tools_with_location_args() {
     let (_dir, db) = ro_db();
     let resp = handle_request(&db, &json!({"jsonrpc":"2.0","id":2,"method":"tools/list"})).unwrap();
     let tools = resp["result"]["tools"].as_array().unwrap();
     let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
-    for expected in ["search", "callers", "callees", "impact", "context", "stats"] {
+    for expected in [
+        "search",
+        "callers",
+        "callees",
+        "impact",
+        "context",
+        "stats",
+        "file_neighbors",
+        "repos",
+    ] {
         assert!(names.contains(&expected), "missing tool: {expected}");
     }
     // Every tool advertises the optional repo/db selector.
@@ -88,6 +97,90 @@ fn tools_call_search_returns_json_content() {
             .unwrap()
             .iter()
             .any(|r| r["name"] == "helper")
+    );
+}
+
+#[test]
+fn tools_call_search_accepts_path_filter() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    fs::create_dir(root.join("tests")).unwrap();
+    fs::write(root.join("app.py"), "def helper():\n    return 1\n").unwrap();
+    fs::write(
+        root.join("tests").join("app_test.py"),
+        "def helper():\n    return 2\n",
+    )
+    .unwrap();
+    let db = root.join("graphtrail.db");
+    let conn = open_db(&db).unwrap();
+    init_schema(&conn).unwrap();
+    sync_repo(&conn, root).unwrap();
+
+    let resp = handle_request(
+        &db,
+        &json!({"jsonrpc":"2.0","id":31,"method":"tools/call",
+                "params":{"name":"search","arguments":{"query":"helper","path":"tests"}}}),
+    )
+    .unwrap();
+
+    assert_eq!(resp["result"]["isError"], false);
+    let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+    let rows: serde_json::Value = serde_json::from_str(text).unwrap();
+    assert_eq!(rows.as_array().unwrap().len(), 1);
+    assert_eq!(rows[0]["file_path"], "tests/app_test.py");
+}
+
+#[test]
+fn tools_call_file_neighbors_returns_adjacent_files() {
+    let (_dir, db) = ro_db();
+
+    let resp = handle_request(
+        &db,
+        &json!({"jsonrpc":"2.0","id":32,"method":"tools/call",
+                "params":{"name":"file_neighbors","arguments":{"path":"app.py"}}}),
+    )
+    .unwrap();
+
+    assert_eq!(resp["result"]["isError"], false);
+    let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+    let rows: serde_json::Value = serde_json::from_str(text).unwrap();
+    assert!(rows.as_array().unwrap().is_empty());
+}
+
+#[test]
+fn tools_call_repos_reports_default_db_and_scanned_roots() {
+    let (_dir, default_db) = ro_db();
+    let root = tempfile::tempdir().unwrap();
+    let repo = root.path().join("repo-a");
+    fs::create_dir(&repo).unwrap();
+    fs::write(repo.join("a.py"), "def alpha():\n    return 1\n").unwrap();
+    let repo_db = repo.join(".graphtrail").join("graphtrail.db");
+    let conn = open_db(&repo_db).unwrap();
+    init_schema(&conn).unwrap();
+    sync_repo(&conn, &repo).unwrap();
+
+    let resp = handle_request(
+        &default_db,
+        &json!({"jsonrpc":"2.0","id":33,"method":"tools/call",
+                "params":{"name":"repos","arguments":{"roots":[root.path().to_str().unwrap()]}}}),
+    )
+    .unwrap();
+
+    assert_eq!(resp["result"]["isError"], false);
+    let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+    let value: serde_json::Value = serde_json::from_str(text).unwrap();
+    assert_eq!(value["default"]["exists"], true);
+    assert!(
+        value["default"]["metadata"]["tool_version"]
+            .as_str()
+            .is_some()
+    );
+    assert!(
+        value["repos"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|repo| repo["db"] == repo_db.to_string_lossy().as_ref())
     );
 }
 
@@ -254,6 +347,35 @@ fn tools_call_malformed_params_returns_invalid_params() {
     .unwrap();
 
     assert_eq!(resp["id"], 11);
+    assert_eq!(resp["error"]["code"], -32602);
+}
+
+#[test]
+fn tools_call_invalid_new_args_return_invalid_params() {
+    let (_dir, db) = ro_db();
+
+    let resp = handle_request(
+        &db,
+        &json!({"jsonrpc":"2.0","id":41,"method":"tools/call",
+                "params":{"name":"search","arguments":{"query":"helper","path":42}}}),
+    )
+    .unwrap();
+    assert_eq!(resp["error"]["code"], -32602);
+
+    let resp = handle_request(
+        &db,
+        &json!({"jsonrpc":"2.0","id":42,"method":"tools/call",
+                "params":{"name":"file_neighbors","arguments":{"path":42}}}),
+    )
+    .unwrap();
+    assert_eq!(resp["error"]["code"], -32602);
+
+    let resp = handle_request(
+        &db,
+        &json!({"jsonrpc":"2.0","id":43,"method":"tools/call",
+                "params":{"name":"repos","arguments":{"roots":["/tmp", 42]}}}),
+    )
+    .unwrap();
     assert_eq!(resp["error"]["code"], -32602);
 }
 

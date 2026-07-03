@@ -1,5 +1,7 @@
 //! Shared plain-data types used across extractors, store, and query layers.
 
+use std::collections::BTreeMap;
+
 use serde::Serialize;
 
 #[derive(Debug, Clone, Serialize)]
@@ -111,6 +113,25 @@ pub struct SearchRow {
     pub end_line: usize,
     pub signature: String,
     pub score: f64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct FileNeighbor {
+    pub file_path: String,
+    pub incoming_edges: i64,
+    pub outgoing_edges: i64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct Stats {
+    pub schema_version: u32,
+    pub files: i64,
+    pub symbols: i64,
+    pub edges: i64,
+    pub imports: i64,
+    pub synced_at: Option<String>,
+    pub tool_version: Option<String>,
+    pub language_files: BTreeMap<String, i64>,
 }
 
 #[derive(Debug, Serialize)]

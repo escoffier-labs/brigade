@@ -20,6 +20,7 @@ fn command_args<'a>(db: &'a Path, command: &'a str) -> Vec<String> {
         "callees" => vec!["--db".into(), db, "callees".into(), "run".into()],
         "impact" => vec!["--db".into(), db, "impact".into(), "helper".into()],
         "context" => vec!["--db".into(), db, "context".into(), "helper".into()],
+        "neighbors" => vec!["--db".into(), db, "neighbors".into(), "app.py".into()],
         "stats" => vec!["--db".into(), db, "stats".into()],
         other => panic!("unknown query command: {other}"),
     }
@@ -81,7 +82,15 @@ fn snapshot_tree(root: &Path) -> BTreeMap<PathBuf, (usize, String)> {
 
 #[test]
 fn query_commands_do_not_create_default_db_state_when_missing() {
-    for command in ["search", "callers", "callees", "impact", "context", "stats"] {
+    for command in [
+        "search",
+        "callers",
+        "callees",
+        "impact",
+        "context",
+        "neighbors",
+        "stats",
+    ] {
         let dir = tempfile::tempdir().unwrap();
         let mut cmd = Command::new(graphtrail());
         cmd.current_dir(dir.path());
@@ -91,6 +100,7 @@ fn query_commands_do_not_create_default_db_state_when_missing() {
             "callees" => cmd.args(["callees", "run"]),
             "impact" => cmd.args(["impact", "helper"]),
             "context" => cmd.args(["context", "helper"]),
+            "neighbors" => cmd.args(["neighbors", "app.py"]),
             "stats" => cmd.arg("stats"),
             other => panic!("unknown query command: {other}"),
         };
@@ -110,7 +120,15 @@ fn query_commands_do_not_create_default_db_state_when_missing() {
 
 #[test]
 fn query_commands_do_not_mutate_existing_db_state() {
-    for command in ["search", "callers", "callees", "impact", "context", "stats"] {
+    for command in [
+        "search",
+        "callers",
+        "callees",
+        "impact",
+        "context",
+        "neighbors",
+        "stats",
+    ] {
         let dir = tempfile::tempdir().unwrap();
         let db = build_db(dir.path());
         let graph_dir = db.parent().unwrap();

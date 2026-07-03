@@ -2,6 +2,20 @@
 
 Running log of decisions/deviations not captured in the spec. Newest first.
 
+## Audit slice 8 MCP navigation (2026-07-03)
+
+Implemented the agent-navigation slice on `feat/mcp-agent-navigation`.
+
+Decisions:
+- `search` now accepts an optional path filter in both CLI and MCP. The filter stays in SQLite over `symbols.file_path`, matching exact file paths, descendants under a directory prefix, or a path fragment.
+- Added `neighbors <path>` to the CLI and `file_neighbors` to MCP. The query returns one row per adjacent file with incoming and outgoing cross-file call-edge counts.
+- Added MCP `repos`. It reports metadata for the resolved default DB and, when `roots` is supplied, scans each root and its immediate child directories for `.graphtrail/graphtrail.db`.
+- `stats` now returns a typed JSON object with `synced_at`, `tool_version`, and `language_files` in addition to the existing table counts and schema version.
+
+Verification during implementation:
+- `brigade work verify run --target . --command "cargo test query::"`
+- `brigade work verify run --target . --command "cargo test --test mcp"`
+
 ## Phase 2 import-aware resolver review fixes (2026-07-02)
 
 Addressed reviewer findings from the Slice A/B implementation pass.

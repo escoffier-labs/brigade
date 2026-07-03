@@ -5,7 +5,7 @@ use std::collections::HashSet;
 use anyhow::Result;
 use rusqlite::{Connection, params};
 
-use crate::model::{Direction, EdgeRow};
+use crate::model::{Direction, EdgeRow, FileNeighbor};
 use crate::query::search::search_symbols;
 
 pub fn graph_edges(
@@ -77,4 +77,39 @@ pub fn dedupe_edges(edges: Vec<EdgeRow>) -> Result<Vec<EdgeRow>> {
         }
     }
     Ok(out)
+}
+
+pub fn file_neighbors(conn: &Connection, file_path: &str) -> Result<Vec<FileNeighbor>> {
+    let mut stmt = conn.prepare(
+        r#"
+        SELECT file_path, SUM(incoming_edges) AS incoming_edges, SUM(outgoing_edges) AS outgoing_edges
+        FROM (
+            SELECT src.file_path AS file_path, 1 AS incoming_edges, 0 AS outgoing_edges
+            FROM edges e
+            JOIN symbols src ON src.id = e.source
+            JOIN symbols dst ON dst.id = e.target
+            WHERE dst.file_path = ?1 AND src.file_path <> ?1
+            UNION ALL
+            SELECT dst.file_path AS file_path, 0 AS incoming_edges, 1 AS outgoing_edges
+            FROM edges e
+            JOIN symbols src ON src.id = e.source
+            JOIN symbols dst ON dst.id = e.target
+            WHERE src.file_path = ?1 AND dst.file_path <> ?1
+        )
+        GROUP BY file_path
+        ORDER BY file_path
+        "#,
+    )?;
+    let mapped = stmt.query_map(params![file_path], |row| {
+        Ok(FileNeighbor {
+            file_path: row.get(0)?,
+            incoming_edges: row.get(1)?,
+            outgoing_edges: row.get(2)?,
+        })
+    })?;
+    let mut rows = Vec::new();
+    for row in mapped {
+        rows.push(row?);
+    }
+    Ok(rows)
 }
