@@ -19,8 +19,8 @@ use serde_json::{Value, json};
 
 use crate::model::Direction;
 use crate::query::{
-    build_context_pack, file_neighbors, graph_edges, render_markdown, search_symbols_with_path,
-    stats,
+    DEFAULT_IMPACT_DEPTH, build_context_pack, file_neighbors, graph_edges_with_depth, impact_edges,
+    normalize_depth, render_markdown, search_symbols_with_path, stats,
 };
 use crate::store::open_read_only;
 
@@ -145,20 +145,25 @@ fn call_tool(default_db: &Path, name: &str, args: &Value) -> Result<String> {
             optional_str_arg(args, "path").as_deref(),
             usize_arg(args, "limit", 20),
         )?),
-        "callers" => to_pretty(&graph_edges(
+        "callers" => to_pretty(&graph_edges_with_depth(
             &conn,
             &str_arg(args, "symbol"),
             Direction::Incoming,
+            normalize_depth(usize_arg(args, "depth", DEFAULT_IMPACT_DEPTH)),
         )?),
-        "callees" => to_pretty(&graph_edges(
+        "callees" => to_pretty(&graph_edges_with_depth(
             &conn,
             &str_arg(args, "symbol"),
             Direction::Outgoing,
+            normalize_depth(usize_arg(args, "depth", DEFAULT_IMPACT_DEPTH)),
         )?),
         "impact" => {
             let symbol = str_arg(args, "symbol");
-            let mut edges = graph_edges(&conn, &symbol, Direction::Incoming)?;
-            edges.extend(graph_edges(&conn, &symbol, Direction::Outgoing)?);
+            let edges = impact_edges(
+                &conn,
+                &symbol,
+                normalize_depth(usize_arg(args, "depth", DEFAULT_IMPACT_DEPTH)),
+            )?;
             to_pretty(&edges)
         }
         "context" => {
@@ -187,6 +192,7 @@ fn validate_tool_args(name: &str, args: &Value) -> std::result::Result<(), Strin
         }
         "callers" | "callees" | "impact" => {
             require_string(args, "symbol")?;
+            require_usize(args, "depth")?;
         }
         "context" => {
             require_string(args, "task")?;
@@ -222,7 +228,10 @@ fn tool_defs() -> Value {
     };
     let symbol_tool = |desc: &str| {
         with_location(
-            json!({ "symbol": { "type": "string", "description": desc } }),
+            json!({
+                "symbol": { "type": "string", "description": desc },
+                "depth": { "type": "integer", "description": "Traversal depth, clamped to 1..5 (default 1)." }
+            }),
             json!(["symbol"]),
         )
     };

@@ -1,6 +1,6 @@
 //! Call-graph edge queries shared by callers/callees/impact.
 
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 
 use anyhow::Result;
 use rusqlite::{Connection, params};
@@ -8,20 +8,92 @@ use rusqlite::{Connection, params};
 use crate::model::{Direction, EdgeRow, FileNeighbor};
 use crate::query::search::search_symbols;
 
+pub const DEFAULT_IMPACT_DEPTH: usize = 1;
+pub const MAX_IMPACT_DEPTH: usize = 5;
+pub const EDGE_CAP_PER_DIRECTION: usize = 500;
+pub const TRUNCATED_EDGE_KIND: &str = "truncated";
+
 pub fn graph_edges(
     conn: &Connection,
     symbol_query: &str,
     direction: Direction,
 ) -> Result<Vec<EdgeRow>> {
+    graph_edges_with_depth(conn, symbol_query, direction, DEFAULT_IMPACT_DEPTH)
+}
+
+pub fn graph_edges_with_depth(
+    conn: &Connection,
+    symbol_query: &str,
+    direction: Direction,
+    depth: usize,
+) -> Result<Vec<EdgeRow>> {
     let symbols = search_symbols(conn, symbol_query, 20)?;
     let mut edges = Vec::new();
     for symbol in symbols {
-        edges.extend(edges_for_symbol_id(conn, &symbol.id, direction)?);
+        edges.extend(edges_for_symbol_id_with_depth(
+            conn, &symbol.id, direction, depth,
+        )?);
     }
-    dedupe_edges(edges)
+    cap_direction_edges(dedupe_edges(edges)?, direction, symbol_query)
+}
+
+pub fn impact_edges(conn: &Connection, symbol_query: &str, depth: usize) -> Result<Vec<EdgeRow>> {
+    let mut edges = graph_edges_with_depth(conn, symbol_query, Direction::Incoming, depth)?;
+    edges.extend(graph_edges_with_depth(
+        conn,
+        symbol_query,
+        Direction::Outgoing,
+        depth,
+    )?);
+    sort_impact_edges(&mut edges);
+    Ok(edges)
 }
 
 pub fn edges_for_symbol_id(
+    conn: &Connection,
+    symbol_id: &str,
+    direction: Direction,
+) -> Result<Vec<EdgeRow>> {
+    edges_for_symbol_id_with_depth(conn, symbol_id, direction, DEFAULT_IMPACT_DEPTH)
+}
+
+pub fn edges_for_symbol_id_with_depth(
+    conn: &Connection,
+    symbol_id: &str,
+    direction: Direction,
+    depth: usize,
+) -> Result<Vec<EdgeRow>> {
+    let depth = normalize_depth(depth);
+    let mut rows = Vec::new();
+    let mut queue = VecDeque::from([(symbol_id.to_string(), 0usize)]);
+    let mut visited_symbols = HashSet::from([symbol_id.to_string()]);
+
+    while let Some((current_symbol, current_hops)) = queue.pop_front() {
+        if current_hops >= depth {
+            continue;
+        }
+        for mut edge in direct_edges_for_symbol_id(conn, &current_symbol, direction)? {
+            edge.hops = current_hops + 1;
+            if rows.len() == EDGE_CAP_PER_DIRECTION {
+                rows.push(truncated_edge(direction, edge.hops, &current_symbol));
+                return dedupe_edges(rows);
+            }
+
+            let next_symbol = match direction {
+                Direction::Incoming => edge.source_id.clone(),
+                Direction::Outgoing => edge.target_id.clone(),
+            };
+            rows.push(edge);
+            if visited_symbols.insert(next_symbol.clone()) {
+                queue.push_back((next_symbol, current_hops + 1));
+            }
+        }
+    }
+
+    dedupe_edges(rows)
+}
+
+fn direct_edges_for_symbol_id(
     conn: &Connection,
     symbol_id: &str,
     direction: Direction,
@@ -52,11 +124,71 @@ pub fn edges_for_symbol_id(
             line: row.get::<_, Option<i64>>(5)?.map(|v| v as usize),
             source_file: row.get(6)?,
             target_file: row.get(7)?,
+            hops: 1,
         })
     })?;
     let mut rows = Vec::new();
     for row in mapped {
         rows.push(row?);
+    }
+    Ok(rows)
+}
+
+pub fn normalize_depth(depth: usize) -> usize {
+    depth.clamp(DEFAULT_IMPACT_DEPTH, MAX_IMPACT_DEPTH)
+}
+
+pub fn sort_impact_edges(edges: &mut [EdgeRow]) {
+    edges.sort_by(|a, b| {
+        a.hops
+            .cmp(&b.hops)
+            .then_with(|| a.source_file.cmp(&b.source_file))
+            .then_with(|| a.source.cmp(&b.source))
+            .then_with(|| a.target.cmp(&b.target))
+            .then_with(|| a.kind.cmp(&b.kind))
+    });
+}
+
+fn truncated_edge(direction: Direction, hops: usize, current_symbol: &str) -> EdgeRow {
+    let direction_label = match direction {
+        Direction::Incoming => "incoming",
+        Direction::Outgoing => "outgoing",
+    };
+    let marker_id = format!("__graphtrail_truncated_{direction_label}__");
+    EdgeRow {
+        source_id: marker_id.clone(),
+        source: format!("{direction_label} traversal truncated"),
+        target_id: current_symbol.to_string(),
+        target: format!("more than {EDGE_CAP_PER_DIRECTION} {direction_label} edges"),
+        kind: TRUNCATED_EDGE_KIND.to_string(),
+        line: None,
+        source_file: String::new(),
+        target_file: String::new(),
+        hops,
+    }
+}
+
+fn cap_direction_edges(
+    edges: Vec<EdgeRow>,
+    direction: Direction,
+    current_symbol: &str,
+) -> Result<Vec<EdgeRow>> {
+    let max_hops = edges.iter().map(|edge| edge.hops).max().unwrap_or(1);
+    let mut rows = Vec::new();
+    let mut truncated = false;
+    for edge in edges {
+        if edge.kind == TRUNCATED_EDGE_KIND {
+            truncated = true;
+            continue;
+        }
+        if rows.len() == EDGE_CAP_PER_DIRECTION {
+            truncated = true;
+            continue;
+        }
+        rows.push(edge);
+    }
+    if truncated {
+        rows.push(truncated_edge(direction, max_hops, current_symbol));
     }
     Ok(rows)
 }

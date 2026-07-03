@@ -7,9 +7,10 @@ use clap::{Parser, Subcommand};
 
 use crate::model::{ContextPack, Direction, EdgeRow, SearchRow};
 use crate::query::{
-    build_context_pack,
+    DEFAULT_IMPACT_DEPTH, build_context_pack,
     context::{edge_location, symbol_location},
-    file_neighbors, graph_edges, render_markdown, search_symbols_with_path, stats,
+    file_neighbors, graph_edges_with_depth, impact_edges, normalize_depth, render_markdown,
+    search_symbols_with_path, stats,
 };
 use crate::store::{db_path, init_schema, open_db, open_default_read_only, sync_repo_force};
 
@@ -52,16 +53,22 @@ enum Command {
     },
     Callers {
         symbol: String,
+        #[arg(long, default_value_t = DEFAULT_IMPACT_DEPTH)]
+        depth: usize,
         #[arg(long)]
         json: bool,
     },
     Callees {
         symbol: String,
+        #[arg(long, default_value_t = DEFAULT_IMPACT_DEPTH)]
+        depth: usize,
         #[arg(long)]
         json: bool,
     },
     Impact {
         symbol: String,
+        #[arg(long, default_value_t = DEFAULT_IMPACT_DEPTH)]
+        depth: usize,
         #[arg(long)]
         json: bool,
     },
@@ -161,26 +168,41 @@ pub fn run(cli: Cli) -> Result<()> {
                 }
             }
         }
-        Command::Callers { symbol, json } => {
+        Command::Callers {
+            symbol,
+            depth,
+            json,
+        } => {
             let conn = open_default_read_only(cli.db)?;
-            let edges = graph_edges(&conn, &symbol, Direction::Incoming)?;
+            let edges = graph_edges_with_depth(
+                &conn,
+                &symbol,
+                Direction::Incoming,
+                normalize_depth(depth),
+            )?;
             print_json_or_edges(json, &edges)?;
         }
-        Command::Callees { symbol, json } => {
+        Command::Callees {
+            symbol,
+            depth,
+            json,
+        } => {
             let conn = open_default_read_only(cli.db)?;
-            let edges = graph_edges(&conn, &symbol, Direction::Outgoing)?;
+            let edges = graph_edges_with_depth(
+                &conn,
+                &symbol,
+                Direction::Outgoing,
+                normalize_depth(depth),
+            )?;
             print_json_or_edges(json, &edges)?;
         }
-        Command::Impact { symbol, json } => {
+        Command::Impact {
+            symbol,
+            depth,
+            json,
+        } => {
             let conn = open_default_read_only(cli.db)?;
-            let mut edges = graph_edges(&conn, &symbol, Direction::Incoming)?;
-            edges.extend(graph_edges(&conn, &symbol, Direction::Outgoing)?);
-            edges.sort_by(|a, b| {
-                a.source_file
-                    .cmp(&b.source_file)
-                    .then_with(|| a.source.cmp(&b.source))
-                    .then_with(|| a.target.cmp(&b.target))
-            });
+            let edges = impact_edges(&conn, &symbol, normalize_depth(depth))?;
             print_json_or_edges(json, &edges)?;
         }
         Command::Context {
@@ -287,10 +309,11 @@ fn print_json_or_edges(json: bool, rows: &[EdgeRow]) -> Result<()> {
     }
     for row in rows {
         println!(
-            "{} --{}@{}--> {}  ({} -> {})",
+            "{} --{}@{} hops={}--> {}  ({} -> {})",
             row.source,
             row.kind,
             row.line.unwrap_or_default(),
+            row.hops,
             row.target,
             row.source_file,
             row.target_file
@@ -371,6 +394,7 @@ mod tests {
                 line: Some(12),
                 source_file: "cli.py".to_string(),
                 target_file: "app.py".to_string(),
+                hops: 1,
             }],
             callees: vec![EdgeRow {
                 source_id: "sym-run".to_string(),
@@ -381,6 +405,7 @@ mod tests {
                 line: Some(6),
                 source_file: "app.py".to_string(),
                 target_file: "lib.py".to_string(),
+                hops: 1,
             }],
             related_files: vec![
                 "app.py".to_string(),

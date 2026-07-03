@@ -64,7 +64,7 @@ DB=/path/to/repo/.graphtrail/graphtrail.db
 graphtrail --db "$DB" search "handoff lint"
 graphtrail --db "$DB" callers serve
 graphtrail --db "$DB" callees serve
-graphtrail --db "$DB" impact serve
+graphtrail --db "$DB" impact serve --depth 3
 graphtrail --db "$DB" context "handoff lint" --json
 graphtrail --db "$DB" stats --json
 ```
@@ -73,7 +73,7 @@ A real `callers` query against GraphTrail's own indexed source:
 
 ```text
 $ graphtrail --db .graphtrail/graphtrail.db callers serve
-main --calls@19--> serve  (src/bin/graphtrail-mcp.rs -> src/mcp.rs)
+main --calls@19 hops=1--> serve  (src/bin/graphtrail-mcp.rs -> src/mcp.rs)
 ```
 
 ## MCP server
@@ -100,15 +100,16 @@ The server exposes eight tools, every one read-only. This list is verified again
 | Tool | Required args | What it returns |
 |---|---|---|
 | `search` | `query` (`limit` optional, default 20, `path` optional) | Full-text search of code symbols (functions, classes, methods) by name, optionally filtered by indexed file path. |
-| `callers` | `symbol` | Symbols that call the given symbol (incoming call edges). |
-| `callees` | `symbol` | Symbols called by the given symbol (outgoing call edges). |
-| `impact` | `symbol` | Combined callers and callees of a symbol (the blast radius of a change). |
+| `callers` | `symbol` (`depth` optional, default 1, clamped to 1..5) | Symbols that call the given symbol (incoming call edges), with `hops` on each edge. |
+| `callees` | `symbol` (`depth` optional, default 1, clamped to 1..5) | Symbols called by the given symbol (outgoing call edges), with `hops` on each edge. |
+| `impact` | `symbol` (`depth` optional, default 1, clamped to 1..5) | Combined callers and callees of a symbol (the blast radius of a change), with `hops` on each edge. |
 | `context` | `task` (`limit` optional, default 12) | A context pack: matching entry points plus their caller/callee neighborhood and related files. |
 | `stats` | none | Counts of files, symbols, edges, imports, schema version, sync metadata, and per-language file counts. |
 | `file_neighbors` | `path` | Files connected to an indexed file by incoming or outgoing call edges. |
 | `repos` | none (`roots` optional) | Default database metadata plus optional one-level scans for `.graphtrail/graphtrail.db` under root directories. |
 
 Every tool additionally accepts an optional `repo` or `db` selector for multi-repo use.
+Call-edge tools cap each direction at 500 real edges. When a traversal is capped, the JSON array includes a final row with `kind: "truncated"`.
 
 A real `stats` tool call (the server indexed GraphTrail's own source first):
 

@@ -2,6 +2,25 @@
 
 Running log of decisions/deviations not captured in the spec. Newest first.
 
+## Impact depth traversal (2026-07-03)
+
+Implemented transitive depth for `callers`, `callees`, and `impact` on `feat/impact-depth`.
+
+Decisions:
+- CLI and MCP accept optional `depth` for the three call-edge tools. The default stays 1, and numeric values clamp to 1..5.
+- The query layer uses BFS in the requested direction. Incoming traversal walks caller to caller; outgoing traversal walks callee to callee.
+- Symbol visitation is cycle-safe: an already-seen symbol can still contribute the edge that reaches it, but it is not queued again.
+- Each direction returns at most 500 real edges. If more edges exist, the array keeps the existing depth-1 contract and appends one marker row with `kind: "truncated"`.
+- Edge rows now include `hops`, with direct edges reported as `hops: 1`.
+
+Verification during implementation:
+- `brigade work verify run --target . --command "cargo test query::graph_tests"`
+- `brigade work verify run --target . --command "cargo test --test mcp tools_call_bad_depth_returns_invalid_params"`
+- `brigade work verify run --target . --command "cargo test --all-features"`
+- `brigade work verify run --target . --command "cargo fmt --check"`
+- `brigade work verify run --target . --command "cargo clippy --all-targets --all-features -- -D warnings"`
+- `brigade work verify run --target . --command "cargo build --release"`
+
 ## Audit slice 8 MCP navigation (2026-07-03)
 
 Implemented the agent-navigation slice on `feat/mcp-agent-navigation`.

@@ -380,6 +380,21 @@ fn tools_call_invalid_new_args_return_invalid_params() {
 }
 
 #[test]
+fn tools_call_bad_depth_returns_invalid_params() {
+    let (_dir, db) = ro_db();
+
+    let resp = handle_request(
+        &db,
+        &json!({"jsonrpc":"2.0","id":44,"method":"tools/call",
+                "params":{"name":"impact","arguments":{"symbol":"helper","depth":"3"}}}),
+    )
+    .unwrap();
+
+    assert_eq!(resp["id"], 44);
+    assert_eq!(resp["error"]["code"], -32602);
+}
+
+#[test]
 fn tools_call_non_string_repo_selector_returns_invalid_params() {
     let (_dir, db) = ro_db();
 

@@ -100,6 +100,7 @@ pub struct EdgeRow {
     pub line: Option<usize>,
     pub source_file: String,
     pub target_file: String,
+    pub hops: usize,
 }
 
 #[derive(Debug, Serialize)]
