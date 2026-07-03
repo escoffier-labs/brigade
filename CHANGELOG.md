@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.18.0] - 2026-07-03
+
 ### Migration
 Upgrading from 0.17.x, two breaking changes need one-time action:
 
