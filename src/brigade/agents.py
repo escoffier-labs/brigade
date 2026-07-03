@@ -172,6 +172,9 @@ class AgentResult:
     text: str
     ok: bool
     detail: str = ""
+    # app-server transport extras; None/"" on the exec path.
+    thread_id: str | None = None
+    status: str = ""
 
 
 def is_known(cli_ref: str) -> bool:
@@ -291,3 +294,40 @@ def run_agent(
     if not text:
         return AgentResult(text="", ok=False, detail="empty output")
     return AgentResult(text=text, ok=True)
+
+
+def run_codex_appserver(
+    server,
+    prompt: str,
+    *,
+    timeout: float,
+    cwd: Path | None,
+    read_only: bool = False,
+    sandbox: str | None = None,
+    model: str | None = None,
+    on_event=None,
+) -> AgentResult:
+    """Run one codex worker as a thread + turn on a shared app-server.
+
+    Mirrors run_agent's contract: empty output is a failure, detail is capped.
+    """
+    from . import codex_appserver
+
+    effective_sandbox = sandbox if sandbox is not None else ("read-only" if read_only else None)
+    try:
+        thread = server.start_thread(cwd=cwd, model=model, sandbox=effective_sandbox)
+        turn = thread.run_turn(prompt, timeout=timeout, on_event=on_event)
+    except codex_appserver.AppServerError as exc:
+        return AgentResult(text="", ok=False, detail=str(exc)[:200], status="failed")
+    text = turn.text.strip()
+    if not turn.ok:
+        return AgentResult(
+            text=text,
+            ok=False,
+            detail=(turn.detail or f"turn {turn.status}")[:200],
+            thread_id=turn.thread_id,
+            status=turn.status,
+        )
+    if not text:
+        return AgentResult(text="", ok=False, detail="empty output", thread_id=turn.thread_id, status=turn.status)
+    return AgentResult(text=text, ok=True, thread_id=turn.thread_id, status=turn.status)
