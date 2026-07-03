@@ -611,6 +611,13 @@ def test_run_cli_worktree_passes_detached_cwd_and_writes_changes_patch(tmp_path,
         assert proc.run(["git", "symbolic-ref", "-q", "HEAD"], cwd=cwd).code == 1
         (cwd / "tracked.txt").write_text("changed in worktree\n")
         (cwd / "created.txt").write_text("created\n")
+        output_dir.mkdir(parents=True)
+        (output_dir / "worker-results.json").write_text(
+            json.dumps({"results": [], "ground_truth": {"available": True, "patch_ref": None}}) + "\n"
+        )
+        (output_dir / "synthesis.json").write_text(
+            json.dumps({"orchestrator": "chef", "result": {"ok": True}, "ground_truth": {"patch_ref": None}}) + "\n"
+        )
         return 0
 
     monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
@@ -629,6 +636,8 @@ def test_run_cli_worktree_passes_detached_cwd_and_writes_changes_patch(tmp_path,
     assert "created.txt" in patch
     assert "+changed in worktree" in patch
     assert "+created" in patch
+    assert json.loads((output_dir / "worker-results.json").read_text())["ground_truth"]["patch_ref"] == "changes.patch"
+    assert json.loads((output_dir / "synthesis.json").read_text())["ground_truth"]["patch_ref"] == "changes.patch"
 
 
 def test_run_cli_worktree_keeps_checkout_when_patch_invalid(tmp_path, monkeypatch, capsys):
