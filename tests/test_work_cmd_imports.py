@@ -1,3 +1,4 @@
+import importlib
 import json
 import subprocess
 import sys
@@ -26,6 +27,15 @@ from tests.work_cmd_test_helpers import (
     _write_chat_surfaces_config,
     _chat_finding,
 )
+
+
+def test_tools_cmd_package_exposes_constants_facade_aliases():
+    constants = importlib.import_module("brigade.tools_cmd.constants")
+
+    assert tools_cmd.constants is constants
+    assert tools_cmd.OK == constants.OK
+    assert tools_cmd.DEFAULT_TOOLS is constants.DEFAULT_TOOLS
+    assert tools_cmd.HIGH_RISK_COMMAND_PATTERNS is constants.HIGH_RISK_COMMAND_PATTERNS
 
 
 def test_work_import_issue_repairs_for_missing_issue_context(tmp_path, capsys):
@@ -758,7 +768,7 @@ supported_harnesses = []
 """
     )
     now = datetime(2026, 5, 30, 12, 0, 0, tzinfo=timezone.utc)
-    monkeypatch.setattr(tools_cmd, "_now", lambda: now)
+    monkeypatch.setattr(tools_cmd.helpers, "_now", lambda: now)
     assert tools_cmd.call_queue(target=tmp_path, tool_id="runner", args='{"path":"README.md"}', json_output=True) == 0
     pending = json.loads(capsys.readouterr().out)["call"]
     calls = tools_cmd._read_calls(tmp_path)
@@ -830,7 +840,7 @@ def test_tools_call_run_next_failure_timeout_health_and_imports(tmp_path, monkey
     running["completed_at"] = None
     calls.append(running)
     tools_cmd._write_calls(tmp_path, calls)
-    monkeypatch.setattr(tools_cmd, "_now", lambda: datetime(2026, 5, 30, 12, 0, 0, tzinfo=timezone.utc))
+    monkeypatch.setattr(tools_cmd.helpers, "_now", lambda: datetime(2026, 5, 30, 12, 0, 0, tzinfo=timezone.utc))
 
     assert tools_cmd.doctor(target=tmp_path) == 0
     out = capsys.readouterr().out

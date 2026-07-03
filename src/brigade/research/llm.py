@@ -12,7 +12,7 @@ class NoResearcherError(RuntimeError):
 def _run_cli(cli: str, prompt: str, timeout: int, model: Optional[str] = None) -> str:
     from brigade import agents  # same dispatch brigade run uses
 
-    return agents.run_agent(cli, prompt, timeout=timeout, model=model)
+    return agents.run_agent(cli, prompt, timeout=timeout, model=model).text
 
 
 def _http_post_json(url: str, payload: Dict[str, Any], headers: Dict[str, str], timeout: int) -> Dict[str, Any]:

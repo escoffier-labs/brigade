@@ -560,25 +560,25 @@ def dispatch(args) -> int:
     from .. import repos_cmd
 
     if args.repos_command == "init":
-        return repos_cmd.init(
+        return repos_cmd.fleet.init(
             target=args.target,
             force=args.force,
             update_gitignore=not args.no_gitignore,
             json_output=args.json,
         )
     if args.repos_command == "list":
-        return repos_cmd.list_repos(target=args.target, json_output=args.json)
+        return repos_cmd.fleet.list_repos(target=args.target, json_output=args.json)
     if args.repos_command == "show":
-        return repos_cmd.show(target=args.target, repo_id=args.repo_id, json_output=args.json)
+        return repos_cmd.fleet.show(target=args.target, repo_id=args.repo_id, json_output=args.json)
     if args.repos_command == "scan":
-        return repos_cmd.scan(target=args.target, json_output=args.json)
+        return repos_cmd.fleet.scan(target=args.target, json_output=args.json)
     if args.repos_command == "doctor":
-        return repos_cmd.doctor(target=args.target, json_output=args.json, deep=args.deep)
+        return repos_cmd.fleet.doctor(target=args.target, json_output=args.json, deep=args.deep)
     if args.repos_command == "import-issues":
-        return repos_cmd.import_issues(target=args.target, dry_run=args.dry_run, json_output=args.json)
+        return repos_cmd.sweeps.import_issues(target=args.target, dry_run=args.dry_run, json_output=args.json)
     if args.repos_command == "first-run":
         if args.repos_first_run_command == "plan":
-            return repos_cmd.first_run_plan(target=args.target, json_output=args.json)
+            return repos_cmd.fleet_health.first_run_plan(target=args.target, json_output=args.json)
         args._brigade_parser.error(f"unknown repos first-run command: {args.repos_first_run_command}")
         return 2
     if args.repos_command == "ingest":
@@ -590,12 +590,12 @@ def dispatch(args) -> int:
             json_output=args.json,
         )
     if args.repos_command == "rearm":
-        return repos_cmd.rearm(target=args.target, apply=args.apply, json_output=args.json)
+        return repos_cmd.fleet.rearm(target=args.target, apply=args.apply, json_output=args.json)
     if args.repos_command == "health-commands":
-        return repos_cmd.health_commands(target=args.target, json_output=args.json)
+        return repos_cmd.fleet_health.health_commands(target=args.target, json_output=args.json)
     if args.repos_command == "discover":
         if args.repos_discover_command == "plan":
-            return repos_cmd.discover_plan(target=args.target, json_output=args.json)
+            return repos_cmd.fleet.discover_plan(target=args.target, json_output=args.json)
         args._brigade_parser.error(f"unknown repos discover command: {args.repos_discover_command}")
         return 2
     if args.repos_command == "report":

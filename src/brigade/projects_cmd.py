@@ -130,7 +130,8 @@ def _required_readiness(decision: str) -> list[str]:
 
 
 def _project_readiness_record(project: dict[str, Any]) -> dict[str, Any]:
-    readiness = project.get("readiness") if isinstance(project.get("readiness"), dict) else {}
+    raw_readiness = project.get("readiness")
+    readiness = raw_readiness if isinstance(raw_readiness, dict) else {}
     required = _required_readiness(str(project.get("decision") or "leave-alone"))
     missing = [key for key in required if not readiness.get(key)]
     blockers = _as_list(project.get("migration_blockers"))

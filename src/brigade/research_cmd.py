@@ -16,6 +16,14 @@ from .selection import WRITER_INBOXES
 from .localio import utc_now_iso as _now
 
 
+def _dict_or_empty(value: object) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def _list_or_empty(value: object) -> list[Any]:
+    return value if isinstance(value, list) else []
+
+
 def _resolve_backend(target: Path):
     from . import roster as roster_mod
     from .research import llm
@@ -191,7 +199,7 @@ def resume(*, target: Path, run_id: str, overrides: Dict[str, Any]) -> str:
     if not rec:
         raise SystemExit(f"no such run: {run_id}")
     registry.set_status(target, run_id, "running")
-    manifest = rec.get("manifest") if isinstance(rec.get("manifest"), dict) else {}
+    manifest = _dict_or_empty(rec.get("manifest"))
     restored_overrides: Dict[str, Any] = {}
     if isinstance(rec.get("caps"), dict):
         restored_overrides.update(rec["caps"])
@@ -265,17 +273,17 @@ def _export_source_payload(target: Path, rec: dict[str, Any], handoff_text: str)
         "run_id": rec.get("run_id"),
         "status": rec.get("status"),
         "question": rec.get("question"),
-        "caps": rec.get("caps") if isinstance(rec.get("caps"), dict) else {},
-        "manifest": rec.get("manifest") if isinstance(rec.get("manifest"), dict) else {},
-        "stats": rec.get("stats") if isinstance(rec.get("stats"), dict) else {},
+        "caps": _dict_or_empty(rec.get("caps")),
+        "manifest": _dict_or_empty(rec.get("manifest")),
+        "stats": _dict_or_empty(rec.get("stats")),
         "handoff_artifact_fingerprint": _fingerprint_text(handoff_text),
     }
 
 
 def _format_manifest_evidence(rec: dict[str, Any], source_fingerprint: str) -> list[str]:
-    manifest = rec.get("manifest") if isinstance(rec.get("manifest"), dict) else {}
-    caps = rec.get("caps") if isinstance(rec.get("caps"), dict) else {}
-    routes = manifest.get("routes") if isinstance(manifest.get("routes"), list) else []
+    manifest = _dict_or_empty(rec.get("manifest"))
+    caps = _dict_or_empty(rec.get("caps"))
+    routes = _list_or_empty(manifest.get("routes"))
     route_labels = []
     for route in routes:
         if not isinstance(route, dict):

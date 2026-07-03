@@ -661,7 +661,7 @@ def patterns_payload(target: Path) -> dict[str, Any]:
     decisions = [dict(item) for item in DECISION_RECORDS]
     missing_owner = [item["id"] for item in families if not item.get("owner")]
     missing_tests = [item["id"] for item in families if not item.get("test_hint")]
-    checks = [
+    checks: list[dict[str, Any]] = [
         {
             "status": WARN if missing_owner else OK,
             "name": "pattern_missing_owner",
@@ -718,7 +718,7 @@ def patterns(*, target: Path, json_output: bool = False) -> int:
 def archive_payload(target: Path) -> dict[str, Any]:
     target = target.expanduser().resolve()
     items = _archived_items()
-    checks = [
+    checks: list[dict[str, Any]] = [
         {
             "status": OK if (target / ROADMAP_ARCHIVE_RELATIVE_PATH).is_file() else WARN,
             "name": "roadmap_archive_doc_exists",
@@ -797,7 +797,7 @@ def command_contract_payload(target: Path) -> dict[str, Any]:
     inventory_path = _command_inventory_path(target)
     existing_inventory = _read_text(inventory_path) if inventory_path.is_file() else ""
     inventory_current = existing_inventory == expected_inventory
-    checks = [
+    checks: list[dict[str, Any]] = [
         {
             "status": WARN if missing_groups else OK,
             "name": "roadmap_command_group_missing_docs",
@@ -909,7 +909,7 @@ def health(target: Path) -> dict[str, Any]:
     pattern_data = patterns_payload(target)
     command_data = command_contract_payload(target)
     archive_data = archive_payload(target)
-    checks = [
+    checks: list[dict[str, Any]] = [
         *audit_data.get("issues", []),
         *pattern_data.get("issues", []),
         *command_data.get("issues", []),
