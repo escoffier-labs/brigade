@@ -14,6 +14,7 @@ from typing import Any
 from uuid import uuid4
 
 from . import agents
+from . import codex_appserver
 from . import proc, runguard
 from .roster import Agent, Roster, is_cli_allowed, timeout_for, workers
 
@@ -35,6 +36,8 @@ class WorkerResult:
     text: str
     ok: bool
     detail: str = ""
+    thread_id: str | None = None
+    status: str = ""
 
 
 @dataclass(frozen=True)
@@ -478,6 +481,26 @@ def _worker_prompt(
     return _prepend_code_graph(prompt, code_graph)
 
 
+def _worker_event_writer(events_dir: Path | None, worker: str, *, verbose: bool = False):
+    """Append lifecycle notifications to events/<worker>.jsonl; optionally narrate."""
+    if events_dir is None and not verbose:
+        return None
+    path = None
+    if events_dir is not None:
+        events_dir.mkdir(parents=True, exist_ok=True)
+        path = events_dir / f"{_slug(worker)}.jsonl"
+
+    def on_event(msg: dict) -> None:
+        if path is not None:
+            with path.open("a") as fh:
+                fh.write(json.dumps(msg) + "\n")
+        if verbose and msg.get("method") == "item/completed":
+            item = (msg.get("params") or {}).get("item") or {}
+            print(f"worker {worker}: {item.get('type', 'item')} completed", file=sys.stderr)
+
+    return on_event
+
+
 def dispatch(
     assignments: list[Assignment],
     roster: Roster,
@@ -486,6 +509,9 @@ def dispatch(
     sandbox_read_only: bool | None = None,
     sandbox: str | None = None,
     code_graph: CodeGraphBrief | None = None,
+    appserver=None,
+    events_dir: Path | None = None,
+    verbose: bool = False,
 ) -> list[WorkerResult]:
     def run_one(assignment: Assignment, prior_results: list[WorkerResult]) -> WorkerResult:
         agent = roster.agents[assignment.worker]
@@ -497,26 +523,38 @@ def dispatch(
                 ok=False,
                 detail=f"{agent.cli} is not allowed by limits.allow_models",
             )
-        kwargs: dict[str, object] = {
-            "timeout": timeout_for(agent, roster),
-            "cwd": cwd,
-            "read_only": read_only if sandbox_read_only is None else sandbox_read_only,
-        }
-        if sandbox is not None:
-            kwargs["sandbox"] = sandbox
-        if agent.model is not None:
-            kwargs["model"] = agent.model
-        result = agents.run_agent(
-            agent.cli,
-            _worker_prompt(agent, assignment, prior_results=prior_results, read_only=read_only, code_graph=code_graph),
-            **kwargs,
-        )
+        prompt = _worker_prompt(agent, assignment, prior_results=prior_results, read_only=read_only, code_graph=code_graph)
+        if agent.cli == "codex" and appserver is not None:
+            on_event = _worker_event_writer(events_dir, assignment.worker, verbose=verbose)
+            result = agents.run_codex_appserver(
+                appserver,
+                prompt,
+                timeout=timeout_for(agent, roster),
+                cwd=cwd,
+                read_only=read_only if sandbox_read_only is None else sandbox_read_only,
+                sandbox=sandbox,
+                model=agent.model,
+                on_event=on_event,
+            )
+        else:
+            kwargs: dict[str, object] = {
+                "timeout": timeout_for(agent, roster),
+                "cwd": cwd,
+                "read_only": read_only if sandbox_read_only is None else sandbox_read_only,
+            }
+            if sandbox is not None:
+                kwargs["sandbox"] = sandbox
+            if agent.model is not None:
+                kwargs["model"] = agent.model
+            result = agents.run_agent(agent.cli, prompt, **kwargs)
         return WorkerResult(
             worker=assignment.worker,
             task=assignment.task,
             text=result.text,
             ok=result.ok,
             detail=result.detail,
+            thread_id=result.thread_id,
+            status=result.status,
         )
 
     if not assignments:
@@ -625,16 +663,20 @@ def _assignment_payload(assignments: list[Assignment]) -> list[dict[str, object]
 
 
 def _worker_payload(results: list[WorkerResult]) -> list[dict[str, object]]:
-    return [
-        {
+    payload: list[dict[str, object]] = []
+    for result in results:
+        entry: dict[str, object] = {
             "worker": result.worker,
             "task": result.task,
             "ok": result.ok,
             "detail": result.detail,
             "text": result.text,
         }
-        for result in results
-    ]
+        if result.thread_id is not None:
+            entry["thread_id"] = result.thread_id
+            entry["status"] = result.status
+        payload.append(entry)
+    return payload
 
 
 def _agent_result_payload(result: agents.AgentResult) -> dict[str, object]:
@@ -872,6 +914,7 @@ def _run_payload(
     handoff_path: Path | None = None,
     error: str | None = None,
     code_graph: CodeGraphBrief | None = None,
+    codex_transport: str | None = None,
 ) -> dict[str, object]:
     payload: dict[str, object] = {
         "task": task,
@@ -895,6 +938,8 @@ def _run_payload(
         payload["handoff"] = str(handoff_path)
     if error is not None:
         payload["error"] = error
+    if codex_transport is not None:
+        payload["codex_transport"] = codex_transport
     return payload
 
 
@@ -913,8 +958,10 @@ def run(
     sandbox: str | None = None,
     code_graph_enabled: bool = True,
     code_graph: CodeGraphBrief | None = None,
+    codex_transport: str | None = None,
 ) -> int:
     started_at = datetime.now(timezone.utc)
+    transport_for_payload = codex_transport or roster.codex_transport
     cwd = cwd.expanduser().resolve() if cwd is not None else None
     output_dir = output_dir.expanduser() if output_dir is not None else None
     handoff_inbox = handoff_inbox.expanduser() if handoff_inbox is not None else None
@@ -935,6 +982,7 @@ def run(
                 started_at=started_at,
                 output_dir=output_dir,
                 code_graph=code_graph,
+                codex_transport=transport_for_payload,
             ),
         )
 
@@ -968,6 +1016,7 @@ def run(
                     output_dir=output_dir,
                     error=str(exc),
                     code_graph=code_graph,
+                    codex_transport=transport_for_payload,
                 ),
             )
         print(f"error: {exc}", file=sys.stderr)
@@ -994,6 +1043,7 @@ def run(
                     finished_at=finished_at,
                     output_dir=output_dir,
                     code_graph=code_graph,
+                    codex_transport=transport_for_payload,
                 ),
             )
         print(json.dumps(payload, indent=2))
@@ -1002,15 +1052,39 @@ def run(
     if show_plan or verbose:
         _print_plan(assignments)
 
-    worker_results = dispatch(
-        assignments,
-        roster,
-        cwd=cwd,
-        read_only=read_only,
-        sandbox_read_only=sandbox_read_only,
-        sandbox=sandbox,
-        code_graph=code_graph,
+    effective_transport = codex_transport or roster.codex_transport
+    has_codex_workers = any(
+        (roster.agents.get(a.worker) is not None and roster.agents[a.worker].cli == "codex") for a in assignments
     )
+    appserver = None
+    if effective_transport == "app-server" and has_codex_workers:
+        try:
+            appserver = codex_appserver.AppServer(cwd=cwd)
+            appserver.start()
+        except codex_appserver.AppServerError as exc:
+            print(f"warning: codex app-server unavailable ({exc}); falling back to exec", file=sys.stderr)
+            appserver = None
+            effective_transport = "exec"
+    elif effective_transport == "app-server":
+        effective_transport = "exec"
+    transport_for_payload = effective_transport
+
+    try:
+        worker_results = dispatch(
+            assignments,
+            roster,
+            cwd=cwd,
+            read_only=read_only,
+            sandbox_read_only=sandbox_read_only,
+            sandbox=sandbox,
+            code_graph=code_graph,
+            appserver=appserver,
+            events_dir=(output_dir / "events") if (output_dir is not None and appserver is not None) else None,
+            verbose=verbose,
+        )
+    finally:
+        if appserver is not None:
+            appserver.close()
     ground_truth = build_ground_truth(cwd, started_at)
     if output_dir is not None:
         _write_json(
@@ -1056,6 +1130,7 @@ def run(
                     output_dir=output_dir,
                     error=final.detail,
                     code_graph=code_graph,
+                    codex_transport=transport_for_payload,
                 ),
             )
         print(f"error: orchestrator failed during synthesis: {final.detail}", file=sys.stderr)
@@ -1076,6 +1151,7 @@ def run(
                 finished_at=finished_at,
                 output_dir=output_dir,
                 code_graph=code_graph,
+                codex_transport=transport_for_payload,
             ),
         )
     if handoff_inbox is not None:
@@ -1108,6 +1184,7 @@ def run(
                         output_dir=output_dir,
                         error=detail,
                         code_graph=code_graph,
+                        codex_transport=transport_for_payload,
                     ),
                 )
             print(f"error: {detail}", file=sys.stderr)
@@ -1130,6 +1207,7 @@ def run(
                     output_dir=output_dir,
                     handoff_path=handoff,
                     code_graph=code_graph,
+                    codex_transport=transport_for_payload,
                 ),
             )
     print(final.text)

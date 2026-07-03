@@ -1038,3 +1038,104 @@ def test_verify_receipts_sorted_chronologically_across_timezone_offsets(tmp_path
     receipts = aboyeur._verify_receipts_since(tmp_path, datetime(2020, 1, 1, tzinfo=timezone.utc))
 
     assert [r["run_id"] for r in receipts] == ["later-utc", "earlier-but-lexically-larger"]
+
+
+def _appserver_roster():
+    return Roster(
+        orchestrator="chef",
+        agents={
+            "chef": Agent("chef", "claude", "plan and synthesize"),
+            "cook": Agent("cook", "codex", "write code"),
+            "scout": Agent("scout", "claude", "search"),
+        },
+        codex_transport="app-server",
+    )
+
+
+class _StubAppServerThread:
+    def __init__(self, thread_id):
+        self.thread_id = thread_id
+
+    def run_turn(self, prompt, *, timeout, on_event=None):
+        from brigade import codex_appserver
+
+        if on_event is not None:
+            on_event({"method": "item/completed", "params": {"threadId": self.thread_id}})
+        return codex_appserver.TurnResult(
+            text=f"appserver says: {prompt[:20]}", ok=True, status="complete", thread_id=self.thread_id
+        )
+
+
+class _StubAppServer:
+    def __init__(self):
+        self.started = []
+
+    def start_thread(self, *, cwd, model=None, sandbox=None):
+        self.started.append({"cwd": cwd, "model": model, "sandbox": sandbox})
+        return _StubAppServerThread(f"t-{len(self.started)}")
+
+
+def test_dispatch_routes_codex_through_appserver(monkeypatch, tmp_path):
+    roster = _appserver_roster()
+    server = _StubAppServer()
+
+    def fake_run_agent(cli_ref, prompt, **kwargs):
+        assert cli_ref != "codex", "codex must not take the exec path when a server is provided"
+        return agents.AgentResult(text="exec says hi", ok=True)
+
+    monkeypatch.setattr(aboyeur.agents, "run_agent", fake_run_agent)
+    assignments = [
+        aboyeur.Assignment(worker="cook", task="write code"),
+        aboyeur.Assignment(worker="scout", task="find things"),
+    ]
+    results = aboyeur.dispatch(assignments, roster, appserver=server, events_dir=tmp_path)
+    by_worker = {r.worker: r for r in results}
+    assert by_worker["cook"].thread_id == "t-1"
+    assert by_worker["cook"].status == "complete"
+    assert by_worker["scout"].thread_id is None
+    events_file = tmp_path / "cook.jsonl"
+    assert events_file.is_file()
+    assert '"item/completed"' in events_file.read_text()
+
+
+def test_worker_payload_includes_thread_fields_only_for_appserver():
+    results = [
+        aboyeur.WorkerResult(worker="cook", task="t", text="x", ok=True, thread_id="t-1", status="complete"),
+        aboyeur.WorkerResult(worker="scout", task="t", text="y", ok=True),
+    ]
+    payload = aboyeur._worker_payload(results)
+    assert payload[0]["thread_id"] == "t-1" and payload[0]["status"] == "complete"
+    assert "thread_id" not in payload[1] and "status" not in payload[1]
+
+
+def test_run_falls_back_to_exec_when_appserver_unavailable(monkeypatch, tmp_path, capsys):
+    roster = _appserver_roster()
+    monkeypatch.setattr(aboyeur, "_graphtrail_bin", lambda: None)
+
+    class _BoomServer:
+        def __init__(self, *a, **k):
+            pass
+
+        def start(self):
+            from brigade import codex_appserver
+
+            raise codex_appserver.AppServerError("no binary")
+
+    monkeypatch.setattr(aboyeur.codex_appserver, "AppServer", _BoomServer)
+    calls = []
+
+    def fake_run_agent(cli_ref, prompt, **kwargs):
+        calls.append(cli_ref)
+        if len(calls) == 1:
+            return agents.AgentResult(
+                text=json.dumps({"assignments": [{"worker": "cook", "task": "do"}]}), ok=True
+            )
+        return agents.AgentResult(text="done", ok=True)
+
+    monkeypatch.setattr(aboyeur.agents, "run_agent", fake_run_agent)
+    out = tmp_path / "run"
+    rc = aboyeur.run("task", roster, cwd=tmp_path, output_dir=out)
+    assert rc == 0
+    assert "falling back to exec" in capsys.readouterr().err
+    run_json = json.loads((out / "run.json").read_text())
+    assert run_json["codex_transport"] == "exec"
