@@ -226,3 +226,54 @@ def test_runs_latest_cli_with_explicit_runs_dir(tmp_path, capsys):
 
     assert cli.main(["runs", "latest", "--cwd", str(tmp_path), "--runs-dir", str(runs_root)]) == 0
     assert f"run: {run_dir}" in capsys.readouterr().out
+
+
+def test_runs_show_prints_ground_truth(tmp_path, capsys):
+    run_dir = tmp_path / "run"
+    _write_run_artifacts(run_dir)
+    payload = json.loads((run_dir / "worker-results.json").read_text())
+    payload["ground_truth"] = {
+        "available": True,
+        "diffstat": " a.txt | 1 +\n 1 file changed, 1 insertion(+)",
+        "changed_files": ["a.txt"],
+        "untracked_files": ["notes.md"],
+        "patch_ref": "changes.patch",
+        "verify_receipts": [
+            {
+                "run_id": "20260703-000000-work-verify-abc",
+                "status": "completed",
+                "commands": [{"command": "pytest -q", "status": "completed", "exit_code": 0}],
+            }
+        ],
+    }
+    _write_json(run_dir / "worker-results.json", payload)
+
+    assert runs_cmd.show(run_dir) == 0
+    out = capsys.readouterr().out
+    assert "ground truth:" in out
+    assert "changed_files: 1 (a.txt)" in out
+    assert "untracked_files: 1 (notes.md)" in out
+    assert "1 file changed, 1 insertion(+)" in out
+    assert "patch_ref: changes.patch" in out
+    assert "verify: 20260703-000000-work-verify-abc completed" in out
+    assert "pytest -q" in out and "exit=0" in out
+
+
+def test_runs_show_prints_unavailable_ground_truth_reason(tmp_path, capsys):
+    run_dir = tmp_path / "run"
+    _write_run_artifacts(run_dir)
+    payload = json.loads((run_dir / "worker-results.json").read_text())
+    payload["ground_truth"] = {"available": False, "reason": "not a git worktree"}
+    _write_json(run_dir / "worker-results.json", payload)
+
+    assert runs_cmd.show(run_dir) == 0
+    out = capsys.readouterr().out
+    assert "ground truth: unavailable (not a git worktree)" in out
+
+
+def test_runs_show_without_ground_truth_stays_quiet(tmp_path, capsys):
+    run_dir = tmp_path / "run"
+    _write_run_artifacts(run_dir)
+
+    assert runs_cmd.show(run_dir) == 0
+    assert "ground truth" not in capsys.readouterr().out
