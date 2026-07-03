@@ -649,7 +649,14 @@ def _verify_receipts_since(cwd: Path, started_at: datetime) -> list[dict[str, ob
         if receipt_started_at is None or receipt_started_at < started_at:
             continue
         receipts.append(_verify_receipt_payload(data))
-    receipts.sort(key=lambda item: str(item.get("started_at") or item.get("run_id") or ""), reverse=True)
+
+    def _sort_key(item: dict[str, object]) -> tuple[datetime, str]:
+        # Sort by parsed UTC time: lexical started_at ordering misorders
+        # receipts with mixed timezone offsets.
+        parsed = _parse_iso_datetime(item.get("started_at"))
+        return (parsed or datetime.min.replace(tzinfo=timezone.utc), str(item.get("run_id") or ""))
+
+    receipts.sort(key=_sort_key, reverse=True)
     return receipts
 
 

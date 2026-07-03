@@ -793,3 +793,25 @@ def test_disallowed_worker_is_recorded_not_run(monkeypatch):
     assert aboyeur.run("build feature", _restricted_roster()) == 0
     assert [call[0] for call in calls] == ["codex", "codex"]
     assert "not allowed by limits.allow_models" in calls[-1][1]
+
+
+def test_verify_receipts_sorted_chronologically_across_timezone_offsets(tmp_path):
+    # Lexical started_at ordering breaks with mixed offsets: 05:00+09:00 on
+    # Jan 2 is 20:00 UTC on Jan 1, chronologically BEFORE 23:00+00:00 on
+    # Jan 1, but lexically after it. latest_verify must follow real time.
+    from datetime import datetime, timezone
+
+    root = tmp_path / ".brigade" / "work" / "verify-runs"
+    for run_id, started_at in (
+        ("later-utc", "2030-01-01T23:00:00+00:00"),
+        ("earlier-but-lexically-larger", "2030-01-02T05:00:00+09:00"),
+    ):
+        d = root / run_id
+        d.mkdir(parents=True)
+        (d / "receipt.json").write_text(
+            json.dumps({"run_id": run_id, "status": "completed", "started_at": started_at, "commands": []}) + "\n"
+        )
+
+    receipts = aboyeur._verify_receipts_since(tmp_path, datetime(2020, 1, 1, tzinfo=timezone.utc))
+
+    assert [r["run_id"] for r in receipts] == ["later-utc", "earlier-but-lexically-larger"]
