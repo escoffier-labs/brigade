@@ -181,6 +181,7 @@ def test_repos_cli_dispatch(tmp_path, monkeypatch):
     monkeypatch.setattr(repos_cmd, "scan", record("scan"))
     monkeypatch.setattr(repos_cmd, "doctor", record("doctor"))
     monkeypatch.setattr(repos_cmd, "import_issues", record("import-issues"))
+    monkeypatch.setattr(repos_cmd, "rearm", record("rearm"))
     monkeypatch.setattr(repos_cmd, "health_commands", record("health-commands"))
     monkeypatch.setattr(repos_cmd, "discover_plan", record("discover-plan"))
 
@@ -190,6 +191,7 @@ def test_repos_cli_dispatch(tmp_path, monkeypatch):
     assert cli.main(["repos", "scan", "--target", str(tmp_path), "--json"]) == 0
     assert cli.main(["repos", "doctor", "--target", str(tmp_path), "--json"]) == 0
     assert cli.main(["repos", "import-issues", "--target", str(tmp_path), "--dry-run", "--json"]) == 0
+    assert cli.main(["repos", "rearm", "--target", str(tmp_path), "--apply", "--json"]) == 0
     assert cli.main(["repos", "health-commands", "--target", str(tmp_path), "--json"]) == 0
     assert cli.main(["repos", "discover", "plan", "--target", str(tmp_path), "--json"]) == 0
 
@@ -200,6 +202,7 @@ def test_repos_cli_dispatch(tmp_path, monkeypatch):
         ("scan", {"target": tmp_path, "json_output": True}),
         ("doctor", {"target": tmp_path, "json_output": True, "deep": False}),
         ("import-issues", {"target": tmp_path, "dry_run": True, "json_output": True}),
+        ("rearm", {"target": tmp_path, "apply": True, "json_output": True}),
         ("health-commands", {"target": tmp_path, "json_output": True}),
         ("discover-plan", {"target": tmp_path, "json_output": True}),
     ]
@@ -279,6 +282,149 @@ def test_repos_ingest_routes_fleet_handoffs_into_owner(tmp_path, capsys):
     assert (owner / "memory" / "cards" / "fleet-note.md").is_file()
     assert (inbox / "processed" / "note.md").is_file()
     assert not (inbox / "note.md").exists()
+
+
+def _write_fleet_config(owner, repos):
+    config = owner / ".brigade" / "repos.toml"
+    config.parent.mkdir(parents=True)
+    config.write_text(
+        "".join(f'[[repo]]\nid = "{repo_id}"\nlabel = "{label}"\npath = "{path}"\n' for repo_id, label, path in repos)
+    )
+
+
+def _write_brigade_config(repo, harnesses=("codex",), owner="codex"):
+    brigade = repo / ".brigade"
+    brigade.mkdir(parents=True, exist_ok=True)
+    (brigade / "config.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "depth": "repo",
+                "harnesses": list(harnesses),
+                "owner": owner,
+                "includes": [],
+            },
+            indent=2,
+        )
+        + "\n"
+    )
+
+
+def _capture_json_call(capsys, func, **kwargs):
+    rc = func(**kwargs, json_output=True)
+    return rc, json.loads(capsys.readouterr().out)
+
+
+def test_repos_rearm_plan_reports_armed_and_dormant_without_writes(tmp_path, capsys):
+    owner = tmp_path / "workspace"
+    armed = tmp_path / "armed-repo"
+    dormant = tmp_path / "dormant-repo"
+    _init_git_repo(owner)
+    _init_git_repo(armed)
+    _init_git_repo(dormant)
+    _write_fleet_config(owner, [("armed", "armed repo", armed), ("dormant", "dormant repo", dormant)])
+    _write_brigade_config(armed)
+    _write_brigade_config(dormant)
+    (armed / ".brigade" / "dogfood.toml").write_text("[dogfood]\n")
+    (armed / ".brigade" / "mcp.json").write_text('{"mcpServers":{}}\n')
+    (dormant / ".brigade" / "mcp.json").write_text('{"mcpServers":{}}\n')
+    before = {str(path.relative_to(tmp_path)) for path in tmp_path.rglob("*")}
+
+    rc, payload = _capture_json_call(capsys, repos_cmd.rearm, target=owner)
+    after = {str(path.relative_to(tmp_path)) for path in tmp_path.rglob("*")}
+
+    assert rc == 0
+    assert after == before
+    assert payload["dry_run"] is True
+    assert payload["totals"]["armed"] == 1
+    assert payload["totals"]["dormant"] == 1
+    assert payload["repos"] == [
+        {
+            "repo_id": "armed",
+            "label": "armed repo",
+            "status": "armed",
+            "action": "none",
+            "reason": None,
+            "has_config": True,
+            "has_dogfood": True,
+            "has_mcp": True,
+            "harnesses": ["codex"],
+        },
+        {
+            "repo_id": "dormant",
+            "label": "dormant repo",
+            "status": "dormant",
+            "action": "plan quickstart",
+            "reason": "missing .brigade/dogfood.toml",
+            "has_config": True,
+            "has_dogfood": False,
+            "has_mcp": True,
+            "harnesses": ["codex"],
+        },
+    ]
+    assert not (dormant / ".brigade" / "dogfood.toml").exists()
+
+
+def test_repos_rearm_apply_arms_dormant_repo_without_clobbering_existing_files(tmp_path, monkeypatch, capsys):
+    owner = tmp_path / "workspace"
+    dormant = tmp_path / "dormant-repo"
+    _init_git_repo(owner)
+    _init_git_repo(dormant)
+    _write_fleet_config(owner, [("dormant", "dormant repo", dormant)])
+    _write_brigade_config(dormant, harnesses=("codex", "cursor"), owner="cursor")
+    agents = dormant / "AGENTS.md"
+    agents.write_text("existing guidance\n")
+    mcp = dormant / ".brigade" / "mcp.json"
+    mcp.write_text('{"mcpServers":{"existing":{"command":"keep"}}}\n')
+    calls = []
+
+    def fake_quickstart(**kwargs):
+        calls.append(kwargs)
+        (kwargs["target"] / ".brigade" / "dogfood.toml").write_text("[dogfood]\n")
+        return 0
+
+    monkeypatch.setattr("brigade.operator_cmd.quickstart", fake_quickstart)
+
+    rc, payload = _capture_json_call(capsys, repos_cmd.rearm, target=owner, apply=True)
+
+    assert rc == 0
+    assert payload["dry_run"] is False
+    assert payload["totals"]["armed"] == 0
+    assert payload["totals"]["dormant"] == 1
+    assert payload["totals"]["applied"] == 1
+    assert (dormant / ".brigade" / "dogfood.toml").is_file()
+    assert agents.read_text() == "existing guidance\n"
+    assert mcp.read_text() == '{"mcpServers":{"existing":{"command":"keep"}}}\n'
+    assert calls == [
+        {
+            "target": dormant,
+            "depth": "repo",
+            "harnesses": "codex,cursor",
+            "owner": "cursor",
+            "dry_run": False,
+            "force": False,
+            "full": False,
+            "json_output": True,
+        }
+    ]
+
+
+def test_repos_rearm_skips_unwired_repo_with_reason(tmp_path, capsys):
+    owner = tmp_path / "workspace"
+    unwired = tmp_path / "unwired-repo"
+    _init_git_repo(owner)
+    _init_git_repo(unwired)
+    (unwired / ".brigade").mkdir()
+    _write_fleet_config(owner, [("unwired", "unwired repo", unwired)])
+
+    rc, payload = _capture_json_call(capsys, repos_cmd.rearm, target=owner)
+
+    assert rc == 0
+    assert payload["totals"]["unwired"] == 1
+    assert payload["repos"][0]["status"] == "unwired"
+    assert payload["repos"][0]["action"] == "skip"
+    assert payload["repos"][0]["reason"] == "unwired; run quickstart with explicit harnesses"
+    assert not (unwired / ".brigade" / "dogfood.toml").exists()
 
 
 def test_repo_summary_counts_opencode_inbox(tmp_path):

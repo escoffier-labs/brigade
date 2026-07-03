@@ -60,6 +60,12 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_repos_ingest.add_argument("--no-promote-cards", action="store_true", help="Do not auto-promote cards.")
     p_repos_ingest.add_argument("--no-route-documents", action="store_true", help="Do not auto-route documents.")
     p_repos_ingest.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_repos_rearm = repos_sub.add_parser("rearm", help="Plan or apply Brigade dogfood arming across fleet repos.")
+    p_repos_rearm.add_argument(
+        "--target", "-t", type=Path, default=Path("."), help="Canonical memory owner (where the fleet config lives)."
+    )
+    p_repos_rearm.add_argument("--apply", action="store_true", help="Write changes. Default is a dry run.")
+    p_repos_rearm.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_repos_health_commands = repos_sub.add_parser(
         "health-commands", help="Inspect configured optional repo health commands."
     )
@@ -583,6 +589,8 @@ def dispatch(args) -> int:
             route_documents=not args.no_route_documents,
             json_output=args.json,
         )
+    if args.repos_command == "rearm":
+        return repos_cmd.rearm(target=args.target, apply=args.apply, json_output=args.json)
     if args.repos_command == "health-commands":
         return repos_cmd.health_commands(target=args.target, json_output=args.json)
     if args.repos_command == "discover":

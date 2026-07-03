@@ -9,9 +9,11 @@ import subprocess
 import sys
 import shutil
 import fnmatch
+from contextlib import redirect_stdout
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from io import StringIO
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -26,7 +28,7 @@ from .localio import (
 )
 from .selection import Selection, WRITER_INBOXES
 from .render import emit
-from . import actionqueue, reportstore, toml_compat as tomllib, work_cmd
+from . import actionqueue, config as brigade_config, reportstore, toml_compat as tomllib, work_cmd
 
 OK = "ok"
 WARN = "warn"
@@ -59,6 +61,7 @@ RELEASE_BUNDLE_FILES = (
     "RELEASE_TRAIN_MATRIX.md",
     "RELEASE_TRAIN_MANIFEST.json",
 )
+UNWIRED_REARM_REASON = "unwired; run quickstart with explicit harnesses"
 
 
 @dataclass(frozen=True)
@@ -972,6 +975,137 @@ def ingest_fleet(
         f"routed={totals['routed']} inboxed={totals['inboxed']} skipped={totals['skipped']}",
     ]
     return emit(payload, json_output, text_lines, 0)
+
+
+def _capture_json_command(func, **kwargs: Any) -> tuple[int, dict[str, Any]]:
+    output = StringIO()
+    with redirect_stdout(output):
+        rc = func(**kwargs, json_output=True)
+    try:
+        payload = json.loads(output.getvalue() or "{}")
+    except json.JSONDecodeError:
+        payload = {
+            "valid": False,
+            "errors": [f"{getattr(func, '__name__', 'command')} returned invalid JSON"],
+            "output": output.getvalue().strip().splitlines(),
+        }
+        rc = 1
+    return rc, payload
+
+
+def _rearm_selection(repo_path: Path) -> tuple[Selection | None, str | None]:
+    config = brigade_config.config_path(repo_path)
+    if not config.is_file():
+        return None, UNWIRED_REARM_REASON
+    try:
+        loaded = brigade_config.load_config(repo_path)
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        return None, f"invalid .brigade/config.json: {exc}"
+    if loaded is None:
+        return None, UNWIRED_REARM_REASON
+    return loaded.selection, None
+
+
+def _rearm_reason(*, has_dogfood: bool, has_mcp: bool) -> str | None:
+    missing = []
+    if not has_dogfood:
+        missing.append(".brigade/dogfood.toml")
+    if not has_mcp:
+        missing.append(".brigade/mcp.json")
+    if not missing:
+        return None
+    return f"missing {', '.join(missing)}"
+
+
+def rearm(*, target: Path, apply: bool = False, json_output: bool = False) -> int:
+    """Plan or apply the operator quickstart loop across configured fleet repos."""
+    from . import operator_cmd
+
+    target = target.expanduser().resolve()
+    entries, errors, config_loaded = _load_config(target)
+    if not config_loaded:
+        print(f"error: no repo fleet config at {config_path(target)}", file=sys.stderr)
+        return 2
+
+    dry_run = not apply
+    repos: list[dict[str, Any]] = []
+    totals = {"armed": 0, "dormant": 0, "unwired": 0, "applied": 0, "failed": 0, "skipped": 0}
+    for entry in entries:
+        if not entry.enabled:
+            continue
+        brigade_dir = entry.path / ".brigade"
+        has_config = (brigade_dir / "config.json").is_file()
+        has_dogfood = (brigade_dir / "dogfood.toml").is_file()
+        has_mcp = (brigade_dir / "mcp.json").is_file()
+        selection, selection_error = _rearm_selection(entry.path)
+        harnesses = list(selection.harnesses) if selection is not None else []
+        row: dict[str, Any] = {
+            "repo_id": entry.repo_id,
+            "label": entry.label,
+            "status": "unwired",
+            "action": "skip",
+            "reason": selection_error,
+            "has_config": has_config,
+            "has_dogfood": has_dogfood,
+            "has_mcp": has_mcp,
+            "harnesses": harnesses,
+        }
+        if selection is None:
+            totals["unwired"] += 1
+            totals["skipped"] += 1
+            repos.append(row)
+            continue
+
+        reason = _rearm_reason(has_dogfood=has_dogfood, has_mcp=has_mcp)
+        if reason is None:
+            row.update({"status": "armed", "action": "none", "reason": None})
+            totals["armed"] += 1
+            repos.append(row)
+            continue
+
+        row.update({"status": "dormant", "action": "plan quickstart", "reason": reason})
+        totals["dormant"] += 1
+        if apply:
+            rc, quickstart_payload = _capture_json_command(
+                operator_cmd.quickstart,
+                target=entry.path,
+                depth=selection.depth,
+                harnesses=",".join(selection.harnesses) or "none",
+                owner=selection.owner,
+                dry_run=False,
+                force=False,
+                full=False,
+            )
+            row["quickstart"] = quickstart_payload
+            if rc == 0:
+                row["action"] = "applied quickstart"
+                totals["applied"] += 1
+            else:
+                row["action"] = "quickstart failed"
+                row["quickstart_return_code"] = rc
+                totals["failed"] += 1
+        repos.append(row)
+
+    payload = {
+        "target": str(target),
+        "dry_run": dry_run,
+        "config_loaded": config_loaded,
+        "config_errors": errors,
+        "repos": repos,
+        "totals": totals,
+    }
+    mode = "DRY-RUN (pass --apply to write)" if dry_run else "applied"
+    text_lines = [
+        f"repos rearm [{mode}]: {target}",
+        *[
+            f"- {repo['repo_id']}: status={repo['status']} action={repo['action']}"
+            + (f" reason={repo['reason']}" if repo.get("reason") else "")
+            for repo in repos
+        ],
+        f"totals: armed={totals['armed']} dormant={totals['dormant']} "
+        f"unwired={totals['unwired']} applied={totals['applied']} failed={totals['failed']}",
+    ]
+    return emit(payload, json_output, text_lines, 1 if totals["failed"] else 0)
 
 
 def init(*, target: Path, force: bool = False, update_gitignore: bool = True, json_output: bool = False) -> int:
