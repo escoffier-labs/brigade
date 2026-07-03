@@ -183,3 +183,24 @@ def test_cli_agent_still_requires_cli_or_endpoint(tmp_path):
     text = 'orchestrator = "chef"\n[agents.chef]\nrole = "plan"\n'
     with pytest.raises(ValueError):
         roster_mod.load_roster(_write(tmp_path, text))
+
+
+def test_codex_transport_defaults_to_exec(tmp_path):
+    p = tmp_path / "roster.toml"
+    p.write_text('orchestrator = "chef"\n\n[agents.chef]\ncli = "codex"\nrole = "plan"\n')
+    assert roster_mod.load_roster(p).codex_transport == "exec"
+
+
+def test_codex_transport_accepts_app_server(tmp_path):
+    p = tmp_path / "roster.toml"
+    p.write_text(
+        'orchestrator = "chef"\ncodex_transport = "app-server"\n\n[agents.chef]\ncli = "codex"\nrole = "plan"\n'
+    )
+    assert roster_mod.load_roster(p).codex_transport == "app-server"
+
+
+def test_codex_transport_rejects_unknown(tmp_path):
+    p = tmp_path / "roster.toml"
+    p.write_text('orchestrator = "chef"\ncodex_transport = "daemon"\n\n[agents.chef]\ncli = "codex"\nrole = "plan"\n')
+    with pytest.raises(ValueError, match="codex_transport"):
+        roster_mod.load_roster(p)

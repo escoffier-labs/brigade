@@ -10,6 +10,7 @@ from . import agents as agent_adapters
 from . import toml_compat
 
 SANDBOX_CHOICES = ("read-only", "workspace-write", "danger-full-access")
+CODEX_TRANSPORT_CHOICES = ("exec", "app-server")
 
 
 @dataclass(frozen=True)
@@ -31,6 +32,7 @@ class Roster:
     allow_models: tuple[str, ...] = ()
     timeout_seconds: float = 600.0
     sandbox: str | None = None
+    codex_transport: str = "exec"
 
     def find_role(self, role: str) -> Agent | None:
         return next((a for a in self.agents.values() if a.role == role), None)
@@ -96,6 +98,11 @@ def load_roster(path: Path) -> Roster:
     timeout_seconds = _as_positive_number(limits.get("timeout_seconds", 600.0), "limits.timeout_seconds")
     sandbox = _as_sandbox(limits.get("sandbox"))
 
+    codex_transport = data.get("codex_transport", "exec")
+    if codex_transport not in CODEX_TRANSPORT_CHOICES:
+        choices = ", ".join(CODEX_TRANSPORT_CHOICES)
+        raise ValueError(f"codex_transport must be one of: {choices}")
+
     raw_allow_models = limits.get("allow_models", [])
     if raw_allow_models is None:
         raw_allow_models = []
@@ -157,6 +164,7 @@ def load_roster(path: Path) -> Roster:
         allow_models=allow_models,
         timeout_seconds=timeout_seconds,
         sandbox=sandbox,
+        codex_transport=codex_transport,
     )
 
 

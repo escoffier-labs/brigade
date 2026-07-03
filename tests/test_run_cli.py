@@ -787,3 +787,45 @@ def test_run_cli_normal_runs_write_no_changes_patch(tmp_path, monkeypatch):
 
     assert cli.main(["run", "x", "--cwd", str(repo), "--output-dir", str(output_dir)]) == 0
     assert not (output_dir / "changes.patch").exists()
+
+
+def test_run_cli_passes_codex_transport_to_aboyeur(tmp_path, monkeypatch):
+    roster_path = tmp_path / "roster.toml"
+    roster_path.write_text('orchestrator = "chef"\n\n[agents.chef]\ncli = "codex"\nrole = "plan"\n')
+    seen = {}
+
+    def fake_run(task, loaded_roster, **kwargs):
+        seen.update(kwargs)
+        return 0
+
+    monkeypatch.setattr(aboyeur, "run", fake_run)
+    rc = cli.main(
+        [
+            "run",
+            "t",
+            "--roster",
+            str(roster_path),
+            "--cwd",
+            str(tmp_path),
+            "--codex-transport",
+            "app-server",
+            "--no-artifacts",
+        ]
+    )
+    assert rc == 0
+    assert seen["codex_transport"] == "app-server"
+
+
+def test_run_cli_codex_transport_default_is_none(tmp_path, monkeypatch):
+    roster_path = tmp_path / "roster.toml"
+    roster_path.write_text('orchestrator = "chef"\n\n[agents.chef]\ncli = "codex"\nrole = "plan"\n')
+    seen = {}
+
+    def fake_run(task, loaded_roster, **kwargs):
+        seen.update(kwargs)
+        return 0
+
+    monkeypatch.setattr(aboyeur, "run", fake_run)
+    rc = cli.main(["run", "t", "--roster", str(roster_path), "--cwd", str(tmp_path), "--no-artifacts"])
+    assert rc == 0
+    assert "codex_transport" not in seen

@@ -1,0 +1,158 @@
+"""Tests for brigade runs resume."""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+from brigade import agents, codex_appserver, run_resume
+
+
+def _write_run_dir(tmp_path: Path, *, results: list[dict]) -> Path:
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    (run_dir / "run.json").write_text(
+        json.dumps(
+            {
+                "task": "big task",
+                "cwd": str(tmp_path),
+                "orchestrator": "chef",
+                "read_only": False,
+                "status": "failed",
+                "started_at": "2026-07-03T00:00:00+00:00",
+            }
+        )
+    )
+    (run_dir / "roster.json").write_text(
+        json.dumps(
+            {
+                "orchestrator": "chef",
+                "max_workers": 4,
+                "timeout_seconds": 600.0,
+                "allow_models": [],
+                "sandbox": None,
+                "agents": {
+                    "chef": {"cli": "claude", "model": None, "role": "plan", "timeout_seconds": None},
+                    "cook": {"cli": "codex", "model": None, "role": "code", "timeout_seconds": None},
+                },
+            }
+        )
+    )
+    (run_dir / "plan.json").write_text(
+        json.dumps({"assignments": [{"stage": 1, "worker": "cook", "task": "write code"}]})
+    )
+    (run_dir / "worker-results.json").write_text(json.dumps({"results": results, "ground_truth": {}}))
+    return run_dir
+
+
+class _StubThread:
+    def __init__(self, thread_id):
+        self.thread_id = thread_id
+
+    def run_turn(self, prompt, *, timeout, on_event=None):
+        assert "big task" not in prompt  # continuation carries the sub-task, not the run task
+        assert "write code" in prompt
+        return codex_appserver.TurnResult(text="finished now", ok=True, status="complete", thread_id=self.thread_id)
+
+
+class _StubServer:
+    def __init__(self, *a, **k):
+        self.resumed = []
+
+    def start(self):
+        pass
+
+    def close(self):
+        pass
+
+    def resume_thread(self, thread_id, *, cwd, model=None, sandbox=None):
+        self.resumed.append(thread_id)
+        return _StubThread(thread_id)
+
+
+def test_resume_reattaches_and_resynthesizes(tmp_path, monkeypatch, capsys):
+    run_dir = _write_run_dir(
+        tmp_path,
+        results=[
+            {
+                "worker": "cook",
+                "task": "write code",
+                "ok": False,
+                "detail": "timeout",
+                "text": "part",
+                "thread_id": "t-1",
+                "status": "interrupted",
+            },
+        ],
+    )
+    monkeypatch.setattr(run_resume.codex_appserver, "AppServer", _StubServer)
+    monkeypatch.setattr(
+        run_resume.agents,
+        "run_agent",
+        lambda *a, **k: agents.AgentResult(text="final synthesis", ok=True),
+    )
+    rc = run_resume.resume(run_dir)
+    assert rc == 0
+    results = json.loads((run_dir / "worker-results.json").read_text())["results"]
+    assert results[0]["ok"] is True and results[0]["text"] == "finished now"
+    assert results[0]["status"] == "complete"
+    assert (run_dir / "final.txt").read_text().strip() == "final synthesis"
+    run_json = json.loads((run_dir / "run.json").read_text())
+    assert run_json["status"] == "ok"
+    assert run_json["resumed_at"]
+
+
+def test_resume_with_nothing_resumable_reports_and_exits_2(tmp_path, capsys):
+    run_dir = _write_run_dir(
+        tmp_path,
+        results=[{"worker": "cook", "task": "write code", "ok": False, "detail": "exec timeout", "text": ""}],
+    )
+    rc = run_resume.resume(run_dir)
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "no resumable workers" in err
+    assert "cook" in err  # names the non-resumable failure
+
+
+def test_resume_missing_artifacts_errors(tmp_path, capsys):
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    assert run_resume.resume(empty) == 2
+    assert "missing" in capsys.readouterr().err
+
+
+def test_runs_resume_cli_dispatches(tmp_path, monkeypatch):
+    from brigade import cli
+
+    seen = {}
+    monkeypatch.setattr(run_resume, "resume", lambda run_dir: seen.update(run_dir=run_dir) or 0)
+    rc = cli.main(["runs", "resume", str(tmp_path)])
+    assert rc == 0
+    assert seen["run_dir"] == tmp_path
+
+
+def test_resume_orchestrator_without_cli_errors(tmp_path, monkeypatch, capsys):
+    run_dir = _write_run_dir(
+        tmp_path,
+        results=[
+            {
+                "worker": "cook",
+                "task": "write code",
+                "ok": False,
+                "detail": "timeout",
+                "text": "",
+                "thread_id": "t-1",
+                "status": "interrupted",
+            },
+        ],
+    )
+    roster = json.loads((run_dir / "roster.json").read_text())
+    roster["agents"]["chef"]["cli"] = None
+    (run_dir / "roster.json").write_text(json.dumps(roster))
+    monkeypatch.setattr(run_resume.codex_appserver, "AppServer", _StubServer)
+    rc = run_resume.resume(run_dir)
+    assert rc == 2
+    assert "no CLI" in capsys.readouterr().err
+    # Resumed worker progress is still persisted even though synthesis was skipped.
+    results = json.loads((run_dir / "worker-results.json").read_text())["results"]
+    assert results[0]["text"] == "finished now"

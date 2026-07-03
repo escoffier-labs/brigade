@@ -227,3 +227,68 @@ def test_run_agent_nonzero_is_not_ok(monkeypatch):
     res = agents.run_agent("claude", "x")
     assert res.ok is False
     assert "boom" in res.detail
+
+
+class _StubThread:
+    def __init__(self, result):
+        self._result = result
+        self.prompts = []
+
+    def run_turn(self, prompt, *, timeout, on_event=None):
+        self.prompts.append((prompt, timeout))
+        return self._result
+
+
+class _StubServer:
+    def __init__(self, result, fail=False):
+        self.thread = _StubThread(result)
+        self.calls = []
+        self.fail = fail
+
+    def start_thread(self, *, cwd, model=None, sandbox=None):
+        if self.fail:
+            from brigade import codex_appserver
+
+            raise codex_appserver.AppServerError("boom")
+        self.calls.append({"cwd": cwd, "model": model, "sandbox": sandbox})
+        return self.thread
+
+
+def test_run_codex_appserver_maps_turn_result():
+    from brigade import codex_appserver
+
+    turn = codex_appserver.TurnResult(text=" hi ", ok=True, status="complete", thread_id="t-1")
+    server = _StubServer(turn)
+    res = agents.run_codex_appserver(server, "do it", timeout=5.0, cwd=None, model="gpt-5.1", sandbox="workspace-write")
+    assert res.ok and res.text == "hi"
+    assert res.thread_id == "t-1" and res.status == "complete"
+    assert server.calls == [{"cwd": None, "model": "gpt-5.1", "sandbox": "workspace-write"}]
+
+
+def test_run_codex_appserver_read_only_maps_to_sandbox():
+    from brigade import codex_appserver
+
+    turn = codex_appserver.TurnResult(text="x", ok=True, status="complete", thread_id="t-1")
+    server = _StubServer(turn)
+    agents.run_codex_appserver(server, "p", timeout=5.0, cwd=None, read_only=True)
+    assert server.calls[0]["sandbox"] == "read-only"
+
+
+def test_run_codex_appserver_empty_text_not_ok():
+    from brigade import codex_appserver
+
+    turn = codex_appserver.TurnResult(text="", ok=True, status="complete", thread_id="t-1")
+    server = _StubServer(turn)
+    res = agents.run_codex_appserver(server, "p", timeout=5.0, cwd=None)
+    assert not res.ok and res.detail == "empty output"
+
+
+def test_run_codex_appserver_server_error_is_failed():
+    server = _StubServer(None, fail=True)
+    res = agents.run_codex_appserver(server, "p", timeout=5.0, cwd=None)
+    assert not res.ok and res.status == "failed" and "boom" in res.detail
+
+
+def test_agent_result_defaults_keep_exec_contract():
+    res = agents.AgentResult(text="t", ok=True)
+    assert res.thread_id is None and res.status == ""

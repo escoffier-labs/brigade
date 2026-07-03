@@ -49,7 +49,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade roster`: 2 command path(s)
 - `brigade run`: 1 command path(s)
 - `brigade runbook` (extras): 4 command path(s)
-- `brigade runs`: 3 command path(s)
+- `brigade runs`: 4 command path(s)
 - `brigade scrub`: 1 command path(s)
 - `brigade security`: 15 command path(s)
 - `brigade skills`: 27 command path(s)
@@ -363,6 +363,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade runbook run` (extras)
 - `brigade runs latest`
 - `brigade runs list`
+- `brigade runs resume`
 - `brigade runs show`
 - `brigade scrub`
 - `brigade security closeout`
