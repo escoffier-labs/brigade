@@ -20,10 +20,16 @@
 Built for engineers running an always-on agent stack who want push notifications without routing real-time session activity through a vendor's notification service.
 
 <p align="center">
+  <img src="docs/assets/agent-notify-send.svg" alt="Recording: a one-channel config, then a piped message goes through agent-notify send with exit 0 and the webhook log shows the delivered Discord payload" width="820">
+</p>
+
+<p align="center"><em>One config, one piped message: <code>agent-notify send</code> exits 0 and the webhook log shows the payload that arrived (a local mock endpoint stands in for Discord).</em></p>
+
+<p align="center">
   <img src="docs/assets/agentnotify-wiring.svg" alt="Recording: agent-notify init scaffolds a config, doctor flags the unconfigured channels, then after the channel env is set doctor reports every channel ready, all without sending a notification" width="820">
 </p>
 
-<p align="center"><em>Scaffold a config, then let `doctor` verify your channel wiring before anything goes out. Nothing is sent: it only checks that each channel's env is present.</em></p>
+<p align="center"><em>Before anything goes out, <code>doctor</code> verifies the wiring. Nothing is sent: it only checks that each channel's env is present.</em></p>
 
 ## What it does
 
