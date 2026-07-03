@@ -523,7 +523,9 @@ def dispatch(
                 ok=False,
                 detail=f"{agent.cli} is not allowed by limits.allow_models",
             )
-        prompt = _worker_prompt(agent, assignment, prior_results=prior_results, read_only=read_only, code_graph=code_graph)
+        prompt = _worker_prompt(
+            agent, assignment, prior_results=prior_results, read_only=read_only, code_graph=code_graph
+        )
         if agent.cli == "codex" and appserver is not None:
             on_event = _worker_event_writer(events_dir, assignment.worker, verbose=verbose)
             result = agents.run_codex_appserver(

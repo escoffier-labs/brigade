@@ -125,9 +125,7 @@ class AppServer:
             raise AppServerError(f"{method} failed: {error.get('message', error)}")
         return response.get("result") or {}
 
-    def start_thread(
-        self, *, cwd: Path | None, model: str | None = None, sandbox: str | None = None
-    ) -> "CodexThread":
+    def start_thread(self, *, cwd: Path | None, model: str | None = None, sandbox: str | None = None) -> "CodexThread":
         result = self.request("thread/start", self._thread_params(cwd, model, sandbox))
         return self._attach(result["thread"]["id"])
 
@@ -158,9 +156,7 @@ class AppServer:
             for orphan_id, msg in list(self._orphans):
                 if orphan_id == thread_id:
                     q.put(msg)
-            self._orphans = deque(
-                ((tid, m) for tid, m in self._orphans if tid != thread_id), maxlen=_ORPHAN_LIMIT
-            )
+            self._orphans = deque(((tid, m) for tid, m in self._orphans if tid != thread_id), maxlen=_ORPHAN_LIMIT)
         if dead:
             q.put(_DEAD)
         return CodexThread(self, thread_id, q)
@@ -295,9 +291,7 @@ class CodexThread:
             )
         except AppServerError:
             pass
-        completed = self._consume(
-            time.monotonic() + _INTERRUPT_GRACE, turn_id, deltas, completed_texts, on_event
-        )
+        completed = self._consume(time.monotonic() + _INTERRUPT_GRACE, turn_id, deltas, completed_texts, on_event)
         salvaged = self._salvage(deltas, completed_texts)
         detail = f"timeout after {timeout}s; interrupted"
         if completed is _DEAD:

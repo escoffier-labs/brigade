@@ -1127,9 +1127,7 @@ def test_run_falls_back_to_exec_when_appserver_unavailable(monkeypatch, tmp_path
     def fake_run_agent(cli_ref, prompt, **kwargs):
         calls.append(cli_ref)
         if len(calls) == 1:
-            return agents.AgentResult(
-                text=json.dumps({"assignments": [{"worker": "cook", "task": "do"}]}), ok=True
-            )
+            return agents.AgentResult(text=json.dumps({"assignments": [{"worker": "cook", "task": "do"}]}), ok=True)
         return agents.AgentResult(text="done", ok=True)
 
     monkeypatch.setattr(aboyeur.agents, "run_agent", fake_run_agent)

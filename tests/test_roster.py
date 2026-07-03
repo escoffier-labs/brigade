@@ -193,7 +193,9 @@ def test_codex_transport_defaults_to_exec(tmp_path):
 
 def test_codex_transport_accepts_app_server(tmp_path):
     p = tmp_path / "roster.toml"
-    p.write_text('orchestrator = "chef"\ncodex_transport = "app-server"\n\n[agents.chef]\ncli = "codex"\nrole = "plan"\n')
+    p.write_text(
+        'orchestrator = "chef"\ncodex_transport = "app-server"\n\n[agents.chef]\ncli = "codex"\nrole = "plan"\n'
+    )
     assert roster_mod.load_roster(p).codex_transport == "app-server"
 
 

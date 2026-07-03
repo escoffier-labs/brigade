@@ -135,8 +135,7 @@ def resume(run_dir: Path) -> int:
     ]
     ground_truth = worker_data.get("ground_truth") or {}
     (run_dir / "worker-results.json").write_text(
-        json.dumps({"results": aboyeur._worker_payload(worker_results), "ground_truth": ground_truth}, indent=2)
-        + "\n"
+        json.dumps({"results": aboyeur._worker_payload(worker_results), "ground_truth": ground_truth}, indent=2) + "\n"
     )
 
     task = run_meta.get("task", "")

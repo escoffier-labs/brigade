@@ -100,7 +100,9 @@ def main() -> int:
                     "result": {"turn": {"id": turn_id, "items": [], "status": "inProgress"}},
                 }
             )
-            _notify("turn/started", {"threadId": thread_id, "turn": {"id": turn_id, "items": [], "status": "inProgress"}})
+            _notify(
+                "turn/started", {"threadId": thread_id, "turn": {"id": turn_id, "items": [], "status": "inProgress"}}
+            )
             if "HANG" in prompt:
                 _notify(
                     "item/agentMessage/delta",
