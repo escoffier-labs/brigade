@@ -10,42 +10,45 @@ Regenerate with:
 brigade roadmap commands --write
 ```
 
+Commands marked `(extras)` register only when the extras surface is
+enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
+
 ## Command Groups
 
 - `brigade add`: 1 command path(s)
-- `brigade budgets`: 2 command path(s)
-- `brigade center`: 29 command path(s)
-- `brigade chat`: 7 command path(s)
+- `brigade budgets` (extras): 2 command path(s)
+- `brigade center` (extras): 29 command path(s)
+- `brigade chat` (extras): 7 command path(s)
 - `brigade completions`: 1 command path(s)
-- `brigade context`: 8 command path(s)
+- `brigade context` (extras): 8 command path(s)
 - `brigade daily`: 26 command path(s)
 - `brigade doctor`: 1 command path(s)
-- `brigade dogfood`: 1 command path(s)
+- `brigade dogfood` (extras): 1 command path(s)
 - `brigade extras`: 3 command path(s)
-- `brigade friction`: 3 command path(s)
+- `brigade friction` (extras): 3 command path(s)
 - `brigade handoff`: 17 command path(s)
 - `brigade handoff-template`: 1 command path(s)
-- `brigade hermes-fragments`: 1 command path(s)
+- `brigade hermes-fragments` (extras): 1 command path(s)
 - `brigade ingest`: 1 command path(s)
 - `brigade init`: 1 command path(s)
-- `brigade learn`: 13 command path(s)
+- `brigade learn` (extras): 13 command path(s)
 - `brigade mcp`: 7 command path(s)
 - `brigade memory`: 10 command path(s)
-- `brigade notifications`: 4 command path(s)
-- `brigade openclaw-fragments`: 1 command path(s)
+- `brigade notifications` (extras): 4 command path(s)
+- `brigade openclaw-fragments` (extras): 1 command path(s)
 - `brigade operator`: 24 command path(s)
 - `brigade outcome`: 6 command path(s)
-- `brigade pantry`: 3 command path(s)
+- `brigade pantry` (extras): 3 command path(s)
 - `brigade profiles`: 2 command path(s)
-- `brigade projects`: 10 command path(s)
+- `brigade projects` (extras): 10 command path(s)
 - `brigade reconfigure`: 1 command path(s)
-- `brigade release`: 23 command path(s)
-- `brigade repos`: 70 command path(s)
-- `brigade research`: 11 command path(s)
-- `brigade roadmap`: 4 command path(s)
+- `brigade release` (extras): 23 command path(s)
+- `brigade repos` (extras): 70 command path(s)
+- `brigade research` (extras): 11 command path(s)
+- `brigade roadmap` (extras): 4 command path(s)
 - `brigade roster`: 2 command path(s)
 - `brigade run`: 1 command path(s)
-- `brigade runbook`: 4 command path(s)
+- `brigade runbook` (extras): 4 command path(s)
 - `brigade runs`: 3 command path(s)
 - `brigade scrub`: 1 command path(s)
 - `brigade security`: 15 command path(s)
@@ -53,59 +56,59 @@ brigade roadmap commands --write
 - `brigade stations`: 1 command path(s)
 - `brigade status`: 1 command path(s)
 - `brigade tools`: 48 command path(s)
-- `brigade untrusted`: 2 command path(s)
+- `brigade untrusted` (extras): 2 command path(s)
 - `brigade work`: 139 command path(s)
 
 ## Commands
 
 - `brigade add`
-- `brigade budgets check`
-- `brigade budgets show`
-- `brigade center actions archive`
-- `brigade center actions build`
-- `brigade center actions defer`
-- `brigade center actions doctor`
-- `brigade center actions done`
-- `brigade center actions import-issues`
-- `brigade center actions list`
-- `brigade center actions plan`
-- `brigade center actions show`
-- `brigade center actions start`
-- `brigade center activity`
-- `brigade center readiness closeout`
-- `brigade center readiness import-issues`
-- `brigade center readiness list`
-- `brigade center readiness plan`
-- `brigade center readiness show`
-- `brigade center report archive`
-- `brigade center report build`
-- `brigade center report closeout`
-- `brigade center report compare`
-- `brigade center report diff`
-- `brigade center report list`
-- `brigade center report plan`
-- `brigade center report review`
-- `brigade center report show`
-- `brigade center reviews`
-- `brigade center schema`
-- `brigade center status`
-- `brigade center templates`
-- `brigade chat surfaces doctor`
-- `brigade chat surfaces init`
-- `brigade chat surfaces list`
-- `brigade chat surfaces show`
-- `brigade chat sweep import-issues`
-- `brigade chat sweep ingest`
-- `brigade chat sweep validate`
+- `brigade budgets check` (extras)
+- `brigade budgets show` (extras)
+- `brigade center actions archive` (extras)
+- `brigade center actions build` (extras)
+- `brigade center actions defer` (extras)
+- `brigade center actions doctor` (extras)
+- `brigade center actions done` (extras)
+- `brigade center actions import-issues` (extras)
+- `brigade center actions list` (extras)
+- `brigade center actions plan` (extras)
+- `brigade center actions show` (extras)
+- `brigade center actions start` (extras)
+- `brigade center activity` (extras)
+- `brigade center readiness closeout` (extras)
+- `brigade center readiness import-issues` (extras)
+- `brigade center readiness list` (extras)
+- `brigade center readiness plan` (extras)
+- `brigade center readiness show` (extras)
+- `brigade center report archive` (extras)
+- `brigade center report build` (extras)
+- `brigade center report closeout` (extras)
+- `brigade center report compare` (extras)
+- `brigade center report diff` (extras)
+- `brigade center report list` (extras)
+- `brigade center report plan` (extras)
+- `brigade center report review` (extras)
+- `brigade center report show` (extras)
+- `brigade center reviews` (extras)
+- `brigade center schema` (extras)
+- `brigade center status` (extras)
+- `brigade center templates` (extras)
+- `brigade chat surfaces doctor` (extras)
+- `brigade chat surfaces init` (extras)
+- `brigade chat surfaces list` (extras)
+- `brigade chat surfaces show` (extras)
+- `brigade chat sweep import-issues` (extras)
+- `brigade chat sweep ingest` (extras)
+- `brigade chat sweep validate` (extras)
 - `brigade completions`
-- `brigade context archive`
-- `brigade context build`
-- `brigade context doctor`
-- `brigade context import-issues`
-- `brigade context list`
-- `brigade context plan`
-- `brigade context show`
-- `brigade context sync`
+- `brigade context archive` (extras)
+- `brigade context build` (extras)
+- `brigade context doctor` (extras)
+- `brigade context import-issues` (extras)
+- `brigade context list` (extras)
+- `brigade context plan` (extras)
+- `brigade context show` (extras)
+- `brigade context sync` (extras)
 - `brigade daily approvals approve`
 - `brigade daily approvals archive`
 - `brigade daily approvals compare`
@@ -133,13 +136,13 @@ brigade roadmap commands --write
 - `brigade daily telemetry doctor`
 - `brigade daily unblock`
 - `brigade doctor`
-- `brigade dogfood`
+- `brigade dogfood` (extras)
 - `brigade extras off`
 - `brigade extras on`
 - `brigade extras status`
-- `brigade friction add`
-- `brigade friction scan`
-- `brigade friction show`
+- `brigade friction add` (extras)
+- `brigade friction scan` (extras)
+- `brigade friction show` (extras)
 - `brigade handoff archive`
 - `brigade handoff closeout`
 - `brigade handoff doctor`
@@ -158,22 +161,22 @@ brigade roadmap commands --write
 - `brigade handoff sources init`
 - `brigade handoff sync-issues`
 - `brigade handoff-template`
-- `brigade hermes-fragments`
+- `brigade hermes-fragments` (extras)
 - `brigade ingest`
 - `brigade init`
-- `brigade learn closeout`
-- `brigade learn closeout-show`
-- `brigade learn closeouts`
-- `brigade learn doctor`
-- `brigade learn import-issues`
-- `brigade learn import-learnings`
-- `brigade learn plan`
-- `brigade learn propose-skill`
-- `brigade learn replay compare`
-- `brigade learn replay export`
-- `brigade learn replay list`
-- `brigade learn replay show`
-- `brigade learn skill-candidates`
+- `brigade learn closeout` (extras)
+- `brigade learn closeout-show` (extras)
+- `brigade learn closeouts` (extras)
+- `brigade learn doctor` (extras)
+- `brigade learn import-issues` (extras)
+- `brigade learn import-learnings` (extras)
+- `brigade learn plan` (extras)
+- `brigade learn propose-skill` (extras)
+- `brigade learn replay compare` (extras)
+- `brigade learn replay export` (extras)
+- `brigade learn replay list` (extras)
+- `brigade learn replay show` (extras)
+- `brigade learn skill-candidates` (extras)
 - `brigade mcp add`
 - `brigade mcp doctor`
 - `brigade mcp import`
@@ -191,11 +194,11 @@ brigade roadmap commands --write
 - `brigade memory care status`
 - `brigade memory search`
 - `brigade memory serve-mcp`
-- `brigade notifications event plan`
-- `brigade notifications event record`
-- `brigade notifications setup plan`
-- `brigade notifications status`
-- `brigade openclaw-fragments`
+- `brigade notifications event plan` (extras)
+- `brigade notifications event record` (extras)
+- `brigade notifications setup plan` (extras)
+- `brigade notifications status` (extras)
+- `brigade openclaw-fragments` (extras)
 - `brigade operator adopt capture`
 - `brigade operator adopt import-issues`
 - `brigade operator adopt plan`
@@ -226,137 +229,137 @@ brigade roadmap commands --write
 - `brigade outcome reconcile`
 - `brigade outcome record`
 - `brigade outcome score`
-- `brigade pantry service plan`
-- `brigade pantry setup plan`
-- `brigade pantry status`
+- `brigade pantry service plan` (extras)
+- `brigade pantry setup plan` (extras)
+- `brigade pantry status` (extras)
 - `brigade profiles list`
 - `brigade profiles show`
-- `brigade projects audit`
-- `brigade projects closeout`
-- `brigade projects closeout-show`
-- `brigade projects closeouts`
-- `brigade projects doctor`
-- `brigade projects import-issues`
-- `brigade projects readiness list`
-- `brigade projects readiness plan`
-- `brigade projects readiness record`
-- `brigade projects readiness show`
+- `brigade projects audit` (extras)
+- `brigade projects closeout` (extras)
+- `brigade projects closeout-show` (extras)
+- `brigade projects closeouts` (extras)
+- `brigade projects doctor` (extras)
+- `brigade projects import-issues` (extras)
+- `brigade projects readiness list` (extras)
+- `brigade projects readiness plan` (extras)
+- `brigade projects readiness record` (extras)
+- `brigade projects readiness show` (extras)
 - `brigade reconfigure`
-- `brigade release candidate archive`
-- `brigade release candidate audit`
-- `brigade release candidate build`
-- `brigade release candidate closeout`
-- `brigade release candidate compare`
-- `brigade release candidate import-issues`
-- `brigade release candidate list`
-- `brigade release candidate plan`
-- `brigade release candidate show`
-- `brigade release ci doctor`
-- `brigade release ci import-issues`
-- `brigade release doctor`
-- `brigade release plan`
-- `brigade release run`
-- `brigade release runs`
-- `brigade release schema`
-- `brigade release show`
-- `brigade release smoke doctor`
-- `brigade release smoke list`
-- `brigade release smoke plan`
-- `brigade release smoke record`
-- `brigade release smoke show`
-- `brigade release version-sync`
-- `brigade repos actions archive`
-- `brigade repos actions build`
-- `brigade repos actions context`
-- `brigade repos actions defer`
-- `brigade repos actions dispatch`
-- `brigade repos actions done`
-- `brigade repos actions list`
-- `brigade repos actions plan`
-- `brigade repos actions reconcile`
-- `brigade repos actions show`
-- `brigade repos actions start`
-- `brigade repos discover plan`
-- `brigade repos doctor`
-- `brigade repos first-run plan`
-- `brigade repos health-commands`
-- `brigade repos import-issues`
-- `brigade repos ingest`
-- `brigade repos init`
-- `brigade repos list`
-- `brigade repos release actions archive`
-- `brigade repos release actions build`
-- `brigade repos release actions defer`
-- `brigade repos release actions done`
-- `brigade repos release actions list`
-- `brigade repos release actions plan`
-- `brigade repos release actions show`
-- `brigade repos release actions start`
-- `brigade repos release activity`
-- `brigade repos release archive`
-- `brigade repos release audit`
-- `brigade repos release build`
-- `brigade repos release checklist`
-- `brigade repos release closeout`
-- `brigade repos release compare`
-- `brigade repos release evidence list`
-- `brigade repos release evidence plan`
-- `brigade repos release evidence record`
-- `brigade repos release evidence show`
-- `brigade repos release hygiene`
-- `brigade repos release import-issues`
-- `brigade repos release list`
-- `brigade repos release manifest`
-- `brigade repos release matrix`
-- `brigade repos release plan`
-- `brigade repos release ready`
-- `brigade repos release reconcile`
-- `brigade repos release report`
-- `brigade repos release show`
-- `brigade repos release summary`
-- `brigade repos release waivers doctor`
-- `brigade repos release waivers import-issues`
-- `brigade repos release waivers list`
-- `brigade repos release waivers record`
-- `brigade repos release waivers renew`
-- `brigade repos release waivers revoke`
-- `brigade repos release waivers show`
-- `brigade repos release waivers templates`
-- `brigade repos report archive`
-- `brigade repos report build`
-- `brigade repos report closeout`
-- `brigade repos report list`
-- `brigade repos report plan`
-- `brigade repos report show`
-- `brigade repos scan`
-- `brigade repos show`
-- `brigade repos sweep closeout`
-- `brigade repos sweep plan`
-- `brigade repos sweep run`
-- `brigade repos sweep runs`
-- `brigade repos sweep show`
-- `brigade research cancel`
-- `brigade research export-handoff`
-- `brigade research handoffs doctor`
-- `brigade research handoffs import-issues`
-- `brigade research list`
-- `brigade research open`
-- `brigade research resume`
-- `brigade research run`
-- `brigade research show`
-- `brigade research sources doctor`
-- `brigade research sources list`
-- `brigade roadmap archive`
-- `brigade roadmap audit`
-- `brigade roadmap commands`
-- `brigade roadmap patterns`
+- `brigade release candidate archive` (extras)
+- `brigade release candidate audit` (extras)
+- `brigade release candidate build` (extras)
+- `brigade release candidate closeout` (extras)
+- `brigade release candidate compare` (extras)
+- `brigade release candidate import-issues` (extras)
+- `brigade release candidate list` (extras)
+- `brigade release candidate plan` (extras)
+- `brigade release candidate show` (extras)
+- `brigade release ci doctor` (extras)
+- `brigade release ci import-issues` (extras)
+- `brigade release doctor` (extras)
+- `brigade release plan` (extras)
+- `brigade release run` (extras)
+- `brigade release runs` (extras)
+- `brigade release schema` (extras)
+- `brigade release show` (extras)
+- `brigade release smoke doctor` (extras)
+- `brigade release smoke list` (extras)
+- `brigade release smoke plan` (extras)
+- `brigade release smoke record` (extras)
+- `brigade release smoke show` (extras)
+- `brigade release version-sync` (extras)
+- `brigade repos actions archive` (extras)
+- `brigade repos actions build` (extras)
+- `brigade repos actions context` (extras)
+- `brigade repos actions defer` (extras)
+- `brigade repos actions dispatch` (extras)
+- `brigade repos actions done` (extras)
+- `brigade repos actions list` (extras)
+- `brigade repos actions plan` (extras)
+- `brigade repos actions reconcile` (extras)
+- `brigade repos actions show` (extras)
+- `brigade repos actions start` (extras)
+- `brigade repos discover plan` (extras)
+- `brigade repos doctor` (extras)
+- `brigade repos first-run plan` (extras)
+- `brigade repos health-commands` (extras)
+- `brigade repos import-issues` (extras)
+- `brigade repos ingest` (extras)
+- `brigade repos init` (extras)
+- `brigade repos list` (extras)
+- `brigade repos release actions archive` (extras)
+- `brigade repos release actions build` (extras)
+- `brigade repos release actions defer` (extras)
+- `brigade repos release actions done` (extras)
+- `brigade repos release actions list` (extras)
+- `brigade repos release actions plan` (extras)
+- `brigade repos release actions show` (extras)
+- `brigade repos release actions start` (extras)
+- `brigade repos release activity` (extras)
+- `brigade repos release archive` (extras)
+- `brigade repos release audit` (extras)
+- `brigade repos release build` (extras)
+- `brigade repos release checklist` (extras)
+- `brigade repos release closeout` (extras)
+- `brigade repos release compare` (extras)
+- `brigade repos release evidence list` (extras)
+- `brigade repos release evidence plan` (extras)
+- `brigade repos release evidence record` (extras)
+- `brigade repos release evidence show` (extras)
+- `brigade repos release hygiene` (extras)
+- `brigade repos release import-issues` (extras)
+- `brigade repos release list` (extras)
+- `brigade repos release manifest` (extras)
+- `brigade repos release matrix` (extras)
+- `brigade repos release plan` (extras)
+- `brigade repos release ready` (extras)
+- `brigade repos release reconcile` (extras)
+- `brigade repos release report` (extras)
+- `brigade repos release show` (extras)
+- `brigade repos release summary` (extras)
+- `brigade repos release waivers doctor` (extras)
+- `brigade repos release waivers import-issues` (extras)
+- `brigade repos release waivers list` (extras)
+- `brigade repos release waivers record` (extras)
+- `brigade repos release waivers renew` (extras)
+- `brigade repos release waivers revoke` (extras)
+- `brigade repos release waivers show` (extras)
+- `brigade repos release waivers templates` (extras)
+- `brigade repos report archive` (extras)
+- `brigade repos report build` (extras)
+- `brigade repos report closeout` (extras)
+- `brigade repos report list` (extras)
+- `brigade repos report plan` (extras)
+- `brigade repos report show` (extras)
+- `brigade repos scan` (extras)
+- `brigade repos show` (extras)
+- `brigade repos sweep closeout` (extras)
+- `brigade repos sweep plan` (extras)
+- `brigade repos sweep run` (extras)
+- `brigade repos sweep runs` (extras)
+- `brigade repos sweep show` (extras)
+- `brigade research cancel` (extras)
+- `brigade research export-handoff` (extras)
+- `brigade research handoffs doctor` (extras)
+- `brigade research handoffs import-issues` (extras)
+- `brigade research list` (extras)
+- `brigade research open` (extras)
+- `brigade research resume` (extras)
+- `brigade research run` (extras)
+- `brigade research show` (extras)
+- `brigade research sources doctor` (extras)
+- `brigade research sources list` (extras)
+- `brigade roadmap archive` (extras)
+- `brigade roadmap audit` (extras)
+- `brigade roadmap commands` (extras)
+- `brigade roadmap patterns` (extras)
 - `brigade roster doctor`
 - `brigade roster init`
 - `brigade run`
-- `brigade runbook closeout`
-- `brigade runbook plan`
-- `brigade runbook resume`
-- `brigade runbook run`
+- `brigade runbook closeout` (extras)
+- `brigade runbook plan` (extras)
+- `brigade runbook resume` (extras)
+- `brigade runbook run` (extras)
 - `brigade runs latest`
 - `brigade runs list`
 - `brigade runs show`
@@ -453,8 +456,8 @@ brigade roadmap commands --write
 - `brigade tools show`
 - `brigade tools sync apply`
 - `brigade tools sync plan`
-- `brigade untrusted scan`
-- `brigade untrusted wrap`
+- `brigade untrusted scan` (extras)
+- `brigade untrusted wrap` (extras)
 - `brigade work acceptance`
 - `brigade work backup closeout`
 - `brigade work backup contract`
@@ -491,70 +494,70 @@ brigade roadmap commands --write
 - `brigade work list`
 - `brigade work next`
 - `brigade work note`
-- `brigade work phases actions archive`
-- `brigade work phases actions build`
-- `brigade work phases actions defer`
-- `brigade work phases actions done`
-- `brigade work phases actions import-issues`
-- `brigade work phases actions list`
-- `brigade work phases actions plan`
-- `brigade work phases actions show`
-- `brigade work phases actions start`
-- `brigade work phases closeout`
-- `brigade work phases compare`
-- `brigade work phases complete`
-- `brigade work phases defer`
-- `brigade work phases doctor`
-- `brigade work phases evidence add`
-- `brigade work phases goal scaffold`
-- `brigade work phases handoff`
-- `brigade work phases import-issues`
-- `brigade work phases init`
-- `brigade work phases list`
-- `brigade work phases next`
-- `brigade work phases plan`
-- `brigade work phases privacy`
-- `brigade work phases reconcile`
-- `brigade work phases report build`
-- `brigade work phases report closeout`
-- `brigade work phases report compare`
-- `brigade work phases report list`
-- `brigade work phases report show`
-- `brigade work phases schema`
-- `brigade work phases session activity`
-- `brigade work phases session audit`
-- `brigade work phases session checkpoint`
-- `brigade work phases session checkpoints archive`
-- `brigade work phases session checkpoints compare`
-- `brigade work phases session checkpoints import-issues`
-- `brigade work phases session checkpoints list`
-- `brigade work phases session checkpoints show`
-- `brigade work phases session closeout`
-- `brigade work phases session gate`
-- `brigade work phases session handoffs`
-- `brigade work phases session import-issues`
-- `brigade work phases session list`
-- `brigade work phases session next`
-- `brigade work phases session privacy`
-- `brigade work phases session progress`
-- `brigade work phases session protocol`
-- `brigade work phases session recovery-note`
-- `brigade work phases session recovery-notes closeout`
-- `brigade work phases session recovery-notes list`
-- `brigade work phases session recovery-notes show`
-- `brigade work phases session report build`
-- `brigade work phases session report list`
-- `brigade work phases session report show`
-- `brigade work phases session resume`
-- `brigade work phases session risk`
-- `brigade work phases session show`
-- `brigade work phases session start`
-- `brigade work phases session verification`
-- `brigade work phases show`
-- `brigade work phases start`
-- `brigade work phases status`
-- `brigade work phases verify plan`
-- `brigade work phases verify record`
+- `brigade work phases actions archive` (extras)
+- `brigade work phases actions build` (extras)
+- `brigade work phases actions defer` (extras)
+- `brigade work phases actions done` (extras)
+- `brigade work phases actions import-issues` (extras)
+- `brigade work phases actions list` (extras)
+- `brigade work phases actions plan` (extras)
+- `brigade work phases actions show` (extras)
+- `brigade work phases actions start` (extras)
+- `brigade work phases closeout` (extras)
+- `brigade work phases compare` (extras)
+- `brigade work phases complete` (extras)
+- `brigade work phases defer` (extras)
+- `brigade work phases doctor` (extras)
+- `brigade work phases evidence add` (extras)
+- `brigade work phases goal scaffold` (extras)
+- `brigade work phases handoff` (extras)
+- `brigade work phases import-issues` (extras)
+- `brigade work phases init` (extras)
+- `brigade work phases list` (extras)
+- `brigade work phases next` (extras)
+- `brigade work phases plan` (extras)
+- `brigade work phases privacy` (extras)
+- `brigade work phases reconcile` (extras)
+- `brigade work phases report build` (extras)
+- `brigade work phases report closeout` (extras)
+- `brigade work phases report compare` (extras)
+- `brigade work phases report list` (extras)
+- `brigade work phases report show` (extras)
+- `brigade work phases schema` (extras)
+- `brigade work phases session activity` (extras)
+- `brigade work phases session audit` (extras)
+- `brigade work phases session checkpoint` (extras)
+- `brigade work phases session checkpoints archive` (extras)
+- `brigade work phases session checkpoints compare` (extras)
+- `brigade work phases session checkpoints import-issues` (extras)
+- `brigade work phases session checkpoints list` (extras)
+- `brigade work phases session checkpoints show` (extras)
+- `brigade work phases session closeout` (extras)
+- `brigade work phases session gate` (extras)
+- `brigade work phases session handoffs` (extras)
+- `brigade work phases session import-issues` (extras)
+- `brigade work phases session list` (extras)
+- `brigade work phases session next` (extras)
+- `brigade work phases session privacy` (extras)
+- `brigade work phases session progress` (extras)
+- `brigade work phases session protocol` (extras)
+- `brigade work phases session recovery-note` (extras)
+- `brigade work phases session recovery-notes closeout` (extras)
+- `brigade work phases session recovery-notes list` (extras)
+- `brigade work phases session recovery-notes show` (extras)
+- `brigade work phases session report build` (extras)
+- `brigade work phases session report list` (extras)
+- `brigade work phases session report show` (extras)
+- `brigade work phases session resume` (extras)
+- `brigade work phases session risk` (extras)
+- `brigade work phases session show` (extras)
+- `brigade work phases session start` (extras)
+- `brigade work phases session verification` (extras)
+- `brigade work phases show` (extras)
+- `brigade work phases start` (extras)
+- `brigade work phases status` (extras)
+- `brigade work phases verify plan` (extras)
+- `brigade work phases verify record` (extras)
 - `brigade work plan-promote`
 - `brigade work plan-proposals`
 - `brigade work plans`

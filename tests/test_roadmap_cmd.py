@@ -187,3 +187,18 @@ def _read_imports(path):
         for line in (path / ".brigade" / "work" / "imports" / "inbox.jsonl").read_text().splitlines()
         if line.strip()
     ]
+
+
+def test_command_inventory_marks_extras_gated_commands(tmp_path):
+    payload = roadmap_cmd.command_contract_payload(tmp_path)
+    inventory = payload["expected_inventory"]
+    # gated top-level groups carry the marker on group and command lines
+    assert "- `brigade release` (extras):" in inventory
+    assert "- `brigade release candidate audit` (extras)" in inventory
+    # the gated work subcommand is marked even though work itself is core
+    assert "- `brigade work phases list` (extras)" in inventory
+    # core commands stay unmarked
+    assert "- `brigade mcp sync`\n" in inventory
+    assert "- `brigade work brief`\n" in inventory
+    # the marker is explained once in the header
+    assert "brigade extras on" in inventory

@@ -835,6 +835,19 @@ def command_contract_payload(target: Path) -> dict[str, Any]:
     }
 
 
+def _extras_marker(command: str) -> str:
+    """Return the inventory marker for commands behind the extras wall."""
+    from .extras import EXTRAS_COMMANDS
+
+    parts = command.split()
+    # commands are "brigade <group> [sub...]"
+    if len(parts) >= 2 and parts[1] in EXTRAS_COMMANDS:
+        return " (extras)"
+    if len(parts) >= 3 and parts[1] == "work" and parts[2] == "phases":
+        return " (extras)"
+    return ""
+
+
 def _command_inventory_markdown(*, groups: list[dict[str, Any]], cli_commands: list[str]) -> str:
     lines = [
         "# Brigade Command Inventory",
@@ -849,14 +862,18 @@ def _command_inventory_markdown(*, groups: list[dict[str, Any]], cli_commands: l
         "brigade roadmap commands --write",
         "```",
         "",
+        "Commands marked `(extras)` register only when the extras surface is",
+        "enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.",
+        "",
         "## Command Groups",
         "",
     ]
     for group in groups:
-        lines.append(f"- `{group['command']}`: {group['cli_path_count']} command path(s)")
+        marker = _extras_marker(str(group["command"]))
+        lines.append(f"- `{group['command']}`{marker}: {group['cli_path_count']} command path(s)")
     lines.extend(["", "## Commands", ""])
     for command in cli_commands:
-        lines.append(f"- `{command}`")
+        lines.append(f"- `{command}`{_extras_marker(command)}")
     lines.append("")
     return "\n".join(lines)
 
