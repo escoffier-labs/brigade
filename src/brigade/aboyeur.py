@@ -17,6 +17,9 @@ from . import agents
 from . import proc, runguard
 from .roster import Agent, Roster, is_cli_allowed, timeout_for, workers
 
+CODE_GRAPH_HEADING = "## Code graph context (GraphTrail, read-only)"
+CODE_GRAPH_LIMIT = 4000
+
 
 @dataclass(frozen=True)
 class Assignment:
@@ -34,11 +37,70 @@ class WorkerResult:
     detail: str = ""
 
 
+@dataclass(frozen=True)
+class CodeGraphBrief:
+    attached: bool
+    text: str = ""
+    bytes: int = 0
+
+
+def _prepend_code_graph(prompt: str, code_graph: CodeGraphBrief | None) -> str:
+    if code_graph is None or not code_graph.attached or not code_graph.text:
+        return prompt
+    if CODE_GRAPH_HEADING in prompt:
+        return prompt
+    return f"{code_graph.text}\n{prompt}"
+
+
+def _truncate_on_line_boundary(text: str, limit: int = CODE_GRAPH_LIMIT) -> str:
+    if len(text) <= limit:
+        return text
+    note = f"\n\n[GraphTrail context truncated to {limit} chars.]\n"
+    room = max(0, limit - len(note))
+    clipped = text[:room]
+    boundary = clipped.rfind("\n")
+    if boundary > 0:
+        clipped = clipped[:boundary]
+    else:
+        clipped = clipped.rstrip()
+    return clipped.rstrip() + note
+
+
+def _graphtrail_bin() -> str | None:
+    from . import context_cmd
+
+    return context_cmd._graphtrail_bin()
+
+
+def code_graph_brief(cwd: Path | None, task: str) -> CodeGraphBrief:
+    if cwd is None:
+        return CodeGraphBrief(attached=False)
+    db_path = cwd / ".graphtrail" / "graphtrail.db"
+    if not db_path.is_file():
+        return CodeGraphBrief(attached=False)
+    binary = _graphtrail_bin()
+    if binary is None:
+        return CodeGraphBrief(attached=False)
+    result = proc.run(
+        [binary, "--db", str(db_path), "context", task, "--markdown", "--limit", "8"],
+        timeout=10.0,
+        cwd=cwd,
+    )
+    if result.code != 0:
+        return CodeGraphBrief(attached=False)
+    body = result.stdout.strip()
+    if not body:
+        return CodeGraphBrief(attached=False)
+    text = _truncate_on_line_boundary(f"{CODE_GRAPH_HEADING}\n\n{body}\n")
+    return CodeGraphBrief(attached=True, text=text, bytes=len(text.encode()))
+
+
 def build_plan_prompt(
     task: str,
     roster: Roster,
     corrective_note: str | None = None,
     read_only: bool = False,
+    code_graph: CodeGraphBrief | None = None,
 ) -> str:
     worker_lines = "\n".join(f"- {agent.name}: cli={agent.cli}; role={agent.role}" for agent in workers(roster))
     if not worker_lines:
@@ -46,7 +108,7 @@ def build_plan_prompt(
 
     note = f"\nCorrection needed: {corrective_note}\n" if corrective_note else ""
     policy = f"\n\n{_read_only_rules()}\n" if read_only else ""
-    return (
+    prompt = (
         "You are the Brigade aboyeur. Split the user's task across the available workers.\n"
         "Return exactly one JSON object, with no prose outside JSON:\n"
         '{"assignments":[{"stage":1,"worker":"<worker-name>","task":"<specific sub-task>"}]}\n'
@@ -61,6 +123,7 @@ def build_plan_prompt(
         "- Use zero assignments only if no worker is useful."
         f"{policy}"
     )
+    return _prepend_code_graph(prompt, code_graph)
 
 
 def _extract_json(text: str) -> object:
@@ -332,10 +395,11 @@ def plan(
     sandbox_read_only: bool | None = None,
     sandbox: str | None = None,
     attempts: list[dict[str, object]] | None = None,
+    code_graph: CodeGraphBrief | None = None,
 ) -> list[Assignment]:
     first = _run_orchestrator(
         roster,
-        build_plan_prompt(task, roster, read_only=read_only),
+        build_plan_prompt(task, roster, read_only=read_only, code_graph=code_graph),
         cwd=cwd,
         read_only=read_only,
         sandbox_read_only=sandbox_read_only,
@@ -352,7 +416,7 @@ def plan(
         _record_plan_attempt(attempts, stage="initial", result=first, parse_error=str(exc))
         second = _run_orchestrator(
             roster,
-            build_plan_prompt(task, roster, corrective_note=str(exc), read_only=read_only),
+            build_plan_prompt(task, roster, corrective_note=str(exc), read_only=read_only, code_graph=code_graph),
             cwd=cwd,
             read_only=read_only,
             sandbox_read_only=sandbox_read_only,
@@ -397,12 +461,13 @@ def _worker_prompt(
     *,
     prior_results: list[WorkerResult] | None = None,
     read_only: bool = False,
+    code_graph: CodeGraphBrief | None = None,
 ) -> str:
     prior_context = ""
     if prior_results:
         prior_context = f"\n\nEarlier-stage context:\n{_render_prior_results(prior_results)}"
     policy = f"\n\n{_read_only_rules()}" if read_only else ""
-    return (
+    prompt = (
         f"You are Brigade worker {agent.name}.\n"
         f"Role:\n{agent.role}\n\n"
         f"Sub-task:\n{assignment.task}\n\n"
@@ -410,6 +475,7 @@ def _worker_prompt(
         f"{prior_context}"
         f"{policy}"
     )
+    return _prepend_code_graph(prompt, code_graph)
 
 
 def dispatch(
@@ -419,6 +485,7 @@ def dispatch(
     read_only: bool = False,
     sandbox_read_only: bool | None = None,
     sandbox: str | None = None,
+    code_graph: CodeGraphBrief | None = None,
 ) -> list[WorkerResult]:
     def run_one(assignment: Assignment, prior_results: list[WorkerResult]) -> WorkerResult:
         agent = roster.agents[assignment.worker]
@@ -441,7 +508,7 @@ def dispatch(
             kwargs["model"] = agent.model
         result = agents.run_agent(
             agent.cli,
-            _worker_prompt(agent, assignment, prior_results=prior_results, read_only=read_only),
+            _worker_prompt(agent, assignment, prior_results=prior_results, read_only=read_only, code_graph=code_graph),
             **kwargs,
         )
         return WorkerResult(
@@ -490,6 +557,7 @@ def build_synth_prompt(
     results: list[WorkerResult],
     read_only: bool = False,
     ground_truth: dict[str, object] | None = None,
+    code_graph: CodeGraphBrief | None = None,
 ) -> str:
     if results:
         rendered = "\n\n".join(
@@ -511,7 +579,7 @@ def build_synth_prompt(
     policy = f"\n\n{_read_only_rules()}" if read_only else ""
     facts = _ground_truth_facts(ground_truth)
     facts_block = f"\n\n{facts}" if facts else ""
-    return (
+    prompt = (
         "You are the Brigade orchestrator. Synthesize the final answer for the user.\n"
         "Account for worker failures if any are present. Do not include implementation chatter."
         f"{facts_block}\n\n"
@@ -519,6 +587,7 @@ def build_synth_prompt(
         f"Worker results:\n{rendered}\n"
         f"{policy}"
     )
+    return _prepend_code_graph(prompt, code_graph)
 
 
 def _print_plan(assignments: list[Assignment]) -> None:
@@ -802,6 +871,7 @@ def _run_payload(
     output_dir: Path | None = None,
     handoff_path: Path | None = None,
     error: str | None = None,
+    code_graph: CodeGraphBrief | None = None,
 ) -> dict[str, object]:
     payload: dict[str, object] = {
         "task": task,
@@ -811,6 +881,10 @@ def _run_payload(
         "read_only": read_only,
         "status": status,
         "started_at": _utc_iso(started_at),
+        "code_graph_brief": {
+            "attached": bool(code_graph.attached) if code_graph is not None else False,
+            "bytes": code_graph.bytes if code_graph is not None else 0,
+        },
     }
     if finished_at is not None:
         payload["finished_at"] = _utc_iso(finished_at)
@@ -837,11 +911,15 @@ def run(
     read_only: bool = False,
     sandbox_read_only: bool | None = None,
     sandbox: str | None = None,
+    code_graph_enabled: bool = True,
+    code_graph: CodeGraphBrief | None = None,
 ) -> int:
     started_at = datetime.now(timezone.utc)
     cwd = cwd.expanduser().resolve() if cwd is not None else None
     output_dir = output_dir.expanduser() if output_dir is not None else None
     handoff_inbox = handoff_inbox.expanduser() if handoff_inbox is not None else None
+    if code_graph is None:
+        code_graph = code_graph_brief(cwd, task) if code_graph_enabled else CodeGraphBrief(attached=False)
     if output_dir is not None:
         output_dir.mkdir(parents=True, exist_ok=True)
         _write_json(output_dir / "roster.json", _roster_payload(roster))
@@ -856,6 +934,7 @@ def run(
                 status="started",
                 started_at=started_at,
                 output_dir=output_dir,
+                code_graph=code_graph,
             ),
         )
 
@@ -869,6 +948,7 @@ def run(
             sandbox_read_only=sandbox_read_only,
             sandbox=sandbox,
             attempts=plan_attempts,
+            code_graph=code_graph,
         )
     except RuntimeError as exc:
         if output_dir is not None:
@@ -887,6 +967,7 @@ def run(
                     finished_at=finished_at,
                     output_dir=output_dir,
                     error=str(exc),
+                    code_graph=code_graph,
                 ),
             )
         print(f"error: {exc}", file=sys.stderr)
@@ -912,6 +993,7 @@ def run(
                     started_at=started_at,
                     finished_at=finished_at,
                     output_dir=output_dir,
+                    code_graph=code_graph,
                 ),
             )
         print(json.dumps(payload, indent=2))
@@ -927,6 +1009,7 @@ def run(
         read_only=read_only,
         sandbox_read_only=sandbox_read_only,
         sandbox=sandbox,
+        code_graph=code_graph,
     )
     ground_truth = build_ground_truth(cwd, started_at)
     if output_dir is not None:
@@ -941,7 +1024,7 @@ def run(
 
     final = _run_orchestrator(
         roster,
-        build_synth_prompt(task, worker_results, read_only=read_only, ground_truth=ground_truth),
+        build_synth_prompt(task, worker_results, read_only=read_only, ground_truth=ground_truth, code_graph=code_graph),
         cwd=cwd,
         read_only=read_only,
         sandbox_read_only=sandbox_read_only,
@@ -972,6 +1055,7 @@ def run(
                     finished_at=finished_at,
                     output_dir=output_dir,
                     error=final.detail,
+                    code_graph=code_graph,
                 ),
             )
         print(f"error: orchestrator failed during synthesis: {final.detail}", file=sys.stderr)
@@ -991,6 +1075,7 @@ def run(
                 started_at=started_at,
                 finished_at=finished_at,
                 output_dir=output_dir,
+                code_graph=code_graph,
             ),
         )
     if handoff_inbox is not None:
@@ -1022,6 +1107,7 @@ def run(
                         finished_at=finished_at,
                         output_dir=output_dir,
                         error=detail,
+                        code_graph=code_graph,
                     ),
                 )
             print(f"error: {detail}", file=sys.stderr)
@@ -1043,6 +1129,7 @@ def run(
                     finished_at=finished_at,
                     output_dir=output_dir,
                     handoff_path=handoff,
+                    code_graph=code_graph,
                 ),
             )
     print(final.text)

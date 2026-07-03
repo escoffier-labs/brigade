@@ -36,6 +36,11 @@ def register(sub: argparse._SubParsersAction) -> None:
         help="Tell agents to inspect and recommend only, without modifying files or external state.",
     )
     p_run.add_argument(
+        "--no-code-graph",
+        action="store_true",
+        help="Do not attach GraphTrail code graph context to brigade run prompts.",
+    )
+    p_run.add_argument(
         "--sandbox",
         choices=["read-only", "workspace-write", "danger-full-access"],
         default=None,
@@ -172,18 +177,19 @@ def dispatch(args) -> int:
                 worktree_cwd = _worktree_checkout_path(runguard.git_root(run_cwd), output_dir)
                 effective_cwd = runguard.create_detached_worktree(run_cwd, worktree_cwd)
                 print(f"worktree: {effective_cwd}", file=sys.stderr)
-            rc = aboyeur_mod.run(
-                args.task,
-                loaded_roster,
-                dry_run=args.dry_run,
-                show_plan=args.show_plan,
-                verbose=args.verbose,
-                cwd=effective_cwd,
-                output_dir=output_dir,
-                handoff_inbox=handoff_inbox,
-                read_only=args.read_only,
-                sandbox=effective_sandbox,
-            )
+            run_kwargs = {
+                "dry_run": args.dry_run,
+                "show_plan": args.show_plan,
+                "verbose": args.verbose,
+                "cwd": effective_cwd,
+                "output_dir": output_dir,
+                "handoff_inbox": handoff_inbox,
+                "read_only": args.read_only,
+                "sandbox": effective_sandbox,
+            }
+            if args.no_code_graph:
+                run_kwargs["code_graph_enabled"] = False
+            rc = aboyeur_mod.run(args.task, loaded_roster, **run_kwargs)
             if args.worktree and output_dir is not None:
                 # Until the patch is proven good, the worktree is the only
                 # recoverable copy of the agents' edits; a collection failure

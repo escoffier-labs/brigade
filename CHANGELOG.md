@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - `brigade run` artifacts now carry brigade-computed ground truth (issue #125): `worker-results.json` and `synthesis.json` include a `ground_truth` block with `git diff --stat`, the changed and untracked file lists, a `changes.patch` reference, and verify exit codes parsed from the actual `.brigade/work/verify-runs` receipts. The synthesis prompt gets a compact brigade-computed facts section, so the chef synthesizes against facts instead of worker narration.
+- `brigade run` now attaches a fail-open GraphTrail code-graph brief when `.graphtrail/graphtrail.db` exists. The read-only markdown context is prepended to orchestration and worker prompts, can be disabled with `--no-code-graph`, and records `code_graph_brief` metadata in `run.json`.
 
 ### Changed
 - `brigade work phases` (the phase-execution ledger) moved behind the extras wall with the other operator-suite surface; it stubs out with enable guidance when extras are disabled.

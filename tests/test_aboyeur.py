@@ -3,6 +3,7 @@ import subprocess
 
 from brigade import aboyeur
 from brigade import agents
+from brigade import proc
 from brigade.roster import Agent, Roster
 from tests.work_cmd_test_helpers import _init_git_repo
 
@@ -191,6 +192,228 @@ def test_worker_prompt_without_prior_context_keeps_original_contract():
     assert "Sub-task:\nimplement it" in prompt
     assert "Return a concise, complete result for the orchestrator to synthesize." in prompt
     assert "Earlier-stage context" not in prompt
+
+
+def test_code_graph_brief_attaches_markdown_pack(tmp_path, monkeypatch):
+    db = tmp_path / ".graphtrail" / "graphtrail.db"
+    db.parent.mkdir()
+    db.write_text("")
+    calls = []
+
+    monkeypatch.setattr(aboyeur, "_graphtrail_bin", lambda: "/bin/graphtrail")
+
+    def fake_run(args, **kw):
+        calls.append((args, kw))
+        return proc.Result(code=0, stdout="graph output\n", stderr="")
+
+    monkeypatch.setattr(aboyeur.proc, "run", fake_run)
+
+    brief = aboyeur.code_graph_brief(tmp_path, "fix dispatch")
+
+    assert brief.attached is True
+    assert brief.bytes == len(brief.text.encode())
+    assert brief.text.startswith("## Code graph context (GraphTrail, read-only)\n")
+    assert "graph output" in brief.text
+    assert calls == [
+        (
+            [
+                "/bin/graphtrail",
+                "--db",
+                str(db),
+                "context",
+                "fix dispatch",
+                "--markdown",
+                "--limit",
+                "8",
+            ],
+            {"timeout": 10.0, "cwd": tmp_path},
+        )
+    ]
+
+
+def test_code_graph_brief_missing_db_is_not_attached(tmp_path, monkeypatch):
+    monkeypatch.setattr(aboyeur, "_graphtrail_bin", lambda: "/bin/graphtrail")
+    monkeypatch.setattr(aboyeur.proc, "run", lambda *args, **kw: (_ for _ in ()).throw(AssertionError("no run")))
+
+    brief = aboyeur.code_graph_brief(tmp_path, "fix dispatch")
+
+    assert brief.attached is False
+    assert brief.bytes == 0
+    assert brief.text == ""
+
+
+def test_code_graph_brief_nonzero_exit_is_not_attached(tmp_path, monkeypatch):
+    db = tmp_path / ".graphtrail" / "graphtrail.db"
+    db.parent.mkdir()
+    db.write_text("")
+    monkeypatch.setattr(aboyeur, "_graphtrail_bin", lambda: "/bin/graphtrail")
+    monkeypatch.setattr(aboyeur.proc, "run", lambda args, **kw: proc.Result(code=2, stdout="partial", stderr="boom"))
+
+    brief = aboyeur.code_graph_brief(tmp_path, "fix dispatch")
+
+    assert brief.attached is False
+    assert brief.bytes == 0
+    assert brief.text == ""
+
+
+def test_code_graph_brief_timeout_is_not_attached(tmp_path, monkeypatch):
+    db = tmp_path / ".graphtrail" / "graphtrail.db"
+    db.parent.mkdir()
+    db.write_text("")
+    monkeypatch.setattr(aboyeur, "_graphtrail_bin", lambda: "/bin/graphtrail")
+    monkeypatch.setattr(aboyeur.proc, "run", lambda args, **kw: proc.Result(code=124, stdout="", stderr="timeout"))
+
+    brief = aboyeur.code_graph_brief(tmp_path, "fix dispatch")
+
+    assert brief.attached is False
+    assert brief.bytes == 0
+    assert brief.text == ""
+
+
+def test_code_graph_brief_missing_binary_is_not_attached(tmp_path, monkeypatch):
+    db = tmp_path / ".graphtrail" / "graphtrail.db"
+    db.parent.mkdir()
+    db.write_text("")
+    monkeypatch.setattr(aboyeur, "_graphtrail_bin", lambda: None)
+    monkeypatch.setattr(aboyeur.proc, "run", lambda *args, **kw: (_ for _ in ()).throw(AssertionError("no run")))
+
+    brief = aboyeur.code_graph_brief(tmp_path, "fix dispatch")
+
+    assert brief.attached is False
+    assert brief.bytes == 0
+    assert brief.text == ""
+
+
+def test_code_graph_brief_empty_or_whitespace_output_is_not_attached(tmp_path, monkeypatch):
+    db = tmp_path / ".graphtrail" / "graphtrail.db"
+    db.parent.mkdir()
+    db.write_text("")
+    monkeypatch.setattr(aboyeur, "_graphtrail_bin", lambda: "/bin/graphtrail")
+
+    for stdout in ("", "   \n\t\n"):
+        monkeypatch.setattr(
+            aboyeur.proc, "run", lambda args, _out=stdout, **kw: proc.Result(code=0, stdout=_out, stderr="")
+        )
+
+        brief = aboyeur.code_graph_brief(tmp_path, "fix dispatch")
+
+        assert brief.attached is False
+        assert brief.bytes == 0
+        assert brief.text == ""
+
+
+def test_code_graph_brief_truncates_on_line_boundary(tmp_path, monkeypatch):
+    db = tmp_path / ".graphtrail" / "graphtrail.db"
+    db.parent.mkdir()
+    db.write_text("")
+    monkeypatch.setattr(aboyeur, "_graphtrail_bin", lambda: "/bin/graphtrail")
+    monkeypatch.setattr(
+        aboyeur.proc, "run", lambda args, **kw: proc.Result(code=0, stdout=("x" * 5000) + "\nlast\n", stderr="")
+    )
+
+    brief = aboyeur.code_graph_brief(tmp_path, "fix dispatch")
+
+    assert brief.attached is True
+    assert len(brief.text) <= 4000
+    assert brief.text.endswith("\n\n[GraphTrail context truncated to 4000 chars.]\n")
+    assert "last" not in brief.text
+
+
+def test_code_graph_context_is_prepended_once_to_plan_worker_and_synthesis(monkeypatch):
+    calls = []
+    brief = aboyeur.CodeGraphBrief(
+        attached=True, text="## Code graph context (GraphTrail, read-only)\n\ngraph\n", bytes=64
+    )
+
+    def fake_run_agent(cli_ref, prompt, timeout=600.0, cwd=None, read_only=False):
+        calls.append((cli_ref, prompt))
+        assert prompt.count("## Code graph context (GraphTrail, read-only)") == 1
+        if len(calls) == 1:
+            assert prompt.index("## Code graph context") < prompt.index("User task:\nbuild feature")
+            return agents.AgentResult(
+                text=json.dumps({"assignments": [{"worker": "coder", "task": "implement it"}]}),
+                ok=True,
+            )
+        if cli_ref == "ollama:llama3.3":
+            assert prompt.index("## Code graph context") < prompt.index("Sub-task:\nimplement it")
+            return agents.AgentResult(text="worker output", ok=True)
+        assert prompt.index("## Code graph context") < prompt.index("Original task:\nbuild feature")
+        return agents.AgentResult(text="final answer", ok=True)
+
+    monkeypatch.setattr(aboyeur.agents, "run_agent", fake_run_agent)
+
+    assert aboyeur.run("build feature", _roster(), code_graph=brief) == 0
+    assert len(calls) == 3
+
+
+def test_run_json_records_code_graph_brief_fields(monkeypatch, tmp_path):
+    db = tmp_path / "work" / ".graphtrail" / "graphtrail.db"
+    db.parent.mkdir(parents=True)
+    db.write_text("")
+    calls = []
+
+    monkeypatch.setattr(aboyeur, "_graphtrail_bin", lambda: "/bin/graphtrail")
+    monkeypatch.setattr(aboyeur.proc, "run", lambda args, **kw: proc.Result(code=0, stdout="graph\n", stderr=""))
+
+    def fake_run_agent(cli_ref, prompt, timeout=600.0, cwd=None, read_only=False):
+        calls.append(prompt)
+        if len(calls) == 1:
+            return agents.AgentResult(
+                text=json.dumps({"assignments": [{"worker": "coder", "task": "implement it"}]}),
+                ok=True,
+            )
+        if cli_ref == "ollama:llama3.3":
+            return agents.AgentResult(text="worker output", ok=True)
+        return agents.AgentResult(text="final answer", ok=True)
+
+    output_dir = tmp_path / "run"
+    monkeypatch.setattr(aboyeur.agents, "run_agent", fake_run_agent)
+
+    assert aboyeur.run("build feature", _roster(), cwd=tmp_path / "work", output_dir=output_dir) == 0
+
+    run_meta = json.loads((output_dir / "run.json").read_text())
+    assert run_meta["code_graph_brief"]["attached"] is True
+    assert run_meta["code_graph_brief"]["bytes"] > 0
+
+
+def test_run_json_records_disabled_code_graph(monkeypatch, tmp_path):
+    db = tmp_path / "work" / ".graphtrail" / "graphtrail.db"
+    db.parent.mkdir(parents=True)
+    db.write_text("")
+    monkeypatch.setattr(aboyeur, "_graphtrail_bin", lambda: "/bin/graphtrail")
+    monkeypatch.setattr(
+        aboyeur.proc, "run", lambda *args, **kw: (_ for _ in ()).throw(AssertionError("no graphtrail run"))
+    )
+
+    def fake_run_agent(cli_ref, prompt, timeout=600.0, cwd=None, read_only=False):
+        assert "## Code graph context" not in prompt
+        if "assignments" in prompt:
+            return agents.AgentResult(
+                text=json.dumps({"assignments": [{"worker": "coder", "task": "implement it"}]}),
+                ok=True,
+            )
+        if cli_ref == "ollama:llama3.3":
+            return agents.AgentResult(text="worker output", ok=True)
+        return agents.AgentResult(text="final answer", ok=True)
+
+    output_dir = tmp_path / "run"
+    monkeypatch.setattr(aboyeur.agents, "run_agent", fake_run_agent)
+
+    assert (
+        aboyeur.run(
+            "build feature",
+            _roster(),
+            cwd=tmp_path / "work",
+            dry_run=True,
+            output_dir=output_dir,
+            code_graph_enabled=False,
+        )
+        == 0
+    )
+    assert json.loads((output_dir / "run.json").read_text())["code_graph_brief"] == {
+        "attached": False,
+        "bytes": 0,
+    }
 
 
 def test_assignment_payload_serializes_stage():
