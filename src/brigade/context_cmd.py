@@ -141,8 +141,12 @@ def _code_graph_summary(target: Path, selected_task: dict[str, Any] | None) -> d
     if not isinstance(data, dict):
         return None
 
-    entry_points = data.get("entry_points") if isinstance(data.get("entry_points"), list) else []
-    related_files = data.get("related_files") if isinstance(data.get("related_files"), list) else []
+    entry_points_value = data.get("entry_points")
+    entry_points = entry_points_value if isinstance(entry_points_value, list) else []
+    related_files_value = data.get("related_files")
+    related_files = related_files_value if isinstance(related_files_value, list) else []
+    callers_value = data.get("callers")
+    callees_value = data.get("callees")
     return {
         "schema_version": data.get("schema_version"),
         "query": query,
@@ -157,8 +161,8 @@ def _code_graph_summary(target: Path, selected_task: dict[str, Any] | None) -> d
             if isinstance(ep, dict)
         ][:8],
         "related_files": related_files[:20],
-        "caller_count": len(data.get("callers")) if isinstance(data.get("callers"), list) else 0,
-        "callee_count": len(data.get("callees")) if isinstance(data.get("callees"), list) else 0,
+        "caller_count": len(callers_value) if isinstance(callers_value, list) else 0,
+        "callee_count": len(callees_value) if isinstance(callees_value, list) else 0,
     }
 
 
@@ -421,7 +425,8 @@ def _context_sync_plan_payload(target: Path, pack_id: str = "latest") -> dict[st
         checks.append({"status": WARN, "name": "context_sync_targets", "detail": "no enabled context sync targets"})
     pack_fingerprint = _pack_fingerprint(pack) if isinstance(pack, dict) else None
     if isinstance(pack, dict):
-        freshness = pack.get("freshness") if isinstance(pack.get("freshness"), dict) else {}
+        freshness_value = pack.get("freshness")
+        freshness = freshness_value if isinstance(freshness_value, dict) else {}
         created = _parse_iso_datetime(pack.get("created_at") or freshness.get("generated_at"))
         if created is not None:
             age_hours = (_now() - created).total_seconds() / 3600
@@ -510,7 +515,8 @@ def _context_issue(pack: dict[str, Any] | None, issue_type: str, detail: str) ->
 
 def _context_pack_issues(target: Path, pack: dict[str, Any]) -> list[dict[str, Any]]:
     issues: list[dict[str, Any]] = []
-    freshness = pack.get("freshness") if isinstance(pack.get("freshness"), dict) else {}
+    freshness_value = pack.get("freshness")
+    freshness = freshness_value if isinstance(freshness_value, dict) else {}
     created = _parse_iso_datetime(pack.get("created_at") or freshness.get("generated_at"))
     if created is not None:
         age_hours = (_now() - created).total_seconds() / 3600
@@ -519,7 +525,8 @@ def _context_pack_issues(target: Path, pack: dict[str, Any]) -> list[dict[str, A
     for ref in pack.get("source_references", []) if isinstance(pack.get("source_references"), list) else []:
         if isinstance(ref, dict) and ref.get("exists") and not (target / str(ref.get("path"))).exists():
             issues.append(_context_issue(pack, "missing_source_reference", str(ref.get("path"))))
-    task = pack.get("task") if isinstance(pack.get("task"), dict) else {}
+    task_value = pack.get("task")
+    task = task_value if isinstance(task_value, dict) else {}
     task_id = task.get("id")
     if isinstance(task_id, str) and task_id:
         current = next(

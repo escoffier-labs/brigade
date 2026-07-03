@@ -376,7 +376,8 @@ def _normalize_finding(
     }
     explicit_actionable = value.get("actionable")
     actionable = issue_type == "task" or (isinstance(explicit_actionable, bool) and explicit_actionable)
-    normalized = {
+    normalized_metadata: dict[str, Any] = {key: item for key, item in metadata.items() if item not in (None, "")}
+    normalized: dict[str, Any] = {
         "id": issue_id,
         "issue_id": issue_id,
         "title": suggested_task_text,
@@ -394,12 +395,12 @@ def _normalize_finding(
         "message_range": metadata["message_range"],
         "evidence_summary": metadata["evidence_summary"],
         "acceptance": [item.strip() for item in acceptance],
-        "metadata": {key: item for key, item in metadata.items() if item not in (None, "")},
+        "metadata": normalized_metadata,
     }
     if fingerprint:
-        normalized["metadata"]["source_fingerprint"] = fingerprint
+        normalized_metadata["source_fingerprint"] = fingerprint
     else:
-        normalized["metadata"]["source_fingerprint"] = _stable_hash(
+        normalized_metadata["source_fingerprint"] = _stable_hash(
             {
                 "provider": provider,
                 "surface_id": surface_id,

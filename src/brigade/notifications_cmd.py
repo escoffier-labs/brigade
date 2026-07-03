@@ -136,19 +136,23 @@ def _read_config(path: Path | None = None) -> tuple[dict[str, Any] | None, str |
 
 
 def _selected_config_channels(config: dict[str, Any], profile: str | None) -> tuple[str | None, list[str], str | None]:
-    channels = config.get("channels") if isinstance(config.get("channels"), dict) else {}
-    profiles = config.get("profiles") if isinstance(config.get("profiles"), dict) else {}
+    channels_value = config.get("channels")
+    channels = channels_value if isinstance(channels_value, dict) else {}
+    profiles_value = config.get("profiles")
+    profiles = profiles_value if isinstance(profiles_value, dict) else {}
     if profile:
         selected = profiles.get(profile)
         if not isinstance(selected, dict):
             return profile, [], f"profile {profile!r} not found in config"
-        names = selected.get("channels") if isinstance(selected.get("channels"), list) else []
+        names_value = selected.get("channels")
+        names = names_value if isinstance(names_value, list) else []
         return profile, [str(name) for name in names if str(name) in channels], None
     for name, candidate in profiles.items():
         if isinstance(candidate, dict) and candidate.get("default") is True:
-            names = candidate.get("channels") if isinstance(candidate.get("channels"), list) else []
+            names_value = candidate.get("channels")
+            names = names_value if isinstance(names_value, list) else []
             return str(name), [str(item) for item in names if str(item) in channels], None
-    return None, sorted(str(name) for name in channels)
+    return None, sorted(str(name) for name in channels), None
 
 
 def _checks_from_status(payload: dict[str, Any]) -> list[dict[str, Any]]:
@@ -198,7 +202,8 @@ def _status_payload(profile: str | None = None) -> dict[str, Any]:
         selected_profile, selected_channels, selection_error = _selected_config_channels(config, profile)
         if selection_error:
             checks.append({"status": "WARN", "name": "agent-notify-profile", "detail": selection_error})
-        channels = config.get("channels") if isinstance(config.get("channels"), dict) else {}
+        channels_value = config.get("channels")
+        channels = channels_value if isinstance(channels_value, dict) else {}
         for name in selected_channels:
             channel = channels.get(name)
             if not isinstance(channel, dict):
@@ -256,7 +261,8 @@ def health(target: Path, profile: str | None = None) -> dict[str, Any]:
     if payload.get("status") == "manual":
         issue_checks = checks
     top_issue = issue_checks[0] if issue_checks else None
-    channels = payload.get("selected_channels") if isinstance(payload.get("selected_channels"), list) else []
+    channels_value = payload.get("selected_channels")
+    channels = channels_value if isinstance(channels_value, list) else []
     return {
         "installed": bool(payload.get("installed")),
         "configured": bool(payload.get("configured")),
@@ -324,7 +330,8 @@ def status(*, target: Path, profile: str | None = None, json_output: bool = Fals
         print(f"binary:     {payload['binary']}")
     if payload.get("config_path"):
         print(f"config:     {payload['config_path']} exists={payload.get('config_exists')}")
-    channels = payload.get("selected_channels") if isinstance(payload.get("selected_channels"), list) else []
+    channels_value = payload.get("selected_channels")
+    channels = channels_value if isinstance(channels_value, list) else []
     print(f"channels:   {len(channels)}")
     print(f"next:       {payload.get('suggested_next_command')}")
     return 0
@@ -332,7 +339,7 @@ def status(*, target: Path, profile: str | None = None, json_output: bool = Fals
 
 def setup_plan(*, target: Path, profile: str = "operator", json_output: bool = False) -> int:
     del target
-    payload = {
+    payload: dict[str, Any] = {
         "profile": profile,
         "config_path": str(CONFIG_PATH),
         "commands": {

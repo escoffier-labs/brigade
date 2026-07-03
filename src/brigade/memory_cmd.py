@@ -374,7 +374,7 @@ def _issue(
         "Update the memory card through the reviewed memory workflow or document why no change is needed.",
         "`brigade memory care doctor` no longer reports this issue.",
     ]
-    record = {
+    record: dict[str, Any] = {
         "id": f"memory-care-{fingerprint}",
         "file": card_path,
         "path": card_path,
@@ -722,11 +722,8 @@ def _autofix_plan_payload(
         if isinstance(scan_payload, dict)
         else _today().isoformat()
     )
-    issues = (
-        scan_payload.get("issues")
-        if isinstance(scan_payload, dict) and isinstance(scan_payload.get("issues"), list)
-        else []
-    )
+    issues_value = scan_payload.get("issues") if isinstance(scan_payload, dict) else None
+    issues = issues_value if isinstance(issues_value, list) else []
     items = [
         _autofix_plan_item(issue, target=target, scan_date=scan_date)
         for issue in issues
@@ -929,6 +926,8 @@ def health(target: Path) -> dict[str, Any]:
             "would_write": False,
         }
     )
+    autofix_items_value = autofix_plan.get("items")
+    autofix_items = autofix_items_value if isinstance(autofix_items_value, list) else []
     return {
         "target": str(target),
         "config_path": str(config_path(target)),
@@ -942,7 +941,7 @@ def health(target: Path) -> dict[str, Any]:
         "autofix_plan": {
             "plan_count": autofix_plan.get("plan_count", 0),
             "blocked_count": autofix_plan.get("blocked_count", 0),
-            "top_item": autofix_plan["items"][0] if autofix_plan.get("items") else None,
+            "top_item": autofix_items[0] if autofix_items else None,
             "suggested_next_command": "brigade memory care plan-fixes" if autofix_plan.get("plan_count") else None,
             "would_write": False,
         },
@@ -965,11 +964,16 @@ def status(*, target: Path, json_output: bool = False) -> int:
     print(f"queue_path: {payload['queue_path']}")
     issue_count = payload["issue_count"]
     print(f"health: {'ok' if issue_count == 0 else str(issue_count) + ' issue(s)'}")
-    metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
-    reviewed = metadata.get("reviewed_dates") if isinstance(metadata.get("reviewed_dates"), dict) else None
-    freshness = metadata.get("freshness_dates") if isinstance(metadata.get("freshness_dates"), dict) else None
-    evidence = metadata.get("evidence") if isinstance(metadata.get("evidence"), dict) else None
-    confidence = metadata.get("confidence") if isinstance(metadata.get("confidence"), dict) else None
+    metadata_value = payload.get("metadata")
+    metadata = metadata_value if isinstance(metadata_value, dict) else {}
+    reviewed_value = metadata.get("reviewed_dates")
+    reviewed = reviewed_value if isinstance(reviewed_value, dict) else None
+    freshness_value = metadata.get("freshness_dates")
+    freshness = freshness_value if isinstance(freshness_value, dict) else None
+    evidence_value = metadata.get("evidence")
+    evidence = evidence_value if isinstance(evidence_value, dict) else None
+    confidence_value = metadata.get("confidence")
+    confidence = confidence_value if isinstance(confidence_value, dict) else None
     if reviewed:
         print(
             f"reviewed_dates: present={reviewed.get('present', 0)} missing={reviewed.get('missing', 0)} stale={reviewed.get('stale', 0)}"
@@ -983,7 +987,8 @@ def status(*, target: Path, json_output: bool = False) -> int:
     if confidence:
         rendered = ", ".join(f"{key}={confidence[key]}" for key in sorted(confidence))
         print(f"confidence_metadata: {rendered}")
-    autofix_plan = payload.get("autofix_plan") if isinstance(payload.get("autofix_plan"), dict) else {}
+    autofix_plan_value = payload.get("autofix_plan")
+    autofix_plan = autofix_plan_value if isinstance(autofix_plan_value, dict) else {}
     if autofix_plan.get("plan_count"):
         print(
             f"autofix_plan: planned={autofix_plan.get('plan_count')} blocked={autofix_plan.get('blocked_count')} would_write=false"
@@ -1117,7 +1122,7 @@ def backfill(*, target: Path, apply: bool = False, json_output: bool = False) ->
                 "candidates": candidates,
             },
         )
-    payload = {
+    payload: dict[str, Any] = {
         "target": str(target),
         "apply": apply,
         "candidate_count": len(candidates),
@@ -1196,7 +1201,8 @@ def closeout(*, target: Path, reason: str | None = None, defer: bool = False, js
     except (OSError, json.JSONDecodeError, ValueError) as exc:
         print(f"error: cannot read memory-care queue: {exc}", file=sys.stderr)
         return 2
-    cards = queue.get("cards") if isinstance(queue, dict) and isinstance(queue.get("cards"), list) else []
+    cards_value = queue.get("cards") if isinstance(queue, dict) else None
+    cards = cards_value if isinstance(cards_value, list) else []
     fingerprints = [
         str(card.get("source_fingerprint"))
         for card in cards
@@ -1402,11 +1408,12 @@ def serve_mcp(*, target: Path, stdio: bool = False, json_output: bool = False) -
     if stdio:
         return _run_card_mcp_stdio(target)
     resources = _mcp_card_resources(target, config)
-    payload = {
+    tools = [str(spec["name"]) for spec in _mcp_card_tool_specs()]
+    payload: dict[str, Any] = {
         "target": str(target),
         "read_only": True,
         "resource_scheme": "card://<repo-relative-path>",
-        "tools": [spec["name"] for spec in _mcp_card_tool_specs()],
+        "tools": tools,
         "registered_resources": len(resources),
     }
     if json_output:
@@ -1414,7 +1421,7 @@ def serve_mcp(*, target: Path, stdio: bool = False, json_output: bool = False) -
         return 0
     print("memory MCP resources: ready read_only=true")
     print("resources: card://<repo-relative-path>")
-    print(f"tools: {', '.join(payload['tools'])}")
+    print(f"tools: {', '.join(tools)}")
     print(f"registered_resources: {payload['registered_resources']}")
     print("run the stdio server with: brigade memory serve-mcp --stdio")
     return 0
