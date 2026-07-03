@@ -25,6 +25,8 @@ GraphTrail indexes your code once, stays incremental after that, and answers str
   <img src="docs/assets/graphtrail-context.svg" alt="Recording: graphtrail init and sync build a code graph, then callers and context answer structural questions before an edit" width="760">
 </p>
 
+<p align="center"><em><code>graphtrail init</code> and <code>sync</code> index the repo, then <code>callers</code> and <code>context</code> answer straight from the code graph.</em></p>
+
 Index a repo, then ask who calls a symbol and what context an agent should load before editing it. The `context` pack is exactly what an agent gets over MCP.
 
 ## What it does
