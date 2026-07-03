@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- The three largest modules are now packages: `repos_cmd` (6,417 lines -> 8 files), `tools_cmd` (6,079 -> 18), and `phases_cmd` (5,621 -> 7), each behind a facade that preserves the full external surface and monkeypatch semantics; no source file exceeds 2,000 lines. The mypy override list dropped from 45 entries to 21, and type-ratcheting surfaced and fixed four latent defects along the way (a friction-show crash on malformed JSON, a notifications tuple-shape crash, a fleet-health wrong-module read, and a research runner returning an object where callers expected text).
+
 ## [0.18.0] - 2026-07-03
 
 ### Migration
