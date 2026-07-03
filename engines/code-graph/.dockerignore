@@ -1,0 +1,5 @@
+target/
+.graphtrail/
+.git/
+.claude/
+*.db

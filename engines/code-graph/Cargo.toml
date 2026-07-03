@@ -2,6 +2,7 @@
 name = "graphtrail"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.85"
 description = "Local code graph sidecar for semantic search, agent context, and Brigade receipts."
 license = "MIT"
 default-run = "graphtrail"
