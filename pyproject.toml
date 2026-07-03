@@ -93,7 +93,6 @@ module = [
     "brigade.release_cmd",
     "brigade.security_cmd",
     "brigade.skills_cmd",
-    "brigade.tools_cmd.calls",
     "brigade.work_cmd.backup",
     "brigade.work_cmd.imports",
     "brigade.work_cmd.ledger",
