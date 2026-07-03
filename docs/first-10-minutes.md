@@ -71,6 +71,8 @@ A `status: warn` (with exit code 1) means setup completed but a step has a host-
 
 Quickstart scopes handoff source coverage to the writer harnesses you selected. A `--harnesses codex` setup watches `.codex/memory-handoffs/` and leaves Claude, OpenCode, Hermes, and OpenClaw paths quiet until you add them.
 
+Quickstart also scaffolds `.brigade/mcp.json` and `.brigade/dogfood.toml` so MCP sync and the work loop have local config from the first run.
+
 ## 5. Check Health
 
 ```bash

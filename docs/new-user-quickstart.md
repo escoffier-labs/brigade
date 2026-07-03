@@ -1,6 +1,6 @@
 # New User Quickstart
 
-Brigade is local-first. Local-first means local data on the operator-controlled machine first, before any external service; that machine can be a laptop, workstation, or VPS. The first run should create local config, handoff inboxes, and portable tool or skill projections without starting services or touching remotes.
+Brigade is local-first. Local-first means local data on the operator-controlled machine first, before any external service; that machine can be a laptop, workstation, or VPS. The first run should create local config and handoff inboxes without starting services or touching remotes; workspace, `--full`, and pack-based installs can also project portable tools or skills.
 
 The target can be a code repo, an OpenClaw or Hermes memory workspace, a VPS operator directory, or another local workspace you control. Repo installs are common, but they are not the only supported shape.
 
@@ -86,7 +86,8 @@ Quickstart runs these local-only steps:
 - installs Brigade repo or workspace templates
 - writes host-local `.brigade/` operator config
 - scopes handoff source coverage to the selected writer harnesses and writes a local bootstrap handoff-ingest latest-run log
-- imports built-in portable tools and skills
+- scaffolds the local MCP catalog and dogfood/work-loop config
+- imports built-in portable tools and skills for workspace installs, `--full`, or explicit pack installs
 - projects harness-specific files such as Codex skills or Claude command docs
 - verifies selected handoff writer inboxes
 - prints next commands

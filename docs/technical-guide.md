@@ -144,6 +144,8 @@ Phase action planning can turn blocked or stale phase-session checkpoint issues 
 Session checkpoint archive moves old recovery points into local JSONL metadata so they stop driving latest-checkpoint health.
 Session report bundles include a recovery section with checkpoint and recovery-note summaries.
 
+Gated operator-suite examples below assume `brigade extras on` has been run once. For one-off invocations, prefix the command with `BRIGADE_EXTRAS=1`.
+
 `brigade work phases evidence add` appends local files, tests, report ids, handoff paths, and notes to a phase record without running commands.
 `brigade work phases verify plan/record` keeps expected verification and recorded outcomes visible without executing tests.
 `brigade work phases reconcile` checks recorded commit and push evidence against local git state without changing git.
@@ -324,7 +326,7 @@ brigade run "make the change" --allow-dirty
 brigade run "make the change" --worktree
 ```
 
-The examples above all drive the same `brigade run` command to show its main flags. Brigade's full surface (work loop, scanners, handoffs, tools, release gates, repo fleet, and more) is documented section by section below. For the complete, auto-generated list of every command, see [`docs/command-inventory.md`](command-inventory.md), and regenerate it with `brigade roadmap commands --write`.
+The examples above all drive the same `brigade run` command to show its main flags. Brigade's full surface (work loop, scanners, handoffs, tools, release gates, repo fleet, and more) is documented section by section below. For the complete, auto-generated list of every command, see [`docs/command-inventory.md`](command-inventory.md), and regenerate it with `BRIGADE_EXTRAS=1 brigade roadmap commands --write`.
 
 Common `brigade run` flags:
 
@@ -516,7 +518,7 @@ brigade operator status --profile internal-dogfood --target .
 brigade daily status --target .
 ```
 
-`brigade operator quickstart` is the first-user path. It runs the repo template install, writes local operator config, imports built-in portable tools and skills, projects harness files, verifies handoff writer inboxes for selected harnesses, and prints the next commands. It is local-only: no daemons, hooks, publishing, pushing, tagging, or remote mutation. JSON output includes a compact `issue_report` object that users can review, redact, and paste into the GitHub quickstart issue form.
+`brigade operator quickstart` is the first-user path. It runs the repo template install, writes local operator config, scaffolds the MCP catalog and dogfood/work-loop config, projects harness files, verifies handoff writer inboxes for selected harnesses, and prints the next commands. Workspace, `--full`, and pack-based quickstarts also import built-in portable tools and skills. It is local-only: no daemons, hooks, publishing, pushing, tagging, or remote mutation. JSON output includes a compact `issue_report` object that users can review, redact, and paste into the GitHub quickstart issue form.
 
 Task ledger commands:
 
@@ -963,8 +965,9 @@ Brigade installs material into a target directory on two independent axes. The t
 
 | Depth | Installs |
 |---|---|
-| `repo` *(default)* | `AGENTS.md`, `SAFETY_RULES.md`, `INSTALL_FOR_AGENTS.md`, `hooks/pre-push`, `.brigade/policies/public-repo.json`, `.brigade/policies/personal.json` |
-| `workspace` | repo + `MEMORY.md`, `TOOLS.md`, `USER.md`, `SOUL.md`, `IDENTITY.md`, `HEARTBEAT.md`, `memory/cards/`, starter cards |
+| `repo` *(default)* | minimal repo baseline: `AGENTS.md`, `SAFETY_RULES.md`, `.brigade/handoff-sources.example.json`, and policy examples under `.brigade/policies/` |
+| `repo` + `--full` | repo baseline + `INSTALL_FOR_AGENTS.md`, `rules/`, and inactive `hooks/pre-push` |
+| `workspace` | repo baseline + full kit, `MEMORY.md`, `TOOLS.md`, `USER.md`, `SOUL.md`, `IDENTITY.md`, `HEARTBEAT.md`, `memory/cards/`, starter cards, and default tool/skill projections |
 
 **Harnesses, which tools you actually use:**
 

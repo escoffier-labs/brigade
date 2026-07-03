@@ -23,7 +23,7 @@ python3 -m pipx ensurepath
 
 ## First install
 
-The canonical first-run command is `brigade operator quickstart`. It installs the template files, wires the operator config, and runs the health checks in one shot:
+The canonical first-run command is `brigade operator quickstart`. It installs the template files, wires the operator config, scaffolds the MCP catalog and dogfood/work-loop config, and runs the health checks in one shot:
 
 ```bash
 # Code repo with Codex as the writer
@@ -35,7 +35,7 @@ brigade operator quickstart --target ~/agent-workspace --depth workspace --harne
 
 Pass `--dry-run` first to preview the planned steps without writing anything.
 
-Two commands share this surface: `brigade init` installs the template files only, and `brigade operator quickstart` wraps it (init, then operator config, then doctor). Use `init` when you want the interactive harness picker or just the files:
+Two commands share this surface: `brigade init` installs the template files only, and `brigade operator quickstart` wraps it with operator config, the MCP and dogfood on-ramps, writer verification, and health checks. Use `init` when you want the interactive harness picker or just the files:
 
 ```bash
 $ brigade init --target ~/agent-kitchen
@@ -150,4 +150,4 @@ Capture against an id you actually have: a skill you followed, a memory card (`-
 - Wire the ingester on a cron or a manual end-of-day workflow.
 - Add a memory-care staleness scan when your card set starts to matter. See [docs/memory-care.md](docs/memory-care.md).
 - If you use TokenJuice, wire Claude Code and Codex hooks deliberately and tell agents what the wrapper means. See the tokens station in [docs/technical-guide.md](docs/technical-guide.md#managed-stations).
-- Run `brigade work bootstrap` inside active repos when you want the dogfood-backed daily work loop, scanner inbox, and local evidence receipts.
+- Run `brigade work bootstrap` inside active repos that did not use quickstart when you want the dogfood-backed daily work loop, scanner inbox, and local evidence receipts.
