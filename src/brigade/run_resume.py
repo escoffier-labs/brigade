@@ -141,6 +141,12 @@ def resume(run_dir: Path) -> int:
     task = run_meta.get("task", "")
     synth_prompt = aboyeur.build_synth_prompt(task, worker_results, read_only=read_only, ground_truth=ground_truth)
     orchestrator = roster.agents[roster.orchestrator]
+    if orchestrator.cli is None:
+        print(
+            f"error: orchestrator {roster.orchestrator!r} has no CLI in roster.json; cannot re-synthesize",
+            file=sys.stderr,
+        )
+        return 2
     final = agents.run_agent(
         orchestrator.cli,
         synth_prompt,

@@ -129,3 +129,30 @@ def test_runs_resume_cli_dispatches(tmp_path, monkeypatch):
     rc = cli.main(["runs", "resume", str(tmp_path)])
     assert rc == 0
     assert seen["run_dir"] == tmp_path
+
+
+def test_resume_orchestrator_without_cli_errors(tmp_path, monkeypatch, capsys):
+    run_dir = _write_run_dir(
+        tmp_path,
+        results=[
+            {
+                "worker": "cook",
+                "task": "write code",
+                "ok": False,
+                "detail": "timeout",
+                "text": "",
+                "thread_id": "t-1",
+                "status": "interrupted",
+            },
+        ],
+    )
+    roster = json.loads((run_dir / "roster.json").read_text())
+    roster["agents"]["chef"]["cli"] = None
+    (run_dir / "roster.json").write_text(json.dumps(roster))
+    monkeypatch.setattr(run_resume.codex_appserver, "AppServer", _StubServer)
+    rc = run_resume.resume(run_dir)
+    assert rc == 2
+    assert "no CLI" in capsys.readouterr().err
+    # Resumed worker progress is still persisted even though synthesis was skipped.
+    results = json.loads((run_dir / "worker-results.json").read_text())["results"]
+    assert results[0]["text"] == "finished now"
