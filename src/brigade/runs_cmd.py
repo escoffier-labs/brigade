@@ -82,6 +82,37 @@ def _print_workers(worker_results: dict[str, Any] | None) -> None:
         print(f"  [{marker}] {result.get('worker', 'unknown')}{detail}")
 
 
+def _print_ground_truth(worker_results: dict[str, Any] | None) -> None:
+    ground_truth = worker_results.get("ground_truth") if worker_results else None
+    if not isinstance(ground_truth, dict):
+        return
+    if ground_truth.get("available") is not True:
+        reason = ground_truth.get("reason")
+        suffix = f" ({reason})" if isinstance(reason, str) and reason else ""
+        print(f"ground truth: unavailable{suffix}")
+        return
+    print("ground truth:")
+    changed = [item for item in ground_truth.get("changed_files") or [] if isinstance(item, str)]
+    untracked = [item for item in ground_truth.get("untracked_files") or [] if isinstance(item, str)]
+    print(f"  changed_files: {len(changed)}" + (f" ({', '.join(changed[:8])})" if changed else ""))
+    if untracked:
+        print(f"  untracked_files: {len(untracked)} ({', '.join(untracked[:8])})")
+    diffstat = ground_truth.get("diffstat")
+    if isinstance(diffstat, str) and diffstat.strip():
+        for line in diffstat.strip().splitlines():
+            print(f"  {line.strip()}")
+    patch_ref = ground_truth.get("patch_ref")
+    if isinstance(patch_ref, str) and patch_ref:
+        print(f"  patch_ref: {patch_ref}")
+    for receipt in ground_truth.get("verify_receipts") or []:
+        if not isinstance(receipt, dict):
+            continue
+        print(f"  verify: {receipt.get('run_id', 'unknown')} {receipt.get('status', 'unknown')}")
+        for command in receipt.get("commands") or []:
+            if isinstance(command, dict):
+                print(f"    - {command.get('command', '?')} exit={command.get('exit_code')}")
+
+
 def _print_synthesis(synthesis: dict[str, Any] | None) -> None:
     if not synthesis:
         return
@@ -230,6 +261,7 @@ def show(run_dir: Path) -> int:
     _print_roster(roster)
     _print_plan(plan)
     _print_workers(worker_results)
+    _print_ground_truth(worker_results)
     _print_synthesis(synthesis)
     _print_final(_read_text(run_dir / "final.txt"))
     return 0
