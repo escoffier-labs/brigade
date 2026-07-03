@@ -7,6 +7,7 @@ frozen here so a re-export regression fails loudly.
 """
 
 from brigade import repos_cmd
+from brigade.repos_cmd import fleet_health
 
 EXPECTED_FACADE_SYMBOLS = (
     "BACKLOG_STALE_DAYS",
@@ -116,3 +117,39 @@ def test_facade_submodules_importable():
 
     for module in (constants, fleet, sweeps, actions_dispatch, release_train, release_ops, fleet_health):
         assert module.__name__.startswith("brigade.repos_cmd.")
+
+
+def test_fleet_health_uses_live_fleet_repo_summary(monkeypatch, tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    target = tmp_path / "target"
+    target.mkdir()
+    config_dir = target / ".brigade"
+    config_dir.mkdir()
+    (config_dir / "repos.toml").write_text(
+        """
+[[repo]]
+id = "demo"
+path = "../repo"
+""".lstrip(),
+        encoding="utf-8",
+    )
+
+    def fake_repo_summary(entry):
+        return {
+            "id": f"patched-{entry.repo_id}",
+            "path": str(repo),
+            "exists": False,
+            "is_git": False,
+            "expect_brigade": False,
+            "expect_publish_guard": False,
+        }
+
+    monkeypatch.setattr(repos_cmd.fleet, "_repo_summary", fake_repo_summary)
+
+    payload = fleet_health.health(target)
+
+    assert payload["repo_count"] == 1
+    assert any(
+        check.get("name") == "repo_missing" and check.get("repo_id") == "patched-demo" for check in payload["checks"]
+    )

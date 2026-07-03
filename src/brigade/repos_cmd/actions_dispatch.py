@@ -1,4 +1,4 @@
-# ruff: noqa: F401,F403,F405
+# ruff: noqa: F401
 from __future__ import annotations
 
 import fnmatch
@@ -28,9 +28,7 @@ from ..localio import (
 )
 from ..render import emit
 from ..selection import Selection, WRITER_INBOXES
-from .constants import *
-from .fleet import *
-from .sweeps import *
+from . import constants, fleet, sweeps
 
 
 def _actions_root(target: Path) -> Path:
@@ -61,13 +59,13 @@ def _read_action_archive(target: Path) -> list[dict[str, Any]]:
     return _read_jsonl(_actions_archive_path(target))
 
 
-def _action_target_entry(target: Path, action: dict[str, Any]) -> tuple[RepoEntry | None, str | None]:
+def _action_target_entry(target: Path, action: dict[str, Any]) -> tuple[constants.RepoEntry | None, str | None]:
     repo_id = str(action.get("repo_id") or "")
-    entries, errors, config_loaded = _load_config(target)
+    entries, errors, config_loaded = fleet._load_config(target)
     if not config_loaded:
         return None, "repo fleet config is missing"
     if errors:
-        return None, "; ".join(_safe_text(error, target, "repo-fleet", "repo fleet") for error in errors)
+        return None, "; ".join(fleet._safe_text(error, target, "repo-fleet", "repo fleet") for error in errors)
     for entry in entries:
         if entry.repo_id == repo_id:
             if not entry.path.is_dir():
@@ -100,7 +98,7 @@ def _action_task_fields(action: dict[str, Any]) -> tuple[str, str, str]:
 def _action_import_record(action: dict[str, Any]) -> dict[str, Any]:
     task_type, priority, template = _action_task_fields(action)
     action_id = str(action.get("fleet_action_id") or "fleet-action")
-    source_fingerprint = str(action.get("source_fingerprint") or _fingerprint_payload(action))
+    source_fingerprint = str(action.get("source_fingerprint") or fleet._fingerprint_payload(action))
     metadata = {
         "fleet_action_id": action_id,
         "source_item_key": action_id,
@@ -144,7 +142,7 @@ def _target_imports_for_action(repo_path: Path, action: dict[str, Any]) -> list[
 def _supersede_prior_dispatch_imports(
     repo_path: Path, action: dict[str, Any], current_import_ids: set[str]
 ) -> list[str]:
-    source_fingerprint = str(action.get("source_fingerprint") or _fingerprint_payload(action))
+    source_fingerprint = str(action.get("source_fingerprint") or fleet._fingerprint_payload(action))
     imports = work_cmd._read_imports(repo_path)
     superseded: list[str] = []
     changed = False
@@ -217,14 +215,14 @@ def _dispatch_plan_for_action(
         blockers.append(f"action status is not dispatchable: {status or 'unknown'}")
     record = _action_import_record(action)
     if entry is not None:
-        record["text"] = _safe_text(record.get("text"), entry.path, entry.repo_id, entry.label)
+        record["text"] = fleet._safe_text(record.get("text"), entry.path, entry.repo_id, entry.label)
         record["acceptance"] = [
-            _safe_text(item, entry.path, entry.repo_id, entry.label) for item in record.get("acceptance", [])
+            fleet._safe_text(item, entry.path, entry.repo_id, entry.label) for item in record.get("acceptance", [])
         ]
         metadata = record.get("metadata") if isinstance(record.get("metadata"), dict) else {}
         for key in ("safe_summary", "suggested_command"):
             if key in metadata:
-                metadata[key] = _safe_text(metadata[key], entry.path, entry.repo_id, entry.label)
+                metadata[key] = fleet._safe_text(metadata[key], entry.path, entry.repo_id, entry.label)
     existing_imports = _target_imports_for_action(entry.path, action) if entry is not None else []
     same_fingerprint = []
     changed_fingerprint = []
@@ -334,7 +332,7 @@ def actions_dispatch_apply(
                 "dispatched_at": now,
                 "source_fingerprint": action.get("source_fingerprint"),
                 "superseded_import_ids": superseded_ids,
-                "target_evidence_fingerprint": _fingerprint_payload(
+                "target_evidence_fingerprint": fleet._fingerprint_payload(
                     _latest_safe_receipts(entry.path, entry.repo_id, entry.label)
                 ),
             }
@@ -378,7 +376,9 @@ def actions_dispatch_apply(
     return emit(payload, json_output, text_lines, rc)
 
 
-def _dispatch_import_summary(entry: RepoEntry, action: dict[str, Any], item: dict[str, Any]) -> dict[str, Any]:
+def _dispatch_import_summary(
+    entry: constants.RepoEntry, action: dict[str, Any], item: dict[str, Any]
+) -> dict[str, Any]:
     metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
     wanted_fingerprint = str(action.get("source_fingerprint") or "")
     source_fingerprint = str(metadata.get("source_fingerprint") or "")
@@ -390,7 +390,7 @@ def _dispatch_import_summary(entry: RepoEntry, action: dict[str, Any], item: dic
         "fingerprint_matches_action": bool(source_fingerprint and source_fingerprint == wanted_fingerprint),
         "created_at": item.get("created_at"),
         "updated_at": item.get("updated_at"),
-        "dismiss_reason": _safe_text(item.get("dismiss_reason"), entry.path, entry.repo_id, entry.label)
+        "dismiss_reason": fleet._safe_text(item.get("dismiss_reason"), entry.path, entry.repo_id, entry.label)
         if item.get("dismiss_reason")
         else None,
         "superseded_at": item.get("superseded_at"),
@@ -406,7 +406,7 @@ def _dispatch_report_for_action(target: Path, action: dict[str, Any]) -> dict[st
     if error or entry is None:
         warnings.append(
             {
-                "status": WARN,
+                "status": constants.WARN,
                 "name": "repo_fleet_dispatch_target_missing",
                 "detail": error or "target repo missing",
                 "suggested_next_command": f"brigade repos actions show {action.get('fleet_action_id')}",
@@ -420,7 +420,7 @@ def _dispatch_report_for_action(target: Path, action: dict[str, Any]) -> dict[st
     if dispatch and target_import_id and not any(item.get("import_id") == target_import_id for item in imports):
         warnings.append(
             {
-                "status": WARN,
+                "status": constants.WARN,
                 "name": "repo_fleet_dispatch_target_import_missing",
                 "detail": f"{action.get('fleet_action_id')} target import is missing",
                 "suggested_next_command": f"brigade repos actions reconcile {action.get('fleet_action_id')}",
@@ -434,7 +434,7 @@ def _dispatch_report_for_action(target: Path, action: dict[str, Any]) -> dict[st
     if changed:
         warnings.append(
             {
-                "status": WARN,
+                "status": constants.WARN,
                 "name": "repo_fleet_dispatch_fingerprint_changed",
                 "detail": f"{action.get('fleet_action_id')} has {len(changed)} target import(s) from older fingerprints",
                 "suggested_next_command": f"brigade repos actions dispatch plan {action.get('fleet_action_id')}",
@@ -443,7 +443,7 @@ def _dispatch_report_for_action(target: Path, action: dict[str, Any]) -> dict[st
     if dismissed:
         warnings.append(
             {
-                "status": WARN,
+                "status": constants.WARN,
                 "name": "repo_fleet_dispatch_import_dismissed",
                 "detail": f"{action.get('fleet_action_id')} has dismissed target import(s)",
                 "suggested_next_command": f"brigade repos actions reconcile {action.get('fleet_action_id')}",
@@ -452,7 +452,7 @@ def _dispatch_report_for_action(target: Path, action: dict[str, Any]) -> dict[st
     if superseded:
         warnings.append(
             {
-                "status": WARN,
+                "status": constants.WARN,
                 "name": "repo_fleet_dispatch_import_superseded",
                 "detail": f"{action.get('fleet_action_id')} has superseded target import(s)",
                 "suggested_next_command": f"brigade repos actions dispatch plan {action.get('fleet_action_id')}",
@@ -462,7 +462,7 @@ def _dispatch_report_for_action(target: Path, action: dict[str, Any]) -> dict[st
     if resolution_status in {"broken-reference", "stale", "dismissed", "superseded"}:
         warnings.append(
             {
-                "status": WARN,
+                "status": constants.WARN,
                 "name": f"repo_fleet_action_{resolution_status}",
                 "detail": f"{action.get('fleet_action_id')} reconciliation status is {resolution_status}",
                 "suggested_next_command": f"brigade repos actions reconcile {action.get('fleet_action_id')}",
@@ -487,7 +487,7 @@ def _dispatch_report_for_action(target: Path, action: dict[str, Any]) -> dict[st
     ]
     checks = warnings or [
         {
-            "status": OK,
+            "status": constants.OK,
             "name": "repo_fleet_dispatch_report",
             "detail": f"{action.get('fleet_action_id')} dispatch is traceable",
         }
@@ -548,7 +548,7 @@ def _dispatch_report_markdown(payload: dict[str, Any]) -> str:
             f"- `{action.get('fleet_action_id')}` repo={action.get('repo_id')} status={action.get('resolution_status') or action.get('action_status')} issues={action.get('issue_count')}"
         )
         for check in action.get("checks") if isinstance(action.get("checks"), list) else []:
-            if check.get("status") != OK:
+            if check.get("status") != constants.OK:
                 lines.append(f"  - {check.get('name')}: {check.get('detail')}")
     if not payload.get("actions"):
         lines.append("- none")
@@ -642,7 +642,7 @@ def _latest_safe_receipts(repo_path: Path, repo_id: str, label: str) -> list[dic
         (repo_path / ".brigade" / "work" / "closeouts", "closeout.json", "work-closeout"),
         (repo_path / ".brigade" / "release" / "runs", "release.json", "release-readiness"),
     ):
-        receipt = _safe_receipt(_latest_json(root, filename), repo_id, label)
+        receipt = fleet._safe_receipt(fleet._latest_json(root, filename), repo_id, label)
         if receipt:
             receipt["kind"] = kind
             receipts.append(receipt)
@@ -665,9 +665,11 @@ def _action_context_payload(target: Path, action: dict[str, Any]) -> tuple[dict[
         "fleet_action_id": action.get("fleet_action_id"),
         "repo_id": action.get("repo_id"),
         "repo_label": action.get("repo_label"),
-        "safe_summary": _safe_text(action.get("safe_summary"), entry.path, entry.repo_id, entry.label),
-        "suggested_command": _safe_text(action.get("suggested_command"), entry.path, entry.repo_id, entry.label),
-        "acceptance": [_safe_text(item, entry.path, entry.repo_id, entry.label) for item in _action_acceptance(action)],
+        "safe_summary": fleet._safe_text(action.get("safe_summary"), entry.path, entry.repo_id, entry.label),
+        "suggested_command": fleet._safe_text(action.get("suggested_command"), entry.path, entry.repo_id, entry.label),
+        "acceptance": [
+            fleet._safe_text(item, entry.path, entry.repo_id, entry.label) for item in _action_acceptance(action)
+        ],
         "guidance_presence": guidance,
         "latest_receipts": _latest_safe_receipts(entry.path, entry.repo_id, entry.label),
         "dispatch": _dispatch_state(action, entry.path),
@@ -687,7 +689,7 @@ def _action_context_payload(target: Path, action: dict[str, Any]) -> tuple[dict[
                 "exists": work_cmd._imports_path(entry.path).is_file(),
             },
         ],
-        "checks": [{"status": OK, "name": "repo_fleet_action_context", "detail": "ready"}],
+        "checks": [{"status": constants.OK, "name": "repo_fleet_action_context", "detail": "ready"}],
     }
     return payload, None
 
@@ -810,18 +812,18 @@ def _reconcile_one(target: Path, action: dict[str, Any]) -> dict[str, Any]:
     elif target_import.get("status") == "promoted":
         status = "in-progress"
     elif target_import.get("status") == "pending":
-        created = _parse_time(str(target_import.get("created_at") or ""))
-        if created and (_now() - created).total_seconds() / 3600 > DISPATCH_STALE_HOURS:
+        created = fleet._parse_time(str(target_import.get("created_at") or ""))
+        if created and (_now() - created).total_seconds() / 3600 > constants.DISPATCH_STALE_HOURS:
             status = "stale"
         else:
             status = "dispatched"
     else:
         status = str(target_import.get("status") or "dispatched")
-    latest_closeout = _safe_receipt(
-        _latest_json(entry.path / ".brigade" / "work" / "closeouts", "closeout.json"), entry.repo_id, entry.label
+    latest_closeout = fleet._safe_receipt(
+        fleet._latest_json(entry.path / ".brigade" / "work" / "closeouts", "closeout.json"), entry.repo_id, entry.label
     )
-    latest_release = _safe_receipt(
-        _latest_json(entry.path / ".brigade" / "release" / "runs", "release.json"), entry.repo_id, entry.label
+    latest_release = fleet._safe_receipt(
+        fleet._latest_json(entry.path / ".brigade" / "release" / "runs", "release.json"), entry.repo_id, entry.label
     )
     result = {
         "fleet_action_id": action.get("fleet_action_id"),

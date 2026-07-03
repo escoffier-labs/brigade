@@ -1,4 +1,4 @@
-# ruff: noqa: F401,F403,F405
+# ruff: noqa: F401
 from __future__ import annotations
 
 import fnmatch
@@ -28,10 +28,7 @@ from ..localio import (
 )
 from ..render import emit
 from ..selection import Selection, WRITER_INBOXES
-from .constants import *
-from .fleet import *
-from .sweeps import *
-from .actions_dispatch import *
+from . import actions_dispatch, constants, fleet, sweeps
 
 
 def _release_trains_root(target: Path) -> Path:
@@ -74,11 +71,13 @@ def _resolve_release_train(target: Path, train_id: str) -> tuple[dict[str, Any] 
 
 
 def _repo_git_labels(repo: Path) -> dict[str, Any]:
-    tracked_dirty, _ = _dirty_counts(repo) if repo.is_dir() else (0, 0)
-    upstream = _git_value(repo, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}") if repo.is_dir() else None
+    tracked_dirty, _ = fleet._dirty_counts(repo) if repo.is_dir() else (0, 0)
+    upstream = (
+        fleet._git_value(repo, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}") if repo.is_dir() else None
+    )
     ahead = behind = None
     if upstream:
-        counts = _git_value(repo, "rev-list", "--left-right", "--count", f"HEAD...{upstream}")
+        counts = fleet._git_value(repo, "rev-list", "--left-right", "--count", f"HEAD...{upstream}")
         if counts:
             parts = counts.split()
             if len(parts) == 2:
@@ -87,8 +86,8 @@ def _repo_git_labels(repo: Path) -> dict[str, Any]:
                 except ValueError:
                     ahead = behind = None
     return {
-        "branch": _git_value(repo, "rev-parse", "--abbrev-ref", "HEAD") if repo.is_dir() else None,
-        "head_label": _git_value(repo, "rev-parse", "--short", "HEAD") if repo.is_dir() else None,
+        "branch": fleet._git_value(repo, "rev-parse", "--abbrev-ref", "HEAD") if repo.is_dir() else None,
+        "head_label": fleet._git_value(repo, "rev-parse", "--short", "HEAD") if repo.is_dir() else None,
         "upstream_label": upstream,
         "ahead": ahead,
         "behind": behind,
@@ -97,7 +96,7 @@ def _repo_git_labels(repo: Path) -> dict[str, Any]:
 
 
 def _fleet_actions_for_repo(target: Path, repo_id: str) -> list[dict[str, Any]]:
-    return [action for action in _read_actions(target) if action.get("repo_id") == repo_id]
+    return [action for action in actions_dispatch._read_actions(target) if action.get("repo_id") == repo_id]
 
 
 def _fleet_imports_for_repo(repo: Path) -> list[dict[str, Any]]:
@@ -135,7 +134,7 @@ def _safe_train_action_ref(action: dict[str, Any]) -> dict[str, Any]:
         "source_fingerprint": action.get("source_fingerprint"),
         "target_import_id": action.get("target_import_id") or dispatch.get("target_import_id"),
         "target_task_id": action.get("target_task_id"),
-        "safe_summary": _safe_text(action.get("safe_summary")),
+        "safe_summary": fleet._safe_text(action.get("safe_summary")),
     }
 
 
@@ -146,18 +145,18 @@ def _latest_review_closeout_ref(repo: Path, repo_id: str, label: str) -> dict[st
         closeout = release_cmd._latest_review_closeout(repo)
     except Exception:
         closeout = None
-    return _safe_report_ref(closeout, repo_id, label)
+    return fleet._safe_report_ref(closeout, repo_id, label)
 
 
 def _latest_security_closeout_ref(repo: Path, repo_id: str, label: str) -> dict[str, Any] | None:
-    return _safe_report_ref(
-        _latest_json_payload(repo / ".brigade" / "security" / "closeouts", "closeout.json"), repo_id, label
+    return fleet._safe_report_ref(
+        fleet._latest_json_payload(repo / ".brigade" / "security" / "closeouts", "closeout.json"), repo_id, label
     )
 
 
 def _latest_verification_ref(repo: Path, repo_id: str, label: str) -> dict[str, Any] | None:
     receipt = work_cmd._latest_verify_receipt(repo)
-    return _safe_report_ref(receipt, repo_id, label)
+    return fleet._safe_report_ref(receipt, repo_id, label)
 
 
 def _classify_release_repo(state: dict[str, Any], actions: list[dict[str, Any]], imports: list[dict[str, Any]]) -> str:
@@ -190,20 +189,20 @@ def _classify_release_repo(state: dict[str, Any], actions: list[dict[str, Any]],
     return "ready"
 
 
-def _release_repo_payload(target: Path, entry: RepoEntry) -> dict[str, Any]:
+def _release_repo_payload(target: Path, entry: constants.RepoEntry) -> dict[str, Any]:
     repo = entry.path
-    state = _repo_brigade_state(entry)
+    state = fleet._repo_brigade_state(entry)
     actions = _fleet_actions_for_repo(target, entry.repo_id)
     imports = _fleet_imports_for_repo(repo) if repo.is_dir() else []
-    latest_sweep = _safe_sweep_ref(_latest_sweep_for_repo(target, entry.repo_id))
-    fleet_report = latest_report(target)
+    latest_sweep = sweeps._safe_sweep_ref(sweeps._latest_sweep_for_repo(target, entry.repo_id))
+    fleet_report = sweeps.latest_report(target)
     classification = _classify_release_repo(state, actions, imports)
     verification = _latest_verification_ref(repo, entry.repo_id, entry.label) if repo.is_dir() else None
     review_closeout = _latest_review_closeout_ref(repo, entry.repo_id, entry.label) if repo.is_dir() else None
     security_closeout = _latest_security_closeout_ref(repo, entry.repo_id, entry.label) if repo.is_dir() else None
     evidence = {
         "latest_fleet_sweep": latest_sweep,
-        "latest_fleet_report": _safe_report_ref(fleet_report, entry.repo_id, entry.label),
+        "latest_fleet_report": fleet._safe_report_ref(fleet_report, entry.repo_id, entry.label),
         "fleet_actions": [_safe_train_action_ref(action) for action in actions],
         "pending_fleet_imports": [_safe_import_ref(item) for item in imports if item.get("status") == "pending"],
         "latest_operator_report": state.get("latest_operator_report"),
@@ -231,7 +230,7 @@ def _release_repo_payload(target: Path, entry: RepoEntry) -> dict[str, Any]:
         "blocker_count": len(state.get("blockers") if isinstance(state.get("blockers"), list) else []),
         "evidence": evidence,
         "suggested_next_command": _release_repo_next_command(entry.repo_id, classification, actions),
-        "source_fingerprint": _fingerprint_payload(
+        "source_fingerprint": fleet._fingerprint_payload(
             {
                 "repo_id": entry.repo_id,
                 "classification": classification,
@@ -264,7 +263,7 @@ def _release_repo_next_command(repo_id: str, classification: str, actions: list[
 
 def _release_train_payload(target: Path) -> dict[str, Any]:
     target = target.expanduser().resolve()
-    entries, errors, config_loaded = _load_config(target)
+    entries, errors, config_loaded = fleet._load_config(target)
     repos = [_release_repo_payload(target, entry) for entry in entries if entry.enabled]
     counts: dict[str, int] = {}
     for repo in repos:
@@ -280,7 +279,7 @@ def _release_train_payload(target: Path) -> dict[str, Any]:
         "schema_version": 1,
         "target_label": "repo-fleet",
         "config_loaded": config_loaded,
-        "config_errors": [_safe_text(error, target, "repo-fleet", "repo fleet") for error in errors],
+        "config_errors": [fleet._safe_text(error, target, "repo-fleet", "repo fleet") for error in errors],
         "generated_at": _now().isoformat(),
         "repo_count": len(repos),
         "classification_counts": counts,
@@ -307,7 +306,7 @@ def _release_train_payload(target: Path) -> dict[str, Any]:
             repo.get("suggested_next_command") for repo in repos if repo.get("suggested_next_command")
         ],
     }
-    payload["train_fingerprint"] = _fingerprint_payload(
+    payload["train_fingerprint"] = fleet._fingerprint_payload(
         {"repos": repos, "counts": counts, "errors": payload["config_errors"]}
     )
     return payload
@@ -474,7 +473,7 @@ def release_compare(*, target: Path, train_id: str = "latest", json_output: bool
         if new is None:
             issues.append(
                 {
-                    "status": WARN,
+                    "status": constants.WARN,
                     "name": "train_repo_missing",
                     "repo_id": repo_id,
                     "detail": f"{repo_id} is no longer in release train",
@@ -490,7 +489,7 @@ def release_compare(*, target: Path, train_id: str = "latest", json_output: bool
         ):
             issues.append(
                 {
-                    "status": WARN,
+                    "status": constants.WARN,
                     "name": "train_repo_head_changed",
                     "repo_id": repo_id,
                     "detail": f"{repo_id} HEAD changed",
@@ -507,7 +506,7 @@ def release_compare(*, target: Path, train_id: str = "latest", json_output: bool
             if old_id and not new_id:
                 issues.append(
                     {
-                        "status": WARN,
+                        "status": constants.WARN,
                         "name": "train_missing_receipt",
                         "repo_id": repo_id,
                         "detail": f"{repo_id} missing {key}",
@@ -515,14 +514,14 @@ def release_compare(*, target: Path, train_id: str = "latest", json_output: bool
                 )
             elif old_id and new_id and old_id != new_id:
                 issues.append(
-                    {"status": WARN, "name": name, "repo_id": repo_id, "detail": f"{repo_id} has newer {key}"}
+                    {"status": constants.WARN, "name": name, "repo_id": repo_id, "detail": f"{repo_id} has newer {key}"}
                 )
         old_actions = old_evidence.get("fleet_actions") if isinstance(old_evidence.get("fleet_actions"), list) else []
         new_actions = new_evidence.get("fleet_actions") if isinstance(new_evidence.get("fleet_actions"), list) else []
-        if _fingerprint_payload(old_actions) != _fingerprint_payload(new_actions):
+        if fleet._fingerprint_payload(old_actions) != fleet._fingerprint_payload(new_actions):
             issues.append(
                 {
-                    "status": WARN,
+                    "status": constants.WARN,
                     "name": "train_fleet_actions_changed",
                     "repo_id": repo_id,
                     "detail": f"{repo_id} fleet action reconciliation changed",
@@ -531,7 +530,7 @@ def release_compare(*, target: Path, train_id: str = "latest", json_output: bool
         if old.get("source_fingerprint") != new.get("source_fingerprint"):
             issues.append(
                 {
-                    "status": WARN,
+                    "status": constants.WARN,
                     "name": "train_unresolved_state_changed",
                     "repo_id": repo_id,
                     "detail": f"{repo_id} unresolved release state changed",
@@ -684,7 +683,7 @@ def _train_closeout_status(train: dict[str, Any]) -> str | None:
 
 def _planned_release_actions(train: dict[str, Any]) -> list[dict[str, Any]]:
     train_id = str(train.get("train_id") or "planned")
-    train_fingerprint = str(train.get("train_fingerprint") or _fingerprint_payload(train))
+    train_fingerprint = str(train.get("train_fingerprint") or fleet._fingerprint_payload(train))
     closeout = train.get("closeout") if isinstance(train.get("closeout"), dict) else {}
     reviewed_at = closeout.get("reviewed_at") if isinstance(closeout, dict) else None
     created = _now().isoformat()
@@ -697,8 +696,8 @@ def _planned_release_actions(train: dict[str, Any]) -> list[dict[str, Any]]:
             continue
         repo_id = str(repo.get("repo_id") or "unknown")
         repo_label = str(repo.get("repo_label") or repo_id)
-        repo_fp = str(repo.get("source_fingerprint") or _fingerprint_payload(repo))
-        source_fingerprint = _fingerprint_payload(
+        repo_fp = str(repo.get("source_fingerprint") or fleet._fingerprint_payload(repo))
+        source_fingerprint = fleet._fingerprint_payload(
             {
                 "train_id": train_id,
                 "train_fingerprint": train_fingerprint,

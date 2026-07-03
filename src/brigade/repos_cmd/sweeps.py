@@ -1,4 +1,4 @@
-# ruff: noqa: F401,F403,F405
+# ruff: noqa: F401
 from __future__ import annotations
 
 import fnmatch
@@ -28,8 +28,7 @@ from ..localio import (
 )
 from ..render import emit
 from ..selection import Selection, WRITER_INBOXES
-from .constants import *
-from .fleet import *
+from . import constants, fleet
 
 
 def _import_records(payload: dict[str, Any]) -> list[dict[str, Any]]:
@@ -66,7 +65,7 @@ def _import_records(payload: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def import_issues(*, target: Path, json_output: bool = False, dry_run: bool = False) -> int:
-    payload = scan_payload(target)
+    payload = fleet.scan_payload(target)
     records = _import_records(payload)
     imported, skipped, dismissed = work_cmd._append_import_records(
         target.expanduser().resolve(), records, dry_run=dry_run
@@ -136,15 +135,19 @@ def _resolve_sweep(target: Path, sweep_id: str) -> tuple[dict[str, Any] | None, 
     return matches[0], None
 
 
-def _sweep_commands() -> list[SweepCommand]:
+def _sweep_commands() -> list[constants.SweepCommand]:
     return [
-        SweepCommand("center-report-build", [sys.executable, "-m", "brigade", "center", "report", "build", "--json"]),
-        SweepCommand("release-plan", [sys.executable, "-m", "brigade", "release", "plan", "--base-ref", "", "--json"]),
-        SweepCommand("work-brief", [sys.executable, "-m", "brigade", "work", "brief", "--json"]),
+        constants.SweepCommand(
+            "center-report-build", [sys.executable, "-m", "brigade", "center", "report", "build", "--json"]
+        ),
+        constants.SweepCommand(
+            "release-plan", [sys.executable, "-m", "brigade", "release", "plan", "--base-ref", "", "--json"]
+        ),
+        constants.SweepCommand("work-brief", [sys.executable, "-m", "brigade", "work", "brief", "--json"]),
     ]
 
 
-def _commands_for_entry(entry: RepoEntry) -> list[SweepCommand]:
+def _commands_for_entry(entry: constants.RepoEntry) -> list[constants.SweepCommand]:
     return [*_sweep_commands(), *entry.health_commands]
 
 
@@ -176,20 +179,22 @@ def _latest_command_receipt(target: Path, repo_id: str, label: str) -> dict[str,
 
 def _health_command_registry_payload(target: Path) -> dict[str, Any]:
     target = target.expanduser().resolve()
-    entries, errors, config_loaded = _load_config(target)
+    entries, errors, config_loaded = fleet._load_config(target)
     checks: list[dict[str, Any]] = []
     repos: list[dict[str, Any]] = []
     if errors:
         checks.extend(
             {
-                "status": WARN,
+                "status": constants.WARN,
                 "name": "repo_health_command_config",
-                "detail": _safe_text(error, target, "repo-fleet", "repo fleet"),
+                "detail": fleet._safe_text(error, target, "repo-fleet", "repo fleet"),
             }
             for error in errors
         )
     elif config_loaded:
-        checks.append({"status": OK, "name": "repo_health_command_config", "detail": CONFIG_REL_PATH})
+        checks.append(
+            {"status": constants.OK, "name": "repo_health_command_config", "detail": constants.CONFIG_REL_PATH}
+        )
     for entry in entries:
         if not entry.enabled:
             continue
@@ -206,7 +211,7 @@ def _health_command_registry_payload(target: Path) -> dict[str, Any]:
             if receipt is None:
                 checks.append(
                     {
-                        "status": WARN,
+                        "status": constants.WARN,
                         "name": "repo_health_command_receipt_missing",
                         "detail": f"{entry.repo_id}:{command.label} has no sweep receipt",
                         "repo_id": entry.repo_id,
@@ -215,14 +220,14 @@ def _health_command_registry_payload(target: Path) -> dict[str, Any]:
                     }
                 )
             else:
-                completed_at = _parse_time(receipt.get("completed_at"))
+                completed_at = fleet._parse_time(receipt.get("completed_at"))
                 if completed_at is not None:
                     age_hours = round((_now() - completed_at).total_seconds() / 3600, 2)
-                    stale = age_hours > HEALTH_COMMAND_RECEIPT_STALE_HOURS
+                    stale = age_hours > constants.HEALTH_COMMAND_RECEIPT_STALE_HOURS
                 if stale:
                     checks.append(
                         {
-                            "status": WARN,
+                            "status": constants.WARN,
                             "name": "repo_health_command_receipt_stale",
                             "detail": f"{entry.repo_id}:{command.label} receipt is stale",
                             "repo_id": entry.repo_id,
@@ -234,7 +239,7 @@ def _health_command_registry_payload(target: Path) -> dict[str, Any]:
                 if receipt.get("status") != "completed":
                     checks.append(
                         {
-                            "status": WARN,
+                            "status": constants.WARN,
                             "name": "repo_health_command_failed",
                             "detail": f"{entry.repo_id}:{command.label} latest receipt status is {receipt.get('status') or 'unknown'}",
                             "repo_id": entry.repo_id,
@@ -251,7 +256,7 @@ def _health_command_registry_payload(target: Path) -> dict[str, Any]:
                     "receipt_status": receipt.get("status") if isinstance(receipt, dict) else "missing",
                     "receipt_age_hours": age_hours,
                     "stale": stale,
-                    "source_fingerprint": _fingerprint_payload(
+                    "source_fingerprint": fleet._fingerprint_payload(
                         {"repo_id": entry.repo_id, "label": command.label, "timeout": command.timeout}
                     ),
                 }
@@ -259,7 +264,7 @@ def _health_command_registry_payload(target: Path) -> dict[str, Any]:
         for label in sorted(duplicate_labels):
             checks.append(
                 {
-                    "status": WARN,
+                    "status": constants.WARN,
                     "name": "repo_health_command_duplicate_label",
                     "detail": f"{entry.repo_id}:{label} is configured more than once",
                     "repo_id": entry.repo_id,
@@ -276,13 +281,13 @@ def _health_command_registry_payload(target: Path) -> dict[str, Any]:
                 "health_commands": command_rows,
             }
         )
-    issues = [check for check in checks if check.get("status") != OK]
+    issues = [check for check in checks if check.get("status") != constants.OK]
     return {
         "schema_version": 1,
         "target_label": "repo-fleet",
-        "config_path_label": CONFIG_REL_PATH,
+        "config_path_label": constants.CONFIG_REL_PATH,
         "config_loaded": config_loaded,
-        "receipt_stale_hours": HEALTH_COMMAND_RECEIPT_STALE_HOURS,
+        "receipt_stale_hours": constants.HEALTH_COMMAND_RECEIPT_STALE_HOURS,
         "repos": repos,
         "repo_count": len(repos),
         "health_command_count": sum(int(repo.get("health_command_count") or 0) for repo in repos),
@@ -331,10 +336,10 @@ def _select_sweep_entries(
     include_disabled: bool = False,
     stale_only: bool = False,
     force: bool = False,
-) -> tuple[list[RepoEntry], list[str], bool]:
-    entries, errors, config_loaded = _load_config(target)
+) -> tuple[list[constants.RepoEntry], list[str], bool]:
+    entries, errors, config_loaded = fleet._load_config(target)
     wanted = set(repo_ids or [])
-    selected: list[RepoEntry] = []
+    selected: list[constants.RepoEntry] = []
     for entry in entries:
         if wanted and entry.repo_id not in wanted:
             continue
@@ -366,10 +371,10 @@ def _sweep_plan_payload(
         force=force or all_repos,
     )
     command_labels = sorted({command.label for entry in selected for command in _commands_for_entry(entry)})
-    safe_errors = [_safe_text(error, target, "repo-fleet", "repo fleet") for error in errors]
+    safe_errors = [fleet._safe_text(error, target, "repo-fleet", "repo fleet") for error in errors]
     return {
         "target_label": "repo-fleet",
-        "config_path_label": CONFIG_REL_PATH,
+        "config_path_label": constants.CONFIG_REL_PATH,
         "config_loaded": config_loaded,
         "errors": safe_errors,
         "mode": "all" if all_repos else ("stale-only" if stale_only else "selected"),
@@ -424,11 +429,11 @@ def sweep_plan(
 
 
 def _summarize_output(text: str, repo_path: Path, repo_id: str, label: str, limit: int = 240) -> str:
-    safe = _safe_text(text.replace("\n", " "), repo_path, repo_id, label).strip()
+    safe = fleet._safe_text(text.replace("\n", " "), repo_path, repo_id, label).strip()
     return work_cmd._short(safe, limit)
 
 
-def _run_sweep_command(entry: RepoEntry, command: SweepCommand, sweep_dir: Path) -> dict[str, Any]:
+def _run_sweep_command(entry: constants.RepoEntry, command: constants.SweepCommand, sweep_dir: Path) -> dict[str, Any]:
     started = _now()
     command_dir = sweep_dir / "logs" / entry.repo_id / command.label
     command_dir.mkdir(parents=True, exist_ok=True)
@@ -530,7 +535,7 @@ def sweep_run(
         command_results = [_run_sweep_command(entry, command, sweep_dir) for command in _commands_for_entry(entry)]
         repo_completed = _now()
         failed = [command for command in command_results if command.get("status") != "completed"]
-        state = _repo_brigade_state(entry)
+        state = fleet._repo_brigade_state(entry)
         receipt_labels = []
         latest_report_ref = (
             state.get("latest_operator_report") if isinstance(state.get("latest_operator_report"), dict) else None
@@ -669,7 +674,9 @@ def sweep_closeout(
         "status": status,
         "reason": reason or f"repo fleet sweep marked {status}",
         "reviewed_at": _now().isoformat(),
-        "source_fingerprint": _fingerprint_payload({"sweep_id": sweep.get("sweep_id"), "repos": sweep.get("repos")}),
+        "source_fingerprint": fleet._fingerprint_payload(
+            {"sweep_id": sweep.get("sweep_id"), "repos": sweep.get("repos")}
+        ),
     }
     closeout_path = sweep_path / "CLOSEOUT.json"
     payload["path_label"] = f"{sweep.get('sweep_id')}:CLOSEOUT.json"
@@ -687,7 +694,7 @@ def sweep_health(target: Path) -> dict[str, Any]:
     if latest is None:
         checks.append(
             {
-                "status": WARN,
+                "status": constants.WARN,
                 "name": "repo_fleet_sweep_missing",
                 "detail": "no repo fleet sweep has been run",
                 "suggested_next_command": "brigade repos sweep run",
@@ -698,7 +705,7 @@ def sweep_health(target: Path) -> dict[str, Any]:
     if not closeout or closeout.get("status") not in {"reviewed", "deferred", "superseded", "archived"}:
         checks.append(
             {
-                "status": WARN,
+                "status": constants.WARN,
                 "name": "repo_fleet_sweep_unclosed",
                 "detail": f"{latest.get('sweep_id')} has not been closed out",
                 "suggested_next_command": f"brigade repos sweep closeout {latest.get('sweep_id')}",
@@ -707,7 +714,7 @@ def sweep_health(target: Path) -> dict[str, Any]:
     if latest.get("status") != "completed":
         checks.append(
             {
-                "status": WARN,
+                "status": constants.WARN,
                 "name": "repo_fleet_sweep_failed",
                 "detail": f"{latest.get('sweep_id')} did not complete",
                 "suggested_next_command": f"brigade repos sweep show {latest.get('sweep_id')}",
@@ -753,8 +760,8 @@ def _resolve_report(target: Path, report_id: str) -> tuple[dict[str, Any] | None
 
 def _report_payload(target: Path) -> dict[str, Any]:
     target = target.expanduser().resolve()
-    entries, errors, config_loaded = _load_config(target)
-    repo_states = [_repo_brigade_state(entry) for entry in entries if entry.enabled]
+    entries, errors, config_loaded = fleet._load_config(target)
+    repo_states = [fleet._repo_brigade_state(entry) for entry in entries if entry.enabled]
     sweep = sweep_health(target)
     health_registry = _health_command_registry_payload(target)
     blockers = [item for repo in repo_states for item in repo.get("blockers", []) if isinstance(item, dict)]
@@ -764,7 +771,7 @@ def _report_payload(target: Path) -> dict[str, Any]:
     payload = {
         "schema_version": 1,
         "target": str(target),
-        "config_path": str(config_path(target)),
+        "config_path": str(constants.config_path(target)),
         "config_loaded": config_loaded,
         "config_errors": errors,
         "generated_at": _now().isoformat(),
@@ -789,7 +796,7 @@ def _report_payload(target: Path) -> dict[str, Any]:
             repo.get("suggested_command") for repo in repo_states if repo.get("suggested_command")
         ],
     }
-    payload["report_fingerprint"] = _fingerprint_payload(
+    payload["report_fingerprint"] = fleet._fingerprint_payload(
         {
             "repos": repo_states,
             "warnings": payload["warnings"],

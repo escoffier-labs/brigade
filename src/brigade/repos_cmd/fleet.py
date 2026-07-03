@@ -1,4 +1,4 @@
-# ruff: noqa: F401,F403,F405
+# ruff: noqa: F401
 from __future__ import annotations
 
 import fnmatch
@@ -28,7 +28,7 @@ from ..localio import (
 )
 from ..render import emit
 from ..selection import Selection, WRITER_INBOXES
-from .constants import *
+from . import constants
 
 
 def _parse_time(value: object) -> datetime | None:
@@ -58,7 +58,7 @@ expect_publish_guard = false
 """
 
 
-def _health_command_from_raw(raw: object, repo_id: str, index: int) -> tuple[SweepCommand | None, str | None]:
+def _health_command_from_raw(raw: object, repo_id: str, index: int) -> tuple[constants.SweepCommand | None, str | None]:
     if not isinstance(raw, dict):
         return None, f"repo {repo_id}: health command {index} must be a table"
     label = str(raw.get("label") or f"health-{index}").strip()
@@ -91,14 +91,14 @@ def _health_command_from_raw(raw: object, repo_id: str, index: int) -> tuple[Swe
                 return None, f"repo {repo_id}: health command {label}: scanner command is not resolvable: {argv[0]}"
         else:
             return None, f"repo {repo_id}: health command {label}: command or argv is required"
-    return SweepCommand(label, argv or [], timeout), None
+    return constants.SweepCommand(label, argv or [], timeout), None
 
 
-def _health_commands(raw_entry: dict[str, Any], repo_id: str) -> tuple[tuple[SweepCommand, ...], list[str]]:
+def _health_commands(raw_entry: dict[str, Any], repo_id: str) -> tuple[tuple[constants.SweepCommand, ...], list[str]]:
     raw_commands = raw_entry.get("health_command") or raw_entry.get("health_commands") or []
     if not isinstance(raw_commands, list):
         return (), [f"repo {repo_id}: health_commands must be a list"]
-    commands: list[SweepCommand] = []
+    commands: list[constants.SweepCommand] = []
     errors: list[str] = []
     for index, raw in enumerate(raw_commands, start=1):
         command, error = _health_command_from_raw(raw, repo_id, index)
@@ -109,8 +109,8 @@ def _health_commands(raw_entry: dict[str, Any], repo_id: str) -> tuple[tuple[Swe
     return tuple(commands), errors
 
 
-def _load_config(target: Path) -> tuple[list[RepoEntry], list[str], bool]:
-    path = config_path(target)
+def _load_config(target: Path) -> tuple[list[constants.RepoEntry], list[str], bool]:
+    path = constants.config_path(target)
     if not path.is_file():
         return [], [f"missing config: {path}"], False
     try:
@@ -120,7 +120,7 @@ def _load_config(target: Path) -> tuple[list[RepoEntry], list[str], bool]:
     raw_entries = data.get("repo")
     if not isinstance(raw_entries, list):
         return [], ["missing [[repo]] entries"], True
-    entries: list[RepoEntry] = []
+    entries: list[constants.RepoEntry] = []
     errors: list[str] = []
     seen: set[str] = set()
     for index, raw in enumerate(raw_entries, start=1):
@@ -144,7 +144,7 @@ def _load_config(target: Path) -> tuple[list[RepoEntry], list[str], bool]:
         errors.extend(health_errors)
         repo_path = (target / path_value).expanduser().resolve()
         entries.append(
-            RepoEntry(
+            constants.RepoEntry(
                 repo_id=repo_id,
                 label=label or repo_id,
                 path=repo_path,
@@ -167,8 +167,8 @@ def _string_list(value: object, *, default: tuple[str, ...] = ()) -> tuple[str, 
     return default
 
 
-def _load_discovery_roots(target: Path) -> tuple[list[DiscoveryRoot], list[str], bool]:
-    path = config_path(target)
+def _load_discovery_roots(target: Path) -> tuple[list[constants.DiscoveryRoot], list[str], bool]:
+    path = constants.config_path(target)
     if not path.is_file():
         return [], [f"missing config: {path}"], False
     try:
@@ -178,7 +178,7 @@ def _load_discovery_roots(target: Path) -> tuple[list[DiscoveryRoot], list[str],
     raw_roots = data.get("discovery_root") or data.get("discovery_roots") or []
     if not isinstance(raw_roots, list):
         return [], ["discovery_root entries must be a list"], True
-    roots: list[DiscoveryRoot] = []
+    roots: list[constants.DiscoveryRoot] = []
     errors: list[str] = []
     seen: set[str] = set()
     for index, raw in enumerate(raw_roots, start=1):
@@ -201,7 +201,7 @@ def _load_discovery_roots(target: Path) -> tuple[list[DiscoveryRoot], list[str],
         max_depth_raw = raw.get("max_depth", 2)
         max_depth = max_depth_raw if isinstance(max_depth_raw, int) and max_depth_raw >= 0 else 2
         roots.append(
-            DiscoveryRoot(
+            constants.DiscoveryRoot(
                 root_id=root_id,
                 label=label or root_id,
                 path=(target / path_value).expanduser().resolve(),
@@ -223,7 +223,7 @@ def _discovery_candidate_id(root_id: str, index: int) -> str:
     return f"{safe_root}-candidate-{index}"
 
 
-def _discover_repos(root: DiscoveryRoot) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+def _discover_repos(root: constants.DiscoveryRoot) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     candidates: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
     if not root.enabled:
@@ -321,11 +321,11 @@ def discover_plan(*, target: Path, json_output: bool = False) -> int:
         )
     checks: list[dict[str, Any]] = []
     if errors:
-        checks.extend({"status": WARN, "name": "repo_discovery_config", "detail": error} for error in errors)
+        checks.extend({"status": constants.WARN, "name": "repo_discovery_config", "detail": error} for error in errors)
     if config_loaded and not roots:
         checks.append(
             {
-                "status": WARN,
+                "status": constants.WARN,
                 "name": "repo_discovery_roots_missing",
                 "detail": "no [[discovery_root]] entries configured",
             }
@@ -333,7 +333,7 @@ def discover_plan(*, target: Path, json_output: bool = False) -> int:
     if not config_loaded:
         checks.append(
             {
-                "status": WARN,
+                "status": constants.WARN,
                 "name": "repo_discovery_config_missing",
                 "detail": "repo discovery uses only explicit configured roots",
             }
@@ -472,7 +472,7 @@ def _safe_report_ref(payload: dict[str, Any] | None, repo_id: str, label: str) -
     }
 
 
-def _repo_brigade_state(entry: RepoEntry) -> dict[str, Any]:
+def _repo_brigade_state(entry: constants.RepoEntry) -> dict[str, Any]:
     repo = entry.path
     repo_id = entry.repo_id
     label = entry.label
@@ -544,7 +544,7 @@ def _repo_brigade_state(entry: RepoEntry) -> dict[str, Any]:
         )
     if isinstance(latest_report, dict):
         report_created = _parse_time(latest_report.get("created_at") or latest_report.get("generated_at"))
-        if report_created and (_now() - report_created).total_seconds() / 3600 > REPORT_STALE_HOURS:
+        if report_created and (_now() - report_created).total_seconds() / 3600 > constants.REPORT_STALE_HOURS:
             warnings.append({"name": "repo_operator_report_stale", "detail": f"{repo_id} operator report is stale"})
     else:
         warnings.append({"name": "repo_operator_report_missing", "detail": f"{repo_id} has no operator report"})
@@ -654,7 +654,7 @@ def _handoff_backlog(repo: Path) -> tuple[int, int | None]:
     return pending, oldest_days
 
 
-def _repo_summary(entry: RepoEntry) -> dict[str, Any]:
+def _repo_summary(entry: constants.RepoEntry) -> dict[str, Any]:
     repo = entry.path
     tracked_dirty, untracked_dirty = _dirty_counts(repo) if repo.is_dir() else (0, 0)
     has_agents = (repo / "AGENTS.md").is_file()
@@ -694,7 +694,7 @@ def _repo_summary(entry: RepoEntry) -> dict[str, Any]:
     }
 
 
-def _repo_summaries(entries: list[RepoEntry]) -> list[dict[str, Any]]:
+def _repo_summaries(entries: list[constants.RepoEntry]) -> list[dict[str, Any]]:
     """Summarize every enabled repo, in config order.
 
     Each summary is independent and IO-bound (git calls plus file stats), so a
@@ -713,13 +713,18 @@ def _repo_checks(summary: dict[str, Any]) -> list[dict[str, Any]]:
     checks: list[dict[str, Any]] = []
     if not summary.get("exists"):
         checks.append(
-            {"status": WARN, "name": "repo_missing", "detail": f"{repo_id} is not reachable", "repo_id": repo_id}
+            {
+                "status": constants.WARN,
+                "name": "repo_missing",
+                "detail": f"{repo_id} is not reachable",
+                "repo_id": repo_id,
+            }
         )
         return checks
     if not summary.get("has_agents") and summary.get("has_claude"):
         checks.append(
             {
-                "status": WARN,
+                "status": constants.WARN,
                 "name": "repo_claude_fallback",
                 "detail": f"{repo_id} relies on CLAUDE guidance fallback",
                 "repo_id": repo_id,
@@ -728,7 +733,7 @@ def _repo_checks(summary: dict[str, Any]) -> list[dict[str, Any]]:
     elif not summary.get("has_agents") and not summary.get("has_claude"):
         checks.append(
             {
-                "status": WARN,
+                "status": constants.WARN,
                 "name": "repo_missing_guidance",
                 "detail": f"{repo_id} has no AGENTS or CLAUDE guidance",
                 "repo_id": repo_id,
@@ -737,7 +742,7 @@ def _repo_checks(summary: dict[str, Any]) -> list[dict[str, Any]]:
     if not summary.get("test_hints"):
         checks.append(
             {
-                "status": WARN,
+                "status": constants.WARN,
                 "name": "repo_missing_test_hint",
                 "detail": f"{repo_id} has no detected test hint",
                 "repo_id": repo_id,
@@ -746,7 +751,7 @@ def _repo_checks(summary: dict[str, Any]) -> list[dict[str, Any]]:
     if summary.get("expect_brigade") and not summary.get("has_brigade_config"):
         checks.append(
             {
-                "status": WARN,
+                "status": constants.WARN,
                 "name": "repo_missing_brigade_config",
                 "detail": f"{repo_id} lacks local Brigade config",
                 "repo_id": repo_id,
@@ -755,7 +760,7 @@ def _repo_checks(summary: dict[str, Any]) -> list[dict[str, Any]]:
     if summary.get("expect_publish_guard") and not summary.get("publish_guard_hooks"):
         checks.append(
             {
-                "status": WARN,
+                "status": constants.WARN,
                 "name": "repo_missing_publish_guard",
                 "detail": f"{repo_id} lacks expected publish-guard hooks",
                 "repo_id": repo_id,
@@ -764,7 +769,7 @@ def _repo_checks(summary: dict[str, Any]) -> list[dict[str, Any]]:
     if int(summary.get("dirty_tracked_count", 0) or 0) > 0:
         checks.append(
             {
-                "status": WARN,
+                "status": constants.WARN,
                 "name": "repo_dirty_tracked",
                 "detail": f"{repo_id} has dirty tracked files",
                 "repo_id": repo_id,
@@ -773,7 +778,7 @@ def _repo_checks(summary: dict[str, Any]) -> list[dict[str, Any]]:
     if not summary.get("handoff_inboxes"):
         checks.append(
             {
-                "status": WARN,
+                "status": constants.WARN,
                 "name": "repo_missing_handoff_inbox",
                 "detail": f"{repo_id} has no local handoff inbox",
                 "repo_id": repo_id,
@@ -781,10 +786,10 @@ def _repo_checks(summary: dict[str, Any]) -> list[dict[str, Any]]:
         )
     pending = int(summary.get("handoff_pending", 0) or 0)
     oldest_days = summary.get("handoff_backlog_oldest_days")
-    if pending and isinstance(oldest_days, int) and oldest_days >= BACKLOG_STALE_DAYS:
+    if pending and isinstance(oldest_days, int) and oldest_days >= constants.BACKLOG_STALE_DAYS:
         checks.append(
             {
-                "status": WARN,
+                "status": constants.WARN,
                 "name": "repo_handoff_backlog",
                 "detail": f"{repo_id} has {pending} un-ingested handoff(s), oldest {oldest_days}d old; ingester is not reaching it",
                 "repo_id": repo_id,
@@ -799,19 +804,23 @@ def scan_payload(target: Path) -> dict[str, Any]:
     repos = _repo_summaries(entries)
     checks: list[dict[str, Any]] = []
     if errors:
-        checks.extend({"status": WARN, "name": "repo_fleet_config", "detail": error} for error in errors)
+        checks.extend({"status": constants.WARN, "name": "repo_fleet_config", "detail": error} for error in errors)
     elif config_loaded:
-        checks.append({"status": OK, "name": "repo_fleet_config", "detail": str(config_path(target))})
+        checks.append(
+            {"status": constants.OK, "name": "repo_fleet_config", "detail": str(constants.config_path(target))}
+        )
     for summary in repos:
         repo_checks = _repo_checks(summary)
         if repo_checks:
             checks.extend(repo_checks)
         else:
-            checks.append({"status": OK, "name": "repo_ready", "detail": summary["id"], "repo_id": summary["id"]})
-    issues = [check for check in checks if check["status"] != OK]
+            checks.append(
+                {"status": constants.OK, "name": "repo_ready", "detail": summary["id"], "repo_id": summary["id"]}
+            )
+    issues = [check for check in checks if check["status"] != constants.OK]
     return {
         "target": str(target),
-        "config_path": str(config_path(target)),
+        "config_path": str(constants.config_path(target)),
         "config_loaded": config_loaded,
         "repos": repos,
         "repo_count": len(repos),
@@ -843,7 +852,7 @@ def ingest_fleet(
     target = target.expanduser().resolve()
     entries, errors, config_loaded = _load_config(target)
     if not config_loaded:
-        print(f"error: no repo fleet config at {config_path(target)}", file=sys.stderr)
+        print(f"error: no repo fleet config at {constants.config_path(target)}", file=sys.stderr)
         return 2
 
     dry_run = not apply
@@ -930,13 +939,13 @@ def _capture_json_command(func, **kwargs: Any) -> tuple[int, dict[str, Any]]:
 def _rearm_selection(repo_path: Path) -> tuple[Selection | None, str | None]:
     config = brigade_config.config_path(repo_path)
     if not config.is_file():
-        return None, UNWIRED_REARM_REASON
+        return None, constants.UNWIRED_REARM_REASON
     try:
         loaded = brigade_config.load_config(repo_path)
     except (OSError, ValueError, json.JSONDecodeError) as exc:
         return None, f"invalid .brigade/config.json: {exc}"
     if loaded is None:
-        return None, UNWIRED_REARM_REASON
+        return None, constants.UNWIRED_REARM_REASON
     return loaded.selection, None
 
 
@@ -958,7 +967,7 @@ def rearm(*, target: Path, apply: bool = False, json_output: bool = False) -> in
     target = target.expanduser().resolve()
     entries, errors, config_loaded = _load_config(target)
     if not config_loaded:
-        print(f"error: no repo fleet config at {config_path(target)}", file=sys.stderr)
+        print(f"error: no repo fleet config at {constants.config_path(target)}", file=sys.stderr)
         return 2
 
     dry_run = not apply
@@ -1047,7 +1056,7 @@ def init(*, target: Path, force: bool = False, update_gitignore: bool = True, js
     if not target.is_dir():
         print(f"error: --target is not a directory: {target}", file=sys.stderr)
         return 2
-    path = config_path(target)
+    path = constants.config_path(target)
     if path.exists() and not force:
         print(f"error: repo fleet config already exists: {path}", file=sys.stderr)
         return 2
@@ -1089,7 +1098,11 @@ def show(*, target: Path, repo_id: str, json_output: bool = False) -> int:
         f"branch: {repo.get('branch') or 'unknown'}",
         f"guidance: {repo.get('guidance_source') or 'none'}",
         f"tests: {', '.join(repo.get('test_hints') or []) or 'none'}",
-        *[f"[{check['status']}] {check['name']}: {check['detail']}" for check in checks if check["status"] != OK],
+        *[
+            f"[{check['status']}] {check['name']}: {check['detail']}"
+            for check in checks
+            if check["status"] != constants.OK
+        ],
     ]
     return emit(output, json_output, text_lines, 0)
 
@@ -1165,7 +1178,7 @@ def doctor(*, target: Path, json_output: bool = False, deep: bool = False) -> in
                 repo_lines.append(f"  [{mark}] {repo['id']}: {repo['blocking_surface_count']} blocking surface(s)")
         text_lines = [
             f"repos doctor --deep: {payload['target']}",
-            *[f"[WARN] repo_fleet_config: {error}" for error in payload["errors"]],
+            *[f"[constants.WARN] repo_fleet_config: {error}" for error in payload["errors"]],
             *repo_lines,
             f"ready: {'yes' if payload['ready'] else 'no'}",
             f"repos: {payload['repo_count']}, blocking: {payload['blocking_repo_count']}",
@@ -1175,7 +1188,9 @@ def doctor(*, target: Path, json_output: bool = False, deep: bool = False) -> in
     from . import fleet_health
 
     payload = fleet_health.health(target)
-    scan_issue_count = sum(1 for check in payload["checks"] if isinstance(check, dict) and check.get("status") != OK)
+    scan_issue_count = sum(
+        1 for check in payload["checks"] if isinstance(check, dict) and check.get("status") != constants.OK
+    )
     health_issue_count = int(payload.get("issue_count") or 0)
     checks = [*payload["checks"]]
     for bucket_name in ("report", "actions", "sweep", "health_commands", "release_train"):

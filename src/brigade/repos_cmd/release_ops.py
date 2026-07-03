@@ -1,4 +1,4 @@
-# ruff: noqa: F401,F403,F405
+# ruff: noqa: F401
 from __future__ import annotations
 
 import fnmatch
@@ -28,19 +28,15 @@ from ..localio import (
 )
 from ..render import emit
 from ..selection import Selection, WRITER_INBOXES
-from .constants import *
-from .fleet import *
-from .sweeps import *
-from .actions_dispatch import *
-from .release_train import *
+from . import actions_dispatch, constants, fleet, release_train, sweeps
 
 
 def release_actions_archive_completed(*, target: Path, json_output: bool = False) -> int:
     target = target.expanduser().resolve()
-    actions = _read_release_actions(target)
+    actions = release_train._read_release_actions(target)
     archived, remaining = actionqueue.split_archived_completed(actions, now=_now().isoformat())
-    _write_release_actions(target, remaining)
-    _append_release_action_archive(target, archived)
+    release_train._write_release_actions(target, remaining)
+    release_train._append_release_action_archive(target, archived)
     payload = {
         "target_label": "repo-fleet",
         "archived_count": len(archived),
@@ -56,7 +52,7 @@ def release_actions_archive_completed(*, target: Path, json_output: bool = False
 
 
 def _release_evidence_path(target: Path) -> Path:
-    return _release_trains_root(target) / "evidence.jsonl"
+    return release_train._release_trains_root(target) / "evidence.jsonl"
 
 
 def _read_release_evidence(target: Path) -> list[dict[str, Any]]:
@@ -72,7 +68,7 @@ def _write_release_evidence(target: Path, records: list[dict[str, Any]]) -> None
 
 
 def _release_waivers_path(target: Path) -> Path:
-    return _release_trains_root(target) / "waivers.jsonl"
+    return release_train._release_trains_root(target) / "waivers.jsonl"
 
 
 def _read_release_waivers(target: Path) -> list[dict[str, Any]]:
@@ -88,7 +84,7 @@ def _write_release_waivers(target: Path, waivers: list[dict[str, Any]]) -> None:
 
 
 def _release_waiver_expired(waiver: dict[str, Any]) -> bool:
-    expires_at = _parse_time(waiver.get("expires_at"))
+    expires_at = fleet._parse_time(waiver.get("expires_at"))
     return bool(expires_at and expires_at < _now())
 
 
@@ -103,7 +99,9 @@ def _active_release_waivers(target: Path, train_id: str) -> list[dict[str, Any]]
 
 
 def _release_waiver_scope_names(waivers: list[dict[str, Any]]) -> set[str]:
-    return {str(waiver.get("scope") or "") for waiver in waivers if waiver.get("scope") in RELEASE_WAIVER_SCOPES}
+    return {
+        str(waiver.get("scope") or "") for waiver in waivers if waiver.get("scope") in constants.RELEASE_WAIVER_SCOPES
+    }
 
 
 def _find_release_waiver(
@@ -130,17 +128,17 @@ def release_waiver_record(
     json_output: bool = False,
 ) -> int:
     target = target.expanduser().resolve()
-    train, error = _resolve_release_train(target, train_id)
+    train, error = release_train._resolve_release_train(target, train_id)
     if train is None:
         print(f"error: {error}", file=sys.stderr)
         return 1 if error and "not found" in error else 2
-    if scope not in RELEASE_WAIVER_SCOPES:
-        print(f"error: --scope must be one of {', '.join(sorted(RELEASE_WAIVER_SCOPES))}", file=sys.stderr)
+    if scope not in constants.RELEASE_WAIVER_SCOPES:
+        print(f"error: --scope must be one of {', '.join(sorted(constants.RELEASE_WAIVER_SCOPES))}", file=sys.stderr)
         return 2
     if not reason:
         print("error: --reason is required", file=sys.stderr)
         return 2
-    if expires_at and _parse_time(expires_at) is None:
+    if expires_at and fleet._parse_time(expires_at) is None:
         print("error: --expires-at must be an ISO timestamp", file=sys.stderr)
         return 2
     train_repos = train.get("repos") if isinstance(train.get("repos"), list) else []
@@ -150,7 +148,7 @@ def release_waiver_record(
         return 2
     now = _now().isoformat()
     train_id_value = str(train.get("train_id") or "")
-    waiver_id = f"train-waiver-{_fingerprint_payload({'train_id': train_id_value, 'repo_id': repo_id or 'all', 'scope': scope})[:16]}"
+    waiver_id = f"train-waiver-{fleet._fingerprint_payload({'train_id': train_id_value, 'repo_id': repo_id or 'all', 'scope': scope})[:16]}"
     waivers = _read_release_waivers(target)
     waiver = {
         "waiver_id": waiver_id,
@@ -159,12 +157,12 @@ def release_waiver_record(
         "repo_id": repo_id,
         "scope": scope,
         "status": "active",
-        "reason": _safe_text(reason),
-        "owner_label": _safe_text(owner_label or ""),
+        "reason": fleet._safe_text(reason),
+        "owner_label": fleet._safe_text(owner_label or ""),
         "expires_at": expires_at,
         "created_at": now,
         "updated_at": now,
-        "source_fingerprint": _fingerprint_payload(
+        "source_fingerprint": fleet._fingerprint_payload(
             {
                 "train_id": train_id_value,
                 "repo_id": repo_id or "all",
@@ -204,7 +202,7 @@ def release_waiver_list(
     waivers = _read_release_waivers(target)
     if train_id:
         if train_id == "latest":
-            latest = latest_release_train(target)
+            latest = release_train.latest_release_train(target)
             train_id = str(latest.get("train_id")) if isinstance(latest, dict) else train_id
         waivers = [waiver for waiver in waivers if str(waiver.get("train_id") or "").startswith(train_id or "")]
     waivers.sort(
@@ -254,7 +252,7 @@ def release_waiver_revoke(*, target: Path, waiver_id: str, reason: str, json_out
     waiver["status"] = "revoked"
     waiver["revoked_at"] = now
     waiver["updated_at"] = now
-    waiver["revoke_reason"] = _safe_text(reason)
+    waiver["revoke_reason"] = fleet._safe_text(reason)
     _write_release_waivers(target, waivers)
     if json_output:
         print(json.dumps({"target_label": "repo-fleet", "waiver": waiver}, indent=2, sort_keys=True))
@@ -276,25 +274,25 @@ def release_waiver_renew(
     if not reason:
         print("error: --reason is required", file=sys.stderr)
         return 2
-    if expires_at and _parse_time(expires_at) is None:
+    if expires_at and fleet._parse_time(expires_at) is None:
         print("error: --expires-at must be an ISO timestamp", file=sys.stderr)
         return 2
     waivers, waiver, error = _find_release_waiver(target, waiver_id)
     if waiver is None:
         print(f"error: {error}", file=sys.stderr)
         return 1 if error and "not found" in error else 2
-    train, _ = _resolve_release_train(target, str(waiver.get("train_id") or ""))
+    train, _ = release_train._resolve_release_train(target, str(waiver.get("train_id") or ""))
     now = _now().isoformat()
     waiver["status"] = "active"
-    waiver["reason"] = _safe_text(reason)
+    waiver["reason"] = fleet._safe_text(reason)
     waiver["expires_at"] = expires_at
     if owner_label is not None:
-        waiver["owner_label"] = _safe_text(owner_label)
+        waiver["owner_label"] = fleet._safe_text(owner_label)
     waiver["renewed_at"] = now
     waiver["updated_at"] = now
     if isinstance(train, dict):
         waiver["train_fingerprint"] = train.get("train_fingerprint")
-    waiver["source_fingerprint"] = _fingerprint_payload(
+    waiver["source_fingerprint"] = fleet._fingerprint_payload(
         {
             "train_id": waiver.get("train_id"),
             "repo_id": waiver.get("repo_id") or "all",
@@ -316,7 +314,7 @@ def _release_waiver_health_payload(target: Path, train_id: str | None = None) ->
     target = target.expanduser().resolve()
     selected_train_id = train_id
     if train_id == "latest":
-        latest = latest_release_train(target)
+        latest = release_train.latest_release_train(target)
         selected_train_id = str(latest.get("train_id")) if isinstance(latest, dict) else train_id
     waivers = _read_release_waivers(target)
     if selected_train_id:
@@ -329,13 +327,13 @@ def _release_waiver_health_payload(target: Path, train_id: str | None = None) ->
         if status != "active":
             continue
         scope = str(waiver.get("scope") or "")
-        train, _ = _resolve_release_train(target, str(waiver.get("train_id") or ""))
+        train, _ = release_train._resolve_release_train(target, str(waiver.get("train_id") or ""))
         repos = train.get("repos") if isinstance(train, dict) and isinstance(train.get("repos"), list) else []
         repo_ids = {str(repo.get("repo_id") or "") for repo in repos if isinstance(repo, dict)}
-        if scope not in RELEASE_WAIVER_SCOPES:
+        if scope not in constants.RELEASE_WAIVER_SCOPES:
             issues.append(
                 {
-                    "status": WARN,
+                    "status": constants.WARN,
                     "name": "release_waiver_invalid_scope",
                     "waiver_id": waiver_id,
                     "train_id": waiver.get("train_id"),
@@ -348,7 +346,7 @@ def _release_waiver_health_payload(target: Path, train_id: str | None = None) ->
         if repo_id and repo_ids and repo_id not in repo_ids:
             issues.append(
                 {
-                    "status": WARN,
+                    "status": constants.WARN,
                     "name": "release_waiver_repo_missing",
                     "waiver_id": waiver_id,
                     "train_id": waiver.get("train_id"),
@@ -359,10 +357,10 @@ def _release_waiver_health_payload(target: Path, train_id: str | None = None) ->
                 }
             )
         reason = str(waiver.get("reason") or "").strip()
-        if len(reason) < RELEASE_WAIVER_REASON_MIN_LENGTH:
+        if len(reason) < constants.RELEASE_WAIVER_REASON_MIN_LENGTH:
             issues.append(
                 {
-                    "status": WARN,
+                    "status": constants.WARN,
                     "name": "release_waiver_reason_too_short",
                     "waiver_id": waiver_id,
                     "train_id": waiver.get("train_id"),
@@ -371,10 +369,10 @@ def _release_waiver_health_payload(target: Path, train_id: str | None = None) ->
                     "suggested_next_command": f'brigade repos release waivers renew {waiver_id} --reason "reviewed with current train context"',
                 }
             )
-        if reason.lower() in RELEASE_WAIVER_GENERIC_REASONS:
+        if reason.lower() in constants.RELEASE_WAIVER_GENERIC_REASONS:
             issues.append(
                 {
-                    "status": WARN,
+                    "status": constants.WARN,
                     "name": "release_waiver_reason_generic",
                     "waiver_id": waiver_id,
                     "train_id": waiver.get("train_id"),
@@ -386,7 +384,7 @@ def _release_waiver_health_payload(target: Path, train_id: str | None = None) ->
         if not str(waiver.get("owner_label") or "").strip():
             issues.append(
                 {
-                    "status": WARN,
+                    "status": constants.WARN,
                     "name": "release_waiver_missing_owner",
                     "waiver_id": waiver_id,
                     "train_id": waiver.get("train_id"),
@@ -398,7 +396,7 @@ def _release_waiver_health_payload(target: Path, train_id: str | None = None) ->
         if _release_waiver_expired(waiver):
             issues.append(
                 {
-                    "status": WARN,
+                    "status": constants.WARN,
                     "name": "release_waiver_expired",
                     "waiver_id": waiver_id,
                     "train_id": waiver.get("train_id"),
@@ -411,7 +409,7 @@ def _release_waiver_health_payload(target: Path, train_id: str | None = None) ->
         if not waiver.get("expires_at"):
             issues.append(
                 {
-                    "status": WARN,
+                    "status": constants.WARN,
                     "name": "release_waiver_missing_expiry",
                     "waiver_id": waiver_id,
                     "train_id": waiver.get("train_id"),
@@ -420,11 +418,11 @@ def _release_waiver_health_payload(target: Path, train_id: str | None = None) ->
                     "suggested_next_command": f'brigade repos release waivers renew {waiver_id} --reason "set expiry" --expires-at <timestamp>',
                 }
             )
-        created = _parse_time(waiver.get("renewed_at") or waiver.get("created_at"))
-        if created and (now - created).total_seconds() / 3600 > RELEASE_WAIVER_STALE_HOURS:
+        created = fleet._parse_time(waiver.get("renewed_at") or waiver.get("created_at"))
+        if created and (now - created).total_seconds() / 3600 > constants.RELEASE_WAIVER_STALE_HOURS:
             issues.append(
                 {
-                    "status": WARN,
+                    "status": constants.WARN,
                     "name": "release_waiver_stale_review",
                     "waiver_id": waiver_id,
                     "train_id": waiver.get("train_id"),
@@ -441,7 +439,7 @@ def _release_waiver_health_payload(target: Path, train_id: str | None = None) ->
         ):
             issues.append(
                 {
-                    "status": WARN,
+                    "status": constants.WARN,
                     "name": "release_waiver_train_changed",
                     "waiver_id": waiver_id,
                     "train_id": waiver.get("train_id"),
@@ -463,13 +461,13 @@ def _release_waiver_health_payload(target: Path, train_id: str | None = None) ->
 
 def _release_waiver_templates_payload() -> dict[str, Any]:
     templates = []
-    for scope in sorted(RELEASE_WAIVER_SCOPES):
+    for scope in sorted(constants.RELEASE_WAIVER_SCOPES):
         templates.append(
             {
                 "scope": scope,
                 "requires_owner_label": True,
                 "requires_expiry": True,
-                "recommended_expiry_hours": RELEASE_WAIVER_STALE_HOURS,
+                "recommended_expiry_hours": constants.RELEASE_WAIVER_STALE_HOURS,
                 "reason_hint": "Describe the reviewed risk, current train context, and why manual publish may proceed.",
                 "suggested_command": f'brigade repos release waivers record latest --scope {scope} --reason "reviewed risk and mitigation" --expires-at <timestamp> --owner-label <label>',
             }
@@ -479,9 +477,9 @@ def _release_waiver_templates_payload() -> dict[str, Any]:
         "template_count": len(templates),
         "templates": templates,
         "policy": {
-            "reason_min_length": RELEASE_WAIVER_REASON_MIN_LENGTH,
-            "generic_reasons": sorted(RELEASE_WAIVER_GENERIC_REASONS),
-            "stale_review_hours": RELEASE_WAIVER_STALE_HOURS,
+            "reason_min_length": constants.RELEASE_WAIVER_REASON_MIN_LENGTH,
+            "generic_reasons": sorted(constants.RELEASE_WAIVER_GENERIC_REASONS),
+            "stale_review_hours": constants.RELEASE_WAIVER_STALE_HOURS,
         },
     }
 
@@ -515,7 +513,7 @@ def _release_waiver_import_records(health: dict[str, Any]) -> list[dict[str, Any
         if not isinstance(issue, dict):
             continue
         waiver_id = str(issue.get("waiver_id") or "unknown")
-        fingerprint = _fingerprint_payload(
+        fingerprint = fleet._fingerprint_payload(
             {
                 "waiver_id": waiver_id,
                 "name": issue.get("name"),
@@ -590,7 +588,7 @@ def _evidence_for_train(records: list[dict[str, Any]], train_id: str) -> list[di
 
 def release_evidence_plan(*, target: Path, train_id: str = "latest", json_output: bool = False) -> int:
     target = target.expanduser().resolve()
-    train, error = _resolve_release_train(target, train_id)
+    train, error = release_train._resolve_release_train(target, train_id)
     if train is None:
         print(f"error: {error}", file=sys.stderr)
         return 1 if error and "not found" in error else 2
@@ -640,15 +638,17 @@ def release_evidence_record(
     json_output: bool = False,
 ) -> int:
     target = target.expanduser().resolve()
-    train, error = _resolve_release_train(target, train_id)
+    train, error = release_train._resolve_release_train(target, train_id)
     if train is None:
         print(f"error: {error}", file=sys.stderr)
         return 1 if error and "not found" in error else 2
-    if step not in RELEASE_EVIDENCE_STEPS:
-        print(f"error: --step must be one of {', '.join(sorted(RELEASE_EVIDENCE_STEPS))}", file=sys.stderr)
+    if step not in constants.RELEASE_EVIDENCE_STEPS:
+        print(f"error: --step must be one of {', '.join(sorted(constants.RELEASE_EVIDENCE_STEPS))}", file=sys.stderr)
         return 2
-    if status not in RELEASE_EVIDENCE_STATUSES:
-        print(f"error: --status must be one of {', '.join(sorted(RELEASE_EVIDENCE_STATUSES))}", file=sys.stderr)
+    if status not in constants.RELEASE_EVIDENCE_STATUSES:
+        print(
+            f"error: --status must be one of {', '.join(sorted(constants.RELEASE_EVIDENCE_STATUSES))}", file=sys.stderr
+        )
         return 2
     train_repos = train.get("repos") if isinstance(train.get("repos"), list) else []
     repos = [repo for repo in train_repos if isinstance(repo, dict)]
@@ -659,7 +659,9 @@ def release_evidence_record(
     now = _now().isoformat()
     records = _read_release_evidence(target)
     train_id_value = str(train.get("train_id") or "")
-    record_id = f"train-ev-{_fingerprint_payload({'train': train_id_value, 'repo_id': repo_id, 'step': step})[:16]}"
+    record_id = (
+        f"train-ev-{fleet._fingerprint_payload({'train': train_id_value, 'repo_id': repo_id, 'step': step})[:16]}"
+    )
     record = {
         "evidence_id": record_id,
         "train_id": train_id_value,
@@ -668,9 +670,9 @@ def release_evidence_record(
         "repo_label": repo.get("repo_label"),
         "step": step,
         "status": status,
-        "safe_summary": _safe_text(summary or f"{step} marked {status} for {repo_id}"),
+        "safe_summary": fleet._safe_text(summary or f"{step} marked {status} for {repo_id}"),
         "recorded_at": now,
-        "source_fingerprint": _fingerprint_payload(
+        "source_fingerprint": fleet._fingerprint_payload(
             {"train_id": train_id_value, "repo_id": repo_id, "step": step, "status": status, "summary": summary or ""}
         ),
     }
@@ -704,7 +706,7 @@ def release_evidence_list(
     records = _read_release_evidence(target)
     if train_id:
         if train_id == "latest":
-            latest = latest_release_train(target)
+            latest = release_train.latest_release_train(target)
             train_id = str(latest.get("train_id")) if isinstance(latest, dict) else train_id
         records = [record for record in records if str(record.get("train_id") or "").startswith(train_id or "")]
     records.sort(key=lambda item: str(item.get("recorded_at") or item.get("evidence_id") or ""), reverse=True)
@@ -768,7 +770,7 @@ def _reconcile_release_action(
     evidence: list[dict[str, Any]] = []
     missing_steps: list[str] = []
     blocked_steps: list[str] = []
-    for step in REQUIRED_RELEASE_EVIDENCE_STEPS:
+    for step in constants.REQUIRED_RELEASE_EVIDENCE_STEPS:
         record = records_by_step.get((repo_id, step))
         if not isinstance(record, dict):
             missing_steps.append(step)
@@ -808,16 +810,16 @@ def _reconcile_release_action(
 
 def release_reconcile(*, target: Path, train_id: str = "latest", json_output: bool = False) -> int:
     target = target.expanduser().resolve()
-    train, error = _resolve_release_train(target, train_id)
+    train, error = release_train._resolve_release_train(target, train_id)
     if train is None:
         print(f"error: {error}", file=sys.stderr)
         return 1 if error and "not found" in error else 2
     train_id_value = str(train.get("train_id") or "")
-    actions = _read_release_actions(target)
+    actions = release_train._read_release_actions(target)
     selected = [action for action in actions if action.get("source_train_id") == train_id_value]
     records_by_step = _release_records_by_repo_step(_read_release_evidence(target), train_id_value)
     results = [_reconcile_release_action(action, records_by_step) for action in selected]
-    _write_release_actions(target, actions)
+    release_train._write_release_actions(target, actions)
     payload = {
         "target_label": "repo-fleet",
         "train_id": train_id_value,
@@ -843,7 +845,7 @@ def _repo_release_summary(
     deferred: list[str] = []
     skipped: list[str] = []
     completed: list[str] = []
-    for step in REQUIRED_RELEASE_EVIDENCE_STEPS:
+    for step in constants.REQUIRED_RELEASE_EVIDENCE_STEPS:
         record = records_by_step.get((repo_id, step))
         if not isinstance(record, dict):
             missing.append(step)
@@ -887,7 +889,9 @@ def _repo_release_summary(
 def _release_summary_payload(target: Path, train: dict[str, Any]) -> dict[str, Any]:
     train_id = str(train.get("train_id") or "")
     records_by_step = _release_records_by_repo_step(_read_release_evidence(target), train_id)
-    actions = [action for action in _read_release_actions(target) if action.get("source_train_id") == train_id]
+    actions = [
+        action for action in release_train._read_release_actions(target) if action.get("source_train_id") == train_id
+    ]
     train_repos = train.get("repos") if isinstance(train.get("repos"), list) else []
     repos = [_repo_release_summary(repo, train_id, records_by_step) for repo in train_repos if isinstance(repo, dict)]
     counts: dict[str, int] = {}
@@ -923,13 +927,15 @@ def _release_summary_payload(target: Path, train: dict[str, Any]) -> dict[str, A
             "brigade repos release reconcile latest",
             "brigade repos release evidence plan latest",
         ],
-        "summary_fingerprint": _fingerprint_payload({"train": train_id, "repos": repos, "actions": unresolved_actions}),
+        "summary_fingerprint": fleet._fingerprint_payload(
+            {"train": train_id, "repos": repos, "actions": unresolved_actions}
+        ),
     }
 
 
 def release_summary(*, target: Path, train_id: str = "latest", json_output: bool = False) -> int:
     target = target.expanduser().resolve()
-    train, error = _resolve_release_train(target, train_id)
+    train, error = release_train._resolve_release_train(target, train_id)
     if train is None:
         print(f"error: {error}", file=sys.stderr)
         return 1 if error and "not found" in error else 2
@@ -984,11 +990,11 @@ def _release_report_markdown(summary: dict[str, Any]) -> str:
 
 def release_report(*, target: Path, train_id: str = "latest", json_output: bool = False) -> int:
     target = target.expanduser().resolve()
-    train, error = _resolve_release_train(target, train_id)
+    train, error = release_train._resolve_release_train(target, train_id)
     if train is None:
         print(f"error: {error}", file=sys.stderr)
         return 1 if error and "not found" in error else 2
-    train_dir = _release_trains_root(target) / str(train.get("train_id") or "")
+    train_dir = release_train._release_trains_root(target) / str(train.get("train_id") or "")
     if not train_dir.is_dir():
         print(
             f"error: fleet release train path is missing: {train.get('path_label') or train.get('train_id')}",
@@ -1001,7 +1007,7 @@ def release_report(*, target: Path, train_id: str = "latest", json_output: bool 
         "train_id": train.get("train_id"),
         "generated_at": summary.get("generated_at"),
         "summary": summary,
-        "report_fingerprint": _fingerprint_payload(summary),
+        "report_fingerprint": fleet._fingerprint_payload(summary),
         "bundle_files": ["RELEASE_TRAIN_REPORT.md", "RELEASE_TRAIN_REPORT.json"],
     }
     _write_json(train_dir / "RELEASE_TRAIN_REPORT.json", report)
@@ -1039,7 +1045,9 @@ def _waivers_for_repo(waivers: list[dict[str, Any]], repo_id: str) -> list[dict[
 def _release_matrix_payload(target: Path, train: dict[str, Any]) -> dict[str, Any]:
     train_id = str(train.get("train_id") or "")
     summary = _release_summary_payload(target, train)
-    actions = [action for action in _read_release_actions(target) if action.get("source_train_id") == train_id]
+    actions = [
+        action for action in release_train._read_release_actions(target) if action.get("source_train_id") == train_id
+    ]
     waivers = _active_release_waivers(target, train_id)
     rows: list[dict[str, Any]] = []
     summary_by_repo = {repo.get("repo_id"): repo for repo in summary.get("repos") if isinstance(repo, dict)}
@@ -1097,12 +1105,12 @@ def _release_matrix_payload(target: Path, train: dict[str, Any]) -> dict[str, An
         "ready_count": sum(1 for row in rows if row.get("ready")),
         "blocked_count": len(blocker_rows),
         "waiver_count": len(waivers),
-        "evidence_steps": list(REQUIRED_RELEASE_EVIDENCE_STEPS),
+        "evidence_steps": list(constants.REQUIRED_RELEASE_EVIDENCE_STEPS),
         "summary": {
             key: summary.get(key)
             for key in ("counts", "missing_evidence_count", "blocked_count", "unresolved_action_count")
         },
-        "matrix_fingerprint": _fingerprint_payload({"train_id": train_id, "rows": rows, "waivers": waivers}),
+        "matrix_fingerprint": fleet._fingerprint_payload({"train_id": train_id, "rows": rows, "waivers": waivers}),
         "suggested_next_commands": ["brigade repos release ready latest", "brigade repos release checklist latest"],
     }
     return payload
@@ -1141,11 +1149,11 @@ def _release_matrix_markdown(matrix: dict[str, Any]) -> str:
 
 def release_matrix(*, target: Path, train_id: str = "latest", json_output: bool = False) -> int:
     target = target.expanduser().resolve()
-    train, error = _resolve_release_train(target, train_id)
+    train, error = release_train._resolve_release_train(target, train_id)
     if train is None:
         print(f"error: {error}", file=sys.stderr)
         return 1 if error and "not found" in error else 2
-    train_dir = _release_trains_root(target) / str(train.get("train_id") or "")
+    train_dir = release_train._release_trains_root(target) / str(train.get("train_id") or "")
     if not train_dir.is_dir():
         print(
             f"error: fleet release train path is missing: {train.get('path_label') or train.get('train_id')}",
@@ -1187,7 +1195,7 @@ def _release_import_records(summary: dict[str, Any]) -> list[dict[str, Any]]:
         status = str(repo.get("evidence_status") or "")
         if status not in {"missing-evidence", "blocked-evidence"}:
             continue
-        fingerprint = _fingerprint_payload(
+        fingerprint = fleet._fingerprint_payload(
             {
                 "train_id": train_id,
                 "repo_id": repo_id,
@@ -1228,7 +1236,7 @@ def release_import_issues(
     *, target: Path, train_id: str = "latest", dry_run: bool = False, json_output: bool = False
 ) -> int:
     target = target.expanduser().resolve()
-    train, error = _resolve_release_train(target, train_id)
+    train, error = release_train._resolve_release_train(target, train_id)
     if train is None:
         print(f"error: {error}", file=sys.stderr)
         return 1 if error and "not found" in error else 2
@@ -1256,7 +1264,7 @@ def release_import_issues(
 
 def release_checklist(*, target: Path, train_id: str = "latest", json_output: bool = False) -> int:
     target = target.expanduser().resolve()
-    train, error = _resolve_release_train(target, train_id)
+    train, error = release_train._resolve_release_train(target, train_id)
     if train is None:
         print(f"error: {error}", file=sys.stderr)
         return 1 if error and "not found" in error else 2
@@ -1292,7 +1300,7 @@ def release_checklist(*, target: Path, train_id: str = "latest", json_output: bo
 
 def release_hygiene(*, target: Path, json_output: bool = False) -> int:
     target = target.expanduser().resolve()
-    trains = _release_trains(target)
+    trains = release_train._release_trains(target)
     issues: list[dict[str, Any]] = []
     for train in trains:
         train_id = str(train.get("train_id") or "")
@@ -1300,29 +1308,29 @@ def release_hygiene(*, target: Path, json_output: bool = False) -> int:
         if not closeout:
             issues.append(
                 {
-                    "status": WARN,
+                    "status": constants.WARN,
                     "name": "fleet_release_train_unclosed",
                     "train_id": train_id,
                     "detail": f"{train_id} has no closeout",
                     "suggested_next_command": f"brigade repos release closeout {train_id}",
                 }
             )
-        report_path = _release_trains_root(target) / train_id / "RELEASE_TRAIN_REPORT.json"
+        report_path = release_train._release_trains_root(target) / train_id / "RELEASE_TRAIN_REPORT.json"
         if not report_path.is_file():
             issues.append(
                 {
-                    "status": WARN,
+                    "status": constants.WARN,
                     "name": "fleet_release_report_missing",
                     "train_id": train_id,
                     "detail": f"{train_id} has no review report",
                     "suggested_next_command": f"brigade repos release report {train_id}",
                 }
             )
-        created = _parse_time(train.get("created_at") or train.get("generated_at"))
-        if created and (_now() - created).total_seconds() / 3600 > RELEASE_TRAIN_STALE_HOURS:
+        created = fleet._parse_time(train.get("created_at") or train.get("generated_at"))
+        if created and (_now() - created).total_seconds() / 3600 > constants.RELEASE_TRAIN_STALE_HOURS:
             issues.append(
                 {
-                    "status": WARN,
+                    "status": constants.WARN,
                     "name": "fleet_release_train_stale",
                     "train_id": train_id,
                     "detail": f"{train_id} is stale",
@@ -1348,10 +1356,10 @@ def release_hygiene(*, target: Path, json_output: bool = False) -> int:
 
 def _release_train_dir(target: Path, train: dict[str, Any]) -> Path:
     train_id = str(train.get("train_id") or "")
-    path = _release_trains_root(target) / train_id
+    path = release_train._release_trains_root(target) / train_id
     if path.is_dir():
         return path
-    return _release_trains_archive_root(target) / train_id
+    return release_train._release_trains_archive_root(target) / train_id
 
 
 def _release_bundle_file_entry(train_dir: Path, name: str) -> dict[str, Any]:
@@ -1359,7 +1367,7 @@ def _release_bundle_file_entry(train_dir: Path, name: str) -> dict[str, Any]:
     entry: dict[str, Any] = {"path_label": name, "exists": path.is_file()}
     if path.is_file() and name != "RELEASE_TRAIN_MANIFEST.json":
         try:
-            entry["fingerprint"] = _fingerprint_payload(path.read_text())
+            entry["fingerprint"] = fleet._fingerprint_payload(path.read_text())
         except OSError:
             entry["fingerprint"] = None
     return entry
@@ -1367,7 +1375,7 @@ def _release_bundle_file_entry(train_dir: Path, name: str) -> dict[str, Any]:
 
 def release_manifest(*, target: Path, train_id: str = "latest", json_output: bool = False) -> int:
     target = target.expanduser().resolve()
-    train, error = _resolve_release_train(target, train_id)
+    train, error = release_train._resolve_release_train(target, train_id)
     if train is None:
         print(f"error: {error}", file=sys.stderr)
         return 1 if error and "not found" in error else 2
@@ -1378,7 +1386,7 @@ def release_manifest(*, target: Path, train_id: str = "latest", json_output: boo
             file=sys.stderr,
         )
         return 2
-    files = [_release_bundle_file_entry(train_dir, name) for name in RELEASE_BUNDLE_FILES]
+    files = [_release_bundle_file_entry(train_dir, name) for name in constants.RELEASE_BUNDLE_FILES]
     manifest = {
         "target_label": "repo-fleet",
         "train_id": train.get("train_id"),
@@ -1388,12 +1396,12 @@ def release_manifest(*, target: Path, train_id: str = "latest", json_output: boo
         "file_count": len(files),
         "missing_count": len([item for item in files if not item.get("exists")]),
     }
-    manifest["manifest_fingerprint"] = _fingerprint_payload({"train_id": manifest["train_id"], "files": files})
+    manifest["manifest_fingerprint"] = fleet._fingerprint_payload({"train_id": manifest["train_id"], "files": files})
     _write_json(train_dir / "RELEASE_TRAIN_MANIFEST.json", manifest)
-    files = [_release_bundle_file_entry(train_dir, name) for name in RELEASE_BUNDLE_FILES]
+    files = [_release_bundle_file_entry(train_dir, name) for name in constants.RELEASE_BUNDLE_FILES]
     manifest["files"] = files
     manifest["missing_count"] = len([item for item in files if not item.get("exists")])
-    manifest["manifest_fingerprint"] = _fingerprint_payload({"train_id": manifest["train_id"], "files": files})
+    manifest["manifest_fingerprint"] = fleet._fingerprint_payload({"train_id": manifest["train_id"], "files": files})
     _write_json(train_dir / "RELEASE_TRAIN_MANIFEST.json", manifest)
     payload = {"target_label": "repo-fleet", "train_id": train.get("train_id"), "manifest": manifest}
     if json_output:
@@ -1412,14 +1420,14 @@ def _release_audit_payload(target: Path, train: dict[str, Any]) -> dict[str, Any
     if not train_dir.is_dir():
         issues.append(
             {
-                "status": WARN,
+                "status": constants.WARN,
                 "name": "release_train_bundle_missing",
                 "detail": f"{train_id} bundle path is missing",
                 "suggested_next_command": "brigade repos release build",
             }
         )
     else:
-        for name in RELEASE_BUNDLE_FILES:
+        for name in constants.RELEASE_BUNDLE_FILES:
             if not (train_dir / name).is_file():
                 command = "brigade repos release manifest"
                 if name.startswith("RELEASE_TRAIN_REPORT"):
@@ -1428,7 +1436,7 @@ def _release_audit_payload(target: Path, train: dict[str, Any]) -> dict[str, Any
                     command = f"brigade repos release closeout {train_id}"
                 issues.append(
                     {
-                        "status": WARN,
+                        "status": constants.WARN,
                         "name": "release_train_bundle_file_missing",
                         "path_label": name,
                         "detail": f"{name} is missing",
@@ -1439,7 +1447,7 @@ def _release_audit_payload(target: Path, train: dict[str, Any]) -> dict[str, Any
         if isinstance(manifest, dict):
             expected = {
                 item["path_label"]: item
-                for item in [_release_bundle_file_entry(train_dir, name) for name in RELEASE_BUNDLE_FILES]
+                for item in [_release_bundle_file_entry(train_dir, name) for name in constants.RELEASE_BUNDLE_FILES]
             }
             stored_files = manifest.get("files") if isinstance(manifest.get("files"), list) else []
             for stored in stored_files:
@@ -1454,7 +1462,7 @@ def _release_audit_payload(target: Path, train: dict[str, Any]) -> dict[str, Any
                 ):
                     issues.append(
                         {
-                            "status": WARN,
+                            "status": constants.WARN,
                             "name": "release_train_manifest_stale",
                             "path_label": stored.get("path_label"),
                             "detail": f"{stored.get('path_label')} changed after manifest build",
@@ -1464,13 +1472,13 @@ def _release_audit_payload(target: Path, train: dict[str, Any]) -> dict[str, Any
                     break
     open_actions = [
         action
-        for action in _read_release_actions(target)
+        for action in release_train._read_release_actions(target)
         if action.get("source_train_id") == train_id and action.get("status") in {"pending", "active", "deferred"}
     ]
     if open_actions:
         issues.append(
             {
-                "status": WARN,
+                "status": constants.WARN,
                 "name": "release_train_open_actions",
                 "detail": f"{len(open_actions)} release action(s) remain open",
                 "suggested_next_command": "brigade repos release actions list --target .",
@@ -1479,7 +1487,7 @@ def _release_audit_payload(target: Path, train: dict[str, Any]) -> dict[str, Any
     if int(summary.get("missing_evidence_count") or 0) > 0:
         issues.append(
             {
-                "status": WARN,
+                "status": constants.WARN,
                 "name": "release_train_missing_evidence",
                 "detail": f"{summary.get('missing_evidence_count')} repo(s) have missing evidence",
                 "suggested_next_command": f"brigade repos release evidence plan {train_id}",
@@ -1488,7 +1496,7 @@ def _release_audit_payload(target: Path, train: dict[str, Any]) -> dict[str, Any
     if int(summary.get("blocked_count") or 0) > 0:
         issues.append(
             {
-                "status": WARN,
+                "status": constants.WARN,
                 "name": "release_train_blocked_evidence",
                 "detail": f"{summary.get('blocked_count')} repo(s) have blocked evidence",
                 "suggested_next_command": f"brigade repos release evidence plan {train_id}",
@@ -1497,7 +1505,7 @@ def _release_audit_payload(target: Path, train: dict[str, Any]) -> dict[str, Any
     if int(train.get("blocker_count") or 0) > 0:
         issues.append(
             {
-                "status": WARN,
+                "status": constants.WARN,
                 "name": "release_train_blocked_repos",
                 "detail": f"{train.get('blocker_count')} repo blocker(s) remain",
                 "suggested_next_command": f"brigade repos release show {train_id}",
@@ -1523,7 +1531,7 @@ def _release_audit_payload(target: Path, train: dict[str, Any]) -> dict[str, Any
 
 def release_audit(*, target: Path, train_id: str = "latest", json_output: bool = False) -> int:
     target = target.expanduser().resolve()
-    train, error = _resolve_release_train(target, train_id)
+    train, error = release_train._resolve_release_train(target, train_id)
     if train is None:
         print(f"error: {error}", file=sys.stderr)
         return 1 if error and "not found" in error else 2
@@ -1540,7 +1548,7 @@ def release_audit(*, target: Path, train_id: str = "latest", json_output: bool =
 
 def release_activity(*, target: Path, train_id: str = "latest", json_output: bool = False) -> int:
     target = target.expanduser().resolve()
-    train, error = _resolve_release_train(target, train_id)
+    train, error = release_train._resolve_release_train(target, train_id)
     if train is None:
         print(f"error: {error}", file=sys.stderr)
         return 1 if error and "not found" in error else 2
@@ -1570,7 +1578,7 @@ def release_activity(*, target: Path, train_id: str = "latest", json_output: boo
                 "suggested_next_command": f"brigade repos release closeout {train_id_value}",
             }
         )
-    for action in _read_release_actions(target):
+    for action in release_train._read_release_actions(target):
         if action.get("source_train_id") == train_id_value:
             events.append(
                 {
@@ -1641,7 +1649,7 @@ def release_activity(*, target: Path, train_id: str = "latest", json_output: boo
 
 def release_ready(*, target: Path, train_id: str = "latest", json_output: bool = False) -> int:
     target = target.expanduser().resolve()
-    train, error = _resolve_release_train(target, train_id)
+    train, error = release_train._resolve_release_train(target, train_id)
     if train is None:
         print(f"error: {error}", file=sys.stderr)
         return 1 if error and "not found" in error else 2
@@ -1685,7 +1693,7 @@ def release_ready(*, target: Path, train_id: str = "latest", json_output: bool =
         "waiver_issues": waiver_health.get("issues"),
         "waiver_issue_count": waiver_health.get("issue_count"),
         "waiver_policy": {
-            "reason_min_length": RELEASE_WAIVER_REASON_MIN_LENGTH,
+            "reason_min_length": constants.RELEASE_WAIVER_REASON_MIN_LENGTH,
             "requires_owner_label": True,
             "requires_expiry": True,
             "template_command": "brigade repos release waivers templates",
@@ -1707,15 +1715,15 @@ def release_ready(*, target: Path, train_id: str = "latest", json_output: bool =
 
 def release_train_actions_health(target: Path) -> dict[str, Any]:
     target = target.expanduser().resolve()
-    actions = _read_release_actions(target)
+    actions = release_train._read_release_actions(target)
     open_actions = [action for action in actions if action.get("status") in {"pending", "active", "deferred"}]
-    open_actions.sort(key=_release_action_rank)
+    open_actions.sort(key=release_train._release_action_rank)
     checks: list[dict[str, Any]] = []
     if open_actions:
         top = open_actions[0]
         checks.append(
             {
-                "status": WARN,
+                "status": constants.WARN,
                 "name": "repo_fleet_release_actions_open",
                 "detail": f"{len(open_actions)} open fleet release action(s)",
                 "suggested_next_command": f"brigade repos release actions show {top.get('release_action_id')}",
@@ -1730,7 +1738,7 @@ def release_train_actions_health(target: Path) -> dict[str, Any]:
         top = unreconciled[0]
         checks.append(
             {
-                "status": WARN,
+                "status": constants.WARN,
                 "name": "repo_fleet_release_action_unreconciled",
                 "detail": f"{len(unreconciled)} fleet release action(s) need reconciliation",
                 "suggested_next_command": f"brigade repos release reconcile {top.get('source_train_id') or 'latest'}",
@@ -1741,7 +1749,7 @@ def release_train_actions_health(target: Path) -> dict[str, Any]:
         top = missing[0]
         checks.append(
             {
-                "status": WARN,
+                "status": constants.WARN,
                 "name": "repo_fleet_release_evidence_missing",
                 "detail": f"{len(missing)} fleet release action(s) are missing manual evidence",
                 "suggested_next_command": f"brigade repos release evidence plan {top.get('source_train_id') or 'latest'}",
@@ -1767,7 +1775,7 @@ def release_train_evidence_health(target: Path) -> dict[str, Any]:
         top = blocked[0]
         checks.append(
             {
-                "status": WARN,
+                "status": constants.WARN,
                 "name": "repo_fleet_release_evidence_blocked",
                 "detail": f"{len(blocked)} blocked fleet release evidence record(s)",
                 "suggested_next_command": f"brigade repos release evidence show {top.get('evidence_id')}",
