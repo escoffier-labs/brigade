@@ -4,14 +4,24 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import TypedDict
 
 from . import doctor as _doctor
 from .registry import all_stations
 
 
+class StatusRow(TypedDict):
+    station: str
+    health: str
+    ok: int
+    warn: int
+    fail: int
+    summary: str
+
+
 def run(target: Path, *, json_output: bool = False) -> int:
     ctx = _doctor.build_context(target)
-    rows = []
+    rows: list[StatusRow] = []
     for station in all_stations():
         checks = station.doctor(ctx) if station.doctor else []
         ok = sum(1 for s, _, _ in checks if s == _doctor.OK)

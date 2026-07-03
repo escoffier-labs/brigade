@@ -51,6 +51,8 @@ def _memory_doctor_doctor(ctx: DoctorContext) -> List[CheckResult]:
     data = r.json()
     if data is None:
         return [(WARN, name, f"unexpected output (exit {r.code})")]
+    if not isinstance(data, dict):
+        return [(WARN, name, f"unexpected output (exit {r.code})")]
     dead = data.get("dead_links", 0)
     status = WARN if dead else OK
     return [(status, name, f"cards={data.get('cards')}, dead_links={dead}, pending={data.get('pending_handoffs')}")]
@@ -62,9 +64,12 @@ def _bootstrap_doctor_doctor(ctx: DoctorContext) -> List[CheckResult]:
     data = r.json()
     if data is None:
         return [(WARN, name, f"installed but unwired or errored (exit {r.code})")]
-    rows = data.get("rows", [])
-    bad = [row for row in rows if row.get("severity") in ("hard", "missing", "unreadable")]
-    soft = [row for row in rows if row.get("severity") == "soft"]
+    if not isinstance(data, dict):
+        return [(WARN, name, f"unexpected status output (exit {r.code})")]
+    rows_value = data.get("rows", [])
+    rows = rows_value if isinstance(rows_value, list) else []
+    bad = [row for row in rows if isinstance(row, dict) and row.get("severity") in ("hard", "missing", "unreadable")]
+    soft = [row for row in rows if isinstance(row, dict) and row.get("severity") == "soft"]
     if bad:
         return [(WARN, name, f"{len(bad)} file(s) over hard limit / missing (advisory)")]
     if soft:
@@ -90,6 +95,8 @@ def _token_glace_doctor(ctx: DoctorContext) -> List[CheckResult]:
     r = proc.run(["token-glace", "doctor", "hooks", "--format", "json"])
     data = r.json()
     if data is None:
+        return [(WARN, "token-glace", f"installed but doctor output unreadable (exit {r.code})")]
+    if not isinstance(data, dict):
         return [(WARN, "token-glace", f"installed but doctor output unreadable (exit {r.code})")]
     status = data.get("status", "unknown")
     mapping = {"ok": OK, "warn": WARN, "disabled": MANUAL, "broken": FAIL}
@@ -178,6 +185,8 @@ def _agentpantry_doctor(ctx: DoctorContext) -> List[CheckResult]:
     data = r.json()
     if data is None:
         return [(WARN, name, f"unexpected output (exit {r.code})")]
+    if not isinstance(data, dict):
+        return [(WARN, name, f"unexpected output (exit {r.code})")]
     role = data.get("role") or "?"
     peer = data.get("peer") or "?"
     surfaces = data.get("surfaces") or []
@@ -196,10 +205,12 @@ def _agent_notify_doctor(ctx: DoctorContext) -> List[CheckResult]:
 
     name = "agent-notify (operator notifications)"
     health = notifications_cmd.health(ctx.target)
-    channels = health.get("selected_channels") if isinstance(health.get("selected_channels"), list) else []
+    channels_value = health.get("selected_channels")
+    channels = channels_value if isinstance(channels_value, list) else []
     profile = health.get("profile") or "none"
     if not health.get("configured"):
-        top = health.get("top_issue") if isinstance(health.get("top_issue"), dict) else {}
+        top_issue = health.get("top_issue")
+        top = top_issue if isinstance(top_issue, dict) else {}
         detail = top.get("detail") or "installed but unwired (no configured notification channels)"
         return [(WARN, name, str(detail))]
     status = OK if health.get("status") == "ok" else WARN

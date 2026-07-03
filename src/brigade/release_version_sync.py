@@ -8,6 +8,7 @@ import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+from typing import cast
 
 from . import toml_compat
 
@@ -120,21 +121,22 @@ def resolve_source(manifest: Manifest, target: Path) -> str:
         if not match:
             raise ValueError(f"source regex found no version in {manifest.source.file}")
         return match.group(1)
+    source_key = cast(str, manifest.source.key)
     data = toml_compat.loads(text) if src_path.suffix == ".toml" else json.loads(text)
     value: object = data
-    for part in manifest.source.key.split("."):
+    for part in source_key.split("."):
         if not isinstance(value, dict) or part not in value:
-            raise ValueError(f"source key `{manifest.source.key}` not found in {manifest.source.file}")
+            raise ValueError(f"source key `{source_key}` not found in {manifest.source.file}")
         value = value[part]
     if not isinstance(value, str):
-        raise ValueError(f"source key `{manifest.source.key}` is not a string")
+        raise ValueError(f"source key `{source_key}` is not a string")
     return value
 
 
 def _resolve_files(location: Location, target: Path) -> list[Path]:
     if location.path is not None:
         return [target / location.path]
-    return sorted(target.glob(location.glob))
+    return sorted(target.glob(cast(str, location.glob)))
 
 
 def scan(manifest: Manifest, target: Path, expected: str) -> list[LocationResult]:

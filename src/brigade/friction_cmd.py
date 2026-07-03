@@ -226,12 +226,12 @@ def _extract_text(value: object) -> list[str]:
             fragments.extend(_extract_text(item))
         return fragments
     if isinstance(value, dict):
-        fragments: list[str] = []
+        object_fragments: list[str] = []
         if isinstance(value.get("text"), str):
-            fragments.append(value["text"])
+            object_fragments.append(value["text"])
         if isinstance(value.get("content"), (str, list, dict)):
-            fragments.extend(_extract_text(value["content"]))
-        return fragments
+            object_fragments.extend(_extract_text(value["content"]))
+        return object_fragments
     return []
 
 
@@ -391,7 +391,11 @@ def show(*, target: Path, severity: str | None = None, json_output: bool = False
     if data is None:
         print(f"error: no friction scan found at {path}; run `brigade friction scan` first", file=sys.stderr)
         return 2
-    candidates = data.get("candidates") if isinstance(data.get("candidates"), list) else []
+    if not isinstance(data, dict):
+        print(f"error: invalid friction scan at {path}; expected JSON object", file=sys.stderr)
+        return 2
+    candidates_value = data.get("candidates")
+    candidates = candidates_value if isinstance(candidates_value, list) else []
     if severity:
         candidates = [c for c in candidates if isinstance(c, dict) and c.get("severity") == severity]
     payload = {
@@ -441,11 +445,15 @@ def _render_markdown(payload: dict[str, Any]) -> str:
         lines.append("")
     lines.append("## Candidate Friction")
     lines.append("")
-    candidates = payload.get("candidates") if isinstance(payload.get("candidates"), list) else []
+    candidates_value = payload.get("candidates")
+    candidates = candidates_value if isinstance(candidates_value, list) else []
     if not candidates:
         lines.append("No candidate friction found.")
     for item in candidates:
-        evidence = item.get("evidence") if isinstance(item.get("evidence"), dict) else {}
+        if not isinstance(item, dict):
+            continue
+        evidence_value = item.get("evidence")
+        evidence = evidence_value if isinstance(evidence_value, dict) else {}
         lines.extend(
             [
                 f"### {item.get('id')}",
@@ -471,7 +479,8 @@ def _write_markdown(path: Path, payload: dict[str, Any]) -> None:
 def _import_candidates(target: Path, candidates: list[dict[str, Any]], *, dry_run: bool) -> tuple[int, int, int]:
     records: list[dict[str, Any]] = []
     for item in candidates:
-        evidence = item.get("evidence") if isinstance(item.get("evidence"), dict) else {}
+        evidence_value = item.get("evidence")
+        evidence = evidence_value if isinstance(evidence_value, dict) else {}
         records.append(
             {
                 "kind": "finding",
@@ -582,7 +591,7 @@ def add(
         print("error: friction text is required", file=sys.stderr)
         return 2
     friction_id = f"manual-{uuid4().hex[:12]}"
-    record = {
+    record: dict[str, Any] = {
         "kind": "finding",
         "source": "friction-manual",
         "text": rendered,
