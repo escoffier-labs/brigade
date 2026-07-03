@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from . import mcp_server, toml_compat as tomllib, work_cmd
+from .budgets import MEMORY_CARD_BUDGET_BYTES
 from .install import apply_gitignore
 from .selection import Selection
 from .localio import utc_now_iso_z as _utc_iso
@@ -50,7 +51,7 @@ class MemoryCareConfig:
     exclude_paths: tuple[str, ...] = ("memory/cards/decay",)
     output_path: str = DEFAULT_OUTPUT_PATH
     enabled_checks: tuple[str, ...] = CHECKS
-    max_card_bytes: int = 12_000
+    max_card_bytes: int = MEMORY_CARD_BUDGET_BYTES
 
 
 def config_path(target: Path) -> Path:
@@ -194,7 +195,9 @@ def load_config(target: Path) -> MemoryCareConfig | None:
         exclude_paths=exclude_paths,
         output_path=_relative_path(output_path, field="output_path"),
         enabled_checks=enabled_checks,
-        max_card_bytes=_positive_int(data.get("max_card_bytes"), field="max_card_bytes", default=12_000, minimum=1),
+        max_card_bytes=_positive_int(
+            data.get("max_card_bytes"), field="max_card_bytes", default=MEMORY_CARD_BUDGET_BYTES, minimum=1
+        ),
     )
 
 

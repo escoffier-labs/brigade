@@ -12,7 +12,6 @@ from typing import List, Tuple
 
 from .budgets import (
     BOOTSTRAP_BUDGETS,
-    MEMORY_CARD_BUDGET_BYTES,
     MEMORY_CARE_SCAN_STALE_DAYS,
 )
 from . import localio
@@ -462,13 +461,25 @@ def _check_memory_cards(target: Path) -> List[CheckResult]:
     if not cards.is_dir():
         return []
 
+    # Honor the same memory-care config `brigade memory care` uses, so the two
+    # subsystems agree: per-workspace max_card_bytes and exclude_paths (decay/,
+    # archive/, ...) instead of a hardcoded limit that also scanned excluded dirs.
+    from . import memory_cmd
+
+    config = memory_cmd.load_config(target) or memory_cmd.MemoryCareConfig()
+    budget = config.max_card_bytes
+
     results: List[CheckResult] = []
     oversized: list[str] = []
     empty: list[str] = []
+    counted = 0
     for path in sorted(cards.rglob("*.md")):
         if not path.is_file():
             continue
         rel = path.relative_to(target)
+        if config.exclude_paths and memory_cmd._path_matches(str(rel), config.exclude_paths):
+            continue
+        counted += 1
         try:
             size = path.stat().st_size
         except OSError as exc:
@@ -476,8 +487,8 @@ def _check_memory_cards(target: Path) -> List[CheckResult]:
             continue
         if size == 0:
             empty.append(str(rel))
-        if size > MEMORY_CARD_BUDGET_BYTES:
-            oversized.append(f"{rel} ({size}/{MEMORY_CARD_BUDGET_BYTES} bytes)")
+        if size > budget:
+            oversized.append(f"{rel} ({size}/{budget} bytes)")
 
     if empty:
         preview = ", ".join(empty[:5])
@@ -499,10 +510,7 @@ def _check_memory_cards(target: Path) -> List[CheckResult]:
             )
         )
     else:
-        count = len([path for path in cards.rglob("*.md") if path.is_file()])
-        results.append(
-            (OK, "memory-card: budget", f"{count} card{'s' if count != 1 else ''} <= {MEMORY_CARD_BUDGET_BYTES} bytes")
-        )
+        results.append((OK, "memory-card: budget", f"{counted} card{'s' if counted != 1 else ''} <= {budget} bytes"))
     return results
 
 
