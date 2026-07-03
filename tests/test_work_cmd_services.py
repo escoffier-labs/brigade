@@ -1750,9 +1750,9 @@ def test_tools_runtime_doctor_safety_warnings(tmp_path, capsys, monkeypatch):
     stale_pid.write_text("999999\n")
     # A live process can legitimately hold pid 999999 on the test host; pin the
     # sentinel dead so the stale-pid branch is deterministic.
-    real_process_alive = tools_cmd._process_alive
+    real_process_alive = tools_cmd.runtimes._process_alive
     monkeypatch.setattr(
-        tools_cmd,
+        tools_cmd.runtimes,
         "_process_alive",
         lambda pid: False if pid == 999999 else real_process_alive(pid),
     )
