@@ -1286,9 +1286,7 @@ def test_operator_quickstart_arms_dogfood_loop(tmp_path, capsys):
 
 def test_operator_quickstart_dry_run_plans_dogfood_without_writing(tmp_path, capsys):
     assert (
-        cli.main(
-            ["operator", "quickstart", "--target", str(tmp_path), "--harnesses", "codex", "--dry-run", "--json"]
-        )
+        cli.main(["operator", "quickstart", "--target", str(tmp_path), "--harnesses", "codex", "--dry-run", "--json"])
         == 0
     )
     payload = json.loads(capsys.readouterr().out)
