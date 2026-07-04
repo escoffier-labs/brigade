@@ -47,6 +47,35 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_rank.add_argument("--json", action="store_true", help="Emit machine-readable JSON instead of text.")
     p_rank.set_defaults(func=_dispatch_rank)
 
+    p_rebuild = outcome_sub.add_parser(
+        "rebuild-status", help="Rebuild status.json from decision receipts and report any drift."
+    )
+    p_rebuild.add_argument(
+        "--check", action="store_true", help="Exit non-zero if the persisted status.json has drifted."
+    )
+    p_rebuild.add_argument("--target", "-t", type=Path, default=Path("."))
+    p_rebuild.add_argument("--json", action="store_true", help="Emit machine-readable JSON instead of text.")
+    p_rebuild.set_defaults(func=_dispatch_rebuild_status)
+
+    p_fork = outcome_sub.add_parser(
+        "fork", help="Project what the ratchet would decide under a hypothetical config (read-only)."
+    )
+    p_fork.add_argument("--out", type=Path, required=True, help="Path to write the fork projection JSON.")
+    p_fork.add_argument("--install-min-helped", type=int, default=None, help="Override install_min_helped.")
+    p_fork.add_argument("--revert-min-hurt", type=int, default=None, help="Override revert_min_hurt.")
+    p_fork.add_argument("--bump-min-helped", type=int, default=None, help="Override bump_min_helped.")
+    p_fork.add_argument("--z", type=float, default=None, help="Override the Wilson z score.")
+    p_fork.add_argument("--target", "-t", type=Path, default=Path("."))
+    p_fork.add_argument("--json", action="store_true", help="Emit machine-readable JSON instead of text.")
+    p_fork.set_defaults(func=_dispatch_fork)
+
+    p_diff = outcome_sub.add_parser("diff", help="Compare two outcome fork projections.")
+    p_diff.add_argument("fork_a", type=Path, help="First fork projection JSON.")
+    p_diff.add_argument("fork_b", type=Path, help="Second fork projection JSON.")
+    p_diff.add_argument("--target", "-t", type=Path, default=Path("."))
+    p_diff.add_argument("--json", action="store_true", help="Emit machine-readable JSON instead of text.")
+    p_diff.set_defaults(func=_dispatch_diff)
+
     p_record = outcome_sub.add_parser("record", help="Record an explicit (non-verify) outcome signal for an artifact.")
     p_record.add_argument("artifact_id", help="Artifact id (card or skill) the signal is about.")
     p_record.add_argument("--source", required=True, help="Signal source, e.g. friction or learnings.")
@@ -94,6 +123,34 @@ def _dispatch_rank(args) -> int:
     from .. import outcome_cmd
 
     return outcome_cmd.rank(target=args.target, json_output=args.json)
+
+
+def _dispatch_rebuild_status(args) -> int:
+    from .. import outcome_cmd
+
+    return outcome_cmd.rebuild_status(target=args.target, check=args.check, json_output=args.json)
+
+
+def _dispatch_fork(args) -> int:
+    from .. import outcome, outcome_cmd
+
+    defaults = outcome.ReconcileConfig()
+    config = outcome.ReconcileConfig(
+        install_min_helped=args.install_min_helped
+        if args.install_min_helped is not None
+        else defaults.install_min_helped,
+        revert_min_hurt=args.revert_min_hurt if args.revert_min_hurt is not None else defaults.revert_min_hurt,
+        bump_min_helped=args.bump_min_helped if args.bump_min_helped is not None else defaults.bump_min_helped,
+        cooldown_seconds=defaults.cooldown_seconds,
+        z=args.z if args.z is not None else defaults.z,
+    )
+    return outcome_cmd.fork(target=args.target, out=args.out, config=config, json_output=args.json)
+
+
+def _dispatch_diff(args) -> int:
+    from .. import outcome_cmd
+
+    return outcome_cmd.diff(target=args.target, fork_a=args.fork_a, fork_b=args.fork_b, json_output=args.json)
 
 
 def _dispatch_record(args) -> int:

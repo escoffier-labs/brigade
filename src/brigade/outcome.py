@@ -165,6 +165,63 @@ def decide(
     return Decision(score.artifact_id, "hold", current_status, "terminal status")
 
 
+@dataclass(frozen=True)
+class StatusTransition:
+    """One persisted status transition, read back from a decision receipt.
+
+    The decision receipts under ``memory/outcome/decisions/`` are the transition
+    log; ``status.json`` is the cache they fold into. Keeping this pure lets the
+    rebuild check prove the cache is reproducible from the log.
+    """
+
+    artifact_id: str
+    new_status: str
+    created_at: str  # ISO 8601
+
+
+def fold_status(transitions: list[StatusTransition]) -> dict[str, dict]:
+    """Fold decision transitions into the status map they produce.
+
+    Later transitions win per artifact, ordered by ``created_at``. This is the
+    projection ``status.json`` caches: reconcile writes a decision receipt and a
+    status entry together on every transition, so replaying the receipts must
+    reproduce the persisted status exactly. Inspired by ActiveGraph's
+    ``apply_event`` projection (state is a fold of the append-only log).
+    """
+    ordered = sorted(transitions, key=lambda t: (t.created_at, t.artifact_id))
+    status: dict[str, dict] = {}
+    for t in ordered:
+        status[t.artifact_id] = {"status": t.new_status, "last_action_ts": t.created_at}
+    return status
+
+
+def project_statuses(
+    scores: dict[str, OutcomeScore],
+    *,
+    config: ReconcileConfig,
+    now: dt.datetime,
+) -> dict[str, Decision]:
+    """Project each artifact's ratchet decision from a clean candidate baseline.
+
+    A pure "what-if" over the signal log: given the scores derived from
+    ``records.jsonl`` and a hypothetical config, what would the ratchet decide
+    for each artifact starting fresh? Because the baseline has no prior action,
+    the cooldown never fires and each artifact gets one decision from its score.
+    This is the fork primitive: replay the log under different rules without
+    touching live state, so two configs can be diffed.
+    """
+    return {
+        artifact_id: decide(
+            score_obj,
+            current_status="candidate",
+            last_action_ts=None,
+            now=now,
+            config=config,
+        )
+        for artifact_id, score_obj in scores.items()
+    }
+
+
 # Retrieval rank weights: confidence, verified outcome, keyword match.
 RANK_WEIGHTS = (0.5, 0.4, 0.1)
 
