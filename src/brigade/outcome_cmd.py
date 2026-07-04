@@ -93,6 +93,175 @@ def append_records(target: Path, records: list[core.OutcomeRecord]) -> None:
             handle.write(json.dumps(dataclasses.asdict(record), sort_keys=True) + "\n")
 
 
+def _decisions_dir(target: Path) -> Path:
+    return target / "memory" / "outcome" / "decisions"
+
+
+def load_transitions(target: Path) -> list[core.StatusTransition]:
+    """Read the decision receipts into the transition log that status.json folds.
+
+    Each receipt written by ``reconcile --apply`` carries the artifact id, the
+    status it moved to, and when. Malformed or partial receipts are skipped so
+    one bad file cannot break the drift check.
+    """
+    decisions = _decisions_dir(target)
+    if not decisions.is_dir():
+        return []
+    transitions: list[core.StatusTransition] = []
+    for path in sorted(decisions.glob("*.json")):
+        payload = localio.read_json_dict(path) or {}
+        artifact_id = payload.get("artifact_id")
+        new_status = payload.get("new_status")
+        created_at = payload.get("created_at")
+        if artifact_id and new_status and created_at:
+            transitions.append(core.StatusTransition(str(artifact_id), str(new_status), str(created_at)))
+    return transitions
+
+
+def _status_drift(rebuilt: dict[str, dict], persisted: dict[str, dict]) -> list[dict]:
+    """Return per-artifact differences between the rebuilt and persisted status."""
+    drift: list[dict] = []
+    for artifact_id in sorted(set(rebuilt) | set(persisted)):
+        want = rebuilt.get(artifact_id)
+        have = persisted.get(artifact_id)
+        if want == have:
+            continue
+        if want is None:
+            drift.append({"artifact_id": artifact_id, "issue": "only-in-status", "persisted": have})
+        elif have is None:
+            drift.append({"artifact_id": artifact_id, "issue": "missing-from-status", "rebuilt": want})
+        else:
+            drift.append({"artifact_id": artifact_id, "issue": "mismatch", "rebuilt": want, "persisted": have})
+    return drift
+
+
+def rebuild_status(*, target: Path, check: bool = False, json_output: bool = False) -> int:
+    """Rebuild status.json from the decision receipts and compare to the persisted file.
+
+    Read-only drift oracle: proves ``status.json`` is reproducible from the
+    append-only transition log before anything is allowed to trust it. With
+    ``--check`` it exits non-zero on any drift (a hand-edit, a partial write, a
+    corrupted status file). It never rewrites status.json; the canonical flip
+    (demoting status.json to a regenerated cache) is a deliberate later step.
+    """
+    target = target.expanduser().resolve()
+    rebuilt = core.fold_status(load_transitions(target))
+    persisted = load_status(target)
+    drift = _status_drift(rebuilt, persisted)
+    if json_output:
+        payload = {
+            "target": str(target),
+            "reproducible": not drift,
+            "rebuilt_count": len(rebuilt),
+            "persisted_count": len(persisted),
+            "drift": drift,
+        }
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 1 if (check and drift) else 0
+    print(f"outcome rebuild-status: {target}")
+    print(f"rebuilt={len(rebuilt)} persisted={len(persisted)} reproducible={not drift}")
+    if not drift:
+        print("drift: none")
+        return 0
+    for item in drift:
+        print(f"- {item['artifact_id']} [{item['issue']}]")
+    return 1 if check else 0
+
+
+def fork(
+    *,
+    target: Path,
+    out: Path,
+    config: core.ReconcileConfig | None = None,
+    json_output: bool = False,
+) -> int:
+    """Project what the ratchet would decide over the current signal log under a config.
+
+    A read-only fork: it replays ``records.jsonl`` through the scorer and the
+    ratchet from a clean baseline under the given config, writing the resulting
+    per-artifact projection to ``out``. It never reads or writes the live
+    status.json, so two forks under different configs can be compared with
+    ``outcome diff`` to see how a rule change would move promotions.
+    """
+    target = target.expanduser().resolve()
+    config = config or core.ReconcileConfig()
+    scores = _scores_by_artifact(load_records(target))
+    decisions = core.project_statuses(scores, config=config, now=localio.utc_now())
+    artifacts = {
+        artifact_id: {
+            "action": decision.action,
+            "new_status": decision.new_status,
+            "reason": decision.reason,
+            "score": scores[artifact_id].score,
+            "helped": scores[artifact_id].helped,
+            "hurt": scores[artifact_id].hurt,
+        }
+        for artifact_id, decision in sorted(decisions.items())
+    }
+    projection = {
+        "version": 1,
+        "target": str(target),
+        "config": dataclasses.asdict(config),
+        "artifacts": artifacts,
+    }
+    out = out.expanduser()
+    localio.write_json(out, projection)
+    if json_output:
+        print(json.dumps({"out": str(out), "projection": projection}, indent=2, sort_keys=True))
+        return 0
+    promoted = sum(1 for a in artifacts.values() if a["new_status"] == "promoted")
+    print(f"outcome fork: {out}")
+    print(f"artifacts={len(artifacts)} would-promote={promoted} (config: {dataclasses.asdict(config)})")
+    return 0
+
+
+def _load_projection(path: Path) -> dict[str, dict]:
+    payload = localio.read_json_dict(path) or {}
+    artifacts = payload.get("artifacts")
+    return artifacts if isinstance(artifacts, dict) else {}
+
+
+def diff(*, target: Path, fork_a: Path, fork_b: Path, json_output: bool = False) -> int:
+    """Compare two fork projections: which artifacts land on a different status.
+
+    Structural, read-only comparison of two ``outcome fork`` outputs, mirroring
+    ActiveGraph's ``compute_diff`` (a set-diff over resulting state). Reports
+    artifacts whose projected status differs and artifacts present in only one
+    fork.
+    """
+    _ = target
+    a = _load_projection(fork_a.expanduser())
+    b = _load_projection(fork_b.expanduser())
+    changed: list[dict] = []
+    for artifact_id in sorted(set(a) | set(b)):
+        ea = a.get(artifact_id)
+        eb = b.get(artifact_id)
+        if ea is None:
+            changed.append({"artifact_id": artifact_id, "issue": "only-in-b", "b": eb})
+        elif eb is None:
+            changed.append({"artifact_id": artifact_id, "issue": "only-in-a", "a": ea})
+        elif ea.get("new_status") != eb.get("new_status") or ea.get("action") != eb.get("action"):
+            changed.append(
+                {
+                    "artifact_id": artifact_id,
+                    "issue": "differs",
+                    "a": {"action": ea.get("action"), "new_status": ea.get("new_status")},
+                    "b": {"action": eb.get("action"), "new_status": eb.get("new_status")},
+                }
+            )
+    if json_output:
+        payload = {"fork_a": str(fork_a), "fork_b": str(fork_b), "identical": not changed, "changed": changed}
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+    print(f"outcome diff: {fork_a} <-> {fork_b}")
+    if not changed:
+        print("changed: none")
+        return 0
+    for item in changed:
+        print(f"- {item['artifact_id']} [{item['issue']}]")
+    return 0
+
+
 def _scores_by_artifact(records: list[core.OutcomeRecord]) -> dict[str, core.OutcomeScore]:
     grouped: dict[str, list[core.OutcomeRecord]] = {}
     for record in records:
