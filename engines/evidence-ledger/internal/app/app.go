@@ -92,13 +92,17 @@ func Run(args []string, out, errw io.Writer) int {
 		return cmdPrune(args[1:], out, errw)
 	case "sql":
 		return cmdSQL(args[1:], out, errw)
+	case "fork":
+		return cmdFork(args[1:], out, errw)
+	case "diff":
+		return cmdDiff(args[1:], out, errw)
 	default:
 		return fatalf(errw, "unknown command: %s", args[0])
 	}
 }
 
 func usage(w io.Writer) {
-	fmt.Fprintln(w, "miseledger version | init | status | sources discover | scans | sessions | serve | mcp | watch | crawl | adapter | import | search | show | evidence | explain | export markdown | relations | stats | compact | prune | sql | doctor")
+	fmt.Fprintln(w, "miseledger version | init | status | sources discover | scans | sessions | serve | mcp | watch | crawl | adapter | import | search | show | evidence | explain | export markdown | relations | stats | fork | diff | compact | prune | sql | doctor")
 }
 
 func openMigrated() (*sql.DB, Paths, error) {
@@ -410,6 +414,273 @@ func countOpenCodeExports(root string) int {
 		return 0
 	}
 	return len(files)
+}
+
+// cmdFork snapshots the current ledger into a standalone branch database. The
+// branch is an ordinary ledger you can import experimental sources into without
+// touching the canonical one; `miseledger diff` then reports exactly what a
+// source added, changed, or removed. Inspired by ActiveGraph's fork_run, which
+// copies event rows up to a cut point into a new run so it can diverge without
+// re-running the shared prefix (see ~/notes/activegraph-credits.md).
+func cmdFork(args []string, out, errw io.Writer) int {
+	_, bools, rest, err := splitFlags(args, nil, map[string]bool{"json": true})
+	if err != nil {
+		return fatalf(errw, "fork: %s", err)
+	}
+	if len(rest) != 1 {
+		return fatalf(errw, "usage: miseledger fork <dest-db-path> [--json]")
+	}
+	dest, err := filepath.Abs(rest[0])
+	if err != nil {
+		return fatalf(errw, "fork: %s", err)
+	}
+	if fileExists(dest) {
+		return fatalf(errw, "fork: destination already exists: %s", dest)
+	}
+	db, paths, err := openMigrated()
+	if err != nil {
+		return fatalf(errw, "fork: %s", err)
+	}
+	defer db.Close()
+	if err := security.EnsurePrivateParent(dest); err != nil {
+		return fatalf(errw, "fork: %s", err)
+	}
+	// VACUUM INTO writes a consistent, standalone copy (no WAL sidecars) of the
+	// live ledger and refuses to overwrite an existing file, which is exactly
+	// the no-clobber semantics we want for a branch.
+	quoted := "'" + strings.ReplaceAll(dest, "'", "''") + "'"
+	if _, err := db.Exec("VACUUM INTO " + quoted); err != nil {
+		return fatalf(errw, "fork: %s", err)
+	}
+	_ = security.ChmodPrivateFile(dest)
+	var items int
+	_ = db.QueryRow("select count(*) from items").Scan(&items)
+	if bools["json"] {
+		writeJSON(out, map[string]any{"forked": true, "source": paths.DBPath, "dest": dest, "items": items})
+	} else {
+		fmt.Fprintf(out, "forked %s -> %s (items=%d)\n", paths.DBPath, dest, items)
+	}
+	return 0
+}
+
+// cmdDiff structurally compares two ledger states: added, changed, and removed
+// items (by content hash) plus added and removed relations. With one path it
+// diffs the current ledger against the given branch; with two it diffs the two
+// branches. Purely read-only; it never mutates either database. This mirrors
+// ActiveGraph's compute_diff, which is a structural set-diff over final state.
+func cmdDiff(args []string, out, errw io.Writer) int {
+	_, bools, rest, err := splitFlags(args, nil, map[string]bool{"json": true})
+	if err != nil {
+		return fatalf(errw, "diff: %s", err)
+	}
+	var (
+		base, fork           *sql.DB
+		baseLabel, forkLabel string
+	)
+	switch len(rest) {
+	case 1:
+		db, paths, err := openMigrated()
+		if err != nil {
+			return fatalf(errw, "diff: %s", err)
+		}
+		f, err := openLedgerFile(rest[0])
+		if err != nil {
+			db.Close()
+			return fatalf(errw, "diff: %s", err)
+		}
+		base, baseLabel = db, paths.DBPath
+		fork, forkLabel = f, rest[0]
+	case 2:
+		b, err := openLedgerFile(rest[0])
+		if err != nil {
+			return fatalf(errw, "diff: %s", err)
+		}
+		f, err := openLedgerFile(rest[1])
+		if err != nil {
+			b.Close()
+			return fatalf(errw, "diff: %s", err)
+		}
+		base, baseLabel = b, rest[0]
+		fork, forkLabel = f, rest[1]
+	default:
+		return fatalf(errw, "usage: miseledger diff [<base-db>] <fork-db> [--json]")
+	}
+	defer base.Close()
+	defer fork.Close()
+
+	result, err := ledgerDiff(base, fork)
+	if err != nil {
+		return fatalf(errw, "diff: %s", err)
+	}
+	result["base"] = baseLabel
+	result["fork"] = forkLabel
+	if bools["json"] {
+		writeJSON(out, result)
+	} else {
+		items := result["items"].(map[string]any)
+		rels := result["relations"].(map[string]any)
+		fmt.Fprintf(out, "items: +%v ~%v -%v  relations: +%v -%v\n",
+			items["added"], items["changed"], items["removed"], rels["added"], rels["removed"])
+	}
+	return 0
+}
+
+// openLedgerFile opens an existing ledger database read path. It refuses to
+// open a missing file so `diff` never silently creates an empty branch and
+// reports everything as removed.
+func openLedgerFile(path string) (*sql.DB, error) {
+	if !fileExists(path) {
+		return nil, fmt.Errorf("not found: %s", path)
+	}
+	return archive.Open(path)
+}
+
+func ledgerDiff(base, fork *sql.DB) (map[string]any, error) {
+	baseItems, err := loadItemStates(base)
+	if err != nil {
+		return nil, err
+	}
+	forkItems, err := loadItemStates(fork)
+	if err != nil {
+		return nil, err
+	}
+	iAdded, iRemoved, iChanged := diffItemStates(baseItems, forkItems)
+
+	baseRel, err := loadRelationKeys(base)
+	if err != nil {
+		return nil, err
+	}
+	forkRel, err := loadRelationKeys(fork)
+	if err != nil {
+		return nil, err
+	}
+	rAdded, rRemoved := diffKeySets(baseRel, forkRel)
+
+	return map[string]any{
+		"items": map[string]any{
+			"added":       len(iAdded),
+			"changed":     len(iChanged),
+			"removed":     len(iRemoved),
+			"added_ids":   sampleIdents(iAdded, 20),
+			"changed_ids": sampleIdents(iChanged, 20),
+			"removed_ids": sampleIdents(iRemoved, 20),
+		},
+		"relations": map[string]any{
+			"added":        len(rAdded),
+			"removed":      len(rRemoved),
+			"added_keys":   sampleIdents(rAdded, 20),
+			"removed_keys": sampleIdents(rRemoved, 20),
+		},
+	}, nil
+}
+
+// identSep is a unit-separator byte that will not appear in ids, so composite
+// identity keys are unambiguous. It is swapped for "/" only for display.
+const identSep = "\x1f"
+
+// loadItemStates maps each logical item identity (source, collection,
+// external id) to the set of content hashes present for it. Items are
+// immutable and content-addressed, so an edit shows up as a new hash under the
+// same identity rather than an in-place update.
+func loadItemStates(db *sql.DB) (map[string]map[string]bool, error) {
+	rows, err := db.Query(`select source_id, collection_id, external_id, content_hash from items`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	m := map[string]map[string]bool{}
+	for rows.Next() {
+		var sid, cid, eid, hash string
+		if err := rows.Scan(&sid, &cid, &eid, &hash); err != nil {
+			return nil, err
+		}
+		ident := sid + identSep + cid + identSep + eid
+		if m[ident] == nil {
+			m[ident] = map[string]bool{}
+		}
+		m[ident][hash] = true
+	}
+	return m, rows.Err()
+}
+
+func diffItemStates(base, fork map[string]map[string]bool) (added, removed, changed []string) {
+	for ident, hashes := range fork {
+		prev, ok := base[ident]
+		if !ok {
+			added = append(added, ident)
+		} else if !sameHashSet(prev, hashes) {
+			changed = append(changed, ident)
+		}
+	}
+	for ident := range base {
+		if _, ok := fork[ident]; !ok {
+			removed = append(removed, ident)
+		}
+	}
+	sort.Strings(added)
+	sort.Strings(removed)
+	sort.Strings(changed)
+	return added, removed, changed
+}
+
+func sameHashSet(a, b map[string]bool) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k := range a {
+		if !b[k] {
+			return false
+		}
+	}
+	return true
+}
+
+// loadRelationKeys returns the set of relation identities: source item,
+// relation type, and target (item id or external id).
+func loadRelationKeys(db *sql.DB) (map[string]bool, error) {
+	rows, err := db.Query(`select source_item_id, relation_type, coalesce(target_item_id, ''), coalesce(target_external_id, '') from relations`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	m := map[string]bool{}
+	for rows.Next() {
+		var src, rel, tid, teid string
+		if err := rows.Scan(&src, &rel, &tid, &teid); err != nil {
+			return nil, err
+		}
+		m[src+identSep+rel+identSep+tid+identSep+teid] = true
+	}
+	return m, rows.Err()
+}
+
+func diffKeySets(base, fork map[string]bool) (added, removed []string) {
+	for k := range fork {
+		if !base[k] {
+			added = append(added, k)
+		}
+	}
+	for k := range base {
+		if !fork[k] {
+			removed = append(removed, k)
+		}
+	}
+	sort.Strings(added)
+	sort.Strings(removed)
+	return added, removed
+}
+
+// sampleIdents returns up to n identity keys with the internal separator
+// swapped for a readable "/".
+func sampleIdents(keys []string, n int) []string {
+	if len(keys) > n {
+		keys = keys[:n]
+	}
+	out := make([]string, len(keys))
+	for i, k := range keys {
+		out[i] = strings.ReplaceAll(k, identSep, "/")
+	}
+	return out
 }
 
 func cmdScans(args []string, out, errw io.Writer) int {
