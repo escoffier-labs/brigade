@@ -907,6 +907,8 @@ brigade security unsuppress <finding-id-or-fingerprint>
 brigade security scan --target . --import-findings
 ```
 
+When `.graphtrail/graphtrail.db` is present, `brigade run` can attach bounded GraphTrail context. If pending upstream drift state is available, it can also attach a drift impact brief. `run.json` records the shared brief budget, attached brief names, byte counts, and truncation flags.
+
 Use `--handoff` to bridge a completed run back into the memory system.
 
 Handoff behavior:
@@ -1039,6 +1041,7 @@ See [QUICKSTART.md](QUICKSTART.md) for setup, verification, and the ingest flow.
 Some stations can install and wire external tools for you.
 Run `brigade add <station>` to install any tool attached to that station that is not already on your PATH, then wire its default config.
 Tools are never imported in process; Brigade shells out to each CLI, so the boundary stays model-neutral and mixed-language.
+`brigade add <path>` also discovers a local `station.json` manifest from an external station repo. The manifest path reports the station name, install command, and machine surfaces. Install commands from a manifest are not executed unless `--install` is passed.
 
 ```bash
 brigade add memory   # memory-doctor + bootstrap-doctor
@@ -1046,6 +1049,7 @@ brigade add guard    # content-guard
 brigade add tokens   # token-glace
 brigade add skills   # built-in skills + optional Skillet roster
 brigade add pantry   # agentpantry
+brigade add ../agentpantry   # inspect an external station.json
 ```
 
 `security` is a built-in station with no external managed tool yet.
@@ -1055,6 +1059,7 @@ brigade add pantry   # agentpantry
 `brigade doctor` health-checks it by shelling out to `agentpantry doctor --json` with a compatibility fallback to `agentpantry status --json`.
 Like the memory satellites, agentpantry inspects host-global state, so its checks are advisory and never FAIL a workspace run: an unwired install (exit 2, no config) is a `WARN`, and setup problems are surfaced as advisory pantry health.
 Use `brigade pantry status` for a pantry-specific status readout, `brigade pantry setup plan --role source|sink` to preview or write a reviewed setup plan, and `brigade pantry service plan --role source|sink` to preview or write service setup steps.
+Use `brigade pantry expiry-alert` to report near-expiry sessions and preview the `agent-notify` message Brigade would send. Add `--send` to actually invoke `agent-notify`.
 These plan commands do not generate or copy PSKs, start services, or mutate browser, GitHub, OpenClaw, or other auth files.
 
 Security commands:
@@ -1123,6 +1128,7 @@ The current managed tools:
 | `pantry` | `agentpantry` | browser session and secret sync for agent hosts |
 
 `brigade doctor` folds installed tools into its report and surfaces each tool's own health.
+`brigade stations list --json` reports the managed machine surfaces each tool exposes, including doctor JSON, bounded markdown briefs, summary JSON, and verify commands where available.
 A missing optional tool is not a failure.
 It shows up as a non-failing `[todo]` hint telling you to run `brigade add <station>`.
 

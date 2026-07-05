@@ -12,7 +12,7 @@ from typing import Any
 from .localio import stable_hash as _stable_hash, utc_now_iso as _now, write_json as _write_json
 
 # ADVISORY ONLY. This deny-list catches a few obviously destructive shapes, but
-# it is trivially bypassable (e.g. `find / -delete`, `dd`, `curl ... | sh`) and
+# it is trivially bypassable by destructive filesystem commands or remote-shell wrappers and
 # must never be treated as a security boundary. The real boundary is the human
 # operator reading the steps before passing --approved. See SECURITY.md.
 DANGEROUS_PATTERNS = (

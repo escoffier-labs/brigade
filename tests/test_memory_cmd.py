@@ -204,6 +204,46 @@ def test_memory_care_status_explains_freshness_metadata(tmp_path, monkeypatch, c
     assert "missing-freshness" in imported_types
 
 
+def test_memory_care_scan_flags_missing_evidence_refs(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(memory_cmd, "_today", lambda: date(2026, 5, 28))
+    cache_home = tmp_path / "cache"
+    monkeypatch.setenv("XDG_CACHE_HOME", str(cache_home))
+    receipt = tmp_path / ".brigade" / "work" / "verify-runs" / "verify-one" / "receipt.json"
+    receipt.parent.mkdir(parents=True)
+    receipt.write_text(json.dumps({"status": "completed"}))
+    bundle = cache_home / "miseledger" / "evidence" / "bundle-ok.json"
+    bundle.parent.mkdir(parents=True)
+    bundle.write_text(json.dumps({"id": "bundle-ok"}))
+    cards = tmp_path / "memory" / "cards"
+    _write_card(
+        cards / "evidence-backed.md",
+        {
+            "topic": "evidence-backed",
+            "last_reviewed": "2026-05-01",
+            "fresh_until": "2026-12-01",
+            "confidence": "high",
+            "evidence": [
+                ".brigade/work/verify-runs/verify-one/receipt.json",
+                "miseledger://evidence/bundle-ok",
+                "miseledger://evidence/bundle-missing",
+            ],
+        },
+    )
+    (tmp_path / "MEMORY.md").write_text("- [evidence-backed](memory/cards/evidence-backed.md)\n")
+
+    assert memory_cmd.scan(target=tmp_path, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+
+    issue = next(issue for issue in payload["issues"] if issue["issue_type"] == "missing-evidence-ref")
+    assert issue["severity"] == "high"
+    assert issue["evidence_references"] == ["missing MiseLedger evidence bundle: miseledger://evidence/bundle-missing"]
+    assert payload["metadata"]["evidence_refs"] == {"present": 3, "missing": 1}
+
+    assert memory_cmd.status(target=tmp_path) == 0
+    out = capsys.readouterr().out
+    assert "evidence_refs: present=3 missing=1" in out
+
+
 def test_memory_care_plan_fixes_reports_blockers_and_writes_nothing(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(memory_cmd, "_today", lambda: date(2026, 5, 28))
     cards = tmp_path / "memory" / "cards"

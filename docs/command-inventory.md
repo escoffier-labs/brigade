@@ -38,7 +38,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade openclaw-fragments` (extras): 1 command path(s)
 - `brigade operator`: 24 command path(s)
 - `brigade outcome`: 9 command path(s)
-- `brigade pantry` (extras): 3 command path(s)
+- `brigade pantry` (extras): 4 command path(s)
 - `brigade profiles`: 2 command path(s)
 - `brigade projects` (extras): 10 command path(s)
 - `brigade reconfigure`: 1 command path(s)
@@ -232,6 +232,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade outcome reconcile`
 - `brigade outcome record`
 - `brigade outcome score`
+- `brigade pantry expiry-alert` (extras)
 - `brigade pantry service plan` (extras)
 - `brigade pantry setup plan` (extras)
 - `brigade pantry status` (extras)

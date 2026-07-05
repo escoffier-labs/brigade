@@ -21,6 +21,16 @@ def _selection_for(station_name: str, profile: profiles.StationProfile) -> str:
     return "not selected"
 
 
+def _surface_payload(surface: managed.MachineSurface) -> dict[str, Any]:
+    return {
+        "kind": surface.kind,
+        "command": list(surface.command),
+        "read_only": surface.read_only,
+        "timeout_seconds": surface.timeout_seconds,
+        "max_chars": surface.max_chars,
+    }
+
+
 def list_stations(*, profile_name: str = "repo", json_output: bool = False) -> int:
     profile = profiles.resolve(profile_name)
     if profile is None:
@@ -37,6 +47,7 @@ def list_stations(*, profile_name: str = "repo", json_output: bool = False) -> i
                     "command": tool.command,
                     "summary": tool.summary,
                     "install_args": list(tool.install_args),
+                    "surfaces": [_surface_payload(surface) for surface in tool.surfaces],
                 }
             )
         rows.append(
@@ -62,4 +73,10 @@ def list_stations(*, profile_name: str = "repo", json_output: bool = False) -> i
         tool_labels.extend(row["built_in_skills"])
         tool_names = ", ".join(tool_labels) or "built-in"
         print(f"  {row['station'].ljust(width)}  [{row['selection']}]  {tool_names}  - {row['summary']}")
+        for tool in row["tools"]:
+            surfaces = tool.get("surfaces") or []
+            if not surfaces:
+                continue
+            labels = ", ".join(surface["kind"] for surface in surfaces)
+            print(f"  {'':{width}}    surfaces: {tool['name']}: {labels}")
     return 0

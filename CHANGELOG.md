@@ -7,8 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.19.0] - 2026-07-05
+
+### Added
+- Managed station tools now declare machine-readable surfaces: live doctor JSON, bounded markdown briefs, summary JSON, and verify commands where each tool supports them. `brigade stations list --json` includes those surfaces so profiles can show what a station can feed into automation before it is installed.
+- `brigade add <path>` can discover a local `station.json` manifest, report its install command and machine surfaces, and refuse to run manifest install commands unless `--install` is passed. Built-in station installation by station name still works as before.
+- `brigade run` now has a run-level brief budget. Code graph and upstream drift impact briefs are ranked by task type, clipped when needed, and recorded in `run.json` with attached brief names, sizes, and truncation flags.
+- `brigade run` can attach a fail-open upstream drift impact brief when a repo has a GraphTrail database and pending upstream-drift state. The brief combines drift report excerpts with `graphtrail impact` output so workers see likely blast radius before editing.
+- `brigade memory care scan` now validates `evidence:` frontmatter for receipt-like paths and MiseLedger evidence refs, reporting `missing-evidence-ref` issues and evidence reference counts.
+- `brigade pantry expiry-alert` reports near-expiry Agent Pantry sessions and plans an `agent-notify` message by default. It sends only when `--send` is passed.
+- `brigade outcome rebuild-status`, `fork`, and `diff` add a drift oracle for outcome receipts. Operators can rebuild `status.json` from records and compare alternate reconciliation configs without mutating live state.
+
 ### Changed
 - The three largest modules are now packages: `repos_cmd` (6,417 lines -> 8 files), `tools_cmd` (6,079 -> 18), and `phases_cmd` (5,621 -> 7), each behind a facade that preserves the full external surface and monkeypatch semantics; no source file exceeds 2,000 lines. The mypy override list dropped from 45 entries to 21, and type-ratcheting surfaced and fixed four latent defects along the way (a friction-show crash on malformed JSON, a notifications tuple-shape crash, a fleet-health wrong-module read, and a research runner returning an object where callers expected text).
+- Agent Pantry health now prefers `agentpantry doctor --json`, uses the old status JSON as a compatibility fallback, and exposes the new `inventory --markdown` brief surface for near-expiry session summaries.
 
 ## [0.18.0] - 2026-07-03
 

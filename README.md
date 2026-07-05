@@ -99,7 +99,7 @@ Every agent tool reads its MCP servers from a different file in a different shap
 brigade mcp init                  # scaffold .brigade/mcp.json
 brigade mcp add --name github --command npx \
   --args "-y @modelcontextprotocol/server-github" \
-  --env GITHUB_TOKEN=ref:GITHUB_TOKEN
+  --env GITHUB_AUTH_ENV=ref:BRIGADE_GITHUB_AUTH_ENV
 brigade mcp sync                  # dry-run: show the diff for every tool
 brigade mcp sync --write          # merge into each tool's config
 ```
@@ -195,13 +195,20 @@ The whole ledger is plain JSON and markdown under `memory/outcome/`, tracked in 
 
 Brigade is the hub. Each station wires an optional standalone tool, installed with `brigade add <station>` and health-checked by `brigade status` and `brigade doctor`. Every tool is its own repo, independently installable, with no library coupling back into Brigade.
 
-Use `brigade profiles list` to see built-in station bundles and `brigade stations list` to see which stations are selected by the default repo profile before installing any sidecar tools.
+Use `brigade profiles list` to see built-in station bundles and `brigade stations list` to see which stations are selected by the default repo profile before installing any sidecar tools. `brigade stations list --json` also shows each managed tool's machine surfaces: doctor JSON, markdown briefs, summary JSON, and verify commands where the tool supports them.
 
 Fresh repo installs use the `repo` profile: core, skills, memory, guard, security, tokens, evidence, and search are selected up front. `brigade init` wires the built-in skills immediately, including `brigade-work` and `ultra-work-scout`, so new Codex users can run the Brigade work loop and broad Scout scoping from the start. External sidecars stay in their own repos and install only when you run `brigade add <station>`.
 
+External station repos can publish the same contract in a local `station.json`. Point `brigade add` at that repo to inspect its install command and surfaces without editing Brigade source:
+
+```bash
+brigade add ../agentpantry          # inspect station.json
+brigade add ../agentpantry --install # run the manifest install command
+```
+
 | `brigade add` | Tool | What it does |
 |---|---|---|
-| `skills` | built-in Scout skills; optional Skillet roster | wires `brigade-work` and `ultra-work-scout` on init; use `npx skills add escoffier-labs/skillet` for the full sidecar skill roster |
+| `skills` | built-in Scout skills; optional Skillet roster | wires `brigade-work` and `ultra-work-scout` on init; use `skills add escoffier-labs/skillet` after installing the sidecar CLI for the full roster |
 | `guard` | content-guard | scans handoffs and content for secrets and PII before anything leaves the machine |
 | `tokens` | token-glace | tracks token spend across your harnesses and compacts noisy output |
 | `memory` | memory-doctor, bootstrap-doctor | validates memory cards and bootstrap files for staleness and contradictions |
@@ -241,7 +248,7 @@ All of them get handoff templates and ingest source coverage. Most also get proj
 
 The same review-and-receipt pattern covers the rest of an operator's day, and you can ignore all of it until you need it. Most of these live behind `brigade extras on`, one command that adds the 18 operator-suite groups (release trains, fleet health, mission control, research, chat archives) to the CLI; until then `brigade --help` stays at the 24 core groups.
 
-- **Cross-model runs**: `brigade run "<task>"` plans, dispatches, and synthesizes one bounded task across the agent CLIs in your roster, so an expensive model can think while cheaper ones do the grunt work. `--worktree` runs everything in a detached git checkout that comes back as a reviewable `changes.patch`.
+- **Cross-model runs**: `brigade run "<task>"` plans, dispatches, and synthesizes one bounded task across the agent CLIs in your roster, so an expensive model can think while cheaper ones do the grunt work. It can attach GraphTrail and upstream-drift context under a shared brief budget, then records which briefs attached in `run.json`. `--worktree` runs everything in a detached git checkout that comes back as a reviewable `changes.patch`.
 - **Daily loop**: `brigade work brief` shows pending work, imports, and warnings; `brigade daily status` keeps it bounded and cheap.
 - **Friction logs**: `brigade friction scan` mines recent notes, handoffs, and session artifacts for reviewable workflow friction.
 - **Security and scrub**: `brigade security scan` is a local read-only scanner for agent workspaces; `brigade scrub` gates content before it leaves the machine.

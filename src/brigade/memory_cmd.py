@@ -5,6 +5,7 @@ from __future__ import annotations
 import ast
 import hashlib
 import json
+import os
 import re
 import sys
 from dataclasses import dataclass
@@ -34,6 +35,7 @@ CHECKS = (
     "missing-frontmatter",
     "missing-reviewed",
     "missing-freshness",
+    "missing-evidence-ref",
 )
 CONFIDENCE_RANK = {"unknown": 0, "low": 1, "medium": 2, "high": 3}
 PLANABLE_METADATA_FIXES = {"missing-reviewed", "missing-freshness"}
@@ -328,6 +330,55 @@ def _has_evidence(meta: dict[str, Any]) -> bool:
     return bool(str(value).strip())
 
 
+def _evidence_refs(meta: dict[str, Any]) -> list[str]:
+    value = _frontmatter_value(meta, "evidence", "sources", "source", "refs", "links")
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
+    rendered = str(value).strip()
+    return [rendered] if rendered else []
+
+
+def _miseledger_evidence_id(ref: str) -> str | None:
+    if ref.startswith("miseledger://evidence/"):
+        return ref.removeprefix("miseledger://evidence/").strip()
+    if ref.startswith("miseledger:"):
+        return ref.removeprefix("miseledger:").strip()
+    return None
+
+
+def _miseledger_evidence_path(bundle_id: str) -> Path | None:
+    if not re.fullmatch(r"[A-Za-z0-9._-]+", bundle_id):
+        return None
+    cache_home = Path.home() / ".cache"
+    if raw := os.environ.get("XDG_CACHE_HOME"):
+        cache_home = Path(raw)
+    return cache_home / "miseledger" / "evidence" / f"{bundle_id}.json"
+
+
+def _tracked_evidence_ref_missing(target: Path, ref: str) -> str | None:
+    bundle_id = _miseledger_evidence_id(ref)
+    if bundle_id is not None:
+        path = _miseledger_evidence_path(bundle_id)
+        if path is None:
+            return f"invalid MiseLedger evidence id: {ref}"
+        return None if path.is_file() else f"missing MiseLedger evidence bundle: {ref}"
+
+    receipt_ref = ref.removeprefix("receipt:").strip()
+    if not (receipt_ref.endswith("receipt.json") or receipt_ref.startswith(".brigade/") or "/.brigade/" in receipt_ref):
+        return None
+    path = Path(receipt_ref)
+    if path.is_absolute():
+        try:
+            path.resolve().relative_to(target.resolve())
+        except ValueError:
+            return f"receipt path escapes target: {ref}"
+    else:
+        path = target / path
+    return None if path.is_file() else f"missing receipt reference: {ref}"
+
+
 def _safe_summary(text: str) -> str:
     rendered = " ".join(text.split())
     if len(rendered) <= 180:
@@ -521,9 +572,15 @@ def _scan_payload(target: Path, config: MemoryCareConfig) -> dict[str, Any]:
         confidence = str(_frontmatter_value(meta, "confidence") or "unknown").lower()
         weak_confidence = CONFIDENCE_RANK.get(confidence, 0) < CONFIDENCE_RANK[config.minimum_confidence]
         has_evidence = _has_evidence(meta)
+        evidence_refs = _evidence_refs(meta)
+        missing_evidence_refs = [
+            detail for ref in evidence_refs if (detail := _tracked_evidence_ref_missing(target, ref)) is not None
+        ]
         missing_evidence = config.require_evidence and not has_evidence
         row["confidence"] = confidence
         row["has_evidence"] = has_evidence
+        row["evidence_ref_count"] = len(evidence_refs)
+        row["missing_evidence_ref_count"] = len(missing_evidence_refs)
         card_rows.append(row)
         if "undersourced" in enabled and (weak_confidence or missing_evidence):
             evidence = []
@@ -541,6 +598,19 @@ def _scan_payload(target: Path, config: MemoryCareConfig) -> dict[str, Any]:
                     summary=f"{rel} has weak confidence or missing evidence metadata.",
                     evidence=evidence,
                     action="Attach current source evidence or lower the card's authority.",
+                )
+            )
+        if "missing-evidence-ref" in enabled and missing_evidence_refs:
+            issues.append(
+                _issue(
+                    target=target,
+                    card_path=rel,
+                    card_id=card_id,
+                    issue_type="missing-evidence-ref",
+                    severity="high",
+                    summary=f"{rel} cites evidence references that no longer resolve.",
+                    evidence=missing_evidence_refs,
+                    action="Regenerate the evidence bundle, restore the receipt, or remove the stale citation.",
                 )
             )
         if "oversized-card" in enabled and path.stat().st_size > config.max_card_bytes:
@@ -625,6 +695,10 @@ def _scan_payload(target: Path, config: MemoryCareConfig) -> dict[str, Any]:
         "evidence": {
             "present": len([row for row in card_rows if row.get("has_evidence")]),
             "missing": len([row for row in card_rows if row.get("has_frontmatter") and not row.get("has_evidence")]),
+        },
+        "evidence_refs": {
+            "present": sum(int(row.get("evidence_ref_count") or 0) for row in card_rows),
+            "missing": sum(int(row.get("missing_evidence_ref_count") or 0) for row in card_rows),
         },
     }
     return {
@@ -972,6 +1046,8 @@ def status(*, target: Path, json_output: bool = False) -> int:
     freshness = freshness_value if isinstance(freshness_value, dict) else None
     evidence_value = metadata.get("evidence")
     evidence = evidence_value if isinstance(evidence_value, dict) else None
+    evidence_refs_value = metadata.get("evidence_refs")
+    evidence_refs = evidence_refs_value if isinstance(evidence_refs_value, dict) else None
     confidence_value = metadata.get("confidence")
     confidence = confidence_value if isinstance(confidence_value, dict) else None
     if reviewed:
@@ -984,6 +1060,8 @@ def status(*, target: Path, json_output: bool = False) -> int:
         )
     if evidence:
         print(f"evidence_metadata: present={evidence.get('present', 0)} missing={evidence.get('missing', 0)}")
+    if evidence_refs:
+        print(f"evidence_refs: present={evidence_refs.get('present', 0)} missing={evidence_refs.get('missing', 0)}")
     if confidence:
         rendered = ", ".join(f"{key}={confidence[key]}" for key in sorted(confidence))
         print(f"confidence_metadata: {rendered}")

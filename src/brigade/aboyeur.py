@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -20,6 +21,9 @@ from .roster import Agent, Roster, is_cli_allowed, timeout_for, workers
 
 CODE_GRAPH_HEADING = "## Code graph context (GraphTrail, read-only)"
 CODE_GRAPH_LIMIT = 4000
+DRIFT_IMPACT_HEADING = "## Upstream drift impact (Upstream Drift + GraphTrail, read-only)"
+DRIFT_IMPACT_LIMIT = 4000
+BRIEF_BUDGET_BYTES = 6000
 
 
 @dataclass(frozen=True)
@@ -47,12 +51,123 @@ class CodeGraphBrief:
     bytes: int = 0
 
 
-def _prepend_code_graph(prompt: str, code_graph: CodeGraphBrief | None) -> str:
-    if code_graph is None or not code_graph.attached or not code_graph.text:
+@dataclass(frozen=True)
+class DriftImpactBrief:
+    attached: bool
+    text: str = ""
+    bytes: int = 0
+    pending_count: int = 0
+
+
+@dataclass(frozen=True)
+class BriefSet:
+    code_graph: CodeGraphBrief
+    drift_impact: DriftImpactBrief
+    budget_bytes: int
+    attached: tuple[dict[str, object], ...]
+
+
+def _brief_bytes(text: str) -> int:
+    return len(text.encode())
+
+
+def _truncate_brief_text(text: str, limit: int, label: str) -> str:
+    if _brief_bytes(text) <= limit:
+        return text
+    note = f"\n\n[{label} brief truncated to fit the run brief budget.]\n"
+    room = max(0, limit - _brief_bytes(note))
+    clipped = text.encode()[:room].decode(errors="ignore")
+    boundary = clipped.rfind("\n")
+    if boundary > 0:
+        clipped = clipped[:boundary]
+    else:
+        clipped = clipped.rstrip()
+    return clipped.rstrip() + note
+
+
+def _brief_order(task: str) -> tuple[str, ...]:
+    lowered = task.lower()
+    if any(word in lowered for word in ("release", "changelog", "publish", "version")):
+        return ("drift_impact", "code_graph")
+    if any(word in lowered for word in ("doc", "readme", "handoff", "memory", "evidence")):
+        return ("drift_impact", "code_graph")
+    return ("code_graph", "drift_impact")
+
+
+def arbitrate_briefs(
+    task: str,
+    *,
+    code_graph: CodeGraphBrief,
+    drift_impact: DriftImpactBrief,
+    budget_bytes: int = BRIEF_BUDGET_BYTES,
+) -> BriefSet:
+    briefs: dict[str, CodeGraphBrief | DriftImpactBrief] = {
+        "code_graph": code_graph,
+        "drift_impact": drift_impact,
+    }
+    kept_code_graph = CodeGraphBrief(attached=False)
+    kept_drift = DriftImpactBrief(attached=False)
+    used = 0
+    attached: list[dict[str, object]] = []
+    for name in _brief_order(task):
+        brief = briefs[name]
+        if not brief.attached or not brief.text:
+            continue
+        remaining = budget_bytes - used
+        if remaining <= 0:
+            continue
+        text = brief.text
+        truncated = False
+        if _brief_bytes(text) > remaining:
+            if remaining < 500:
+                continue
+            text = _truncate_brief_text(text, remaining, name.replace("_", " "))
+            truncated = True
+        size = _brief_bytes(text)
+        used += size
+        attached.append({"name": name, "bytes": size, "truncated": truncated})
+        if name == "code_graph":
+            kept_code_graph = CodeGraphBrief(attached=True, text=text, bytes=size)
+        else:
+            kept_drift = DriftImpactBrief(
+                attached=True,
+                text=text,
+                bytes=size,
+                pending_count=getattr(brief, "pending_count", 0),
+            )
+    return BriefSet(
+        code_graph=kept_code_graph,
+        drift_impact=kept_drift,
+        budget_bytes=budget_bytes,
+        attached=tuple(attached),
+    )
+
+
+def _prepend_brief(prompt: str, *, heading: str, text: str) -> str:
+    if not text:
         return prompt
+    if heading in prompt:
+        return prompt
+    return f"{text}\n{prompt}"
+
+
+def _prepend_optional_briefs(
+    prompt: str,
+    *,
+    code_graph: CodeGraphBrief | None = None,
+    drift_impact: DriftImpactBrief | None = None,
+) -> str:
+    if code_graph is not None and code_graph.attached and code_graph.text:
+        prompt = _prepend_brief(prompt, heading=CODE_GRAPH_HEADING, text=code_graph.text)
+    if drift_impact is not None and drift_impact.attached and drift_impact.text:
+        prompt = _prepend_brief(prompt, heading=DRIFT_IMPACT_HEADING, text=drift_impact.text)
+    return prompt
+
+
+def _prepend_code_graph(prompt: str, code_graph: CodeGraphBrief | None) -> str:
     if CODE_GRAPH_HEADING in prompt:
         return prompt
-    return f"{code_graph.text}\n{prompt}"
+    return _prepend_optional_briefs(prompt, code_graph=code_graph)
 
 
 def _truncate_on_line_boundary(text: str, limit: int = CODE_GRAPH_LIMIT) -> str:
@@ -98,12 +213,140 @@ def code_graph_brief(cwd: Path | None, task: str) -> CodeGraphBrief:
     return CodeGraphBrief(attached=True, text=text, bytes=len(text.encode()))
 
 
+def _upstream_drift_state_path() -> Path:
+    return Path(os.environ.get("UPSTREAM_DRIFT_STATE_PATH", Path.home() / ".config/upstream-drift/state.json"))
+
+
+def _upstream_drift_reports_dir() -> Path:
+    return Path(os.environ.get("UPSTREAM_DRIFT_REPORTS_DIR", Path.home() / "repos/upstream-drift/reports"))
+
+
+def _read_json_dict(path: Path) -> dict[str, object] | None:
+    try:
+        value = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def _latest_drift_report(reports_dir: Path, watch: str) -> str:
+    if not _safe_watch_name(watch):
+        return ""
+    root = reports_dir / watch
+    if not root.is_dir():
+        return ""
+    reports = sorted(root.glob("*.md"), key=lambda path: path.stat().st_mtime, reverse=True)
+    if not reports:
+        return ""
+    try:
+        return reports[0].read_text()
+    except OSError:
+        return ""
+
+
+def _safe_watch_name(value: str) -> bool:
+    return bool(re.fullmatch(r"[A-Za-z0-9._-]+", value))
+
+
+def _drift_symbol_candidates(watch: str, report: str) -> list[str]:
+    candidates: list[str] = []
+    for value in [watch, *re.findall(r"`([A-Za-z_][A-Za-z0-9_.:-]{2,80})`", report)]:
+        for part in re.split(r"[^A-Za-z0-9_.:]+", value):
+            cleaned = part.strip("._:")
+            if len(cleaned) < 3:
+                continue
+            if cleaned not in candidates:
+                candidates.append(cleaned)
+            if len(candidates) >= 4:
+                return candidates
+    return candidates
+
+
+def _drift_report_excerpt(report: str, limit: int = 700) -> str:
+    lines = []
+    for line in report.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped == "---" or stripped.startswith(("watch:", "date:")):
+            continue
+        lines.append(stripped)
+        if len(" ".join(lines)) >= limit:
+            break
+    text = "\n".join(lines)
+    return _truncate_on_line_boundary(text, limit)
+
+
+def _pending_drift_entries() -> list[dict[str, object]]:
+    state = _read_json_dict(_upstream_drift_state_path())
+    if state is None:
+        return []
+    entries: list[dict[str, object]] = []
+    for name, raw in sorted(state.items()):
+        if not isinstance(name, str) or not _safe_watch_name(name) or not isinstance(raw, dict):
+            continue
+        failures = raw.get("consecutiveFailures")
+        if not isinstance(failures, int) or failures < 3:
+            continue
+        entries.append(
+            {
+                "name": name,
+                "consecutive_failures": failures,
+                "last_run_at": raw.get("lastRunAt") if isinstance(raw.get("lastRunAt"), str) else None,
+            }
+        )
+    return entries
+
+
+def drift_impact_brief(cwd: Path | None) -> DriftImpactBrief:
+    if cwd is None:
+        return DriftImpactBrief(attached=False)
+    db_path = cwd / ".graphtrail" / "graphtrail.db"
+    binary = _graphtrail_bin()
+    if not db_path.is_file() or binary is None:
+        return DriftImpactBrief(attached=False)
+    pending = _pending_drift_entries()
+    if not pending:
+        return DriftImpactBrief(attached=False)
+
+    reports_dir = _upstream_drift_reports_dir()
+    sections = [DRIFT_IMPACT_HEADING, ""]
+    for entry in pending[:3]:
+        watch = str(entry["name"])
+        report = _latest_drift_report(reports_dir, watch)
+        sections.append(
+            f"### {watch}\n"
+            f"- consecutive failures: {entry['consecutive_failures']}\n"
+            f"- last run: {entry.get('last_run_at') or 'unknown'}"
+        )
+        excerpt = _drift_report_excerpt(report)
+        if excerpt:
+            sections.append("Drift report excerpt:\n" + excerpt)
+        for candidate in _drift_symbol_candidates(watch, report):
+            result = proc.run(
+                [binary, "--db", str(db_path), "impact", candidate, "--depth", "2"],
+                timeout=5.0,
+                cwd=cwd,
+            )
+            body = result.stdout.strip()
+            if result.code == 0 and body:
+                sections.append(f"GraphTrail impact for `{candidate}`:\n{body}")
+                break
+
+    text = _truncate_on_line_boundary("\n\n".join(sections).strip() + "\n", DRIFT_IMPACT_LIMIT)
+    return DriftImpactBrief(
+        attached=True,
+        text=text,
+        bytes=len(text.encode()),
+        pending_count=len(pending),
+    )
+
+
 def build_plan_prompt(
     task: str,
     roster: Roster,
     corrective_note: str | None = None,
     read_only: bool = False,
     code_graph: CodeGraphBrief | None = None,
+    drift_impact: DriftImpactBrief | None = None,
 ) -> str:
     worker_lines = "\n".join(f"- {agent.name}: cli={agent.cli}; role={agent.role}" for agent in workers(roster))
     if not worker_lines:
@@ -126,7 +369,7 @@ def build_plan_prompt(
         "- Use zero assignments only if no worker is useful."
         f"{policy}"
     )
-    return _prepend_code_graph(prompt, code_graph)
+    return _prepend_optional_briefs(prompt, code_graph=code_graph, drift_impact=drift_impact)
 
 
 def _extract_json(text: str) -> object:
@@ -399,10 +642,11 @@ def plan(
     sandbox: str | None = None,
     attempts: list[dict[str, object]] | None = None,
     code_graph: CodeGraphBrief | None = None,
+    drift_impact: DriftImpactBrief | None = None,
 ) -> list[Assignment]:
     first = _run_orchestrator(
         roster,
-        build_plan_prompt(task, roster, read_only=read_only, code_graph=code_graph),
+        build_plan_prompt(task, roster, read_only=read_only, code_graph=code_graph, drift_impact=drift_impact),
         cwd=cwd,
         read_only=read_only,
         sandbox_read_only=sandbox_read_only,
@@ -419,7 +663,14 @@ def plan(
         _record_plan_attempt(attempts, stage="initial", result=first, parse_error=str(exc))
         second = _run_orchestrator(
             roster,
-            build_plan_prompt(task, roster, corrective_note=str(exc), read_only=read_only, code_graph=code_graph),
+            build_plan_prompt(
+                task,
+                roster,
+                corrective_note=str(exc),
+                read_only=read_only,
+                code_graph=code_graph,
+                drift_impact=drift_impact,
+            ),
             cwd=cwd,
             read_only=read_only,
             sandbox_read_only=sandbox_read_only,
@@ -465,6 +716,7 @@ def _worker_prompt(
     prior_results: list[WorkerResult] | None = None,
     read_only: bool = False,
     code_graph: CodeGraphBrief | None = None,
+    drift_impact: DriftImpactBrief | None = None,
 ) -> str:
     prior_context = ""
     if prior_results:
@@ -478,7 +730,7 @@ def _worker_prompt(
         f"{prior_context}"
         f"{policy}"
     )
-    return _prepend_code_graph(prompt, code_graph)
+    return _prepend_optional_briefs(prompt, code_graph=code_graph, drift_impact=drift_impact)
 
 
 def _worker_event_writer(events_dir: Path | None, worker: str, *, verbose: bool = False):
@@ -509,6 +761,7 @@ def dispatch(
     sandbox_read_only: bool | None = None,
     sandbox: str | None = None,
     code_graph: CodeGraphBrief | None = None,
+    drift_impact: DriftImpactBrief | None = None,
     appserver=None,
     events_dir: Path | None = None,
     verbose: bool = False,
@@ -524,7 +777,12 @@ def dispatch(
                 detail=f"{agent.cli} is not allowed by limits.allow_models",
             )
         prompt = _worker_prompt(
-            agent, assignment, prior_results=prior_results, read_only=read_only, code_graph=code_graph
+            agent,
+            assignment,
+            prior_results=prior_results,
+            read_only=read_only,
+            code_graph=code_graph,
+            drift_impact=drift_impact,
         )
         if agent.cli == "codex" and appserver is not None:
             on_event = _worker_event_writer(events_dir, assignment.worker, verbose=verbose)
@@ -598,6 +856,7 @@ def build_synth_prompt(
     read_only: bool = False,
     ground_truth: dict[str, object] | None = None,
     code_graph: CodeGraphBrief | None = None,
+    drift_impact: DriftImpactBrief | None = None,
 ) -> str:
     if results:
         rendered = "\n\n".join(
@@ -627,7 +886,7 @@ def build_synth_prompt(
         f"Worker results:\n{rendered}\n"
         f"{policy}"
     )
-    return _prepend_code_graph(prompt, code_graph)
+    return _prepend_optional_briefs(prompt, code_graph=code_graph, drift_impact=drift_impact)
 
 
 def _print_plan(assignments: list[Assignment]) -> None:
@@ -916,6 +1175,8 @@ def _run_payload(
     handoff_path: Path | None = None,
     error: str | None = None,
     code_graph: CodeGraphBrief | None = None,
+    drift_impact: DriftImpactBrief | None = None,
+    brief_set: BriefSet | None = None,
     codex_transport: str | None = None,
 ) -> dict[str, object]:
     payload: dict[str, object] = {
@@ -929,6 +1190,15 @@ def _run_payload(
         "code_graph_brief": {
             "attached": bool(code_graph.attached) if code_graph is not None else False,
             "bytes": code_graph.bytes if code_graph is not None else 0,
+        },
+        "drift_impact_brief": {
+            "attached": bool(drift_impact.attached) if drift_impact is not None else False,
+            "bytes": drift_impact.bytes if drift_impact is not None else 0,
+            "pending_count": drift_impact.pending_count if drift_impact is not None else 0,
+        },
+        "brief_budget": {
+            "bytes": brief_set.budget_bytes if brief_set is not None else BRIEF_BUDGET_BYTES,
+            "attached": list(brief_set.attached) if brief_set is not None else [],
         },
     }
     if finished_at is not None:
@@ -960,6 +1230,7 @@ def run(
     sandbox: str | None = None,
     code_graph_enabled: bool = True,
     code_graph: CodeGraphBrief | None = None,
+    drift_impact: DriftImpactBrief | None = None,
     codex_transport: str | None = None,
 ) -> int:
     started_at = datetime.now(timezone.utc)
@@ -969,6 +1240,11 @@ def run(
     handoff_inbox = handoff_inbox.expanduser() if handoff_inbox is not None else None
     if code_graph is None:
         code_graph = code_graph_brief(cwd, task) if code_graph_enabled else CodeGraphBrief(attached=False)
+    if drift_impact is None:
+        drift_impact = drift_impact_brief(cwd) if code_graph_enabled else DriftImpactBrief(attached=False)
+    brief_set = arbitrate_briefs(task, code_graph=code_graph, drift_impact=drift_impact)
+    code_graph = brief_set.code_graph
+    drift_impact = brief_set.drift_impact
     if output_dir is not None:
         output_dir.mkdir(parents=True, exist_ok=True)
         _write_json(output_dir / "roster.json", _roster_payload(roster))
@@ -984,6 +1260,8 @@ def run(
                 started_at=started_at,
                 output_dir=output_dir,
                 code_graph=code_graph,
+                drift_impact=drift_impact,
+                brief_set=brief_set,
                 codex_transport=transport_for_payload,
             ),
         )
@@ -999,6 +1277,7 @@ def run(
             sandbox=sandbox,
             attempts=plan_attempts,
             code_graph=code_graph,
+            drift_impact=drift_impact,
         )
     except RuntimeError as exc:
         if output_dir is not None:
@@ -1018,6 +1297,8 @@ def run(
                     output_dir=output_dir,
                     error=str(exc),
                     code_graph=code_graph,
+                    drift_impact=drift_impact,
+                    brief_set=brief_set,
                     codex_transport=transport_for_payload,
                 ),
             )
@@ -1045,6 +1326,8 @@ def run(
                     finished_at=finished_at,
                     output_dir=output_dir,
                     code_graph=code_graph,
+                    drift_impact=drift_impact,
+                    brief_set=brief_set,
                     codex_transport=transport_for_payload,
                 ),
             )
@@ -1080,6 +1363,7 @@ def run(
             sandbox_read_only=sandbox_read_only,
             sandbox=sandbox,
             code_graph=code_graph,
+            drift_impact=drift_impact,
             appserver=appserver,
             events_dir=(output_dir / "events") if (output_dir is not None and appserver is not None) else None,
             verbose=verbose,
@@ -1100,7 +1384,14 @@ def run(
 
     final = _run_orchestrator(
         roster,
-        build_synth_prompt(task, worker_results, read_only=read_only, ground_truth=ground_truth, code_graph=code_graph),
+        build_synth_prompt(
+            task,
+            worker_results,
+            read_only=read_only,
+            ground_truth=ground_truth,
+            code_graph=code_graph,
+            drift_impact=drift_impact,
+        ),
         cwd=cwd,
         read_only=read_only,
         sandbox_read_only=sandbox_read_only,
@@ -1132,6 +1423,8 @@ def run(
                     output_dir=output_dir,
                     error=final.detail,
                     code_graph=code_graph,
+                    drift_impact=drift_impact,
+                    brief_set=brief_set,
                     codex_transport=transport_for_payload,
                 ),
             )
@@ -1153,6 +1446,8 @@ def run(
                 finished_at=finished_at,
                 output_dir=output_dir,
                 code_graph=code_graph,
+                drift_impact=drift_impact,
+                brief_set=brief_set,
                 codex_transport=transport_for_payload,
             ),
         )
@@ -1186,6 +1481,8 @@ def run(
                         output_dir=output_dir,
                         error=detail,
                         code_graph=code_graph,
+                        drift_impact=drift_impact,
+                        brief_set=brief_set,
                         codex_transport=transport_for_payload,
                     ),
                 )
@@ -1209,6 +1506,8 @@ def run(
                     output_dir=output_dir,
                     handoff_path=handoff,
                     code_graph=code_graph,
+                    drift_impact=drift_impact,
+                    brief_set=brief_set,
                     codex_transport=transport_for_payload,
                 ),
             )

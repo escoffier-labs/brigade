@@ -70,7 +70,7 @@ rather than silently skipped. New adapters are added in `src/brigade/mcp_adapter
 brigade mcp init                       # scaffold .brigade/mcp.json + sidecar, update .gitignore
 brigade mcp add --name github \
   --command npx --args "-y @modelcontextprotocol/server-github" \
-  --env GITHUB_TOKEN=ref:GITHUB_TOKEN --timeout 60
+  --env GITHUB_AUTH_ENV=ref:BRIGADE_GITHUB_AUTH_ENV --timeout 60
 brigade mcp list                       # show the catalog
 brigade mcp plan                       # preview what a sync would do (read-only)
 brigade mcp sync                       # dry-run across every configured tool

@@ -106,6 +106,81 @@ def status(*, target: Path, json_output: bool = False) -> int:
     return 0
 
 
+def _near_expiry_message(near: list[dict[str, Any]], *, expiry_days: int) -> str:
+    lines = [f"Agent Pantry: {len(near)} session cookie(s) expire within {expiry_days} day(s)."]
+    for item in near[:10]:
+        lines.append(f"- {item.get('host')}/{item.get('name')} expires {item.get('expires')}")
+    if len(near) > 10:
+        lines.append(f"- plus {len(near) - 10} more")
+    return "\n".join(lines)
+
+
+def expiry_alert_payload(*, expiry_days: int = 14, profile: str = "agent-stop", send: bool = False) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "created_at": _now(),
+        "expiry_days": expiry_days,
+        "profile": profile,
+        "send": send,
+        "agentpantry_installed": proc.which("agentpantry") is not None,
+        "agent_notify_installed": proc.which("agent-notify") is not None,
+        "near_expiry_count": 0,
+        "message": "",
+        "sent": False,
+    }
+    if expiry_days < 0:
+        payload["error"] = "expiry_days must not be negative"
+        return payload
+    if not payload["agentpantry_installed"]:
+        payload["error"] = "agentpantry is not installed"
+        return payload
+
+    inventory = _run_json(["agentpantry", "inventory", "--json", "--expiry-days", str(expiry_days)])
+    payload["inventory"] = inventory
+    data = inventory.get("stdout_json") or {}
+    near = data.get("near_expiry") if isinstance(data, dict) else []
+    near_items = [item for item in near if isinstance(item, dict)] if isinstance(near, list) else []
+    payload["near_expiry_count"] = len(near_items)
+    if inventory.get("exit_code") != 0:
+        payload["error"] = "agentpantry inventory failed"
+        return payload
+    if not near_items:
+        payload["summary"] = "no near-expiry sessions"
+        return payload
+
+    message = _near_expiry_message(near_items, expiry_days=expiry_days)
+    payload["message"] = message
+    payload["summary"] = f"{len(near_items)} near-expiry session(s)"
+    payload["planned_argv"] = ["agent-notify", "send", "--profile", profile, message]
+    if not send:
+        return payload
+    if not payload["agent_notify_installed"]:
+        payload["error"] = "agent-notify is not installed"
+        return payload
+    result = proc.run(["agent-notify", "send", "--profile", profile, message], timeout=15.0)
+    payload["notify_exit_code"] = result.code
+    payload["notify_stderr"] = result.stderr[:500]
+    payload["sent"] = result.code == 0
+    if result.code != 0:
+        payload["error"] = "agent-notify send failed"
+    return payload
+
+
+def expiry_alert(
+    *, expiry_days: int = 14, profile: str = "agent-stop", send: bool = False, json_output: bool = False
+) -> int:
+    payload = expiry_alert_payload(expiry_days=expiry_days, profile=profile, send=send)
+    if json_output:
+        _json_print(payload)
+        return 0 if not payload.get("error") or payload.get("near_expiry_count") == 0 else 1
+    print(f"pantry expiry alert: {payload.get('summary') or payload.get('error') or 'ready'}")
+    if payload.get("message"):
+        print(payload["message"])
+    if payload.get("planned_argv") and not payload.get("send"):
+        print("send: false")
+        print("next_command: brigade pantry expiry-alert --send")
+    return 0 if not payload.get("error") or payload.get("near_expiry_count") == 0 else 1
+
+
 def setup_plan_payload(
     *,
     target: Path,

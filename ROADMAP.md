@@ -20,7 +20,7 @@ The one rule behind all of it: Brigade writes local files and queues, but it nev
 
 ## Where things stand
 
-The base layers are built and shipped: portable setup (`operator quickstart`), memory handoffs with lint and source coverage, the local security scanner and Content Guard integration, the daily operator loop, the scanner-ready work inbox, repo fleet evidence, release readiness receipts, the tool catalog, the skill registry, deep research, runbook execution, chat surface sweeps, and backup health visibility. See the [archive](docs/roadmap-archive.md) for the complete record.
+The base layers are built and shipped: portable setup (`operator quickstart`), memory handoffs with lint and source coverage, the local security scanner and Content Guard integration, the daily operator loop, the scanner-ready work inbox, repo fleet evidence, release readiness receipts, the tool catalog, the skill registry, deep research, runbook execution, chat surface sweeps, backup health visibility, station manifests, and brief-budgeted run context. See the [archive](docs/roadmap-archive.md) for the complete record.
 
 What follows is what is actually ahead.
 

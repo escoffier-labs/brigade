@@ -80,6 +80,54 @@ def test_setup_plan_write_creates_json_and_markdown(tmp_path):
     assert (plans[0].parent / "PLAN.md").exists()
 
 
+def test_expiry_alert_plans_notification_without_sending(monkeypatch):
+    monkeypatch.setattr(pantry_cmd.proc, "which", lambda cmd: f"/x/{cmd}")
+
+    def fake_run(args, **kw):
+        assert args == ["agentpantry", "inventory", "--json", "--expiry-days", "7"]
+        return pantry_cmd.proc.Result(
+            0,
+            json.dumps({"near_expiry": [{"host": "example.com", "name": "sid", "expires": "2026-07-05T00:00:00Z"}]}),
+            "",
+        )
+
+    monkeypatch.setattr(pantry_cmd.proc, "run", fake_run)
+
+    payload = pantry_cmd.expiry_alert_payload(expiry_days=7, profile="expiry", send=False)
+
+    assert payload["near_expiry_count"] == 1
+    assert payload["sent"] is False
+    assert payload["planned_argv"][:4] == ["agent-notify", "send", "--profile", "expiry"]
+    assert "example.com/sid" in payload["message"]
+
+
+def test_expiry_alert_send_invokes_agent_notify(monkeypatch):
+    monkeypatch.setattr(pantry_cmd.proc, "which", lambda cmd: f"/x/{cmd}")
+    calls = []
+
+    def fake_run(args, **kw):
+        calls.append((args, kw))
+        if args[:2] == ["agentpantry", "inventory"]:
+            return pantry_cmd.proc.Result(
+                0,
+                json.dumps(
+                    {"near_expiry": [{"host": "example.com", "name": "sid", "expires": "2026-07-05T00:00:00Z"}]}
+                ),
+                "",
+            )
+        if args[:2] == ["agent-notify", "send"]:
+            return pantry_cmd.proc.Result(0, "", "")
+        raise AssertionError(args)
+
+    monkeypatch.setattr(pantry_cmd.proc, "run", fake_run)
+
+    payload = pantry_cmd.expiry_alert_payload(expiry_days=7, profile="agent-stop", send=True)
+
+    assert payload["sent"] is True
+    assert calls[1][0][0:4] == ["agent-notify", "send", "--profile", "agent-stop"]
+    assert "example.com/sid" in calls[1][0][4]
+
+
 def test_work_brief_includes_pantry_health(monkeypatch, tmp_path):
     monkeypatch.setattr(
         pantry_cmd, "status_payload", lambda target: {"installed": False, "summary": "pantry test summary"}

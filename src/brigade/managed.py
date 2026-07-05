@@ -20,6 +20,15 @@ from .station import CheckResult, DoctorContext
 
 
 @dataclass(frozen=True)
+class MachineSurface:
+    kind: str  # doctor-json | brief-markdown | summary-json | verify-exit
+    command: Tuple[str, ...]
+    read_only: bool = True
+    timeout_seconds: Optional[float] = None
+    max_chars: Optional[int] = None
+
+
+@dataclass(frozen=True)
 class ManagedTool:
     name: str  # e.g. "memory-doctor"
     station: str  # "memory" | "guard" | "tokens"
@@ -28,6 +37,7 @@ class ManagedTool:
     install_args: List[str]  # argv to install (pipx/npm/pip)
     wire: Callable[[DoctorContext], List[CheckResult]]  # lay config; returns notes
     doctor: Callable[[DoctorContext], List[CheckResult]]  # health via proc
+    surfaces: Tuple[MachineSurface, ...] = ()
 
     def detect(self) -> bool:
         return proc.which(self.command) is not None
@@ -38,6 +48,16 @@ class ManagedTool:
 
 def _noop_wire(ctx: DoctorContext) -> List[CheckResult]:
     return []
+
+
+def _surface(
+    kind: str,
+    command: Tuple[str, ...],
+    *,
+    timeout_seconds: Optional[float] = None,
+    max_chars: Optional[int] = None,
+) -> MachineSurface:
+    return MachineSurface(kind=kind, command=command, timeout_seconds=timeout_seconds, max_chars=max_chars)
 
 
 # memory-doctor and bootstrap-doctor inspect the operator's canonical memory and
@@ -284,6 +304,10 @@ _TOOLS: Tuple[ManagedTool, ...] = (
         install_args=["pipx", "install", "git+https://github.com/escoffier-labs/memory-doctor"],
         wire=_noop_wire,
         doctor=_memory_doctor_doctor,
+        surfaces=(
+            _surface("doctor-json", ("memory-doctor", "status", "--json"), timeout_seconds=30.0),
+            _surface("verify-exit", ("memory-doctor", "lint"), timeout_seconds=30.0),
+        ),
     ),
     ManagedTool(
         name="bootstrap-doctor",
@@ -293,6 +317,10 @@ _TOOLS: Tuple[ManagedTool, ...] = (
         install_args=["pipx", "install", "git+https://github.com/escoffier-labs/bootstrap-doctor"],
         wire=_noop_wire,
         doctor=_bootstrap_doctor_doctor,
+        surfaces=(
+            _surface("doctor-json", ("bootstrap-doctor", "status", "--json"), timeout_seconds=30.0),
+            _surface("verify-exit", ("bootstrap-doctor", "status", "--json"), timeout_seconds=30.0),
+        ),
     ),
     ManagedTool(
         name="content-guard",
@@ -302,6 +330,12 @@ _TOOLS: Tuple[ManagedTool, ...] = (
         install_args=["pipx", "install", "git+https://github.com/escoffier-labs/content-guard"],
         wire=_content_guard_wire,
         doctor=_content_guard_doctor,
+        surfaces=(
+            _surface(
+                "doctor-json", ("content-guard", "scan", "--policy", "public-repo", "--json"), timeout_seconds=30.0
+            ),
+            _surface("verify-exit", ("content-guard", "scan", "--policy", "public-repo"), timeout_seconds=30.0),
+        ),
     ),
     ManagedTool(
         name="token-glace",
@@ -319,6 +353,11 @@ _TOOLS: Tuple[ManagedTool, ...] = (
         ],
         wire=_token_glace_wire,
         doctor=_token_glace_doctor,
+        surfaces=(
+            _surface("doctor-json", ("token-glace", "doctor", "hooks", "--format", "json"), timeout_seconds=30.0),
+            _surface("summary-json", ("token-glace", "stats", "--format", "json"), timeout_seconds=30.0),
+            _surface("verify-exit", ("token-glace", "verify"), timeout_seconds=60.0),
+        ),
     ),
     ManagedTool(
         name="code-search-api",
@@ -328,6 +367,7 @@ _TOOLS: Tuple[ManagedTool, ...] = (
         install_args=["pipx", "install", "git+https://github.com/escoffier-labs/code-search-api"],
         wire=_noop_wire,
         doctor=_code_search_api_doctor,
+        surfaces=(_surface("verify-exit", ("code-search-api", "--version"), timeout_seconds=10.0),),
     ),
     ManagedTool(
         name="code-search-mcp",
@@ -337,6 +377,10 @@ _TOOLS: Tuple[ManagedTool, ...] = (
         install_args=["npm", "install", "-g", "@solomonneas/code-search-mcp"],
         wire=_noop_wire,
         doctor=_code_search_mcp_doctor,
+        surfaces=(
+            _surface("doctor-json", ("code-search", "health", "--json"), timeout_seconds=10.0),
+            _surface("verify-exit", ("code-search", "--version"), timeout_seconds=10.0),
+        ),
     ),
     ManagedTool(
         name="agentpantry",
@@ -346,6 +390,13 @@ _TOOLS: Tuple[ManagedTool, ...] = (
         install_args=["go", "install", "github.com/escoffier-labs/agentpantry/cmd/agentpantry@latest"],
         wire=_noop_wire,
         doctor=_agentpantry_doctor,
+        surfaces=(
+            _surface("doctor-json", ("agentpantry", "doctor", "--json"), timeout_seconds=10.0),
+            _surface(
+                "brief-markdown", ("agentpantry", "inventory", "--markdown"), timeout_seconds=10.0, max_chars=4000
+            ),
+            _surface("verify-exit", ("agentpantry", "version"), timeout_seconds=10.0),
+        ),
     ),
     ManagedTool(
         name="agent-notify",
@@ -355,6 +406,10 @@ _TOOLS: Tuple[ManagedTool, ...] = (
         install_args=["go", "install", "github.com/escoffier-labs/agent-notify/cmd/agent-notify@latest"],
         wire=_agent_notify_wire,
         doctor=_agent_notify_doctor,
+        surfaces=(
+            _surface("doctor-json", ("agent-notify", "doctor", "--json"), timeout_seconds=10.0),
+            _surface("verify-exit", ("agent-notify", "version"), timeout_seconds=10.0),
+        ),
     ),
     ManagedTool(
         name="miseledger",
@@ -364,6 +419,11 @@ _TOOLS: Tuple[ManagedTool, ...] = (
         install_args=["go", "install", "github.com/escoffier-labs/miseledger/cmd/miseledger@latest"],
         wire=_noop_wire,
         doctor=_miseledger_doctor,
+        surfaces=(
+            _surface("doctor-json", ("miseledger", "status", "--json"), timeout_seconds=120.0),
+            _surface("brief-markdown", ("miseledger", "export", "--markdown"), timeout_seconds=10.0, max_chars=4000),
+            _surface("verify-exit", ("miseledger", "doctor"), timeout_seconds=120.0),
+        ),
     ),
 )
 

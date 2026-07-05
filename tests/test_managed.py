@@ -10,6 +10,11 @@ def test_all_tools_declare_required_fields():
         assert callable(t.doctor)
         assert callable(t.wire)
         assert isinstance(t.install_args, list) and t.install_args
+        assert isinstance(t.surfaces, tuple)
+        for surface in t.surfaces:
+            assert surface.kind
+            assert surface.command
+            assert surface.read_only is True
 
 
 def test_tools_attach_to_known_stations():
@@ -67,6 +72,13 @@ def test_token_glace_doctor_reads_status_field_not_exit(monkeypatch):
     assert any(status == "WARN" for status, _, _ in results)
 
 
+def test_token_glace_declares_stage_one_surfaces():
+    t = managed.resolve("token-glace")
+    surfaces = {surface.kind: surface.command for surface in t.surfaces}
+    assert surfaces["doctor-json"] == ("token-glace", "doctor", "hooks", "--format", "json")
+    assert surfaces["summary-json"] == ("token-glace", "stats", "--format", "json")
+
+
 def test_agentpantry_doctor_unwired(monkeypatch):
     t = managed.resolve("agentpantry")
     assert t is not None and t.station == "pantry"
@@ -81,6 +93,15 @@ def test_agentpantry_doctor_unwired(monkeypatch):
     ctx = DoctorContext(target=Path("/tmp/ws"), selection=None, harnesses=[])
     results = t.doctor(ctx)
     assert any(status == "WARN" and "unwired" in detail for status, _, detail in results)
+
+
+def test_agentpantry_declares_markdown_brief_surface():
+    t = managed.resolve("agentpantry")
+    surfaces = {surface.kind: surface for surface in t.surfaces}
+    assert surfaces["doctor-json"].command == ("agentpantry", "doctor", "--json")
+    assert surfaces["brief-markdown"].command == ("agentpantry", "inventory", "--markdown")
+    assert surfaces["brief-markdown"].timeout_seconds == 10.0
+    assert surfaces["brief-markdown"].max_chars == 4000
 
 
 def test_agentpantry_doctor_parses_status(monkeypatch):

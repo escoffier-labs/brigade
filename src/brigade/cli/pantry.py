@@ -14,6 +14,13 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_pantry_status = pantry_sub.add_parser("status", help="Show agentpantry status and advisory health.")
     p_pantry_status.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
     p_pantry_status.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_expiry = pantry_sub.add_parser(
+        "expiry-alert", help="Check near-expiry Agent Pantry sessions and optionally notify."
+    )
+    p_expiry.add_argument("--expiry-days", type=int, default=14, help="Near-expiry window in days.")
+    p_expiry.add_argument("--profile", default="agent-stop", help="agent-notify profile to use when --send is passed.")
+    p_expiry.add_argument("--send", action="store_true", help="Invoke agent-notify when near-expiry sessions exist.")
+    p_expiry.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_pantry_setup = pantry_sub.add_parser("setup", help="Plan source or sink setup without applying it.")
     pantry_setup_sub = p_pantry_setup.add_subparsers(dest="pantry_setup_command", metavar="<setup-command>")
     pantry_setup_sub.required = True
@@ -62,6 +69,13 @@ def dispatch(args) -> int:
 
     if args.pantry_command == "status":
         return pantry_cmd.status(target=args.target, json_output=args.json)
+    if args.pantry_command == "expiry-alert":
+        return pantry_cmd.expiry_alert(
+            expiry_days=args.expiry_days,
+            profile=args.profile,
+            send=args.send,
+            json_output=args.json,
+        )
     if args.pantry_command == "setup":
         if args.pantry_setup_command == "plan":
             return pantry_cmd.setup_plan(

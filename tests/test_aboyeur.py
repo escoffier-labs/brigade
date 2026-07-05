@@ -319,6 +319,116 @@ def test_code_graph_brief_truncates_on_line_boundary(tmp_path, monkeypatch):
     assert "last" not in brief.text
 
 
+def test_drift_impact_brief_attaches_pending_drift_and_graph_impact(tmp_path, monkeypatch):
+    work = tmp_path / "work"
+    db = work / ".graphtrail" / "graphtrail.db"
+    db.parent.mkdir(parents=True)
+    db.write_text("")
+    state = tmp_path / "state.json"
+    state.write_text(
+        json.dumps(
+            {
+                "fixture": {
+                    "consecutiveFailures": 3,
+                    "lastRunAt": "2026-07-04T12:00:00Z",
+                }
+            }
+        )
+    )
+    report_dir = tmp_path / "reports" / "fixture"
+    report_dir.mkdir(parents=True)
+    (report_dir / "2026-07-04.md").write_text(
+        "---\nwatch: fixture\ndate: 2026-07-04\n---\n## Summary\n`fixture` changed dispatch wiring.\n"
+    )
+    calls = []
+
+    monkeypatch.setenv("UPSTREAM_DRIFT_STATE_PATH", str(state))
+    monkeypatch.setenv("UPSTREAM_DRIFT_REPORTS_DIR", str(tmp_path / "reports"))
+    monkeypatch.setattr(aboyeur, "_graphtrail_bin", lambda: "/bin/graphtrail")
+
+    def fake_run(args, **kw):
+        calls.append((args, kw))
+        return proc.Result(code=0, stdout="impact rows\n", stderr="")
+
+    monkeypatch.setattr(aboyeur.proc, "run", fake_run)
+
+    brief = aboyeur.drift_impact_brief(work)
+
+    assert brief.attached is True
+    assert brief.pending_count == 1
+    assert brief.bytes == len(brief.text.encode())
+    assert brief.text.startswith("## Upstream drift impact")
+    assert "`fixture` changed dispatch wiring" in brief.text
+    assert "impact rows" in brief.text
+    assert calls == [
+        (
+            [
+                "/bin/graphtrail",
+                "--db",
+                str(db),
+                "impact",
+                "fixture",
+                "--depth",
+                "2",
+            ],
+            {"timeout": 5.0, "cwd": work},
+        )
+    ]
+
+
+def test_drift_impact_brief_missing_state_is_not_attached(tmp_path, monkeypatch):
+    work = tmp_path / "work"
+    db = work / ".graphtrail" / "graphtrail.db"
+    db.parent.mkdir(parents=True)
+    db.write_text("")
+    monkeypatch.setenv("UPSTREAM_DRIFT_STATE_PATH", str(tmp_path / "missing.json"))
+    monkeypatch.setattr(aboyeur, "_graphtrail_bin", lambda: "/bin/graphtrail")
+    monkeypatch.setattr(aboyeur.proc, "run", lambda *args, **kw: (_ for _ in ()).throw(AssertionError("no run")))
+
+    brief = aboyeur.drift_impact_brief(work)
+
+    assert brief.attached is False
+    assert brief.bytes == 0
+
+
+def test_arbitrate_briefs_prefers_code_context_for_code_tasks():
+    code = aboyeur.CodeGraphBrief(attached=True, text="## Code graph context\n\ncode\n", bytes=26)
+    drift = aboyeur.DriftImpactBrief(
+        attached=True,
+        text="## Upstream drift impact\n\ndrift\n",
+        bytes=31,
+        pending_count=2,
+    )
+
+    brief_set = aboyeur.arbitrate_briefs("fix dispatch bug", code_graph=code, drift_impact=drift)
+
+    assert [item["name"] for item in brief_set.attached] == ["code_graph", "drift_impact"]
+    assert brief_set.code_graph.attached is True
+    assert brief_set.drift_impact.attached is True
+
+
+def test_arbitrate_briefs_prefers_drift_context_for_release_tasks_and_truncates():
+    code = aboyeur.CodeGraphBrief(attached=True, text="## Code graph context\n\n" + ("c" * 900), bytes=923)
+    drift = aboyeur.DriftImpactBrief(
+        attached=True,
+        text="## Upstream drift impact\n\n" + ("d\n" * 500),
+        bytes=1025,
+        pending_count=1,
+    )
+
+    brief_set = aboyeur.arbitrate_briefs(
+        "prepare release notes",
+        code_graph=code,
+        drift_impact=drift,
+        budget_bytes=700,
+    )
+
+    assert brief_set.drift_impact.attached is True
+    assert brief_set.code_graph.attached is False
+    assert brief_set.attached == ({"name": "drift_impact", "bytes": brief_set.drift_impact.bytes, "truncated": True},)
+    assert "truncated to fit the run brief budget" in brief_set.drift_impact.text
+
+
 def test_code_graph_context_is_prepended_once_to_plan_worker_and_synthesis(monkeypatch):
     calls = []
     brief = aboyeur.CodeGraphBrief(
@@ -369,11 +479,27 @@ def test_run_json_records_code_graph_brief_fields(monkeypatch, tmp_path):
     output_dir = tmp_path / "run"
     monkeypatch.setattr(aboyeur.agents, "run_agent", fake_run_agent)
 
-    assert aboyeur.run("build feature", _roster(), cwd=tmp_path / "work", output_dir=output_dir) == 0
+    drift = aboyeur.DriftImpactBrief(
+        attached=True,
+        text="## Upstream drift impact (Upstream Drift + GraphTrail, read-only)\n\nfixture\n",
+        bytes=80,
+        pending_count=2,
+    )
+
+    assert (
+        aboyeur.run("build feature", _roster(), cwd=tmp_path / "work", output_dir=output_dir, drift_impact=drift) == 0
+    )
 
     run_meta = json.loads((output_dir / "run.json").read_text())
     assert run_meta["code_graph_brief"]["attached"] is True
     assert run_meta["code_graph_brief"]["bytes"] > 0
+    assert run_meta["drift_impact_brief"] == {
+        "attached": True,
+        "bytes": len(drift.text.encode()),
+        "pending_count": 2,
+    }
+    assert run_meta["brief_budget"]["bytes"] == aboyeur.BRIEF_BUDGET_BYTES
+    assert [item["name"] for item in run_meta["brief_budget"]["attached"]] == ["code_graph", "drift_impact"]
 
 
 def test_run_json_records_disabled_code_graph(monkeypatch, tmp_path):
