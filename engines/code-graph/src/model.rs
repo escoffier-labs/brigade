@@ -103,7 +103,7 @@ pub struct EdgeRow {
     pub hops: usize,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct SearchRow {
     pub id: String,
     pub kind: String,

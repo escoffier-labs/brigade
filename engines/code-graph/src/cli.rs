@@ -7,7 +7,7 @@ use clap::{Parser, Subcommand};
 
 use crate::model::{ContextPack, Direction, EdgeRow, SearchRow};
 use crate::query::{
-    DEFAULT_IMPACT_DEPTH, build_context_pack,
+    DEFAULT_IMPACT_DEPTH, build_context_pack, build_context_pack_from_entry_points,
     context::{edge_location, symbol_location},
     file_neighbors, graph_edges_with_depth, impact_edges, normalize_depth, render_markdown,
     search_symbols_with_path, stats,
@@ -81,6 +81,20 @@ enum Command {
         /// Render the pack as Brigade-friendly markdown.
         #[arg(long)]
         markdown: bool,
+        /// Use Code Search semantic hits as entry points, then rank them with graph centrality.
+        #[cfg(feature = "codesearch")]
+        #[arg(long)]
+        blend_code_search: bool,
+        #[cfg(feature = "codesearch")]
+        #[arg(long, default_value_t = 0.6)]
+        embed_weight: f64,
+        #[cfg(feature = "codesearch")]
+        #[arg(long, default_value_t = 0.4)]
+        graph_weight: f64,
+        /// Append read-only MiseLedger evidence links for the task and entry points.
+        #[cfg(feature = "miseledger")]
+        #[arg(long)]
+        evidence: bool,
     },
     Stats {
         #[arg(long)]
@@ -210,15 +224,42 @@ pub fn run(cli: Cli) -> Result<()> {
             limit,
             json,
             markdown,
+            #[cfg(feature = "codesearch")]
+            blend_code_search,
+            #[cfg(feature = "codesearch")]
+            embed_weight,
+            #[cfg(feature = "codesearch")]
+            graph_weight,
+            #[cfg(feature = "miseledger")]
+            evidence,
         } => {
             let conn = open_default_read_only(cli.db)?;
-            let pack = build_context_pack(&conn, task, limit)?;
+            #[cfg(feature = "codesearch")]
+            let pack = if blend_code_search {
+                let client = crate::adapters::codesearch::CodeSearchClient::from_env();
+                let hits = client.search(&task, limit.max(20))?;
+                let rows = crate::query::blend(&conn, &hits, embed_weight, graph_weight, limit)?;
+                let entry_points = rows.into_iter().map(|row| row.symbol).collect();
+                build_context_pack_from_entry_points(&conn, task.clone(), entry_points)?
+            } else {
+                build_context_pack(&conn, task.clone(), limit)?
+            };
+            #[cfg(not(feature = "codesearch"))]
+            let pack = build_context_pack(&conn, task.clone(), limit)?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&pack)?);
             } else if markdown {
                 print!("{}", render_markdown(&pack));
+                #[cfg(feature = "miseledger")]
+                if evidence {
+                    print!("{}", render_evidence_links(&task, &pack, limit)?);
+                }
             } else {
                 print!("{}", render_context(&pack));
+                #[cfg(feature = "miseledger")]
+                if evidence {
+                    print!("{}", render_evidence_links(&task, &pack, limit)?);
+                }
             }
         }
         Command::Stats { json } => {
@@ -363,6 +404,50 @@ fn render_context(pack: &ContextPack) -> String {
         let _ = writeln!(text, "- {file}");
     }
     text
+}
+
+#[cfg(feature = "miseledger")]
+fn render_evidence_links(task: &str, pack: &ContextPack, limit: usize) -> Result<String> {
+    use std::collections::BTreeSet;
+    use std::fmt::Write;
+
+    let db = crate::adapters::miseledger::default_db_path();
+    let mut terms = BTreeSet::new();
+    terms.insert(task.to_string());
+    for row in &pack.entry_points {
+        terms.insert(row.qualified_name.clone());
+        terms.insert(row.name.clone());
+    }
+
+    let mut md = String::new();
+    let _ = writeln!(md, "\n## Evidence links\n");
+    let mut written = 0usize;
+    for term in terms {
+        if written >= limit {
+            break;
+        }
+        let hits = crate::adapters::miseledger::search_evidence(&db, &term, 3)?;
+        if hits.is_empty() {
+            continue;
+        }
+        let _ = writeln!(md, "### `{term}`\n");
+        for hit in hits {
+            if written >= limit {
+                break;
+            }
+            let _ = writeln!(
+                md,
+                "- [{}] `{}` - {}",
+                hit.source_kind, hit.item_id, hit.snippet
+            );
+            written += 1;
+        }
+        md.push('\n');
+    }
+    if written == 0 {
+        let _ = writeln!(md, "_none_\n");
+    }
+    Ok(md)
 }
 
 #[cfg(test)]

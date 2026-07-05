@@ -12,6 +12,14 @@ use crate::store::SCHEMA_VERSION;
 
 pub fn build_context_pack(conn: &Connection, task: String, limit: usize) -> Result<ContextPack> {
     let entry_points = search_symbols(conn, &task, limit)?;
+    build_context_pack_from_entry_points(conn, task, entry_points)
+}
+
+pub fn build_context_pack_from_entry_points(
+    conn: &Connection,
+    task: String,
+    entry_points: Vec<SearchRow>,
+) -> Result<ContextPack> {
     let mut callers = Vec::new();
     let mut callees = Vec::new();
     let mut files = HashSet::new();

@@ -146,6 +146,10 @@ GraphTrail's Brigade adapter is built in: `graphtrail context "<task>" --markdow
 Two more adapters are gated behind optional cargo features, so the default binary stays free of network and cross-tool dependencies:
 
 ```bash
+# Build one context brief from graph context, Code Search semantic hits, and MiseLedger evidence.
+cargo run --features codesearch,miseledger -- \
+  --db <db> context "rate limiting" --markdown --blend-code-search --evidence
+
 # Blend Code Search embedding hits with graph centrality.
 # Honors CODE_SEARCH_URL and CODE_SEARCH_API_KEY.
 cargo run --features codesearch -- --db <db> blend "rate limiting" --json

@@ -1,0 +1,33 @@
+{
+  "schema": "brigade.station.v1",
+  "name": "graphtrail",
+  "station": "search",
+  "summary": "local code graph context, impact, and optional semantic plus evidence join layer",
+  "tools": [
+    {
+      "name": "graphtrail",
+      "command": "graphtrail",
+      "summary": "read-only code graph CLI and context pack renderer",
+      "install": ["cargo", "install", "--path", "."],
+      "surfaces": [
+        {
+          "kind": "brief-markdown",
+          "command": ["graphtrail", "context", "<task>", "--markdown"],
+          "timeout_seconds": 10,
+          "max_chars": 4000
+        },
+        {
+          "kind": "verify-exit",
+          "command": ["graphtrail", "stats", "--json"],
+          "timeout_seconds": 10
+        },
+        {
+          "kind": "brief-markdown",
+          "command": ["graphtrail", "context", "<task>", "--markdown", "--blend-code-search", "--evidence"],
+          "timeout_seconds": 10,
+          "max_chars": 4000
+        }
+      ]
+    }
+  ]
+}

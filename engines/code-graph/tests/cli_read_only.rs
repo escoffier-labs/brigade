@@ -148,3 +148,17 @@ fn query_commands_do_not_mutate_existing_db_state() {
         );
     }
 }
+
+#[cfg(all(feature = "codesearch", feature = "miseledger"))]
+#[test]
+fn context_help_lists_join_layer_flags() {
+    let output = Command::new(graphtrail())
+        .args(["context", "--help"])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success(), "{output:?}");
+    let help = String::from_utf8(output.stdout).unwrap();
+    assert!(help.contains("--blend-code-search"));
+    assert!(help.contains("--evidence"));
+}
