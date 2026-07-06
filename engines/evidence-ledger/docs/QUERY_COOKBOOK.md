@@ -80,8 +80,9 @@ Run this after importing older adapter files or after importing a target item th
 miseledger compact --json
 miseledger doctor --mcp --json
 miseledger doctor --archive --json
+miseledger prune --policy default --dry-run --json
 miseledger prune imports --before 2026-01-01 --dry-run --json
 miseledger prune scans --missing --dry-run --json
 ```
 
-`compact` runs checkpoint, analyze, vacuum, and optimize against the local SQLite archive. `doctor --mcp` checks the local MCP surface. `doctor --archive` checks SQLite integrity, orphan rows, relation resolution, FTS coverage, and missing scan paths. Prune commands remove old import metadata or missing scan manifests only, not normalized evidence items.
+`compact` runs checkpoint, analyze, vacuum, and optimize against the local SQLite archive. `doctor --mcp` checks the local MCP surface. `doctor --archive` checks SQLite integrity, orphan rows, relation resolution, FTS coverage, and missing scan paths. `prune --policy default --dry-run` reports old operational-noise items that a guarded policy prune would export and delete. `prune imports` and `prune scans` only remove metadata rows.

@@ -2341,15 +2341,20 @@ func cmdCompact(args []string, out, errw io.Writer) int {
 
 func cmdPrune(args []string, out, errw io.Writer) int {
 	if len(args) == 0 {
-		return fatalf(errw, "usage: miseledger prune imports|scans")
+		return fatalf(errw, "usage: miseledger prune imports|scans|policy")
+	}
+	if strings.HasPrefix(args[0], "--") {
+		return cmdPrunePolicy(args, out, errw)
 	}
 	switch args[0] {
 	case "imports":
 		return cmdPruneImports(args[1:], out, errw)
 	case "scans":
 		return cmdPruneScans(args[1:], out, errw)
+	case "policy":
+		return cmdPrunePolicy(args[1:], out, errw)
 	default:
-		return fatalf(errw, "usage: miseledger prune imports|scans")
+		return fatalf(errw, "usage: miseledger prune imports|scans|policy")
 	}
 }
 

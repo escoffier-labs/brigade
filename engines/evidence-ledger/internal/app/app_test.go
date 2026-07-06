@@ -3,9 +3,11 @@ package app
 import (
 	"archive/zip"
 	"bytes"
+	"compress/gzip"
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -1054,6 +1056,115 @@ func TestArchiveOperations(t *testing.T) {
 	}
 }
 
+func TestPrunePolicyDryRunReportsOperationalNoiseOnly(t *testing.T) {
+	withTempHome(t)
+	runOK(t, "init")
+	fixture := filepath.Join(t.TempDir(), "retention.adapter.jsonl")
+	body := strings.Join([]string{
+		retentionRecord("old-tool", "tool_call", "2020-01-02T00:00:00Z", "old tool output", nil),
+		retentionRecord("old-message", "message", "2020-01-02T00:00:00Z", "old message to keep", nil),
+		retentionRecord("fresh-tool", "tool_call", "2030-01-02T00:00:00Z", "fresh tool output", nil),
+	}, "")
+	if err := os.WriteFile(fixture, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runOK(t, "import", "adapter", fixture, "--json")
+
+	dry := runJSON(t, "prune", "policy", "--json")
+	if dry["dry_run"] != true || dry["matched_items"].(float64) != 1 {
+		t.Fatalf("dry run = %v, want one matched item and dry_run true", dry)
+	}
+	flagForm := runJSON(t, "prune", "--policy", "default", "--json")
+	if flagForm["dry_run"] != true || flagForm["matched_items"].(float64) != 1 {
+		t.Fatalf("flag-form dry run = %v, want one matched item and dry_run true", flagForm)
+	}
+	tiers := dry["tiers"].([]any)
+	if len(tiers) != 1 {
+		t.Fatalf("tiers = %v, want one matched tier", tiers)
+	}
+	tier := tiers[0].(map[string]any)
+	if tier["tier"] != "default-operational-noise" || tier["item_kind"] != "tool_call" {
+		t.Fatalf("tier = %v, want old tool_call operational noise", tier)
+	}
+	status := runJSON(t, "status", "--json")
+	if status["items"].(float64) != 3 {
+		t.Fatalf("dry run deleted items: %v", status)
+	}
+}
+
+func TestPrunePolicyApplyExportsDeletesAndTombstones(t *testing.T) {
+	withTempHome(t)
+	runOK(t, "init")
+	fixture := filepath.Join(t.TempDir(), "retention.adapter.jsonl")
+	body := strings.Join([]string{
+		retentionRecord("old-tool", "tool_call", "2020-01-02T00:00:00Z", "old tool output", nil),
+		retentionRecord("old-message", "message", "2020-01-02T00:00:00Z", "old message to keep", []map[string]string{{"target_external_id": "old-tool", "type": "mentions"}}),
+	}, "")
+	if err := os.WriteFile(fixture, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runOK(t, "import", "adapter", fixture, "--json")
+	runOK(t, "relations", "backfill", "--json")
+
+	exportPath := filepath.Join(t.TempDir(), "retention-prune.jsonl.gz")
+	out := runJSON(t, "prune", "policy", "--apply", "--export", exportPath, "--json")
+	if out["dry_run"] != false || out["deleted_items"].(float64) != 1 || out["exported_items"].(float64) != 1 {
+		t.Fatalf("apply result = %v, want one exported and deleted item", out)
+	}
+	if out["tombstoned_relations"].(float64) != 1 {
+		t.Fatalf("tombstoned_relations = %v, want 1", out["tombstoned_relations"])
+	}
+	lines := readGzipLines(t, exportPath)
+	if len(lines) != 1 || !strings.Contains(lines[0], `"external_id":"old-tool"`) {
+		t.Fatalf("export lines = %v, want old-tool JSONL only", lines)
+	}
+
+	searchDeleted := runJSON(t, "search", "old tool output", "--json")
+	if len(searchDeleted["results"].([]any)) != 0 {
+		t.Fatalf("deleted tool_call still searchable: %v", searchDeleted)
+	}
+	searchKept := runJSON(t, "search", "old message to keep", "--json")
+	if len(searchKept["results"].([]any)) != 1 {
+		t.Fatalf("kept message missing after prune: %v", searchKept)
+	}
+	db, _, err := openMigrated()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var target sql.NullString
+	if err := db.QueryRow(`select target_item_id from relations where relation_type = 'mentions'`).Scan(&target); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if target.Valid {
+		_ = db.Close()
+		t.Fatalf("relation target_item_id = %q after prune, want tombstone null", target.String)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	restored := runJSON(t, "import", "adapter", exportPath, "--json")
+	if restored["inserted_items"].(float64) != 1 {
+		t.Fatalf("restore from prune export = %v, want one restored item", restored)
+	}
+	restoredSearch := runJSON(t, "search", "old tool output", "--json")
+	if len(restoredSearch["results"].([]any)) != 1 {
+		t.Fatalf("restored tool_call missing from search: %v", restoredSearch)
+	}
+	db, _, err = openMigrated()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := db.QueryRow(`select target_item_id from relations where relation_type = 'mentions'`).Scan(&target); err != nil {
+		t.Fatal(err)
+	}
+	if !target.Valid {
+		t.Fatal("relation target_item_id stayed null after restore, want rehydrated target")
+	}
+}
+
 func TestImportDiscoveredAndWatchOnce(t *testing.T) {
 	withTempHome(t)
 	runOK(t, "init")
@@ -1235,6 +1346,69 @@ func mustWrite(t *testing.T, path, body string) {
 	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func retentionRecord(externalID, kind, createdAt, text string, relations []map[string]string) string {
+	rec := map[string]any{
+		"schema": "miseledger.adapter.v1",
+		"source": map[string]any{"kind": "retention", "name": "Retention Fixture"},
+		"collection": map[string]any{
+			"external_id": "retention:collection",
+			"kind":        "agent_session",
+			"name":        "retention",
+		},
+		"item": map[string]any{
+			"external_id": externalID,
+			"kind":        kind,
+			"created_at":  createdAt,
+			"text":        text,
+			"tags":        []string{"retention"},
+		},
+		"actor": map[string]any{
+			"external_id": "retention:actor",
+			"type":        "agent",
+			"name":        "fixture",
+		},
+		"artifacts": []map[string]any{{
+			"external_id": "artifact:" + externalID,
+			"kind":        "text",
+			"text":        "artifact text for " + externalID,
+		}},
+		"links":     []any{},
+		"relations": relations,
+		"raw": map[string]any{
+			"format":  "json",
+			"path":    "retention.jsonl",
+			"ordinal": 1,
+		},
+	}
+	b, _ := json.Marshal(rec)
+	return string(b) + "\n"
+}
+
+func readGzipLines(t *testing.T, path string) []string {
+	t.Helper()
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	gz, err := gzip.NewReader(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer gz.Close()
+	b, err := io.ReadAll(gz)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := []string{}
+	for _, line := range strings.Split(strings.TrimSpace(string(b)), "\n") {
+		if strings.TrimSpace(line) != "" {
+			lines = append(lines, line)
+		}
+	}
+	return lines
 }
 
 func withTempHome(t *testing.T) {

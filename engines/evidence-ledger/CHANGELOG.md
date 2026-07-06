@@ -8,6 +8,13 @@ Releases before this changelog was started are on the [releases page](https://gi
 
 ## [Unreleased]
 
+### Added
+
+- `prune policy` and `prune --policy` now provide item-level retention for large
+  archives. The default policy dry-runs old operational-noise items first, and
+  destructive runs require `--apply --export <path>` so matched records are
+  written to compressed adapter JSONL before deletion (#12).
+
 ## [0.3.1] - 2026-07-02
 
 ### Fixed

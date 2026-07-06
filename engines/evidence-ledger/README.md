@@ -414,12 +414,13 @@ Archive maintenance commands are local-only:
 miseledger stats --json
 miseledger relations backfill --json
 miseledger compact --json
+miseledger prune --policy default --dry-run --json
 miseledger prune imports --before 2026-01-01 --dry-run --json
 miseledger prune scans --missing --dry-run --json
 miseledger doctor --archive --json
 ```
 
-`stats` summarizes archive contents by source, item kind, actor type, collection kind, and recent imports. `relations backfill` resolves stored `target_external_id` values after later imports add the target item. `compact` checkpoints, analyzes, vacuums, and optimizes the SQLite archive. `prune imports` removes old import metadata and warning rows only. `prune scans --missing` removes scan manifest rows for files no longer present. Neither prune command deletes normalized evidence items. Item-level retention is tracked in [docs/RETENTION_POLICY.md](docs/RETENTION_POLICY.md).
+`stats` summarizes archive contents by source, item kind, actor type, collection kind, and recent imports. `relations backfill` resolves stored `target_external_id` values after later imports add the target item. `compact` checkpoints, analyzes, vacuums, and optimizes the SQLite archive. `prune --policy default --dry-run` reports old operational-noise items eligible for retention pruning. Destructive policy pruning requires `--apply --export <path>` and writes compressed adapter JSONL before deleting item rows. `prune imports` removes old import metadata and warning rows only. `prune scans --missing` removes scan manifest rows for files no longer present. See [docs/RETENTION_POLICY.md](docs/RETENTION_POLICY.md) for policy file shape and deletion semantics.
 
 `doctor --archive` checks SQLite quick-check status, foreign keys, orphan rows, unresolved relations, FTS coverage, and missing scan paths. It reports counts and status only, not transcript content.
 

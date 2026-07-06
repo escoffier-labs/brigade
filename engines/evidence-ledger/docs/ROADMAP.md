@@ -22,7 +22,6 @@ These are the next hardening steps before recommending MiseLedger broadly:
 - Keep release install smoke checks passing for MiseLedger.
 - Add more real redacted fixture shapes for each supported harness.
 - Add clearer diagnostics for missing external tools in wrapper imports.
-- Define item-level retention policies for long-running local stores. Current prune commands only remove old import metadata and missing scan manifests; see `docs/RETENTION_POLICY.md` for the proposed safety rails and default tier shape.
 
 ## Later
 

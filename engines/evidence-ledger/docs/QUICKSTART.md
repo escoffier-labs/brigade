@@ -137,6 +137,7 @@ miseledger stats --json
 miseledger relations backfill --json
 miseledger compact --json
 miseledger doctor --archive --json
+miseledger prune --policy default --dry-run --json
 miseledger prune imports --before 2026-01-01 --dry-run --json
 miseledger prune scans --missing --dry-run --json
 ```

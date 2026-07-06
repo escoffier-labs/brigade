@@ -1,38 +1,72 @@
-# Retention Policy Design
+# Retention Policy
 
-MiseLedger currently keeps normalized evidence items indefinitely. The existing `prune` commands only remove old import metadata and missing scan manifests; they do not delete items, events, artifacts, relations, or FTS rows.
+MiseLedger can prune item-level evidence through an explicit policy pass:
 
-This is intentional until item-level retention has three safety rails:
+```bash
+miseledger prune --policy default --dry-run --json
+miseledger prune --policy default --apply --export exports/pruned-2026-07-06.jsonl.gz --json
+miseledger prune policy --policy retention.json --dry-run --json
+```
 
-1. A dry-run report that names exactly which tiers match, how many rows would be affected, and which source kinds and item kinds dominate the total.
-2. A cold export step that writes matched rows to compressed adapter JSONL before deletion, so a retained slice can be re-imported later.
-3. Relation and scan-manifest rules that avoid accidental resurrection or dangling evidence.
+Dry run is the default. A destructive run must include both `--apply` and `--export <path>`. Matched records are written to compressed adapter JSONL before any rows are deleted, so the slice can be restored later with `miseledger import adapter <file>`.
 
-## Default Tier Shape
+## Default Policy
 
-A future `prune --policy <file|default>` should start with conservative defaults:
+The default policy targets old operational noise:
 
-| Tier | Match | Default Action |
+| Tier | Match | Action |
 | --- | --- | --- |
-| Fresh evidence | Any item younger than 90 days | Keep |
-| Durable decisions | Messages, summaries, decisions, notes, issues, pull requests | Keep longer than operational noise |
-| Operational noise | Tool calls, command output, progress events, status events | Eligible after the fresh window |
-| Large raw artifacts | Artifact text or payloads above a configured byte threshold | Eligible before the parent item |
+| `default-operational-noise` | `tool_call`, `command`, `progress`, `status`, `event`, and `queue-operation` items older than 90 days | Export, then delete |
 
-Policy files should be explicit about source kind, item kind, age, and action. No policy should infer that a kind is low-value just because it is frequent.
+Messages, decisions, notes, issues, and pull requests are not matched by the default policy.
 
-## Required Delete Semantics
+## Custom Policy
 
-Item deletion should happen in one transaction per policy application after the export succeeds. The operation should:
+Custom policies are JSON files:
 
-- delete or tombstone relations that reference pruned items, based on policy;
-- remove FTS rows for deleted items;
-- keep source scan manifests by default, so re-runs do not re-import files that were intentionally pruned;
-- run checkpoint and FTS optimization after bulk deletion;
-- report the export path, row counts, and reclaimed bytes.
+```json
+{
+  "name": "local-retention",
+  "tiers": [
+    {
+      "name": "old-command-output",
+      "source_kinds": ["codex", "claude"],
+      "item_kinds": ["command", "tool_call"],
+      "older_than_days": 120,
+      "action": "delete"
+    }
+  ]
+}
+```
 
-## Open Decisions
+Fields:
 
-- Whether relation rows should be tombstoned by default or dropped with deleted items.
-- Whether policy should support summarization as a first-class action, or whether summarization belongs in a separate command that writes new adapter records before prune runs.
-- Whether default policy should ever delete message-like evidence, or only operational noise.
+- `name`: policy name reported in JSON output.
+- `tiers[].name`: tier name reported in JSON output.
+- `tiers[].source_kinds`: optional list of source kinds to match.
+- `tiers[].item_kinds`: required list of item kinds to match.
+- `tiers[].older_than_days`: required positive age threshold.
+- `tiers[].action`: must be `delete`.
+
+## Delete Semantics
+
+Policy pruning deletes only matched items and dependent rows. It does not remove sources, collections, actors, imports, import warnings, or source scan manifests.
+
+For each matched item, MiseLedger:
+
+- exports the original adapter JSON line to gzip-compressed JSONL;
+- deletes item tags, item metadata, events, artifacts, and FTS rows;
+- deletes relations where the pruned item is the source;
+- tombstones relations where the pruned item is the target by setting `target_item_id` to null while preserving `target_external_id`;
+- deletes the item row;
+- optimizes FTS and checkpoints the WAL.
+
+Keeping scan manifests prevents routine re-crawls from resurrecting intentionally pruned source files.
+
+## Restoring A Slice
+
+```bash
+miseledger import adapter exports/pruned-2026-07-06.jsonl.gz --json
+```
+
+Restored rows use the same adapter identity rules as any other import. If the original source files are still present, keep the scan manifests intact so normal crawls do not re-add pruned rows by accident.

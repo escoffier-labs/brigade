@@ -38,6 +38,7 @@ fi
 "$MISELEDGER" doctor --archive --json >"$TMP_WORK/doctor-archive.json"
 "$MISELEDGER" prune imports --before 2000-01-01 --dry-run --json >"$TMP_WORK/prune-imports.json"
 "$MISELEDGER" prune scans --missing --dry-run --json >"$TMP_WORK/prune-scans.json"
+"$MISELEDGER" prune --policy default --dry-run --json >"$TMP_WORK/prune-policy.json"
 "$MISELEDGER" search "Hermes snapshots" --source hermes --json >"$TMP_WORK/search-hermes.json"
 "$SESSIONFIND" search "exec_command" --source codex --json >"$TMP_WORK/sessionfind-codex.json"
 "$MISELEDGER" evidence "Hermes snapshots" --source hermes --json >"$TMP_WORK/evidence-hermes.json"
@@ -77,6 +78,7 @@ assert doctor_archive["ok"] is True, doctor_archive
 
 assert load("prune-imports.json")["dry_run"] is True
 assert load("prune-scans.json")["dry_run"] is True
+assert load("prune-policy.json")["dry_run"] is True
 
 search = load("search-hermes.json")
 assert len(search["results"]) >= 1, search

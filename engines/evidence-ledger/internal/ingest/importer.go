@@ -2,6 +2,7 @@ package ingest
 
 import (
 	"bufio"
+	"compress/gzip"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
@@ -65,7 +66,17 @@ func ImportAdapterFileProgress(db *sql.DB, path, sourceOverride string, progress
 		return AdapterResult{}, err
 	}
 	defer f.Close()
-	return ImportAdapterReaderProgress(db, f, abs, sourceOverride, progress)
+	var r io.Reader = f
+	var gz *gzip.Reader
+	if strings.HasSuffix(strings.ToLower(abs), ".gz") {
+		gz, err = gzip.NewReader(f)
+		if err != nil {
+			return AdapterResult{}, err
+		}
+		defer gz.Close()
+		r = gz
+	}
+	return ImportAdapterReaderProgress(db, r, abs, sourceOverride, progress)
 }
 
 // importBatchSize is how many records are committed per transaction. Batching
