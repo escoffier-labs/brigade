@@ -105,11 +105,13 @@ External crawler binaries can emit adapter JSONL directly or run through MiseLed
 
 ```bash
 miseledger crawl discord --limit 100 --json
+miseledger crawl github --repo escoffier-labs/miseledger --json
 miseledger crawl slack --workspace T123 --json
 miseledger crawl granola --json
 miseledger crawl notion --json
 miseledger crawl gmail --account me@example.com --query "subject:miseledger" --json
-miseledger import adapter discrawl.adapter.jsonl --source discrawl --json
+miseledger crawl telegram --chat "MiseLedger" --json
+miseledger import adapter discrawl.adapter.jsonl --json
 ```
 
 The archived StationTrail and SourceHarvest repositories previously emitted this same adapter contract. Already-generated adapter JSONL files from those tools remain importable with `miseledger import adapter`.

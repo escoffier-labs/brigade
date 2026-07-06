@@ -45,6 +45,37 @@ func TestImportAdapterReaderIdempotent(t *testing.T) {
 	}
 }
 
+func TestImportAdapterReaderWarnsOnSourceOverrideMismatch(t *testing.T) {
+	db, err := archive.Open(t.TempDir() + "/miseledger.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := archive.Migrate(db); err != nil {
+		t.Fatal(err)
+	}
+	result, err := ImportAdapterReader(db, strings.NewReader(adapterRecord("discord", "discord:item:1", "source override mismatch", "discord.jsonl", 1)), "discord://fixture", "discrawl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.SourceKind != "discrawl" {
+		t.Fatalf("source kind = %q, want discrawl", result.SourceKind)
+	}
+	if len(result.Warnings) != 1 {
+		t.Fatalf("warnings = %#v, want one source override mismatch warning", result.Warnings)
+	}
+	if warning := result.Warnings[0]; !strings.Contains(warning, `--source "discrawl"`) || !strings.Contains(warning, `source.kind "discord"`) {
+		t.Fatalf("warning %q does not name both source kinds", warning)
+	}
+	var sourceKind string
+	if err := db.QueryRow(`select sources.kind from items join sources on sources.id = items.source_id limit 1`).Scan(&sourceKind); err != nil {
+		t.Fatal(err)
+	}
+	if sourceKind != "discrawl" {
+		t.Fatalf("stored source_kind = %q, want discrawl", sourceKind)
+	}
+}
+
 func TestReimportSkipsWritesForKnownItems(t *testing.T) {
 	// Re-importing already-known items must not re-run the sources/collections
 	// upserts (which bump updated_at). A partial import that is retried should

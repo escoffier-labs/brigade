@@ -389,6 +389,52 @@ printf '{"source":"%s","path":"%s","records":1,"files":1,"warnings":[],"generate
 	}
 }
 
+func TestCrawlExternalExporterWrappersIncludeGithubAndTelegram(t *testing.T) {
+	withTempHome(t)
+	runOK(t, "init")
+	binDir := t.TempDir()
+	for _, tc := range []struct {
+		binary string
+		source string
+		text   string
+	}{
+		{"gitcrawl", "github", "gitcrawl wrapper fixture"},
+		{"telecrawl", "telegram", "telecrawl wrapper fixture"},
+	} {
+		script := filepath.Join(binDir, tc.binary)
+		body := fmt.Sprintf(`#!/bin/sh
+if [ "$1" != "export" ] || [ "$2" != "adapter" ] || [ "$3" != "--out" ] || [ "$4" != "-" ]; then
+  echo "bad adapter export args: $*" >&2
+  exit 1
+fi
+printf '{"schema":"miseledger.adapter.v1","source":{"kind":%q,"name":"Fixture"},"collection":{"external_id":%q,"kind":"messages","name":"Fixture"},"item":{"external_id":%q,"kind":"message","created_at":"2026-06-03T00:00:00Z","text":%q,"tags":["wrapper"]},"actor":{"external_id":%q,"type":"system","name":"fixture"},"artifacts":[],"links":[],"relations":[],"raw":{"format":"json","path":%q,"ordinal":1}}\n'
+`, tc.source, tc.source+":collection", tc.source+":item:1", tc.text, tc.source+":actor", tc.binary+".jsonl")
+		if err := os.WriteFile(script, []byte(body), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	oldPath := os.Getenv("PATH")
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+oldPath)
+
+	for _, tc := range []struct {
+		command string
+		source  string
+		query   string
+	}{
+		{"github", "github", "gitcrawl wrapper"},
+		{"telegram", "telegram", "telecrawl wrapper"},
+	} {
+		out := runJSON(t, "crawl", tc.command, "--json")
+		if out["source_kind"] != tc.source || out["inserted_items"].(float64) != 1 {
+			t.Fatalf("crawl %s = %v, want one %s item", tc.command, out, tc.source)
+		}
+		search := runJSON(t, "search", tc.query, "--source", tc.source, "--json")
+		if len(search["results"].([]any)) != 1 {
+			t.Fatalf("crawl %s search failed: %v", tc.command, search)
+		}
+	}
+}
+
 func TestCrawlProviderExports(t *testing.T) {
 	withTempHome(t)
 	runOK(t, "init")

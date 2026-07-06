@@ -104,7 +104,7 @@ miseledger crawl jsonl export.jsonl --source notes --collection notes:local --js
 
 Re-running imports is idempotent. Growing files can be re-imported safely without duplicating existing items.
 
-Leave `--source` off adapter imports when the file already carries a source kind (crawler exports do). Deduplication keys on the source kind, so overriding it forks a second copy of every record: a file imported with `--source discrawl` will never dedupe against the same messages ingested by `crawl discord`, which records them under the kind `discord`. If you must override, match the wrapper's kind (`discord`, `slack`, `granola`, `notion`, `gmail`), never the binary name.
+Leave `--source` off adapter imports when the file already carries a source kind (crawler exports do). Deduplication keys on the source kind, so overriding it forks a second copy of every record: a file imported with `--source discrawl` will never dedupe against the same messages ingested by `crawl discord`, which records them under the kind `discord`. If you must override, match the wrapper's kind (`discord`, `github`, `slack`, `granola`, `notion`, `gmail`, `telegram`), never the binary name.
 
 ## Already Running OpenClaw And The Crawlers
 
@@ -124,7 +124,7 @@ Rules that keep re-ingestion clean when the same records can arrive by more than
 2. Do not rename kinds with `--source` (see above). This is the one way to create duplicates from a single crawler.
 3. Pick one redaction posture per source. The content hash is part of the item identity, so importing the same session once raw and once with `--redact paths,secrets` stores two near-identical items. Redact everywhere or nowhere for a given source.
 4. Wiring Brigade next to MiseLedger adds no dedupe risk: Brigade's memory cards and handoffs are a separate store, and its evidence bundles only read from the archive.
-5. `crawl discord|slack|granola|notion|gmail` needs a crawler build with the `export adapter` subcommand. `telecrawl` and `gitcrawl` do not have adapter export yet; import their data via generic `crawl json` with an explicit `--source`, and keep that source name stable.
+5. `crawl discord|github|slack|granola|notion|gmail|telegram` needs a crawler build with the `export adapter` subcommand.
 
 ## Inspect Archive State
 

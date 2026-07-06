@@ -51,7 +51,7 @@ MiseLedger is the normalized evidence layer above those systems, not a replaceme
 The same loop on the bundled fixtures, real output:
 
 ```console
-$ miseledger import adapter testdata/adapters/discrawl.fixture.jsonl --source discrawl
+$ miseledger import adapter testdata/adapters/discrawl.fixture.jsonl
 imported=2 warnings=0 already_known=false source=discrawl
 
 $ miseledger search "adapter contract"
@@ -235,7 +235,7 @@ Directories and files created by the CLI use private permissions.
 
 ```bash
 miseledger init
-miseledger import adapter testdata/adapters/discrawl.fixture.jsonl --source discrawl
+miseledger import adapter testdata/adapters/discrawl.fixture.jsonl
 miseledger import adapter testdata/adapters/agent-session.fixture.jsonl --source codex
 miseledger adapter codex testdata/harnesses/codex-session.fixture.jsonl --out -
 miseledger adapter hermes testdata/harnesses/session_hermes-demo.fixture.json --out -
@@ -379,14 +379,18 @@ External crawler binaries can be called through domain wrappers when installed o
 
 ```bash
 miseledger crawl discord --limit 100 --json
+miseledger crawl github --repo escoffier-labs/miseledger --json
 miseledger crawl slack --workspace T123 --json
 miseledger crawl granola --json
 miseledger crawl notion --json
 miseledger crawl gmail --account me@example.com --query "subject:miseledger" --json
-miseledger import adapter discrawl.adapter.jsonl --source discrawl --json
+miseledger crawl telegram --chat "MiseLedger" --json
+miseledger import adapter discrawl.adapter.jsonl --json
 ```
 
 Archived StationTrail and SourceHarvest exports are still ordinary `miseledger.adapter.v1` JSONL, so already-generated files can be imported with `miseledger import adapter`.
+
+For adapter files that already carry a source kind, leave `--source` off. If you must override it, use the wrapper's canonical kind: `discord`, `github`, `slack`, `granola`, `notion`, `gmail`, or `telegram`. MiseLedger warns when the override disagrees with embedded record kinds because that creates a separate dedupe namespace.
 
 ## Scan Manifests
 
@@ -415,7 +419,7 @@ miseledger prune scans --missing --dry-run --json
 miseledger doctor --archive --json
 ```
 
-`stats` summarizes archive contents by source, item kind, actor type, collection kind, and recent imports. `relations backfill` resolves stored `target_external_id` values after later imports add the target item. `compact` checkpoints, analyzes, vacuums, and optimizes the SQLite archive. `prune imports` removes old import metadata and warning rows only. `prune scans --missing` removes scan manifest rows for files no longer present. Neither prune command deletes normalized evidence items.
+`stats` summarizes archive contents by source, item kind, actor type, collection kind, and recent imports. `relations backfill` resolves stored `target_external_id` values after later imports add the target item. `compact` checkpoints, analyzes, vacuums, and optimizes the SQLite archive. `prune imports` removes old import metadata and warning rows only. `prune scans --missing` removes scan manifest rows for files no longer present. Neither prune command deletes normalized evidence items. Item-level retention is tracked in [docs/RETENTION_POLICY.md](docs/RETENTION_POLICY.md).
 
 `doctor --archive` checks SQLite quick-check status, foreign keys, orphan rows, unresolved relations, FTS coverage, and missing scan paths. It reports counts and status only, not transcript content.
 

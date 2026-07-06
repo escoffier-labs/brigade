@@ -105,6 +105,7 @@ func importAdapterReaderProgress(db *sql.DB, r io.Reader, sourcePath, sourceOver
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 0, 64*1024), 10*1024*1024)
 	ordinal := int64(0)
+	warnedOverrideKinds := map[string]bool{}
 
 	tx, err := db.Begin()
 	if err != nil {
@@ -165,6 +166,11 @@ func importAdapterReaderProgress(db *sql.DB, r io.Reader, sourcePath, sourceOver
 		if err != nil {
 			result.Warnings = append(result.Warnings, fmt.Sprintf("line %d: %s", ordinal, err))
 			continue
+		}
+		embeddedKind := rec.Source.Kind
+		if sourceOverride != "" && embeddedKind != "" && embeddedKind != sourceOverride && !warnedOverrideKinds[embeddedKind] {
+			result.Warnings = append(result.Warnings, fmt.Sprintf("line %d: --source %q overrides embedded source.kind %q; records will be imported as %q", ordinal, sourceOverride, embeddedKind, sourceOverride))
+			warnedOverrideKinds[embeddedKind] = true
 		}
 		if sourceOverride != "" {
 			rec.Source.Kind = sourceOverride

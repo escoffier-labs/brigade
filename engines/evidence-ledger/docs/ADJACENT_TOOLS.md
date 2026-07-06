@@ -45,7 +45,9 @@ Common paths:
 miseledger crawl sessions --json
 miseledger crawl docs ./notes --json
 miseledger crawl gitlog . --json
-miseledger import adapter discrawl.adapter.jsonl --source discrawl --json
+miseledger crawl github --repo escoffier-labs/miseledger --json
+miseledger crawl telegram --chat "MiseLedger" --json
+miseledger import adapter discrawl.adapter.jsonl --json
 ```
 
 The minimum proof remains:
