@@ -8,12 +8,26 @@ Releases before this changelog was started are on the [releases page](https://gi
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-07-06
+
 ### Added
 
+- `fork` and `diff` let local archives branch into standalone SQLite copies and
+  compare added, changed, and removed evidence across archive states (#14).
+- `crawl github` and `crawl telegram` wrap `gitcrawl` and `telecrawl` adapter
+  exports, so those crawler outputs can stream straight into MiseLedger (#13).
 - `prune policy` and `prune --policy` now provide item-level retention for large
   archives. The default policy dry-runs old operational-noise items first, and
   destructive runs require `--apply --export <path>` so matched records are
   written to compressed adapter JSONL before deletion (#12).
+- Adapter imports now read `.jsonl.gz` files, including retention prune exports.
+
+### Changed
+
+- `import adapter --source` keeps the override behavior but now warns when the
+  override disagrees with the embedded `source.kind` (#13).
+- Quickstart and asset docs now cover existing OpenClaw and crawler installs
+  plus the StationTrail and SourceHarvest fold-in path.
 
 ## [0.3.1] - 2026-07-02
 
