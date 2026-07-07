@@ -55,7 +55,7 @@ fn notifications_get_no_response() {
 }
 
 #[test]
-fn tools_list_exposes_the_eight_query_tools_with_location_args() {
+fn tools_list_exposes_the_query_tools_with_location_args() {
     let (_dir, db) = ro_db();
     let resp = handle_request(&db, &json!({"jsonrpc":"2.0","id":2,"method":"tools/list"})).unwrap();
     let tools = resp["result"]["tools"].as_array().unwrap();
@@ -69,15 +69,72 @@ fn tools_list_exposes_the_eight_query_tools_with_location_args() {
         "stats",
         "file_neighbors",
         "repos",
+        "diff",
     ] {
         assert!(names.contains(&expected), "missing tool: {expected}");
     }
-    // Every tool advertises the optional repo/db selector.
+    // Every single-db tool advertises the optional repo/db selector. `diff` is the
+    // exception: it takes two explicit db paths (`before`/`after`) instead.
     for tool in tools {
         let props = &tool["inputSchema"]["properties"];
+        if tool["name"] == "diff" {
+            assert!(props.get("before").is_some(), "diff missing before");
+            assert!(props.get("after").is_some(), "diff missing after");
+            continue;
+        }
         assert!(props.get("repo").is_some(), "{} missing repo", tool["name"]);
         assert!(props.get("db").is_some(), "{} missing db", tool["name"]);
     }
+}
+
+#[test]
+fn tools_call_diff_reports_added_symbols_and_edges() {
+    // Two separate indexed DBs (before/after); `after` adds a function and a call.
+    let before = tempfile::tempdir().unwrap();
+    fs::write(before.path().join("m.py"), "def foo():\n    return 1\n").unwrap();
+    let before_db = before.path().join("graphtrail.db");
+    let conn = open_db(&before_db).unwrap();
+    init_schema(&conn).unwrap();
+    sync_repo(&conn, before.path()).unwrap();
+
+    let after = tempfile::tempdir().unwrap();
+    fs::write(
+        after.path().join("m.py"),
+        "def foo():\n    return 1\n\ndef bar():\n    foo()\n",
+    )
+    .unwrap();
+    let after_db = after.path().join("graphtrail.db");
+    let conn = open_db(&after_db).unwrap();
+    init_schema(&conn).unwrap();
+    sync_repo(&conn, after.path()).unwrap();
+
+    let resp = handle_request(
+        &before_db,
+        &json!({"jsonrpc":"2.0","id":50,"method":"tools/call",
+                "params":{"name":"diff","arguments":{
+                    "before": before_db.to_str().unwrap(),
+                    "after": after_db.to_str().unwrap()}}}),
+    )
+    .unwrap();
+
+    assert_eq!(resp["result"]["isError"], false);
+    let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+    let diff: serde_json::Value = serde_json::from_str(text).unwrap();
+    assert_eq!(diff["summary"]["added_nodes"], 1);
+    assert_eq!(diff["summary"]["added_edges"], 1);
+    assert_eq!(diff["added_nodes"][0]["qualified_name"], "bar");
+}
+
+#[test]
+fn tools_call_diff_missing_after_returns_invalid_params() {
+    let (_dir, db) = ro_db();
+    let resp = handle_request(
+        &db,
+        &json!({"jsonrpc":"2.0","id":51,"method":"tools/call",
+                "params":{"name":"diff","arguments":{"before": db.to_str().unwrap()}}}),
+    )
+    .unwrap();
+    assert_eq!(resp["error"]["code"], -32602);
 }
 
 #[test]

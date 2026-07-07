@@ -19,8 +19,8 @@ use serde_json::{Value, json};
 
 use crate::model::Direction;
 use crate::query::{
-    DEFAULT_IMPACT_DEPTH, build_context_pack, file_neighbors, graph_edges_with_depth, impact_edges,
-    normalize_depth, render_markdown, search_symbols_with_path, stats,
+    DEFAULT_IMPACT_DEPTH, build_context_pack, diff_graphs, file_neighbors, graph_edges_with_depth,
+    impact_edges, normalize_depth, render_markdown, search_symbols_with_path, stats,
 };
 use crate::store::open_read_only;
 
@@ -135,6 +135,13 @@ fn call_tool(default_db: &Path, name: &str, args: &Value) -> Result<String> {
         let db = resolve_db(default_db, args);
         return to_pretty(&repos_response(&db, args)?);
     }
+    // `diff` needs two databases, so it opens its own connections before the
+    // single shared-connection open below.
+    if name == "diff" {
+        let before = open_read_only(Path::new(&str_arg(args, "before")))?;
+        let after = open_read_only(Path::new(&str_arg(args, "after")))?;
+        return to_pretty(&diff_graphs(&before, &after)?);
+    }
 
     let db = resolve_db(default_db, args);
     let conn = open_read_only(&db)?;
@@ -201,6 +208,10 @@ fn validate_tool_args(name: &str, args: &Value) -> std::result::Result<(), Strin
         }
         "file_neighbors" => {
             require_string(args, "path")?;
+        }
+        "diff" => {
+            require_string(args, "before")?;
+            require_string(args, "after")?;
         }
         "repos" => {
             require_roots(args)?;
@@ -275,6 +286,18 @@ fn tool_defs() -> Value {
                 json!({ "path": { "type": "string", "description": "Indexed file path to inspect." } }),
                 json!(["path"])
             )
+        },
+        {
+            "name": "diff",
+            "description": "Structural diff of two indexed graph DBs (before -> after): added/removed/changed symbols and added/removed call edges. Build the two DBs with `graphtrail --db <path> sync <root>`.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "before": { "type": "string", "description": "Path to the 'before' graphtrail.db." },
+                    "after": { "type": "string", "description": "Path to the 'after' graphtrail.db." }
+                },
+                "required": ["before", "after"]
+            }
         },
         {
             "name": "repos",
