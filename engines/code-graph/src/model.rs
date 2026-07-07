@@ -146,6 +146,53 @@ pub struct ContextPack {
     pub related_files: Vec<String>,
 }
 
+/// A single node (symbol) in a graph diff. Compact by design so a diff stays
+/// small enough to attach to a Brigade receipt.
+#[derive(Debug, Clone, Serialize)]
+pub struct DiffNode {
+    pub kind: String,
+    pub qualified_name: String,
+    pub file_path: String,
+    pub start_line: usize,
+    pub signature: String,
+}
+
+/// A single call edge in a graph diff, canonicalized to symbol names + file so
+/// it is stable across re-index (symbol ids bake in line numbers).
+#[derive(Debug, Clone, Serialize)]
+pub struct DiffEdge {
+    pub source: String,
+    pub source_file: String,
+    pub target: String,
+    pub target_file: String,
+    pub line: usize,
+}
+
+/// Counts for a quick receipt-friendly summary line.
+#[derive(Debug, Serialize)]
+pub struct GraphDiffCounts {
+    pub added_nodes: usize,
+    pub removed_nodes: usize,
+    pub changed_nodes: usize,
+    pub added_edges: usize,
+    pub removed_edges: usize,
+}
+
+/// Structural diff of two code graphs (before -> after). Nodes are keyed by
+/// `(file_path, qualified_name, kind)` so a symbol that only moves lines is not
+/// a spurious remove+add; a node is `changed` when that key survives but its
+/// signature or line-span differs. Edges are the `calls` set, diffed both ways.
+#[derive(Debug, Serialize)]
+pub struct GraphDiff {
+    pub schema_version: u32,
+    pub summary: GraphDiffCounts,
+    pub added_nodes: Vec<DiffNode>,
+    pub removed_nodes: Vec<DiffNode>,
+    pub changed_nodes: Vec<DiffNode>,
+    pub added_edges: Vec<DiffEdge>,
+    pub removed_edges: Vec<DiffEdge>,
+}
+
 #[derive(Clone, Copy)]
 pub enum Direction {
     Incoming,

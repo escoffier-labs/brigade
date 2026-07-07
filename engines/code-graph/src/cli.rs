@@ -5,14 +5,18 @@ use std::path::PathBuf;
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 
-use crate::model::{ContextPack, Direction, EdgeRow, SearchRow};
+use crate::model::{ContextPack, Direction, EdgeRow, GraphDiff, SearchRow};
+#[cfg(feature = "codesearch")]
+use crate::query::build_context_pack_from_entry_points;
 use crate::query::{
-    DEFAULT_IMPACT_DEPTH, build_context_pack, build_context_pack_from_entry_points,
+    DEFAULT_IMPACT_DEPTH, build_context_pack,
     context::{edge_location, symbol_location},
-    file_neighbors, graph_edges_with_depth, impact_edges, normalize_depth, render_markdown,
-    search_symbols_with_path, stats,
+    diff_graphs, file_neighbors, graph_edges_with_depth, impact_edges, normalize_depth,
+    render_markdown, search_symbols_with_path, stats,
 };
-use crate::store::{db_path, init_schema, open_db, open_default_read_only, sync_repo_force};
+use crate::store::{
+    db_path, init_schema, open_db, open_default_read_only, open_read_only, sync_repo_force,
+};
 
 #[derive(Parser)]
 #[command(version, about)]
@@ -97,6 +101,16 @@ enum Command {
         evidence: bool,
     },
     Stats {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Diff two indexed graph DBs (before -> after) into added/removed/changed
+    /// nodes and edges. Produce the DBs with `graphtrail --db X sync <root>`.
+    Diff {
+        #[arg(long, value_name = "PATH")]
+        before: PathBuf,
+        #[arg(long, value_name = "PATH")]
+        after: PathBuf,
         #[arg(long)]
         json: bool,
     },
@@ -284,6 +298,21 @@ pub fn run(cli: Cli) -> Result<()> {
                 }
             }
         }
+        Command::Diff {
+            before,
+            after,
+            json,
+        } => {
+            let before_conn = open_read_only(&before)?;
+            let after_conn = open_read_only(&after)?;
+            let diff = diff_graphs(&before_conn, &after_conn)?;
+            if json {
+                // Compact, not pretty: this is what Brigade embeds in a receipt.
+                println!("{}", serde_json::to_string(&diff)?);
+            } else {
+                print!("{}", render_diff(&diff));
+            }
+        }
         #[cfg(feature = "codesearch")]
         Command::Blend {
             query,
@@ -403,6 +432,58 @@ fn render_context(pack: &ContextPack) -> String {
     for file in &pack.related_files {
         let _ = writeln!(text, "- {file}");
     }
+    text
+}
+
+fn render_diff(diff: &GraphDiff) -> String {
+    use std::fmt::Write;
+
+    let mut text = String::new();
+    let s = &diff.summary;
+    let _ = writeln!(text, "# Graph diff\n");
+    let _ = writeln!(
+        text,
+        "nodes: +{} -{} ~{}   edges: +{} -{}\n",
+        s.added_nodes, s.removed_nodes, s.changed_nodes, s.added_edges, s.removed_edges
+    );
+
+    let section = |text: &mut String, title: &str, nodes: &[crate::model::DiffNode]| {
+        if nodes.is_empty() {
+            return;
+        }
+        let _ = writeln!(text, "## {title}");
+        for n in nodes {
+            let _ = writeln!(
+                text,
+                "- {} `{}` at {}:{}",
+                n.kind, n.qualified_name, n.file_path, n.start_line
+            );
+        }
+        text.push('\n');
+    };
+
+    section(&mut text, "Added nodes", &diff.added_nodes);
+    section(&mut text, "Removed nodes", &diff.removed_nodes);
+    section(&mut text, "Changed nodes", &diff.changed_nodes);
+
+    let edge_section = |text: &mut String, title: &str, edges: &[crate::model::DiffEdge]| {
+        if edges.is_empty() {
+            return;
+        }
+        let _ = writeln!(text, "## {title}");
+        for e in edges {
+            let _ = writeln!(
+                text,
+                "- `{}` calls `{}` at {}:{} -> {}",
+                e.source, e.target, e.source_file, e.line, e.target_file
+            );
+        }
+        text.push('\n');
+    };
+
+    edge_section(&mut text, "Added edges", &diff.added_edges);
+    edge_section(&mut text, "Removed edges", &diff.removed_edges);
+
     text
 }
 
