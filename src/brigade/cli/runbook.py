@@ -17,11 +17,21 @@ def register(sub: argparse._SubParsersAction) -> None:
         "--target", "-t", type=Path, default=Path("."), help="Repo or workspace command target."
     )
     p_runbook_plan.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_runbook_pin = runbook_sub.add_parser("pin", help="Write or refresh optional binary pins for a runbook.")
+    p_runbook_pin.add_argument("runbook", type=Path, help="Runbook JSON file.")
+    p_runbook_pin.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace command target.")
+    p_runbook_pin.add_argument("--dry-run", action="store_true", help="Show pins without writing the runbook file.")
+    p_runbook_pin.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_runbook_run = runbook_sub.add_parser("run", help="Run a reviewed runbook and write a receipt.")
     p_runbook_run.add_argument("runbook", nargs="?", type=Path, help="Runbook JSON file.")
     p_runbook_run.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace command target.")
     p_runbook_run.add_argument("--approved", action="store_true", help="Approve this explicit runbook execution.")
     p_runbook_run.add_argument("--dry-run", action="store_true", help="Validate and show steps without executing.")
+    p_runbook_run.add_argument(
+        "--allow-pin-mismatch",
+        action="store_true",
+        help="Proceed when a configured runbook pin is missing or has a different sha256.",
+    )
     p_runbook_run.add_argument(
         "--resume", dest="resume_run_id", default=None, help="Retry from the first failed step of a previous run."
     )
@@ -55,6 +65,8 @@ def dispatch(args) -> int:
 
     if args.runbook_command == "plan":
         return runbook_cmd.plan(target=args.target, runbook=args.runbook, json_output=args.json)
+    if args.runbook_command == "pin":
+        return runbook_cmd.pin(target=args.target, runbook=args.runbook, dry_run=args.dry_run, json_output=args.json)
     if args.runbook_command == "run":
         if args.resume_run_id:
             return runbook_cmd.retry(
@@ -63,6 +75,7 @@ def dispatch(args) -> int:
                 approved=args.approved,
                 dry_run=args.dry_run,
                 json_output=args.json,
+                allow_pin_mismatch=args.allow_pin_mismatch,
             )
         if args.runbook is None:
             args._brigade_parser.error("runbook run requires a runbook path unless --resume is used")
@@ -73,6 +86,7 @@ def dispatch(args) -> int:
             approved=args.approved,
             dry_run=args.dry_run,
             json_output=args.json,
+            allow_pin_mismatch=args.allow_pin_mismatch,
         )
     if args.runbook_command == "resume":
         return runbook_cmd.resume(target=args.target, run_id=args.run_id, json_output=args.json)
