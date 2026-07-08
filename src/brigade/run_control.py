@@ -1,0 +1,239 @@
+"""Live control socket for app-server Brigade runs."""
+
+from __future__ import annotations
+
+import json
+import socket
+import sys
+import threading
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+_CLIENT_TIMEOUT_SECONDS = 5.0
+
+
+class ControlError(RuntimeError):
+    """Control socket setup, request, or operation failure."""
+
+
+@dataclass(frozen=True)
+class ActiveTurn:
+    worker: str
+    thread: Any
+    thread_id: str
+    turn_id: str
+
+
+class LiveTurnRegistry:
+    """Thread-safe registry of worker names to their current app-server turn."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._active: dict[str, ActiveTurn] = {}
+
+    def register(self, worker: str, thread: Any, turn_id: str) -> None:
+        thread_id = getattr(thread, "thread_id", "")
+        with self._lock:
+            self._active[worker] = ActiveTurn(worker=worker, thread=thread, thread_id=thread_id, turn_id=turn_id)
+
+    def unregister(self, worker: str, turn_id: str) -> None:
+        with self._lock:
+            active = self._active.get(worker)
+            if active is not None and active.turn_id == turn_id:
+                self._active.pop(worker, None)
+
+    def steer(self, worker: str, text: str) -> dict[str, object]:
+        if not text.strip():
+            raise ControlError("steer text must not be empty")
+        active = self._require_worker(worker)
+        active.thread.steer(text, active.turn_id)
+        return {
+            "ok": True,
+            "worker": active.worker,
+            "thread_id": active.thread_id,
+            "turn_id": active.turn_id,
+        }
+
+    def interrupt(self, worker: str | None = None) -> dict[str, object]:
+        turns = self._turns(worker)
+        if not turns:
+            target = f" for worker {worker!r}" if worker else ""
+            raise ControlError(f"no active turn{target}")
+        interrupted: list[str] = []
+        for active in turns:
+            active.thread.interrupt(active.turn_id)
+            interrupted.append(active.worker)
+        return {"ok": True, "interrupted": len(interrupted), "workers": interrupted}
+
+    def _require_worker(self, worker: str) -> ActiveTurn:
+        with self._lock:
+            active = self._active.get(worker)
+        if active is None:
+            raise ControlError(f"no active turn for worker {worker!r}")
+        return active
+
+    def _turns(self, worker: str | None) -> list[ActiveTurn]:
+        with self._lock:
+            if worker:
+                active = self._active.get(worker)
+                return [active] if active is not None else []
+            return list(self._active.values())
+
+
+class ControlServer:
+    """Newline-delimited JSON control server over a Unix domain socket."""
+
+    def __init__(self, path: Path, registry: LiveTurnRegistry) -> None:
+        self.path = path.expanduser()
+        self.registry = registry
+        self._sock: socket.socket | None = None
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._client_threads: list[threading.Thread] = []
+
+    def start(self) -> None:
+        if self._thread is not None:
+            return
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            self.path.unlink()
+        except FileNotFoundError:
+            pass
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            sock.bind(str(self.path))
+            sock.listen()
+            sock.settimeout(0.1)
+        except OSError as exc:
+            sock.close()
+            raise ControlError(f"failed to start control socket: {exc}") from exc
+        self._sock = sock
+        self._thread = threading.Thread(target=self._serve, name="brigade-run-control", daemon=True)
+        self._thread.start()
+
+    def close(self) -> None:
+        self._stop.set()
+        sock = self._sock
+        self._sock = None
+        if sock is not None:
+            sock.close()
+        thread = self._thread
+        if thread is not None:
+            thread.join(timeout=1.0)
+        for client in list(self._client_threads):
+            client.join(timeout=0.2)
+        try:
+            self.path.unlink()
+        except FileNotFoundError:
+            pass
+
+    def _serve(self) -> None:
+        while not self._stop.is_set():
+            sock = self._sock
+            if sock is None:
+                return
+            try:
+                conn, _ = sock.accept()
+            except TimeoutError:
+                continue
+            except OSError:
+                return
+            thread = threading.Thread(target=self._handle_client, args=(conn,), daemon=True)
+            self._client_threads.append(thread)
+            thread.start()
+
+    def _handle_client(self, conn: socket.socket) -> None:
+        with conn:
+            try:
+                fh = conn.makefile("rwb")
+            except OSError:
+                return
+            with fh:
+                for raw in fh:
+                    try:
+                        request = json.loads(raw.decode())
+                        if not isinstance(request, dict):
+                            raise ControlError("request must be a JSON object")
+                        response = self._dispatch(request)
+                    except json.JSONDecodeError as exc:
+                        response = {"ok": False, "error": f"invalid JSON: {exc.msg}"}
+                    except ControlError as exc:
+                        response = {"ok": False, "error": str(exc)}
+                    except Exception as exc:  # noqa: BLE001 - control server boundary
+                        response = {"ok": False, "error": str(exc)}
+                    fh.write(json.dumps(response, sort_keys=True).encode() + b"\n")
+                    fh.flush()
+
+    def _dispatch(self, request: dict[str, object]) -> dict[str, object]:
+        op = request.get("op")
+        if op == "steer":
+            worker = request.get("worker")
+            text = request.get("text")
+            if not isinstance(worker, str) or not worker:
+                raise ControlError("steer requires worker")
+            if not isinstance(text, str):
+                raise ControlError("steer requires text")
+            return self.registry.steer(worker, text)
+        if op == "interrupt":
+            worker = request.get("worker")
+            if worker is not None and (not isinstance(worker, str) or not worker):
+                raise ControlError("interrupt worker must be a non-empty string")
+            return self.registry.interrupt(worker)
+        raise ControlError(f"unknown control op: {op}")
+
+
+def send_request(path: Path, payload: dict[str, object], *, timeout: float = _CLIENT_TIMEOUT_SECONDS) -> dict[str, Any]:
+    path = path.expanduser()
+    if not path.exists():
+        raise ControlError(f"control socket is not active: {path}")
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    sock.settimeout(timeout)
+    try:
+        sock.connect(str(path))
+        with sock, sock.makefile("rwb") as fh:
+            fh.write(json.dumps(payload, sort_keys=True).encode() + b"\n")
+            fh.flush()
+            raw = fh.readline()
+    except OSError as exc:
+        raise ControlError(f"control socket request failed: {exc}") from exc
+    if not raw:
+        raise ControlError("control socket closed without a response")
+    try:
+        response = json.loads(raw.decode())
+    except json.JSONDecodeError as exc:
+        raise ControlError(f"control socket returned invalid JSON: {exc}") from exc
+    if not isinstance(response, dict):
+        raise ControlError("control socket returned a non-object response")
+    return response
+
+
+def control_socket_from_run(run_dir: Path) -> Path:
+    run_json = run_dir / "run.json"
+    try:
+        meta = json.loads(run_json.read_text())
+    except FileNotFoundError as exc:
+        raise ControlError(f"run.json not found in {run_dir}") from exc
+    except json.JSONDecodeError as exc:
+        raise ControlError(f"run.json is not valid JSON: {exc}") from exc
+    if not isinstance(meta, dict):
+        raise ControlError("run.json must contain a JSON object")
+    socket_value = meta.get("control_socket")
+    if isinstance(socket_value, str) and socket_value:
+        return Path(socket_value)
+    if meta.get("codex_transport") != "app-server":
+        raise ControlError("run was not started with app-server transport")
+    raise ControlError("run does not record a control socket")
+
+
+def print_control_response(response: dict[str, object], *, op: str) -> int:
+    if response.get("ok") is not True:
+        print(f"error: {response.get('error') or 'control request failed'}", file=sys.stderr)
+        return 1
+    if op == "steer":
+        print(f"steer: {response.get('worker')} turn={response.get('turn_id')}")
+    elif op == "interrupt":
+        workers = response.get("workers")
+        worker_text = ", ".join(str(worker) for worker in workers) if isinstance(workers, list) else ""
+        print(f"interrupt: {response.get('interrupted', 0)}" + (f" ({worker_text})" if worker_text else ""))
+    return 0

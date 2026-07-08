@@ -17,6 +17,7 @@ from uuid import uuid4
 from . import agents
 from . import codex_appserver
 from . import proc, runguard
+from . import run_control
 from .roster import Agent, Roster, is_cli_allowed, timeout_for, workers
 
 CODE_GRAPH_HEADING = "## Code graph context (GraphTrail, read-only)"
@@ -753,6 +754,57 @@ def _worker_event_writer(events_dir: Path | None, worker: str, *, verbose: bool 
     return on_event
 
 
+def _run_codex_appserver_worker(
+    appserver,
+    agent: Agent,
+    worker: str,
+    prompt: str,
+    *,
+    timeout: float,
+    cwd: Path | None,
+    read_only: bool,
+    sandbox: str | None,
+    registry: run_control.LiveTurnRegistry | None,
+    on_event=None,
+) -> agents.AgentResult:
+    effective_sandbox = sandbox if sandbox is not None else ("read-only" if read_only else None)
+    active_turn_id: str | None = None
+    try:
+        thread = appserver.start_thread(cwd=cwd, model=agent.model, sandbox=effective_sandbox)
+
+        def on_turn_start(turn_id: str) -> None:
+            nonlocal active_turn_id
+            active_turn_id = turn_id
+            if registry is not None:
+                registry.register(worker, thread, turn_id)
+
+        try:
+            turn = thread.run_turn(prompt, timeout=timeout, on_event=on_event, on_turn_start=on_turn_start)
+        except TypeError as exc:
+            if "on_turn_start" not in str(exc):
+                raise
+            turn = thread.run_turn(prompt, timeout=timeout, on_event=on_event)
+    except codex_appserver.AppServerError as exc:
+        return agents.AgentResult(text="", ok=False, detail=str(exc)[:200], status="failed")
+    finally:
+        if registry is not None and active_turn_id is not None:
+            registry.unregister(worker, active_turn_id)
+    text = turn.text.strip()
+    if not turn.ok:
+        return agents.AgentResult(
+            text=text,
+            ok=False,
+            detail=(turn.detail or f"turn {turn.status}")[:200],
+            thread_id=turn.thread_id,
+            status=turn.status,
+        )
+    if not text:
+        return agents.AgentResult(
+            text="", ok=False, detail="empty output", thread_id=turn.thread_id, status=turn.status
+        )
+    return agents.AgentResult(text=text, ok=True, thread_id=turn.thread_id, status=turn.status)
+
+
 def dispatch(
     assignments: list[Assignment],
     roster: Roster,
@@ -763,6 +815,7 @@ def dispatch(
     code_graph: CodeGraphBrief | None = None,
     drift_impact: DriftImpactBrief | None = None,
     appserver=None,
+    control_registry: run_control.LiveTurnRegistry | None = None,
     events_dir: Path | None = None,
     verbose: bool = False,
 ) -> list[WorkerResult]:
@@ -786,14 +839,16 @@ def dispatch(
         )
         if agent.cli == "codex" and appserver is not None:
             on_event = _worker_event_writer(events_dir, assignment.worker, verbose=verbose)
-            result = agents.run_codex_appserver(
+            result = _run_codex_appserver_worker(
                 appserver,
+                agent,
+                assignment.worker,
                 prompt,
                 timeout=timeout_for(agent, roster),
                 cwd=cwd,
                 read_only=read_only if sandbox_read_only is None else sandbox_read_only,
                 sandbox=sandbox,
-                model=agent.model,
+                registry=control_registry,
                 on_event=on_event,
             )
         else:
@@ -1178,6 +1233,7 @@ def _run_payload(
     drift_impact: DriftImpactBrief | None = None,
     brief_set: BriefSet | None = None,
     codex_transport: str | None = None,
+    control_socket: Path | None = None,
 ) -> dict[str, object]:
     payload: dict[str, object] = {
         "task": task,
@@ -1212,6 +1268,8 @@ def _run_payload(
         payload["error"] = error
     if codex_transport is not None:
         payload["codex_transport"] = codex_transport
+    if control_socket is not None:
+        payload["control_socket"] = str(control_socket)
     return payload
 
 
@@ -1266,6 +1324,7 @@ def run(
             ),
         )
 
+    control_socket = None
     plan_attempts: list[dict[str, object]] | None = [] if output_dir is not None else None
     try:
         assignments = plan(
@@ -1300,6 +1359,7 @@ def run(
                     drift_impact=drift_impact,
                     brief_set=brief_set,
                     codex_transport=transport_for_payload,
+                    control_socket=control_socket,
                 ),
             )
         print(f"error: {exc}", file=sys.stderr)
@@ -1342,6 +1402,8 @@ def run(
         (roster.agents.get(a.worker) is not None and roster.agents[a.worker].cli == "codex") for a in assignments
     )
     appserver = None
+    control_registry = None
+    control_server = None
     if effective_transport == "app-server" and has_codex_workers:
         try:
             appserver = codex_appserver.AppServer(cwd=cwd)
@@ -1350,9 +1412,39 @@ def run(
             print(f"warning: codex app-server unavailable ({exc}); falling back to exec", file=sys.stderr)
             appserver = None
             effective_transport = "exec"
+        if appserver is not None and output_dir is not None:
+            control_registry = run_control.LiveTurnRegistry()
+            control_socket = output_dir / "control.sock"
+            control_server = run_control.ControlServer(control_socket, control_registry)
+            try:
+                control_server.start()
+            except run_control.ControlError as exc:
+                print(f"warning: run control unavailable ({exc})", file=sys.stderr)
+                control_registry = None
+                control_server = None
+                control_socket = None
     elif effective_transport == "app-server":
         effective_transport = "exec"
     transport_for_payload = effective_transport
+    if output_dir is not None and control_socket is not None:
+        _write_json(
+            output_dir / "run.json",
+            _run_payload(
+                task=task,
+                cwd=cwd,
+                roster=roster,
+                dry_run=dry_run,
+                read_only=read_only,
+                status="dispatching",
+                started_at=started_at,
+                output_dir=output_dir,
+                code_graph=code_graph,
+                drift_impact=drift_impact,
+                brief_set=brief_set,
+                codex_transport=transport_for_payload,
+                control_socket=control_socket,
+            ),
+        )
 
     try:
         worker_results = dispatch(
@@ -1365,10 +1457,13 @@ def run(
             code_graph=code_graph,
             drift_impact=drift_impact,
             appserver=appserver,
+            control_registry=control_registry,
             events_dir=(output_dir / "events") if (output_dir is not None and appserver is not None) else None,
             verbose=verbose,
         )
     finally:
+        if control_server is not None:
+            control_server.close()
         if appserver is not None:
             appserver.close()
     ground_truth = build_ground_truth(cwd, started_at)
@@ -1449,6 +1544,7 @@ def run(
                 drift_impact=drift_impact,
                 brief_set=brief_set,
                 codex_transport=transport_for_payload,
+                control_socket=control_socket,
             ),
         )
     if handoff_inbox is not None:
@@ -1484,6 +1580,7 @@ def run(
                         drift_impact=drift_impact,
                         brief_set=brief_set,
                         codex_transport=transport_for_payload,
+                        control_socket=control_socket,
                     ),
                 )
             print(f"error: {detail}", file=sys.stderr)
@@ -1509,6 +1606,7 @@ def run(
                     drift_impact=drift_impact,
                     brief_set=brief_set,
                     codex_transport=transport_for_payload,
+                    control_socket=control_socket,
                 ),
             )
     print(final.text)

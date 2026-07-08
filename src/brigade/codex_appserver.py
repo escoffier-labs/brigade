@@ -261,12 +261,20 @@ class CodexThread:
             {"threadId": self.thread_id, "expectedTurnId": turn_id, "input": [{"type": "text", "text": text}]},
         )
 
+    def interrupt(self, turn_id: str) -> None:
+        self._server.request(
+            "turn/interrupt",
+            {"threadId": self.thread_id, "turnId": turn_id},
+            timeout=_INTERRUPT_GRACE,
+        )
+
     def run_turn(
         self,
         prompt: str,
         *,
         timeout: float,
         on_event: Callable[[dict], None] | None = None,
+        on_turn_start: Callable[[str], None] | None = None,
     ) -> TurnResult:
         try:
             result = self._server.request(
@@ -276,6 +284,11 @@ class CodexThread:
         except AppServerError as exc:
             return TurnResult(text="", ok=False, status="failed", thread_id=self.thread_id, detail=str(exc)[:200])
         turn_id = result["turn"]["id"]
+        if on_turn_start is not None:
+            try:
+                on_turn_start(turn_id)
+            except Exception:  # noqa: BLE001 - observer must never kill the turn
+                pass
         deltas: dict[str, list[str]] = {}
         completed_texts: list[str] = []
         deadline = time.monotonic() + timeout
@@ -286,9 +299,7 @@ class CodexThread:
 
         # Timed out: interrupt, then drain briefly for the interrupted turn/completed.
         try:
-            self._server.request(
-                "turn/interrupt", {"threadId": self.thread_id, "turnId": turn_id}, timeout=_INTERRUPT_GRACE
-            )
+            self.interrupt(turn_id)
         except AppServerError:
             pass
         completed = self._consume(time.monotonic() + _INTERRUPT_GRACE, turn_id, deltas, completed_texts, on_event)

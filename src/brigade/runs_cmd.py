@@ -4,8 +4,12 @@ from __future__ import annotations
 
 import json
 import sys
+import time
 from pathlib import Path
 from typing import Any
+
+_NONTERMINAL_STATUSES = frozenset({"started", "planning", "dispatching", "synthesizing", "running"})
+_SUCCESS_STATUSES = frozenset({"ok", "dry-run"})
 
 
 def _read_json(path: Path) -> dict[str, Any] | None:
@@ -24,6 +28,41 @@ def _read_text(path: Path) -> str | None:
     if not path.exists():
         return None
     return path.read_text().strip()
+
+
+def _runs_root(cwd: Path, runs_dir: Path | None) -> tuple[Path | None, str | None]:
+    cwd = cwd.expanduser().resolve()
+    if not cwd.is_dir():
+        return None, f"error: --cwd is not a directory: {cwd}"
+    root = runs_dir.expanduser() if runs_dir is not None else cwd / ".brigade" / "runs"
+    if not root.is_dir():
+        return None, f"error: runs directory not found: {root}"
+    return root, None
+
+
+def _resolve_run_dir(run: str | Path, *, cwd: Path, runs_dir: Path | None = None) -> tuple[Path | None, str | None]:
+    raw = Path(run).expanduser()
+    if raw.is_absolute() or len(raw.parts) > 1 or raw.exists():
+        run_dir = raw.resolve()
+        if not run_dir.is_dir():
+            return None, f"error: run directory not found: {run_dir}"
+        return run_dir, None
+
+    root, error = _runs_root(cwd, runs_dir)
+    if error is not None:
+        return None, error
+    assert root is not None
+    if str(run) == "latest":
+        runs, skipped = _collect_runs(root)
+        if skipped:
+            print(f"skipped {skipped} invalid run director{'y' if skipped == 1 else 'ies'}", file=sys.stderr)
+        if not runs:
+            return None, f"error: no runs found in {root}"
+        return runs[0][0].resolve(), None
+    run_dir = (root / raw).resolve()
+    if not run_dir.is_dir():
+        return None, f"error: run directory not found: {run_dir}"
+    return run_dir, None
 
 
 def _line(label: str, value: object | None) -> None:
@@ -137,6 +176,209 @@ def _print_final(final_text: str | None) -> None:
         print(f"  {line}")
 
 
+def _duration_text(value: object) -> str:
+    if not isinstance(value, (int, float)):
+        return "unknown duration"
+    return f"{value:g}s"
+
+
+def _artifact_signature(payload: object) -> str:
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
+
+
+def _is_terminal(meta: dict[str, Any]) -> bool:
+    status = meta.get("status")
+    if meta.get("finished_at"):
+        return True
+    return isinstance(status, str) and status not in _NONTERMINAL_STATUSES
+
+
+def _watch_return_code(status: object) -> int:
+    if status in _SUCCESS_STATUSES:
+        return 0
+    return 1
+
+
+def _emit_json(payload: dict[str, object]) -> None:
+    print(json.dumps(payload, sort_keys=True))
+
+
+def _emit_run(meta: dict[str, Any], *, json_output: bool) -> None:
+    if json_output:
+        payload = {
+            "type": "run",
+            "status": meta.get("status"),
+            "task": meta.get("task"),
+            "started_at": meta.get("started_at"),
+            "finished_at": meta.get("finished_at"),
+            "duration_seconds": meta.get("duration_seconds"),
+        }
+        _emit_json({key: value for key, value in payload.items() if value is not None})
+        return
+    _line("status", meta.get("status"))
+    _line("task", meta.get("task"))
+
+
+def _emit_plan(plan_payload: dict[str, Any], *, json_output: bool) -> None:
+    assignments = plan_payload.get("assignments")
+    if not isinstance(assignments, list):
+        return
+    if json_output:
+        _emit_json({"type": "plan", "assignments": assignments})
+        return
+    print("plan:")
+    if not assignments:
+        print("  (no worker assignments)")
+        return
+    for assignment in assignments:
+        if not isinstance(assignment, dict):
+            continue
+        stage = assignment.get("stage", 1)
+        print(f"  stage {stage} -> {assignment.get('worker', 'unknown')}: {assignment.get('task', '')}")
+
+
+def _event_item_type(event: dict[str, Any]) -> str:
+    params = event.get("params")
+    if not isinstance(params, dict):
+        return ""
+    item = params.get("item")
+    if isinstance(item, dict) and isinstance(item.get("type"), str):
+        return item["type"]
+    turn = params.get("turn")
+    if isinstance(turn, dict):
+        return "turn"
+    return ""
+
+
+def _emit_event(worker: str, event: dict[str, Any], *, json_output: bool) -> None:
+    if json_output:
+        _emit_json({"type": "event", "worker": worker, "event": event})
+        return
+    method = event.get("method", "unknown")
+    item_type = _event_item_type(event)
+    suffix = f" {item_type}" if item_type else ""
+    print(f"event: {worker} {method}{suffix}")
+
+
+def _emit_workers(worker_results: dict[str, Any], *, json_output: bool) -> None:
+    if json_output:
+        _emit_json({"type": "workers", "results": worker_results.get("results") or []})
+        return
+    _print_workers(worker_results)
+
+
+def _emit_synthesis(synthesis: dict[str, Any], *, json_output: bool) -> None:
+    if json_output:
+        _emit_json(
+            {
+                "type": "synthesis",
+                "orchestrator": synthesis.get("orchestrator"),
+                "result": synthesis.get("result"),
+            }
+        )
+        return
+    _print_synthesis(synthesis)
+
+
+def _emit_final(final_text: str, *, json_output: bool) -> None:
+    if json_output:
+        _emit_json({"type": "final", "text": final_text})
+        return
+    _print_final(final_text)
+
+
+def _emit_summary(run_dir: Path, meta: dict[str, Any], *, json_output: bool) -> None:
+    status = str(meta.get("status") or "unknown")
+    duration = meta.get("duration_seconds")
+    if json_output:
+        payload: dict[str, object] = {"type": "summary", "run": str(run_dir), "status": status}
+        if isinstance(duration, (int, float)):
+            payload["duration_seconds"] = duration
+        _emit_json(payload)
+        return
+    print(f"summary: {status} in {_duration_text(duration)}")
+
+
+def _tail_events(run_dir: Path, offsets: dict[Path, int], *, json_output: bool) -> None:
+    events_dir = run_dir / "events"
+    if not events_dir.is_dir():
+        return
+    for path in sorted(events_dir.glob("*.jsonl")):
+        try:
+            size = path.stat().st_size
+        except OSError:
+            continue
+        offset = offsets.get(path, 0)
+        if size < offset:
+            offset = 0
+        try:
+            with path.open() as fh:
+                fh.seek(offset)
+                for line in fh:
+                    stripped = line.strip()
+                    if not stripped:
+                        continue
+                    try:
+                        event = json.loads(stripped)
+                    except json.JSONDecodeError:
+                        continue
+                    if isinstance(event, dict):
+                        _emit_event(path.stem, event, json_output=json_output)
+                offsets[path] = fh.tell()
+        except OSError:
+            continue
+
+
+def _poll_watch_artifacts(
+    run_dir: Path,
+    signatures: dict[str, str],
+    event_offsets: dict[Path, int],
+    *,
+    json_output: bool,
+) -> tuple[dict[str, Any] | None, int | None]:
+    try:
+        run_meta = _read_json(run_dir / "run.json")
+        if run_meta is None:
+            print(f"error: run.json not found in {run_dir}", file=sys.stderr)
+            return None, 2
+        run_sig = _artifact_signature(run_meta)
+        if signatures.get("run") != run_sig:
+            _emit_run(run_meta, json_output=json_output)
+            signatures["run"] = run_sig
+
+        plan = _read_json(run_dir / "plan.json")
+        if plan is not None:
+            plan_sig = _artifact_signature(plan)
+            if signatures.get("plan") != plan_sig:
+                _emit_plan(plan, json_output=json_output)
+                signatures["plan"] = plan_sig
+
+        _tail_events(run_dir, event_offsets, json_output=json_output)
+
+        worker_results = _read_json(run_dir / "worker-results.json")
+        if worker_results is not None:
+            workers_sig = _artifact_signature(worker_results)
+            if signatures.get("workers") != workers_sig:
+                _emit_workers(worker_results, json_output=json_output)
+                signatures["workers"] = workers_sig
+
+        synthesis = _read_json(run_dir / "synthesis.json")
+        if synthesis is not None:
+            synthesis_sig = _artifact_signature(synthesis)
+            if signatures.get("synthesis") != synthesis_sig:
+                _emit_synthesis(synthesis, json_output=json_output)
+                signatures["synthesis"] = synthesis_sig
+
+        final_text = _read_text(run_dir / "final.txt")
+        if final_text is not None and signatures.get("final") != final_text:
+            _emit_final(final_text, json_output=json_output)
+            signatures["final"] = final_text
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return None, 2
+    return run_meta, None
+
+
 def _short(text: object, limit: int = 72) -> str:
     rendered = " ".join(str(text or "").split())
     if len(rendered) <= limit:
@@ -220,6 +462,48 @@ def show_latest(*, cwd: Path, runs_dir: Path | None = None) -> int:
         print(f"error: no runs found in {root}", file=sys.stderr)
         return 1
     return show(runs[0][0])
+
+
+def watch(
+    run: str | Path,
+    *,
+    cwd: Path,
+    runs_dir: Path | None = None,
+    json_output: bool = False,
+    interval: float = 1.0,
+) -> int:
+    if interval < 0:
+        print("error: --interval must be non-negative", file=sys.stderr)
+        return 2
+    run_dir, error = _resolve_run_dir(run, cwd=cwd, runs_dir=runs_dir)
+    if error is not None:
+        print(error, file=sys.stderr)
+        return 2
+    assert run_dir is not None
+    if json_output:
+        _emit_json({"type": "watch", "run": str(run_dir)})
+    else:
+        print(f"watching: {run_dir}")
+
+    signatures: dict[str, str] = {}
+    event_offsets: dict[Path, int] = {}
+    summary_emitted = False
+    while True:
+        run_meta, rc = _poll_watch_artifacts(
+            run_dir,
+            signatures,
+            event_offsets,
+            json_output=json_output,
+        )
+        if rc is not None:
+            return rc
+        assert run_meta is not None
+        if _is_terminal(run_meta):
+            if not summary_emitted:
+                _emit_summary(run_dir, run_meta, json_output=json_output)
+                summary_emitted = True
+            return _watch_return_code(run_meta.get("status"))
+        time.sleep(interval)
 
 
 def show(run_dir: Path) -> int:

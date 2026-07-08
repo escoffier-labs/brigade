@@ -70,3 +70,10 @@ Export findings should contain:
 Raw exports and sweep outputs stay under `.brigade/` and should remain gitignored. Brigade rejects raw private chat fields by default, including `raw_text`, `raw_messages`, `messages`, `message_text`, `quotes`, and `transcript`.
 
 Use safe summaries, labels, message ranges, local evidence paths, and confidence values. Brigade does not run Discord, Slack, Telegram, or ClickClack APIs, perform OAuth, send webhooks, edit memory, promote imports, or run a daemon.
+
+## Live Run Controls
+
+`brigade runs watch`, `brigade runs steer`, and `brigade runs interrupt` operate on local run artifacts and, for active Codex app-server runs, the `control_socket` recorded in `run.json`.
+They are not chat export APIs. `runs watch` tails `.brigade/runs/<run>/events/*.jsonl` and other artifacts; `runs steer` and `runs interrupt` send newline-delimited JSON to the local Unix socket for an active worker turn.
+
+The socket exists only while the run process is alive and is removed during cleanup. Completed runs remain inspectable through artifacts, but cannot be steered or interrupted.
