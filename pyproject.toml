@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "brigade-cli"
-version = "0.20.0"
+version = "0.19.0"
 description = "One local source for the MCP servers, tools, and memory your AI coding agents share (Codex, Claude Code, OpenCode, Hermes, OpenClaw), merged into each tool's native config with a review gate and a receipt for every change."
 readme = "README.md"
 requires-python = ">=3.10"
