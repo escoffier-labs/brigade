@@ -34,11 +34,17 @@ You should get an acknowledgment within 72 hours. If you do not, please follow u
 - Pins cover `argv[0]` only. For `bash script.sh`, `python script.py`, or a similar interpreter step, the pin covers the interpreter binary, not the script, package imports, shell profile, environment, or network content the interpreter may load.
 - If a pin has `version_cmd`, Brigade runs the resolved pinned binary with those arguments (for example `--version`) during `runbook pin` to refresh the stored `version`, and during `runbook run` pin verification to record runtime `version_output` in the receipt, so the version always describes the same file the hash covers. `runbook plan` and `runbook run --dry-run` never execute `version_cmd`. Review `version_cmd` arguments the same way you review step commands.
 
-## Receipt digests are not signatures
+## Receipt digests and optional local signatures
 
 Work verification receipts, runbook receipts, and outcome ledger records use SHA-256 digests to make ordinary local drift visible. `brigade receipts verify` recomputes receipt payload digests, stdout and stderr log digests, and the outcome ledger `prev_digest` chain.
 
-This is tamper-evident bookkeeping, not signing. It can detect hand-edited receipt fields, changed or missing logs, edited outcome records, and deleted middle ledger records. It does not defend against an attacker who can rewrite both the receipt and its digests, or an attacker who can rewrite and re-chain the ledger tail after changing a record. Optional signing with key ids is future work, and would be a separate security boundary.
+The digest layer is tamper-evident bookkeeping. It can detect hand-edited receipt fields, changed or missing logs, edited outcome records, and deleted middle ledger records. By itself, it does not defend against an attacker who can rewrite both a receipt and its stored digests, or an attacker who can rewrite and re-chain the ledger tail after changing a record.
+
+Brigade also supports an optional single-machine HMAC tier for work verification and runbook receipts. `brigade receipts keygen --target .` creates a local `.brigade/receipt-signing-key`, or `BRIGADE_RECEIPT_SIGNING_KEY_FILE` can point at another key file. When a key is available, receipt writers store `digests.signature` and `digests.key_id`; `brigade receipts verify` validates a matching local key as `SIGNED-OK`.
+
+The HMAC tier defends against receipt-plus-digest rewrites by someone who does not have the local signing key. It does not protect against a trusted key holder, a stolen key, or malware running as the operator. It is single-machine authorship evidence, not PKI and not cross-machine identity. If a receipt carries a signature but the local key is absent, unreadable, rotated away, or has a different `key_id`, verification reports `UNVERIFIABLE-SIGNATURE` without changing the command exit status. If the local `key_id` matches but the HMAC does not, verification reports `SIGNATURE-MISMATCH` and exits nonzero like a digest mismatch.
+
+Key rotation is explicit: run `brigade receipts keygen --force --target .`. Rotation orphans older signatures on that machine into `UNVERIFIABLE-SIGNATURE` unless the old key is supplied through `BRIGADE_RECEIPT_SIGNING_KEY_FILE`. A future cross-machine trust tier can use `minisign` or `ssh -Y sign` for public-key signatures, but that is separate from the local HMAC design.
 
 ## Out of scope
 
