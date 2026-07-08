@@ -1,0 +1,36 @@
+{
+  "_comment": [
+    "Public repo policy. Hard publish gate for actual leakage (RFC 1918 IPs, secrets,",
+    "PII, attribution trailers), but treats baseline technical-doc patterns as warnings:",
+    "loopback-ipv4 (127.x.x.x), localhost-port, localhost-bare, port-reference. README,",
+    "CONTRIBUTING, and docs frequently have to discuss localhost and named ports without",
+    "it being a leak. The stricter public-content policy keeps those at block since",
+    "blog/social copy is a more sensitive public surface than a technical docs repo.",
+    "See policies/public-repo.md for the long-form rationale."
+  ],
+  "name": "public-repo",
+  "backends": {
+    "opf": {
+      "enabled": false,
+      "action": "warn",
+      "device": "cpu"
+    }
+  },
+  "defaults": {
+    "infrastructure": "block",
+    "secret": "block",
+    "pii": "block",
+    "personal": "block",
+    "business": "block",
+    "attribution": "block",
+    "tooling": "warn"
+  },
+  "rules": {
+    "loopback-ipv4": "warn",
+    "localhost-port": "warn",
+    "localhost-bare": "warn",
+    "port-reference": "warn",
+    "opf-pii": "warn"
+  },
+  "custom_rules": []
+}

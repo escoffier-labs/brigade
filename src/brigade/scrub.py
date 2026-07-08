@@ -14,7 +14,23 @@ from .templates import template_root
 
 
 def scanner_dir() -> Path:
-    return Path(os.environ.get("CONTENT_GUARD_DIR", str(Path.home() / "repos" / "content-guard")))
+    configured = os.environ.get("CONTENT_GUARD_DIR")
+    if configured:
+        return Path(configured).expanduser()
+    return Path(__file__).resolve().parent / "guard"
+
+
+def scanner_module() -> str:
+    return "content_guard" if os.environ.get("CONTENT_GUARD_DIR") else "brigade.guard"
+
+
+def _scanner_env() -> dict[str, str]:
+    env = os.environ.copy()
+    if scanner_module() == "content_guard":
+        existing_pp = env.get("PYTHONPATH", "")
+        external_src = scanner_dir() / "src"
+        env["PYTHONPATH"] = f"{external_src}{os.pathsep}{existing_pp}" if existing_pp else str(external_src)
+    return env
 
 
 def available() -> bool:
@@ -59,11 +75,19 @@ def hook_status(target: Path, policy: str = "public-repo") -> dict[str, Any]:
     policy_exists = Path(resolved_policy).is_file()
     checks: list[dict[str, str]] = []
     suggestions: list[str] = []
+    external_configured = bool(os.environ.get("CONTENT_GUARD_DIR"))
     if not available():
-        checks.append(
-            {"status": "warn", "name": "content_guard_missing", "detail": f"content-guard not found at {scanner_dir()}"}
+        detail = (
+            f"CONTENT_GUARD_DIR points at missing content-guard checkout: {scanner_dir()}"
+            if external_configured
+            else f"embedded content guard not found at {scanner_dir()}"
         )
-        suggestions.append("clone https://github.com/escoffier-labs/content-guard or set CONTENT_GUARD_DIR")
+        checks.append({"status": "warn", "name": "content_guard_missing", "detail": detail})
+        suggestions.append(
+            "unset CONTENT_GUARD_DIR to use Brigade's embedded guard"
+            if external_configured
+            else "reinstall brigade-cli so the embedded guard package is present"
+        )
     if not policy_exists:
         checks.append(
             {"status": "warn", "name": "content_guard_policy_missing", "detail": f"policy not found: {resolved_policy}"}
@@ -96,12 +120,13 @@ def hook_status(target: Path, policy: str = "public-repo") -> dict[str, Any]:
             {
                 "status": "ok",
                 "name": "content_guard_ready",
-                "detail": "content-guard policy and pre-push hook are available",
+                "detail": f"{scanner_module()} policy and pre-push hook are available",
             }
         )
     return {
         "available": available(),
         "scanner_dir": str(scanner_dir()),
+        "scanner_module": scanner_module(),
         "policy": policy,
         "policy_path": resolved_policy,
         "policy_exists": policy_exists,
@@ -203,13 +228,23 @@ def run_scan(scan_target: Path, *, repo_target: Path | None = None, policy: str 
     repo_target = repo_target.expanduser().resolve() if repo_target is not None else scan_target
     scanner = scanner_dir()
     if not scanner.is_dir():
+        external_configured = bool(os.environ.get("CONTENT_GUARD_DIR"))
+        detail = (
+            f"CONTENT_GUARD_DIR points at missing content-guard checkout: {scanner}"
+            if external_configured
+            else f"embedded content guard not found at {scanner}"
+        )
         return {
             "available": False,
             "status": "missing",
             "exit_code": 2,
-            "detail": f"content-guard not found at {scanner}",
+            "detail": detail,
             "stdout": "",
-            "stderr": "clone https://github.com/escoffier-labs/content-guard or set CONTENT_GUARD_DIR",
+            "stderr": (
+                "unset CONTENT_GUARD_DIR to use Brigade's embedded guard"
+                if external_configured
+                else "reinstall brigade-cli so the embedded guard package is present"
+            ),
             "policy": policy,
             "policy_path": None,
             "target": str(scan_target),
@@ -243,19 +278,16 @@ def run_scan(scan_target: Path, *, repo_target: Path | None = None, policy: str 
     cmd = [
         sys.executable,
         "-m",
-        "content_guard",
+        scanner_module(),
         "scan",
         str(scan_target),
         "--policy",
         str(resolved_policy),
     ]
-    env = os.environ.copy()
-    existing_pp = env.get("PYTHONPATH", "")
-    env["PYTHONPATH"] = f"{scanner / 'src'}{os.pathsep}{existing_pp}" if existing_pp else str(scanner / "src")
     try:
         result = subprocess.run(
             cmd,
-            env=env,
+            env=_scanner_env(),
             check=False,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -302,12 +334,18 @@ def run(
     scanner_dir = globals()["scanner_dir"]()
 
     if not scanner_dir.is_dir():
+        external_configured = bool(os.environ.get("CONTENT_GUARD_DIR"))
+        scanner_label = "content-guard checkout" if external_configured else "embedded content guard"
         print(
-            f"brigade scrub: content-guard not found at {scanner_dir}",
+            f"brigade scrub: {scanner_label} not found at {scanner_dir}",
             file=sys.stderr,
         )
         print(
-            "brigade scrub: clone https://github.com/escoffier-labs/content-guard or set CONTENT_GUARD_DIR",
+            (
+                "brigade scrub: unset CONTENT_GUARD_DIR to use Brigade's embedded guard"
+                if external_configured
+                else "brigade scrub: reinstall brigade-cli so the embedded guard package is present"
+            ),
             file=sys.stderr,
         )
         return 2
@@ -321,7 +359,7 @@ def run(
         print(f"brigade scrub: policy not found: {policy_path}", file=sys.stderr)
         return 3
 
-    cmd = [sys.executable, "-m", "content_guard", "scan", str(target), "--policy", str(policy_path)]
+    cmd = [sys.executable, "-m", scanner_module(), "scan", str(target), "--policy", str(policy_path)]
     if dry_run:
         if json_output:
             print(
@@ -332,7 +370,8 @@ def run(
             return 0
         print("brigade scrub: would run:")
         print(" ", " ".join(cmd))
-        print(f"  PYTHONPATH={scanner_dir / 'src'}")
+        if scanner_module() == "content_guard":
+            print(f"  PYTHONPATH={scanner_dir / 'src'}")
         return 0
 
     result = run_scan(target, policy=policy)
@@ -373,7 +412,8 @@ def _resolve_policy(target: Path, scanner_dir: Path, policy: str) -> Path:
          treat it as a literal file path and use it as-is.
       2. Otherwise, treat it as a basename and search the safe lookup chain:
          `<target>/.brigade/policies/<policy>.json`,
-         Brigade's packaged policies, then `<scanner_dir>/policies/<policy>.json`.
+         Brigade's embedded guard policies, Brigade's template policies, then
+         `<scanner_dir>/policies/<policy>.json`.
     """
     looks_like_path = "/" in policy or "\\" in policy or policy.endswith(".json")
     if looks_like_path:
@@ -386,6 +426,7 @@ def _resolve_policy(target: Path, scanner_dir: Path, policy: str) -> Path:
 
     candidates = [
         target / ".brigade" / "policies" / f"{safe}.json",
+        Path(__file__).resolve().parent / "guard" / "policies" / f"{safe}.json",
         template_root() / "policies" / f"{safe}.json",
         scanner_dir / "policies" / f"{safe}.json",
     ]

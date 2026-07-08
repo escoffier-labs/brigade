@@ -1542,10 +1542,13 @@ def test_local_operator_doctor_does_not_block_on_inactive_content_guard_hook(tmp
     capsys.readouterr()
 
     def fake_hook_status(target, policy="public-repo"):
+        # A hook file is wired into the repo but not enabled. The embedded
+        # guard makes "available" true on every install, so only explicit
+        # hook signals count as configured.
         return {
             "available": True,
             "hooks_path": None,
-            "configured_pre_push_hook_exists": False,
+            "configured_pre_push_hook_exists": True,
             "git_pre_push_hook_exists": False,
             "pre_push_hook_enabled": False,
             "pre_push_hook_mode": "not-enabled",

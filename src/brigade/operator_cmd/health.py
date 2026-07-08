@@ -71,9 +71,11 @@ def status_payload(target: Path, *, profile: str = "internal-dogfood") -> dict[s
                 "detail": str((readiness.get("blockers") or [{}])[0].get("safe_summary") or "readiness blocker"),
             }
         )
+    # "Configured" means the operator wired a hook for this repo. Scanner
+    # availability no longer signals intent: the guard ships embedded, so
+    # available is true on every install.
     content_guard_configured = bool(
-        content_guard_health.get("available")
-        or content_guard_health.get("hooks_path")
+        content_guard_health.get("hooks_path")
         or content_guard_health.get("configured_pre_push_hook_exists")
         or content_guard_health.get("git_pre_push_hook_exists")
     )

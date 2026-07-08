@@ -1,0 +1,25 @@
+{
+  "name": "public-content",
+  "backends": {
+    "opf": {
+      "enabled": false,
+      "action": "warn",
+      "device": "cpu"
+    }
+  },
+  "defaults": {
+    "infrastructure": "block",
+    "secret": "block",
+    "pii": "warn",
+    "personal": "block",
+    "business": "warn",
+    "attribution": "block",
+    "tooling": "warn"
+  },
+  "rules": {
+    "email": "warn",
+    "us-phone": "warn",
+    "opf-pii": "warn"
+  },
+  "custom_rules": []
+}

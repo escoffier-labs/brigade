@@ -53,3 +53,66 @@ def test_subcommand_help_still_lists_subcommands(capsys):
     out = capsys.readouterr().out
     assert "brief" in out
     assert "tasks" in out
+
+
+def test_guard_command_delegates_to_embedded_guard(monkeypatch):
+    calls = []
+
+    def fake_main(argv=None):
+        calls.append(argv)
+        return 17
+
+    monkeypatch.setattr("brigade.guard.cli.main", fake_main)
+
+    assert cli.main(["guard", "scan", "-"]) == 17
+    assert calls == [["scan", "-"]]
+
+
+def test_guard_help_prints_group_help_without_delegating(monkeypatch, capsys):
+    calls = []
+
+    def fake_main(argv=None):
+        calls.append(argv)
+        return 0
+
+    monkeypatch.setattr("brigade.guard.cli.main", fake_main)
+
+    assert cli.main(["guard", "--help"]) == 0
+    assert calls == []
+    out = capsys.readouterr().out
+    for name in ("scan", "audit", "git", "commits", "publish-check", "pr", "n8n-validate"):
+        assert name in out
+
+
+def test_guard_no_args_prints_group_help(capsys):
+    assert cli.main(["guard"]) == 0
+    out = capsys.readouterr().out
+    assert "usage: brigade guard" in out
+    assert "git" in out
+    assert "scan" in out
+
+
+def test_guard_routes_git_to_git_scan(monkeypatch):
+    calls = []
+
+    def fake_main(argv=None):
+        calls.append(argv)
+        return 5
+
+    monkeypatch.setattr("brigade.guard.git_scan.main", fake_main)
+
+    assert cli.main(["guard", "git", "--all-tracked", "--policy", "p.json"]) == 5
+    assert calls == [["--all-tracked", "--policy", "p.json"]]
+
+
+def test_guard_routes_publish_check(monkeypatch):
+    calls = []
+
+    def fake_main(argv=None):
+        calls.append(argv)
+        return 0
+
+    monkeypatch.setattr("brigade.guard.publish_check.main", fake_main)
+
+    assert cli.main(["guard", "publish-check", "--target", "."]) == 0
+    assert calls == [["--target", "."]]

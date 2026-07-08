@@ -1,0 +1,14 @@
+{
+  "description": "Clean social draft should pass advisory checks.",
+  "request": {
+    "text": "Content Guard is running as an advisory publish check before public posts.",
+    "name": "clean-social-post",
+    "source": "n8n:synthetic:social",
+    "policy": "public-content"
+  },
+  "expected": {
+    "blocked": false,
+    "changed": false,
+    "finding_rule_ids": []
+  }
+}

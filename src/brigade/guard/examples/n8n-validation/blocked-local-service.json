@@ -1,0 +1,17 @@
+{
+  "description": "Synthetic local service reference should be blocked and redacted.",
+  "request": {
+    "_content_guard_allow": "content-guard: allow localhost-port",
+    "text": "Draft says the preview is running at localhost:5204 before launch.",
+    "name": "blocked-local-service",
+    "source": "n8n:synthetic:blog",
+    "policy": "public-content"
+  },
+  "expected": {
+    "blocked": true,
+    "changed": true,
+    "finding_rule_ids": [
+      "localhost-port"
+    ]
+  }
+}

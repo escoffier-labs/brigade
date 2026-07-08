@@ -86,10 +86,10 @@ profile: local-operator
 ready: yes
 blocking_issues: 0
 next: brigade daily plan --target .
-content_guard: missing hook=not-enabled policy=public-repo
+content_guard: installed hook=not-enabled policy=public-repo
 ```
 
-content-guard is an optional sidecar in its own repo; doctor reports it missing until you install it (`brigade add guard`) and stays ready regardless.
+Brigade ships its content guard scanner in the CLI, so `brigade scrub` works on a fresh install. Set `CONTENT_GUARD_DIR` only when you want to run an external content-guard checkout instead.
 
 ## One MCP catalog, synced into every tool
 
@@ -193,7 +193,7 @@ The whole ledger is plain JSON and markdown under `memory/outcome/`, tracked in 
 
 ## Sidecars
 
-Brigade is the hub. Each station wires an optional standalone tool, installed with `brigade add <station>` and health-checked by `brigade status` and `brigade doctor`. Every tool is its own repo, independently installable, with no library coupling back into Brigade.
+Brigade is the hub. Most stations wire an optional standalone tool, installed with `brigade add <station>` and health-checked by `brigade status` and `brigade doctor`. Each external tool is its own repo, independently installable, with no library coupling back into Brigade.
 
 Use `brigade profiles list` to see built-in station bundles and `brigade stations list` to see which stations are selected by the default repo profile before installing any sidecar tools. `brigade stations list --json` also shows each managed tool's machine surfaces: doctor JSON, markdown briefs, summary JSON, and verify commands where the tool supports them.
 
@@ -209,7 +209,7 @@ brigade add ../agentpantry --install # run the manifest install command
 | `brigade add` | Tool | What it does |
 |---|---|---|
 | `skills` | built-in Scout skills; optional Skillet roster | wires `brigade-work` and `ultra-work-scout` on init; use `skills add escoffier-labs/skillet` after installing the sidecar CLI for the full roster |
-| `guard` | content-guard | scans handoffs and content for secrets and PII before anything leaves the machine |
+| `guard` | embedded content guard, with an optional external checkout override | scans handoffs and content for secrets and PII before anything leaves the machine |
 | `tokens` | token-glace | tracks token spend across your harnesses and compacts noisy output |
 | `memory` | memory-doctor, bootstrap-doctor | validates memory cards and bootstrap files for staleness and contradictions |
 | `pantry` | agentpantry | syncs browser sessions and auth across an agent's machine |
@@ -251,7 +251,7 @@ The same review-and-receipt pattern covers the rest of an operator's day, and yo
 - **Cross-model runs**: `brigade run "<task>"` plans, dispatches, and synthesizes one bounded task across the agent CLIs in your roster, so an expensive model can think while cheaper ones do the grunt work. It can attach GraphTrail and upstream-drift context under a shared brief budget, then records which briefs attached in `run.json`. `--worktree` runs everything in a detached git checkout that comes back as a reviewable `changes.patch`.
 - **Daily loop**: `brigade work brief` shows pending work, imports, and warnings; `brigade daily status` keeps it bounded and cheap.
 - **Friction logs**: `brigade friction scan` mines recent notes, handoffs, and session artifacts for reviewable workflow friction.
-- **Security and scrub**: `brigade security scan` is a local read-only scanner for agent workspaces; `brigade scrub` gates content before it leaves the machine.
+- **Security and scrub**: `brigade security scan` is a local read-only scanner for agent workspaces. `brigade scrub` gates content before it leaves the machine, and `brigade guard` exposes the embedded content guard CLI.
 - **Research**: `brigade research run` turns a question into a cited local report and a reviewable memory handoff.
 - **Fleet and release**: health evidence across your local repos and release-readiness receipts, with no publish step.
 

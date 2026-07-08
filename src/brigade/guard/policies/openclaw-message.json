@@ -1,0 +1,32 @@
+{
+  "name": "openclaw-message",
+  "backends": {
+    "opf": {
+      "enabled": false,
+      "action": "warn",
+      "device": "cpu"
+    }
+  },
+  "defaults": {
+    "infrastructure": "redact",
+    "secret": "redact",
+    "pii": "warn",
+    "personal": "warn",
+    "business": "warn",
+    "attribution": "redact",
+    "tooling": "warn"
+  },
+  "rules": {
+    "opf-pii": "warn"
+  },
+  "custom_rules": [
+    {
+      "id": "local-hostname-example",
+      "category": "infrastructure",
+      "pattern": "\\binternal-host\\b",
+      "replacement": "[redacted-host]",
+      "description": "Example local workstation hostname.",
+      "flags": ["ignorecase"]
+    }
+  ]
+}

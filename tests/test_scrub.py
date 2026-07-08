@@ -46,6 +46,51 @@ def test_resolve_named_policy_falls_back_to_packaged_policy(tmp_path: Path):
     assert "templates/policies" in p.as_posix()
 
 
+def test_default_scanner_uses_embedded_guard(monkeypatch):
+    monkeypatch.delenv("CONTENT_GUARD_DIR", raising=False)
+    assert scrub_mod.scanner_module() == "brigade.guard"
+    assert scrub_mod.scanner_dir().is_dir()
+    assert scrub_mod.scanner_dir().name == "guard"
+
+
+def test_run_scan_invokes_embedded_guard_by_default(tmp_path: Path, monkeypatch):
+    target = tmp_path / "repo"
+    target.mkdir()
+    policy_file = tmp_path / "policy.json"
+    policy_file.write_text("{}\n")
+    monkeypatch.delenv("CONTENT_GUARD_DIR", raising=False)
+    monkeypatch.setattr(scrub_mod, "policy_path", lambda repo, policy: policy_file)
+    calls = []
+
+    def fake_run(argv, **kwargs):
+        calls.append((argv, kwargs))
+
+        class Result:
+            returncode = 0
+            stdout = "Clean. 1 file(s) checked.\n"
+            stderr = ""
+
+        return Result()
+
+    monkeypatch.setattr(scrub_mod.subprocess, "run", fake_run)
+
+    result = scrub_mod.run_scan(target, policy="public-repo")
+
+    assert result["exit_code"] == 0
+    argv, kwargs = calls[0]
+    assert argv[:3] == [scrub_mod.sys.executable, "-m", "brigade.guard"]
+    assert "PYTHONPATH" not in kwargs["env"] or "content-guard" not in kwargs["env"]["PYTHONPATH"]
+
+
+def test_content_guard_dir_keeps_external_scanner_behavior(tmp_path: Path, monkeypatch):
+    scanner = tmp_path / "content-guard"
+    (scanner / "src").mkdir(parents=True)
+    monkeypatch.setenv("CONTENT_GUARD_DIR", str(scanner))
+
+    assert scrub_mod.scanner_dir() == scanner
+    assert scrub_mod.scanner_module() == "content_guard"
+
+
 def test_hook_status_detects_configured_global_pre_push(tmp_path: Path, monkeypatch):
     target = tmp_path / "repo"
     target.mkdir()
