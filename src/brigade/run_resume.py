@@ -134,8 +134,9 @@ def resume(run_dir: Path) -> int:
         for r in results
     ]
     ground_truth = worker_data.get("ground_truth") or {}
-    (run_dir / "worker-results.json").write_text(
-        json.dumps({"results": aboyeur._worker_payload(worker_results), "ground_truth": ground_truth}, indent=2) + "\n"
+    aboyeur._write_json(
+        run_dir / "worker-results.json",
+        {"results": aboyeur._worker_payload(worker_results), "ground_truth": ground_truth},
     )
 
     task = run_meta.get("task", "")
@@ -155,28 +156,25 @@ def resume(run_dir: Path) -> int:
         read_only=read_only,
         **({"model": orchestrator.model} if orchestrator.model is not None else {}),
     )
-    (run_dir / "synthesis.json").write_text(
-        json.dumps(
-            {
-                "orchestrator": roster.orchestrator,
-                "result": {"ok": final.ok, "detail": final.detail, "text": final.text},
-                "ground_truth": ground_truth,
-            },
-            indent=2,
-        )
-        + "\n"
+    aboyeur._write_json(
+        run_dir / "synthesis.json",
+        {
+            "orchestrator": roster.orchestrator,
+            "result": {"ok": final.ok, "detail": final.detail, "text": final.text},
+            "ground_truth": ground_truth,
+        },
     )
     now = datetime.now(timezone.utc).isoformat()
     run_meta.setdefault("resumed_at", []).append(now)
     if not final.ok:
         run_meta["status"] = "failed"
         run_meta["error"] = final.detail
-        (run_dir / "run.json").write_text(json.dumps(run_meta, indent=2) + "\n")
+        aboyeur._write_json(run_dir / "run.json", run_meta)
         print(f"error: orchestrator failed during synthesis: {final.detail}", file=sys.stderr)
         return 2
     (run_dir / "final.txt").write_text(final.text + "\n")
     run_meta["status"] = "ok"
     run_meta.pop("error", None)
-    (run_dir / "run.json").write_text(json.dumps(run_meta, indent=2) + "\n")
+    aboyeur._write_json(run_dir / "run.json", run_meta)
     print(final.text)
     return 0
