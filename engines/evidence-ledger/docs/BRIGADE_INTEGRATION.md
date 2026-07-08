@@ -91,6 +91,25 @@ JSON shape:
 }
 ```
 
+## Inbound: Brigade receipts as evidence
+
+The reverse direction is live. Brigade exports verify-run and brigade-run receipts as `miseledger.adapter.v1` JSONL, and MiseLedger ingests them with the standard adapter importer. No MiseLedger-side code is involved:
+
+```bash
+brigade receipts export miseledger --target <repo> --out receipts.jsonl
+miseledger import adapter receipts.jsonl --source brigade --json
+```
+
+What each imported item carries:
+
+- `item.kind` is `brigade_work_verify_receipt` or `brigade_run_receipt`
+- `item.text` holds the searchable line: run id, status, the command strings, the run task, and the code-graph delta summary when the receipt has one (`added_nodes=1 changed_symbols=...`)
+- `item.metadata.code_graph_delta` holds the compact delta dict verbatim
+- `artifacts` point at `receipt.json`, `graph-delta.json`, and the digest-covered logs
+- `raw.hash` reuses the receipt's own sha256 digest, so the identity boundary (`source_kind + collection + item + content_hash`) dedupes re-imports: importing the same export twice inserts 0 and reports `already_known`
+
+Receipts are trusted local artifacts at export time, but once inside the archive they flow through the same evidence surfaces as everything else and come back marked untrusted context like any other search result.
+
 Potential future commands:
 
 ```bash
