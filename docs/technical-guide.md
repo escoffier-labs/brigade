@@ -1002,6 +1002,17 @@ GraphTrail raw diff counts are preserved under `raw_counts`. Brigade also comput
 
 Known blind spots remain GraphTrail blind spots: unsupported languages, parse failures, dynamic dispatch, generated code, import-time side effects, reflection, and runtime wiring can be missed or approximated. A clean delta means the captured static graph did not report meaningful churn, not that the behavior is unchanged.
 
+### Context eval metric
+
+When a non-read-only aboyeur run has both a pre-run code graph brief and a successful GraphTrail delta sidecar with changed file paths, Brigade records `context_eval` in the run artifacts and synthesis ground truth.
+The metric is set arithmetic over repo-relative file paths: it compares the files named by the pre-run context pack with the files the run structurally touched according to the GraphTrail delta.
+For example, `brief hit rate 0.50 (2/4 files, 2 missed)` means two of four structurally touched files were named in the brief, and two touched files were not.
+
+This is not a quality score.
+It does not say whether the context was useful, sufficient, or correct, only whether the pre-run context pack named the structurally changed files.
+Brief parsing is heuristic, and GraphTrail deltas only see structural code changes.
+Docs-only runs and runs without structural graph changes produce no context eval.
+
 Use `--handoff` to bridge a completed run back into the memory system.
 
 Handoff behavior:

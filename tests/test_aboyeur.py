@@ -3,6 +3,7 @@ import subprocess
 
 from brigade import aboyeur
 from brigade import agents
+from brigade import context_eval
 from brigade import proc
 from brigade.roster import Agent, Roster
 from tests.work_cmd_test_helpers import _init_git_repo
@@ -300,6 +301,70 @@ def test_code_graph_brief_empty_or_whitespace_output_is_not_attached(tmp_path, m
         assert brief.attached is False
         assert brief.bytes == 0
         assert brief.text == ""
+
+
+def test_context_eval_extracts_real_graphtrail_brief_paths():
+    brief = """## Code graph context (GraphTrail, read-only)
+
+### Entry points
+
+- `brigade.aboyeur.run` function at `src/brigade/aboyeur.py:1211`
+- file_path: `src/brigade/context_eval.py`
+
+### Related files
+
+- `tests/test_aboyeur.py`
+- `/tmp/not-repo.py`
+- `https://example.invalid/not-code.py`
+"""
+
+    assert context_eval.extract_brief_files(brief) == [
+        "src/brigade/aboyeur.py",
+        "src/brigade/context_eval.py",
+        "tests/test_aboyeur.py",
+    ]
+
+
+def test_context_eval_reports_sorted_hits_misses_and_rate():
+    assert context_eval.evaluate(
+        ["src/brigade/aboyeur.py", "tests/test_aboyeur.py"],
+        ["tests/test_aboyeur.py", "src/brigade/context_eval.py"],
+    ) == {
+        "counts": {
+            "brief_files": 2,
+            "delta_files": 2,
+            "hits": 1,
+            "missed": 1,
+        },
+        "hits": ["tests/test_aboyeur.py"],
+        "missed": ["src/brigade/context_eval.py"],
+        "brief_hit_rate": 0.5,
+    }
+
+
+def test_ground_truth_facts_surface_context_eval_metric_once():
+    facts = aboyeur._ground_truth_facts(
+        {
+            "available": True,
+            "changed_files": [],
+            "untracked_files": [],
+            "diffstat": "",
+            "verify_receipts": [],
+            "context_eval": {
+                "counts": {
+                    "brief_files": 3,
+                    "delta_files": 4,
+                    "hits": 2,
+                    "missed": 2,
+                },
+                "hits": ["src/brigade/aboyeur.py", "tests/test_aboyeur.py"],
+                "missed": ["docs/technical-guide.md", "src/brigade/context_eval.py"],
+                "brief_hit_rate": 0.5,
+            },
+        }
+    )
+
+    assert facts.splitlines().count("- context eval: brief hit rate 0.50 (2/4 files, 2 missed)") == 1
 
 
 def test_code_graph_brief_truncates_on_line_boundary(tmp_path, monkeypatch):
@@ -986,6 +1051,187 @@ def test_run_writes_code_graph_delta_to_artifacts_and_synthesis(monkeypatch, tmp
     assert json.loads((output_dir / "synthesis.json").read_text())["ground_truth"]["code_graph_delta"] == after_payload
     assert json.loads((output_dir / "run.json").read_text())["code_graph_delta"] == after_payload
     assert "code_graph_delta: code graph delta: ok changed_symbols=1 edge_churn=2 edges_added=3" in calls[-1][1]
+
+
+def test_run_writes_context_eval_when_brief_and_delta_sidecar_overlap(monkeypatch, tmp_path):
+    calls = []
+    before_payload = {"ok": True, "status": "captured", "summary": "before captured"}
+    brief = aboyeur.CodeGraphBrief(
+        attached=True,
+        text=(
+            "## Code graph context (GraphTrail, read-only)\n\n"
+            "- `tests/test_aboyeur.py:10`\n"
+            "- `src/brigade/aboyeur.py:20`\n"
+        ),
+        bytes=100,
+    )
+
+    def fake_run_agent(cli_ref, prompt, timeout=600.0, cwd=None, read_only=False):
+        calls.append((cli_ref, prompt))
+        if len(calls) == 1:
+            return agents.AgentResult(
+                text=json.dumps({"assignments": [{"worker": "coder", "task": "implement it"}]}),
+                ok=True,
+            )
+        if cli_ref == "ollama:llama3.3":
+            return agents.AgentResult(text="worker output", ok=True)
+        return agents.AgentResult(text="final answer", ok=True)
+
+    def fake_capture_after(target, run_dir, before):
+        sidecar = run_dir / "graph-delta.json"
+        sidecar.write_text(
+            json.dumps(
+                {
+                    "ok": True,
+                    "changed_nodes": [{"file_path": "tests/test_aboyeur.py"}],
+                    "added_nodes": [{"file_path": "src/brigade/context_eval.py"}],
+                    "removed_nodes": [],
+                }
+            )
+            + "\n"
+        )
+        return {
+            "status": "ok",
+            "ok": True,
+            "summary": "code graph delta: ok",
+            "raw_counts": {"changed_nodes": 1, "added_nodes": 1},
+            "edge_churn": 0,
+            "changed_symbols": [],
+            "changed_symbol_count": 0,
+            "sidecar_path": str(sidecar),
+        }
+
+    output_dir = tmp_path / "run"
+    monkeypatch.setattr(aboyeur.agents, "run_agent", fake_run_agent)
+    monkeypatch.setattr(aboyeur.graphtrail_delta, "capture_before", lambda target, run_dir: before_payload)
+    monkeypatch.setattr(aboyeur.graphtrail_delta, "capture_after_and_diff", fake_capture_after)
+
+    assert aboyeur.run("build feature", _roster(), cwd=tmp_path, output_dir=output_dir, code_graph=brief) == 0
+
+    expected = {
+        "counts": {
+            "brief_files": 2,
+            "delta_files": 2,
+            "hits": 1,
+            "missed": 1,
+        },
+        "hits": ["tests/test_aboyeur.py"],
+        "missed": ["src/brigade/context_eval.py"],
+        "brief_hit_rate": 0.5,
+    }
+    ground_truth = json.loads((output_dir / "worker-results.json").read_text())["ground_truth"]
+    assert ground_truth["context_eval"] == expected
+    assert json.loads((output_dir / "synthesis.json").read_text())["ground_truth"]["context_eval"] == expected
+    assert json.loads((output_dir / "run.json").read_text())["context_eval"] == expected
+    assert "- context eval: brief hit rate 0.50 (1/2 files, 1 missed)" in calls[-1][1]
+
+
+def test_run_omits_context_eval_without_brief(monkeypatch, tmp_path):
+    before_payload = {"ok": True, "status": "captured", "summary": "before captured"}
+
+    def fake_run_agent(cli_ref, prompt, timeout=600.0, cwd=None, read_only=False):
+        if "assignments" in prompt:
+            return agents.AgentResult(
+                text=json.dumps({"assignments": [{"worker": "coder", "task": "implement it"}]}),
+                ok=True,
+            )
+        if cli_ref == "ollama:llama3.3":
+            return agents.AgentResult(text="worker output", ok=True)
+        return agents.AgentResult(text="final answer", ok=True)
+
+    def fake_capture_after(target, run_dir, before):
+        sidecar = run_dir / "graph-delta.json"
+        sidecar.write_text(json.dumps({"ok": True, "changed_nodes": [{"file_path": "tests/test_aboyeur.py"}]}) + "\n")
+        return {"status": "ok", "ok": True, "summary": "code graph delta: ok", "sidecar_path": str(sidecar)}
+
+    output_dir = tmp_path / "run"
+    monkeypatch.setattr(aboyeur.agents, "run_agent", fake_run_agent)
+    monkeypatch.setattr(aboyeur.graphtrail_delta, "capture_before", lambda target, run_dir: before_payload)
+    monkeypatch.setattr(aboyeur.graphtrail_delta, "capture_after_and_diff", fake_capture_after)
+
+    assert (
+        aboyeur.run(
+            "build feature",
+            _roster(),
+            cwd=tmp_path,
+            output_dir=output_dir,
+            code_graph=aboyeur.CodeGraphBrief(attached=False),
+        )
+        == 0
+    )
+
+    ground_truth = json.loads((output_dir / "worker-results.json").read_text())["ground_truth"]
+    assert "context_eval" not in ground_truth
+    assert "context_eval" not in json.loads((output_dir / "run.json").read_text())
+
+
+def test_run_omits_context_eval_when_delta_failed(monkeypatch, tmp_path):
+    before_payload = {"ok": True, "status": "captured", "summary": "before captured"}
+    brief = aboyeur.CodeGraphBrief(
+        attached=True,
+        text="## Code graph context (GraphTrail, read-only)\n\n- `tests/test_aboyeur.py:10`\n",
+        bytes=80,
+    )
+
+    def fake_run_agent(cli_ref, prompt, timeout=600.0, cwd=None, read_only=False):
+        if "assignments" in prompt:
+            return agents.AgentResult(
+                text=json.dumps({"assignments": [{"worker": "coder", "task": "implement it"}]}),
+                ok=True,
+            )
+        if cli_ref == "ollama:llama3.3":
+            return agents.AgentResult(text="worker output", ok=True)
+        return agents.AgentResult(text="final answer", ok=True)
+
+    output_dir = tmp_path / "run"
+    monkeypatch.setattr(aboyeur.agents, "run_agent", fake_run_agent)
+    monkeypatch.setattr(aboyeur.graphtrail_delta, "capture_before", lambda target, run_dir: before_payload)
+    monkeypatch.setattr(
+        aboyeur.graphtrail_delta,
+        "capture_after_and_diff",
+        lambda target, run_dir, before: {"status": "sync_failed", "ok": False, "summary": "failed"},
+    )
+
+    assert aboyeur.run("build feature", _roster(), cwd=tmp_path, output_dir=output_dir, code_graph=brief) == 0
+
+    ground_truth = json.loads((output_dir / "worker-results.json").read_text())["ground_truth"]
+    assert "context_eval" not in ground_truth
+    assert "context_eval" not in json.loads((output_dir / "run.json").read_text())
+
+
+def test_run_omits_context_eval_when_delta_has_no_files(monkeypatch, tmp_path):
+    before_payload = {"ok": True, "status": "captured", "summary": "before captured"}
+    brief = aboyeur.CodeGraphBrief(
+        attached=True,
+        text="## Code graph context (GraphTrail, read-only)\n\n- `tests/test_aboyeur.py:10`\n",
+        bytes=80,
+    )
+
+    def fake_run_agent(cli_ref, prompt, timeout=600.0, cwd=None, read_only=False):
+        if "assignments" in prompt:
+            return agents.AgentResult(
+                text=json.dumps({"assignments": [{"worker": "coder", "task": "implement it"}]}),
+                ok=True,
+            )
+        if cli_ref == "ollama:llama3.3":
+            return agents.AgentResult(text="worker output", ok=True)
+        return agents.AgentResult(text="final answer", ok=True)
+
+    def fake_capture_after(target, run_dir, before):
+        sidecar = run_dir / "graph-delta.json"
+        sidecar.write_text(json.dumps({"ok": True, "changed_nodes": []}) + "\n")
+        return {"status": "ok", "ok": True, "summary": "code graph delta: ok", "sidecar_path": str(sidecar)}
+
+    output_dir = tmp_path / "run"
+    monkeypatch.setattr(aboyeur.agents, "run_agent", fake_run_agent)
+    monkeypatch.setattr(aboyeur.graphtrail_delta, "capture_before", lambda target, run_dir: before_payload)
+    monkeypatch.setattr(aboyeur.graphtrail_delta, "capture_after_and_diff", fake_capture_after)
+
+    assert aboyeur.run("build feature", _roster(), cwd=tmp_path, output_dir=output_dir, code_graph=brief) == 0
+
+    ground_truth = json.loads((output_dir / "worker-results.json").read_text())["ground_truth"]
+    assert "context_eval" not in ground_truth
+    assert "context_eval" not in json.loads((output_dir / "run.json").read_text())
 
 
 def test_run_worker_results_include_latest_verification_receipt_commands(monkeypatch, tmp_path):

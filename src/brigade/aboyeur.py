@@ -16,6 +16,7 @@ from uuid import uuid4
 
 from . import agents
 from . import codex_appserver
+from . import context_eval
 from . import graphtrail_delta
 from . import localio
 from . import proc, runguard
@@ -1234,7 +1235,37 @@ def _ground_truth_facts(ground_truth: dict[str, object] | None) -> str:
         if len(summary) > 240:
             summary = summary[:237] + "..."
         lines.append(f"- code_graph_delta: {summary}")
+    context_eval_payload = ground_truth.get("context_eval")
+    if isinstance(context_eval_payload, dict):
+        summary = _context_eval_fact(context_eval_payload)
+        if summary:
+            lines.append(f"- context eval: {summary}")
     return "\n".join(lines)
+
+
+def _context_eval_fact(payload: dict[str, object]) -> str:
+    try:
+        counts = payload.get("counts")
+        if not isinstance(counts, dict):
+            return ""
+        rate = payload.get("brief_hit_rate")
+        hits = counts.get("hits")
+        delta_files = counts.get("delta_files")
+        missed = counts.get("missed")
+        if (
+            isinstance(rate, bool)
+            or not isinstance(rate, (int, float))
+            or isinstance(hits, bool)
+            or not isinstance(hits, int)
+            or isinstance(delta_files, bool)
+            or not isinstance(delta_files, int)
+            or isinstance(missed, bool)
+            or not isinstance(missed, int)
+        ):
+            return ""
+        return f"brief hit rate {rate:.2f} ({hits}/{delta_files} files, {missed} missed)"
+    except BaseException:
+        return ""
 
 
 def _with_patch_ref(ground_truth: object, patch_ref: str) -> object:
@@ -1243,6 +1274,27 @@ def _with_patch_ref(ground_truth: object, patch_ref: str) -> object:
     updated = dict(ground_truth)
     updated["patch_ref"] = patch_ref
     return updated
+
+
+def _context_eval_for_run(
+    code_graph: CodeGraphBrief | None,
+    code_graph_delta: dict[str, object] | None,
+) -> dict[str, object] | None:
+    try:
+        if code_graph is None or not code_graph.attached or not code_graph.text:
+            return None
+        if not isinstance(code_graph_delta, dict) or code_graph_delta.get("ok") is not True:
+            return None
+        sidecar_path = code_graph_delta.get("sidecar_path")
+        if not isinstance(sidecar_path, str) or not sidecar_path:
+            return None
+        delta_files = context_eval.extract_delta_files(sidecar_path)
+        if not delta_files:
+            return None
+        brief_files = context_eval.extract_brief_files(code_graph.text)
+        return context_eval.evaluate(brief_files, delta_files)
+    except BaseException:
+        return None
 
 
 def set_artifact_patch_ref(output_dir: Path, patch_ref: str = "changes.patch") -> None:
@@ -1296,6 +1348,7 @@ def _run_payload(
     codex_transport: str | None = None,
     control_socket: Path | None = None,
     code_graph_delta: dict[str, object] | None = None,
+    context_eval_payload: dict[str, object] | None = None,
 ) -> dict[str, object]:
     payload: dict[str, object] = {
         "task": task,
@@ -1324,6 +1377,8 @@ def _run_payload(
         payload["git"] = git
     if code_graph_delta is not None:
         payload["code_graph_delta"] = code_graph_delta
+    if context_eval_payload is not None:
+        payload["context_eval"] = context_eval_payload
     if finished_at is not None:
         payload["finished_at"] = _utc_iso(finished_at)
         payload["duration_seconds"] = max(0.0, round((finished_at - started_at).total_seconds(), 3))
@@ -1549,9 +1604,12 @@ def run(
             appserver.close()
     if output_dir is not None and code_graph_delta_before is not None and cwd is not None:
         code_graph_delta = graphtrail_delta.capture_after_and_diff(cwd, output_dir, code_graph_delta_before)
+    context_eval_payload = _context_eval_for_run(code_graph, code_graph_delta)
     ground_truth = build_ground_truth(cwd, started_at)
     if code_graph_delta is not None:
         ground_truth["code_graph_delta"] = code_graph_delta
+    if context_eval_payload is not None:
+        ground_truth["context_eval"] = context_eval_payload
     if output_dir is not None:
         _write_json(
             output_dir / "worker-results.json",
@@ -1607,6 +1665,7 @@ def run(
                     brief_set=brief_set,
                     codex_transport=transport_for_payload,
                     code_graph_delta=code_graph_delta,
+                    context_eval_payload=context_eval_payload,
                 ),
             )
         print(f"error: orchestrator failed during synthesis: {final.detail}", file=sys.stderr)
@@ -1632,6 +1691,7 @@ def run(
                 codex_transport=transport_for_payload,
                 control_socket=control_socket,
                 code_graph_delta=code_graph_delta,
+                context_eval_payload=context_eval_payload,
             ),
         )
     if handoff_inbox is not None:
@@ -1669,6 +1729,7 @@ def run(
                         codex_transport=transport_for_payload,
                         control_socket=control_socket,
                         code_graph_delta=code_graph_delta,
+                        context_eval_payload=context_eval_payload,
                     ),
                 )
             print(f"error: {detail}", file=sys.stderr)
@@ -1696,6 +1757,7 @@ def run(
                     codex_transport=transport_for_payload,
                     control_socket=control_socket,
                     code_graph_delta=code_graph_delta,
+                    context_eval_payload=context_eval_payload,
                 ),
             )
     print(final.text)
