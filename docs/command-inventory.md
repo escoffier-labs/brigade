@@ -58,6 +58,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade tools`: 48 command path(s)
 - `brigade untrusted` (extras): 2 command path(s)
 - `brigade work`: 139 command path(s)
+- `brigade workflow` (extras): 3 command path(s)
 
 ## Commands
 
@@ -606,3 +607,6 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade work verify run`
 - `brigade work verify runs`
 - `brigade work verify show`
+- `brigade workflow propose-runbook` (extras)
+- `brigade workflow scan` (extras)
+- `brigade workflow show` (extras)

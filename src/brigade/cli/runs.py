@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from collections.abc import Mapping
 from pathlib import Path
 
 
@@ -136,7 +137,7 @@ def dispatch(args) -> int:
     return 2
 
 
-def _control_request(run: str, *, cwd: Path, runs_dir: Path | None, payload: dict[str, object]) -> int:
+def _control_request(run: str, *, cwd: Path, runs_dir: Path | None, payload: Mapping[str, object]) -> int:
     import sys
 
     from .. import run_control, runs_cmd
@@ -148,7 +149,7 @@ def _control_request(run: str, *, cwd: Path, runs_dir: Path | None, payload: dic
     assert run_dir is not None
     try:
         socket_path = run_control.control_socket_from_run(run_dir)
-        response = run_control.send_request(socket_path, payload)
+        response = run_control.send_request(socket_path, dict(payload))
     except run_control.ControlError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
