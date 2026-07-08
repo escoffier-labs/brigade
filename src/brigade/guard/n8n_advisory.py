@@ -3,7 +3,11 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from importlib.resources.abc import Traversable
+
+if sys.version_info >= (3, 11):
+    from importlib.resources.abc import Traversable
+else:  # pragma: no cover - 3.10 fallback
+    from importlib.abc import Traversable
 from os import PathLike
 from pathlib import Path
 from typing import Any
