@@ -7,11 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.21.0] - 2026-07-08
+
 ### Added
-- Vendored content-guard under `brigade.guard`, added `python -m brigade.guard` and `brigade guard ...`, and packaged the guard policies so scrub works without a separate checkout.
+- Verified binary pins for runbooks: a runbook can pin each step's binary by sha256, `runbook plan` shows pin status without executing, `runbook run` refuses on mismatch unless `--allow-pin-mismatch` is passed and records the check (and any override) in the receipt, and `brigade runbook pin <runbook.json>` writes pins from the current binaries. Unpinned runbooks behave exactly as before. (#156)
+- Tamper-evident receipts: verify, runbook, and outcome artifacts carry a sha256 `digests` block binding the receipt payload and every referenced log file; `memory/outcome/records.jsonl` is hash-chained with `prev_digest`/`digest` so an edited or deleted middle record breaks visibly; `brigade receipts verify` walks everything and reports OK, MISMATCH, MISSING, or legacy, wired into `brigade doctor` and `outcome doctor`. Pre-existing artifacts report as legacy, not failures. (#157)
+- Optional receipt signing: `brigade receipts keygen` writes a local 0600 key, receipts then carry an HMAC-SHA256 `signature` and `key_id` over the receipt digest, and `receipts verify` reports SIGNED-OK, flips SIGNATURE-MISMATCH nonzero, or marks foreign-key signatures unverifiable. Without a key, receipts are byte-identical to before. (#164)
+- Code-graph delta receipts: verify runs and `brigade run` snapshot the target's GraphTrail database (WAL-safe), re-sync and diff after, and attach a compact `code_graph_delta` summary to the receipt with the full diff as a digest-covered `graph-delta.json` sidecar. Snapshots are deleted after the diff with their sha256s kept as attestations. Fail-open everywhere; read-only, dry-run, and `--no-code-graph` runs skip capture. (#158)
+- MiseLedger receipt export: `brigade receipts export miseledger` emits one `miseledger.adapter.v1` JSONL line per verify-run and run receipt, with `raw.hash` reusing the receipt digest so re-imports dedupe on content identity. `--new-only` adds a cursor so reruns export only new receipts, and `--import` pipes the export straight through `miseledger import adapter`, fail-open when the binary is absent and skipping the import subprocess entirely when nothing new was exported. (#159, #162, #165)
+- Git provenance on receipts: verify receipts and run payloads capture `head`, `branch`, and `dirty_files` inside the digest-covered content, and the MiseLedger export emits the GitHub commit URL as a link. (#162)
+- Delta-aware outcome ledger: `outcome capture` copies the receipt's compact code-graph delta onto the hash-chained record, `outcome capture --run-receipt <run-id|latest>` captures from run receipts (where code actually changes) with status mapped to signal, and `outcome rank`/`reconcile` report `graph: N changing / M no-op` per subject. Promotion decision rules are unchanged. (#163, #169)
+- Context evals on run receipts: when a run had a code-graph brief and its delta captured cleanly, `context_eval` records whether the pre-run context named the files the run actually touched (`hits`, `missed`, `brief_hit_rate`). Absent when there is no brief, no clean delta, or nothing changed. (#167)
+- Evidence briefs close the receipts-to-context loop: `brigade run` can attach a capped, fail-open brief of recent verified evidence for the target repo pulled from MiseLedger, always framed as untrusted evidence rather than instructions, gated by `--no-evidence`, and recorded in `run.json`. `brigade work import context --from-miseledger '<query>'` runs the same fetch on demand. (#171)
+- Workflow sequence scanner: mines run artifacts for recurring command sequences and proposes runbooks (with empty pin stubs) from what operators actually repeat. (#155)
+- Detached run control: `brigade run --detach`, live watch, and steer/interrupt verbs for app-server runs. (#154)
+- Vendored content-guard under `brigade.guard`, added `python -m brigade.guard` and `brigade guard ...`, and packaged the guard policies so scrub works without a separate checkout. (#166)
 
 ### Changed
-- `brigade scrub` now defaults to the embedded `brigade.guard` scanner and policy set. Setting `CONTENT_GUARD_DIR` still preserves the old external checkout behavior, including `python -m content_guard` with that checkout's `src` on `PYTHONPATH`.
+- `brigade scrub` now defaults to the embedded `brigade.guard` scanner and policy set. Setting `CONTENT_GUARD_DIR` still preserves the old external checkout behavior, including `python -m content_guard` with that checkout's `src` on `PYTHONPATH`. (#166)
+
+### Fixed
+- Run receipts are written atomically, closing a race where a concurrent reader could catch a partially written `run.json`. (#161)
+- Friction imports use shared import identity keys, so re-imports no longer duplicate items. (#153)
+- The technical guide no longer overstates runbook approval semantics. (#152)
 
 ## [0.19.0] - 2026-07-05
 
