@@ -81,6 +81,10 @@ _TEMPLATE_PATTERNS = (
 )
 
 
+def _as_list(value: object) -> list[Any]:
+    return value if isinstance(value, list) else []
+
+
 def _concrete_command(command: object) -> str:
     return " ".join(str(command or "").split())
 
@@ -229,7 +233,7 @@ def _verify_observations(
         if len(concrete) < min_steps:
             continue
         status = str(receipt.get("status") or "")
-        rows = receipt.get("commands") if isinstance(receipt.get("commands"), list) else []
+        rows = _as_list(receipt.get("commands"))
         all_exit_zero = all(int(row.get("exit_code") or 0) == 0 for row in rows if isinstance(row, dict))
         observations.append(
             {
@@ -283,7 +287,7 @@ def _candidate_from_group(pattern_key: str, observations: list[dict[str, Any]]) 
     first = observations[0]
     latest = observations[-1]
     candidate_id = f"workflow-{pattern_key}"
-    sequence = list(first.get("sequence") if isinstance(first.get("sequence"), list) else [])
+    sequence = list(_as_list(first.get("sequence")))
     sources = sorted({str(item.get("source")) for item in observations}, key=_source_sort_key)
     evidence = [
         {
@@ -292,7 +296,7 @@ def _candidate_from_group(pattern_key: str, observations: list[dict[str, Any]]) 
             "run_id": item.get("run_id"),
             "started_at": item.get("started_at"),
             "status": item.get("status"),
-            "command_count": len(item.get("sequence") if isinstance(item.get("sequence"), list) else []),
+            "command_count": len(_as_list(item.get("sequence"))),
         }
         for item in observations[-MAX_EVIDENCE:]
     ]
@@ -338,7 +342,7 @@ def _review_risk(commands: list[str]) -> str:
 def _group_candidates(observations: list[dict[str, Any]], *, min_count: int) -> list[dict[str, Any]]:
     grouped: dict[str, list[dict[str, Any]]] = {}
     for item in observations:
-        sequence = item.get("sequence") if isinstance(item.get("sequence"), list) else []
+        sequence = _as_list(item.get("sequence"))
         grouped.setdefault(_sequence_pattern_key([str(command) for command in sequence]), []).append(item)
     candidates = [_candidate_from_group(key, items) for key, items in grouped.items()]
     candidates = [item for item in candidates if int(item.get("occurrence_count") or 0) >= min_count]
@@ -380,7 +384,7 @@ def scan_payload(
     candidates = _group_candidates(observations, min_count=min_count)
     source_counts: dict[str, int] = {}
     for item in candidates:
-        for source in item.get("sources") if isinstance(item.get("sources"), list) else []:
+        for source in _as_list(item.get("sources")):
             source_counts[str(source)] = source_counts.get(str(source), 0) + 1
     payload = {
         "version": 1,
@@ -433,7 +437,7 @@ def _render_markdown(payload: dict[str, Any]) -> str:
         lines.append("")
     lines.append("## Candidate Workflows")
     lines.append("")
-    candidates = payload.get("candidates") if isinstance(payload.get("candidates"), list) else []
+    candidates = _as_list(payload.get("candidates"))
     if not candidates:
         lines.append("No workflow candidates found.")
     for item in candidates:
@@ -452,7 +456,7 @@ def _render_markdown(payload: dict[str, Any]) -> str:
                 "",
             ]
         )
-        sequence = item.get("sequence") if isinstance(item.get("sequence"), list) else []
+        sequence = _as_list(item.get("sequence"))
         for command in sequence:
             lines.append(f"  - `{command}`")
         lines.append("")
@@ -468,7 +472,7 @@ def _import_candidates(target: Path, candidates: list[dict[str, Any]], *, dry_ru
     records: list[dict[str, Any]] = []
     for item in candidates:
         candidate_id = str(item.get("id") or "workflow-candidate")
-        sequence = item.get("sequence") if isinstance(item.get("sequence"), list) else []
+        sequence = _as_list(item.get("sequence"))
         preview = " && ".join(str(command) for command in sequence[:3])
         records.append(
             {
@@ -524,7 +528,7 @@ def scan(
     skipped = 0
     skipped_dismissed = 0
     if import_candidates:
-        candidates = payload.get("candidates") if isinstance(payload.get("candidates"), list) else []
+        candidates = _as_list(payload.get("candidates"))
         imported, skipped, skipped_dismissed = _import_candidates(target, candidates, dry_run=dry_run)
     payload["output"] = {
         "json": str(json_path),
@@ -637,7 +641,7 @@ def _runbook_payload(candidate: dict[str, Any]) -> tuple[dict[str, Any] | None, 
         if not name:
             return None, f"workflow candidate has an unparsable example command: {candidate_id}"
         allowed_commands.add(name)
-    sources = candidate.get("sources") if isinstance(candidate.get("sources"), list) else []
+    sources = _as_list(candidate.get("sources"))
     provenance = ", ".join(str(source) for source in sources) or "unknown"
     payload: dict[str, Any] = {
         "id": runbook_id,
