@@ -759,6 +759,8 @@ Portable tool projections and first-class skills are related but separate. Tool 
 Explicit runbook commands:
 
 - `brigade runbook plan runbook.json` validates a reviewed local runbook file, policy checks, and exact steps without executing them.
+- `brigade runbook pin runbook.json` shlex-tokenizes each step, resolves each step's `argv[0]`, hashes the current executable, and writes or refreshes the runbook-level `pins` list.
+- `brigade runbook pin runbook.json --dry-run` prints the pins it would write without modifying the runbook file.
 - `brigade runbook run runbook.json --approved` runs foreground shell steps, then writes stdout logs, stderr logs, and a receipt under `.brigade/runbooks/runs/`.
 - `brigade runbook run runbook.json --approved --dry-run` validates policy and renders the executable steps without writing run receipts.
 - `brigade runbook resume latest` shows the latest runbook receipt and the next failed step, if any.
@@ -766,6 +768,26 @@ Explicit runbook commands:
 - `brigade runbook closeout latest --status reviewed --reason "..."` records operator review for the runbook run.
 
 Runbooks are the first explicit execution lane for multi-step local workflows. Execution requires the operator to pass `--approved`. An `approved: true` value in the runbook is recorded as file metadata only and does not authorize execution. Runbooks block destructive default-deny command patterns and can restrict steps with `allowed_commands`. Status, doctor, brief, and center views still do not execute runbooks automatically.
+
+Runbooks can also carry optional binary pins:
+
+```json
+{
+  "pins": [
+    {
+      "command": "python3",
+      "path": "/usr/bin/python3",
+      "sha256": "..."
+    }
+  ]
+}
+```
+
+`brigade runbook pin` writes `command`, absolute `path`, and `sha256` from the binaries currently resolved for the runbook steps. `version_cmd` holds arguments for the pinned binary (for example `--version`), never a standalone command; Brigade always executes it against the resolved pinned path so the recorded version describes the same file the hash covers. If an existing pin has `version_cmd`, pinning preserves it and refreshes `version` from its output. Pinning never executes the step `run` strings, but it does run the pinned binary with the preserved `version_cmd` arguments because those are part of the pin metadata.
+
+During `runbook plan`, pinned steps report `pin.status` as `ok`, `mismatch`, or `missing` with the resolved path and expected or observed hashes. Plan does not execute `version_cmd`. During `runbook run`, Brigade verifies configured pins before any step command runs. Missing or mismatched pins fail the run unless the operator passes `--allow-pin-mismatch`; receipts for pinned runbooks include `pin_checks`, refreshed runtime-only `version_output` when `version_cmd` is configured (executed as arguments to the resolved pinned binary, and only when steps actually execute, never on `--dry-run`), and whether an override was used.
+
+Pins are an advisory drift defense, not a security boundary. They only bind the first token that Brigade parses from each step with `shlex.split`, the same parser used by the policy layer. For `bash script.sh`, `python script.py`, or another interpreter invocation, the pin covers the interpreter at `argv[0]`, not the script file or imports it loads. For shell wrappers such as `bash -c "..."`, the allowlist policy still treats the inline script as unconstrained and blocks it when `allowed_commands` is configured. Operators still need to review every command, every referenced file, and any `version_cmd` before approving execution.
 
 Backup health commands:
 
