@@ -3,7 +3,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from brigade import cli, localio, outcome, outcome_cmd, receipts_cmd, runbook_cmd, work_cmd
+from brigade import cli, localio, outcome, outcome_cmd, receipt_signing, receipts_cmd, runbook_cmd, work_cmd
 
 from tests.work_cmd_test_helpers import _init_git_repo
 
@@ -74,6 +74,7 @@ def _write_verify_export_receipt(
     *,
     started_at,
     digest=True,
+    digest_signature=None,
     code_graph_delta=None,
     git=None,
 ):
@@ -117,6 +118,9 @@ def _write_verify_export_receipt(
             "logs": dict(sorted(logs.items())),
             "receipt_sha256": _receipt_digest(receipt),
         }
+        if digest_signature is not None:
+            receipt["digests"]["signature"] = digest_signature["signature"]
+            receipt["digests"]["key_id"] = digest_signature["key_id"]
     localio.write_json(run_dir / "receipt.json", receipt)
     return run_dir / "receipt.json"
 
@@ -218,6 +222,34 @@ def test_receipts_export_miseledger_exports_run_and_digestless_verify_receipts(t
     assert rows[0]["item"]["metadata"]["code_graph_delta_summary"] == "changed_symbols=1"
     assert rows[1]["raw"]["hash"] == "sha256:" + localio.file_sha256(verify_path)
     assert rows[1]["item"]["metadata"]["digest_source"] == "file_sha256"
+
+
+def test_receipts_export_miseledger_includes_digest_signature_when_present(tmp_path, capsys):
+    signature = {"signature": "a" * 64, "key_id": "deadbeef"}
+    _write_verify_export_receipt(
+        tmp_path,
+        "20260708-110000-work-verify-signed",
+        started_at="2026-07-08T11:00:00Z",
+        digest_signature=signature,
+    )
+
+    assert receipts_cmd.export_miseledger(target=tmp_path) == 0
+    rows = _jsonl(capsys.readouterr().out)
+
+    assert rows[0]["item"]["metadata"]["digest_signature"] == signature
+
+
+def test_receipts_export_miseledger_omits_digest_signature_when_absent(tmp_path, capsys):
+    _write_verify_export_receipt(
+        tmp_path,
+        "20260708-110000-work-verify-unsigned",
+        started_at="2026-07-08T11:00:00Z",
+    )
+
+    assert receipts_cmd.export_miseledger(target=tmp_path) == 0
+    rows = _jsonl(capsys.readouterr().out)
+
+    assert "digest_signature" not in rows[0]["item"]["metadata"]
 
 
 def test_receipts_export_miseledger_is_byte_identical_and_limit_uses_newest_first(tmp_path, capsys):
@@ -529,6 +561,97 @@ def test_receipts_verify_reports_mismatch_when_receipt_field_is_edited(tmp_path,
     problem = [item for item in payload["artifacts"] if item["status"] == "MISMATCH"][0]
     assert problem["artifact_type"] == "work-verify-receipt"
     assert problem["check"] == "receipt_sha256"
+
+
+def test_receipts_verify_reports_signed_ok_with_matching_local_key(tmp_path, capsys):
+    _init_git_repo(tmp_path)
+    receipt_signing.generate_key(tmp_path)
+    assert (
+        work_cmd.verify_run(
+            target=tmp_path,
+            commands=["python3 -c \"print('ok')\""],
+            timeout=30,
+            json_output=True,
+        )
+        == 0
+    )
+    capsys.readouterr()
+
+    assert receipts_cmd.verify(target=tmp_path, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+
+    signed_items = [item for item in payload["artifacts"] if item["status"] == "SIGNED-OK"]
+    assert len(signed_items) == 1
+    assert signed_items[0]["check"] == "digest_signature"
+
+
+def test_receipts_verify_signature_mismatch_exits_nonzero_when_digest_is_rewritten(tmp_path, capsys):
+    _init_git_repo(tmp_path)
+    receipt_signing.generate_key(tmp_path)
+    assert (
+        work_cmd.verify_run(
+            target=tmp_path,
+            commands=["python3 -c \"print('ok')\""],
+            timeout=30,
+            json_output=True,
+        )
+        == 0
+    )
+    receipt = json.loads(capsys.readouterr().out)
+    path = tmp_path / ".brigade" / "work" / "verify-runs" / receipt["run_id"] / "receipt.json"
+    tampered = json.loads(path.read_text())
+    tampered["status"] = "failed"
+    tampered["digests"]["receipt_sha256"] = _receipt_digest(tampered)
+    localio.write_json(path, tampered)
+
+    assert receipts_cmd.verify(target=tmp_path, json_output=True) == 1
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["summary"]["mismatch"] == 1
+    problem = [item for item in payload["artifacts"] if item["status"] == "SIGNATURE-MISMATCH"][0]
+    assert problem["artifact_type"] == "work-verify-receipt"
+    assert problem["check"] == "digest_signature"
+
+
+def test_receipts_verify_reports_foreign_key_id_as_unverifiable_without_failing(tmp_path, capsys):
+    _init_git_repo(tmp_path)
+    receipt_signing.generate_key(tmp_path)
+    assert (
+        work_cmd.verify_run(
+            target=tmp_path,
+            commands=["python3 -c \"print('ok')\""],
+            timeout=30,
+            json_output=True,
+        )
+        == 0
+    )
+    capsys.readouterr()
+    receipt_signing.generate_key(tmp_path, force=True)
+
+    assert receipts_cmd.verify(target=tmp_path, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+
+    unverifiable = [item for item in payload["artifacts"] if item["status"] == "UNVERIFIABLE-SIGNATURE"]
+    assert len(unverifiable) == 1
+    assert unverifiable[0]["check"] == "digest_signature"
+    assert "foreign key_id" in unverifiable[0]["detail"]
+
+
+def test_receipts_verify_no_key_receipt_keeps_digest_checks_only(tmp_path):
+    _write_verify_export_receipt(
+        tmp_path,
+        "20260708-120000-work-verify-no-key",
+        started_at="2026-07-08T12:00:00Z",
+    )
+
+    payload = receipts_cmd.verify_payload(tmp_path)
+
+    assert payload["summary"] == {"total": 3, "ok": 3, "mismatch": 0, "missing": 0, "legacy": 0}
+    assert [(item["status"], item["check"]) for item in payload["artifacts"]] == [
+        ("OK", "receipt_sha256"),
+        ("OK", "log_sha256"),
+        ("OK", "log_sha256"),
+    ]
 
 
 def test_receipts_verify_reports_missing_when_referenced_log_is_deleted(tmp_path, capsys):

@@ -11,7 +11,7 @@ import sys
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
-from .. import graphtrail_delta, localio
+from .. import graphtrail_delta, localio, receipt_signing
 from . import constants, helpers, ledger as ledger_mod
 from . import reviews as reviews_mod
 from . import scanners as scanners_mod
@@ -388,6 +388,11 @@ def _run_verify_commands(target: Path, commands: list[str], timeout: int) -> tup
         "logs": dict(sorted(log_digests.items())),
         "receipt_sha256": localio.canonical_json_digest(receipt, exclude_keys={"digests"}),
     }
+    signing_key = receipt_signing.load_key(target)
+    if signing_key is not None:
+        key, key_id = signing_key
+        receipt["digests"]["signature"] = receipt_signing.sign(receipt["digests"]["receipt_sha256"], key)
+        receipt["digests"]["key_id"] = key_id
     helpers._write_json(run_dir / "receipt.json", receipt)
     _write_verify_markdown(run_dir, receipt)
     _prune_verify_runs(target)

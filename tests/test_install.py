@@ -92,6 +92,7 @@ def test_opencode_install_creates_inbox_and_gitignore(tmp_path):
     assert (tmp_path / ".opencode" / "memory-handoffs" / "TEMPLATE.md").is_file()
     assert (tmp_path / ".opencode" / "memory-handoffs" / "processed").is_dir()
     block = build_gitignore_block(sel)
+    assert ".brigade/receipt-signing-key" in block
     assert ".opencode/memory-handoffs/*" in block
     assert "!.opencode/memory-handoffs/TEMPLATE.md" in block
 

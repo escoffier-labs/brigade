@@ -11,6 +11,8 @@ import subprocess
 import sys
 from pathlib import Path
 from typing import Any
+
+from . import receipt_signing
 from .localio import (
     canonical_json_digest as _canonical_json_digest,
     file_sha256 as _file_sha256,
@@ -565,6 +567,11 @@ def _execute_plan(
         "logs": dict(sorted(log_digests.items())),
         "receipt_sha256": _canonical_json_digest(receipt, exclude_keys={"digests"}),
     }
+    signing_key = receipt_signing.load_key(target)
+    if signing_key is not None:
+        signing_key_bytes, signing_key_id = signing_key
+        receipt["digests"]["signature"] = receipt_signing.sign(receipt["digests"]["receipt_sha256"], signing_key_bytes)
+        receipt["digests"]["key_id"] = signing_key_id
     _write_json(run_dir / "receipt.json", receipt)
     if json_output:
         print(json.dumps(receipt, indent=2, sort_keys=True))

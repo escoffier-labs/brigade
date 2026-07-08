@@ -61,6 +61,7 @@ def build_gitignore_block(selection: Selection) -> str:
             "",
             "# brigade local state (logs, scrub cache, dogfood runs, work sessions).",
             ".brigade/",
+            ".brigade/receipt-signing-key",
             ".brigade/backups/",
             ".brigade/backups.toml",
             ".brigade/center/",

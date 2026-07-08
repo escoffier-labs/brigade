@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hmac
 import json
 import re
 import shutil
@@ -14,11 +15,15 @@ from urllib.parse import urlparse
 
 from . import __version__
 from . import localio
+from . import receipt_signing
 
 OK = "OK"
 MISMATCH = "MISMATCH"
 MISSING = "MISSING"
 LEGACY = "LEGACY"
+SIGNED_OK = "SIGNED-OK"
+SIGNATURE_MISMATCH = "SIGNATURE-MISMATCH"
+UNVERIFIABLE_SIGNATURE = "UNVERIFIABLE-SIGNATURE"
 MISELEDGER_SCHEMA = "miseledger.adapter.v1"
 MISELEDGER_SOURCE = {"kind": "brigade", "name": "Brigade", "version": __version__}
 MISELEDGER_ACTOR = {"external_id": "brigade:system", "type": "system", "name": "Brigade"}
@@ -30,6 +35,23 @@ def _rel(path: Path, target: Path) -> str:
         return str(path.relative_to(target))
     except ValueError:
         return str(path)
+
+
+def keygen(*, target: Path, force: bool = False) -> int:
+    target = target.expanduser().resolve()
+    if not target.is_dir():
+        print(f"error: --target is not a directory: {target}", file=sys.stderr)
+        return 2
+    try:
+        path, key_id = receipt_signing.generate_key(target, force=force)
+    except FileExistsError:
+        print(f"error: receipt signing key already exists: {receipt_signing.key_path(target)}", file=sys.stderr)
+        print("hint: pass --force to overwrite it", file=sys.stderr)
+        return 1
+    print(f"receipt signing key: {path}")
+    print(f"key_id: {key_id}")
+    print("reminder: keep this key gitignored; Brigade's .brigade/ ignore convention covers it.")
+    return 0
 
 
 def _item(
@@ -178,6 +200,16 @@ def _verify_receipt(path: Path, *, artifact_type: str, log_type: str, target: Pa
                 actual=actual_receipt,
             )
         )
+    signature_item = _verify_digest_signature(
+        digests=digests,
+        receipt_digest=expected_receipt,
+        artifact_type=artifact_type,
+        artifact_id=artifact_id,
+        path=path,
+        target=target,
+    )
+    if signature_item is not None:
+        items.append(signature_item)
 
     logs = digests.get("logs")
     if not isinstance(logs, dict):
@@ -267,6 +299,102 @@ def _verify_receipt(path: Path, *, artifact_type: str, log_type: str, target: Pa
                 )
             )
     return items
+
+
+def _verify_digest_signature(
+    *,
+    digests: dict[str, Any],
+    receipt_digest: object,
+    artifact_type: str,
+    artifact_id: str,
+    path: Path,
+    target: Path,
+) -> dict[str, Any] | None:
+    signature = digests.get("signature")
+    key_id = digests.get("key_id")
+    if signature is None and key_id is None:
+        return None
+    if not isinstance(signature, str) or not signature or not isinstance(key_id, str) or not key_id:
+        return _item(
+            artifact_type=artifact_type,
+            artifact_id=artifact_id,
+            status=UNVERIFIABLE_SIGNATURE,
+            check="digest_signature",
+            detail="unverifiable-signature: signature or key_id is missing",
+            path=path,
+            target=target,
+        )
+    if not isinstance(receipt_digest, str) or not receipt_digest:
+        return _item(
+            artifact_type=artifact_type,
+            artifact_id=artifact_id,
+            status=UNVERIFIABLE_SIGNATURE,
+            check="digest_signature",
+            detail="unverifiable-signature: receipt_sha256 is missing",
+            path=path,
+            target=target,
+        )
+    try:
+        loaded = receipt_signing.load_key(target)
+    except (OSError, ValueError) as exc:
+        return _item(
+            artifact_type=artifact_type,
+            artifact_id=artifact_id,
+            status=UNVERIFIABLE_SIGNATURE,
+            check="digest_signature",
+            detail=f"unverifiable-signature: local key unavailable: {exc}",
+            path=path,
+            target=target,
+            expected=key_id,
+        )
+    if loaded is None:
+        return _item(
+            artifact_type=artifact_type,
+            artifact_id=artifact_id,
+            status=UNVERIFIABLE_SIGNATURE,
+            check="digest_signature",
+            detail="unverifiable-signature: no local receipt signing key",
+            path=path,
+            target=target,
+            expected=key_id,
+        )
+    key, local_key_id = loaded
+    if local_key_id != key_id:
+        return _item(
+            artifact_type=artifact_type,
+            artifact_id=artifact_id,
+            status=UNVERIFIABLE_SIGNATURE,
+            check="digest_signature",
+            detail=f"unverifiable-signature: foreign key_id {key_id}",
+            path=path,
+            target=target,
+            expected=key_id,
+            actual=local_key_id,
+        )
+    actual_signature = receipt_signing.sign(receipt_digest, key)
+    if not hmac.compare_digest(signature, actual_signature):
+        return _item(
+            artifact_type=artifact_type,
+            artifact_id=artifact_id,
+            status=SIGNATURE_MISMATCH,
+            check="digest_signature",
+            detail="SIGNATURE-MISMATCH: receipt digest signature does not match local key",
+            path=path,
+            target=target,
+            expected=signature,
+            actual=actual_signature,
+        )
+    return _item(
+        artifact_type=artifact_type,
+        artifact_id=artifact_id,
+        status=SIGNED_OK,
+        check="digest_signature",
+        detail="receipt digest signature matches local key",
+        path=path,
+        target=target,
+        expected=signature,
+        actual=actual_signature,
+    )
 
 
 def _verify_receipt_tree(target: Path) -> list[dict[str, Any]]:
@@ -429,7 +557,11 @@ def _summary(items: list[dict[str, Any]]) -> dict[str, int]:
     counts = {OK: 0, MISMATCH: 0, MISSING: 0, LEGACY: 0}
     for item in items:
         status = str(item.get("status") or "")
-        if status in counts:
+        if status == SIGNED_OK:
+            counts[OK] += 1
+        elif status == SIGNATURE_MISMATCH:
+            counts[MISMATCH] += 1
+        elif status in counts:
             counts[status] += 1
     return {
         "total": len(items),
@@ -468,7 +600,7 @@ def verify(*, target: Path, json_output: bool = False) -> int:
         f"missing={summary['missing']} legacy={summary['legacy']}"
     )
     for item in payload["artifacts"]:
-        if item["status"] in {MISMATCH, MISSING, LEGACY}:
+        if item["status"] in {MISMATCH, MISSING, LEGACY, SIGNATURE_MISMATCH, UNVERIFIABLE_SIGNATURE}:
             print(f"- {item['status']} {item['artifact_id']} [{item['check']}] {item['detail']}")
     return 1 if failed else 0
 
@@ -582,6 +714,17 @@ def _metadata_with_git(metadata: dict[str, Any], payload: dict[str, Any]) -> dic
     git = _receipt_git(payload)
     if git is not None:
         metadata["git"] = git
+    return metadata
+
+
+def _metadata_with_digest_signature(metadata: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
+    digests = payload.get("digests")
+    if not isinstance(digests, dict):
+        return metadata
+    signature = digests.get("signature")
+    key_id = digests.get("key_id")
+    if isinstance(signature, str) and signature and isinstance(key_id, str) and key_id:
+        metadata["digest_signature"] = {"signature": signature, "key_id": key_id}
     return metadata
 
 
@@ -777,6 +920,7 @@ def _verify_miseledger_item(payload: dict[str, Any], path: Path, target: Path, o
     }
     metadata = _metadata_with_delta(metadata, payload)
     metadata = _metadata_with_git(metadata, payload)
+    metadata = _metadata_with_digest_signature(metadata, payload)
     text = f"Brigade work verify run {run_id} status={payload.get('status') or 'unknown'} commands={len(commands)}."
     command_text = _one_line(
         " ; ".join(str(command.get("command") or "") for command in commands if isinstance(command, dict)),
@@ -837,6 +981,7 @@ def _run_miseledger_item(payload: dict[str, Any], path: Path, target: Path, ordi
     }
     metadata = _metadata_with_delta(metadata, payload)
     metadata = _metadata_with_git(metadata, payload)
+    metadata = _metadata_with_digest_signature(metadata, payload)
     text = f"Brigade run {run_id} status={payload.get('status') or 'unknown'}."
     if task:
         text += f" Task: {task}."

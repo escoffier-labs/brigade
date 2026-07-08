@@ -41,7 +41,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade pantry` (extras): 4 command path(s)
 - `brigade profiles`: 2 command path(s)
 - `brigade projects` (extras): 10 command path(s)
-- `brigade receipts`: 2 command path(s)
+- `brigade receipts`: 3 command path(s)
 - `brigade reconfigure`: 1 command path(s)
 - `brigade release` (extras): 23 command path(s)
 - `brigade repos` (extras): 71 command path(s)
@@ -252,6 +252,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade projects readiness record` (extras)
 - `brigade projects readiness show` (extras)
 - `brigade receipts export miseledger`
+- `brigade receipts keygen`
 - `brigade receipts verify`
 - `brigade reconfigure`
 - `brigade release candidate archive` (extras)
