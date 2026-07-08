@@ -139,6 +139,13 @@ def main() -> int:
             thread_id = pending_hang.pop(turn_id, msg["params"]["threadId"])
             _send({"jsonrpc": "2.0", "id": msg_id, "result": {}})
             _complete_turn(thread_id, turn_id, "interrupted", None)
+        elif method == "turn/steer":
+            params = msg["params"]
+            turn_id = params["expectedTurnId"]
+            text = params["input"][0]["text"]
+            thread_id = pending_hang.pop(turn_id, params["threadId"])
+            _send({"jsonrpc": "2.0", "id": msg_id, "result": {}})
+            _complete_turn(thread_id, turn_id, "completed", f"steered: {text}")
         else:
             _send({"jsonrpc": "2.0", "id": msg_id, "result": {}})
     return 0

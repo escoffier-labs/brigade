@@ -4,7 +4,13 @@ from __future__ import annotations
 
 import argparse
 import sys
+import time
 from pathlib import Path
+from subprocess import DEVNULL, STDOUT, Popen
+
+
+_DETACH_START_TIMEOUT_SECONDS = 30.0
+_DETACH_POLL_INTERVAL_SECONDS = 0.05
 
 
 def register(sub: argparse._SubParsersAction) -> None:
@@ -18,6 +24,11 @@ def register(sub: argparse._SubParsersAction) -> None:
         help="Path to roster.toml. Defaults to .brigade/roster.toml under the current directory.",
     )
     p_run.add_argument("--dry-run", action="store_true", help="Print the plan without dispatching workers.")
+    p_run.add_argument(
+        "--detach",
+        action="store_true",
+        help="Start the run in a detached child process and return after run metadata is written.",
+    )
     p_run.add_argument(
         "--allow-dirty",
         action="store_true",
@@ -95,6 +106,15 @@ def dispatch(args) -> int:
     run_cwd = args.cwd.expanduser().resolve()
     if not run_cwd.is_dir():
         print(f"error: --cwd is not a directory: {run_cwd}", file=sys.stderr)
+        return 2
+    if args.detach and args.dry_run:
+        print("error: --detach cannot be used with --dry-run", file=sys.stderr)
+        return 2
+    if args.detach and args.no_artifacts:
+        print("error: --detach cannot be used with --no-artifacts", file=sys.stderr)
+        return 2
+    if args.detach and args.inspect:
+        print("error: --detach cannot be used with --inspect", file=sys.stderr)
         return 2
     if args.handoff and args.dry_run:
         print("error: --handoff cannot be used with --dry-run", file=sys.stderr)
@@ -174,6 +194,10 @@ def dispatch(args) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 2
 
+    if args.detach:
+        assert output_dir is not None
+        return _dispatch_detached(args, run_cwd=run_cwd, roster_path=roster_path, output_dir=output_dir)
+
     worktree_cwd = None
     effective_cwd = run_cwd
     keep_worktree = False
@@ -239,6 +263,95 @@ def dispatch(args) -> int:
 
             runs_cmd.show(output_dir)
     return rc
+
+
+def _dispatch_detached(args, *, run_cwd: Path, roster_path: Path, output_dir: Path) -> int:
+    output_dir = output_dir.expanduser().resolve()
+    output_dir.mkdir(parents=True, exist_ok=True)
+    log_path = output_dir / "detached.log"
+    argv = _detached_child_argv(args, run_cwd=run_cwd, roster_path=roster_path, output_dir=output_dir)
+    try:
+        with log_path.open("a", encoding="utf-8") as log:
+            proc = Popen(
+                argv,
+                cwd=run_cwd,
+                stdin=DEVNULL,
+                stdout=log,
+                stderr=STDOUT,
+                start_new_session=True,
+            )
+    except OSError as exc:
+        print(f"error: failed to start detached run: {exc}", file=sys.stderr)
+        print(f"log: {log_path}", file=sys.stderr)
+        return 2
+
+    exit_code = _poll_detached_start(proc, output_dir)
+    if exit_code is not None:
+        print(f"error: detached child exited before run metadata was written: exit {exit_code}", file=sys.stderr)
+        print(f"artifacts: {output_dir}", file=sys.stderr)
+        print(f"log: {log_path}", file=sys.stderr)
+        return 2
+
+    if not (output_dir / "run.json").is_file():
+        print(
+            "warning: detached child has not written run metadata yet; check the log for startup progress.",
+            file=sys.stderr,
+        )
+    print(f"run: {output_dir.name}")
+    print(f"detached: pid {proc.pid}", file=sys.stderr)
+    print(f"artifacts: {output_dir}", file=sys.stderr)
+    print(f"log: {log_path}", file=sys.stderr)
+    return 0
+
+
+def _detached_child_argv(args, *, run_cwd: Path, roster_path: Path, output_dir: Path) -> list[str]:
+    argv = [
+        sys.executable,
+        "-m",
+        "brigade",
+        "run",
+        args.task,
+        "--roster",
+        str(roster_path.expanduser().resolve()),
+        "--cwd",
+        str(run_cwd),
+        "--output-dir",
+        str(output_dir),
+    ]
+    if args.allow_dirty:
+        argv.append("--allow-dirty")
+    if args.worktree:
+        argv.append("--worktree")
+    if args.show_plan:
+        argv.append("--show-plan")
+    if args.verbose:
+        argv.append("--verbose")
+    if args.read_only:
+        argv.append("--read-only")
+    if args.no_code_graph:
+        argv.append("--no-code-graph")
+    if args.sandbox is not None:
+        argv.extend(["--sandbox", args.sandbox])
+    if args.codex_transport is not None:
+        argv.extend(["--codex-transport", args.codex_transport])
+    if args.handoff:
+        argv.append("--handoff")
+    if args.handoff_inbox is not None:
+        argv.extend(["--handoff-inbox", str(args.handoff_inbox.expanduser().resolve())])
+    return argv
+
+
+def _poll_detached_start(proc: Popen, output_dir: Path) -> int | None:
+    run_json = output_dir / "run.json"
+    deadline = time.monotonic() + _DETACH_START_TIMEOUT_SECONDS
+    while time.monotonic() < deadline:
+        if run_json.is_file():
+            return None
+        exit_code = proc.poll()
+        if exit_code is not None:
+            return exit_code
+        time.sleep(_DETACH_POLL_INTERVAL_SECONDS)
+    return None
 
 
 def _worktree_checkout_path(repo_root: Path, output_dir: Path) -> Path:

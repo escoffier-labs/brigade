@@ -326,6 +326,7 @@ brigade run "review this repo" --read-only
 brigade run "review this repo" --read-only --inspect
 brigade run "make the change" --allow-dirty
 brigade run "make the change" --worktree
+brigade run "make the change" --detach
 ```
 
 The examples above all drive the same `brigade run` command to show its main flags. Brigade's full surface (work loop, scanners, handoffs, tools, release gates, repo fleet, and more) is documented section by section below. For the complete, auto-generated list of every command, see [`docs/command-inventory.md`](command-inventory.md), and regenerate it with `BRIGADE_EXTRAS=1 brigade roadmap commands --write`.
@@ -333,6 +334,7 @@ The examples above all drive the same `brigade run` command to show its main fla
 Common `brigade run` flags:
 
 - `--dry-run` prints planned assignments as JSON and stops before worker dispatch.
+- `--detach` starts the run in a child process, writes child output to `detached.log`, and returns after `run.json` appears.
 - `--allow-dirty` bypasses the default dirty-git-worktree guard.
 - `--worktree` runs agents in a detached git worktree and captures `changes.patch`.
 - `--show-plan` prints assignments before a normal run.
@@ -346,6 +348,27 @@ Common `brigade run` flags:
 For `codex` agents, `--read-only` also passes `codex exec --sandbox read-only`.
 Combine `--sandbox` with `--read-only` to keep prompt-level read-only rules while overriding native sandbox behavior.
 Other adapters receive the prompt policy only.
+
+Detached runs require artifacts, so `--detach` cannot be combined with `--no-artifacts`.
+It also refuses `--dry-run` and `--inspect`, because the parent process exits before it can print a plan or inspect final artifacts.
+Use `brigade runs watch <run>` to follow a detached run from its artifacts:
+
+```bash
+brigade runs watch latest --cwd /path/to/repo
+brigade runs watch <run-id> --cwd /path/to/repo --json
+```
+
+When a run uses the Codex app-server transport, `run.json` records a temporary `control_socket` while workers are active.
+Use it to send live control to active worker turns:
+
+```bash
+brigade runs steer latest coder "narrow this to the failing test"
+brigade runs interrupt latest coder
+brigade runs interrupt latest
+```
+
+`runs steer` requires a worker name and text. `runs interrupt` accepts an optional worker; without one, it interrupts every active worker turn.
+Both commands are local Unix socket requests. They refuse exec-transport runs, completed runs whose socket has been cleaned up, and app-server runs that have no active matching turn.
 
 The `cli` values are adapters for installed command-line tools:
 `codex`, `claude`, `opencode`, `antigravity`, `pi`, `cursor`, and `ollama:<model>`. Brigade shells out to those tools and keeps no provider keys. The Antigravity adapter uses the installed `agy --print` non-interactive CLI path, the Pi adapter uses `pi -p`, and the Cursor adapter uses `cursor-agent -p --output-format text`.
