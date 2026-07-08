@@ -16,7 +16,10 @@ COMMAND_GROUPS: list[tuple[str, list[str]]] = [
         "Core memory loop",
         ["init", "handoff", "handoff-template", "ingest", "memory", "doctor", "status", "profiles"],
     ),
-    ("Daily operator loop", ["operator", "daily", "work", "friction", "center", "runbook", "budgets", "notifications"]),
+    (
+        "Daily operator loop",
+        ["operator", "daily", "work", "friction", "workflow", "center", "runbook", "budgets", "notifications"],
+    ),
     ("Stations and tools", ["add", "stations", "skills", "tools", "mcp", "pantry", "roster", "run", "runs", "dogfood"]),
     (
         "Review, security, and research",

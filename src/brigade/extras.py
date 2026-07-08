@@ -38,6 +38,7 @@ EXTRAS_COMMANDS: tuple[str, ...] = (
     "roadmap",
     "runbook",
     "untrusted",
+    "workflow",
 )
 
 

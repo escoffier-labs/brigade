@@ -46,6 +46,7 @@ from . import (
     memory as _memory_group,
     work as _work_group,
     friction as _friction_group,
+    workflow as _workflow_group,
     chat as _chat_group,
     context as _context_group,
     projects as _projects_group,
@@ -78,6 +79,7 @@ _EXTRAS_MODULES = {
     "context": _context_group,
     "dogfood": _dogfood_group,
     "friction": _friction_group,
+    "workflow": _workflow_group,
     "hermes-fragments": _hermes_fragments_group,
     "learn": _learn_group,
     "notifications": _notifications_group,
@@ -136,6 +138,7 @@ def _build_parser() -> argparse.ArgumentParser:
     _memory_group.register(sub)
     _work_group.register(sub)
     _register_extras(sub, "friction", extras_enabled)
+    _register_extras(sub, "workflow", extras_enabled)
 
     _register_extras(sub, "chat", extras_enabled)
 

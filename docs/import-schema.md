@@ -13,6 +13,8 @@ brigade work import memory-care
 brigade work import memory-refresh
 brigade work import chat-sweep
 brigade chat sweep import-issues discord-export
+brigade workflow scan --import-candidates
+brigade workflow propose-runbook <candidate-id>
 brigade work inbox
 brigade work inbox doctor
 brigade work inbox archive
@@ -25,7 +27,7 @@ brigade work import promote --run <import-id>
 brigade work import promote --all --source memory-care --kind task
 ```
 
-`validate` checks a JSONL file without writing. `ingest` appends valid records into `.brigade/work/imports/inbox.jsonl`, skipping duplicate pending records with the same source, kind, and normalized text. Scanner producers can also provide stable source item keys and fingerprints so repeated ingestion skips equivalent pending or promoted imports, while dismissed imports stay dismissed unless the source item changes materially. `inbox` groups pending imports for daily review. `inbox doctor` reports queue hygiene issues, and `inbox archive` moves old closed imports to `.brigade/work/imports/archive.jsonl` without touching pending imports. `import provenance` audits producer imports for stable source identity, source fingerprints, safe summaries, evidence references, and scanner run provenance. `plan` previews the task or handoff a reviewed import would create. `promote --run` promotes one task import and immediately runs it through the normal work-session loop. `plan-handoff` and `promote-handoff` preview and write reviewed Memory Handoff drafts for durable non-task imports. `memory-care` reads `memory/cards/decay/refresh-queue.json` and converts queued cards into task imports. `memory-refresh` accepts the same queue plus `candidates` or `refresh_candidates` and writes TDD-ready refresh task imports. `chat-sweep` reads `.brigade/chat-memory-sweeps/latest.json` and converts sweep `issues`; actionable issues become task imports. `brigade chat sweep import-issues <surface-id>` produces that same chat-sweep import shape from configured local chat export fixtures.
+`validate` checks a JSONL file without writing. `ingest` appends valid records into `.brigade/work/imports/inbox.jsonl`, skipping duplicate pending records with the same source, kind, and normalized text. Scanner producers can also provide stable source item keys and fingerprints so repeated ingestion skips equivalent pending or promoted imports, while dismissed imports stay dismissed unless the source item changes materially. `inbox` groups pending imports for daily review. `inbox doctor` reports queue hygiene issues, and `inbox archive` moves old closed imports to `.brigade/work/imports/archive.jsonl` without touching pending imports. `import provenance` audits producer imports for stable source identity, source fingerprints, safe summaries, evidence references, and scanner run provenance. `plan` previews the task or handoff a reviewed import would create. `promote --run` promotes one task import and immediately runs it through the normal work-session loop. `plan-handoff` and `promote-handoff` preview and write reviewed Memory Handoff drafts for durable non-task imports. `memory-care` reads `memory/cards/decay/refresh-queue.json` and converts queued cards into task imports. `memory-refresh` accepts the same queue plus `candidates` or `refresh_candidates` and writes TDD-ready refresh task imports. `chat-sweep` reads `.brigade/chat-memory-sweeps/latest.json` and converts sweep `issues`. Actionable issues become task imports. `brigade chat sweep import-issues <surface-id>` produces that same chat-sweep import shape from configured local chat export fixtures. `workflow scan --import-candidates` mines repeated command sequences from local verify receipts and daily run receipts, then writes reviewed workflow imports. `workflow propose-runbook` writes a workshop `runbook.json` from a chosen sequence candidate using its concrete `example_commands` only. It does not execute the runbook.
 
 ## Record Shape
 
@@ -96,6 +98,44 @@ Roadmap and repo-fleet producers use the same import contract:
 - `source: project-consolidation` records local project decision or readiness gaps from `brigade projects import-issues`. Metadata includes a safe project alias, `issue_type`, `safe_summary`, `source_item_key`, and `source_fingerprint`.
 - `source: learning-loop` records bounded local learning candidates from `brigade learn import-issues`. Metadata includes candidate id, source subsystem, safe summary, `source_item_key`, and `source_fingerprint`.
 - `source: learnings-import` records entries parsed from structured `.learnings/` markdown logs by `brigade learn import-learnings`. `ERR` entries import as `incident`, `LRN` entries as `finding`, and `FEAT` entries as `feature` tasks. Metadata includes `entry_id`, `entry_prefix`, `source_file`, `area`, redacted `safe_summary` and `safe_detail`, `source_item_key`, and `source_fingerprint`.
+- `source: workflow-scan` records repeated command sequences from `brigade workflow scan --import-candidates`. Verify receipts contribute one observation per receipt from the full ordered `commands[].command` list, falling back to `shlex.join(argv)` when `command` is missing. Daily runs contribute one observation per run from the full ordered `commands_invoked` list. The scanner does not create per-command candidates and does not key candidates on failure status. Metadata includes `workflow_id`, `pattern_key`, `suggested_runbook_id`, `sources`, `review_risk`, `source_item_key`, and `source_fingerprint`. `source_item_key` is exactly the candidate id. `source_fingerprint` is the first 16 hex characters of the SHA-256 digest over canonical JSON containing only `id`, `sequence`, and `suggested_runbook_id`.
+
+## Workflow Sequence Scanner Producer
+
+Run:
+
+```bash
+brigade workflow scan --days 30 --min-count 2 --min-steps 1 --import-candidates
+brigade workflow show
+brigade workflow propose-runbook <candidate-id>
+```
+
+`workflow scan` writes `.brigade/workflow/latest.json` and `.brigade/workflow/latest.md` unless `--dry-run` is passed. `--json` prints the same scan payload. `--min-count` defaults to 2 and must be at least 1, so singleton sequences are excluded unless the operator opts in with `--min-count 1`. `--max-files` bounds receipt file reads per source.
+
+Each candidate object has this exact schema:
+
+```json
+{
+  "id": "workflow-<pattern_key>",
+  "pattern_key": "<sha256 first 12 hex over joined normalized sequence templates>",
+  "sequence": ["python3 -m pytest -q", "python3 -m ruff check ."],
+  "example_commands": ["python3 -m pytest -q", "python3 -m ruff check ."],
+  "occurrence_count": 2,
+  "session_count": 2,
+  "sources": ["verify"],
+  "ends_in_verify_pass": true,
+  "first_seen": "2026-06-11T12:00:00+00:00",
+  "last_seen": "2026-06-11T13:00:00+00:00",
+  "suggested_runbook_id": "workflow-<pattern_key>",
+  "evidence": [],
+  "review_risk": "normal",
+  "suggested_next_command": "brigade workflow propose-runbook workflow-<pattern_key>"
+}
+```
+
+`pattern_key` is computed from the normalized sequence templates joined with newline characters. Normalization replaces volatile tokens with fixed placeholders before hashing: run-id shapes become `<run-id>`, UUIDs and bare hex tokens of 12 or more characters become `<hex>`, ISO timestamps and dates become `<date>`, and absolute paths under `/tmp` or the user home become `<path>`. Repo-relative paths are kept as-is. The same workflow observed across runs that differ only by those tokens therefore produces the same `pattern_key`. The candidate `id` and `suggested_runbook_id` are both `workflow-<pattern_key>`. `sequence` holds the templates; `example_commands` holds the concrete commands from the most recent observation. `review_risk` is `high` when any example command matches the advisory destructive deny-list used by runbook policy, otherwise `normal`.
+
+`workflow propose-runbook` resolves an exact candidate id or a unique prefix against `.brigade/workflow/latest.json`. It writes or prints a runbook whose id is `suggested_runbook_id`, whose description names the scan candidate and provenance, whose `approved` field is false, whose `pins` list is empty, whose `allowed_commands` are sorted command names from `example_commands`, and whose steps use concrete runnable commands from `example_commands` with `timeout_seconds` set to 600. The generated payload is validated against `brigade runbook plan` policy before anything is written; when validation fails, the command reports the policy failures, writes nothing, and exits 1.
 
 Repo-fleet imports must use safe labels only. Do not copy full local paths, guidance file contents, private config values, raw logs, scanner output, owner names, exact private repo names, or raw evidence into import text or metadata.
 
