@@ -742,7 +742,7 @@ Explicit runbook commands:
 - `brigade runbook run --resume <run-id> --approved` retries from the first failed step of a previous run.
 - `brigade runbook closeout latest --status reviewed --reason "..."` records operator review for the runbook run.
 
-Runbooks are the first explicit execution lane for multi-step local workflows. Execution requires `--approved` or `approved: true` in the runbook, blocks destructive default-deny command patterns, and can restrict steps with `allowed_commands`. Status, doctor, brief, and center views still do not execute runbooks automatically.
+Runbooks are the first explicit execution lane for multi-step local workflows. Execution requires the operator to pass `--approved`. An `approved: true` value in the runbook is recorded as file metadata only and does not authorize execution. Runbooks block destructive default-deny command patterns and can restrict steps with `allowed_commands`. Status, doctor, brief, and center views still do not execute runbooks automatically.
 
 Backup health commands:
 
