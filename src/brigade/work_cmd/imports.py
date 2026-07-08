@@ -5,7 +5,7 @@ import json
 import sys
 from pathlib import Path
 from typing import Any
-from .. import scrub
+from .. import evidence_brief, scrub
 from ..untrusted import scan_untrusted, wrap_untrusted
 from . import constants, helpers, ledger as ledger_mod
 from . import scanners as scanners_mod
@@ -114,6 +114,89 @@ def import_context(
     print(f"context_kind: {context_kind}")
     if sig.flagged:
         print(f"needs_review: injection signal ({sig.count})")
+    return 0
+
+
+def _append_active_context_note(target: Path, rendered: str) -> Path | None:
+    session_dir = helpers._active_session_dir(target)
+    if session_dir is None:
+        return None
+    session_json = session_dir / "session.json"
+    try:
+        payload = json.loads(session_json.read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    notes = payload.setdefault("notes", [])
+    if not isinstance(notes, list):
+        return None
+    entry = {
+        "created_at": helpers._now().isoformat(),
+        "text": rendered,
+    }
+    notes.append(entry)
+    helpers._write_json(session_json, payload)
+
+    notes_path = session_dir / "notes.md"
+    prefix = "" if notes_path.exists() and notes_path.read_text().endswith("\n") else "\n"
+    with notes_path.open("a") as handle:
+        if notes_path.stat().st_size == 0:
+            handle.write("# Brigade Work Session Notes\n")
+        else:
+            handle.write(prefix)
+        handle.write(f"\n## {entry['created_at']}\n\n{rendered}\n")
+    return notes_path
+
+
+def import_context_from_miseledger(
+    *,
+    target: Path,
+    query: str,
+    limit: int = 5,
+    json_output: bool = False,
+) -> int:
+    target = target.expanduser().resolve()
+    if not target.is_dir():
+        print(f"error: --target is not a directory: {target}", file=sys.stderr)
+        return 2
+    rendered_query = " ".join(str(query or "").split())
+    if not rendered_query:
+        print("error: --from-miseledger query is required", file=sys.stderr)
+        return 2
+    if limit < 1:
+        print("error: --limit must be a positive integer", file=sys.stderr)
+        return 2
+
+    bundle = evidence_brief.fetch_evidence_bundle(target, rendered_query, limit=limit)
+    if bundle is None:
+        payload = {
+            "attached": False,
+            "query": rendered_query,
+            "results": [],
+            "warnings": ["MiseLedger evidence unavailable; continuing without imported context."],
+        }
+        if json_output:
+            print(json.dumps(payload, indent=2, sort_keys=True))
+        else:
+            print("miseledger evidence: unavailable", file=sys.stderr)
+            print("persistence: print-only (no evidence brief)", file=sys.stderr)
+        return 0
+
+    rendered = evidence_brief.render_evidence_bundle(bundle, limit=limit)
+    notes_path = _append_active_context_note(target, rendered) if rendered else None
+    if json_output:
+        print(json.dumps(bundle, indent=2, sort_keys=True))
+    elif rendered:
+        print(rendered, end="" if rendered.endswith("\n") else "\n")
+    else:
+        print("miseledger evidence: no results", file=sys.stderr)
+
+    if rendered:
+        if notes_path is not None:
+            print(f"persisted: {notes_path}", file=sys.stderr)
+        else:
+            print("persistence: print-only (no active work session)", file=sys.stderr)
     return 0
 
 

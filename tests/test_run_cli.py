@@ -143,6 +143,47 @@ role = "code"
     assert seen["code_graph_enabled"] is False
 
 
+def test_run_cli_passes_no_evidence_to_aboyeur(tmp_path, monkeypatch):
+    config_dir = tmp_path / ".brigade"
+    config_dir.mkdir()
+    (config_dir / "roster.toml").write_text(
+        """
+orchestrator = "chef"
+
+[agents.chef]
+cli = "codex"
+role = "plan"
+
+[agents.coder]
+cli = "codex"
+role = "code"
+"""
+    )
+    seen = {}
+
+    def fake_run(
+        task,
+        loaded_roster,
+        dry_run=False,
+        show_plan=False,
+        verbose=False,
+        cwd=None,
+        output_dir=None,
+        handoff_inbox=None,
+        read_only=False,
+        sandbox=None,
+        evidence_enabled=True,
+    ):
+        seen["evidence_enabled"] = evidence_enabled
+        return 0
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(aboyeur, "run", fake_run)
+
+    assert cli.main(["run", "x", "--no-artifacts", "--no-evidence"]) == 0
+    assert seen["evidence_enabled"] is False
+
+
 def test_run_cli_default_sandbox_is_none(tmp_path, monkeypatch):
     config_dir = tmp_path / ".brigade"
     config_dir.mkdir()
