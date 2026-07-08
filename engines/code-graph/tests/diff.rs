@@ -16,6 +16,43 @@ fn index(dir: &std::path::Path, source: &str) -> rusqlite::Connection {
 }
 
 #[test]
+fn diff_json_contract_matches_inline_golden() {
+    let before = "\
+def keep():
+    return 1
+
+def changed():
+    return 1
+
+def removed():
+    keep()
+";
+    let after = "\
+def keep():
+    return 1
+
+def changed(x):
+    return x
+
+def added():
+    keep()
+";
+
+    let before_dir = tempfile::tempdir().unwrap();
+    let after_dir = tempfile::tempdir().unwrap();
+    let before_conn = index(before_dir.path(), before);
+    let after_conn = index(after_dir.path(), after);
+
+    let diff = diff_graphs(&before_conn, &after_conn).unwrap();
+    let json = serde_json::to_string(&diff).unwrap();
+
+    assert_eq!(
+        json,
+        r#"{"schema_version":2,"summary":{"added_nodes":1,"removed_nodes":1,"changed_nodes":1,"added_edges":1,"removed_edges":1},"added_nodes":[{"kind":"function","qualified_name":"added","file_path":"mod.py","start_line":7,"signature":"def added():"}],"removed_nodes":[{"kind":"function","qualified_name":"removed","file_path":"mod.py","start_line":7,"signature":"def removed():"}],"changed_nodes":[{"kind":"function","qualified_name":"changed","file_path":"mod.py","start_line":4,"signature":"def changed(x):"}],"added_edges":[{"source":"added","source_file":"mod.py","target":"keep","target_file":"mod.py","line":8}],"removed_edges":[{"source":"removed","source_file":"mod.py","target":"keep","target_file":"mod.py","line":8}]}"#
+    );
+}
+
+#[test]
 fn diff_reports_added_removed_and_changed() {
     // `old` is deleted, `baz` is added, `foo` changes signature, `bar` is untouched.
     // Line layout is identical for the surviving pieces so the bar->foo edge does
@@ -106,6 +143,76 @@ fn duplicate_symbol_added_is_not_missed() {
             .iter()
             .all(|n| n.qualified_name.contains("hook"))
     );
+}
+
+#[test]
+fn line_shift_reports_removed_and_added_call_edge() {
+    let before = "\
+def target():
+    return 1
+
+def caller():
+    return target()
+";
+    let after = "\
+# inserted above the unchanged call site
+def target():
+    return 1
+
+def caller():
+    return target()
+";
+
+    let before_dir = tempfile::tempdir().unwrap();
+    let after_dir = tempfile::tempdir().unwrap();
+    let before_conn = index(before_dir.path(), before);
+    let after_conn = index(after_dir.path(), after);
+
+    let diff = diff_graphs(&before_conn, &after_conn).unwrap();
+
+    assert_eq!(diff.summary.added_nodes, 0);
+    assert_eq!(diff.summary.removed_nodes, 0);
+    assert_eq!(diff.summary.changed_nodes, 0);
+
+    // This deliberately locks the current line-sensitive churn behavior:
+    // CanonEdge includes the call line, so an insertion above an unchanged call
+    // site is reported as one removed edge and one added edge.
+    assert_eq!(diff.summary.added_edges, 1);
+    assert_eq!(diff.summary.removed_edges, 1);
+    assert_eq!(diff.removed_edges[0].source, "caller");
+    assert_eq!(diff.removed_edges[0].target, "target");
+    assert_eq!(diff.removed_edges[0].line, 5);
+    assert_eq!(diff.added_edges[0].source, "caller");
+    assert_eq!(diff.added_edges[0].target, "target");
+    assert_eq!(diff.added_edges[0].line, 6);
+}
+
+#[test]
+fn body_only_change_with_same_signature_and_span_is_not_a_changed_node() {
+    let before = "\
+def value():
+    total = 1
+    return total
+";
+    let after = "\
+def value():
+    total = 2
+    return total
+";
+
+    let before_dir = tempfile::tempdir().unwrap();
+    let after_dir = tempfile::tempdir().unwrap();
+    let before_conn = index(before_dir.path(), before);
+    let after_conn = index(after_dir.path(), after);
+
+    let diff = diff_graphs(&before_conn, &after_conn).unwrap();
+
+    // Documented limitation from docs/design/activegraph-inspiration.md: diff
+    // fingerprints use signature plus line span, so a body-only edit with the
+    // same span is currently invisible as a changed node. This is not desired
+    // behavior, only the contract today.
+    assert!(diff.changed_nodes.is_empty(), "{:?}", diff.changed_nodes);
+    assert_eq!(diff.summary.changed_nodes, 0);
 }
 
 #[test]

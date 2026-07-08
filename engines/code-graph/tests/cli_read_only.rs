@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::SystemTime;
 
 use graphtrail::store::{init_schema, open_db, sync_repo};
 use sha2::{Digest, Sha256};
@@ -48,6 +49,12 @@ def run():
     db
 }
 
+fn snapshot_file(path: &Path) -> (Vec<u8>, SystemTime) {
+    let bytes = fs::read(path).unwrap();
+    let modified = fs::metadata(path).unwrap().modified().unwrap();
+    (bytes, modified)
+}
+
 /// Snapshot every file under `root` except SQLite's own `-wal`/`-shm` sidecars: a read-only
 /// WAL connection may (re)create empty sidecars, which is standard SQLite operation, not a
 /// mutation of graph state.
@@ -78,6 +85,83 @@ fn snapshot_tree(root: &Path) -> BTreeMap<PathBuf, (usize, String)> {
         }
     }
     out
+}
+
+#[test]
+fn diff_reports_missing_input_db_errors() {
+    let dir = tempfile::tempdir().unwrap();
+    let existing_db = build_db(dir.path());
+
+    for (missing_flag, before, after) in [
+        (
+            "--before",
+            dir.path().join("missing-before.db"),
+            existing_db.clone(),
+        ),
+        (
+            "--after",
+            existing_db.clone(),
+            dir.path().join("missing-after.db"),
+        ),
+    ] {
+        let output = Command::new(graphtrail())
+            .args([
+                "diff",
+                "--before",
+                &before.display().to_string(),
+                "--after",
+                &after.display().to_string(),
+                "--json",
+            ])
+            .output()
+            .unwrap();
+
+        assert!(
+            !output.status.success(),
+            "diff unexpectedly succeeded with missing {missing_flag}: {output:?}"
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("failed to open")
+                && stderr.contains("read-only")
+                && stderr.contains(missing_flag.trim_start_matches("--")),
+            "diff missing {missing_flag} error was not clear: {stderr:?}"
+        );
+    }
+}
+
+#[test]
+fn diff_does_not_mutate_input_db_files() {
+    let before_dir = tempfile::tempdir().unwrap();
+    let after_dir = tempfile::tempdir().unwrap();
+    let before_db = build_db(before_dir.path());
+    let after_db = build_db(after_dir.path());
+    let before_snapshot = snapshot_file(&before_db);
+    let after_snapshot = snapshot_file(&after_db);
+
+    let output = Command::new(graphtrail())
+        .args([
+            "diff",
+            "--before",
+            &before_db.display().to_string(),
+            "--after",
+            &after_db.display().to_string(),
+            "--json",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success(), "diff failed: {output:?}");
+    assert_eq!(
+        before_snapshot,
+        snapshot_file(&before_db),
+        "diff mutated the before db file"
+    );
+    assert_eq!(
+        after_snapshot,
+        snapshot_file(&after_db),
+        "diff mutated the after db file"
+    );
 }
 
 #[test]
