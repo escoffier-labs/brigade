@@ -1,4 +1,6 @@
 import json
+import os
+import sys
 from pathlib import Path
 
 from brigade import cli
@@ -203,13 +205,16 @@ def test_work_verify_plan_run_list_show(tmp_path, capsys):
     assert "python3 -c" in out
 
 
-def test_work_verify_receipt_digests_recompute_from_payload_and_logs(tmp_path, capsys):
+def test_work_verify_receipt_digests_recompute_from_payload_and_logs(tmp_path, capsys, monkeypatch):
     _init_git_repo(tmp_path)
+    monkeypatch.setenv("GRAPHTRAIL_BIN", str(tmp_path / "missing-graphtrail"))
+    monkeypatch.setenv("PATH", str(tmp_path))
+    monkeypatch.setenv("HOME", str(tmp_path))
 
     assert (
         work_cmd.verify_run(
             target=tmp_path,
-            commands=["python3 -c \"print('ok')\""],
+            commands=[f"{sys.executable} -c \"print('ok')\""],
             timeout=30,
             json_output=True,
         )
@@ -228,6 +233,181 @@ def test_work_verify_receipt_digests_recompute_from_payload_and_logs(tmp_path, c
 
     stored = json.loads((run_dir / "receipt.json").read_text())
     assert stored["digests"] == digests
+
+
+def _write_fake_graphtrail(tmp_path, *, mode: str = "ok") -> Path:
+    script = tmp_path / "fake-graphtrail.py"
+    script.write_text(
+        """
+import hashlib
+import json
+import os
+import sqlite3
+import sys
+from pathlib import Path
+
+args = sys.argv[1:]
+db = Path(args[args.index("--db") + 1]) if "--db" in args else Path(".graphtrail/graphtrail.db")
+command = args[args.index(str(db)) + 1] if str(db) in args and args.index(str(db)) + 1 < len(args) else ""
+mode = os.environ.get("FAKE_GRAPHTRAIL_MODE", "ok")
+
+# Mirror the real clap CLI strictly: `sync` rejects --json, `diff` requires
+# --before/--after/--json. JSON shape follows graphtrail's diff golden fixture.
+if command == "sync":
+    if "--json" in args:
+        print("error: unexpected argument '--json' found", file=sys.stderr)
+        raise SystemExit(2)
+    if mode == "sync-fail":
+        print("sync failed", file=sys.stderr)
+        raise SystemExit(5)
+    db.parent.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(db) as con:
+        con.execute("create table if not exists symbols (name text)")
+        con.execute("insert into symbols values ('after')")
+    print("indexed files=1 symbols=1 calls=0 imports=0 deleted=0 db=" + str(db))
+    raise SystemExit(0)
+
+if command == "diff":
+    if "--before" not in args or "--after" not in args or "--json" not in args:
+        print("error: required arguments missing (--before/--after/--json)", file=sys.stderr)
+        raise SystemExit(2)
+    before = Path(args[args.index("--before") + 1])
+    after = Path(args[args.index("--after") + 1])
+    if not before.is_file() or not after.is_file():
+        print("error: no such database", file=sys.stderr)
+        raise SystemExit(1)
+    if mode == "malformed-diff":
+        print("{not-json")
+        raise SystemExit(0)
+
+    def node(name, line=1):
+        return {
+            "kind": "function",
+            "qualified_name": name,
+            "file_path": "pkg/mod.py",
+            "start_line": line,
+            "signature": "def " + name + "()",
+        }
+
+    def edge(source, target, line):
+        return {
+            "source_file": "pkg/a.py",
+            "source": source,
+            "line": line,
+            "target_file": "pkg/b.py",
+            "target": target,
+        }
+
+    payload = {
+        "schema_version": 3,
+        "summary": {
+            "added_nodes": 2,
+            "removed_nodes": 1,
+            "changed_nodes": 25,
+            "added_edges": 2,
+            "removed_edges": 1,
+        },
+        "added_nodes": [node("pkg.new_a"), node("pkg.new_b")],
+        "removed_nodes": [node("pkg.gone")],
+        "changed_nodes": [node(f"pkg.symbol_{i}", line=i + 1) for i in range(25)],
+        "added_edges": [edge("pkg.a", "pkg.b", 20), edge("pkg.c", "pkg.d", 30)],
+        "removed_edges": [edge("pkg.a", "pkg.b", 10)],
+    }
+    print(json.dumps(payload))
+    raise SystemExit(0)
+
+print("unexpected command: " + repr(args), file=sys.stderr)
+raise SystemExit(9)
+"""
+    )
+    script.chmod(0o755)
+    wrapper = tmp_path / "graphtrail"
+    wrapper.write_text(
+        f'#!/bin/sh\nFAKE_GRAPHTRAIL_MODE={mode} exec {os.environ.get("PYTHON", "python3")} {script} "$@"\n'
+    )
+    wrapper.chmod(0o755)
+    return wrapper
+
+
+def test_work_verify_graphtrail_delta_missing_binary_fails_open(tmp_path, capsys, monkeypatch):
+    _init_git_repo(tmp_path)
+    monkeypatch.setenv("GRAPHTRAIL_BIN", str(tmp_path / "missing-graphtrail"))
+    monkeypatch.setenv("PATH", str(tmp_path))
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    assert (
+        work_cmd.verify_run(target=tmp_path, commands=[f"{sys.executable} -c \"print('ok')\""], json_output=True) == 0
+    )
+    receipt = json.loads(capsys.readouterr().out)
+
+    delta = receipt["code_graph_delta"]
+    assert delta["status"] == "unavailable"
+    assert "graphtrail binary not found" in delta["summary"]
+    assert not (Path(receipt["path"]) / "graph-delta.json").exists()
+
+
+def test_work_verify_graphtrail_delta_sidecar_digest_cleanup_and_summary(tmp_path, capsys, monkeypatch):
+    _init_git_repo(tmp_path)
+    graphtrail = _write_fake_graphtrail(tmp_path)
+    monkeypatch.setenv("GRAPHTRAIL_BIN", str(graphtrail))
+
+    assert work_cmd.verify_run(target=tmp_path, commands=["python3 -c \"print('ok')\""], json_output=True) == 0
+    receipt = json.loads(capsys.readouterr().out)
+    run_dir = Path(receipt["path"])
+    sidecar_path = run_dir / "graph-delta.json"
+    sidecar = json.loads(sidecar_path.read_text())
+
+    assert receipt["code_graph_delta"]["status"] == "ok"
+    assert receipt["code_graph_delta"]["edge_churn"] == 1
+    assert receipt["code_graph_delta"]["changed_symbol_count"] == 20
+    assert "edge_churn=1" in receipt["code_graph_delta"]["summary"]
+    assert sidecar["raw_counts"] == {
+        "added_nodes": 2,
+        "removed_nodes": 1,
+        "changed_nodes": 25,
+        "added_edges": 2,
+        "removed_edges": 1,
+    }
+    assert len(sidecar["changed_symbols"]) == 20
+    assert sidecar["changed_symbols_truncated"] is True
+    assert sidecar["edge_churn"] == 1
+    assert sidecar["snapshot_deleted"] is True
+    assert not Path(sidecar["before_snapshot_path"]).exists()
+    assert not (run_dir / "graphtrail-after.db").exists()
+    assert sidecar["attestations"]["before_snapshot_sha256"]
+    after_sha = sidecar["attestations"]["after_snapshot_sha256"]
+    assert isinstance(after_sha, str) and len(after_sha) == 64
+    assert receipt["digests"]["logs"]["graph-delta.json"] == localio.file_sha256(sidecar_path)
+    assert json.loads((run_dir / "receipt.json").read_text())["digests"] == receipt["digests"]
+    assert "- Code graph delta: " + receipt["code_graph_delta"]["summary"] in (run_dir / "summary.md").read_text()
+
+
+def test_work_verify_graphtrail_delta_sync_failure_fails_open(tmp_path, capsys, monkeypatch):
+    _init_git_repo(tmp_path)
+    graphtrail = _write_fake_graphtrail(tmp_path, mode="sync-fail")
+    monkeypatch.setenv("GRAPHTRAIL_BIN", str(graphtrail))
+
+    assert work_cmd.verify_run(target=tmp_path, commands=["python3 -c \"print('ok')\""], json_output=True) == 0
+    receipt = json.loads(capsys.readouterr().out)
+    sidecar = json.loads((Path(receipt["path"]) / "graph-delta.json").read_text())
+
+    assert receipt["code_graph_delta"]["status"] == "sync_failed"
+    assert sidecar["status"] == "sync_failed"
+    assert sidecar["ok"] is False
+
+
+def test_work_verify_graphtrail_delta_malformed_diff_fails_open(tmp_path, capsys, monkeypatch):
+    _init_git_repo(tmp_path)
+    graphtrail = _write_fake_graphtrail(tmp_path, mode="malformed-diff")
+    monkeypatch.setenv("GRAPHTRAIL_BIN", str(graphtrail))
+
+    assert work_cmd.verify_run(target=tmp_path, commands=["python3 -c \"print('ok')\""], json_output=True) == 0
+    receipt = json.loads(capsys.readouterr().out)
+    sidecar = json.loads((Path(receipt["path"]) / "graph-delta.json").read_text())
+
+    assert receipt["code_graph_delta"]["status"] == "diff_malformed"
+    assert sidecar["status"] == "diff_malformed"
+    assert sidecar["ok"] is False
 
 
 def test_work_closeout_writes_ready_receipt(tmp_path, capsys):

@@ -241,3 +241,48 @@ def test_receipts_verify_reports_mismatch_when_referenced_log_is_edited(tmp_path
     assert problem["artifact_type"] == "work-verify-log"
     assert problem["artifact_id"].endswith("command-1-stdout.log")
     assert problem["check"] == "log_sha256"
+
+
+def test_receipts_verify_reports_mismatch_when_graph_delta_sidecar_is_edited(tmp_path, capsys):
+    _init_git_repo(tmp_path)
+    run_dir = tmp_path / ".brigade" / "work" / "verify-runs" / "with-graph-delta"
+    run_dir.mkdir(parents=True)
+    (run_dir / "command-1-stdout.log").write_text("ok\n")
+    (run_dir / "command-1-stderr.log").write_text("")
+    sidecar = run_dir / "graph-delta.json"
+    sidecar.write_text(json.dumps({"status": "ok", "summary": "edge_churn=0"}, sort_keys=True) + "\n")
+    receipt = {
+        "run_id": "with-graph-delta",
+        "target": str(tmp_path),
+        "status": "completed",
+        "commands": [
+            {
+                "command": "python3 -c \"print('ok')\"",
+                "status": "completed",
+                "exit_code": 0,
+                "stdout_log_path": str(run_dir / "command-1-stdout.log"),
+                "stderr_log_path": str(run_dir / "command-1-stderr.log"),
+            }
+        ],
+        "code_graph_delta": {"status": "ok", "summary": "edge_churn=0"},
+    }
+    receipt["digests"] = {
+        "algorithm": "sha256",
+        "logs": {
+            "command-1-stderr.log": localio.file_sha256(run_dir / "command-1-stderr.log"),
+            "command-1-stdout.log": localio.file_sha256(run_dir / "command-1-stdout.log"),
+            "graph-delta.json": localio.file_sha256(sidecar),
+        },
+        "receipt_sha256": localio.canonical_json_digest(receipt, exclude_keys={"digests"}),
+    }
+    localio.write_json(run_dir / "receipt.json", receipt)
+    sidecar.write_text(json.dumps({"status": "ok", "summary": "tampered"}, sort_keys=True) + "\n")
+
+    assert receipts_cmd.verify(target=tmp_path, json_output=True) == 1
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["summary"]["mismatch"] == 1
+    problem = [item for item in payload["artifacts"] if item["status"] == "MISMATCH"][0]
+    assert problem["artifact_type"] == "work-verify-log"
+    assert problem["artifact_id"].endswith("graph-delta.json")
+    assert problem["check"] == "log_sha256"

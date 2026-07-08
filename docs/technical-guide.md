@@ -959,6 +959,20 @@ brigade security scan --target . --import-findings
 
 When `.graphtrail/graphtrail.db` is present, `brigade run` can attach bounded GraphTrail context. If pending upstream drift state is available, it can also attach a drift impact brief. `run.json` records the shared brief budget, attached brief names, byte counts, and truncation flags.
 
+### Code-graph delta receipts
+
+Work verification and non-read-only aboyeur runs can also record a GraphTrail delta receipt. The flow is: run `graphtrail sync`, take a sqlite backup snapshot of `.graphtrail/graphtrail.db`, run the work, run `graphtrail sync` again, diff the live graph against the snapshot, write `graph-delta.json`, and store a compact `code_graph_delta` summary in the receipt or run artifacts.
+
+Delta capture is fail-open. Missing GraphTrail, sync failures, malformed diff JSON, and snapshot problems are recorded as status data instead of failing the run. `--no-code-graph`, read-only runs, and dry runs record skip statuses and do not run GraphTrail sync.
+
+Snapshots use sqlite backup instead of copying the db file directly. That keeps the baseline safe when the database is in WAL mode or GraphTrail is writing adjacent sqlite state. After the diff, Brigade deletes the temporary snapshot and records SHA-256 attestations for the before snapshot, after database, diff stdout, sidecar, and receipt log digests when those files exist.
+
+GraphTrail raw diff counts are preserved under `raw_counts`. Brigade also computes a line-insensitive edge churn value by stripping line and range fields from added and removed edges before pairing them, so pure line-number movement is less noisy than raw edge add/remove totals.
+
+`brigade receipts verify` includes `graph-delta.json` in the existing log digest map when a verification receipt wrote the sidecar. Editing or deleting that sidecar after the run is treated like editing stdout or stderr logs.
+
+Known blind spots remain GraphTrail blind spots: unsupported languages, parse failures, dynamic dispatch, generated code, import-time side effects, reflection, and runtime wiring can be missed or approximated. A clean delta means the captured static graph did not report meaningful churn, not that the behavior is unchanged.
+
 Use `--handoff` to bridge a completed run back into the memory system.
 
 Handoff behavior:

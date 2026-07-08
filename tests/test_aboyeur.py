@@ -540,6 +540,7 @@ def test_run_json_records_disabled_code_graph(monkeypatch, tmp_path):
         "attached": False,
         "bytes": 0,
     }
+    assert json.loads((output_dir / "run.json").read_text())["code_graph_delta"]["status"] == "disabled"
 
 
 def test_assignment_payload_serializes_stage():
@@ -563,6 +564,40 @@ def test_run_dry_run_stops_after_plan(monkeypatch, capsys):
     assert rc == 0
     assert "implement it" in out
     assert len(calls) == 1
+
+
+def test_run_dry_run_records_code_graph_delta_skip_without_graphtrail(monkeypatch, tmp_path):
+    def fake_run_agent(cli_ref, prompt, timeout=600.0, cwd=None, read_only=False):
+        return agents.AgentResult(
+            text=json.dumps({"assignments": [{"worker": "coder", "task": "implement it"}]}),
+            ok=True,
+        )
+
+    monkeypatch.setattr(aboyeur.agents, "run_agent", fake_run_agent)
+    monkeypatch.setattr(
+        aboyeur.graphtrail_delta,
+        "capture_before",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("no graphtrail sync")),
+    )
+    monkeypatch.setattr(
+        aboyeur.graphtrail_delta,
+        "capture_after_and_diff",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("no graphtrail sync")),
+    )
+
+    output_dir = tmp_path / "run"
+    assert aboyeur.run("build feature", _roster(), dry_run=True, output_dir=output_dir) == 0
+
+    run_meta = json.loads((output_dir / "run.json").read_text())
+    assert run_meta["code_graph_delta"] == {
+        "status": "skipped_dry_run",
+        "ok": False,
+        "summary": "code graph delta skipped: dry run",
+        "raw_counts": {},
+        "edge_churn": 0,
+        "changed_symbols": [],
+        "changed_symbol_count": 0,
+    }
 
 
 def test_run_dispatches_and_synthesizes(monkeypatch, capsys):
@@ -701,6 +736,39 @@ def test_read_only_mode_is_in_all_prompts_and_artifacts(monkeypatch, tmp_path):
     assert all("Do not modify files" in prompt for _, prompt, _ in calls)
     assert all(read_only for _, _, read_only in calls)
     assert json.loads((output_dir / "run.json").read_text())["read_only"] is True
+    assert json.loads((output_dir / "run.json").read_text())["code_graph_delta"]["status"] == "skipped_read_only"
+
+
+def test_read_only_mode_skips_code_graph_delta_without_graphtrail(monkeypatch, tmp_path):
+    def fake_run_agent(cli_ref, prompt, timeout=600.0, cwd=None, read_only=False):
+        if "assignments" in prompt:
+            return agents.AgentResult(
+                text=json.dumps({"assignments": [{"worker": "coder", "task": "inspect it"}]}),
+                ok=True,
+            )
+        if cli_ref == "ollama:llama3.3":
+            return agents.AgentResult(text="worker output", ok=True)
+        return agents.AgentResult(text="final answer", ok=True)
+
+    monkeypatch.setattr(aboyeur.agents, "run_agent", fake_run_agent)
+    monkeypatch.setattr(
+        aboyeur.graphtrail_delta,
+        "capture_before",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("no graphtrail sync")),
+    )
+    monkeypatch.setattr(
+        aboyeur.graphtrail_delta,
+        "capture_after_and_diff",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("no graphtrail sync")),
+    )
+
+    output_dir = tmp_path / "run"
+    assert aboyeur.run("inspect feature", _roster(), output_dir=output_dir, read_only=True) == 0
+
+    run_meta = json.loads((output_dir / "run.json").read_text())
+    assert run_meta["code_graph_delta"]["status"] == "skipped_read_only"
+    ground_truth = json.loads((output_dir / "worker-results.json").read_text())["ground_truth"]
+    assert ground_truth["code_graph_delta"]["status"] == "skipped_read_only"
 
 
 def test_prompt_read_only_can_disable_native_sandbox(monkeypatch):
@@ -861,6 +929,63 @@ def test_run_writes_artifacts(monkeypatch, tmp_path):
     assert "Brigade-computed facts:" in calls[-1][1]
     assert "tracked.txt" in calls[-1][1]
     assert {call[2] for call in calls} == {run_cwd}
+
+
+def test_run_writes_code_graph_delta_to_artifacts_and_synthesis(monkeypatch, tmp_path):
+    calls = []
+    before_payload = {"ok": True, "status": "captured", "summary": "before captured"}
+    after_payload = {
+        "status": "ok",
+        "ok": True,
+        "summary": "code graph delta: ok changed_symbols=1 edge_churn=2 edges_added=3",
+        "raw_counts": {"edges_added": 3},
+        "edge_churn": 2,
+        "changed_symbols": ["brigade.aboyeur.run"],
+        "changed_symbol_count": 1,
+    }
+
+    def fake_run_agent(cli_ref, prompt, timeout=600.0, cwd=None, read_only=False):
+        calls.append((cli_ref, prompt))
+        if len(calls) == 1:
+            return agents.AgentResult(
+                text=json.dumps({"assignments": [{"worker": "coder", "task": "implement it"}]}),
+                ok=True,
+            )
+        if cli_ref == "ollama:llama3.3":
+            return agents.AgentResult(text="worker output", ok=True)
+        return agents.AgentResult(text="final answer", ok=True)
+
+    delta_calls = []
+
+    def fake_capture_before(target, run_dir):
+        delta_calls.append(("before", target, run_dir))
+        return before_payload
+
+    def fake_capture_after(target, run_dir, before):
+        delta_calls.append(("after", target, run_dir, before))
+        return after_payload
+
+    run_cwd = tmp_path / "work"
+    run_cwd.mkdir()
+    _init_git_repo(run_cwd)
+    (run_cwd / "tracked.txt").write_text("initial\n")
+    _commit_all(run_cwd)
+    output_dir = tmp_path / "run"
+    monkeypatch.setattr(aboyeur.agents, "run_agent", fake_run_agent)
+    monkeypatch.setattr(aboyeur.graphtrail_delta, "capture_before", fake_capture_before)
+    monkeypatch.setattr(aboyeur.graphtrail_delta, "capture_after_and_diff", fake_capture_after)
+
+    assert aboyeur.run("build feature", _roster(), cwd=run_cwd, output_dir=output_dir) == 0
+
+    assert delta_calls == [
+        ("before", run_cwd, output_dir),
+        ("after", run_cwd, output_dir, before_payload),
+    ]
+    ground_truth = json.loads((output_dir / "worker-results.json").read_text())["ground_truth"]
+    assert ground_truth["code_graph_delta"] == after_payload
+    assert json.loads((output_dir / "synthesis.json").read_text())["ground_truth"]["code_graph_delta"] == after_payload
+    assert json.loads((output_dir / "run.json").read_text())["code_graph_delta"] == after_payload
+    assert "code_graph_delta: code graph delta: ok changed_symbols=1 edge_churn=2 edges_added=3" in calls[-1][1]
 
 
 def test_run_worker_results_include_latest_verification_receipt_commands(monkeypatch, tmp_path):
