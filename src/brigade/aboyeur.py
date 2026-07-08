@@ -17,6 +17,7 @@ from uuid import uuid4
 from . import agents
 from . import codex_appserver
 from . import graphtrail_delta
+from . import localio
 from . import proc, runguard
 from . import run_control
 from .roster import Agent, Roster, is_cli_allowed, timeout_for, workers
@@ -417,8 +418,10 @@ def make_run_dir(base: Path, now: datetime | None = None) -> Path:
 
 
 def _write_json(path: Path, payload: object) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2) + "\n")
+    # run.json is polled by `brigade runs watch/steer/interrupt` while the run
+    # rewrites it, so the write must be atomic or a concurrent reader can
+    # observe a truncated file.
+    localio.write_text_atomic(path, json.dumps(payload, indent=2) + "\n")
 
 
 def _utc_iso(value: datetime) -> str:
