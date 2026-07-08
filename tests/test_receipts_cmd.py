@@ -406,6 +406,37 @@ def test_receipts_export_miseledger_import_missing_binary_warns_and_exits_zero(t
     assert len(_jsonl(out_path.read_text())) == 1
 
 
+def test_receipts_export_miseledger_import_skips_binary_on_zero_item_export(tmp_path, monkeypatch, capsys):
+    _write_verify_export_receipt(
+        tmp_path,
+        "20260708-120000-work-verify-nothing-new",
+        started_at="2026-07-08T12:00:00Z",
+    )
+    fake = tmp_path / "miseledger"
+    fake.write_text(
+        f"""#!{sys.executable}
+import pathlib
+import sys
+
+pathlib.Path(sys.argv[3]).parent.joinpath("import-argv.json").write_text("invoked")
+"""
+    )
+    fake.chmod(0o755)
+    monkeypatch.setenv("PATH", str(tmp_path))
+
+    assert cli.main(["receipts", "export", "miseledger", "--target", str(tmp_path), "--new-only"]) == 0
+    assert len(_jsonl(capsys.readouterr().out)) == 1
+
+    assert cli.main(["receipts", "export", "miseledger", "--target", str(tmp_path), "--new-only", "--import"]) == 0
+    captured = capsys.readouterr()
+
+    assert captured.out == "nothing new; import skipped\n"
+    assert captured.err == ""
+    work_dir = tmp_path / ".brigade" / "work"
+    assert not (work_dir / "import-argv.json").exists()
+    assert list(work_dir.glob("miseledger-export-*.jsonl")) == []
+
+
 def test_receipts_export_miseledger_copies_git_metadata_and_github_commit_link(tmp_path, capsys):
     head = _init_git_repo_with_head(tmp_path)
     subprocess.run(
