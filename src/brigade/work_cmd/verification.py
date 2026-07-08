@@ -11,6 +11,7 @@ import sys
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
+from .. import localio
 from . import constants, helpers, ledger as ledger_mod
 from . import reviews as reviews_mod
 from . import scanners as scanners_mod
@@ -337,6 +338,25 @@ def _run_verify_commands(target: Path, commands: list[str], timeout: int) -> tup
         receipt["status"] = "failed"
     else:
         receipt["status"] = "rejected"
+    log_digests: dict[str, str] = {}
+    for command in receipt["commands"]:
+        if not isinstance(command, dict):
+            continue
+        for key in ("stdout_log_path", "stderr_log_path"):
+            value = command.get(key)
+            if not isinstance(value, str) or not value:
+                continue
+            path = Path(value)
+            try:
+                log_name = str(path.relative_to(run_dir))
+            except ValueError:
+                log_name = path.name
+            log_digests[log_name] = localio.file_sha256(path)
+    receipt["digests"] = {
+        "algorithm": "sha256",
+        "logs": dict(sorted(log_digests.items())),
+        "receipt_sha256": localio.canonical_json_digest(receipt, exclude_keys={"digests"}),
+    }
     helpers._write_json(run_dir / "receipt.json", receipt)
     _write_verify_markdown(run_dir, receipt)
     _prune_verify_runs(target)

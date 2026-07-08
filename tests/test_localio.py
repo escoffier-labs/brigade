@@ -36,3 +36,35 @@ def test_write_json_is_atomic_and_leaves_original_intact_on_failure(tmp_path: Pa
     assert path.read_text() == original
     leftovers = sorted(p.name for p in tmp_path.iterdir() if p.name != "receipt.json")
     assert leftovers == []
+
+
+def test_canonical_json_digest_excludes_top_level_keys_and_hashes_files(tmp_path: Path):
+    payload = {
+        "b": 2,
+        "a": {"keep": True, "digest": "kept-as-content"},
+        "items": [{"digest": "kept-as-content"}, {"value": "kept"}],
+        "digests": {"receipt_sha256": "ignore"},
+    }
+    expected = localio.canonical_json_digest(
+        {
+            "a": {"keep": True, "digest": "kept-as-content"},
+            "b": 2,
+            "items": [{"digest": "kept-as-content"}, {"value": "kept"}],
+        }
+    )
+
+    assert localio.canonical_json_digest(payload, exclude_keys={"digest", "digests"}) == expected
+
+    blob = tmp_path / "blob.txt"
+    blob.write_text("hello\n")
+    assert localio.file_sha256(blob) == "5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03"
+
+
+def test_canonical_json_digest_excludes_top_level_keys_only():
+    base = {"a": 1, "nested": {"digests": "evidence-digest-1"}, "digests": {"receipt_sha256": "x"}}
+    edited = {"a": 1, "nested": {"digests": "evidence-digest-TAMPERED"}, "digests": {"receipt_sha256": "y"}}
+
+    base_digest = localio.canonical_json_digest(base, exclude_keys={"digests"})
+    edited_digest = localio.canonical_json_digest(edited, exclude_keys={"digests"})
+
+    assert base_digest != edited_digest

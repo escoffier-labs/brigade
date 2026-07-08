@@ -2,6 +2,7 @@ import json
 from pathlib import Path
 
 from brigade import cli
+from brigade import localio
 from brigade import work_cmd
 
 from tests.work_cmd_test_helpers import (
@@ -200,6 +201,33 @@ def test_work_verify_plan_run_list_show(tmp_path, capsys):
     out = capsys.readouterr().out
     assert f"work verify run: {receipt['run_id']}" in out
     assert "python3 -c" in out
+
+
+def test_work_verify_receipt_digests_recompute_from_payload_and_logs(tmp_path, capsys):
+    _init_git_repo(tmp_path)
+
+    assert (
+        work_cmd.verify_run(
+            target=tmp_path,
+            commands=["python3 -c \"print('ok')\""],
+            timeout=30,
+            json_output=True,
+        )
+        == 0
+    )
+    receipt = json.loads(capsys.readouterr().out)
+    digests = receipt["digests"]
+    run_dir = Path(receipt["path"])
+
+    assert digests["algorithm"] == "sha256"
+    assert digests["receipt_sha256"] == localio.canonical_json_digest(receipt, exclude_keys={"digests"})
+    assert digests["logs"] == {
+        "command-1-stderr.log": localio.file_sha256(run_dir / "command-1-stderr.log"),
+        "command-1-stdout.log": localio.file_sha256(run_dir / "command-1-stdout.log"),
+    }
+
+    stored = json.loads((run_dir / "receipt.json").read_text())
+    assert stored["digests"] == digests
 
 
 def test_work_closeout_writes_ready_receipt(tmp_path, capsys):

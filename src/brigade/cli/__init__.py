@@ -28,6 +28,7 @@ from . import (
     doctor as _doctor_group,
     status as _status_group,
     profiles as _profiles_group,
+    receipts as _receipts_group,
     daily as _daily_group,
     add as _add_group,
     stations as _stations_group,
@@ -118,6 +119,7 @@ def _build_parser() -> argparse.ArgumentParser:
     _doctor_group.register(sub)
     _status_group.register(sub)
     _profiles_group.register(sub)
+    _receipts_group.register(sub)
     _daily_group.register(sub)
     _add_group.register(sub)
     _stations_group.register(sub)

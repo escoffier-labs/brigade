@@ -14,7 +14,7 @@ import argparse
 COMMAND_GROUPS: list[tuple[str, list[str]]] = [
     (
         "Core memory loop",
-        ["init", "handoff", "handoff-template", "ingest", "memory", "doctor", "status", "profiles"],
+        ["init", "handoff", "handoff-template", "ingest", "memory", "doctor", "status", "profiles", "receipts"],
     ),
     (
         "Daily operator loop",
