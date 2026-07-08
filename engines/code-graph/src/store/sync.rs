@@ -9,6 +9,10 @@ use std::collections::{HashMap, HashSet};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
 use std::time::UNIX_EPOCH;
 
 use anyhow::{Context, Result};
@@ -17,7 +21,7 @@ use rusqlite::{Connection, params};
 
 use crate::extractors::common::hex_hash;
 use crate::extractors::{extractor_fingerprint_for, index_file, language_for};
-use crate::model::{CallKind, Import, Lang, PendingCall};
+use crate::model::{CallKind, IgnoredSummary, Import, Lang, PendingCall, PendingChanges};
 use crate::store::db::now_ts;
 
 #[derive(Default)]
@@ -32,7 +36,7 @@ pub struct SyncSummary {
     pub deleted: usize,
 }
 
-struct Entry {
+pub(crate) struct Entry {
     path: PathBuf,
     rel: String,
     lang: Lang,
@@ -50,6 +54,11 @@ struct DbFile {
 struct StalePlan<'a> {
     entries: Vec<&'a Entry>,
     requires_full_reindex: bool,
+}
+
+pub(crate) struct SyncWalk {
+    entries: Vec<Entry>,
+    ignored: IgnoredSummary,
 }
 
 #[derive(Clone)]
@@ -79,48 +88,7 @@ pub fn sync_repo_force(conn: &Connection, root: &Path, force: bool) -> Result<Sy
     let force_full_reindex = force || upgraded;
 
     // Stat pass: enumerate supported files without parsing them.
-    let mut entries: Vec<Entry> = Vec::new();
-    let has_git_context = has_git_context(&root);
-    let mut walker = WalkBuilder::new(&root);
-    walker
-        .hidden(false)
-        .git_ignore(has_git_context)
-        .git_global(false)
-        .git_exclude(has_git_context)
-        .ignore(false)
-        .parents(true)
-        .filter_entry(keep_entry);
-    for entry in walker.build() {
-        let entry = entry?;
-        if !entry
-            .file_type()
-            .is_some_and(|file_type| file_type.is_file())
-        {
-            continue;
-        }
-        let Some(lang) = language_for(entry.path()) else {
-            continue;
-        };
-        let rel = entry
-            .path()
-            .strip_prefix(&root)
-            .unwrap_or(entry.path())
-            .to_string_lossy()
-            .replace('\\', "/");
-        let metadata = entry.metadata()?;
-        let mtime = metadata
-            .modified()
-            .ok()
-            .and_then(|m| m.duration_since(UNIX_EPOCH).ok())
-            .map_or(0, |d| d.as_secs() as i64);
-        entries.push(Entry {
-            path: entry.path().to_path_buf(),
-            rel,
-            lang,
-            size: metadata.len(),
-            mtime,
-        });
-    }
+    let entries = collect_sync_walk(&root, false)?.entries;
 
     let db_files = load_db_files(conn)?;
     if graph_dir_created && db_files.is_empty() && has_git_marker(&root) {
@@ -291,6 +259,137 @@ pub fn sync_repo_force(conn: &Connection, root: &Path, force: bool) -> Result<Sy
     })
 }
 
+pub fn pending_changes(conn: &Connection, root: &Path) -> Result<(PendingChanges, IgnoredSummary)> {
+    let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    let walk = collect_sync_walk(&root, true)?;
+    let db_files = load_db_files(conn)?;
+    let on_disk: HashSet<&str> = walk
+        .entries
+        .iter()
+        .map(|entry| entry.rel.as_str())
+        .collect();
+    let mut pending = PendingChanges {
+        deleted_files: db_files
+            .keys()
+            .filter(|path| !on_disk.contains(path.as_str()))
+            .count(),
+        ..PendingChanges::default()
+    };
+    for entry in &walk.entries {
+        match entry_freshness(entry, &db_files)? {
+            EntryFreshness::New => pending.new_files += 1,
+            EntryFreshness::Changed => pending.changed_files += 1,
+            EntryFreshness::FingerprintStale => pending.fingerprint_stale += 1,
+            EntryFreshness::Fresh => {}
+        }
+    }
+    Ok((pending, walk.ignored))
+}
+
+fn collect_sync_walk(root: &Path, count_ignored: bool) -> Result<SyncWalk> {
+    let ignored = IgnoredSummary {
+        hardcoded_floor: 0,
+        gitignore: if count_ignored {
+            count_gitignored_entries(root)?
+        } else {
+            0
+        },
+    };
+    let hardcoded_floor = Arc::new(AtomicUsize::new(0));
+    let entries = collect_supported_entries(
+        root,
+        has_git_context(root),
+        count_ignored.then_some(hardcoded_floor.clone()),
+    )?;
+    Ok(SyncWalk {
+        entries,
+        ignored: IgnoredSummary {
+            hardcoded_floor: hardcoded_floor.load(Ordering::Relaxed),
+            ..ignored
+        },
+    })
+}
+
+fn collect_supported_entries(
+    root: &Path,
+    use_gitignore: bool,
+    hardcoded_counter: Option<Arc<AtomicUsize>>,
+) -> Result<Vec<Entry>> {
+    let mut entries: Vec<Entry> = Vec::new();
+    let mut walker = WalkBuilder::new(root);
+    walker
+        .hidden(false)
+        .git_ignore(use_gitignore)
+        .git_global(false)
+        .git_exclude(use_gitignore)
+        .ignore(false)
+        .parents(true)
+        .filter_entry(move |entry| keep_entry_counted(entry, hardcoded_counter.as_ref()));
+    for entry in walker.build() {
+        let entry = entry?;
+        if !entry
+            .file_type()
+            .is_some_and(|file_type| file_type.is_file())
+        {
+            continue;
+        }
+        let Some(lang) = language_for(entry.path()) else {
+            continue;
+        };
+        let metadata = entry.metadata()?;
+        let mtime = metadata
+            .modified()
+            .ok()
+            .and_then(|m| m.duration_since(UNIX_EPOCH).ok())
+            .map_or(0, |d| d.as_secs() as i64);
+        entries.push(Entry {
+            path: entry.path().to_path_buf(),
+            rel: rel_path(root, entry.path()),
+            lang,
+            size: metadata.len(),
+            mtime,
+        });
+    }
+    Ok(entries)
+}
+
+fn count_gitignored_entries(root: &Path) -> Result<usize> {
+    if !has_git_context(root) {
+        return Ok(0);
+    }
+    let without_gitignore = collect_walk_paths(root, false)?;
+    let with_gitignore = collect_walk_paths(root, true)?;
+    Ok(without_gitignore.difference(&with_gitignore).count())
+}
+
+fn collect_walk_paths(root: &Path, use_gitignore: bool) -> Result<HashSet<String>> {
+    let mut paths = HashSet::new();
+    let mut walker = WalkBuilder::new(root);
+    walker
+        .hidden(false)
+        .git_ignore(use_gitignore)
+        .git_global(false)
+        .git_exclude(use_gitignore)
+        .ignore(false)
+        .parents(true)
+        .filter_entry(|entry| keep_entry_counted(entry, None));
+    for entry in walker.build() {
+        let entry = entry?;
+        if entry.depth() == 0 {
+            continue;
+        }
+        paths.insert(rel_path(root, entry.path()));
+    }
+    Ok(paths)
+}
+
+fn rel_path(root: &Path, path: &Path) -> String {
+    path.strip_prefix(root)
+        .unwrap_or(path)
+        .to_string_lossy()
+        .replace('\\', "/")
+}
+
 fn stale_plan<'a>(
     entries: &'a [Entry],
     db_files: &HashMap<String, DbFile>,
@@ -298,27 +397,15 @@ fn stale_plan<'a>(
     let mut stale = Vec::new();
     let mut requires_full_reindex = false;
     for entry in entries {
-        match db_files.get(&entry.rel) {
-            None => {
+        match entry_freshness(entry, db_files)? {
+            EntryFreshness::New | EntryFreshness::Changed => {
                 stale.push(entry);
                 requires_full_reindex = true;
             }
-            Some(db_file) => {
-                let mut content_changed = false;
-                if db_file.size != entry.size || db_file.mtime != entry.mtime {
-                    // Cheap stat differs; confirm with content hash to ignore mtime-only touches.
-                    let content = fs::read_to_string(&entry.path)?;
-                    content_changed = hex_hash(content.as_bytes()) != db_file.content_hash;
-                }
-                if content_changed {
-                    stale.push(entry);
-                    requires_full_reindex = true;
-                } else if db_file.extractor_fingerprint.as_deref()
-                    != Some(extractor_fingerprint_for(entry.lang))
-                {
-                    stale.push(entry);
-                }
+            EntryFreshness::FingerprintStale => {
+                stale.push(entry);
             }
+            EntryFreshness::Fresh => {}
         }
     }
     Ok(StalePlan {
@@ -327,9 +414,45 @@ fn stale_plan<'a>(
     })
 }
 
+enum EntryFreshness {
+    Fresh,
+    New,
+    Changed,
+    FingerprintStale,
+}
+
+fn entry_freshness(entry: &Entry, db_files: &HashMap<String, DbFile>) -> Result<EntryFreshness> {
+    let Some(db_file) = db_files.get(&entry.rel) else {
+        return Ok(EntryFreshness::New);
+    };
+    if db_file.size != entry.size || db_file.mtime != entry.mtime {
+        // Cheap stat differs; confirm with content hash to ignore mtime-only touches.
+        let content = fs::read_to_string(&entry.path)?;
+        if hex_hash(content.as_bytes()) != db_file.content_hash {
+            return Ok(EntryFreshness::Changed);
+        }
+    }
+    if db_file.extractor_fingerprint.as_deref() != Some(extractor_fingerprint_for(entry.lang)) {
+        return Ok(EntryFreshness::FingerprintStale);
+    }
+    Ok(EntryFreshness::Fresh)
+}
+
 fn keep_entry(entry: &DirEntry) -> bool {
+    !is_hardcoded_floor(entry)
+}
+
+fn keep_entry_counted(entry: &DirEntry, hardcoded_counter: Option<&Arc<AtomicUsize>>) -> bool {
+    let keep = keep_entry(entry);
+    if !keep && let Some(counter) = hardcoded_counter {
+        counter.fetch_add(1, Ordering::Relaxed);
+    }
+    keep
+}
+
+fn is_hardcoded_floor(entry: &DirEntry) -> bool {
     let name = entry.file_name().to_string_lossy();
-    !matches!(
+    matches!(
         name.as_ref(),
         ".git"
             | ".graphtrail"
@@ -397,9 +520,14 @@ fn gitignore_covers_graphtrail(root: &Path, gitignore: &Path) -> Result<bool> {
 
 /// Map file path -> freshness metadata from the `files` table.
 fn load_db_files(conn: &Connection) -> Result<HashMap<String, DbFile>> {
-    let mut stmt = conn.prepare(
-        "SELECT path, content_hash, size, modified_at, extractor_fingerprint FROM files",
-    )?;
+    let has_fingerprint =
+        crate::store::schema::table_has_column(conn, "files", "extractor_fingerprint")?;
+    let sql = if has_fingerprint {
+        "SELECT path, content_hash, size, modified_at, extractor_fingerprint FROM files"
+    } else {
+        "SELECT path, content_hash, size, modified_at, NULL AS extractor_fingerprint FROM files"
+    };
+    let mut stmt = conn.prepare(sql)?;
     let rows = stmt.query_map([], |row| {
         Ok((
             row.get::<_, String>(0)?,

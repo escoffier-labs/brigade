@@ -67,6 +67,7 @@ fn tools_list_exposes_the_query_tools_with_location_args() {
         "impact",
         "context",
         "stats",
+        "doctor",
         "file_neighbors",
         "repos",
         "diff",
@@ -85,8 +86,12 @@ fn tools_list_exposes_the_query_tools_with_location_args() {
         }
         assert!(props.get("repo").is_some(), "{} missing repo", tool["name"]);
         assert!(props.get("db").is_some(), "{} missing db", tool["name"]);
-        if tool["name"] == "repos" {
-            assert!(props.get("refresh").is_none(), "repos must not refresh");
+        if matches!(tool["name"].as_str(), Some("repos" | "doctor")) {
+            assert!(
+                props.get("refresh").is_none(),
+                "{} must not refresh",
+                tool["name"]
+            );
         } else {
             assert!(
                 props.get("refresh").is_some(),
@@ -95,6 +100,55 @@ fn tools_list_exposes_the_query_tools_with_location_args() {
             );
         }
     }
+}
+
+#[test]
+fn tools_call_doctor_returns_freshness_report() {
+    let (dir, db) = ro_db();
+    let resp = handle_request(
+        &db,
+        &json!({"jsonrpc":"2.0","id":56,"method":"tools/call",
+                "params":{"name":"doctor","arguments":{}}}),
+    )
+    .unwrap();
+
+    assert_eq!(resp["result"]["isError"], false);
+    let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+    let report: serde_json::Value = serde_json::from_str(text).unwrap();
+    assert_eq!(report["repo_root"], dir.path().to_string_lossy().as_ref());
+    assert_eq!(report["db_path"], db.to_string_lossy().as_ref());
+    assert_eq!(report["verdict"], "FRESH");
+    assert_eq!(report["pending"]["new_files"], 0);
+    assert_eq!(report["pending"]["changed_files"], 0);
+    assert_eq!(report["pending"]["deleted_files"], 0);
+    assert_eq!(report["pending"]["fingerprint_stale"], 0);
+    assert_eq!(report["schema"]["needs_migration"], false);
+}
+
+#[test]
+fn tools_call_doctor_missing_db_stays_tool_error_result() {
+    let (_dir, db) = ro_db();
+    let missing_db = db.with_file_name("missing-doctor.db");
+
+    let resp = handle_request(
+        &db,
+        &json!({"jsonrpc":"2.0","id":57,"method":"tools/call",
+                "params":{"name":"doctor","arguments":{"db": missing_db}}}),
+    )
+    .unwrap();
+
+    assert!(resp.get("error").is_none());
+    assert_eq!(resp["result"]["isError"], true);
+    assert!(
+        resp["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("read-only")
+    );
+    assert!(
+        !missing_db.exists(),
+        "MCP doctor must not create missing databases"
+    );
 }
 
 #[test]

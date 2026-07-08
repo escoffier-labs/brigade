@@ -23,6 +23,7 @@ fn command_args<'a>(db: &'a Path, command: &'a str) -> Vec<String> {
         "context" => vec!["--db".into(), db, "context".into(), "helper".into()],
         "neighbors" => vec!["--db".into(), db, "neighbors".into(), "app.py".into()],
         "stats" => vec!["--db".into(), db, "stats".into()],
+        "doctor" => vec!["--db".into(), db, "doctor".into()],
         other => panic!("unknown query command: {other}"),
     }
 }
@@ -174,6 +175,7 @@ fn query_commands_do_not_create_default_db_state_when_missing() {
         "context",
         "neighbors",
         "stats",
+        "doctor",
     ] {
         let dir = tempfile::tempdir().unwrap();
         let mut cmd = Command::new(graphtrail());
@@ -186,6 +188,7 @@ fn query_commands_do_not_create_default_db_state_when_missing() {
             "context" => cmd.args(["context", "helper"]),
             "neighbors" => cmd.args(["neighbors", "app.py"]),
             "stats" => cmd.arg("stats"),
+            "doctor" => cmd.arg("doctor"),
             other => panic!("unknown query command: {other}"),
         };
 
@@ -212,6 +215,7 @@ fn query_commands_do_not_mutate_existing_db_state() {
         "context",
         "neighbors",
         "stats",
+        "doctor",
     ] {
         let dir = tempfile::tempdir().unwrap();
         let db = build_db(dir.path());
@@ -231,6 +235,115 @@ fn query_commands_do_not_mutate_existing_db_state() {
             "{command} mutated graph db state"
         );
     }
+}
+
+#[test]
+fn doctor_fresh_synced_repo_reports_fresh() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = build_db(dir.path());
+
+    let output = Command::new(graphtrail())
+        .current_dir(dir.path())
+        .args(["--db", &db.display().to_string(), "doctor", "--json"])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success(), "doctor failed: {output:?}");
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["verdict"], "FRESH");
+    assert_eq!(value["pending"]["new_files"], 0);
+    assert_eq!(value["pending"]["changed_files"], 0);
+    assert_eq!(value["pending"]["deleted_files"], 0);
+    assert_eq!(value["pending"]["fingerprint_stale"], 0);
+}
+
+#[test]
+fn doctor_new_file_reports_stale_exit_1() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = build_db(dir.path());
+    fs::write(dir.path().join("late.py"), "def late():\n    return 2\n").unwrap();
+
+    let output = Command::new(graphtrail())
+        .current_dir(dir.path())
+        .args(["--db", &db.display().to_string(), "doctor", "--json"])
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(1), "doctor output: {output:?}");
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["verdict"], "STALE");
+    assert_eq!(value["pending"]["new_files"], 1);
+    assert_eq!(value["pending"]["changed_files"], 0);
+}
+
+#[test]
+fn doctor_null_fingerprint_reports_stale_fingerprint() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = build_db(dir.path());
+    {
+        let conn = open_db(&db).unwrap();
+        conn.execute(
+            "UPDATE files SET extractor_fingerprint = NULL WHERE path = 'app.py'",
+            [],
+        )
+        .unwrap();
+        conn.pragma_update(None, "wal_checkpoint", "TRUNCATE")
+            .unwrap();
+    }
+
+    let output = Command::new(graphtrail())
+        .current_dir(dir.path())
+        .args(["--db", &db.display().to_string(), "doctor", "--json"])
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(1), "doctor output: {output:?}");
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["verdict"], "STALE");
+    assert_eq!(value["pending"]["fingerprint_stale"], 1);
+    assert_eq!(value["pending"]["new_files"], 0);
+    assert_eq!(value["pending"]["changed_files"], 0);
+}
+
+#[test]
+fn doctor_missing_db_exits_2_without_creating_state() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let output = Command::new(graphtrail())
+        .current_dir(dir.path())
+        .args(["doctor", "--json"])
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(2), "doctor output: {output:?}");
+    assert!(
+        !dir.path().join(".graphtrail").exists(),
+        "doctor created default graph db state"
+    );
+}
+
+#[test]
+fn doctor_does_not_mutate_db_or_tree() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = build_db(dir.path());
+    let graph_dir = db.parent().unwrap();
+    let before_db = snapshot_file(&db);
+    let before_tree = snapshot_tree(dir.path());
+
+    let output = Command::new(graphtrail())
+        .current_dir(dir.path())
+        .args(["--db", &db.display().to_string(), "doctor", "--json"])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success(), "doctor failed: {output:?}");
+    assert_eq!(before_db, snapshot_file(&db), "doctor mutated the db file");
+    assert_eq!(
+        before_tree,
+        snapshot_tree(dir.path()),
+        "doctor mutated the repo tree"
+    );
+    assert_eq!(before_tree, snapshot_tree(graph_dir.parent().unwrap()));
 }
 
 #[cfg(all(feature = "codesearch", feature = "miseledger"))]

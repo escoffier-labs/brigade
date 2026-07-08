@@ -136,6 +136,29 @@ pub struct Stats {
     pub language_files: BTreeMap<String, i64>,
 }
 
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct PendingChanges {
+    pub new_files: usize,
+    pub changed_files: usize,
+    pub deleted_files: usize,
+    pub fingerprint_stale: usize,
+}
+
+impl PendingChanges {
+    pub fn is_empty(self) -> bool {
+        self.new_files == 0
+            && self.changed_files == 0
+            && self.deleted_files == 0
+            && self.fingerprint_stale == 0
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct IgnoredSummary {
+    pub hardcoded_floor: usize,
+    pub gitignore: usize,
+}
+
 #[derive(Debug, Serialize)]
 pub struct ContextPack {
     /// Version of the JSON pack shape, so consumers can detect format changes.

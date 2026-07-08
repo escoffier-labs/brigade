@@ -23,8 +23,9 @@ use serde_json::{Value, json};
 
 use crate::model::Direction;
 use crate::query::{
-    DEFAULT_IMPACT_DEPTH, build_context_pack, diff_graphs, file_neighbors, graph_edges_with_depth,
-    impact_edges, normalize_depth, render_markdown, search_symbols_with_path, stats,
+    DEFAULT_IMPACT_DEPTH, build_context_pack, diff_graphs, doctor, file_neighbors,
+    graph_edges_with_depth, impact_edges, normalize_depth, render_markdown,
+    search_symbols_with_path, stats,
 };
 use crate::store::{init_schema, open_db, open_read_only, sync_repo};
 
@@ -194,6 +195,7 @@ fn call_tool(default_db: &Path, name: &str, args: &Value) -> Result<String> {
         }
         "file_neighbors" => to_pretty(&file_neighbors(&conn, &str_arg(args, "path"))?),
         "stats" => to_pretty(&stats(&conn)?),
+        "doctor" => to_pretty(&doctor(&conn, &doctor_root(default_db, args, &db), &db)?),
         other => Err(anyhow!("unknown tool '{other}'")),
     }?;
     Ok(with_refresh_error(text, refresh_error))
@@ -230,7 +232,7 @@ fn validate_tool_args(name: &str, args: &Value) -> std::result::Result<(), Strin
         "repos" => {
             require_roots(args)?;
         }
-        "stats" => {}
+        "stats" | "doctor" => {}
         _ => {}
     }
     Ok(())
@@ -305,6 +307,7 @@ fn tool_defs() -> Value {
             )
         },
         { "name": "stats", "description": "Counts of files, symbols, edges, imports, sync metadata, and per-language file counts.", "inputSchema": with_location(with_refresh(json!({})), json!([])) },
+        { "name": "doctor", "description": "Freshness contract for the graph: schema status, last sync age, pending file changes, ignored entries, and FRESH/STALE/NEEDS-MIGRATION verdict.", "inputSchema": with_location(json!({}), json!([])) },
         {
             "name": "file_neighbors",
             "description": "Files connected to a file by incoming or outgoing call edges.",
@@ -373,6 +376,16 @@ fn refresh_db(default_db: &Path, args: &Value, db: &Path) -> Option<String> {
 }
 
 fn refresh_root(default_db: &Path, args: &Value, db: &Path) -> PathBuf {
+    if let Some(repo) = args.get("repo").and_then(|v| v.as_str()) {
+        return PathBuf::from(repo);
+    }
+    repo_from_db(db)
+        .or_else(|| repo_from_db(default_db))
+        .or_else(|| db.parent().map(|path| path.to_path_buf()))
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+
+fn doctor_root(default_db: &Path, args: &Value, db: &Path) -> PathBuf {
     if let Some(repo) = args.get("repo").and_then(|v| v.as_str()) {
         return PathBuf::from(repo);
     }

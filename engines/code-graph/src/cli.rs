@@ -11,8 +11,8 @@ use crate::query::build_context_pack_from_entry_points;
 use crate::query::{
     DEFAULT_IMPACT_DEPTH, build_context_pack,
     context::{edge_location, symbol_location},
-    diff_graphs, file_neighbors, graph_edges_with_depth, impact_edges, normalize_depth,
-    render_markdown, search_symbols_with_path, stats,
+    diff_graphs, doctor, file_neighbors, graph_edges_with_depth, impact_edges, missing_db_report,
+    normalize_depth, render_markdown, search_symbols_with_path, stats,
 };
 use crate::store::{
     db_path, init_schema, open_db, open_default_read_only, open_read_only, sync_repo_force,
@@ -101,6 +101,12 @@ enum Command {
         evidence: bool,
     },
     Stats {
+        #[arg(long)]
+        json: bool,
+    },
+    Doctor {
+        #[arg(default_value = ".")]
+        root: PathBuf,
         #[arg(long)]
         json: bool,
     },
@@ -298,6 +304,18 @@ pub fn run(cli: Cli) -> Result<()> {
                 }
             }
         }
+        Command::Doctor { root, json } => {
+            let db_path = db_path(cli.db, &root);
+            if !db_path.exists() {
+                let report = missing_db_report(&root, &db_path);
+                print_doctor_report(&report, json)?;
+                std::process::exit(report.exit_code());
+            }
+            let conn = open_read_only(&db_path)?;
+            let report = doctor(&conn, &root, &db_path)?;
+            print_doctor_report(&report, json)?;
+            std::process::exit(report.exit_code());
+        }
         Command::Diff {
             before,
             after,
@@ -389,6 +407,47 @@ fn print_json_or_edges(json: bool, rows: &[EdgeRow]) -> Result<()> {
             row.target_file
         );
     }
+    Ok(())
+}
+
+fn print_doctor_report(report: &crate::query::DoctorReport, json: bool) -> Result<()> {
+    if json {
+        println!("{}", serde_json::to_string_pretty(report)?);
+        return Ok(());
+    }
+    println!("repo: root={} db={}", report.repo_root, report.db_path);
+    println!(
+        "version: tool={} schema={}/{} needs_migration={}",
+        report.tool_version,
+        report
+            .schema
+            .stored
+            .map(|version| version.to_string())
+            .unwrap_or_else(|| "missing".to_string()),
+        report.schema.current,
+        report.schema.needs_migration
+    );
+    println!(
+        "last_sync: synced_at={} age_seconds={}",
+        report.last_sync.synced_at.as_deref().unwrap_or("missing"),
+        report
+            .last_sync
+            .age_seconds
+            .map(|age| age.to_string())
+            .unwrap_or_else(|| "missing".to_string())
+    );
+    println!(
+        "pending: new_files={} changed_files={} deleted_files={} fingerprint_stale={}",
+        report.pending.new_files,
+        report.pending.changed_files,
+        report.pending.deleted_files,
+        report.pending.fingerprint_stale
+    );
+    println!(
+        "ignored: hardcoded_floor={} gitignore={}",
+        report.ignored.hardcoded_floor, report.ignored.gitignore
+    );
+    println!("verdict: {}", report.verdict);
     Ok(())
 }
 

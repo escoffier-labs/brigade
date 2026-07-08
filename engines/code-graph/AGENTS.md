@@ -2,7 +2,7 @@
 
 Orientation for coding agents working on GraphTrail.
 
-GraphTrail is a local code-graph sidecar. It parses a repository with tree-sitter in a single pass per file, extracts symbols, imports, and call edges into a small SQLite graph under `.graphtrail/`, and answers structural questions (search, callers, callees, impact, context, stats) over two surfaces: a CLI (`graphtrail`) and an MCP server (`graphtrail-mcp`). MCP queries always run on `SQLITE_OPEN_READ_ONLY` connections; the one deliberate exception is the opt-in `refresh: true` parameter, which runs the same incremental sync as the CLI on a write connection before answering, then serves the query read-only. The default build makes no network calls and starts no daemon. Languages supported: Python, TypeScript/JavaScript, Rust, Go.
+GraphTrail is a local code-graph sidecar. It parses a repository with tree-sitter in a single pass per file, extracts symbols, imports, and call edges into a small SQLite graph under `.graphtrail/`, and answers structural questions (search, callers, callees, impact, context, stats) plus freshness checks (`doctor`) over two surfaces: a CLI (`graphtrail`) and an MCP server (`graphtrail-mcp`). MCP queries always run on `SQLITE_OPEN_READ_ONLY` connections; the one deliberate exception is the opt-in `refresh: true` parameter, which runs the same incremental sync as the CLI on a write connection before answering, then serves the query read-only. The default build makes no network calls and starts no daemon. Languages supported: Python, TypeScript/JavaScript, Rust, Go.
 
 ## Build and test
 
@@ -29,13 +29,13 @@ The code is split into focused modules:
 - `model` (`src/model.rs`): shared types.
 - `extractors` (`src/extractors/`): per-language tree-sitter providers plus shared traversal in `common.rs`. Each language is a provider behind the `LangSpec` trait.
 - `store` (`src/store/`): `db`, `schema`, `sync`.
-- `query` (`src/query/`): `search`, `graph`, `context`, `stats`.
+- `query` (`src/query/`): `search`, `graph`, `context`, `stats`, `doctor`.
 - `cli` (`src/cli.rs`): a thin command-line interface.
 - Binaries: `src/main.rs` (the `graphtrail` CLI) and `src/bin/graphtrail-mcp.rs` (the `graphtrail-mcp` MCP server).
 
 ## MCP smoke test
 
-Build, then pipe newline-delimited JSON-RPC into the server over stdio. It speaks JSON-RPC 2.0 and exposes eight read-only tools (`search`, `callers`, `callees`, `impact`, `context`, `stats`, `file_neighbors`, `repos`).
+Build, then pipe newline-delimited JSON-RPC into the server over stdio. It speaks JSON-RPC 2.0 and exposes ten tools (`search`, `callers`, `callees`, `impact`, `context`, `stats`, `doctor`, `file_neighbors`, `repos`, `diff`).
 
 ```bash
 cargo run -- init .

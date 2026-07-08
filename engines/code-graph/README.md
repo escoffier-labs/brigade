@@ -75,9 +75,12 @@ graphtrail --db "$DB" callees serve
 graphtrail --db "$DB" impact serve --depth 3
 graphtrail --db "$DB" context "handoff lint" --json
 graphtrail --db "$DB" stats --json
+graphtrail --db "$DB" doctor /path/to/repo --json
 ```
 
 When the sync root is inside a git repository, `sync` follows `.gitignore` files and `.git/info/exclude`, while still indexing hidden paths such as `.github` if they are not ignored. Ignored files are skipped even if they are committed, because GraphTrail follows ignore rules rather than git status.
+
+Use `doctor` before relying on a graph in scripts or agent workflows. It opens the database read-only, checks schema freshness, last sync age, pending new/changed/deleted/fingerprint-stale files, and exits 0 for `FRESH`, 1 for `STALE`, or 2 for `NEEDS-MIGRATION` or a missing database.
 
 A real `callers` query against GraphTrail's own indexed source:
 
@@ -105,7 +108,7 @@ Register it with an MCP client. For Claude Code, add to `.mcp.json` (project sco
 
 ### Tools
 
-The server exposes eight tools, every one read-only. This list is verified against the live `tools/list` response from `graphtrail-mcp`:
+The server exposes ten tools. This list is verified against the live `tools/list` response from `graphtrail-mcp`:
 
 | Tool | Required args | What it returns |
 |---|---|---|
@@ -115,10 +118,13 @@ The server exposes eight tools, every one read-only. This list is verified again
 | `impact` | `symbol` (`depth` optional, default 1, clamped to 1..5) | Combined callers and callees of a symbol (the blast radius of a change), with `hops` on each edge. |
 | `context` | `task` (`limit` optional, default 12) | A context pack: matching entry points plus their caller/callee neighborhood and related files. |
 | `stats` | none | Counts of files, symbols, edges, imports, schema version, sync metadata, and per-language file counts. |
+| `doctor` | none | Freshness contract for the graph: schema status, last sync age, pending file changes, ignored entries, and `FRESH`/`STALE`/`NEEDS-MIGRATION` verdict. |
 | `file_neighbors` | `path` | Files connected to an indexed file by incoming or outgoing call edges. |
 | `repos` | none (`roots` optional) | Default database metadata plus optional one-level scans for `.graphtrail/graphtrail.db` under root directories. |
+| `diff` | `before`, `after` | Structural diff of two indexed graph DBs: added, removed, and changed symbols plus added and removed call edges. |
 
 Every tool additionally accepts an optional `repo` or `db` selector for multi-repo use.
+`doctor`, `repos`, and `diff` do not accept `refresh`; `doctor` reports staleness and leaves refresh to the query tools that opt into it.
 Call-edge tools cap each direction at 500 real edges. When a traversal is capped, the JSON array includes a final row with `kind: "truncated"`.
 
 A real `stats` tool call (the server indexed GraphTrail's own source first):
