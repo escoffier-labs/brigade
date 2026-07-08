@@ -12,6 +12,7 @@ from __future__ import annotations
 import datetime as dt
 import math
 from dataclasses import dataclass
+from typing import Any
 
 # Map (source, status) to a verified signal weight. Only signals the model
 # cannot author earn a non-zero weight. "aboyeur ok" means the worker CLI exited
@@ -42,6 +43,7 @@ class OutcomeRecord:
     signal_value: int  # +1 | 0 | -1
     evidence_ref: str
     ts: str
+    code_graph_delta: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -93,8 +95,8 @@ def signal_value(source: str, status: str) -> int:
     return SIGNAL_RULES.get((source, status), 0)
 
 
-def score_records(artifact_id: str, records: list[OutcomeRecord]) -> OutcomeScore:
-    """Fold an artifact's records into counts plus a Wilson lower-bound score.
+def scored_records(records: list[OutcomeRecord]) -> list[OutcomeRecord]:
+    """Return the de-duplicated records that contribute to scoring.
 
     Counts DISTINCT verified evidence, not raw rows. A re-captured or retried run
     yields a byte-identical record (same source, evidence_ref, task_id), and the
@@ -116,6 +118,12 @@ def score_records(artifact_id: str, records: list[OutcomeRecord]) -> OutcomeScor
             continue
         seen.add(key)
         deduped.append(r)
+    return deduped
+
+
+def score_records(artifact_id: str, records: list[OutcomeRecord]) -> OutcomeScore:
+    """Fold an artifact's records into counts plus a Wilson lower-bound score."""
+    deduped = scored_records(records)
     helped = sum(1 for r in deduped if r.signal_value > 0)
     hurt = sum(1 for r in deduped if r.signal_value < 0)
     neutral = sum(1 for r in deduped if r.signal_value == 0)
