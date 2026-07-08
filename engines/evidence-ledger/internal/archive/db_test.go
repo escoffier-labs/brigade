@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 )
 
@@ -41,15 +42,35 @@ func TestMigrateIsIdempotent(t *testing.T) {
 
 func TestMigrateCreatesRelationLookupIndexes(t *testing.T) {
 	db := openMigrated(t)
-	for _, name := range []string{"idx_relations_source_item", "idx_relations_target_item"} {
+	// idx_items_source_external backs resolveRelations, whose correlated
+	// (source_id, external_id) target lookup otherwise skip-scans the whole
+	// unique(source_id, collection_id, external_id, content_hash) index for
+	// every unresolved relation on every import.
+	for _, name := range []string{"idx_relations_source_item", "idx_relations_target_item", "idx_items_source_external"} {
 		var got string
 		err := db.QueryRow(
 			"select name from sqlite_master where type = 'index' and name = ?",
 			name,
 		).Scan(&got)
 		if err != nil {
-			t.Fatalf("relation index %q not found after migrate: %v", name, err)
+			t.Fatalf("lookup index %q not found after migrate: %v", name, err)
 		}
+	}
+	rows, err := db.Query("select name from pragma_index_info('idx_items_source_external') order by seqno")
+	if err != nil {
+		t.Fatalf("pragma_index_info failed: %v", err)
+	}
+	defer rows.Close()
+	var cols []string
+	for rows.Next() {
+		var col string
+		if err := rows.Scan(&col); err != nil {
+			t.Fatalf("scan index column: %v", err)
+		}
+		cols = append(cols, col)
+	}
+	if want := []string{"source_id", "external_id"}; !slices.Equal(cols, want) {
+		t.Fatalf("idx_items_source_external columns = %v, want %v", cols, want)
 	}
 	if err := Migrate(db); err != nil {
 		t.Fatalf("second Migrate failed: %v", err)
