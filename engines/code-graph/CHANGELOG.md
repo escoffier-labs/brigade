@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-07-08
+
+### Added
+- Before/after code-graph diff: `graphtrail diff --before <db> --after <db> [--json]` compares two indexed databases into added/removed/changed symbols and added/removed call edges, opening both read-only. Nodes key on `(file_path, qualified_name, kind)`, so a symbol that only moves lines is not a spurious remove+add. The compact JSON output is built for attaching structural deltas to CI or agent-run receipts. (#10)
+- MCP `diff` tool: the same before/after comparison over the MCP surface, taking explicit `before`/`after` database paths. (#12)
+- Per-symbol body hashes (schema v3): a body edit that keeps the same signature and line span is now reported as changed instead of slipping through invisibly. Changed nodes carry a `previous` block with the before-side signature and start line, and the diff summary adds `added_edges_line_insensitive` / `removed_edges_line_insensitive` so a pure line shift reads as zero structural churn alongside the exact raw counts. Existing v2 databases upgrade in place with a one-pass reindex on the next sync. (#15)
+- Extractor fingerprints (schema v4): each language extractor declares a version fingerprint recorded per file, and the incremental-sync skip check compares it alongside the content hash. Changing an extractor re-extracts exactly that language's files on the next sync, with no forced full-reindex migrations. (#17)
+- MCP `refresh` parameter on the query tools (`search`, `callers`, `callees`, `impact`, `context`, `file_neighbors`, `stats`): opt-in incremental sync before answering, fail-open with a note if the sync cannot run. Queries themselves stay on read-only connections. (#17)
+- `graphtrail doctor`: the freshness contract. Reports tool and schema versions, last-sync age, pending change counts (new / changed / deleted / fingerprint-stale files), and ignored-entry counts, then verdicts FRESH, STALE, or NEEDS-MIGRATION with exit codes 0/1/2 for scripting. Also exposed as an MCP tool, deliberately without `refresh`. (#18)
+
+### Changed
+- Sync respects `.gitignore` in git repositories (including nested and `.git/info/exclude`), and files that become ignored are removed from the index on the next sync, so polluted databases clean themselves. Non-git roots keep the hardcoded skip list, which now also covers bare `venv`. Hidden paths are still indexed. One real-world graph went from 2,955 files (2,803 of them site-packages noise) to 152. (#16)
+- First index of a git repository ensures `.graphtrail/` is in `.gitignore`, idempotently. (#17)
+
+### Fixed
+- The diff JSON contract, edge-identity behavior, and read-only guarantees are locked by regression fixtures: a full golden test for the JSON shape, a line-shift fixture for edge churn, a body-only fixture, and CLI tests asserting missing-database errors and unmutated inputs. (#14)
+
 ## [0.2.0] - 2026-07-03
 
 ### Added
@@ -40,5 +57,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - README rewritten to lead with what GraphTrail is, why it exists, and how it differs from grep, embedding search, and an LSP. Adds a verified MCP tool table, a copy-paste quickstart, a real `stats` proof block, and a recorded terminal demo (`docs/assets/graphtrail-context.svg`, reproducible from the `.cast`) of init, sync, callers, and context.
 
-[Unreleased]: https://github.com/escoffier-labs/graphtrail/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/escoffier-labs/graphtrail/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/escoffier-labs/graphtrail/compare/v0.2.0...v0.3.0
+[0.2.0]: https://github.com/escoffier-labs/graphtrail/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/escoffier-labs/graphtrail/releases/tag/v0.1.0
