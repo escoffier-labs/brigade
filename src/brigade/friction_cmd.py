@@ -476,6 +476,21 @@ def _write_markdown(path: Path, payload: dict[str, Any]) -> None:
     path.write_text(_render_markdown(payload))
 
 
+def _candidate_fingerprint(item: dict[str, Any]) -> str:
+    # Fingerprint only the meaning-bearing fields. Evidence position (path/line/
+    # snippet placement) drifts as scanned logs grow, and a drifted position must
+    # not re-import an otherwise unchanged friction.
+    stable = {
+        "id": item.get("id"),
+        "title": item.get("title"),
+        "text": item.get("text"),
+        "friction_type": item.get("friction_type"),
+        "severity": item.get("severity"),
+        "workflow": item.get("workflow"),
+    }
+    return hashlib.sha256(json.dumps(stable, sort_keys=True, default=str).encode("utf-8")).hexdigest()[:16]
+
+
 def _import_candidates(target: Path, candidates: list[dict[str, Any]], *, dry_run: bool) -> tuple[int, int, int]:
     records: list[dict[str, Any]] = []
     for item in candidates:
@@ -487,10 +502,8 @@ def _import_candidates(target: Path, candidates: list[dict[str, Any]], *, dry_ru
                 "source": "friction-scan",
                 "text": str(item.get("text") or item.get("title") or "").strip(),
                 "metadata": {
-                    "source_key": item.get("id"),
-                    "fingerprint": hashlib.sha256(
-                        json.dumps(item, sort_keys=True, default=str).encode("utf-8")
-                    ).hexdigest()[:16],
+                    "source_item_key": item.get("id"),
+                    "source_fingerprint": _candidate_fingerprint(item),
                     "friction_id": item.get("id"),
                     "friction_type": item.get("friction_type"),
                     "severity": item.get("severity"),
@@ -596,8 +609,8 @@ def add(
         "source": "friction-manual",
         "text": rendered,
         "metadata": {
-            "source_key": friction_id,
-            "fingerprint": hashlib.sha256(rendered.encode("utf-8")).hexdigest()[:16],
+            "source_item_key": friction_id,
+            "source_fingerprint": hashlib.sha256(rendered.encode("utf-8")).hexdigest()[:16],
             "friction_id": friction_id,
             "friction_type": friction_type,
             "severity": severity,
