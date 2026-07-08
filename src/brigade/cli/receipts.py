@@ -23,6 +23,10 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_miseledger.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
     p_miseledger.add_argument("--out", default="-", help="Output path, or '-' for stdout.")
     p_miseledger.add_argument("--limit", type=int, default=0, help="Maximum records to export; 0 means all.")
+    p_miseledger.add_argument("--new-only", action="store_true", help="Export only receipt items not in the cursor.")
+    p_miseledger.add_argument(
+        "--import", dest="import_miseledger", action="store_true", help="Import the JSONL with miseledger."
+    )
     p_miseledger.set_defaults(func=dispatch)
 
 
@@ -32,6 +36,12 @@ def dispatch(args) -> int:
     if args.receipts_command == "verify":
         return receipts_cmd.verify(target=args.target, json_output=args.json)
     if args.receipts_command == "export" and args.receipts_export_command == "miseledger":
-        return receipts_cmd.export_miseledger(target=args.target, out=args.out, limit=args.limit)
+        return receipts_cmd.export_miseledger(
+            target=args.target,
+            out=args.out,
+            limit=args.limit,
+            new_only=args.new_only,
+            import_miseledger=args.import_miseledger,
+        )
     args._brigade_parser.error(f"unknown receipts command: {args.receipts_command}")
     return 2

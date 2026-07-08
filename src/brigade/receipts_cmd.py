@@ -3,9 +3,14 @@
 from __future__ import annotations
 
 import json
+import re
+import shutil
+import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from . import __version__
 from . import localio
@@ -17,6 +22,7 @@ LEGACY = "LEGACY"
 MISELEDGER_SCHEMA = "miseledger.adapter.v1"
 MISELEDGER_SOURCE = {"kind": "brigade", "name": "Brigade", "version": __version__}
 MISELEDGER_ACTOR = {"external_id": "brigade:system", "type": "system", "name": "Brigade"}
+MISELEDGER_CURSOR_REL = Path(".brigade") / "work" / "miseledger-export-cursor.json"
 
 
 def _rel(path: Path, target: Path) -> str:
@@ -501,6 +507,84 @@ def _receipt_hash(payload: dict[str, Any], path: Path) -> tuple[str, str]:
         return _hash_value(localio.canonical_json_digest(payload)), "canonical_json_digest"
 
 
+def _git_value(target: Path, *args: str) -> str | None:
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(target), *args],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            stdin=subprocess.DEVNULL,
+            text=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0:
+        return None
+    value = result.stdout.strip()
+    return value or None
+
+
+def _github_host(host: str | None) -> bool:
+    return bool(host and (host == "github.com" or host.endswith(".github.com")))
+
+
+def _strip_git_suffix(repo: str) -> str:
+    return repo[:-4] if repo.endswith(".git") else repo
+
+
+def _github_remote_parts(remote: str) -> tuple[str, str, str] | None:
+    parsed = urlparse(remote)
+    if parsed.scheme == "https" and _github_host(parsed.hostname):
+        parts = [part for part in parsed.path.split("/") if part]
+        if len(parts) == 2:
+            return parsed.hostname or "", parts[0], _strip_git_suffix(parts[1])
+        return None
+    match = re.match(r"^git@([^:]+):([^/]+)/(.+)$", remote)
+    if match and _github_host(match.group(1)):
+        return match.group(1), match.group(2), _strip_git_suffix(match.group(3))
+    return None
+
+
+def _receipt_git(payload: dict[str, Any]) -> dict[str, Any] | None:
+    git = payload.get("git")
+    if not isinstance(git, dict):
+        return None
+    head = git.get("head")
+    if not isinstance(head, str) or not head:
+        return None
+    copied = {key: git[key] for key in ("head", "branch", "dirty_files") if key in git}
+    return copied if copied else None
+
+
+def _git_commit_links(item_external_id: str, payload: dict[str, Any], target: Path) -> list[dict[str, Any]]:
+    git = _receipt_git(payload)
+    if git is None:
+        return []
+    remote = _git_value(target, "remote", "get-url", "origin")
+    if remote is None:
+        return []
+    parts = _github_remote_parts(remote)
+    if parts is None:
+        return []
+    host, org, repo = parts
+    return [
+        {
+            "external_id": f"{item_external_id}:git-commit",
+            "kind": "url",
+            "url": f"https://{host}/{org}/{repo}/commit/{git['head']}",
+        }
+    ]
+
+
+def _metadata_with_git(metadata: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
+    git = _receipt_git(payload)
+    if git is not None:
+        metadata["git"] = git
+    return metadata
+
+
 def _read_export_receipt(path: Path, target: Path) -> dict[str, Any] | None:
     try:
         payload = json.loads(path.read_text())
@@ -692,6 +776,7 @@ def _verify_miseledger_item(payload: dict[str, Any], path: Path, target: Path, o
         "commands": commands,
     }
     metadata = _metadata_with_delta(metadata, payload)
+    metadata = _metadata_with_git(metadata, payload)
     text = f"Brigade work verify run {run_id} status={payload.get('status') or 'unknown'} commands={len(commands)}."
     command_text = _one_line(
         " ; ".join(str(command.get("command") or "") for command in commands if isinstance(command, dict)),
@@ -721,7 +806,7 @@ def _verify_miseledger_item(payload: dict[str, Any], path: Path, target: Path, o
         },
         "actor": MISELEDGER_ACTOR,
         "artifacts": artifacts,
-        "links": [],
+        "links": _git_commit_links(item_external_id, payload, target),
         "relations": [],
         "raw": {
             "format": "json",
@@ -751,6 +836,7 @@ def _run_miseledger_item(payload: dict[str, Any], path: Path, target: Path, ordi
         "read_only": payload.get("read_only"),
     }
     metadata = _metadata_with_delta(metadata, payload)
+    metadata = _metadata_with_git(metadata, payload)
     text = f"Brigade run {run_id} status={payload.get('status') or 'unknown'}."
     if task:
         text += f" Task: {task}."
@@ -785,7 +871,7 @@ def _run_miseledger_item(payload: dict[str, Any], path: Path, target: Path, ordi
         },
         "actor": MISELEDGER_ACTOR,
         "artifacts": artifacts,
-        "links": [],
+        "links": _git_commit_links(item_external_id, payload, target),
         "relations": [],
         "raw": {
             "format": "json",
@@ -808,7 +894,131 @@ def _render_miseledger_jsonl(records: list[dict[str, Any]]) -> str:
     return "".join(json.dumps(record, sort_keys=True, separators=(",", ":"), default=str) + "\n" for record in records)
 
 
-def export_miseledger(*, target: Path, out: str | Path = "-", limit: int = 0) -> int:
+def _miseledger_jsonl_lines(records: list[dict[str, Any]]) -> list[tuple[str, str]]:
+    lines: list[tuple[str, str]] = []
+    for record in records:
+        raw = record.get("raw")
+        raw_hash = raw.get("hash") if isinstance(raw, dict) else None
+        if not isinstance(raw_hash, str) or not raw_hash:
+            continue
+        line = json.dumps(record, sort_keys=True, separators=(",", ":"), default=str) + "\n"
+        lines.append((line, raw_hash))
+    return lines
+
+
+def _miseledger_cursor_path(target: Path) -> Path:
+    return target / MISELEDGER_CURSOR_REL
+
+
+def _read_miseledger_cursor_hashes(target: Path) -> set[str]:
+    payload = localio.read_json_dict(_miseledger_cursor_path(target)) or {}
+    hashes = payload.get("raw_hashes")
+    if not isinstance(hashes, list):
+        return set()
+    return {value for value in hashes if isinstance(value, str) and value}
+
+
+def _write_miseledger_cursor_hashes(target: Path, hashes: set[str]) -> None:
+    localio.write_json(
+        _miseledger_cursor_path(target),
+        {
+            "schema": "brigade.miseledger_export_cursor.v1",
+            "source": "brigade",
+            "raw_hashes": sorted(hashes),
+        },
+    )
+
+
+def _write_miseledger_lines_to_stdout(lines: list[tuple[str, str]]) -> tuple[int, list[str]]:
+    written_hashes: list[str] = []
+    try:
+        for line, raw_hash in lines:
+            written = sys.stdout.write(line)
+            if written != len(line):
+                raise OSError("short write to stdout")
+            written_hashes.append(raw_hash)
+    except OSError as exc:
+        print(f"error: could not write output stdout: {exc}", file=sys.stderr)
+        return 1, written_hashes
+    return 0, written_hashes
+
+
+def _write_miseledger_lines_to_path(output_path: Path, lines: list[tuple[str, str]]) -> tuple[int, list[str]]:
+    written_hashes: list[str] = []
+    try:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        with output_path.open("w", encoding="utf-8") as handle:
+            for line, raw_hash in lines:
+                written = handle.write(line)
+                if written != len(line):
+                    raise OSError("short write")
+                written_hashes.append(raw_hash)
+    except OSError as exc:
+        print(f"error: could not write output {output_path}: {exc}", file=sys.stderr)
+        return 1, written_hashes
+    return 0, written_hashes
+
+
+def _temporary_miseledger_export_path(target: Path) -> Path:
+    work_dir = target / ".brigade" / "work"
+    work_dir.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(
+        "w",
+        encoding="utf-8",
+        dir=work_dir,
+        prefix="miseledger-export-",
+        suffix=".jsonl",
+        delete=False,
+    ) as handle:
+        return Path(handle.name)
+
+
+def _miseledger_import_summary(payload: object) -> tuple[object, object]:
+    if not isinstance(payload, dict):
+        return "unknown", "unknown"
+    inserted = payload.get("inserted_items", payload.get("inserted", "unknown"))
+    known = payload.get("already_known", payload.get("known_items", "unknown"))
+    return inserted, known
+
+
+def _import_miseledger_file(path: Path) -> None:
+    binary = shutil.which("miseledger")
+    if binary is None:
+        print(f"warning: miseledger binary not found on PATH; export kept at {path}", file=sys.stderr)
+        return
+    try:
+        result = subprocess.run(
+            [binary, "import", "adapter", str(path), "--source", "brigade", "--json"],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            stdin=subprocess.DEVNULL,
+            text=True,
+            timeout=120,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        print(f"warning: miseledger import failed; export kept at {path}: {exc}", file=sys.stderr)
+        return
+    if result.returncode != 0:
+        detail = _one_line(result.stderr or result.stdout or f"exit {result.returncode}", 500)
+        print(f"warning: miseledger import failed; export kept at {path}: {detail}", file=sys.stderr)
+        return
+    try:
+        payload = json.loads(result.stdout or "{}")
+    except json.JSONDecodeError:
+        payload = {}
+    inserted, known = _miseledger_import_summary(payload)
+    print(f"miseledger import: inserted_items={inserted} already_known={known}")
+
+
+def export_miseledger(
+    *,
+    target: Path,
+    out: str | Path = "-",
+    limit: int = 0,
+    new_only: bool = False,
+    import_miseledger: bool = False,
+) -> int:
     if limit < 0:
         print("error: --limit must be zero or a positive integer", file=sys.stderr)
         return 2
@@ -822,17 +1032,31 @@ def export_miseledger(*, target: Path, out: str | Path = "-", limit: int = 0) ->
         return 1
     selected = receipts[:limit] if limit else receipts
     records = [_miseledger_item(receipt, target, ordinal) for ordinal, receipt in enumerate(selected, start=1)]
-    rendered = _render_miseledger_jsonl(records)
-    if str(out) == "-":
-        sys.stdout.write(rendered)
-        return 0
-    output_path = Path(out).expanduser()
-    try:
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        output_path.write_text(rendered)
-    except OSError as exc:
-        print(f"error: could not write output {output_path}: {exc}", file=sys.stderr)
-        return 1
+    cursor_hashes: set[str] = set()
+    if new_only:
+        cursor_hashes = _read_miseledger_cursor_hashes(target)
+        records = [
+            record
+            for record in records
+            if isinstance(record.get("raw"), dict) and record["raw"].get("hash") not in cursor_hashes
+        ]
+    lines = _miseledger_jsonl_lines(records)
+    output_path: Path | None = None
+    if str(out) == "-" and not import_miseledger:
+        exit_code, written_hashes = _write_miseledger_lines_to_stdout(lines)
+    else:
+        output_path = _temporary_miseledger_export_path(target) if str(out) == "-" else Path(out).expanduser()
+        exit_code, written_hashes = _write_miseledger_lines_to_path(output_path, lines)
+    if new_only and written_hashes:
+        try:
+            _write_miseledger_cursor_hashes(target, cursor_hashes | set(written_hashes))
+        except OSError as exc:
+            print(f"error: could not write cursor {_miseledger_cursor_path(target)}: {exc}", file=sys.stderr)
+            return 1
+    if exit_code != 0:
+        return exit_code
+    if import_miseledger and output_path is not None:
+        _import_miseledger_file(output_path)
     return 0
 
 

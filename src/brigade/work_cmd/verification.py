@@ -29,6 +29,18 @@ def _default_verify_commands(target: Path) -> list[str]:
     return []
 
 
+def _receipt_git_snapshot(target: Path) -> dict[str, Any] | None:
+    try:
+        head = helpers._git_value(target, "rev-parse", "HEAD")
+        branch = helpers._git_value(target, "rev-parse", "--abbrev-ref", "HEAD")
+        status = helpers._git(target, "status", "--porcelain")
+    except OSError:
+        return None
+    if head is None or branch is None or status.returncode != 0:
+        return None
+    return {"head": head, "branch": branch, "dirty_files": len(status.stdout.splitlines())}
+
+
 def _verify_parse_command(command: str) -> tuple[list[str] | None, dict[str, str], str | None]:
     try:
         parts = shlex.split(command)
@@ -343,6 +355,9 @@ def _run_verify_commands(target: Path, commands: list[str], timeout: int) -> tup
         receipt["status"] = "failed"
     else:
         receipt["status"] = "rejected"
+    git = _receipt_git_snapshot(target)
+    if git is not None:
+        receipt["git"] = git
     log_digests: dict[str, str] = {}
     for command in receipt["commands"]:
         if not isinstance(command, dict):

@@ -1,5 +1,6 @@
 import json
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -11,6 +12,18 @@ from tests.work_cmd_test_helpers import (
     _write_json,
     _init_git_repo,
 )
+
+
+def _init_git_repo_with_head(path):
+    _init_git_repo(path)
+    (path / ".gitignore").write_text(".brigade/\n")
+    subprocess.run(["git", "add", ".gitignore"], cwd=path, check=True, stdout=subprocess.DEVNULL)
+    subprocess.run(
+        ["git", "-c", "user.name=Test User", "-c", "user.email=test@example.invalid", "commit", "-m", "init"],
+        cwd=path,
+        check=True,
+        stdout=subprocess.DEVNULL,
+    )
 
 
 def test_verify_run_marks_parser_rejected_command_as_rejected_not_failed(tmp_path, capsys):
@@ -233,6 +246,53 @@ def test_work_verify_receipt_digests_recompute_from_payload_and_logs(tmp_path, c
 
     stored = json.loads((run_dir / "receipt.json").read_text())
     assert stored["digests"] == digests
+
+
+def test_work_verify_receipt_captures_git_state_before_digest(tmp_path, capsys, monkeypatch):
+    _init_git_repo_with_head(tmp_path)
+    (tmp_path / "dirty.txt").write_text("dirty\n")
+    monkeypatch.setenv("GRAPHTRAIL_BIN", str(tmp_path / "missing-graphtrail"))
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    assert (
+        work_cmd.verify_run(
+            target=tmp_path,
+            commands=[f"{sys.executable} -c \"print('ok')\""],
+            timeout=30,
+            json_output=True,
+        )
+        == 0
+    )
+    receipt = json.loads(capsys.readouterr().out)
+    dirty_files = subprocess.check_output(["git", "-C", str(tmp_path), "status", "--porcelain"], text=True)
+
+    assert receipt["git"] == {
+        "head": subprocess.check_output(["git", "-C", str(tmp_path), "rev-parse", "HEAD"], text=True).strip(),
+        "branch": subprocess.check_output(
+            ["git", "-C", str(tmp_path), "rev-parse", "--abbrev-ref", "HEAD"], text=True
+        ).strip(),
+        "dirty_files": len(dirty_files.splitlines()),
+    }
+    assert receipt["digests"]["receipt_sha256"] == localio.canonical_json_digest(receipt, exclude_keys={"digests"})
+
+
+def test_work_verify_receipt_omits_git_state_outside_git_repo(tmp_path, capsys, monkeypatch):
+    monkeypatch.setenv("GRAPHTRAIL_BIN", str(tmp_path / "missing-graphtrail"))
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    assert (
+        work_cmd.verify_run(
+            target=tmp_path,
+            commands=[f"{sys.executable} -c \"print('ok')\""],
+            timeout=30,
+            json_output=True,
+        )
+        == 0
+    )
+    receipt = json.loads(capsys.readouterr().out)
+
+    assert "git" not in receipt
+    assert receipt["digests"]["receipt_sha256"] == localio.canonical_json_digest(receipt, exclude_keys={"digests"})
 
 
 def _write_fake_graphtrail(tmp_path, *, mode: str = "ok") -> Path:

@@ -1,8 +1,24 @@
 import json
+import subprocess
+import sys
+from pathlib import Path
 
 from brigade import cli, localio, outcome, outcome_cmd, receipts_cmd, runbook_cmd, work_cmd
 
 from tests.work_cmd_test_helpers import _init_git_repo
+
+
+def _init_git_repo_with_head(path):
+    _init_git_repo(path)
+    (path / ".gitignore").write_text(".brigade/\n")
+    subprocess.run(["git", "add", ".gitignore"], cwd=path, check=True, stdout=subprocess.DEVNULL)
+    subprocess.run(
+        ["git", "-c", "user.name=Test User", "-c", "user.email=test@example.invalid", "commit", "-m", "init"],
+        cwd=path,
+        check=True,
+        stdout=subprocess.DEVNULL,
+    )
+    return subprocess.check_output(["git", "-C", str(path), "rev-parse", "HEAD"], text=True).strip()
 
 
 def _write_digestless_work_receipt(target):
@@ -59,6 +75,7 @@ def _write_verify_export_receipt(
     started_at,
     digest=True,
     code_graph_delta=None,
+    git=None,
 ):
     run_dir = target / ".brigade" / "work" / "verify-runs" / run_id
     run_dir.mkdir(parents=True)
@@ -86,6 +103,8 @@ def _write_verify_export_receipt(
         sidecar = run_dir / "graph-delta.json"
         sidecar.write_text(json.dumps(code_graph_delta, sort_keys=True) + "\n")
         receipt["code_graph_delta"] = code_graph_delta
+    if git is not None:
+        receipt["git"] = git
     if digest:
         logs = {
             "command-1-stderr.log": localio.file_sha256(stderr),
@@ -217,6 +236,212 @@ def test_receipts_export_miseledger_is_byte_identical_and_limit_uses_newest_firs
     assert first == second
     rows = _jsonl(first)
     assert [row["item"]["external_id"] for row in rows] == ["brigade:run:20260708-140000-new"]
+
+
+def test_receipts_export_miseledger_new_only_exports_once_and_records_cursor(tmp_path, capsys):
+    _write_verify_export_receipt(
+        tmp_path,
+        "20260708-090000-work-verify-old",
+        started_at="2026-07-08T09:00:00Z",
+    )
+    _write_run_export_receipt(tmp_path, "20260708-140000-new", started_at="2026-07-08T14:00:00Z")
+
+    assert cli.main(["receipts", "export", "miseledger", "--target", str(tmp_path), "--new-only"]) == 0
+    first_rows = _jsonl(capsys.readouterr().out)
+    assert len(first_rows) == 2
+
+    cursor_path = tmp_path / ".brigade" / "work" / "miseledger-export-cursor.json"
+    cursor = json.loads(cursor_path.read_text())
+    assert cursor["raw_hashes"] == sorted(row["raw"]["hash"] for row in first_rows)
+
+    assert cli.main(["receipts", "export", "miseledger", "--target", str(tmp_path), "--new-only"]) == 0
+    second = capsys.readouterr()
+    assert second.out == ""
+    assert second.err == ""
+    assert json.loads(cursor_path.read_text()) == cursor
+
+
+def test_receipts_export_miseledger_without_new_only_ignores_cursor(tmp_path, capsys):
+    _write_verify_export_receipt(
+        tmp_path,
+        "20260708-090000-work-verify-old",
+        started_at="2026-07-08T09:00:00Z",
+    )
+    cursor_path = tmp_path / ".brigade" / "work" / "miseledger-export-cursor.json"
+    cursor_path.parent.mkdir(parents=True, exist_ok=True)
+    cursor_path.write_text("{not json\n")
+
+    assert receipts_cmd.export_miseledger(target=tmp_path) == 0
+    rows = _jsonl(capsys.readouterr().out)
+
+    assert len(rows) == 1
+    assert cursor_path.read_text() == "{not json\n"
+
+
+def test_receipts_export_miseledger_new_only_cursor_records_only_written_lines(tmp_path, monkeypatch, capsys):
+    _write_verify_export_receipt(
+        tmp_path,
+        "20260708-120000-work-verify-first",
+        started_at="2026-07-08T12:00:00Z",
+    )
+    _write_run_export_receipt(tmp_path, "20260708-130000-second", started_at="2026-07-08T13:00:00Z")
+    out_path = tmp_path / "export.jsonl"
+    writes = []
+
+    class PartialWrite:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def write(self, line):
+            writes.append(line)
+            if len(writes) == 2:
+                raise OSError("disk full")
+            return len(line)
+
+    original_open = Path.open
+
+    def partial_open(self, *args, **kwargs):
+        mode = args[0] if args else kwargs.get("mode", "r")
+        if self == out_path and "w" in mode:
+            return PartialWrite()
+        return original_open(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", partial_open)
+
+    assert receipts_cmd.export_miseledger(target=tmp_path, out=out_path, new_only=True) == 1
+    captured = capsys.readouterr()
+
+    assert "could not write output" in captured.err
+    assert len(writes) == 2
+    first_hash = json.loads(writes[0])["raw"]["hash"]
+    cursor = json.loads((tmp_path / ".brigade" / "work" / "miseledger-export-cursor.json").read_text())
+    assert cursor["raw_hashes"] == [first_hash]
+
+
+def test_receipts_export_miseledger_import_runs_fake_binary_and_prints_summary(tmp_path, monkeypatch, capsys):
+    _write_verify_export_receipt(
+        tmp_path,
+        "20260708-120000-work-verify-import",
+        started_at="2026-07-08T12:00:00Z",
+    )
+    fake = tmp_path / "miseledger"
+    fake.write_text(
+        f"""#!{sys.executable}
+import json
+import pathlib
+import sys
+
+assert sys.argv[1:3] == ["import", "adapter"]
+export_path = pathlib.Path(sys.argv[3])
+assert sys.argv[4:] == ["--source", "brigade", "--json"]
+(export_path.parent / "import-argv.json").write_text(json.dumps({{"argv": sys.argv[1:], "input": export_path.read_text()}}))
+print(json.dumps({{"inserted_items": 1, "already_known": 0}}))
+"""
+    )
+    fake.chmod(0o755)
+    monkeypatch.setenv("PATH", str(tmp_path))
+
+    assert cli.main(["receipts", "export", "miseledger", "--target", str(tmp_path), "--import"]) == 0
+    captured = capsys.readouterr()
+
+    assert captured.out == "miseledger import: inserted_items=1 already_known=0\n"
+    assert captured.err == ""
+    marker = json.loads((tmp_path / ".brigade" / "work" / "import-argv.json").read_text())
+    assert marker["argv"][0:2] == ["import", "adapter"]
+    assert marker["argv"][3:] == ["--source", "brigade", "--json"]
+    assert len(_jsonl(marker["input"])) == 1
+
+
+def test_receipts_export_miseledger_import_missing_binary_warns_and_exits_zero(tmp_path, monkeypatch, capsys):
+    _write_verify_export_receipt(
+        tmp_path,
+        "20260708-120000-work-verify-missing-import",
+        started_at="2026-07-08T12:00:00Z",
+    )
+    out_path = tmp_path / "export.jsonl"
+    empty_path = tmp_path / "empty-path"
+    empty_path.mkdir()
+    monkeypatch.setenv("PATH", str(empty_path))
+
+    assert receipts_cmd.export_miseledger(target=tmp_path, out=out_path, import_miseledger=True) == 0
+    captured = capsys.readouterr()
+
+    assert captured.out == ""
+    assert "warning: miseledger binary not found on PATH; export kept at" in captured.err
+    assert len(_jsonl(out_path.read_text())) == 1
+
+
+def test_receipts_export_miseledger_copies_git_metadata_and_github_commit_link(tmp_path, capsys):
+    head = _init_git_repo_with_head(tmp_path)
+    subprocess.run(
+        ["git", "remote", "add", "origin", "https://github.com/example-org/example-repo.git"],
+        cwd=tmp_path,
+        check=True,
+    )
+    git = {"head": head, "branch": "main", "dirty_files": 2}
+    _write_verify_export_receipt(
+        tmp_path,
+        "20260708-120000-work-verify-git",
+        started_at="2026-07-08T12:00:00Z",
+        git=git,
+    )
+
+    assert receipts_cmd.export_miseledger(target=tmp_path) == 0
+    rows = _jsonl(capsys.readouterr().out)
+
+    assert rows[0]["item"]["metadata"]["git"] == git
+    assert rows[0]["links"] == [
+        {
+            "external_id": "brigade:work-verify:20260708-120000-work-verify-git:git-commit",
+            "kind": "url",
+            "url": f"https://github.com/example-org/example-repo/commit/{head}",
+        }
+    ]
+
+
+def test_receipts_export_miseledger_supports_ssh_github_commit_link(tmp_path, capsys):
+    head = _init_git_repo_with_head(tmp_path)
+    subprocess.run(
+        ["git", "remote", "add", "origin", "git@github.com:example-org/example-repo.git"],
+        cwd=tmp_path,
+        check=True,
+    )
+    _write_verify_export_receipt(
+        tmp_path,
+        "20260708-120000-work-verify-ssh-git",
+        started_at="2026-07-08T12:00:00Z",
+        git={"head": head, "branch": "main", "dirty_files": 0},
+    )
+
+    assert receipts_cmd.export_miseledger(target=tmp_path) == 0
+    rows = _jsonl(capsys.readouterr().out)
+
+    assert rows[0]["links"][0]["url"] == f"https://github.com/example-org/example-repo/commit/{head}"
+
+
+def test_receipts_export_miseledger_keeps_git_metadata_without_non_github_link(tmp_path, capsys):
+    head = _init_git_repo_with_head(tmp_path)
+    subprocess.run(
+        ["git", "remote", "add", "origin", "https://example.invalid/example-org/example-repo.git"],
+        cwd=tmp_path,
+        check=True,
+    )
+    git = {"head": head, "branch": "main", "dirty_files": 0}
+    _write_verify_export_receipt(
+        tmp_path,
+        "20260708-120000-work-verify-no-link",
+        started_at="2026-07-08T12:00:00Z",
+        git=git,
+    )
+
+    assert receipts_cmd.export_miseledger(target=tmp_path) == 0
+    rows = _jsonl(capsys.readouterr().out)
+
+    assert rows[0]["item"]["metadata"]["git"] == git
+    assert rows[0]["links"] == []
 
 
 def test_receipts_export_miseledger_skips_malformed_receipts_with_warning(tmp_path, capsys):
