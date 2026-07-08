@@ -1,0 +1,23 @@
+{
+  "name": "pr-draft",
+  "backends": {
+    "opf": {
+      "enabled": false,
+      "action": "warn",
+      "device": "cpu"
+    }
+  },
+  "defaults": {
+    "infrastructure": "block",
+    "secret": "block",
+    "pii": "block",
+    "personal": "block",
+    "business": "block",
+    "attribution": "block",
+    "tooling": "warn"
+  },
+  "rules": {
+    "opf-pii": "warn"
+  },
+  "custom_rules": []
+}

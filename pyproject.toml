@@ -44,7 +44,7 @@ solo-mise = "brigade.cli:main_deprecated"
 where = ["src"]
 
 [tool.setuptools.package-data]
-brigade = ["py.typed", "templates/**/*"]
+brigade = ["py.typed", "templates/**/*", "guard/policies/*.json", "guard/examples/**/*.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

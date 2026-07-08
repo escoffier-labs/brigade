@@ -1,0 +1,17 @@
+{
+  "description": "Synthetic reviewer email should warn without blocking under the public-content policy.",
+  "request": {
+    "_content_guard_allow": "content-guard: allow email",
+    "text": "Draft asks readers to send questions to reviewer@example.test.",
+    "name": "warn-review-email",
+    "source": "n8n:synthetic:social",
+    "policy": "public-content"
+  },
+  "expected": {
+    "blocked": false,
+    "changed": false,
+    "finding_rule_ids": [
+      "example-email-reserved"
+    ]
+  }
+}

@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Vendored content-guard under `brigade.guard`, added `python -m brigade.guard` and `brigade guard ...`, and packaged the guard policies so scrub works without a separate checkout.
+
+### Changed
+- `brigade scrub` now defaults to the embedded `brigade.guard` scanner and policy set. Setting `CONTENT_GUARD_DIR` still preserves the old external checkout behavior, including `python -m content_guard` with that checkout's `src` on `PYTHONPATH`.
+
 ## [0.19.0] - 2026-07-05
 
 ### Added
