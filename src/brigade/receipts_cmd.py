@@ -1186,6 +1186,15 @@ def export_miseledger(
             if isinstance(record.get("raw"), dict) and record["raw"].get("hash") not in cursor_hashes
         ]
     lines = _miseledger_jsonl_lines(records)
+    if import_miseledger and not lines:
+        # An import invocation costs minutes against a large archive regardless
+        # of input size, so a zero-item export never launches the subprocess.
+        if str(out) != "-":
+            exit_code, _ = _write_miseledger_lines_to_path(Path(out).expanduser(), lines)
+            if exit_code != 0:
+                return exit_code
+        print("nothing new; import skipped")
+        return 0
     output_path: Path | None = None
     if str(out) == "-" and not import_miseledger:
         exit_code, written_hashes = _write_miseledger_lines_to_stdout(lines)
