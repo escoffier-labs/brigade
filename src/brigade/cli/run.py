@@ -52,6 +52,11 @@ def register(sub: argparse._SubParsersAction) -> None:
         help="Do not attach GraphTrail code graph context to brigade run prompts.",
     )
     p_run.add_argument(
+        "--no-evidence",
+        action="store_true",
+        help="Do not attach MiseLedger run evidence context to brigade run prompts.",
+    )
+    p_run.add_argument(
         "--sandbox",
         choices=["read-only", "workspace-write", "danger-full-access"],
         default=None,
@@ -221,6 +226,8 @@ def dispatch(args) -> int:
                 run_kwargs["codex_transport"] = args.codex_transport
             if args.no_code_graph:
                 run_kwargs["code_graph_enabled"] = False
+            if args.no_evidence:
+                run_kwargs["evidence_enabled"] = False
             rc = aboyeur_mod.run(args.task, loaded_roster, **run_kwargs)
             if args.worktree and output_dir is not None:
                 # Until the patch is proven good, the worktree is the only
@@ -330,6 +337,8 @@ def _detached_child_argv(args, *, run_cwd: Path, roster_path: Path, output_dir: 
         argv.append("--read-only")
     if args.no_code_graph:
         argv.append("--no-code-graph")
+    if args.no_evidence:
+        argv.append("--no-evidence")
     if args.sandbox is not None:
         argv.extend(["--sandbox", args.sandbox])
     if args.codex_transport is not None:

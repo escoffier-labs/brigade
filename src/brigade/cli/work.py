@@ -452,6 +452,13 @@ def register(sub: argparse._SubParsersAction) -> None:
     )
     p_work_import_context.add_argument("--from-file", type=Path, default=None, help="Read context body from a file.")
     p_work_import_context.add_argument(
+        "--from-miseledger",
+        default=None,
+        metavar="QUERY",
+        help="Fetch a Brigade-source evidence bundle from MiseLedger and print it as untrusted context.",
+    )
+    p_work_import_context.add_argument("--limit", type=int, default=5, help="Maximum MiseLedger results to fetch.")
+    p_work_import_context.add_argument(
         "--max-chars", type=int, default=20000, help="Maximum characters of body to fence."
     )
     p_work_import_context.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
@@ -1228,6 +1235,15 @@ def dispatch(args) -> int:
                 metadata=args.metadata,
             )
         if args.import_command == "context":
+            if args.from_miseledger is not None:
+                if args.text or args.from_file is not None:
+                    args._brigade_parser.error("--from-miseledger cannot be combined with text or --from-file")
+                return work_cmd.import_context_from_miseledger(
+                    target=args.target,
+                    query=args.from_miseledger,
+                    limit=args.limit,
+                    json_output=args.json,
+                )
             if not args.text and args.from_file is None:
                 args._brigade_parser.error("work import context requires text or --from-file")
             return work_cmd.import_context(

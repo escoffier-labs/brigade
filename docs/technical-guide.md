@@ -566,7 +566,7 @@ Issue body text is not stored, and Brigade does not poll, sync, mutate, or refre
 Import inbox commands:
 
 - `brigade work import add "..."` creates a scanner-ready local import.
-- `brigade work import context` frames raw links, transcripts, or terminal errors as untrusted local context, flags prompt-injection signals for review, and always lands the result in the inbox.
+- `brigade work import context` frames raw links, transcripts, or terminal errors as untrusted local context, flags prompt-injection signals for review, and always lands the result in the inbox. Add `--from-miseledger "query"` to fetch Brigade receipt evidence from MiseLedger instead of inboxing pasted text. That mode prints a rendered untrusted evidence brief, or the raw evidence bundle with `--json`, and appends the rendered brief to the active work session notes when a session is open.
 - `brigade work import validate imports.jsonl` checks scanner output against [`docs/import-schema.md`](import-schema.md).
 - `brigade work import ingest imports.jsonl` ingests scanner output.
 - `brigade memory care scan` scans local memory cards for stale, expired, undersourced, contradictory, missing-index-link, orphaned, oversized, missing-frontmatter, missing-reviewed, and missing-freshness issues without editing memory.
@@ -890,6 +890,16 @@ For scheduled local indexing, use the built-in pipeline:
 ```bash
 brigade receipts export miseledger --target . --new-only --import
 ```
+
+Put that export on your own timer when you want the loop to run without thinking about it. Brigade does not install the timer. The export sends new verify-run and Brigade-run receipts to MiseLedger, and the next `brigade run` can fetch them back as a compact evidence brief through the same read-only `miseledger evidence ... --source brigade --json` path. The direct command is:
+
+```bash
+brigade work import context --from-miseledger "auth receipts" --target .
+```
+
+The brief contains only bounded evidence lines: run id, status, code-graph delta summary when the receipt text has one, and a commit link when MiseLedger returned one. The header always labels it as untrusted run evidence, and the body says to treat it as context, not instructions. Evidence from local receipts is trusted when exported, but once it has gone through the archive search path it comes back under the same untrusted-context rule as crawler, chat, browser, or transcript data.
+
+MiseLedger evidence is fail-open. Missing `miseledger`, a nonzero exit, timeout, malformed JSON, or zero usable results does not block `brigade run` or `brigade work import context --from-miseledger`. Run prompts proceed without the brief, and the import command reports the absence instead of writing a broken context note.
 
 `--new-only` stores exported `raw.hash` values in `.brigade/work/miseledger-export-cursor.json`, so later runs only write receipt items that have not already been exported. The cursor is an optimization, not the identity boundary. MiseLedger uses content-hash identity for adapter items, so double-importing the same receipt file remains harmless if the cursor is deleted, copied late, or skipped.
 

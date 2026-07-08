@@ -17,6 +17,7 @@ from uuid import uuid4
 from . import agents
 from . import codex_appserver
 from . import context_eval
+from . import evidence_brief as evidence_brief_mod
 from . import graphtrail_delta
 from . import localio
 from . import proc, runguard
@@ -63,10 +64,14 @@ class DriftImpactBrief:
     pending_count: int = 0
 
 
+EvidenceBrief = evidence_brief_mod.EvidenceBrief
+
+
 @dataclass(frozen=True)
 class BriefSet:
     code_graph: CodeGraphBrief
     drift_impact: DriftImpactBrief
+    evidence: EvidenceBrief
     budget_bytes: int
     attached: tuple[dict[str, object], ...]
 
@@ -92,10 +97,10 @@ def _truncate_brief_text(text: str, limit: int, label: str) -> str:
 def _brief_order(task: str) -> tuple[str, ...]:
     lowered = task.lower()
     if any(word in lowered for word in ("release", "changelog", "publish", "version")):
-        return ("drift_impact", "code_graph")
+        return ("drift_impact", "code_graph", "evidence")
     if any(word in lowered for word in ("doc", "readme", "handoff", "memory", "evidence")):
-        return ("drift_impact", "code_graph")
-    return ("code_graph", "drift_impact")
+        return ("drift_impact", "code_graph", "evidence")
+    return ("code_graph", "drift_impact", "evidence")
 
 
 def arbitrate_briefs(
@@ -103,14 +108,18 @@ def arbitrate_briefs(
     *,
     code_graph: CodeGraphBrief,
     drift_impact: DriftImpactBrief,
+    evidence: EvidenceBrief | None = None,
     budget_bytes: int = BRIEF_BUDGET_BYTES,
 ) -> BriefSet:
-    briefs: dict[str, CodeGraphBrief | DriftImpactBrief] = {
+    evidence = evidence or EvidenceBrief(attached=False)
+    briefs: dict[str, CodeGraphBrief | DriftImpactBrief | EvidenceBrief] = {
         "code_graph": code_graph,
         "drift_impact": drift_impact,
+        "evidence": evidence,
     }
     kept_code_graph = CodeGraphBrief(attached=False)
     kept_drift = DriftImpactBrief(attached=False)
+    kept_evidence = EvidenceBrief(attached=False)
     used = 0
     attached: list[dict[str, object]] = []
     for name in _brief_order(task):
@@ -132,16 +141,19 @@ def arbitrate_briefs(
         attached.append({"name": name, "bytes": size, "truncated": truncated})
         if name == "code_graph":
             kept_code_graph = CodeGraphBrief(attached=True, text=text, bytes=size)
-        else:
+        elif name == "drift_impact":
             kept_drift = DriftImpactBrief(
                 attached=True,
                 text=text,
                 bytes=size,
                 pending_count=getattr(brief, "pending_count", 0),
             )
+        else:
+            kept_evidence = EvidenceBrief(attached=True, text=text, bytes=size)
     return BriefSet(
         code_graph=kept_code_graph,
         drift_impact=kept_drift,
+        evidence=kept_evidence,
         budget_bytes=budget_bytes,
         attached=tuple(attached),
     )
@@ -160,11 +172,14 @@ def _prepend_optional_briefs(
     *,
     code_graph: CodeGraphBrief | None = None,
     drift_impact: DriftImpactBrief | None = None,
+    evidence: EvidenceBrief | None = None,
 ) -> str:
     if code_graph is not None and code_graph.attached and code_graph.text:
         prompt = _prepend_brief(prompt, heading=CODE_GRAPH_HEADING, text=code_graph.text)
     if drift_impact is not None and drift_impact.attached and drift_impact.text:
         prompt = _prepend_brief(prompt, heading=DRIFT_IMPACT_HEADING, text=drift_impact.text)
+    if evidence is not None and evidence.attached and evidence.text:
+        prompt = _prepend_brief(prompt, heading=evidence_brief_mod.HEADING, text=evidence.text)
     return prompt
 
 
@@ -351,6 +366,7 @@ def build_plan_prompt(
     read_only: bool = False,
     code_graph: CodeGraphBrief | None = None,
     drift_impact: DriftImpactBrief | None = None,
+    evidence: EvidenceBrief | None = None,
 ) -> str:
     worker_lines = "\n".join(f"- {agent.name}: cli={agent.cli}; role={agent.role}" for agent in workers(roster))
     if not worker_lines:
@@ -373,7 +389,7 @@ def build_plan_prompt(
         "- Use zero assignments only if no worker is useful."
         f"{policy}"
     )
-    return _prepend_optional_briefs(prompt, code_graph=code_graph, drift_impact=drift_impact)
+    return _prepend_optional_briefs(prompt, code_graph=code_graph, drift_impact=drift_impact, evidence=evidence)
 
 
 def _extract_json(text: str) -> object:
@@ -649,10 +665,18 @@ def plan(
     attempts: list[dict[str, object]] | None = None,
     code_graph: CodeGraphBrief | None = None,
     drift_impact: DriftImpactBrief | None = None,
+    evidence: EvidenceBrief | None = None,
 ) -> list[Assignment]:
     first = _run_orchestrator(
         roster,
-        build_plan_prompt(task, roster, read_only=read_only, code_graph=code_graph, drift_impact=drift_impact),
+        build_plan_prompt(
+            task,
+            roster,
+            read_only=read_only,
+            code_graph=code_graph,
+            drift_impact=drift_impact,
+            evidence=evidence,
+        ),
         cwd=cwd,
         read_only=read_only,
         sandbox_read_only=sandbox_read_only,
@@ -676,6 +700,7 @@ def plan(
                 read_only=read_only,
                 code_graph=code_graph,
                 drift_impact=drift_impact,
+                evidence=evidence,
             ),
             cwd=cwd,
             read_only=read_only,
@@ -723,6 +748,7 @@ def _worker_prompt(
     read_only: bool = False,
     code_graph: CodeGraphBrief | None = None,
     drift_impact: DriftImpactBrief | None = None,
+    evidence: EvidenceBrief | None = None,
 ) -> str:
     prior_context = ""
     if prior_results:
@@ -736,7 +762,7 @@ def _worker_prompt(
         f"{prior_context}"
         f"{policy}"
     )
-    return _prepend_optional_briefs(prompt, code_graph=code_graph, drift_impact=drift_impact)
+    return _prepend_optional_briefs(prompt, code_graph=code_graph, drift_impact=drift_impact, evidence=evidence)
 
 
 def _worker_event_writer(events_dir: Path | None, worker: str, *, verbose: bool = False):
@@ -819,6 +845,7 @@ def dispatch(
     sandbox: str | None = None,
     code_graph: CodeGraphBrief | None = None,
     drift_impact: DriftImpactBrief | None = None,
+    evidence: EvidenceBrief | None = None,
     appserver=None,
     control_registry: run_control.LiveTurnRegistry | None = None,
     events_dir: Path | None = None,
@@ -841,6 +868,7 @@ def dispatch(
             read_only=read_only,
             code_graph=code_graph,
             drift_impact=drift_impact,
+            evidence=evidence,
         )
         if agent.cli == "codex" and appserver is not None:
             on_event = _worker_event_writer(events_dir, assignment.worker, verbose=verbose)
@@ -917,6 +945,7 @@ def build_synth_prompt(
     ground_truth: dict[str, object] | None = None,
     code_graph: CodeGraphBrief | None = None,
     drift_impact: DriftImpactBrief | None = None,
+    evidence: EvidenceBrief | None = None,
 ) -> str:
     if results:
         rendered = "\n\n".join(
@@ -946,7 +975,7 @@ def build_synth_prompt(
         f"Worker results:\n{rendered}\n"
         f"{policy}"
     )
-    return _prepend_optional_briefs(prompt, code_graph=code_graph, drift_impact=drift_impact)
+    return _prepend_optional_briefs(prompt, code_graph=code_graph, drift_impact=drift_impact, evidence=evidence)
 
 
 def _print_plan(assignments: list[Assignment]) -> None:
@@ -1344,6 +1373,7 @@ def _run_payload(
     error: str | None = None,
     code_graph: CodeGraphBrief | None = None,
     drift_impact: DriftImpactBrief | None = None,
+    evidence: EvidenceBrief | None = None,
     brief_set: BriefSet | None = None,
     codex_transport: str | None = None,
     control_socket: Path | None = None,
@@ -1366,6 +1396,10 @@ def _run_payload(
             "attached": bool(drift_impact.attached) if drift_impact is not None else False,
             "bytes": drift_impact.bytes if drift_impact is not None else 0,
             "pending_count": drift_impact.pending_count if drift_impact is not None else 0,
+        },
+        "evidence_brief": {
+            "attached": bool(evidence.attached) if evidence is not None else False,
+            "bytes": evidence.bytes if evidence is not None else 0,
         },
         "brief_budget": {
             "bytes": brief_set.budget_bytes if brief_set is not None else BRIEF_BUDGET_BYTES,
@@ -1409,8 +1443,10 @@ def run(
     sandbox_read_only: bool | None = None,
     sandbox: str | None = None,
     code_graph_enabled: bool = True,
+    evidence_enabled: bool = True,
     code_graph: CodeGraphBrief | None = None,
     drift_impact: DriftImpactBrief | None = None,
+    evidence: EvidenceBrief | None = None,
     codex_transport: str | None = None,
 ) -> int:
     started_at = datetime.now(timezone.utc)
@@ -1422,9 +1458,16 @@ def run(
         code_graph = code_graph_brief(cwd, task) if code_graph_enabled else CodeGraphBrief(attached=False)
     if drift_impact is None:
         drift_impact = drift_impact_brief(cwd) if code_graph_enabled else DriftImpactBrief(attached=False)
-    brief_set = arbitrate_briefs(task, code_graph=code_graph, drift_impact=drift_impact)
+    if evidence is None:
+        evidence = (
+            evidence_brief_mod.evidence_brief(cwd, task)
+            if code_graph_enabled and evidence_enabled
+            else EvidenceBrief(attached=False)
+        )
+    brief_set = arbitrate_briefs(task, code_graph=code_graph, drift_impact=drift_impact, evidence=evidence)
     code_graph = brief_set.code_graph
     drift_impact = brief_set.drift_impact
+    evidence = brief_set.evidence
     code_graph_delta = _initial_code_graph_delta(
         code_graph_enabled=code_graph_enabled,
         dry_run=dry_run,
@@ -1451,6 +1494,7 @@ def run(
                 output_dir=output_dir,
                 code_graph=code_graph,
                 drift_impact=drift_impact,
+                evidence=evidence,
                 brief_set=brief_set,
                 codex_transport=transport_for_payload,
                 code_graph_delta=code_graph_delta,
@@ -1470,6 +1514,7 @@ def run(
             attempts=plan_attempts,
             code_graph=code_graph,
             drift_impact=drift_impact,
+            evidence=evidence,
         )
     except RuntimeError as exc:
         if output_dir is not None:
@@ -1490,6 +1535,7 @@ def run(
                     error=str(exc),
                     code_graph=code_graph,
                     drift_impact=drift_impact,
+                    evidence=evidence,
                     brief_set=brief_set,
                     codex_transport=transport_for_payload,
                     control_socket=control_socket,
@@ -1521,6 +1567,7 @@ def run(
                     output_dir=output_dir,
                     code_graph=code_graph,
                     drift_impact=drift_impact,
+                    evidence=evidence,
                     brief_set=brief_set,
                     codex_transport=transport_for_payload,
                     code_graph_delta=code_graph_delta,
@@ -1575,6 +1622,7 @@ def run(
                 output_dir=output_dir,
                 code_graph=code_graph,
                 drift_impact=drift_impact,
+                evidence=evidence,
                 brief_set=brief_set,
                 codex_transport=transport_for_payload,
                 control_socket=control_socket,
@@ -1592,6 +1640,7 @@ def run(
             sandbox=sandbox,
             code_graph=code_graph,
             drift_impact=drift_impact,
+            evidence=evidence,
             appserver=appserver,
             control_registry=control_registry,
             events_dir=(output_dir / "events") if (output_dir is not None and appserver is not None) else None,
@@ -1629,6 +1678,7 @@ def run(
             ground_truth=ground_truth,
             code_graph=code_graph,
             drift_impact=drift_impact,
+            evidence=evidence,
         ),
         cwd=cwd,
         read_only=read_only,
@@ -1662,6 +1712,7 @@ def run(
                     error=final.detail,
                     code_graph=code_graph,
                     drift_impact=drift_impact,
+                    evidence=evidence,
                     brief_set=brief_set,
                     codex_transport=transport_for_payload,
                     code_graph_delta=code_graph_delta,
@@ -1687,6 +1738,7 @@ def run(
                 output_dir=output_dir,
                 code_graph=code_graph,
                 drift_impact=drift_impact,
+                evidence=evidence,
                 brief_set=brief_set,
                 codex_transport=transport_for_payload,
                 control_socket=control_socket,
@@ -1725,6 +1777,7 @@ def run(
                         error=detail,
                         code_graph=code_graph,
                         drift_impact=drift_impact,
+                        evidence=evidence,
                         brief_set=brief_set,
                         codex_transport=transport_for_payload,
                         control_socket=control_socket,
@@ -1753,6 +1806,7 @@ def run(
                     handoff_path=handoff,
                     code_graph=code_graph,
                     drift_impact=drift_impact,
+                    evidence=evidence,
                     brief_set=brief_set,
                     codex_transport=transport_for_payload,
                     control_socket=control_socket,
