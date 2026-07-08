@@ -80,10 +80,20 @@ fn tools_list_exposes_the_query_tools_with_location_args() {
         if tool["name"] == "diff" {
             assert!(props.get("before").is_some(), "diff missing before");
             assert!(props.get("after").is_some(), "diff missing after");
+            assert!(props.get("refresh").is_none(), "diff must not refresh");
             continue;
         }
         assert!(props.get("repo").is_some(), "{} missing repo", tool["name"]);
         assert!(props.get("db").is_some(), "{} missing db", tool["name"]);
+        if tool["name"] == "repos" {
+            assert!(props.get("refresh").is_none(), "repos must not refresh");
+        } else {
+            assert!(
+                props.get("refresh").is_some(),
+                "{} missing refresh",
+                tool["name"]
+            );
+        }
     }
 }
 
@@ -146,6 +156,130 @@ fn tools_call_search_returns_json_content() {
                 "params":{"name":"search","arguments":{"query":"helper"}}}),
     )
     .unwrap();
+    assert_eq!(resp["result"]["isError"], false);
+    let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+    let rows: serde_json::Value = serde_json::from_str(text).unwrap();
+    assert!(
+        rows.as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["name"] == "helper")
+    );
+}
+
+#[test]
+fn tools_call_refresh_absent_or_false_does_not_resync() {
+    let dir = synced_repo_with_graph_dir();
+    let root = dir.path();
+    let db = root.join(".graphtrail").join("graphtrail.db");
+    fs::write(root.join("late.py"), "def late_symbol():\n    return 2\n").unwrap();
+
+    let absent = handle_request(
+        &db,
+        &json!({"jsonrpc":"2.0","id":52,"method":"tools/call",
+        "params":{"name":"search","arguments":{
+            "query":"late_symbol",
+            "repo": root.to_str().unwrap()
+        }}}),
+    )
+    .unwrap();
+    let rows: serde_json::Value =
+        serde_json::from_str(absent["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert!(rows.as_array().unwrap().is_empty());
+
+    let explicit_false = handle_request(
+        &db,
+        &json!({"jsonrpc":"2.0","id":53,"method":"tools/call",
+        "params":{"name":"search","arguments":{
+            "query":"late_symbol",
+            "repo": root.to_str().unwrap(),
+            "refresh": false
+        }}}),
+    )
+    .unwrap();
+    let rows: serde_json::Value = serde_json::from_str(
+        explicit_false["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(rows.as_array().unwrap().is_empty());
+}
+
+#[test]
+fn tools_call_refresh_true_resyncs_before_querying() {
+    let dir = synced_repo_with_graph_dir();
+    let root = dir.path();
+    let db = root.join(".graphtrail").join("graphtrail.db");
+    fs::write(root.join("late.py"), "def late_symbol():\n    return 2\n").unwrap();
+
+    let resp = handle_request(
+        &db,
+        &json!({"jsonrpc":"2.0","id":54,"method":"tools/call",
+        "params":{"name":"search","arguments":{
+            "query":"late_symbol",
+            "repo": root.to_str().unwrap(),
+            "refresh": true
+        }}}),
+    )
+    .unwrap();
+
+    assert_eq!(resp["result"]["isError"], false);
+    let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+    let rows: serde_json::Value = serde_json::from_str(text).unwrap();
+    assert!(
+        rows.as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["name"] == "late_symbol")
+    );
+}
+
+#[test]
+fn tools_call_refresh_failure_still_answers_with_note() {
+    let dir = synced_repo_with_graph_dir();
+    let root = dir.path();
+    let db = root.join(".graphtrail").join("graphtrail.db");
+    fs::write(root.join("bad.py"), [0xff, 0xfe, 0xfd]).unwrap();
+
+    let resp = handle_request(
+        &db,
+        &json!({"jsonrpc":"2.0","id":55,"method":"tools/call",
+        "params":{"name":"search","arguments":{
+            "query":"helper",
+            "repo": root.to_str().unwrap(),
+            "refresh": true
+        }}}),
+    )
+    .unwrap();
+
+    assert_eq!(resp["result"]["isError"], false);
+    let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(text.contains("\"name\": \"helper\""));
+    assert!(text.contains("refresh_error:"));
+}
+
+#[test]
+fn read_only_request_accepts_v3_db_without_extractor_fingerprint_column() {
+    let (_dir, db) = ro_db();
+    {
+        let conn = open_db(&db).unwrap();
+        conn.execute(
+            "UPDATE meta SET value = '3' WHERE key = 'schema_version'",
+            [],
+        )
+        .unwrap();
+        conn.execute("ALTER TABLE files DROP COLUMN extractor_fingerprint", [])
+            .unwrap();
+    }
+
+    let resp = handle_request(
+        &db,
+        &json!({"jsonrpc":"2.0","id":34,"method":"tools/call",
+                "params":{"name":"search","arguments":{"query":"helper"}}}),
+    )
+    .unwrap();
+
     assert_eq!(resp["result"]["isError"], false);
     let text = resp["result"]["content"][0]["text"].as_str().unwrap();
     let rows: serde_json::Value = serde_json::from_str(text).unwrap();
@@ -507,4 +641,15 @@ fn unknown_method_with_id_returns_error() {
     let (_dir, db) = ro_db();
     let resp = handle_request(&db, &json!({"jsonrpc":"2.0","id":5,"method":"bogus"})).unwrap();
     assert_eq!(resp["error"]["code"], -32601);
+}
+
+fn synced_repo_with_graph_dir() -> TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    fs::write(root.join("app.py"), "def helper():\n    return 1\n").unwrap();
+    let db = root.join(".graphtrail").join("graphtrail.db");
+    let conn = open_db(&db).unwrap();
+    init_schema(&conn).unwrap();
+    sync_repo(&conn, root).unwrap();
+    dir
 }

@@ -6,16 +6,17 @@
 //! purges rows for files that were deleted from disk.
 
 use std::collections::{HashMap, HashSet};
-use std::fs;
+use std::fs::{self, OpenOptions};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
-use anyhow::Result;
-use ignore::{DirEntry, WalkBuilder};
+use anyhow::{Context, Result};
+use ignore::{DirEntry, WalkBuilder, gitignore::GitignoreBuilder};
 use rusqlite::{Connection, params};
 
 use crate::extractors::common::hex_hash;
-use crate::extractors::{index_file, language_for};
+use crate::extractors::{extractor_fingerprint_for, index_file, language_for};
 use crate::model::{CallKind, Import, Lang, PendingCall};
 use crate::store::db::now_ts;
 
@@ -37,6 +38,18 @@ struct Entry {
     lang: Lang,
     size: u64,
     mtime: i64,
+}
+
+struct DbFile {
+    content_hash: String,
+    size: u64,
+    mtime: i64,
+    extractor_fingerprint: Option<String>,
+}
+
+struct StalePlan<'a> {
+    entries: Vec<&'a Entry>,
+    requires_full_reindex: bool,
 }
 
 #[derive(Clone)]
@@ -61,8 +74,9 @@ pub fn sync_repo(conn: &Connection, root: &Path) -> Result<SyncSummary> {
 /// Like [`sync_repo`] but `force` rebuilds every file regardless of the stat/hash check.
 pub fn sync_repo_force(conn: &Connection, root: &Path, force: bool) -> Result<SyncSummary> {
     let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    let graph_dir_created = crate::store::db::take_created_graph_dir(&root.join(".graphtrail"));
     let upgraded = crate::store::schema::upgrade_for_sync(conn)?;
-    let force = force || upgraded;
+    let force_full_reindex = force || upgraded;
 
     // Stat pass: enumerate supported files without parsing them.
     let mut entries: Vec<Entry> = Vec::new();
@@ -109,6 +123,10 @@ pub fn sync_repo_force(conn: &Connection, root: &Path, force: bool) -> Result<Sy
     }
 
     let db_files = load_db_files(conn)?;
+    if graph_dir_created && db_files.is_empty() && has_git_marker(&root) {
+        ensure_graphtrail_ignored(&root)?;
+    }
+
     let on_disk: HashSet<&str> = entries.iter().map(|e| e.rel.as_str()).collect();
     let deleted: Vec<String> = db_files
         .keys()
@@ -116,7 +134,21 @@ pub fn sync_repo_force(conn: &Connection, root: &Path, force: bool) -> Result<Sy
         .cloned()
         .collect();
 
-    let changed = force || !deleted.is_empty() || has_real_change(&entries, &db_files)?;
+    let stale_plan = if force_full_reindex {
+        StalePlan {
+            entries: entries.iter().collect(),
+            requires_full_reindex: true,
+        }
+    } else {
+        stale_plan(&entries, &db_files)?
+    };
+    let files_to_index: Vec<&Entry> = if stale_plan.requires_full_reindex {
+        entries.iter().collect()
+    } else {
+        stale_plan.entries
+    };
+
+    let changed = !deleted.is_empty() || !files_to_index.is_empty();
     if !changed {
         let tx = conn.unchecked_transaction()?;
         crate::store::meta::write_sync_meta(&tx)?;
@@ -133,9 +165,10 @@ pub fn sync_repo_force(conn: &Connection, root: &Path, force: bool) -> Result<Sy
         });
     }
 
-    // Rebuild: re-index every present file and purge rows for deleted files.
-    let mut graphs = Vec::with_capacity(entries.len());
-    for entry in &entries {
+    // Rebuild changed files and purge rows for deleted files. Content changes
+    // still rebuild all present files because pending call resolution is not stored.
+    let mut graphs = Vec::with_capacity(files_to_index.len());
+    for entry in files_to_index {
         graphs.push(index_file(&root, &entry.path, entry.lang)?);
     }
 
@@ -143,10 +176,17 @@ pub fn sync_repo_force(conn: &Connection, root: &Path, force: bool) -> Result<Sy
     let mut purge: Vec<String> = graphs.iter().map(|g| g.path.clone()).collect();
     purge.extend(deleted.iter().cloned());
     for path in &purge {
+        let delete_target_edges = stale_plan.requires_full_reindex || deleted.contains(path);
         tx.execute(
             "DELETE FROM edges WHERE source IN (SELECT id FROM symbols WHERE file_path = ?1)",
             params![path],
         )?;
+        if delete_target_edges {
+            tx.execute(
+                "DELETE FROM edges WHERE target IN (SELECT id FROM symbols WHERE file_path = ?1)",
+                params![path],
+            )?;
+        }
         tx.execute(
             "DELETE FROM symbols_fts WHERE file_path = ?1",
             params![path],
@@ -158,16 +198,19 @@ pub fn sync_repo_force(conn: &Connection, root: &Path, force: bool) -> Result<Sy
 
     let now = now_ts();
     for graph in &graphs {
+        let lang =
+            language_for(Path::new(&graph.path)).expect("indexed graph has a known language");
         tx.execute(
-            "INSERT OR REPLACE INTO files(path, content_hash, size, modified_at, indexed_at, language)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            "INSERT OR REPLACE INTO files(path, content_hash, size, modified_at, indexed_at, language, extractor_fingerprint)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![
                 graph.path,
                 graph.hash,
                 graph.size as i64,
                 graph.modified_at,
                 now,
-                graph.language
+                graph.language,
+                extractor_fingerprint_for(lang)
             ],
         )?;
         for symbol in &graph.symbols {
@@ -220,7 +263,6 @@ pub fn sync_repo_force(conn: &Connection, root: &Path, force: bool) -> Result<Sy
     let import_index = load_import_index(&tx)?;
     let source_index = load_symbol_id_index(&tx)?;
     let file_index = load_file_index(&tx)?;
-    let mut inserted_calls = 0;
     for graph in &graphs {
         for call in &graph.calls {
             let chosen = resolve_call(call, &name_index, &import_index, &source_index, &file_index);
@@ -232,43 +274,57 @@ pub fn sync_repo_force(conn: &Connection, root: &Path, force: bool) -> Result<Sy
                     "INSERT OR IGNORE INTO edges(source, target, kind, line) VALUES (?1, ?2, 'calls', ?3)",
                     params![call.source_id, target.id, call.line as i64],
                 )?;
-                inserted_calls += 1;
             }
         }
     }
     crate::store::meta::write_sync_meta(&tx)?;
     tx.commit()?;
 
+    let counts = table_counts(conn)?;
     Ok(SyncSummary {
-        files: graphs.len(),
-        symbols: graphs.iter().map(|g| g.symbols.len()).sum(),
-        imports: graphs.iter().map(|g| g.imports.len()).sum(),
-        calls: inserted_calls,
+        files: counts.0,
+        symbols: counts.1,
+        calls: counts.2,
+        imports: counts.3,
         unchanged: false,
         deleted: deleted.len(),
     })
 }
 
-/// True if any file is new, or differs in size/mtime AND content hash, from what's indexed.
-fn has_real_change(
-    entries: &[Entry],
-    db_files: &HashMap<String, (String, u64, i64)>,
-) -> Result<bool> {
+fn stale_plan<'a>(
+    entries: &'a [Entry],
+    db_files: &HashMap<String, DbFile>,
+) -> Result<StalePlan<'a>> {
+    let mut stale = Vec::new();
+    let mut requires_full_reindex = false;
     for entry in entries {
         match db_files.get(&entry.rel) {
-            None => return Ok(true),
-            Some((hash, size, mtime)) => {
-                if *size != entry.size || *mtime != entry.mtime {
+            None => {
+                stale.push(entry);
+                requires_full_reindex = true;
+            }
+            Some(db_file) => {
+                let mut content_changed = false;
+                if db_file.size != entry.size || db_file.mtime != entry.mtime {
                     // Cheap stat differs; confirm with content hash to ignore mtime-only touches.
                     let content = fs::read_to_string(&entry.path)?;
-                    if &hex_hash(content.as_bytes()) != hash {
-                        return Ok(true);
-                    }
+                    content_changed = hex_hash(content.as_bytes()) != db_file.content_hash;
+                }
+                if content_changed {
+                    stale.push(entry);
+                    requires_full_reindex = true;
+                } else if db_file.extractor_fingerprint.as_deref()
+                    != Some(extractor_fingerprint_for(entry.lang))
+                {
+                    stale.push(entry);
                 }
             }
         }
     }
-    Ok(false)
+    Ok(StalePlan {
+        entries: stale,
+        requires_full_reindex,
+    })
 }
 
 fn keep_entry(entry: &DirEntry) -> bool {
@@ -298,21 +354,67 @@ fn has_git_marker(dir: &Path) -> bool {
     git.is_file() || git.join("HEAD").is_file()
 }
 
-/// Map file path -> (content_hash, size, modified_at) from the `files` table.
-fn load_db_files(conn: &Connection) -> Result<HashMap<String, (String, u64, i64)>> {
-    let mut stmt = conn.prepare("SELECT path, content_hash, size, modified_at FROM files")?;
+fn ensure_graphtrail_ignored(root: &Path) -> Result<()> {
+    let gitignore = root.join(".gitignore");
+    if gitignore_covers_graphtrail(root, &gitignore)? {
+        return Ok(());
+    }
+
+    let mut needs_leading_newline = false;
+    if gitignore.exists() {
+        let content = fs::read_to_string(&gitignore)
+            .with_context(|| format!("failed to read {}", gitignore.display()))?;
+        needs_leading_newline = !content.is_empty() && !content.ends_with('\n');
+    }
+
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&gitignore)
+        .with_context(|| format!("failed to open {}", gitignore.display()))?;
+    if needs_leading_newline {
+        writeln!(file)?;
+    }
+    writeln!(file, ".graphtrail/")?;
+    println!("updated {} to ignore .graphtrail/", gitignore.display());
+    Ok(())
+}
+
+fn gitignore_covers_graphtrail(root: &Path, gitignore: &Path) -> Result<bool> {
+    if !gitignore.exists() {
+        return Ok(false);
+    }
+
+    let mut builder = GitignoreBuilder::new(root);
+    if let Some(err) = builder.add(gitignore) {
+        return Err(err).with_context(|| format!("failed to parse {}", gitignore.display()));
+    }
+    let matcher = builder
+        .build()
+        .with_context(|| format!("failed to parse {}", gitignore.display()))?;
+    Ok(matcher.matched(root.join(".graphtrail"), true).is_ignore())
+}
+
+/// Map file path -> freshness metadata from the `files` table.
+fn load_db_files(conn: &Connection) -> Result<HashMap<String, DbFile>> {
+    let mut stmt = conn.prepare(
+        "SELECT path, content_hash, size, modified_at, extractor_fingerprint FROM files",
+    )?;
     let rows = stmt.query_map([], |row| {
         Ok((
             row.get::<_, String>(0)?,
-            row.get::<_, String>(1)?,
-            row.get::<_, i64>(2)? as u64,
-            row.get::<_, i64>(3)?,
+            DbFile {
+                content_hash: row.get::<_, String>(1)?,
+                size: row.get::<_, i64>(2)? as u64,
+                mtime: row.get::<_, i64>(3)?,
+                extractor_fingerprint: row.get::<_, Option<String>>(4)?,
+            },
         ))
     })?;
     let mut map = HashMap::new();
     for row in rows {
-        let (path, hash, size, mtime) = row?;
-        map.insert(path, (hash, size, mtime));
+        let (path, db_file) = row?;
+        map.insert(path, db_file);
     }
     Ok(map)
 }

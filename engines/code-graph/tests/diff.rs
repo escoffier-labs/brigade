@@ -4,7 +4,7 @@
 use std::fs;
 
 use graphtrail::query::diff_graphs;
-use graphtrail::store::{init_schema, meta, open_db, sync_repo};
+use graphtrail::store::{SCHEMA_VERSION, init_schema, meta, open_db, sync_repo};
 
 /// Sync `source` (a single mod.py) into a fresh DB under `dir` and return the connection.
 fn index(dir: &std::path::Path, source: &str) -> rusqlite::Connection {
@@ -273,7 +273,7 @@ fn sync_upgrades_v2_schema_and_populates_body_hashes() {
     assert!(!summary.unchanged, "upgrade must force a reindex pass");
     assert_eq!(
         meta::read(&conn, "schema_version").unwrap().as_deref(),
-        Some("3")
+        Some(SCHEMA_VERSION.to_string().as_str())
     );
     let body_hash: Option<String> = conn
         .query_row(

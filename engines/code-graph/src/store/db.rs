@@ -2,10 +2,14 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
+use std::{collections::HashSet, ffi::OsStr};
 
 use anyhow::{Context, Result};
 use rusqlite::{Connection, OpenFlags};
+
+static CREATED_DB_DIRS: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
 
 /// Resolve the db path: an explicit `--db` wins, else `<root>/.graphtrail/graphtrail.db`.
 pub fn db_path(explicit: Option<PathBuf>, root: &Path) -> PathBuf {
@@ -27,13 +31,41 @@ pub fn open_default_read_only(explicit: Option<PathBuf>) -> Result<Connection> {
 /// Open (creating parent dirs) a WAL-mode SQLite connection.
 pub fn open_db(path: &Path) -> Result<Connection> {
     if let Some(parent) = path.parent() {
+        let records_graphtrail_creation =
+            parent.file_name() == Some(OsStr::new(".graphtrail")) && !parent.exists();
         fs::create_dir_all(parent)
             .with_context(|| format!("failed to create db directory {}", parent.display()))?;
+        if records_graphtrail_creation {
+            record_created_db_dir(parent);
+        }
     }
     let conn =
         Connection::open(path).with_context(|| format!("failed to open {}", path.display()))?;
     conn.pragma_update(None, "journal_mode", "WAL")?;
     Ok(conn)
+}
+
+pub(crate) fn take_created_graph_dir(path: &Path) -> bool {
+    let normalized = normalize_dir(path);
+    created_db_dirs()
+        .lock()
+        .map(|mut dirs| dirs.remove(&normalized))
+        .unwrap_or(false)
+}
+
+fn record_created_db_dir(path: &Path) {
+    let normalized = normalize_dir(path);
+    if let Ok(mut dirs) = created_db_dirs().lock() {
+        dirs.insert(normalized);
+    }
+}
+
+fn created_db_dirs() -> &'static Mutex<HashSet<PathBuf>> {
+    CREATED_DB_DIRS.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+fn normalize_dir(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
 
 /// Open an existing db read-only. Used by the MCP server and query commands so they can never

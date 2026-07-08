@@ -4,7 +4,7 @@ use anyhow::Result;
 use rusqlite::Connection;
 
 /// Bumped when the on-disk schema changes; surfaced in JSON packs from Phase 2 on.
-pub const SCHEMA_VERSION: u32 = 3;
+pub const SCHEMA_VERSION: u32 = 4;
 
 pub fn init_schema(conn: &Connection) -> Result<()> {
     conn.execute_batch(
@@ -15,7 +15,8 @@ pub fn init_schema(conn: &Connection) -> Result<()> {
             size INTEGER NOT NULL,
             modified_at INTEGER NOT NULL,
             indexed_at INTEGER NOT NULL,
-            language TEXT NOT NULL
+            language TEXT NOT NULL,
+            extractor_fingerprint TEXT
         );
 
         CREATE TABLE IF NOT EXISTS symbols (
@@ -78,13 +79,19 @@ pub fn init_schema(conn: &Connection) -> Result<()> {
 
 /// Apply write-path schema upgrades needed before sync can insert current rows.
 ///
-/// Returns true when the symbols table was upgraded and the caller should force
-/// a full reindex so newly added nullable columns are populated for existing files.
+/// Returns true when the caller should force a full reindex so newly added
+/// nullable columns are populated for existing rows that cannot be refreshed lazily.
 pub fn upgrade_for_sync(conn: &Connection) -> Result<bool> {
     let mut upgraded = false;
     if !table_has_column(conn, "symbols", "body_hash")? {
         conn.execute("ALTER TABLE symbols ADD COLUMN body_hash TEXT", [])?;
         upgraded = true;
+    }
+    if !table_has_column(conn, "files", "extractor_fingerprint")? {
+        conn.execute(
+            "ALTER TABLE files ADD COLUMN extractor_fingerprint TEXT",
+            [],
+        )?;
     }
     Ok(upgraded)
 }

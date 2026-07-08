@@ -6,7 +6,8 @@ use std::path::Path;
 use std::thread::sleep;
 use std::time::Duration;
 
-use graphtrail::store::{init_schema, meta, open_db, sync_repo};
+use graphtrail::extractors::{python, rust};
+use graphtrail::store::{SCHEMA_VERSION, init_schema, meta, open_db, sync_repo};
 use rusqlite::Connection;
 
 #[test]
@@ -136,6 +137,99 @@ fn unchanged_sync_refreshes_synced_at_without_reindexing_files() {
 }
 
 #[test]
+fn old_extractor_fingerprint_reextracts_file_with_same_content() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write_file(root.join("a.py"), "def helper():\n    return 1\n");
+
+    let conn = open_graph(root);
+    let first = sync_repo(&conn, root).unwrap();
+    assert!(!first.unchanged);
+    let first_indexed_at = indexed_at(&conn, "a.py");
+
+    conn.execute(
+        "UPDATE files SET extractor_fingerprint = 'python-old' WHERE path = 'a.py'",
+        [],
+    )
+    .unwrap();
+    sleep(Duration::from_millis(1100));
+
+    let second = sync_repo(&conn, root).unwrap();
+
+    assert!(!second.unchanged, "old extractor fingerprint is stale");
+    assert!(indexed_at(&conn, "a.py") > first_indexed_at);
+    assert_eq!(
+        extractor_fingerprint(&conn, "a.py").as_deref(),
+        Some(python::EXTRACTOR_FINGERPRINT)
+    );
+}
+
+#[test]
+fn only_doctored_language_row_is_reextracted() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write_file(root.join("lib.rs"), "fn helper() {}\n");
+    write_file(root.join("app.py"), "def helper():\n    return 1\n");
+
+    let conn = open_graph(root);
+    let first = sync_repo(&conn, root).unwrap();
+    assert!(!first.unchanged);
+    let rust_indexed_at = indexed_at(&conn, "lib.rs");
+    let python_indexed_at = indexed_at(&conn, "app.py");
+
+    conn.execute(
+        "UPDATE files SET extractor_fingerprint = 'rust-old' WHERE path = 'lib.rs'",
+        [],
+    )
+    .unwrap();
+    sleep(Duration::from_millis(1100));
+
+    let second = sync_repo(&conn, root).unwrap();
+
+    assert!(!second.unchanged);
+    assert!(indexed_at(&conn, "lib.rs") > rust_indexed_at);
+    assert_eq!(indexed_at(&conn, "app.py"), python_indexed_at);
+    assert_eq!(
+        extractor_fingerprint(&conn, "lib.rs").as_deref(),
+        Some(rust::EXTRACTOR_FINGERPRINT)
+    );
+    assert_eq!(
+        extractor_fingerprint(&conn, "app.py").as_deref(),
+        Some(python::EXTRACTOR_FINGERPRINT)
+    );
+}
+
+#[test]
+fn sync_migrates_v3_files_table_and_populates_extractor_fingerprint() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write_file(root.join("a.py"), "def helper():\n    return 1\n");
+
+    let conn = open_graph(root);
+    let first = sync_repo(&conn, root).unwrap();
+    assert!(!first.unchanged);
+    conn.execute(
+        "UPDATE meta SET value = '3' WHERE key = 'schema_version'",
+        [],
+    )
+    .unwrap();
+    conn.execute("ALTER TABLE files DROP COLUMN extractor_fingerprint", [])
+        .unwrap();
+
+    let second = sync_repo(&conn, root).unwrap();
+
+    assert!(!second.unchanged);
+    assert_eq!(
+        meta::read(&conn, "schema_version").unwrap().as_deref(),
+        Some(SCHEMA_VERSION.to_string().as_str())
+    );
+    assert_eq!(
+        extractor_fingerprint(&conn, "a.py").as_deref(),
+        Some(python::EXTRACTOR_FINGERPRINT)
+    );
+}
+
+#[test]
 fn sync_honors_root_gitignore_patterns() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
@@ -235,6 +329,83 @@ fn file_removed_by_new_gitignore_rule_self_cleans_from_db() {
 }
 
 #[test]
+fn first_graphtrail_index_in_git_repo_adds_root_gitignore_entry() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    make_git_repo(root);
+    write_file(root.join("app.py"), "def kept():\n    return 1\n");
+
+    let conn = open_graphtrail_graph(root);
+    let summary = sync_repo(&conn, root).unwrap();
+
+    assert!(!summary.unchanged);
+    assert_eq!(
+        fs::read_to_string(root.join(".gitignore")).unwrap(),
+        ".graphtrail/\n"
+    );
+}
+
+#[test]
+fn second_graphtrail_sync_does_not_duplicate_gitignore_entry() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    make_git_repo(root);
+    write_file(root.join("app.py"), "def kept():\n    return 1\n");
+
+    let conn = open_graphtrail_graph(root);
+    sync_repo(&conn, root).unwrap();
+    sync_repo(&conn, root).unwrap();
+
+    assert_eq!(
+        fs::read_to_string(root.join(".gitignore")).unwrap(),
+        ".graphtrail/\n"
+    );
+}
+
+#[test]
+fn first_graphtrail_index_respects_covering_gitignore_pattern() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    make_git_repo(root);
+    write_file(root.join(".gitignore"), ".graphtrail*\n");
+    write_file(root.join("app.py"), "def kept():\n    return 1\n");
+
+    let conn = open_graphtrail_graph(root);
+    sync_repo(&conn, root).unwrap();
+
+    assert_eq!(
+        fs::read_to_string(root.join(".gitignore")).unwrap(),
+        ".graphtrail*\n"
+    );
+}
+
+#[test]
+fn first_graphtrail_index_in_non_git_root_does_not_write_gitignore() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write_file(root.join("app.py"), "def kept():\n    return 1\n");
+
+    let conn = open_graphtrail_graph(root);
+    sync_repo(&conn, root).unwrap();
+
+    assert!(!root.join(".gitignore").exists());
+}
+
+#[test]
+fn preexisting_graphtrail_dir_does_not_write_gitignore() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    make_git_repo(root);
+    fs::create_dir(root.join(".graphtrail")).unwrap();
+    write_file(root.join("app.py"), "def kept():\n    return 1\n");
+
+    let conn = open_graphtrail_graph(root);
+    sync_repo(&conn, root).unwrap();
+
+    assert!(!root.join(".gitignore").exists());
+}
+
+#[test]
 fn hidden_paths_are_indexed() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
@@ -269,6 +440,12 @@ fn open_graph(root: &Path) -> Connection {
     conn
 }
 
+fn open_graphtrail_graph(root: &Path) -> Connection {
+    let conn = open_db(&root.join(".graphtrail").join("graphtrail.db")).unwrap();
+    init_schema(&conn).unwrap();
+    conn
+}
+
 fn write_file(path: impl AsRef<Path>, content: &str) {
     let path = path.as_ref();
     if let Some(parent) = path.parent() {
@@ -285,6 +462,24 @@ fn indexed_paths(conn: &Connection) -> BTreeSet<String> {
         .unwrap()
         .map(|row| row.unwrap())
         .collect()
+}
+
+fn indexed_at(conn: &Connection, path: &str) -> i64 {
+    conn.query_row(
+        "SELECT indexed_at FROM files WHERE path = ?1",
+        [path],
+        |row| row.get(0),
+    )
+    .unwrap()
+}
+
+fn extractor_fingerprint(conn: &Connection, path: &str) -> Option<String> {
+    conn.query_row(
+        "SELECT extractor_fingerprint FROM files WHERE path = ?1",
+        [path],
+        |row| row.get(0),
+    )
+    .unwrap()
 }
 
 fn paths<const N: usize>(paths: [&str; N]) -> BTreeSet<String> {

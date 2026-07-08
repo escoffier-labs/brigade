@@ -26,6 +26,16 @@ pub fn language_for(path: &Path) -> Option<Lang> {
     }
 }
 
+/// Current extractor fingerprint for a supported source language.
+pub fn extractor_fingerprint_for(lang: Lang) -> &'static str {
+    match lang {
+        Lang::Python => python::EXTRACTOR_FINGERPRINT,
+        Lang::TypeScript => typescript::EXTRACTOR_FINGERPRINT,
+        Lang::Rust => rust::EXTRACTOR_FINGERPRINT,
+        Lang::Go => go::EXTRACTOR_FINGERPRINT,
+    }
+}
+
 /// Read and extract a single file into a [`FileGraph`].
 pub fn index_file(root: &Path, path: &Path, lang: Lang) -> Result<FileGraph> {
     let content =

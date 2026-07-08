@@ -11,8 +11,9 @@ use anyhow::Result;
 use rusqlite::Connection;
 
 use crate::model::{DiffEdge, DiffNode, DiffNodePrevious, GraphDiff, GraphDiffCounts};
-use crate::store::SCHEMA_VERSION;
 use crate::store::schema::table_has_column;
+
+const GRAPH_DIFF_SCHEMA_VERSION: u32 = 3;
 
 /// A symbol as loaded for diffing (a subset of the `symbols` row).
 struct SymRow {
@@ -275,7 +276,7 @@ pub fn diff_graphs(before: &Connection, after: &Connection) -> Result<GraphDiff>
     };
 
     Ok(GraphDiff {
-        schema_version: SCHEMA_VERSION,
+        schema_version: GRAPH_DIFF_SCHEMA_VERSION,
         summary,
         added_nodes,
         removed_nodes,

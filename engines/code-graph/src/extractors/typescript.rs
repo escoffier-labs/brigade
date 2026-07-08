@@ -6,6 +6,9 @@ use tree_sitter::Node as TsNode;
 use crate::extractors::common::{LangSpec, extract_with, node_text, string_literal_text};
 use crate::model::{CallTarget, FileGraph, Import};
 
+/// Bump when TypeScript or JavaScript extraction output can change for the same file content.
+pub const EXTRACTOR_FINGERPRINT: &str = "typescript-extractor-v1";
+
 /// Ubiquitous globals/methods that would only ever produce noise edges.
 const JS_SKIP: &[&str] = &[
     "console",

@@ -4,13 +4,17 @@
 //!
 //! Multi-repo: the server holds a default db path but opens the database lazily per `tools/call`.
 //! Each tool accepts an optional `repo` (uses `<repo>/.graphtrail/graphtrail.db`) or `db` (explicit
-//! path) argument, so a single registered server can answer for any indexed repository. Connections
-//! are always opened `SQLITE_OPEN_READ_ONLY`, so the server can never mutate a graph.
+//! path) argument, so a single registered server can answer for any indexed repository. Query
+//! connections are always opened `SQLITE_OPEN_READ_ONLY`; the opt-in `refresh: true` parameter is
+//! the one sanctioned write path, running the CLI's incremental sync (fail-open) before the query.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
+use std::sync::mpsc;
+use std::thread;
+use std::time::Duration;
 
 use anyhow::{Result, anyhow};
 use rusqlite::{OptionalExtension, params};
@@ -22,9 +26,10 @@ use crate::query::{
     DEFAULT_IMPACT_DEPTH, build_context_pack, diff_graphs, file_neighbors, graph_edges_with_depth,
     impact_edges, normalize_depth, render_markdown, search_symbols_with_path, stats,
 };
-use crate::store::open_read_only;
+use crate::store::{init_schema, open_db, open_read_only, sync_repo};
 
 const PROTOCOL_VERSION: &str = "2024-11-05";
+const REFRESH_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Read JSON-RPC requests line by line and write one response line per request. `default_db` is the
 /// fallback database used when a request does not specify its own `repo`/`db`.
@@ -144,8 +149,13 @@ fn call_tool(default_db: &Path, name: &str, args: &Value) -> Result<String> {
     }
 
     let db = resolve_db(default_db, args);
+    let refresh_error = if supports_refresh(name) && bool_arg(args, "refresh", false) {
+        refresh_db(default_db, args, &db)
+    } else {
+        None
+    };
     let conn = open_read_only(&db)?;
-    match name {
+    let text = match name {
         "search" => to_pretty(&search_symbols_with_path(
             &conn,
             &str_arg(args, "query"),
@@ -185,12 +195,16 @@ fn call_tool(default_db: &Path, name: &str, args: &Value) -> Result<String> {
         "file_neighbors" => to_pretty(&file_neighbors(&conn, &str_arg(args, "path"))?),
         "stats" => to_pretty(&stats(&conn)?),
         other => Err(anyhow!("unknown tool '{other}'")),
-    }
+    }?;
+    Ok(with_refresh_error(text, refresh_error))
 }
 
 fn validate_tool_args(name: &str, args: &Value) -> std::result::Result<(), String> {
     optional_string(args, "db")?;
     optional_string(args, "repo")?;
+    if supports_refresh(name) {
+        optional_bool(args, "refresh")?;
+    }
     match name {
         "search" => {
             require_string(args, "query")?;
@@ -228,6 +242,9 @@ fn tool_defs() -> Value {
         "repo": { "type": "string", "description": "Repo path; uses <repo>/.graphtrail/graphtrail.db." },
         "db": { "type": "string", "description": "Explicit graphtrail.db path (overrides repo and the server default)." }
     });
+    let refresh = json!({
+        "refresh": { "type": "boolean", "description": "Default false; sync is incremental and cheap on warm repos." }
+    });
     let with_location = |props: Value, required: Value| {
         let mut merged = location.clone();
         if let (Some(dst), Some(src)) = (merged.as_object_mut(), props.as_object()) {
@@ -237,12 +254,21 @@ fn tool_defs() -> Value {
         }
         json!({ "type": "object", "properties": merged, "required": required })
     };
+    let with_refresh = |props: Value| {
+        let mut merged = props;
+        if let (Some(dst), Some(src)) = (merged.as_object_mut(), refresh.as_object()) {
+            for (k, v) in src {
+                dst.insert(k.clone(), v.clone());
+            }
+        }
+        merged
+    };
     let symbol_tool = |desc: &str| {
         with_location(
-            json!({
+            with_refresh(json!({
                 "symbol": { "type": "string", "description": desc },
                 "depth": { "type": "integer", "description": "Traversal depth, clamped to 1..5 (default 1)." }
-            }),
+            })),
             json!(["symbol"]),
         )
     };
@@ -251,11 +277,11 @@ fn tool_defs() -> Value {
             "name": "search",
             "description": "Full-text search code symbols (functions, classes, methods) by name.",
             "inputSchema": with_location(
-                json!({
+                with_refresh(json!({
                     "query": { "type": "string", "description": "Search terms." },
                     "path": { "type": "string", "description": "Optional file path, directory prefix, or path fragment." },
                     "limit": { "type": "integer", "description": "Max results (default 20)." }
-                }),
+                })),
                 json!(["query"])
             )
         },
@@ -266,7 +292,7 @@ fn tool_defs() -> Value {
             "name": "context",
             "description": "A context pack for a task: matching entry points plus their caller/callee neighborhood and related files.",
             "inputSchema": with_location(
-                json!({
+                with_refresh(json!({
                     "task": { "type": "string", "description": "Task or feature description to gather context for." },
                     "limit": { "type": "integer", "description": "Max entry points (default 12)." },
                     "format": {
@@ -274,16 +300,16 @@ fn tool_defs() -> Value {
                         "enum": ["json", "markdown"],
                         "description": "Response format (default json)."
                     }
-                }),
+                })),
                 json!(["task"])
             )
         },
-        { "name": "stats", "description": "Counts of files, symbols, edges, imports, sync metadata, and per-language file counts.", "inputSchema": with_location(json!({}), json!([])) },
+        { "name": "stats", "description": "Counts of files, symbols, edges, imports, sync metadata, and per-language file counts.", "inputSchema": with_location(with_refresh(json!({})), json!([])) },
         {
             "name": "file_neighbors",
             "description": "Files connected to a file by incoming or outgoing call edges.",
             "inputSchema": with_location(
-                json!({ "path": { "type": "string", "description": "Indexed file path to inspect." } }),
+                with_refresh(json!({ "path": { "type": "string", "description": "Indexed file path to inspect." } })),
                 json!(["path"])
             )
         },
@@ -314,6 +340,56 @@ fn to_pretty<T: Serialize>(value: &T) -> Result<String> {
     Ok(serde_json::to_string_pretty(value)?)
 }
 
+fn supports_refresh(name: &str) -> bool {
+    matches!(
+        name,
+        "search" | "callers" | "callees" | "impact" | "context" | "file_neighbors" | "stats"
+    )
+}
+
+fn refresh_db(default_db: &Path, args: &Value, db: &Path) -> Option<String> {
+    let db = db.to_path_buf();
+    let root = refresh_root(default_db, args, &db);
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        let result = (|| -> Result<()> {
+            let conn = open_db(&db)?;
+            init_schema(&conn)?;
+            sync_repo(&conn, &root)?;
+            Ok(())
+        })();
+        let _ = tx.send(result);
+    });
+
+    match rx.recv_timeout(REFRESH_TIMEOUT) {
+        Ok(Ok(())) => None,
+        Ok(Err(err)) => Some(err.to_string()),
+        Err(mpsc::RecvTimeoutError::Timeout) => Some(format!(
+            "refresh timed out after {}s",
+            REFRESH_TIMEOUT.as_secs()
+        )),
+        Err(mpsc::RecvTimeoutError::Disconnected) => Some("refresh worker stopped".to_string()),
+    }
+}
+
+fn refresh_root(default_db: &Path, args: &Value, db: &Path) -> PathBuf {
+    if let Some(repo) = args.get("repo").and_then(|v| v.as_str()) {
+        return PathBuf::from(repo);
+    }
+    repo_from_db(db)
+        .or_else(|| repo_from_db(default_db))
+        .or_else(|| db.parent().map(|path| path.to_path_buf()))
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+
+fn with_refresh_error(mut text: String, refresh_error: Option<String>) -> String {
+    if let Some(err) = refresh_error {
+        text.push_str("\n\nrefresh_error: ");
+        text.push_str(&err);
+    }
+    text
+}
+
 fn str_arg(args: &Value, key: &str) -> String {
     args.get(key)
         .and_then(|v| v.as_str())
@@ -334,11 +410,23 @@ fn usize_arg(args: &Value, key: &str, default: usize) -> usize {
         .unwrap_or(default)
 }
 
+fn bool_arg(args: &Value, key: &str, default: bool) -> bool {
+    args.get(key).and_then(|v| v.as_bool()).unwrap_or(default)
+}
+
 fn optional_string(args: &Value, key: &str) -> std::result::Result<(), String> {
     match args.get(key) {
         None => Ok(()),
         Some(value) if value.as_str().is_some() => Ok(()),
         _ => Err(format!("invalid string argument '{key}'")),
+    }
+}
+
+fn optional_bool(args: &Value, key: &str) -> std::result::Result<(), String> {
+    match args.get(key) {
+        None => Ok(()),
+        Some(value) if value.as_bool().is_some() => Ok(()),
+        _ => Err(format!("invalid boolean argument '{key}'")),
     }
 }
 

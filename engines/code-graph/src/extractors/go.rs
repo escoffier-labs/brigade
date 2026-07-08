@@ -6,6 +6,9 @@ use tree_sitter::Node as TsNode;
 use crate::extractors::common::{LangSpec, extract_with, node_text};
 use crate::model::{CallTarget, FileGraph, Import};
 
+/// Bump when Go extraction output can change for the same file content.
+pub const EXTRACTOR_FINGERPRINT: &str = "go-extractor-v1";
+
 /// Go builtins that parse as calls but never resolve to a project symbol.
 const GO_SKIP: &[&str] = &[
     "make", "len", "cap", "append", "panic", "recover", "new", "print", "println", "close",
