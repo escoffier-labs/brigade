@@ -236,7 +236,24 @@ def _gather_checks(ctx: DoctorContext) -> List[CheckResult]:
                 f"{len(missing_tools)} managed tools not installed ({', '.join(stations)}); optional, install with `brigade add <station>`",
             )
         )
+    checks.append(_check_receipts(ctx.target))
     return checks
+
+
+def _check_receipts(target: Path) -> CheckResult:
+    from . import receipts_cmd
+
+    try:
+        payload = receipts_cmd.verify_payload(target)
+    except Exception as exc:  # noqa: BLE001 - doctor must stay advisory
+        return (WARN, "receipts: verify", f"unable to inspect receipts: {type(exc).__name__}: {exc}")
+    summary = payload["summary"]
+    status = WARN if summary["mismatch"] or summary["missing"] else OK
+    detail = (
+        f"checked={summary['total']} ok={summary['ok']} mismatch={summary['mismatch']} "
+        f"missing={summary['missing']} legacy={summary['legacy']}"
+    )
+    return (status, "receipts: verify", detail)
 
 
 def _check_workspace_files(target: Path) -> List[CheckResult]:

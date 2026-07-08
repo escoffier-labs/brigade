@@ -86,6 +86,30 @@ def read_jsonl_dicts(path: Path) -> list[dict[str, Any]]:
     return records
 
 
+def canonical_json_digest(payload: Any, *, exclude_keys: set[str] | None = None) -> str:
+    """Return a full sha256 digest of payload's canonical sorted-key JSON.
+
+    exclude_keys applies to the TOP LEVEL only: it exists so an artifact can
+    carry its own digest field without self-reference. Nested keys with the
+    same name are content and must stay inside the hash, or edits to them
+    would be undetectable.
+    """
+    normalized = payload
+    if exclude_keys and isinstance(payload, dict):
+        normalized = {key: item for key, item in payload.items() if key not in exclude_keys}
+    rendered = json.dumps(normalized, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(rendered.encode("utf-8")).hexdigest()
+
+
+def file_sha256(path: Path) -> str:
+    """Return the sha256 digest for path's bytes, streamed in bounded chunks."""
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def stable_hash(value: object) -> str:
     """Return a 16-char sha256 fingerprint of value's canonical JSON rendering."""
     rendered = json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)

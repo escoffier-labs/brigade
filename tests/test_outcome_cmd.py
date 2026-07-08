@@ -1,6 +1,6 @@
 import json
 
-from brigade import cli, outcome, outcome_cmd, work_cmd
+from brigade import cli, localio, outcome, outcome_cmd, work_cmd
 
 from tests.work_cmd_test_helpers import _init_git_repo
 
@@ -14,6 +14,51 @@ def test_records_persist_under_git_tracked_memory_dir(tmp_path):
     assert (tmp_path / "memory" / "outcome" / "records.jsonl").is_file()
     # durable ledger must NOT live under the gitignored .brigade/ dir
     assert not (tmp_path / ".brigade" / "outcome" / "records.jsonl").exists()
+
+
+def test_appended_records_carry_tamper_evident_digest_chain(tmp_path):
+    first = outcome.OutcomeRecord("skill-x", "skill", "t1", "verify", 1, "ref1", "2026-06-20T00:00:00+00:00")
+    second = outcome.OutcomeRecord("skill-x", "skill", "t2", "verify", -1, "ref2", "2026-06-20T01:00:00+00:00")
+
+    outcome_cmd.append_records(tmp_path, [first])
+    outcome_cmd.append_records(tmp_path, [second])
+
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "memory" / "outcome" / "records.jsonl").read_text().splitlines()
+        if line.strip()
+    ]
+    assert rows[0]["prev_digest"] is None
+    assert rows[0]["digest"] == localio.canonical_json_digest(rows[0], exclude_keys={"digest"})
+    assert rows[1]["prev_digest"] == rows[0]["digest"]
+    assert rows[1]["digest"] == localio.canonical_json_digest(rows[1], exclude_keys={"digest"})
+
+
+def test_legacy_digestless_records_still_load_and_do_not_break_new_chain(tmp_path):
+    path = tmp_path / "memory" / "outcome" / "records.jsonl"
+    path.parent.mkdir(parents=True)
+    legacy = {
+        "artifact_id": "skill-x",
+        "artifact_kind": "skill",
+        "task_id": "t0",
+        "source": "verify",
+        "signal_value": 1,
+        "evidence_ref": "legacy",
+        "ts": "2026-06-20T00:00:00+00:00",
+    }
+    path.write_text(json.dumps(legacy, sort_keys=True) + "\n")
+
+    outcome_cmd.append_records(
+        tmp_path,
+        [outcome.OutcomeRecord("skill-x", "skill", "t1", "verify", 1, "ref1", "2026-06-20T01:00:00+00:00")],
+    )
+
+    loaded = outcome_cmd.load_records(tmp_path)
+    rows = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+    assert [record.evidence_ref for record in loaded] == ["legacy", "ref1"]
+    assert "digest" not in rows[0]
+    assert rows[1]["prev_digest"] is None
+    assert rows[1]["digest"] == localio.canonical_json_digest(rows[1], exclude_keys={"digest"})
 
 
 def test_score_reports_wilson_for_seeded_records(tmp_path, capsys):

@@ -6,7 +6,7 @@ import os
 import shutil
 from pathlib import Path
 
-from brigade import cli, runbook_cmd
+from brigade import cli, localio, runbook_cmd
 
 
 def _sha256(path):
@@ -377,8 +377,30 @@ def test_runbook_unpinned_receipt_keys_unchanged_and_no_pin_checks(tmp_path, cap
         "start_index",
         "steps",
         "receipt_path",
+        "digests",
     }
     assert "pin_checks" not in receipt
+
+
+def test_runbook_receipt_digests_recompute_from_payload_and_step_logs(tmp_path, capsys):
+    runbook = _write_runbook(tmp_path / "runbook.json")
+
+    assert runbook_cmd.run(target=tmp_path, runbook=runbook, approved=True, json_output=True) == 0
+    receipt = json.loads(capsys.readouterr().out)
+    digests = receipt["digests"]
+    run_dir = Path(receipt["receipt_path"]).parent
+
+    assert digests["algorithm"] == "sha256"
+    assert digests["receipt_sha256"] == localio.canonical_json_digest(receipt, exclude_keys={"digests"})
+    assert digests["logs"] == {
+        "01-hello.stderr.log": localio.file_sha256(run_dir / "01-hello.stderr.log"),
+        "01-hello.stdout.log": localio.file_sha256(run_dir / "01-hello.stdout.log"),
+        "02-again.stderr.log": localio.file_sha256(run_dir / "02-again.stderr.log"),
+        "02-again.stdout.log": localio.file_sha256(run_dir / "02-again.stdout.log"),
+    }
+
+    stored = json.loads((run_dir / "receipt.json").read_text())
+    assert stored["digests"] == digests
 
 
 def test_runbook_bash_script_step_plan_pins_only_argv0_interpreter(tmp_path, capsys):

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import hashlib
 import os
 import re
 import shlex
@@ -12,7 +11,13 @@ import subprocess
 import sys
 from pathlib import Path
 from typing import Any
-from .localio import stable_hash as _stable_hash, utc_now_iso as _now, write_json as _write_json
+from .localio import (
+    canonical_json_digest as _canonical_json_digest,
+    file_sha256 as _file_sha256,
+    stable_hash as _stable_hash,
+    utc_now_iso as _now,
+    write_json as _write_json,
+)
 
 # ADVISORY ONLY. This deny-list catches a few obviously destructive shapes, but
 # it is trivially bypassable by destructive filesystem commands or remote-shell wrappers and
@@ -121,11 +126,7 @@ def _pin_for_step(payload: dict[str, Any], step: dict[str, Any]) -> dict[str, An
 
 
 def _sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
+    return _file_sha256(path)
 
 
 def _run_version_cmd(resolved_path: str, version_cmd: str) -> dict[str, Any]:
@@ -545,6 +546,25 @@ def _execute_plan(
     }
     if pin_checks:
         receipt["pin_checks"] = pin_checks
+    log_digests: dict[str, str] = {}
+    for step in receipt["steps"]:
+        if not isinstance(step, dict):
+            continue
+        for key in ("stdout_log_path", "stderr_log_path"):
+            value = step.get(key)
+            if not isinstance(value, str) or not value:
+                continue
+            path = Path(value)
+            try:
+                log_name = str(path.relative_to(run_dir))
+            except ValueError:
+                log_name = path.name
+            log_digests[log_name] = _file_sha256(path)
+    receipt["digests"] = {
+        "algorithm": "sha256",
+        "logs": dict(sorted(log_digests.items())),
+        "receipt_sha256": _canonical_json_digest(receipt, exclude_keys={"digests"}),
+    }
     _write_json(run_dir / "receipt.json", receipt)
     if json_output:
         print(json.dumps(receipt, indent=2, sort_keys=True))

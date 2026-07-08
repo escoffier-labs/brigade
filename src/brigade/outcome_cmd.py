@@ -85,12 +85,25 @@ def load_records(target: Path) -> list[core.OutcomeRecord]:
     return [record for record in records if record is not None]
 
 
+def _last_record_digest(path: Path) -> str | None:
+    for row in reversed(localio.read_jsonl_dicts(path)):
+        digest = row.get("digest")
+        if isinstance(digest, str) and digest:
+            return digest
+    return None
+
+
 def append_records(target: Path, records: list[core.OutcomeRecord]) -> None:
     path = _records_path(target)
     path.parent.mkdir(parents=True, exist_ok=True)
+    prev_digest = _last_record_digest(path)
     with path.open("a", encoding="utf-8") as handle:
         for record in records:
-            handle.write(json.dumps(dataclasses.asdict(record), sort_keys=True) + "\n")
+            row = dataclasses.asdict(record)
+            row["prev_digest"] = prev_digest
+            row["digest"] = localio.canonical_json_digest(row, exclude_keys={"digest"})
+            handle.write(json.dumps(row, sort_keys=True) + "\n")
+            prev_digest = row["digest"]
 
 
 def _decisions_dir(target: Path) -> Path:
@@ -332,10 +345,11 @@ def capture(
     run_id: str = "latest",
     json_output: bool = False,
 ) -> int:
-    """Correlate a verify run's exit-code outcome into a signed record.
+    """Correlate a verify run's exit-code outcome into the digest-chained ledger.
 
     The signal is the run's status (a real exit code the model cannot author),
-    not an LLM judgment. The caller names which artifact the run exercised.
+    not an LLM judgment. The caller names which artifact the run exercised, and
+    appended records carry a tamper-evident prev_digest/digest chain.
     """
     target = target.expanduser().resolve()
     from .work_cmd import verification as verify_mod
@@ -573,6 +587,12 @@ def rank(*, target: Path, json_output: bool = False) -> int:
     for item in ordered:
         print(f"- {item.artifact_id} score={item.score:.3f} helped={item.helped} hurt={item.hurt}")
     return 0
+
+
+def doctor(*, target: Path, json_output: bool = False) -> int:
+    from . import receipts_cmd
+
+    return receipts_cmd.doctor(target=target, json_output=json_output)
 
 
 def record(

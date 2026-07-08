@@ -864,8 +864,13 @@ Work verification and closeout commands:
 - `brigade work verify plan` previews the local verification commands and current evidence snapshot without running anything.
 - `brigade work verify run` executes explicit local verification commands without a shell and writes receipts under `.brigade/work/verify-runs/`.
 - `brigade work verify runs` and `brigade work verify show <run-id>` inspect local verification receipts, command exit codes, summaries, and log paths.
+- `brigade receipts verify` recomputes SHA-256 receipt digests, stdout and stderr log digests, and the `memory/outcome/records.jsonl` digest chain. It reports `OK`, `MISMATCH`, `MISSING`, or `LEGACY` for each checked artifact and exits non-zero only for mismatch or missing evidence.
 - `brigade work closeout <session-id-or-latest>` writes a local closeout receipt under `.brigade/work/closeouts/` that collects task acceptance, latest verification, scanner sweep status, code review closeout state, handoff draft status, and session evidence.
 - `brigade work acceptance` reports pending task acceptance coverage, completion metadata gaps, completion-time acceptance evidence, code-review finding outcomes, and latest work closeout state. Release readiness and release candidate evidence include the same rollup.
+
+Verification receipts and runbook receipts include tamper-evident SHA-256 digests over the canonical receipt payload and referenced stdout and stderr logs. Outcome records include `prev_digest` and `digest` fields so the ledger tail points back through prior records. These are digests, not signatures. Optional signing and key ids may be added later, but current receipts do not prove authorship or bind an external identity.
+
+This digest layer detects common local drift, such as hand-edited receipt fields, missing logs, changed logs, edited outcome records, and deleted middle ledger records. It does not defend against an attacker who can rewrite both receipt contents and their stored digests, or an attacker who can rewrite and re-chain the outcome ledger tail from the changed point onward.
 
 Verification and closeout are local gates. Brigade does not mutate CI, GitHub, reviewers, scanner promotions, handoff ingestion, daemons, or schedulers. Verification commands run only when explicitly requested.
 
