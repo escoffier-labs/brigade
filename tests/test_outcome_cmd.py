@@ -38,6 +38,37 @@ def _write_verify_receipt(
     return run_dir / "receipt.json"
 
 
+def _write_run_receipt(
+    target,
+    run_id="brigade-run",
+    *,
+    status="ok",
+    dry_run=False,
+    read_only=False,
+    code_graph_delta=None,
+    context_eval=None,
+    started_at="2026-06-20T00:00:00+00:00",
+):
+    run_dir = target / ".brigade" / "runs" / run_id
+    run_dir.mkdir(parents=True)
+    receipt = {
+        "task": "fixture task",
+        "cwd": str(target),
+        "status": status,
+        "dry_run": dry_run,
+        "read_only": read_only,
+        "started_at": started_at,
+        "completed_at": started_at,
+        "artifacts": str(run_dir),
+    }
+    if code_graph_delta is not None:
+        receipt["code_graph_delta"] = code_graph_delta
+    if context_eval is not None:
+        receipt["context_eval"] = context_eval
+    localio.write_json(run_dir / "run.json", receipt)
+    return run_dir / "run.json"
+
+
 def test_records_persist_under_git_tracked_memory_dir(tmp_path):
     _seed(tmp_path, [outcome.OutcomeRecord("c", "card", "t", "verify", 1, "r", "2026-06-20T00:00:00+00:00")])
     assert (tmp_path / "memory" / "outcome" / "records.jsonl").is_file()
@@ -85,6 +116,10 @@ def test_legacy_digestless_records_still_load_and_do_not_break_new_chain(tmp_pat
     loaded = outcome_cmd.load_records(tmp_path)
     rows = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
     assert [record.evidence_ref for record in loaded] == ["legacy", "ref1"]
+    assert loaded[0].code_graph_delta is None
+    assert loaded[1].code_graph_delta is None
+    assert loaded[0].context_eval is None
+    assert loaded[1].context_eval is None
     assert "digest" not in rows[0]
     assert rows[1]["prev_digest"] is None
     assert rows[1]["digest"] == localio.canonical_json_digest(rows[1], exclude_keys={"digest"})
@@ -204,6 +239,158 @@ def test_capture_copies_compact_code_graph_delta_from_verify_receipt(tmp_path, c
     assert row["code_graph_delta"] == compact
     assert "sidecar_path" not in row["code_graph_delta"]
     assert row["digest"] == localio.canonical_json_digest(row, exclude_keys={"digest"})
+
+
+def test_capture_run_receipt_copies_delta_and_context_eval_into_digest_chain(tmp_path, capsys):
+    delta = {
+        "status": "ok",
+        "summary": "changed_symbols=2 edge_churn=1",
+        "changed_symbol_count": 2,
+        "edge_churn": 1,
+        "raw_counts": {"edges_added": 2, "edges_removed": 1},
+        "sidecar_path": "/tmp/not-copied.json",
+    }
+    context_eval = {
+        "counts": {"brief_files": 2, "delta_files": 2, "hits": 1, "missed": 1},
+        "hits": ["src/brigade/outcome_cmd.py"],
+        "missed": ["tests/test_outcome_cmd.py"],
+        "brief_hit_rate": 0.5,
+    }
+    run_json = _write_run_receipt(
+        tmp_path,
+        run_id="run-with-delta",
+        code_graph_delta=delta,
+        context_eval=context_eval,
+    )
+
+    assert (
+        outcome_cmd.capture(
+            target=tmp_path,
+            artifact_id="skill-x",
+            artifact_kind="skill",
+            task_id="t-run",
+            run_receipt="run-with-delta",
+            json_output=True,
+        )
+        == 0
+    )
+    payload = json.loads(capsys.readouterr().out)
+    compact = {
+        "status": "ok",
+        "summary": "changed_symbols=2 edge_churn=1",
+        "changed_symbol_count": 2,
+        "edge_churn": 1,
+        "raw_counts": {"edges_added": 2, "edges_removed": 1},
+    }
+    assert payload["record"]["source"] == "run"
+    assert payload["record"]["signal_value"] == 1
+    assert payload["record"]["evidence_ref"] == str(run_json)
+    assert payload["record"]["code_graph_delta"] == compact
+    assert payload["record"]["context_eval"] == context_eval
+
+    row = json.loads((tmp_path / "memory" / "outcome" / "records.jsonl").read_text())
+    assert row["code_graph_delta"] == compact
+    assert row["context_eval"] == context_eval
+    assert "sidecar_path" not in row["code_graph_delta"]
+    assert row["digest"] == localio.canonical_json_digest(row, exclude_keys={"digest"})
+    records = outcome_cmd.load_records(tmp_path)
+    assert records[0].context_eval == context_eval
+
+
+def test_capture_run_receipt_maps_ok_error_and_dry_run_signals(tmp_path, capsys):
+    _write_run_receipt(tmp_path, run_id="ok-run", status="ok")
+    _write_run_receipt(tmp_path, run_id="error-run", status="error")
+    _write_run_receipt(tmp_path, run_id="failed-run", status="failed")
+    _write_run_receipt(tmp_path, run_id="dry-run", status="dry-run", dry_run=True)
+    _write_run_receipt(tmp_path, run_id="read-only-run", status="ok", read_only=True)
+
+    expected = {
+        "ok-run": 1,
+        "error-run": -1,
+        "failed-run": -1,
+        "dry-run": 0,
+        "read-only-run": 0,
+    }
+    for run_id, signal in expected.items():
+        assert (
+            outcome_cmd.capture(
+                target=tmp_path,
+                artifact_id="skill-x",
+                run_receipt=run_id,
+                json_output=True,
+            )
+            == 0
+        )
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["record"]["signal_value"] == signal
+
+
+def test_capture_run_receipt_latest_uses_newest_run_json(tmp_path, capsys):
+    _write_run_receipt(tmp_path, run_id="older", status="error", started_at="2026-06-20T00:00:00+00:00")
+    latest = _write_run_receipt(tmp_path, run_id="newer", status="ok", started_at="2026-06-20T01:00:00+00:00")
+
+    assert outcome_cmd.capture(target=tmp_path, artifact_id="skill-x", run_receipt="latest", json_output=True) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["record"]["signal_value"] == 1
+    assert payload["record"]["evidence_ref"] == str(latest)
+
+
+def test_capture_errors_when_run_id_and_run_receipt_are_both_passed(tmp_path, capsys):
+    _write_verify_receipt(tmp_path, run_id="verify-run")
+    _write_run_receipt(tmp_path, run_id="brigade-run")
+
+    assert (
+        outcome_cmd.capture(
+            target=tmp_path,
+            artifact_id="skill-x",
+            run_id="verify-run",
+            run_receipt="brigade-run",
+        )
+        == 1
+    )
+    assert "pass either --run-id or --run-receipt, not both" in capsys.readouterr().err
+
+
+def test_cli_outcome_capture_accepts_run_receipt_and_rejects_both_flags(tmp_path, capsys):
+    _write_verify_receipt(tmp_path, run_id="verify-run")
+    _write_run_receipt(tmp_path, run_id="brigade-run")
+
+    assert (
+        cli.main(
+            [
+                "outcome",
+                "capture",
+                "skill-x",
+                "--target",
+                str(tmp_path),
+                "--run-receipt",
+                "brigade-run",
+                "--json",
+            ]
+        )
+        == 0
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["record"]["source"] == "run"
+
+    assert (
+        cli.main(
+            [
+                "outcome",
+                "capture",
+                "skill-x",
+                "--target",
+                str(tmp_path),
+                "--run-id",
+                "verify-run",
+                "--run-receipt",
+                "brigade-run",
+            ]
+        )
+        == 1
+    )
+    assert "pass either --run-id or --run-receipt, not both" in capsys.readouterr().err
 
 
 def test_capture_omits_code_graph_delta_when_verify_receipt_omits_it(tmp_path, capsys):
@@ -472,6 +659,65 @@ def test_rank_json_includes_graph_delta_counters_for_mixed_records(tmp_path, cap
     assert ranking["skill-x"]["graph_no_op"] == 1
     assert "graph_changing" not in ranking["skill-y"]
     assert "graph_no_op" not in ranking["skill-y"]
+
+
+def test_rank_and_reconcile_count_verify_and_run_receipt_graph_deltas_identically(tmp_path, capsys):
+    _write_verify_receipt(
+        tmp_path,
+        run_id="verify-changing",
+        code_graph_delta={"status": "ok", "changed_symbol_count": 1, "edge_churn": 0},
+    )
+    _write_run_receipt(
+        tmp_path,
+        run_id="run-no-op",
+        code_graph_delta={"status": "ok", "changed_symbol_count": 0, "edge_churn": 0},
+        started_at="2026-06-20T01:00:00+00:00",
+    )
+
+    assert (
+        outcome_cmd.capture(
+            target=tmp_path,
+            artifact_id="skill-x",
+            artifact_kind="skill",
+            task_id="t-verify",
+            run_id="verify-changing",
+            json_output=True,
+        )
+        == 0
+    )
+    capsys.readouterr()
+    assert (
+        outcome_cmd.capture(
+            target=tmp_path,
+            artifact_id="skill-x",
+            artifact_kind="skill",
+            task_id="t-run",
+            run_receipt="run-no-op",
+            json_output=True,
+        )
+        == 0
+    )
+    capsys.readouterr()
+
+    assert outcome_cmd.rank(target=tmp_path, json_output=True) == 0
+    ranking = {item["artifact_id"]: item for item in json.loads(capsys.readouterr().out)["ranking"]}
+    assert ranking["skill-x"]["helped"] == 2
+    assert ranking["skill-x"]["graph_changing"] == 1
+    assert ranking["skill-x"]["graph_no_op"] == 1
+
+    assert outcome_cmd.reconcile(target=tmp_path, apply=False, json_output=True) == 0
+    decision = {item["artifact_id"]: item for item in json.loads(capsys.readouterr().out)["decisions"]}["skill-x"]
+    assert decision["action"] == "install"
+    assert decision["graph_changing"] == 1
+    assert decision["graph_no_op"] == 1
+
+    assert outcome_cmd.rank(target=tmp_path, json_output=False) == 0
+    expected = (
+        f"outcome rank: {tmp_path.resolve()}\n"
+        f"- skill-x score={outcome.wilson_lower_bound(2, 2):.3f} helped=2 hurt=0 "
+        "graph: 1 changing / 1 no-op\n"
+    )
+    assert capsys.readouterr().out == expected
 
 
 def test_reconcile_dry_run_json_surfaces_graph_delta_counters(tmp_path, capsys):

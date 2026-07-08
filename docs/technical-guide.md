@@ -990,7 +990,20 @@ Work verification and non-read-only aboyeur runs can also record a GraphTrail de
 
 Delta capture is fail-open. Missing GraphTrail, sync failures, malformed diff JSON, and snapshot problems are recorded as status data instead of failing the run. `--no-code-graph`, read-only runs, and dry runs record skip statuses and do not run GraphTrail sync.
 
-When `brigade outcome capture` records a verification receipt with `code_graph_delta`, the outcome ledger keeps the compact fields `status`, `summary`, `changed_symbol_count`, `edge_churn`, and `raw_counts`. `brigade outcome rank` and dry-run `brigade outcome reconcile` surface per-artifact counts for scored records whose graph delta is changing or no-op. These counters are display-only today: promotion, rollback, cooldown, and ranking decisions still use the existing verified outcome rules.
+`brigade outcome capture` can copy code delta summaries from two receipt sources:
+
+```bash
+brigade outcome capture <artifact-id> --run-id <verify-run-id|latest>
+brigade outcome capture <artifact-id> --run-receipt <run-id|latest>
+```
+
+`--run-id` reads work verification receipts under `.brigade/work/verify-runs/`. `--run-receipt` reads aboyeur run receipts under `.brigade/runs/<run-id>/run.json`. The flags are mutually exclusive. Both sources store the same compact `code_graph_delta` fields in the outcome ledger: `status`, `summary`, `changed_symbol_count`, `edge_churn`, and `raw_counts`.
+
+Run-receipt signal mapping is fixed and local: `status: ok` records `+1`, `status: error` and `status: failed` record `-1`, and `dry_run: true` or `read_only: true` records neutral `0`. The evidence reference points at the `run.json` file that supplied the signal and delta. Verification receipts keep their existing mapping: completed is positive, failed or timed out is negative, and rejected or unknown statuses are neutral through the same outcome rule table.
+
+Run receipts usually carry the useful code delta because a non-read-only `brigade run` brackets the worker command itself: GraphTrail syncs before the worker edits, syncs again after the edits, and writes the delta into the run artifacts. Verification runs usually execute after the work, often as tests, linters, docs checks, or receipt checks. Those commands may not edit the source graph at all, so their deltas are commonly absent or no-op even when the preceding worker run made structural code changes.
+
+`brigade outcome rank` and dry-run `brigade outcome reconcile` surface per-artifact counts for scored records whose graph delta is changing or no-op. Verify-sourced and run-receipt-sourced deltas are counted identically once they are in the outcome ledger. These counters are display-only today: promotion, rollback, cooldown, and ranking decisions still use the existing verified outcome rules.
 
 For those counters, a delta is changing only when `status` is `ok` and `changed_symbol_count` or `edge_churn` is greater than zero. A delta is no-op only when `status` is `ok` and both counts are zero. Zero graph delta does not mean nothing happened: docs-only changes, test-only changes, and pre-v3 body-edit blind spots can still read as no-op.
 

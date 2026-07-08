@@ -22,6 +22,9 @@ SIGNAL_RULES: dict[tuple[str, str], int] = {
     ("verify", "completed"): 1,
     ("verify", "failed"): -1,
     ("verify", "timed_out"): -1,
+    ("run", "ok"): 1,
+    ("run", "error"): -1,
+    ("run", "failed"): -1,
     ("friction", "cleared"): 1,
     ("friction", "recurred"): -1,
     ("learnings", "cleared"): 1,
@@ -44,6 +47,7 @@ class OutcomeRecord:
     evidence_ref: str
     ts: str
     code_graph_delta: dict[str, Any] | None = None
+    context_eval: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
