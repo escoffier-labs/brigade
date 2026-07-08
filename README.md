@@ -252,7 +252,7 @@ The same review-and-receipt pattern covers the rest of an operator's day, and yo
 - **Daily loop**: `brigade work brief` shows pending work, imports, and warnings; `brigade daily status` keeps it bounded and cheap.
 - **Friction logs**: `brigade friction scan` mines recent notes, handoffs, and session artifacts for reviewable workflow friction.
 - **Security and scrub**: `brigade security scan` is a local read-only scanner for agent workspaces. `brigade scrub` gates content before it leaves the machine, and `brigade guard` exposes the embedded content guard CLI.
-- **Research**: `brigade research run` turns a question into a cited local report and a reviewable memory handoff.
+- **Research**: `brigade research run` turns a question into a cited local report and a reviewable memory handoff. Set `research_search_provider = "youcom"` in `.brigade/research.toml` to swap the web-search backend to You.com, or keep the default browser provider.
 - **Fleet and release**: health evidence across your local repos and release-readiness receipts, with no publish step.
 
 The full tour of every station lives in [docs/overview.md](docs/overview.md).

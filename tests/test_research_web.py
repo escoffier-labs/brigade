@@ -42,3 +42,31 @@ def test_provider_factory_default_is_playwright():
     prov = web.build_provider(None, {})
     assert isinstance(prov, web.PlaywrightProvider)
     assert prov.trust == "browser"
+
+
+def test_youcom_provider_parses_web_and_news_results(monkeypatch):
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self):
+            return (
+                b'{"results":{"web":[{"url":"https://ex.com/w","title":"Web Hit"}],'
+                b'"news":[{"url":"https://ex.com/n","title":"News Hit"}]}}'
+            )
+
+    monkeypatch.setattr(web.request, "urlopen", lambda req, timeout=15: FakeResponse())
+    prov = web.YouComProvider(api_key="k")
+    hits = prov.search("query", 2)
+    assert hits == [
+        {"url": "https://ex.com/w", "title": "Web Hit"},
+        {"url": "https://ex.com/n", "title": "News Hit"},
+    ]
+
+
+def test_provider_factory_supports_youcom_aliases():
+    prov = web.build_provider("youcom", {"ydc_api_key": "k"})
+    assert isinstance(prov, web.YouComProvider)
