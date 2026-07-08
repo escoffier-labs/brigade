@@ -61,6 +61,8 @@ pub fn sync_repo(conn: &Connection, root: &Path) -> Result<SyncSummary> {
 /// Like [`sync_repo`] but `force` rebuilds every file regardless of the stat/hash check.
 pub fn sync_repo_force(conn: &Connection, root: &Path, force: bool) -> Result<SyncSummary> {
     let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    let upgraded = crate::store::schema::upgrade_for_sync(conn)?;
+    let force = force || upgraded;
 
     // Stat pass: enumerate supported files without parsing them.
     let mut entries: Vec<Entry> = Vec::new();
@@ -157,8 +159,8 @@ pub fn sync_repo_force(conn: &Connection, root: &Path, force: bool) -> Result<Sy
         )?;
         for symbol in &graph.symbols {
             tx.execute(
-                "INSERT INTO symbols(id, kind, name, qualified_name, file_path, start_line, end_line, signature, container, content_hash)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                "INSERT INTO symbols(id, kind, name, qualified_name, file_path, start_line, end_line, signature, container, content_hash, body_hash)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
                 params![
                     symbol.id,
                     symbol.kind,
@@ -170,6 +172,7 @@ pub fn sync_repo_force(conn: &Connection, root: &Path, force: bool) -> Result<Sy
                     symbol.signature,
                     symbol.container,
                     symbol.content_hash,
+                    symbol.body_hash,
                 ],
             )?;
             tx.execute(

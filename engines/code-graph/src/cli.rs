@@ -443,8 +443,14 @@ fn render_diff(diff: &GraphDiff) -> String {
     let _ = writeln!(text, "# Graph diff\n");
     let _ = writeln!(
         text,
-        "nodes: +{} -{} ~{}   edges: +{} -{}\n",
-        s.added_nodes, s.removed_nodes, s.changed_nodes, s.added_edges, s.removed_edges
+        "nodes: +{} -{} ~{}   edges: +{} -{}   edges_line_insensitive: +{} -{}\n",
+        s.added_nodes,
+        s.removed_nodes,
+        s.changed_nodes,
+        s.added_edges,
+        s.removed_edges,
+        s.added_edges_line_insensitive,
+        s.removed_edges_line_insensitive
     );
 
     let section = |text: &mut String, title: &str, nodes: &[crate::model::DiffNode]| {

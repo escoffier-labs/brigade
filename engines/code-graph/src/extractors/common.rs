@@ -119,6 +119,7 @@ fn visit<L: LangSpec>(
                 .map_or("", |line| *line)
                 .trim()
                 .to_string();
+            let body_hash = hex_hash(line_span_text(ctx.source, start_line, end_line).as_bytes());
             let container = spec
                 .symbol_container(node, ctx.source)
                 .or_else(|| stack.last().map(|frame| frame.qualified_name.clone()));
@@ -137,6 +138,7 @@ fn visit<L: LangSpec>(
                 signature,
                 container,
                 content_hash: ctx.content_hash.to_string(),
+                body_hash: Some(body_hash),
             });
 
             stack.push(Frame {
@@ -169,6 +171,21 @@ fn visit_children<L: LangSpec>(
 
 pub fn node_text(node: TsNode<'_>, source: &[u8]) -> String {
     node.utf8_text(source).unwrap_or("").to_string()
+}
+
+fn line_span_text(source: &[u8], start_line: usize, end_line: usize) -> String {
+    if start_line == 0 || end_line < start_line {
+        return String::new();
+    }
+
+    String::from_utf8_lossy(source)
+        .split_inclusive('\n')
+        .enumerate()
+        .filter_map(|(idx, line)| {
+            let line_no = idx + 1;
+            (start_line <= line_no && line_no <= end_line).then_some(line)
+        })
+        .collect()
 }
 
 /// Text of a tree-sitter `string` node with quotes removed (prefers the `string_fragment` child).

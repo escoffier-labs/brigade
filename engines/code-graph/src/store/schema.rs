@@ -4,7 +4,7 @@ use anyhow::Result;
 use rusqlite::Connection;
 
 /// Bumped when the on-disk schema changes; surfaced in JSON packs from Phase 2 on.
-pub const SCHEMA_VERSION: u32 = 2;
+pub const SCHEMA_VERSION: u32 = 3;
 
 pub fn init_schema(conn: &Connection) -> Result<()> {
     conn.execute_batch(
@@ -29,6 +29,7 @@ pub fn init_schema(conn: &Connection) -> Result<()> {
             signature TEXT NOT NULL,
             container TEXT,
             content_hash TEXT NOT NULL,
+            body_hash TEXT,
             FOREIGN KEY(file_path) REFERENCES files(path) ON DELETE CASCADE
         );
 
@@ -75,6 +76,19 @@ pub fn init_schema(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// Apply write-path schema upgrades needed before sync can insert current rows.
+///
+/// Returns true when the symbols table was upgraded and the caller should force
+/// a full reindex so newly added nullable columns are populated for existing files.
+pub fn upgrade_for_sync(conn: &Connection) -> Result<bool> {
+    let mut upgraded = false;
+    if !table_has_column(conn, "symbols", "body_hash")? {
+        conn.execute("ALTER TABLE symbols ADD COLUMN body_hash TEXT", [])?;
+        upgraded = true;
+    }
+    Ok(upgraded)
+}
+
 fn ensure_import_columns(conn: &Connection) -> Result<()> {
     let mut stmt = conn.prepare("PRAGMA table_info(imports)")?;
     let columns = stmt
@@ -86,4 +100,12 @@ fn ensure_import_columns(conn: &Connection) -> Result<()> {
         }
     }
     Ok(())
+}
+
+pub fn table_has_column(conn: &Connection, table: &str, column: &str) -> Result<bool> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let columns = stmt
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(columns.iter().any(|existing| existing == column))
 }

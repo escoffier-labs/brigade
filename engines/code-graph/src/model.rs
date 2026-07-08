@@ -16,6 +16,7 @@ pub struct Symbol {
     pub signature: String,
     pub container: Option<String>,
     pub content_hash: String,
+    pub body_hash: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -155,6 +156,14 @@ pub struct DiffNode {
     pub file_path: String,
     pub start_line: usize,
     pub signature: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub previous: Option<DiffNodePrevious>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DiffNodePrevious {
+    pub start_line: usize,
+    pub signature: String,
 }
 
 /// A single call edge in a graph diff, canonicalized to symbol names + file so
@@ -174,14 +183,21 @@ pub struct GraphDiffCounts {
     pub added_nodes: usize,
     pub removed_nodes: usize,
     pub changed_nodes: usize,
+    /// Raw added call-edge rows, line-sensitive.
     pub added_edges: usize,
+    /// Raw removed call-edge rows, line-sensitive.
     pub removed_edges: usize,
+    /// Added call-edge count after canceling pairs that only moved lines.
+    pub added_edges_line_insensitive: usize,
+    /// Removed call-edge count after canceling pairs that only moved lines.
+    pub removed_edges_line_insensitive: usize,
 }
 
 /// Structural diff of two code graphs (before -> after). Nodes are keyed by
 /// `(file_path, qualified_name, kind)` so a symbol that only moves lines is not
 /// a spurious remove+add; a node is `changed` when that key survives but its
-/// signature or line-span differs. Edges are the `calls` set, diffed both ways.
+/// signature, line-span, or v3 body hash differs. Edges are the `calls` set,
+/// diffed both ways.
 #[derive(Debug, Serialize)]
 pub struct GraphDiff {
     pub schema_version: u32,

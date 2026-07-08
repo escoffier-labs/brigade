@@ -34,10 +34,12 @@ symbol right now?" but not "what did this change do to the call graph?"
   opens both DBs read-only and writes nothing.
 - **Nodes** are keyed by `(file_path, qualified_name, kind)` so a symbol that only
   moves lines is not a spurious remove+add. A node is `changed` when that key
-  survives but its signature or line-span differs.
+  survives but its signature, line-span, or v3 per-symbol body hash differs.
 - **Edges** are the `calls` set, canonicalized to
   `(source_file, source, line, target_file, target)` (the same canonical row the
-  golden-corpus resolver test asserts on), diffed both ways.
+  golden-corpus resolver test asserts on), diffed both ways. The JSON summary
+  reports raw line-sensitive edge counts and line-insensitive counts that cancel
+  call pairs whose only difference is line number.
 - The JSON output is compact by design so Brigade can attach a code-graph delta to
   an outcome receipt: a promotion then records the actual structural change, not
   just a commit range.
@@ -54,19 +56,20 @@ Implementation: `src/query/diff.rs` (`diff_graphs`), `src/model.rs`
 ## What we did differently, and why
 
 - **Two DB paths, not two git refs.** The minimal core is a pure read/compare.
-  Ref-awareness (auto `git worktree` + double-sync) is kept out so the feature
-  touches nothing in sync, schema, or git handling.
+  Ref-awareness (auto `git worktree` + double-sync) is kept out. The v1 diff
+  touched nothing in sync or schema; schema v3 later added `symbols.body_hash`
+  (with a one-pass reindex on upgrade) precisely so the diff could detect
+  body-only edits, but git handling stays out of scope.
 - **Full-graph query, not the traversal API.** The traversal helpers in
   `src/query/graph.rs` cap fan-out (`EDGE_CAP_PER_DIRECTION`) for interactive use.
   A diff must not truncate, so it reads the `edges` table directly.
-- **Node identity excludes line, "changed" uses signature + span.** GraphTrail's
+- **Node identity excludes line, "changed" uses signature + span + body hash.** GraphTrail's
   `symbols.id` bakes in `start_line`, so keying on it would read every line shift
   as remove+add. Keying on `(file_path, qualified_name, kind)` and classifying
-  "changed" by signature-or-span keeps a moved-but-identical symbol quiet. This is
-  a heuristic: `symbols.content_hash` is the *file's* hash, not a per-symbol body
-  hash, so a body edit that leaves the first line and span unchanged is not caught.
-  A per-symbol body hash would be the one optional schema addition to make
-  "changed" exact.
+  "changed" by signature-or-span keeps a moved-but-identical symbol quiet. v3 adds
+  `symbols.body_hash`, a per-symbol hash of the indexed line span, so a body edit
+  that leaves the first line and span unchanged is now caught. Mixed v2/v3 diffs
+  keep the older signature+span heuristic when either side lacks `body_hash`.
 
 ## Feedback worth sending Yohei
 

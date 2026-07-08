@@ -4,7 +4,7 @@
 use std::fs;
 
 use graphtrail::query::diff_graphs;
-use graphtrail::store::{init_schema, open_db, sync_repo};
+use graphtrail::store::{init_schema, meta, open_db, sync_repo};
 
 /// Sync `source` (a single mod.py) into a fresh DB under `dir` and return the connection.
 fn index(dir: &std::path::Path, source: &str) -> rusqlite::Connection {
@@ -48,7 +48,7 @@ def added():
 
     assert_eq!(
         json,
-        r#"{"schema_version":2,"summary":{"added_nodes":1,"removed_nodes":1,"changed_nodes":1,"added_edges":1,"removed_edges":1},"added_nodes":[{"kind":"function","qualified_name":"added","file_path":"mod.py","start_line":7,"signature":"def added():"}],"removed_nodes":[{"kind":"function","qualified_name":"removed","file_path":"mod.py","start_line":7,"signature":"def removed():"}],"changed_nodes":[{"kind":"function","qualified_name":"changed","file_path":"mod.py","start_line":4,"signature":"def changed(x):"}],"added_edges":[{"source":"added","source_file":"mod.py","target":"keep","target_file":"mod.py","line":8}],"removed_edges":[{"source":"removed","source_file":"mod.py","target":"keep","target_file":"mod.py","line":8}]}"#
+        r#"{"schema_version":3,"summary":{"added_nodes":1,"removed_nodes":1,"changed_nodes":1,"added_edges":1,"removed_edges":1,"added_edges_line_insensitive":1,"removed_edges_line_insensitive":1},"added_nodes":[{"kind":"function","qualified_name":"added","file_path":"mod.py","start_line":7,"signature":"def added():"}],"removed_nodes":[{"kind":"function","qualified_name":"removed","file_path":"mod.py","start_line":7,"signature":"def removed():"}],"changed_nodes":[{"kind":"function","qualified_name":"changed","file_path":"mod.py","start_line":4,"signature":"def changed(x):","previous":{"start_line":4,"signature":"def changed():"}}],"added_edges":[{"source":"added","source_file":"mod.py","target":"keep","target_file":"mod.py","line":8}],"removed_edges":[{"source":"removed","source_file":"mod.py","target":"keep","target_file":"mod.py","line":8}]}"#
     );
 }
 
@@ -111,6 +111,12 @@ def baz():
         "changed node carries the new signature, got {:?}",
         diff.changed_nodes[0].signature
     );
+    let previous = diff.changed_nodes[0]
+        .previous
+        .as_ref()
+        .expect("changed node carries previous metadata");
+    assert_eq!(previous.start_line, 1);
+    assert_eq!(previous.signature, "def foo():");
 
     assert!(diff.added_edges[0].source.contains("baz"));
     assert!(diff.added_edges[0].target.contains("foo"));
@@ -174,11 +180,14 @@ def caller():
     assert_eq!(diff.summary.removed_nodes, 0);
     assert_eq!(diff.summary.changed_nodes, 0);
 
-    // This deliberately locks the current line-sensitive churn behavior:
-    // CanonEdge includes the call line, so an insertion above an unchanged call
-    // site is reported as one removed edge and one added edge.
+    // Raw edges stay line-sensitive for inspection; the line-insensitive summary
+    // cancels an unchanged call pair whose only difference is the line number.
     assert_eq!(diff.summary.added_edges, 1);
     assert_eq!(diff.summary.removed_edges, 1);
+    assert_eq!(diff.summary.added_edges_line_insensitive, 0);
+    assert_eq!(diff.summary.removed_edges_line_insensitive, 0);
+    assert_eq!(diff.added_edges.len(), 1);
+    assert_eq!(diff.removed_edges.len(), 1);
     assert_eq!(diff.removed_edges[0].source, "caller");
     assert_eq!(diff.removed_edges[0].target, "target");
     assert_eq!(diff.removed_edges[0].line, 5);
@@ -188,7 +197,9 @@ def caller():
 }
 
 #[test]
-fn body_only_change_with_same_signature_and_span_is_not_a_changed_node() {
+fn body_only_change_with_same_signature_and_span_is_a_changed_node() {
+    // Fixed in v3: per-symbol body_hash catches edits that keep signature and
+    // span unchanged.
     let before = "\
 def value():
     total = 1
@@ -207,12 +218,14 @@ def value():
 
     let diff = diff_graphs(&before_conn, &after_conn).unwrap();
 
-    // Documented limitation from docs/design/activegraph-inspiration.md: diff
-    // fingerprints use signature plus line span, so a body-only edit with the
-    // same span is currently invisible as a changed node. This is not desired
-    // behavior, only the contract today.
-    assert!(diff.changed_nodes.is_empty(), "{:?}", diff.changed_nodes);
-    assert_eq!(diff.summary.changed_nodes, 0);
+    assert_eq!(diff.summary.changed_nodes, 1);
+    assert_eq!(diff.changed_nodes[0].qualified_name, "value");
+    let previous = diff.changed_nodes[0]
+        .previous
+        .as_ref()
+        .expect("changed node carries previous metadata");
+    assert_eq!(previous.start_line, 1);
+    assert_eq!(previous.signature, "def value():");
 }
 
 #[test]
@@ -236,4 +249,182 @@ def bar():
     assert_eq!(diff.summary.changed_nodes, 0);
     assert_eq!(diff.summary.added_edges, 0);
     assert_eq!(diff.summary.removed_edges, 0);
+}
+
+#[test]
+fn sync_upgrades_v2_schema_and_populates_body_hashes() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("mod.py"), "def value():\n    return 1\n").unwrap();
+
+    let db = dir.path().join("g.db");
+    let conn = open_db(&db).unwrap();
+    init_schema(&conn).unwrap();
+    sync_repo(&conn, dir.path()).unwrap();
+    conn.execute(
+        "UPDATE meta SET value = '2' WHERE key = 'schema_version'",
+        [],
+    )
+    .unwrap();
+    conn.execute("ALTER TABLE symbols DROP COLUMN body_hash", [])
+        .unwrap();
+
+    let summary = sync_repo(&conn, dir.path()).unwrap();
+
+    assert!(!summary.unchanged, "upgrade must force a reindex pass");
+    assert_eq!(
+        meta::read(&conn, "schema_version").unwrap().as_deref(),
+        Some("3")
+    );
+    let body_hash: Option<String> = conn
+        .query_row(
+            "SELECT body_hash FROM symbols WHERE qualified_name = 'value'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(
+        body_hash.as_deref().is_some_and(|hash| hash.len() == 64),
+        "body_hash was not populated: {body_hash:?}"
+    );
+}
+
+#[test]
+fn diff_reads_old_schema_without_body_hash_column() {
+    fn old_db() -> rusqlite::Connection {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE files (
+                path TEXT PRIMARY KEY,
+                content_hash TEXT NOT NULL,
+                size INTEGER NOT NULL,
+                modified_at INTEGER NOT NULL,
+                indexed_at INTEGER NOT NULL,
+                language TEXT NOT NULL
+            );
+            CREATE TABLE symbols (
+                id TEXT PRIMARY KEY,
+                kind TEXT NOT NULL,
+                name TEXT NOT NULL,
+                qualified_name TEXT NOT NULL,
+                file_path TEXT NOT NULL,
+                start_line INTEGER NOT NULL,
+                end_line INTEGER NOT NULL,
+                signature TEXT NOT NULL,
+                container TEXT,
+                content_hash TEXT NOT NULL
+            );
+            CREATE TABLE edges (
+                source TEXT NOT NULL,
+                target TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                line INTEGER,
+                PRIMARY KEY(source, target, kind, line)
+            );
+            "#,
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO files(path, content_hash, size, modified_at, indexed_at, language)
+             VALUES ('mod.py', 'file', 1, 1, 1, 'python')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO symbols(id, kind, name, qualified_name, file_path, start_line, end_line, signature, content_hash)
+             VALUES ('s', 'function', 'value', 'value', 'mod.py', 1, 3, 'def value():', 'file')",
+            [],
+        )
+        .unwrap();
+        conn
+    }
+
+    let before = old_db();
+    let after = old_db();
+
+    let diff = diff_graphs(&before, &after).unwrap();
+
+    assert_eq!(diff.summary.changed_nodes, 0);
+}
+
+#[test]
+fn diff_mixed_v2_v3_falls_back_to_signature_and_span_when_body_hash_missing() {
+    fn old_db() -> rusqlite::Connection {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE files (
+                path TEXT PRIMARY KEY,
+                content_hash TEXT NOT NULL,
+                size INTEGER NOT NULL,
+                modified_at INTEGER NOT NULL,
+                indexed_at INTEGER NOT NULL,
+                language TEXT NOT NULL
+            );
+            CREATE TABLE symbols (
+                id TEXT PRIMARY KEY,
+                kind TEXT NOT NULL,
+                name TEXT NOT NULL,
+                qualified_name TEXT NOT NULL,
+                file_path TEXT NOT NULL,
+                start_line INTEGER NOT NULL,
+                end_line INTEGER NOT NULL,
+                signature TEXT NOT NULL,
+                container TEXT,
+                content_hash TEXT NOT NULL
+            );
+            CREATE TABLE edges (
+                source TEXT NOT NULL,
+                target TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                line INTEGER,
+                PRIMARY KEY(source, target, kind, line)
+            );
+            "#,
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO files(path, content_hash, size, modified_at, indexed_at, language)
+             VALUES ('mod.py', 'file', 1, 1, 1, 'python')",
+            [],
+        )
+        .unwrap();
+        for (id, name, start_line) in [("a", "alpha", 1), ("b", "beta", 5)] {
+            conn.execute(
+                "INSERT INTO symbols(id, kind, name, qualified_name, file_path, start_line, end_line, signature, content_hash)
+                 VALUES (?1, 'function', ?2, ?2, 'mod.py', ?3, ?4, ?5, 'file')",
+                rusqlite::params![
+                    id,
+                    name,
+                    start_line,
+                    start_line + 2,
+                    format!("def {name}():")
+                ],
+            )
+            .unwrap();
+        }
+        conn
+    }
+
+    let new_source = "\
+def alpha():
+    value = 20
+    return value
+
+def beta():
+    value = 40
+    return value
+";
+    let new_dir = tempfile::tempdir().unwrap();
+    let new_conn = index(new_dir.path(), new_source);
+    let old_before = old_db();
+    let old_after = old_db();
+
+    let old_to_new = diff_graphs(&old_before, &new_conn).unwrap();
+    let new_to_old = diff_graphs(&new_conn, &old_after).unwrap();
+
+    assert_eq!(old_to_new.summary.changed_nodes, 0);
+    assert_eq!(new_to_old.summary.changed_nodes, 0);
+    assert!(old_to_new.changed_nodes.is_empty());
+    assert!(new_to_old.changed_nodes.is_empty());
 }
