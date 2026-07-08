@@ -230,9 +230,7 @@ def _verify_observations(
             continue
         status = str(receipt.get("status") or "")
         rows = receipt.get("commands") if isinstance(receipt.get("commands"), list) else []
-        all_exit_zero = all(
-            int(row.get("exit_code") or 0) == 0 for row in rows if isinstance(row, dict)
-        )
+        all_exit_zero = all(int(row.get("exit_code") or 0) == 0 for row in rows if isinstance(row, dict))
         observations.append(
             {
                 "source": "verify",
@@ -663,9 +661,7 @@ def _planned_runbook_path(target: Path, candidate: dict[str, Any]) -> Path:
     )
 
 
-def _plan_generated_runbook(
-    target: Path, runbook_payload: dict[str, Any]
-) -> tuple[dict[str, Any] | None, str | None]:
+def _plan_generated_runbook(target: Path, runbook_payload: dict[str, Any]) -> tuple[dict[str, Any] | None, str | None]:
     # Always validate the freshly generated payload via a temp file, never a
     # stale runbook.json already on disk at the destination path.
     from . import runbook_cmd
