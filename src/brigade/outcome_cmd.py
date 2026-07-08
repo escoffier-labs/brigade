@@ -14,6 +14,7 @@ import io
 import json
 import sys
 from pathlib import Path
+from typing import Any
 
 from . import localio, outcome as core
 
@@ -66,6 +67,7 @@ def _artifact_known(target: Path, artifact_id: str, kind: str) -> bool:
 
 def _record_from_dict(payload: dict) -> core.OutcomeRecord | None:
     code_graph_delta = payload.get("code_graph_delta")
+    context_eval = payload.get("context_eval")
     try:
         return core.OutcomeRecord(
             artifact_id=str(payload["artifact_id"]),
@@ -76,6 +78,7 @@ def _record_from_dict(payload: dict) -> core.OutcomeRecord | None:
             evidence_ref=str(payload.get("evidence_ref", "")),
             ts=str(payload.get("ts", "")),
             code_graph_delta=code_graph_delta if isinstance(code_graph_delta, dict) else None,
+            context_eval=context_eval if isinstance(context_eval, dict) else None,
         )
     except (KeyError, TypeError, ValueError):
         return None
@@ -99,6 +102,8 @@ def _record_payload(record: core.OutcomeRecord) -> dict:
     row = dataclasses.asdict(record)
     if row.get("code_graph_delta") is None:
         row.pop("code_graph_delta", None)
+    if row.get("context_eval") is None:
+        row.pop("context_eval", None)
     return row
 
 
@@ -125,6 +130,72 @@ def _compact_code_graph_delta(receipt: dict) -> dict | None:
         if key in delta
     }
     return compact or None
+
+
+def _compact_context_eval(receipt: dict) -> dict | None:
+    context_eval = receipt.get("context_eval")
+    if not isinstance(context_eval, dict):
+        return None
+    return dict(context_eval)
+
+
+def _run_receipts_root(target: Path) -> Path:
+    return target / ".brigade" / "runs"
+
+
+def _read_run_receipt(run_dir: Path) -> tuple[dict[str, Any] | None, Path]:
+    run_json = run_dir / "run.json"
+    if not run_json.is_file():
+        return None, run_json
+    try:
+        payload = json.loads(run_json.read_text())
+    except (OSError, json.JSONDecodeError):
+        return None, run_json
+    if not isinstance(payload, dict):
+        return None, run_json
+    return payload, run_json
+
+
+def _resolve_run_receipt(target: Path, run_id: str) -> tuple[dict[str, Any] | None, Path | None, str | None]:
+    root = _run_receipts_root(target)
+    if not root.is_dir():
+        return None, None, f"run receipt directory not found: {root}"
+    raw = Path(run_id).expanduser()
+    if raw.is_absolute() or len(raw.parts) > 1 or raw.exists():
+        run_dir = raw.resolve()
+        if not run_dir.is_dir():
+            return None, None, f"run receipt directory not found: {run_dir}"
+        payload, run_json = _read_run_receipt(run_dir)
+        if payload is None:
+            return None, None, f"run receipt not found or invalid: {run_json}"
+        return payload, run_json, None
+    runs: list[tuple[Path, dict[str, Any], Path]] = []
+    for child in root.iterdir():
+        if not child.is_dir():
+            continue
+        payload, run_json = _read_run_receipt(child)
+        if payload is not None:
+            runs.append((child, payload, run_json))
+    runs.sort(key=lambda item: str(item[1].get("started_at") or item[0].name), reverse=True)
+    if run_id == "latest":
+        if not runs:
+            return None, None, f"run receipt not found: {run_id}"
+        _, payload, run_json = runs[0]
+        return payload, run_json, None
+    matches = [(payload, run_json) for child, payload, run_json in runs if child.name.startswith(run_id)]
+    if not matches:
+        return None, None, f"run receipt not found: {run_id}"
+    if len(matches) > 1:
+        return None, None, f"run receipt id is ambiguous: {run_id}"
+    return matches[0][0], matches[0][1], None
+
+
+def _run_receipt_signal_status(receipt: dict) -> str:
+    if receipt.get("dry_run") is True:
+        return "dry-run"
+    if receipt.get("read_only") is True:
+        return "read-only"
+    return str(receipt.get("status") or "")
 
 
 def _decisions_dir(target: Path) -> Path:
@@ -409,21 +480,19 @@ def capture(
     artifact_id: str,
     artifact_kind: str = "skill",
     task_id: str | None = None,
-    run_id: str = "latest",
+    run_id: str | None = None,
+    run_receipt: str | None = None,
     json_output: bool = False,
 ) -> int:
-    """Correlate a verify run's exit-code outcome into the digest-chained ledger.
+    """Correlate a verified receipt outcome into the digest-chained ledger.
 
-    The signal is the run's status (a real exit code the model cannot author),
+    The signal is the receipt status (a real run result the model cannot author),
     not an LLM judgment. The caller names which artifact the run exercised, and
     appended records carry a tamper-evident prev_digest/digest chain.
     """
     target = target.expanduser().resolve()
-    from .work_cmd import verification as verify_mod
-
-    receipt, error = verify_mod._resolve_verify_receipt(target, run_id)
-    if receipt is None:
-        print(f"error: {error}", file=sys.stderr)
+    if run_id is not None and run_receipt is not None:
+        print("error: pass either --run-id or --run-receipt, not both", file=sys.stderr)
         return 1
     if not _artifact_known(target, artifact_id, artifact_kind):
         known = _known_skill_names(target) if artifact_kind == "skill" else _known_card_names(target)
@@ -434,23 +503,51 @@ def capture(
             f"trustworthy. known {artifact_kind}s: {hint}",
             file=sys.stderr,
         )
-    status = str(receipt.get("status") or "")
+    source = "verify"
+    effective_status = ""
+    evidence_ref = ""
+    ts = localio.utc_now_iso()
+    code_graph_delta: dict[str, Any] | None = None
+    context_eval: dict[str, Any] | None = None
+    if run_receipt is not None:
+        receipt, run_json, error = _resolve_run_receipt(target, run_receipt)
+        if receipt is None or run_json is None:
+            print(f"error: {error}", file=sys.stderr)
+            return 1
+        source = "run"
+        effective_status = _run_receipt_signal_status(receipt)
+        evidence_ref = str(run_json)
+        ts = str(receipt.get("completed_at") or receipt.get("started_at") or localio.utc_now_iso())
+        code_graph_delta = _compact_code_graph_delta(receipt)
+        context_eval = _compact_context_eval(receipt)
+    else:
+        from .work_cmd import verification as verify_mod
+
+        receipt, error = verify_mod._resolve_verify_receipt(target, run_id or "latest")
+        if receipt is None:
+            print(f"error: {error}", file=sys.stderr)
+            return 1
+        effective_status = str(receipt.get("status") or "")
+        evidence_ref = str(Path(str(receipt.get("path", ""))) / "receipt.json")
+        ts = str(receipt.get("completed_at") or receipt.get("started_at") or localio.utc_now_iso())
+        code_graph_delta = _compact_code_graph_delta(receipt)
     record = core.OutcomeRecord(
         artifact_id=artifact_id,
         artifact_kind=artifact_kind,
         task_id=task_id or "",
-        source="verify",
-        signal_value=core.signal_value("verify", status),
-        evidence_ref=str(Path(str(receipt.get("path", ""))) / "receipt.json"),
-        ts=str(receipt.get("completed_at") or receipt.get("started_at") or localio.utc_now_iso()),
-        code_graph_delta=_compact_code_graph_delta(receipt),
+        source=source,
+        signal_value=core.signal_value(source, effective_status),
+        evidence_ref=evidence_ref,
+        ts=ts,
+        code_graph_delta=code_graph_delta,
+        context_eval=context_eval,
     )
     append_records(target, [record])
     if json_output:
         print(json.dumps({"target": str(target), "record": _record_payload(record)}, indent=2, sort_keys=True))
         return 0
     print(f"outcome capture: {artifact_id}")
-    print(f"source: verify [{status}] signal={record.signal_value:+d}")
+    print(f"source: {source} [{effective_status}] signal={record.signal_value:+d}")
     print(f"evidence: {record.evidence_ref}")
     return 0
 

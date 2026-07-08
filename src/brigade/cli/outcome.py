@@ -23,11 +23,14 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_explain.add_argument("--json", action="store_true", help="Emit machine-readable JSON instead of text.")
     p_explain.set_defaults(func=_dispatch_explain)
 
-    p_capture = outcome_sub.add_parser("capture", help="Record a verify run's outcome for a learned artifact.")
+    p_capture = outcome_sub.add_parser("capture", help="Record a receipt outcome for a learned artifact.")
     p_capture.add_argument("artifact_id", help="Artifact id (card or skill) the run exercised.")
     p_capture.add_argument("--kind", default="skill", choices=["skill", "card"], help="Artifact kind.")
     p_capture.add_argument("--task-id", default=None, help="Task id to correlate the signal with.")
-    p_capture.add_argument("--run-id", default="latest", help="Verify run id to read (default: latest).")
+    p_capture.add_argument("--run-id", default=None, help="Verify run id to read (default: latest).")
+    p_capture.add_argument(
+        "--run-receipt", default=None, help="Brigade run id to read from .brigade/runs/<id>/run.json."
+    )
     p_capture.add_argument("--target", "-t", type=Path, default=Path("."))
     p_capture.add_argument("--json", action="store_true", help="Emit machine-readable JSON instead of text.")
     p_capture.set_defaults(func=_dispatch_capture)
@@ -114,6 +117,7 @@ def _dispatch_capture(args) -> int:
         artifact_kind=args.kind,
         task_id=args.task_id,
         run_id=args.run_id,
+        run_receipt=args.run_receipt,
         json_output=args.json,
     )
 
