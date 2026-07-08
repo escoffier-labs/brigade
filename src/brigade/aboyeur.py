@@ -16,6 +16,7 @@ from uuid import uuid4
 
 from . import agents
 from . import codex_appserver
+from . import graphtrail_delta
 from . import proc, runguard
 from . import run_control
 from .roster import Agent, Roster, is_cli_allowed, timeout_for, workers
@@ -1003,6 +1004,43 @@ def _agent_result_payload(result: agents.AgentResult) -> dict[str, object]:
     }
 
 
+def _code_graph_delta_skip(status: str) -> dict[str, object]:
+    reasons = {
+        "disabled": "disabled",
+        "skipped_read_only": "read-only run",
+        "skipped_dry_run": "dry run",
+        "unavailable": "cwd not set",
+    }
+    reason = reasons.get(status, status.replace("_", " "))
+    return {
+        "status": status,
+        "ok": False,
+        "summary": f"code graph delta skipped: {reason}",
+        "raw_counts": {},
+        "edge_churn": 0,
+        "changed_symbols": [],
+        "changed_symbol_count": 0,
+    }
+
+
+def _initial_code_graph_delta(
+    *,
+    code_graph_enabled: bool,
+    dry_run: bool,
+    read_only: bool,
+    cwd: Path | None,
+) -> dict[str, object] | None:
+    if not code_graph_enabled:
+        return _code_graph_delta_skip("disabled")
+    if read_only:
+        return _code_graph_delta_skip("skipped_read_only")
+    if dry_run:
+        return _code_graph_delta_skip("skipped_dry_run")
+    if cwd is None:
+        return _code_graph_delta_skip("unavailable")
+    return None
+
+
 def _parse_iso_datetime(value: object) -> datetime | None:
     if not isinstance(value, str) or not value.strip():
         return None
@@ -1173,6 +1211,12 @@ def _ground_truth_facts(ground_truth: dict[str, object] | None) -> str:
         lines.append(f"- verify_receipts: {len(verify_receipts)} latest={latest_run} status={latest_status}")
     else:
         lines.append("- verify_receipts: 0")
+    code_graph_delta = ground_truth.get("code_graph_delta")
+    if isinstance(code_graph_delta, dict):
+        summary = _one_line(str(code_graph_delta.get("summary") or code_graph_delta.get("status") or "unknown"))
+        if len(summary) > 240:
+            summary = summary[:237] + "..."
+        lines.append(f"- code_graph_delta: {summary}")
     return "\n".join(lines)
 
 
@@ -1234,6 +1278,7 @@ def _run_payload(
     brief_set: BriefSet | None = None,
     codex_transport: str | None = None,
     control_socket: Path | None = None,
+    code_graph_delta: dict[str, object] | None = None,
 ) -> dict[str, object]:
     payload: dict[str, object] = {
         "task": task,
@@ -1257,6 +1302,8 @@ def _run_payload(
             "attached": list(brief_set.attached) if brief_set is not None else [],
         },
     }
+    if code_graph_delta is not None:
+        payload["code_graph_delta"] = code_graph_delta
     if finished_at is not None:
         payload["finished_at"] = _utc_iso(finished_at)
         payload["duration_seconds"] = max(0.0, round((finished_at - started_at).total_seconds(), 3))
@@ -1303,8 +1350,18 @@ def run(
     brief_set = arbitrate_briefs(task, code_graph=code_graph, drift_impact=drift_impact)
     code_graph = brief_set.code_graph
     drift_impact = brief_set.drift_impact
+    code_graph_delta = _initial_code_graph_delta(
+        code_graph_enabled=code_graph_enabled,
+        dry_run=dry_run,
+        read_only=read_only,
+        cwd=cwd,
+    )
+    code_graph_delta_before: dict[str, object] | None = None
     if output_dir is not None:
         output_dir.mkdir(parents=True, exist_ok=True)
+        if code_graph_delta is None and cwd is not None:
+            code_graph_delta_before = graphtrail_delta.capture_before(cwd, output_dir)
+            code_graph_delta = code_graph_delta_before
         _write_json(output_dir / "roster.json", _roster_payload(roster))
         _write_json(
             output_dir / "run.json",
@@ -1321,6 +1378,7 @@ def run(
                 drift_impact=drift_impact,
                 brief_set=brief_set,
                 codex_transport=transport_for_payload,
+                code_graph_delta=code_graph_delta,
             ),
         )
 
@@ -1360,6 +1418,7 @@ def run(
                     brief_set=brief_set,
                     codex_transport=transport_for_payload,
                     control_socket=control_socket,
+                    code_graph_delta=code_graph_delta,
                 ),
             )
         print(f"error: {exc}", file=sys.stderr)
@@ -1389,6 +1448,7 @@ def run(
                     drift_impact=drift_impact,
                     brief_set=brief_set,
                     codex_transport=transport_for_payload,
+                    code_graph_delta=code_graph_delta,
                 ),
             )
         print(json.dumps(payload, indent=2))
@@ -1443,6 +1503,7 @@ def run(
                 brief_set=brief_set,
                 codex_transport=transport_for_payload,
                 control_socket=control_socket,
+                code_graph_delta=code_graph_delta,
             ),
         )
 
@@ -1466,7 +1527,11 @@ def run(
             control_server.close()
         if appserver is not None:
             appserver.close()
+    if output_dir is not None and code_graph_delta_before is not None and cwd is not None:
+        code_graph_delta = graphtrail_delta.capture_after_and_diff(cwd, output_dir, code_graph_delta_before)
     ground_truth = build_ground_truth(cwd, started_at)
+    if code_graph_delta is not None:
+        ground_truth["code_graph_delta"] = code_graph_delta
     if output_dir is not None:
         _write_json(
             output_dir / "worker-results.json",
@@ -1521,6 +1586,7 @@ def run(
                     drift_impact=drift_impact,
                     brief_set=brief_set,
                     codex_transport=transport_for_payload,
+                    code_graph_delta=code_graph_delta,
                 ),
             )
         print(f"error: orchestrator failed during synthesis: {final.detail}", file=sys.stderr)
@@ -1545,6 +1611,7 @@ def run(
                 brief_set=brief_set,
                 codex_transport=transport_for_payload,
                 control_socket=control_socket,
+                code_graph_delta=code_graph_delta,
             ),
         )
     if handoff_inbox is not None:
@@ -1581,6 +1648,7 @@ def run(
                         brief_set=brief_set,
                         codex_transport=transport_for_payload,
                         control_socket=control_socket,
+                        code_graph_delta=code_graph_delta,
                     ),
                 )
             print(f"error: {detail}", file=sys.stderr)
@@ -1607,6 +1675,7 @@ def run(
                     brief_set=brief_set,
                     codex_transport=transport_for_payload,
                     control_socket=control_socket,
+                    code_graph_delta=code_graph_delta,
                 ),
             )
     print(final.text)
