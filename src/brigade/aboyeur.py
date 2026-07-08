@@ -1064,6 +1064,20 @@ def _git_stdout(cwd: Path, *args: str) -> tuple[str, str | None]:
     return "", detail
 
 
+def _receipt_git_snapshot(cwd: Path | None) -> dict[str, object] | None:
+    if cwd is None:
+        return None
+    try:
+        head, head_error = _git_stdout(cwd, "rev-parse", "HEAD")
+        branch, branch_error = _git_stdout(cwd, "rev-parse", "--abbrev-ref", "HEAD")
+        status, status_error = _git_stdout(cwd, "status", "--porcelain")
+    except Exception:
+        return None
+    if head_error or branch_error or status_error:
+        return None
+    return {"head": head.strip(), "branch": branch.strip(), "dirty_files": len(status.splitlines())}
+
+
 def _receipt_command_payload(command: object) -> dict[str, object] | None:
     if not isinstance(command, dict):
         return None
@@ -1302,6 +1316,9 @@ def _run_payload(
             "attached": list(brief_set.attached) if brief_set is not None else [],
         },
     }
+    git = _receipt_git_snapshot(cwd)
+    if git is not None:
+        payload["git"] = git
     if code_graph_delta is not None:
         payload["code_graph_delta"] = code_graph_delta
     if finished_at is not None:

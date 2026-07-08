@@ -865,7 +865,7 @@ Work verification and closeout commands:
 - `brigade work verify run` executes explicit local verification commands without a shell and writes receipts under `.brigade/work/verify-runs/`.
 - `brigade work verify runs` and `brigade work verify show <run-id>` inspect local verification receipts, command exit codes, summaries, and log paths.
 - `brigade receipts verify` recomputes SHA-256 receipt digests, stdout and stderr log digests, and the `memory/outcome/records.jsonl` digest chain. It reports `OK`, `MISMATCH`, `MISSING`, or `LEGACY` for each checked artifact and exits non-zero only for mismatch or missing evidence.
-- `brigade receipts export miseledger` exports local work verification receipts and Brigade run receipts as `miseledger.adapter.v1` JSONL for offline import into MiseLedger. Stdout is the default output; pass `--out <path>` to write a file and `--limit <n>` to export only the newest receipts.
+- `brigade receipts export miseledger` exports local work verification receipts and Brigade run receipts as `miseledger.adapter.v1` JSONL for offline import into MiseLedger. Stdout is the default output; pass `--out <path>` to write a file, `--limit <n>` to export only the newest receipts, `--new-only` to skip hashes already recorded in the local export cursor, and `--import` to invoke `miseledger import adapter <file> --source brigade --json` after the JSONL file is written.
 - `brigade work closeout <session-id-or-latest>` writes a local closeout receipt under `.brigade/work/closeouts/` that collects task acceptance, latest verification, scanner sweep status, code review closeout state, handoff draft status, and session evidence.
 - `brigade work acceptance` reports pending task acceptance coverage, completion metadata gaps, completion-time acceptance evidence, code-review finding outcomes, and latest work closeout state. Release readiness and release candidate evidence include the same rollup.
 
@@ -879,6 +879,14 @@ The MiseLedger export is a bridge format, not a live sync. It gives another loca
 brigade receipts export miseledger --target . --out /tmp/brigade-receipts.jsonl
 miseledger import adapter /tmp/brigade-receipts.jsonl --source brigade --json
 ```
+
+For scheduled local indexing, use the built-in pipeline:
+
+```bash
+brigade receipts export miseledger --target . --new-only --import
+```
+
+`--new-only` stores exported `raw.hash` values in `.brigade/work/miseledger-export-cursor.json`, so later runs only write receipt items that have not already been exported. The cursor is an optimization, not the identity boundary. MiseLedger uses content-hash identity for adapter items, so double-importing the same receipt file remains harmless if the cursor is deleted, copied late, or skipped.
 
 The export is deterministic and idempotent for unchanged receipts: records are sorted newest first, external ids derive from receipt ids, hashes derive from stored receipt digests or deterministic fallbacks, and JSONL rendering uses stable key order. Re-importing the same file should update or skip the same MiseLedger adapter items rather than create duplicates.
 
