@@ -985,6 +985,10 @@ Work verification and non-read-only aboyeur runs can also record a GraphTrail de
 
 Delta capture is fail-open. Missing GraphTrail, sync failures, malformed diff JSON, and snapshot problems are recorded as status data instead of failing the run. `--no-code-graph`, read-only runs, and dry runs record skip statuses and do not run GraphTrail sync.
 
+When `brigade outcome capture` records a verification receipt with `code_graph_delta`, the outcome ledger keeps the compact fields `status`, `summary`, `changed_symbol_count`, `edge_churn`, and `raw_counts`. `brigade outcome rank` and dry-run `brigade outcome reconcile` surface per-artifact counts for scored records whose graph delta is changing or no-op. These counters are display-only today: promotion, rollback, cooldown, and ranking decisions still use the existing verified outcome rules.
+
+For those counters, a delta is changing only when `status` is `ok` and `changed_symbol_count` or `edge_churn` is greater than zero. A delta is no-op only when `status` is `ok` and both counts are zero. Zero graph delta does not mean nothing happened: docs-only changes, test-only changes, and pre-v3 body-edit blind spots can still read as no-op.
+
 Snapshots use sqlite backup instead of copying the db file directly. That keeps the baseline safe when the database is in WAL mode or GraphTrail is writing adjacent sqlite state. After the diff, Brigade deletes the temporary snapshot and records SHA-256 attestations for the before snapshot, after database, diff stdout, sidecar, and receipt log digests when those files exist.
 
 GraphTrail raw diff counts are preserved under `raw_counts`. Brigade also computes a line-insensitive edge churn value by stripping line and range fields from added and removed edges before pairing them, so pure line-number movement is less noisy than raw edge add/remove totals.

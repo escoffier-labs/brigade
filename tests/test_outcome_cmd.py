@@ -1,12 +1,41 @@
 import json
 
-from brigade import cli, localio, outcome, outcome_cmd, work_cmd
+from brigade import cli, localio, outcome, outcome_cmd, receipts_cmd, work_cmd
 
 from tests.work_cmd_test_helpers import _init_git_repo
 
 
 def _seed(target, records):
     outcome_cmd.append_records(target, records)
+
+
+def _write_verify_receipt(
+    target,
+    run_id="verify-run",
+    *,
+    status="completed",
+    code_graph_delta=None,
+    started_at="2026-06-20T00:00:00+00:00",
+):
+    run_dir = target / ".brigade" / "work" / "verify-runs" / run_id
+    run_dir.mkdir(parents=True)
+    receipt = {
+        "run_id": run_id,
+        "target": str(target),
+        "status": status,
+        "started_at": started_at,
+        "completed_at": started_at,
+        "commands": [],
+    }
+    if code_graph_delta is not None:
+        receipt["code_graph_delta"] = code_graph_delta
+    receipt["digests"] = {
+        "algorithm": "sha256",
+        "logs": {},
+        "receipt_sha256": localio.canonical_json_digest(receipt, exclude_keys={"digests"}),
+    }
+    localio.write_json(run_dir / "receipt.json", receipt)
+    return run_dir / "receipt.json"
 
 
 def test_records_persist_under_git_tracked_memory_dir(tmp_path):
@@ -138,6 +167,65 @@ def test_capture_records_a_passing_verify_run_as_helped(tmp_path, capsys):
     assert len(records) == 1 and records[0].evidence_ref.endswith("receipt.json")
 
 
+def test_capture_copies_compact_code_graph_delta_from_verify_receipt(tmp_path, capsys):
+    delta = {
+        "status": "ok",
+        "summary": "changed_symbols=3 edge_churn=2",
+        "changed_symbol_count": 3,
+        "edge_churn": 2,
+        "raw_counts": {"edges_added": 5, "edges_removed": 3},
+        "sidecar_path": "/tmp/not-copied.json",
+        "internal_debug": {"ignored": True},
+    }
+    _write_verify_receipt(tmp_path, run_id="with-delta", code_graph_delta=delta)
+
+    assert (
+        outcome_cmd.capture(
+            target=tmp_path,
+            artifact_id="skill-x",
+            artifact_kind="skill",
+            task_id="t-delta",
+            run_id="with-delta",
+            json_output=True,
+        )
+        == 0
+    )
+    payload = json.loads(capsys.readouterr().out)
+    compact = {
+        "status": "ok",
+        "summary": "changed_symbols=3 edge_churn=2",
+        "changed_symbol_count": 3,
+        "edge_churn": 2,
+        "raw_counts": {"edges_added": 5, "edges_removed": 3},
+    }
+    assert payload["record"]["code_graph_delta"] == compact
+
+    row = json.loads((tmp_path / "memory" / "outcome" / "records.jsonl").read_text())
+    assert row["code_graph_delta"] == compact
+    assert "sidecar_path" not in row["code_graph_delta"]
+    assert row["digest"] == localio.canonical_json_digest(row, exclude_keys={"digest"})
+
+
+def test_capture_omits_code_graph_delta_when_verify_receipt_omits_it(tmp_path, capsys):
+    _write_verify_receipt(tmp_path, run_id="legacy-without-delta")
+
+    assert (
+        outcome_cmd.capture(
+            target=tmp_path,
+            artifact_id="skill-x",
+            artifact_kind="skill",
+            run_id="legacy-without-delta",
+            json_output=True,
+        )
+        == 0
+    )
+    payload = json.loads(capsys.readouterr().out)
+    row = json.loads((tmp_path / "memory" / "outcome" / "records.jsonl").read_text())
+
+    assert "code_graph_delta" not in payload["record"]
+    assert "code_graph_delta" not in row
+
+
 def test_capture_records_a_failing_verify_run_as_hurt(tmp_path, capsys):
     _init_git_repo(tmp_path)
     assert work_cmd.verify_run(target=tmp_path, commands=['python3 -c "raise SystemExit(3)"'], timeout=30) == 3
@@ -236,6 +324,36 @@ def test_reconcile_holds_inside_cooldown_after_apply(tmp_path, capsys, monkeypat
     assert payload["decisions"] == []
 
 
+def test_rebuild_status_check_accepts_mixed_legacy_and_delta_ledger(tmp_path, capsys):
+    _seed(
+        tmp_path,
+        [
+            outcome.OutcomeRecord("card-x", "card", "t1", "verify", 1, "ref1", "2026-06-20T00:00:00+00:00"),
+            outcome.OutcomeRecord(
+                "card-x",
+                "card",
+                "t2",
+                "verify",
+                1,
+                "ref2",
+                "2026-06-20T01:00:00+00:00",
+                code_graph_delta={
+                    "status": "ok",
+                    "summary": "changed_symbols=1",
+                    "changed_symbol_count": 1,
+                },
+            ),
+        ],
+    )
+    assert outcome_cmd.reconcile(target=tmp_path, apply=True, json_output=True) == 0
+    capsys.readouterr()
+
+    assert outcome_cmd.rebuild_status(target=tmp_path, check=True, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["reproducible"] is True
+    assert payload["drift"] == []
+
+
 def test_reconcile_rolls_back_promoted_artifact_on_regression(tmp_path, capsys, monkeypatch):
     _stub_execute(monkeypatch)
     cfg = outcome.ReconcileConfig(cooldown_seconds=0)
@@ -276,6 +394,135 @@ def test_rank_orders_artifacts_by_verified_score(tmp_path, capsys):
     assert ids.index("skill-a") < ids.index("skill-b")
 
 
+def test_rank_human_surfaces_graph_delta_counters_for_delta_subjects(tmp_path, capsys):
+    _seed(
+        tmp_path,
+        [
+            outcome.OutcomeRecord(
+                "skill-x",
+                "skill",
+                "t1",
+                "verify",
+                1,
+                "ref1",
+                "2026-06-20T00:00:00+00:00",
+                code_graph_delta={"status": "ok", "changed_symbol_count": 2, "edge_churn": 0},
+            ),
+            outcome.OutcomeRecord(
+                "skill-x",
+                "skill",
+                "t2",
+                "verify",
+                1,
+                "ref2",
+                "2026-06-20T01:00:00+00:00",
+                code_graph_delta={"status": "ok", "changed_symbol_count": 0, "edge_churn": 0},
+            ),
+            outcome.OutcomeRecord(
+                "skill-x",
+                "skill",
+                "t3",
+                "verify",
+                1,
+                "ref3",
+                "2026-06-20T02:00:00+00:00",
+                code_graph_delta={"status": "skipped", "changed_symbol_count": 0, "edge_churn": 0},
+            ),
+        ],
+    )
+
+    assert outcome_cmd.rank(target=tmp_path, json_output=False) == 0
+
+    assert "graph: 1 changing / 1 no-op" in capsys.readouterr().out
+
+
+def test_rank_json_includes_graph_delta_counters_for_mixed_records(tmp_path, capsys):
+    _seed(
+        tmp_path,
+        [
+            outcome.OutcomeRecord(
+                "skill-x",
+                "skill",
+                "t1",
+                "verify",
+                1,
+                "ref1",
+                "2026-06-20T00:00:00+00:00",
+                code_graph_delta={"status": "ok", "changed_symbol_count": 0, "edge_churn": 1},
+            ),
+            outcome.OutcomeRecord(
+                "skill-x",
+                "skill",
+                "t2",
+                "verify",
+                1,
+                "ref2",
+                "2026-06-20T01:00:00+00:00",
+                code_graph_delta={"status": "ok", "changed_symbol_count": 0, "edge_churn": 0},
+            ),
+            outcome.OutcomeRecord("skill-y", "skill", "t3", "verify", 1, "ref3", "2026-06-20T02:00:00+00:00"),
+        ],
+    )
+
+    assert outcome_cmd.rank(target=tmp_path, json_output=True) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    ranking = {item["artifact_id"]: item for item in payload["ranking"]}
+    assert ranking["skill-x"]["graph_changing"] == 1
+    assert ranking["skill-x"]["graph_no_op"] == 1
+    assert "graph_changing" not in ranking["skill-y"]
+    assert "graph_no_op" not in ranking["skill-y"]
+
+
+def test_reconcile_dry_run_json_surfaces_graph_delta_counters(tmp_path, capsys):
+    _seed(
+        tmp_path,
+        [
+            outcome.OutcomeRecord(
+                "skill-x",
+                "skill",
+                "t1",
+                "verify",
+                1,
+                "ref1",
+                "2026-06-20T00:00:00+00:00",
+                code_graph_delta={"status": "ok", "changed_symbol_count": 1, "edge_churn": 0},
+            ),
+            outcome.OutcomeRecord(
+                "skill-x",
+                "skill",
+                "t2",
+                "verify",
+                1,
+                "ref2",
+                "2026-06-20T01:00:00+00:00",
+                code_graph_delta={"status": "ok", "changed_symbol_count": 0, "edge_churn": 0},
+            ),
+        ],
+    )
+
+    assert outcome_cmd.reconcile(target=tmp_path, apply=False, json_output=True) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    decision = {item["artifact_id"]: item for item in payload["decisions"]}["skill-x"]
+    assert decision["action"] == "install"
+    assert decision["graph_changing"] == 1
+    assert decision["graph_no_op"] == 1
+    assert not _status_file(tmp_path).exists()
+    assert not _decisions_dir(tmp_path).exists()
+
+
+def test_rank_human_output_unchanged_without_delta_records(tmp_path, capsys):
+    _seed(tmp_path, [outcome.OutcomeRecord("skill-x", "skill", "t1", "verify", 1, "ref1", "2026-06-20T00:00:00+00:00")])
+
+    assert outcome_cmd.rank(target=tmp_path, json_output=False) == 0
+
+    expected = (
+        f"outcome rank: {tmp_path.resolve()}\n- skill-x score={outcome.wilson_lower_bound(1, 1):.3f} helped=1 hurt=0\n"
+    )
+    assert capsys.readouterr().out == expected
+
+
 def test_record_appends_an_explicit_friction_cleared_signal(tmp_path, capsys):
     assert (
         outcome_cmd.record(
@@ -307,6 +554,28 @@ def test_record_friction_recurred_is_a_hurt_signal(tmp_path, capsys):
     )
     capsys.readouterr()
     assert outcome_cmd.load_records(tmp_path)[0].signal_value == -1
+
+
+def test_receipts_verify_accepts_code_graph_delta_outcome_chain(tmp_path, capsys):
+    _write_verify_receipt(
+        tmp_path,
+        run_id="with-delta",
+        code_graph_delta={
+            "status": "ok",
+            "summary": "edge_churn=1",
+            "edge_churn": 1,
+        },
+    )
+    assert outcome_cmd.capture(target=tmp_path, artifact_id="skill-x", run_id="with-delta", json_output=True) == 0
+    capsys.readouterr()
+
+    assert receipts_cmd.verify(target=tmp_path, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["summary"]["mismatch"] == 0
+    assert payload["summary"]["missing"] == 0
+    ledger_items = [item for item in payload["artifacts"] if item["artifact_type"] == "outcome-ledger-record"]
+    assert ledger_items
+    assert all(item["status"] == "OK" for item in ledger_items)
 
 
 def test_cli_outcome_rank_and_record_dispatch(tmp_path, capsys):

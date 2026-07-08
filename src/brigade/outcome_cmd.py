@@ -65,6 +65,7 @@ def _artifact_known(target: Path, artifact_id: str, kind: str) -> bool:
 
 
 def _record_from_dict(payload: dict) -> core.OutcomeRecord | None:
+    code_graph_delta = payload.get("code_graph_delta")
     try:
         return core.OutcomeRecord(
             artifact_id=str(payload["artifact_id"]),
@@ -74,6 +75,7 @@ def _record_from_dict(payload: dict) -> core.OutcomeRecord | None:
             signal_value=int(payload.get("signal_value", 0)),
             evidence_ref=str(payload.get("evidence_ref", "")),
             ts=str(payload.get("ts", "")),
+            code_graph_delta=code_graph_delta if isinstance(code_graph_delta, dict) else None,
         )
     except (KeyError, TypeError, ValueError):
         return None
@@ -93,17 +95,36 @@ def _last_record_digest(path: Path) -> str | None:
     return None
 
 
+def _record_payload(record: core.OutcomeRecord) -> dict:
+    row = dataclasses.asdict(record)
+    if row.get("code_graph_delta") is None:
+        row.pop("code_graph_delta", None)
+    return row
+
+
 def append_records(target: Path, records: list[core.OutcomeRecord]) -> None:
     path = _records_path(target)
     path.parent.mkdir(parents=True, exist_ok=True)
     prev_digest = _last_record_digest(path)
     with path.open("a", encoding="utf-8") as handle:
         for record in records:
-            row = dataclasses.asdict(record)
+            row = _record_payload(record)
             row["prev_digest"] = prev_digest
             row["digest"] = localio.canonical_json_digest(row, exclude_keys={"digest"})
             handle.write(json.dumps(row, sort_keys=True) + "\n")
             prev_digest = row["digest"]
+
+
+def _compact_code_graph_delta(receipt: dict) -> dict | None:
+    delta = receipt.get("code_graph_delta")
+    if not isinstance(delta, dict):
+        return None
+    compact = {
+        key: delta[key]
+        for key in ("status", "summary", "changed_symbol_count", "edge_churn", "raw_counts")
+        if key in delta
+    }
+    return compact or None
 
 
 def _decisions_dir(target: Path) -> Path:
@@ -276,10 +297,56 @@ def diff(*, target: Path, fork_a: Path, fork_b: Path, json_output: bool = False)
 
 
 def _scores_by_artifact(records: list[core.OutcomeRecord]) -> dict[str, core.OutcomeScore]:
+    grouped = _records_by_artifact(records)
+    return {artifact_id: core.score_records(artifact_id, recs) for artifact_id, recs in grouped.items()}
+
+
+def _records_by_artifact(records: list[core.OutcomeRecord]) -> dict[str, list[core.OutcomeRecord]]:
     grouped: dict[str, list[core.OutcomeRecord]] = {}
     for record in records:
         grouped.setdefault(record.artifact_id, []).append(record)
-    return {artifact_id: core.score_records(artifact_id, recs) for artifact_id, recs in grouped.items()}
+    return grouped
+
+
+def _graph_count_value(value) -> int | None:
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, int):
+        return value
+    return None
+
+
+def _graph_delta_counts(records: list[core.OutcomeRecord]) -> dict[str, int] | None:
+    deltas = [
+        record.code_graph_delta for record in core.scored_records(records) if isinstance(record.code_graph_delta, dict)
+    ]
+    if not deltas:
+        return None
+    counts = {"graph_changing": 0, "graph_no_op": 0}
+    for delta in deltas:
+        if delta.get("status") != "ok":
+            continue
+        changed_symbols = _graph_count_value(delta.get("changed_symbol_count"))
+        edge_churn = _graph_count_value(delta.get("edge_churn"))
+        if (changed_symbols is not None and changed_symbols > 0) or (edge_churn is not None and edge_churn > 0):
+            counts["graph_changing"] += 1
+        elif changed_symbols == 0 and edge_churn == 0:
+            counts["graph_no_op"] += 1
+    return counts
+
+
+def _graph_delta_counts_by_artifact(records: list[core.OutcomeRecord]) -> dict[str, dict[str, int]]:
+    return {
+        artifact_id: counts
+        for artifact_id, recs in _records_by_artifact(records).items()
+        if (counts := _graph_delta_counts(recs)) is not None
+    }
+
+
+def _graph_delta_human_suffix(counts: dict[str, int] | None) -> str:
+    if counts is None:
+        return ""
+    return f" graph: {counts['graph_changing']} changing / {counts['graph_no_op']} no-op"
 
 
 def score(*, target: Path, artifact_id: str | None = None, json_output: bool = False) -> int:
@@ -376,10 +443,11 @@ def capture(
         signal_value=core.signal_value("verify", status),
         evidence_ref=str(Path(str(receipt.get("path", ""))) / "receipt.json"),
         ts=str(receipt.get("completed_at") or receipt.get("started_at") or localio.utc_now_iso()),
+        code_graph_delta=_compact_code_graph_delta(receipt),
     )
     append_records(target, [record])
     if json_output:
-        print(json.dumps({"target": str(target), "record": dataclasses.asdict(record)}, indent=2, sort_keys=True))
+        print(json.dumps({"target": str(target), "record": _record_payload(record)}, indent=2, sort_keys=True))
         return 0
     print(f"outcome capture: {artifact_id}")
     print(f"source: verify [{status}] signal={record.signal_value:+d}")
@@ -452,6 +520,7 @@ def reconcile(
     config = config or core.ReconcileConfig()
     records = load_records(target)
     scores = _scores_by_artifact(records)
+    graph_counts = _graph_delta_counts_by_artifact(records)
     kinds: dict[str, str] = {}
     for record in records:
         kinds.setdefault(record.artifact_id, record.artifact_kind or "skill")
@@ -515,22 +584,26 @@ def reconcile(
                 applied.append(decision.artifact_id)
         localio.write_json(_status_path(target), {"version": 1, "artifacts": status_map})
 
+    decisions_payload = []
+    for decision, score_obj, prior_status in results:
+        item = {
+            "artifact_id": decision.artifact_id,
+            "action": decision.action,
+            "prior_status": prior_status,
+            "new_status": effective_status.get(decision.artifact_id, decision.new_status),
+            "decided_status": decision.new_status,
+            "reason": decision.reason,
+            "score": score_obj.score,
+            "execution": executions.get(decision.artifact_id, "dry-run"),
+        }
+        counts = graph_counts.get(decision.artifact_id)
+        if counts is not None:
+            item.update(counts)
+        decisions_payload.append(item)
     payload = {
         "target": str(target),
         "apply": apply,
-        "decisions": [
-            {
-                "artifact_id": decision.artifact_id,
-                "action": decision.action,
-                "prior_status": prior_status,
-                "new_status": effective_status.get(decision.artifact_id, decision.new_status),
-                "decided_status": decision.new_status,
-                "reason": decision.reason,
-                "score": score_obj.score,
-                "execution": executions.get(decision.artifact_id, "dry-run"),
-            }
-            for decision, score_obj, prior_status in results
-        ],
+        "decisions": decisions_payload,
         "applied": applied,
     }
     if json_output:
@@ -546,7 +619,11 @@ def reconcile(
         # On --apply, surface the physical execution so the output is never
         # byte-identical to a dry-run that did nothing.
         tail = f" -> {executions[decision.artifact_id]}" if apply and decision.artifact_id in executions else ""
-        print(f"- {decision.artifact_id} {prior_status} -> {shown_status} [{decision.action}] {decision.reason}{tail}")
+        graph_tail = _graph_delta_human_suffix(graph_counts.get(decision.artifact_id))
+        print(
+            f"- {decision.artifact_id} {prior_status} -> {shown_status} "
+            f"[{decision.action}] {decision.reason}{graph_tail}{tail}"
+        )
     return 0
 
 
@@ -558,24 +635,30 @@ def rank(*, target: Path, json_output: bool = False) -> int:
     by what a real signal has confirmed.
     """
     target = target.expanduser().resolve()
-    scores = _scores_by_artifact(load_records(target))
+    records = load_records(target)
+    scores = _scores_by_artifact(records)
+    graph_counts = _graph_delta_counts_by_artifact(records)
 
     def blended(item: core.OutcomeScore) -> float:
         return core.rank_score(confidence=0.0, outcome=item.score, keyword=0.0)
 
     ordered = sorted(scores.values(), key=lambda item: (-blended(item), item.artifact_id))
+    ranking_payload = []
+    for item in ordered:
+        entry = {
+            "artifact_id": item.artifact_id,
+            "score": item.score,
+            "rank_score": blended(item),
+            "helped": item.helped,
+            "hurt": item.hurt,
+        }
+        counts = graph_counts.get(item.artifact_id)
+        if counts is not None:
+            entry.update(counts)
+        ranking_payload.append(entry)
     payload = {
         "target": str(target),
-        "ranking": [
-            {
-                "artifact_id": item.artifact_id,
-                "score": item.score,
-                "rank_score": blended(item),
-                "helped": item.helped,
-                "hurt": item.hurt,
-            }
-            for item in ordered
-        ],
+        "ranking": ranking_payload,
     }
     if json_output:
         print(json.dumps(payload, indent=2, sort_keys=True))
@@ -585,7 +668,8 @@ def rank(*, target: Path, json_output: bool = False) -> int:
         print("ranking: none")
         return 0
     for item in ordered:
-        print(f"- {item.artifact_id} score={item.score:.3f} helped={item.helped} hurt={item.hurt}")
+        graph_tail = _graph_delta_human_suffix(graph_counts.get(item.artifact_id))
+        print(f"- {item.artifact_id} score={item.score:.3f} helped={item.helped} hurt={item.hurt}{graph_tail}")
     return 0
 
 
@@ -623,7 +707,7 @@ def record(
     )
     append_records(target, [new_record])
     if json_output:
-        print(json.dumps({"target": str(target), "record": dataclasses.asdict(new_record)}, indent=2, sort_keys=True))
+        print(json.dumps({"target": str(target), "record": _record_payload(new_record)}, indent=2, sort_keys=True))
         return 0
     print(f"outcome record: {artifact_id}")
     print(f"source: {source} [{status}] signal={new_record.signal_value:+d}")
