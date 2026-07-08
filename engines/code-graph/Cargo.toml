@@ -19,6 +19,7 @@ rusqlite = { version = "0.37", features = ["bundled"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sha2 = "0.10"
+ignore = "0.4.25"
 tree-sitter = "0.26.9"
 tree-sitter-go = "0.25.0"
 tree-sitter-javascript = "0.25.0"
@@ -26,7 +27,6 @@ tree-sitter-python = "0.25.0"
 tree-sitter-rust = "0.24.2"
 tree-sitter-typescript = "0.23.2"
 ureq = { version = "2", features = ["json"], optional = true }
-walkdir = "2.5"
 
 [features]
 # Optional, no-network-by-default integrations.

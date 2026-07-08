@@ -11,8 +11,8 @@ use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
 use anyhow::Result;
+use ignore::{DirEntry, WalkBuilder};
 use rusqlite::{Connection, params};
-use walkdir::{DirEntry, WalkDir};
 
 use crate::extractors::common::hex_hash;
 use crate::extractors::{index_file, language_for};
@@ -66,9 +66,22 @@ pub fn sync_repo_force(conn: &Connection, root: &Path, force: bool) -> Result<Sy
 
     // Stat pass: enumerate supported files without parsing them.
     let mut entries: Vec<Entry> = Vec::new();
-    for entry in WalkDir::new(&root).into_iter().filter_entry(keep_entry) {
+    let has_git_context = has_git_context(&root);
+    let mut walker = WalkBuilder::new(&root);
+    walker
+        .hidden(false)
+        .git_ignore(has_git_context)
+        .git_global(false)
+        .git_exclude(has_git_context)
+        .ignore(false)
+        .parents(true)
+        .filter_entry(keep_entry);
+    for entry in walker.build() {
         let entry = entry?;
-        if !entry.file_type().is_file() {
+        if !entry
+            .file_type()
+            .is_some_and(|file_type| file_type.is_file())
+        {
             continue;
         }
         let Some(lang) = language_for(entry.path()) else {
@@ -271,8 +284,18 @@ fn keep_entry(entry: &DirEntry) -> bool {
             | ".next"
             | ".turbo"
             | ".venv"
+            | "venv"
             | "__pycache__"
     )
+}
+
+fn has_git_context(root: &Path) -> bool {
+    root.ancestors().any(has_git_marker)
+}
+
+fn has_git_marker(dir: &Path) -> bool {
+    let git = dir.join(".git");
+    git.is_file() || git.join("HEAD").is_file()
 }
 
 /// Map file path -> (content_hash, size, modified_at) from the `files` table.

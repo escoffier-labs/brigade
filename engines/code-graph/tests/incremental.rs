@@ -1,10 +1,13 @@
 //! Integration tests for incremental sync: no-op when unchanged, rebuild on change, purge on delete.
 
+use std::collections::BTreeSet;
 use std::fs;
+use std::path::Path;
 use std::thread::sleep;
 use std::time::Duration;
 
 use graphtrail::store::{init_schema, meta, open_db, sync_repo};
+use rusqlite::Connection;
 
 #[test]
 fn second_sync_is_noop_then_change_and_delete_are_detected() {
@@ -130,4 +133,160 @@ fn unchanged_sync_refreshes_synced_at_without_reindexing_files() {
 
     assert!(second_synced_at > first_synced_at);
     assert_eq!(second_indexed_at, first_indexed_at);
+}
+
+#[test]
+fn sync_honors_root_gitignore_patterns() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    make_git_repo(root);
+    write_file(root.join(".gitignore"), "vendor/\n*.gen.py\n");
+    write_file(root.join("app.py"), "def kept():\n    return 1\n");
+    write_file(
+        root.join("vendor/pkg.py"),
+        "def vendored():\n    return 1\n",
+    );
+    write_file(
+        root.join("schema.gen.py"),
+        "def generated():\n    return 1\n",
+    );
+
+    let conn = open_graph(root);
+    let summary = sync_repo(&conn, root).unwrap();
+
+    assert_eq!(summary.files, 1);
+    assert_eq!(indexed_paths(&conn), paths(["app.py"]));
+}
+
+#[test]
+fn sync_honors_nested_gitignore_patterns() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    make_git_repo(root);
+    write_file(root.join("pkg/.gitignore"), "generated/\n");
+    write_file(root.join("pkg/kept.py"), "def kept():\n    return 1\n");
+    write_file(
+        root.join("pkg/generated/noise.py"),
+        "def ignored():\n    return 1\n",
+    );
+
+    let conn = open_graph(root);
+    let summary = sync_repo(&conn, root).unwrap();
+
+    assert_eq!(summary.files, 1);
+    assert_eq!(indexed_paths(&conn), paths(["pkg/kept.py"]));
+}
+
+#[test]
+fn non_git_root_ignores_only_the_hardcoded_floor() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write_file(root.join(".gitignore"), "ignored.py\n");
+    write_file(root.join("kept.py"), "def kept():\n    return 1\n");
+    write_file(
+        root.join("ignored.py"),
+        "def still_indexed():\n    return 1\n",
+    );
+    write_file(
+        root.join("vendor/pkg.py"),
+        "def vendored():\n    return 1\n",
+    );
+    write_file(
+        root.join("venv/lib/site.py"),
+        "def skipped():\n    return 1\n",
+    );
+    write_file(
+        root.join("node_modules/pkg/index.js"),
+        "export function skipped() { return 1 }\n",
+    );
+
+    let conn = open_graph(root);
+    let summary = sync_repo(&conn, root).unwrap();
+
+    assert_eq!(summary.files, 3);
+    assert_eq!(
+        indexed_paths(&conn),
+        paths(["ignored.py", "kept.py", "vendor/pkg.py"])
+    );
+}
+
+#[test]
+fn file_removed_by_new_gitignore_rule_self_cleans_from_db() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    make_git_repo(root);
+    write_file(root.join("app.py"), "def kept():\n    return 1\n");
+    write_file(
+        root.join("vendor/pkg.py"),
+        "def vendored():\n    return 1\n",
+    );
+
+    let conn = open_graph(root);
+    let first = sync_repo(&conn, root).unwrap();
+    assert_eq!(first.files, 2);
+    assert_eq!(indexed_paths(&conn), paths(["app.py", "vendor/pkg.py"]));
+
+    write_file(root.join(".gitignore"), "vendor/\n");
+    let second = sync_repo(&conn, root).unwrap();
+
+    assert!(!second.unchanged);
+    assert_eq!(second.deleted, 1);
+    assert_eq!(indexed_paths(&conn), paths(["app.py"]));
+}
+
+#[test]
+fn hidden_paths_are_indexed() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    make_git_repo(root);
+    write_file(
+        root.join(".github/workflows/check.py"),
+        "def hidden_workflow():\n    return 1\n",
+    );
+    write_file(
+        root.join(".hidden.py"),
+        "def hidden_file():\n    return 1\n",
+    );
+
+    let conn = open_graph(root);
+    let summary = sync_repo(&conn, root).unwrap();
+
+    assert_eq!(summary.files, 2);
+    assert_eq!(
+        indexed_paths(&conn),
+        paths([".github/workflows/check.py", ".hidden.py"])
+    );
+}
+
+fn make_git_repo(root: &Path) {
+    fs::create_dir_all(root.join(".git")).unwrap();
+    fs::write(root.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+}
+
+fn open_graph(root: &Path) -> Connection {
+    let conn = open_db(&root.join("g.db")).unwrap();
+    init_schema(&conn).unwrap();
+    conn
+}
+
+fn write_file(path: impl AsRef<Path>, content: &str) {
+    let path = path.as_ref();
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).unwrap();
+    }
+    fs::write(path, content).unwrap();
+}
+
+fn indexed_paths(conn: &Connection) -> BTreeSet<String> {
+    let mut stmt = conn
+        .prepare("SELECT path FROM files ORDER BY path")
+        .unwrap();
+    stmt.query_map([], |row| row.get::<_, String>(0))
+        .unwrap()
+        .map(|row| row.unwrap())
+        .collect()
+}
+
+fn paths<const N: usize>(paths: [&str; N]) -> BTreeSet<String> {
+    paths.into_iter().map(str::to_owned).collect()
 }

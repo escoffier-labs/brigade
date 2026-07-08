@@ -77,6 +77,8 @@ graphtrail --db "$DB" context "handoff lint" --json
 graphtrail --db "$DB" stats --json
 ```
 
+When the sync root is inside a git repository, `sync` follows `.gitignore` files and `.git/info/exclude`, while still indexing hidden paths such as `.github` if they are not ignored. Ignored files are skipped even if they are committed, because GraphTrail follows ignore rules rather than git status.
+
 A real `callers` query against GraphTrail's own indexed source:
 
 ```text
