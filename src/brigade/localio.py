@@ -42,16 +42,15 @@ def read_json_dict(path: Path) -> dict[str, Any] | None:
     return payload if isinstance(payload, dict) else None
 
 
-def write_json(path: Path, payload: dict[str, Any]) -> None:
-    """Write payload as indented, key-sorted JSON, atomically, creating parents.
+def write_text_atomic(path: Path, data: str) -> None:
+    """Write data to path atomically, creating parents.
 
     The write goes to a temp file in the same directory and is swapped in with
     os.replace, so a reader (or a crashed writer) never observes a half-written
-    receipt: it sees either the old file or the complete new one. On failure the
+    file: it sees either the old file or the complete new one. On failure the
     temp file is removed and the existing file is left untouched.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
-    data = json.dumps(payload, indent=2, sort_keys=True) + "\n"
     fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
     tmp_path = Path(tmp_name)
     try:
@@ -63,6 +62,11 @@ def write_json(path: Path, payload: dict[str, Any]) -> None:
     except BaseException:
         tmp_path.unlink(missing_ok=True)
         raise
+
+
+def write_json(path: Path, payload: dict[str, Any]) -> None:
+    """Write payload as indented, key-sorted JSON, atomically, creating parents."""
+    write_text_atomic(path, json.dumps(payload, indent=2, sort_keys=True) + "\n")
 
 
 def read_jsonl_dicts(path: Path) -> list[dict[str, Any]]:

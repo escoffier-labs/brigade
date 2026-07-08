@@ -29,6 +29,19 @@ def _wait_for(predicate, *, timeout: float = 5.0):
     raise AssertionError("timed out waiting for condition")
 
 
+def _control_socket_from_run_json(run_dir: Path) -> Path | None:
+    # Polled while aboyeur.run rewrites run.json on another thread, so tolerate
+    # a file that is missing or not yet parseable and let _wait_for retry.
+    try:
+        meta = json.loads((run_dir / "run.json").read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(meta, dict):
+        return None
+    socket_value = meta.get("control_socket")
+    return Path(socket_value) if socket_value else None
+
+
 class _FakeTurn:
     thread_id = "thread-1"
 
@@ -142,13 +155,7 @@ def test_run_records_control_socket_and_cli_steers_live_worker(tmp_path, monkeyp
     )
     thread.start()
 
-    control_socket = _wait_for(
-        lambda: (
-            Path(json.loads((run_dir / "run.json").read_text()).get("control_socket", ""))
-            if (run_dir / "run.json").is_file() and json.loads((run_dir / "run.json").read_text()).get("control_socket")
-            else None
-        )
-    )
+    control_socket = _wait_for(lambda: _control_socket_from_run_json(run_dir))
     _wait_for(lambda: control_socket.exists())
 
     assert cli.main(["runs", "steer", str(run_dir), "cook", "please finish"]) == 0
@@ -198,13 +205,7 @@ def test_cli_interrupt_leaves_live_worker_resumable(tmp_path, monkeypatch, capsy
     )
     thread.start()
 
-    control_socket = _wait_for(
-        lambda: (
-            Path(json.loads((run_dir / "run.json").read_text()).get("control_socket", ""))
-            if (run_dir / "run.json").is_file() and json.loads((run_dir / "run.json").read_text()).get("control_socket")
-            else None
-        )
-    )
+    control_socket = _wait_for(lambda: _control_socket_from_run_json(run_dir))
     _wait_for(lambda: control_socket.exists())
 
     assert cli.main(["runs", "interrupt", str(run_dir), "cook"]) == 0
