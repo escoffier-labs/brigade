@@ -476,6 +476,26 @@ The web tier needs the optional browser dependency, installed once:
 pip install 'brigade[research]' && playwright install chromium
 ```
 
+PageForge can serve as the web provider when you want searches and fetched pages banked in its local SQLite cache instead of reading each page through headless Chromium:
+
+```toml
+[search]
+research_search_provider = "pageforge"
+pageforge_command = ["node", "/path/to/pageforge/bin/pageforge.js"]
+pageforge_db_path = "/path/to/pageforge.sqlite"
+pageforge_timeout = 120
+```
+
+Then run:
+
+```bash
+brigade research run "latest on X" --web --provider pageforge
+```
+
+`pageforge_command` is the argv prefix Brigade calls before `search_web`, `ingest_url`, and `get`.
+`pageforge_db_path` is optional. When set, Brigade passes it to PageForge as `--db`.
+If PageForge extracts only very short markdown from a fetched page, Brigade tries the Playwright reader once and keeps the PageForge result if that fallback is unavailable or still thin.
+
 Local-only runs need no extra dependency. Without the extra, `--web` records a blocker telling you to install it rather than crashing.
 
 ### Daily Work Loop
