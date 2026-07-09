@@ -205,6 +205,28 @@ def test_surface_rejects_non_finite_timeout(tmp_path, timeout):
         station_manifest.load(str(path))
 
 
+def test_surface_rejects_integer_timeout_too_large_for_float(tmp_path):
+    path = _write_manifest(
+        tmp_path,
+        tools=[
+            {
+                "name": "example-sidecar",
+                "command": "example-sidecar",
+                "surfaces": [
+                    {
+                        "kind": "verify-exit",
+                        "command": ["example-sidecar", "--version"],
+                        "timeout_seconds": 10**400,
+                    }
+                ],
+            }
+        ],
+    )
+
+    with pytest.raises(ValueError, match="range"):
+        station_manifest.load(str(path))
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     [

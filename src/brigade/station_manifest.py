@@ -162,7 +162,13 @@ def _parse_surface(raw: object, index: int) -> ManifestSurface:
     if timeout is not None:
         if not isinstance(timeout, int | float) or isinstance(timeout, bool):
             raise ValueError("station manifest field 'surface.timeout_seconds' must be a number")
-        if not math.isfinite(float(timeout)):
+        try:
+            timeout_number = float(timeout)
+        except OverflowError as exc:
+            raise ValueError(
+                "station manifest field 'surface.timeout_seconds' must be within finite numeric range"
+            ) from exc
+        if not math.isfinite(timeout_number):
             raise ValueError("station manifest field 'surface.timeout_seconds' must be finite")
     max_chars = raw.get("max_chars")
     if max_chars is not None and (not isinstance(max_chars, int) or isinstance(max_chars, bool)):

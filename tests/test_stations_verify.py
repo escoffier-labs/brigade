@@ -117,6 +117,21 @@ def test_cli_verify_manifest_read_race_is_structured_usage_error(tmp_path, monke
     assert "could not be read" in payload["detail"]
 
 
+def test_cli_verify_oversized_timeout_is_structured_usage_error(tmp_path, capsys):
+    manifest = _write_manifest(tmp_path / "sidecar")
+    raw = json.loads(manifest.read_text())
+    raw["tools"][0]["surfaces"][0]["timeout_seconds"] = 10**400
+    manifest.write_text(json.dumps(raw))
+
+    assert cli.main(["stations", "verify", str(manifest), "--json"]) == 2
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert payload["status"] == "error"
+    assert payload["exit_code"] == 2
+    assert "numeric range" in payload["detail"]
+    assert "Traceback" not in captured.err
+
+
 def test_discovery_and_verification_never_execute_install_argv(tmp_path, helper_path):
     marker = tmp_path / "install-ran"
     manifest = _write_manifest(tmp_path / "sidecar")
