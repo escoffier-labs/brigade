@@ -1182,13 +1182,13 @@ brigade add ../agentpantry   # inspect an external station.json
 
 `security` is a built-in station with no external managed tool yet.
 
-`pantry` (alias `larder`) is the agent session auth sync station.
-`brigade add pantry` installs agentpantry via `go install github.com/escoffier-labs/agentpantry/cmd/agentpantry@latest`.
+`pantry` (alias `larder`) is the agent session auth sync station. Agent Pantry remains a process-boundary Go binary; Brigade never imports it.
+`brigade add pantry` installs agentpantry via `go install github.com/escoffier-labs/agentpantry/cmd/agentpantry@latest` and prints the first-class operator path (setup plan, doctor, expiry-alert).
 `brigade doctor` health-checks it by shelling out to `agentpantry doctor --json` with a compatibility fallback to `agentpantry status --json`.
 Like the memory satellites, agentpantry inspects host-global state, so its checks are advisory and never FAIL a workspace run: an unwired install (exit 2, no config) is a `WARN`, and setup problems are surfaced as advisory pantry health.
-Use `brigade pantry status` for a pantry-specific status readout, `brigade pantry setup plan --role source|sink` to preview or write a reviewed setup plan, and `brigade pantry service plan --role source|sink` to preview or write service setup steps.
-Use `brigade pantry expiry-alert` to report near-expiry sessions and preview the `agent-notify` message Brigade would send. Add `--send` to actually invoke `agent-notify`.
-These plan commands do not generate or copy PSKs, start services, or mutate browser, GitHub, OpenClaw, or other auth files.
+Use `brigade pantry status` and `brigade pantry doctor` for pantry-specific health with explicit `next` commands, `brigade pantry setup plan --role source|sink` to preview or write a reviewed setup plan, and `brigade pantry service plan --role source|sink` to preview or write service setup steps.
+Use `brigade pantry expiry-alert` to report near-expiry sessions and preview the `agent-notify` message Brigade would send. Add `--send` only after `brigade add notifications` if you want delivery.
+These plan commands do not generate or copy PSKs, start services, or mutate browser, GitHub, OpenClaw, or other auth files. Product page: https://brigade.tools/agentpantry.
 
 Security commands:
 

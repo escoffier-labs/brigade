@@ -515,12 +515,23 @@ Exports are explicit and receipt-backed. Brigade records the source fingerprint 
 
 ## Agent Pantry
 
-The `pantry` station (alias `larder`) wires [Agent Pantry](https://github.com/escoffier-labs/agentpantry) into the same operator workflow: encrypted browser session, cookie, and secret sync between agent machines. The pantry is where the chef stores the cookies and the secret recipes.
+The `pantry` station (alias `larder`) wires [Agent Pantry](https://github.com/escoffier-labs/agentpantry) into the same operator workflow: encrypted browser session, cookie, and secret sync between agent machines. Agent Pantry stays a **separate Go binary** (process boundary). Brigade installs it, plans setup, and health-checks it; it does not mint PSKs, start source/sink, or mutate browser auth files. The pantry is where the chef stores the cookies and the secret recipes.
 
-- `brigade add pantry` installs agentpantry.
-- `brigade pantry status` gives a pantry-specific health readout.
-- `brigade pantry setup plan --role source|sink` previews or writes a reviewed setup plan.
-- Pantry checks are advisory. An unwired install warns but never fails a workspace run.
+Multi-machine path (sink on the agent host, source on the daily driver):
+
+```bash
+brigade add pantry
+brigade pantry setup plan --role sink --peer 127.0.0.1:8787
+brigade pantry setup plan --role source --peer <sink-host>:8787
+# run the printed agentpantry commands yourself, then:
+brigade pantry doctor
+brigade pantry expiry-alert          # preview near-expiry cookies
+brigade pantry expiry-alert --send   # optional agent-notify (install notifications first)
+```
+
+- `brigade pantry status` / `brigade pantry doctor` — advisory health with next commands.
+- `brigade pantry setup plan` / `service plan` — review-only plans under `.brigade/pantry/plans/`.
+- Pantry checks are advisory for workspace `doctor`. An unwired install warns but never fails a workspace run.
 
 ## For OpenClaw Users
 
