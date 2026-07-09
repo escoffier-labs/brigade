@@ -77,6 +77,7 @@ def test_sync_write_creates_all_repo_scoped_targets(tmp_path):
     assert claude["mcpServers"]["github"]["env"]["GITHUB_TOKEN"] == "${GITHUB_TOKEN}"
     assert (tmp_path / ".cursor/mcp.json").is_file()
     assert (tmp_path / ".codex/config.toml").is_file()
+    assert (tmp_path / ".grok/config.toml").is_file()
     assert (tmp_path / ".vscode/mcp.json").is_file()
     assert (tmp_path / "opencode.json").is_file()
     # user-scoped antigravity is NOT written without --user-scope
@@ -268,3 +269,15 @@ def test_unsupported_harness_reported_by_doctor(tmp_path, capsys):
     mcp_cmd.doctor(target=tmp_path, json_output=True)
     payload = _payload(capsys)
     assert "aider" in payload["unsupported_harnesses"]
+
+
+def test_grok_harness_is_supported_by_doctor(tmp_path, capsys):
+    from brigade.config import Config, write_config
+    from brigade.selection import Selection
+
+    _init(tmp_path)
+    write_config(tmp_path, Config(version=1, selection=Selection(depth="repo", harnesses=["grok"])))
+    capsys.readouterr()
+    assert mcp_cmd.doctor(target=tmp_path, json_output=True) == 0
+    payload = _payload(capsys)
+    assert "grok" not in payload["unsupported_harnesses"]

@@ -54,6 +54,7 @@ tool expands at launch.
 | Claude Code | `.mcp.json` | JSON `mcpServers`; remote `{type,url}` |
 | Cursor | `.cursor/mcp.json` | JSON `mcpServers` (same as Claude) |
 | Codex CLI | `.codex/config.toml` | TOML `[mcp_servers.<name>]`, merged surgically (other tables/comments preserved) |
+| Grok CLI | `.grok/config.toml` | TOML `[mcp_servers.<name>]`, same surgical merge as Codex (`grok-user` → `~/.grok/config.toml` with `--user-scope`) |
 | VS Code | `.vscode/mcp.json` | JSON `servers`; secrets become top-level `inputs[]` + `${input:VAR}` |
 | OpenCode | `opencode.json` | JSON `mcp`; `{type:"local",command:[cmd,...args],environment}` |
 | Antigravity | `~/.gemini/config/mcp_config.json` | JSON `mcpServers`; remote uses `serverUrl`. **User-scoped** (`--user-scope`) |

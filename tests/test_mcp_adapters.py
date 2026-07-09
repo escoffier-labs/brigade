@@ -98,8 +98,31 @@ def test_codex_write_preserves_foreign_tables_and_comments():
     assert parsed["model"] == "gpt-5.5"
 
 
+def test_grok_write_preserves_foreign_tables_and_comments():
+    existing = '# my grok config\nmodel = "grok-4"\n\n[model_providers.xai]\nname = "xAI"\n'
+    adapter = A.ADAPTERS["grok"]
+    server_dict = adapter.to_provider(_stdio())
+    out = adapter.write_file(existing, {"github": server_dict}, set())
+    assert 'model = "grok-4"' in out
+    assert "[model_providers.xai]" in out
+    assert "[mcp_servers.github]" in out
+    from brigade import toml_compat
+
+    parsed = toml_compat.loads(out)
+    assert parsed["mcp_servers"]["github"]["command"] == "npx"
+    assert parsed["model"] == "grok-4"
+
+
 def test_codex_read_then_remove():
     adapter = A.ADAPTERS["codex"]
+    text = adapter.write_file(None, {"github": adapter.to_provider(_stdio())}, set())
+    assert adapter.read_file(text)["github"]["command"] == "npx"
+    pruned = adapter.write_file(text, {}, {"github"})
+    assert "mcp_servers" not in toml_loads(pruned)
+
+
+def test_grok_read_then_remove():
+    adapter = A.ADAPTERS["grok"]
     text = adapter.write_file(None, {"github": adapter.to_provider(_stdio())}, set())
     assert adapter.read_file(text)["github"]["command"] == "npx"
     pruned = adapter.write_file(text, {}, {"github"})
@@ -167,6 +190,16 @@ def test_codex_remote_roundtrip_is_idempotent():
     assert round_tripped == projected
 
 
+def test_grok_remote_roundtrip_is_idempotent():
+    """Grok remote tables must render type/transport so a re-sync is a no-op."""
+    adapter = A.ADAPTERS["grok"]
+    projected = adapter.to_provider(_remote())
+    assert projected["type"] == "http"
+    text = adapter.write_file(None, {"docs": projected}, set())
+    round_tripped = adapter.read_file(text)["docs"]
+    assert round_tripped == projected
+
+
 def test_codex_dotted_server_name_is_idempotent_and_valid_toml():
     """BUG 2: a dotted/quoted server name synced twice stays one valid table."""
     adapter = A.ADAPTERS["codex"]
@@ -189,9 +222,41 @@ def test_codex_dotted_server_name_is_idempotent_and_valid_toml():
     assert "mcp_servers" not in toml_loads(pruned)
 
 
+def test_grok_dotted_server_name_is_idempotent_and_valid_toml():
+    """A dotted/quoted Grok server name synced twice stays one valid table."""
+    adapter = A.ADAPTERS["grok"]
+    server = CanonicalServer(
+        name="io.github.example",
+        transport="stdio",
+        command="npx",
+        args=("-y", "@mcp/server"),
+        timeout=60,
+    )
+    projected = adapter.to_provider(server)
+    first = adapter.write_file(None, {"io.github.example": projected}, set())
+    second = adapter.write_file(first, {"io.github.example": projected}, set())
+    assert second.count("[mcp_servers.") == 1
+    parsed = toml_loads(second)
+    assert parsed["mcp_servers"]["io.github.example"]["command"] == "npx"
+    pruned = adapter.write_file(second, {}, {"io.github.example"})
+    assert "mcp_servers" not in toml_loads(pruned)
+
+
 def test_codex_remote_headers_roundtrip():
     """BUG 3: codex remote tables must render and parse Authorization headers."""
     adapter = A.ADAPTERS["codex"]
+    projected = adapter.to_provider(_remote_with_headers())
+    assert projected["headers"] == {"Authorization": "${TOKEN}"}
+    text = adapter.write_file(None, {"docs": projected}, set())
+    round_tripped = adapter.read_file(text)["docs"]
+    assert round_tripped == projected
+    back, _ = adapter.from_provider("docs", round_tripped)
+    assert back.headers == {"Authorization": {"ref": "TOKEN"}}
+
+
+def test_grok_remote_headers_roundtrip():
+    """Grok remote tables must render and parse Authorization headers."""
+    adapter = A.ADAPTERS["grok"]
     projected = adapter.to_provider(_remote_with_headers())
     assert projected["headers"] == {"Authorization": "${TOKEN}"}
     text = adapter.write_file(None, {"docs": projected}, set())

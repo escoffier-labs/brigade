@@ -19,16 +19,23 @@ def _stdio():
 
 
 def test_user_scope_adapters_registered():
-    for name in ("codex-user", "claude-user", "openclaw"):
+    for name in ("codex-user", "claude-user", "openclaw", "grok-user"):
         a = A.ADAPTERS[name]
         assert a.user_scope is True
         assert a.path.startswith("~")
-    assert {"codex-user", "claude-user", "openclaw"} <= set(A.MCP_TARGETS)
+    assert {"codex-user", "claude-user", "openclaw", "grok-user"} <= set(A.MCP_TARGETS)
 
 
 def test_codex_user_is_toml_codex_shape():
     a = A.ADAPTERS["codex-user"]
     assert a.fmt == "toml" and a.path == "~/.codex/config.toml"
+
+
+def test_grok_user_is_toml_grok_shape():
+    a = A.ADAPTERS["grok-user"]
+    assert a.fmt == "toml" and a.path == "~/.grok/config.toml"
+    assert a.top_key == "mcp_servers"
+    assert a.user_scope is True
 
 
 def test_openclaw_stdio_has_no_type_field():
