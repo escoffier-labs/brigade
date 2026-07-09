@@ -46,6 +46,8 @@ def test_operator_checkup_rolls_up_each_first_run_doctor(monkeypatch, capsys):
     assert skills["ready"] is False
     assert skills["issue_count"] == 3
     assert payload["next_command"] == "brigade skills doctor --target ."
+    assert "loop" in payload
+    assert set(payload["loop"]) == {"graph", "ledger", "context_eval"}
 
 
 def test_operator_checkup_is_ready_when_all_surfaces_pass(monkeypatch, capsys):
@@ -56,6 +58,46 @@ def test_operator_checkup_is_ready_when_all_surfaces_pass(monkeypatch, capsys):
     assert payload["ready"] is True
     assert payload["blocking_surface_count"] == 0
     assert payload["next_command"] is None
+
+
+def test_operator_checkup_loop_reports_graph_ledger_and_brief_hit_rate(monkeypatch, tmp_path, capsys):
+    _patch_all_doctors(monkeypatch, skills_rc=0)
+    monkeypatch.setattr("brigade.context_cmd._graphtrail_bin", lambda: "/usr/bin/graphtrail")
+    monkeypatch.setattr("brigade.evidence_brief._miseledger_bin", lambda: "/usr/bin/miseledger")
+    db = tmp_path / ".graphtrail" / "graphtrail.db"
+    db.parent.mkdir(parents=True)
+    db.write_text("ok")
+    run_dir = tmp_path / ".brigade" / "runs" / "2026-07-09T00-00-00Z"
+    run_dir.mkdir(parents=True)
+    (run_dir / "run.json").write_text(
+        json.dumps(
+            {
+                "started_at": "2026-07-09T00:00:00Z",
+                "context_eval": {
+                    "brief_hit_rate": 0.75,
+                    "hits": ["a.py"],
+                    "missed": ["b.py"],
+                },
+            }
+        )
+    )
+
+    rc = lifecycle.checkup(target=tmp_path, json_output=False)
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "loop:" in out
+    assert "[ok] graph:" in out
+    assert "[ok] ledger:" in out
+    assert "[ok] brief_hit_rate:" in out
+    assert "last=0.750" in out
+
+    rc = lifecycle.checkup(target=tmp_path, json_output=True)
+    payload = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert payload["loop"]["graph"]["ok"] is True
+    assert payload["loop"]["ledger"]["ok"] is True
+    assert payload["loop"]["context_eval"]["last_brief_hit_rate"] == 0.75
+    assert payload["loop"]["context_eval"]["sample_count"] == 1
 
 
 def test_operator_checkup_cli_dispatch(monkeypatch, tmp_path):

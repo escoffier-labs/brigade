@@ -202,11 +202,21 @@ def test_evidence_install_args_use_escoffier_labs():
 
 
 def test_search_tools_attach_to_search_station():
-    for name in ("code-search-api", "code-search-mcp"):
+    for name in ("code-search-api", "code-search-mcp", "graphtrail"):
         t = managed.resolve(name)
         assert t is not None and t.station == "search", name
     names = {t.name for t in managed.for_station("search")}
-    assert names == {"code-search-api", "code-search-mcp"}
+    assert names == {"code-search-api", "code-search-mcp", "graphtrail"}
+
+
+def test_graphtrail_doctor_reports_missing_db(monkeypatch, tmp_path):
+    t = managed.resolve("graphtrail")
+    assert t is not None
+    monkeypatch.setattr(managed.proc, "which", lambda c: "/usr/bin/graphtrail" if c == "graphtrail" else None)
+    ctx = DoctorContext(target=tmp_path, selection=None, harnesses=[])
+    results = t.doctor(ctx)
+    assert results[0][0] == "WARN"
+    assert "graphtrail sync" in results[0][2]
 
 
 def test_search_install_args_keep_npm_scope_distinction():

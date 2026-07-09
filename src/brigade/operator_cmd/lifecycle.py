@@ -834,6 +834,96 @@ def _surface_issue_count(payload: dict[str, Any]) -> int | None:
     return None
 
 
+def _loop_stations_payload(target: Path) -> dict[str, Any]:
+    """Report GraphTrail / MiseLedger / context-eval loop health (informational).
+
+    Optional stations do not block checkup readiness. The point is one glance:
+    graph ok, ledger ok, last evidence brief hit rate.
+    """
+    from .. import context_cmd, evidence_brief
+
+    graph_bin = context_cmd._graphtrail_bin()
+    graph_db = target / ".graphtrail" / "graphtrail.db"
+    if graph_bin and graph_db.is_file():
+        graph = {
+            "ok": True,
+            "status": "ok",
+            "detail": "graphtrail on PATH and .graphtrail/graphtrail.db present",
+        }
+    elif graph_bin:
+        graph = {
+            "ok": False,
+            "status": "missing-db",
+            "detail": "graphtrail on PATH; run `graphtrail sync` to build .graphtrail/graphtrail.db",
+        }
+    else:
+        graph = {
+            "ok": False,
+            "status": "missing-bin",
+            "detail": "graphtrail not on PATH (optional: cargo install graphtrail)",
+        }
+
+    ledger_bin = evidence_brief._miseledger_bin()
+    if ledger_bin:
+        ledger = {
+            "ok": True,
+            "status": "ok",
+            "detail": "miseledger on PATH",
+        }
+    else:
+        ledger = {
+            "ok": False,
+            "status": "missing-bin",
+            "detail": "miseledger not on PATH (optional: brigade add evidence)",
+        }
+
+    rates: list[float] = []
+    runs_root = target / ".brigade" / "runs"
+    if runs_root.is_dir():
+        run_rows: list[tuple[str, float]] = []
+        for child in runs_root.iterdir():
+            if not child.is_dir():
+                continue
+            run_json = child / "run.json"
+            if not run_json.is_file():
+                continue
+            try:
+                payload = json.loads(run_json.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+                continue
+            if not isinstance(payload, dict):
+                continue
+            context_eval = payload.get("context_eval")
+            if not isinstance(context_eval, dict):
+                continue
+            rate = context_eval.get("brief_hit_rate")
+            if isinstance(rate, bool) or not isinstance(rate, (int, float)):
+                continue
+            stamp = str(payload.get("started_at") or child.name)
+            run_rows.append((stamp, float(rate)))
+        run_rows.sort(key=lambda item: item[0], reverse=True)
+        rates = [rate for _, rate in run_rows]
+
+    last_rate = rates[0] if rates else None
+    mean_rate = round(sum(rates) / len(rates), 3) if rates else None
+    return {
+        "graph": graph,
+        "ledger": ledger,
+        "context_eval": {
+            "last_brief_hit_rate": last_rate,
+            "mean_brief_hit_rate": mean_rate,
+            "sample_count": len(rates),
+            "detail": (
+                f"last={last_rate:.3f} mean={mean_rate:.3f} (n={len(rates)})"
+                if rates and last_rate is not None and mean_rate is not None
+                else "no context_eval on recent run receipts"
+            ),
+            "ok": bool(rates),
+            "status": "ok" if rates else "none",
+        },
+    }
+
+
 def checkup_payload(target: Path, *, profile: str = "internal-dogfood") -> dict[str, Any]:
     """Run every read-only first-run doctor once and roll the verdicts up.
 
@@ -842,6 +932,9 @@ def checkup_payload(target: Path, *, profile: str = "internal-dogfood") -> dict[
     single ready/blocking verdict. Each surface's exit code is the source of
     truth for readiness; the issue count is informational. Nothing here writes
     files (security scan and verify-harness are deliberately excluded).
+
+    Also reports optional GraphTrail/MiseLedger loop health (graph / ledger /
+    last evidence brief hit rate). Those stations never block readiness.
     """
     target = target.expanduser().resolve()
     spec = [
@@ -877,6 +970,7 @@ def checkup_payload(target: Path, *, profile: str = "internal-dogfood") -> dict[
         "blocking_surface_count": blocking,
         "surfaces": surfaces,
         "next_command": next_command,
+        "loop": _loop_stations_payload(target),
     }
 
 
@@ -893,6 +987,17 @@ def checkup(*, target: Path, profile: str = "internal-dogfood", json_output: boo
         count = surface["issue_count"]
         suffix = f" ({count} issue{'s' if count != 1 else ''})" if isinstance(count, int) and count else ""
         print(f"  [{mark}] {surface['name']}{suffix}")
+    loop = payload.get("loop") if isinstance(payload.get("loop"), dict) else {}
+    if loop:
+        print("loop:")
+        for key in ("graph", "ledger", "context_eval"):
+            row = loop.get(key)
+            if not isinstance(row, dict):
+                continue
+            mark = "ok" if row.get("ok") else "warn"
+            detail = row.get("detail") or row.get("status") or ""
+            label = "brief_hit_rate" if key == "context_eval" else key
+            print(f"  [{mark}] {label}: {detail}")
     print(f"ready: {'yes' if payload['ready'] else 'no'}")
     print(f"blocking_surfaces: {payload['blocking_surface_count']}")
     if payload["next_command"]:

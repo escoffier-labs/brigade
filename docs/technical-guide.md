@@ -1013,7 +1013,7 @@ Run-receipt signal mapping is fixed and local: `status: ok` records `+1`, `statu
 
 Run receipts usually carry the useful code delta because a non-read-only `brigade run` brackets the worker command itself: GraphTrail syncs before the worker edits, syncs again after the edits, and writes the delta into the run artifacts. Verification runs usually execute after the work, often as tests, linters, docs checks, or receipt checks. Those commands may not edit the source graph at all, so their deltas are commonly absent or no-op even when the preceding worker run made structural code changes.
 
-`brigade outcome rank` and dry-run `brigade outcome reconcile` surface per-artifact counts for scored records whose graph delta is changing or no-op. Verify-sourced and run-receipt-sourced deltas are counted identically once they are in the outcome ledger. These counters are display-only today: promotion, rollback, cooldown, and ranking decisions still use the existing verified outcome rules.
+`brigade outcome rank` and dry-run `brigade outcome reconcile` surface per-artifact counts for scored records whose graph delta is changing or no-op. Verify-sourced and run-receipt-sourced deltas are counted identically once they are in the outcome ledger. Graph counters remain display-only for install/rollback thresholds: promotion, rollback, and cooldown still use verified exit-code signals only.
 
 For those counters, a delta is changing only when `status` is `ok` and `changed_symbol_count` or `edge_churn` is greater than zero. A delta is no-op only when `status` is `ok` and both counts are zero. Zero graph delta does not mean nothing happened: docs-only changes, test-only changes, and pre-v3 body-edit blind spots can still read as no-op.
 
@@ -1031,10 +1031,11 @@ When a non-read-only aboyeur run has both a pre-run code graph brief and a succe
 The metric is set arithmetic over repo-relative file paths: it compares the files named by the pre-run context pack with the files the run structurally touched according to the GraphTrail delta.
 For example, `brief hit rate 0.50 (2/4 files, 2 missed)` means two of four structurally touched files were named in the brief, and two touched files were not.
 
-This is not a quality score.
-It does not say whether the context was useful, sufficient, or correct, only whether the pre-run context pack named the structurally changed files.
-Brief parsing is heuristic, and GraphTrail deltas only see structural code changes.
-Docs-only runs and runs without structural graph changes produce no context eval.
+`outcome capture --run-receipt` copies `context_eval` onto the hash-chained outcome record. `outcome rank` and dry-run `outcome reconcile` then surface the mean `brief_hit_rate` per skill (`brief_hit: 0.750 (n=2)` in text; `brief_hit_rate` / `brief_hit_samples` in JSON). Among artifacts with equal Wilson scores, a higher mean brief hit rate ranks first. Install and rollback thresholds still ignore brief hit rate: a skill that fails verify still demotes, and a skill that only has strong context coverage without verified exits does not auto-install.
+
+This is a coverage quality signal for skill and runbook ranking, not a claim that the context was useful, sufficient, or correct. Brief parsing is heuristic, and GraphTrail deltas only see structural code changes. Docs-only runs and runs without structural graph changes produce no context eval.
+
+`brigade operator checkup` reports optional loop station health alongside the first-run doctors: graph ok (graphtrail + db), ledger ok (miseledger on PATH), and last/mean brief hit rate from recent run receipts. Missing optional stations warn; they never block the checkup ready verdict.
 
 Use `--handoff` to bridge a completed run back into the memory system.
 

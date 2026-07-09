@@ -143,6 +143,27 @@ brigade work verify run --target . --command "pytest -q" --capture <skill-or-car
 
 Capture against an id you actually have: a skill you followed, a memory card (`--kind card`), or `brigade-work` itself when nothing else applies. `brigade work brief` surfaces the loop's own health so an empty ledger never goes unnoticed.
 
+## Optional: close the GraphTrail ↔ Brigade ↔ MiseLedger loop
+
+0.21.0 already ships receipt deltas, MiseLedger export, evidence briefs, and context evals. Productizing them is a short dogfood path:
+
+```bash
+# optional stations (fail-open everywhere if absent)
+brigade add graphtrail          # or: cargo install graphtrail
+graphtrail sync                 # builds .graphtrail/graphtrail.db in the repo
+brigade add evidence            # miseledger
+
+# one operator glance: doctors + graph ok / ledger ok / last brief hit rate
+brigade operator checkup --target .
+
+# after real work flows through verify/run + capture:
+brigade receipts export miseledger --target . --new-only --import
+brigade outcome rank --target .    # surfaces brief_hit as a skill quality signal
+# next brigade run attaches a capped MiseLedger evidence brief automatically
+```
+
+That is the differentiated loop: receipts that feed the next run's context, with a measured hit rate (`context_eval.brief_hit_rate`) on whether the pre-run brief named the files the run actually touched.
+
 ## Next steps
 
 - Read [the cookbook](https://github.com/escoffier-labs/solos-cookbook) for the deep version of every concept here.

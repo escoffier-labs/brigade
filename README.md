@@ -213,7 +213,7 @@ brigade add ../agentpantry --install # run the manifest install command
 | `tokens` | token-glace | tracks token spend across your harnesses and compacts noisy output |
 | `memory` | memory-doctor, bootstrap-doctor | validates memory cards and bootstrap files for staleness and contradictions |
 | `pantry` | agentpantry | syncs browser sessions and auth across an agent's machine |
-| `search` | code-search | local semantic code search over your repos |
+| `search` | code-search, graphtrail | local semantic search plus a code-graph CLI for callers, impact, and structural diffs |
 | `evidence` | miseledger | a local-first evidence ledger with receipts and source exporters |
 
 ## Harness support

@@ -18,11 +18,16 @@ def run(target: Path, station: str, *, install_manifest: bool = False) -> int:
         return _run_manifest_add(station, install_manifest=install_manifest)
 
     st = resolve_station(station)
-    if st is None:
-        print(f"error: unknown station {station!r}", file=sys.stderr)
+    single_tool = managed.resolve(station) if st is None else None
+    if st is None and single_tool is None:
+        print(f"error: unknown station or tool {station!r}", file=sys.stderr)
         return 2
 
-    tools = managed.for_station(st.name)
+    if single_tool is not None:
+        tools = (single_tool,)
+        print(f"tool {single_tool.name!r} (station {single_tool.station!r})")
+    else:
+        tools = managed.for_station(st.name)
     if not tools:
         if st.name == "skills":
             print("station 'skills' ships built-in Brigade skills:")

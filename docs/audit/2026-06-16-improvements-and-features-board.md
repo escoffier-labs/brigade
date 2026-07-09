@@ -31,9 +31,9 @@ calls still lack the v0.11.0 stdin/timeout fix.
 | 2 | `.brigade/memory-care/decay` created by workspace init | fix | high | S | **shipped** (#79) |
 | 3 | `write_json` atomic (tmp + os.replace) | fix | high | S | **shipped** |
 | 4 | `doctor --json` / `status --json` | feature | high | S | **shipped** |
-| 5 | `security diff --base --against` (by fingerprint) | feature | high | S | proposal |
-| 6 | Parallelize fleet `_repo_summary` (ThreadPoolExecutor) | perf | high | S | proposal |
-| 7 | `brigade operator checkup` (all first-run doctors at once) | feature | high | M | proposal |
+| 5 | `security diff --base --against` (by fingerprint) | feature | high | S | **shipped** (0.12.0) |
+| 6 | Parallelize fleet `_repo_summary` (ThreadPoolExecutor) | perf | high | S | **shipped** (0.12.0) |
+| 7 | `brigade operator checkup` (all first-run doctors at once) | feature | high | M | **shipped** (0.12.0; loop health in Unreleased) |
 
 ## Improvements backlog
 
@@ -75,11 +75,11 @@ calls still lack the v0.11.0 stdin/timeout fix.
 
 ## Specials board (leverage-sorted)
 
-- **[high] `security diff`** - new/fixed/persisting findings between two scans, keyed on the existing stable `_fingerprint` (`security_cmd.py:2282`), mirroring `center` report-diff. `brigade security diff --base <dir> --against <dir> [--json]`, nonzero exit on new findings. S.
-- **[high] `brigade operator checkup`** - one command runs every first-run doctor; `lifecycle.py:581,590` already `_capture_json_call`s `tools`+`skills` doctors in sequence. M. Prereq for the #78 fleet sweep.
-- **[high] Surface read-only enforcement strength per harness in `brigade run`** - `agents.py` enforces `--read-only` natively only for codex et al, prompt-only for goose/grok/amp/crush, and not at all for claude + opencode. Print `WARNING: read-only is best-effort for <harness>` + receipt. S.
-- **[high] Expose memory cards over the existing MCP stdio server** - `skills_cmd.py:1319` `serve_mcp` already implements a zero-dep JSON-RPC stdio server for `skill://`; add a read-only `card://` scheme backed by `_iter_cards`. M.
-- **[high] Generate shell completions** for the 594-subcommand surface - pure argparse tree, walkable, zero-dep. `brigade completions bash|zsh|fish`. M-L.
+- **[shipped] `security diff`** - 0.12.0: fingerprint-keyed new/resolved/persisting findings between two scans.
+- **[shipped] `brigade operator checkup`** - 0.12.0: every first-run doctor in one pass; Unreleased adds optional GraphTrail/MiseLedger loop health (graph/ledger/brief hit rate).
+- **[shipped] Surface read-only enforcement strength per harness in `brigade run`** - 0.12.0 (issue #87).
+- **[shipped] Expose memory cards over the existing MCP stdio server** - 0.12.0 `memory serve-mcp` with `card://` (issue #88).
+- **[shipped] Generate shell completions** - 0.12.0 `brigade completions bash|zsh|fish` (issue #89).
 - **[med] Deterministic keyword search over `memory/cards`** - reuse `_iter_cards`+`_parse_frontmatter`; stdlib precursor to the roadmapped (Later) semantic retrieval. `memory search <term> [--json]`. M.
 - **[med] Route failed runbook steps into work-import** - 30 other sites use `ledger._append_import_records`; runbook closeout (`runbook_cmd.py:370`) does not. M.
 - **[med] `skills uninstall`** to mirror `skills install` - literal inverse, reuses `_install_targets`/`_install_dir` + history receipt. S.
@@ -87,7 +87,7 @@ calls still lack the v0.11.0 stdin/timeout fix.
 - **[med] `projects doctor`** - the one station missing a doctor wrapper; `projects_cmd.health()` already exists. S.
 - **[med] `scrub` receipt + `--json`** - the egress gate is the most safety-critical boundary and the only station with no trail; store summary-only to avoid re-leaking gated PII. S.
 - **[med] AGENTS.md quality lint station (#84)** - `doctor.py:206-258` checks existence + byte budget only. Owner must pin the required-section vocabulary first (brigade's own template uses neither "Definition of Done" nor a handoff-footer heading). M.
-- **[med] `doctor` fleet sweep (#78)** - loop the existing fleet iterator over the operator-doctor payload; build after `operator checkup` + `doctor --json` (shipped). M.
+- **[shipped] `doctor` fleet sweep (#78)** - 0.12.0 `brigade repos doctor --deep` runs operator checkup per fleet repo.
 - **[med] init/doctor detect third-party clones -> recommend `.git/info/exclude` (#81)** - reuse `build_gitignore_block`, recommend-only; needs an owner-identity heuristic. M, med.
 - **[med] Wire `friction scan` staleness into `daily status`** - friction is absent from the daily loop; report latest.json staleness + candidate count, no auto-run. M.
 - **[low] Snapshot on `tools apply`** for rollback (mirror skills install) - `tools_cmd.py:5499` writes with no snapshot. M.
