@@ -554,6 +554,7 @@ def _compact_repo_fleet_health(payload: dict[str, Any]) -> dict[str, Any]:
 
 def _brief_payload(target: Path, *, limit: int = 3) -> dict[str, Any]:
     from .. import (
+        aboyeur,
         center_cmd,
         chat_cmd,
         context_cmd,
@@ -579,6 +580,12 @@ def _brief_payload(target: Path, *, limit: int = 3) -> dict[str, Any]:
     latest_session = helpers._session_info(sessions[0][0], sessions[0][1]) if sessions else None
     recent_sessions = [helpers._session_info(path, payload) for path, payload in sessions[:limit]]
     resolved = _resolve_next_task(target)
+    task_text = str(resolved.get("task") or "").strip()
+    code_graph = (
+        aboyeur.code_graph_brief(target, task_text)
+        if task_text and resolved.get("source") != "default_review"
+        else None
+    )
     ledger_task = resolved.get("ledger_task") if isinstance(resolved.get("ledger_task"), dict) else None
     git = helpers._git_snapshot(target)
     suggested = _suggested_command(active, resolved["task"], resolved["source"])
@@ -712,6 +719,11 @@ def _brief_payload(target: Path, *, limit: int = 3) -> dict[str, Any]:
         },
         "pantry": pantry_health,
         "notifications": notification_health,
+        "code_graph_context": code_graph.text if code_graph is not None and code_graph.attached else None,
+        "code_graph_brief": {
+            "attached": bool(code_graph.attached) if code_graph is not None else False,
+            "bytes": code_graph.bytes if code_graph is not None else 0,
+        },
         "context_packs": {
             "pack_count": context_health["pack_count"],
             "issue_count": context_health["issue_count"],

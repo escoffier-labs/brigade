@@ -7,7 +7,7 @@ Architecture: verification receipts reference the previous receipt by stable met
 ## File map
 
 - `src/brigade/work_cmd/verification.py`, `tests/test_work_cmd_verification.py`: previous-receipt evidence compaction.
-- `src/brigade/work_cmd/brief.py`, `src/brigade/context_cmd.py`, relevant tests: pre-edit GraphTrail brief attachment.
+- `src/brigade/work_cmd/session.py`, `src/brigade/context_cmd.py`, relevant tests: pre-edit GraphTrail brief attachment.
 - `docs/` and changelog/release notes where the integration contract is documented.
 
 ### Task 1: Compact previous verification evidence
@@ -20,11 +20,11 @@ Architecture: verification receipts reference the previous receipt by stable met
 
 ### Task 2: Attach GraphTrail context before work
 
-- [ ] Add a failing test for a target with `.graphtrail/graphtrail.db`, a fake GraphTrail binary, and a selected task. Assert `work brief --json` contains an attached code-graph brief and a nonzero context record.
-- [ ] Run the focused test; expect failure because current work briefs report no attached context.
-- [ ] Reuse the existing context helper from the work-brief path, keep missing binary/db/task fail-open, and record attachment metadata in the brief payload.
-- [ ] Run focused work/context tests; expect pass.
-- [ ] Commit `feat(work): attach graphtrail context to pre-edit briefs`.
+- [x] Add a failing test for a target with `.graphtrail/graphtrail.db`, a fake GraphTrail binary, and a selected task. Assert `work brief --json` contains an attached code-graph brief and a nonzero context record.
+- [x] Run the focused test; expect failure because current work briefs report no attached context.
+- [x] Reuse the existing context helper from the work-brief path, keep missing binary/db/task fail-open, and record attachment metadata in the brief payload.
+- [x] Run focused work/context tests; expect pass.
+- [x] Commit `feat(work): attach graphtrail context to pre-edit briefs`.
 
 ### Task 3: Final verification
 

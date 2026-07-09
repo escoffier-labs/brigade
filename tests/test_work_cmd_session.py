@@ -671,6 +671,46 @@ def test_work_brief_json_reports_recent_sessions(tmp_path, monkeypatch, capsys):
     assert payload["suggested_command"] == 'brigade work end --note "..." --handoff'
 
 
+def test_work_brief_json_attaches_graphtrail_context_for_selected_task(tmp_path, monkeypatch, capsys):
+    _init_git_repo(tmp_path)
+    db = tmp_path / ".graphtrail" / "graphtrail.db"
+    db.parent.mkdir()
+    db.write_text("")
+    graphtrail = tmp_path / "fake-graphtrail"
+    graphtrail.write_text("#!/bin/sh\nprintf '%s\\n' '### Entry points' '- brigade.work_cmd.session._brief_payload'\n")
+    graphtrail.chmod(0o755)
+    monkeypatch.setenv("GRAPHTRAIL_BIN", str(graphtrail))
+    assert work_cmd.task_add(target=tmp_path, text="Attach GraphTrail to work brief") == 0
+    capsys.readouterr()
+
+    assert cli.main(["work", "brief", "--target", str(tmp_path), "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    context = payload["code_graph_context"]
+
+    assert "brigade.work_cmd.session._brief_payload" in context
+    assert payload["code_graph_brief"] == {
+        "attached": True,
+        "bytes": len(context.encode()),
+    }
+
+
+def test_work_brief_json_skips_graphtrail_without_selected_task(tmp_path, monkeypatch, capsys):
+    _init_git_repo(tmp_path)
+    db = tmp_path / ".graphtrail" / "graphtrail.db"
+    db.parent.mkdir()
+    db.write_text("")
+    graphtrail = tmp_path / "fake-graphtrail"
+    graphtrail.write_text("#!/bin/sh\nprintf '%s\\n' 'unexpected default-review context'\n")
+    graphtrail.chmod(0o755)
+    monkeypatch.setenv("GRAPHTRAIL_BIN", str(graphtrail))
+
+    assert cli.main(["work", "brief", "--target", str(tmp_path), "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["code_graph_context"] is None
+    assert payload["code_graph_brief"] == {"attached": False, "bytes": 0}
+
+
 def test_work_brief_json_compacts_heavy_report_and_fleet_health(tmp_path, monkeypatch, capsys):
     _init_git_repo(tmp_path)
     dogfood_cmd.init(target=tmp_path)
