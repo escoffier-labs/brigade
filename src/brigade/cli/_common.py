@@ -35,6 +35,7 @@ COMMAND_GROUPS: list[tuple[str, list[str]]] = [
             "roster",
             "run",
             "runs",
+            "model",
             "dogfood",
         ],
     ),
