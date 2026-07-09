@@ -4,38 +4,43 @@
 
 <h1 align="center">agent-notify</h1>
 
-<p align="center"><strong>Privacy-first push notifications for AI coding agents. No telemetry, no vendor push service.</strong></p>
-
-<p align="center"><a href="https://agent-notify.escoffierlabs.dev">Website</a> &nbsp;&middot;&nbsp; <a href="#install">Install</a> &nbsp;&middot;&nbsp; <a href="#quickstart-no-config-file">Quickstart</a> &nbsp;&middot;&nbsp; <a href="#hook-integrations">Hook integrations</a></p>
-
 <p align="center">
-  <a href="https://github.com/escoffier-labs/agent-notify/actions/workflows/ci.yml"><img src="https://shieldcn.dev/github/ci/escoffier-labs/agent-notify.svg?branch=main&workflow=ci.yml" alt="CI status"></a>
-  <a href="https://github.com/escoffier-labs/agent-notify/releases"><img src="https://shieldcn.dev/github/release/escoffier-labs/agent-notify.svg" alt="Latest release"></a>
-  <img src="https://shieldcn.dev/badge/go-1.22%2B-00ADD8.svg?logo=go&logoColor=white" alt="Go 1.22+">
-  <a href="LICENSE"><img src="https://shieldcn.dev/badge/license-MIT-green.svg" alt="MIT license"></a>
+  <img src="docs/assets/marks/agent-notify-circle.svg" alt="" width="40" height="40">
 </p>
 
-`agent-notify` is a single-binary CLI that sends push notifications to Discord, Telegram, and Signal when your AI coding agent finishes a task or needs input. It exists because the built-in mobile push in most agent harnesses rides the same telemetry plumbing you turned off, so killing the data exhaust also kills your notifications. Unlike a hosted notification service, every message goes straight from your machine to the channel API you configured and nowhere else: no telemetry, no third-party push infrastructure, no Anthropic or OpenAI involvement.
-
-Built for engineers running an always-on agent stack who want push notifications without routing real-time session activity through a vendor's notification service.
-
 <p align="center">
-  <img src="docs/assets/agent-notify-send.svg" alt="Recording: a one-channel config, then a piped message goes through agent-notify send with exit 0 and the webhook log shows the delivered Discord payload" width="820">
+  <strong>Stop babysitting terminals. Get a private ping when the agent finishes.</strong>
 </p>
 
-<p align="center"><em>One config, one piped message: <code>agent-notify send</code> exits 0 and the webhook log shows the payload that arrived (a local mock endpoint stands in for Discord).</em></p>
-
 <p align="center">
-  <img src="docs/assets/agentnotify-wiring.svg" alt="Recording: agent-notify init scaffolds a config, doctor flags the unconfigured channels, then after the channel env is set doctor reports every channel ready, all without sending a notification" width="820">
+  Privacy-first push notifications for coding agents: Discord, Telegram, Signal. Zero telemetry, one Go binary. Brigade can plan messages; send is always opt-in.
 </p>
 
-<p align="center"><em>Before anything goes out, <code>doctor</code> verifies the wiring. Nothing is sent: it only checks that each channel's env is present.</em></p>
+<p align="center">
+  <a href="https://brigade.tools/agent-notify">Website</a> &middot; <a href="#install">Install</a>
+</p>
+
+<p align="center">
+  <img src="https://shieldcn.dev/github/ci/escoffier-labs/agent-notify.svg?branch=main&workflow=ci.yml" alt="CI status">
+  <img src="https://shieldcn.dev/badge/license-MIT-green.svg" alt="MIT license">
+</p>
+
+## Install
+
+```bash
+go install github.com/escoffier-labs/agent-notify/cmd/agent-notify@latest
+# Brigade station
+brigade add notifications
+```
 
 ## What it does
 
-`agent-notify` is a privacy-first notification dispatcher for AI coding agents and any other host process. It reads a message from stdin or a positional argument, applies routing rules, and fans the notification out to one or more configured channels (Discord webhooks, the Telegram Bot API, or a self-hosted Signal CLI) concurrently and best-effort. Built-in hook adapters parse the event JSON that Claude Code, Codex CLI, and similar agents emit, so you wire it once and forget it. There is no daemon, no account, and no cloud service: the binary runs, sends, and exits.
+| | Job | What you get |
+|---|---|---|
+| **Notify** | When long work ends | Discord, Telegram, Signal from one binary |
+| **Stay private** | No product telemetry | Your notify path is not an analytics surface |
+| **Opt-in send** | Plan free, send explicit | Brigade status/plan without auto-spam |
 
-Keywords this tool covers: agent notifications, Claude Code Stop hook, Codex notify hook, Discord webhook CLI, Telegram bot notifications, Signal CLI alerts, privacy-first push, no-telemetry notifier.
 
 ## Install
 
