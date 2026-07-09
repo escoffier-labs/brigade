@@ -35,7 +35,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade init`: 1 command path(s)
 - `brigade learn` (extras): 13 command path(s)
 - `brigade mcp`: 7 command path(s)
-- `brigade memory`: 10 command path(s)
+- `brigade memory`: 14 command path(s)
 - `brigade model`: 1 command path(s)
 - `brigade notifications` (extras): 4 command path(s)
 - `brigade openclaw-fragments` (extras): 1 command path(s)
@@ -204,8 +204,12 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade memory care plan-fixes`
 - `brigade memory care scan`
 - `brigade memory care status`
+- `brigade memory compact`
+- `brigade memory init-git`
+- `brigade memory lint`
 - `brigade memory search`
 - `brigade memory serve-mcp`
+- `brigade memory status`
 - `brigade model scorecard`
 - `brigade notifications event plan` (extras)
 - `brigade notifications event record` (extras)

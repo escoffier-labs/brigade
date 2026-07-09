@@ -332,7 +332,7 @@ flowchart TB
     subgraph MEMORY [" memory and handoffs "]
         OPENCLAW["OpenClaw"]
         HERMES["Hermes"]
-        MDOCTOR["memory-doctor"]
+        MDOCTOR["brigade memory<br/>status · lint · compact"]
         BDOCTOR["bootstrap-doctor"]
     end
 
@@ -365,7 +365,7 @@ Memory and handoff tools:
 
 - [OpenClaw](https://github.com/solomonneas/openclaw): personal AI assistant and memory owner.
 - Hermes: local memory owner and handoff writer convention.
-- [memory-doctor](https://github.com/escoffier-labs/memory-doctor): focused maintenance CLI for Claude Code / OpenClaw memory.
+- Memory maintenance is embedded in Brigade: `brigade memory status`, `lint`, `compact`, and `init-git` (the retired [memory-doctor](https://github.com/escoffier-labs/memory-doctor) package). Use `brigade ingest` for handoff promotion.
 - [bootstrap-doctor](https://github.com/escoffier-labs/bootstrap-doctor): audits and trims oversized OpenClaw bootstrap files.
 
 Safety and operations tools:

@@ -211,7 +211,7 @@ brigade add ../agentpantry --install # run the manifest install command
 | `skills` | built-in Scout skills; optional Skillet roster | wires `brigade-work` and `ultra-work-scout` on init; use `skills add escoffier-labs/skillet` after installing the sidecar CLI for the full roster |
 | `guard` | embedded content guard, with an optional external checkout override | scans handoffs and content for secrets and PII before anything leaves the machine |
 | `tokens` | token-glace | tracks token spend across your harnesses and compacts noisy output |
-| `memory` | memory-doctor, bootstrap-doctor | validates memory cards and bootstrap files for staleness and contradictions |
+| `memory` | bootstrap-doctor (optional); memory maintenance is built in | `brigade memory status|lint|compact` plus memory-care for card freshness |
 | `pantry` | agentpantry (Go sidecar) | plans and health-checks sealed browser-session sync; never starts source/sink |
 | `search` | code-search, graphtrail | local semantic search plus a code-graph CLI for callers, impact, and structural diffs |
 | `evidence` | miseledger (Go sidecar) | plans crawl/export and health-checks the local evidence ledger; does not crawl for you |
