@@ -552,7 +552,7 @@ def _compact_repo_fleet_health(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _brief_payload(target: Path, *, limit: int = 3) -> dict[str, Any]:
+def _brief_payload(target: Path, *, limit: int = 3, include_code_graph: bool = False) -> dict[str, Any]:
     from .. import (
         aboyeur,
         center_cmd,
@@ -583,7 +583,7 @@ def _brief_payload(target: Path, *, limit: int = 3) -> dict[str, Any]:
     task_text = str(resolved.get("task") or "").strip()
     code_graph = (
         aboyeur.code_graph_brief(target, task_text)
-        if task_text and resolved.get("source") != "default_review"
+        if include_code_graph and task_text and resolved.get("source") != "default_review"
         else None
     )
     ledger_task = resolved.get("ledger_task") if isinstance(resolved.get("ledger_task"), dict) else None
@@ -1177,7 +1177,7 @@ def brief(*, target: Path, limit: int = 3, json_output: bool = False) -> int:
         print(f"error: --target is not a directory: {target}", file=sys.stderr)
         return 2
 
-    payload = _brief_payload(target, limit=limit)
+    payload = _brief_payload(target, limit=limit, include_code_graph=json_output)
     if json_output:
         print(json.dumps(payload, indent=2, sort_keys=True))
         return 0
