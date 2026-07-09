@@ -253,10 +253,14 @@ pub fn run(cli: Cli) -> Result<()> {
             #[cfg(feature = "miseledger")]
             evidence,
         } => {
-            let conn = open_default_read_only(cli.db)?;
+            let db_path = default_query_db_path(cli.db.clone());
+            let conn = open_read_only(&db_path)?;
             #[cfg(feature = "codesearch")]
             let pack = if blend_code_search {
-                let client = crate::adapters::codesearch::CodeSearchClient::from_env();
+                let repo_root = repo_root_for_codesearch(&db_path);
+                let client = crate::adapters::codesearch::CodeSearchClient::from_env_for_repo(
+                    repo_root.as_deref(),
+                );
                 let hits = client.search(&task, limit.max(20))?;
                 let rows = crate::query::blend(&conn, &hits, embed_weight, graph_weight, limit)?;
                 let entry_points = rows.into_iter().map(|row| row.symbol).collect();
@@ -339,8 +343,12 @@ pub fn run(cli: Cli) -> Result<()> {
             graph_weight,
             json,
         } => {
-            let conn = open_default_read_only(cli.db)?;
-            let client = crate::adapters::codesearch::CodeSearchClient::from_env();
+            let db_path = default_query_db_path(cli.db);
+            let conn = open_read_only(&db_path)?;
+            let repo_root = repo_root_for_codesearch(&db_path);
+            let client = crate::adapters::codesearch::CodeSearchClient::from_env_for_repo(
+                repo_root.as_deref(),
+            );
             let hits = client.search(&query, limit.max(20))?;
             let rows = crate::query::blend(&conn, &hits, embed_weight, graph_weight, limit)?;
             if json {
@@ -374,6 +382,31 @@ pub fn run(cli: Cli) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn default_query_db_path(explicit: Option<PathBuf>) -> PathBuf {
+    explicit.unwrap_or_else(|| PathBuf::from(".graphtrail/graphtrail.db"))
+}
+
+#[cfg(feature = "codesearch")]
+fn repo_root_for_codesearch(db: &std::path::Path) -> Option<PathBuf> {
+    repo_from_graphtrail_db(db).or_else(|| std::env::current_dir().ok())
+}
+
+#[cfg(feature = "codesearch")]
+fn repo_from_graphtrail_db(db: &std::path::Path) -> Option<PathBuf> {
+    let graph_dir = db.parent()?;
+    if graph_dir.file_name()? != ".graphtrail" {
+        return None;
+    }
+    let parent = graph_dir.parent()?;
+    // A relative default like `.graphtrail/graphtrail.db` has an empty parent here;
+    // the repo root in that case is the current directory.
+    if parent.as_os_str().is_empty() {
+        std::env::current_dir().ok()
+    } else {
+        Some(parent.to_path_buf())
+    }
 }
 
 fn print_json_or_symbols(json: bool, rows: &[SearchRow]) -> Result<()> {
@@ -600,6 +633,26 @@ fn render_evidence_links(task: &str, pack: &ContextPack, limit: usize) -> Result
 mod tests {
     use super::*;
     use crate::store::SCHEMA_VERSION;
+
+    #[cfg(feature = "codesearch")]
+    #[test]
+    fn repo_from_graphtrail_db_resolves_relative_default_to_current_dir() {
+        let root = repo_from_graphtrail_db(std::path::Path::new(".graphtrail/graphtrail.db"));
+        assert_eq!(root, std::env::current_dir().ok());
+    }
+
+    #[cfg(feature = "codesearch")]
+    #[test]
+    fn repo_from_graphtrail_db_resolves_absolute_paths_and_rejects_other_dirs() {
+        let root = repo_from_graphtrail_db(std::path::Path::new(
+            "/tmp/example/.graphtrail/graphtrail.db",
+        ));
+        assert_eq!(root, Some(std::path::PathBuf::from("/tmp/example")));
+        assert_eq!(
+            repo_from_graphtrail_db(std::path::Path::new("/tmp/example/other/graphtrail.db")),
+            None
+        );
+    }
 
     fn sample_pack() -> ContextPack {
         ContextPack {

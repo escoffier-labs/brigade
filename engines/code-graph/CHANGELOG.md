@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - Feature-gated MCP `semantic_search` tool for `codesearch` builds. It uses the existing Code Search client, can return raw per-file hits with `blend: false`, and defaults to blended symbol rows ranked by embedding score plus graph centrality.
 - Feature-gated MCP `context` argument `blend_code_search`, matching the CLI flag while leaving the default build's tool list and existing context calls unchanged.
+- Shared Code Search index manifest support for `codesearch` builds. GraphTrail now discovers the manifest, matches the canonical repo root, falls back to `semantic_api_url` when `CODE_SEARCH_URL` is unset, scopes requests with `code_search_project`, and strips `code_search_file_prefix` from returned hits.
 
 ## [0.3.0] - 2026-07-08
 

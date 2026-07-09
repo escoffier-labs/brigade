@@ -167,7 +167,7 @@ cargo run --features codesearch,miseledger -- \
   --db <db> context "rate limiting" --markdown --blend-code-search --evidence
 
 # Blend Code Search embedding hits with graph centrality.
-# Honors CODE_SEARCH_URL and CODE_SEARCH_API_KEY.
+# Honors CODE_SEARCH_URL, CODE_SEARCH_API_KEY, and the shared code-index manifest.
 cargo run --features codesearch -- --db <db> blend "rate limiting" --json
 
 # Expose Code Search over MCP too.
@@ -177,6 +177,16 @@ cargo build --features codesearch --bin graphtrail-mcp
 # Honors MISELEDGER_DB (defaults to ~/.local/share/miseledger/miseledger.db).
 cargo run --features miseledger -- links "dispatch" --json
 ```
+
+When `codesearch` is enabled, GraphTrail also reads the shared Code Search index
+manifest from `CODE_INDEX_MANIFEST`, `XDG_DATA_HOME/code-index/manifest.json`, or
+`~/.local/share/code-index/manifest.json`. `CODE_SEARCH_URL` still wins when it is
+set; otherwise the client falls back to the manifest's `semantic_api_url`, then to
+`http://localhost:5204`. If the manifest has an entry whose canonical `repo_root`
+matches the GraphTrail repo, requests include that entry's `code_search_project`.
+Returned Code Search paths must start with `code_search_file_prefix`; GraphTrail
+strips that prefix so blended hits match its repo-relative graph paths and drops
+nonmatching hits.
 
 ## How the pieces fit
 

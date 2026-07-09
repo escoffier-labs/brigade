@@ -196,7 +196,8 @@ fn call_tool(default_db: &Path, name: &str, args: &Value) -> Result<String> {
         #[cfg(feature = "codesearch")]
         "semantic_search" => {
             let limit = semantic_search_limit(args);
-            let hits = code_search_hits(&str_arg(args, "query"), limit)?;
+            let repo_root = code_search_repo_root(default_db, args, &db);
+            let hits = code_search_hits(&str_arg(args, "query"), limit, repo_root.as_deref())?;
             if bool_arg(args, "blend", true) {
                 to_pretty(&crate::query::blend(
                     &conn,
@@ -216,7 +217,8 @@ fn call_tool(default_db: &Path, name: &str, args: &Value) -> Result<String> {
             let pack = if bool_arg(args, "blend_code_search", false) {
                 let search_limit =
                     limit.clamp(SEMANTIC_SEARCH_DEFAULT_LIMIT, SEMANTIC_SEARCH_MAX_LIMIT);
-                let hits = code_search_hits(&task, search_limit)?;
+                let repo_root = code_search_repo_root(default_db, args, &db);
+                let hits = code_search_hits(&task, search_limit, repo_root.as_deref())?;
                 let rows = crate::query::blend(
                     &conn,
                     &hits,
@@ -541,11 +543,25 @@ fn semantic_search_limit(args: &Value) -> usize {
 }
 
 #[cfg(feature = "codesearch")]
-fn code_search_hits(query: &str, limit: usize) -> Result<Vec<crate::query::ExternalHit>> {
-    let client = crate::adapters::codesearch::CodeSearchClient::from_env();
+fn code_search_hits(
+    query: &str,
+    limit: usize,
+    repo_root: Option<&Path>,
+) -> Result<Vec<crate::query::ExternalHit>> {
+    let client = crate::adapters::codesearch::CodeSearchClient::from_env_for_repo(repo_root);
     client.search(query, limit).map_err(|err| {
         anyhow!("Code Search API is unreachable; check CODE_SEARCH_URL and the service: {err}")
     })
+}
+
+#[cfg(feature = "codesearch")]
+fn code_search_repo_root(default_db: &Path, args: &Value, db: &Path) -> Option<PathBuf> {
+    if let Some(repo) = args.get("repo").and_then(|v| v.as_str()) {
+        return Some(PathBuf::from(repo));
+    }
+    repo_from_db(db)
+        .or_else(|| repo_from_db(default_db))
+        .or_else(|| std::env::current_dir().ok())
 }
 
 fn optional_string(args: &Value, key: &str) -> std::result::Result<(), String> {
@@ -702,7 +718,14 @@ fn repo_from_db(db: &Path) -> Option<PathBuf> {
     if graph_dir.file_name()? != ".graphtrail" {
         return None;
     }
-    graph_dir.parent().map(|path| path.to_path_buf())
+    let parent = graph_dir.parent()?;
+    // A relative default like `.graphtrail/graphtrail.db` has an empty parent here;
+    // the repo root in that case is the current directory.
+    if parent.as_os_str().is_empty() {
+        std::env::current_dir().ok()
+    } else {
+        Some(parent.to_path_buf())
+    }
 }
 
 fn db_metadata(db: &Path) -> Result<BTreeMap<String, String>> {
