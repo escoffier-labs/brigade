@@ -1,0 +1,95 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="880" height="440" viewBox="0 0 880 440" role="img" aria-labelledby="title desc">
+  <title id="title">MiseLedger evidence graph: sources into ledger into search and Brigade export</title>
+  <desc id="desc">Scattered AI work sources crawl into adapter.v1 records, land in a local SQLite ledger with FTS5, then search and evidence export feed Brigade run briefs as untrusted context.</desc>
+  <defs>
+    <linearGradient id="card" x1="0" y1="0" x2="0.12" y2="1">
+      <stop offset="0%" stop-color="#161a20"/>
+      <stop offset="100%" stop-color="#0f1217"/>
+    </linearGradient>
+    <linearGradient id="rail" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#e0a45c"/>
+      <stop offset="100%" stop-color="#3ecf8e"/>
+    </linearGradient>
+    <marker id="arr" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto">
+      <path d="M0,0 L8,4 L0,8 Z" fill="#e0a45c"/>
+    </marker>
+    <marker id="arr-g" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto">
+      <path d="M0,0 L8,4 L0,8 Z" fill="#3ecf8e"/>
+    </marker>
+    <filter id="soft" x="-8%" y="-8%" width="116%" height="116%">
+      <feDropShadow dx="0" dy="10" stdDeviation="14" flood-color="#000" flood-opacity="0.35"/>
+    </filter>
+  </defs>
+
+  <rect width="880" height="440" fill="#14261c"/>
+  <circle cx="740" cy="80" r="200" fill="#3ecf8e" opacity="0.12"/>
+  <circle cx="100" cy="380" r="160" fill="#e0a45c" opacity="0.1"/>
+
+  <rect x="36" y="24" width="808" height="392" rx="18" fill="url(#card)" stroke="#2a3340" filter="url(#soft)"/>
+  <rect x="36" y="24" width="5" height="392" rx="2.5" fill="url(#rail)"/>
+
+  <text x="68" y="56" fill="#8b9bb0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11" letter-spacing="2.2">THE EVIDENCE GRAPH (LOCAL)</text>
+  <text x="812" y="56" text-anchor="end" fill="#6b7a8f" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11">adapter.v1 · FTS5 · untrusted</text>
+  <line x1="68" y1="72" x2="812" y2="72" stroke="#2a3340"/>
+
+  <!-- sources -->
+  <text x="68" y="100" fill="#e0a45c" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11" letter-spacing="1.6">SOURCES · crawl / import</text>
+  <g font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12">
+    <rect x="68" y="112" width="130" height="34" rx="8" fill="#12161c" stroke="#e0a45c"/>
+    <text x="133" y="133" text-anchor="middle" fill="#e8eef6">Codex sessions</text>
+    <rect x="68" y="154" width="130" height="34" rx="8" fill="#12161c" stroke="#e0a45c"/>
+    <text x="133" y="175" text-anchor="middle" fill="#e8eef6">Claude / OpenClaw</text>
+    <rect x="68" y="196" width="130" height="34" rx="8" fill="#12161c" stroke="#e0a45c"/>
+    <text x="133" y="217" text-anchor="middle" fill="#e8eef6">git · notes · HTML</text>
+    <rect x="68" y="238" width="130" height="34" rx="8" fill="#12161c" stroke="#3d4654"/>
+    <text x="133" y="259" text-anchor="middle" fill="#6b7a8f">Discord · Slack · …</text>
+  </g>
+
+  <path d="M198 129 H250" stroke="#e0a45c" stroke-width="1.6" marker-end="url(#arr)"/>
+  <path d="M198 171 H250" stroke="#e0a45c" stroke-width="1.6" marker-end="url(#arr)"/>
+  <path d="M198 213 H250" stroke="#e0a45c" stroke-width="1.6" marker-end="url(#arr)"/>
+  <path d="M198 255 H250" stroke="#6b7a8f" stroke-width="1.4" marker-end="url(#arr)"/>
+
+  <!-- adapter -->
+  <rect x="250" y="150" width="120" height="100" rx="12" fill="#1a140c" stroke="#e0a45c" stroke-width="2"/>
+  <text x="310" y="188" text-anchor="middle" fill="#e0a45c" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11" letter-spacing="1.2">ADAPTER</text>
+  <text x="310" y="212" text-anchor="middle" fill="#f5f2ea" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14" font-weight="700">v1 JSONL</text>
+  <text x="310" y="232" text-anchor="middle" fill="#6b7a8f" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10">one contract</text>
+
+  <path d="M370 200 H420" stroke="#e0a45c" stroke-width="1.8" marker-end="url(#arr)"/>
+
+  <!-- ledger hub -->
+  <rect x="420" y="112" width="200" height="176" rx="14" fill="#12161c" stroke="#3ecf8e" stroke-width="2"/>
+  <text x="520" y="140" text-anchor="middle" fill="#7dffb3" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11" letter-spacing="1.4">LEDGER · SQLite</text>
+  <g font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" fill="#e8eef6">
+    <text x="444" y="172">sources</text>
+    <text x="444" y="196">collections</text>
+    <text x="444" y="220">items · actors</text>
+    <text x="444" y="244">relations</text>
+    <text x="444" y="268" fill="#7dffb3">FTS5 index</text>
+  </g>
+
+  <path d="M620 160 H670" stroke="#3ecf8e" stroke-width="1.8" marker-end="url(#arr-g)"/>
+  <path d="M620 220 H670" stroke="#3ecf8e" stroke-width="1.8" marker-end="url(#arr-g)"/>
+  <path d="M620 260 H670" stroke="#3ecf8e" stroke-width="1.8" marker-end="url(#arr-g)"/>
+
+  <!-- outputs -->
+  <text x="670" y="100" fill="#7dffb3" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11" letter-spacing="1.6">OUT</text>
+  <rect x="670" y="112" width="158" height="52" rx="10" fill="#12301f" stroke="#2f8f5b"/>
+  <text x="749" y="134" text-anchor="middle" fill="#e8eef6" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13">search</text>
+  <text x="749" y="152" text-anchor="middle" fill="#6b7a8f" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10">"cookie rotation"</text>
+
+  <rect x="670" y="176" width="158" height="52" rx="10" fill="#12301f" stroke="#2f8f5b"/>
+  <text x="749" y="198" text-anchor="middle" fill="#e8eef6" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13">evidence --json</text>
+  <text x="749" y="216" text-anchor="middle" fill="#6b7a8f" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10">Brigade-ready bundle</text>
+
+  <rect x="670" y="240" width="158" height="48" rx="10" fill="#1a140c" stroke="#e0a45c"/>
+  <text x="749" y="260" text-anchor="middle" fill="#f0c48a" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12">→ Brigade brief</text>
+  <text x="749" y="278" text-anchor="middle" fill="#6b7a8f" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10">marked untrusted</text>
+
+  <line x1="68" y1="310" x2="812" y2="310" stroke="#2a3340"/>
+  <text x="68" y="338" fill="#cbbfac" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11" letter-spacing="1.6">WHY IT IS A GRAPH</text>
+  <text x="68" y="362" fill="#e8eef6" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13">items link to sources · actors · artifacts · relations  ·  not a flat log dump</text>
+  <text x="68" y="386" fill="#6b7a8f" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12">Memory is for decisions. MiseLedger is for proof of what actually happened.</text>
+  <text x="68" y="406" fill="#6b7a8f" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11">Local only. No daemon. Imported text is evidence, never instructions.</text>
+</svg>

@@ -55,10 +55,10 @@ cd miseledger && go build -o bin/miseledger ./cmd/miseledger
 | **Export** | Hand evidence to Brigade | Bundles marked untrusted for run briefs and receipts |
 
 <p align="center">
-  <img src="docs/assets/miseledger-ledger.svg" alt="Recording: miseledger init, import, search, stats" width="760">
+  <img src="docs/assets/evidence-graph.svg" alt="Evidence graph: sources crawl into adapter.v1, land in SQLite ledger with FTS5, then search and evidence export to Brigade" width="880">
 </p>
 
-<p align="center"><em>Init a ledger, import records, search with FTS5, export evidence. Everything stays on your machine.</em></p>
+<p align="center"><em>Memory is for decisions. MiseLedger is for proof of what actually happened. Local only.</em></p>
 
 
 ## Build
