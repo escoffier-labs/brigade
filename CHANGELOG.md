@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.21.1] - 2026-07-09
+
 ### Added
 - Embedded memory-doctor verbs under `brigade memory`: `status`, `lint` (dead wiki-links), `compact` (flatten/tighten MEMORY.md), and `init-git`. Also available as `python -m brigade.memory_doctor`. Handoff promotion stays on `brigade ingest`.
 - Search station CLI: `brigade search status|doctor` and review-only `sync plan` for GraphTrail plus optional code-search. Shared station health schema (`station_health`) powers status/doctor/plan across stations.
@@ -19,6 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - MCP adapters for Grok CLI: project `.grok/config.toml` (`grok`) and user `~/.grok/config.toml` (`grok-user`, requires `--user-scope`). Same Codex-like `[mcp_servers.<name>]` TOML shape. (#183)
 
 ### Fixed
+- Release preflight now bumps and synchronizes every version stamp before the full verification and cold-start gates, and the checklist confirms the published PyPI version after tagging.
 - MCP Codex/Grok empty-`args` fingerprint conflicts: `to_provider` no longer emits `args: []`, matching TOML render which omits empty arrays, so force-sync stays idempotent. (#181)
 - MCP import of url-only servers no longer lands as invalid `stdio`+`url`; coerce to `http`/`sse`, including OpenClaw sources with a bogus `transport: stdio` or a command that is actually a URL. (#182)
 - Productized GraphTrail ↔ Brigade ↔ MiseLedger dogfood path: `brigade operator checkup` reports optional loop health (`graph` / `ledger` / last and mean `brief_hit_rate` from run receipts) without blocking readiness; `brigade add graphtrail` installs the code-graph tool under the search station; QUICKSTART documents install → checkup → export → rank.
