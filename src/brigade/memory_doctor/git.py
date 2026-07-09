@@ -126,6 +126,8 @@ def commit_run(
     if not files:
         return CommitResult()
 
+    name: str | None
+    email: str | None
     if author:
         try:
             name, email = _parse_author(author)

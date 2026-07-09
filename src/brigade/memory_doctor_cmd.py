@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from .memory_doctor.paths import PathConfigError, resolve_paths
+from .memory_doctor.paths import PathConfig, PathConfigError, resolve_paths
 
 
 def _resolve_commit(commit: bool, no_commit: bool) -> bool:
@@ -24,7 +24,7 @@ def _paths(
     max_bytes: int | None,
     target: Path | None,
     require_handoffs: bool = True,
-) -> tuple[object | None, int]:
+) -> tuple[PathConfig | None, int]:
     """Resolve memory/handoffs paths. When --target is set and dirs are not,
     prefer the Brigade workspace layout under that target.
     """

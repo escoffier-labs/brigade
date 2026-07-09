@@ -22,10 +22,10 @@ MEMORY = Station(
 )
 GUARD = Station(
     name="guard",
-    summary="publish safety and content scrub",
+    summary="publish safety, content scrub, and optional demo plating",
     aliases=("pass",),
     doctor=_doctor.guard_station_checks,
-    tools=("content-guard",),
+    tools=("content-guard", "plating"),
 )
 SKILLS = Station(
     name="skills",
@@ -35,17 +35,17 @@ SKILLS = Station(
 )
 TOKENS = Station(
     name="tokens",
-    summary="Token Glace output compaction",
+    summary="Token Glace output compaction and optional usage export",
     aliases=(),
     doctor=_doctor.tokens_station_checks,
-    tools=("token-glace",),
+    tools=("token-glace", "usage-tracker"),
 )
 SEARCH = Station(
     name="search",
-    summary="local semantic code search",
+    summary="local code graph (GraphTrail) and optional semantic code search",
     aliases=("code-search",),
     doctor=_doctor.search_station_checks,
-    tools=("code-search-api", "code-search-mcp"),
+    tools=("graphtrail", "code-search-api", "code-search-mcp"),
 )
 SECURITY = Station(
     name="security",

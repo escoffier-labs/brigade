@@ -24,6 +24,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade daily`: 26 command path(s)
 - `brigade doctor`: 1 command path(s)
 - `brigade dogfood` (extras): 1 command path(s)
+- `brigade evidence`: 4 command path(s)
 - `brigade extras`: 3 command path(s)
 - `brigade friction` (extras): 3 command path(s)
 - `brigade guard`: 1 command path(s)
@@ -34,12 +35,12 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade init`: 1 command path(s)
 - `brigade learn` (extras): 13 command path(s)
 - `brigade mcp`: 7 command path(s)
-- `brigade memory`: 10 command path(s)
+- `brigade memory`: 14 command path(s)
 - `brigade notifications` (extras): 4 command path(s)
 - `brigade openclaw-fragments` (extras): 1 command path(s)
 - `brigade operator`: 24 command path(s)
 - `brigade outcome`: 10 command path(s)
-- `brigade pantry` (extras): 4 command path(s)
+- `brigade pantry` (extras): 5 command path(s)
 - `brigade profiles`: 2 command path(s)
 - `brigade projects` (extras): 10 command path(s)
 - `brigade receipts`: 3 command path(s)
@@ -53,10 +54,12 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade runbook` (extras): 5 command path(s)
 - `brigade runs`: 7 command path(s)
 - `brigade scrub`: 1 command path(s)
+- `brigade search`: 3 command path(s)
 - `brigade security`: 15 command path(s)
 - `brigade skills`: 27 command path(s)
-- `brigade stations`: 1 command path(s)
+- `brigade stations`: 2 command path(s)
 - `brigade status`: 1 command path(s)
+- `brigade tokens`: 3 command path(s)
 - `brigade tools`: 48 command path(s)
 - `brigade untrusted` (extras): 2 command path(s)
 - `brigade work`: 139 command path(s)
@@ -140,6 +143,10 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade daily unblock`
 - `brigade doctor`
 - `brigade dogfood` (extras)
+- `brigade evidence crawl plan`
+- `brigade evidence doctor`
+- `brigade evidence export plan`
+- `brigade evidence status`
 - `brigade extras off`
 - `brigade extras on`
 - `brigade extras status`
@@ -196,8 +203,12 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade memory care plan-fixes`
 - `brigade memory care scan`
 - `brigade memory care status`
+- `brigade memory compact`
+- `brigade memory init-git`
+- `brigade memory lint`
 - `brigade memory search`
 - `brigade memory serve-mcp`
+- `brigade memory status`
 - `brigade notifications event plan` (extras)
 - `brigade notifications event record` (extras)
 - `brigade notifications setup plan` (extras)
@@ -237,6 +248,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade outcome reconcile`
 - `brigade outcome record`
 - `brigade outcome score`
+- `brigade pantry doctor` (extras)
 - `brigade pantry expiry-alert` (extras)
 - `brigade pantry service plan` (extras)
 - `brigade pantry setup plan` (extras)
@@ -382,6 +394,9 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade runs steer`
 - `brigade runs watch`
 - `brigade scrub`
+- `brigade search doctor`
+- `brigade search status`
+- `brigade search sync plan`
 - `brigade security closeout`
 - `brigade security config`
 - `brigade security diff`
@@ -424,8 +439,12 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade skills search`
 - `brigade skills serve-mcp`
 - `brigade skills uninstall`
+- `brigade stations discover`
 - `brigade stations list`
 - `brigade status`
+- `brigade tokens doctor`
+- `brigade tokens status`
+- `brigade tokens wire plan`
 - `brigade tools apply`
 - `brigade tools call approve`
 - `brigade tools call hold`

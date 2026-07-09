@@ -381,8 +381,11 @@ def run(
 
     if plan.tightens:
         print("\nTighten candidates:")
-        for t in plan.tightens:
-            print(f"  [{t.title}] -> {t.target_name} ({len(t.full_hook)} -> {len(t.short_hook)} chars)")
+        for tighten in plan.tightens:
+            print(
+                f"  [{tighten.title}] -> {tighten.target_name} "
+                f"({len(tighten.full_hook)} -> {len(tighten.short_hook)} chars)"
+            )
 
     if not plan.flattens and not plan.tightens:
         if has_unicode:

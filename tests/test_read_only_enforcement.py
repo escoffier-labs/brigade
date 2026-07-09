@@ -10,6 +10,7 @@ from brigade.roster import Agent, Roster
 def test_read_only_enforcement_classification():
     assert agents.read_only_enforcement("codex") == "hard"
     assert agents.read_only_enforcement("aider") == "hard"
+    assert agents.read_only_enforcement("grok") == "hard"
     assert agents.read_only_enforcement("goose") == "soft"
     assert agents.read_only_enforcement("crush") == "soft"
     assert agents.read_only_enforcement("claude") == "none"
