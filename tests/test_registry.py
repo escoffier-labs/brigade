@@ -30,7 +30,7 @@ def test_stations_declare_attached_tools():
     tokens = registry.resolve("tokens")
     search = registry.resolve("search")
     security = registry.resolve("security")
-    assert set(memory.tools) == {"memory-doctor", "bootstrap-doctor"}
+    assert set(memory.tools) == {"bootstrap-doctor"}
     assert set(guard.tools) == {"content-guard", "plating"}
     assert tokens is not None and set(tokens.tools) == {"token-glace", "usage-tracker"}
     assert search is not None and set(search.tools) == {"graphtrail", "code-search-api", "code-search-mcp"}

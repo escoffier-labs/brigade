@@ -24,28 +24,20 @@ def test_tools_attach_to_known_stations():
 
 def test_for_station_filters():
     names = {t.name for t in managed.for_station("memory")}
-    assert names == {"memory-doctor", "bootstrap-doctor"}
+    assert names == {"bootstrap-doctor"}
 
 
 def test_detect_uses_which(monkeypatch):
-    t = managed.resolve("content-guard")
+    t = managed.resolve("bootstrap-doctor")
     monkeypatch.setattr(managed.proc, "which", lambda c: None)
     assert t.detect() is False
     monkeypatch.setattr(managed.proc, "which", lambda c: "/usr/bin/" + c)
     assert t.detect() is True
 
 
-def test_memory_doctor_doctor_parses_status(monkeypatch):
-    t = managed.resolve("memory-doctor")
-    monkeypatch.setattr(managed.proc, "which", lambda c: "/x/" + c)
-
-    def fake_run(args, **kw):
-        return managed.proc.Result(code=0, stdout='{"cards": 4, "dead_links": 0, "pending_handoffs": 1}', stderr="")
-
-    monkeypatch.setattr(managed.proc, "run", fake_run)
-    ctx = DoctorContext(target=Path("/tmp/ws"), selection=None, harnesses=[])
-    results = t.doctor(ctx)
-    assert any(status == "OK" and "memory-doctor" in name for status, name, _ in results)
+def test_memory_doctor_no_longer_external_managed_tool():
+    # Folded into brigade.memory_doctor / brigade memory status|lint|compact.
+    assert managed.resolve("memory-doctor") is None
 
 
 def test_token_glace_installs_from_release_tarball():
