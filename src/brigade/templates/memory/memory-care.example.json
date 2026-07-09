@@ -1,5 +1,5 @@
 {
-  "_brigade_version": "0.21.0",
+  "_brigade_version": "0.21.1",
   "_description": "Example config for a local memory-care scanner. Brigade does not run this scanner for you; it validates the output with `brigade doctor`.",
   "cards_glob": "memory/cards/*.md",
   "decay_dir": ".brigade/memory-care/decay",
