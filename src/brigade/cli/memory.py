@@ -82,6 +82,44 @@ def register(sub: argparse._SubParsersAction) -> None:
         "--stdio", action="store_true", help="Run the JSON-RPC stdio server (otherwise print the contract)."
     )
     p_memory_serve_mcp.add_argument("--json", action="store_true", help="Print the contract as JSON.")
+
+    # Embedded memory-doctor verbs (status / lint / compact / init-git).
+    def _add_md_common(p: argparse.ArgumentParser) -> None:
+        p.add_argument(
+            "--target", "-t", type=Path, default=None, help="Repo/workspace (uses memory/ + handoff inboxes)."
+        )
+        p.add_argument("--memory-dir", default=None, help="Memory dir (cards + MEMORY.md).")
+        p.add_argument("--handoffs-dir", default=None, help="Handoffs dir.")
+        p.add_argument("--max-lines", type=int, default=None, help="MEMORY.md line threshold.")
+        p.add_argument("--max-bytes", type=int, default=None, help="MEMORY.md byte threshold.")
+
+    p_memory_status = memory_sub.add_parser(
+        "status", help="Read-only memory health summary (cards, index size, handoffs, dead links)."
+    )
+    _add_md_common(p_memory_status)
+    p_memory_status.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+
+    p_memory_lint = memory_sub.add_parser("lint", help="Find dead [[wiki-links]] in memory cards; exit 1 if any.")
+    _add_md_common(p_memory_lint)
+
+    p_memory_compact = memory_sub.add_parser(
+        "compact", help="Flatten or tighten oversized MEMORY.md entries into topic cards (dry-run by default)."
+    )
+    _add_md_common(p_memory_compact)
+    p_memory_compact.add_argument("--apply", action="store_true", help="Write changes (default: dry-run).")
+    p_memory_compact.add_argument(
+        "--commit", action="store_true", help="Commit after --apply when the memory dir is a git repo."
+    )
+    p_memory_compact.add_argument(
+        "--no-commit", action="store_true", help="Never commit even if MEMORY_DOCTOR_COMMIT=1."
+    )
+    p_memory_compact.add_argument("--commit-author", default=None, help='Commit author "Name <email>".')
+
+    p_memory_init_git = memory_sub.add_parser(
+        "init-git", help="Initialize the memory dir as a git repo with one initial commit."
+    )
+    _add_md_common(p_memory_init_git)
+
     p_memory.set_defaults(func=dispatch)
 
 
@@ -124,5 +162,45 @@ def dispatch(args) -> int:
         return memory_cmd.search(target=args.target, query=args.query, limit=args.limit, json_output=args.json)
     if args.memory_command == "serve-mcp":
         return memory_cmd.serve_mcp(target=args.target, stdio=args.stdio, json_output=args.json)
+
+    from .. import memory_doctor_cmd
+
+    if args.memory_command == "status":
+        return memory_doctor_cmd.status(
+            memory_dir=args.memory_dir,
+            handoffs_dir=args.handoffs_dir,
+            max_lines=args.max_lines,
+            max_bytes=args.max_bytes,
+            target=args.target,
+            json_output=args.json,
+        )
+    if args.memory_command == "lint":
+        return memory_doctor_cmd.lint(
+            memory_dir=args.memory_dir,
+            handoffs_dir=args.handoffs_dir,
+            max_lines=args.max_lines,
+            max_bytes=args.max_bytes,
+            target=args.target,
+        )
+    if args.memory_command == "compact":
+        return memory_doctor_cmd.compact(
+            memory_dir=args.memory_dir,
+            handoffs_dir=args.handoffs_dir,
+            max_lines=args.max_lines,
+            max_bytes=args.max_bytes,
+            target=args.target,
+            apply=args.apply,
+            commit=args.commit,
+            no_commit=args.no_commit,
+            commit_author=args.commit_author,
+        )
+    if args.memory_command == "init-git":
+        return memory_doctor_cmd.init_git(
+            memory_dir=args.memory_dir,
+            handoffs_dir=args.handoffs_dir,
+            max_lines=args.max_lines,
+            max_bytes=args.max_bytes,
+            target=args.target,
+        )
     args._brigade_parser.error(f"unknown memory command: {args.memory_command}")
     return 2

@@ -63,19 +63,6 @@ def _surface(
 # memory-doctor and bootstrap-doctor inspect the operator's canonical memory and
 # bootstrap files (host-global), not a per-target workspace, so their findings are
 # advisory: labeled operator-scoped and never FAIL a workspace doctor run.
-def _memory_doctor_doctor(ctx: DoctorContext) -> List[CheckResult]:
-    name = "memory-doctor (operator memory)"
-    r = proc.run(["memory-doctor", "status", "--json"])
-    if r.code == 2:
-        return [(WARN, name, "installed but unwired (memory/handoffs dir missing)")]
-    data = r.json()
-    if data is None:
-        return [(WARN, name, f"unexpected output (exit {r.code})")]
-    if not isinstance(data, dict):
-        return [(WARN, name, f"unexpected output (exit {r.code})")]
-    dead = data.get("dead_links", 0)
-    status = WARN if dead else OK
-    return [(status, name, f"cards={data.get('cards')}, dead_links={dead}, pending={data.get('pending_handoffs')}")]
 
 
 def _bootstrap_doctor_doctor(ctx: DoctorContext) -> List[CheckResult]:
@@ -310,19 +297,6 @@ def _token_glace_wire(ctx: DoctorContext) -> List[CheckResult]:
 # ---- registry -------------------------------------------------------------
 
 _TOOLS: Tuple[ManagedTool, ...] = (
-    ManagedTool(
-        name="memory-doctor",
-        station="memory",
-        command="memory-doctor",
-        summary="memory index health, dead-link lint, handoff counts",
-        install_args=["pipx", "install", "git+https://github.com/escoffier-labs/memory-doctor"],
-        wire=_noop_wire,
-        doctor=_memory_doctor_doctor,
-        surfaces=(
-            _surface("doctor-json", ("memory-doctor", "status", "--json"), timeout_seconds=30.0),
-            _surface("verify-exit", ("memory-doctor", "lint"), timeout_seconds=30.0),
-        ),
-    ),
     ManagedTool(
         name="bootstrap-doctor",
         station="memory",

@@ -15,10 +15,10 @@ CORE = Station(
 )
 MEMORY = Station(
     name="memory",
-    summary="handoff inbox, ingest, and memory-care",
+    summary="handoff inbox, ingest, memory-care, and embedded memory maintenance",
     aliases=("garde",),
     doctor=_doctor.memory_station_checks,
-    tools=("memory-doctor", "bootstrap-doctor"),
+    tools=("bootstrap-doctor",),
 )
 GUARD = Station(
     name="guard",

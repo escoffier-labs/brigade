@@ -47,6 +47,15 @@ def run(target: Path, station: str, *, install_manifest: bool = False) -> int:
         print(f"station {station_name!r} has no managed tools to add.")
         return 0
 
+    if st is not None and st.name == "memory":
+        print("memory maintenance is built into brigade-cli:")
+        print("  brigade memory status")
+        print("  brigade memory lint")
+        print("  brigade memory compact")
+        print("  brigade memory init-git")
+        print("  brigade ingest   # handoff promotion (not the retired memory-doctor ingest)")
+        print()
+
     ctx = _doctor.build_context(target)
     rc = 0
     for tool in tools:
