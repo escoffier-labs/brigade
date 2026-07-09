@@ -464,8 +464,25 @@ def _codex_write_file(text: str | None, owned: dict[str, dict[str, Any]], remove
 # --------------------------------------------------------------------------- #
 
 
+def _remote_transport(raw: dict[str, Any], *, type_key: str = "type") -> str:
+    """Pick http/sse for a remote server; never keep stdio when only a URL is present."""
+    for key in (type_key, "transport", "type"):
+        value = raw.get(key)
+        if value in ("http", "sse"):
+            return str(value)
+    return "http"
+
+
+def _looks_like_url(value: object) -> bool:
+    return isinstance(value, str) and value.startswith(("http://", "https://"))
+
+
 def _mcpservers_to_provider(server: CanonicalServer, env_style: str, *, remote_url_key: str = "url") -> dict[str, Any]:
-    """The common JSON ``mcpServers`` per-server shape (Claude, Cursor, Antigravity)."""
+    """The common JSON ``mcpServers`` per-server shape (Claude, Cursor, Antigravity).
+
+    Empty ``args`` are omitted so write/read round-trips stay fingerprint-stable
+    for formats (Codex/Grok TOML) that drop empty arrays on render.
+    """
     if server.is_remote:
         out: dict[str, Any] = {remote_url_key: server.url}
         if remote_url_key == "url":
@@ -473,7 +490,9 @@ def _mcpservers_to_provider(server: CanonicalServer, env_style: str, *, remote_u
         if server.headers:
             out["headers"] = _emit_env(server.headers, env_style)
         return out
-    out = {"command": server.command, "args": list(server.args)}
+    out: dict[str, Any] = {"command": server.command}
+    if server.args:
+        out["args"] = list(server.args)
     if server.env:
         out["env"] = _emit_env(server.env, env_style)
     if server.timeout is not None:
@@ -485,9 +504,18 @@ def _mcpservers_from_provider(
     name: str, raw: dict[str, Any], *, remote_url_key: str = "url", keep_secrets: bool = False
 ) -> tuple[CanonicalServer, list[str]]:
     url = raw.get(remote_url_key) or raw.get("url") or raw.get("serverUrl")
+    command = raw.get("command")
+    # Url-only (or command that is actually a URL) is always remote.
+    if not url and _looks_like_url(command) and not raw.get("args"):
+        url = command
+        command = None
+    if url and not command:
+        headers, demoted = _parse_env(raw.get("headers"), keep_secrets=keep_secrets)
+        transport = _remote_transport(raw)
+        return CanonicalServer(name=name, transport=transport, url=str(url), headers=headers), demoted
     if url:
         headers, demoted = _parse_env(raw.get("headers"), keep_secrets=keep_secrets)
-        transport = raw.get("type") if raw.get("type") in ("http", "sse") else "http"
+        transport = _remote_transport(raw)
         return CanonicalServer(name=name, transport=transport, url=str(url), headers=headers), demoted
     env, demoted = _parse_env(raw.get("env"), keep_secrets=keep_secrets)
     timeout = raw.get("timeout")
@@ -495,7 +523,7 @@ def _mcpservers_from_provider(
         CanonicalServer(
             name=name,
             transport="stdio",
-            command=str(raw["command"]) if raw.get("command") else None,
+            command=str(command) if command else None,
             args=tuple(str(a) for a in (raw.get("args") or [])),
             env=env,
             timeout=int(timeout) if isinstance(timeout, (int, float)) else None,
@@ -510,7 +538,9 @@ def _vscode_to_provider(server: CanonicalServer) -> dict[str, Any]:
         if server.headers:
             out["headers"] = _emit_env(server.headers, "vscode-inputs")
         return out
-    out = {"type": "stdio", "command": server.command, "args": list(server.args)}
+    out: dict[str, Any] = {"type": "stdio", "command": server.command}
+    if server.args:
+        out["args"] = list(server.args)
     if server.env:
         out["env"] = _emit_env(server.env, "vscode-inputs")
     return out
@@ -571,7 +601,9 @@ def _openclaw_to_provider(server: CanonicalServer) -> dict[str, Any]:
         if server.headers:
             remote["headers"] = _emit_env(server.headers, "expand")
         return remote
-    out: dict[str, Any] = {"command": server.command, "args": list(server.args)}
+    out: dict[str, Any] = {"command": server.command}
+    if server.args:
+        out["args"] = list(server.args)
     if server.env:
         out["env"] = _emit_env(server.env, "expand")
     return out
@@ -580,12 +612,17 @@ def _openclaw_to_provider(server: CanonicalServer) -> dict[str, Any]:
 def _openclaw_from_provider(
     name: str, raw: dict[str, Any], *, keep_secrets: bool = False
 ) -> tuple[CanonicalServer, list[str]]:
-    if raw.get("url"):
+    url = raw.get("url")
+    command = raw.get("command")
+    if not url and _looks_like_url(command) and not raw.get("args"):
+        url = command
+        command = None
+    if url:
         headers, demoted = _parse_env(raw.get("headers"), keep_secrets=keep_secrets)
+        # Never keep transport=stdio for a URL-bearing entry (import fidelity).
+        transport = _remote_transport(raw, type_key="transport")
         return (
-            CanonicalServer(
-                name=name, transport=str(raw.get("transport") or "http"), url=str(raw["url"]), headers=headers
-            ),
+            CanonicalServer(name=name, transport=transport, url=str(url), headers=headers),
             demoted,
         )
     env, demoted = _parse_env(raw.get("env"), keep_secrets=keep_secrets)
@@ -593,7 +630,7 @@ def _openclaw_from_provider(
         CanonicalServer(
             name=name,
             transport="stdio",
-            command=str(raw["command"]) if raw.get("command") else None,
+            command=str(command) if command else None,
             args=tuple(str(a) for a in (raw.get("args") or [])),
             env=env,
         ),
@@ -700,6 +737,34 @@ ADAPTERS: dict[str, McpAdapter] = {
         from_provider=_openclaw_from_provider,
         read_file=lambda t: _json_read_file(t, "mcp.servers"),
         write_file=lambda t, o, r: _json_write_file(t, o, r, "mcp.servers"),
+    ),
+    # Grok CLI: Codex-like [mcp_servers.<name>] TOML. Project scope lives under
+    # .grok/config.toml; user scope under ~/.grok/config.toml (grok mcp add default).
+    "grok": McpAdapter(
+        harness="grok",
+        path=".grok/config.toml",
+        fmt="toml",
+        top_key="mcp_servers",
+        user_scope=False,
+        supports_remote=True,
+        env_style="passthrough",
+        to_provider=lambda s: _mcpservers_to_provider(s, "passthrough"),
+        from_provider=lambda n, r, keep_secrets=False: _mcpservers_from_provider(n, r, keep_secrets=keep_secrets),
+        read_file=_codex_read_file,
+        write_file=_codex_write_file,
+    ),
+    "grok-user": McpAdapter(
+        harness="grok-user",
+        path="~/.grok/config.toml",
+        fmt="toml",
+        top_key="mcp_servers",
+        user_scope=True,
+        supports_remote=True,
+        env_style="passthrough",
+        to_provider=lambda s: _mcpservers_to_provider(s, "passthrough"),
+        from_provider=lambda n, r, keep_secrets=False: _mcpservers_from_provider(n, r, keep_secrets=keep_secrets),
+        read_file=_codex_read_file,
+        write_file=_codex_write_file,
     ),
 }
 
