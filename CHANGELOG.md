@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `brigade stations verify <path>` checks an explicitly selected `station.json` without running install commands. Read-only surfaces and support probes run without a shell in an isolated temporary home, with process-group cleanup, positive timeouts, and a 64 KiB combined output ceiling. JSON results omit raw child output. Managed-catalog drift is advisory unless `--check-managed` is set, while non-active lifecycle manifests skip execution.
+
 ## [0.21.1] - 2026-07-09
 
 ### Added
