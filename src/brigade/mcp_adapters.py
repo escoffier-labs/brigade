@@ -464,6 +464,19 @@ def _codex_write_file(text: str | None, owned: dict[str, dict[str, Any]], remove
 # --------------------------------------------------------------------------- #
 
 
+def _remote_transport(raw: dict[str, Any], *, type_key: str = "type") -> str:
+    """Pick http/sse for a remote server; never keep stdio when only a URL is present."""
+    for key in (type_key, "transport", "type"):
+        value = raw.get(key)
+        if value in ("http", "sse"):
+            return str(value)
+    return "http"
+
+
+def _looks_like_url(value: object) -> bool:
+    return isinstance(value, str) and value.startswith(("http://", "https://"))
+
+
 def _mcpservers_to_provider(server: CanonicalServer, env_style: str, *, remote_url_key: str = "url") -> dict[str, Any]:
     """The common JSON ``mcpServers`` per-server shape (Claude, Cursor, Antigravity)."""
     if server.is_remote:
@@ -485,9 +498,14 @@ def _mcpservers_from_provider(
     name: str, raw: dict[str, Any], *, remote_url_key: str = "url", keep_secrets: bool = False
 ) -> tuple[CanonicalServer, list[str]]:
     url = raw.get(remote_url_key) or raw.get("url") or raw.get("serverUrl")
+    command = raw.get("command")
+    # A bare URL in the command field is a remote endpoint, not a stdio command.
+    if not url and _looks_like_url(command) and not raw.get("args"):
+        url = command
+        command = None
     if url:
         headers, demoted = _parse_env(raw.get("headers"), keep_secrets=keep_secrets)
-        transport = raw.get("type") if raw.get("type") in ("http", "sse") else "http"
+        transport = _remote_transport(raw)
         return CanonicalServer(name=name, transport=transport, url=str(url), headers=headers), demoted
     env, demoted = _parse_env(raw.get("env"), keep_secrets=keep_secrets)
     timeout = raw.get("timeout")
@@ -580,12 +598,19 @@ def _openclaw_to_provider(server: CanonicalServer) -> dict[str, Any]:
 def _openclaw_from_provider(
     name: str, raw: dict[str, Any], *, keep_secrets: bool = False
 ) -> tuple[CanonicalServer, list[str]]:
-    if raw.get("url"):
+    url = raw.get("url")
+    command = raw.get("command")
+    # A bare URL in the command field is a remote endpoint, not a stdio command.
+    if not url and _looks_like_url(command) and not raw.get("args"):
+        url = command
+        command = None
+    if url:
         headers, demoted = _parse_env(raw.get("headers"), keep_secrets=keep_secrets)
+        # Never keep transport=stdio for a URL-bearing entry: OpenClaw stamps a
+        # default transport that would otherwise emit an invalid stdio+url server.
+        transport = _remote_transport(raw, type_key="transport")
         return (
-            CanonicalServer(
-                name=name, transport=str(raw.get("transport") or "http"), url=str(raw["url"]), headers=headers
-            ),
+            CanonicalServer(name=name, transport=transport, url=str(url), headers=headers),
             demoted,
         )
     env, demoted = _parse_env(raw.get("env"), keep_secrets=keep_secrets)
@@ -593,7 +618,7 @@ def _openclaw_from_provider(
         CanonicalServer(
             name=name,
             transport="stdio",
-            command=str(raw["command"]) if raw.get("command") else None,
+            command=str(command) if command else None,
             args=tuple(str(a) for a in (raw.get("args") or [])),
             env=env,
         ),
