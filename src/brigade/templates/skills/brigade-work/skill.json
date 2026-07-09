@@ -1,0 +1,7 @@
+{
+  "id": "brigade-work",
+  "title": "brigade-work",
+  "version": "0.1.0",
+  "description": "Route work through Brigade so verification, outcomes, evidence export, and handoffs are captured instead of leaving Brigade installed-but-dormant.",
+  "tests": ["brigade skills lint brigade-work"]
+}
