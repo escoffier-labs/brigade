@@ -1173,14 +1173,28 @@ Tools are never imported in process; Brigade shells out to each CLI, so the boun
 
 ```bash
 brigade add memory   # memory-doctor + bootstrap-doctor
-brigade add guard    # content-guard
-brigade add tokens   # token-glace
+brigade add guard    # content-guard (+ optional plating)
+brigade add tokens   # token-glace (+ optional usage-tracker)
+brigade add search   # graphtrail + optional code-search
+brigade add evidence # miseledger
 brigade add skills   # built-in skills + optional Skillet roster
-brigade add pantry   # agentpantry
+brigade add pantry   # agentpantry (extras surface)
+brigade stations discover --root ~/repos
 brigade add ../agentpantry   # inspect an external station.json
 ```
 
 `security` is a built-in station with no external managed tool yet.
+
+First-class station CLIs (always registered; not extras-gated):
+
+| Command group | Plans / health |
+|---|---|
+| `brigade evidence` | `status`, `doctor`, `crawl plan`, `export plan` |
+| `brigade search` | `status`, `doctor`, `sync plan` |
+| `brigade tokens` | `status`, `doctor`, `wire plan` |
+| `brigade stations` | `list`, `discover` |
+
+`pantry` and `notifications` remain extras-gated (`brigade extras on` or `BRIGADE_EXTRAS=1`).
 
 `pantry` (alias `larder`) is the agent session auth sync station. Agent Pantry remains a process-boundary Go binary; Brigade never imports it.
 `brigade add pantry` installs agentpantry via `go install github.com/escoffier-labs/agentpantry/cmd/agentpantry@latest` and prints the first-class operator path (setup plan, doctor, expiry-alert).
@@ -1194,6 +1208,14 @@ These plan commands do not generate or copy PSKs, start services, or mutate brow
 `brigade add evidence` installs miseledger and prints the crawl/export path.
 Use `brigade evidence status` and `brigade evidence doctor` for advisory health with explicit `next` commands, `brigade evidence crawl plan` to preview miseledger init/crawl/doctor commands, and `brigade evidence export plan` to preview `brigade receipts export miseledger --new-only --import`.
 These plan commands do not execute crawl or import. Product page: https://brigade.tools/miseledger.
+
+`search` (alias `code-search`) wires GraphTrail and optional code-search-api / code-search-mcp.
+Use `brigade search status` / `doctor` and review-only `brigade search sync plan`. Brigade does not run `graphtrail sync` or start the search API for you.
+
+`tokens` wires Token Glace (current name; TokenJuice is the old name) and optional usage-tracker spend export.
+Use `brigade tokens status` / `doctor` and review-only `brigade tokens wire plan`.
+
+`plating` is an optional guard-station publish helper (`brigade add plating`) for demo SVG render, leak scan, and output-drift verify. Not required for scrub.
 
 Security commands:
 
@@ -1256,12 +1278,20 @@ The current managed tools:
 | `memory` | `memory-doctor` | memory index health, dead-link lint, handoff counts |
 | `memory` | `bootstrap-doctor` | bootstrap-file size and limit audit |
 | `guard` | `content-guard` | policy-driven content scanning |
-| `tokens` | `token-glace` | output compaction via host hooks |
+| `guard` | `plating` | optional demo render, leak scan, and recorded-output verify |
+| `tokens` | `token-glace` | output compaction via host hooks (TokenJuice was the old name) |
+| `tokens` | `usage-tracker` | optional local usage/spend export summary |
+| `search` | `graphtrail` | local code graph, context briefs, structural diffs |
+| `search` | `code-search-api` | optional local semantic search service |
+| `search` | `code-search-mcp` | optional MCP bridge for code-search-api |
+| `evidence` | `miseledger` | local evidence ledger, crawls, FTS, receipt import |
 | `skills` | `brigade-work`, `ultra-work-scout`; optional Skillet roster | default work-loop skills and broad Scout scoping for agent harnesses |
 | `pantry` | `agentpantry` | browser session and secret sync for agent hosts |
+| `notifications` | `agent-notify` | private operator notifications for agent events |
 
 `brigade doctor` folds installed tools into its report and surfaces each tool's own health.
 `brigade stations list --json` reports the managed machine surfaces each tool exposes, including doctor JSON, bounded markdown briefs, summary JSON, and verify commands where available.
+`brigade stations discover` finds local `station.json` catalogs (`brigade.station.v1`) under cwd and common repo roots.
 A missing optional tool is not a failure.
 It shows up as a non-failing `[todo]` hint telling you to run `brigade add <station>`.
 
