@@ -620,6 +620,33 @@ def sources_payload(*, target: Path) -> Dict[str, Any]:
                 "trust": "web",
             }
         )
+    if web_provider == "pageforge" or settings.get("pageforge_command"):
+        command = clisrc._command_parts(settings.get("pageforge_command"))
+        executable = command[0] if command else ""
+        executable_path = Path(executable).expanduser()
+        if "/" in executable and not executable_path.is_absolute():
+            executable_path = target / executable_path
+        exists = bool(executable) and (
+            executable_path.exists() if "/" in executable else shutil.which(executable) is not None
+        )
+        if not command:
+            status = "fail"
+            detail = "missing search.pageforge_command"
+        elif exists:
+            status = "ok"
+            detail = "configured PageForge web search with local cache"
+        else:
+            status = "fail"
+            detail = "configured PageForge executable not found"
+        routes.append(
+            {
+                "id": "pageforge",
+                "type": "web",
+                "status": status,
+                "detail": detail,
+                "trust": "web",
+            }
+        )
 
     # _safe_source_adapters drops typeless entries, so pair against the same filter.
     typed_adapters = [entry for entry in adapters if str(entry.get("type") or "").strip()]

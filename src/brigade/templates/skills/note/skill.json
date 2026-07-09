@@ -1,0 +1,7 @@
+{
+  "id": "note",
+  "title": "note",
+  "version": "1.0.0",
+  "description": "Create an Obsidian-formatted markdown note documenting the current session topic and sync it to the configured Obsidian inbox.",
+  "tests": ["brigade skills lint note"]
+}

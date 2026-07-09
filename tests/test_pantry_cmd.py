@@ -9,7 +9,9 @@ def test_pantry_status_reports_uninstalled(monkeypatch, tmp_path):
     payload = pantry_cmd.status_payload(tmp_path)
 
     assert payload["installed"] is False
+    assert payload["health"] == "missing"
     assert "brigade add pantry" in payload["summary"]
+    assert "brigade pantry doctor" in payload["next_commands"]
 
 
 def test_pantry_status_combines_status_and_doctor(monkeypatch, tmp_path):
@@ -42,8 +44,46 @@ def test_pantry_status_combines_status_and_doctor(monkeypatch, tmp_path):
     payload = pantry_cmd.status_payload(tmp_path)
 
     assert payload["installed"] is True
+    assert payload["health"] == "warn"
     assert "role=sink" in payload["summary"]
     assert "0 fail/1 warn" in payload["summary"]
+    assert any("expiry-alert" in cmd for cmd in payload["next_commands"])
+
+
+def test_pantry_doctor_exits_nonzero_on_fail(monkeypatch, tmp_path):
+    monkeypatch.setattr(pantry_cmd.proc, "which", lambda cmd: "/x/agentpantry")
+
+    def fake_run(args, **kw):
+        if args == ["agentpantry", "status", "--json"]:
+            return pantry_cmd.proc.Result(
+                0,
+                json.dumps(
+                    {
+                        "role": "sink",
+                        "peer": "127.0.0.1:8787",
+                        "surfaces": ["sidecar"],
+                        "last_sync": "never",
+                    }
+                ),
+                "",
+            )
+        if args == ["agentpantry", "doctor", "--json"]:
+            return pantry_cmd.proc.Result(
+                1,
+                json.dumps(
+                    {
+                        "configured": True,
+                        "fail_count": 1,
+                        "warn_count": 0,
+                        "checks": [{"status": "FAIL", "name": "key", "detail": "missing"}],
+                    }
+                ),
+                "",
+            )
+        raise AssertionError(args)
+
+    monkeypatch.setattr(pantry_cmd.proc, "run", fake_run)
+    assert pantry_cmd.doctor(target=tmp_path) == 1
 
 
 def test_setup_plan_is_review_only(tmp_path):
@@ -99,6 +139,7 @@ def test_expiry_alert_plans_notification_without_sending(monkeypatch):
     assert payload["sent"] is False
     assert payload["planned_argv"][:4] == ["agent-notify", "send", "--profile", "expiry"]
     assert "example.com/sid" in payload["message"]
+    assert "brigade pantry expiry-alert --send" in payload["next_commands"]
 
 
 def test_expiry_alert_send_invokes_agent_notify(monkeypatch):

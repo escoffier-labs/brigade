@@ -169,11 +169,70 @@ brigade outcome rank --target .    # surfaces brief_hit as a skill quality signa
 
 That is the differentiated loop: receipts that feed the next run's context, with a measured hit rate (`context_eval.brief_hit_rate`) on whether the pre-run brief named the files the run actually touched.
 
+## Optional: multi-machine pantry (Agent Pantry)
+
+When the agent runs on a different machine from your daily browser login, the **pantry** station wires [Agent Pantry](https://brigade.tools/agentpantry) as a process-boundary Go binary. Brigade installs and plans; it does not mint PSKs or start services.
+
+```bash
+brigade add pantry                                          # go install agentpantry
+brigade pantry setup plan --role sink --peer 127.0.0.1:8787 # agent host
+brigade pantry setup plan --role source --peer <sink>:8787  # daily driver
+# run the printed agentpantry init/keygen/source|sink commands yourself
+brigade pantry doctor
+brigade pantry expiry-alert                                 # preview near-expiry cookies
+# optional notify path:
+brigade add notifications
+brigade pantry expiry-alert --send
+```
+
+`brigade pantry status` and `doctor` always print a `next:` block so the path stays obvious after install.
+
+## Optional: search and tokens stations
+
+```bash
+# GraphTrail code-graph + optional local semantic search
+brigade add search              # or: brigade add graphtrail
+brigade search sync plan        # review-only; does not run sync
+brigade search doctor
+
+# Token Glace (output compaction; TokenJuice was the old name) + optional usage export
+brigade add tokens
+brigade tokens wire plan
+brigade tokens doctor
+```
+
+## Optional: discover external station catalogs
+
+Sidecars can ship a `station.json` (`schema: brigade.station.v1`). Discover them locally without folding them into the core:
+
+```bash
+brigade stations list
+brigade stations discover --root ~/repos
+brigade add /path/to/sidecar --install   # runs printed install args after review
+```
+
+## Optional: operator notifications (extras)
+
+`notifications` and `pantry` are part of the **extras** surface. Enable once with `brigade extras on` (or `BRIGADE_EXTRAS=1` per invocation). Core station CLIs (`evidence`, `search`, `tokens`) always register.
+
+```bash
+brigade extras on
+brigade add notifications
+brigade notifications status
+brigade notifications setup plan --profile operator
+# Brigade never sends from doctor/status; secrets stay in env vars referenced by config.toml
+```
+
+## Extras honesty
+
+`brigade --help` shows the core pitch by default. The wider operator suite (release trains, fleet health, research, pantry, notifications, ...) stays fully functional but only registers when extras are on. That keeps command count honest for new users without deleting capability for operators.
+
 ## Next steps
 
 - Read [the cookbook](https://github.com/escoffier-labs/solos-cookbook) for the deep version of every concept here.
 - Customize `USER.md` and `TOOLS.md` with your real preferences and runbooks (kept private; do not commit personal details).
 - Wire the ingester on a cron or a manual end-of-day workflow.
 - Add a memory-care staleness scan when your card set starts to matter. See [docs/memory-care.md](docs/memory-care.md).
-- If you use TokenJuice, wire Claude Code and Codex hooks deliberately and tell agents what the wrapper means. See the tokens station in [docs/technical-guide.md](docs/technical-guide.md#managed-stations).
+- If you use Token Glace (formerly TokenJuice), wire Claude Code and Codex hooks deliberately and tell agents what the wrapper means. See the tokens station in [docs/technical-guide.md](docs/technical-guide.md#managed-stations).
 - Run `brigade work bootstrap` inside active repos that did not use quickstart when you want the dogfood-backed daily work loop, scanner inbox, and local evidence receipts.
+- Wire Grok as a writer harness with `--harnesses ...,grok` so handoffs land in `.grok/memory-handoffs/` (first-class, same as Claude/Codex).

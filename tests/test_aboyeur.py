@@ -1229,6 +1229,111 @@ def test_run_writes_artifacts(monkeypatch, tmp_path):
     assert {call[2] for call in calls} == {run_cwd}
 
 
+def test_run_marks_suspected_noop_for_ok_write_worker_with_no_non_brigade_changes(monkeypatch, tmp_path):
+    calls = []
+
+    def fake_run_agent(cli_ref, prompt, timeout=600.0, cwd=None, read_only=False):
+        calls.append((cli_ref, prompt, read_only))
+        if len(calls) == 1:
+            return agents.AgentResult(
+                text=json.dumps({"assignments": [{"worker": "coder", "task": "implement it"}]}),
+                ok=True,
+            )
+        if cli_ref == "ollama:llama3.3":
+            (cwd / ".brigade" / "scratch.txt").write_text("internal artifact\n")
+            return agents.AgentResult(text="worker output", ok=True)
+        return agents.AgentResult(text="final answer", ok=True)
+
+    run_cwd = tmp_path / "work"
+    run_cwd.mkdir()
+    _init_git_repo(run_cwd)
+    (run_cwd / "tracked.txt").write_text("initial\n")
+    (run_cwd / ".brigade").mkdir()
+    _commit_all(run_cwd)
+    output_dir = tmp_path / "run"
+    monkeypatch.setattr(aboyeur.agents, "run_agent", fake_run_agent)
+
+    assert (
+        aboyeur.run(
+            "build feature",
+            _roster(),
+            cwd=run_cwd,
+            output_dir=output_dir,
+            code_graph_enabled=False,
+        )
+        == 0
+    )
+
+    worker_results = json.loads((output_dir / "worker-results.json").read_text())
+    assert worker_results["results"][0]["ok"] is True
+    assert worker_results["results"][0]["detail"] == "no-op"
+    assert worker_results["ground_truth"]["changed_files"] == []
+    assert worker_results["ground_truth"]["untracked_files"] == [".brigade/scratch.txt"]
+    assert worker_results["ground_truth"]["suspected_noop"] is True
+    assert json.loads((output_dir / "run.json").read_text())["suspected_noop"] is True
+
+
+def test_run_does_not_mark_suspected_noop_for_read_only(monkeypatch, tmp_path):
+    calls = []
+
+    def fake_run_agent(cli_ref, prompt, timeout=600.0, cwd=None, read_only=False):
+        calls.append((cli_ref, prompt, read_only))
+        if len(calls) == 1:
+            return agents.AgentResult(
+                text=json.dumps({"assignments": [{"worker": "coder", "task": "inspect it"}]}),
+                ok=True,
+            )
+        if cli_ref == "ollama:llama3.3":
+            return agents.AgentResult(text="worker output", ok=True)
+        return agents.AgentResult(text="final answer", ok=True)
+
+    run_cwd = tmp_path / "work"
+    run_cwd.mkdir()
+    _init_git_repo(run_cwd)
+    (run_cwd / "tracked.txt").write_text("initial\n")
+    _commit_all(run_cwd)
+    output_dir = tmp_path / "run"
+    monkeypatch.setattr(aboyeur.agents, "run_agent", fake_run_agent)
+
+    assert aboyeur.run("inspect feature", _roster(), cwd=run_cwd, output_dir=output_dir, read_only=True) == 0
+
+    worker_results = json.loads((output_dir / "worker-results.json").read_text())
+    assert worker_results["results"][0]["detail"] == ""
+    assert worker_results["ground_truth"]["suspected_noop"] is False
+    assert json.loads((output_dir / "run.json").read_text())["suspected_noop"] is False
+
+
+def test_run_does_not_mark_suspected_noop_when_worker_changes_real_file(monkeypatch, tmp_path):
+    calls = []
+
+    def fake_run_agent(cli_ref, prompt, timeout=600.0, cwd=None, read_only=False):
+        calls.append((cli_ref, prompt, read_only))
+        if len(calls) == 1:
+            return agents.AgentResult(
+                text=json.dumps({"assignments": [{"worker": "coder", "task": "implement it"}]}),
+                ok=True,
+            )
+        if cli_ref == "ollama:llama3.3":
+            (cwd / "tracked.txt").write_text("changed by worker\n")
+            return agents.AgentResult(text="worker output", ok=True)
+        return agents.AgentResult(text="final answer", ok=True)
+
+    run_cwd = tmp_path / "work"
+    run_cwd.mkdir()
+    _init_git_repo(run_cwd)
+    (run_cwd / "tracked.txt").write_text("initial\n")
+    _commit_all(run_cwd)
+    output_dir = tmp_path / "run"
+    monkeypatch.setattr(aboyeur.agents, "run_agent", fake_run_agent)
+
+    assert aboyeur.run("build feature", _roster(), cwd=run_cwd, output_dir=output_dir) == 0
+
+    worker_results = json.loads((output_dir / "worker-results.json").read_text())
+    assert worker_results["results"][0]["detail"] == ""
+    assert worker_results["ground_truth"]["suspected_noop"] is False
+    assert json.loads((output_dir / "run.json").read_text())["suspected_noop"] is False
+
+
 def test_run_writes_code_graph_delta_to_artifacts_and_synthesis(monkeypatch, tmp_path):
     calls = []
     before_payload = {"ok": True, "status": "captured", "summary": "before captured"}

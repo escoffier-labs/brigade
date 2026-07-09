@@ -212,7 +212,7 @@ brigade add ../agentpantry --install # run the manifest install command
 | `guard` | embedded content guard, with an optional external checkout override | scans handoffs and content for secrets and PII before anything leaves the machine |
 | `tokens` | token-glace | tracks token spend across your harnesses and compacts noisy output |
 | `memory` | memory-doctor, bootstrap-doctor | validates memory cards and bootstrap files for staleness and contradictions |
-| `pantry` | agentpantry | syncs browser sessions and auth across an agent's machine |
+| `pantry` | agentpantry (Go sidecar) | plans and health-checks sealed browser-session sync; never starts source/sink |
 | `search` | code-search, graphtrail | local semantic search plus a code-graph CLI for callers, impact, and structural diffs |
 | `evidence` | miseledger (Go sidecar) | plans crawl/export and health-checks the local evidence ledger; does not crawl for you |
 

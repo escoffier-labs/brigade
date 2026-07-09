@@ -261,6 +261,37 @@ def _graphtrail_doctor(ctx: DoctorContext) -> List[CheckResult]:
     return [(OK, name, f"db present at {db}")]
 
 
+def _usage_tracker_doctor(ctx: DoctorContext) -> List[CheckResult]:
+    """Advisory usage export health (host-global spend visibility under tokens)."""
+    name = "usage-tracker (spend export)"
+    if not proc.which("usage-tracker"):
+        return [(MANUAL, name, "not installed; run `brigade add tokens` or `brigade add usage-tracker`")]
+    r = proc.run(["usage-tracker", "export", "--summary-json"], timeout=30.0)
+    data = r.json()
+    if r.code != 0:
+        return [(WARN, name, f"installed but export failed (exit {r.code})")]
+    if isinstance(data, dict):
+        spend = data.get("total_cost_usd") or data.get("api_spend_usd") or data.get("totalCostUsd")
+        detail = "export --summary-json ok"
+        if spend is not None:
+            detail = f"{detail}, cost={spend}"
+        return [(OK, name, detail)]
+    return [(OK, name, "export --summary-json ok")]
+
+
+def _plating_doctor(ctx: DoctorContext) -> List[CheckResult]:
+    """Optional publish helper: demo render + leak scan under the guard station."""
+    name = "plating (publish demos)"
+    if not proc.which("plating"):
+        return [(MANUAL, name, "not installed; run `brigade add plating` for optional demo/scrub helpers")]
+    r = proc.run(["plating", "--version"], timeout=10.0)
+    if r.code != 0:
+        return [(WARN, name, f"installed but not runnable (exit {r.code})")]
+    version = (r.stdout or r.stderr or "").strip().splitlines()
+    detail = version[0][:80] if version else "installed"
+    return [(OK, name, detail)]
+
+
 # miseledger (which absorbed the stationtrail/sourceharvest exporters in v0.3.0)
 # operates on the operator's host-global evidence archive and local session logs,
 # not a per-target workspace. Like the memory and pantry satellites, its findings
@@ -400,7 +431,7 @@ _TOOLS: Tuple[ManagedTool, ...] = (
         name="agentpantry",
         station="pantry",
         command="agentpantry",
-        summary="browser session auth sync (source -> sink)",
+        summary="browser session auth sync (source -> sink); process-boundary Go binary",
         install_args=["go", "install", "github.com/escoffier-labs/agentpantry/cmd/agentpantry@latest"],
         wire=_noop_wire,
         doctor=_agentpantry_doctor,
@@ -453,6 +484,37 @@ _TOOLS: Tuple[ManagedTool, ...] = (
         surfaces=(
             _surface("verify-exit", ("graphtrail", "--version"), timeout_seconds=10.0),
             _surface("doctor-json", ("graphtrail", "doctor", "--json"), timeout_seconds=30.0),
+        ),
+    ),
+    # usage-tracker is optional spend visibility under the tokens station. The
+    # binary name is usage-tracker; station.json in that repo is the external
+    # catalog source of truth for install/surfaces.
+    ManagedTool(
+        name="usage-tracker",
+        station="tokens",
+        command="usage-tracker",
+        summary="local model usage export with spend and Token Glace savings summaries",
+        install_args=["pipx", "install", "git+https://github.com/escoffier-labs/usage-tracker"],
+        wire=_noop_wire,
+        doctor=_usage_tracker_doctor,
+        surfaces=(
+            _surface("summary-json", ("usage-tracker", "export", "--summary-json"), timeout_seconds=30.0),
+            _surface("verify-exit", ("usage-tracker", "export", "--help"), timeout_seconds=10.0),
+        ),
+    ),
+    # plating is an optional publish helper under guard: render demos, scan for
+    # leaks, and verify recorded CLI output. Process-boundary; never required.
+    ManagedTool(
+        name="plating",
+        station="guard",
+        command="plating",
+        summary="demo rendering, leak scanning, and recorded-output drift verification",
+        install_args=["pipx", "install", "git+https://github.com/escoffier-labs/plating"],
+        wire=_noop_wire,
+        doctor=_plating_doctor,
+        surfaces=(
+            _surface("verify-exit", ("plating", "--version"), timeout_seconds=10.0),
+            _surface("verify-exit", ("plating", "scan", "--help"), timeout_seconds=10.0),
         ),
     ),
 )

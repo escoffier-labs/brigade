@@ -265,6 +265,7 @@ def dispatch(args) -> int:
             runguard.remove_worktree(run_cwd, worktree_cwd)
     if output_dir is not None:
         print(f"artifacts: {output_dir}", file=sys.stderr)
+        _print_suspected_noop_warning(output_dir)
         if args.inspect:
             from .. import runs_cmd
 
@@ -366,6 +367,20 @@ def _poll_detached_start(proc: Popen, output_dir: Path) -> int | None:
 def _worktree_checkout_path(repo_root: Path, output_dir: Path) -> Path:
     run_id = output_dir.expanduser().resolve().name
     return Path.home() / ".cache" / "brigade" / "worktrees" / f"{repo_root.name}-{run_id}"
+
+
+def _print_suspected_noop_warning(output_dir: Path) -> None:
+    try:
+        import json
+
+        payload = json.loads((output_dir / "run.json").read_text())
+    except (OSError, json.JSONDecodeError):
+        return
+    if isinstance(payload, dict) and payload.get("suspected_noop") is True:
+        print(
+            "warning: suspected no-op run; ok workers produced no non-.brigade file changes.",
+            file=sys.stderr,
+        )
 
 
 def _read_only_advisory(roster, effective_sandbox) -> list[str]:
