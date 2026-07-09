@@ -5,11 +5,21 @@
 <h1 align="center">GraphTrail</h1>
 
 <p align="center">
-  <strong>A local code-graph sidecar that maps your repo into a SQLite graph of symbols, imports, and call edges, then answers callers, callees, impact, and context over a CLI and a read-only MCP server. It is what your AI agent reads before it edits, so a change starts with the call graph instead of a guess. Unlike a grep or an embedding index, it walks real tree-sitter call edges, stays read-only, and runs with no daemon and no network.</strong>
+  <img src="docs/assets/marks/graphtrail-circle.svg" alt="" width="40" height="40">
 </p>
 
 <p align="center">
-  <a href="https://graphtrail.escoffierlabs.dev"><strong>Website &rarr; graphtrail.escoffierlabs.dev</strong></a>
+  <strong>Your agents grep. GraphTrail shows who calls whom.</strong>
+</p>
+
+<p align="center">
+  Local code graph in SQLite: symbols, imports, and real tree-sitter call edges. Ask <code>callers</code>, <code>callees</code>, <code>impact</code>, and <code>context</code> over a CLI or a read-only MCP server, so an edit starts from the call graph instead of a guess. No daemon, no network in the default build.
+</p>
+
+<p align="center">
+  <a href="https://brigade.tools/graphtrail">Website</a> &middot;
+  <a href="#install">Install</a> &middot;
+  <a href="https://brigade.tools">Brigade hub</a>
 </p>
 
 <p align="center">
@@ -19,75 +29,67 @@
   <img src="https://shieldcn.dev/badge/MCP-server-8A2BE2.svg" alt="MCP server">
 </p>
 
-GraphTrail indexes your code once, stays incremental after that, and answers structural questions before an agent touches a line.
-
-<p align="center">
-  <img src="docs/assets/graphtrail-context.svg" alt="Recording: graphtrail init and sync build a code graph, then callers and context answer structural questions before an edit" width="760">
-</p>
-
-<p align="center"><em><code>graphtrail init</code> and <code>sync</code> index the repo, then <code>callers</code> and <code>context</code> answer straight from the code graph.</em></p>
-
-Index a repo, then ask who calls a symbol and what context an agent should load before editing it. The `context` pack is exactly what an agent gets over MCP.
-
-## What it does
-
-GraphTrail is a code-graph navigation tool for AI coding agents and developers. It parses each source file with tree-sitter in a single pass, extracts symbols (functions, classes, methods), imports, and call edges, and writes them into a small local SQLite graph under `.graphtrail/`. From that graph it answers the structural questions you ask before changing code: full-text symbol search, the callers of a symbol, its callees, the impact (blast radius) of a change, and a context pack that gathers entry points plus their caller and callee neighborhood for a task.
-
-It speaks two surfaces over the same graph. A command-line interface for humans and scripts, and a read-only Model Context Protocol (MCP) server (`graphtrail-mcp`) that exposes the same queries as tools an agent can call. The MCP server opens every connection `SQLITE_OPEN_READ_ONLY`, so it can never mutate your graph, and it is multi-repo: one running server can answer for any repository you have indexed. It supports Python, TypeScript/JavaScript, Rust, and Go. After indexing it is read-only, installs no hooks, starts no daemon, and makes no network calls.
-
 ## Install
 
-GraphTrail is a Rust crate with two binaries: `graphtrail` (the CLI) and `graphtrail-mcp` (the MCP server). Install both from [crates.io](https://crates.io/crates/graphtrail):
+Two binaries: `graphtrail` (CLI) and `graphtrail-mcp` (read-only MCP). From [crates.io](https://crates.io/crates/graphtrail):
 
 ```bash
 cargo install graphtrail
 ```
 
-Or track the repository head:
+From git or a clone:
 
 ```bash
 cargo install --git https://github.com/escoffier-labs/graphtrail
-```
-
-Or build from a clone:
-
-```bash
+# or
 git clone https://github.com/escoffier-labs/graphtrail.git
-cd graphtrail
-cargo build --release   # binaries land in target/release/
+cd graphtrail && cargo build --release
 ```
 
 ## Quickstart
 
-Index a repository, then ask the graph structural questions:
-
 ```bash
-# Index once, then keep it current incrementally.
-graphtrail init /path/to/repo
-graphtrail sync /path/to/repo          # incremental: a no-op when nothing changed
-graphtrail sync /path/to/repo --force  # rebuild every file
+graphtrail init .
+graphtrail sync .                    # incremental after the first pass
+DB=.graphtrail/graphtrail.db
 
-# Query against the repo's graph database.
-DB=/path/to/repo/.graphtrail/graphtrail.db
-graphtrail --db "$DB" search "handoff lint"
 graphtrail --db "$DB" callers serve
 graphtrail --db "$DB" callees serve
-graphtrail --db "$DB" impact serve --depth 3
+graphtrail --db "$DB" impact serve --depth 2
 graphtrail --db "$DB" context "handoff lint" --json
-graphtrail --db "$DB" stats --json
-graphtrail --db "$DB" doctor /path/to/repo --json
+graphtrail --db "$DB" doctor . --json
 ```
 
-When the sync root is inside a git repository, `sync` follows `.gitignore` files and `.git/info/exclude`, while still indexing hidden paths such as `.github` if they are not ignored. Ignored files are skipped even if they are committed, because GraphTrail follows ignore rules rather than git status.
+<p align="center">
+  <img src="docs/assets/graphtrail-context.svg" alt="Recording: graphtrail init and sync, then callers and context" width="760">
+</p>
 
-Use `doctor` before relying on a graph in scripts or agent workflows. It opens the database read-only, checks schema freshness, last sync age, pending new/changed/deleted/fingerprint-stale files, and exits 0 for `FRESH`, 1 for `STALE`, or 2 for `NEEDS-MIGRATION` or a missing database.
+<p align="center"><em><code>init</code> + <code>sync</code> build the graph. <code>callers</code> / <code>context</code> answer from it.</em></p>
 
-A real `callers` query against GraphTrail's own indexed source:
+Real output against GraphTrail's own source:
 
 ```text
 $ graphtrail --db .graphtrail/graphtrail.db callers serve
 main --calls@19 hops=1--> serve  (src/bin/graphtrail-mcp.rs -> src/mcp.rs)
 ```
+
+## What it does
+
+| | Job | What you get |
+|---|---|---|
+| **Index** | Parse the repo with tree-sitter | Symbols, imports, and call edges in `.graphtrail/graphtrail.db` |
+| **Ask** | Query structure, not text | `search`, `callers`, `callees`, `impact`, `file_neighbors`, `diff` |
+| **Brief** | Pack neighborhood for agents | `context` over CLI or read-only MCP; Brigade can attach it to runs |
+
+<p align="center">
+  <img src="docs/assets/graph-relationships.svg" alt="Call graph around serve: callers on the left, focus symbol in the center, callees on the right, impact as blast radius, context pack for agents" width="880">
+</p>
+
+<p align="center"><em>Grep finds strings. Embeddings find vibes. The graph finds who calls whom, and what breaks if you change it.</em></p>
+
+Python, TypeScript/JavaScript, Rust, and Go. One SQLite file per repo. CLI for humans and scripts; `graphtrail-mcp` for agents (every DB connection is `SQLITE_OPEN_READ_ONLY`, multi-repo via `repo` / `db` args). No hooks, no daemon, no network in the default build.
+
+When the sync root is inside a git repository, `sync` follows `.gitignore` and `.git/info/exclude`, while still indexing hidden paths such as `.github` if they are not ignored. `doctor` exits 0 for `FRESH`, 1 for `STALE`, or 2 for `NEEDS-MIGRATION` or a missing database.
 
 ## MCP server
 

@@ -1,0 +1,101 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="880" height="420" viewBox="0 0 880 420" role="img" aria-labelledby="title desc">
+  <title id="title">GraphTrail call graph: callers, callees, and impact around serve</title>
+  <desc id="desc">Call graph for the symbol serve. Callers arrive from main and tests. Callees go to handle_request and neighbors. Impact is the blast radius. Context packs this neighborhood for an agent before an edit.</desc>
+  <defs>
+    <linearGradient id="card" x1="0" y1="0" x2="0.1" y2="1">
+      <stop offset="0%" stop-color="#161a20"/>
+      <stop offset="100%" stop-color="#0f1217"/>
+    </linearGradient>
+    <linearGradient id="rail" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#e0a45c"/>
+      <stop offset="100%" stop-color="#3d8bfd"/>
+    </linearGradient>
+    <marker id="arr" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto">
+      <path d="M0,0 L8,4 L0,8 Z" fill="#e0a45c"/>
+    </marker>
+    <marker id="arr-slate" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto">
+      <path d="M0,0 L8,4 L0,8 Z" fill="#9aa4b2"/>
+    </marker>
+    <filter id="soft" x="-8%" y="-8%" width="116%" height="116%">
+      <feDropShadow dx="0" dy="10" stdDeviation="14" flood-color="#000" flood-opacity="0.35"/>
+    </filter>
+  </defs>
+
+  <!-- ambient -->
+  <rect width="880" height="420" fill="#1a2740"/>
+  <circle cx="760" cy="60" r="200" fill="#3d8bfd" opacity="0.18"/>
+  <circle cx="80" cy="360" r="180" fill="#e0a45c" opacity="0.1"/>
+
+  <!-- card -->
+  <rect x="36" y="24" width="808" height="372" rx="18" fill="url(#card)" stroke="#2a3340" filter="url(#soft)"/>
+  <rect x="36" y="24" width="5" height="372" rx="2.5" fill="url(#rail)"/>
+
+  <!-- header -->
+  <text x="68" y="56" fill="#8b9bb0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11" letter-spacing="2.2">THE GRAPH (NOT GREP)</text>
+  <text x="812" y="56" text-anchor="end" fill="#6b7a8f" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11">symbol: serve · real tree-sitter edges</text>
+  <line x1="68" y1="72" x2="812" y2="72" stroke="#2a3340"/>
+
+  <!-- legend pills -->
+  <g font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11">
+    <rect x="68" y="88" width="92" height="24" rx="12" fill="#1e2530" stroke="#e0a45c"/>
+    <text x="114" y="104" text-anchor="middle" fill="#f0c48a">callers</text>
+    <rect x="172" y="88" width="92" height="24" rx="12" fill="#1e2530" stroke="#3d8bfd"/>
+    <text x="218" y="104" text-anchor="middle" fill="#9ec1ff">callees</text>
+    <rect x="276" y="88" width="100" height="24" rx="12" fill="#1e2530" stroke="#2f8f5b"/>
+    <text x="326" y="104" text-anchor="middle" fill="#7dffb3">impact</text>
+    <rect x="388" y="88" width="110" height="24" rx="12" fill="#1e2530" stroke="#9aa4b2"/>
+    <text x="443" y="104" text-anchor="middle" fill="#cbbfac">context pack</text>
+  </g>
+
+  <!-- CALLERS column -->
+  <text x="100" y="150" fill="#e0a45c" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11" letter-spacing="1.6">CALLERS · who reaches me</text>
+
+  <rect x="68" y="164" width="170" height="44" rx="10" fill="#12161c" stroke="#e0a45c"/>
+  <text x="153" y="183" text-anchor="middle" fill="#e8eef6" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13">main</text>
+  <text x="153" y="199" text-anchor="middle" fill="#6b7a8f" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10">graphtrail-mcp.rs</text>
+
+  <rect x="68" y="220" width="170" height="44" rx="10" fill="#12161c" stroke="#e0a45c"/>
+  <text x="153" y="239" text-anchor="middle" fill="#e8eef6" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12">serve_returns_…</text>
+  <text x="153" y="255" text-anchor="middle" fill="#6b7a8f" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10">tests/mcp.rs</text>
+
+  <rect x="68" y="276" width="170" height="36" rx="10" fill="#12161c" stroke="#3d4654"/>
+  <text x="153" y="298" text-anchor="middle" fill="#6b7a8f" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11">…more hop-1 callers</text>
+
+  <!-- arrows callers -> serve -->
+  <path d="M238 186 H300" stroke="#e0a45c" stroke-width="1.8" marker-end="url(#arr)"/>
+  <path d="M238 242 H300" stroke="#e0a45c" stroke-width="1.8" marker-end="url(#arr)"/>
+
+  <!-- CENTER: serve -->
+  <rect x="300" y="190" width="180" height="72" rx="14" fill="#1a140c" stroke="#e0a45c" stroke-width="2"/>
+  <text x="390" y="218" text-anchor="middle" fill="#e0a45c" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11" letter-spacing="1.4">FOCUS</text>
+  <text x="390" y="242" text-anchor="middle" fill="#f5f2ea" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="20" font-weight="700">serve</text>
+  <text x="390" y="258" text-anchor="middle" fill="#6b7a8f" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10">src/mcp.rs</text>
+
+  <!-- IMPACT ring label -->
+  <rect x="300" y="150" width="180" height="28" rx="8" fill="#12301f" stroke="#2f8f5b"/>
+  <text x="390" y="168" text-anchor="middle" fill="#7dffb3" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11">impact = blast radius</text>
+
+  <!-- arrows serve -> callees -->
+  <path d="M480 210 H540" stroke="#3d8bfd" stroke-width="1.8" marker-end="url(#arr-slate)"/>
+  <path d="M480 242 H540" stroke="#3d8bfd" stroke-width="1.8" marker-end="url(#arr-slate)"/>
+
+  <!-- CALLEES column -->
+  <text x="560" y="150" fill="#9ec1ff" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11" letter-spacing="1.6">CALLEES · who I reach</text>
+
+  <rect x="540" y="164" width="180" height="44" rx="10" fill="#12161c" stroke="#3d8bfd"/>
+  <text x="630" y="183" text-anchor="middle" fill="#e8eef6" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13">handle_request</text>
+  <text x="630" y="199" text-anchor="middle" fill="#6b7a8f" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10">hops=1 · mcp.rs</text>
+
+  <rect x="540" y="220" width="180" height="44" rx="10" fill="#12161c" stroke="#3d8bfd"/>
+  <text x="630" y="239" text-anchor="middle" fill="#e8eef6" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13">call_tool · ok · error</text>
+  <text x="630" y="255" text-anchor="middle" fill="#6b7a8f" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10">hops=2 from handle_request</text>
+
+  <rect x="540" y="276" width="180" height="36" rx="10" fill="#12161c" stroke="#3d4654"/>
+  <text x="630" y="298" text-anchor="middle" fill="#6b7a8f" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11">…neighborhood</text>
+
+  <!-- bottom: context pack -->
+  <line x1="68" y1="330" x2="812" y2="330" stroke="#2a3340"/>
+  <text x="68" y="354" fill="#cbbfac" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11" letter-spacing="1.6">CONTEXT PACK · what the agent loads before editing</text>
+  <text x="68" y="378" fill="#e8eef6" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13">entry points + callers + callees + related files  →  CLI · MCP · Brigade run brief</text>
+  <text x="68" y="396" fill="#6b7a8f" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11">grep finds strings. embeddings find vibes. the graph finds who calls whom.</text>
+</svg>
