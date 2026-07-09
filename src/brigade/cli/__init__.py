@@ -53,6 +53,7 @@ from . import (
     projects as _projects_group,
     learn as _learn_group,
     outcome as _outcome_group,
+    model as _model_group,
     research as _research_group,
     center as _center_group,
     run as _run_group,
@@ -149,6 +150,7 @@ def _build_parser() -> argparse.ArgumentParser:
     _register_extras(sub, "projects", extras_enabled)
     _register_extras(sub, "learn", extras_enabled)
     _outcome_group.register(sub)
+    _model_group.register(sub)
     _register_extras(sub, "research", extras_enabled)
     _register_extras(sub, "center", extras_enabled)
     _run_group.register(sub)
