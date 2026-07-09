@@ -5,17 +5,19 @@
 <h1 align="center">MiseLedger</h1>
 
 <p align="center">
-  <strong>Turn scattered AI work history into a local, searchable evidence graph.</strong>
+  <img src="docs/assets/marks/miseledger-circle.svg" alt="" width="40" height="40">
 </p>
 
 <p align="center">
-  <a href="https://miseledger.escoffierlabs.dev"><strong>Website</strong></a>
-  &nbsp;·&nbsp;
-  <a href="docs/QUICKSTART.md">Quickstart</a>
-  &nbsp;·&nbsp;
-  <a href="docs/MCP.md">MCP</a>
-  &nbsp;·&nbsp;
-  <a href="docs/EXAMPLES.md">Examples</a>
+  <strong>Your agent history is scattered. MiseLedger makes it searchable evidence.</strong>
+</p>
+
+<p align="center">
+  Local SQLite evidence graph for AI work: crawl sessions and notes, import adapter.v1 records, search with FTS5, export Brigade-ready bundles. Untrusted evidence, not instructions. No network required.
+</p>
+
+<p align="center">
+  <a href="https://brigade.tools/miseledger">Website</a> &middot; <a href="#install">Install</a> &middot; <a href="docs/QUICKSTART.md">Quickstart</a> &middot; <a href="https://brigade.tools">Brigade hub</a>
 </p>
 
 <p align="center">
@@ -25,41 +27,39 @@
   <img src="https://shieldcn.dev/badge/license-MIT-green.svg" alt="MIT license">
 </p>
 
-MiseLedger is a local-first CLI that turns scattered AI work history into one searchable SQLite evidence graph you can grep, cite, and export. It exists because your prompts, agent sessions, chat exports, and project notes are smeared across a dozen tools and folders, so the answer to "where did I figure that out?" is lost. Unlike a cloud memory service or a single tool's built-in history, MiseLedger keeps everything on your machine, normalizes every source into one `adapter.v1` contract, and treats imported text as untrusted evidence rather than executable instructions.
+## Install
 
-<p align="center">
-  <img src="docs/assets/miseledger-ledger.svg" alt="Recording: miseledger init creates a local ledger, import loads adapter records, search runs FTS5, and stats summarizes the evidence graph" width="760">
-</p>
+```bash
+# install from latest release (Linux/macOS)
+curl -fsSL https://raw.githubusercontent.com/escoffier-labs/miseledger/HEAD/install.sh | sh
+miseledger init
+miseledger crawl sessions
+miseledger search "cookie rotation"
+miseledger evidence --json
+```
 
-<p align="center"><em>Initialize a local SQLite ledger, import `adapter.v1` records from your sources, then search them with FTS5 and roll them up with `stats` (or export Brigade-ready evidence bundles). Everything stays on your machine.</em></p>
+Or from source:
+
+```bash
+git clone https://github.com/escoffier-labs/miseledger.git
+cd miseledger && go build -o bin/miseledger ./cmd/miseledger
+```
 
 ## What it does
 
-MiseLedger builds a **local-first evidence ledger** of your AI work history: agent sessions, chat exports, notes, and project artifacts, all normalized into one SQLite archive with **full-text search**. It crawls local agent sessions and project files, imports `miseledger.adapter.v1` JSONL records into SQLite, preserves raw payload references for audit, searches with SQLite FTS5, shows normalized items, exports Markdown, emits Brigade-ready evidence bundles, and allows read-only SQL inspection. Everything runs offline on your machine, with no network calls in the core path and no transcript text leaving the box.
+| | Job | What you get |
+|---|---|---|
+| **Crawl** | Sessions, files, git, chat exports | Built-in crawlers + external exporters into adapter.v1 |
+| **Store** | One local ledger | SQLite with FTS5, deduped collections and items |
+| **Search** | Find what you already figured out | Full-text search across sources with provenance |
+| **Export** | Hand evidence to Brigade | Bundles marked untrusted for run briefs and receipts |
 
-Each source system is best at its native domain:
+<p align="center">
+  <img src="docs/assets/miseledger-ledger.svg" alt="Recording: miseledger init, import, search, stats" width="760">
+</p>
 
-- Built-in session crawlers: Codex, Claude, OpenClaw, OpenCode, Hermes, and Cursor local history.
-- Built-in local artifact crawlers: Markdown, text files, HTML exports, JSON or JSONL exports, and git history.
-- Built-in provider export crawlers: official ChatGPT and Claude conversation exports.
-- External crawler binaries: `discrawl` for Discord, `gitcrawl` for GitHub issues and pull requests, `graincrawl` for Granola, `notcrawl` for Notion, `slacrawl` for Slack, `mailcrawl` for Gmail, and `telecrawl` for Telegram Desktop archive data.
+<p align="center"><em>Init a ledger, import records, search with FTS5, export evidence. Everything stays on your machine.</em></p>
 
-The earlier StationTrail and SourceHarvest repositories were archived after their portable export paths were absorbed into MiseLedger's built-in crawl and import surfaces.
-
-MiseLedger is the normalized evidence layer above those systems, not a replacement for them.
-
-The same loop on the bundled fixtures, real output:
-
-```console
-$ miseledger import adapter testdata/adapters/discrawl.fixture.jsonl
-imported=2 warnings=0 already_known=false source=discrawl
-
-$ miseledger search "adapter contract"
-811f62fc16aead90dfecac7b [discrawl/message] We need the [adapter] [contract] normalized and easy to hook into crawler apps.
-
-$ miseledger stats
-sources=1 collections=1 items=2 artifacts=0 relations=0 unresolved_relations=0 db=~/.local/share/miseledger/miseledger.db
-```
 
 ## Build
 
