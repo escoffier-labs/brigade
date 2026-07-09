@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "brigade-cli"
 version = "0.21.0"
-description = "Local operator CLI for AI coding agents: one reviewed source for MCP servers, skills, and memory across Claude Code, Codex, Grok, Hermes, OpenClaw, and more. Stations for evidence (MiseLedger), code graph (GraphTrail), pantry auth sync, and skills. Dry-run sync, review gates, and receipts. pipx install brigade-cli."
+description = "Your agents run loops. Brigade keeps the receipts. Local control plane for multi-agent coding: share MCP/tools/memory, remember via handoffs, prove with file receipts, improve by promoting skills only on real exit codes. Claude Code, Codex, Grok, Hermes, OpenClaw, and more. Stations for evidence, code graph, pantry, skills. pipx install brigade-cli."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }

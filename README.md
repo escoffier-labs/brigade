@@ -5,7 +5,11 @@
 <h1 align="center">Brigade</h1>
 
 <p align="center">
-  <strong>Every agent CLI you run keeps its own MCP config and its own private memory, and writes to both without review. Brigade merges one reviewed catalog of MCP servers, tools, and memory into each tool's native config. Local files, no daemon, no lock-in.</strong>
+  <strong>Your agents run loops. Brigade keeps the receipts.</strong>
+</p>
+
+<p align="center">
+  Local control plane for multi-agent coding: share MCP, tools, and memory across Claude Code, Codex, Cursor, and the rest of your fleet; remember across sessions; prove every run with a file receipt; improve only from real exit codes. Diff before every write. No daemon, no lock-in.
 </p>
 
 <p align="center">
@@ -19,30 +23,30 @@
   <img src="https://shieldcn.dev/badge/license-MIT-green.svg?size=xs" alt="MIT license">
 </p>
 
-Your agents run loops. Brigade keeps the receipts.
+<p align="center">
+  <img src="docs/assets/verify-receipt.svg" alt="Verify receipt: pytest -q exit 0, skill taste +1, filed under .brigade/work/verify-runs/" width="760">
+</p>
+
+<p align="center"><em>Prove and improve in one file: the command, the real exit code, and which skill earned the +1. Grep it, diff it, promote or roll it back.</em></p>
+
+## What it does
+
+| | Job | What you get |
+|---|---|---|
+| **Share** | One catalog of MCP servers, tools, and skills | Merged into each harness's native config after a dry-run diff |
+| **Remember** | Handoffs between sessions and agents | Linted notes, shared memory, slim bootstrap instead of silo bloat |
+| **Prove** | Verify and run through Brigade | File receipts: command, real exit code, what changed |
+| **Improve** | Promote or roll back what worked | Skills and cards only rank up on those exit codes, never on model self-score |
+
+Self-improving means the fleet gets better from measured work, not from the model grading itself. Capture a verify or run receipt, score it against the skill that did the work, then `outcome reconcile` installs winners and rolls back regressions across harnesses.
+
+You run more than one agent CLI. Each one keeps MCP config and memory in its own files and writes without review. Brigade is the local layer that fixes that: one reviewed source, projected into the tools you already use, with a gate before writes, a paper trail after, and a learning loop that only trusts real signals. It is a CLI, not an MCP server and not a hosted memory product. Plain files in your repo when you run a command. That is all it does.
 
 <p align="center">
   <img src="docs/assets/quickstart.svg" alt="Recording: brigade operator quickstart wires a repo and brigade operator doctor reports ready, in seconds" width="760">
 </p>
 
-<p align="center"><em><code>brigade operator quickstart</code> wires a repo and <code>operator doctor</code> reports ready, in seconds.</em></p>
-
-## What it does
-
-You run more than one agent CLI. Each one keeps its MCP servers in its own config file, its memory in its own silo, and writes to both without review. Brigade is the local layer that fixes that. You keep one canonical source for your MCP servers, your tool and skill catalog, and your memory, and Brigade merges each into the tools you actually use: MCP servers into each tool's native config, tools and skills projected into each harness, and one shared memory owned in one place. A review gate sits in front of anything that gets written. And when Brigade says receipt, it means a file: every consequential change writes a plain record of what ran, what it touched, and how it exited, into your repo where you can grep it, diff it, and roll it back. No daemon, no hosted service, no vendor lock-in: it writes plain files in your repo when you run a command, and that is all it does.
-
-```text
-┌──────────────────────────────────────────────────┐
-│  BRIGADE · VERIFY RECEIPT         20260630-1906  │
-├──────────────────────────────────────────────────┤
-│  command    pytest -q                            │
-│  exit       0              status    passed      │
-│  captured   skill: taste                   +1    │
-│  on file    .brigade/work/verify-runs/           │
-└──────────────────────────────────────────────────┘
-```
-
-<p align="center"><em>One verify receipt: the command, the real exit code, and the skill it scores, filed under <code>.brigade/</code> in your repo.</em></p>
+<p align="center"><em><code>brigade operator quickstart</code> wires a repo. <code>operator doctor</code> reports ready. Install first, deepen later.</em></p>
 
 ## Install
 
