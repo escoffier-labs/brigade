@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Plating managed tool under the guard station for optional demo render / leak scan / drift verify helpers.
 - Evidence station CLI: `brigade evidence status|doctor`, review-only `crawl plan` and `export plan`, and `brigade add evidence` next-step banner. MiseLedger stays a process-boundary Go binary; crawl/import are operator-run.
 - Pantry station first-class path: `brigade pantry doctor`, status/expiry/setup plans emit explicit `next` commands and product docs links, and `brigade add pantry` prints the multi-machine setup sequence. Agent Pantry stays a process-boundary Go sidecar.
+- MCP adapter for Hermes: user-scoped `~/.hermes/config.yaml` under `mcp_servers` (YAML subset, zero-dep surgical merge). Requires `--user-scope`.
 - MCP adapters for Grok CLI: project `.grok/config.toml` (`grok`) and user `~/.grok/config.toml` (`grok-user`, requires `--user-scope`). Same Codex-like `[mcp_servers.<name>]` TOML shape. (#183)
 
 ### Fixed

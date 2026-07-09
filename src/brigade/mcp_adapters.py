@@ -594,6 +594,263 @@ def _vscode_from_provider(
     )
 
 
+def _yaml_scalar(value: object) -> str:
+    """Render a simple YAML scalar without a full YAML library (Brigade is zero-dep)."""
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return str(value)
+    text = str(value)
+    if text == "":
+        return '""'
+    # Quote when needed so bare :, #, spaces do not break YAML.
+    if (
+        any(ch in text for ch in (":", "#", "{", "}", "[", "]", ",", "&", "*", "!", "|", ">", "'", '"', "%", "@", "`"))
+        or text.strip() != text
+        or text
+        in (
+            "true",
+            "false",
+            "null",
+            "yes",
+            "no",
+            "on",
+            "off",
+        )
+    ):
+        escaped = text.replace("\\", "\\\\").replace('"', '\\"')
+        return f'"{escaped}"'
+    if text[0].isdigit() or text.startswith(("-", ".")):
+        escaped = text.replace("\\", "\\\\").replace('"', '\\"')
+        return f'"{escaped}"'
+    return text
+
+
+def _yaml_parse_scalar(raw: str) -> object:
+    text = raw.strip()
+    if not text or text == "null" or text == "~":
+        return None
+    if text in ("true", "True", "yes", "on"):
+        return True
+    if text in ("false", "False", "no", "off"):
+        return False
+    if (text.startswith('"') and text.endswith('"')) or (text.startswith("'") and text.endswith("'")):
+        inner = text[1:-1]
+        return inner.replace('\\"', '"').replace("\\\\", "\\")
+    try:
+        if "." in text:
+            return float(text)
+        return int(text)
+    except ValueError:
+        return text
+
+
+def _hermes_to_provider(server: CanonicalServer) -> dict[str, Any]:
+    """Hermes mcp_servers entry: YAML under ~/.hermes/config.yaml."""
+    if server.is_remote:
+        remote: dict[str, Any] = {"url": server.url}
+        if server.transport and server.transport != "http":
+            remote["transport"] = server.transport
+        if server.headers:
+            remote["headers"] = _emit_env(server.headers, "passthrough")
+        if server.timeout is not None:
+            remote["timeout"] = server.timeout
+        return remote
+    out: dict[str, Any] = {"command": server.command}
+    if server.args:
+        out["args"] = list(server.args)
+    if server.env:
+        out["env"] = _emit_env(server.env, "passthrough")
+    if server.timeout is not None:
+        out["timeout"] = server.timeout
+    return out
+
+
+def _hermes_from_provider(
+    name: str, raw: dict[str, Any], *, keep_secrets: bool = False
+) -> tuple[CanonicalServer, list[str]]:
+    url = raw.get("url")
+    command = raw.get("command")
+    if not url and _looks_like_url(command) and not raw.get("args"):
+        url = command
+        command = None
+    if url and not command:
+        headers, demoted = _parse_env(raw.get("headers"), keep_secrets=keep_secrets)
+        transport = _remote_transport(raw, type_key="transport")
+        timeout = raw.get("timeout")
+        return (
+            CanonicalServer(
+                name=name,
+                transport=transport,
+                url=str(url),
+                headers=headers,
+                timeout=int(timeout) if isinstance(timeout, (int, float)) else None,
+            ),
+            demoted,
+        )
+    env, demoted = _parse_env(raw.get("env"), keep_secrets=keep_secrets)
+    timeout = raw.get("timeout")
+    return (
+        CanonicalServer(
+            name=name,
+            transport="stdio",
+            command=str(command) if command else None,
+            args=tuple(str(a) for a in (raw.get("args") or [])),
+            env=env,
+            timeout=int(timeout) if isinstance(timeout, (int, float)) else None,
+        ),
+        demoted,
+    )
+
+
+def _hermes_render_servers(servers: dict[str, dict[str, Any]]) -> str:
+    """Render a top-level mcp_servers mapping as indented YAML."""
+    lines = ["mcp_servers:"]
+    if not servers:
+        lines.append("  {}")
+        return "\n".join(lines) + "\n"
+    for name in sorted(servers):
+        body = servers[name]
+        lines.append(f"  {_yaml_scalar(name)}:")
+        if not body:
+            lines.append("    {}")
+            continue
+        for key in ("command", "url", "transport", "timeout", "connect_timeout"):
+            if key not in body or body[key] is None:
+                continue
+            lines.append(f"    {key}: {_yaml_scalar(body[key])}")
+        args = body.get("args")
+        if isinstance(args, list) and args:
+            lines.append("    args:")
+            for item in args:
+                lines.append(f"      - {_yaml_scalar(item)}")
+        for map_key in ("env", "headers"):
+            mapping = body.get(map_key)
+            if not isinstance(mapping, dict) or not mapping:
+                continue
+            lines.append(f"    {map_key}:")
+            for mk, mv in mapping.items():
+                lines.append(f"      {_yaml_scalar(mk)}: {_yaml_scalar(mv)}")
+    return "\n".join(lines) + "\n"
+
+
+def _hermes_parse_mcp_servers(text: str) -> dict[str, dict[str, Any]]:
+    """Parse only the top-level mcp_servers mapping from a Hermes config.yaml.
+
+    Supports the flat stdio/remote shape Hermes documents (command/args/env/url/headers/timeout).
+    Nested maps deeper than env/headers are not required for Brigade's projection.
+    """
+    lines = text.splitlines()
+    start = None
+    base_indent = 0
+    for index, line in enumerate(lines):
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if stripped.rstrip(":") == "mcp_servers" or stripped.startswith("mcp_servers:"):
+            start = index
+            base_indent = len(line) - len(line.lstrip(" "))
+            break
+    if start is None:
+        return {}
+    # Inline empty map: mcp_servers: {}
+    first = lines[start].strip()
+    if first.endswith(": {}") or first.endswith(":{}") or first == "mcp_servers: {}":
+        return {}
+    servers: dict[str, dict[str, Any]] = {}
+    current: str | None = None
+    current_map: str | None = None  # env | headers | args
+    for line in lines[start + 1 :]:
+        if not line.strip() or line.strip().startswith("#"):
+            continue
+        indent = len(line) - len(line.lstrip(" "))
+        if indent <= base_indent and line.lstrip() and not line.lstrip().startswith("#"):
+            break  # next top-level key
+        stripped = line.strip()
+        if indent == base_indent + 2 and stripped.endswith(":") and not stripped.startswith("-"):
+            name = stripped[:-1].strip().strip("\"'")
+            current = name
+            servers[current] = {}
+            current_map = None
+            continue
+        if current is None:
+            continue
+        if indent == base_indent + 4 and stripped.endswith(":") and stripped[:-1] in ("env", "headers", "args"):
+            current_map = stripped[:-1]
+            if current_map in ("env", "headers"):
+                servers[current][current_map] = {}
+            elif current_map == "args":
+                servers[current]["args"] = []
+            continue
+        if current_map == "args" and stripped.startswith("- "):
+            servers[current].setdefault("args", []).append(_yaml_parse_scalar(stripped[2:]))
+            continue
+        if current_map in ("env", "headers") and ":" in stripped and indent >= base_indent + 6:
+            key, _, val = stripped.partition(":")
+            servers[current].setdefault(current_map, {})[key.strip().strip("\"'")] = _yaml_parse_scalar(val)
+            continue
+        if indent == base_indent + 4 and ":" in stripped and not stripped.startswith("-"):
+            current_map = None
+            key, _, val = stripped.partition(":")
+            key = key.strip()
+            val = val.strip()
+            if val:
+                servers[current][key] = _yaml_parse_scalar(val)
+            continue
+    return {k: v for k, v in servers.items() if isinstance(v, dict)}
+
+
+def _hermes_read_file(text: str | None) -> dict[str, dict[str, Any]]:
+    if not text:
+        return {}
+    return _hermes_parse_mcp_servers(text)
+
+
+def _hermes_write_file(text: str | None, owned: dict[str, dict[str, Any]], remove: set[str]) -> str:
+    """Replace or append the top-level mcp_servers block; preserve the rest of config.yaml."""
+    existing_text = text or ""
+    live = _hermes_parse_mcp_servers(existing_text)
+    for name in remove:
+        live.pop(name, None)
+    live.update(owned)
+    block = _hermes_render_servers(live)
+    lines = existing_text.splitlines(keepends=True)
+    if not lines:
+        return block
+    start = None
+    base_indent = 0
+    for index, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped.rstrip(":") == "mcp_servers" or stripped.startswith("mcp_servers:"):
+            start = index
+            base_indent = len(line) - len(line.lstrip(" "))
+            break
+    if start is None:
+        body = existing_text.rstrip("\n")
+        return (body + "\n\n" + block) if body else block
+    end = len(lines)
+    for index in range(start + 1, len(lines)):
+        line = lines[index]
+        if not line.strip() or line.strip().startswith("#"):
+            continue
+        indent = len(line) - len(line.lstrip(" "))
+        if indent <= base_indent:
+            end = index
+            break
+    new_lines = lines[:start] + [block if block.endswith("\n") else block + "\n"]
+    if end < len(lines) and not lines[end].startswith("\n") and lines[end].strip():
+        # ensure blank line before next top-level key when missing
+        if new_lines and not new_lines[-1].endswith("\n\n"):
+            pass
+    new_lines.extend(lines[end:])
+    result = "".join(new_lines)
+    if not result.endswith("\n"):
+        result += "\n"
+    return result
+
+
 def _openclaw_to_provider(server: CanonicalServer) -> dict[str, Any]:
     """OpenClaw mcp.servers shape: stdio {command,args,env} (no type); remote {url,transport}."""
     if server.is_remote:
@@ -765,6 +1022,21 @@ ADAPTERS: dict[str, McpAdapter] = {
         from_provider=lambda n, r, keep_secrets=False: _mcpservers_from_provider(n, r, keep_secrets=keep_secrets),
         read_file=_codex_read_file,
         write_file=_codex_write_file,
+    ),
+    # Hermes: ~/.hermes/config.yaml under mcp_servers (YAML). User-scoped only;
+    # profiles may set HERMES_HOME, but the default home is the machine catalog.
+    "hermes": McpAdapter(
+        harness="hermes",
+        path="~/.hermes/config.yaml",
+        fmt="yaml",
+        top_key="mcp_servers",
+        user_scope=True,
+        supports_remote=True,
+        env_style="passthrough",
+        to_provider=_hermes_to_provider,
+        from_provider=_hermes_from_provider,
+        read_file=_hermes_read_file,
+        write_file=_hermes_write_file,
     ),
 }
 
