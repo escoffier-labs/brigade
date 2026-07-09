@@ -8,6 +8,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- MCP adapters for Grok CLI: project `.grok/config.toml` (`grok`) and user `~/.grok/config.toml` (`grok-user`, requires `--user-scope`). Same Codex-like `[mcp_servers.<name>]` TOML shape. (#183)
+
+### Fixed
+- MCP Codex/Grok empty-`args` fingerprint conflicts: `to_provider` no longer emits `args: []`, matching TOML render which omits empty arrays, so force-sync stays idempotent. (#181)
+- MCP import of url-only servers no longer lands as invalid `stdio`+`url`; coerce to `http`/`sse`, including OpenClaw sources with a bogus `transport: stdio` or a command that is actually a URL. (#182)
+
+### Added
 - Productized GraphTrail ↔ Brigade ↔ MiseLedger dogfood path: `brigade operator checkup` reports optional loop health (`graph` / `ledger` / last and mean `brief_hit_rate` from run receipts) without blocking readiness; `brigade add graphtrail` installs the code-graph tool under the search station; QUICKSTART documents install → checkup → export → rank.
 - Outcome rank/reconcile surfaces mean `context_eval.brief_hit_rate` per skill as a quality signal (secondary sort among equal Wilson scores; install/rollback thresholds still use verified exit codes only).
 - `brigade-work` skill teaches the full loop: verify with capture → outcome from run → MiseLedger export → evidence brief next time.
