@@ -67,10 +67,10 @@ New here? [QUICKSTART.md](QUICKSTART.md) and [docs/first-10-minutes.md](docs/fir
 | **Improve** | Promote or roll back what worked | Skills and cards only rank up on those exit codes, never on model self-score |
 
 <p align="center">
-  <img src="docs/assets/verify-receipt.svg" alt="Verify receipt: pytest -q exit 0, skill taste +1, filed under .brigade/work/verify-runs/" width="760">
+  <img src="docs/assets/verify-receipt.svg" alt="Plated prove-to-improve loop: verify run writes receipt.json, outcome capture scores skill taste +1, reconcile can promote; GraphTrail delta when present" width="880">
 </p>
 
-<p align="center"><em>Prove and improve in one file: real exit code, skill +1. Grep it, diff it, promote or roll it back.</em></p>
+<p align="center"><em>Same grammar as the rest of the fleet plating: source of truth on the left (prove), consequence on the right (improve). Exit code in, skill score out. GraphTrail rides along when the station is installed.</em></p>
 
 Self-improving means the fleet gets better from measured work, not from the model grading itself. Capture a verify or run receipt, score it against the skill that did the work, then `outcome reconcile` installs winners and rolls back regressions across harnesses. Brigade is a CLI, not an MCP server and not a hosted memory product. Plain files when you run a command.
 

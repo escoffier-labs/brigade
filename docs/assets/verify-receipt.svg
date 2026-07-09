@@ -1,51 +1,92 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="760" height="280" viewBox="0 0 760 280" role="img" aria-labelledby="title desc">
-  <title id="title">Brigade verify receipt</title>
-  <desc id="desc">A verify receipt: pytest -q exited 0, status passed, skill taste scored plus one, filed under .brigade/work/verify-runs/</desc>
+<svg xmlns="http://www.w3.org/2000/svg" width="880" height="400" viewBox="0 0 880 400" role="img" aria-labelledby="title desc">
+  <title id="title">Brigade verify receipt closes the prove-to-improve loop</title>
+  <desc id="desc">work verify run records pytest -q with exit 0 and a GraphTrail delta, outcome capture scores skill taste plus one, outcome reconcile can promote that skill across harnesses. Model self-score is never used.</desc>
   <defs>
-    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0%" stop-color="#1a1f26"/>
-      <stop offset="100%" stop-color="#12161c"/>
+    <linearGradient id="card" x1="0" y1="0" x2="0.15" y2="1">
+      <stop offset="0%" stop-color="#161a20"/>
+      <stop offset="100%" stop-color="#0f1217"/>
     </linearGradient>
-    <linearGradient id="edge" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0%" stop-color="#3d8bfd" stop-opacity="0.55"/>
-      <stop offset="100%" stop-color="#3d8bfd" stop-opacity="0.08"/>
+    <linearGradient id="rail" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#e0a45c"/>
+      <stop offset="100%" stop-color="#3d8bfd"/>
     </linearGradient>
+    <filter id="soft" x="-5%" y="-5%" width="110%" height="110%">
+      <feDropShadow dx="0" dy="10" stdDeviation="14" flood-color="#000" flood-opacity="0.35"/>
+    </filter>
   </defs>
 
+  <!-- ambient (matches plating cards on a colored ground) -->
+  <rect width="880" height="400" fill="#2a1f4a"/>
+  <circle cx="720" cy="40" r="180" fill="#5b3fd4" opacity="0.35"/>
+  <circle cx="120" cy="360" r="160" fill="#1a3a5c" opacity="0.45"/>
+
   <!-- card -->
-  <rect x="8" y="8" width="744" height="264" rx="14" fill="url(#bg)" stroke="#2a3340" stroke-width="1.5"/>
-  <rect x="8" y="8" width="6" height="264" rx="3" fill="url(#edge)"/>
+  <rect x="40" y="28" width="800" height="344" rx="18" fill="url(#card)" stroke="#2a3340" stroke-width="1" filter="url(#soft)"/>
+  <rect x="40" y="28" width="5" height="344" rx="2.5" fill="url(#rail)"/>
 
-  <!-- header strip -->
-  <rect x="8" y="8" width="744" height="56" rx="14" fill="#1e2530"/>
-  <rect x="8" y="48" width="744" height="16" fill="#1e2530"/>
-  <text x="36" y="42" fill="#8b9bb0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" letter-spacing="2.2">BRIGADE · VERIFY RECEIPT</text>
-  <text x="724" y="42" text-anchor="end" fill="#6b7a8f" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12">2026-06-30 19:06</text>
+  <!-- header -->
+  <text x="72" y="62" fill="#8b9bb0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11" letter-spacing="2.4">THE RECEIPT (SOURCE OF TRUTH)</text>
+  <text x="808" y="62" text-anchor="end" fill="#6b7a8f" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11">2026-06-30 19:06</text>
+  <line x1="72" y1="78" x2="808" y2="78" stroke="#2a3340" stroke-width="1"/>
 
-  <!-- status pill -->
-  <rect x="600" y="78" width="124" height="30" rx="15" fill="#12301f" stroke="#2f8f5b" stroke-width="1"/>
-  <circle cx="620" cy="93" r="5" fill="#3ecf8e"/>
-  <text x="634" y="98" fill="#7dffb3" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" font-weight="700">PASSED</text>
-
-  <!-- rows -->
-  <g font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="15">
-    <text x="36" y="100" fill="#6b7a8f">command</text>
-    <text x="160" y="100" fill="#e8eef6">pytest -q</text>
-
-    <text x="36" y="136" fill="#6b7a8f">exit</text>
-    <text x="160" y="136" fill="#e8eef6">0</text>
-    <text x="220" y="136" fill="#6b7a8f">status</text>
-    <text x="300" y="136" fill="#7dffb3">passed</text>
-
-    <text x="36" y="172" fill="#6b7a8f">captured</text>
-    <text x="160" y="172" fill="#e8eef6">skill: taste</text>
-    <text x="320" y="172" fill="#3d8bfd" font-weight="700">+1</text>
-
-    <text x="36" y="208" fill="#6b7a8f">on file</text>
-    <text x="160" y="208" fill="#b7c4d6">.brigade/work/verify-runs/</text>
+  <!-- pipeline -->
+  <text x="72" y="104" fill="#6b7a8f" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="10" letter-spacing="1.8">LOOP</text>
+  <g font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12">
+    <!-- step 1 -->
+    <rect x="72" y="116" width="148" height="36" rx="10" fill="#12161c" stroke="#3d4654"/>
+    <text x="146" y="138" text-anchor="middle" fill="#e8eef6">verify run</text>
+    <!-- connector -->
+    <path d="M220 134 H236" stroke="#6b7a8f" stroke-width="1.5"/>
+    <path d="M232 129 L240 134 L232 139" fill="#6b7a8f"/>
+    <!-- step 2 -->
+    <rect x="242" y="116" width="148" height="36" rx="10" fill="#12161c" stroke="#e0a45c"/>
+    <text x="316" y="138" text-anchor="middle" fill="#f0c48a">receipt.json</text>
+    <path d="M390 134 H406" stroke="#6b7a8f" stroke-width="1.5"/>
+    <path d="M402 129 L410 134 L402 139" fill="#6b7a8f"/>
+    <!-- step 3 -->
+    <rect x="412" y="116" width="148" height="36" rx="10" fill="#12161c" stroke="#3d4654"/>
+    <text x="486" y="138" text-anchor="middle" fill="#e8eef6">outcome capture</text>
+    <path d="M560 134 H576" stroke="#6b7a8f" stroke-width="1.5"/>
+    <path d="M572 129 L580 134 L572 139" fill="#6b7a8f"/>
+    <!-- step 4 -->
+    <rect x="582" y="116" width="200" height="36" rx="10" fill="#12301f" stroke="#2f8f5b"/>
+    <text x="682" y="138" text-anchor="middle" fill="#7dffb3">reconcile → promote</text>
   </g>
 
-  <!-- footer -->
-  <line x1="36" y1="230" x2="724" y2="230" stroke="#2a3340" stroke-width="1"/>
-  <text x="36" y="252" fill="#6b7a8f" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12">Prove: real exit code. Improve: skill ranked +1. Model self-score never used.</text>
+  <line x1="72" y1="172" x2="808" y2="172" stroke="#2a3340" stroke-width="1"/>
+
+  <!-- two columns: prove | improve -->
+  <!-- PROVE -->
+  <text x="72" y="198" fill="#e0a45c" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11" letter-spacing="2">A · PROVE</text>
+  <text x="72" y="222" fill="#6b7a8f" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12">command</text>
+  <text x="168" y="222" fill="#e8eef6" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13">pytest -q</text>
+
+  <text x="72" y="248" fill="#6b7a8f" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12">exit</text>
+  <text x="168" y="248" fill="#7dffb3" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14" font-weight="700">0</text>
+  <rect x="198" y="232" width="78" height="22" rx="11" fill="#12301f" stroke="#2f8f5b"/>
+  <text x="237" y="247" text-anchor="middle" fill="#7dffb3" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11" font-weight="700">PASSED</text>
+
+  <text x="72" y="274" fill="#6b7a8f" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12">graph Δ</text>
+  <text x="168" y="274" fill="#e8eef6" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13">+3 symbols · churn 4</text>
+  <text x="72" y="294" fill="#6b7a8f" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11">GraphTrail station when present</text>
+
+  <text x="72" y="324" fill="#6b7a8f" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12">on file</text>
+  <text x="168" y="324" fill="#b7c4d6" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12">.brigade/work/verify-runs/…/receipt.json</text>
+
+  <!-- vertical hairline -->
+  <line x1="440" y1="188" x2="440" y2="340" stroke="#2a3340" stroke-width="1"/>
+
+  <!-- IMPROVE -->
+  <text x="468" y="198" fill="#3d8bfd" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11" letter-spacing="2">B · IMPROVE</text>
+
+  <rect x="468" y="212" width="340" height="48" rx="10" fill="#12161c" stroke="#2a3340"/>
+  <text x="488" y="232" fill="#6b7a8f" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11">captured against</text>
+  <text x="488" y="250" fill="#e8eef6" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14">skill: taste</text>
+  <text x="780" y="246" text-anchor="end" fill="#3d8bfd" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="22" font-weight="700">+1</text>
+
+  <rect x="468" y="270" width="340" height="40" rx="10" fill="#12161c" stroke="#2a3340"/>
+  <text x="488" y="295" fill="#e8eef6" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13">wilson score ↑ · ranked in outcome ledger</text>
+
+  <rect x="468" y="320" width="340" height="28" rx="10" fill="#12301f" stroke="#2f8f5b"/>
+  <text x="638" y="339" text-anchor="middle" fill="#7dffb3" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12">not model self-score · real exit only</text>
 </svg>
