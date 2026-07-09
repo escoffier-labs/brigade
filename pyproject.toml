@@ -5,12 +5,12 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "brigade-cli"
 version = "0.21.0"
-description = "One local source for the MCP servers, tools, and memory your AI coding agents share (Codex, Claude Code, OpenCode, Hermes, OpenClaw), merged into each tool's native config with a review gate and a receipt for every change."
+description = "Local operator CLI for AI coding agents: one reviewed source for MCP servers, skills, and memory across Claude Code, Codex, Grok, Hermes, OpenClaw, and more. Stations for evidence (MiseLedger), code graph (GraphTrail), pantry auth sync, and skills. Dry-run sync, review gates, and receipts. pipx install brigade-cli."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
 authors = [{ name = "Solomon Neas", email = "me@solomonneas.dev" }] # content-guard: allow email
-keywords = ["agents", "ai-agents", "agent-memory", "agent-handoffs", "ai-memory", "mcp", "mcp-config", "mcp-sync", "model-context-protocol", "openclaw", "claude-code", "codex", "opencode", "memory", "bootstrap", "brigade", "brigade-cli", "operator", "local-first", "guardrails", "agents-md"]
+keywords = ["agents", "ai-agents", "agent-memory", "agent-handoffs", "ai-memory", "mcp", "mcp-config", "mcp-sync", "model-context-protocol", "openclaw", "claude-code", "codex", "opencode", "grok", "hermes", "memory", "bootstrap", "brigade", "brigade-cli", "operator", "local-first", "guardrails", "agents-md", "miseledger", "graphtrail", "agentpantry", "code-graph", "evidence-ledger"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "License :: OSI Approved :: MIT License",
@@ -29,11 +29,19 @@ research = ["playwright>=1.40"]
 Homepage = "https://brigade.tools"
 Documentation = "https://brigade.tools/docs"
 Compare = "https://brigade.tools/compare/sync-mcp-servers-across-coding-agents"
+Handoffs = "https://brigade.tools/compare/memory-handoffs-across-coding-agents"
+CodeGraph = "https://brigade.tools/compare/local-code-graph-for-ai-coding-agents"
+Evidence = "https://brigade.tools/compare/local-evidence-ledger-for-agent-work"
+Skills = "https://brigade.tools/compare/portable-skills-across-coding-agents"
+LLMs = "https://brigade.tools/llms.txt"
 Repository = "https://github.com/escoffier-labs/brigade"
-Cookbook = "https://github.com/escoffier-labs/solos-cookbook"
+Cookbook = "https://escoffierlabs.dev/cookbook/"
+CookbookSource = "https://github.com/escoffier-labs/solos-cookbook"
 OpenClaw = "https://github.com/solomonneas/openclaw"
 ContentGuard = "https://github.com/escoffier-labs/content-guard"
 AgentPantry = "https://github.com/escoffier-labs/agentpantry"
+MiseLedger = "https://brigade.tools/miseledger"
+GraphTrail = "https://brigade.tools/graphtrail"
 Issues = "https://github.com/escoffier-labs/brigade/issues"
 
 [project.scripts]
