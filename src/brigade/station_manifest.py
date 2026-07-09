@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -66,7 +67,11 @@ def load(ref: str, *, cwd: Path | None = None) -> StationManifest:
     if path is None:
         raise ValueError(f"station manifest not found: {ref}")
     try:
-        raw = json.loads(path.read_text())
+        source = path.read_text()
+    except OSError as exc:
+        raise ValueError("station manifest could not be read") from exc
+    try:
+        raw = json.loads(source)
     except json.JSONDecodeError as exc:
         raise ValueError(f"station manifest is not valid JSON: {exc}") from exc
     if not isinstance(raw, dict):
@@ -154,8 +159,11 @@ def _parse_surface(raw: object, index: int) -> ManifestSurface:
     if not isinstance(read_only, bool):
         raise ValueError("station manifest field 'surface.read_only' must be a boolean")
     timeout = raw.get("timeout_seconds")
-    if timeout is not None and (not isinstance(timeout, int | float) or isinstance(timeout, bool)):
-        raise ValueError("station manifest field 'surface.timeout_seconds' must be a number")
+    if timeout is not None:
+        if not isinstance(timeout, int | float) or isinstance(timeout, bool):
+            raise ValueError("station manifest field 'surface.timeout_seconds' must be a number")
+        if not math.isfinite(float(timeout)):
+            raise ValueError("station manifest field 'surface.timeout_seconds' must be finite")
     max_chars = raw.get("max_chars")
     if max_chars is not None and (not isinstance(max_chars, int) or isinstance(max_chars, bool)):
         raise ValueError("station manifest field 'surface.max_chars' must be an integer")

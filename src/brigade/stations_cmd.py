@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import re
 import selectors
 import shutil
 import signal
@@ -12,6 +13,7 @@ import subprocess
 import tempfile
 import time
 from typing import Any
+import unicodedata
 
 from . import managed, profiles, registry, station_manifest
 from .install import DEFAULT_WIRED_SKILLS
@@ -20,7 +22,9 @@ from .install import DEFAULT_WIRED_SKILLS
 VERIFY_SCHEMA = "brigade.stations.verify.v1"
 OUTPUT_LIMIT_BYTES = 64 * 1024
 _DETAIL_LIMIT = 240
-_SUPPORT_ARGUMENTS = frozenset({"--help", "-h", "--version", "version"})
+_HELP_ARGUMENTS = frozenset({"--help", "-h"})
+_TOP_LEVEL_VERSION_FORMS = frozenset({("--version",), ("version",)})
+_SUBCOMMAND_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]*\Z")
 
 
 def _json_print(payload: dict[str, Any]) -> None:
@@ -262,10 +266,32 @@ def discover(
 
 def _detail(value: str) -> str:
     """Return a bounded single-line verifier detail without child output."""
-    clean = " ".join(value.replace("\x00", "").split())
+    clean = " ".join(_strip_controls(value).split())
     if len(clean) <= _DETAIL_LIMIT:
         return clean
     return clean[: _DETAIL_LIMIT - 3] + "..."
+
+
+def _strip_controls(value: str) -> str:
+    """Remove terminal, C0/C1, bidi, and other format controls."""
+    pieces = []
+    for character in value:
+        category = unicodedata.category(character)
+        if category in {"Cc", "Cf"}:
+            if character in "\t\n\r":
+                pieces.append(" ")
+            continue
+        pieces.append(character)
+    return "".join(pieces)
+
+
+def _human_field(value: object) -> str:
+    """Quote untrusted manifest text after removing display controls."""
+    return json.dumps(_strip_controls(str(value)), ensure_ascii=True)
+
+
+def _supports_process_containment() -> bool:
+    return os.name == "posix" and hasattr(os, "killpg")
 
 
 def _isolated_environment(root: Path) -> dict[str, str]:
@@ -276,14 +302,6 @@ def _isolated_environment(root: Path) -> dict[str, str]:
         "XDG_CACHE_HOME": root / "cache",
         "XDG_DATA_HOME": root / "data",
     }
-    if os.name == "nt":  # pragma: no cover - exercised on Windows CI only
-        values.update(
-            {
-                "USERPROFILE": root / "home",
-                "APPDATA": root / "config",
-                "LOCALAPPDATA": root / "data",
-            }
-        )
     for name, path in values.items():
         path.mkdir(parents=True, exist_ok=True)
         env[name] = str(path)
@@ -292,21 +310,7 @@ def _isolated_environment(root: Path) -> dict[str, str]:
 
 def _terminate_process_group(process: subprocess.Popen[bytes]) -> None:
     try:
-        if os.name == "posix":
-            os.killpg(process.pid, signal.SIGKILL)
-        else:  # pragma: no cover - exercised on Windows CI only
-            try:
-                subprocess.run(
-                    ["taskkill", "/PID", str(process.pid), "/T", "/F"],
-                    shell=False,
-                    stdin=subprocess.DEVNULL,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    timeout=5,
-                    check=False,
-                )
-            except OSError:
-                process.kill()
+        os.killpg(process.pid, signal.SIGKILL)
     except ProcessLookupError:
         pass
 
@@ -328,10 +332,7 @@ def _run_bounded(
         "stderr": subprocess.PIPE,
         "bufsize": 0,
     }
-    if os.name == "posix":
-        popen_kwargs["start_new_session"] = True
-    elif hasattr(subprocess, "CREATE_NEW_PROCESS_GROUP"):  # pragma: no cover
-        popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+    popen_kwargs["start_new_session"] = True
 
     try:
         process = subprocess.Popen(argv, **popen_kwargs)
@@ -448,6 +449,20 @@ def _surface_base(surface: station_manifest.ManifestSurface) -> dict[str, Any]:
     }
 
 
+def _is_safe_support_probe(argv: tuple[str, ...]) -> bool:
+    arguments = argv[1:]
+    if arguments in _TOP_LEVEL_VERSION_FORMS or arguments in {("--help",), ("-h",)}:
+        return True
+    if len(arguments) < 2 or arguments[-1] not in _HELP_ARGUMENTS:
+        return False
+    subcommands = arguments[:-1]
+    return all(_SUBCOMMAND_RE.fullmatch(part) for part in subcommands)
+
+
+def _reject_json_constant(value: str) -> None:
+    raise ValueError(f"non-standard JSON constant: {value}")
+
+
 def _surface_preflight(
     tool: station_manifest.ManifestTool,
     surface: station_manifest.ManifestSurface,
@@ -467,8 +482,12 @@ def _surface_preflight(
         if tool.kind == "executable":
             if not argv or argv[0] != tool.command:
                 return "failed", (), "executed argv does not match declared executable"
-            if not any(argument in _SUPPORT_ARGUMENTS for argument in argv[1:]):
-                return "failed", (), "probe is not a safe support command"
+            if not _is_safe_support_probe(argv):
+                return (
+                    "failed",
+                    (),
+                    "probe is not a safe support command under the safe support grammar",
+                )
         else:
             if surface.kind != "verify-exit":
                 return "failed", (), "skill-roster probes must use a verify-exit surface"
@@ -568,8 +587,11 @@ def _verify_surface(
             return payload
     elif surface.kind.endswith("-json"):
         try:
-            json.loads(stdout.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError):
+            json.loads(
+                stdout.decode("utf-8"),
+                parse_constant=_reject_json_constant,
+            )
+        except (UnicodeDecodeError, ValueError):
             payload.update(status="invalid-json", detail="operational surface did not produce valid JSON")
             return payload
     elif surface.kind.endswith("-markdown") and not stdout.decode("utf-8", errors="replace").strip():
@@ -653,6 +675,10 @@ def verify_payload(ref: str, *, check_managed: bool = False) -> dict[str, Any]:
         "ok": False,
         "check_managed": check_managed,
         "output_limit_bytes": OUTPUT_LIMIT_BYTES,
+        "platform": {
+            "supported": _supports_process_containment(),
+            "detail": "POSIX process-group containment",
+        },
         "manifest": {
             "path": str(manifest.path),
             "name": manifest.name,
@@ -675,6 +701,30 @@ def verify_payload(ref: str, *, check_managed: bool = False) -> dict[str, Any]:
                 "exemptions": [],
             },
         )
+        return base
+
+    if not _supports_process_containment():
+        detail = "station probe execution requires POSIX process-group containment"
+        base["platform"] = {"supported": False, "detail": detail}
+        base["status"] = "unsupported-platform"
+        base["tools"] = [
+            {
+                "name": tool.name,
+                "kind": tool.kind,
+                "status": "unsupported-platform",
+                "surface_count": len(tool.surfaces),
+                "surfaces": [
+                    {
+                        **_surface_base(surface),
+                        "status": "unsupported-platform",
+                        "detail": detail,
+                    }
+                    for surface in tool.surfaces
+                ],
+            }
+            for tool in manifest.tools
+        ]
+        base["managed_parity"] = _managed_parity(manifest, check_managed=check_managed)
         return base
 
     with tempfile.TemporaryDirectory(prefix="brigade-station-verify-") as temp:
@@ -735,19 +785,20 @@ def verify(ref: str, *, json_output: bool = False, check_managed: bool = False) 
         if json_output:
             _json_print(error)
         else:
-            print(f"brigade stations verify: error: {error['detail']}")
+            print(f"brigade stations verify: error: {_human_field(error['detail'])}")
         return 2
     if json_output:
         _json_print(payload)
     else:
         print(
             f"brigade stations verify: {payload['status']} "
-            f"name={payload['manifest']['name']} lifecycle={payload['manifest']['lifecycle']}"
+            f"name={_human_field(payload['manifest']['name'])} "
+            f"lifecycle={_human_field(payload['manifest']['lifecycle'])}"
         )
         for tool in payload["tools"]:
-            print(f"  {tool['name']} [{tool['status']}]")
+            print(f"  {_human_field(tool['name'])} [{tool['status']}]")
             for surface in tool["surfaces"]:
-                print(f"    {surface['kind']} [{surface['status']}]: {surface['detail']}")
+                print(f"    {_human_field(surface['kind'])} [{surface['status']}]: {_human_field(surface['detail'])}")
         parity = payload["managed_parity"]
         if parity["status"] == "drift":
             label = "gate" if check_managed else "advisory"

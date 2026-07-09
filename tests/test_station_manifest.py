@@ -182,6 +182,29 @@ def test_surface_parses_probe_assertions_and_allowed_placeholders(tmp_path):
     assert surfaces[1].placeholders == ("query",)
 
 
+@pytest.mark.parametrize("timeout", [float("nan"), float("inf"), float("-inf")])
+def test_surface_rejects_non_finite_timeout(tmp_path, timeout):
+    path = _write_manifest(
+        tmp_path,
+        tools=[
+            {
+                "name": "example-sidecar",
+                "command": "example-sidecar",
+                "surfaces": [
+                    {
+                        "kind": "verify-exit",
+                        "command": ["example-sidecar", "--version"],
+                        "timeout_seconds": timeout,
+                    }
+                ],
+            }
+        ],
+    )
+
+    with pytest.raises(ValueError, match="finite"):
+        station_manifest.load(str(path))
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     [

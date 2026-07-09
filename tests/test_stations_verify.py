@@ -99,6 +99,24 @@ def test_cli_verify_missing_or_malformed_manifest_is_usage_error(tmp_path, capsy
     assert "not valid JSON" in malformed["detail"]
 
 
+def test_cli_verify_manifest_read_race_is_structured_usage_error(tmp_path, monkeypatch, capsys):
+    manifest = _write_manifest(tmp_path / "sidecar")
+    real_read_text = Path.read_text
+
+    def raced_read_text(path, *args, **kwargs):
+        if path == manifest:
+            raise FileNotFoundError("manifest disappeared")
+        return real_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", raced_read_text)
+
+    assert cli.main(["stations", "verify", str(manifest), "--json"]) == 2
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == "error"
+    assert payload["exit_code"] == 2
+    assert "could not be read" in payload["detail"]
+
+
 def test_discovery_and_verification_never_execute_install_argv(tmp_path, helper_path):
     marker = tmp_path / "install-ran"
     manifest = _write_manifest(tmp_path / "sidecar")
@@ -191,6 +209,33 @@ def test_safe_operational_surface_validates_json_or_markdown_shape(tmp_path, mon
     assert payload["ok"] is (expected == "passed")
 
 
+@pytest.mark.parametrize(
+    "body",
+    [
+        "print('NaN')",
+        "print('Infinity')",
+        "print('-Infinity')",
+        "print('{\"value\": NaN}')",
+    ],
+)
+def test_json_surface_rejects_non_standard_constants(tmp_path, monkeypatch, body):
+    binary = _write_executable(tmp_path / "bin", "station-helper", body)
+    monkeypatch.setenv("PATH", f"{binary.parent}{os.pathsep}{os.environ.get('PATH', '')}")
+    _write_manifest(
+        tmp_path / "sidecar",
+        tool={
+            "name": "station-helper",
+            "command": "station-helper",
+            "surfaces": [_surface(kind="summary-json", command=["station-helper"], max_chars=100)],
+        },
+    )
+
+    payload = stations_cmd.verify_payload(str(tmp_path / "sidecar"))
+
+    assert payload["tools"][0]["surfaces"][0]["status"] == "invalid-json"
+    assert payload["ok"] is False
+
+
 def test_help_probe_checks_flags_without_running_stateful_template(tmp_path, monkeypatch):
     marker = tmp_path / "operational-ran"
     binary = _write_executable(
@@ -228,6 +273,69 @@ else:
     assert payload["ok"] is True
     assert payload["tools"][0]["surfaces"][0]["execution"] == "probe"
     assert not marker.exists()
+
+
+@pytest.mark.parametrize(
+    "probe",
+    [
+        ["station-helper", "--help"],
+        ["station-helper", "-h"],
+        ["station-helper", "--version"],
+        ["station-helper", "version"],
+        ["station-helper", "doctor", "--help"],
+        ["station-helper", "doctor", "hooks", "-h"],
+    ],
+)
+def test_safe_probe_grammar_accepts_only_documented_help_and_version_forms(tmp_path, monkeypatch, probe):
+    binary = _write_executable(tmp_path / "bin", "station-helper", "print('--required-flag')")
+    monkeypatch.setenv("PATH", f"{binary.parent}{os.pathsep}{os.environ.get('PATH', '')}")
+    _write_manifest(
+        tmp_path / "sidecar",
+        tool={
+            "name": "station-helper",
+            "command": "station-helper",
+            "surfaces": [_surface(probe=probe, probe_contains=["--required-flag"])],
+        },
+    )
+
+    payload = stations_cmd.verify_payload(str(tmp_path / "sidecar"))
+
+    assert payload["ok"] is True
+
+
+@pytest.mark.parametrize(
+    "probe",
+    [
+        ["station-helper", "--help", "write"],
+        ["station-helper", "version", "write"],
+        ["station-helper", "doctor", "--version"],
+        ["station-helper", "--json", "--help"],
+        ["station-helper", "../outside", "--help"],
+        ["station-helper", "doctor;write", "--help"],
+        ["station-helper", "doctör", "--help"],
+    ],
+)
+def test_safe_probe_grammar_rejects_ambiguous_forms_before_spawn(tmp_path, helper_path, monkeypatch, probe):
+    _write_manifest(
+        tmp_path / "sidecar",
+        tool={
+            "name": "station-helper",
+            "command": "station-helper",
+            "surfaces": [_surface(probe=probe, probe_contains=["--required-flag"])],
+        },
+    )
+    monkeypatch.setattr(
+        stations_cmd.subprocess,
+        "Popen",
+        lambda *args, **kwargs: pytest.fail("unsafe probe spawned"),
+    )
+
+    payload = stations_cmd.verify_payload(str(tmp_path / "sidecar"))
+
+    result = payload["tools"][0]["surfaces"][0]
+    assert result["status"] == "failed"
+    assert result["executed"] is False
+    assert "safe support grammar" in result["detail"]
 
 
 def test_unverified_surface_makes_active_conformance_fail(tmp_path, helper_path):
@@ -388,22 +496,56 @@ else:
     assert "oooo" not in json.dumps(payload)
 
 
-def test_windows_cleanup_terminates_the_process_tree(monkeypatch):
-    calls = []
+def test_unsupported_platform_fails_closed_before_spawn(tmp_path, helper_path, monkeypatch, capsys):
+    _write_manifest(tmp_path / "sidecar")
+    monkeypatch.setattr(stations_cmd, "_supports_process_containment", lambda: False, raising=False)
+    monkeypatch.setattr(
+        stations_cmd.subprocess,
+        "Popen",
+        lambda *args, **kwargs: pytest.fail("verifier process spawned on unsupported platform"),
+    )
 
-    class FakeProcess:
-        pid = 4242
+    assert cli.main(["stations", "verify", str(tmp_path / "sidecar"), "--json"]) == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == "unsupported-platform"
+    assert payload["ok"] is False
+    assert payload["platform"] == {
+        "supported": False,
+        "detail": "station probe execution requires POSIX process-group containment",
+    }
+    assert payload["tools"][0]["status"] == "unsupported-platform"
+    assert payload["tools"][0]["surfaces"][0]["status"] == "unsupported-platform"
 
-        def kill(self):
-            pytest.fail("single-process cleanup used")
 
-    monkeypatch.setattr(stations_cmd.os, "name", "nt")
-    monkeypatch.setattr(stations_cmd.subprocess, "run", lambda argv, **kwargs: calls.append((argv, kwargs)))
+def test_details_strip_controls_and_human_output_quotes_manifest_fields(tmp_path, helper_path, capsys):
+    manifest = _write_manifest(
+        tmp_path / "sidecar",
+        tool={
+            "name": "tool\x07name",
+            "command": "station-helper",
+            "surfaces": [
+                _surface(
+                    kind="surface\u009bkind",
+                    probe=["station-helper", "--help"],
+                    probe_contains=["\x1b[31m\u202e--missing"],
+                )
+            ],
+        },
+    )
+    raw = json.loads(manifest.read_text())
+    raw["name"] = "station\x1b[31m\u202ename"
+    manifest.write_text(json.dumps(raw))
 
-    stations_cmd._terminate_process_group(FakeProcess())
+    assert stations_cmd.verify(str(manifest)) == 1
+    output = capsys.readouterr().out
+    result = stations_cmd.verify_payload(str(manifest))["tools"][0]["surfaces"][0]
 
-    assert calls[0][0] == ["taskkill", "/PID", "4242", "/T", "/F"]
-    assert calls[0][1]["shell"] is False
+    forbidden = {"\x1b", "\x07", "\u009b", "\u202e"}
+    assert not any(character in result["detail"] for character in forbidden)
+    assert not any(character in output for character in forbidden)
+    assert 'name="station[31mname"' in output
+    assert '"toolname"' in output
+    assert '"surfacekind"' in output
 
 
 @pytest.mark.parametrize("lifecycle", ["embedded", "deprecated", "historical"])
