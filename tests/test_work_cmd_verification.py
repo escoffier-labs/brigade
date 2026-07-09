@@ -4,6 +4,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 from brigade import cli
 from brigade import localio
 from brigade import work_cmd
@@ -216,6 +218,100 @@ def test_work_verify_plan_run_list_show(tmp_path, capsys):
     out = capsys.readouterr().out
     assert f"work verify run: {receipt['run_id']}" in out
     assert "python3 -c" in out
+
+
+def test_work_verify_run_argv_json_bypasses_metacharacter_heuristic(tmp_path, capsys):
+    # A quoted argument containing shell metacharacters (semicolons, quotes) is safe
+    # when it arrives as pre-parsed argv: shell=False was already the execution mode,
+    # so the string-split heuristic is irrelevant and must not reject it.
+    _init_git_repo(tmp_path)
+    argv = ["python3", "-c", "print(1); print(2)"]
+
+    rc = cli.main(
+        [
+            "work",
+            "verify",
+            "run",
+            "--target",
+            str(tmp_path),
+            "--argv-json",
+            json.dumps(argv),
+            "--json",
+        ]
+    )
+    receipt = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert receipt["status"] == "completed"
+    assert receipt["commands"][0]["status"] == "completed"
+    assert receipt["commands"][0]["argv"] == argv
+    assert receipt["commands"][0]["stdout_summary"] == "1\n2"
+    assert Path(receipt["path"], "receipt.json").is_file()
+
+
+def test_work_verify_run_command_still_rejects_shell_metacharacters(tmp_path, capsys):
+    _init_git_repo(tmp_path)
+
+    rc = cli.main(
+        [
+            "work",
+            "verify",
+            "run",
+            "--target",
+            str(tmp_path),
+            "--command",
+            'python3 -c "print(1); print(2)"',
+            "--json",
+        ]
+    )
+    receipt = json.loads(capsys.readouterr().out)
+    assert rc != 0
+    assert receipt["status"] == "rejected"
+    assert receipt["commands"][0]["status"] == "rejected"
+    assert "shell metacharacters" in receipt["commands"][0]["stderr_summary"]
+    assert "--argv-json" in receipt["commands"][0]["stderr_summary"]
+
+
+def test_work_verify_run_command_and_argv_json_are_mutually_exclusive(tmp_path, capsys):
+    with pytest.raises(SystemExit) as exc:
+        cli.main(
+            [
+                "work",
+                "verify",
+                "run",
+                "--target",
+                str(tmp_path),
+                "--command",
+                "python3 -m pytest -q",
+                "--argv-json",
+                json.dumps(["python3", "-m", "pytest", "-q"]),
+            ]
+        )
+    assert exc.value.code == 2
+    err = capsys.readouterr().err
+    assert "--command" in err and "--argv-json" in err
+    assert "mutually exclusive" in err
+
+
+def test_work_verify_run_requires_exactly_one_of_command_or_argv_json(tmp_path, capsys):
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["work", "verify", "run", "--target", str(tmp_path)])
+    assert exc.value.code == 2
+    err = capsys.readouterr().err
+    assert "--command" in err and "--argv-json" in err
+
+
+def test_work_verify_run_argv_json_rejects_malformed_json(tmp_path, capsys):
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["work", "verify", "run", "--target", str(tmp_path), "--argv-json", "not-json"])
+    assert exc.value.code == 2
+    err = capsys.readouterr().err
+    assert "--argv-json" in err
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["work", "verify", "run", "--target", str(tmp_path), "--argv-json", json.dumps({"not": "an array"})])
+    assert exc.value.code == 2
+    err = capsys.readouterr().err
+    assert "--argv-json" in err
 
 
 def test_work_verify_receipt_digests_recompute_from_payload_and_logs(tmp_path, capsys, monkeypatch):

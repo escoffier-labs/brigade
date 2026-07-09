@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 
 from .. import extras as _extras_mod
@@ -128,7 +129,18 @@ def register(sub: argparse._SubParsersAction) -> None:
         dest="verify_commands",
         action="append",
         default=None,
-        help="Verification command. May be repeated.",
+        help="Verification command. May be repeated. Mutually exclusive with --argv-json.",
+    )
+    p_work_verify_run.add_argument(
+        "--argv-json",
+        dest="verify_argv_json",
+        default=None,
+        metavar="JSON",
+        help=(
+            "JSON array of argv strings for one verification command, executed directly "
+            "with shell=False (bypasses the shell-metacharacter check, for commands whose "
+            "arguments need punctuation like ';' or quotes). Mutually exclusive with --command."
+        ),
     )
     p_work_verify_run.add_argument("--timeout", type=int, default=900, help="Timeout per command in seconds.")
     p_work_verify_run.add_argument(
@@ -766,9 +778,29 @@ def dispatch(args) -> int:
         if args.verify_command == "plan":
             return work_cmd.verify_plan(target=args.target, commands=args.verify_commands, json_output=args.json)
         if args.verify_command == "run":
+            has_command = bool(args.verify_commands)
+            has_argv_json = args.verify_argv_json is not None
+            if has_command and has_argv_json:
+                args._brigade_parser.error("--command and --argv-json are mutually exclusive")
+            if not has_command and not has_argv_json:
+                args._brigade_parser.error("work verify run requires exactly one of --command or --argv-json")
+            if has_argv_json:
+                try:
+                    parsed_argv = json.loads(args.verify_argv_json)
+                except json.JSONDecodeError as exc:
+                    args._brigade_parser.error(f"--argv-json is not valid JSON: {exc}")
+                if (
+                    not isinstance(parsed_argv, list)
+                    or not parsed_argv
+                    or not all(isinstance(item, str) for item in parsed_argv)
+                ):
+                    args._brigade_parser.error("--argv-json must be a JSON array of strings")
+                commands = [parsed_argv]
+            else:
+                commands = args.verify_commands
             return work_cmd.verify_run(
                 target=args.target,
-                commands=args.verify_commands,
+                commands=commands,
                 timeout=args.timeout,
                 json_output=args.json,
                 capture=args.capture,
