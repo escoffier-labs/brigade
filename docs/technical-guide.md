@@ -377,6 +377,61 @@ When `--roster` is omitted, `brigade run` first reads `--cwd/.brigade/roster.tom
 if that file is missing, it falls back to `Path.home()/.brigade/roster.toml`.
 Passing `--roster` keeps using exactly that file.
 
+### Model scorecard
+
+`brigade model scorecard` aggregates run artifacts from `.brigade/runs` into a per-model summary. It is read-only: it never writes or networks. Rows group by `(cli, model)`; a missing or empty `model` is shown as the CLI alone (for example `codex`), otherwise as `cli/model` (for example `claude/claude-fable-5`). The scorecard reads the same run artifacts that `brigade runs show` inspects.
+
+Metrics per row:
+
+- `runs` - distinct run directories that seat the model.
+- `seats` - `worker_seats + orchestrator_seats` (printed as `workers+orchestrators`, for example `6+2`).
+- `w_ok` - worker results with `ok: true`.
+- `ok_rate` - `worker_ok / worker_seats` (0 if no worker seats); shown as a percentage.
+- `noop` - suspected no-op run count for that model (see below).
+- `mean_dur` - mean of `duration_seconds` across the model's runs.
+- `first_seen` / `last_seen` - min/max `started_at` among contributing runs.
+
+Rows sort by `ok_rate` descending, then `seats` descending, then label ascending. A footer shows `scanned: N  skipped: M` (`skipped` counts malformed or missing artifact dirs, not runs filtered by `--since`).
+
+Flags:
+
+- `--target` / `-t` - workspace whose `.brigade/runs` directory is scanned (default `.`).
+- `--runs-dir` - explicit runs directory; repeatable. With the CLI (which always has a target), each `--runs-dir` is an extra root and the target's `.brigade/runs` is still scanned. A library call with only `runs_dirs` and no `target` scans just those directories.
+- `--since YYYY-MM-DD` - only include runs with `started_at` on or after that UTC date at 00:00:00Z. Invalid date exits 2 with `error: --since must use YYYY-MM-DD` on stderr.
+- `--json` - emit machine-readable JSON (`indent=2`, `sort_keys`) instead of the text table. Shape includes `models[]`, `scanned`, `skipped`, and `skipped_dirs[{path,reason}]`. Each model object includes `cli`, `model`, `label`, `runs`, `seats`, `worker_seats`, `orchestrator_seats`, `worker_ok`, `ok_rate`, `suspected_no_op`, `mean_duration_seconds`, `total_duration_seconds`, `first_seen`, and `last_seen`.
+- `--verbose` / `-v` - after the table and footer, list skipped run directories and skip reasons.
+
+A run contributes to a model's `noop` count only when all of the following hold:
+
+1. At least one worker result for that model has `ok: true`.
+2. `worker-results.json` ground_truth is available (`available` is true).
+3. After ignoring housekeeping paths, there are no real changed files: either `changed_files` is null or absent, or every entry is under `.brigade/` (paths starting with `.brigade/` or exactly `.brigade`).
+
+The count is per run per model (at most once per run), not per worker seat. Failed workers with empty changes do not count. Ok workers with ground_truth unavailable do not count. Ok workers with real non-`.brigade/` changed files do not count.
+
+```bash
+brigade model scorecard
+brigade model scorecard --target /path/to/repo
+brigade model scorecard --target /path/to/repo --since 2026-05-01
+brigade model scorecard --runs-dir /path/to/archive/runs --runs-dir /path/to/other/runs
+brigade model scorecard --target /path/to/repo --json
+brigade model scorecard --target /path/to/repo --verbose
+```
+
+Sample output:
+
+```
+model                  runs  seats  w_ok  ok_rate  noop  mean_dur  first_seen            last_seen
+---------------------  ----  -----  ----  -------  ----  --------  --------------------  --------------------
+claude/claude-fable-5  4     6+2    5      83.3%   1     12.0s     2026-05-01T12:00:00Z  2026-06-15T09:30:00Z
+codex/gpt-5.5          3     3+0    2      66.7%   0     30.0s     2026-05-10T08:00:00Z  2026-06-10T18:00:00Z
+codex                  5     0+5    0       0.0%   0     6.0s      2026-04-20T00:00:00Z  2026-06-01T00:00:00Z
+
+scanned: 12  skipped: 1
+```
+
+If no model seats are found, the table is replaced with `no model seats found` and the scanned/skipped footer is still printed.
+
 ### Dogfood
 
 `brigade dogfood` is the shortcut for using Brigade on itself or another trusted repo.
