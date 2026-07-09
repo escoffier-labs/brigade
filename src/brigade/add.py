@@ -47,6 +47,19 @@ def run(target: Path, station: str, *, install_manifest: bool = False) -> int:
         print(f"station {station_name!r} has no managed tools to add.")
         return 0
 
+    if st is not None and st.name == "evidence":
+        print("evidence station wires MiseLedger (separate Go binary; process boundary):")
+        print("  brigade evidence crawl plan")
+        print("  brigade evidence doctor")
+        print("  brigade evidence export plan")
+        print("  brigade receipts export miseledger --target . --new-only --import")
+        print("  brigade operator checkup --target .")
+        print(
+            "Brigade does not crawl sessions or import the ledger from add; "
+            "run the planned miseledger commands yourself."
+        )
+        print()
+
     ctx = _doctor.build_context(target)
     rc = 0
     for tool in tools:

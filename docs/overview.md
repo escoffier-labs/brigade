@@ -378,8 +378,13 @@ Safety and operations tools:
 
 Evidence ledger tools:
 
-- [MiseLedger](https://github.com/escoffier-labs/miseledger): local-first evidence ledger that imports `miseledger.adapter.v1` JSONL into SQLite, searches with FTS5, and emits Brigade-ready evidence bundles.
-- Session and source exporters live inside MiseLedger since v0.3.0 (`miseledger crawl sessions|files|gitlog|...`); the archived [StationTrail](https://github.com/escoffier-labs/stationtrail) and [SourceHarvest](https://github.com/escoffier-labs/sourceharvest) repos document the retired standalone exporters.
+- [MiseLedger](https://github.com/escoffier-labs/miseledger): local-first evidence ledger. One binary crawls sessions, files, git history, and chat sources (`miseledger crawl ...`), stores `miseledger.adapter.v1` JSONL in SQLite with FTS5, and emits Brigade-ready evidence bundles. No separate exporter install.
+- Brigade station CLI (process boundary; does not crawl for you):
+  - `brigade add evidence` installs miseledger and prints the crawl/export path
+  - `brigade evidence status` / `doctor` — advisory health + next commands
+  - `brigade evidence crawl plan` / `export plan` — review-only plans under `.brigade/evidence/plans/`
+  - `brigade receipts export miseledger --new-only --import` — export verify/run receipts into the ledger
+- Historical note only: StationTrail and SourceHarvest were absorbed into MiseLedger crawl in v0.3.0; their archived repos are migration notes, not active products.
 
 Search and context tools:
 

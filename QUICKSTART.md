@@ -151,7 +151,12 @@ Capture against an id you actually have: a skill you followed, a memory card (`-
 # optional stations (fail-open everywhere if absent)
 brigade add graphtrail          # or: cargo install graphtrail
 graphtrail sync                 # builds .graphtrail/graphtrail.db in the repo
-brigade add evidence            # miseledger
+brigade add evidence            # miseledger (process-boundary Go binary)
+
+# evidence station CLI (install / plan / health; does not crawl for you)
+brigade evidence crawl plan     # review-only miseledger init + crawl commands
+brigade evidence doctor
+brigade evidence export plan    # review-only receipts export path
 
 # one operator glance: doctors + graph ok / ledger ok / last brief hit rate
 brigade operator checkup --target .

@@ -1190,6 +1190,11 @@ Use `brigade pantry status` for a pantry-specific status readout, `brigade pantr
 Use `brigade pantry expiry-alert` to report near-expiry sessions and preview the `agent-notify` message Brigade would send. Add `--send` to actually invoke `agent-notify`.
 These plan commands do not generate or copy PSKs, start services, or mutate browser, GitHub, OpenClaw, or other auth files.
 
+`evidence` (alias `ledger`) is the local evidence-ledger station. MiseLedger remains a process-boundary Go binary; Brigade never imports it.
+`brigade add evidence` installs miseledger and prints the crawl/export path.
+Use `brigade evidence status` and `brigade evidence doctor` for advisory health with explicit `next` commands, `brigade evidence crawl plan` to preview miseledger init/crawl/doctor commands, and `brigade evidence export plan` to preview `brigade receipts export miseledger --new-only --import`.
+These plan commands do not execute crawl or import. Product page: https://brigade.tools/miseledger.
+
 Security commands:
 
 - `brigade security init` writes gitignored local defaults to `.brigade/security.toml`.
