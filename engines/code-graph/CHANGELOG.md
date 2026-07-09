@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- `sync` now refuses to index the filesystem root or the user's home directory instead of walking every cache, toolchain, and vendored source tree on the machine, which held the whole pending graph in memory and could exhaust system RAM. The CLI rejects the root before creating `.graphtrail/`, and the same guard covers the MCP `refresh: true` path. Set `GRAPHTRAIL_ALLOW_UNSAFE_ROOT=1` to override.
+
 ### Added
 - Feature-gated MCP `semantic_search` tool for `codesearch` builds. It uses the existing Code Search client, can return raw per-file hits with `blend: false`, and defaults to blended symbol rows ranked by embedding score plus graph centrality.
 - Feature-gated MCP `context` argument `blend_code_search`, matching the CLI flag while leaving the default build's tool list and existing context calls unchanged.

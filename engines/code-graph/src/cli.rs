@@ -153,6 +153,8 @@ pub fn run(cli: Cli) -> Result<()> {
             println!("initialized {}", db_path.display());
         }
         Command::Sync { root, force } => {
+            let canonical_root = root.canonicalize().unwrap_or_else(|_| root.clone());
+            crate::store::guard_unsafe_root(&canonical_root)?;
             let db_path = db_path(cli.db, &root);
             let conn = open_db(&db_path)?;
             init_schema(&conn)?;

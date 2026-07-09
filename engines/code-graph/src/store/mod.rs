@@ -7,4 +7,5 @@ pub mod sync;
 
 pub use db::{db_path, open_db, open_default, open_default_read_only, open_read_only};
 pub use schema::{SCHEMA_VERSION, init_schema};
+pub(crate) use sync::guard_unsafe_root;
 pub use sync::{pending_changes, sync_repo, sync_repo_force};

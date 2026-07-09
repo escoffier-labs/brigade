@@ -83,6 +83,7 @@ pub fn sync_repo(conn: &Connection, root: &Path) -> Result<SyncSummary> {
 /// Like [`sync_repo`] but `force` rebuilds every file regardless of the stat/hash check.
 pub fn sync_repo_force(conn: &Connection, root: &Path, force: bool) -> Result<SyncSummary> {
     let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    guard_unsafe_root(&root)?;
     let graph_dir_created = crate::store::db::take_created_graph_dir(&root.join(".graphtrail"));
     let upgraded = crate::store::schema::upgrade_for_sync(conn)?;
     let force_full_reindex = force || upgraded;
@@ -466,6 +467,39 @@ fn is_hardcoded_floor(entry: &DirEntry) -> bool {
             | "venv"
             | "__pycache__"
     )
+}
+
+/// Refuse to sync roots that are never a real project: the filesystem root and the user's home
+/// directory. Outside a git repo the walker has no gitignore to lean on, so a sync there parses
+/// every cache, toolchain, and vendored source tree on the machine and holds the pending graph in
+/// memory until the final transaction, which can exhaust system RAM. Set
+/// `GRAPHTRAIL_ALLOW_UNSAFE_ROOT=1` to bypass.
+pub(crate) fn guard_unsafe_root(root: &Path) -> Result<()> {
+    if std::env::var_os("GRAPHTRAIL_ALLOW_UNSAFE_ROOT").is_some_and(|v| v == "1") {
+        return Ok(());
+    }
+    let home = std::env::var_os("HOME").map(|h| {
+        let home = PathBuf::from(h);
+        home.canonicalize().unwrap_or(home)
+    });
+    if let Some(reason) = unsafe_root_reason(root, home.as_deref()) {
+        anyhow::bail!(
+            "refusing to sync {}: {reason}. Run sync from a project directory, or set \
+             GRAPHTRAIL_ALLOW_UNSAFE_ROOT=1 to override.",
+            root.display()
+        );
+    }
+    Ok(())
+}
+
+fn unsafe_root_reason(root: &Path, home: Option<&Path>) -> Option<&'static str> {
+    if root.parent().is_none() {
+        return Some("root is the filesystem root");
+    }
+    if home.is_some_and(|home| root == home) {
+        return Some("root is the home directory");
+    }
+    None
 }
 
 fn has_git_context(root: &Path) -> bool {
@@ -940,5 +974,42 @@ fn push_module_variants(files: &mut Vec<String>, prefix: &str, exts: &[&str]) {
         if *ext == "py" {
             files.push(format!("{prefix}/__init__.py"));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::unsafe_root_reason;
+    use std::path::Path;
+
+    #[test]
+    fn filesystem_root_is_unsafe() {
+        assert_eq!(
+            unsafe_root_reason(Path::new("/"), None),
+            Some("root is the filesystem root")
+        );
+    }
+
+    #[test]
+    fn home_directory_is_unsafe() {
+        let home = Path::new("/home/someone");
+        assert_eq!(
+            unsafe_root_reason(home, Some(home)),
+            Some("root is the home directory")
+        );
+    }
+
+    #[test]
+    fn project_directory_under_home_is_safe() {
+        let home = Path::new("/home/someone");
+        assert_eq!(
+            unsafe_root_reason(Path::new("/home/someone/repos/project"), Some(home)),
+            None
+        );
+    }
+
+    #[test]
+    fn any_directory_is_safe_without_home() {
+        assert_eq!(unsafe_root_reason(Path::new("/srv/project"), None), None);
     }
 }
