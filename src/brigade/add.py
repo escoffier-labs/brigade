@@ -24,12 +24,15 @@ def run(target: Path, station: str, *, install_manifest: bool = False) -> int:
         return 2
 
     if single_tool is not None:
-        tools = (single_tool,)
+        tools: tuple[managed.ManagedTool, ...] = (single_tool,)
         print(f"tool {single_tool.name!r} (station {single_tool.station!r})")
-    else:
+    elif st is not None:
         tools = managed.for_station(st.name)
+    else:  # pragma: no cover - guarded above
+        print(f"error: unknown station or tool {station!r}", file=sys.stderr)
+        return 2
     if not tools:
-        if st.name == "skills":
+        if st is not None and st.name == "skills":
             print("station 'skills' ships built-in Brigade skills:")
             for skill_id in DEFAULT_WIRED_SKILLS:
                 print(f"  [built-in] {skill_id}")
@@ -40,7 +43,8 @@ def run(target: Path, station: str, *, install_manifest: bool = False) -> int:
             print()
             print("Run `brigade init --harnesses codex` to wire the built-in skills into Codex.")
             return 0
-        print(f"station {st.name!r} has no managed tools to add.")
+        station_name = st.name if st is not None else station
+        print(f"station {station_name!r} has no managed tools to add.")
         return 0
 
     ctx = _doctor.build_context(target)
