@@ -344,6 +344,49 @@ def test_work_verify_receipt_digests_recompute_from_payload_and_logs(tmp_path, c
     assert stored["digests"] == digests
 
 
+def test_work_verify_receipt_compacts_prior_nested_evidence(tmp_path, capsys, monkeypatch):
+    prior_dir = tmp_path / ".brigade" / "work" / "verify-runs" / "20260708-120000-work-verify-prior"
+    prior_digest = "a" * 64
+    prior_dir.mkdir(parents=True)
+    _write_json(
+        prior_dir / "receipt.json",
+        {
+            "run_id": prior_dir.name,
+            "status": "completed",
+            "path": str(prior_dir),
+            "started_at": "2026-07-08T12:00:00+00:00",
+            "digests": {"receipt_sha256": prior_digest},
+            "evidence": {
+                "latest_verify": {
+                    "run_id": "20260707-120000-work-verify-older",
+                    "evidence": {"latest_verify": {"run_id": "nested"}},
+                }
+            },
+        },
+    )
+    monkeypatch.setenv("GRAPHTRAIL_BIN", str(tmp_path / "missing-graphtrail"))
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    assert (
+        work_cmd.verify_run(
+            target=tmp_path,
+            commands=[f"{sys.executable} -c \"print('ok')\""],
+            timeout=30,
+            json_output=True,
+        )
+        == 0
+    )
+    receipt = json.loads(capsys.readouterr().out)
+
+    assert receipt["evidence"]["latest_verify"] == {
+        "run_id": prior_dir.name,
+        "status": "completed",
+        "path": str(prior_dir),
+        "digest": prior_digest,
+    }
+    assert "evidence" not in receipt["evidence"]["latest_verify"]
+
+
 def test_work_verify_receipt_captures_git_state_before_digest(tmp_path, capsys, monkeypatch):
     _init_git_repo_with_head(tmp_path)
     (tmp_path / "dirty.txt").write_text("dirty\n")

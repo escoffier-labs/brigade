@@ -12,11 +12,11 @@ Architecture: verification receipts reference the previous receipt by stable met
 
 ### Task 1: Compact previous verification evidence
 
-- [ ] Add a failing test that creates a prior receipt containing nested `evidence`, runs a second verification, and asserts the new receipt contains only prior `run_id`, status, path, and digest, with no nested `evidence` key.
-- [ ] Run the focused test; expect failure because the full previous receipt is embedded.
-- [ ] Replace full-payload embedding with a compact reference derived from the prior receipt and its digest.
-- [ ] Run the focused test and receipt-signing tests; expect pass.
-- [ ] Commit `fix(work): reference prior verification receipts compactly`.
+- [x] Add a failing test that creates a prior receipt containing nested `evidence`, runs a second verification, and asserts the new receipt contains only prior `run_id`, status, path, and digest, with no nested `evidence` key.
+- [x] Run the focused test; expect failure because the full previous receipt is embedded.
+- [x] Replace full-payload embedding with a compact reference derived from the prior receipt and its digest.
+- [x] Run the focused test and receipt-signing tests; expect pass.
+- [x] Commit `fix(work): reference prior verification receipts compactly`.
 
 ### Task 2: Attach GraphTrail context before work
 

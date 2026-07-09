@@ -124,6 +124,18 @@ def _latest_verify_receipt(target: Path) -> dict[str, Any] | None:
     return receipts[0] if receipts else None
 
 
+def _verify_receipt_reference(receipt: dict[str, Any] | None) -> dict[str, Any] | None:
+    if receipt is None:
+        return None
+    digests = receipt.get("digests") if isinstance(receipt.get("digests"), dict) else {}
+    return {
+        "run_id": receipt.get("run_id"),
+        "status": receipt.get("status"),
+        "path": receipt.get("path"),
+        "digest": digests.get("receipt_sha256"),
+    }
+
+
 def _verify_read_receipt(path: Path) -> dict[str, Any] | None:
     receipt = path / "receipt.json" if path.is_dir() else path
     if not receipt.is_file():
@@ -173,7 +185,7 @@ def _verification_evidence_payload(target: Path, session: tuple[Path, dict[str, 
     latest_session = session or (sessions[0] if sessions else None)
     session_info = helpers._session_info(latest_session[0], latest_session[1]) if latest_session else None
     task = _verification_task_from_session(latest_session[1]) if latest_session else None
-    latest_verify = _latest_verify_receipt(target)
+    latest_verify = _verify_receipt_reference(_latest_verify_receipt(target))
     sweep_health = scanners_mod._scanner_sweep_health(target)
     review_health = reviews_mod._review_health(target)
     handoff_drafts = handoff_cmd.draft_queue_payload(target)
