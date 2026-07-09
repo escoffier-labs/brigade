@@ -541,6 +541,8 @@ def show(run_dir: Path) -> int:
     _line("artifacts", run_meta.get("artifacts"))
     _line("handoff", run_meta.get("handoff"))
     _line("error", run_meta.get("error"))
+    if run_meta.get("suspected_noop") is True:
+        print("warning: suspected no-op run; ok workers produced no non-.brigade file changes.")
 
     _print_roster(roster)
     _print_plan(plan)
