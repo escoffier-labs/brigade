@@ -789,8 +789,10 @@ def dispatch(args) -> int:
                     parsed_argv = json.loads(args.verify_argv_json)
                 except json.JSONDecodeError as exc:
                     args._brigade_parser.error(f"--argv-json is not valid JSON: {exc}")
-                if not isinstance(parsed_argv, list) or not parsed_argv or not all(
-                    isinstance(item, str) for item in parsed_argv
+                if (
+                    not isinstance(parsed_argv, list)
+                    or not parsed_argv
+                    or not all(isinstance(item, str) for item in parsed_argv)
                 ):
                     args._brigade_parser.error("--argv-json must be a JSON array of strings")
                 commands = [parsed_argv]

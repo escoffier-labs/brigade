@@ -259,7 +259,7 @@ def test_work_verify_run_command_still_rejects_shell_metacharacters(tmp_path, ca
             "--target",
             str(tmp_path),
             "--command",
-            "python3 -c \"print(1); print(2)\"",
+            'python3 -c "print(1); print(2)"',
             "--json",
         ]
     )

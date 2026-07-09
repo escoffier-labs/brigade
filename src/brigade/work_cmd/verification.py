@@ -59,9 +59,13 @@ def _verify_parse_command(command: str) -> tuple[list[str] | None, dict[str, str
     if executable in constants.SCANNER_HIGH_RISK_COMMANDS:
         return None, env, f"high-risk verification command: {executable}"
     if any(constants.SCANNER_SHELL_META_RE.search(part) for part in argv):
-        return None, env, (
-            "high-risk verification command contains shell metacharacters "
-            "(use --argv-json to pass a pre-parsed argv list instead)"
+        return (
+            None,
+            env,
+            (
+                "high-risk verification command contains shell metacharacters "
+                "(use --argv-json to pass a pre-parsed argv list instead)"
+            ),
         )
     if "/" in argv[0]:
         if not Path(argv[0]).expanduser().exists():
