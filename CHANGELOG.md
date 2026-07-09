@@ -8,6 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Search station CLI: `brigade search status|doctor` and review-only `sync plan` for GraphTrail plus optional code-search. Shared station health schema (`station_health`) powers status/doctor/plan across stations.
+- Tokens station CLI: `brigade tokens status|doctor` and review-only `wire plan` for Token Glace (current name; TokenJuice is the old name) plus optional `usage-tracker` managed tool under the tokens station.
+- `brigade stations discover` finds local `station.json` catalogs (`brigade.station.v1`) and prints `brigade add <path>` next commands.
+- Plating managed tool under the guard station for optional demo render / leak scan / drift verify helpers.
+- Evidence station CLI: `brigade evidence status|doctor`, review-only `crawl plan` and `export plan`, and `brigade add evidence` next-step banner. MiseLedger stays a process-boundary Go binary; crawl/import are operator-run.
+- Pantry station first-class path: `brigade pantry doctor`, status/expiry/setup plans emit explicit `next` commands and product docs links, and `brigade add pantry` prints the multi-machine setup sequence. Agent Pantry stays a process-boundary Go sidecar.
 - MCP adapters for Grok CLI: project `.grok/config.toml` (`grok`) and user `~/.grok/config.toml` (`grok-user`, requires `--user-scope`). Same Codex-like `[mcp_servers.<name>]` TOML shape. (#183)
 
 ### Fixed
