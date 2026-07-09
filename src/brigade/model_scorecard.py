@@ -198,11 +198,7 @@ def _ground_truth_empty_changes(gt: Any) -> bool:
         return False
     # .brigade/ entries are run housekeeping (roster edits, artifacts), not
     # task output; a run whose only changes live there still did no work.
-    real = [
-        f
-        for f in changed
-        if isinstance(f, str) and not f.startswith(".brigade/") and f != ".brigade"
-    ]
+    real = [f for f in changed if isinstance(f, str) and not f.startswith(".brigade/") and f != ".brigade"]
     return len(real) == 0
 
 

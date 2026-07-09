@@ -22,7 +22,22 @@ COMMAND_GROUPS: list[tuple[str, list[str]]] = [
     ),
     (
         "Stations and tools",
-        ["add", "stations", "skills", "tools", "mcp", "pantry", "roster", "run", "runs", "model", "dogfood"],
+        [
+            "add",
+            "stations",
+            "skills",
+            "tools",
+            "mcp",
+            "evidence",
+            "search",
+            "tokens",
+            "pantry",
+            "roster",
+            "run",
+            "runs",
+            "model",
+            "dogfood",
+        ],
     ),
     (
         "Review, security, and research",

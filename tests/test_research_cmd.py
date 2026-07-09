@@ -162,6 +162,23 @@ def test_sources_payload_reports_configured_cli_source(tmp_path: Path):
     assert route["accepts_query"] is True
 
 
+def test_sources_payload_reports_pageforge_status(tmp_path: Path):
+    (tmp_path / ".brigade").mkdir()
+    (tmp_path / ".brigade" / "research.toml").write_text(
+        "[search]\n"
+        'research_search_provider = "pageforge"\n'
+        f'pageforge_command = ["{sys.executable}", "-c", "print(\'ok\')"]\n'
+        'pageforge_db_path = "/tmp/pageforge.db"\n'
+    )
+
+    payload = research_cmd.sources_payload(target=tmp_path)
+    route = next(route for route in payload["routes"] if route["id"] == "pageforge")
+    assert route["status"] == "ok"
+    assert route["type"] == "web"
+    assert route["trust"] == "web"
+    assert "local cache" in route["detail"]
+
+
 def test_antigravity_source_adapter_is_cli_lane(tmp_path: Path):
     (tmp_path / ".brigade").mkdir()
     (tmp_path / ".brigade" / "research.toml").write_text(

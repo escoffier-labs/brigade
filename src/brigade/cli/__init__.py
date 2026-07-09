@@ -33,6 +33,9 @@ from . import (
     add as _add_group,
     stations as _stations_group,
     pantry as _pantry_group,
+    evidence as _evidence_group,
+    search as _search_group,
+    tokens as _tokens_group,
     notifications as _notifications_group,
     budgets as _budgets_group,
     untrusted as _untrusted_group,
@@ -125,6 +128,9 @@ def _build_parser() -> argparse.ArgumentParser:
     _daily_group.register(sub)
     _add_group.register(sub)
     _stations_group.register(sub)
+    _evidence_group.register(sub)
+    _search_group.register(sub)
+    _tokens_group.register(sub)
     _register_extras(sub, "pantry", extras_enabled)
     _register_extras(sub, "notifications", extras_enabled)
     _register_extras(sub, "budgets", extras_enabled)
