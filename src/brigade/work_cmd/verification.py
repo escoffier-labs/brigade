@@ -59,13 +59,36 @@ def _verify_parse_command(command: str) -> tuple[list[str] | None, dict[str, str
     if executable in constants.SCANNER_HIGH_RISK_COMMANDS:
         return None, env, f"high-risk verification command: {executable}"
     if any(constants.SCANNER_SHELL_META_RE.search(part) for part in argv):
-        return None, env, "high-risk verification command contains shell metacharacters"
+        return None, env, (
+            "high-risk verification command contains shell metacharacters "
+            "(use --argv-json to pass a pre-parsed argv list instead)"
+        )
     if "/" in argv[0]:
         if not Path(argv[0]).expanduser().exists():
             return None, env, f"verification command is not resolvable: {argv[0]}"
     elif shutil.which(argv[0]) is None:
         return None, env, f"verification command is not resolvable: {argv[0]}"
     return argv, env, None
+
+
+def _verify_parse_argv(argv: list[str]) -> tuple[list[str] | None, dict[str, str], str | None]:
+    """Resolve a pre-parsed verification argv (e.g. from --argv-json).
+
+    The argv arrived pre-split (no shlex/shell parsing happens on it), so the
+    shell-metacharacter heuristic in ``_verify_parse_command`` does not apply:
+    there is no shell involved and no ambiguity for it to guard against.
+    """
+    if not argv:
+        return None, {}, "empty command"
+    executable = Path(argv[0]).name
+    if executable in constants.SCANNER_HIGH_RISK_COMMANDS:
+        return None, {}, f"high-risk verification command: {executable}"
+    if "/" in argv[0]:
+        if not Path(argv[0]).expanduser().exists():
+            return None, {}, f"verification command is not resolvable: {argv[0]}"
+    elif shutil.which(argv[0]) is None:
+        return None, {}, f"verification command is not resolvable: {argv[0]}"
+    return list(argv), {}, None
 
 
 VERIFY_RUNS_KEEP = 50
@@ -237,7 +260,7 @@ def _write_verify_markdown(run_dir: Path, receipt: dict[str, Any]) -> None:
     (run_dir / "summary.md").write_text("\n".join(lines) + "\n")
 
 
-def _run_verify_commands(target: Path, commands: list[str], timeout: int) -> tuple[dict[str, Any], int]:
+def _run_verify_commands(target: Path, commands: list[str | list[str]], timeout: int) -> tuple[dict[str, Any], int]:
     started = helpers._now()
     run_id = f"{started.strftime('%Y%m%d-%H%M%S')}-work-verify-{uuid4().hex[:6]}"
     run_dir = helpers._verify_runs_root(target) / run_id
@@ -255,9 +278,14 @@ def _run_verify_commands(target: Path, commands: list[str], timeout: int) -> tup
     }
     rc = 0
     for index, command in enumerate(commands, start=1):
-        argv, env_assignments, error = _verify_parse_command(command)
+        if isinstance(command, list):
+            argv, env_assignments, error = _verify_parse_argv(command)
+            display_command = shlex.join(command)
+        else:
+            argv, env_assignments, error = _verify_parse_command(command)
+            display_command = command
         command_result: dict[str, Any] = {
-            "command": command,
+            "command": display_command,
             "env": sorted(env_assignments),
             "started_at": helpers._now().isoformat(),
         }
@@ -574,7 +602,7 @@ def verify_plan(
 def verify_run(
     *,
     target: Path,
-    commands: list[str] | None = None,
+    commands: list[str | list[str]] | None = None,
     timeout: int = 900,
     json_output: bool = False,
     capture: str | None = None,
