@@ -62,6 +62,7 @@ tool expands at launch.
 | Codex user | `~/.codex/config.toml` | TOML `[mcp_servers.<name>]`. **User-scoped** (`--user-scope`) |
 | Grok user | `~/.grok/config.toml` | TOML `[mcp_servers.<name>]`. **User-scoped** (`--user-scope`) |
 | OpenClaw | `~/.openclaw/openclaw.json` | JSON `mcp.servers`. **User-scoped** (`--user-scope`) |
+| Hermes | `~/.hermes/config.yaml` | YAML `mcp_servers`. **User-scoped** (`--user-scope`) |
 
 By default a repo's sync targets the tools in its Brigade selection (`.brigade/config.json`)
 that have an adapter. VS Code is not a Brigade harness: it is included only when the repo

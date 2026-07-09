@@ -292,6 +292,32 @@ def test_grok_adapters_share_codex_toml_shape():
         assert A.ADAPTERS[name].read_file(text)["graphtrail"] == projected
 
 
+def test_hermes_stdio_and_remote_roundtrip_preserves_siblings():
+    adapter = A.ADAPTERS["hermes"]
+    assert adapter.user_scope is True
+    assert adapter.path == "~/.hermes/config.yaml"
+    existing = "model: gpt-test\nplugins:\n  enabled:\n    - orca-status\n\nmcp_servers: {}\n"
+    stdio = adapter.to_provider(_stdio())
+    remote = adapter.to_provider(_remote())
+    text = adapter.write_file(existing, {"github": stdio, "docs": remote}, set())
+    assert "model: gpt-test" in text
+    assert "orca-status" in text
+    assert "mcp_servers:" in text
+    live = adapter.read_file(text)
+    assert live["github"]["command"] == "npx"
+    assert live["github"]["args"] == ["-y", "@mcp/server-github"]
+    assert live["docs"]["url"] == "https://mcp.example.com/v1"
+    # second write is idempotent for projected shape
+    again = adapter.write_file(text, {"github": stdio, "docs": remote}, set())
+    assert adapter.read_file(again) == live
+
+
+def test_hermes_from_provider_url_only_is_http():
+    back, _ = A.ADAPTERS["hermes"].from_provider("x", {"url": "http://127.0.0.1:8000/mcp", "transport": "stdio"})
+    assert back.transport == "http"
+    assert back.url == "http://127.0.0.1:8000/mcp"
+
+
 def test_server_dict_roundtrip():
     s = _stdio()
     raw = A.server_to_dict(s)
