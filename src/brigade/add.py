@@ -47,6 +47,15 @@ def run(target: Path, station: str, *, install_manifest: bool = False) -> int:
         print(f"station {station_name!r} has no managed tools to add.")
         return 0
 
+    if st is not None and st.name == "memory":
+        print("memory maintenance is built into brigade-cli:")
+        print("  brigade memory status")
+        print("  brigade memory lint")
+        print("  brigade memory compact")
+        print("  brigade memory init-git")
+        print("  brigade ingest   # handoff promotion (not the retired memory-doctor ingest)")
+        print()
+
     if st is not None and st.name == "pantry":
         print("pantry station wires Agent Pantry (separate Go binary; process boundary):")
         print("  brigade pantry setup plan --role sink --peer 127.0.0.1:8787")

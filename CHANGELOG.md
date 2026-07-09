@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Embedded memory-doctor verbs under `brigade memory`: `status`, `lint` (dead wiki-links), `compact` (flatten/tighten MEMORY.md), and `init-git`. Also available as `python -m brigade.memory_doctor`. Handoff promotion stays on `brigade ingest`.
 - Search station CLI: `brigade search status|doctor` and review-only `sync plan` for GraphTrail plus optional code-search. Shared station health schema (`station_health`) powers status/doctor/plan across stations.
 - Tokens station CLI: `brigade tokens status|doctor` and review-only `wire plan` for Token Glace (current name; TokenJuice is the old name) plus optional `usage-tracker` managed tool under the tokens station.
 - `brigade stations discover` finds local `station.json` catalogs (`brigade.station.v1`) and prints `brigade add <path>` next commands.
@@ -20,12 +21,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - MCP Codex/Grok empty-`args` fingerprint conflicts: `to_provider` no longer emits `args: []`, matching TOML render which omits empty arrays, so force-sync stays idempotent. (#181)
 - MCP import of url-only servers no longer lands as invalid `stdio`+`url`; coerce to `http`/`sse`, including OpenClaw sources with a bogus `transport: stdio` or a command that is actually a URL. (#182)
-
-### Added
 - Productized GraphTrail ↔ Brigade ↔ MiseLedger dogfood path: `brigade operator checkup` reports optional loop health (`graph` / `ledger` / last and mean `brief_hit_rate` from run receipts) without blocking readiness; `brigade add graphtrail` installs the code-graph tool under the search station; QUICKSTART documents install → checkup → export → rank.
 - Outcome rank/reconcile surfaces mean `context_eval.brief_hit_rate` per skill as a quality signal (secondary sort among equal Wilson scores; install/rollback thresholds still use verified exit codes only).
 - `brigade-work` skill teaches the full loop: verify with capture → outcome from run → MiseLedger export → evidence brief next time.
 - `brigade add` accepts a managed tool name (e.g. `graphtrail`) as well as a station name, so optional loop sidecars install without pulling every tool on the station.
+
+### Changed
+- Memory station no longer installs the external memory-doctor package. Maintenance is built into brigade-cli; bootstrap-doctor remains an optional sidecar for OpenClaw prefix trim.
 
 ## [0.21.0] - 2026-07-08
 
