@@ -473,7 +473,9 @@ def _mcpservers_to_provider(server: CanonicalServer, env_style: str, *, remote_u
         if server.headers:
             out["headers"] = _emit_env(server.headers, env_style)
         return out
-    out = {"command": server.command, "args": list(server.args)}
+    out: dict[str, Any] = {"command": server.command}
+    if server.args:
+        out["args"] = list(server.args)
     if server.env:
         out["env"] = _emit_env(server.env, env_style)
     if server.timeout is not None:
