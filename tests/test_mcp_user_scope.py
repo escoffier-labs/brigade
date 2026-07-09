@@ -31,6 +31,13 @@ def test_codex_user_is_toml_codex_shape():
     assert a.fmt == "toml" and a.path == "~/.codex/config.toml"
 
 
+def test_grok_user_is_toml_grok_shape():
+    a = A.ADAPTERS["grok-user"]
+    assert a.fmt == "toml" and a.path == "~/.grok/config.toml"
+    assert a.top_key == "mcp_servers"
+    assert a.user_scope is True
+
+
 def test_openclaw_stdio_has_no_type_field():
     d = A.ADAPTERS["openclaw"].to_provider(_stdio())
     assert "type" not in d

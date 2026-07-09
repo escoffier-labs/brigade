@@ -42,6 +42,36 @@ def test_user_scope_antigravity_writes_home(tmp_path, monkeypatch):
     assert "github" in json.loads(cfg.read_text())["mcpServers"]
 
 
+def test_user_scope_grok_writes_home(tmp_path, monkeypatch, capsys):
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _seed(repo)
+    # Default sync never touches the user-global grok config.
+    mcp_cmd.sync(target=repo, write=True, json_output=True)
+    assert not (home / ".grok/config.toml").exists()
+    # Plan with --user-scope includes grok-user.
+    capsys.readouterr()
+    assert mcp_cmd.plan(target=repo, harness="grok-user", user_scope=True, json_output=True) == 0
+    plan_payload = json.loads(capsys.readouterr().out)
+    assert any(item.get("harness") == "grok-user" for item in plan_payload.get("items", []))
+    # With --user-scope it writes under $HOME using codex-shaped TOML mcp_servers.
+    assert mcp_cmd.sync(target=repo, harness="grok-user", user_scope=True, write=True, json_output=True) == 0
+    cfg = home / ".grok/config.toml"
+    assert cfg.is_file()
+    text = cfg.read_text()
+    assert "[mcp_servers.github]" in text
+    assert "command" in text
+    # Import without --user-scope is refused; with the flag it discovers the synced server.
+    assert mcp_cmd.import_servers(target=repo, harness="grok-user", json_output=True) == 2
+    capsys.readouterr()
+    assert mcp_cmd.import_servers(target=repo, harness="grok-user", user_scope=True, json_output=True) == 0
+    import_payload = json.loads(capsys.readouterr().out)
+    assert "github" in import_payload.get("discovered", [])
+
+
 def test_user_scope_required_for_antigravity_import(tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()

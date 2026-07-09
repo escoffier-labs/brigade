@@ -127,6 +127,7 @@ One catalog (`.brigade/mcp.json`), six native targets. If you are evaluating opt
 | Claude Code | `.mcp.json` |
 | Cursor | `.cursor/mcp.json` |
 | Codex CLI | `.codex/config.toml` (merged surgically, other tables preserved) |
+| Grok CLI | `.grok/config.toml` (same TOML shape as Codex; `~/.grok/config.toml` via `--user-scope`) |
 | VS Code | `.vscode/mcp.json` (secrets become `inputs[]`) |
 | OpenCode | `opencode.json` |
 | Antigravity | `~/.gemini/config/mcp_config.json` (user-scoped, `--user-scope`) |
