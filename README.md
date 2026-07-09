@@ -9,11 +9,11 @@
 </p>
 
 <p align="center">
-  Local control plane for multi-agent coding: share MCP, tools, and memory across Claude Code, Codex, Cursor, and the rest of your fleet; remember across sessions; prove every run with a file receipt; improve only from real exit codes. Diff before every write. No daemon, no lock-in.
+  Local control plane for multi-agent coding: share MCP, tools, and memory; remember across sessions; prove runs with file receipts; improve only from real exit codes. Optional stations (GraphTrail, MiseLedger, Agent Pantry) plug into that loop. Diff before every write. No daemon, no lock-in.
 </p>
 
 <p align="center">
-  <a href="https://brigade.tools">Website</a> &middot; <a href="https://brigade.tools/docs">Docs</a> &middot; <a href="#try-it-in-60-seconds">Quickstart</a> &middot; <a href="https://escoffierlabs.dev/cookbook/">Cookbook</a>
+  <a href="https://brigade.tools">Website</a> &middot; <a href="https://brigade.tools/docs">Docs</a> &middot; <a href="#install">Install</a> &middot; <a href="https://escoffierlabs.dev/cookbook/">Cookbook</a>
 </p>
 
 <p align="center">
@@ -23,11 +23,39 @@
   <img src="https://shieldcn.dev/badge/license-MIT-green.svg?size=xs" alt="MIT license">
 </p>
 
+## Install
+
+```bash
+pipx install brigade-cli
+pipx ensurepath          # then open a new shell so `brigade` is on PATH
+brigade operator quickstart --target ./my-repo --harnesses codex
+brigade operator doctor --target ./my-repo --profile local-operator
+```
+
+That wires memory, handoffs, a local MCP catalog, the work loop, and guardrails into one repo for one harness, then prints ready. Default footprint is small: `AGENTS.md`, `SAFETY_RULES.md`, a handoff template, and `.brigade/` state. Add `--dry-run` to preview; `--full` for the whole kit. Nothing leaves your machine.
+
+```
+operator doctor: ~/my-repo
+profile: local-operator
+ready: yes
+blocking_issues: 0
+next: brigade daily plan --target .
+```
+
 <p align="center">
-  <img src="docs/assets/verify-receipt.svg" alt="Verify receipt: pytest -q exit 0, skill taste +1, filed under .brigade/work/verify-runs/" width="760">
+  <img src="docs/assets/quickstart.svg" alt="Recording: brigade operator quickstart wires a repo and brigade operator doctor reports ready, in seconds" width="760">
 </p>
 
-<p align="center"><em>Prove and improve in one file: the command, the real exit code, and which skill earned the +1. Grep it, diff it, promote or roll it back.</em></p>
+<p align="center"><em><code>brigade operator quickstart</code> then <code>operator doctor</code>. Install first, deepen later.</em></p>
+
+Workspace / multi-harness (OpenClaw, Hermes, more agents):
+
+```bash
+brigade operator quickstart --target ~/agent-workspace \
+  --depth workspace --harnesses openclaw,hermes --owner openclaw
+```
+
+New here? [QUICKSTART.md](QUICKSTART.md) and [docs/first-10-minutes.md](docs/first-10-minutes.md). Homegrown setup already? `brigade operator adopt plan`. Point an agent at this repo; [AGENTS.md](AGENTS.md) tells it what to do and where to stop. Content guard is built in (`brigade scrub`); set `CONTENT_GUARD_DIR` only for an external checkout.
 
 ## What it does
 
@@ -38,84 +66,33 @@
 | **Prove** | Verify and run through Brigade | File receipts: command, real exit code, what changed |
 | **Improve** | Promote or roll back what worked | Skills and cards only rank up on those exit codes, never on model self-score |
 
-Self-improving means the fleet gets better from measured work, not from the model grading itself. Capture a verify or run receipt, score it against the skill that did the work, then `outcome reconcile` installs winners and rolls back regressions across harnesses.
+<p align="center">
+  <img src="docs/assets/verify-receipt.svg" alt="Verify receipt: pytest -q exit 0, skill taste +1, filed under .brigade/work/verify-runs/" width="760">
+</p>
 
-You run more than one agent CLI. Each one keeps MCP config and memory in its own files and writes without review. Brigade is the local layer that fixes that: one reviewed source, projected into the tools you already use, with a gate before writes, a paper trail after, and a learning loop that only trusts real signals. It is a CLI, not an MCP server and not a hosted memory product. Plain files in your repo when you run a command. That is all it does.
+<p align="center"><em>Prove and improve in one file: real exit code, skill +1. Grep it, diff it, promote or roll it back.</em></p>
+
+Self-improving means the fleet gets better from measured work, not from the model grading itself. Capture a verify or run receipt, score it against the skill that did the work, then `outcome reconcile` installs winners and rolls back regressions across harnesses. Brigade is a CLI, not an MCP server and not a hosted memory product. Plain files when you run a command.
 
 ## Stations: how the fleet plugs in
 
-Brigade is the hub. Optional tools stay in their own repos; you install them with `brigade add <station>`, then `brigade status` / `brigade doctor` health-check whatever is present. Core works with zero sidecars. Each station plugs into a job in the loop above.
+Brigade is the hub. Optional tools stay in their own repos; `brigade add <station>` installs them, and `status` / `doctor` health-check what is present. Core works with zero sidecars.
 
-| Station | Install | Plugs into | What it does for Brigade |
+| Station | Install | Plugs into | Role |
 |---|---|---|---|
-| **GraphTrail** | `brigade add search` (or present in repo) | **Prove** | Local code graph (callers, callees, impact). When a graph exists, `brigade run` prepends a capped context pack so workers start from structure, not a cold grep |
-| **MiseLedger** | `brigade add evidence` | **Prove** / **Remember** | Local evidence ledger of sessions and notes. Export bundles into work context; next runs get a measured evidence brief, not a vibe |
-| **Agent Pantry** | `brigade add pantry` | **Share** | Encrypted browser-session and secret sync across machines so agents inherit working logins instead of dead cookies |
-| **Content Guard** | built in (`brigade guard` / `scrub`) | **Share** / **Remember** | Scans handoffs and publish paths for secrets and PII before anything leaves the machine |
-| **Skillet / skills** | built-in on init; full roster via Skillet | **Improve** | Portable skills across harnesses; outcome reconcile promotes or rolls them back from verify/run receipts |
-| **Token Glace** | `brigade add tokens` | **Prove** | Token spend across harnesses so you see which agent burned budget and why |
+| **GraphTrail** | `brigade add search` | **Prove** | Code graph; `brigade run` prepends a context pack when a graph exists |
+| **MiseLedger** | `brigade add evidence` | **Prove** / **Remember** | Evidence ledger; export briefs into the next work context |
+| **Agent Pantry** | `brigade add pantry` | **Share** | Encrypted browser-session / secret sync across machines |
+| **Content Guard** | built in (`guard` / `scrub`) | **Share** / **Remember** | Secrets and PII scan before publish |
+| **Skills / Skillet** | built-in on init | **Improve** | Portable skills; reconcile promotes or rolls them back |
+| **Token Glace** | `brigade add tokens` | **Prove** | Token spend across harnesses |
 
 ```bash
-brigade add pantry              # plan/health-check Agent Pantry
-brigade add evidence            # plan/health-check MiseLedger
-brigade add search              # code-search + GraphTrail wiring
-brigade status --target .       # which stations are present
+brigade add pantry && brigade add evidence && brigade add search
+brigade status --target .
 ```
 
-Full station matrix and install notes: [Sidecars](#sidecars). Product pages: [GraphTrail](https://brigade.tools/graphtrail), [MiseLedger](https://brigade.tools/miseledger), [Agent Pantry](https://brigade.tools/agentpantry).
-
-<p align="center">
-  <img src="docs/assets/quickstart.svg" alt="Recording: brigade operator quickstart wires a repo and brigade operator doctor reports ready, in seconds" width="760">
-</p>
-
-<p align="center"><em><code>brigade operator quickstart</code> wires a repo. <code>operator doctor</code> reports ready. Install first, add stations when you need them.</em></p>
-
-## Install
-
-`brigade operator quickstart` (in [Try it in 60 seconds](#try-it-in-60-seconds)) wires one code repo for one harness. For an OpenClaw or Hermes workspace instead:
-
-```bash
-brigade operator quickstart --target ~/agent-workspace --depth workspace --harnesses openclaw,hermes --owner openclaw
-```
-
-Use `--dry-run` first to preview the planned steps without writing anything. Pass more harnesses as a comma-separated list; quickstart only wires the harnesses you select and leaves the rest alone.
-
-Write a handoff and check the wiring:
-
-```bash
-brigade handoff draft --target ./my-repo --inbox codex \
-  --title "What changed" \
-  --summary "Short note future agents should know." \
-  --content "The durable note itself goes here."
-brigade handoff lint --target ./my-repo
-brigade handoff doctor --target ./my-repo
-```
-
-New here? Start with [QUICKSTART.md](QUICKSTART.md) for the five-minute install, then [docs/first-10-minutes.md](docs/first-10-minutes.md) for the guided first session. Already have a homegrown setup with scripts, crons, and handoff folders? Brigade has an adoption path that inventories what you have before changing anything: start with `brigade operator adopt plan` and see the [technical guide](docs/technical-guide.md). Want an agent to set this up for you? Point it at this repo; [AGENTS.md](AGENTS.md) tells it exactly what to do and where to stop.
-
-## Try it in 60 seconds
-
-```bash
-pipx install brigade-cli
-pipx ensurepath          # then open a new shell so `brigade` is on PATH
-brigade operator quickstart --target ./my-repo --harnesses codex      # wire one repo
-brigade operator doctor --target ./my-repo --profile local-operator   # verify
-```
-
-That installs the CLI, wires memory, handoffs, a local MCP catalog, the dogfood/work-loop config, and local guardrails into one repo for a single harness, and prints a readiness check. The default footprint is deliberately small: `AGENTS.md`, `SAFETY_RULES.md`, the selected handoff template, and local `.brigade/` state. Pass `--full` for the whole kit (workflow rules, the inactive pre-push hook, the agent install doc, and the default tool packs); workspace-depth installs always get the full kitchen. Nothing leaves your machine and no daemon is started. Add `--dry-run` to preview the file-by-file plan before anything is written. More harnesses, workspace setups, and the homegrown-adoption path are under [Install](#install).
-
-The run ends with a readiness verdict (the recording above shows the full report):
-
-```
-operator doctor: ~/my-repo
-profile: local-operator
-ready: yes
-blocking_issues: 0
-next: brigade daily plan --target .
-content_guard: installed hook=not-enabled policy=public-repo
-```
-
-Brigade ships its content guard scanner in the CLI, so `brigade scrub` works on a fresh install. Set `CONTENT_GUARD_DIR` only when you want to run an external content-guard checkout instead.
+Product pages: [GraphTrail](https://brigade.tools/graphtrail) · [MiseLedger](https://brigade.tools/miseledger) · [Agent Pantry](https://brigade.tools/agentpantry). Full matrix: [Sidecars](#sidecars).
 
 ## One MCP catalog, synced into every tool
 
