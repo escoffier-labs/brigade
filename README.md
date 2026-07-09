@@ -66,17 +66,11 @@ New here? [QUICKSTART.md](QUICKSTART.md) and [docs/first-10-minutes.md](docs/fir
 | **Prove** | Verify and run through Brigade | File receipts: command, real exit code, what changed |
 | **Improve** | Promote or roll back what worked | Skills and cards only rank up on those exit codes, never on model self-score |
 
-Real commands, real exit codes (rendered with [plating](https://github.com/escoffier-labs/plating)):
-
 <p align="center">
-  <img src="docs/assets/prove-improve.svg" alt="Recording: brigade work verify run with pytest, outcome capture +1, outcome rank, reconcile dry-run promote" width="880">
+  <img src="docs/assets/verify-receipt.svg" alt="Prove-to-improve loop: verify run writes receipt.json with exit 0 and GraphTrail delta; outcome capture scores the skill +1; reconcile can promote" width="880">
 </p>
 
-<p align="center"><em><code>verify run --capture</code> writes a receipt and scores the skill. <code>outcome rank</code> / <code>reconcile</code> promote only when those exits say so.</em></p>
-
-<p align="center">
-  <img src="docs/assets/verify-receipt.svg" alt="Diagram of the same loop: prove receipt on the left, improve outcome on the right" width="720">
-</p>
+<p align="center"><em><code>verify run --capture</code> → receipt + skill score → <code>rank</code> / <code>reconcile</code> promote only on real exits. Not model self-score.</em></p>
 
 Self-improving means the fleet gets better from measured work, not from the model grading itself. Brigade is a CLI, not an MCP server and not a hosted memory product. Plain files when you run a command.
 
