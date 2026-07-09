@@ -98,8 +98,11 @@ def _openhands_argv(prompt: str, read_only: bool, sandbox: str | None) -> List[s
 
 
 def _grok_argv(prompt: str, read_only: bool, sandbox: str | None) -> List[str]:
-    task = _read_only_prompt(prompt) if read_only or sandbox == "read-only" else prompt
-    return ["grok", "-p", task]
+    # Headless `grok -p` stops silently (exit 0) at the first tool-approval
+    # gate, so a write task without an approval flag no-ops after its preamble.
+    if read_only or sandbox == "read-only":
+        return ["grok", "-p", prompt, "--permission-mode", "plan"]
+    return ["grok", "-p", prompt, "--always-approve"]
 
 
 def _amp_argv(prompt: str, read_only: bool, sandbox: str | None) -> List[str]:
@@ -152,7 +155,7 @@ READ_ONLY_ENFORCEMENT: dict[str, str] = {
     "copilot": "soft",
     "adal": "soft",
     "openhands": "soft",
-    "grok": "soft",
+    "grok": "hard",
     "amp": "soft",
     "crush": "soft",
     "claude": "none",

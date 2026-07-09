@@ -54,9 +54,15 @@ tool expands at launch.
 | Claude Code | `.mcp.json` | JSON `mcpServers`; remote `{type,url}` |
 | Cursor | `.cursor/mcp.json` | JSON `mcpServers` (same as Claude) |
 | Codex CLI | `.codex/config.toml` | TOML `[mcp_servers.<name>]`, merged surgically (other tables/comments preserved) |
+| Grok CLI | `.grok/config.toml` | TOML `[mcp_servers.<name>]` (Codex-like; project scope) |
 | VS Code | `.vscode/mcp.json` | JSON `servers`; secrets become top-level `inputs[]` + `${input:VAR}` |
 | OpenCode | `opencode.json` | JSON `mcp`; `{type:"local",command:[cmd,...args],environment}` |
 | Antigravity | `~/.gemini/config/mcp_config.json` | JSON `mcpServers`; remote uses `serverUrl`. **User-scoped** (`--user-scope`) |
+| Claude user | `~/.claude.json` | JSON `mcpServers`. **User-scoped** (`--user-scope`) |
+| Codex user | `~/.codex/config.toml` | TOML `[mcp_servers.<name>]`. **User-scoped** (`--user-scope`) |
+| Grok user | `~/.grok/config.toml` | TOML `[mcp_servers.<name>]`. **User-scoped** (`--user-scope`) |
+| OpenClaw | `~/.openclaw/openclaw.json` | JSON `mcp.servers`. **User-scoped** (`--user-scope`) |
+| Hermes | `~/.hermes/config.yaml` | YAML `mcp_servers`. **User-scoped** (`--user-scope`) |
 
 By default a repo's sync targets the tools in its Brigade selection (`.brigade/config.json`)
 that have an adapter. VS Code is not a Brigade harness: it is included only when the repo

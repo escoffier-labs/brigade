@@ -14,6 +14,12 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_pantry_status = pantry_sub.add_parser("status", help="Show agentpantry status and advisory health.")
     p_pantry_status.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
     p_pantry_status.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_pantry_doctor = pantry_sub.add_parser(
+        "doctor",
+        help="Advisory pantry health (install, config, agentpantry doctor). Exits 1 only on fail_count.",
+    )
+    p_pantry_doctor.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_pantry_doctor.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_expiry = pantry_sub.add_parser(
         "expiry-alert", help="Check near-expiry Agent Pantry sessions and optionally notify."
     )
@@ -69,6 +75,8 @@ def dispatch(args) -> int:
 
     if args.pantry_command == "status":
         return pantry_cmd.status(target=args.target, json_output=args.json)
+    if args.pantry_command == "doctor":
+        return pantry_cmd.doctor(target=args.target, json_output=args.json)
     if args.pantry_command == "expiry-alert":
         return pantry_cmd.expiry_alert(
             expiry_days=args.expiry_days,
