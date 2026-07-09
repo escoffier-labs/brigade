@@ -82,6 +82,8 @@ def load(ref: str, *, cwd: Path | None = None) -> StationManifest:
         allowed = ", ".join(LIFECYCLES)
         raise ValueError(f"station manifest field 'lifecycle' must be one of: {allowed}")
     owner = _optional_str(raw, "owner")
+    if lifecycle != "active" and not owner:
+        raise ValueError("non-active station manifest field 'owner' must be a non-empty string")
     tools_raw = raw.get("tools")
     if not isinstance(tools_raw, list):
         raise ValueError("station manifest field 'tools' must be an array")

@@ -49,7 +49,10 @@ def test_legacy_manifest_defaults_to_active_executable(tmp_path):
 
 @pytest.mark.parametrize("lifecycle", ["active", "embedded", "deprecated", "historical"])
 def test_manifest_accepts_each_lifecycle(tmp_path, lifecycle):
-    manifest = station_manifest.load(str(_write_manifest(tmp_path, lifecycle=lifecycle)))
+    overrides = {"lifecycle": lifecycle}
+    if lifecycle != "active":
+        overrides["owner"] = "maintained-package"
+    manifest = station_manifest.load(str(_write_manifest(tmp_path, **overrides)))
 
     assert manifest.lifecycle == lifecycle
 
@@ -77,6 +80,22 @@ def test_non_active_manifest_may_have_no_tools(tmp_path, lifecycle):
     assert manifest.lifecycle == lifecycle
     assert manifest.owner == "maintained-package"
     assert manifest.tools == ()
+
+
+@pytest.mark.parametrize("lifecycle", ["embedded", "deprecated", "historical"])
+def test_non_active_manifest_rejects_omitted_owner(tmp_path, lifecycle):
+    path = _write_manifest(tmp_path, lifecycle=lifecycle, tools=[])
+
+    with pytest.raises(ValueError, match="owner"):
+        station_manifest.load(str(path))
+
+
+@pytest.mark.parametrize("lifecycle", ["embedded", "deprecated", "historical"])
+def test_non_active_manifest_rejects_blank_owner(tmp_path, lifecycle):
+    path = _write_manifest(tmp_path, lifecycle=lifecycle, owner="   ", tools=[])
+
+    with pytest.raises(ValueError, match="owner"):
+        station_manifest.load(str(path))
 
 
 def test_executable_kind_still_requires_command(tmp_path):
