@@ -871,12 +871,14 @@ def _openclaw_from_provider(
 ) -> tuple[CanonicalServer, list[str]]:
     url = raw.get("url")
     command = raw.get("command")
+    # A bare URL in the command field is a remote endpoint, not a stdio command.
     if not url and _looks_like_url(command) and not raw.get("args"):
         url = command
         command = None
     if url:
         headers, demoted = _parse_env(raw.get("headers"), keep_secrets=keep_secrets)
-        # Never keep transport=stdio for a URL-bearing entry (import fidelity).
+        # Never keep transport=stdio for a URL-bearing entry: OpenClaw stamps a
+        # default transport that would otherwise emit an invalid stdio+url server.
         transport = _remote_transport(raw, type_key="transport")
         return (
             CanonicalServer(name=name, transport=transport, url=str(url), headers=headers),
