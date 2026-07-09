@@ -1,5 +1,7 @@
 //! Read-only client for the local Code Search API (`POST /api/search`). Feature: `codesearch`.
 
+use std::time::Duration;
+
 use anyhow::{Context, Result};
 use serde::Deserialize;
 
@@ -21,6 +23,8 @@ pub struct CodeSearchClient {
     pub base_url: String,
     pub api_key: Option<String>,
 }
+
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(3);
 
 impl Default for CodeSearchClient {
     fn default() -> Self {
@@ -45,6 +49,7 @@ impl CodeSearchClient {
             req = req.set("X-API-Key", key);
         }
         let response = req
+            .timeout(REQUEST_TIMEOUT)
             .send_json(serde_json::json!({
                 "query": query,
                 "limit": limit,

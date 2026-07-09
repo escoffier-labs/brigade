@@ -10,7 +10,7 @@ use serde::Serialize;
 use crate::model::SearchRow;
 
 /// An embedding hit from an external semantic search (e.g. Code Search), keyed by file.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ExternalHit {
     pub file_path: String,
     pub score: f64,

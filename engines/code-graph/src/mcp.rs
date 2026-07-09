@@ -22,6 +22,8 @@ use serde::Serialize;
 use serde_json::{Value, json};
 
 use crate::model::Direction;
+#[cfg(feature = "codesearch")]
+use crate::query::build_context_pack_from_entry_points;
 use crate::query::{
     DEFAULT_IMPACT_DEPTH, build_context_pack, diff_graphs, doctor, file_neighbors,
     graph_edges_with_depth, impact_edges, normalize_depth, render_markdown,
@@ -31,6 +33,10 @@ use crate::store::{init_schema, open_db, open_read_only, sync_repo};
 
 const PROTOCOL_VERSION: &str = "2024-11-05";
 const REFRESH_TIMEOUT: Duration = Duration::from_secs(10);
+#[cfg(feature = "codesearch")]
+const SEMANTIC_SEARCH_DEFAULT_LIMIT: usize = 10;
+#[cfg(feature = "codesearch")]
+const SEMANTIC_SEARCH_MAX_LIMIT: usize = 50;
 
 /// Read JSON-RPC requests line by line and write one response line per request. `default_db` is the
 /// fallback database used when a request does not specify its own `repo`/`db`.
@@ -112,6 +118,9 @@ pub fn handle_request(default_db: &Path, req: &Value) -> Option<Value> {
                     id,
                     json!({ "content": [{ "type": "text", "text": text }], "isError": false }),
                 ),
+                Err(err) if returns_json_rpc_tool_error(name) => {
+                    error(id, -32000, &err.to_string())
+                }
                 Err(err) => ok(
                     id,
                     json!({ "content": [{ "type": "text", "text": format!("error: {err}") }], "isError": true }),
@@ -184,9 +193,44 @@ fn call_tool(default_db: &Path, name: &str, args: &Value) -> Result<String> {
             )?;
             to_pretty(&edges)
         }
+        #[cfg(feature = "codesearch")]
+        "semantic_search" => {
+            let limit = semantic_search_limit(args);
+            let hits = code_search_hits(&str_arg(args, "query"), limit)?;
+            if bool_arg(args, "blend", true) {
+                to_pretty(&crate::query::blend(
+                    &conn,
+                    &hits,
+                    f64_arg(args, "embed_weight", 0.6),
+                    f64_arg(args, "graph_weight", 0.4),
+                    limit,
+                )?)
+            } else {
+                to_pretty(&hits)
+            }
+        }
         "context" => {
-            let pack =
-                build_context_pack(&conn, str_arg(args, "task"), usize_arg(args, "limit", 12))?;
+            let task = str_arg(args, "task");
+            let limit = usize_arg(args, "limit", 12);
+            #[cfg(feature = "codesearch")]
+            let pack = if bool_arg(args, "blend_code_search", false) {
+                let search_limit =
+                    limit.clamp(SEMANTIC_SEARCH_DEFAULT_LIMIT, SEMANTIC_SEARCH_MAX_LIMIT);
+                let hits = code_search_hits(&task, search_limit)?;
+                let rows = crate::query::blend(
+                    &conn,
+                    &hits,
+                    f64_arg(args, "embed_weight", 0.6),
+                    f64_arg(args, "graph_weight", 0.4),
+                    limit,
+                )?;
+                let entry_points = rows.into_iter().map(|row| row.symbol).collect();
+                build_context_pack_from_entry_points(&conn, task.clone(), entry_points)?
+            } else {
+                build_context_pack(&conn, task.clone(), limit)?
+            };
+            #[cfg(not(feature = "codesearch"))]
+            let pack = build_context_pack(&conn, task.clone(), limit)?;
             match str_arg(args, "format").as_str() {
                 "" | "json" => to_pretty(&pack),
                 "markdown" => Ok(render_markdown(&pack)),
@@ -217,10 +261,24 @@ fn validate_tool_args(name: &str, args: &Value) -> std::result::Result<(), Strin
             require_string(args, "symbol")?;
             require_usize(args, "depth")?;
         }
+        #[cfg(feature = "codesearch")]
+        "semantic_search" => {
+            require_string(args, "query")?;
+            require_usize(args, "limit")?;
+            optional_bool(args, "blend")?;
+            optional_number(args, "embed_weight")?;
+            optional_number(args, "graph_weight")?;
+        }
         "context" => {
             require_string(args, "task")?;
             require_usize(args, "limit")?;
             require_format(args)?;
+            #[cfg(feature = "codesearch")]
+            {
+                optional_bool(args, "blend_code_search")?;
+                optional_number(args, "embed_weight")?;
+                optional_number(args, "graph_weight")?;
+            }
         }
         "file_neighbors" => {
             require_string(args, "path")?;
@@ -274,7 +332,33 @@ fn tool_defs() -> Value {
             json!(["symbol"]),
         )
     };
-    json!([
+    let context_props = json!({
+        "task": { "type": "string", "description": "Task or feature description to gather context for." },
+        "limit": { "type": "integer", "description": "Max entry points (default 12)." },
+        "format": {
+            "type": "string",
+            "enum": ["json", "markdown"],
+            "description": "Response format (default json)."
+        }
+    });
+    #[cfg(feature = "codesearch")]
+    let mut context_props = context_props;
+    #[cfg(feature = "codesearch")]
+    if let Some(props) = context_props.as_object_mut() {
+        props.insert(
+            "blend_code_search".to_string(),
+            json!({ "type": "boolean", "description": "Default false; use Code Search semantic hits as context entry points." }),
+        );
+        props.insert(
+            "embed_weight".to_string(),
+            json!({ "type": "number", "description": "Embedding score weight for blended Code Search context (default 0.6)." }),
+        );
+        props.insert(
+            "graph_weight".to_string(),
+            json!({ "type": "number", "description": "Graph centrality score weight for blended Code Search context (default 0.4)." }),
+        );
+    }
+    let tools = json!([
         {
             "name": "search",
             "description": "Full-text search code symbols (functions, classes, methods) by name.",
@@ -294,15 +378,7 @@ fn tool_defs() -> Value {
             "name": "context",
             "description": "A context pack for a task: matching entry points plus their caller/callee neighborhood and related files.",
             "inputSchema": with_location(
-                with_refresh(json!({
-                    "task": { "type": "string", "description": "Task or feature description to gather context for." },
-                    "limit": { "type": "integer", "description": "Max entry points (default 12)." },
-                    "format": {
-                        "type": "string",
-                        "enum": ["json", "markdown"],
-                        "description": "Response format (default json)."
-                    }
-                })),
+                with_refresh(context_props),
                 json!(["task"])
             )
         },
@@ -336,7 +412,30 @@ fn tool_defs() -> Value {
                 json!([])
             )
         }
-    ])
+    ]);
+    #[cfg(feature = "codesearch")]
+    let mut tools = tools;
+    #[cfg(feature = "codesearch")]
+    if let Some(array) = tools.as_array_mut() {
+        array.insert(
+            1,
+            json!({
+                "name": "semantic_search",
+                "description": "Code Search semantic hits, optionally blended with GraphTrail graph centrality.",
+                "inputSchema": with_location(
+                    with_refresh(json!({
+                        "query": { "type": "string", "description": "Semantic search query." },
+                        "limit": { "type": "integer", "description": "Max results, clamped to 1..50 (default 10)." },
+                        "blend": { "type": "boolean", "description": "Default true; return blended symbol rows instead of raw per-file Code Search hits." },
+                        "embed_weight": { "type": "number", "description": "Embedding score weight when blend is true (default 0.6)." },
+                        "graph_weight": { "type": "number", "description": "Graph centrality score weight when blend is true (default 0.4)." }
+                    })),
+                    json!(["query"])
+                )
+            }),
+        );
+    }
+    tools
 }
 
 fn to_pretty<T: Serialize>(value: &T) -> Result<String> {
@@ -347,7 +446,11 @@ fn supports_refresh(name: &str) -> bool {
     matches!(
         name,
         "search" | "callers" | "callees" | "impact" | "context" | "file_neighbors" | "stats"
-    )
+    ) || (cfg!(feature = "codesearch") && name == "semantic_search")
+}
+
+fn returns_json_rpc_tool_error(name: &str) -> bool {
+    cfg!(feature = "codesearch") && name == "semantic_search"
 }
 
 fn refresh_db(default_db: &Path, args: &Value, db: &Path) -> Option<String> {
@@ -423,8 +526,26 @@ fn usize_arg(args: &Value, key: &str, default: usize) -> usize {
         .unwrap_or(default)
 }
 
+#[cfg(feature = "codesearch")]
+fn f64_arg(args: &Value, key: &str, default: f64) -> f64 {
+    args.get(key).and_then(|v| v.as_f64()).unwrap_or(default)
+}
+
 fn bool_arg(args: &Value, key: &str, default: bool) -> bool {
     args.get(key).and_then(|v| v.as_bool()).unwrap_or(default)
+}
+
+#[cfg(feature = "codesearch")]
+fn semantic_search_limit(args: &Value) -> usize {
+    usize_arg(args, "limit", SEMANTIC_SEARCH_DEFAULT_LIMIT).clamp(1, SEMANTIC_SEARCH_MAX_LIMIT)
+}
+
+#[cfg(feature = "codesearch")]
+fn code_search_hits(query: &str, limit: usize) -> Result<Vec<crate::query::ExternalHit>> {
+    let client = crate::adapters::codesearch::CodeSearchClient::from_env();
+    client.search(query, limit).map_err(|err| {
+        anyhow!("Code Search API is unreachable; check CODE_SEARCH_URL and the service: {err}")
+    })
 }
 
 fn optional_string(args: &Value, key: &str) -> std::result::Result<(), String> {
@@ -440,6 +561,15 @@ fn optional_bool(args: &Value, key: &str) -> std::result::Result<(), String> {
         None => Ok(()),
         Some(value) if value.as_bool().is_some() => Ok(()),
         _ => Err(format!("invalid boolean argument '{key}'")),
+    }
+}
+
+#[cfg(feature = "codesearch")]
+fn optional_number(args: &Value, key: &str) -> std::result::Result<(), String> {
+    match args.get(key) {
+        None => Ok(()),
+        Some(value) if value.as_f64().is_some() => Ok(()),
+        _ => Err(format!("invalid number argument '{key}'")),
     }
 }
 

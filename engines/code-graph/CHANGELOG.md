@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Feature-gated MCP `semantic_search` tool for `codesearch` builds. It uses the existing Code Search client, can return raw per-file hits with `blend: false`, and defaults to blended symbol rows ranked by embedding score plus graph centrality.
+- Feature-gated MCP `context` argument `blend_code_search`, matching the CLI flag while leaving the default build's tool list and existing context calls unchanged.
+
 ## [0.3.0] - 2026-07-08
 
 ### Added

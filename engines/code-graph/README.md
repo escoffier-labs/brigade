@@ -127,6 +127,14 @@ Every tool additionally accepts an optional `repo` or `db` selector for multi-re
 `doctor`, `repos`, and `diff` do not accept `refresh`; `doctor` reports staleness and leaves refresh to the query tools that opt into it.
 Call-edge tools cap each direction at 500 real edges. When a traversal is capped, the JSON array includes a final row with `kind: "truncated"`.
 
+Builds compiled with `--features codesearch` also expose the Code Search integration over MCP:
+
+| Tool | Required args | What it returns |
+|---|---|---|
+| `semantic_search` | `query` (`limit` optional, default 10, clamped to 1..50, `blend` optional, default true) | Code Search semantic hits. With `blend: true`, returns symbols ranked by embedding score plus graph centrality; with `blend: false`, returns raw per-file hits. |
+
+With the same feature, `context` also accepts `blend_code_search: true` plus optional `embed_weight` and `graph_weight`, mirroring the CLI `--blend-code-search` flag. The default build remains network-free, and a `codesearch` build makes no Code Search request unless `semantic_search` is called or `context` is called with `blend_code_search: true`.
+
 A real `stats` tool call (the server indexed GraphTrail's own source first):
 
 ```json
@@ -161,6 +169,9 @@ cargo run --features codesearch,miseledger -- \
 # Blend Code Search embedding hits with graph centrality.
 # Honors CODE_SEARCH_URL and CODE_SEARCH_API_KEY.
 cargo run --features codesearch -- --db <db> blend "rate limiting" --json
+
+# Expose Code Search over MCP too.
+cargo build --features codesearch --bin graphtrail-mcp
 
 # Surface MiseLedger evidence items (read-only FTS) mentioning a symbol or term.
 # Honors MISELEDGER_DB (defaults to ~/.local/share/miseledger/miseledger.db).

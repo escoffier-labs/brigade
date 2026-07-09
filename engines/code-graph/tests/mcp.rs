@@ -2,12 +2,26 @@
 
 use std::fs;
 use std::io::Cursor;
+#[cfg(feature = "codesearch")]
+use std::io::{Read, Write};
+#[cfg(feature = "codesearch")]
+use std::net::TcpListener;
 use std::path::PathBuf;
+#[cfg(feature = "codesearch")]
+use std::sync::Mutex;
+#[cfg(feature = "codesearch")]
+use std::thread::{self, JoinHandle};
+#[cfg(feature = "codesearch")]
+use std::time::{Duration, Instant};
 
 use graphtrail::mcp::{handle_request, serve};
+use graphtrail::query::build_context_pack;
 use graphtrail::store::{init_schema, open_db, sync_repo};
 use serde_json::json;
 use tempfile::TempDir;
+
+#[cfg(feature = "codesearch")]
+static CODE_SEARCH_ENV_LOCK: Mutex<()> = Mutex::new(());
 
 /// Build a synced graph db from a one-file repo; return the temp dir and the db path.
 fn ro_db() -> (TempDir, PathBuf) {
@@ -74,6 +88,16 @@ fn tools_list_exposes_the_query_tools_with_location_args() {
     ] {
         assert!(names.contains(&expected), "missing tool: {expected}");
     }
+    #[cfg(not(feature = "codesearch"))]
+    assert!(
+        !names.contains(&"semantic_search"),
+        "default MCP tools must not expose codesearch-only semantic_search"
+    );
+    #[cfg(feature = "codesearch")]
+    assert!(
+        names.contains(&"semantic_search"),
+        "codesearch MCP tools must expose semantic_search"
+    );
     // Every single-db tool advertises the optional repo/db selector. `diff` is the
     // exception: it takes two explicit db paths (`before`/`after`) instead.
     for tool in tools {
@@ -97,6 +121,18 @@ fn tools_list_exposes_the_query_tools_with_location_args() {
                 props.get("refresh").is_some(),
                 "{} missing refresh",
                 tool["name"]
+            );
+        }
+        if tool["name"] == "context" {
+            #[cfg(not(feature = "codesearch"))]
+            assert!(
+                props.get("blend_code_search").is_none(),
+                "default context schema must not expose codesearch arguments"
+            );
+            #[cfg(feature = "codesearch")]
+            assert!(
+                props.get("blend_code_search").is_some(),
+                "codesearch context schema must expose blend_code_search"
             );
         }
     }
@@ -452,6 +488,121 @@ fn tools_call_context_defaults_to_json_content() {
 }
 
 #[test]
+fn tools_call_context_without_new_arguments_matches_direct_pack() {
+    let (_dir, db) = ro_db();
+    let resp = handle_request(
+        &db,
+        &json!({"jsonrpc":"2.0","id":39,"method":"tools/call",
+                "params":{"name":"context","arguments":{"task":"helper"}}}),
+    )
+    .unwrap();
+
+    assert_eq!(resp["result"]["isError"], false);
+    let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+    let conn = open_db(&db).unwrap();
+    let pack = build_context_pack(&conn, "helper".to_string(), 12).unwrap();
+    let expected = serde_json::to_string_pretty(&pack).unwrap();
+    assert_eq!(text, expected);
+}
+
+#[cfg(feature = "codesearch")]
+#[test]
+fn tools_call_context_explicit_blend_false_matches_absent_argument() {
+    let (_dir, db) = ro_db();
+    let absent = with_code_search_url("http://127.0.0.1:9", || {
+        handle_request(
+            &db,
+            &json!({"jsonrpc":"2.0","id":70,"method":"tools/call",
+                    "params":{"name":"context","arguments":{"task":"helper"}}}),
+        )
+        .unwrap()
+    });
+    let explicit_false = with_code_search_url("http://127.0.0.1:9", || {
+        handle_request(
+            &db,
+            &json!({"jsonrpc":"2.0","id":71,"method":"tools/call",
+            "params":{"name":"context","arguments":{
+                "task":"helper",
+                "blend_code_search": false
+            }}}),
+        )
+        .unwrap()
+    });
+
+    assert_eq!(absent["result"]["isError"], false);
+    assert_eq!(explicit_false["result"]["isError"], false);
+    assert_eq!(
+        absent["result"]["content"][0]["text"],
+        explicit_false["result"]["content"][0]["text"]
+    );
+}
+
+#[cfg(feature = "codesearch")]
+#[test]
+fn tools_call_semantic_search_blends_mock_code_search_hits() {
+    let (_dir, db) = ro_db();
+    let mock = MockCodeSearch::new(
+        "semantic helper",
+        r#"{"results":[{"file_path":"app.py","score":0.91},{"file_path":"missing.py","score":0.80}]}"#,
+    );
+
+    let resp = with_code_search_url(&mock.base_url, || {
+        handle_request(
+            &db,
+            &json!({"jsonrpc":"2.0","id":72,"method":"tools/call",
+            "params":{"name":"semantic_search","arguments":{
+                "query":"semantic helper",
+                "limit":5,
+                "embed_weight":1.0,
+                "graph_weight":0.0
+            }}}),
+        )
+        .unwrap()
+    });
+    mock.join();
+
+    assert_eq!(resp["result"]["isError"], false);
+    let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+    let rows: serde_json::Value = serde_json::from_str(text).unwrap();
+    assert!(
+        rows.as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["symbol"]["file_path"] == "app.py"
+                && row["embedding_score"].as_f64().unwrap() > 0.9)
+    );
+}
+
+#[cfg(feature = "codesearch")]
+#[test]
+fn tools_call_semantic_search_unreachable_code_search_returns_json_rpc_error() {
+    let (_dir, db) = ro_db();
+    let resp = with_code_search_url("http://127.0.0.1:9", || {
+        handle_request(
+            &db,
+            &json!({"jsonrpc":"2.0","id":73,"method":"tools/call",
+                    "params":{"name":"semantic_search","arguments":{"query":"helper"}}}),
+        )
+        .unwrap()
+    });
+
+    assert_eq!(resp["id"], 73);
+    assert_eq!(resp["error"]["code"], -32000);
+    assert!(
+        resp["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("Code Search API is unreachable")
+    );
+    assert!(
+        resp["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("CODE_SEARCH_URL")
+    );
+}
+
+#[test]
 fn tools_call_context_can_return_markdown_content() {
     let (_dir, db) = ro_db();
     let resp = handle_request(
@@ -706,4 +857,99 @@ fn synced_repo_with_graph_dir() -> TempDir {
     init_schema(&conn).unwrap();
     sync_repo(&conn, root).unwrap();
     dir
+}
+
+#[cfg(feature = "codesearch")]
+fn with_code_search_url<T>(url: &str, f: impl FnOnce() -> T) -> T {
+    let _guard = CODE_SEARCH_ENV_LOCK.lock().unwrap();
+    let old_url = std::env::var_os("CODE_SEARCH_URL");
+    let old_key = std::env::var_os("CODE_SEARCH_API_KEY");
+    unsafe {
+        std::env::set_var("CODE_SEARCH_URL", url);
+        std::env::remove_var("CODE_SEARCH_API_KEY");
+    }
+    let out = f();
+    unsafe {
+        match old_url {
+            Some(value) => std::env::set_var("CODE_SEARCH_URL", value),
+            None => std::env::remove_var("CODE_SEARCH_URL"),
+        }
+        match old_key {
+            Some(value) => std::env::set_var("CODE_SEARCH_API_KEY", value),
+            None => std::env::remove_var("CODE_SEARCH_API_KEY"),
+        }
+    }
+    out
+}
+
+#[cfg(feature = "codesearch")]
+struct MockCodeSearch {
+    base_url: String,
+    handle: JoinHandle<()>,
+}
+
+#[cfg(feature = "codesearch")]
+impl MockCodeSearch {
+    fn new(expected_query: &'static str, body: &'static str) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let handle = thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(2);
+            let (mut stream, _) = loop {
+                match listener.accept() {
+                    Ok(accepted) => break accepted,
+                    Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                        assert!(Instant::now() < deadline, "mock code search was not called");
+                        thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(err) => panic!("mock code search accept failed: {err}"),
+                }
+            };
+            let mut request = Vec::new();
+            let mut buf = [0_u8; 1024];
+            loop {
+                let read = stream.read(&mut buf).unwrap();
+                assert!(read > 0, "mock code search request ended early");
+                request.extend_from_slice(&buf[..read]);
+                if request_complete(&request) {
+                    break;
+                }
+            }
+            let text = String::from_utf8_lossy(&request);
+            assert!(text.starts_with("POST /api/search "));
+            assert!(text.contains(expected_query));
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+        Self { base_url, handle }
+    }
+
+    fn join(self) {
+        self.handle.join().unwrap();
+    }
+}
+
+#[cfg(feature = "codesearch")]
+fn request_complete(request: &[u8]) -> bool {
+    let Some(header_end) = request.windows(4).position(|window| window == b"\r\n\r\n") else {
+        return false;
+    };
+    let headers = String::from_utf8_lossy(&request[..header_end]);
+    let content_length = headers
+        .lines()
+        .find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            if name.eq_ignore_ascii_case("content-length") {
+                value.trim().parse::<usize>().ok()
+            } else {
+                None
+            }
+        })
+        .unwrap_or(0);
+    request.len() >= header_end + 4 + content_length
 }
