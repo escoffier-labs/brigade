@@ -49,6 +49,41 @@ def test_user_scope_required_for_antigravity_import(tmp_path):
     assert mcp_cmd.import_servers(target=repo, harness="antigravity", json_output=True) == 2
 
 
+def test_codex_user_stdio_no_args_never_stays_conflicted(tmp_path, monkeypatch, capsys):
+    """Issue #181: a no-args stdio server must not be "conflicted" forever.
+
+    ``_codex_render_table`` omits an empty ``args = []`` from the rendered TOML, so
+    reading the file back never carries an "args" key. If the fingerprint recorded at
+    sync time was computed against a provider dict that DID include ``"args": []``,
+    every later plan sees a live/projected fingerprint mismatch and reports the server
+    "conflicted" forever, even though nothing was ever edited outside Brigade.
+    """
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    mcp_cmd.init(target=repo, json_output=True)
+    mcp_cmd.add(target=repo, name="noargs", command="some-mcp-server", json_output=True)
+
+    capsys.readouterr()
+    rc = mcp_cmd.sync(target=repo, harness="codex-user", user_scope=True, write=True, force=True, json_output=True)
+    assert rc == 0
+    sync_payload = json.loads(capsys.readouterr().out)
+    assert sync_payload["counts"]["conflict"] == 0
+
+    # Plan again, twice, exactly as `brigade mcp plan --harness codex-user --user-scope`
+    # would after a real sync --write --force. A forever-conflicted server never clears.
+    for _ in range(2):
+        capsys.readouterr()
+        rc = mcp_cmd.plan(target=repo, harness="codex-user", user_scope=True, json_output=True)
+        payload = json.loads(capsys.readouterr().out)
+        statuses = {item["server"]: item["status"] for item in payload["items"]}
+        assert statuses.get("noargs") in ("current", "skip"), payload["items"]
+        assert payload["counts"]["conflict"] == 0
+        assert rc == 0
+
+
 # --- operator sync-mcp (three-phase, dry-run default) --- #
 
 

@@ -57,6 +57,45 @@ def run(target: Path, station: str, *, install_manifest: bool = False) -> int:
         print("Brigade does not start source/sink or mint PSKs; run the planned agentpantry commands yourself.")
         print()
 
+    if st is not None and st.name == "evidence":
+        print("evidence station wires MiseLedger (separate Go binary; process boundary):")
+        print("  brigade evidence crawl plan")
+        print("  brigade evidence doctor")
+        print("  brigade evidence export plan")
+        print("  brigade receipts export miseledger --target . --new-only --import")
+        print("  brigade operator checkup --target .")
+        print(
+            "Brigade does not crawl sessions or import the ledger from add; "
+            "run the planned miseledger commands yourself."
+        )
+        print()
+
+    if st is not None and st.name == "search":
+        print("search station wires GraphTrail + optional code-search (process-boundary binaries):")
+        print("  brigade search sync plan")
+        print("  brigade search doctor")
+        print("  graphtrail sync")
+        print("  brigade operator checkup --target .")
+        print("Brigade does not run graphtrail sync or start code-search-api from add.")
+        print()
+
+    if st is not None and st.name == "tokens":
+        print("tokens station wires Token Glace (+ optional usage-tracker; process boundary):")
+        print("  brigade tokens wire plan")
+        print("  brigade tokens doctor")
+        print("  token-glace install claude-code")
+        print("  token-glace install codex")
+        print("Brigade does not install host hooks from add unless you re-run wire on an installed tool.")
+        print()
+
+    if single_tool is not None and single_tool.name == "plating":
+        print("plating is an optional guard-station publish helper (demo SVG render + leak scan):")
+        print("  plating render <spec>")
+        print("  plating verify <spec>")
+        print("  plating scan <cast> --policy public-repo")
+        print("Optional; not required for scrub or content-guard.")
+        print()
+
     ctx = _doctor.build_context(target)
     rc = 0
     for tool in tools:

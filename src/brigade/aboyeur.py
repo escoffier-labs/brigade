@@ -7,7 +7,7 @@ import os
 import re
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from json import JSONDecoder
 from pathlib import Path
@@ -29,6 +29,7 @@ CODE_GRAPH_LIMIT = 4000
 DRIFT_IMPACT_HEADING = "## Upstream drift impact (Upstream Drift + GraphTrail, read-only)"
 DRIFT_IMPACT_LIMIT = 4000
 BRIEF_BUDGET_BYTES = 6000
+NOOP_DETAIL = "no-op"
 
 
 @dataclass(frozen=True)
@@ -1029,6 +1030,43 @@ def _worker_payload(results: list[WorkerResult]) -> list[dict[str, object]]:
     return payload
 
 
+def _is_brigade_path(value: str) -> bool:
+    normalized = value.replace("\\", "/").strip("/")
+    return normalized == ".brigade" or normalized.startswith(".brigade/")
+
+
+def _non_brigade_paths(paths: object) -> list[str]:
+    if not isinstance(paths, list):
+        return []
+    return [item for item in paths if isinstance(item, str) and item.strip() and not _is_brigade_path(item)]
+
+
+def _suspected_noop(
+    *,
+    ground_truth: dict[str, object],
+    worker_results: list[WorkerResult],
+    dry_run: bool,
+    read_only: bool,
+    sandbox_read_only: bool | None,
+    sandbox: str | None,
+) -> bool:
+    if dry_run or read_only or sandbox_read_only is True or sandbox == "read-only":
+        return False
+    if ground_truth.get("available") is not True or not worker_results:
+        return False
+    if not all(result.ok for result in worker_results):
+        return False
+    changed = _non_brigade_paths(ground_truth.get("changed_files"))
+    untracked = _non_brigade_paths(ground_truth.get("untracked_files"))
+    return not changed and not untracked
+
+
+def _mark_noop_worker_results(worker_results: list[WorkerResult], suspected_noop: bool) -> list[WorkerResult]:
+    if not suspected_noop:
+        return worker_results
+    return [replace(result, detail=NOOP_DETAIL) if result.ok else result for result in worker_results]
+
+
 def _agent_result_payload(result: agents.AgentResult) -> dict[str, object]:
     return {
         "ok": result.ok,
@@ -1379,6 +1417,7 @@ def _run_payload(
     control_socket: Path | None = None,
     code_graph_delta: dict[str, object] | None = None,
     context_eval_payload: dict[str, object] | None = None,
+    suspected_noop: bool = False,
 ) -> dict[str, object]:
     payload: dict[str, object] = {
         "task": task,
@@ -1388,6 +1427,7 @@ def _run_payload(
         "read_only": read_only,
         "status": status,
         "started_at": _utc_iso(started_at),
+        "suspected_noop": suspected_noop,
         "code_graph_brief": {
             "attached": bool(code_graph.attached) if code_graph is not None else False,
             "bytes": code_graph.bytes if code_graph is not None else 0,
@@ -1659,6 +1699,16 @@ def run(
         ground_truth["code_graph_delta"] = code_graph_delta
     if context_eval_payload is not None:
         ground_truth["context_eval"] = context_eval_payload
+    suspected_noop = _suspected_noop(
+        ground_truth=ground_truth,
+        worker_results=worker_results,
+        dry_run=dry_run,
+        read_only=read_only,
+        sandbox_read_only=sandbox_read_only,
+        sandbox=sandbox,
+    )
+    ground_truth["suspected_noop"] = suspected_noop
+    worker_results = _mark_noop_worker_results(worker_results, suspected_noop)
     if output_dir is not None:
         _write_json(
             output_dir / "worker-results.json",
@@ -1717,6 +1767,7 @@ def run(
                     codex_transport=transport_for_payload,
                     code_graph_delta=code_graph_delta,
                     context_eval_payload=context_eval_payload,
+                    suspected_noop=suspected_noop,
                 ),
             )
         print(f"error: orchestrator failed during synthesis: {final.detail}", file=sys.stderr)
@@ -1744,6 +1795,7 @@ def run(
                 control_socket=control_socket,
                 code_graph_delta=code_graph_delta,
                 context_eval_payload=context_eval_payload,
+                suspected_noop=suspected_noop,
             ),
         )
     if handoff_inbox is not None:
@@ -1783,6 +1835,7 @@ def run(
                         control_socket=control_socket,
                         code_graph_delta=code_graph_delta,
                         context_eval_payload=context_eval_payload,
+                        suspected_noop=suspected_noop,
                     ),
                 )
             print(f"error: {detail}", file=sys.stderr)
@@ -1812,6 +1865,7 @@ def run(
                     control_socket=control_socket,
                     code_graph_delta=code_graph_delta,
                     context_eval_payload=context_eval_payload,
+                    suspected_noop=suspected_noop,
                 ),
             )
     print(final.text)

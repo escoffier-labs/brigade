@@ -370,7 +370,8 @@ def _render_plan_md(payload: dict[str, Any]) -> str:
         lines.append(f"- peer: {payload.get('peer')}")
     if payload.get("key_path"):
         lines.append(f"- key: {payload.get('key_path')}")
-    docs = payload.get("docs") if isinstance(payload.get("docs"), dict) else {}
+    docs_raw = payload.get("docs")
+    docs: dict[str, Any] = docs_raw if isinstance(docs_raw, dict) else {}
     if docs.get("product"):
         lines.append(f"- product: {docs['product']}")
     if docs.get("repo"):

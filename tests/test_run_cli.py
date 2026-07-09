@@ -575,6 +575,99 @@ role = "code"
     assert f"artifacts: {output_dir}" in captured.err
 
 
+def test_run_cli_warns_on_suspected_noop_in_stderr_and_inspect_output(tmp_path, monkeypatch, capsys):
+    roster_path = tmp_path / "roster.toml"
+    roster_path.write_text(
+        """
+orchestrator = "chef"
+
+[agents.chef]
+cli = "codex"
+role = "plan"
+
+[agents.coder]
+cli = "codex"
+role = "code"
+"""
+    )
+    output_dir = tmp_path / "run"
+
+    def fake_run(task, loaded_roster, **kwargs):
+        output_dir.mkdir(parents=True)
+        (output_dir / "run.json").write_text(
+            json.dumps(
+                {
+                    "status": "ok",
+                    "task": task,
+                    "cwd": str(tmp_path),
+                    "read_only": False,
+                    "dry_run": False,
+                    "started_at": "2026-07-09T12:00:00Z",
+                    "finished_at": "2026-07-09T12:00:01Z",
+                    "duration_seconds": 1,
+                    "artifacts": str(output_dir),
+                    "suspected_noop": True,
+                }
+            )
+            + "\n"
+        )
+        (output_dir / "roster.json").write_text(json.dumps({"orchestrator": "chef", "agents": {}}) + "\n")
+        (output_dir / "plan.json").write_text(
+            json.dumps({"assignments": [{"stage": 1, "worker": "coder", "task": "implement it"}]}) + "\n"
+        )
+        (output_dir / "worker-results.json").write_text(
+            json.dumps(
+                {
+                    "results": [
+                        {
+                            "worker": "coder",
+                            "task": "implement it",
+                            "ok": True,
+                            "detail": "no-op",
+                            "text": "worker output",
+                        }
+                    ],
+                    "ground_truth": {
+                        "available": True,
+                        "changed_files": [],
+                        "untracked_files": [],
+                        "diffstat": "",
+                        "patch_ref": None,
+                        "suspected_noop": True,
+                    },
+                }
+            )
+            + "\n"
+        )
+        (output_dir / "synthesis.json").write_text(
+            json.dumps({"orchestrator": "chef", "result": {"ok": True}, "ground_truth": {}}) + "\n"
+        )
+        (output_dir / "final.txt").write_text("final answer\n")
+        return 0
+
+    monkeypatch.setattr(aboyeur, "run", fake_run)
+
+    rc = cli.main(
+        [
+            "run",
+            "x",
+            "--roster",
+            str(roster_path),
+            "--cwd",
+            str(tmp_path),
+            "--output-dir",
+            str(output_dir),
+            "--inspect",
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert rc == 0
+    assert "warning: suspected no-op run" in captured.err
+    assert "warning: suspected no-op run" in captured.out
+    assert "[ok] coder: no-op" in captured.out
+
+
 def _git(repo, *args):
     result = proc.run(["git", *args], cwd=repo)
     assert result.code == 0, result.stderr
@@ -720,6 +813,66 @@ def test_run_cli_worktree_passes_detached_cwd_and_writes_changes_patch(tmp_path,
     assert "+created" in patch
     assert json.loads((output_dir / "worker-results.json").read_text())["ground_truth"]["patch_ref"] == "changes.patch"
     assert json.loads((output_dir / "synthesis.json").read_text())["ground_truth"]["patch_ref"] == "changes.patch"
+
+
+def test_run_cli_worktree_warns_on_empty_changes_patch_noop(tmp_path, monkeypatch, capsys):
+    repo = _git_repo_with_roster(tmp_path)
+    output_dir = tmp_path / "run"
+
+    def fake_run(task, loaded_roster, **kwargs):
+        cwd = kwargs["cwd"]
+        output = kwargs["output_dir"]
+        output.mkdir(parents=True)
+        (output / "run.json").write_text(
+            json.dumps(
+                {
+                    "status": "ok",
+                    "task": task,
+                    "cwd": str(cwd),
+                    "read_only": False,
+                    "dry_run": False,
+                    "started_at": "2026-07-09T12:00:00Z",
+                    "finished_at": "2026-07-09T12:00:01Z",
+                    "duration_seconds": 1,
+                    "artifacts": str(output),
+                    "suspected_noop": True,
+                }
+            )
+            + "\n"
+        )
+        (output / "worker-results.json").write_text(
+            json.dumps(
+                {
+                    "results": [{"worker": "coder", "task": "implement it", "ok": True, "detail": "no-op", "text": ""}],
+                    "ground_truth": {
+                        "available": True,
+                        "changed_files": [],
+                        "untracked_files": [],
+                        "diffstat": "",
+                        "patch_ref": None,
+                        "suspected_noop": True,
+                    },
+                }
+            )
+            + "\n"
+        )
+        (output / "synthesis.json").write_text(
+            json.dumps({"orchestrator": "chef", "result": {"ok": True}, "ground_truth": {"patch_ref": None}}) + "\n"
+        )
+        return 0
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
+    monkeypatch.setattr(aboyeur, "run", fake_run)
+
+    rc = cli.main(["run", "x", "--cwd", str(repo), "--output-dir", str(output_dir), "--worktree"])
+
+    captured = capsys.readouterr()
+    assert rc == 0
+    assert (output_dir / "changes.patch").read_text() == ""
+    assert json.loads((output_dir / "worker-results.json").read_text())["ground_truth"]["patch_ref"] == "changes.patch"
+    assert "changes: none" in captured.err
+    assert "changes.patch" in captured.err
+    assert "warning: suspected no-op run" in captured.err
 
 
 def test_run_cli_worktree_keeps_checkout_when_patch_invalid(tmp_path, monkeypatch, capsys):

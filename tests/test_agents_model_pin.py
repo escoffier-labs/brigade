@@ -16,10 +16,18 @@ def test_pins_model_for_grok():
         "grok-composer-2.5-fast",
         "-p",
         "P",
+        "--always-approve",
     ]
     read_only = agents.build_argv("grok", "P", read_only=True, model="grok-composer-2.5-fast")
-    assert read_only[:4] == ["grok", "-m", "grok-composer-2.5-fast", "-p"]
-    assert read_only[-1].startswith("Read-only planning run.")
+    assert read_only == [
+        "grok",
+        "-m",
+        "grok-composer-2.5-fast",
+        "-p",
+        "P",
+        "--permission-mode",
+        "plan",
+    ]
 
 
 def test_pins_model_for_opencode():
