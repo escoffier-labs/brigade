@@ -214,7 +214,7 @@ brigade add ../agentpantry --install # run the manifest install command
 | `memory` | memory-doctor, bootstrap-doctor | validates memory cards and bootstrap files for staleness and contradictions |
 | `pantry` | agentpantry (Go sidecar) | plans and health-checks sealed browser-session sync; never starts source/sink |
 | `search` | code-search, graphtrail | local semantic search plus a code-graph CLI for callers, impact, and structural diffs |
-| `evidence` | miseledger | a local-first evidence ledger with receipts and source exporters |
+| `evidence` | miseledger (Go sidecar) | plans crawl/export and health-checks the local evidence ledger; does not crawl for you |
 
 ## Harness support
 
