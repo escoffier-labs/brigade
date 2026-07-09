@@ -864,9 +864,18 @@ fn with_code_search_url<T>(url: &str, f: impl FnOnce() -> T) -> T {
     let _guard = CODE_SEARCH_ENV_LOCK.lock().unwrap();
     let old_url = std::env::var_os("CODE_SEARCH_URL");
     let old_key = std::env::var_os("CODE_SEARCH_API_KEY");
+    let old_manifest = std::env::var_os("CODE_INDEX_MANIFEST");
     unsafe {
         std::env::set_var("CODE_SEARCH_URL", url);
         std::env::remove_var("CODE_SEARCH_API_KEY");
+        // Point manifest discovery at a path that never exists. Without this,
+        // a developer whose real manifest enrolls this checkout gets repo
+        // matching and prefix stripping applied to the mock's hits, and the
+        // suite fails only on their machine.
+        std::env::set_var(
+            "CODE_INDEX_MANIFEST",
+            "/nonexistent/graphtrail-test-manifest.json",
+        );
     }
     let out = f();
     unsafe {
@@ -877,6 +886,10 @@ fn with_code_search_url<T>(url: &str, f: impl FnOnce() -> T) -> T {
         match old_key {
             Some(value) => std::env::set_var("CODE_SEARCH_API_KEY", value),
             None => std::env::remove_var("CODE_SEARCH_API_KEY"),
+        }
+        match old_manifest {
+            Some(value) => std::env::set_var("CODE_INDEX_MANIFEST", value),
+            None => std::env::remove_var("CODE_INDEX_MANIFEST"),
         }
     }
     out
