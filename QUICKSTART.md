@@ -164,6 +164,24 @@ brigade outcome rank --target .    # surfaces brief_hit as a skill quality signa
 
 That is the differentiated loop: receipts that feed the next run's context, with a measured hit rate (`context_eval.brief_hit_rate`) on whether the pre-run brief named the files the run actually touched.
 
+## Optional: multi-machine pantry (Agent Pantry)
+
+When the agent runs on a different machine from your daily browser login, the **pantry** station wires [Agent Pantry](https://brigade.tools/agentpantry) as a process-boundary Go binary. Brigade installs and plans; it does not mint PSKs or start services.
+
+```bash
+brigade add pantry                                          # go install agentpantry
+brigade pantry setup plan --role sink --peer 127.0.0.1:8787 # agent host
+brigade pantry setup plan --role source --peer <sink>:8787  # daily driver
+# run the printed agentpantry init/keygen/source|sink commands yourself
+brigade pantry doctor
+brigade pantry expiry-alert                                 # preview near-expiry cookies
+# optional notify path:
+brigade add notifications
+brigade pantry expiry-alert --send
+```
+
+`brigade pantry status` and `doctor` always print a `next:` block so the path stays obvious after install.
+
 ## Next steps
 
 - Read [the cookbook](https://github.com/escoffier-labs/solos-cookbook) for the deep version of every concept here.

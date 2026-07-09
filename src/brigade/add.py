@@ -47,6 +47,16 @@ def run(target: Path, station: str, *, install_manifest: bool = False) -> int:
         print(f"station {station_name!r} has no managed tools to add.")
         return 0
 
+    if st is not None and st.name == "pantry":
+        print("pantry station wires Agent Pantry (separate Go binary; process boundary):")
+        print("  brigade pantry setup plan --role sink --peer 127.0.0.1:8787")
+        print("  brigade pantry setup plan --role source --peer <sink-host>:8787")
+        print("  brigade pantry doctor")
+        print("  brigade pantry expiry-alert")
+        print("  brigade pantry service plan --role sink")
+        print("Brigade does not start source/sink or mint PSKs; run the planned agentpantry commands yourself.")
+        print()
+
     ctx = _doctor.build_context(target)
     rc = 0
     for tool in tools:
