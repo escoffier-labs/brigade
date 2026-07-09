@@ -1192,7 +1192,7 @@ Tools are never imported in process; Brigade shells out to each CLI, so the boun
 `brigade add <path>` also discovers a local `station.json` manifest from an external station repo. The manifest path reports the station name, install command, and machine surfaces. Install commands from a manifest are not executed unless `--install` is passed.
 
 ```bash
-brigade add memory   # memory-doctor + bootstrap-doctor
+brigade add memory   # bootstrap-doctor (optional); status/lint/compact are built in
 brigade add guard    # content-guard (+ optional plating)
 brigade add tokens   # token-glace (+ optional usage-tracker)
 brigade add search   # graphtrail + optional code-search
@@ -1295,7 +1295,7 @@ The current managed tools:
 
 | Station | Tool | What it does |
 |---|---|---|
-| `memory` | `memory-doctor` | memory index health, dead-link lint, handoff counts |
+| `memory` | embedded `brigade memory status|lint|compact` | index health, dead-link lint, MEMORY.md compact |
 | `memory` | `bootstrap-doctor` | bootstrap-file size and limit audit |
 | `guard` | `content-guard` | policy-driven content scanning |
 | `guard` | `plating` | optional demo render, leak scan, and recorded-output verify |
