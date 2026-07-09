@@ -1,0 +1,2 @@
+outcome rank: ~/my-repo
+- brigade-work score=0.610 helped=6 hurt=0 graph: 0 changing / 6 no-op

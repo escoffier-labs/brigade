@@ -1,0 +1,2 @@
+outcome reconcile: ~/my-repo (dry-run)
+- brigade-work candidate -> promoted [install] verified helped, no regressions graph: 0 changing / 6 no-op

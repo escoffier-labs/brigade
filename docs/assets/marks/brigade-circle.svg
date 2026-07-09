@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="brigade">
+  <!-- plating option B: circular with hairline ring -->
+  <circle cx="32" cy="32" r="31" fill="#0d1014"/>
+  <circle cx="32" cy="32" r="30" fill="none" stroke="#2a3340" stroke-width="1"/>
+  <circle cx="32" cy="32" r="28.5" fill="none" stroke="#3d4654" stroke-width="0.75" opacity="0.9"/>
+  <path d="M32 13 V48" fill="none" stroke="#9aa4b2" stroke-width="3" stroke-linecap="round"/>
+  <path d="M28 49 H36" fill="none" stroke="#9aa4b2" stroke-width="3" stroke-linecap="round"/>
+  <rect x="20" y="19" width="24" height="22" rx="2" fill="none" stroke="#e0a45c" stroke-width="3" stroke-linejoin="round"/>
+  <path d="M26 27 H39 M26 34 H35" fill="none" stroke="#e0a45c" stroke-width="2.5" stroke-linecap="round"/>
+</svg>

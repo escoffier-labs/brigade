@@ -66,26 +66,44 @@ New here? [QUICKSTART.md](QUICKSTART.md) and [docs/first-10-minutes.md](docs/fir
 | **Prove** | Verify and run through Brigade | File receipts: command, real exit code, what changed |
 | **Improve** | Promote or roll back what worked | Skills and cards only rank up on those exit codes, never on model self-score |
 
+Real commands, real exit codes (rendered with [plating](https://github.com/escoffier-labs/plating)):
+
 <p align="center">
-  <img src="docs/assets/verify-receipt.svg" alt="Plated prove-to-improve loop: verify run writes receipt.json, outcome capture scores skill taste +1, reconcile can promote; GraphTrail delta when present" width="880">
+  <img src="docs/assets/prove-improve.svg" alt="Recording: brigade work verify run with pytest, outcome capture +1, outcome rank, reconcile dry-run promote" width="880">
 </p>
 
-<p align="center"><em>Same grammar as the rest of the fleet plating: source of truth on the left (prove), consequence on the right (improve). Exit code in, skill score out. GraphTrail rides along when the station is installed.</em></p>
+<p align="center"><em><code>verify run --capture</code> writes a receipt and scores the skill. <code>outcome rank</code> / <code>reconcile</code> promote only when those exits say so.</em></p>
 
-Self-improving means the fleet gets better from measured work, not from the model grading itself. Capture a verify or run receipt, score it against the skill that did the work, then `outcome reconcile` installs winners and rolls back regressions across harnesses. Brigade is a CLI, not an MCP server and not a hosted memory product. Plain files when you run a command.
+<p align="center">
+  <img src="docs/assets/verify-receipt.svg" alt="Diagram of the same loop: prove receipt on the left, improve outcome on the right" width="720">
+</p>
+
+Self-improving means the fleet gets better from measured work, not from the model grading itself. Brigade is a CLI, not an MCP server and not a hosted memory product. Plain files when you run a command.
 
 ## Stations: how the fleet plugs in
 
+<p align="center">
+  <a href="https://brigade.tools"><img src="docs/assets/marks/brigade-circle.svg" alt="Brigade" width="40" height="40"></a>
+  &nbsp;&nbsp;
+  <a href="https://brigade.tools/graphtrail"><img src="docs/assets/marks/graphtrail-circle.svg" alt="GraphTrail" width="40" height="40"></a>
+  &nbsp;&nbsp;
+  <a href="https://brigade.tools/miseledger"><img src="docs/assets/marks/miseledger-circle.svg" alt="MiseLedger" width="40" height="40"></a>
+  &nbsp;&nbsp;
+  <a href="https://brigade.tools/agentpantry"><img src="docs/assets/marks/agentpantry-circle.svg" alt="Agent Pantry" width="40" height="40"></a>
+</p>
+
+<p align="center"><em>Hub marks, option B plating: circular with hairline ring. Brigade · GraphTrail · MiseLedger · Agent Pantry.</em></p>
+
 Brigade is the hub. Optional tools stay in their own repos; `brigade add <station>` installs them, and `status` / `doctor` health-check what is present. Core works with zero sidecars.
 
-| Station | Install | Plugs into | Role |
-|---|---|---|---|
-| **GraphTrail** | `brigade add search` | **Prove** | Code graph; `brigade run` prepends a context pack when a graph exists |
-| **MiseLedger** | `brigade add evidence` | **Prove** / **Remember** | Evidence ledger; export briefs into the next work context |
-| **Agent Pantry** | `brigade add pantry` | **Share** | Encrypted browser-session / secret sync across machines |
-| **Content Guard** | built in (`guard` / `scrub`) | **Share** / **Remember** | Secrets and PII scan before publish |
-| **Skills / Skillet** | built-in on init | **Improve** | Portable skills; reconcile promotes or rolls them back |
-| **Token Glace** | `brigade add tokens` | **Prove** | Token spend across harnesses |
+| | Station | Install | Plugs into | Role |
+|---|---|---|---|---|
+| <img src="docs/assets/marks/graphtrail-circle.svg" width="28" height="28" alt=""> | **GraphTrail** | `brigade add search` | **Prove** | Code graph; `brigade run` prepends a context pack when a graph exists |
+| <img src="docs/assets/marks/miseledger-circle.svg" width="28" height="28" alt=""> | **MiseLedger** | `brigade add evidence` | **Prove** / **Remember** | Evidence ledger; export briefs into the next work context |
+| <img src="docs/assets/marks/agentpantry-circle.svg" width="28" height="28" alt=""> | **Agent Pantry** | `brigade add pantry` | **Share** | Encrypted browser-session / secret sync across machines |
+| | **Content Guard** | built in (`guard` / `scrub`) | **Share** / **Remember** | Secrets and PII scan before publish |
+| | **Skills / Skillet** | built-in on init | **Improve** | Portable skills; reconcile promotes or rolls them back |
+| | **Token Glace** | `brigade add tokens` | **Prove** | Token spend across harnesses |
 
 ```bash
 brigade add pantry && brigade add evidence && brigade add search

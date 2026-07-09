@@ -1,0 +1,9 @@
+work verify run: ~/my-repo
+run: 20260709-132019-work-verify-292671
+status: completed
+commands: 1
+- pytest -q [completed] exit=0
+receipt: ~/my-repo/.brigade/work/verify-runs/20260709-132019-work-verify-292671/receipt.json
+outcome capture: brigade-work
+source: verify [completed] signal=+1
+evidence: ~/my-repo/.brigade/work/verify-runs/20260709-132019-work-verify-292671/receipt.json

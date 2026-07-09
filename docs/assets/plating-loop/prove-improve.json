@@ -1,0 +1,21 @@
+{
+  "title": "prove-improve",
+  "width": 92,
+  "height": 22,
+  "padding": 14,
+  "normalize": [["~/my-repo", "~/my-repo"]],
+  "steps": [
+    {
+      "command": "brigade work verify run --target . --command \"pytest -q\" --capture brigade-work",
+      "output_file": "verify-capture.txt"
+    },
+    {
+      "command": "brigade outcome rank --target .",
+      "output_file": "rank.txt"
+    },
+    {
+      "command": "brigade outcome reconcile --target .",
+      "output_file": "reconcile.txt"
+    }
+  ]
+}
