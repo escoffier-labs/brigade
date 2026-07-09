@@ -81,7 +81,7 @@ def status_payload(target: Path) -> dict[str, Any]:
             "brigade receipts export / run evidence briefs",
         ],
     }
-    if not installed:
+    if not installed or binary is None:
         return payload
 
     status_result = _run_json([binary, "status", "--json"], timeout=120.0)
@@ -99,8 +99,10 @@ def status_payload(target: Path) -> dict[str, Any]:
     payload["status"] = status_result
     payload["doctor"] = doctor_result
 
-    status_data = status_result.get("stdout_json") if isinstance(status_result.get("stdout_json"), dict) else {}
-    doctor_data = doctor_result.get("stdout_json") if isinstance(doctor_result.get("stdout_json"), dict) else {}
+    status_json = status_result.get("stdout_json")
+    doctor_json = doctor_result.get("stdout_json")
+    status_data: dict[str, Any] = status_json if isinstance(status_json, dict) else {}
+    doctor_data: dict[str, Any] = doctor_json if isinstance(doctor_json, dict) else {}
 
     if status_result.get("exit_code") == 124 or doctor_result.get("exit_code") == 124:
         payload["health"] = "timeout"
@@ -324,7 +326,8 @@ def _render_plan_md(payload: dict[str, Any]) -> str:
         "",
         f"- target: {payload.get('target')}",
     ]
-    docs = payload.get("docs") if isinstance(payload.get("docs"), dict) else {}
+    docs_raw = payload.get("docs")
+    docs: dict[str, Any] = docs_raw if isinstance(docs_raw, dict) else {}
     if docs.get("product"):
         lines.append(f"- product: {docs['product']}")
     if docs.get("repo"):

@@ -73,7 +73,8 @@ def status_payload(target: Path) -> dict[str, Any]:
     if glace:
         result = health.run_json([glace, "doctor", "hooks", "--format", "json"], timeout=30.0)
         tools["token-glace"]["doctor"] = result
-        data = result.get("stdout_json") if isinstance(result.get("stdout_json"), dict) else {}
+        stdout_json = result.get("stdout_json")
+        data: dict[str, Any] = stdout_json if isinstance(stdout_json, dict) else {}
         status = str(data.get("status") or "unknown")
         mapping = {"ok": "ok", "warn": "warn", "disabled": "unwired", "broken": "fail"}
         glace_health = mapping.get(status, "incomplete" if result.get("exit_code") not in (0, None) else "warn")

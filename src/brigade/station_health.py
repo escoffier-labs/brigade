@@ -84,7 +84,8 @@ def render_plan_md(title: str, payload: Mapping[str, Any]) -> str:
     lines = [f"# {title}", "", f"- target: {payload.get('target')}"]
     if payload.get("station"):
         lines.append(f"- station: {payload.get('station')}")
-    docs = payload.get("docs") if isinstance(payload.get("docs"), dict) else {}
+    docs_raw = payload.get("docs")
+    docs: dict[str, Any] = docs_raw if isinstance(docs_raw, dict) else {}
     if docs.get("product"):
         lines.append(f"- product: {docs['product']}")
     if docs.get("repo"):
