@@ -42,11 +42,33 @@ Self-improving means the fleet gets better from measured work, not from the mode
 
 You run more than one agent CLI. Each one keeps MCP config and memory in its own files and writes without review. Brigade is the local layer that fixes that: one reviewed source, projected into the tools you already use, with a gate before writes, a paper trail after, and a learning loop that only trusts real signals. It is a CLI, not an MCP server and not a hosted memory product. Plain files in your repo when you run a command. That is all it does.
 
+## Stations: how the fleet plugs in
+
+Brigade is the hub. Optional tools stay in their own repos; you install them with `brigade add <station>`, then `brigade status` / `brigade doctor` health-check whatever is present. Core works with zero sidecars. Each station plugs into a job in the loop above.
+
+| Station | Install | Plugs into | What it does for Brigade |
+|---|---|---|---|
+| **GraphTrail** | `brigade add search` (or present in repo) | **Prove** | Local code graph (callers, callees, impact). When a graph exists, `brigade run` prepends a capped context pack so workers start from structure, not a cold grep |
+| **MiseLedger** | `brigade add evidence` | **Prove** / **Remember** | Local evidence ledger of sessions and notes. Export bundles into work context; next runs get a measured evidence brief, not a vibe |
+| **Agent Pantry** | `brigade add pantry` | **Share** | Encrypted browser-session and secret sync across machines so agents inherit working logins instead of dead cookies |
+| **Content Guard** | built in (`brigade guard` / `scrub`) | **Share** / **Remember** | Scans handoffs and publish paths for secrets and PII before anything leaves the machine |
+| **Skillet / skills** | built-in on init; full roster via Skillet | **Improve** | Portable skills across harnesses; outcome reconcile promotes or rolls them back from verify/run receipts |
+| **Token Glace** | `brigade add tokens` | **Prove** | Token spend across harnesses so you see which agent burned budget and why |
+
+```bash
+brigade add pantry              # plan/health-check Agent Pantry
+brigade add evidence            # plan/health-check MiseLedger
+brigade add search              # code-search + GraphTrail wiring
+brigade status --target .       # which stations are present
+```
+
+Full station matrix and install notes: [Sidecars](#sidecars). Product pages: [GraphTrail](https://brigade.tools/graphtrail), [MiseLedger](https://brigade.tools/miseledger), [Agent Pantry](https://brigade.tools/agentpantry).
+
 <p align="center">
   <img src="docs/assets/quickstart.svg" alt="Recording: brigade operator quickstart wires a repo and brigade operator doctor reports ready, in seconds" width="760">
 </p>
 
-<p align="center"><em><code>brigade operator quickstart</code> wires a repo. <code>operator doctor</code> reports ready. Install first, deepen later.</em></p>
+<p align="center"><em><code>brigade operator quickstart</code> wires a repo. <code>operator doctor</code> reports ready. Install first, add stations when you need them.</em></p>
 
 ## Install
 
