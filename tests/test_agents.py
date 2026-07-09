@@ -18,7 +18,7 @@ def test_build_argv_for_known_clis():
     assert agents.build_argv("kimi", "hi") == ["kimi", "--print", "-p", "hi", "--final-message-only"]
     assert agents.build_argv("adal", "hi") == ["adal", "-q", "hi"]
     assert agents.build_argv("openhands", "hi") == ["openhands", "--headless", "-t", "hi"]
-    assert agents.build_argv("grok", "hi") == ["grok", "-p", "hi"]
+    assert agents.build_argv("grok", "hi") == ["grok", "-p", "hi", "--always-approve"]
     assert agents.build_argv("amp", "hi") == ["amp", "-x", "hi"]
     assert agents.build_argv("crush", "hi") == ["crush", "run", "hi"]
     assert agents.build_argv("ollama:llama3.3", "hi") == ["ollama", "run", "llama3.3", "hi"]
@@ -66,7 +66,13 @@ def test_build_argv_for_read_only_codex():
     assert agents.build_argv("copilot", "hi", read_only=True)[-1].startswith("Read-only planning run.")
     assert agents.build_argv("adal", "hi", read_only=True)[-1].startswith("Read-only planning run.")
     assert agents.build_argv("openhands", "hi", read_only=True)[-1].startswith("Read-only planning run.")
-    assert agents.build_argv("grok", "hi", read_only=True)[-1].startswith("Read-only planning run.")
+    assert agents.build_argv("grok", "hi", read_only=True) == [
+        "grok",
+        "-p",
+        "hi",
+        "--permission-mode",
+        "plan",
+    ]
     assert agents.build_argv("amp", "hi", read_only=True)[-1].startswith("Read-only planning run.")
     assert agents.build_argv("crush", "hi", read_only=True)[-1].startswith("Read-only planning run.")
     assert agents.build_argv("ollama:llama3.3", "hi", read_only=True) == [
