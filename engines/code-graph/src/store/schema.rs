@@ -4,7 +4,19 @@ use anyhow::Result;
 use rusqlite::Connection;
 
 /// Bumped when the on-disk schema changes; surfaced in JSON packs from Phase 2 on.
-pub const SCHEMA_VERSION: u32 = 5;
+pub const SCHEMA_VERSION: u32 = 6;
+
+/// What sync must redo after a schema upgrade, from nothing to everything.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum SchemaUpgrade {
+    /// Schema is current; sync normally.
+    None,
+    /// Derived edge data changed shape; re-resolve edges from stored pending
+    /// calls without re-parsing any file.
+    RebuildEdges,
+    /// Extraction output changed shape; re-parse every file.
+    FullReindex,
+}
 
 pub fn init_schema(conn: &Connection) -> Result<()> {
     conn.execute_batch(
@@ -39,6 +51,7 @@ pub fn init_schema(conn: &Connection) -> Result<()> {
             target TEXT NOT NULL,
             kind TEXT NOT NULL,
             line INTEGER,
+            confidence REAL,
             PRIMARY KEY(source, target, kind, line),
             FOREIGN KEY(source) REFERENCES symbols(id) ON DELETE CASCADE,
             FOREIGN KEY(target) REFERENCES symbols(id) ON DELETE CASCADE
@@ -88,15 +101,13 @@ pub fn init_schema(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-/// Apply write-path schema upgrades needed before sync can insert current rows.
-///
-/// Returns true when the caller should force a full reindex so newly added
-/// nullable columns are populated for existing rows that cannot be refreshed lazily.
-pub fn upgrade_for_sync(conn: &Connection) -> Result<bool> {
-    let mut upgraded = false;
+/// Apply write-path schema upgrades needed before sync can insert current rows,
+/// returning how much derived state the caller must rebuild.
+pub fn upgrade_for_sync(conn: &Connection) -> Result<SchemaUpgrade> {
+    let mut upgrade = SchemaUpgrade::None;
     if !table_has_column(conn, "symbols", "body_hash")? {
         conn.execute("ALTER TABLE symbols ADD COLUMN body_hash TEXT", [])?;
-        upgraded = true;
+        upgrade = upgrade.max(SchemaUpgrade::FullReindex);
     }
     if !table_has_column(conn, "files", "extractor_fingerprint")? {
         conn.execute(
@@ -125,9 +136,16 @@ pub fn upgrade_for_sync(conn: &Connection) -> Result<bool> {
             "CREATE INDEX IF NOT EXISTS idx_pending_calls_file ON pending_calls(file_path)",
             [],
         )?;
-        upgraded = true;
+        upgrade = upgrade.max(SchemaUpgrade::FullReindex);
     }
-    Ok(upgraded)
+    // v6 added edges.confidence. Edges are derived from pending_calls, so a
+    // resolution pass (no re-parse) fills the column. The column check is the
+    // signal here: CREATE TABLE IF NOT EXISTS never alters an existing table.
+    if !table_has_column(conn, "edges", "confidence")? {
+        conn.execute("ALTER TABLE edges ADD COLUMN confidence REAL", [])?;
+        upgrade = upgrade.max(SchemaUpgrade::RebuildEdges);
+    }
+    Ok(upgrade)
 }
 
 fn stored_schema_version(conn: &Connection) -> Result<Option<u32>> {

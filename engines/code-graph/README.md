@@ -78,7 +78,7 @@ main --calls@19 hops=1--> serve  (src/bin/graphtrail-mcp.rs -> src/mcp.rs)
 | | Job | What you get |
 |---|---|---|
 | **Index** | Parse the repo with tree-sitter | Symbols, imports, and call edges in `.graphtrail/graphtrail.db` |
-| **Ask** | Query structure, not text | `search`, `callers`, `callees`, `impact`, `file_neighbors`, `diff` |
+| **Ask** | Query structure, not text | `search`, `callers`, `callees`, `impact`, `file_neighbors`, `dead_code`, `cycles`, `affected`, `diff` |
 | **Brief** | Pack neighborhood for agents | `context` over CLI or read-only MCP; Brigade can attach it to runs |
 
 <p align="center">
@@ -110,7 +110,7 @@ Register it with an MCP client. For Claude Code, add to `.mcp.json` (project sco
 
 ### Tools
 
-The server exposes ten tools. This list is verified against the live `tools/list` response from `graphtrail-mcp`:
+The server exposes thirteen tools. This list is verified against the live `tools/list` response from `graphtrail-mcp`:
 
 | Tool | Required args | What it returns |
 |---|---|---|
@@ -120,8 +120,11 @@ The server exposes ten tools. This list is verified against the live `tools/list
 | `impact` | `symbol` (`depth` optional, default 1, clamped to 1..5) | Combined callers and callees of a symbol (the blast radius of a change), with `hops` on each edge. |
 | `context` | `task` (`limit` optional, default 12) | A context pack: matching entry points plus their caller/callee neighborhood and related files. |
 | `stats` | none | Counts of files, symbols, edges, imports, schema version, sync metadata, and per-language file counts. |
-| `doctor` | none | Freshness contract for the graph: schema status, last sync age, pending file changes, ignored entries, and `FRESH`/`STALE`/`NEEDS-MIGRATION` verdict. |
+| `doctor` | none | Freshness contract for the graph: schema status, last sync age, branch drift, pending file changes, ignored entries, and `FRESH`/`STALE`/`NEEDS-MIGRATION` verdict. |
 | `file_neighbors` | `path` | Files connected to an indexed file by incoming or outgoing call edges. |
+| `dead_code` | none (`limit` optional, default 100) | Callables with no incoming call edges. A candidate list, not proof: dynamic dispatch, exports, and entry points are invisible to call edges. |
+| `cycles` | none | File-level dependency cycles from cross-file call edges, grouped into strongly connected components. |
+| `affected` | `files` (`depth` optional, default 3, clamped to 1..5) | Tests statically attributed to the changed files via incoming call edges, plus impacted source files. A lower bound on what to run, not coverage. |
 | `repos` | none (`roots` optional) | Default database metadata plus optional one-level scans for `.graphtrail/graphtrail.db` under root directories. |
 | `diff` | `before`, `after` | Structural diff of two indexed graph DBs: added, removed, and changed symbols plus added and removed call edges. |
 

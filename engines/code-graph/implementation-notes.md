@@ -2,6 +2,19 @@
 
 Running log of decisions/deviations not captured in the spec. Newest first.
 
+## Analysis tools, branch drift, and edge confidence (2026-07-09)
+
+Three read-only analysis tools, doctor branch awareness, and scored edges, all derived from data the graph already stores.
+
+Decisions:
+- `dead_code` (CLI `dead-code`, MCP `dead_code`) is one anti-join over `edges.target`, filtered to callables, minus `main`, dunders, test files, and members of a `tests` container (Rust inline `mod tests`). The report carries an in-band `attribution` note saying it is a candidate list, not proof: dynamic dispatch, exports, and entry points are invisible to call edges. Same honesty rule for `affected`.
+- `cycles` pulls the distinct cross-file edge list in one query and runs an iterative Tarjan SCC (explicit stack, so a 10k-file chain cannot overflow). Groups of size > 1 are cycles; output capped at 50 groups with a `truncated` flag.
+- `affected` takes changed files from the caller (`git diff --name-only`; GraphTrail spawns nothing), seeds every symbol in them, and walks incoming call edges once (depth clamp 1..5, default 3). Reached symbols in test files become `affected_tests`, the rest `impacted_files`, each with `min_hops` and up to five `via` symbols. One BFS total, not one per function.
+- Doctor now reports `branch {synced, current, drifted}`. Sync records the checked-out branch (from `.git/HEAD`, following linked-worktree `gitdir:` pointers, detached heads as `detached@<12 hex>`); doctor compares and reports drift as STALE, because the graph describes the other branch even when file stats look fresh.
+- Edges carry `confidence` (schema v6), set by resolution path: import-strict 0.9, same-file qualified 0.85, same-file bare 0.8, unique cross-file name 0.7, import fallback 0.55, ambiguous cross-file name 0.5. Values are ordinal, not probabilities. `EdgeRow` JSON gains the field (omitted when null); text output is unchanged.
+- The v5 to v6 upgrade only rebuilds edges from stored pending calls, no re-parse: `upgrade_for_sync` now returns a `SchemaUpgrade` level (`None`/`RebuildEdges`/`FullReindex`). Pre-v6 databases opened read-only keep working: edge queries probe for the column and select NULL until the next sync migrates.
+- Rust import resolution now also matches files under the module directory (`use crate::store::X` accepts definitions in `src/store/*.rs`, reaching through `mod.rs` re-exports). Before this, test-to-lib edges rarely resolved in Rust repos and `affected` found nothing; on this repo it now attributes all eight integration-test files to a change in `src/store/sync.rs`.
+
 ## True incremental sync via persisted pending calls (2026-07-09)
 
 Reworked the sync write path so a content change no longer rebuilds every file.

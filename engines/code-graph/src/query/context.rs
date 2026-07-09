@@ -174,6 +174,7 @@ mod tests {
                 source_file: "cli.py".to_string(),
                 target_file: "app.py".to_string(),
                 hops: 1,
+                confidence: None,
             }],
             callees: vec![EdgeRow {
                 source_id: "sym-run".to_string(),
@@ -185,6 +186,7 @@ mod tests {
                 source_file: "app.py".to_string(),
                 target_file: "lib.py".to_string(),
                 hops: 1,
+                confidence: None,
             }],
             related_files: vec![
                 "app.py".to_string(),

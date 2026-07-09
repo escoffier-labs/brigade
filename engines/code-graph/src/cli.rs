@@ -9,10 +9,10 @@ use crate::model::{ContextPack, Direction, EdgeRow, GraphDiff, SearchRow};
 #[cfg(feature = "codesearch")]
 use crate::query::build_context_pack_from_entry_points;
 use crate::query::{
-    DEFAULT_IMPACT_DEPTH, build_context_pack,
+    DEFAULT_AFFECTED_DEPTH, DEFAULT_IMPACT_DEPTH, affected, build_context_pack,
     context::{edge_location, symbol_location},
-    diff_graphs, doctor, file_neighbors, graph_edges_with_depth, impact_edges, missing_db_report,
-    normalize_depth, render_markdown, search_symbols_with_path, stats,
+    cycles, dead_code, diff_graphs, doctor, file_neighbors, graph_edges_with_depth, impact_edges,
+    missing_db_report, normalize_depth, render_markdown, search_symbols_with_path, stats,
 };
 use crate::store::{
     db_path, init_schema, open_db, open_default_read_only, open_read_only, sync_repo_force,
@@ -99,6 +99,28 @@ enum Command {
         #[cfg(feature = "miseledger")]
         #[arg(long)]
         evidence: bool,
+    },
+    /// Callables with no incoming call edges (a candidate list, not proof of dead code).
+    DeadCode {
+        #[arg(long, default_value_t = 100)]
+        limit: usize,
+        #[arg(long)]
+        json: bool,
+    },
+    /// File-level dependency cycles from cross-file call edges.
+    Cycles {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Tests statically attributed to the given changed files via incoming call edges.
+    Affected {
+        /// Changed files, repo-relative (e.g. from `git diff --name-only`).
+        #[arg(required = true)]
+        files: Vec<String>,
+        #[arg(long, default_value_t = DEFAULT_AFFECTED_DEPTH)]
+        depth: usize,
+        #[arg(long)]
+        json: bool,
     },
     Stats {
         #[arg(long)]
@@ -288,6 +310,77 @@ pub fn run(cli: Cli) -> Result<()> {
                 }
             }
         }
+        Command::DeadCode { limit, json } => {
+            let conn = open_default_read_only(cli.db)?;
+            let report = dead_code(&conn, limit)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                println!(
+                    "uncalled callables: {} (showing {})",
+                    report.total,
+                    report.symbols.len()
+                );
+                println!("note: {}", report.attribution);
+                for symbol in &report.symbols {
+                    println!(
+                        "{} {} {}:{} {}",
+                        symbol.kind,
+                        symbol.qualified_name,
+                        symbol.file_path,
+                        symbol.start_line,
+                        symbol.signature
+                    );
+                }
+            }
+        }
+        Command::Cycles { json } => {
+            let conn = open_default_read_only(cli.db)?;
+            let report = cycles(&conn)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                println!(
+                    "cycle groups: {}{}",
+                    report.total_groups,
+                    if report.truncated { " (truncated)" } else { "" }
+                );
+                for group in &report.groups {
+                    println!("- {}", group.join(" <-> "));
+                }
+            }
+        }
+        Command::Affected { files, depth, json } => {
+            let conn = open_default_read_only(cli.db)?;
+            let report = affected(&conn, &files, depth)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                println!(
+                    "changed: {} known, {} missing (depth {})",
+                    report.changed_files.len(),
+                    report.missing_files.len(),
+                    report.depth
+                );
+                for missing in &report.missing_files {
+                    println!("missing: {missing}");
+                }
+                println!("note: {}", report.attribution);
+                println!("affected tests: {}", report.affected_tests.len());
+                for row in &report.affected_tests {
+                    println!(
+                        "- {} hops={} via {}",
+                        row.file_path,
+                        row.min_hops,
+                        row.via.join(", ")
+                    );
+                }
+                println!("impacted files: {}", report.impacted_files.len());
+                for row in &report.impacted_files {
+                    println!("- {} hops={}", row.file_path, row.min_hops);
+                }
+            }
+        }
         Command::Stats { json } => {
             let conn = open_default_read_only(cli.db)?;
             let stats = stats(&conn)?;
@@ -470,6 +563,12 @@ fn print_doctor_report(report: &crate::query::DoctorReport, json: bool) -> Resul
             .age_seconds
             .map(|age| age.to_string())
             .unwrap_or_else(|| "missing".to_string())
+    );
+    println!(
+        "branch: synced={} current={} drifted={}",
+        report.branch.synced.as_deref().unwrap_or("unknown"),
+        report.branch.current.as_deref().unwrap_or("unknown"),
+        report.branch.drifted
     );
     println!(
         "pending: new_files={} changed_files={} deleted_files={} fingerprint_stale={}",
@@ -681,6 +780,7 @@ mod tests {
                 source_file: "cli.py".to_string(),
                 target_file: "app.py".to_string(),
                 hops: 1,
+                confidence: None,
             }],
             callees: vec![EdgeRow {
                 source_id: "sym-run".to_string(),
@@ -692,6 +792,7 @@ mod tests {
                 source_file: "app.py".to_string(),
                 target_file: "lib.py".to_string(),
                 hops: 1,
+                confidence: None,
             }],
             related_files: vec![
                 "app.py".to_string(),

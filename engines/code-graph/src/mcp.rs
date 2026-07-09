@@ -25,9 +25,9 @@ use crate::model::Direction;
 #[cfg(feature = "codesearch")]
 use crate::query::build_context_pack_from_entry_points;
 use crate::query::{
-    DEFAULT_IMPACT_DEPTH, build_context_pack, diff_graphs, doctor, file_neighbors,
-    graph_edges_with_depth, impact_edges, normalize_depth, render_markdown,
-    search_symbols_with_path, stats,
+    DEFAULT_AFFECTED_DEPTH, DEFAULT_IMPACT_DEPTH, affected, build_context_pack, cycles, dead_code,
+    diff_graphs, doctor, file_neighbors, graph_edges_with_depth, impact_edges, normalize_depth,
+    render_markdown, search_symbols_with_path, stats,
 };
 use crate::store::{init_schema, open_db, open_read_only, sync_repo};
 
@@ -240,6 +240,13 @@ fn call_tool(default_db: &Path, name: &str, args: &Value) -> Result<String> {
             }
         }
         "file_neighbors" => to_pretty(&file_neighbors(&conn, &str_arg(args, "path"))?),
+        "dead_code" => to_pretty(&dead_code(&conn, usize_arg(args, "limit", 100))?),
+        "cycles" => to_pretty(&cycles(&conn)?),
+        "affected" => to_pretty(&affected(
+            &conn,
+            &files_arg(args),
+            usize_arg(args, "depth", DEFAULT_AFFECTED_DEPTH),
+        )?),
         "stats" => to_pretty(&stats(&conn)?),
         "doctor" => to_pretty(&doctor(&conn, &doctor_root(default_db, args, &db), &db)?),
         other => Err(anyhow!("unknown tool '{other}'")),
@@ -285,6 +292,13 @@ fn validate_tool_args(name: &str, args: &Value) -> std::result::Result<(), Strin
         "file_neighbors" => {
             require_string(args, "path")?;
         }
+        "dead_code" => {
+            require_usize(args, "limit")?;
+        }
+        "affected" => {
+            require_files(args)?;
+            require_usize(args, "depth")?;
+        }
         "diff" => {
             require_string(args, "before")?;
             require_string(args, "after")?;
@@ -292,7 +306,7 @@ fn validate_tool_args(name: &str, args: &Value) -> std::result::Result<(), Strin
         "repos" => {
             require_roots(args)?;
         }
-        "stats" | "doctor" => {}
+        "stats" | "doctor" | "cycles" => {}
         _ => {}
     }
     Ok(())
@@ -395,6 +409,30 @@ fn tool_defs() -> Value {
             )
         },
         {
+            "name": "dead_code",
+            "description": "Callables with no incoming call edges: a dead-code candidate list, not proof (dynamic dispatch, exports, and entry points are invisible to call edges).",
+            "inputSchema": with_location(
+                with_refresh(json!({ "limit": { "type": "integer", "description": "Max symbols returned (default 100)." } })),
+                json!([])
+            )
+        },
+        {
+            "name": "cycles",
+            "description": "File-level dependency cycles from cross-file call edges, grouped into strongly connected components.",
+            "inputSchema": with_location(with_refresh(json!({})), json!([]))
+        },
+        {
+            "name": "affected",
+            "description": "Tests statically attributed to changed files via incoming call edges: a lower bound on what to run, not coverage. Pass changed files from `git diff --name-only`.",
+            "inputSchema": with_location(
+                with_refresh(json!({
+                    "files": { "type": "array", "items": { "type": "string" }, "description": "Changed files, repo-relative." },
+                    "depth": { "type": "integer", "description": "Caller-BFS depth, clamped to 1..5 (default 3)." }
+                })),
+                json!(["files"])
+            )
+        },
+        {
             "name": "diff",
             "description": "Structural diff of two indexed graph DBs (before -> after): added/removed/changed symbols and added/removed call edges. Build the two DBs with `graphtrail --db <path> sync <root>`.",
             "inputSchema": {
@@ -447,7 +485,16 @@ fn to_pretty<T: Serialize>(value: &T) -> Result<String> {
 fn supports_refresh(name: &str) -> bool {
     matches!(
         name,
-        "search" | "callers" | "callees" | "impact" | "context" | "file_neighbors" | "stats"
+        "search"
+            | "callers"
+            | "callees"
+            | "impact"
+            | "context"
+            | "file_neighbors"
+            | "stats"
+            | "dead_code"
+            | "cycles"
+            | "affected"
     ) || (cfg!(feature = "codesearch") && name == "semantic_search")
 }
 
@@ -604,6 +651,28 @@ fn require_usize(args: &Value, key: &str) -> std::result::Result<(), String> {
             .map_err(|_| format!("integer argument '{key}' is too large")),
         None => Ok(()),
     }
+}
+
+fn require_files(args: &Value) -> std::result::Result<(), String> {
+    match args.get("files") {
+        Some(Value::Array(files))
+            if !files.is_empty() && files.iter().all(|file| file.as_str().is_some()) =>
+        {
+            Ok(())
+        }
+        Some(_) => Err("invalid string array argument 'files'".to_string()),
+        None => Err("missing required argument 'files'".to_string()),
+    }
+}
+
+fn files_arg(args: &Value) -> Vec<String> {
+    args.get("files")
+        .and_then(|v| v.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|v| v.as_str())
+        .map(str::to_string)
+        .collect()
 }
 
 fn require_roots(args: &Value) -> std::result::Result<(), String> {

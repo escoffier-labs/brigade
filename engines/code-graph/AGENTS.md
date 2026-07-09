@@ -35,7 +35,7 @@ The code is split into focused modules:
 
 ## MCP smoke test
 
-Build, then pipe newline-delimited JSON-RPC into the server over stdio. It speaks JSON-RPC 2.0 and exposes ten tools (`search`, `callers`, `callees`, `impact`, `context`, `stats`, `doctor`, `file_neighbors`, `repos`, `diff`).
+Build, then pipe newline-delimited JSON-RPC into the server over stdio. It speaks JSON-RPC 2.0 and exposes thirteen tools (`search`, `callers`, `callees`, `impact`, `context`, `stats`, `doctor`, `file_neighbors`, `dead_code`, `cycles`, `affected`, `repos`, `diff`).
 
 ```bash
 cargo run -- init .

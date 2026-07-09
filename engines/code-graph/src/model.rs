@@ -122,6 +122,10 @@ pub struct EdgeRow {
     pub source_file: String,
     pub target_file: String,
     pub hops: usize,
+    /// Resolution-path confidence written at sync time; absent on marker rows
+    /// and on databases indexed before the column existed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub confidence: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize)]

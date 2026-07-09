@@ -7,6 +7,7 @@ use std::thread::sleep;
 use std::time::Duration;
 
 use graphtrail::extractors::{python, rust};
+use graphtrail::query::doctor;
 use graphtrail::store::{SCHEMA_VERSION, init_schema, meta, open_db, sync_repo};
 use rusqlite::Connection;
 
@@ -504,6 +505,88 @@ fn sync_upgrades_v4_schema_and_repopulates_pending_calls() {
         .unwrap();
     assert!(pending > 0, "reindex must repopulate pending_calls");
     assert_eq!(edge_names(&conn), vec![("run".into(), "helper".into())]);
+}
+
+#[test]
+fn sync_upgrades_v5_schema_by_rebuilding_edges_without_reparsing() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write_file(root.join("a.py"), "def helper():\n    return 1\n");
+    write_file(root.join("b.py"), "def run():\n    helper()\n");
+
+    let conn = open_graph(root);
+    let first = sync_repo(&conn, root).unwrap();
+    assert!(!first.unchanged);
+    let first_indexed_at = indexed_at(&conn, "a.py");
+
+    // Simulate a v5 database: edges lack the confidence column.
+    conn.execute("ALTER TABLE edges DROP COLUMN confidence", [])
+        .unwrap();
+    conn.execute(
+        "UPDATE meta SET value = '5' WHERE key = 'schema_version'",
+        [],
+    )
+    .unwrap();
+
+    let second = sync_repo(&conn, root).unwrap();
+
+    assert!(!second.unchanged, "v5 database must rebuild edges");
+    assert_eq!(
+        indexed_at(&conn, "a.py"),
+        first_indexed_at,
+        "edge-only upgrade must not re-parse files"
+    );
+    assert_eq!(
+        meta::read(&conn, "schema_version").unwrap().as_deref(),
+        Some(SCHEMA_VERSION.to_string().as_str())
+    );
+    let unscored: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM edges WHERE confidence IS NULL",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let total: i64 = conn
+        .query_row("SELECT COUNT(*) FROM edges", [], |row| row.get(0))
+        .unwrap();
+    assert!(total > 0);
+    assert_eq!(unscored, 0, "rebuilt edges must carry confidence");
+}
+
+#[test]
+fn doctor_reports_branch_drift_as_stale() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    make_git_repo(root);
+    write_file(root.join("a.py"), "def helper():\n    return 1\n");
+
+    let conn = open_graph(root);
+    sync_repo(&conn, root).unwrap();
+    assert_eq!(
+        meta::read(&conn, "synced_branch").unwrap().as_deref(),
+        Some("main")
+    );
+
+    let fresh = doctor(&conn, root, &root.join("g.db")).unwrap();
+    assert_eq!(fresh.verdict, "FRESH");
+    assert!(!fresh.branch.drifted);
+
+    // Same files on disk, different checked-out branch: the graph describes
+    // the other branch, so doctor must not call it fresh.
+    fs::write(root.join(".git/HEAD"), "ref: refs/heads/feature-x\n").unwrap();
+    let drifted = doctor(&conn, root, &root.join("g.db")).unwrap();
+
+    assert_eq!(drifted.verdict, "STALE");
+    assert!(drifted.branch.drifted);
+    assert_eq!(drifted.branch.synced.as_deref(), Some("main"));
+    assert_eq!(drifted.branch.current.as_deref(), Some("feature-x"));
+
+    // Re-syncing on the new branch clears the drift.
+    sync_repo(&conn, root).unwrap();
+    let resynced = doctor(&conn, root, &root.join("g.db")).unwrap();
+    assert_eq!(resynced.verdict, "FRESH");
+    assert!(!resynced.branch.drifted);
 }
 
 #[test]

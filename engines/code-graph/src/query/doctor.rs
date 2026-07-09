@@ -17,9 +17,20 @@ pub struct DoctorReport {
     pub tool_version: String,
     pub schema: SchemaStatus,
     pub last_sync: LastSync,
+    pub branch: BranchStatus,
     pub pending: PendingChanges,
     pub ignored: IgnoredSummary,
     pub verdict: &'static str,
+}
+
+/// Which branch the graph was synced on versus the branch checked out now.
+/// A drifted graph describes the other branch's code, so doctor reports STALE
+/// even when file stats happen to look fresh.
+#[derive(Debug, Default, Serialize)]
+pub struct BranchStatus {
+    pub synced: Option<String>,
+    pub current: Option<String>,
+    pub drifted: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -58,9 +69,10 @@ pub fn doctor(conn: &Connection, repo_root: &Path, db_path: &Path) -> Result<Doc
         .map(|timestamp| (now_ts() - timestamp).max(0));
     let (pending, ignored) = pending_changes(conn, &repo_root)?;
     let needs_migration = stored_schema != Some(SCHEMA_VERSION);
+    let branch = branch_status(conn, &repo_root)?;
     let verdict = if needs_migration {
         "NEEDS-MIGRATION"
-    } else if pending.is_empty() {
+    } else if pending.is_empty() && !branch.drifted {
         "FRESH"
     } else {
         "STALE"
@@ -79,9 +91,21 @@ pub fn doctor(conn: &Connection, repo_root: &Path, db_path: &Path) -> Result<Doc
             synced_at,
             age_seconds,
         },
+        branch,
         pending,
         ignored,
         verdict,
+    })
+}
+
+fn branch_status(conn: &Connection, repo_root: &Path) -> Result<BranchStatus> {
+    let synced = meta::read(conn, "synced_branch")?;
+    let current = crate::store::current_git_branch(repo_root);
+    let drifted = matches!((&synced, &current), (Some(synced), Some(current)) if synced != current);
+    Ok(BranchStatus {
+        synced,
+        current,
+        drifted,
     })
 }
 
@@ -101,6 +125,7 @@ pub fn missing_db_report(repo_root: &Path, db_path: &Path) -> DoctorReport {
             synced_at: None,
             age_seconds: None,
         },
+        branch: BranchStatus::default(),
         pending: PendingChanges::default(),
         ignored: IgnoredSummary::default(),
         verdict: "NEEDS-MIGRATION",

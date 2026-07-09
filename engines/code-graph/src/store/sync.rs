@@ -27,6 +27,7 @@ use crate::extractors::common::hex_hash;
 use crate::extractors::{extractor_fingerprint_for, index_file, language_for};
 use crate::model::{CallKind, IgnoredSummary, Import, Lang, PendingCall, PendingChanges};
 use crate::store::db::now_ts;
+use crate::store::schema::SchemaUpgrade;
 
 #[derive(Debug, Default)]
 pub struct SyncSummary {
@@ -89,8 +90,8 @@ pub fn sync_repo_force(conn: &Connection, root: &Path, force: bool) -> Result<Sy
     guard_unsafe_root(&root)?;
     let _lock = acquire_sync_lock(conn)?;
     let graph_dir_created = crate::store::db::take_created_graph_dir(&root.join(".graphtrail"));
-    let upgraded = crate::store::schema::upgrade_for_sync(conn)?;
-    let force_full_reindex = force || upgraded;
+    let upgrade = crate::store::schema::upgrade_for_sync(conn)?;
+    let force_full_reindex = force || upgrade == SchemaUpgrade::FullReindex;
 
     // Stat pass: enumerate supported files without parsing them.
     let entries = collect_sync_walk(&root, false)?.entries;
@@ -113,10 +114,12 @@ pub fn sync_repo_force(conn: &Connection, root: &Path, force: bool) -> Result<Sy
         stale_plan(&entries, &db_files)?.entries
     };
 
-    let changed = !deleted.is_empty() || !files_to_index.is_empty();
+    let changed =
+        !deleted.is_empty() || !files_to_index.is_empty() || upgrade == SchemaUpgrade::RebuildEdges;
     if !changed {
         let tx = conn.unchecked_transaction()?;
         crate::store::meta::write_sync_meta(&tx)?;
+        write_branch_meta(&tx, &root)?;
         tx.commit()?;
 
         let counts = table_counts(conn)?;
@@ -163,6 +166,7 @@ pub fn sync_repo_force(conn: &Connection, root: &Path, force: bool) -> Result<Sy
 
     rebuild_edges(&tx)?;
     crate::store::meta::write_sync_meta(&tx)?;
+    write_branch_meta(&tx, &root)?;
     tx.commit()?;
 
     let counts = table_counts(conn)?;
@@ -419,7 +423,8 @@ fn rebuild_edges(tx: &Connection) -> Result<()> {
         "SELECT source_id, file_path, target_name, kind, qualifier, line FROM pending_calls",
     )?;
     let mut insert = tx.prepare(
-        "INSERT OR IGNORE INTO edges(source, target, kind, line) VALUES (?1, ?2, 'calls', ?3)",
+        "INSERT OR IGNORE INTO edges(source, target, kind, line, confidence)
+         VALUES (?1, ?2, 'calls', ?3, ?4)",
     )?;
     let rows = select.query_map([], |row| {
         Ok((
@@ -451,10 +456,15 @@ fn rebuild_edges(tx: &Connection) -> Result<()> {
             &source_index,
             &file_index,
         ) {
-            if target.id == call.source_id {
+            if target.candidate.id == call.source_id {
                 continue;
             }
-            insert.execute(params![call.source_id, target.id, call.line as i64])?;
+            insert.execute(params![
+                call.source_id,
+                target.candidate.id,
+                call.line as i64,
+                target.confidence
+            ])?;
         }
     }
     Ok(())
@@ -564,6 +574,59 @@ fn has_git_context(root: &Path) -> bool {
 fn has_git_marker(dir: &Path) -> bool {
     let git = dir.join(".git");
     git.is_file() || git.join("HEAD").is_file()
+}
+
+/// Record which branch the graph describes, so `doctor` can flag a checkout
+/// of a different branch as drift. Removed when the root has no git context,
+/// so a repo that stops being one does not pin a stale branch forever.
+fn write_branch_meta(tx: &Connection, root: &Path) -> Result<()> {
+    match current_git_branch(root) {
+        Some(branch) => crate::store::meta::upsert(tx, "synced_branch", &branch)?,
+        None => {
+            tx.execute("DELETE FROM meta WHERE key = 'synced_branch'", [])?;
+        }
+    }
+    Ok(())
+}
+
+/// Current branch name from `.git/HEAD`, without spawning git. Follows the
+/// `gitdir:` pointer of linked worktrees. Detached heads report the short
+/// commit as `detached@<12 hex>`.
+pub(crate) fn current_git_branch(root: &Path) -> Option<String> {
+    let git_dir = root.ancestors().find_map(|dir| {
+        let git = dir.join(".git");
+        if git.join("HEAD").is_file() {
+            return Some(git);
+        }
+        if git.is_file() {
+            // Linked worktree: `.git` is a file containing `gitdir: <path>`.
+            let content = fs::read_to_string(&git).ok()?;
+            let pointed = content.strip_prefix("gitdir:")?.trim();
+            let pointed = if Path::new(pointed).is_absolute() {
+                PathBuf::from(pointed)
+            } else {
+                dir.join(pointed)
+            };
+            if pointed.join("HEAD").is_file() {
+                return Some(pointed);
+            }
+        }
+        None
+    })?;
+    let head = fs::read_to_string(git_dir.join("HEAD")).ok()?;
+    let head = head.trim();
+    if let Some(reference) = head.strip_prefix("ref:") {
+        let reference = reference.trim();
+        let branch = reference.strip_prefix("refs/heads/").unwrap_or(reference);
+        return Some(branch.to_string());
+    }
+    // Detached HEAD: the file holds a commit hash.
+    let short: String = head.chars().take(12).collect();
+    if short.chars().all(|c| c.is_ascii_hexdigit()) && !short.is_empty() {
+        Some(format!("detached@{short}"))
+    } else {
+        None
+    }
 }
 
 fn ensure_graphtrail_ignored(root: &Path) -> Result<()> {
@@ -729,16 +792,42 @@ fn load_import_index(conn: &Connection) -> Result<HashMap<String, Vec<Import>>> 
     Ok(map)
 }
 
+/// A resolved call target plus how the resolver got there.
+///
+/// Confidence encodes the resolution path, not a probability: import-strict
+/// matches beat same-file matches, which beat cross-file name guesses. The
+/// values order the paths and leave room between them; consumers should treat
+/// them ordinally.
+struct ScoredTarget {
+    candidate: SymbolCandidate,
+    confidence: f64,
+}
+
+/// Import matched and the target's file agrees with the imported module.
+const CONFIDENCE_IMPORT_STRICT: f64 = 0.9;
+/// Same file, and the qualifier matched the candidate's container.
+const CONFIDENCE_SAME_FILE_QUALIFIED: f64 = 0.85;
+/// Same file, bare call.
+const CONFIDENCE_SAME_FILE_BARE: f64 = 0.8;
+/// Cross-file bare call and exactly one symbol has this name.
+const CONFIDENCE_NAME_UNIQUE: f64 = 0.7;
+/// Import matched but the module could not be pinned to indexed files.
+const CONFIDENCE_IMPORT_FALLBACK: f64 = 0.55;
+/// Cross-file bare call with several same-named candidates.
+const CONFIDENCE_NAME_AMBIGUOUS: f64 = 0.5;
+
 fn resolve_call(
     call: &PendingCall,
     name_index: &HashMap<String, Vec<SymbolCandidate>>,
     import_index: &HashMap<String, Vec<Import>>,
     source_index: &HashMap<String, SymbolCandidate>,
     file_index: &HashSet<String>,
-) -> Vec<SymbolCandidate> {
+) -> Vec<ScoredTarget> {
     let import_resolution = resolve_imported_call(call, name_index, import_index, file_index);
     let use_name_fallback = match import_resolution {
-        ImportResolution::Resolved(import_targets) => return import_targets,
+        ImportResolution::Resolved(import_targets) => {
+            return scored(import_targets, CONFIDENCE_IMPORT_STRICT);
+        }
         ImportResolution::Unresolved => return Vec::new(),
         ImportResolution::Fallback => true,
         ImportResolution::NoImport => false,
@@ -749,20 +838,43 @@ fn resolve_call(
     };
 
     if use_name_fallback {
-        return candidates.iter().take(8).cloned().collect();
+        return scored(
+            candidates.iter().take(8).cloned().collect(),
+            CONFIDENCE_IMPORT_FALLBACK,
+        );
     }
 
     if let Some(same_file) = resolve_same_file_call(call, candidates, source_index)
         && !same_file.is_empty()
     {
-        return same_file;
+        let confidence = if call.kind == CallKind::Bare {
+            CONFIDENCE_SAME_FILE_BARE
+        } else {
+            CONFIDENCE_SAME_FILE_QUALIFIED
+        };
+        return scored(same_file, confidence);
     }
 
     if call.kind != CallKind::Bare {
         return Vec::new();
     }
 
-    candidates.iter().take(8).cloned().collect()
+    let confidence = if candidates.len() == 1 {
+        CONFIDENCE_NAME_UNIQUE
+    } else {
+        CONFIDENCE_NAME_AMBIGUOUS
+    };
+    scored(candidates.iter().take(8).cloned().collect(), confidence)
+}
+
+fn scored(candidates: Vec<SymbolCandidate>, confidence: f64) -> Vec<ScoredTarget> {
+    candidates
+        .into_iter()
+        .map(|candidate| ScoredTarget {
+            candidate,
+            confidence,
+        })
+        .collect()
 }
 
 fn resolve_same_file_call(
@@ -912,6 +1024,10 @@ fn module_targets(source_file: &str, import: &Import, call_kind: CallKind) -> Mo
         targets.relative = rust_module_prefix(&import.module).is_some();
         if let Some(prefix) = rust_module_prefix(&import.module) {
             push_module_variants(&mut targets.files, &prefix, &["rs"]);
+            // `use crate::store::X` reaches X through src/store/mod.rs
+            // re-exports, so any file under the module directory is a
+            // legitimate definition site.
+            targets.dirs.push(format!("{prefix}/"));
         }
     } else if import.module.starts_with('.') {
         targets.relative = true;

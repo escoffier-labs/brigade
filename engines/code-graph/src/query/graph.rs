@@ -64,6 +64,9 @@ pub fn edges_for_symbol_id_with_depth(
     depth: usize,
 ) -> Result<Vec<EdgeRow>> {
     let depth = normalize_depth(depth);
+    // Pre-v6 databases have no confidence column; selecting it would error on
+    // a read-only connection that cannot migrate. Check once per query.
+    let has_confidence = crate::store::schema::table_has_column(conn, "edges", "confidence")?;
     let mut rows = Vec::new();
     let mut queue = VecDeque::from([(symbol_id.to_string(), 0usize)]);
     let mut visited_symbols = HashSet::from([symbol_id.to_string()]);
@@ -72,7 +75,9 @@ pub fn edges_for_symbol_id_with_depth(
         if current_hops >= depth {
             continue;
         }
-        for mut edge in direct_edges_for_symbol_id(conn, &current_symbol, direction)? {
+        for mut edge in
+            direct_edges_for_symbol_id(conn, &current_symbol, direction, has_confidence)?
+        {
             edge.hops = current_hops + 1;
             if rows.len() == EDGE_CAP_PER_DIRECTION {
                 rows.push(truncated_edge(direction, edge.hops, &current_symbol));
@@ -97,15 +102,21 @@ fn direct_edges_for_symbol_id(
     conn: &Connection,
     symbol_id: &str,
     direction: Direction,
+    has_confidence: bool,
 ) -> Result<Vec<EdgeRow>> {
     let (where_clause, order) = match direction {
         Direction::Incoming => ("e.target = ?1", "src.file_path, src.start_line"),
         Direction::Outgoing => ("e.source = ?1", "dst.file_path, dst.start_line"),
     };
+    let confidence_column = if has_confidence {
+        "e.confidence"
+    } else {
+        "NULL AS confidence"
+    };
     let sql = format!(
         r#"
         SELECT e.source, src.qualified_name, e.target, dst.qualified_name, e.kind, e.line,
-               src.file_path, dst.file_path
+               src.file_path, dst.file_path, {confidence_column}
         FROM edges e
         JOIN symbols src ON src.id = e.source
         JOIN symbols dst ON dst.id = e.target
@@ -125,6 +136,7 @@ fn direct_edges_for_symbol_id(
             source_file: row.get(6)?,
             target_file: row.get(7)?,
             hops: 1,
+            confidence: row.get::<_, Option<f64>>(8)?,
         })
     })?;
     let mut rows = Vec::new();
@@ -165,6 +177,7 @@ fn truncated_edge(direction: Direction, hops: usize, current_symbol: &str) -> Ed
         source_file: String::new(),
         target_file: String::new(),
         hops,
+        confidence: None,
     }
 }
 
