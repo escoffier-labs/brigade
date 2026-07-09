@@ -769,6 +769,102 @@ def test_rank_human_output_unchanged_without_delta_records(tmp_path, capsys):
     assert capsys.readouterr().out == expected
 
 
+def test_rank_surfaces_brief_hit_rate_and_uses_it_as_secondary_key(tmp_path, capsys):
+    # Equal Wilson scores: skill-high mean hit rate should rank above skill-low.
+    _seed(
+        tmp_path,
+        [
+            outcome.OutcomeRecord(
+                "skill-high",
+                "skill",
+                "t1",
+                "verify",
+                1,
+                "ref-h1",
+                "2026-06-20T00:00:00+00:00",
+                context_eval={"brief_hit_rate": 1.0, "hits": ["a.py"], "missed": []},
+            ),
+            outcome.OutcomeRecord(
+                "skill-high",
+                "skill",
+                "t2",
+                "verify",
+                1,
+                "ref-h2",
+                "2026-06-20T01:00:00+00:00",
+                context_eval={"brief_hit_rate": 0.5, "hits": ["a.py"], "missed": ["b.py"]},
+            ),
+            outcome.OutcomeRecord(
+                "skill-low",
+                "skill",
+                "t3",
+                "verify",
+                1,
+                "ref-l1",
+                "2026-06-20T02:00:00+00:00",
+                context_eval={"brief_hit_rate": 0.0, "hits": [], "missed": ["c.py"]},
+            ),
+            outcome.OutcomeRecord(
+                "skill-low",
+                "skill",
+                "t4",
+                "verify",
+                1,
+                "ref-l2",
+                "2026-06-20T03:00:00+00:00",
+                context_eval={"brief_hit_rate": 0.25, "hits": ["c.py"], "missed": ["d.py", "e.py", "f.py"]},
+            ),
+        ],
+    )
+
+    assert outcome_cmd.rank(target=tmp_path, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    ranking = {item["artifact_id"]: item for item in payload["ranking"]}
+    ids = [item["artifact_id"] for item in payload["ranking"]]
+    assert ids.index("skill-high") < ids.index("skill-low")
+    assert ranking["skill-high"]["brief_hit_rate"] == 0.75
+    assert ranking["skill-high"]["brief_hit_samples"] == 2
+    assert ranking["skill-low"]["brief_hit_rate"] == 0.125
+
+    assert outcome_cmd.rank(target=tmp_path, json_output=False) == 0
+    out = capsys.readouterr().out
+    assert "brief_hit: 0.750 (n=2)" in out
+    assert "brief_hit: 0.125 (n=2)" in out
+
+
+def test_reconcile_json_includes_brief_hit_rate_stats(tmp_path, capsys):
+    _seed(
+        tmp_path,
+        [
+            outcome.OutcomeRecord(
+                "skill-x",
+                "skill",
+                "t1",
+                "verify",
+                1,
+                "ref1",
+                "2026-06-20T00:00:00+00:00",
+                context_eval={"brief_hit_rate": 1.0},
+            ),
+            outcome.OutcomeRecord(
+                "skill-x",
+                "skill",
+                "t2",
+                "verify",
+                1,
+                "ref2",
+                "2026-06-20T01:00:00+00:00",
+                context_eval={"brief_hit_rate": 0.5},
+            ),
+        ],
+    )
+    assert outcome_cmd.reconcile(target=tmp_path, apply=False, json_output=True) == 0
+    decision = {item["artifact_id"]: item for item in json.loads(capsys.readouterr().out)["decisions"]}["skill-x"]
+    assert decision["action"] == "install"
+    assert decision["brief_hit_rate"] == 0.75
+    assert decision["brief_hit_samples"] == 2
+
+
 def test_record_appends_an_explicit_friction_cleared_signal(tmp_path, capsys):
     assert (
         outcome_cmd.record(

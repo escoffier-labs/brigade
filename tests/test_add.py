@@ -27,7 +27,24 @@ def test_add_installs_and_wires_station_tools(monkeypatch, tmp_target, capsys):
 def test_add_unknown_station_errors(tmp_target, capsys):
     rc = add_mod.run(target=tmp_target, station="nope")
     assert rc == 2
-    assert "unknown station" in capsys.readouterr().err.lower()
+    err = capsys.readouterr().err.lower()
+    assert "unknown station" in err or "unknown station or tool" in err
+
+
+def test_add_accepts_managed_tool_name(monkeypatch, tmp_target, capsys):
+    calls = []
+    monkeypatch.setattr(managed.proc, "which", lambda c: None)
+
+    def fake_run(args, **kw):
+        calls.append(args)
+        return managed.proc.Result(0, "", "")
+
+    monkeypatch.setattr(managed.proc, "run", fake_run)
+    rc = add_mod.run(target=tmp_target, station="graphtrail")
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "graphtrail" in out
+    assert any("cargo" in a for a in calls)
 
 
 def test_add_skips_install_when_already_present(monkeypatch, tmp_target):

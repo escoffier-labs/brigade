@@ -420,6 +420,48 @@ def _graph_delta_human_suffix(counts: dict[str, int] | None) -> str:
     return f" graph: {counts['graph_changing']} changing / {counts['graph_no_op']} no-op"
 
 
+def _brief_hit_rate_value(value) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value)
+
+
+def _brief_hit_stats(records: list[core.OutcomeRecord]) -> dict[str, float | int] | None:
+    """Aggregate context_eval.brief_hit_rate across scored records with a rate."""
+    rates: list[float] = []
+    for record in core.scored_records(records):
+        context_eval = record.context_eval
+        if not isinstance(context_eval, dict):
+            continue
+        rate = _brief_hit_rate_value(context_eval.get("brief_hit_rate"))
+        if rate is None:
+            continue
+        rates.append(rate)
+    if not rates:
+        return None
+    mean = round(sum(rates) / len(rates), 3)
+    return {
+        "brief_hit_rate": mean,
+        "brief_hit_samples": len(rates),
+        "brief_hit_min": round(min(rates), 3),
+        "brief_hit_max": round(max(rates), 3),
+    }
+
+
+def _brief_hit_stats_by_artifact(records: list[core.OutcomeRecord]) -> dict[str, dict[str, float | int]]:
+    return {
+        artifact_id: stats
+        for artifact_id, recs in _records_by_artifact(records).items()
+        if (stats := _brief_hit_stats(recs)) is not None
+    }
+
+
+def _brief_hit_human_suffix(stats: dict[str, float | int] | None) -> str:
+    if stats is None:
+        return ""
+    return f" brief_hit: {stats['brief_hit_rate']:.3f} (n={stats['brief_hit_samples']})"
+
+
 def score(*, target: Path, artifact_id: str | None = None, json_output: bool = False) -> int:
     target = target.expanduser().resolve()
     scores = _scores_by_artifact(load_records(target))
@@ -618,6 +660,7 @@ def reconcile(
     records = load_records(target)
     scores = _scores_by_artifact(records)
     graph_counts = _graph_delta_counts_by_artifact(records)
+    brief_stats = _brief_hit_stats_by_artifact(records)
     kinds: dict[str, str] = {}
     for record in records:
         kinds.setdefault(record.artifact_id, record.artifact_kind or "skill")
@@ -696,6 +739,9 @@ def reconcile(
         counts = graph_counts.get(decision.artifact_id)
         if counts is not None:
             item.update(counts)
+        stats = brief_stats.get(decision.artifact_id)
+        if stats is not None:
+            item.update(stats)
         decisions_payload.append(item)
     payload = {
         "target": str(target),
@@ -717,9 +763,10 @@ def reconcile(
         # byte-identical to a dry-run that did nothing.
         tail = f" -> {executions[decision.artifact_id]}" if apply and decision.artifact_id in executions else ""
         graph_tail = _graph_delta_human_suffix(graph_counts.get(decision.artifact_id))
+        brief_tail = _brief_hit_human_suffix(brief_stats.get(decision.artifact_id))
         print(
             f"- {decision.artifact_id} {prior_status} -> {shown_status} "
-            f"[{decision.action}] {decision.reason}{graph_tail}{tail}"
+            f"[{decision.action}] {decision.reason}{graph_tail}{brief_tail}{tail}"
         )
     return 0
 
@@ -729,17 +776,27 @@ def rank(*, target: Path, json_output: bool = False) -> int:
 
     The blended retrieval score (rank_score) leaves room for confidence and
     keyword inputs that the live retrieval path supplies; on its own it orders
-    by what a real signal has confirmed.
+    by what a real signal has confirmed. When context_eval samples exist,
+    mean brief_hit_rate is a secondary quality key so skills whose pre-run
+    context named the files they actually touched rise among equal scores.
+    Install/rollback thresholds still use verified exit-code signals only.
     """
     target = target.expanduser().resolve()
     records = load_records(target)
     scores = _scores_by_artifact(records)
     graph_counts = _graph_delta_counts_by_artifact(records)
+    brief_stats = _brief_hit_stats_by_artifact(records)
 
     def blended(item: core.OutcomeScore) -> float:
         return core.rank_score(confidence=0.0, outcome=item.score, keyword=0.0)
 
-    ordered = sorted(scores.values(), key=lambda item: (-blended(item), item.artifact_id))
+    def sort_key(item: core.OutcomeScore) -> tuple:
+        stats = brief_stats.get(item.artifact_id)
+        # Missing brief samples sort after measured ones at the same Wilson score.
+        hit = float(stats["brief_hit_rate"]) if stats is not None else -1.0
+        return (-blended(item), -hit, item.artifact_id)
+
+    ordered = sorted(scores.values(), key=sort_key)
     ranking_payload = []
     for item in ordered:
         entry = {
@@ -752,6 +809,9 @@ def rank(*, target: Path, json_output: bool = False) -> int:
         counts = graph_counts.get(item.artifact_id)
         if counts is not None:
             entry.update(counts)
+        stats = brief_stats.get(item.artifact_id)
+        if stats is not None:
+            entry.update(stats)
         ranking_payload.append(entry)
     payload = {
         "target": str(target),
@@ -766,7 +826,10 @@ def rank(*, target: Path, json_output: bool = False) -> int:
         return 0
     for item in ordered:
         graph_tail = _graph_delta_human_suffix(graph_counts.get(item.artifact_id))
-        print(f"- {item.artifact_id} score={item.score:.3f} helped={item.helped} hurt={item.hurt}{graph_tail}")
+        brief_tail = _brief_hit_human_suffix(brief_stats.get(item.artifact_id))
+        print(
+            f"- {item.artifact_id} score={item.score:.3f} helped={item.helped} hurt={item.hurt}{graph_tail}{brief_tail}"
+        )
     return 0
 
 

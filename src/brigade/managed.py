@@ -247,6 +247,20 @@ def _agent_notify_wire(ctx: DoctorContext) -> List[CheckResult]:
     ]
 
 
+def _graphtrail_doctor(ctx: DoctorContext) -> List[CheckResult]:
+    """Health-check GraphTrail for the target workspace (optional station)."""
+    name = "graphtrail (code graph)"
+    if not proc.which("graphtrail"):
+        return [(MANUAL, name, "not installed; cargo install graphtrail")]
+    db = ctx.target / ".graphtrail" / "graphtrail.db"
+    if not db.is_file():
+        return [(WARN, name, "installed; run `graphtrail sync` to build .graphtrail/graphtrail.db")]
+    r = proc.run(["graphtrail", "doctor", "--json"], timeout=30.0)
+    if r.code != 0:
+        return [(WARN, name, f"doctor exit {r.code}; graph may need re-sync")]
+    return [(OK, name, f"db present at {db}")]
+
+
 # miseledger (which absorbed the stationtrail/sourceharvest exporters in v0.3.0)
 # operates on the operator's host-global evidence archive and local session logs,
 # not a per-target workspace. Like the memory and pantry satellites, its findings
@@ -423,6 +437,22 @@ _TOOLS: Tuple[ManagedTool, ...] = (
             _surface("doctor-json", ("miseledger", "status", "--json"), timeout_seconds=120.0),
             _surface("brief-markdown", ("miseledger", "export", "--markdown"), timeout_seconds=10.0, max_chars=4000),
             _surface("verify-exit", ("miseledger", "doctor"), timeout_seconds=120.0),
+        ),
+    ),
+    # GraphTrail closes the other half of the receipts-to-context loop: code-graph
+    # briefs and deltas on verify/run receipts. Install is cargo-based; doctor is
+    # fail-open (MANUAL when absent) like every other optional sidecar.
+    ManagedTool(
+        name="graphtrail",
+        station="search",
+        command="graphtrail",
+        summary="local code-graph CLI: callers, callees, impact, context briefs, and structural diffs",
+        install_args=["cargo", "install", "graphtrail"],
+        wire=_noop_wire,
+        doctor=_graphtrail_doctor,
+        surfaces=(
+            _surface("verify-exit", ("graphtrail", "--version"), timeout_seconds=10.0),
+            _surface("doctor-json", ("graphtrail", "doctor", "--json"), timeout_seconds=30.0),
         ),
     ),
 )
