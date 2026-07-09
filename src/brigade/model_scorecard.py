@@ -29,6 +29,7 @@ class ModelRow:
     worker_seats: int
     orchestrator_seats: int
     worker_ok: int
+    orch_ok: int
     suspected_no_op: int
     total_duration_seconds: float
     first_seen: str | None
@@ -49,6 +50,12 @@ class ModelRow:
         if self.worker_seats <= 0:
             return 0.0
         return self.worker_ok / self.worker_seats
+
+    @property
+    def orch_rate(self) -> float:
+        if self.orchestrator_seats <= 0:
+            return 0.0
+        return self.orch_ok / self.orchestrator_seats
 
     @property
     def mean_duration_seconds(self) -> float:
@@ -73,6 +80,7 @@ class _Acc:
     worker_seats: int = 0
     orchestrator_seats: int = 0
     worker_ok: int = 0
+    orch_ok: int = 0
     suspected_no_op_runs: set[str] = field(default_factory=set)
     total_duration_seconds: float = 0.0
     first_seen: str | None = None
@@ -98,6 +106,7 @@ class _Acc:
             worker_seats=self.worker_seats,
             orchestrator_seats=self.orchestrator_seats,
             worker_ok=self.worker_ok,
+            orch_ok=self.orch_ok,
             suspected_no_op=len(self.suspected_no_op_runs),
             total_duration_seconds=self.total_duration_seconds,
             first_seen=self.first_seen,
@@ -202,6 +211,17 @@ def _ground_truth_empty_changes(gt: Any) -> bool:
     return len(real) == 0
 
 
+def _orchestrator_completed_plan(plan_attempts: Any) -> bool:
+    if not isinstance(plan_attempts, dict):
+        return False
+    attempts = plan_attempts.get("attempts")
+    if not isinstance(attempts, list):
+        return False
+    # run.json uses "failed" for both planning and synthesis failures. plan()
+    # records parsed=True only after an attempt produced accepted assignments.
+    return any(isinstance(attempt, dict) and attempt.get("parsed") is True for attempt in attempts)
+
+
 def build_scorecard(
     *,
     target: Path | None = None,
@@ -301,6 +321,9 @@ def _scan_run_dir(
         if wr_err is not None:
             return False, wr_err
 
+    plan_attempts, _ = _read_json_object(run_dir / "plan-attempts.json")
+    orchestrator_completed_plan = _orchestrator_completed_plan(plan_attempts)
+
     # All inputs valid — mutate into.
     for name, agent in agents_raw.items():
         if not isinstance(name, str) or not isinstance(agent, dict):
@@ -316,6 +339,8 @@ def _scan_run_dir(
         bucket.note_seen(started_at, run_id, duration_f)
         if orchestrator_name is not None and name == orchestrator_name:
             bucket.orchestrator_seats += 1
+            if orchestrator_completed_plan:
+                bucket.orch_ok += 1
 
     results: list[Any] = []
     ground_truth: Any = None
@@ -368,6 +393,7 @@ def _merge_acc(
                 worker_seats=src_bucket.worker_seats,
                 orchestrator_seats=src_bucket.orchestrator_seats,
                 worker_ok=src_bucket.worker_ok,
+                orch_ok=src_bucket.orch_ok,
                 suspected_no_op_runs=set(src_bucket.suspected_no_op_runs),
                 total_duration_seconds=src_bucket.total_duration_seconds,
                 first_seen=src_bucket.first_seen,
@@ -382,6 +408,7 @@ def _merge_acc(
         dst.worker_seats += src_bucket.worker_seats
         dst.orchestrator_seats += src_bucket.orchestrator_seats
         dst.worker_ok += src_bucket.worker_ok
+        dst.orch_ok += src_bucket.orch_ok
         dst.suspected_no_op_runs |= src_bucket.suspected_no_op_runs
         dst.total_duration_seconds += src_bucket.total_duration_seconds
         if src_bucket.first_seen is not None and (dst.first_seen is None or src_bucket.first_seen < dst.first_seen):
@@ -402,6 +429,8 @@ def scorecard_to_dict(card: Scorecard) -> dict[str, Any]:
                 "mean_duration_seconds": row.mean_duration_seconds,
                 "model": row.model,
                 "ok_rate": row.ok_rate,
+                "orch_ok": row.orch_ok,
+                "orch_rate": row.orch_rate,
                 "orchestrator_seats": row.orchestrator_seats,
                 "runs": row.runs,
                 "seats": row.seats,
@@ -436,6 +465,8 @@ def format_scorecard_text(card: Scorecard, *, verbose: bool = False) -> str:
         "seats",
         "w_ok",
         "ok_rate",
+        "orch_ok",
+        "orch_rate",
         "noop",
         "mean_dur",
         "first_seen",
@@ -450,6 +481,8 @@ def format_scorecard_text(card: Scorecard, *, verbose: bool = False) -> str:
                 f"{row.worker_seats}+{row.orchestrator_seats}",
                 str(row.worker_ok),
                 _format_rate(row.ok_rate),
+                str(row.orch_ok) if row.orchestrator_seats else "-",
+                _format_rate(row.orch_rate) if row.orchestrator_seats else "-",
                 str(row.suspected_no_op),
                 _format_duration(row.mean_duration_seconds),
                 row.first_seen or "-",

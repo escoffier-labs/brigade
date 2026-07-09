@@ -27,6 +27,7 @@ def _write_run(
     agents: dict | None = None,
     results: list | None = None,
     ground_truth: dict | None = None,
+    plan_attempts: list | None = None,
     include_worker_results: bool = True,
 ) -> Path:
     """Write a realistic run artifact tree under run_dir."""
@@ -54,6 +55,22 @@ def _write_run(
             "timeout_seconds": 600.0,
             "allow_models": [],
             "agents": agents,
+        },
+    )
+    _write_json(
+        run_dir / "plan-attempts.json",
+        {
+            "attempts": plan_attempts
+            if plan_attempts is not None
+            else [
+                {
+                    "stage": "initial",
+                    "ok": True,
+                    "parsed": True,
+                    "detail": "",
+                    "text": '{"assignments": []}',
+                }
+            ]
         },
     )
     if include_worker_results:
@@ -170,6 +187,38 @@ def test_worker_ok_count_and_ok_rate(tmp_path):
     assert coder.worker_seats == 2
     assert coder.worker_ok == 1
     assert coder.ok_rate == pytest.approx(0.5)
+
+
+def test_orchestrator_ok_count_and_rate_from_parsed_plan_attempts(tmp_path):
+    runs = _runs_root(tmp_path)
+    agents = {
+        "chef": {"cli": "codex", "model": "gpt-5", "role": "plan"},
+        "coder": {"cli": "claude", "model": "m1", "role": "code"},
+    }
+    _write_run(runs / "plan-ok", agents=agents)
+    _write_run(
+        runs / "plan-failed",
+        status="failed",
+        started_at="2026-05-27T14:00:00Z",
+        agents=agents,
+        plan_attempts=[
+            {
+                "stage": "initial",
+                "ok": False,
+                "parsed": False,
+                "detail": "orchestrator timed out",
+                "text": "",
+            }
+        ],
+        include_worker_results=False,
+    )
+
+    card = model_scorecard.build_scorecard(target=tmp_path)
+    chef = next(row for row in card.models if row.label == "codex/gpt-5")
+
+    assert chef.orchestrator_seats == 2
+    assert chef.orch_ok == 1
+    assert chef.orch_rate == pytest.approx(0.5)
 
 
 def test_suspected_no_op_flag_per_run_count_per_model(tmp_path):
@@ -372,6 +421,8 @@ def test_json_stable_shape(tmp_path):
         "seats",
         "worker_ok",
         "ok_rate",
+        "orch_ok",
+        "orch_rate",
         "suspected_no_op",
         "total_duration_seconds",
         "mean_duration_seconds",
@@ -446,6 +497,8 @@ def test_cli_scorecard_text_table_and_footer(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "claude/claude-fable-5" in out or "claude" in out
     assert "codex" in out
+    assert "orch_ok" in out
+    assert "orch_rate" in out
     assert "scanned" in out.lower()
     assert "skipped" in out.lower()
 
