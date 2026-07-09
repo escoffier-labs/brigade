@@ -19,11 +19,11 @@ def _stdio():
 
 
 def test_user_scope_adapters_registered():
-    for name in ("codex-user", "claude-user", "openclaw", "grok-user"):
+    for name in ("codex-user", "claude-user", "openclaw", "grok-user", "hermes"):
         a = A.ADAPTERS[name]
         assert a.user_scope is True
         assert a.path.startswith("~")
-    assert {"codex-user", "claude-user", "openclaw", "grok-user"} <= set(A.MCP_TARGETS)
+    assert {"codex-user", "claude-user", "openclaw", "grok-user", "hermes"} <= set(A.MCP_TARGETS)
 
 
 def test_codex_user_is_toml_codex_shape():

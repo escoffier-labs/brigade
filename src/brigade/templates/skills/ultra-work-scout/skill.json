@@ -1,0 +1,7 @@
+{
+  "id": "ultra-work-scout",
+  "title": "ultra-work-scout",
+  "version": "0.1.0",
+  "description": "Turn a large request into a small number of parallel, bounded scouting jobs before changing code, then bring the results back into one implementation path.",
+  "tests": ["brigade skills lint ultra-work-scout"]
+}
