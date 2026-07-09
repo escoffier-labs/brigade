@@ -166,6 +166,7 @@ def discover_payload(
                 tools.append(
                     {
                         "name": tool.name,
+                        "kind": tool.kind,
                         "command": tool.command,
                         "summary": tool.summary,
                         "install": list(tool.install),
@@ -176,6 +177,9 @@ def discover_payload(
                                 "read_only": surface.read_only,
                                 "timeout_seconds": surface.timeout_seconds,
                                 "max_chars": surface.max_chars,
+                                "probe": list(surface.probe),
+                                "probe_contains": list(surface.probe_contains),
+                                "placeholders": list(surface.placeholders),
                             }
                             for surface in tool.surfaces
                         ],
@@ -187,15 +191,24 @@ def discover_payload(
                     "name": manifest.name,
                     "station": manifest.station,
                     "summary": manifest.summary,
+                    "lifecycle": manifest.lifecycle,
+                    "owner": manifest.owner,
                     "tools": tools,
                     "add_command": f"brigade add {manifest.path.parent}",
                 }
             )
 
+    lifecycle_counts = {lifecycle: 0 for lifecycle in station_manifest.LIFECYCLES}
+    for manifest in found:
+        lifecycle_counts[manifest["lifecycle"]] += 1
+
     return {
         "roots": [str(r) for r in search_roots],
         "max_depth": max_depth,
         "count": len(found),
+        "active_count": lifecycle_counts["active"],
+        "non_active_count": len(found) - lifecycle_counts["active"],
+        "lifecycle_counts": lifecycle_counts,
         "manifests": found,
         "errors": errors,
         "docs": {
@@ -216,10 +229,13 @@ def discover(
     if json_output:
         _json_print(payload)
         return 0
-    print(f"brigade stations discover: {payload['count']} station.json file(s)")
+    print(
+        f"brigade stations discover: {payload['count']} station.json file(s) "
+        f"({payload['active_count']} active, {payload['non_active_count']} non-active)"
+    )
     for row in payload["manifests"]:
         tool_names = ", ".join(tool["name"] for tool in row["tools"]) or "(none)"
-        print(f"  {row['name']}  station={row['station']}  tools={tool_names}")
+        print(f"  {row['name']}  station={row['station']}  lifecycle={row['lifecycle']}  tools={tool_names}")
         print(f"    path: {row['path']}")
         print(f"    next: {row['add_command']}")
     if payload["errors"]:

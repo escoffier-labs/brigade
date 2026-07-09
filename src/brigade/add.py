@@ -133,11 +133,19 @@ def _run_manifest_add(ref: str, *, install_manifest: bool) -> int:
     print(f"station manifest: {manifest.name} ({manifest.station})")
     print(f"  summary: {manifest.summary}")
     print(f"  path: {manifest.path}")
+    print(f"  lifecycle: {manifest.lifecycle}")
+    if manifest.owner:
+        print(f"  maintained owner: {manifest.owner}")
+    if manifest.lifecycle != "active":
+        print(f"  {manifest.lifecycle} manifests are informational; no external install action was taken.")
+        return 0
     rc = 0
     for tool in manifest.tools:
-        installed = managed.proc.which(tool.command) is not None
+        installed = tool.kind == "executable" and managed.proc.which(tool.command) is not None
         marker = "installed" if installed else "missing"
-        print(f"  [{marker}] {tool.name}: {tool.summary or tool.command}")
+        if tool.kind == "skill-roster":
+            marker = "skill-roster"
+        print(f"  [{marker}] {tool.name}: {tool.summary or tool.command or tool.kind}")
         if tool.install:
             if install_manifest and not installed:
                 print(f"    install: {' '.join(tool.install)}")
@@ -156,6 +164,10 @@ def _run_manifest_add(ref: str, *, install_manifest: bool) -> int:
                 extras.append(f"max_chars={surface.max_chars}")
             suffix = f" ({', '.join(extras)})" if extras else ""
             print(f"    surface[{surface.kind}]: {' '.join(surface.command)}{suffix}")
+            if surface.probe:
+                print(f"      probe: {' '.join(surface.probe)}")
+            if surface.probe_contains:
+                print(f"      probe_contains: {', '.join(surface.probe_contains)}")
     if not install_manifest:
         print("\nManifest install commands were not run. Re-run with `--install` to execute them.")
     return rc

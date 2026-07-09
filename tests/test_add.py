@@ -2,6 +2,8 @@
 
 import json
 
+import pytest
+
 from brigade import add as add_mod
 from brigade import managed
 from brigade import station_manifest
@@ -153,3 +155,102 @@ def test_station_manifest_rejects_invalid_schema(tmp_path):
         assert "schema" in str(exc)
     else:
         raise AssertionError("expected ValueError")
+
+
+@pytest.mark.parametrize("lifecycle", ["embedded", "deprecated", "historical"])
+def test_add_non_active_manifest_never_takes_external_action(monkeypatch, tmp_target, tmp_path, capsys, lifecycle):
+    manifest_dir = tmp_path / lifecycle
+    manifest_dir.mkdir()
+    (manifest_dir / "station.json").write_text(
+        json.dumps(
+            {
+                "schema": station_manifest.SCHEMA,
+                "name": f"{lifecycle}-sidecar",
+                "station": "guard",
+                "summary": "retired external package",
+                "lifecycle": lifecycle,
+                "owner": "brigade-cli",
+                "tools": [
+                    {
+                        "name": "old-sidecar",
+                        "command": "old-sidecar",
+                        "install": ["pipx", "install", "old-sidecar"],
+                    }
+                ],
+            }
+        )
+    )
+    monkeypatch.setattr(
+        managed.proc,
+        "which",
+        lambda command: pytest.fail(f"unexpected executable lookup: {command}"),
+    )
+    monkeypatch.setattr(
+        managed.proc,
+        "run",
+        lambda args, **kwargs: pytest.fail(f"unexpected external action: {args}"),
+    )
+
+    rc = add_mod.run(
+        target=tmp_target,
+        station=str(manifest_dir),
+        install_manifest=True,
+    )
+
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert f"lifecycle: {lifecycle}" in out
+    assert "maintained owner: brigade-cli" in out
+    assert "no external install action was taken" in out
+
+
+def test_add_skill_roster_does_not_use_executable_discovery(monkeypatch, tmp_target, tmp_path, capsys):
+    manifest_dir = tmp_path / "skill-roster"
+    manifest_dir.mkdir()
+    (manifest_dir / "station.json").write_text(
+        json.dumps(
+            {
+                "schema": station_manifest.SCHEMA,
+                "name": "example-skills",
+                "station": "skills",
+                "summary": "portable skill roster",
+                "tools": [
+                    {
+                        "name": "example-skills",
+                        "kind": "skill-roster",
+                        "summary": "portable skills",
+                        "install": ["npx", "skills", "add", "example.invalid/skills"],
+                        "surfaces": [
+                            {
+                                "kind": "verify-exit",
+                                "command": ["bash", "tests/lint-skills.sh"],
+                            }
+                        ],
+                    }
+                ],
+            }
+        )
+    )
+    calls = []
+    monkeypatch.setattr(
+        managed.proc,
+        "which",
+        lambda command: pytest.fail(f"unexpected executable lookup: {command}"),
+    )
+
+    def fake_run(args, **kwargs):
+        calls.append(args)
+        return managed.proc.Result(0, "", "")
+
+    monkeypatch.setattr(managed.proc, "run", fake_run)
+
+    rc = add_mod.run(
+        target=tmp_target,
+        station=str(manifest_dir),
+        install_manifest=True,
+    )
+
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert calls == [["npx", "skills", "add", "example.invalid/skills"]]
+    assert "[skill-roster] example-skills" in out
