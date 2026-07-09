@@ -28,5 +28,10 @@ Architecture: verification receipts reference the previous receipt by stable met
 
 ### Task 3: Final verification
 
-- [ ] Run through Brigade with `PY` pointing at the existing development venv: `./scripts/verify`.
-- [ ] Generate two temporary verification receipts and assert the second stays below 100 KB and parses with `jq`.
+- [x] Run through Brigade with `PY` pointing at the existing development venv: `./scripts/verify`.
+- [x] Generate two temporary verification receipts and assert the second stays below 100 KB and parses with `jq`.
+
+Verification evidence:
+
+- Branch-backed Brigade run `20260709-201930-work-verify-342ea9`: Ruff checks passed, 374 files were already formatted, version 0.21.1 matched 12 locations, and pytest reported 1,813 passed and 1 skipped.
+- Temporary branch-backed receipts were 3,257 bytes and 3,582 bytes. The second parsed with `jq`, contained only `digest`, `path`, `run_id`, and `status` in its prior-receipt reference, matched the first receipt digest, and remained below 100 KB.
