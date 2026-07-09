@@ -429,6 +429,124 @@ fn hidden_paths_are_indexed() {
     );
 }
 
+#[test]
+fn new_definition_resolves_calls_from_unchanged_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write_file(root.join("b.py"), "def run():\n    helper()\n");
+
+    let conn = open_graph(root);
+    let first = sync_repo(&conn, root).unwrap();
+    assert!(!first.unchanged);
+    assert_eq!(edge_count(&conn), 0, "helper is undefined, no edges yet");
+    let b_indexed_at = indexed_at(&conn, "b.py");
+
+    // Define helper in a new file; b.py itself does not change.
+    sleep(Duration::from_millis(1100));
+    write_file(root.join("a.py"), "def helper():\n    return 1\n");
+    let second = sync_repo(&conn, root).unwrap();
+
+    assert!(!second.unchanged);
+    assert_eq!(
+        indexed_at(&conn, "b.py"),
+        b_indexed_at,
+        "unchanged file must not be re-extracted"
+    );
+    assert_eq!(
+        edge_names(&conn),
+        vec![("run".to_string(), "helper".to_string())],
+        "call in the unchanged file must resolve to the new definition"
+    );
+
+    // Remove the definition again; the derived edge must disappear, not linger.
+    sleep(Duration::from_millis(1100));
+    write_file(root.join("a.py"), "def helper2():\n    return 1\n");
+    let third = sync_repo(&conn, root).unwrap();
+
+    assert!(!third.unchanged);
+    assert_eq!(indexed_at(&conn, "b.py"), b_indexed_at);
+    assert_eq!(
+        edge_count(&conn),
+        0,
+        "stale resolution must be dropped when its target goes away"
+    );
+}
+
+#[test]
+fn sync_upgrades_v4_schema_and_repopulates_pending_calls() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write_file(root.join("a.py"), "def helper():\n    return 1\n");
+    write_file(root.join("b.py"), "def run():\n    helper()\n");
+
+    let conn = open_graph(root);
+    let first = sync_repo(&conn, root).unwrap();
+    assert!(!first.unchanged);
+    assert_eq!(edge_names(&conn), vec![("run".into(), "helper".into())]);
+
+    // Simulate a v4 database: no pending_calls table, stored version 4.
+    conn.execute("DROP TABLE pending_calls", []).unwrap();
+    conn.execute(
+        "UPDATE meta SET value = '4' WHERE key = 'schema_version'",
+        [],
+    )
+    .unwrap();
+
+    let second = sync_repo(&conn, root).unwrap();
+
+    assert!(!second.unchanged, "v4 database must trigger a reindex");
+    assert_eq!(
+        meta::read(&conn, "schema_version").unwrap().as_deref(),
+        Some(SCHEMA_VERSION.to_string().as_str())
+    );
+    let pending: i64 = conn
+        .query_row("SELECT COUNT(*) FROM pending_calls", [], |row| row.get(0))
+        .unwrap();
+    assert!(pending > 0, "reindex must repopulate pending_calls");
+    assert_eq!(edge_names(&conn), vec![("run".into(), "helper".into())]);
+}
+
+#[test]
+fn sync_fails_fast_when_lock_is_held() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write_file(root.join("a.py"), "def helper():\n    return 1\n");
+
+    let conn = open_graph(root);
+    let lock_file = root.join("g.db.lock");
+    fs::write(&lock_file, format!("{}\n", std::process::id())).unwrap();
+
+    let err = sync_repo(&conn, root).unwrap_err();
+    assert!(
+        err.to_string().contains("another sync is already running"),
+        "unexpected error: {err}"
+    );
+
+    fs::remove_file(&lock_file).unwrap();
+    let summary = sync_repo(&conn, root).unwrap();
+    assert!(!summary.unchanged);
+    assert!(
+        !lock_file.exists(),
+        "sync must release the lock when it finishes"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn sync_reclaims_lock_from_dead_process() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write_file(root.join("a.py"), "def helper():\n    return 1\n");
+
+    let conn = open_graph(root);
+    // PIDs are capped far below this on Linux, so this owner cannot be alive.
+    fs::write(root.join("g.db.lock"), "999999999\n").unwrap();
+
+    let summary = sync_repo(&conn, root).unwrap();
+    assert!(!summary.unchanged);
+    assert!(!root.join("g.db.lock").exists());
+}
+
 fn make_git_repo(root: &Path) {
     fs::create_dir_all(root.join(".git")).unwrap();
     fs::write(root.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
@@ -471,6 +589,27 @@ fn indexed_at(conn: &Connection, path: &str) -> i64 {
         |row| row.get(0),
     )
     .unwrap()
+}
+
+fn edge_count(conn: &Connection) -> i64 {
+    conn.query_row("SELECT COUNT(*) FROM edges", [], |row| row.get(0))
+        .unwrap()
+}
+
+/// (source name, target name) pairs for every call edge, ordered.
+fn edge_names(conn: &Connection) -> Vec<(String, String)> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT src.name, dst.name FROM edges e
+             JOIN symbols src ON src.id = e.source
+             JOIN symbols dst ON dst.id = e.target
+             ORDER BY src.name, dst.name",
+        )
+        .unwrap();
+    stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .map(|row| row.unwrap())
+        .collect()
 }
 
 fn extractor_fingerprint(conn: &Connection, path: &str) -> Option<String> {

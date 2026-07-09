@@ -1,9 +1,13 @@
 //! Repository sync: walk files, extract graphs, and write them transactionally.
 //!
 //! Sync is incremental: a stat pass (size + mtime, confirmed by content hash when those differ)
-//! decides whether anything actually changed. If nothing did, sync skips all parsing and only
-//! refreshes sync metadata. When something changed (or `force`), it rebuilds the present files and
-//! purges rows for files that were deleted from disk.
+//! decides which files actually changed. Only those files are re-parsed, one at a time, so peak
+//! memory stays at a single file's graph regardless of repository size. Unresolved calls are
+//! persisted in `pending_calls`, and edges are derived state: after any change they are rebuilt
+//! from every stored pending call, so a new definition in one file updates call resolutions in
+//! files that did not change. If nothing changed, sync skips all parsing and only refreshes sync
+//! metadata. A `<db>.lock` file (stale locks from dead processes are reclaimed) keeps concurrent
+//! syncs from duplicating the work.
 
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, OpenOptions};
@@ -24,7 +28,7 @@ use crate::extractors::{extractor_fingerprint_for, index_file, language_for};
 use crate::model::{CallKind, IgnoredSummary, Import, Lang, PendingCall, PendingChanges};
 use crate::store::db::now_ts;
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct SyncSummary {
     pub files: usize,
     pub symbols: usize,
@@ -53,7 +57,6 @@ struct DbFile {
 
 struct StalePlan<'a> {
     entries: Vec<&'a Entry>,
-    requires_full_reindex: bool,
 }
 
 pub(crate) struct SyncWalk {
@@ -84,6 +87,7 @@ pub fn sync_repo(conn: &Connection, root: &Path) -> Result<SyncSummary> {
 pub fn sync_repo_force(conn: &Connection, root: &Path, force: bool) -> Result<SyncSummary> {
     let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
     guard_unsafe_root(&root)?;
+    let _lock = acquire_sync_lock(conn)?;
     let graph_dir_created = crate::store::db::take_created_graph_dir(&root.join(".graphtrail"));
     let upgraded = crate::store::schema::upgrade_for_sync(conn)?;
     let force_full_reindex = force || upgraded;
@@ -103,18 +107,10 @@ pub fn sync_repo_force(conn: &Connection, root: &Path, force: bool) -> Result<Sy
         .cloned()
         .collect();
 
-    let stale_plan = if force_full_reindex {
-        StalePlan {
-            entries: entries.iter().collect(),
-            requires_full_reindex: true,
-        }
-    } else {
-        stale_plan(&entries, &db_files)?
-    };
-    let files_to_index: Vec<&Entry> = if stale_plan.requires_full_reindex {
+    let files_to_index: Vec<&Entry> = if force_full_reindex {
         entries.iter().collect()
     } else {
-        stale_plan.entries
+        stale_plan(&entries, &db_files)?.entries
     };
 
     let changed = !deleted.is_empty() || !files_to_index.is_empty();
@@ -134,118 +130,38 @@ pub fn sync_repo_force(conn: &Connection, root: &Path, force: bool) -> Result<Sy
         });
     }
 
-    // Rebuild changed files and purge rows for deleted files. Content changes
-    // still rebuild all present files because pending call resolution is not stored.
-    let mut graphs = Vec::with_capacity(files_to_index.len());
-    for entry in files_to_index {
-        graphs.push(index_file(&root, &entry.path, entry.lang)?);
-    }
-
     let tx = conn.unchecked_transaction()?;
-    let mut purge: Vec<String> = graphs.iter().map(|g| g.path.clone()).collect();
-    purge.extend(deleted.iter().cloned());
+
+    // Purge rows for files about to be re-indexed and files deleted from disk.
+    // Edges are not purged per file: they are derived state, rebuilt below.
+    let mut purge: Vec<&str> = files_to_index
+        .iter()
+        .map(|entry| entry.rel.as_str())
+        .collect();
+    purge.extend(deleted.iter().map(String::as_str));
     for path in &purge {
-        let delete_target_edges = stale_plan.requires_full_reindex || deleted.contains(path);
-        tx.execute(
-            "DELETE FROM edges WHERE source IN (SELECT id FROM symbols WHERE file_path = ?1)",
-            params![path],
-        )?;
-        if delete_target_edges {
-            tx.execute(
-                "DELETE FROM edges WHERE target IN (SELECT id FROM symbols WHERE file_path = ?1)",
-                params![path],
-            )?;
-        }
         tx.execute(
             "DELETE FROM symbols_fts WHERE file_path = ?1",
             params![path],
         )?;
         tx.execute("DELETE FROM symbols WHERE file_path = ?1", params![path])?;
         tx.execute("DELETE FROM imports WHERE file_path = ?1", params![path])?;
+        tx.execute(
+            "DELETE FROM pending_calls WHERE file_path = ?1",
+            params![path],
+        )?;
         tx.execute("DELETE FROM files WHERE path = ?1", params![path])?;
     }
 
+    // Extract and write one file at a time so peak memory stays at a single
+    // file's graph no matter how many files changed.
     let now = now_ts();
-    for graph in &graphs {
-        let lang =
-            language_for(Path::new(&graph.path)).expect("indexed graph has a known language");
-        tx.execute(
-            "INSERT OR REPLACE INTO files(path, content_hash, size, modified_at, indexed_at, language, extractor_fingerprint)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            params![
-                graph.path,
-                graph.hash,
-                graph.size as i64,
-                graph.modified_at,
-                now,
-                graph.language,
-                extractor_fingerprint_for(lang)
-            ],
-        )?;
-        for symbol in &graph.symbols {
-            tx.execute(
-                "INSERT INTO symbols(id, kind, name, qualified_name, file_path, start_line, end_line, signature, container, content_hash, body_hash)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
-                params![
-                    symbol.id,
-                    symbol.kind,
-                    symbol.name,
-                    symbol.qualified_name,
-                    symbol.file_path,
-                    symbol.start_line as i64,
-                    symbol.end_line as i64,
-                    symbol.signature,
-                    symbol.container,
-                    symbol.content_hash,
-                    symbol.body_hash,
-                ],
-            )?;
-            tx.execute(
-                "INSERT INTO symbols_fts(symbol_id, name, qualified_name, signature, file_path)
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![
-                    symbol.id,
-                    symbol.name,
-                    symbol.qualified_name,
-                    symbol.signature,
-                    symbol.file_path
-                ],
-            )?;
-        }
-        for import in &graph.imports {
-            tx.execute(
-                "INSERT INTO imports(file_path, module, local_name, imported_name, alias, line)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                params![
-                    graph.path,
-                    import.module,
-                    import.local_name,
-                    import.imported_name,
-                    import.alias,
-                    import.line as i64
-                ],
-            )?;
-        }
+    for entry in files_to_index {
+        let graph = index_file(&root, &entry.path, entry.lang)?;
+        write_file_graph(&tx, &graph, now)?;
     }
 
-    let name_index = load_name_index(&tx)?;
-    let import_index = load_import_index(&tx)?;
-    let source_index = load_symbol_id_index(&tx)?;
-    let file_index = load_file_index(&tx)?;
-    for graph in &graphs {
-        for call in &graph.calls {
-            let chosen = resolve_call(call, &name_index, &import_index, &source_index, &file_index);
-            for target in chosen {
-                if target.id == call.source_id {
-                    continue;
-                }
-                tx.execute(
-                    "INSERT OR IGNORE INTO edges(source, target, kind, line) VALUES (?1, ?2, 'calls', ?3)",
-                    params![call.source_id, target.id, call.line as i64],
-                )?;
-            }
-        }
-    }
+    rebuild_edges(&tx)?;
     crate::store::meta::write_sync_meta(&tx)?;
     tx.commit()?;
 
@@ -396,23 +312,163 @@ fn stale_plan<'a>(
     db_files: &HashMap<String, DbFile>,
 ) -> Result<StalePlan<'a>> {
     let mut stale = Vec::new();
-    let mut requires_full_reindex = false;
     for entry in entries {
         match entry_freshness(entry, db_files)? {
-            EntryFreshness::New | EntryFreshness::Changed => {
-                stale.push(entry);
-                requires_full_reindex = true;
-            }
-            EntryFreshness::FingerprintStale => {
+            EntryFreshness::New | EntryFreshness::Changed | EntryFreshness::FingerprintStale => {
                 stale.push(entry);
             }
             EntryFreshness::Fresh => {}
         }
     }
-    Ok(StalePlan {
-        entries: stale,
-        requires_full_reindex,
-    })
+    Ok(StalePlan { entries: stale })
+}
+
+/// Insert one extracted file's rows: the file record, its symbols (plus FTS),
+/// imports, and pending calls awaiting cross-file resolution.
+fn write_file_graph(tx: &Connection, graph: &crate::model::FileGraph, now: i64) -> Result<()> {
+    let lang = language_for(Path::new(&graph.path)).expect("indexed graph has a known language");
+    tx.execute(
+        "INSERT OR REPLACE INTO files(path, content_hash, size, modified_at, indexed_at, language, extractor_fingerprint)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![
+            graph.path,
+            graph.hash,
+            graph.size as i64,
+            graph.modified_at,
+            now,
+            graph.language,
+            extractor_fingerprint_for(lang)
+        ],
+    )?;
+    for symbol in &graph.symbols {
+        tx.execute(
+            "INSERT INTO symbols(id, kind, name, qualified_name, file_path, start_line, end_line, signature, container, content_hash, body_hash)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            params![
+                symbol.id,
+                symbol.kind,
+                symbol.name,
+                symbol.qualified_name,
+                symbol.file_path,
+                symbol.start_line as i64,
+                symbol.end_line as i64,
+                symbol.signature,
+                symbol.container,
+                symbol.content_hash,
+                symbol.body_hash,
+            ],
+        )?;
+        tx.execute(
+            "INSERT INTO symbols_fts(symbol_id, name, qualified_name, signature, file_path)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                symbol.id,
+                symbol.name,
+                symbol.qualified_name,
+                symbol.signature,
+                symbol.file_path
+            ],
+        )?;
+    }
+    for import in &graph.imports {
+        tx.execute(
+            "INSERT INTO imports(file_path, module, local_name, imported_name, alias, line)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                graph.path,
+                import.module,
+                import.local_name,
+                import.imported_name,
+                import.alias,
+                import.line as i64
+            ],
+        )?;
+    }
+    for call in &graph.calls {
+        tx.execute(
+            "INSERT INTO pending_calls(source_id, file_path, target_name, kind, qualifier, line)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                call.source_id,
+                call.source_file,
+                call.target_name,
+                call.kind.as_str(),
+                call.qualifier,
+                call.line as i64
+            ],
+        )?;
+    }
+    Ok(())
+}
+
+/// Derive the `edges` table from every stored pending call.
+///
+/// Rebuilding from scratch keeps resolution a pure function of the current
+/// symbols, imports, and pending calls: a definition added in one file gains
+/// edges from callers in unchanged files, and resolutions that a change made
+/// stale (a fallback superseded by a strict match, a deleted target) disappear
+/// instead of lingering.
+fn rebuild_edges(tx: &Connection) -> Result<()> {
+    tx.execute("DELETE FROM edges", [])?;
+    let name_index = load_name_index(tx)?;
+    let import_index = load_import_index(tx)?;
+    let source_index = load_symbol_id_index(tx)?;
+    let file_index = load_file_index(tx)?;
+
+    let mut select = tx.prepare(
+        "SELECT source_id, file_path, target_name, kind, qualifier, line FROM pending_calls",
+    )?;
+    let mut insert = tx.prepare(
+        "INSERT OR IGNORE INTO edges(source, target, kind, line) VALUES (?1, ?2, 'calls', ?3)",
+    )?;
+    let rows = select.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, String>(3)?,
+            row.get::<_, Option<String>>(4)?,
+            row.get::<_, i64>(5)?,
+        ))
+    })?;
+    for row in rows {
+        let (source_id, source_file, target_name, kind, qualifier, line) = row?;
+        let Some(kind) = CallKind::parse(&kind) else {
+            continue;
+        };
+        let call = PendingCall {
+            source_id,
+            target_name,
+            qualifier,
+            kind,
+            line: line.max(0) as usize,
+            source_file,
+        };
+        for target in resolve_call(
+            &call,
+            &name_index,
+            &import_index,
+            &source_index,
+            &file_index,
+        ) {
+            if target.id == call.source_id {
+                continue;
+            }
+            insert.execute(params![call.source_id, target.id, call.line as i64])?;
+        }
+    }
+    Ok(())
+}
+
+/// Take the advisory sync lock for the database behind `conn`, when it has an
+/// on-disk path (in-memory databases need no cross-process exclusion).
+fn acquire_sync_lock(conn: &Connection) -> Result<Option<crate::store::lock::SyncLock>> {
+    match conn.path() {
+        Some(path) if !path.is_empty() => Ok(Some(crate::store::lock::SyncLock::acquire(
+            Path::new(path),
+        )?)),
+        _ => Ok(None),
+    }
 }
 
 enum EntryFreshness {
@@ -471,9 +527,8 @@ fn is_hardcoded_floor(entry: &DirEntry) -> bool {
 
 /// Refuse to sync roots that are never a real project: the filesystem root and the user's home
 /// directory. Outside a git repo the walker has no gitignore to lean on, so a sync there parses
-/// every cache, toolchain, and vendored source tree on the machine and holds the pending graph in
-/// memory until the final transaction, which can exhaust system RAM. Set
-/// `GRAPHTRAIL_ALLOW_UNSAFE_ROOT=1` to bypass.
+/// every cache, toolchain, and vendored source tree on the machine into one giant graph nobody
+/// asked for. Set `GRAPHTRAIL_ALLOW_UNSAFE_ROOT=1` to bypass.
 pub(crate) fn guard_unsafe_root(root: &Path) -> Result<()> {
     if std::env::var_os("GRAPHTRAIL_ALLOW_UNSAFE_ROOT").is_some_and(|v| v == "1") {
         return Ok(());

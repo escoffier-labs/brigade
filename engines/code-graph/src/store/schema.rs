@@ -4,7 +4,7 @@ use anyhow::Result;
 use rusqlite::Connection;
 
 /// Bumped when the on-disk schema changes; surfaced in JSON packs from Phase 2 on.
-pub const SCHEMA_VERSION: u32 = 4;
+pub const SCHEMA_VERSION: u32 = 5;
 
 pub fn init_schema(conn: &Connection) -> Result<()> {
     conn.execute_batch(
@@ -54,6 +54,16 @@ pub fn init_schema(conn: &Connection) -> Result<()> {
             line INTEGER NOT NULL
         );
 
+        CREATE TABLE IF NOT EXISTS pending_calls (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            source_id TEXT NOT NULL,
+            file_path TEXT NOT NULL,
+            target_name TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            qualifier TEXT,
+            line INTEGER NOT NULL
+        );
+
         CREATE TABLE IF NOT EXISTS meta (
             key TEXT PRIMARY KEY,
             value TEXT NOT NULL
@@ -71,6 +81,7 @@ pub fn init_schema(conn: &Connection) -> Result<()> {
         CREATE INDEX IF NOT EXISTS idx_symbols_file ON symbols(file_path);
         CREATE INDEX IF NOT EXISTS idx_edges_source ON edges(source);
         CREATE INDEX IF NOT EXISTS idx_edges_target ON edges(target);
+        CREATE INDEX IF NOT EXISTS idx_pending_calls_file ON pending_calls(file_path);
         "#,
     )?;
     ensure_import_columns(conn)?;
@@ -93,7 +104,42 @@ pub fn upgrade_for_sync(conn: &Connection) -> Result<bool> {
             [],
         )?;
     }
+    // v5 introduced persisted pending calls. A pre-v5 DB has none, so edges can
+    // no longer be derived for its files; reindex once to populate them. The
+    // stored version (not table existence) is the signal, because init_schema
+    // creates the empty table before this runs.
+    if stored_schema_version(conn)?.is_some_and(|version| version < 5) {
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS pending_calls (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                source_id TEXT NOT NULL,
+                file_path TEXT NOT NULL,
+                target_name TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                qualifier TEXT,
+                line INTEGER NOT NULL
+            )",
+            [],
+        )?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_pending_calls_file ON pending_calls(file_path)",
+            [],
+        )?;
+        upgraded = true;
+    }
     Ok(upgraded)
+}
+
+fn stored_schema_version(conn: &Connection) -> Result<Option<u32>> {
+    let meta_exists: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'meta')",
+        [],
+        |row| row.get(0),
+    )?;
+    if !meta_exists {
+        return Ok(None);
+    }
+    Ok(crate::store::meta::read(conn, "schema_version")?.and_then(|value| value.parse().ok()))
 }
 
 fn ensure_import_columns(conn: &Connection) -> Result<()> {

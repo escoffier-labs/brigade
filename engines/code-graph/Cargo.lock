@@ -357,6 +357,7 @@ dependencies = [
  "anyhow",
  "clap",
  "ignore",
+ "libc",
  "rusqlite",
  "serde",
  "serde_json",

@@ -2,6 +2,29 @@
 
 Running log of decisions/deviations not captured in the spec. Newest first.
 
+## True incremental sync via persisted pending calls (2026-07-09)
+
+Reworked the sync write path so a content change no longer rebuilds every file.
+
+Decisions:
+- New `pending_calls` table (schema v5) stores each file's unresolved calls at extraction time. Cross-file resolution no longer needs the other files' fresh parse output, so only changed files are re-extracted.
+- Edges are now derived state: after any change, `rebuild_edges` deletes the table and re-resolves every stored pending call against the current symbol, import, and file indexes. This keeps resolution a pure function of the store. A definition added in one file gains edges from callers in unchanged files, and resolutions a change made stale (fallback superseded by a strict match, deleted target) disappear instead of lingering. The old per-file edge purge with its `delete_target_edges` special case is gone.
+- Extraction streams: each file is parsed and written inside the transaction one at a time, so peak memory is one file's graph plus the resolution indexes, not the whole repository. This is the structural fix for the class of failure behind issue #19 (multi-GB RSS when sync walks a huge tree).
+- Sync takes an advisory `<db>.lock` file (PID inside, stale locks from dead owners reclaimed via signal-0 on unix, age fallback elsewhere). CLI sync and MCP `refresh: true` can no longer duplicate work; the loser fails fast and refresh stays fail-open.
+- Pre-v5 databases carry no pending calls, so `upgrade_for_sync` forces one full reindex when the stored `schema_version` is below 5. The signal is the stored version, not table existence, because `init_schema` creates the empty table before the upgrade check runs.
+
+Benchmarks (16,686-file TypeScript repo, release build, identical row counts before/after):
+- full index: 19.8s / 397MB peak RSS before, 21.4s / 136MB after
+- one-file change: 2m52s before (rebuilds everything), 2.5s after
+
+Also fixed in passing: the codesearch MCP tests read the developer's real `~/.local/share/code-index/manifest.json`; when it enrolls the graphtrail checkout itself, prefix stripping empties the mocked hits and the suite fails only on that machine. `with_code_search_url` now pins `CODE_INDEX_MANIFEST` to a nonexistent path.
+
+Verification during implementation:
+- `brigade work verify run --target . --command "cargo test --all-features"`
+- `brigade work verify run --target . --command "cargo fmt --check"`
+- `brigade work verify run --target . --command "cargo clippy --all-targets --all-features -- -D warnings"`
+- `brigade work verify run --target . --command "cargo build --release"`
+
 ## Impact depth traversal (2026-07-03)
 
 Implemented transitive depth for `callers`, `callees`, and `impact` on `feat/impact-depth`.

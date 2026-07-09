@@ -28,7 +28,7 @@ The code is split into focused modules:
 
 - `model` (`src/model.rs`): shared types.
 - `extractors` (`src/extractors/`): per-language tree-sitter providers plus shared traversal in `common.rs`. Each language is a provider behind the `LangSpec` trait.
-- `store` (`src/store/`): `db`, `schema`, `sync`.
+- `store` (`src/store/`): `db`, `lock`, `schema`, `sync`.
 - `query` (`src/query/`): `search`, `graph`, `context`, `stats`, `doctor`.
 - `cli` (`src/cli.rs`): a thin command-line interface.
 - Binaries: `src/main.rs` (the `graphtrail` CLI) and `src/bin/graphtrail-mcp.rs` (the `graphtrail-mcp` MCP server).

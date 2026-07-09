@@ -28,6 +28,9 @@ tree-sitter-rust = "0.24.2"
 tree-sitter-typescript = "0.23.2"
 ureq = { version = "2", features = ["json"], optional = true }
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [features]
 # Optional, no-network-by-default integrations.
 codesearch = ["dep:ureq"]

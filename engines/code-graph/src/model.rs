@@ -35,6 +35,26 @@ pub enum CallKind {
     Scoped,
 }
 
+impl CallKind {
+    /// Stable text form used by the `pending_calls.kind` column.
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            CallKind::Bare => "bare",
+            CallKind::Member => "member",
+            CallKind::Scoped => "scoped",
+        }
+    }
+
+    pub(crate) fn parse(value: &str) -> Option<CallKind> {
+        match value {
+            "bare" => Some(CallKind::Bare),
+            "member" => Some(CallKind::Member),
+            "scoped" => Some(CallKind::Scoped),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct CallTarget {
     pub name: String,
