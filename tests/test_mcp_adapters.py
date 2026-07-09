@@ -228,6 +228,70 @@ def test_openclaw_remote_headers_roundtrip():
     assert back.headers == {"Authorization": {"ref": "TOKEN"}}
 
 
+def test_codex_empty_args_roundtrip_is_idempotent():
+    """#181: empty args must not fingerprint-conflict after codex TOML write/read.
+
+    to_provider used to emit args=[] while _codex_render_table omits empty arrays,
+    so live fingerprint never matched projected_fingerprint.
+    """
+    adapter = A.ADAPTERS["codex"]
+    server = CanonicalServer(name="dossier", transport="stdio", command="/usr/bin/dossier-mcp")
+    projected = adapter.to_provider(server)
+    assert "args" not in projected
+    text = adapter.write_file(None, {"dossier": projected}, set())
+    round_tripped = adapter.read_file(text)["dossier"]
+    assert round_tripped == projected
+    # user-scope alias shares the same transforms
+    user = A.ADAPTERS["codex-user"]
+    assert user.to_provider(server) == projected
+
+
+def test_openclaw_url_only_never_stdio():
+    """#182: url-only import must coerce to http/sse, never stdio+url."""
+    adapter = A.ADAPTERS["openclaw"]
+    # Broken source shapes seen in the wild
+    for raw in (
+        {"url": "http://127.0.0.1:8000/mcp", "transport": "stdio"},
+        {"url": "http://127.0.0.1:8000/mcp"},
+        {"command": "https://mcp.example.com/v1"},
+    ):
+        back, _ = adapter.from_provider("x", raw)
+        assert back.is_remote, raw
+        assert back.transport in ("http", "sse"), raw
+        assert back.url
+        assert back.command is None
+        projected = adapter.to_provider(back)
+        assert "url" in projected
+        assert projected.get("transport") in ("http", "sse")
+
+
+def test_mcpservers_url_only_coerces_http():
+    """#182: common mcpServers from_provider coerces url-only + bogus type."""
+    adapter = A.ADAPTERS["claude"]
+    back, _ = adapter.from_provider("x", {"url": "http://127.0.0.1:8000/mcp", "type": "stdio"})
+    assert back.transport == "http"
+    assert back.url == "http://127.0.0.1:8000/mcp"
+
+
+def test_grok_adapters_share_codex_toml_shape():
+    """#183: Grok project + user adapters reuse Codex-like mcp_servers TOML."""
+    for name, path, user_scope in (
+        ("grok", ".grok/config.toml", False),
+        ("grok-user", "~/.grok/config.toml", True),
+    ):
+        adapter = A.ADAPTERS[name]
+        assert adapter.path == path
+        assert adapter.user_scope is user_scope
+        assert adapter.fmt == "toml"
+        assert adapter.top_key == "mcp_servers"
+    server = CanonicalServer(name="graphtrail", transport="stdio", command="/usr/bin/graphtrail-mcp")
+    for name in ("grok", "grok-user", "codex"):
+        projected = A.ADAPTERS[name].to_provider(server)
+        text = A.ADAPTERS[name].write_file(None, {"graphtrail": projected}, set())
+        assert "[mcp_servers.graphtrail]" in text
+        assert A.ADAPTERS[name].read_file(text)["graphtrail"] == projected
+
+
 def test_server_dict_roundtrip():
     s = _stdio()
     raw = A.server_to_dict(s)
