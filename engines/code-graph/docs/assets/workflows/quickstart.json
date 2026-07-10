@@ -1,0 +1,86 @@
+{
+  "title": "Index once, then ask the graph",
+  "eyebrow": "GRAPHTRAIL WORKFLOW",
+  "description": "Tree-sitter extracts structure into one local SQLite file for CLI and MCP queries.",
+  "meta": "no daemon · no network",
+  "accent": "#4F86FF",
+  "columns": [
+    {
+      "title": "SOURCE",
+      "nodes": [
+        {
+          "id": "repo",
+          "label": "repository",
+          "detail": "Python · TS/JS · Rust · Go",
+          "kind": "default"
+        }
+      ]
+    },
+    {
+      "title": "INDEX",
+      "nodes": [
+        {
+          "id": "init",
+          "label": "graphtrail init",
+          "detail": "first full pass",
+          "kind": "accent"
+        },
+        {
+          "id": "sync",
+          "label": "graphtrail sync",
+          "detail": "changed files only",
+          "kind": "focus",
+          "badge": "incremental"
+        }
+      ]
+    },
+    {
+      "title": "STORE",
+      "nodes": [
+        {
+          "id": "db",
+          "label": "graphtrail.db",
+          "detail": "symbols · imports · calls",
+          "kind": "success"
+        }
+      ]
+    },
+    {
+      "title": "ASK",
+      "nodes": [
+        {
+          "id": "cli",
+          "label": "CLI",
+          "detail": "humans + scripts",
+          "kind": "default"
+        },
+        {
+          "id": "mcp",
+          "label": "MCP",
+          "detail": "read-only queries",
+          "kind": "accent"
+        },
+        {
+          "id": "context",
+          "label": "context pack",
+          "detail": "neighborhood before edit",
+          "kind": "focus"
+        }
+      ]
+    }
+  ],
+  "edges": [
+    {"from": "repo", "to": "init"},
+    {"from": "repo", "to": "sync"},
+    {"from": "init", "to": "db"},
+    {"from": "sync", "to": "db"},
+    {"from": "db", "to": "cli"},
+    {"from": "db", "to": "mcp"},
+    {"from": "db", "to": "context"}
+  ],
+  "context": {
+    "title": "QUERY CONTRACT",
+    "body": "callers · callees · impact · affected · context",
+    "detail": "Queries open SQLite read-only. refresh: true explicitly starts an incremental sync first."
+  }
+}

@@ -61,10 +61,10 @@ graphtrail --db "$DB" doctor . --json
 ```
 
 <p align="center">
-  <img src="docs/assets/graphtrail-context.svg" alt="Recording: graphtrail init and sync, then callers and context" width="760">
+  <img src="docs/assets/graphtrail-context.svg" alt="GraphTrail workflow: source files pass through init or incremental sync into SQLite, then CLI and MCP queries return graph answers and context packs" width="900">
 </p>
 
-<p align="center"><em><code>init</code> + <code>sync</code> build the graph. <code>callers</code> / <code>context</code> answer from it.</em></p>
+<p align="center"><em><code>init</code> builds the first graph. <code>sync</code> updates changed files. Every query reads the same SQLite index.</em></p>
 
 Real output against GraphTrail's own source:
 
@@ -85,7 +85,7 @@ main --calls@19 hops=1--> serve  (src/bin/graphtrail-mcp.rs -> src/mcp.rs)
   <img src="docs/assets/graph-relationships.svg" alt="Call graph around serve: callers on the left, focus symbol in the center, callees on the right, impact as blast radius, context pack for agents" width="880">
 </p>
 
-<p align="center"><em>Grep finds strings. Embeddings find vibes. The graph finds who calls whom, and what breaks if you change it.</em></p>
+<p align="center"><em>Incoming edges identify callers. Outgoing edges identify callees. <code>context</code> packages that neighborhood before an edit.</em></p>
 
 Python, TypeScript/JavaScript, Rust, and Go. One SQLite file per repo. CLI for humans and scripts. `graphtrail-mcp` serves agents, opens query connections with `SQLITE_OPEN_READ_ONLY`, and supports multiple repositories through `repo` and `db` arguments. No hooks, no daemon, no network in the default build.
 
