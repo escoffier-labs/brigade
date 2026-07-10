@@ -7,28 +7,33 @@
 # Bypass only if you know what you are allowing through:
 #   git push --no-verify
 #
-# Requires content-guard: https://github.com/solomonneas/content-guard
+# Uses Brigade's embedded content guard. CONTENT_GUARD_DIR is an explicit
+# compatibility override for an older standalone checkout.
 set -euo pipefail
 
-SCANNER_DIR="${CONTENT_GUARD_DIR:-$HOME/repos/content-guard}"
-POLICY="${CONTENT_GUARD_POLICY:-$SCANNER_DIR/policies/public-repo.json}"
-
-if [[ ! -d "$SCANNER_DIR" ]]; then
-  echo "pre-push: content-guard not found at $SCANNER_DIR" >&2
-  echo "pre-push: clone https://github.com/solomonneas/content-guard, or set CONTENT_GUARD_DIR" >&2
-  exit 1
-fi
-
-if [[ ! -f "$POLICY" ]]; then
-  echo "pre-push: policy file not found: $POLICY" >&2
-  exit 1
-fi
-
 REPO_ROOT="$(git rev-parse --show-toplevel)"
-echo "pre-push: scanning $REPO_ROOT against $(basename "$POLICY")"
-
 rc=0
-PYTHONPATH="$SCANNER_DIR/src" python3 -m content_guard scan "$REPO_ROOT" --policy "$POLICY" || rc=$?
+if [[ -n "${CONTENT_GUARD_DIR:-}" ]]; then
+  POLICY="${CONTENT_GUARD_POLICY:-$CONTENT_GUARD_DIR/policies/public-repo.json}"
+  if [[ ! -d "$CONTENT_GUARD_DIR" ]]; then
+    echo "pre-push: CONTENT_GUARD_DIR not found: $CONTENT_GUARD_DIR" >&2
+    exit 1
+  fi
+  if [[ ! -f "$POLICY" ]]; then
+    echo "pre-push: policy file not found: $POLICY" >&2
+    exit 1
+  fi
+  echo "pre-push: scanning $REPO_ROOT with explicit content-guard compatibility override"
+  PYTHONPATH="$CONTENT_GUARD_DIR/src" python3 -m content_guard scan "$REPO_ROOT" --policy "$POLICY" || rc=$?
+else
+  POLICY="${CONTENT_GUARD_POLICY:-public-repo}"
+  if ! command -v brigade >/dev/null 2>&1; then
+    echo "pre-push: brigade not found; reinstall brigade-cli to restore the embedded guard" >&2
+    exit 1
+  fi
+  echo "pre-push: scanning $REPO_ROOT with Brigade's embedded guard"
+  brigade scrub --target "$REPO_ROOT" --policy "$POLICY" --no-receipt || rc=$?
+fi
 
 if [[ "$rc" -eq 0 ]]; then
   exit 0

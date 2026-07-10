@@ -76,3 +76,12 @@ def test_sync_plan_write_creates_files(tmp_path):
     plans = list((tmp_path / ".brigade" / "search" / "plans").glob("*/plan.json"))
     assert len(plans) == 1
     assert (plans[0].parent / "PLAN.md").exists()
+
+
+def test_search_names_code_search_api_mcp_as_maintained_owner(monkeypatch, tmp_path):
+    monkeypatch.setattr(search_cmd.proc, "which", lambda cmd: None)
+    payload = search_cmd.status_payload(tmp_path)
+    compat = payload["tools"]["code-search-mcp"]
+    assert compat["owner"] == "code-search-api/mcp"
+    assert compat["compatibility_key"] == "code-search-mcp"
+    assert "github.com/escoffier-labs/code-search-mcp" not in str(payload)

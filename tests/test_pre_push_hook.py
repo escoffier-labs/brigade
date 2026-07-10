@@ -28,3 +28,16 @@ def test_pre_push_hook_reports_scanner_errors_separately():
     text = _hook_text()
     assert "failed to run" in text
     assert "not a leak verdict" in text
+
+
+def test_pre_push_hook_defaults_to_embedded_brigade_scrub():
+    text = _hook_text()
+    assert 'brigade scrub --target "$REPO_ROOT"' in text
+    assert 'SCANNER_DIR="${CONTENT_GUARD_DIR:-' not in text
+    assert "clone https://github.com" not in text
+
+
+def test_pre_push_hook_keeps_external_checkout_as_explicit_override():
+    text = _hook_text()
+    assert 'if [[ -n "${CONTENT_GUARD_DIR:-}" ]]' in text
+    assert 'PYTHONPATH="$CONTENT_GUARD_DIR/src"' in text

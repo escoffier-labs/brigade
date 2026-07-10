@@ -1239,7 +1239,7 @@ See [QUICKSTART.md](QUICKSTART.md) for setup, verification, and the ingest flow.
 
 ## Managed stations
 
-> **In plain terms:** "stations" are optional add-on tools Brigade can install and wire up for you (memory health, content guard, token compaction, auth sync, security scanning). `brigade add <station>` installs whatever is missing. They always run as separate command-line tools, never imported into Brigade, so the boundary stays clean and language-agnostic. A missing one is never a failure, just a "todo" hint.
+> **In plain terms:** "stations" group built-in capabilities and optional tools Brigade can install and wire for you. Managed tools run as separate command-line processes. Content Guard is embedded in Brigade, so `brigade add guard` only offers the optional Plating helper.
 
 Some stations can install and wire external tools for you.
 Run `brigade add <station>` to install any tool attached to that station that is not already on your PATH, then wire its default config.
@@ -1248,7 +1248,7 @@ Tools are never imported in process; Brigade shells out to each CLI, so the boun
 
 ```bash
 brigade add memory   # bootstrap-doctor (optional); status/lint/compact are built in
-brigade add guard    # content-guard (+ optional plating)
+brigade add guard    # embedded scrub path + optional plating
 brigade add tokens   # token-glace (+ optional usage-tracker)
 brigade add search   # graphtrail + optional code-search
 brigade add evidence # miseledger
@@ -1273,7 +1273,7 @@ First-class station CLIs (always registered; not extras-gated):
 
 `pantry` (alias `larder`) is the agent session auth sync station. Agent Pantry remains a process-boundary Go binary; Brigade never imports it.
 `brigade add pantry` installs agentpantry via `go install github.com/escoffier-labs/agentpantry/cmd/agentpantry@latest` and prints the first-class operator path (setup plan, doctor, expiry-alert).
-`brigade doctor` health-checks it by shelling out to `agentpantry doctor --json` with a compatibility fallback to `agentpantry status --json`.
+`brigade doctor` health-checks it with `agentpantry doctor --json --no-net` and keeps a compatibility fallback to `agentpantry status --json` for older binaries.
 Like the memory satellites, agentpantry inspects host-global state, so its checks are advisory and never FAIL a workspace run: an unwired install (exit 2, no config) is a `WARN`, and setup problems are surfaced as advisory pantry health.
 Use `brigade pantry status` and `brigade pantry doctor` for pantry-specific health with explicit `next` commands, `brigade pantry setup plan --role source|sink` to preview or write a reviewed setup plan, and `brigade pantry service plan --role source|sink` to preview or write service setup steps.
 Use `brigade pantry expiry-alert` to report near-expiry sessions and preview the `agent-notify` message Brigade would send. Add `--send` only after `brigade add notifications` if you want delivery.
@@ -1284,7 +1284,7 @@ These plan commands do not generate or copy PSKs, start services, or mutate brow
 Use `brigade evidence status` and `brigade evidence doctor` for advisory health with explicit `next` commands, `brigade evidence crawl plan` to preview miseledger init/crawl/doctor commands, and `brigade evidence export plan` to preview `brigade receipts export miseledger --new-only --import`.
 These plan commands do not execute crawl or import. Product page: https://brigade.tools/miseledger.
 
-`search` (alias `code-search`) wires GraphTrail and optional code-search-api / code-search-mcp.
+`search` (alias `code-search`) wires GraphTrail and optional code-search-api. The `code-search-mcp` compatibility key points to the bridge maintained under `code-search-api/mcp`.
 Use `brigade search status` / `doctor` and review-only `brigade search sync plan`. Brigade does not run `graphtrail sync` or start the search API for you.
 
 `tokens` wires Token Glace (current name; TokenJuice is the old name) and optional usage-tracker spend export.
@@ -1357,13 +1357,13 @@ The current managed tools:
 |---|---|---|
 | `memory` | embedded `brigade memory status|lint|compact` | index health, dead-link lint, MEMORY.md compact |
 | `memory` | `bootstrap-doctor` | bootstrap-file size and limit audit |
-| `guard` | `content-guard` | policy-driven content scanning |
+| `guard` | embedded Content Guard | policy-driven content scanning through `brigade scrub` |
 | `guard` | `plating` | optional demo render, leak scan, and recorded-output verify |
 | `tokens` | `token-glace` | output compaction via host hooks (TokenJuice was the old name) |
 | `tokens` | `usage-tracker` | optional local usage/spend export summary |
 | `search` | `graphtrail` | local code graph, context briefs, structural diffs |
 | `search` | `code-search-api` | optional local semantic search service |
-| `search` | `code-search-mcp` | optional MCP bridge for code-search-api |
+| `search` | `code-search-mcp` compatibility key | optional MCP bridge maintained under `code-search-api/mcp` |
 | `evidence` | `miseledger` | local evidence ledger, crawls, FTS, receipt import |
 | `skills` | `brigade-work`, `ultra-work-scout`; optional Skillet roster | default work-loop skills and broad Scout scoping for agent harnesses |
 | `pantry` | `agentpantry` | browser session and secret sync for agent hosts |
@@ -1391,7 +1391,7 @@ brigade doctor: target ~/agent-kitchen (generic)
   [ok]   handoff: processed/               ~/agent-kitchen/.claude/memory-handoffs/processed
   [ok]   memory: cards/                    ~/agent-kitchen/memory/cards
   [ok]   publish: hooks/pre-push           ~/agent-kitchen/hooks/pre-push
-  [ok]   publish: content-guard            ~/repos/content-guard
+  [ok]   guard: embedded content guard     brigade.guard
 
 summary: 14 checks, 0 failed, 0 manual
 ```
@@ -1406,7 +1406,7 @@ Everything happens on your local filesystem against the templates packaged with 
 
 The normal exception is your own configured tooling:
 
-- the `pre-push` hook runs the local `content-guard` scanner before commits leave the machine
+- the `pre-push` hook runs Brigade's embedded content guard before commits leave the machine
 - `brigade security enrich` can call MISP only when you explicitly configure and run the `misp` provider
 
 ## Maintenance and utility commands
@@ -1414,7 +1414,7 @@ The normal exception is your own configured tooling:
 A few commands sit outside the daily loop:
 
 - `brigade reconfigure --target <path>` adjusts an existing install to a new Selection. Pass `--depth`, `--harnesses`, `--owner`, or repeatable `--include`, and add `--prune` to remove files for harnesses you no longer select.
-- `brigade scrub --target <path>` runs the local content-guard scanner against a target, defaulting to the `public-repo` policy. Use `--policy <name-or-path>` to pick another policy and `--dry-run` to preview.
+- `brigade scrub --target <path>` runs the embedded content guard against a target, defaulting to the `public-repo` policy. Use `--policy <name-or-path>` to pick another policy and `--dry-run` to preview. Set `CONTENT_GUARD_DIR` only when an older standalone checkout must remain in use.
 - `brigade handoff-template` prints the handoff `TEMPLATE.md`; `--target` prefers a target's installed template when present.
 - `brigade openclaw-fragments --out <dir>` writes OpenClaw config fragments for manual review.
 - `brigade hermes-fragments --out <dir>` writes Hermes adapter fragments (experimental).
@@ -1439,7 +1439,7 @@ Each subsystem has a companion doc under [`docs/`]() with the full local contrac
 ## Related
 
 - [Cookbook](https://github.com/escoffier-labs/solos-cookbook): the long-form companion guide and reference docs
-- [content-guard](https://github.com/escoffier-labs/content-guard): the publish-gate scanner used by the pre-push hook
+- Content Guard is embedded in Brigade and used by the publish gate and pre-push hook.
 - [OpenClaw](https://github.com/openclaw/openclaw): the reference memory owner
 
 ## License

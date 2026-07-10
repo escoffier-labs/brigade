@@ -663,13 +663,14 @@ def _check_publish_gate(target: Path) -> List[CheckResult]:
     else:
         results.append((WARN, "publish: hooks/pre-push", f"missing at {hook}"))
 
-    scanner_dir = Path(os.environ.get("CONTENT_GUARD_DIR", str(Path.home() / "repos" / "content-guard")))
+    from . import scrub
+
+    scanner_dir = scrub.scanner_dir()
     if scanner_dir.is_dir():
-        results.append((OK, "publish: content-guard", str(scanner_dir)))
+        label = "external compatibility override" if os.environ.get("CONTENT_GUARD_DIR") else "embedded content guard"
+        results.append((OK, "guard: embedded content guard", f"{label}: {scanner_dir}"))
     else:
-        results.append(
-            (MANUAL, "publish: content-guard", f"not found at {scanner_dir}; install or set CONTENT_GUARD_DIR")
-        )
+        results.append((MANUAL, "guard: embedded content guard", f"not found at {scanner_dir}; reinstall brigade-cli"))
     return results
 
 
@@ -826,7 +827,7 @@ _MARKERS = {
 # under their own header keeps a single-repo run from reading as if the repo
 # itself is responsible for an unrelated OpenClaw config or content-guard clone.
 _MACHINE_LEVEL_PREFIXES = ("openclaw:",)
-_MACHINE_LEVEL_NAMES = {"publish: content-guard", "managed tools"}
+_MACHINE_LEVEL_NAMES = {"guard: embedded content guard", "managed tools"}
 
 
 def _is_machine_level(name: str) -> bool:

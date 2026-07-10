@@ -208,8 +208,12 @@ Sidecars can ship a `station.json` (`schema: brigade.station.v1`). Discover them
 ```bash
 brigade stations list
 brigade stations discover --root ~/repos
+brigade stations verify /path/to/sidecar          # read-only conformance from an explicit local path
+brigade stations verify /path/to/sidecar --json   # bounded result; no raw child output
 brigade add /path/to/sidecar --install   # runs printed install args after review
 ```
+
+`stations verify` never installs the sidecar. On POSIX it runs declared read-only commands or narrowly checked help/version probes with an isolated temporary home, finite positive timeouts, process-group cleanup, and a 64 KiB combined stdout/stderr ceiling. Windows returns `unsupported-platform` before spawning a probe. Use `--check-managed` in coordinated fleet checks to turn matching Brigade catalog drift from an advisory into a failure. Legacy v1 manifests remain discoverable, but missing bounds fail strict verification. Embedded, deprecated, and historical manifests report a lifecycle skip without running external commands.
 
 ## Optional: operator notifications (extras)
 

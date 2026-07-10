@@ -52,7 +52,7 @@ def test_stations_list_marks_selected_and_optional_for_repo(capsys):
     token_surfaces = {surface["kind"] for surface in token_tools["token-glace"]["surfaces"]}
     assert {"doctor-json", "summary-json", "verify-exit"} <= token_surfaces
     usage_surfaces = {surface["kind"] for surface in token_tools["usage-tracker"]["surfaces"]}
-    assert {"summary-json", "verify-exit"} <= usage_surfaces
+    assert usage_surfaces == {"summary-json"}
 
 
 def test_stations_list_unknown_profile_returns_cli_error(capsys):

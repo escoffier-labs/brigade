@@ -26,6 +26,8 @@ class MachineSurface:
     read_only: bool = True
     timeout_seconds: Optional[float] = None
     max_chars: Optional[int] = None
+    probe: Tuple[str, ...] = ()
+    probe_contains: Tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -56,8 +58,19 @@ def _surface(
     *,
     timeout_seconds: Optional[float] = None,
     max_chars: Optional[int] = None,
+    read_only: bool = True,
+    probe: Tuple[str, ...] = (),
+    probe_contains: Tuple[str, ...] = (),
 ) -> MachineSurface:
-    return MachineSurface(kind=kind, command=command, timeout_seconds=timeout_seconds, max_chars=max_chars)
+    return MachineSurface(
+        kind=kind,
+        command=command,
+        read_only=read_only,
+        timeout_seconds=timeout_seconds,
+        max_chars=max_chars,
+        probe=probe,
+        probe_contains=probe_contains,
+    )
 
 
 # memory-doctor and bootstrap-doctor inspect the operator's canonical memory and
@@ -82,20 +95,6 @@ def _bootstrap_doctor_doctor(ctx: DoctorContext) -> List[CheckResult]:
     if soft:
         return [(WARN, name, f"{len(soft)} file(s) in soft band")]
     return [(OK, name, f"{len(rows)} bootstrap file(s) within limits")]
-
-
-def _content_guard_doctor(ctx: DoctorContext) -> List[CheckResult]:
-    # A "tool present + policy loads" check: scan this plan's own clean string.
-    r = proc.run(["content-guard", "scan", "--policy", "public-repo", "--json"], env=None)
-    data = r.json()
-    if data is None and r.code not in (0, 1):
-        return [(WARN, "content-guard", f"installed but not runnable (exit {r.code})")]
-    return [(OK, "content-guard", "installed; public-repo policy loads")]
-
-
-def _content_guard_wire(ctx: DoctorContext) -> List[CheckResult]:
-    # content-guard ships bundled policies; nothing to lay down for the default.
-    return [(OK, "content-guard: policy", "using bundled public-repo policy")]
 
 
 def _token_glace_doctor(ctx: DoctorContext) -> List[CheckResult]:
@@ -156,7 +155,7 @@ def _code_search_mcp_doctor(ctx: DoctorContext) -> List[CheckResult]:
 # workspace doctor run.
 def _agentpantry_doctor(ctx: DoctorContext) -> List[CheckResult]:
     name = "agentpantry (session auth sync)"
-    r = proc.run(["agentpantry", "doctor", "--json"])
+    r = proc.run(["agentpantry", "doctor", "--json", "--no-net"])
     data = r.json()
     if data is not None:
         if isinstance(data, dict) and data.get("configured") is False:
@@ -253,17 +252,18 @@ def _usage_tracker_doctor(ctx: DoctorContext) -> List[CheckResult]:
     name = "usage-tracker (spend export)"
     if not proc.which("usage-tracker"):
         return [(MANUAL, name, "not installed; run `brigade add tokens` or `brigade add usage-tracker`")]
-    r = proc.run(["usage-tracker", "export", "--summary-json"], timeout=30.0)
+    argv = ["usage-tracker", "export", "--since", "30d", "--summary-json", "--no-write"]
+    r = proc.run(argv, timeout=30.0)
     data = r.json()
     if r.code != 0:
         return [(WARN, name, f"installed but export failed (exit {r.code})")]
     if isinstance(data, dict):
         spend = data.get("total_cost_usd") or data.get("api_spend_usd") or data.get("totalCostUsd")
-        detail = "export --summary-json ok"
+        detail = "export --since 30d --summary-json --no-write ok"
         if spend is not None:
             detail = f"{detail}, cost={spend}"
         return [(OK, name, detail)]
-    return [(OK, name, "export --summary-json ok")]
+    return [(OK, name, "export --since 30d --summary-json --no-write ok")]
 
 
 def _plating_doctor(ctx: DoctorContext) -> List[CheckResult]:
@@ -285,14 +285,13 @@ def _plating_doctor(ctx: DoctorContext) -> List[CheckResult]:
 # are advisory: they never FAIL a workspace doctor run.
 def _miseledger_doctor(ctx: DoctorContext) -> List[CheckResult]:
     name = "miseledger (evidence archive)"
-    # `status --json` opens (and migrates) the local archive and reports counts.
-    r = proc.run(["miseledger", "status", "--json"], timeout=120.0)
+    r = proc.run(["miseledger", "doctor", "--json"], timeout=120.0)
     if r.code == 124:
         return [
             (
                 WARN,
                 name,
-                "status check timed out after 120s (large archive, not an error); run `miseledger status` manually",
+                "doctor check timed out after 120s (large archive, not an error); run `miseledger doctor` manually",
             )
         ]
     data = r.json()
@@ -300,12 +299,14 @@ def _miseledger_doctor(ctx: DoctorContext) -> List[CheckResult]:
         return [(WARN, name, f"installed but unwired or errored (exit {r.code})")]
     if not isinstance(data, dict):
         return [(WARN, name, f"unexpected status output (exit {r.code})")]
-    items = data.get("items", 0)
-    sources = data.get("sources", 0)
-    schema = data.get("schema_version", "?")
-    fts = data.get("fts") or "?"
-    status = WARN if fts != "ok" else OK
-    return [(status, name, f"schema={schema}, items={items}, sources={sources}, fts={fts}")]
+    checks_value = data.get("checks", [])
+    checks = checks_value if isinstance(checks_value, list) else []
+    failed = [check for check in checks if isinstance(check, dict) and check.get("ok") is False]
+    status = OK if data.get("ok") is True and not failed and r.code == 0 else WARN
+    if failed:
+        top = failed[0]
+        return [(status, name, f"{len(failed)} check(s) failed; {top.get('name')}: {top.get('detail')}")]
+    return [(status, name, f"{len(checks)} check(s) passed")]
 
 
 def _token_glace_wire(ctx: DoctorContext) -> List[CheckResult]:
@@ -342,21 +343,6 @@ _TOOLS: Tuple[ManagedTool, ...] = (
         ),
     ),
     ManagedTool(
-        name="content-guard",
-        station="guard",
-        command="content-guard",
-        summary="policy-driven content scanning",
-        install_args=["pipx", "install", "git+https://github.com/escoffier-labs/content-guard"],
-        wire=_content_guard_wire,
-        doctor=_content_guard_doctor,
-        surfaces=(
-            _surface(
-                "doctor-json", ("content-guard", "scan", "--policy", "public-repo", "--json"), timeout_seconds=30.0
-            ),
-            _surface("verify-exit", ("content-guard", "scan", "--policy", "public-repo"), timeout_seconds=30.0),
-        ),
-    ),
-    ManagedTool(
         name="token-glace",
         station="tokens",
         command="token-glace",
@@ -374,7 +360,14 @@ _TOOLS: Tuple[ManagedTool, ...] = (
         doctor=_token_glace_doctor,
         surfaces=(
             _surface("doctor-json", ("token-glace", "doctor", "hooks", "--format", "json"), timeout_seconds=30.0),
-            _surface("summary-json", ("token-glace", "stats", "--format", "json"), timeout_seconds=30.0),
+            _surface(
+                "summary-json",
+                ("token-glace", "stats", "--format", "json", "--timezone", "utc"),
+                timeout_seconds=30.0,
+                max_chars=4000,
+                probe=("token-glace", "--help"),
+                probe_contains=("--format", "--timezone"),
+            ),
             _surface("verify-exit", ("token-glace", "verify"), timeout_seconds=60.0),
         ),
     ),
@@ -392,7 +385,7 @@ _TOOLS: Tuple[ManagedTool, ...] = (
         name="code-search-mcp",
         station="search",
         command="code-search-mcp",
-        summary="read-only MCP bridge for a running code-search-api service",
+        summary="compatibility key for the MCP bridge maintained in code-search-api/mcp",
         install_args=["npm", "install", "-g", "@solomonneas/code-search-mcp"],
         wire=_noop_wire,
         doctor=_code_search_mcp_doctor,
@@ -410,11 +403,23 @@ _TOOLS: Tuple[ManagedTool, ...] = (
         wire=_noop_wire,
         doctor=_agentpantry_doctor,
         surfaces=(
-            _surface("doctor-json", ("agentpantry", "doctor", "--json"), timeout_seconds=10.0),
             _surface(
-                "brief-markdown", ("agentpantry", "inventory", "--markdown"), timeout_seconds=10.0, max_chars=4000
+                "doctor-json",
+                ("agentpantry", "doctor", "--json", "--no-net"),
+                read_only=False,
+                timeout_seconds=10.0,
+                probe=("agentpantry", "doctor", "--help"),
+                probe_contains=("-json", "-no-net"),
             ),
-            _surface("verify-exit", ("agentpantry", "version"), timeout_seconds=10.0),
+            _surface(
+                "summary-json",
+                ("agentpantry", "inventory", "--json"),
+                timeout_seconds=10.0,
+                max_chars=4000,
+                probe=("agentpantry", "inventory", "--help"),
+                probe_contains=("-json",),
+            ),
+            _surface("verify-exit", ("agentpantry", "version", "--json"), timeout_seconds=10.0),
         ),
     ),
     ManagedTool(
@@ -426,8 +431,14 @@ _TOOLS: Tuple[ManagedTool, ...] = (
         wire=_agent_notify_wire,
         doctor=_agent_notify_doctor,
         surfaces=(
-            _surface("doctor-json", ("agent-notify", "doctor", "--json"), timeout_seconds=10.0),
-            _surface("verify-exit", ("agent-notify", "version"), timeout_seconds=10.0),
+            _surface(
+                "doctor-json",
+                ("agent-notify", "doctor", "--json", "--skip-network"),
+                timeout_seconds=10.0,
+                probe=("agent-notify", "doctor", "--help"),
+                probe_contains=("--json", "--skip-network"),
+            ),
+            _surface("verify-exit", ("agent-notify", "version", "--json"), timeout_seconds=10.0),
         ),
     ),
     ManagedTool(
@@ -439,9 +450,24 @@ _TOOLS: Tuple[ManagedTool, ...] = (
         wire=_noop_wire,
         doctor=_miseledger_doctor,
         surfaces=(
-            _surface("doctor-json", ("miseledger", "status", "--json"), timeout_seconds=120.0),
-            _surface("brief-markdown", ("miseledger", "export", "--markdown"), timeout_seconds=10.0, max_chars=4000),
-            _surface("verify-exit", ("miseledger", "doctor"), timeout_seconds=120.0),
+            _surface(
+                "doctor-json",
+                ("miseledger", "doctor", "--json"),
+                read_only=False,
+                timeout_seconds=120.0,
+                probe=("miseledger", "doctor", "--help"),
+                probe_contains=("--json", "--mcp", "--archive"),
+            ),
+            _surface(
+                "brief-markdown",
+                ("miseledger", "evidence", "<task>", "--markdown", "--limit", "5"),
+                read_only=False,
+                timeout_seconds=10.0,
+                max_chars=4000,
+                probe=("miseledger", "evidence", "--help"),
+                probe_contains=("--markdown", "--limit"),
+            ),
+            _surface("verify-exit", ("miseledger", "version"), timeout_seconds=10.0),
         ),
     ),
     # GraphTrail closes the other half of the receipts-to-context loop: code-graph
@@ -456,8 +482,22 @@ _TOOLS: Tuple[ManagedTool, ...] = (
         wire=_noop_wire,
         doctor=_graphtrail_doctor,
         surfaces=(
+            _surface(
+                "brief-markdown",
+                ("graphtrail", "context", "<task>", "--markdown"),
+                timeout_seconds=10.0,
+                max_chars=4000,
+                probe=("graphtrail", "context", "--help"),
+                probe_contains=("--markdown",),
+            ),
             _surface("verify-exit", ("graphtrail", "--version"), timeout_seconds=10.0),
-            _surface("doctor-json", ("graphtrail", "doctor", "--json"), timeout_seconds=30.0),
+            _surface(
+                "doctor-json",
+                ("graphtrail", "doctor", "--json"),
+                timeout_seconds=30.0,
+                probe=("graphtrail", "doctor", "--help"),
+                probe_contains=("--json",),
+            ),
         ),
     ),
     # usage-tracker is optional spend visibility under the tokens station. The
@@ -472,8 +512,14 @@ _TOOLS: Tuple[ManagedTool, ...] = (
         wire=_noop_wire,
         doctor=_usage_tracker_doctor,
         surfaces=(
-            _surface("summary-json", ("usage-tracker", "export", "--summary-json"), timeout_seconds=30.0),
-            _surface("verify-exit", ("usage-tracker", "export", "--help"), timeout_seconds=10.0),
+            _surface(
+                "summary-json",
+                ("usage-tracker", "export", "--since", "30d", "--summary-json", "--no-write"),
+                timeout_seconds=30.0,
+                max_chars=4000,
+                probe=("usage-tracker", "export", "--help"),
+                probe_contains=("--since", "--summary-json", "--no-write"),
+            ),
         ),
     ),
     # plating is an optional publish helper under guard: render demos, scan for

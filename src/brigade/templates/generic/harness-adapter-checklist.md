@@ -35,7 +35,7 @@ Use this when wiring a new harness into the `brigade` contract.
 
 - [ ] `hooks/pre-push` installed.
 - [ ] `git config core.hooksPath hooks` run once.
-- [ ] `content-guard` installed and policy points at `public-repo.json` or stricter.
+- [ ] `brigade scrub --target <workspace> --policy public-repo --dry-run` resolves the embedded guard and policy.
 
 ## 7. Verification
 

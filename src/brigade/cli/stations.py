@@ -33,6 +33,17 @@ def register(sub: argparse._SubParsersAction) -> None:
         help="How deep under each root to look for station.json (default 2: root and one level of children).",
     )
     p_discover.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_verify = stations_sub.add_parser(
+        "verify",
+        help="Verify one explicitly selected station.json contract without installing it.",
+    )
+    p_verify.add_argument("path", help="Directory containing station.json, or the station.json path itself.")
+    p_verify.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_verify.add_argument(
+        "--check-managed",
+        action="store_true",
+        help="Fail when a matching active executable contract drifts from Brigade's managed catalog.",
+    )
     p_stations.set_defaults(func=dispatch)
 
 
@@ -43,5 +54,11 @@ def dispatch(args) -> int:
         return stations_cmd.list_stations(profile_name=args.profile, json_output=args.json)
     if args.stations_command == "discover":
         return stations_cmd.discover(roots=args.root, max_depth=args.max_depth, json_output=args.json)
+    if args.stations_command == "verify":
+        return stations_cmd.verify(
+            args.path,
+            json_output=args.json,
+            check_managed=args.check_managed,
+        )
     args._brigade_parser.error(f"unknown stations command: {args.stations_command}")
     return 2

@@ -111,6 +111,59 @@ def _patch_content_guard(monkeypatch, *, tip_status="ok", introduced_status="ok"
     monkeypatch.setattr(release_cmd, "_content_guard_available", lambda target: True)
 
 
+def test_release_guard_defaults_to_embedded_brigade_modules(tmp_path, monkeypatch):
+    monkeypatch.delenv("CONTENT_GUARD_DIR", raising=False)
+    tip, tip_env, tip_error = release_cmd._content_guard_command(
+        tmp_path, policy="public-repo", introduced=False, base_ref=None
+    )
+    history, history_env, history_error = release_cmd._content_guard_command(
+        tmp_path, policy="public-repo", introduced=True, base_ref="origin/main"
+    )
+    assert tip_error is None
+    assert tip[:3] == [release_cmd.sys.executable, "-m", "brigade.guard"]
+    assert history[:3] == [release_cmd.sys.executable, "-m", "brigade.guard.git_scan"]
+    assert tip_env == history_env == {}
+    assert "CONTENT_GUARD_DIR" not in " ".join(tip + history)
+
+
+def test_release_guard_external_checkout_requires_explicit_override(tmp_path, monkeypatch):
+    checkout = tmp_path / "content-guard"
+    (checkout / "src").mkdir(parents=True)
+    (checkout / "policies").mkdir()
+    (checkout / "policies" / "public-repo.json").write_text("{}")
+    monkeypatch.setenv("CONTENT_GUARD_DIR", str(checkout))
+    tip, tip_env, tip_error = release_cmd._content_guard_command(
+        tmp_path, policy="public-repo", introduced=False, base_ref=None
+    )
+    history, history_env, history_error = release_cmd._content_guard_command(
+        tmp_path, policy="public-repo", introduced=True, base_ref="origin/main"
+    )
+    policy = str(checkout / "policies" / "public-repo.json")
+    assert tip_error is None
+    assert tip == [
+        release_cmd.sys.executable,
+        "-m",
+        "content_guard",
+        "scan",
+        str(tmp_path),
+        "--policy",
+        policy,
+    ]
+    assert history_error is None
+    assert history == [
+        release_cmd.sys.executable,
+        "-m",
+        "content_guard.git_scan",
+        "--history",
+        "--range",
+        "origin/main..HEAD",
+        "--policy",
+        policy,
+    ]
+    expected_env = {"PYTHONPATH": str(checkout / "src")}
+    assert tip_env == history_env == expected_env
+
+
 def test_release_plan_run_runs_show_clean_ready(tmp_path, monkeypatch, capsys):
     _init_repo(tmp_path)
     _seed_ready_evidence(tmp_path)
