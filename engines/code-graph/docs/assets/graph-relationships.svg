@@ -30,26 +30,25 @@
   <text x="72.0" y="164" fill="#e0a45c" font-family="IBM Plex Mono, ui-monospace, monospace" font-size="10" font-weight="600" letter-spacing="1.7">CALLERS · WHO REACHES ME</text>
   <text x="354.0" y="164" fill="#e0a45c" font-family="IBM Plex Mono, ui-monospace, monospace" font-size="10" font-weight="600" letter-spacing="1.7">FOCUS</text>
   <text x="636.0" y="164" fill="#e0a45c" font-family="IBM Plex Mono, ui-monospace, monospace" font-size="10" font-weight="600" letter-spacing="1.7">CALLEES · WHO I REACH</text>
-  <path d="M324.0,230.0 C342.0,230.0 336.0,271.0 354.0,271.0" fill="none" stroke="#e0a45c" stroke-width="1.5" opacity="0.9" marker-end="url(#workflow-arrow)"/>
-  <path d="M324.0,312.0 C342.0,312.0 336.0,271.0 354.0,271.0" fill="none" stroke="#e0a45c" stroke-width="1.5" opacity="0.9" marker-end="url(#workflow-arrow)"/>
-  <path d="M606.0,271.0 C624.0,271.0 618.0,230.0 636.0,230.0" fill="none" stroke="#e0a45c" stroke-width="1.5" opacity="0.9" marker-end="url(#workflow-arrow)"/>
-  <path d="M606.0,271.0 C624.0,271.0 618.0,312.0 636.0,312.0" fill="none" stroke="#e0a45c" stroke-width="1.5" opacity="0.9" marker-end="url(#workflow-arrow)"/>
+  <line class="workflow-edge" x1="324.0" y1="230.0" x2="354.0" y2="271.0" stroke="#e0a45c" stroke-width="1.5" opacity="0.9" marker-end="url(#workflow-arrow)"/>
+  <line class="workflow-edge" x1="324.0" y1="312.0" x2="354.0" y2="271.0" stroke="#e0a45c" stroke-width="1.5" opacity="0.9" marker-end="url(#workflow-arrow)"/>
+  <line class="workflow-edge" x1="606.0" y1="271.0" x2="636.0" y2="230.0" stroke="#e0a45c" stroke-width="1.5" opacity="0.9" marker-end="url(#workflow-arrow)"/>
+  <line class="workflow-edge" x1="606.0" y1="271.0" x2="636.0" y2="312.0" stroke="#e0a45c" stroke-width="1.5" opacity="0.9" marker-end="url(#workflow-arrow)"/>
   <rect x="72.0" y="196.0" width="252.0" height="68" rx="12" fill="#11161c" stroke="#2a323d"/>
-  <text x="88.0" y="225.0" fill="#dde3ea" font-family="IBM Plex Mono, ui-monospace, monospace" font-size="14" font-weight="600">main</text>
+  <text class="workflow-node-label" x="88.0" y="225.0" fill="#dde3ea" font-family="IBM Plex Mono, ui-monospace, monospace" font-size="14" font-weight="600">main</text>
   <text x="88.0" y="245.0" fill="#9aa4b2" font-family="IBM Plex Mono, ui-monospace, monospace" font-size="10">graphtrail-mcp.rs</text>
   <rect x="72.0" y="278.0" width="252.0" height="68" rx="12" fill="#0f1318" stroke="#1e242c"/>
-  <text x="88.0" y="307.0" fill="#dde3ea" font-family="IBM Plex Mono, ui-monospace, monospace" font-size="14" font-weight="600">serve_returns_error</text>
+  <text class="workflow-node-label" x="88.0" y="307.0" fill="#dde3ea" font-family="IBM Plex Mono, ui-monospace, monospace" font-size="14" font-weight="600">serve_returns_error</text>
   <text x="88.0" y="327.0" fill="#9aa4b2" font-family="IBM Plex Mono, ui-monospace, monospace" font-size="10">tests/mcp.rs</text>
   <rect x="354.0" y="237.0" width="252.0" height="68" rx="12" fill="#0f1318" stroke="#e0a45c"/>
-  <text x="370.0" y="266.0" fill="#dde3ea" font-family="IBM Plex Mono, ui-monospace, monospace" font-size="14" font-weight="600">serve</text>
-  <text x="370.0" y="286.0" fill="#9aa4b2" font-family="IBM Plex Mono, ui-monospace, monospace" font-size="10">src/mcp.rs</text>
-  <rect x="536.0" y="249.0" width="58" height="20" rx="10" fill="#0f1318" stroke="#e0a45c"/>
-  <text x="565.0" y="263.0" text-anchor="middle" fill="#e0a45c" font-family="IBM Plex Mono, ui-monospace, monospace" font-size="9" font-weight="600">impact</text>
+  <text class="workflow-node-label" x="370.0" y="274.0" fill="#dde3ea" font-family="IBM Plex Mono, ui-monospace, monospace" font-size="14" font-weight="600">serve</text>
+  <text x="370.0" y="293.0" fill="#9aa4b2" font-family="IBM Plex Mono, ui-monospace, monospace" font-size="10">src/mcp.rs</text>
+  <text class="workflow-badge" x="370.0" y="254.0" fill="#e0a45c" font-family="IBM Plex Mono, ui-monospace, monospace" font-size="8" font-weight="600" letter-spacing="1.2">IMPACT</text>
   <rect x="636.0" y="196.0" width="252.0" height="68" rx="12" fill="#11161c" stroke="#e0a45c"/>
-  <text x="652.0" y="225.0" fill="#dde3ea" font-family="IBM Plex Mono, ui-monospace, monospace" font-size="14" font-weight="600">handle_request</text>
+  <text class="workflow-node-label" x="652.0" y="225.0" fill="#dde3ea" font-family="IBM Plex Mono, ui-monospace, monospace" font-size="14" font-weight="600">handle_request</text>
   <text x="652.0" y="245.0" fill="#9aa4b2" font-family="IBM Plex Mono, ui-monospace, monospace" font-size="10">hops=1 · mcp.rs</text>
   <rect x="636.0" y="278.0" width="252.0" height="68" rx="12" fill="#11161c" stroke="#2a323d"/>
-  <text x="652.0" y="307.0" fill="#dde3ea" font-family="IBM Plex Mono, ui-monospace, monospace" font-size="14" font-weight="600">call_tool</text>
+  <text class="workflow-node-label" x="652.0" y="307.0" fill="#dde3ea" font-family="IBM Plex Mono, ui-monospace, monospace" font-size="14" font-weight="600">call_tool</text>
   <text x="652.0" y="327.0" fill="#9aa4b2" font-family="IBM Plex Mono, ui-monospace, monospace" font-size="10">hops=2 from handle_request</text>
   <line x1="72" y1="398" x2="888" y2="398" stroke="#1e242c"/>
   <text x="72" y="427" fill="#e0a45c" font-family="IBM Plex Mono, ui-monospace, monospace" font-size="10" font-weight="600" letter-spacing="1.6">CONTEXT PACK</text>

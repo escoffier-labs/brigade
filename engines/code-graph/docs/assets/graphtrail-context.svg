@@ -31,35 +31,34 @@
   <text x="283.5" y="164" fill="#e0a45c" font-family="IBM Plex Mono, ui-monospace, monospace" font-size="10" font-weight="600" letter-spacing="1.7">INDEX</text>
   <text x="495.0" y="164" fill="#e0a45c" font-family="IBM Plex Mono, ui-monospace, monospace" font-size="10" font-weight="600" letter-spacing="1.7">STORE</text>
   <text x="706.5" y="164" fill="#e0a45c" font-family="IBM Plex Mono, ui-monospace, monospace" font-size="10" font-weight="600" letter-spacing="1.7">ASK</text>
-  <path d="M253.5,271.0 C271.5,271.0 265.5,230.0 283.5,230.0" fill="none" stroke="#e0a45c" stroke-width="1.5" opacity="0.9" marker-end="url(#workflow-arrow)"/>
-  <path d="M253.5,271.0 C271.5,271.0 265.5,312.0 283.5,312.0" fill="none" stroke="#e0a45c" stroke-width="1.5" opacity="0.9" marker-end="url(#workflow-arrow)"/>
-  <path d="M465.0,230.0 C483.0,230.0 477.0,271.0 495.0,271.0" fill="none" stroke="#e0a45c" stroke-width="1.5" opacity="0.9" marker-end="url(#workflow-arrow)"/>
-  <path d="M465.0,312.0 C483.0,312.0 477.0,271.0 495.0,271.0" fill="none" stroke="#e0a45c" stroke-width="1.5" opacity="0.9" marker-end="url(#workflow-arrow)"/>
-  <path d="M676.5,271.0 C694.5,271.0 688.5,189.0 706.5,189.0" fill="none" stroke="#e0a45c" stroke-width="1.5" opacity="0.9" marker-end="url(#workflow-arrow)"/>
-  <path d="M676.5,271.0 C694.5,271.0 688.5,271.0 706.5,271.0" fill="none" stroke="#e0a45c" stroke-width="1.5" opacity="0.9" marker-end="url(#workflow-arrow)"/>
-  <path d="M676.5,271.0 C694.5,271.0 688.5,353.0 706.5,353.0" fill="none" stroke="#e0a45c" stroke-width="1.5" opacity="0.9" marker-end="url(#workflow-arrow)"/>
+  <line class="workflow-edge" x1="253.5" y1="271.0" x2="283.5" y2="230.0" stroke="#e0a45c" stroke-width="1.5" opacity="0.9" marker-end="url(#workflow-arrow)"/>
+  <line class="workflow-edge" x1="253.5" y1="271.0" x2="283.5" y2="312.0" stroke="#e0a45c" stroke-width="1.5" opacity="0.9" marker-end="url(#workflow-arrow)"/>
+  <line class="workflow-edge" x1="465.0" y1="230.0" x2="495.0" y2="271.0" stroke="#e0a45c" stroke-width="1.5" opacity="0.9" marker-end="url(#workflow-arrow)"/>
+  <line class="workflow-edge" x1="465.0" y1="312.0" x2="495.0" y2="271.0" stroke="#e0a45c" stroke-width="1.5" opacity="0.9" marker-end="url(#workflow-arrow)"/>
+  <line class="workflow-edge" x1="676.5" y1="271.0" x2="706.5" y2="189.0" stroke="#e0a45c" stroke-width="1.5" opacity="0.9" marker-end="url(#workflow-arrow)"/>
+  <line class="workflow-edge" x1="676.5" y1="271.0" x2="706.5" y2="271.0" stroke="#e0a45c" stroke-width="1.5" opacity="0.9" marker-end="url(#workflow-arrow)"/>
+  <line class="workflow-edge" x1="676.5" y1="271.0" x2="706.5" y2="353.0" stroke="#e0a45c" stroke-width="1.5" opacity="0.9" marker-end="url(#workflow-arrow)"/>
   <rect x="72.0" y="237.0" width="181.5" height="68" rx="12" fill="#11161c" stroke="#2a323d"/>
-  <text x="88.0" y="266.0" fill="#dde3ea" font-family="IBM Plex Mono, ui-monospace, monospace" font-size="14" font-weight="600">repository</text>
+  <text class="workflow-node-label" x="88.0" y="266.0" fill="#dde3ea" font-family="IBM Plex Mono, ui-monospace, monospace" font-size="14" font-weight="600">repository</text>
   <text x="88.0" y="286.0" fill="#9aa4b2" font-family="IBM Plex Mono, ui-monospace, monospace" font-size="10">Python · TS/JS · Rust · Go</text>
   <rect x="283.5" y="196.0" width="181.5" height="68" rx="12" fill="#11161c" stroke="#e0a45c"/>
-  <text x="299.5" y="225.0" fill="#dde3ea" font-family="IBM Plex Mono, ui-monospace, monospace" font-size="14" font-weight="600">graphtrail init</text>
+  <text class="workflow-node-label" x="299.5" y="225.0" fill="#dde3ea" font-family="IBM Plex Mono, ui-monospace, monospace" font-size="14" font-weight="600">graphtrail init</text>
   <text x="299.5" y="245.0" fill="#9aa4b2" font-family="IBM Plex Mono, ui-monospace, monospace" font-size="10">first full pass</text>
   <rect x="283.5" y="278.0" width="181.5" height="68" rx="12" fill="#0f1318" stroke="#e0a45c"/>
-  <text x="299.5" y="307.0" fill="#dde3ea" font-family="IBM Plex Mono, ui-monospace, monospace" font-size="14" font-weight="600">graphtrail sync</text>
-  <text x="299.5" y="327.0" fill="#9aa4b2" font-family="IBM Plex Mono, ui-monospace, monospace" font-size="10">changed files only</text>
-  <rect x="360.0" y="290.0" width="93" height="20" rx="10" fill="#0f1318" stroke="#e0a45c"/>
-  <text x="406.5" y="304.0" text-anchor="middle" fill="#e0a45c" font-family="IBM Plex Mono, ui-monospace, monospace" font-size="9" font-weight="600">incremental</text>
+  <text class="workflow-node-label" x="299.5" y="315.0" fill="#dde3ea" font-family="IBM Plex Mono, ui-monospace, monospace" font-size="14" font-weight="600">graphtrail sync</text>
+  <text x="299.5" y="334.0" fill="#9aa4b2" font-family="IBM Plex Mono, ui-monospace, monospace" font-size="10">changed files only</text>
+  <text class="workflow-badge" x="299.5" y="295.0" fill="#e0a45c" font-family="IBM Plex Mono, ui-monospace, monospace" font-size="8" font-weight="600" letter-spacing="1.2">INCREMENTAL</text>
   <rect x="495.0" y="237.0" width="181.5" height="68" rx="12" fill="#11161c" stroke="#2a323d"/>
-  <text x="511.0" y="266.0" fill="#dde3ea" font-family="IBM Plex Mono, ui-monospace, monospace" font-size="14" font-weight="600">graphtrail.db</text>
+  <text class="workflow-node-label" x="511.0" y="266.0" fill="#dde3ea" font-family="IBM Plex Mono, ui-monospace, monospace" font-size="14" font-weight="600">graphtrail.db</text>
   <text x="511.0" y="286.0" fill="#9aa4b2" font-family="IBM Plex Mono, ui-monospace, monospace" font-size="10">symbols · imports · calls</text>
   <rect x="706.5" y="155.0" width="181.5" height="68" rx="12" fill="#11161c" stroke="#2a323d"/>
-  <text x="722.5" y="184.0" fill="#dde3ea" font-family="IBM Plex Mono, ui-monospace, monospace" font-size="14" font-weight="600">CLI</text>
+  <text class="workflow-node-label" x="722.5" y="184.0" fill="#dde3ea" font-family="IBM Plex Mono, ui-monospace, monospace" font-size="14" font-weight="600">CLI</text>
   <text x="722.5" y="204.0" fill="#9aa4b2" font-family="IBM Plex Mono, ui-monospace, monospace" font-size="10">humans + scripts</text>
   <rect x="706.5" y="237.0" width="181.5" height="68" rx="12" fill="#11161c" stroke="#e0a45c"/>
-  <text x="722.5" y="266.0" fill="#dde3ea" font-family="IBM Plex Mono, ui-monospace, monospace" font-size="14" font-weight="600">MCP</text>
+  <text class="workflow-node-label" x="722.5" y="266.0" fill="#dde3ea" font-family="IBM Plex Mono, ui-monospace, monospace" font-size="14" font-weight="600">MCP</text>
   <text x="722.5" y="286.0" fill="#9aa4b2" font-family="IBM Plex Mono, ui-monospace, monospace" font-size="10">read-only queries</text>
   <rect x="706.5" y="319.0" width="181.5" height="68" rx="12" fill="#0f1318" stroke="#e0a45c"/>
-  <text x="722.5" y="348.0" fill="#dde3ea" font-family="IBM Plex Mono, ui-monospace, monospace" font-size="14" font-weight="600">context pack</text>
+  <text class="workflow-node-label" x="722.5" y="348.0" fill="#dde3ea" font-family="IBM Plex Mono, ui-monospace, monospace" font-size="14" font-weight="600">context pack</text>
   <text x="722.5" y="368.0" fill="#9aa4b2" font-family="IBM Plex Mono, ui-monospace, monospace" font-size="10">neighborhood before edit</text>
   <line x1="72" y1="398" x2="888" y2="398" stroke="#1e242c"/>
   <text x="72" y="427" fill="#e0a45c" font-family="IBM Plex Mono, ui-monospace, monospace" font-size="10" font-weight="600" letter-spacing="1.6">QUERY CONTRACT</text>
