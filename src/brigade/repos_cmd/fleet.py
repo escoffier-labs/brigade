@@ -503,8 +503,8 @@ def _repo_brigade_state(entry: constants.RepoEntry) -> dict[str, Any]:
 
     latest_report = center_cmd.latest_report(repo)
     action_health = center_cmd.actions_health(repo)
-    release_ready = release_cmd._latest_release_receipt(repo)
-    release_candidate = release_cmd._latest_candidate(repo)
+    release_ready = release_cmd._latest_release_receipt(repo)  # type: ignore[misc]
+    release_candidate = release_cmd._latest_candidate(repo)  # type: ignore[misc]
     work_closeout = _latest_json_payload(repo / ".brigade" / "work" / "closeouts", "closeout.json")
     review_health = work_cmd._review_health(repo)
     handoff_payload = handoff_cmd.draft_queue_payload(repo)
