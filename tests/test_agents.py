@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import pytest
 
 from brigade import agents
@@ -9,6 +11,8 @@ def test_build_argv_for_known_clis():
     assert agents.build_argv("opencode", "hi") == ["opencode", "run", "hi"]
     assert agents.build_argv("antigravity", "hi") == [
         "agy",
+        "--add-dir",
+        str(Path.cwd().resolve()),
         "--dangerously-skip-permissions",
         "--print",
         "hi",
@@ -100,6 +104,58 @@ def test_build_argv_antigravity_writable_uses_cwd_write_approval(tmp_path):
         "agy",
         "--add-dir",
         str(tmp_path),
+        "--dangerously-skip-permissions",
+        "--print",
+        "hi",
+    ]
+
+
+def test_build_argv_antigravity_writable_preserves_explicit_cwd():
+    cwd = Path("workspace")
+
+    assert agents.build_argv("antigravity", "hi", cwd=cwd) == [
+        "agy",
+        "--add-dir",
+        "workspace",
+        "--dangerously-skip-permissions",
+        "--print",
+        "hi",
+    ]
+
+
+def test_build_argv_antigravity_writable_uses_current_cwd_when_cwd_omitted(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+
+    assert agents.build_argv("antigravity", "hi") == [
+        "agy",
+        "--add-dir",
+        str(tmp_path.resolve()),
+        "--dangerously-skip-permissions",
+        "--print",
+        "hi",
+    ]
+
+
+def test_research_antigravity_cli_uses_current_cwd_when_cwd_omitted(tmp_path, monkeypatch):
+    from brigade.research import llm
+
+    captured = {}
+
+    def fake_run(argv, **kw):
+        captured["argv"] = argv
+        captured["cwd"] = kw["cwd"]
+        return agents.proc.Result(0, "answer", "")
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(agents.proc, "which", lambda c: "/x/" + c)
+    monkeypatch.setattr(agents.proc, "run", fake_run)
+
+    assert llm._run_cli("antigravity", "hi", 10) == "answer"
+    assert captured["cwd"] is None
+    assert captured["argv"] == [
+        "agy",
+        "--add-dir",
+        str(tmp_path.resolve()),
         "--dangerously-skip-permissions",
         "--print",
         "hi",
@@ -301,6 +357,31 @@ def test_run_agent_threads_cwd_into_argv_builder(monkeypatch, tmp_path):
         "agy",
         "--add-dir",
         str(tmp_path),
+        "--dangerously-skip-permissions",
+        "--print",
+        "hi",
+    ]
+
+
+def test_run_agent_antigravity_with_no_cwd_allows_current_cwd(monkeypatch, tmp_path):
+    captured = {}
+
+    def fake_run(argv, **kw):
+        captured["argv"] = argv
+        captured["cwd"] = kw["cwd"]
+        return agents.proc.Result(0, "answer", "")
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(agents.proc, "which", lambda c: "/x/" + c)
+    monkeypatch.setattr(agents.proc, "run", fake_run)
+    res = agents.run_agent("antigravity", "hi")
+
+    assert res.ok is True
+    assert captured["cwd"] is None
+    assert captured["argv"] == [
+        "agy",
+        "--add-dir",
+        str(tmp_path.resolve()),
         "--dangerously-skip-permissions",
         "--print",
         "hi",

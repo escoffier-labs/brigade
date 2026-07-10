@@ -34,9 +34,8 @@ def _opencode_argv(prompt: str, read_only: bool, sandbox: str | None, cwd: Path 
 def _antigravity_argv(prompt: str, read_only: bool, sandbox: str | None, cwd: Path | None) -> List[str]:
     if read_only or sandbox == "read-only":
         return ["agy", "--sandbox", "--print", prompt]
-    argv = ["agy"]
-    if cwd is not None:
-        argv.extend(["--add-dir", str(cwd)])
+    effective_cwd = cwd if cwd is not None else Path.cwd().resolve()
+    argv = ["agy", "--add-dir", str(effective_cwd)]
     argv.extend(["--dangerously-skip-permissions", "--print", prompt])
     return argv
 

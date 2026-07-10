@@ -4,6 +4,8 @@ Every expected argv here is checked against the real CLI's --help flag; the
 adapters covered are the ones with a confirmed model flag on an installed CLI.
 """
 
+from pathlib import Path
+
 import pytest
 
 from brigade import agents
@@ -110,6 +112,8 @@ def test_pins_model_for_antigravity():
         "agy",
         "--model",
         "gpt-5",
+        "--add-dir",
+        str(Path.cwd().resolve()),
         "--dangerously-skip-permissions",
         "--print",
         "P",
