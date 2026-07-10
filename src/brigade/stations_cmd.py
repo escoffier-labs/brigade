@@ -218,8 +218,8 @@ def discover_payload(
             )
 
     lifecycle_counts = {lifecycle: 0 for lifecycle in station_manifest.LIFECYCLES}
-    for manifest in found:
-        lifecycle_counts[manifest["lifecycle"]] += 1
+    for manifest_row in found:
+        lifecycle_counts[manifest_row["lifecycle"]] += 1
 
     return {
         "roots": [str(r) for r in search_roots],
@@ -372,13 +372,12 @@ def _run_bounded(
         if not events and (timed_out or overflowed):
             break
         for key, _ in events:
-            stream = key.fileobj
             try:
-                chunk = os.read(stream.fileno(), 4096)
+                chunk = os.read(key.fd, 4096)
             except OSError:
                 chunk = b""
             if not chunk:
-                selector.unregister(stream)
+                selector.unregister(key.fileobj)
                 continue
             remaining = OUTPUT_LIMIT_BYTES - total
             accepted = chunk[:remaining]
@@ -532,6 +531,7 @@ def _resolve_argv(
             return None, "declared executable is not available on PATH"
         return [resolved_tool, *argv[1:]], None
     executable = argv[0]
+    resolved: str | None
     if Path(executable).is_absolute():
         resolved = executable
     else:
