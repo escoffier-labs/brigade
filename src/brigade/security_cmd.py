@@ -2270,24 +2270,102 @@ def _python_url_dependency_candidate(file_name: str, section: str, stripped: str
     return stripped.startswith(("dependencies", "requires"))
 
 
-def _iter_scan_files(target: Path) -> list[Path]:
-    paths: list[Path] = []
-    for path in target.rglob("*"):
-        if path.is_dir():
+def _scan_path_selected(rel_path: str, *, include_paths: tuple[str, ...], exclude_paths: tuple[str, ...]) -> bool:
+    if include_paths and not _path_matches_any(rel_path, include_paths):
+        return False
+    return not (exclude_paths and _path_matches_any(rel_path, exclude_paths))
+
+
+def _candidate_scan_roots(target: Path, include_paths: tuple[str, ...]) -> list[Path]:
+    if not include_paths:
+        return [target]
+    roots: list[Path] = []
+    seen: set[Path] = set()
+    for pattern in include_paths:
+        clean = pattern.strip().replace("\\", "/").strip("/")
+        if not clean:
             continue
-        rel_parts = path.relative_to(target).parts
-        if any(part in SKIP_DIRS for part in rel_parts):
-            continue
-        if any(rel_parts[: len(prefix)] == prefix for prefix in SKIP_PREFIXES):
-            continue
-        if path.suffix.lower() not in TEXT_SUFFIXES:
-            continue
+        root = (target / clean).resolve()
         try:
-            if path.stat().st_size > 500_000:
-                continue
-        except OSError:
+            root.relative_to(target)
+        except ValueError:
             continue
-        paths.append(path)
+        if root.exists() and root not in seen:
+            roots.append(root)
+            seen.add(root)
+    return sorted(roots)
+
+
+def _should_scan_file(path: Path) -> bool:
+    if path.suffix.lower() not in TEXT_SUFFIXES:
+        return False
+    try:
+        return path.stat().st_size <= 500_000
+    except OSError:
+        return False
+
+
+def _iter_scan_files(
+    target: Path, *, include_paths: tuple[str, ...] = (), exclude_paths: tuple[str, ...] = ()
+) -> list[Path]:
+    paths: list[Path] = []
+    for root in _candidate_scan_roots(target, include_paths):
+        if root.is_file():
+            rel = str(root.relative_to(target))
+            rel_parts = root.relative_to(target).parts
+            if (
+                not _scan_path_selected(rel, include_paths=include_paths, exclude_paths=exclude_paths)
+                or any(part in SKIP_DIRS for part in rel_parts)
+                or any(rel_parts[: len(prefix)] == prefix for prefix in SKIP_PREFIXES)
+                or not _should_scan_file(root)
+            ):
+                continue
+            paths.append(root)
+            continue
+        for dirpath, dirnames, filenames in os.walk(root):
+            current = Path(dirpath)
+            try:
+                rel_current = current.relative_to(target)
+            except ValueError:
+                dirnames[:] = []
+                continue
+            rel_parts = rel_current.parts
+            if rel_parts and (
+                any(part in SKIP_DIRS for part in rel_parts)
+                or any(rel_parts[: len(prefix)] == prefix for prefix in SKIP_PREFIXES)
+                or not _scan_path_selected(
+                    str(rel_current), include_paths=include_paths, exclude_paths=exclude_paths
+                )
+            ):
+                dirnames[:] = []
+                continue
+            kept_dirs: list[str] = []
+            for dirname in sorted(dirnames):
+                child = current / dirname
+                try:
+                    child_rel = child.relative_to(target)
+                except ValueError:
+                    continue
+                child_parts = child_rel.parts
+                if (
+                    dirname in SKIP_DIRS
+                    or any(child_parts[: len(prefix)] == prefix for prefix in SKIP_PREFIXES)
+                    or not _scan_path_selected(
+                        str(child_rel), include_paths=include_paths, exclude_paths=exclude_paths
+                    )
+                ):
+                    continue
+                kept_dirs.append(dirname)
+            dirnames[:] = kept_dirs
+            for filename in sorted(filenames):
+                path = current / filename
+                rel = str(path.relative_to(target))
+                if _scan_path_selected(
+                    rel,
+                    include_paths=include_paths,
+                    exclude_paths=exclude_paths,
+                ) and _should_scan_file(path):
+                    paths.append(path)
     paths.sort()
     return paths
 
@@ -2656,7 +2734,13 @@ def _filter_findings(
     return selected
 
 
-def _scan_handoff_inboxes(findings: list[dict[str, Any]], *, target: Path) -> list[str]:
+def _scan_handoff_inboxes(
+    findings: list[dict[str, Any]],
+    *,
+    target: Path,
+    include_paths: tuple[str, ...] = (),
+    exclude_paths: tuple[str, ...] = (),
+) -> list[str]:
     """Screen pending handoff notes for injection signals.
 
     Handoff inboxes are excluded from the line scanner via SKIP_PREFIXES so
@@ -2673,11 +2757,14 @@ def _scan_handoff_inboxes(findings: list[dict[str, Any]], *, target: Path) -> li
         for path in sorted(inbox.glob("*.md")):
             if path.name == "TEMPLATE.md":
                 continue
+            rel = str(path.relative_to(target))
+            if not _scan_path_selected(rel, include_paths=include_paths, exclude_paths=exclude_paths):
+                continue
             try:
                 text = path.read_text(errors="replace")
             except OSError:
                 continue
-            scanned.append(str(path.relative_to(target)))
+            scanned.append(rel)
             signal = scan_untrusted(text)
             if signal.flagged:
                 _finding(
@@ -2707,8 +2794,15 @@ def scan_target(
     target = target.expanduser().resolve()
     findings: list[dict[str, Any]] = []
     scanned_files: list[str] = []
-    scanned_files.extend(_scan_handoff_inboxes(findings, target=target))
-    for path in _iter_scan_files(target):
+    scanned_files.extend(
+        _scan_handoff_inboxes(
+            findings,
+            target=target,
+            include_paths=include_paths,
+            exclude_paths=exclude_paths,
+        )
+    )
+    for path in _iter_scan_files(target, include_paths=include_paths, exclude_paths=exclude_paths):
         if not include_templates and _confidence_for(path, target) == "template":
             continue
         try:
