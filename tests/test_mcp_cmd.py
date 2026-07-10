@@ -64,6 +64,35 @@ def test_init_repairs_parent_brigade_ignore_so_catalog_is_trackable(tmp_path, ca
     assert _git(tmp_path, "check-ignore", ".brigade/mcp/state.json").returncode == 0
 
 
+def test_init_repairs_later_gitignore_rule_shadowing_valid_mcp_snippet(tmp_path, capsys):
+    assert _git(tmp_path, "init").returncode == 0
+    (tmp_path / ".gitignore").write_text(
+        "\n".join(
+            [
+                "# user rules",
+                "!.brigade/",
+                ".brigade/*",
+                "!.brigade/mcp.json",
+                ".brigade/mcp/",
+                "*.json",
+            ]
+        )
+        + "\n"
+    )
+
+    assert _git(tmp_path, "check-ignore", ".brigade/mcp.json").returncode == 0
+
+    assert mcp_cmd.init(target=tmp_path, json_output=True) == 0
+
+    payload = _payload(capsys)
+    assert payload["gitignore_updated"] is True
+    gi = (tmp_path / ".gitignore").read_text()
+    assert gi.startswith("# user rules\n")
+    assert "*.json" in gi
+    assert _git(tmp_path, "check-ignore", ".brigade/mcp.json").returncode == 1
+    assert _git(tmp_path, "check-ignore", ".brigade/mcp/state.json").returncode == 0
+
+
 def test_init_refuses_overwrite_without_force(tmp_path):
     _init(tmp_path)
     assert mcp_cmd.init(target=tmp_path, json_output=True) == 3
