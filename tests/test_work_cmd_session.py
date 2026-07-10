@@ -2,6 +2,7 @@ import json
 import subprocess
 from datetime import datetime, timezone
 
+from brigade import aboyeur
 from brigade import cli
 from brigade import center_cmd
 from brigade import dogfood_cmd
@@ -669,6 +670,68 @@ def test_work_brief_json_reports_recent_sessions(tmp_path, monkeypatch, capsys):
     assert payload["dogfood"]["next_source"] == "final"
     assert payload["next"] == "Build JSON brief."
     assert payload["suggested_command"] == 'brigade work end --note "..." --handoff'
+
+
+def test_work_brief_json_attaches_graphtrail_context_for_selected_task(tmp_path, monkeypatch, capsys):
+    _init_git_repo(tmp_path)
+    db = tmp_path / ".graphtrail" / "graphtrail.db"
+    db.parent.mkdir()
+    db.write_text("")
+    graphtrail = tmp_path / "fake-graphtrail"
+    graphtrail.write_text("#!/bin/sh\nprintf '%s\\n' '### Entry points' '- brigade.work_cmd.session._brief_payload'\n")
+    graphtrail.chmod(0o755)
+    monkeypatch.setenv("GRAPHTRAIL_BIN", str(graphtrail))
+    assert work_cmd.task_add(target=tmp_path, text="Attach GraphTrail to work brief") == 0
+    capsys.readouterr()
+
+    assert cli.main(["work", "brief", "--target", str(tmp_path), "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    context = payload["code_graph_context"]
+
+    assert "brigade.work_cmd.session._brief_payload" in context
+    assert payload["code_graph_brief"] == {
+        "attached": True,
+        "bytes": len(context.encode()),
+    }
+
+
+def test_plain_work_brief_skips_graphtrail_while_json_attaches(tmp_path, monkeypatch, capsys):
+    _init_git_repo(tmp_path)
+    assert work_cmd.task_add(target=tmp_path, text="Attach GraphTrail only to JSON brief") == 0
+    capsys.readouterr()
+    calls = []
+    text = "## Code graph context (GraphTrail, read-only)\n\nselected task context\n"
+
+    def fake_code_graph_brief(target, task):
+        calls.append((target, task))
+        return aboyeur.CodeGraphBrief(attached=True, text=text, bytes=len(text.encode()))
+
+    monkeypatch.setattr(aboyeur, "code_graph_brief", fake_code_graph_brief)
+
+    assert cli.main(["work", "brief", "--target", str(tmp_path)]) == 0
+    capsys.readouterr()
+    assert calls == []
+
+    assert cli.main(["work", "brief", "--target", str(tmp_path), "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert calls == [(tmp_path.resolve(), "Attach GraphTrail only to JSON brief")]
+    assert payload["code_graph_context"] == text
+    assert payload["code_graph_brief"] == {"attached": True, "bytes": len(text.encode())}
+
+
+def test_work_brief_json_skips_graphtrail_without_selected_task(tmp_path, monkeypatch, capsys):
+    _init_git_repo(tmp_path)
+
+    def fail_if_called(target, task):
+        raise AssertionError(f"unexpected GraphTrail call for {target}: {task}")
+
+    monkeypatch.setattr(aboyeur, "code_graph_brief", fail_if_called)
+
+    assert cli.main(["work", "brief", "--target", str(tmp_path), "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["code_graph_context"] is None
+    assert payload["code_graph_brief"] == {"attached": False, "bytes": 0}
 
 
 def test_work_brief_json_compacts_heavy_report_and_fleet_health(tmp_path, monkeypatch, capsys):
