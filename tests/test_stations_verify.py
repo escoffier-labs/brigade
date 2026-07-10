@@ -433,7 +433,8 @@ def test_timeout_kills_descendant_holding_pipe_and_sanitizes_payload(tmp_path, m
         f"""
 import pathlib, subprocess, sys
 child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])
-pathlib.Path({str(pid_file)!r}).write_text(str(child.pid))
+stat_fields = pathlib.Path(f'/proc/{{child.pid}}/stat').read_text().rsplit(')', 1)[1].split()
+pathlib.Path({str(pid_file)!r}).write_text(f'{{child.pid}} {{stat_fields[19]}}')
 print('sensitive child output', flush=True)
 raise SystemExit(0)
 """,
@@ -460,20 +461,39 @@ raise SystemExit(0)
     serialized = json.dumps(payload)
     assert "sensitive child output" not in serialized
     assert set(["exit_code", "duration_ms", "stdout_bytes", "stderr_bytes", "total_bytes"]) <= set(result)
-    child_pid = int(pid_file.read_text())
+    child_pid_text, original_start_time = pid_file.read_text().split()
+    child_pid = int(child_pid_text)
+    stat_path = Path(f"/proc/{child_pid}/stat")
     status_path = Path(f"/proc/{child_pid}/status")
-    if status_path.exists():
-        assert "State:\tZ" in status_path.read_text()
+
+    def original_process_state() -> str | None:
+        try:
+            stat_before = stat_path.read_text().rsplit(")", 1)[1].split()
+        except FileNotFoundError:
+            return None
+        if stat_before[19] != original_start_time:
+            return None
+        try:
+            status = status_path.read_text()
+        except FileNotFoundError:
+            return None
+        try:
+            stat_after = stat_path.read_text().rsplit(")", 1)[1].split()
+        except FileNotFoundError:
+            return None
+        if stat_after[19] != original_start_time:
+            return None
+        return next(line.split()[1] for line in status.splitlines() if line.startswith("State:"))
+
+    state = "unknown"
+    deadline = time.monotonic() + 1
+    while time.monotonic() < deadline:
+        state = original_process_state()
+        if state is None or state == "Z":
+            break
+        time.sleep(0.01)
     else:
-        deadline = time.monotonic() + 1
-        while time.monotonic() < deadline:
-            try:
-                os.kill(child_pid, 0)
-            except ProcessLookupError:
-                break
-            time.sleep(0.01)
-        else:
-            pytest.fail("descendant remained alive after process-group timeout cleanup")
+        pytest.fail(f"descendant remained in state {state} after process-group timeout cleanup")
 
 
 @pytest.mark.skipif(not hasattr(os, "fork"), reason="fork-based process-group fixture requires POSIX")
