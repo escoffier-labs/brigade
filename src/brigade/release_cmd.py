@@ -741,10 +741,15 @@ def _content_guard_command(
     env: dict[str, str] = {}
     if not scanner_dir.is_dir():
         return None, env, f"content guard not available at {scanner_dir}"
-    try:
-        policy_path = scrub.policy_path(target, policy)
-    except ValueError as exc:
-        return None, env, str(exc)
+    policy_ref = Path(policy)
+    if os.environ.get("CONTENT_GUARD_DIR") and policy_ref.parent == Path("."):
+        policy_name = policy_ref.name if policy_ref.suffix == ".json" else f"{policy_ref.name}.json"
+        policy_path = scanner_dir / "policies" / policy_name
+    else:
+        try:
+            policy_path = scrub.policy_path(target, policy)
+        except ValueError as exc:
+            return None, env, str(exc)
     if not policy_path.is_file():
         return None, env, f"content guard policy not found: {policy_path}"
     module = scrub.scanner_module()

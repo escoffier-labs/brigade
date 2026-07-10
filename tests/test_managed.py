@@ -90,7 +90,7 @@ def test_agentpantry_doctor_unwired(monkeypatch):
     assert any(status == "WARN" and "unwired" in detail for status, _, detail in results)
 
 
-def test_agentpantry_declares_markdown_brief_surface():
+def test_agentpantry_declares_json_inventory_contract():
     t = managed.resolve("agentpantry")
     surfaces = {surface.kind: surface for surface in t.surfaces}
     doctor = surfaces["doctor-json"]

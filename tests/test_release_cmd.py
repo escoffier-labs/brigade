@@ -132,12 +132,36 @@ def test_release_guard_external_checkout_requires_explicit_override(tmp_path, mo
     (checkout / "policies").mkdir()
     (checkout / "policies" / "public-repo.json").write_text("{}")
     monkeypatch.setenv("CONTENT_GUARD_DIR", str(checkout))
-    argv, env, error = release_cmd._content_guard_command(
+    tip, tip_env, tip_error = release_cmd._content_guard_command(
         tmp_path, policy="public-repo", introduced=False, base_ref=None
     )
-    assert error is None
-    assert argv[:3] == [release_cmd.sys.executable, "-m", "content_guard"]
-    assert env == {"PYTHONPATH": str(checkout / "src")}
+    history, history_env, history_error = release_cmd._content_guard_command(
+        tmp_path, policy="public-repo", introduced=True, base_ref="origin/main"
+    )
+    policy = str(checkout / "policies" / "public-repo.json")
+    assert tip_error is None
+    assert tip == [
+        release_cmd.sys.executable,
+        "-m",
+        "content_guard",
+        "scan",
+        str(tmp_path),
+        "--policy",
+        policy,
+    ]
+    assert history_error is None
+    assert history == [
+        release_cmd.sys.executable,
+        "-m",
+        "content_guard.git_scan",
+        "--history",
+        "--range",
+        "origin/main..HEAD",
+        "--policy",
+        policy,
+    ]
+    expected_env = {"PYTHONPATH": str(checkout / "src")}
+    assert tip_env == history_env == expected_env
 
 
 def test_release_plan_run_runs_show_clean_ready(tmp_path, monkeypatch, capsys):
