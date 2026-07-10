@@ -575,6 +575,17 @@ def test_security_scan_include_paths_do_not_open_unrelated_files(tmp_path, monke
     assert "unrelated/secret.txt" not in opened
 
 
+def test_security_scan_overlapping_include_paths_scan_each_file_once(tmp_path):
+    source = tmp_path / "src"
+    source.mkdir()
+    (source / "foo.txt").write_text("SERVICE_TOKEN=abcd1234abcd1234abcd1234\n")
+
+    report = security_cmd.scan_target(tmp_path, include_paths=("src", "src/foo.txt"))
+
+    assert report["scanned_files"].count("src/foo.txt") == 1
+    assert [finding["path"] for finding in report["findings"]] == ["src/foo.txt"]
+
+
 def test_security_scan_handoff_inboxes_respect_selection_before_read(tmp_path, monkeypatch):
     included_inbox = tmp_path / ".codex" / "memory-handoffs"
     included_inbox.mkdir(parents=True)
@@ -752,6 +763,40 @@ def test_security_scan_writes_suppression_health_cache(tmp_path, capsys):
     }
     assert cache["key"]["candidate_fingerprint"]
     assert cache["key"]["suppressions"] == [fingerprint]
+
+
+def test_security_suppression_cache_missing_or_invalid_skips_candidate_fingerprint(tmp_path, monkeypatch):
+    config = tmp_path / ".brigade" / "security.toml"
+    config.parent.mkdir(parents=True)
+    config.write_text(
+        "\n".join(
+            [
+                'policy = "personal"',
+                'fail_on = "none"',
+                "include_templates = false",
+                "",
+                "[suppressions]",
+                'fingerprints = ["0123456789abcdef"]',
+                "",
+                "[suppression_reasons]",
+                '0123456789abcdef = "reviewed fake local finding"',
+                "",
+            ]
+        )
+    )
+
+    def fail_candidate_fingerprint(*args, **kwargs):
+        raise AssertionError("candidate fingerprint should not be computed")
+
+    monkeypatch.setattr(security_cmd, "_candidate_file_fingerprint", fail_candidate_fingerprint)
+    cache = security_cmd.suppression_health_cache_path(tmp_path)
+
+    assert security_cmd.suppression_health_cache(tmp_path)["status"] == "missing"
+
+    cache.parent.mkdir(parents=True)
+    for invalid_payload in ("{", "[]"):
+        cache.write_text(invalid_payload)
+        assert security_cmd.suppression_health_cache(tmp_path)["status"] == "invalid"
 
 
 def test_security_init_writes_gitignored_local_config(tmp_path, capsys):

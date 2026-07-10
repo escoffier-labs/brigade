@@ -1582,7 +1582,6 @@ def suppression_health_cache(target: Path) -> dict[str, Any]:
             "next_command": None,
         }
     effective = _effective_policy(target, policy=None, fail_on=None, include_templates=None)
-    expected_key = _suppression_cache_key(target, effective, config)
     path = suppression_health_cache_path(target)
     next_command = _suppression_full_scan_next_command(target)
     if not path.is_file():
@@ -1608,11 +1607,12 @@ def suppression_health_cache(target: Path) -> dict[str, Any]:
             "detail": f"cache invalid: expected object; run `{next_command}`",
             "next_command": next_command,
         }
-    if payload.get("key") != expected_key:
+    cache_key = payload.get("key")
+    if not isinstance(cache_key, dict):
         return {
-            "status": "stale",
+            "status": "invalid",
             "health": None,
-            "detail": f"cache stale; run `{next_command}`",
+            "detail": f"cache invalid: missing key; run `{next_command}`",
             "next_command": next_command,
         }
     health = payload.get("health")
@@ -1621,6 +1621,14 @@ def suppression_health_cache(target: Path) -> dict[str, Any]:
             "status": "invalid",
             "health": None,
             "detail": f"cache invalid: missing health; run `{next_command}`",
+            "next_command": next_command,
+        }
+    expected_key = _suppression_cache_key(target, effective, config)
+    if payload.get("key") != expected_key:
+        return {
+            "status": "stale",
+            "health": None,
+            "detail": f"cache stale; run `{next_command}`",
             "next_command": next_command,
         }
     return {"status": "ok", "health": health, "detail": "cache fresh", "next_command": None}
@@ -2636,7 +2644,14 @@ def _iter_scan_files(
                 ) and _should_scan_file(path):
                     paths.append(path)
     paths.sort()
-    return paths
+    unique_paths: list[Path] = []
+    seen: set[Path] = set()
+    for path in paths:
+        if path in seen:
+            continue
+        unique_paths.append(path)
+        seen.add(path)
+    return unique_paths
 
 
 def _surface_for(path: Path, target: Path) -> str:
