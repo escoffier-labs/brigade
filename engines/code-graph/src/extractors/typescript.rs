@@ -7,7 +7,7 @@ use crate::extractors::common::{LangSpec, extract_with, node_text, string_litera
 use crate::model::{CallTarget, FileGraph, Import};
 
 /// Bump when TypeScript or JavaScript extraction output can change for the same file content.
-pub const EXTRACTOR_FINGERPRINT: &str = "typescript-extractor-v1";
+pub const EXTRACTOR_FINGERPRINT: &str = "typescript-extractor-v2";
 
 /// Ubiquitous globals/methods that would only ever produce noise edges.
 const JS_SKIP: &[&str] = &[
@@ -55,21 +55,25 @@ impl LangSpec for TypeScriptSpec {
         let line = node.start_position().row + 1;
         match node.kind() {
             "import_statement" => {
-                if let Some(src) = node.child_by_field_name("source")
-                    && let Some(module) = string_literal_text(src, source)
-                    && !module.is_empty()
-                {
-                    let before = out.len();
-                    collect_ts_import_bindings(node, src, &module, line, source, out);
-                    if before == out.len() {
-                        out.push(Import {
-                            module,
-                            local_name: None,
-                            imported_name: None,
-                            alias: None,
-                            line,
-                        });
-                    }
+                let Some(src) = node.child_by_field_name("source") else {
+                    return;
+                };
+                let Some(module) = string_literal_text(src, source) else {
+                    return;
+                };
+                if module.is_empty() {
+                    return;
+                }
+                let before = out.len();
+                collect_ts_import_bindings(node, src, &module, line, source, out);
+                if before == out.len() {
+                    out.push(Import {
+                        module,
+                        local_name: None,
+                        imported_name: None,
+                        alias: None,
+                        line,
+                    });
                 }
             }
             "call_expression" => {
@@ -86,22 +90,24 @@ impl LangSpec for TypeScriptSpec {
                 let mut cursor = args.walk();
                 for arg in args.named_children(&mut cursor) {
                     if arg.kind() == "string" {
-                        if let Some(module) = string_literal_text(arg, source)
-                            && !module.is_empty()
-                        {
-                            let local_name = node
-                                .parent()
-                                .filter(|parent| parent.kind() == "variable_declarator")
-                                .and_then(|parent| parent.child_by_field_name("name"))
-                                .map(|name| node_text(name, source));
-                            out.push(Import {
-                                module,
-                                local_name,
-                                imported_name: None,
-                                alias: None,
-                                line,
-                            });
+                        let Some(module) = string_literal_text(arg, source) else {
+                            break;
+                        };
+                        if module.is_empty() {
+                            break;
                         }
+                        let local_name = node
+                            .parent()
+                            .filter(|parent| parent.kind() == "variable_declarator")
+                            .and_then(|parent| parent.child_by_field_name("name"))
+                            .map(|name| node_text(name, source));
+                        out.push(Import {
+                            module,
+                            local_name,
+                            imported_name: None,
+                            alias: None,
+                            line,
+                        });
                         break;
                     }
                 }

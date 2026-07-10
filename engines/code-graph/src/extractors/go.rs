@@ -7,7 +7,7 @@ use crate::extractors::common::{LangSpec, extract_with, node_text};
 use crate::model::{CallTarget, FileGraph, Import};
 
 /// Bump when Go extraction output can change for the same file content.
-pub const EXTRACTOR_FINGERPRINT: &str = "go-extractor-v1";
+pub const EXTRACTOR_FINGERPRINT: &str = "go-extractor-v2";
 
 /// Go builtins that parse as calls but never resolve to a project symbol.
 const GO_SKIP: &[&str] = &[
@@ -37,27 +37,30 @@ impl LangSpec for GoSpec {
     }
 
     fn collect_import(&self, node: TsNode<'_>, source: &[u8], out: &mut Vec<Import>) {
-        if node.kind() == "import_spec"
-            && let Some(path) = node.child_by_field_name("path")
-        {
-            let module = node_text(path, source).trim_matches('"').to_string();
-            if !module.is_empty() {
-                let alias = node
-                    .child_by_field_name("name")
-                    .map(|alias| node_text(alias, source))
-                    .filter(|alias| alias != "." && alias != "_");
-                let local_name = alias
-                    .clone()
-                    .or_else(|| module.rsplit('/').next().map(str::to_string));
-                out.push(Import {
-                    module,
-                    local_name,
-                    imported_name: None,
-                    alias,
-                    line: node.start_position().row + 1,
-                });
-            }
+        if node.kind() != "import_spec" {
+            return;
         }
+        let Some(path) = node.child_by_field_name("path") else {
+            return;
+        };
+        let module = node_text(path, source).trim_matches('"').to_string();
+        if module.is_empty() {
+            return;
+        }
+        let alias = node
+            .child_by_field_name("name")
+            .map(|alias| node_text(alias, source))
+            .filter(|alias| alias != "." && alias != "_");
+        let local_name = alias
+            .clone()
+            .or_else(|| module.rsplit('/').next().map(str::to_string));
+        out.push(Import {
+            module,
+            local_name,
+            imported_name: None,
+            alias,
+            line: node.start_position().row + 1,
+        });
     }
 
     fn call_target(&self, node: TsNode<'_>, source: &[u8]) -> Option<CallTarget> {

@@ -1,5 +1,6 @@
 //! Read-only client for the local Code Search API (`POST /api/search`). Feature: `codesearch`.
 
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -49,6 +50,7 @@ pub struct CodeSearchClient {
 }
 
 const DEFAULT_REQUEST_TIMEOUT_SECS: u64 = 20;
+const MAX_CODE_SEARCH_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 
 /// Read timeout for search requests. A busy indexer can take many seconds to
 /// answer, so this is tunable via `CODE_SEARCH_TIMEOUT_SECS`. Connection
@@ -107,9 +109,19 @@ impl CodeSearchClient {
             .timeout(request_timeout())
             .send_json(Value::Object(payload))
             .context("code search request failed")?;
-        let body: CodeSearchResponse = response
-            .into_json()
-            .context("failed to decode code search response")?;
+        let mut bytes = Vec::new();
+        response
+            .into_reader()
+            .take((MAX_CODE_SEARCH_RESPONSE_BYTES + 1) as u64)
+            .read_to_end(&mut bytes)
+            .context("failed to read code search response")?;
+        if bytes.len() > MAX_CODE_SEARCH_RESPONSE_BYTES {
+            anyhow::bail!(
+                "code search response exceeds {MAX_CODE_SEARCH_RESPONSE_BYTES} byte limit"
+            );
+        }
+        let body: CodeSearchResponse =
+            serde_json::from_slice(&bytes).context("failed to decode code search response")?;
         Ok(hits_from_results(body.results, self.repo_match.as_ref()))
     }
 }
@@ -366,6 +378,40 @@ mod tests {
         assert_eq!(hits[0].file_path, "repos/demo/src/lib.rs");
     }
 
+    #[test]
+    fn oversized_response_is_rejected_before_json_decode() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let body = format!(
+            r#"{{"results":[]}}{}"#,
+            " ".repeat(MAX_CODE_SEARCH_RESPONSE_BYTES + 1)
+        );
+        let mock = MockCodeSearch::new("needle", None, body);
+
+        unsafe {
+            std::env::set_var("CODE_SEARCH_URL", &mock.base_url);
+            std::env::set_var(
+                "CODE_INDEX_MANIFEST",
+                "/tmp/graphtrail-missing-manifest.json",
+            );
+            std::env::remove_var("CODE_SEARCH_API_KEY");
+        }
+        let client = CodeSearchClient::from_env_for_repo(None);
+        let result = client.search("needle", 5);
+        mock.join();
+        unsafe {
+            std::env::remove_var("CODE_SEARCH_URL");
+            std::env::remove_var("CODE_INDEX_MANIFEST");
+        }
+
+        let error = result.expect_err("oversized response must be rejected");
+        let expected =
+            format!("code search response exceeds {MAX_CODE_SEARCH_RESPONSE_BYTES} byte limit");
+        assert!(
+            format!("{error:#}").contains(&expected),
+            "unexpected error: {error:#}"
+        );
+    }
+
     fn write_manifest(
         dir: &Path,
         repo: &Path,
@@ -402,8 +448,9 @@ mod tests {
         fn new(
             expected_query: &'static str,
             expected_project: Option<&'static str>,
-            body: &'static str,
+            body: impl Into<String>,
         ) -> Self {
+            let body = body.into();
             let listener = TcpListener::bind("127.0.0.1:0").unwrap();
             listener.set_nonblocking(true).unwrap();
             let base_url = format!("http://{}", listener.local_addr().unwrap());

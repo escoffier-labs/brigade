@@ -91,9 +91,7 @@ fn lock_is_stale(path: &Path) -> bool {
     let owner_pid = fs::read_to_string(path)
         .ok()
         .and_then(|content| content.trim().parse::<u32>().ok());
-    if let Some(pid) = owner_pid
-        && let Some(alive) = pid_alive(pid)
-    {
+    if let Some(alive) = owner_pid.and_then(pid_alive) {
         return !alive;
     }
     // Unreadable owner or no liveness signal: fall back to age.

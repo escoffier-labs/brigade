@@ -1,4 +1,6 @@
-//! GraphTrail MCP server binary: a read-only stdio JSON-RPC server over graph databases.
+//! GraphTrail MCP server binary with read-only query connections and one opt-in `refresh: true`
+//! incremental sync writer. Supported tools wait up to 10 seconds for refresh, then fail open with
+//! a `refresh_error` note. A timed-out worker may finish concurrently with the query.
 //!
 //! The default database comes from `--db <path>`, `--db=<path>`, the `GRAPHTRAIL_DB` env var, or
 //! `.graphtrail/graphtrail.db` in the working directory. Individual tool calls may override it with

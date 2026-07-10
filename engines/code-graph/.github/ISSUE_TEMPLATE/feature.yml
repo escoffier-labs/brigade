@@ -1,5 +1,6 @@
 name: Feature request
 description: Suggest an improvement to GraphTrail's extractors, queries, CLI, or MCP server.
+title: "[Feature]: "
 labels: ["enhancement"]
 body:
   - type: textarea
@@ -24,10 +25,13 @@ body:
       label: Area
       options:
         - Extractor / language coverage
+        - Indexing / sync / schema
         - Graph queries (search, callers, callees, impact, context)
+        - Analysis (dead-code, cycles, affected, diff)
+        - Doctor / freshness
         - CLI surface
         - MCP server / tools
-        - Optional integration (codesearch, miseledger, Brigade)
+        - Optional integration (Code Search, MiseLedger, Brigade)
         - Other
     validations:
       required: true
@@ -42,7 +46,7 @@ body:
     id: scope
     attributes:
       label: Scope check
-      description: GraphTrail is a small read-only sidecar by design.
+      description: State any effect on the default no-network build, graph schema, or MCP write boundary in the proposal above.
       options:
-        - label: This keeps the default build network-free and the MCP server read-only.
-          required: false
+        - label: I described any required network access, schema migration, or graph-index write.
+          required: true

@@ -7,7 +7,7 @@ use crate::extractors::common::{LangSpec, extract_with, node_text};
 use crate::model::{CallTarget, FileGraph, Import};
 
 /// Bump when Rust extraction output can change for the same file content.
-pub const EXTRACTOR_FINGERPRINT: &str = "rust-extractor-v1";
+pub const EXTRACTOR_FINGERPRINT: &str = "rust-extractor-v2";
 
 /// Common enum constructors that parse as calls but rarely resolve to a project symbol.
 const RUST_SKIP: &[&str] = &["Some", "Ok", "Err", "None", "Box"];
@@ -42,11 +42,13 @@ impl LangSpec for RustSpec {
     }
 
     fn collect_import(&self, node: TsNode<'_>, source: &[u8], out: &mut Vec<Import>) {
-        if node.kind() == "use_declaration"
-            && let Some(arg) = node.child_by_field_name("argument")
-        {
-            collect_rust_use(&node_text(arg, source), node.start_position().row + 1, out);
+        if node.kind() != "use_declaration" {
+            return;
         }
+        let Some(arg) = node.child_by_field_name("argument") else {
+            return;
+        };
+        collect_rust_use(&node_text(arg, source), node.start_position().row + 1, out);
     }
 
     fn call_target(&self, node: TsNode<'_>, source: &[u8]) -> Option<CallTarget> {

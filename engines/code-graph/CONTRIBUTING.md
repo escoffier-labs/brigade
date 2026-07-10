@@ -1,13 +1,13 @@
 # Contributing to GraphTrail
 
-GraphTrail is a local code-graph sidecar: it indexes a repository into a small SQLite graph of symbols, imports, and call edges, and answers structural questions over a CLI and a read-only MCP server. Patches are welcome. Before you start, please skim this file so we both spend our time on the right things.
+GraphTrail is a local code-graph sidecar: it indexes a repository into a small SQLite graph of symbols, imports, and call edges, and answers structural questions over a CLI and an MCP server whose query connections are read-only. On supported tools, `refresh: true` incremental sync is the only sanctioned MCP writer. It waits up to 10 seconds before opening the query read-only. If the refresh fails or times out, the query fails open with a `refresh_error` note. A timed-out worker may finish concurrently with that query. Patches are welcome. Before you start, please skim this file so we both spend our time on the right things.
 
 ## What kinds of changes land easily
 
 - **Bug fixes** in the extractors, `store` (sync/schema), `query` (search/graph/context/stats), the CLI, or the MCP server.
 - **Extractor improvements**: better symbol, import, or call-edge coverage for an already-supported language (Python, TypeScript/JavaScript, Rust, Go).
 - **Resolution improvements**: sharper same-file-first / capped cross-file call-edge matching.
-- **MCP server fixes** that keep it read-only and dependency-light.
+- **MCP server fixes** that keep query connections read-only, refresh writes explicit and default-off, and dependencies small.
 - **Test coverage** for any of the above.
 
 ## What needs a conversation first
@@ -20,7 +20,7 @@ GraphTrail is a local code-graph sidecar: it indexes a repository into a small S
 
 - Personal details, hostnames, IPs, account IDs, or live auth profiles in code, tests, or fixtures. The whole point of a public repo is to keep that out. Run `content-guard` before you push.
 - Anything that makes the default build call the network or start a daemon.
-- Anything that makes the MCP server able to mutate a graph. Connections must stay `SQLITE_OPEN_READ_ONLY`.
+- Anything that makes a query connection writable, allows an MCP graph write without `refresh: true`, or removes the 10-second fail-open bound.
 - AI co-authorship trailers on commits (`Co-Authored-By: <model>`). Conventional commits only.
 
 ## Local dev

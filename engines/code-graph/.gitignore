@@ -3,6 +3,7 @@
 
 # Agent session + handoff artifacts
 .claude/
+.codex/
 
 # Local MCP registration (machine-specific paths)
 .mcp.json

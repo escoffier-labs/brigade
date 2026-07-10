@@ -1,5 +1,7 @@
-target/
-.graphtrail/
-.git/
-.claude/
-*.db
+**
+!Dockerfile
+!.dockerignore
+!Cargo.toml
+!Cargo.lock
+!src/
+!src/**

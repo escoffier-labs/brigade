@@ -1,5 +1,6 @@
 //! Integration tests for dead_code, cycles, affected, and edge confidence.
 
+use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 
@@ -31,6 +32,32 @@ fn fixture() -> (tempfile::TempDir, Connection) {
     write(
         root.join("tests/test_app.py"),
         "from app import run\n\ndef test_run():\n    assert run()\n",
+    );
+
+    let conn = open_db(&root.join("g.db")).unwrap();
+    init_schema(&conn).unwrap();
+    sync_repo(&conn, root).unwrap();
+    (dir, conn)
+}
+
+/// Low-confidence candidates sort before the private function by file name,
+/// so the report must use confidence rather than the SQL's file ordering.
+fn dead_code_confidence_fixture() -> (tempfile::TempDir, Connection) {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write(
+        root.join("a_trait.rs"),
+        "trait Handler {\n    fn handle(&self) {}\n}\n",
+    );
+    write(root.join("b_public.rs"), "pub fn exported_entry() {}\n");
+    write(root.join("c_callback.rs"), "fn on_event() {}\n");
+    write(
+        root.join("d_export_list.js"),
+        "function listedApi() {}\n\nexport { listedApi };\n",
+    );
+    write(
+        root.join("z_private.rs"),
+        "fn local_helper() {}\nfn pending_hint() {}\nfn import_hint() {}\n",
     );
 
     let conn = open_db(&root.join("g.db")).unwrap();
@@ -73,6 +100,106 @@ fn dead_code_limit_truncates_but_reports_total() {
     let report = dead_code(&conn, 1).unwrap();
     assert_eq!(report.symbols.len(), 1);
     assert_eq!(report.total, 2);
+}
+
+#[test]
+fn dead_code_ranks_private_candidates_ahead_of_uncertain_ones() {
+    let (_dir, conn) = dead_code_confidence_fixture();
+    let report = dead_code(&conn, 100).unwrap();
+    let by_name: HashMap<&str, _> = report
+        .symbols
+        .iter()
+        .map(|symbol| (symbol.name.as_str(), symbol))
+        .collect();
+
+    let private = by_name.get("local_helper").expect("private candidate");
+    assert_eq!(private.confidence, "high");
+    assert!(
+        private.reason.contains("private/local"),
+        "{}",
+        private.reason
+    );
+
+    for uncertain in ["handle", "exported_entry", "on_event", "listedApi"] {
+        let symbol = by_name
+            .get(uncertain)
+            .expect("uncertain candidate retained");
+        assert_eq!(symbol.confidence, "low", "{uncertain}: {symbol:?}");
+        assert!(!symbol.reason.is_empty(), "{uncertain} needs a reason");
+    }
+
+    assert!(by_name["handle"].reason.contains("dynamic dispatch"));
+    assert!(by_name["exported_entry"].reason.contains("public/exported"));
+    assert!(by_name["on_event"].reason.contains("callback-style"));
+    assert!(by_name["listedApi"].reason.contains("module visibility"));
+
+    let private_position = report
+        .symbols
+        .iter()
+        .position(|symbol| symbol.name == "local_helper")
+        .unwrap();
+    let first_uncertain_position = report
+        .symbols
+        .iter()
+        .position(|symbol| {
+            matches!(
+                symbol.name.as_str(),
+                "handle" | "exported_entry" | "on_event" | "listedApi"
+            )
+        })
+        .unwrap();
+    assert!(
+        private_position < first_uncertain_position,
+        "symbols: {:?}",
+        report.symbols
+    );
+
+    let limited = dead_code(&conn, 1).unwrap();
+    assert_eq!(limited.total, report.total);
+    assert_eq!(limited.symbols[0].name, "local_helper");
+    assert_eq!(limited.symbols[0].confidence, "high");
+
+    let serialized = serde_json::to_value(&report).unwrap();
+    for symbol in serialized["symbols"].as_array().unwrap() {
+        assert!(matches!(
+            symbol["confidence"].as_str(),
+            Some("high" | "low")
+        ));
+        assert!(
+            symbol["reason"]
+                .as_str()
+                .is_some_and(|reason| !reason.is_empty())
+        );
+    }
+}
+
+#[test]
+fn dead_code_downgrades_stored_reference_hints() {
+    let (_dir, conn) = dead_code_confidence_fixture();
+    conn.execute(
+        "INSERT INTO pending_calls(source_id, file_path, target_name, kind, qualifier, line)
+         VALUES ('external-source', 'consumer.rs', 'pending_hint', 'bare', NULL, 1)",
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO imports(file_path, module, local_name, imported_name, alias, line)
+         VALUES ('consumer.rs', 'crate::z_private', 'renamed', 'import_hint', 'renamed', 1)",
+        [],
+    )
+    .unwrap();
+
+    let report = dead_code(&conn, 100).unwrap();
+    let by_name: HashMap<&str, _> = report
+        .symbols
+        .iter()
+        .map(|symbol| (symbol.name.as_str(), symbol))
+        .collect();
+
+    assert_eq!(by_name["pending_hint"].confidence, "low");
+    assert!(by_name["pending_hint"].reason.contains("unresolved call"));
+    assert_eq!(by_name["import_hint"].confidence, "low");
+    assert!(by_name["import_hint"].reason.contains("import evidence"));
 }
 
 #[test]

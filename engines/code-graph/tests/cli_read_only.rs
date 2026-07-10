@@ -238,6 +238,27 @@ fn query_commands_do_not_mutate_existing_db_state() {
 }
 
 #[test]
+fn dead_code_plain_text_includes_confidence_and_reason() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = build_db(dir.path());
+
+    let output = Command::new(graphtrail())
+        .current_dir(dir.path())
+        .args(["--db", &db.display().to_string(), "dead-code"])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success(), "dead-code failed: {output:?}");
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        stdout.contains(
+            "low function run app.py:5 def run(): - public/exported entry point may be called outside the indexed graph"
+        ),
+        "stdout: {stdout:?}"
+    );
+}
+
+#[test]
 fn doctor_fresh_synced_repo_reports_fresh() {
     let dir = tempfile::tempdir().unwrap();
     let db = build_db(dir.path());

@@ -4,18 +4,26 @@ on:
   push:
     paths-ignore:
       - 'docs/**'
-      - '*.md'
       - 'LICENSE'
       - '.gitignore'
     branches: [master, main]
   pull_request:
     paths-ignore:
       - 'docs/**'
-      - '*.md'
       - 'LICENSE'
       - '.gitignore'
 
 jobs:
+  msrv:
+    name: MSRV (Rust 1.85)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.85.0
+      - uses: Swatinem/rust-cache@v2
+      - name: Check locked all-features build
+        run: cargo check --locked --all-features
+
   build-and-test:
     runs-on: ubuntu-latest
     steps:

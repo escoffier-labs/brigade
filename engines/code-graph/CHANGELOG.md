@@ -7,13 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Fixed
-- `sync` now refuses to index the filesystem root or the user's home directory instead of walking every cache, toolchain, and vendored source tree on the machine, which held the whole pending graph in memory and could exhaust system RAM. The CLI rejects the root before creating `.graphtrail/`, and the same guard covers the MCP `refresh: true` path. Set `GRAPHTRAIL_ALLOW_UNSAFE_ROOT=1` to override.
-
 ### Added
+- Schema v5 persists pending calls so an incremental sync can rebuild all derived edges when definitions change in another file. Databases from before v5 reindex once to populate the new table.
+- Schema v6 stores confidence on call edges and rebuilds existing derived edges from persisted pending calls without re-parsing source files.
+- `dead-code`, `cycles`, and `affected` analysis commands over the CLI, with matching `dead_code`, `cycles`, and `affected` MCP tools.
+- Branch-drift detection in `doctor`, which marks a graph stale when its recorded sync branch differs from the checked-out branch.
 - Feature-gated MCP `semantic_search` tool for `codesearch` builds. It uses the existing Code Search client, can return raw per-file hits with `blend: false`, and defaults to blended symbol rows ranked by embedding score plus graph centrality.
 - Feature-gated MCP `context` argument `blend_code_search`, matching the CLI flag while leaving the default build's tool list and existing context calls unchanged.
 - Shared Code Search index manifest support for `codesearch` builds. GraphTrail now discovers the manifest, matches the canonical repo root, falls back to `semantic_api_url` when `CODE_SEARCH_URL` is unset, scopes requests with `code_search_project`, and strips `code_search_file_prefix` from returned hits.
+
+### Changed
+- MCP tool names, schemas, refresh policy, validation, and dispatch now come from one registry. The public tool names and response shapes are unchanged.
+
+### Fixed
+- `sync` now refuses to index the filesystem root or the user's home directory instead of walking every cache, toolchain, and vendored source tree on the machine, which held the whole pending graph in memory and could exhaust system RAM. The CLI rejects the root before creating `.graphtrail/`, and the same guard covers the MCP `refresh: true` path. Set `GRAPHTRAIL_ALLOW_UNSAFE_ROOT=1` to override.
+- `sync` disambiguates distinct same-named symbols that begin on one line, avoiding primary-key collisions in generated JavaScript bundles while preserving the first declaration's existing ID.
+- Docker builds copy only the manifests and source tree they need, while `.dockerignore` excludes Brigade receipts, local agent state, memory handoffs, MCP configuration, environment files, and key material.
+- Code Search responses above 8 MiB are rejected before JSON decoding, preventing an oversized response from being buffered without a bound.
 
 ## [0.3.0] - 2026-07-08
 

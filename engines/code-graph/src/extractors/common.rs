@@ -1,6 +1,8 @@
 //! Shared extraction scaffolding: a single tree-sitter traversal that yields a file's symbols,
 //! imports, and call edges together, parameterized by a per-language [`LangSpec`].
 
+use std::collections::HashSet;
+
 use anyhow::{Result, anyhow};
 use sha2::{Digest, Sha256};
 use tree_sitter::{Language, Node as TsNode, Parser as TsParser};
@@ -24,6 +26,12 @@ pub trait LangSpec {
 struct Frame {
     qualified_name: String,
     symbol_id: String,
+}
+
+#[derive(Default)]
+struct SymbolState {
+    ids: HashSet<String>,
+    symbols: Vec<Symbol>,
 }
 
 struct Ctx<'a> {
@@ -57,7 +65,7 @@ pub fn extract_with<L: LangSpec>(
         lines: &lines,
     };
 
-    let mut symbols = Vec::new();
+    let mut symbol_state = SymbolState::default();
     let mut imports = Vec::new();
     let mut calls = Vec::new();
     let mut stack: Vec<Frame> = Vec::new();
@@ -66,7 +74,7 @@ pub fn extract_with<L: LangSpec>(
         &ctx,
         tree.root_node(),
         &mut stack,
-        &mut symbols,
+        &mut symbol_state,
         &mut imports,
         &mut calls,
     );
@@ -77,7 +85,7 @@ pub fn extract_with<L: LangSpec>(
         hash: content_hash.to_string(),
         size: 0,
         modified_at: 0,
-        symbols,
+        symbols: symbol_state.symbols,
         imports,
         calls,
     })
@@ -88,7 +96,7 @@ fn visit<L: LangSpec>(
     ctx: &Ctx,
     node: TsNode<'_>,
     stack: &mut Vec<Frame>,
-    symbols: &mut Vec<Symbol>,
+    symbol_state: &mut SymbolState,
     imports: &mut Vec<Import>,
     calls: &mut Vec<PendingCall>,
 ) {
@@ -126,8 +134,22 @@ fn visit<L: LangSpec>(
             let qualified_name = container
                 .as_ref()
                 .map_or_else(|| name.clone(), |parent| format!("{parent}.{name}"));
-            let id = symbol_id(ctx.path, &qualified_name, start_line, kind);
-            symbols.push(Symbol {
+            let base_id = symbol_id(ctx.path, &qualified_name, start_line, kind);
+            let id = if symbol_state.ids.insert(base_id.clone()) {
+                base_id
+            } else {
+                let disambiguated = symbol_id_at_byte(
+                    ctx.path,
+                    &qualified_name,
+                    start_line,
+                    kind,
+                    node.start_byte(),
+                );
+                let is_new = symbol_state.ids.insert(disambiguated.clone());
+                debug_assert!(is_new, "source byte must disambiguate symbol ids");
+                disambiguated
+            };
+            symbol_state.symbols.push(Symbol {
                 id: id.clone(),
                 kind: kind.to_string(),
                 name: name.clone(),
@@ -145,13 +167,13 @@ fn visit<L: LangSpec>(
                 qualified_name,
                 symbol_id: id,
             });
-            visit_children(spec, ctx, node, stack, symbols, imports, calls);
+            visit_children(spec, ctx, node, stack, symbol_state, imports, calls);
             stack.pop();
             return;
         }
     }
 
-    visit_children(spec, ctx, node, stack, symbols, imports, calls);
+    visit_children(spec, ctx, node, stack, symbol_state, imports, calls);
 }
 
 fn visit_children<L: LangSpec>(
@@ -159,13 +181,13 @@ fn visit_children<L: LangSpec>(
     ctx: &Ctx,
     node: TsNode<'_>,
     stack: &mut Vec<Frame>,
-    symbols: &mut Vec<Symbol>,
+    symbol_state: &mut SymbolState,
     imports: &mut Vec<Import>,
     calls: &mut Vec<PendingCall>,
 ) {
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
-        visit(spec, ctx, child, stack, symbols, imports, calls);
+        visit(spec, ctx, child, stack, symbol_state, imports, calls);
     }
 }
 
@@ -205,6 +227,16 @@ pub fn string_literal_text(node: TsNode<'_>, source: &[u8]) -> Option<String> {
 
 pub fn symbol_id(path: &str, qualified_name: &str, line: usize, kind: &str) -> String {
     hex_hash(format!("{path}:{qualified_name}:{line}:{kind}").as_bytes())
+}
+
+fn symbol_id_at_byte(
+    path: &str,
+    qualified_name: &str,
+    line: usize,
+    kind: &str,
+    start_byte: usize,
+) -> String {
+    hex_hash(format!("{path}:{qualified_name}:{line}:{kind}:{start_byte}").as_bytes())
 }
 
 pub fn hex_hash(bytes: &[u8]) -> String {

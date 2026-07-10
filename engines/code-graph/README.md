@@ -13,7 +13,7 @@
 </p>
 
 <p align="center">
-  Local code graph in SQLite: symbols, imports, and real tree-sitter call edges. Ask <code>callers</code>, <code>callees</code>, <code>impact</code>, and <code>context</code> over a CLI or a read-only MCP server, so an edit starts from the call graph instead of a guess. No daemon, no network in the default build.
+  Local code graph in SQLite: symbols, imports, and real tree-sitter call edges. Ask <code>callers</code>, <code>callees</code>, <code>impact</code>, and <code>context</code> over a CLI or MCP server, so an edit starts from the call graph instead of a guess. No daemon, no network in the default build.
 </p>
 
 <p align="center">
@@ -31,7 +31,7 @@
 
 ## Install
 
-Two binaries: `graphtrail` (CLI) and `graphtrail-mcp` (read-only MCP). From [crates.io](https://crates.io/crates/graphtrail):
+GraphTrail requires Rust 1.85 or newer. It installs two binaries: `graphtrail` for CLI use and `graphtrail-mcp` for MCP clients. From [crates.io](https://crates.io/crates/graphtrail):
 
 ```bash
 cargo install graphtrail
@@ -79,7 +79,7 @@ main --calls@19 hops=1--> serve  (src/bin/graphtrail-mcp.rs -> src/mcp.rs)
 |---|---|---|
 | **Index** | Parse the repo with tree-sitter | Symbols, imports, and call edges in `.graphtrail/graphtrail.db` |
 | **Ask** | Query structure, not text | `search`, `callers`, `callees`, `impact`, `file_neighbors`, `dead_code`, `cycles`, `affected`, `diff` |
-| **Brief** | Pack neighborhood for agents | `context` over CLI or read-only MCP; Brigade can attach it to runs |
+| **Brief** | Pack neighborhood for agents | `context` over CLI or MCP. Brigade can attach it to runs |
 
 <p align="center">
   <img src="docs/assets/graph-relationships.svg" alt="Call graph around serve: callers on the left, focus symbol in the center, callees on the right, impact as blast radius, context pack for agents" width="880">
@@ -87,13 +87,15 @@ main --calls@19 hops=1--> serve  (src/bin/graphtrail-mcp.rs -> src/mcp.rs)
 
 <p align="center"><em>Grep finds strings. Embeddings find vibes. The graph finds who calls whom, and what breaks if you change it.</em></p>
 
-Python, TypeScript/JavaScript, Rust, and Go. One SQLite file per repo. CLI for humans and scripts; `graphtrail-mcp` for agents (every DB connection is `SQLITE_OPEN_READ_ONLY`, multi-repo via `repo` / `db` args). No hooks, no daemon, no network in the default build.
+Python, TypeScript/JavaScript, Rust, and Go. One SQLite file per repo. CLI for humans and scripts. `graphtrail-mcp` serves agents, opens query connections with `SQLITE_OPEN_READ_ONLY`, and supports multiple repositories through `repo` and `db` arguments. No hooks, no daemon, no network in the default build.
 
 When the sync root is inside a git repository, `sync` follows `.gitignore` and `.git/info/exclude`, while still indexing hidden paths such as `.github` if they are not ignored. `doctor` exits 0 for `FRESH`, 1 for `STALE`, or 2 for `NEEDS-MIGRATION` or a missing database.
 
 ## MCP server
 
-`graphtrail-mcp` is a read-only MCP server that speaks newline-delimited JSON-RPC 2.0 over stdio. It has no async runtime and no extra dependencies, so the sidecar stays small. The default database comes from `--db <path>`, `--db=<path>`, the `GRAPHTRAIL_DB` env var, or `.graphtrail/graphtrail.db` in the working directory. Every tool also accepts an optional `repo` (uses `<repo>/.graphtrail/graphtrail.db`) or `db` (explicit path) argument, so a single running server can answer for any indexed repository. The database is opened lazily per call, so the server starts even before the default db exists.
+`graphtrail-mcp` speaks newline-delimited JSON-RPC 2.0 over stdio. It has no async runtime and no extra dependencies, so the sidecar stays small. `refresh: true` starts an incremental graph-index write and waits up to 10 seconds before opening the query read-only. If the refresh fails or times out, the query proceeds and appends a `refresh_error` note to its text result. A timed-out worker may finish concurrently with that read-only query. Without `refresh`, query tools do not write the graph.
+
+The default database comes from `--db <path>`, `--db=<path>`, the `GRAPHTRAIL_DB` env var, or `.graphtrail/graphtrail.db` in the working directory. Every tool also accepts an optional `repo` (uses `<repo>/.graphtrail/graphtrail.db`) or `db` (explicit path) argument, so a single running server can answer for any indexed repository. The database is opened lazily per call, so the server starts even before the default db exists.
 
 Register it with an MCP client. For Claude Code, add to `.mcp.json` (project scope) or `~/.claude.json` (user scope):
 
@@ -140,25 +142,13 @@ Builds compiled with `--features codesearch` also expose the Code Search integra
 
 With the same feature, `context` also accepts `blend_code_search: true` plus optional `embed_weight` and `graph_weight`, mirroring the CLI `--blend-code-search` flag. The default build remains network-free, and a `codesearch` build makes no Code Search request unless `semantic_search` is called or `context` is called with `blend_code_search: true`.
 
-A real `stats` tool call (the server indexed GraphTrail's own source first):
+A live self-index reports counts for the checked-out revision. Run this after `graphtrail sync .` instead of relying on counts copied from an older release:
 
-```json
-{
-  "edges": 168,
-  "files": 26,
-  "imports": 119,
-  "language_files": {
-    "go": 1,
-    "python": 3,
-    "rust": 18,
-    "typescript": 4
-  },
-  "schema_version": 2,
-  "symbols": 150,
-  "synced_at": "1783099401",
-  "tool_version": "0.3.0"
-}
+```bash
+graphtrail --db .graphtrail/graphtrail.db stats --json
 ```
+
+The response includes `files`, `symbols`, `edges`, `imports`, `language_files`, `schema_version`, `synced_at`, and `tool_version`.
 
 ## Optional integrations
 
@@ -208,7 +198,7 @@ Internally the code is split into focused modules: `model` (shared types), `extr
 
 - **grep / ripgrep** find text, not structure. They will show you every line where a name appears, but they do not know that one function calls another, so they cannot answer "who calls this" or "what breaks if I change it." GraphTrail walks real tree-sitter call edges and answers those directly.
 - **An embedding / semantic index** (the kind Code Search keeps) is great for "find code that looks relevant to this idea," but it ranks by similarity, not by reachability. It will not tell you the blast radius of an edit. GraphTrail is the structural layer; the two compose, which is exactly what the optional `blend` feature does.
-- **A language server (LSP)** gives precise per-language navigation inside an editor, but it is a stateful daemon tied to one project and one process, not a queryable database an agent can hit over MCP across many repos at once. GraphTrail persists a small graph to disk, stays read-only, runs no daemon, and is multi-repo from a single server.
+- **A language server (LSP)** gives precise per-language navigation inside an editor, but it is a stateful daemon tied to one project and one process, not a queryable database an agent can hit over MCP across many repos at once. GraphTrail persists a small graph to disk, opens queries read-only, runs no daemon, and is multi-repo from a single server.
 - **A full code-intelligence platform** (graph databases, ctags servers, hosted indexers) does far more and costs far more to run. GraphTrail is a sidecar on purpose: one SQLite file per repo, no network, no background process.
 
 ## What GraphTrail is not
@@ -219,7 +209,7 @@ GraphTrail is a sidecar, not a platform. It does not:
 - make network calls in the default build
 - own memory, receipts, publishing, or scheduling (those stay in Brigade and MiseLedger)
 - keep semantic chunks, summaries, or embeddings (Code Search owns those)
-- mutate your code or your graph after indexing (the MCP server is read-only by construction)
+- mutate your code, or write graph state unless a supported MCP query explicitly sets `refresh: true`
 
 It indexes source into a graph and answers structural questions. That is the whole job.
 

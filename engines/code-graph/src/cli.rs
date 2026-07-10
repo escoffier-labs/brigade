@@ -324,12 +324,14 @@ pub fn run(cli: Cli) -> Result<()> {
                 println!("note: {}", report.attribution);
                 for symbol in &report.symbols {
                     println!(
-                        "{} {} {}:{} {}",
+                        "{} {} {} {}:{} {} - {}",
+                        symbol.confidence,
                         symbol.kind,
                         symbol.qualified_name,
                         symbol.file_path,
                         symbol.start_line,
-                        symbol.signature
+                        symbol.signature,
+                        symbol.reason
                     );
                 }
             }

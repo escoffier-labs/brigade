@@ -1,4 +1,5 @@
-//! Integration tests for the MCP request handler against real read-only graph dbs.
+//! Integration tests for the MCP request handler with real graph dbs, read-only query connections,
+//! and the opt-in `refresh: true` incremental sync writer with its 10-second fail-open wait.
 
 use std::fs;
 use std::io::Cursor;
@@ -74,7 +75,7 @@ fn tools_list_exposes_the_query_tools_with_location_args() {
     let resp = handle_request(&db, &json!({"jsonrpc":"2.0","id":2,"method":"tools/list"})).unwrap();
     let tools = resp["result"]["tools"].as_array().unwrap();
     let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
-    for expected in [
+    let mut expected = vec![
         "search",
         "callers",
         "callees",
@@ -83,21 +84,15 @@ fn tools_list_exposes_the_query_tools_with_location_args() {
         "stats",
         "doctor",
         "file_neighbors",
-        "repos",
+        "dead_code",
+        "cycles",
+        "affected",
         "diff",
-    ] {
-        assert!(names.contains(&expected), "missing tool: {expected}");
-    }
-    #[cfg(not(feature = "codesearch"))]
-    assert!(
-        !names.contains(&"semantic_search"),
-        "default MCP tools must not expose codesearch-only semantic_search"
-    );
+        "repos",
+    ];
     #[cfg(feature = "codesearch")]
-    assert!(
-        names.contains(&"semantic_search"),
-        "codesearch MCP tools must expose semantic_search"
-    );
+    expected.insert(1, "semantic_search");
+    assert_eq!(names, expected);
     // Every single-db tool advertises the optional repo/db selector. `diff` is the
     // exception: it takes two explicit db paths (`before`/`after`) instead.
     for tool in tools {
@@ -426,6 +421,62 @@ fn tools_call_file_neighbors_returns_adjacent_files() {
     let text = resp["result"]["content"][0]["text"].as_str().unwrap();
     let rows: serde_json::Value = serde_json::from_str(text).unwrap();
     assert!(rows.as_array().unwrap().is_empty());
+}
+
+#[test]
+fn tools_call_dead_code_returns_json_content() {
+    let (_dir, db) = ro_db();
+    let resp = handle_request(
+        &db,
+        &json!({"jsonrpc":"2.0","id":81,"method":"tools/call",
+                "params":{"name":"dead_code","arguments":{"limit":10}}}),
+    )
+    .unwrap();
+
+    assert_eq!(resp["result"]["isError"], false);
+    let report: serde_json::Value =
+        serde_json::from_str(resp["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert!(report["symbols"].is_array());
+    assert!(
+        report["attribution"]
+            .as_str()
+            .unwrap()
+            .contains("not proof")
+    );
+}
+
+#[test]
+fn tools_call_cycles_returns_json_content() {
+    let (_dir, db) = ro_db();
+    let resp = handle_request(
+        &db,
+        &json!({"jsonrpc":"2.0","id":82,"method":"tools/call",
+                "params":{"name":"cycles","arguments":{}}}),
+    )
+    .unwrap();
+
+    assert_eq!(resp["result"]["isError"], false);
+    let report: serde_json::Value =
+        serde_json::from_str(resp["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert!(report["groups"].is_array());
+    assert_eq!(report["total_groups"], 0);
+}
+
+#[test]
+fn tools_call_affected_returns_json_content() {
+    let (_dir, db) = ro_db();
+    let resp = handle_request(
+        &db,
+        &json!({"jsonrpc":"2.0","id":83,"method":"tools/call",
+                "params":{"name":"affected","arguments":{"files":["app.py"],"depth":3}}}),
+    )
+    .unwrap();
+
+    assert_eq!(resp["result"]["isError"], false);
+    let report: serde_json::Value =
+        serde_json::from_str(resp["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(report["changed_files"], json!(["app.py"]));
+    assert!(report["affected_tests"].is_array());
 }
 
 #[test]
@@ -787,6 +838,45 @@ fn tools_call_bad_depth_returns_invalid_params() {
     .unwrap();
 
     assert_eq!(resp["id"], 44);
+    assert_eq!(resp["error"]["code"], -32602);
+}
+
+#[test]
+fn tools_call_affected_rejects_non_array_files() {
+    let (_dir, db) = ro_db();
+    let resp = handle_request(
+        &db,
+        &json!({"jsonrpc":"2.0","id":84,"method":"tools/call",
+                "params":{"name":"affected","arguments":{"files":"app.py"}}}),
+    )
+    .unwrap();
+
+    assert_eq!(resp["error"]["code"], -32602);
+}
+
+#[test]
+fn tools_call_dead_code_rejects_non_integer_limit() {
+    let (_dir, db) = ro_db();
+    let resp = handle_request(
+        &db,
+        &json!({"jsonrpc":"2.0","id":85,"method":"tools/call",
+                "params":{"name":"dead_code","arguments":{"limit":"10"}}}),
+    )
+    .unwrap();
+
+    assert_eq!(resp["error"]["code"], -32602);
+}
+
+#[test]
+fn tools_call_affected_rejects_non_integer_depth() {
+    let (_dir, db) = ro_db();
+    let resp = handle_request(
+        &db,
+        &json!({"jsonrpc":"2.0","id":86,"method":"tools/call",
+                "params":{"name":"affected","arguments":{"files":["app.py"],"depth":"3"}}}),
+    )
+    .unwrap();
+
     assert_eq!(resp["error"]["code"], -32602);
 }
 

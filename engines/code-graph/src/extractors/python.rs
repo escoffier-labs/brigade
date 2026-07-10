@@ -7,7 +7,7 @@ use crate::extractors::common::{LangSpec, extract_with, node_text};
 use crate::model::{CallTarget, FileGraph, Import};
 
 /// Bump when Python extraction output can change for the same file content.
-pub const EXTRACTOR_FINGERPRINT: &str = "python-extractor-v1";
+pub const EXTRACTOR_FINGERPRINT: &str = "python-extractor-v2";
 
 /// Ubiquitous builtins that would only ever produce noise edges; AST already excludes keywords.
 const PY_SKIP: &[&str] = &[

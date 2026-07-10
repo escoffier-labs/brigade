@@ -35,6 +35,10 @@ pub struct UncalledSymbol {
     pub start_line: usize,
     pub end_line: usize,
     pub signature: String,
+    /// Stable, conservative classification for report consumers.
+    pub confidence: String,
+    /// Evidence behind `confidence`; this does not claim runtime reachability.
+    pub reason: String,
 }
 
 /// Callables (functions and methods) with no incoming call edges.
@@ -46,8 +50,24 @@ pub fn dead_code(conn: &Connection, limit: usize) -> Result<DeadCodeReport> {
     let mut stmt = conn.prepare(
         r#"
         SELECT s.id, s.kind, s.name, s.qualified_name, s.file_path,
-               s.start_line, s.end_line, s.signature
+               s.start_line, s.end_line, s.signature, s.container, f.language,
+               EXISTS(
+                   SELECT 1 FROM pending_calls p
+                   WHERE p.target_name = s.name
+                     AND NOT EXISTS(
+                         SELECT 1 FROM edges resolved
+                         WHERE resolved.source = p.source_id
+                           AND resolved.line = p.line
+                     )
+               ),
+               EXISTS(
+                   SELECT 1 FROM imports i
+                   WHERE i.local_name = s.name
+                      OR i.imported_name = s.name
+                      OR i.alias = s.name
+               )
         FROM symbols s
+        JOIN files f ON f.path = s.file_path
         LEFT JOIN edges e ON e.target = s.id
         WHERE e.source IS NULL
           AND s.kind IN ('function', 'method')
@@ -58,15 +78,33 @@ pub fn dead_code(conn: &Connection, limit: usize) -> Result<DeadCodeReport> {
         "#,
     )?;
     let mapped = stmt.query_map([], |row| {
+        let kind = row.get::<_, String>(1)?;
+        let name = row.get::<_, String>(2)?;
+        let signature = row.get::<_, String>(7)?;
+        let container = row.get::<_, Option<String>>(8)?;
+        let language = row.get::<_, String>(9)?;
+        let has_pending_call = row.get::<_, bool>(10)?;
+        let has_import = row.get::<_, bool>(11)?;
+        let (confidence, reason) = classify_dead_code_candidate(
+            &kind,
+            &name,
+            &signature,
+            container.as_deref(),
+            &language,
+            has_pending_call,
+            has_import,
+        );
         Ok(UncalledSymbol {
             id: row.get(0)?,
-            kind: row.get(1)?,
-            name: row.get(2)?,
+            kind,
+            name,
             qualified_name: row.get(3)?,
             file_path: row.get(4)?,
             start_line: row.get::<_, i64>(5)? as usize,
             end_line: row.get::<_, i64>(6)? as usize,
-            signature: row.get(7)?,
+            signature,
+            confidence: confidence.to_string(),
+            reason: reason.to_string(),
         })
     })?;
     let mut symbols = Vec::new();
@@ -76,6 +114,12 @@ pub fn dead_code(conn: &Connection, limit: usize) -> Result<DeadCodeReport> {
             symbols.push(symbol);
         }
     }
+    symbols.sort_by(|a, b| {
+        confidence_rank(&a.confidence)
+            .cmp(&confidence_rank(&b.confidence))
+            .then_with(|| a.file_path.cmp(&b.file_path))
+            .then_with(|| a.start_line.cmp(&b.start_line))
+    });
     let total = symbols.len();
     symbols.truncate(limit);
     Ok(DeadCodeReport {
@@ -83,6 +127,97 @@ pub fn dead_code(conn: &Connection, limit: usize) -> Result<DeadCodeReport> {
         total,
         symbols,
     })
+}
+
+fn classify_dead_code_candidate(
+    kind: &str,
+    name: &str,
+    signature: &str,
+    container: Option<&str>,
+    language: &str,
+    has_pending_call: bool,
+    has_import: bool,
+) -> (&'static str, &'static str) {
+    if kind == "method" || container.is_some() {
+        return (
+            "low",
+            "method or nested callable may be reached through dynamic dispatch or framework conventions",
+        );
+    }
+    if is_callback_style(name) {
+        return (
+            "low",
+            "callback-style name may be registered or invoked indirectly",
+        );
+    }
+    if matches!(language, "typescript" | "javascript") {
+        return (
+            "low",
+            "top-level JavaScript/TypeScript module visibility is not persisted; export-list use cannot be ruled out",
+        );
+    }
+    if is_public_or_exported(language, name, signature) {
+        return (
+            "low",
+            "public/exported entry point may be called outside the indexed graph",
+        );
+    }
+    if has_pending_call {
+        return (
+            "low",
+            "unresolved call evidence references this symbol name",
+        );
+    }
+    if has_import {
+        return ("low", "import evidence references this symbol name");
+    }
+    if !matches!(language, "python" | "typescript" | "rust" | "go") {
+        return (
+            "low",
+            "source language has no private/local visibility rule",
+        );
+    }
+    (
+        "high",
+        "private/local function has no incoming edges or stored reference hints",
+    )
+}
+
+fn confidence_rank(confidence: &str) -> u8 {
+    match confidence {
+        "high" => 0,
+        _ => 1,
+    }
+}
+
+fn is_public_or_exported(language: &str, name: &str, signature: &str) -> bool {
+    let signature = signature.trim_start();
+    match language {
+        "python" => !name.starts_with('_'),
+        "typescript" => signature.starts_with("export "),
+        "rust" => signature.starts_with("pub ") || signature.starts_with("pub("),
+        "go" => name.chars().next().is_some_and(char::is_uppercase),
+        _ => true,
+    }
+}
+
+fn is_callback_style(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    ["on_", "handle_", "before_", "after_", "did_", "will_"]
+        .iter()
+        .any(|prefix| lower.starts_with(prefix))
+        || ["_callback", "_handler", "_hook", "_listener"]
+            .iter()
+            .any(|suffix| lower.ends_with(suffix))
+        || matches!(lower.as_str(), "callback" | "handler" | "handle")
+        || has_camel_callback_prefix(name, "on")
+        || has_camel_callback_prefix(name, "handle")
+}
+
+fn has_camel_callback_prefix(name: &str, prefix: &str) -> bool {
+    name.strip_prefix(prefix)
+        .and_then(|rest| rest.chars().next())
+        .is_some_and(char::is_uppercase)
 }
 
 /// How many cycle groups a report lists at most.

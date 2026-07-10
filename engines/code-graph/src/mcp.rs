@@ -12,7 +12,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
-use std::sync::mpsc;
+use std::sync::{OnceLock, mpsc};
 use std::thread;
 use std::time::Duration;
 
@@ -37,6 +37,34 @@ const REFRESH_TIMEOUT: Duration = Duration::from_secs(10);
 const SEMANTIC_SEARCH_DEFAULT_LIMIT: usize = 10;
 #[cfg(feature = "codesearch")]
 const SEMANTIC_SEARCH_MAX_LIMIT: usize = 50;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ToolId {
+    Search,
+    Callers,
+    Callees,
+    Impact,
+    #[cfg(feature = "codesearch")]
+    SemanticSearch,
+    Context,
+    Stats,
+    Doctor,
+    FileNeighbors,
+    DeadCode,
+    Cycles,
+    Affected,
+    Diff,
+    Repos,
+}
+
+struct ToolSpec {
+    id: ToolId,
+    name: &'static str,
+    description: &'static str,
+    input_schema: Value,
+    supports_refresh: bool,
+    returns_json_rpc_error: bool,
+}
 
 /// Read JSON-RPC requests line by line and write one response line per request. `default_db` is the
 /// fallback database used when a request does not specify its own `repo`/`db`.
@@ -146,45 +174,46 @@ fn resolve_db(default_db: &Path, args: &Value) -> PathBuf {
 }
 
 fn call_tool(default_db: &Path, name: &str, args: &Value) -> Result<String> {
-    if name == "repos" {
+    let spec = tool_spec(name).ok_or_else(|| anyhow!("unknown tool '{name}'"))?;
+    if spec.id == ToolId::Repos {
         let db = resolve_db(default_db, args);
         return to_pretty(&repos_response(&db, args)?);
     }
     // `diff` needs two databases, so it opens its own connections before the
     // single shared-connection open below.
-    if name == "diff" {
+    if spec.id == ToolId::Diff {
         let before = open_read_only(Path::new(&str_arg(args, "before")))?;
         let after = open_read_only(Path::new(&str_arg(args, "after")))?;
         return to_pretty(&diff_graphs(&before, &after)?);
     }
 
     let db = resolve_db(default_db, args);
-    let refresh_error = if supports_refresh(name) && bool_arg(args, "refresh", false) {
+    let refresh_error = if spec.supports_refresh && bool_arg(args, "refresh", false) {
         refresh_db(default_db, args, &db)
     } else {
         None
     };
     let conn = open_read_only(&db)?;
-    let text = match name {
-        "search" => to_pretty(&search_symbols_with_path(
+    let text = match spec.id {
+        ToolId::Search => to_pretty(&search_symbols_with_path(
             &conn,
             &str_arg(args, "query"),
             optional_str_arg(args, "path").as_deref(),
             usize_arg(args, "limit", 20),
         )?),
-        "callers" => to_pretty(&graph_edges_with_depth(
+        ToolId::Callers => to_pretty(&graph_edges_with_depth(
             &conn,
             &str_arg(args, "symbol"),
             Direction::Incoming,
             normalize_depth(usize_arg(args, "depth", DEFAULT_IMPACT_DEPTH)),
         )?),
-        "callees" => to_pretty(&graph_edges_with_depth(
+        ToolId::Callees => to_pretty(&graph_edges_with_depth(
             &conn,
             &str_arg(args, "symbol"),
             Direction::Outgoing,
             normalize_depth(usize_arg(args, "depth", DEFAULT_IMPACT_DEPTH)),
         )?),
-        "impact" => {
+        ToolId::Impact => {
             let symbol = str_arg(args, "symbol");
             let edges = impact_edges(
                 &conn,
@@ -194,7 +223,7 @@ fn call_tool(default_db: &Path, name: &str, args: &Value) -> Result<String> {
             to_pretty(&edges)
         }
         #[cfg(feature = "codesearch")]
-        "semantic_search" => {
+        ToolId::SemanticSearch => {
             let limit = semantic_search_limit(args);
             let repo_root = code_search_repo_root(default_db, args, &db);
             let hits = code_search_hits(&str_arg(args, "query"), limit, repo_root.as_deref())?;
@@ -210,7 +239,7 @@ fn call_tool(default_db: &Path, name: &str, args: &Value) -> Result<String> {
                 to_pretty(&hits)
             }
         }
-        "context" => {
+        ToolId::Context => {
             let task = str_arg(args, "task");
             let limit = usize_arg(args, "limit", 12);
             #[cfg(feature = "codesearch")]
@@ -239,17 +268,17 @@ fn call_tool(default_db: &Path, name: &str, args: &Value) -> Result<String> {
                 other => Err(anyhow!("unknown context format '{other}'")),
             }
         }
-        "file_neighbors" => to_pretty(&file_neighbors(&conn, &str_arg(args, "path"))?),
-        "dead_code" => to_pretty(&dead_code(&conn, usize_arg(args, "limit", 100))?),
-        "cycles" => to_pretty(&cycles(&conn)?),
-        "affected" => to_pretty(&affected(
+        ToolId::FileNeighbors => to_pretty(&file_neighbors(&conn, &str_arg(args, "path"))?),
+        ToolId::DeadCode => to_pretty(&dead_code(&conn, usize_arg(args, "limit", 100))?),
+        ToolId::Cycles => to_pretty(&cycles(&conn)?),
+        ToolId::Affected => to_pretty(&affected(
             &conn,
             &files_arg(args),
             usize_arg(args, "depth", DEFAULT_AFFECTED_DEPTH),
         )?),
-        "stats" => to_pretty(&stats(&conn)?),
-        "doctor" => to_pretty(&doctor(&conn, &doctor_root(default_db, args, &db), &db)?),
-        other => Err(anyhow!("unknown tool '{other}'")),
+        ToolId::Stats => to_pretty(&stats(&conn)?),
+        ToolId::Doctor => to_pretty(&doctor(&conn, &doctor_root(default_db, args, &db), &db)?),
+        ToolId::Diff | ToolId::Repos => unreachable!("special tools return before opening one db"),
     }?;
     Ok(with_refresh_error(text, refresh_error))
 }
@@ -257,28 +286,31 @@ fn call_tool(default_db: &Path, name: &str, args: &Value) -> Result<String> {
 fn validate_tool_args(name: &str, args: &Value) -> std::result::Result<(), String> {
     optional_string(args, "db")?;
     optional_string(args, "repo")?;
-    if supports_refresh(name) {
+    let Some(spec) = tool_spec(name) else {
+        return Ok(());
+    };
+    if spec.supports_refresh {
         optional_bool(args, "refresh")?;
     }
-    match name {
-        "search" => {
+    match spec.id {
+        ToolId::Search => {
             require_string(args, "query")?;
             optional_string(args, "path")?;
             require_usize(args, "limit")?;
         }
-        "callers" | "callees" | "impact" => {
+        ToolId::Callers | ToolId::Callees | ToolId::Impact => {
             require_string(args, "symbol")?;
             require_usize(args, "depth")?;
         }
         #[cfg(feature = "codesearch")]
-        "semantic_search" => {
+        ToolId::SemanticSearch => {
             require_string(args, "query")?;
             require_usize(args, "limit")?;
             optional_bool(args, "blend")?;
             optional_number(args, "embed_weight")?;
             optional_number(args, "graph_weight")?;
         }
-        "context" => {
+        ToolId::Context => {
             require_string(args, "task")?;
             require_usize(args, "limit")?;
             require_format(args)?;
@@ -289,30 +321,34 @@ fn validate_tool_args(name: &str, args: &Value) -> std::result::Result<(), Strin
                 optional_number(args, "graph_weight")?;
             }
         }
-        "file_neighbors" => {
+        ToolId::FileNeighbors => {
             require_string(args, "path")?;
         }
-        "dead_code" => {
+        ToolId::DeadCode => {
             require_usize(args, "limit")?;
         }
-        "affected" => {
+        ToolId::Affected => {
             require_files(args)?;
             require_usize(args, "depth")?;
         }
-        "diff" => {
+        ToolId::Diff => {
             require_string(args, "before")?;
             require_string(args, "after")?;
         }
-        "repos" => {
+        ToolId::Repos => {
             require_roots(args)?;
         }
-        "stats" | "doctor" | "cycles" => {}
-        _ => {}
+        ToolId::Stats | ToolId::Doctor | ToolId::Cycles => {}
     }
     Ok(())
 }
 
-fn tool_defs() -> Value {
+fn tool_specs() -> &'static [ToolSpec] {
+    static SPECS: OnceLock<Vec<ToolSpec>> = OnceLock::new();
+    SPECS.get_or_init(build_tool_specs).as_slice()
+}
+
+fn build_tool_specs() -> Vec<ToolSpec> {
     // Every tool also accepts an optional repo/db selector for multi-repo use.
     let location = json!({
         "repo": { "type": "string", "description": "Repo path; uses <repo>/.graphtrail/graphtrail.db." },
@@ -374,132 +410,187 @@ fn tool_defs() -> Value {
             json!({ "type": "number", "description": "Graph centrality score weight for blended Code Search context (default 0.4)." }),
         );
     }
-    let tools = json!([
-        {
-            "name": "search",
-            "description": "Full-text search code symbols (functions, classes, methods) by name.",
-            "inputSchema": with_location(
+    let tool = |id, name, description, input_schema, supports_refresh| ToolSpec {
+        id,
+        name,
+        description,
+        input_schema,
+        supports_refresh,
+        returns_json_rpc_error: false,
+    };
+    let mut tools = vec![tool(
+        ToolId::Search,
+        "search",
+        "Full-text search code symbols (functions, classes, methods) by name.",
+        with_location(
+            with_refresh(json!({
+                "query": { "type": "string", "description": "Search terms." },
+                "path": { "type": "string", "description": "Optional file path, directory prefix, or path fragment." },
+                "limit": { "type": "integer", "description": "Max results (default 20)." }
+            })),
+            json!(["query"]),
+        ),
+        true,
+    )];
+    #[cfg(feature = "codesearch")]
+    tools.push(ToolSpec {
+        returns_json_rpc_error: true,
+        ..tool(
+            ToolId::SemanticSearch,
+            "semantic_search",
+            "Code Search semantic hits, optionally blended with GraphTrail graph centrality.",
+            with_location(
                 with_refresh(json!({
-                    "query": { "type": "string", "description": "Search terms." },
-                    "path": { "type": "string", "description": "Optional file path, directory prefix, or path fragment." },
-                    "limit": { "type": "integer", "description": "Max results (default 20)." }
+                    "query": { "type": "string", "description": "Semantic search query." },
+                    "limit": { "type": "integer", "description": "Max results, clamped to 1..50 (default 10)." },
+                    "blend": { "type": "boolean", "description": "Default true; return blended symbol rows instead of raw per-file Code Search hits." },
+                    "embed_weight": { "type": "number", "description": "Embedding score weight when blend is true (default 0.6)." },
+                    "graph_weight": { "type": "number", "description": "Graph centrality score weight when blend is true (default 0.4)." }
                 })),
-                json!(["query"])
-            )
-        },
-        { "name": "callers", "description": "Symbols that call the given symbol (incoming call edges).", "inputSchema": symbol_tool("Symbol name to find callers of.") },
-        { "name": "callees", "description": "Symbols called by the given symbol (outgoing call edges).", "inputSchema": symbol_tool("Symbol name to find callees of.") },
-        { "name": "impact", "description": "Combined callers and callees of a symbol (blast radius of a change).", "inputSchema": symbol_tool("Symbol name to assess impact for.") },
-        {
-            "name": "context",
-            "description": "A context pack for a task: matching entry points plus their caller/callee neighborhood and related files.",
-            "inputSchema": with_location(
+                json!(["query"]),
+            ),
+            true,
+        )
+    });
+    tools.extend([
+        tool(
+            ToolId::Callers,
+            "callers",
+            "Symbols that call the given symbol (incoming call edges).",
+            symbol_tool("Symbol name to find callers of."),
+            true,
+        ),
+        tool(
+            ToolId::Callees,
+            "callees",
+            "Symbols called by the given symbol (outgoing call edges).",
+            symbol_tool("Symbol name to find callees of."),
+            true,
+        ),
+        tool(
+            ToolId::Impact,
+            "impact",
+            "Combined callers and callees of a symbol (blast radius of a change).",
+            symbol_tool("Symbol name to assess impact for."),
+            true,
+        ),
+        tool(
+            ToolId::Context,
+            "context",
+            "A context pack for a task: matching entry points plus their caller/callee neighborhood and related files.",
+            with_location(
                 with_refresh(context_props),
-                json!(["task"])
-            )
-        },
-        { "name": "stats", "description": "Counts of files, symbols, edges, imports, sync metadata, and per-language file counts.", "inputSchema": with_location(with_refresh(json!({})), json!([])) },
-        { "name": "doctor", "description": "Freshness contract for the graph: schema status, last sync age, pending file changes, ignored entries, and FRESH/STALE/NEEDS-MIGRATION verdict.", "inputSchema": with_location(json!({}), json!([])) },
-        {
-            "name": "file_neighbors",
-            "description": "Files connected to a file by incoming or outgoing call edges.",
-            "inputSchema": with_location(
+                json!(["task"]),
+            ),
+            true,
+        ),
+        tool(
+            ToolId::Stats,
+            "stats",
+            "Counts of files, symbols, edges, imports, sync metadata, and per-language file counts.",
+            with_location(with_refresh(json!({})), json!([])),
+            true,
+        ),
+        tool(
+            ToolId::Doctor,
+            "doctor",
+            "Freshness contract for the graph: schema status, last sync age, pending file changes, ignored entries, and FRESH/STALE/NEEDS-MIGRATION verdict.",
+            with_location(json!({}), json!([])),
+            false,
+        ),
+        tool(
+            ToolId::FileNeighbors,
+            "file_neighbors",
+            "Files connected to a file by incoming or outgoing call edges.",
+            with_location(
                 with_refresh(json!({ "path": { "type": "string", "description": "Indexed file path to inspect." } })),
-                json!(["path"])
-            )
-        },
-        {
-            "name": "dead_code",
-            "description": "Callables with no incoming call edges: a dead-code candidate list, not proof (dynamic dispatch, exports, and entry points are invisible to call edges).",
-            "inputSchema": with_location(
+                json!(["path"]),
+            ),
+            true,
+        ),
+        tool(
+            ToolId::DeadCode,
+            "dead_code",
+            "Callables with no incoming call edges: a dead-code candidate list, not proof (dynamic dispatch, exports, and entry points are invisible to call edges).",
+            with_location(
                 with_refresh(json!({ "limit": { "type": "integer", "description": "Max symbols returned (default 100)." } })),
-                json!([])
-            )
-        },
-        {
-            "name": "cycles",
-            "description": "File-level dependency cycles from cross-file call edges, grouped into strongly connected components.",
-            "inputSchema": with_location(with_refresh(json!({})), json!([]))
-        },
-        {
-            "name": "affected",
-            "description": "Tests statically attributed to changed files via incoming call edges: a lower bound on what to run, not coverage. Pass changed files from `git diff --name-only`.",
-            "inputSchema": with_location(
+                json!([]),
+            ),
+            true,
+        ),
+        tool(
+            ToolId::Cycles,
+            "cycles",
+            "File-level dependency cycles from cross-file call edges, grouped into strongly connected components.",
+            with_location(with_refresh(json!({})), json!([])),
+            true,
+        ),
+        tool(
+            ToolId::Affected,
+            "affected",
+            "Tests statically attributed to changed files via incoming call edges: a lower bound on what to run, not coverage. Pass changed files from `git diff --name-only`.",
+            with_location(
                 with_refresh(json!({
                     "files": { "type": "array", "items": { "type": "string" }, "description": "Changed files, repo-relative." },
                     "depth": { "type": "integer", "description": "Caller-BFS depth, clamped to 1..5 (default 3)." }
                 })),
-                json!(["files"])
-            )
-        },
-        {
-            "name": "diff",
-            "description": "Structural diff of two indexed graph DBs (before -> after): added/removed/changed symbols and added/removed call edges. Build the two DBs with `graphtrail --db <path> sync <root>`.",
-            "inputSchema": {
+                json!(["files"]),
+            ),
+            true,
+        ),
+        tool(
+            ToolId::Diff,
+            "diff",
+            "Structural diff of two indexed graph DBs (before -> after): added/removed/changed symbols and added/removed call edges. Build the two DBs with `graphtrail --db <path> sync <root>`.",
+            json!({
                 "type": "object",
                 "properties": {
                     "before": { "type": "string", "description": "Path to the 'before' graphtrail.db." },
                     "after": { "type": "string", "description": "Path to the 'after' graphtrail.db." }
                 },
                 "required": ["before", "after"]
-            }
-        },
-        {
-            "name": "repos",
-            "description": "Default database metadata plus optional one-level scans for indexed repos under root directories.",
-            "inputSchema": with_location(
-                json!({ "roots": { "type": "array", "items": { "type": "string" }, "description": "Root directories to scan one level for .graphtrail/graphtrail.db." } }),
-                json!([])
-            )
-        }
-    ]);
-    #[cfg(feature = "codesearch")]
-    let mut tools = tools;
-    #[cfg(feature = "codesearch")]
-    if let Some(array) = tools.as_array_mut() {
-        array.insert(
-            1,
-            json!({
-                "name": "semantic_search",
-                "description": "Code Search semantic hits, optionally blended with GraphTrail graph centrality.",
-                "inputSchema": with_location(
-                    with_refresh(json!({
-                        "query": { "type": "string", "description": "Semantic search query." },
-                        "limit": { "type": "integer", "description": "Max results, clamped to 1..50 (default 10)." },
-                        "blend": { "type": "boolean", "description": "Default true; return blended symbol rows instead of raw per-file Code Search hits." },
-                        "embed_weight": { "type": "number", "description": "Embedding score weight when blend is true (default 0.6)." },
-                        "graph_weight": { "type": "number", "description": "Graph centrality score weight when blend is true (default 0.4)." }
-                    })),
-                    json!(["query"])
-                )
             }),
-        );
-    }
+            false,
+        ),
+        tool(
+            ToolId::Repos,
+            "repos",
+            "Default database metadata plus optional one-level scans for indexed repos under root directories.",
+            with_location(
+                json!({ "roots": { "type": "array", "items": { "type": "string" }, "description": "Root directories to scan one level for .graphtrail/graphtrail.db." } }),
+                json!([]),
+            ),
+            false,
+        ),
+    ]);
     tools
+}
+
+fn tool_spec(name: &str) -> Option<&'static ToolSpec> {
+    tool_specs().iter().find(|spec| spec.name == name)
+}
+
+fn tool_defs() -> Value {
+    Value::Array(
+        tool_specs()
+            .iter()
+            .map(|spec| {
+                json!({
+                    "name": spec.name,
+                    "description": spec.description,
+                    "inputSchema": spec.input_schema.clone(),
+                })
+            })
+            .collect(),
+    )
 }
 
 fn to_pretty<T: Serialize>(value: &T) -> Result<String> {
     Ok(serde_json::to_string_pretty(value)?)
 }
 
-fn supports_refresh(name: &str) -> bool {
-    matches!(
-        name,
-        "search"
-            | "callers"
-            | "callees"
-            | "impact"
-            | "context"
-            | "file_neighbors"
-            | "stats"
-            | "dead_code"
-            | "cycles"
-            | "affected"
-    ) || (cfg!(feature = "codesearch") && name == "semantic_search")
-}
-
 fn returns_json_rpc_tool_error(name: &str) -> bool {
-    cfg!(feature = "codesearch") && name == "semantic_search"
+    tool_spec(name).is_some_and(|spec| spec.returns_json_rpc_error)
 }
 
 fn refresh_db(default_db: &Path, args: &Value, db: &Path) -> Option<String> {
@@ -819,9 +910,10 @@ fn db_metadata(db: &Path) -> Result<BTreeMap<String, String>> {
 }
 
 fn expand_tilde(path: &str) -> PathBuf {
-    if (path == "~" || path.starts_with("~/"))
-        && let Some(home) = std::env::var_os("HOME")
-    {
+    let home = (path == "~" || path.starts_with("~/"))
+        .then(|| std::env::var_os("HOME"))
+        .flatten();
+    if let Some(home) = home {
         let mut expanded = PathBuf::from(home);
         if path.len() > 2 {
             expanded.push(&path[2..]);
@@ -829,4 +921,66 @@ fn expand_tilde(path: &str) -> PathBuf {
         return expanded;
     }
     PathBuf::from(path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tool_specs_are_unique_complete_and_refresh_consistent() {
+        let specs = tool_specs();
+        let names: BTreeSet<_> = specs.iter().map(|spec| spec.name).collect();
+        assert_eq!(names.len(), specs.len(), "tool names must be unique");
+        for (index, spec) in specs.iter().enumerate() {
+            assert!(
+                !specs[..index].iter().any(|prior| prior.id == spec.id),
+                "dispatch identity must be unique for {}",
+                spec.name
+            );
+        }
+
+        let mut expected = BTreeSet::from([
+            "search",
+            "callers",
+            "callees",
+            "impact",
+            "context",
+            "stats",
+            "doctor",
+            "file_neighbors",
+            "dead_code",
+            "cycles",
+            "affected",
+            "diff",
+            "repos",
+        ]);
+        #[cfg(feature = "codesearch")]
+        expected.insert("semantic_search");
+        assert_eq!(names, expected);
+
+        let mut refresh_tools = BTreeSet::from([
+            "search",
+            "callers",
+            "callees",
+            "impact",
+            "context",
+            "stats",
+            "file_neighbors",
+            "dead_code",
+            "cycles",
+            "affected",
+        ]);
+        #[cfg(feature = "codesearch")]
+        refresh_tools.insert("semantic_search");
+        for spec in specs {
+            assert_eq!(
+                spec.supports_refresh,
+                refresh_tools.contains(spec.name),
+                "refresh policy drifted for {}",
+                spec.name
+            );
+            assert_eq!(spec.input_schema["type"], "object", "{}", spec.name);
+        }
+    }
 }
