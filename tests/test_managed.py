@@ -1,6 +1,9 @@
+import json
 from pathlib import Path
 
 from brigade import managed
+from brigade import station_manifest
+from brigade import stations_cmd
 from brigade.station import DoctorContext
 
 
@@ -14,7 +17,7 @@ def test_all_tools_declare_required_fields():
         for surface in t.surfaces:
             assert surface.kind
             assert surface.command
-            assert surface.read_only is True
+            assert isinstance(surface.read_only, bool)
 
 
 def test_tools_attach_to_known_stations():
@@ -68,7 +71,7 @@ def test_token_glace_declares_stage_one_surfaces():
     t = managed.resolve("token-glace")
     surfaces = {surface.kind: surface.command for surface in t.surfaces}
     assert surfaces["doctor-json"] == ("token-glace", "doctor", "hooks", "--format", "json")
-    assert surfaces["summary-json"] == ("token-glace", "stats", "--format", "json")
+    assert surfaces["summary-json"] == ("token-glace", "stats", "--format", "json", "--timezone", "utc")
 
 
 def test_agentpantry_doctor_unwired(monkeypatch):
@@ -76,7 +79,7 @@ def test_agentpantry_doctor_unwired(monkeypatch):
     assert t is not None and t.station == "pantry"
 
     def fake_run(args, **kw):
-        assert args == ["agentpantry", "doctor", "--json"]
+        assert args == ["agentpantry", "doctor", "--json", "--no-net"]
         return managed.proc.Result(
             code=2, stdout='{"configured": false, "fail_count": 1, "warn_count": 0, "checks": []}', stderr=""
         )
@@ -90,17 +93,27 @@ def test_agentpantry_doctor_unwired(monkeypatch):
 def test_agentpantry_declares_markdown_brief_surface():
     t = managed.resolve("agentpantry")
     surfaces = {surface.kind: surface for surface in t.surfaces}
-    assert surfaces["doctor-json"].command == ("agentpantry", "doctor", "--json")
-    assert surfaces["brief-markdown"].command == ("agentpantry", "inventory", "--markdown")
-    assert surfaces["brief-markdown"].timeout_seconds == 10.0
-    assert surfaces["brief-markdown"].max_chars == 4000
+    doctor = surfaces["doctor-json"]
+    assert doctor.command == ("agentpantry", "doctor", "--json", "--no-net")
+    assert doctor.read_only is False
+    assert doctor.timeout_seconds == 10.0
+    assert doctor.probe == ("agentpantry", "doctor", "--help")
+    assert doctor.probe_contains == ("-json", "-no-net")
+    inventory = surfaces["summary-json"]
+    assert inventory.command == ("agentpantry", "inventory", "--json")
+    assert inventory.read_only is True
+    assert inventory.timeout_seconds == 10.0
+    assert inventory.max_chars == 4000
+    assert inventory.probe == ("agentpantry", "inventory", "--help")
+    assert inventory.probe_contains == ("-json",)
+    assert surfaces["verify-exit"].command == ("agentpantry", "version", "--json")
 
 
 def test_agentpantry_doctor_parses_status(monkeypatch):
     t = managed.resolve("agentpantry")
 
     def fake_run(args, **kw):
-        assert args == ["agentpantry", "doctor", "--json"]
+        assert args == ["agentpantry", "doctor", "--json", "--no-net"]
         return managed.proc.Result(
             code=0,
             stdout='{"role": "source", "configured": true, "peer": "127.0.0.1:8787",'
@@ -120,7 +133,7 @@ def test_agentpantry_never_fails_workspace(monkeypatch):
     t = managed.resolve("agentpantry")
 
     def fake_run(args, **kw):
-        assert args == ["agentpantry", "doctor", "--json"]
+        assert args == ["agentpantry", "doctor", "--json", "--no-net"]
         return managed.proc.Result(
             code=1,
             stdout='{"role": "sink", "configured": true, "peer": "0.0.0.0:8787",'
@@ -154,7 +167,7 @@ def test_agentpantry_doctor_handles_garbage_output(monkeypatch):
     results = t.doctor(ctx)
     assert any(status == "WARN" and "unexpected output" in detail for status, _, detail in results)
     assert all(status != "FAIL" for status, _, _ in results)
-    assert calls == [["agentpantry", "doctor", "--json"], ["agentpantry", "status", "--json"]]
+    assert calls == [["agentpantry", "doctor", "--json", "--no-net"], ["agentpantry", "status", "--json"]]
 
 
 def test_agentpantry_doctor_falls_back_to_status_for_old_binary(monkeypatch):
@@ -163,7 +176,7 @@ def test_agentpantry_doctor_falls_back_to_status_for_old_binary(monkeypatch):
 
     def fake_run(args, **kw):
         calls.append(args)
-        if args == ["agentpantry", "doctor", "--json"]:
+        if args == ["agentpantry", "doctor", "--json", "--no-net"]:
             return managed.proc.Result(code=2, stdout="", stderr="flag provided but not defined: -json")
         return managed.proc.Result(
             code=0,
@@ -177,7 +190,7 @@ def test_agentpantry_doctor_falls_back_to_status_for_old_binary(monkeypatch):
     ctx = DoctorContext(target=Path("/tmp/ws"), selection=None, harnesses=[])
     results = t.doctor(ctx)
     assert any(status == "OK" and "role=sink" in detail for status, _, detail in results)
-    assert calls == [["agentpantry", "doctor", "--json"], ["agentpantry", "status", "--json"]]
+    assert calls == [["agentpantry", "doctor", "--json", "--no-net"], ["agentpantry", "status", "--json"]]
 
 
 def test_evidence_tools_attach_to_evidence_station():
@@ -270,18 +283,18 @@ def test_miseledger_doctor_parses_status(monkeypatch):
     t = managed.resolve("miseledger")
 
     def fake_run(args, **kw):
-        assert args == ["miseledger", "status", "--json"]
+        assert args == ["miseledger", "doctor", "--json"]
         assert kw == {"timeout": 120.0}
         return managed.proc.Result(
             code=0,
-            stdout='{"schema_version": 7, "items": 42, "sources": 3, "artifacts": 5, "fts": "ok", "source_counts": {}}',
+            stdout='{"ok": true, "checks": [{"name": "schema", "ok": true, "detail": "version 7"}]}',
             stderr="",
         )
 
     monkeypatch.setattr(managed.proc, "run", fake_run)
     ctx = DoctorContext(target=Path("/tmp/ws"), selection=None, harnesses=[])
     results = t.doctor(ctx)
-    assert any(status == "OK" and "items=42" in detail for status, _, detail in results)
+    assert any(status == "OK" and "1 check(s) passed" in detail for status, _, detail in results)
 
 
 def test_miseledger_doctor_warns_on_unavailable_fts(monkeypatch):
@@ -289,8 +302,8 @@ def test_miseledger_doctor_warns_on_unavailable_fts(monkeypatch):
 
     def fake_run(args, **kw):
         return managed.proc.Result(
-            code=0,
-            stdout='{"schema_version": 7, "items": 0, "sources": 0, "fts": "unavailable"}',
+            code=1,
+            stdout='{"ok": false, "checks": [{"name": "fts", "ok": false, "detail": "sqlite fts5"}]}',
             stderr="",
         )
 
@@ -318,7 +331,7 @@ def test_miseledger_doctor_warns_distinctly_on_timeout(monkeypatch):
     t = managed.resolve("miseledger")
 
     def fake_run(args, **kw):
-        assert args == ["miseledger", "status", "--json"]
+        assert args == ["miseledger", "doctor", "--json"]
         assert kw == {"timeout": 120.0}
         return managed.proc.Result(code=124, stdout="", stderr="timeout after 120.0s")
 
@@ -329,9 +342,170 @@ def test_miseledger_doctor_warns_distinctly_on_timeout(monkeypatch):
     assert all(status != "FAIL" for status, _, _ in results)
 
 
-def test_content_guard_install_args_use_escoffier_labs():
-    t = managed.resolve("content-guard")
-    assert "github.com/escoffier-labs/content-guard" in " ".join(t.install_args)
+def test_miseledger_declares_bounded_evidence_contract():
+    t = managed.resolve("miseledger")
+    surfaces = {surface.kind: surface for surface in t.surfaces}
+    doctor = surfaces["doctor-json"]
+    assert doctor.command == ("miseledger", "doctor", "--json")
+    assert doctor.read_only is False
+    assert doctor.timeout_seconds == 120.0
+    assert doctor.probe == ("miseledger", "doctor", "--help")
+    assert doctor.probe_contains == ("--json", "--mcp", "--archive")
+    evidence = surfaces["brief-markdown"]
+    assert evidence.command == ("miseledger", "evidence", "<task>", "--markdown", "--limit", "5")
+    assert evidence.read_only is False
+    assert evidence.timeout_seconds == 10.0
+    assert evidence.max_chars == 4000
+    assert evidence.probe == ("miseledger", "evidence", "--help")
+    assert evidence.probe_contains == ("--markdown", "--limit")
+    assert surfaces["verify-exit"].command == ("miseledger", "version")
+
+
+def test_usage_tracker_declares_no_write_bounded_summary_contract():
+    t = managed.resolve("usage-tracker")
+    assert t is not None
+    assert len(t.surfaces) == 1
+    summary = t.surfaces[0]
+    assert summary.kind == "summary-json"
+    assert summary.command == (
+        "usage-tracker",
+        "export",
+        "--since",
+        "30d",
+        "--summary-json",
+        "--no-write",
+    )
+    assert summary.read_only is True
+    assert summary.timeout_seconds == 30.0
+    assert summary.max_chars == 4000
+    assert summary.probe == ("usage-tracker", "export", "--help")
+    assert summary.probe_contains == ("--since", "--summary-json", "--no-write")
+
+
+def test_representative_sidecar_manifest_contracts_match_managed_catalog(tmp_path):
+    manifests = [
+        {
+            "name": "usage-tracker",
+            "station": "tokens",
+            "summary": "local usage export",
+            "tools": [
+                {
+                    "name": "usage-tracker",
+                    "command": "usage-tracker",
+                    "install": ["pipx", "install", "git+https://github.com/escoffier-labs/usage-tracker"],
+                    "surfaces": [
+                        {
+                            "kind": "summary-json",
+                            "command": [
+                                "usage-tracker",
+                                "export",
+                                "--since",
+                                "30d",
+                                "--summary-json",
+                                "--no-write",
+                            ],
+                            "timeout_seconds": 30,
+                            "max_chars": 4000,
+                            "probe": ["usage-tracker", "export", "--help"],
+                            "probe_contains": ["--since", "--summary-json", "--no-write"],
+                        }
+                    ],
+                }
+            ],
+        },
+        {
+            "name": "agentpantry",
+            "station": "pantry",
+            "summary": "session synchronization",
+            "tools": [
+                {
+                    "name": "agentpantry",
+                    "command": "agentpantry",
+                    "install": [
+                        "go",
+                        "install",
+                        "github.com/escoffier-labs/agentpantry/cmd/agentpantry@latest",
+                    ],
+                    "surfaces": [
+                        {
+                            "kind": "doctor-json",
+                            "command": ["agentpantry", "doctor", "--json", "--no-net"],
+                            "read_only": False,
+                            "timeout_seconds": 10,
+                            "probe": ["agentpantry", "doctor", "--help"],
+                            "probe_contains": ["-json", "-no-net"],
+                        },
+                        {
+                            "kind": "summary-json",
+                            "command": ["agentpantry", "inventory", "--json"],
+                            "timeout_seconds": 10,
+                            "max_chars": 4000,
+                            "probe": ["agentpantry", "inventory", "--help"],
+                            "probe_contains": ["-json"],
+                        },
+                        {
+                            "kind": "verify-exit",
+                            "command": ["agentpantry", "version", "--json"],
+                            "timeout_seconds": 10,
+                        },
+                    ],
+                }
+            ],
+        },
+    ]
+    for index, payload in enumerate(manifests):
+        root = tmp_path / str(index)
+        root.mkdir()
+        payload = {"schema": station_manifest.SCHEMA, "lifecycle": "active", **payload}
+        (root / "station.json").write_text(json.dumps(payload))
+        manifest = station_manifest.load(str(root))
+        parity = stations_cmd._managed_parity(manifest, check_managed=True)
+        assert parity["status"] == "matched", parity
+
+
+def test_agent_notify_declares_skip_network_contract():
+    t = managed.resolve("agent-notify")
+    surfaces = {surface.kind: surface for surface in t.surfaces}
+    doctor = surfaces["doctor-json"]
+    assert doctor.command == ("agent-notify", "doctor", "--json", "--skip-network")
+    assert doctor.timeout_seconds == 10.0
+    assert doctor.probe == ("agent-notify", "doctor", "--help")
+    assert doctor.probe_contains == ("--json", "--skip-network")
+    assert surfaces["verify-exit"].command == ("agent-notify", "version", "--json")
+
+
+def test_token_glace_declares_utc_summary_contract():
+    t = managed.resolve("token-glace")
+    surfaces = {surface.kind: surface for surface in t.surfaces}
+    assert surfaces["doctor-json"].command == ("token-glace", "doctor", "hooks", "--format", "json")
+    summary = surfaces["summary-json"]
+    assert summary.command == ("token-glace", "stats", "--format", "json", "--timezone", "utc")
+    assert summary.timeout_seconds == 30.0
+    assert summary.max_chars == 4000
+    assert summary.probe == ("token-glace", "--help")
+    assert summary.probe_contains == ("--format", "--timezone")
+
+
+def test_graphtrail_declares_portable_install_and_bounded_context_contract():
+    t = managed.resolve("graphtrail")
+    assert t.install_args == ["cargo", "install", "graphtrail"]
+    surfaces = {surface.kind: surface for surface in t.surfaces}
+    context = surfaces["brief-markdown"]
+    assert context.command == ("graphtrail", "context", "<task>", "--markdown")
+    assert context.timeout_seconds == 10.0
+    assert context.max_chars == 4000
+    assert context.probe == ("graphtrail", "context", "--help")
+    assert context.probe_contains == ("--markdown",)
+    doctor = surfaces["doctor-json"]
+    assert doctor.command == ("graphtrail", "doctor", "--json")
+    assert doctor.probe == ("graphtrail", "doctor", "--help")
+    assert doctor.probe_contains == ("--json",)
+    assert surfaces["verify-exit"].command == ("graphtrail", "--version")
+
+
+def test_standalone_content_guard_is_not_a_managed_install():
+    assert managed.resolve("content-guard") is None
+    assert {tool.name for tool in managed.for_station("guard")} == {"plating"}
 
 
 def test_agent_notify_install_args_use_escoffier_labs():

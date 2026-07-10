@@ -46,6 +46,8 @@ def _surface_payload(surface: managed.MachineSurface) -> dict[str, Any]:
         "read_only": surface.read_only,
         "timeout_seconds": surface.timeout_seconds,
         "max_chars": surface.max_chars,
+        "probe": list(surface.probe),
+        "probe_contains": list(surface.probe_contains),
     }
 
 
@@ -608,8 +610,8 @@ def _managed_surface_contract(surface: managed.MachineSurface) -> dict[str, Any]
         "read_only": surface.read_only,
         "timeout_seconds": surface.timeout_seconds,
         "max_chars": surface.max_chars,
-        "probe": list(getattr(surface, "probe", ())),
-        "probe_contains": list(getattr(surface, "probe_contains", ())),
+        "probe": list(surface.probe),
+        "probe_contains": list(surface.probe_contains),
     }
 
 

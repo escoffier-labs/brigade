@@ -56,6 +56,13 @@ def run(target: Path, station: str, *, install_manifest: bool = False) -> int:
         print("  brigade ingest   # handoff promotion (not the retired memory-doctor ingest)")
         print()
 
+    if st is not None and st.name == "guard":
+        print("content scanning is embedded in brigade-cli:")
+        print("  brigade scrub --target . --policy public-repo")
+        print("  brigade security scan --target .")
+        print("plating remains an optional process-boundary helper for publish demos.")
+        print()
+
     if st is not None and st.name == "pantry":
         print("pantry station wires Agent Pantry (separate Go binary; process boundary):")
         print("  brigade pantry setup plan --role sink --peer 127.0.0.1:8787")

@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import os
 import re
-import shutil
 import subprocess
 import sys
 from datetime import datetime, timedelta
@@ -24,6 +23,7 @@ from . import (
     reportstore,
     research_cmd,
     roadmap_cmd,
+    scrub,
     security_cmd,
     tools_cmd,
     work_cmd,
@@ -731,54 +731,41 @@ def ci_import_issues(
 
 
 def _content_guard_available(target: Path) -> bool:
-    if shutil.which("content-guard"):
-        return True
-    scanner_dir = Path(os.environ.get("CONTENT_GUARD_DIR", str(Path.home() / "repos" / "content-guard")))
-    return scanner_dir.is_dir()
+    return scrub.available()
 
 
 def _content_guard_command(
     target: Path, *, policy: str, introduced: bool, base_ref: str | None
 ) -> tuple[list[str] | None, dict[str, str], str | None]:
-    scanner_dir = Path(os.environ.get("CONTENT_GUARD_DIR", str(Path.home() / "repos" / "content-guard")))
+    scanner_dir = scrub.scanner_dir()
     env: dict[str, str] = {}
-    if scanner_dir.is_dir():
-        policy_path = scanner_dir / "policies" / f"{policy}.json"
+    if not scanner_dir.is_dir():
+        return None, env, f"content guard not available at {scanner_dir}"
+    try:
+        policy_path = scrub.policy_path(target, policy)
+    except ValueError as exc:
+        return None, env, str(exc)
+    if not policy_path.is_file():
+        return None, env, f"content guard policy not found: {policy_path}"
+    module = scrub.scanner_module()
+    if module == "content_guard":
         env["PYTHONPATH"] = str(scanner_dir / "src")
-        if introduced and base_ref:
-            return (
-                [
-                    sys.executable,
-                    "-m",
-                    "content_guard.git_scan",
-                    "--history",
-                    "--range",
-                    f"{base_ref}..HEAD",
-                    "--policy",
-                    str(policy_path),
-                ],
-                env,
-                None,
-            )
+    if introduced and base_ref:
         return (
             [
                 sys.executable,
                 "-m",
-                "content_guard",
-                "scan",
-                str(target),
+                f"{module}.git_scan",
+                "--history",
+                "--range",
+                f"{base_ref}..HEAD",
                 "--policy",
                 str(policy_path),
             ],
             env,
             None,
         )
-    executable = shutil.which("content-guard")
-    if executable:
-        if introduced and base_ref:
-            return [executable, "git-scan", "--history", "--range", f"{base_ref}..HEAD", "--policy", policy], env, None
-        return [executable, "scan", str(target), "--policy", policy], env, None
-    return None, env, "content-guard not available"
+    return [sys.executable, "-m", module, "scan", str(target), "--policy", str(policy_path)], env, None
 
 
 def _run_content_guard_check(

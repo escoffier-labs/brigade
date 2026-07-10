@@ -370,7 +370,7 @@ Memory and handoff tools:
 
 Safety and operations tools:
 
-- [Content Guard](https://github.com/escoffier-labs/content-guard): policy-driven content scanning and publish checks.
+- Content Guard is embedded in Brigade and powers `brigade scrub`, publish checks, and the seeded pre-push hook. `CONTENT_GUARD_DIR` remains an explicit compatibility override for older standalone checkouts.
 - [Agent Pantry](https://github.com/escoffier-labs/agentpantry): encrypted browser session, cookie, and secret sync for agent machines.
 - [agent-notify](https://github.com/escoffier-labs/agent-notify): optional notification hooks for long-running agent work.
 - [Token Glace](https://github.com/escoffier-labs/token-glace): output compaction for terminal-heavy agent workflows.
@@ -389,7 +389,7 @@ Evidence ledger tools:
 Search and context tools:
 
 - [code-search-api](https://github.com/escoffier-labs/code-search-api): local semantic code-search service backed by SQLite and Ollama embeddings.
-- [code-search-mcp](https://github.com/escoffier-labs/code-search-mcp): read-only MCP bridge for a running code-search-api service. The GitHub repo lives under Escoffier Labs; the npm package remains `@solomonneas/code-search-mcp`.
+- The read-only MCP bridge is maintained under [`code-search-api/mcp`](https://github.com/escoffier-labs/code-search-api/tree/main/mcp). Brigade retains the `code-search-mcp` compatibility key and the published package remains `@solomonneas/code-search-mcp`.
 
 Brigade also has native local workflows for [repo fleet operations](repo-fleet.md), [portable tool catalogs](tool-catalog.md), [security scans](security.md), and [handoff promotion](handoff-promotion.md). The highlights are below.
 

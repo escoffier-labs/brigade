@@ -20,12 +20,12 @@ tags: [publishing, content-guard, pre-push, scrubber]
 
 ## Two layers
 
-1. **Pre-push hook.** `hooks/pre-push` runs `content-guard` against the working tree before every `git push`. Blocks on violations. Inline allow-tags exist for intentional examples.
+1. **Pre-push hook.** `hooks/pre-push` runs Brigade's embedded content guard against the working tree before every `git push`. It blocks on violations. Inline allow-tags exist for intentional examples.
 2. **Deterministic scrub.** `brigade scrub --target .` runs the same scanner standalone. Use it before generating public artifacts (blog posts, social drafts, docs PRs).
 
 ## Bypass
 
-`git push --no-verify` skips the pre-push hook. Use it only when you understand exactly what you are allowing through. Both `brigade scrub` and the hook log every violation so you can audit later.
+Do not bypass the hook. Both `brigade scrub` and the hook report every violation so you can review the result locally.
 
 ## Inline allow
 
@@ -41,13 +41,7 @@ A local service might run on localhost:8080. <!-- content-guard: allow localhost
 git config core.hooksPath hooks
 ```
 
-If content-guard is not installed:
-
-```bash
-git clone https://github.com/escoffier-labs/content-guard ~/repos/content-guard
-```
-
-The hook reads `CONTENT_GUARD_DIR` (defaults to `$HOME/repos/content-guard`) and `CONTENT_GUARD_POLICY` (defaults to `$SCANNER_DIR/policies/public-repo.json`).
+The guard ships with `brigade-cli`. `CONTENT_GUARD_POLICY` defaults to `public-repo`. `CONTENT_GUARD_DIR` is an explicit compatibility override for older standalone checkouts.
 
 ## Why this is part of the product
 

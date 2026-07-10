@@ -29,6 +29,7 @@ BOUNDARIES = [
     "GraphTrail and code-search stay process-boundary binaries; Brigade only installs, plans, and health-checks.",
     "Brigade does not start code-search-api or run graphtrail sync from these commands.",
     "Search station tools are optional and fail-open for workspace doctor.",
+    "The code-search-mcp compatibility key is maintained by code-search-api/mcp.",
 ]
 
 
@@ -53,6 +54,8 @@ def status_payload(target: Path) -> dict[str, Any]:
         "code-search-mcp": {
             "installed": mcp_bin is not None,
             "binary": mcp_bin,
+            "owner": "code-search-api/mcp",
+            "compatibility_key": "code-search-mcp",
         },
     }
 
@@ -78,7 +81,7 @@ def status_payload(target: Path) -> dict[str, Any]:
             "graphtrail sync",
             ".graphtrail/graphtrail.db",
             "graphtrail context / receipt code_graph_delta",
-            "optional code-search-api serve + code-search-mcp",
+            "optional code-search-api serve + code-search-api/mcp bridge",
         ],
     )
 
@@ -150,7 +153,7 @@ def status_payload(target: Path) -> dict[str, Any]:
     if api_bin:
         parts.append(f"code-search-api={api_health}")
     if mcp_bin:
-        parts.append("code-search-mcp=installed")
+        parts.append("code-search-mcp=installed (owner=code-search-api/mcp)")
     payload["summary"] = "; ".join(parts) if parts else payload["summary"]
 
     payload["next_commands"] = [
@@ -218,6 +221,7 @@ def sync_plan_payload(*, target: Path) -> dict[str, Any]:
             "code-search-api": proc.which("code-search-api") is not None,
             "code-search-mcp": proc.which("code-search-mcp") is not None,
         },
+        "compatibility": {"code-search-mcp": {"owner": "code-search-api/mcp"}},
         "commands": [
             ["graphtrail", "sync", str(target)],
             ["graphtrail", "doctor", "--json"],

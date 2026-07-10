@@ -22,10 +22,10 @@ MEMORY = Station(
 )
 GUARD = Station(
     name="guard",
-    summary="publish safety, content scrub, and optional demo plating",
+    summary="embedded publish safety and content scrub, with optional demo plating",
     aliases=("pass",),
     doctor=_doctor.guard_station_checks,
-    tools=("content-guard", "plating"),
+    tools=("plating",),
 )
 SKILLS = Station(
     name="skills",
@@ -42,7 +42,7 @@ TOKENS = Station(
 )
 SEARCH = Station(
     name="search",
-    summary="local code graph (GraphTrail) and optional semantic code search",
+    summary="local code graph and semantic search, with MCP maintained by code-search-api/mcp",
     aliases=("code-search",),
     doctor=_doctor.search_station_checks,
     tools=("graphtrail", "code-search-api", "code-search-mcp"),

@@ -21,9 +21,9 @@ def test_add_installs_and_wires_station_tools(monkeypatch, tmp_target, capsys):
     rc = add_mod.run(target=tmp_target, station="guard")
     out = capsys.readouterr().out
     assert rc == 0
-    # content-guard install args were invoked
-    assert any("content-guard" in " ".join(a) for a in calls)
-    assert "content-guard" in out
+    assert not any("content-guard" in " ".join(call) for call in calls)
+    assert "embedded" in out
+    assert "brigade scrub" in out
 
 
 def test_add_unknown_station_errors(tmp_target, capsys):
