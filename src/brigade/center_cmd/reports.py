@@ -43,7 +43,7 @@ from ..localio import (
 )
 from ..render import emit
 
-from . import schema as _family_base
+from . import schema_ops as _family_base
 
 globals().update({name: value for name, value in vars(_family_base).items() if not name.startswith("__")})
 

@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import importlib
 from pathlib import Path
+from types import ModuleType
+
+import pytest
 
 FAMILIES = {
     "daily_cmd": {
@@ -800,15 +803,73 @@ def test_phase257_family_submodules_importable():
             assert module.__name__ == f"{config['facade']}.{module_name}"
 
 
+@pytest.mark.parametrize(
+    "module_name",
+    [
+        "brigade.cli.work.register",
+        "brigade.cli.work.dispatch",
+        "brigade.daily_cmd.telemetry",
+        "brigade.daily_cmd.closeout",
+        "brigade.center_cmd.schema",
+        "brigade.center_cmd.report_review",
+        "brigade.security_cmd.template_audit",
+        "brigade.handoff_cmd.inspect",
+        "brigade.handoff_cmd.migrate",
+        "brigade.handoff_cmd.issues",
+        "brigade.release_cmd.candidate_audit",
+        "brigade.release_cmd.schema",
+        "brigade.work_cmd.session.brief",
+        "brigade.work_cmd.session.tasks",
+    ],
+)
+def test_phase257_normal_dotted_imports_bind_modules(module_name):
+    namespace: dict[str, object] = {}
+    exec(f"import {module_name} as imported_module", namespace)
+    assert isinstance(namespace["imported_module"], ModuleType), module_name
+
+
+@pytest.mark.parametrize(
+    ("facade_name", "callable_name", "target_module_name"),
+    [
+        ("brigade.cli.work", "register", "brigade.cli.work.registration"),
+        ("brigade.cli.work", "dispatch", "brigade.cli.work.dispatching"),
+        ("brigade.daily_cmd", "telemetry", "brigade.daily_cmd.telemetry_ops"),
+        ("brigade.daily_cmd", "closeout", "brigade.daily_cmd.closeout_ops"),
+        ("brigade.center_cmd", "report_review", "brigade.center_cmd.report_review_ops"),
+        ("brigade.security_cmd", "template_audit", "brigade.security_cmd.template_audit_ops"),
+        ("brigade.handoff_cmd", "inspect", "brigade.handoff_cmd.inspect_ops"),
+        ("brigade.handoff_cmd", "migrate", "brigade.handoff_cmd.migrate_ops"),
+        ("brigade.handoff_cmd", "issues", "brigade.handoff_cmd.issue_ops"),
+        ("brigade.release_cmd", "candidate_audit", "brigade.release_cmd.candidate_audit_ops"),
+        ("brigade.work_cmd.session", "brief", "brigade.work_cmd.session.briefing"),
+        ("brigade.work_cmd.session", "tasks", "brigade.work_cmd.session.task_ops"),
+    ],
+)
+def test_phase257_alias_modules_preserve_callable_facade_exports(
+    monkeypatch, facade_name, callable_name, target_module_name
+):
+    exec(f"import {facade_name}.{callable_name}")
+    facade = importlib.import_module(facade_name)
+    target = importlib.import_module(target_module_name)
+    exported = getattr(facade, callable_name)
+
+    def replacement(*args, **kwargs):
+        return ("called", args, kwargs)
+
+    monkeypatch.setattr(target, callable_name, replacement)
+    assert isinstance(exported, ModuleType)
+    assert exported("value", flag=True) == ("called", ("value",), {"flag": True})
+
+
 def test_phase257_facade_monkeypatch_reaches_submodule(monkeypatch):
     checks = {
         "daily_cmd": ("_safe_text", "config"),
-        "center_cmd": ("_parse_time", "schema"),
+        "center_cmd": ("_parse_time", "schema_ops"),
         "security_cmd": ("config_path", "config"),
         "handoff_cmd": ("_short", "sources"),
         "release_cmd": ("_git_value", "paths"),
-        "work_cmd.session": ("_suggested_command", "brief"),
-        "cli.work": ("dispatch", "dispatch"),
+        "work_cmd.session": ("_suggested_command", "briefing"),
+        "cli.work": ("dispatch", "dispatching"),
     }
     sentinel = object()
     for family, (name, module_name) in checks.items():

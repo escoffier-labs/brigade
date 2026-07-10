@@ -12,7 +12,7 @@ from ...dogfood_cmd import DEFAULT_TIMEOUT_SECONDS
 from ...work_cmd import TASK_PRIORITIES, TASK_TYPES
 from .. import extras as _extras_cli
 
-from . import register as _family_base
+from . import registration as _family_base
 
 globals().update({name: value for name, value in vars(_family_base).items() if not name.startswith("__")})
 
