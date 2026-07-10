@@ -23,6 +23,8 @@ STATE_REL = ".brigade/mcp/state.json"
 
 GITIGNORE_SNIPPET = [
     "# brigade mcp: canonical source is shared, sidecar state is machine-local",
+    "!.brigade/",
+    ".brigade/*",
     "!.brigade/mcp.json",
     ".brigade/mcp/",
 ]
@@ -280,12 +282,23 @@ def _public_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
 def _ensure_gitignore(target: Path) -> bool:
     gi = target / ".gitignore"
     existing = gi.read_text() if gi.is_file() else ""
-    if "!.brigade/mcp.json" in existing:
+    if _gitignore_keeps_mcp_catalog_trackable(existing):
         return False
     block = "\n".join(GITIGNORE_SNIPPET)
     sep = "" if existing == "" or existing.endswith("\n") else "\n"
     gi.write_text(existing + sep + ("\n" if existing else "") + block + "\n")
     return True
+
+
+def _gitignore_keeps_mcp_catalog_trackable(existing: str) -> bool:
+    lines = existing.splitlines()
+    try:
+        unignore_parent = lines.index("!.brigade/")
+        ignore_children = lines.index(".brigade/*", unignore_parent + 1)
+        unignore_catalog = lines.index("!.brigade/mcp.json", ignore_children + 1)
+    except ValueError:
+        return False
+    return ".brigade/mcp/" in lines[unignore_catalog + 1 :]
 
 
 def init(*, target: Path, force: bool = False, update_gitignore: bool = True, json_output: bool = False) -> int:
