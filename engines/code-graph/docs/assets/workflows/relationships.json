@@ -3,7 +3,6 @@
   "eyebrow": "THE GRAPH",
   "description": "Incoming and outgoing tree-sitter call edges define the neighborhood of serve.",
   "meta": "symbol: serve · depth 1",
-  "accent": "#4F86FF",
   "columns": [
     {
       "title": "CALLERS · WHO REACHES ME",

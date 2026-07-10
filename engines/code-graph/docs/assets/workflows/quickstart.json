@@ -3,7 +3,6 @@
   "eyebrow": "GRAPHTRAIL WORKFLOW",
   "description": "Tree-sitter extracts structure into one local SQLite file for CLI and MCP queries.",
   "meta": "no daemon · no network",
-  "accent": "#4F86FF",
   "columns": [
     {
       "title": "SOURCE",
