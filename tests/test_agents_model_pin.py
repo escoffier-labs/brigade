@@ -72,6 +72,7 @@ def test_pins_model_for_kimi():
         "kimi",
         "-m",
         "kimi-k2.5",
+        "--yolo",
         "--print",
         "-p",
         "P",
@@ -109,6 +110,7 @@ def test_pins_model_for_antigravity():
         "agy",
         "--model",
         "gpt-5",
+        "--dangerously-skip-permissions",
         "--print",
         "P",
     ]

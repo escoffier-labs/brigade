@@ -7,7 +7,12 @@ def test_build_argv_for_known_clis():
     assert agents.build_argv("claude", "hi") == ["claude", "-p", "hi"]
     assert agents.build_argv("codex", "hi") == ["codex", "exec", "hi"]
     assert agents.build_argv("opencode", "hi") == ["opencode", "run", "hi"]
-    assert agents.build_argv("antigravity", "hi") == ["agy", "--print", "hi"]
+    assert agents.build_argv("antigravity", "hi") == [
+        "agy",
+        "--dangerously-skip-permissions",
+        "--print",
+        "hi",
+    ]
     assert agents.build_argv("pi", "hi") == ["pi", "-p", "hi"]
     assert agents.build_argv("cursor", "hi") == ["cursor-agent", "-p", "--output-format", "text", "hi"]
     assert agents.build_argv("aider", "hi") == ["aider", "--yes", "--no-auto-commits", "--message", "hi"]
@@ -15,7 +20,14 @@ def test_build_argv_for_known_clis():
     assert agents.build_argv("continue", "hi") == ["cn", "-p", "hi"]
     assert agents.build_argv("copilot", "hi") == ["copilot", "-p", "hi"]
     assert agents.build_argv("qwen", "hi") == ["qwen", "-p", "hi", "--approval-mode", "yolo"]
-    assert agents.build_argv("kimi", "hi") == ["kimi", "--print", "-p", "hi", "--final-message-only"]
+    assert agents.build_argv("kimi", "hi") == [
+        "kimi",
+        "--yolo",
+        "--print",
+        "-p",
+        "hi",
+        "--final-message-only",
+    ]
     assert agents.build_argv("adal", "hi") == ["adal", "-q", "hi"]
     assert agents.build_argv("openhands", "hi") == ["openhands", "--headless", "-t", "hi"]
     assert agents.build_argv("grok", "hi") == ["grok", "-p", "hi", "--always-approve"]
@@ -81,6 +93,51 @@ def test_build_argv_for_read_only_codex():
         "llama3.3",
         "hi",
     ]
+
+
+def test_build_argv_antigravity_writable_uses_cwd_write_approval(tmp_path):
+    assert agents.build_argv("antigravity", "hi", cwd=tmp_path) == [
+        "agy",
+        "--add-dir",
+        str(tmp_path),
+        "--dangerously-skip-permissions",
+        "--print",
+        "hi",
+    ]
+
+
+def test_build_argv_antigravity_read_only_keeps_sandbox_without_write_flags(tmp_path):
+    assert agents.build_argv("antigravity", "hi", read_only=True, cwd=tmp_path) == [
+        "agy",
+        "--sandbox",
+        "--print",
+        "hi",
+    ]
+    argv = agents.build_argv("antigravity", "hi", sandbox="read-only", cwd=tmp_path)
+    assert argv == ["agy", "--sandbox", "--print", "hi"]
+    assert "--add-dir" not in argv
+    assert "--dangerously-skip-permissions" not in argv
+
+
+def test_build_argv_kimi_writable_uses_yolo_and_read_only_keeps_plan():
+    assert agents.build_argv("kimi", "hi") == [
+        "kimi",
+        "--yolo",
+        "--print",
+        "-p",
+        "hi",
+        "--final-message-only",
+    ]
+    read_only = agents.build_argv("kimi", "hi", read_only=True)
+    assert read_only == [
+        "kimi",
+        "--plan",
+        "--print",
+        "-p",
+        "hi",
+        "--final-message-only",
+    ]
+    assert "--yolo" not in read_only
 
 
 def test_build_argv_can_set_codex_sandbox():
@@ -225,6 +282,29 @@ def test_run_agent_forwards_model_to_argv(monkeypatch):
     res = agents.run_agent("claude", "hi", model="claude-fable-5")
     assert res.ok is True
     assert captured["argv"] == ["claude", "--model", "claude-fable-5", "-p", "hi"]
+
+
+def test_run_agent_threads_cwd_into_argv_builder(monkeypatch, tmp_path):
+    captured = {}
+
+    def fake_run(argv, **kw):
+        captured["argv"] = argv
+        captured["cwd"] = kw["cwd"]
+        return agents.proc.Result(0, "answer", "")
+
+    monkeypatch.setattr(agents.proc, "which", lambda c: "/x/" + c)
+    monkeypatch.setattr(agents.proc, "run", fake_run)
+    res = agents.run_agent("antigravity", "hi", cwd=tmp_path)
+    assert res.ok is True
+    assert captured["cwd"] == tmp_path
+    assert captured["argv"] == [
+        "agy",
+        "--add-dir",
+        str(tmp_path),
+        "--dangerously-skip-permissions",
+        "--print",
+        "hi",
+    ]
 
 
 def test_run_agent_nonzero_is_not_ok(monkeypatch):
