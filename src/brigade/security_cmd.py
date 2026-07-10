@@ -30,6 +30,8 @@ SEVERITY_ORDER = {
 }
 CONFIG_REL_PATH = ".brigade/security.toml"
 ARTIFACTS_REL_PATH = ".brigade/security/latest"
+SUPPRESSION_HEALTH_CACHE_REL_PATH = ".brigade/security/suppression-health-cache.json"
+SUPPRESSION_HEALTH_CACHE_VERSION = 1
 POLICIES = {
     "personal": {
         "fail_on": "critical",
@@ -277,6 +279,10 @@ def config_path(target: Path) -> Path:
 
 def default_artifacts_dir(target: Path) -> Path:
     return target / ARTIFACTS_REL_PATH
+
+
+def suppression_health_cache_path(target: Path) -> Path:
+    return target / SUPPRESSION_HEALTH_CACHE_REL_PATH
 
 
 def _closeouts_root(target: Path) -> Path:
@@ -1453,6 +1459,173 @@ def unsuppress(*, target: Path, fingerprint: str, json_output: bool = False) -> 
     return 0
 
 
+def _file_sha256(path: Path) -> str | None:
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError:
+        return None
+
+
+def _candidate_file_records(target: Path, effective: EffectivePolicy) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    for path in _iter_scan_files(target, include_paths=effective.include_paths, exclude_paths=effective.exclude_paths):
+        classification = _classification_for(path, target)
+        if not effective.include_templates and classification.confidence == "template":
+            continue
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        records.append(
+            {
+                "path": str(path.relative_to(target)),
+                "size": stat.st_size,
+                "mtime_ns": stat.st_mtime_ns,
+            }
+        )
+    for inbox_rel in sorted(set(WRITER_INBOXES.values())):
+        inbox = target / inbox_rel
+        if not inbox.is_dir():
+            continue
+        for path in sorted(inbox.glob("*.md")):
+            if path.name == "TEMPLATE.md":
+                continue
+            rel = str(path.relative_to(target))
+            if not _scan_path_selected(
+                rel,
+                include_paths=effective.include_paths,
+                exclude_paths=effective.exclude_paths,
+            ):
+                continue
+            try:
+                stat = path.stat()
+            except OSError:
+                continue
+            records.append({"path": rel, "size": stat.st_size, "mtime_ns": stat.st_mtime_ns})
+    return sorted(records, key=lambda item: str(item["path"]))
+
+
+def _candidate_file_fingerprint(target: Path, effective: EffectivePolicy) -> str:
+    records = _candidate_file_records(target, effective)
+    payload = json.dumps(records, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(payload.encode()).hexdigest()[:16]
+
+
+def _suppression_cache_key(target: Path, effective: EffectivePolicy, config: SecurityConfig) -> dict[str, Any]:
+    config_digest = _file_sha256(effective.config_path) if effective.config_path.is_file() else None
+    return {
+        "version": SUPPRESSION_HEALTH_CACHE_VERSION,
+        "config_digest": config_digest,
+        "policy": effective.policy,
+        "scan_profile": effective.scan_profile,
+        "include_templates": effective.include_templates,
+        "enabled_checks": list(effective.enabled_checks),
+        "include_paths": list(effective.include_paths),
+        "exclude_paths": list(effective.exclude_paths),
+        "severity_threshold": effective.severity_threshold,
+        "suppressions": list(effective.suppressions),
+        "suppression_reasons": dict(sorted(config.suppression_reasons.items())),
+        "candidate_fingerprint": _candidate_file_fingerprint(target, effective),
+    }
+
+
+def _suppression_health_from_active(config: SecurityConfig, active: set[str]) -> dict[str, Any]:
+    stale = [fingerprint for fingerprint in config.suppressions if fingerprint not in active]
+    missing_reasons = [
+        fingerprint for fingerprint in config.suppressions if not config.suppression_reasons.get(fingerprint)
+    ]
+    return {
+        "suppression_count": len(config.suppressions),
+        "missing_reasons": missing_reasons,
+        "stale": stale,
+    }
+
+
+def _write_suppression_health_cache(target: Path, effective: EffectivePolicy, health: dict[str, Any]) -> None:
+    config = load_config(target)
+    if config is None or not effective.config_loaded or not effective.suppressions:
+        return
+    payload = {
+        "schema": "brigade.security.suppression-health-cache.v1",
+        "key": _suppression_cache_key(target, effective, config),
+        "health": health,
+    }
+    _write_json(suppression_health_cache_path(target), payload)
+
+
+def _write_suppression_health_cache_from_report(
+    target: Path, effective: EffectivePolicy, report: dict[str, Any]
+) -> None:
+    config = load_config(target)
+    if config is None or not config.suppressions:
+        return
+    active = {
+        str(item.get("fingerprint"))
+        for item in list(report.get("findings") or []) + list(report.get("suppressed_findings") or [])
+        if item.get("fingerprint")
+    }
+    _write_suppression_health_cache(target, effective, _suppression_health_from_active(config, active))
+
+
+def _suppression_full_scan_next_command(target: Path) -> str:
+    return f"brigade security scan --target {target} --output-dir {default_artifacts_dir(target)}"
+
+
+def suppression_health_cache(target: Path) -> dict[str, Any]:
+    target = target.expanduser().resolve()
+    config = load_config(target)
+    if config is None or not config.suppressions:
+        return {
+            "status": "ok",
+            "health": {"suppression_count": 0, "missing_reasons": [], "stale": []},
+            "detail": "no suppressions configured",
+            "next_command": None,
+        }
+    effective = _effective_policy(target, policy=None, fail_on=None, include_templates=None)
+    expected_key = _suppression_cache_key(target, effective, config)
+    path = suppression_health_cache_path(target)
+    next_command = _suppression_full_scan_next_command(target)
+    if not path.is_file():
+        return {
+            "status": "missing",
+            "health": None,
+            "detail": f"cache missing; run `{next_command}`",
+            "next_command": next_command,
+        }
+    try:
+        payload = _read_json(path)
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        return {
+            "status": "invalid",
+            "health": None,
+            "detail": f"cache invalid: {exc}; run `{next_command}`",
+            "next_command": next_command,
+        }
+    if not isinstance(payload, dict):
+        return {
+            "status": "invalid",
+            "health": None,
+            "detail": f"cache invalid: expected object; run `{next_command}`",
+            "next_command": next_command,
+        }
+    if payload.get("key") != expected_key:
+        return {
+            "status": "stale",
+            "health": None,
+            "detail": f"cache stale; run `{next_command}`",
+            "next_command": next_command,
+        }
+    health = payload.get("health")
+    if not isinstance(health, dict):
+        return {
+            "status": "invalid",
+            "health": None,
+            "detail": f"cache invalid: missing health; run `{next_command}`",
+            "next_command": next_command,
+        }
+    return {"status": "ok", "health": health, "detail": "cache fresh", "next_command": None}
+
+
 def suppression_health(target: Path) -> dict[str, Any]:
     target = target.expanduser().resolve()
     config = load_config(target)
@@ -1471,15 +1644,9 @@ def suppression_health(target: Path) -> dict[str, Any]:
         severity_threshold=effective.severity_threshold,
     )
     active = {str(item.get("fingerprint")) for item in report["findings"] if item.get("fingerprint")}
-    stale = [fingerprint for fingerprint in config.suppressions if fingerprint not in active]
-    missing_reasons = [
-        fingerprint for fingerprint in config.suppressions if not config.suppression_reasons.get(fingerprint)
-    ]
-    return {
-        "suppression_count": len(config.suppressions),
-        "missing_reasons": missing_reasons,
-        "stale": stale,
-    }
+    health = _suppression_health_from_active(config, active)
+    _write_suppression_health_cache(target, effective, health)
+    return health
 
 
 def _short(text: str, limit: int = 160) -> str:
@@ -2439,9 +2606,7 @@ def _iter_scan_files(
             if rel_parts and (
                 any(part in SKIP_DIRS for part in rel_parts)
                 or any(rel_parts[: len(prefix)] == prefix for prefix in SKIP_PREFIXES)
-                or not _scan_path_selected(
-                    str(rel_current), include_paths=include_paths, exclude_paths=exclude_paths
-                )
+                or not _scan_path_selected(str(rel_current), include_paths=include_paths, exclude_paths=exclude_paths)
             ):
                 dirnames[:] = []
                 continue
@@ -2456,9 +2621,7 @@ def _iter_scan_files(
                 if (
                     dirname in SKIP_DIRS
                     or any(child_parts[: len(prefix)] == prefix for prefix in SKIP_PREFIXES)
-                    or not _scan_path_selected(
-                        str(child_rel), include_paths=include_paths, exclude_paths=exclude_paths
-                    )
+                    or not _scan_path_selected(str(child_rel), include_paths=include_paths, exclude_paths=exclude_paths)
                 ):
                     continue
                 kept_dirs.append(dirname)
@@ -3292,7 +3455,7 @@ def show_config(*, target: Path, json_output: bool = False) -> int:
     return 0
 
 
-def health(target: Path) -> dict[str, Any]:
+def health(target: Path, *, suppression_cache_only: bool = False) -> dict[str, Any]:
     target = target.expanduser().resolve()
     checks: list[dict[str, Any]] = []
     closeouts = _read_closeouts(target)
@@ -3369,16 +3532,32 @@ def health(target: Path) -> dict[str, Any]:
                 "detail": f"{harness_wiring['scanned_file_count']} harness wiring file(s) checked",
             }
         )
+    suppression_cache: dict[str, Any] | None = None
     try:
-        suppression = suppression_health(target)
+        if suppression_cache_only:
+            suppression_cache = suppression_health_cache(target)
+            if suppression_cache["status"] == "ok":
+                suppression = suppression_cache["health"]
+            else:
+                checks.append(
+                    {
+                        "status": "warn",
+                        "name": "security_suppressions_cache",
+                        "detail": suppression_cache["detail"],
+                        "next_command": suppression_cache["next_command"],
+                    }
+                )
+                suppression = None
+        else:
+            suppression = suppression_health(target)
     except ValueError as exc:
         checks.append({"status": "fail", "name": "security_suppressions", "detail": str(exc)})
     else:
-        if suppression["stale"]:
+        if suppression is not None and suppression["stale"]:
             checks.append(
                 {"status": "warn", "name": "security_stale_suppressions", "detail": ", ".join(suppression["stale"][:5])}
             )
-        if suppression["missing_reasons"]:
+        if suppression is not None and suppression["missing_reasons"]:
             checks.append(
                 {
                     "status": "warn",
@@ -3386,7 +3565,7 @@ def health(target: Path) -> dict[str, Any]:
                     "detail": ", ".join(suppression["missing_reasons"][:5]),
                 }
             )
-        if not suppression["stale"] and not suppression["missing_reasons"]:
+        if suppression is not None and not suppression["stale"] and not suppression["missing_reasons"]:
             checks.append(
                 {
                     "status": "ok",
@@ -3426,6 +3605,7 @@ def health(target: Path) -> dict[str, Any]:
         "evidence": bundle,
         "template_privacy": template_audit_payload,
         "harness_wiring": harness_wiring,
+        "suppression_cache": suppression_cache,
         "latest_closeout": closeouts[0] if closeouts else None,
     }
 
@@ -3582,6 +3762,7 @@ def scan(
     report["config"] = str(effective.config_path)
     report["config_loaded"] = effective.config_loaded
     report["generated_at"] = _utc_iso()
+    _write_suppression_health_cache_from_report(target, effective, report)
     configured_output_dir = target / effective.output_path
     requested_output_dir = output_dir
     if requested_output_dir is None and (import_findings or effective.config_loaded):

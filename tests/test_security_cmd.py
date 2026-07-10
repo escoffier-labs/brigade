@@ -719,6 +719,41 @@ def test_security_suppression_health_reports_stale_and_missing_reasons(tmp_path)
     assert health["missing_reasons"] == ["0123456789abcdef"]
 
 
+def test_security_scan_writes_suppression_health_cache(tmp_path, capsys):
+    (tmp_path / ".env").write_text("SERVICE_TOKEN=abcd1234abcd1234abcd1234\n")
+    fingerprint = security_cmd.scan_target(tmp_path)["findings"][0]["fingerprint"]
+    config = tmp_path / ".brigade" / "security.toml"
+    config.parent.mkdir(parents=True)
+    config.write_text(
+        "\n".join(
+            [
+                'policy = "personal"',
+                'fail_on = "none"',
+                "include_templates = false",
+                "",
+                "[suppressions]",
+                f'fingerprints = ["{fingerprint}"]',
+                "",
+                "[suppression_reasons]",
+                f'{fingerprint} = "reviewed fake local token"',
+                "",
+            ]
+        )
+    )
+
+    assert security_cmd.scan(target=tmp_path, json_output=True) == 0
+    capsys.readouterr()
+
+    cache = json.loads((tmp_path / ".brigade" / "security" / "suppression-health-cache.json").read_text())
+    assert cache["health"] == {
+        "suppression_count": 1,
+        "missing_reasons": [],
+        "stale": [],
+    }
+    assert cache["key"]["candidate_fingerprint"]
+    assert cache["key"]["suppressions"] == [fingerprint]
+
+
 def test_security_init_writes_gitignored_local_config(tmp_path, capsys):
     tmp_path.mkdir(exist_ok=True)
 
