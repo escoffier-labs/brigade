@@ -469,17 +469,17 @@ raise SystemExit(0)
     def original_process_state() -> str | None:
         try:
             stat_before = stat_path.read_text().rsplit(")", 1)[1].split()
-        except FileNotFoundError:
+        except (FileNotFoundError, ProcessLookupError):
             return None
         if stat_before[19] != original_start_time:
             return None
         try:
             status = status_path.read_text()
-        except FileNotFoundError:
+        except (FileNotFoundError, ProcessLookupError):
             return None
         try:
             stat_after = stat_path.read_text().rsplit(")", 1)[1].split()
-        except FileNotFoundError:
+        except (FileNotFoundError, ProcessLookupError):
             return None
         if stat_after[19] != original_start_time:
             return None
