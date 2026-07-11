@@ -8,7 +8,7 @@ from pathlib import Path
 import tempfile
 from typing import Any, Mapping, Sequence
 
-from . import registry, station_manifest
+from . import registry, station_manifest, stations_cmd
 
 
 SCHEMA = "brigade.station_scaffold.v1"
@@ -28,6 +28,9 @@ def scaffold_payload(
 ) -> dict[str, Any]:
     """Return a JSON-ready scaffold plan after station-manifest validation."""
     output_path = Path(output)
+    unsafe = _unsafe_output(output_path)
+    if unsafe:
+        return _error_payload(output_path, detail=unsafe, status="refused")
     try:
         manifest = _manifest_payload(
             station=station,
@@ -41,7 +44,7 @@ def scaffold_payload(
     except ValueError as exc:
         return _error_payload(output_path, detail=str(exc))
 
-    return {
+    payload: dict[str, Any] = {
         "schema": SCHEMA,
         "ok": True,
         "status": "ready",
@@ -55,6 +58,8 @@ def scaffold_payload(
         "next_commands": list(NEXT_COMMANDS),
         "detail": "station scaffold is ready to write",
     }
+    payload["safety"]["writes_outside_output"] = False
+    return payload
 
 
 def write_scaffold(
@@ -80,16 +85,7 @@ def write_scaffold(
     )
     if not payload["ok"]:
         return payload
-    if output_path.exists() and not output_path.is_dir():
-        payload.update(
-            ok=False,
-            status="refused",
-            would_write=False,
-            detail="output path already exists and is not a directory",
-        )
-        return payload
-
-    existing = [relative for relative in FILES if (output_path / relative).exists()]
+    existing = [relative for relative in FILES if os.path.lexists(output_path / relative)]
     if existing:
         payload.update(
             ok=False,
@@ -101,10 +97,11 @@ def write_scaffold(
         return payload
 
     output_path.mkdir(parents=True, exist_ok=True)
+    trusted_root = output_path.resolve(strict=True)
     station_path = output_path / "station.json"
     readme_path = output_path / "README.md"
-    station_path.write_text(json.dumps(payload["manifest"], indent=2, sort_keys=True) + "\n")
-    readme_path.write_text(_readme(payload["manifest"]))
+    _atomic_write(station_path, json.dumps(payload["manifest"], indent=2, sort_keys=True) + "\n", trusted_root)
+    _atomic_write(readme_path, _readme(payload["manifest"]), trusted_root)
     written = [
         {"path": "README.md", "bytes": readme_path.stat().st_size},
         {"path": "station.json", "bytes": station_path.stat().st_size},
@@ -162,7 +159,12 @@ def _validate_manifest(manifest: Mapping[str, Any]) -> None:
     with tempfile.TemporaryDirectory(prefix="brigade-station-scaffold-") as temp:
         path = Path(temp) / "station.json"
         path.write_text(json.dumps(manifest))
-        station_manifest.load(str(path))
+        loaded = station_manifest.load(str(path))
+        for tool in loaded.tools:
+            for surface in tool.surfaces:
+                status, _, detail = stations_cmd._surface_preflight(tool, surface, manifest_dir=path.parent)
+                if status is not None:
+                    raise ValueError(f"surface {surface.kind} fails stations verify preflight: {detail}")
 
 
 def _required_text(field: str, value: str) -> str:
@@ -201,19 +203,19 @@ def _surface_payload(surface: Mapping[str, Any], index: int) -> dict[str, Any]:
     return payload
 
 
-def _safety_payload() -> dict[str, bool]:
+def _safety_payload() -> dict[str, bool | None]:
     return {
         "install_executed": False,
         "probe_executed": False,
-        "writes_outside_output": False,
+        "writes_outside_output": None,
     }
 
 
-def _error_payload(output: Path, *, detail: str) -> dict[str, Any]:
+def _error_payload(output: Path, *, detail: str, status: str = "error") -> dict[str, Any]:
     return {
         "schema": SCHEMA,
         "ok": False,
-        "status": "error",
+        "status": status,
         "output": str(output),
         "files": list(FILES),
         "manifest": None,
@@ -242,3 +244,39 @@ def _readme(manifest: Mapping[str, Any]) -> str:
         f"Command: `{tool['command']}`\n\n"
         f"Install argv: `{install}`\n"
     )
+
+
+def _unsafe_output(output: Path) -> str | None:
+    absolute = output.absolute()
+    current = Path(absolute.anchor)
+    for part in absolute.parts[1:]:
+        current /= part
+        if not os.path.lexists(current):
+            break
+        if current.is_symlink():
+            return f"output path contains a symlink: {current}"
+    if os.path.lexists(output) and not output.is_dir():
+        return "output path already exists and is not a directory"
+    if output.is_dir():
+        for relative in FILES:
+            candidate = output / relative
+            if os.path.lexists(candidate) and candidate.is_symlink():
+                return f"destination is a symlink: {relative}"
+    return None
+
+
+def _atomic_write(destination: Path, content: str, trusted_root: Path) -> None:
+    parent = destination.parent.resolve(strict=True)
+    if not parent.is_relative_to(trusted_root):
+        raise ValueError(f"destination escapes trusted root: {destination}")
+    if os.path.lexists(destination):
+        raise ValueError(f"destination already exists: {destination.name}")
+    fd, temp_name = tempfile.mkstemp(prefix=f".{destination.name}.", dir=parent, text=True)
+    temp_path = Path(temp_name)
+    try:
+        with os.fdopen(fd, "w") as target:
+            target.write(content)
+        os.replace(temp_path, destination)
+    finally:
+        if os.path.lexists(temp_path):
+            temp_path.unlink()

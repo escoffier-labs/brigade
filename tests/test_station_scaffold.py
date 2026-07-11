@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import os
 
-from brigade import station_manifest, station_scaffold
+from brigade import station_manifest, station_scaffold, stations_cmd
 
 
 def test_scaffold_payload_defaults_to_bounded_read_only_version_surface(tmp_path):
@@ -83,6 +83,28 @@ def test_scaffold_payload_accepts_repeatable_surfaces_and_validates_with_manifes
     assert manifest.tools[0].surfaces[1].placeholders == ("task",)
 
 
+def test_scaffold_payload_rejects_surface_that_fails_static_verify_preflight(tmp_path, monkeypatch):
+    monkeypatch.setattr(stations_cmd, "_run_bounded", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError))
+    payload = station_scaffold.scaffold_payload(
+        tmp_path / "station",
+        station="evidence",
+        name="example-tool",
+        summary="Example sidecar",
+        command="example-tool",
+        install=["python3", "-m", "example_tool"],
+        surfaces=[
+            {
+                "kind": "verify-exit",
+                "command": ["example-tool", "--version"],
+                "read_only": True,
+            }
+        ],
+    )
+
+    assert payload["ok"] is False
+    assert "timeout_seconds" in payload["detail"]
+
+
 def test_scaffold_payload_returns_json_ready_errors_for_invalid_inputs(tmp_path):
     invalid_station = station_scaffold.scaffold_payload(
         tmp_path / "station",
@@ -153,6 +175,40 @@ def test_write_scaffold_refuses_overwrite_even_with_partial_existing_files(tmp_p
     assert payload["status"] == "refused"
     assert "already exists" in payload["detail"]
     assert json.loads((output / "station.json").read_text()) == {}
+
+
+def test_write_scaffold_refuses_symlinked_output_root_and_parent(tmp_path):
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    output = tmp_path / "station"
+    output.symlink_to(outside, target_is_directory=True)
+
+    root_refused = station_scaffold.write_scaffold(
+        output,
+        station="tokens",
+        name="example-tokens",
+        summary="Example tokens station sidecar",
+        command="example-tokens",
+        install=["python3", "-m", "example_tokens"],
+    )
+
+    assert root_refused["ok"] is False
+    assert not (outside / "station.json").exists()
+
+    output.unlink()
+    output.mkdir()
+    (output / "README.md").symlink_to(outside / "README.md")
+    destination_refused = station_scaffold.write_scaffold(
+        output,
+        station="tokens",
+        name="example-tokens",
+        summary="Example tokens station sidecar",
+        command="example-tokens",
+        install=["python3", "-m", "example_tokens"],
+    )
+
+    assert destination_refused["ok"] is False
+    assert not (outside / "README.md").exists()
 
 
 def test_scaffold_payload_rejects_empty_install_argv(tmp_path):

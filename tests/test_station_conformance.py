@@ -82,6 +82,50 @@ def test_write_conformance_kit_refuses_nonempty_output_unless_forced(tmp_path):
     assert (output / "station.json").is_file()
 
 
+def test_conformance_payload_refuses_existing_regular_file_output(tmp_path):
+    output = tmp_path / "kit"
+    output.write_text("occupied\n")
+
+    payload = station_conformance.conformance_payload(output)
+
+    assert payload["ok"] is False
+    assert payload["status"] == "refused"
+    assert payload["would_write"] is False
+
+
+def test_write_conformance_kit_refuses_symlinked_output_root_even_when_forced(tmp_path):
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    output = tmp_path / "kit"
+    output.symlink_to(outside, target_is_directory=True)
+
+    payload = station_conformance.write_conformance_kit(output, force=True)
+
+    assert payload["ok"] is False
+    assert payload["status"] == "refused"
+    assert not (outside / "station.json").exists()
+
+
+def test_write_conformance_kit_refuses_symlinked_parent_and_broken_destination(tmp_path):
+    output = tmp_path / "kit"
+    output.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (output / "fixtures").symlink_to(outside, target_is_directory=True)
+
+    parent_refused = station_conformance.write_conformance_kit(output, force=True)
+
+    assert parent_refused["ok"] is False
+    assert not (outside / "example-station").exists()
+
+    (output / "fixtures").unlink()
+    (output / "station.json").symlink_to(tmp_path / "missing-target")
+    destination_refused = station_conformance.write_conformance_kit(output, force=True)
+
+    assert destination_refused["ok"] is False
+    assert os.path.lexists(output / "station.json")
+
+
 def test_conformance_template_manifest_has_no_personal_data_or_external_dependencies(tmp_path):
     output = tmp_path / "kit"
     station_conformance.write_conformance_kit(output)

@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import shutil
 import stat
+import tempfile
 from typing import Any
 
 from .templates import template_root
@@ -29,9 +30,23 @@ NEXT_COMMANDS = (
 def conformance_payload(output: str | os.PathLike[str], *, force: bool = False) -> dict[str, Any]:
     """Return the JSON-ready plan for writing the station conformance kit."""
     output_path = Path(output)
+    unsafe = _unsafe_output(output_path)
+    if unsafe:
+        payload = _base_payload(output_path, force=force)
+        payload.update(
+            ok=False,
+            status="refused",
+            would_write=False,
+            wrote=False,
+            existing=[],
+            written=[],
+            detail=unsafe,
+        )
+        return payload
     existing = _existing_entries(output_path)
-    refused = bool(existing) and not force
+    refused = (os.path.lexists(output_path) and not output_path.is_dir()) or (bool(existing) and not force)
     payload = _base_payload(output_path, force=force)
+    payload["safety"]["writes_outside_output"] = False
     payload.update(
         ok=not refused,
         status="refused" if refused else "ready",
@@ -40,7 +55,9 @@ def conformance_payload(output: str | os.PathLike[str], *, force: bool = False) 
         existing=existing,
         written=[],
         detail=(
-            "output directory is non-empty; pass force=True to write kit files"
+            "output path exists and is not a directory"
+            if os.path.lexists(output_path) and not output_path.is_dir()
+            else "output directory is non-empty; pass force=True to write kit files"
             if refused
             else "station conformance kit is ready to write"
         ),
@@ -54,23 +71,18 @@ def write_conformance_kit(output: str | os.PathLike[str], *, force: bool = False
     payload = conformance_payload(output_path, force=force)
     if not payload["ok"]:
         return payload
-    if output_path.exists() and not output_path.is_dir():
-        payload.update(
-            ok=False,
-            status="refused",
-            would_write=False,
-            detail="output path exists and is not a directory",
-        )
-        return payload
-
     source_root = template_root() / TEMPLATE_DIR
+    output_path.mkdir(parents=True, exist_ok=True)
+    trusted_root = output_path.resolve(strict=True)
     written: list[dict[str, Any]] = []
     for relative in FILES:
         source = source_root / relative
         destination = output_path / relative
-        destination.parent.mkdir(parents=True, exist_ok=True)
+        _ensure_local_parent(output_path, destination.parent, trusted_root)
+        if destination.is_symlink():
+            return _refuse(payload, f"destination is a symlink: {relative}")
         if source.is_file():
-            shutil.copyfile(source, destination)
+            _atomic_copy(source, destination)
         else:  # pragma: no cover - packaged template drift
             raise FileNotFoundError(f"station conformance template missing: {relative}")
         mode = destination.stat().st_mode
@@ -100,7 +112,7 @@ def _base_payload(output: Path, *, force: bool) -> dict[str, Any]:
         "safety": {
             "install_executed": False,
             "probe_executed": False,
-            "writes_outside_output": False,
+            "writes_outside_output": None,
             "runtime_dependencies": [],
         },
         "next_commands": list(NEXT_COMMANDS),
@@ -111,3 +123,57 @@ def _existing_entries(output: Path) -> list[str]:
     if not output.exists() or not output.is_dir():
         return []
     return sorted(entry.name for entry in output.iterdir())
+
+
+def _unsafe_output(output: Path) -> str | None:
+    absolute = output.absolute()
+    current = Path(absolute.anchor)
+    for part in absolute.parts[1:]:
+        current /= part
+        if not os.path.lexists(current):
+            break
+        if current.is_symlink():
+            return f"output path contains a symlink: {current}"
+    if os.path.lexists(output) and not output.is_dir():
+        return None
+    if output.is_dir():
+        for relative in FILES:
+            current = output
+            for part in Path(relative).parts:
+                current /= part
+                if not os.path.lexists(current):
+                    break
+                if current.is_symlink():
+                    return f"output contains a symlink: {current}"
+    return None
+
+
+def _ensure_local_parent(output: Path, parent: Path, trusted_root: Path) -> None:
+    current = output
+    for part in parent.relative_to(output).parts:
+        current /= part
+        if os.path.lexists(current):
+            if current.is_symlink() or not current.is_dir():
+                raise ValueError(f"unsafe output parent: {current}")
+        else:
+            current.mkdir()
+        if not current.resolve(strict=True).is_relative_to(trusted_root):
+            raise ValueError(f"output parent escapes trusted root: {current}")
+
+
+def _atomic_copy(source: Path, destination: Path) -> None:
+    fd, temp_name = tempfile.mkstemp(prefix=f".{destination.name}.", dir=destination.parent)
+    temp_path = Path(temp_name)
+    try:
+        with os.fdopen(fd, "wb") as target, source.open("rb") as template:
+            shutil.copyfileobj(template, target)
+        os.replace(temp_path, destination)
+    finally:
+        if os.path.lexists(temp_path):
+            temp_path.unlink()
+
+
+def _refuse(payload: dict[str, Any], detail: str) -> dict[str, Any]:
+    payload.update(ok=False, status="refused", would_write=False, wrote=False, detail=detail)
+    payload["safety"]["writes_outside_output"] = None
+    return payload
