@@ -55,7 +55,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade runbook` (extras): 5 command path(s)
 - `brigade runs`: 7 command path(s)
 - `brigade scrub`: 1 command path(s)
-- `brigade search`: 3 command path(s)
+- `brigade search`: 4 command path(s)
 - `brigade security`: 15 command path(s)
 - `brigade skills`: 27 command path(s)
 - `brigade stations`: 5 command path(s)
@@ -397,6 +397,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade runs watch`
 - `brigade scrub`
 - `brigade search doctor`
+- `brigade search refresh plan`
 - `brigade search status`
 - `brigade search sync plan`
 - `brigade security closeout`

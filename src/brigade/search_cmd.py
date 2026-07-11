@@ -28,6 +28,7 @@ DOCS = {
 BOUNDARIES = [
     "GraphTrail and code-search stay process-boundary binaries; Brigade only installs, plans, and health-checks.",
     "Brigade does not start code-search-api or run graphtrail sync from these commands.",
+    "Brigade does not run graphtrail sync from receipt generation.",
     "Search station tools are optional and fail-open for workspace doctor.",
     "The code-search-mcp compatibility key is maintained by code-search-api/mcp.",
 ]
@@ -68,6 +69,7 @@ def status_payload(target: Path) -> dict[str, Any]:
         installed=installed_any,
         next_commands=[
             "brigade add graphtrail",
+            "brigade search refresh plan",
             "brigade search sync plan",
             "brigade search doctor",
         ],
@@ -95,7 +97,7 @@ def status_payload(target: Path) -> dict[str, Any]:
     if graphtrail_bin:
         if not db.is_file():
             graph_health = "unwired"
-            graph_summary = "graphtrail installed; run `graphtrail sync` to build .graphtrail/graphtrail.db"
+            graph_summary = "graphtrail installed; run `brigade search refresh plan` then graphtrail sync manually"
             graph_doctor = health.run_json([graphtrail_bin, "doctor", "--json"], timeout=30.0)
         else:
             graph_doctor = health.run_json([graphtrail_bin, "doctor", "--json"], timeout=30.0)
@@ -157,18 +159,20 @@ def status_payload(target: Path) -> dict[str, Any]:
     payload["summary"] = "; ".join(parts) if parts else payload["summary"]
 
     payload["next_commands"] = [
+        "brigade search refresh plan",
         "brigade search sync plan",
         "brigade search doctor",
         "brigade operator checkup --target .",
     ]
     if overall in ("fail", "unwired", "incomplete", "timeout"):
         payload["next_commands"] = [
+            "brigade search refresh plan",
             "brigade search sync plan",
             "graphtrail sync",
             "brigade search doctor",
         ]
     elif not graphtrail_bin:
-        payload["next_commands"] = ["brigade add graphtrail", "brigade search sync plan"]
+        payload["next_commands"] = ["brigade add graphtrail", "brigade search refresh plan", "brigade search sync plan"]
     return payload
 
 
@@ -208,13 +212,13 @@ def doctor(*, target: Path, json_output: bool = False) -> int:
     return health.doctor_exit(str(payload.get("health") or "missing"))
 
 
-def sync_plan_payload(*, target: Path) -> dict[str, Any]:
+def refresh_plan_payload(*, target: Path) -> dict[str, Any]:
     target = target.expanduser().resolve()
     return {
         "target": str(target),
         "station": "search",
-        "kind": "sync",
-        "title": "search sync plan",
+        "kind": "refresh",
+        "title": "search refresh plan",
         "created_at": health.now_iso(),
         "installed": {
             "graphtrail": proc.which("graphtrail") is not None,
@@ -222,6 +226,7 @@ def sync_plan_payload(*, target: Path) -> dict[str, Any]:
             "code-search-mcp": proc.which("code-search-mcp") is not None,
         },
         "compatibility": {"code-search-mcp": {"owner": "code-search-api/mcp"}},
+        "aliases": ["brigade search sync plan"],
         "commands": [
             ["graphtrail", "sync", str(target)],
             ["graphtrail", "doctor", "--json"],
@@ -231,6 +236,7 @@ def sync_plan_payload(*, target: Path) -> dict[str, Any]:
         ],
         "manual_steps": [
             "Run graphtrail sync in each repo that should contribute code-graph deltas.",
+            "Receipt generation only reads the existing .graphtrail/graphtrail.db and never runs graphtrail sync.",
             "Start code-search-api only when you want local semantic search (optional).",
             "Configure MCP clients with CODE_SEARCH_API_URL after the API is listening.",
         ],
@@ -252,15 +258,23 @@ def sync_plan_payload(*, target: Path) -> dict[str, Any]:
     }
 
 
-def sync_plan(*, target: Path, write: bool = False, json_output: bool = False) -> int:
-    payload = sync_plan_payload(target=target)
+def sync_plan_payload(*, target: Path) -> dict[str, Any]:
+    return refresh_plan_payload(target=target)
+
+
+def refresh_plan(*, target: Path, write: bool = False, json_output: bool = False) -> int:
+    payload = refresh_plan_payload(target=target)
     if write:
         payload = health.write_plan(target, "search", payload)
     if json_output:
         health.json_print(payload)
         return 0
     if write:
-        print(f"wrote search sync plan: {payload['plan_path']}")
+        print(f"wrote search refresh plan: {payload['plan_path']}")
     else:
-        print(health.render_plan_md("search sync plan", payload), end="")
+        print(health.render_plan_md("search refresh plan", payload), end="")
     return 0
+
+
+def sync_plan(*, target: Path, write: bool = False, json_output: bool = False) -> int:
+    return refresh_plan(target=target, write=write, json_output=json_output)

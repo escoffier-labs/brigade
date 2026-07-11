@@ -25,6 +25,16 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_doctor.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
     p_doctor.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
 
+    p_refresh = search_sub.add_parser("refresh", help="Plan graphtrail/code-search refresh without executing it.")
+    refresh_sub = p_refresh.add_subparsers(dest="search_refresh_command", metavar="<refresh-command>")
+    refresh_sub.required = True
+    p_refresh_plan = refresh_sub.add_parser("plan", help="Plan graphtrail sync and optional code-search serve.")
+    p_refresh_plan.add_argument(
+        "--target", "-t", type=Path, default=Path("."), help="Repo or workspace for plan paths and --write."
+    )
+    p_refresh_plan.add_argument("--write", action="store_true", help="Write plan under .brigade/search/plans/.")
+    p_refresh_plan.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+
     p_sync = search_sub.add_parser("sync", help="Plan graphtrail/code-search setup without executing it.")
     sync_sub = p_sync.add_subparsers(dest="search_sync_command", metavar="<sync-command>")
     sync_sub.required = True
@@ -45,6 +55,11 @@ def dispatch(args) -> int:
         return search_cmd.status(target=args.target, json_output=args.json)
     if args.search_command == "doctor":
         return search_cmd.doctor(target=args.target, json_output=args.json)
+    if args.search_command == "refresh":
+        if args.search_refresh_command == "plan":
+            return search_cmd.refresh_plan(target=args.target, write=args.write, json_output=args.json)
+        args._brigade_parser.error(f"unknown search refresh command: {args.search_refresh_command}")
+        return 2
     if args.search_command == "sync":
         if args.search_sync_command == "plan":
             return search_cmd.sync_plan(target=args.target, write=args.write, json_output=args.json)

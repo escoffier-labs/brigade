@@ -1,5 +1,6 @@
 import json
 import os
+import sqlite3
 import subprocess
 import sys
 from pathlib import Path
@@ -338,6 +339,7 @@ def test_work_verify_receipt_digests_recompute_from_payload_and_logs(tmp_path, c
     assert digests["logs"] == {
         "command-1-stderr.log": localio.file_sha256(run_dir / "command-1-stderr.log"),
         "command-1-stdout.log": localio.file_sha256(run_dir / "command-1-stdout.log"),
+        "graph-delta.json": localio.file_sha256(run_dir / "graph-delta.json"),
     }
 
     stored = json.loads((run_dir / "receipt.json").read_text())
@@ -453,18 +455,8 @@ mode = os.environ.get("FAKE_GRAPHTRAIL_MODE", "ok")
 # Mirror the real clap CLI strictly: `sync` rejects --json, `diff` requires
 # --before/--after/--json. JSON shape follows graphtrail's diff golden fixture.
 if command == "sync":
-    if "--json" in args:
-        print("error: unexpected argument '--json' found", file=sys.stderr)
-        raise SystemExit(2)
-    if mode == "sync-fail":
-        print("sync failed", file=sys.stderr)
-        raise SystemExit(5)
-    db.parent.mkdir(parents=True, exist_ok=True)
-    with sqlite3.connect(db) as con:
-        con.execute("create table if not exists symbols (name text)")
-        con.execute("insert into symbols values ('after')")
-    print("indexed files=1 symbols=1 calls=0 imports=0 deleted=0 db=" + str(db))
-    raise SystemExit(0)
+    print("receipt capture must not run graphtrail sync", file=sys.stderr)
+    raise SystemExit(99)
 
 if command == "diff":
     if "--before" not in args or "--after" not in args or "--json" not in args:
@@ -528,6 +520,15 @@ raise SystemExit(9)
     return wrapper
 
 
+def _write_graphtrail_db(target: Path) -> Path:
+    db = target / ".graphtrail" / "graphtrail.db"
+    db.parent.mkdir(parents=True)
+    with sqlite3.connect(db) as con:
+        con.execute("create table if not exists symbols (name text)")
+        con.execute("insert into symbols values ('indexed')")
+    return db
+
+
 def test_work_verify_graphtrail_delta_missing_binary_fails_open(tmp_path, capsys, monkeypatch):
     _init_git_repo(tmp_path)
     monkeypatch.setenv("GRAPHTRAIL_BIN", str(tmp_path / "missing-graphtrail"))
@@ -540,14 +541,19 @@ def test_work_verify_graphtrail_delta_missing_binary_fails_open(tmp_path, capsys
     receipt = json.loads(capsys.readouterr().out)
 
     delta = receipt["code_graph_delta"]
-    assert delta["status"] == "unavailable"
-    assert "graphtrail binary not found" in delta["summary"]
-    assert not (Path(receipt["path"]) / "graph-delta.json").exists()
+    assert delta["status"] == "refresh_required"
+    assert "graphtrail database missing" in delta["summary"]
+    assert not (tmp_path / ".graphtrail" / "graphtrail.db").exists()
+    sidecar = json.loads((Path(receipt["path"]) / "graph-delta.json").read_text())
+    assert sidecar["refresh_required"] is True
+    assert sidecar["refresh_plan_command"] == "brigade search refresh plan"
+    assert sidecar["refresh_command"] == ["graphtrail", "sync", str(tmp_path.resolve())]
 
 
 def test_work_verify_graphtrail_delta_sidecar_digest_cleanup_and_summary(tmp_path, capsys, monkeypatch):
     _init_git_repo(tmp_path)
     graphtrail = _write_fake_graphtrail(tmp_path)
+    _write_graphtrail_db(tmp_path)
     monkeypatch.setenv("GRAPHTRAIL_BIN", str(graphtrail))
 
     assert work_cmd.verify_run(target=tmp_path, commands=["python3 -c \"print('ok')\""], json_output=True) == 0
@@ -579,25 +585,38 @@ def test_work_verify_graphtrail_delta_sidecar_digest_cleanup_and_summary(tmp_pat
     assert receipt["digests"]["logs"]["graph-delta.json"] == localio.file_sha256(sidecar_path)
     assert json.loads((run_dir / "receipt.json").read_text())["digests"] == receipt["digests"]
     assert "- Code graph delta: " + receipt["code_graph_delta"]["summary"] in (run_dir / "summary.md").read_text()
+    commands = sidecar["commands"]
+    assert "before_sync" not in commands
+    assert "after_sync" not in commands
+    assert "diff" in commands["diff"]["argv"]
 
 
-def test_work_verify_graphtrail_delta_sync_failure_fails_open(tmp_path, capsys, monkeypatch):
+def test_work_verify_graphtrail_delta_stale_database_fails_open_without_sync(tmp_path, capsys, monkeypatch):
     _init_git_repo(tmp_path)
-    graphtrail = _write_fake_graphtrail(tmp_path, mode="sync-fail")
+    graphtrail = _write_fake_graphtrail(tmp_path)
+    db = _write_graphtrail_db(tmp_path)
+    source = tmp_path / "pkg" / "mod.py"
+    source.parent.mkdir()
+    source.write_text("print('newer than graphtrail db')\n")
+    os.utime(source, (db.stat().st_mtime + 5, db.stat().st_mtime + 5))
     monkeypatch.setenv("GRAPHTRAIL_BIN", str(graphtrail))
 
     assert work_cmd.verify_run(target=tmp_path, commands=["python3 -c \"print('ok')\""], json_output=True) == 0
     receipt = json.loads(capsys.readouterr().out)
     sidecar = json.loads((Path(receipt["path"]) / "graph-delta.json").read_text())
 
-    assert receipt["code_graph_delta"]["status"] == "sync_failed"
-    assert sidecar["status"] == "sync_failed"
+    assert receipt["code_graph_delta"]["status"] == "refresh_required"
+    assert sidecar["status"] == "refresh_required"
     assert sidecar["ok"] is False
+    assert sidecar["refresh_required"] is True
+    assert "newer_files" in sidecar
+    assert sidecar["newer_files"] == ["pkg/mod.py"]
 
 
 def test_work_verify_graphtrail_delta_malformed_diff_fails_open(tmp_path, capsys, monkeypatch):
     _init_git_repo(tmp_path)
     graphtrail = _write_fake_graphtrail(tmp_path, mode="malformed-diff")
+    _write_graphtrail_db(tmp_path)
     monkeypatch.setenv("GRAPHTRAIL_BIN", str(graphtrail))
 
     assert work_cmd.verify_run(target=tmp_path, commands=["python3 -c \"print('ok')\""], json_output=True) == 0

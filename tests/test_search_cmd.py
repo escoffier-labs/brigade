@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 
+from brigade import cli
 from brigade import search_cmd
 
 
@@ -15,6 +16,7 @@ def test_search_status_reports_uninstalled(monkeypatch, tmp_path):
     assert payload["installed"] is False
     assert payload["health"] == "missing"
     assert "brigade add" in payload["summary"]
+    assert "brigade search refresh plan" in payload["next_commands"]
     assert "brigade search sync plan" in payload["next_commands"]
     assert payload["pipeline"][0] == "graphtrail sync"
 
@@ -62,12 +64,29 @@ def test_search_status_unwired_without_db(monkeypatch, tmp_path):
 
 
 def test_sync_plan_is_review_only(tmp_path):
-    payload = search_cmd.sync_plan_payload(target=tmp_path)
-    rendered = search_cmd.health.render_plan_md("search sync plan", payload)
+    payload = search_cmd.refresh_plan_payload(target=tmp_path)
+    rendered = search_cmd.health.render_plan_md("search refresh plan", payload)
 
     assert ["graphtrail", "sync", str(tmp_path.resolve())] in payload["commands"]
     assert "Brigade does not start code-search-api" in payload["boundaries"][1]
+    assert "Brigade does not run graphtrail sync from receipt generation." in payload["boundaries"]
+    assert payload["kind"] == "refresh"
     assert "graphtrail sync" in rendered
+
+
+def test_sync_plan_remains_compatible_alias(tmp_path):
+    sync_payload = search_cmd.sync_plan_payload(target=tmp_path)
+    refresh_payload = search_cmd.refresh_plan_payload(target=tmp_path)
+    assert sync_payload["kind"] == refresh_payload["kind"] == "refresh"
+    assert sync_payload["title"] == refresh_payload["title"] == "search refresh plan"
+    assert sync_payload["commands"] == refresh_payload["commands"]
+
+
+def test_search_refresh_plan_cli(tmp_path, capsys):
+    assert cli.main(["search", "refresh", "plan", "--target", str(tmp_path), "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["title"] == "search refresh plan"
+    assert ["graphtrail", "sync", str(tmp_path.resolve())] in payload["commands"]
 
 
 def test_sync_plan_write_creates_files(tmp_path):

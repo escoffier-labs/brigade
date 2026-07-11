@@ -16,6 +16,38 @@ SNAPSHOT_NAME = "graphtrail-before.db"
 SNAPSHOT_AFTER_NAME = "graphtrail-after.db"
 SIDECAR_NAME = "graph-delta.json"
 CHANGED_SYMBOL_LIMIT = 20
+STALE_SOURCE_LIMIT = 10
+SOURCE_SUFFIXES = {
+    ".c",
+    ".cc",
+    ".cpp",
+    ".cs",
+    ".go",
+    ".java",
+    ".js",
+    ".jsx",
+    ".kt",
+    ".mjs",
+    ".py",
+    ".rb",
+    ".rs",
+    ".swift",
+    ".ts",
+    ".tsx",
+}
+SKIP_DIRS = {
+    ".brigade",
+    ".git",
+    ".graphtrail",
+    ".hg",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".tox",
+    ".venv",
+    "__pycache__",
+    "node_modules",
+}
 LINE_KEYS = {
     "line",
     "line_number",
@@ -30,30 +62,21 @@ LINE_KEYS = {
 
 
 def capture_before(target: Path, run_dir: Path, *, timeout: float = 10.0) -> dict[str, Any]:
-    """Sync GraphTrail and snapshot its sqlite DB; return status data, never raise."""
+    """Snapshot an existing GraphTrail sqlite DB; return status data, never raise."""
     try:
         target = target.expanduser().resolve()
         run_dir = run_dir.expanduser().resolve()
+        db_path = target / ".graphtrail" / "graphtrail.db"
+        refresh = _refresh_required(target, db_path)
+        if refresh is not None:
+            return refresh
         binary = _graphtrail_bin()
         if binary is None:
-            return _status("unavailable", "code graph delta unavailable: graphtrail binary not found")
-        db_path = target / ".graphtrail" / "graphtrail.db"
-        sync = _run_graphtrail(binary, db_path, "sync", timeout=timeout)
-        if sync["returncode"] != 0:
             return _status(
-                "sync_failed",
-                f"code graph delta unavailable: graphtrail sync failed ({sync['returncode']})",
-                binary=binary,
+                "unavailable",
+                "code graph delta unavailable: graphtrail binary not found",
                 db_path=str(db_path),
-                sync=sync,
-            )
-        if not db_path.is_file():
-            return _status(
-                "no_database",
-                "code graph delta unavailable: graphtrail sync did not create a database",
-                binary=binary,
-                db_path=str(db_path),
-                sync=sync,
+                refresh_plan_command="brigade search refresh plan",
             )
         snapshot_path = run_dir / SNAPSHOT_NAME
         _backup_sqlite(db_path, snapshot_path)
@@ -65,7 +88,6 @@ def capture_before(target: Path, run_dir: Path, *, timeout: float = 10.0) -> dic
             "db_path": str(db_path),
             "before_snapshot_path": str(snapshot_path),
             "before_snapshot_sha256": _file_sha256(snapshot_path),
-            "sync": sync,
         }
     except BaseException as exc:
         return _status("capture_failed", f"code graph delta unavailable: {type(exc).__name__}: {exc}")
@@ -78,7 +100,7 @@ def capture_after_and_diff(
     *,
     timeout: float = 10.0,
 ) -> dict[str, Any]:
-    """Sync after verification, diff against the snapshot, write sidecar when available."""
+    """Diff the existing database against the snapshot, writing a sidecar when available."""
     try:
         target = target.expanduser().resolve()
         run_dir = run_dir.expanduser().resolve()
@@ -92,15 +114,9 @@ def capture_after_and_diff(
         binary = str(before.get("binary") or "")
         db_path = Path(str(before.get("db_path") or target / ".graphtrail" / "graphtrail.db"))
         snapshot_path = Path(str(before.get("before_snapshot_path") or run_dir / SNAPSHOT_NAME))
-        sync = _run_graphtrail(binary, db_path, "sync", timeout=timeout)
-        if sync["returncode"] != 0:
-            payload = _failure_payload(
-                target,
-                before,
-                "sync_failed",
-                summary=f"code graph delta unavailable: graphtrail sync failed ({sync['returncode']})",
-                after_sync=sync,
-            )
+        refresh = _refresh_required(target, db_path)
+        if refresh is not None:
+            payload = _failure_payload(target, refresh, "refresh_required")
             return _write_and_compact(run_dir, payload, snapshot_path=snapshot_path)
 
         after_snapshot_path = run_dir / SNAPSHOT_AFTER_NAME
@@ -123,7 +139,6 @@ def capture_after_and_diff(
                 before,
                 "diff_failed",
                 summary=f"code graph delta unavailable: graphtrail diff failed ({diff['returncode']})",
-                after_sync=sync,
                 diff=diff,
             )
             return _write_and_compact(
@@ -137,7 +152,6 @@ def capture_after_and_diff(
                 before,
                 "diff_malformed",
                 summary=f"code graph delta unavailable: graphtrail diff returned malformed JSON: {exc.msg}",
-                after_sync=sync,
                 diff=diff,
             )
             return _write_and_compact(
@@ -149,7 +163,6 @@ def capture_after_and_diff(
                 before,
                 "diff_malformed",
                 summary="code graph delta unavailable: graphtrail diff JSON is not an object",
-                after_sync=sync,
                 diff=diff,
             )
             return _write_and_compact(
@@ -174,7 +187,7 @@ def capture_after_and_diff(
             "line_insensitive_edge_churn": edge_churn,
             "before_snapshot_path": str(snapshot_path),
             "db_path": str(db_path),
-            "commands": {"before_sync": before.get("sync"), "after_sync": sync, "diff": diff},
+            "commands": {"diff": diff},
             "attestations": {
                 "before_snapshot_sha256": before.get("before_snapshot_sha256"),
                 "after_snapshot_sha256": after_snapshot_sha256,
@@ -211,6 +224,82 @@ def _graphtrail_bin() -> str | None:
         return found
     fallback = Path.home() / ".cargo" / "bin" / "graphtrail"
     return str(fallback) if fallback.is_file() else None
+
+
+def _refresh_required(target: Path, db_path: Path) -> dict[str, Any] | None:
+    if not db_path.is_file():
+        return _refresh_required_payload(
+            target,
+            db_path,
+            "graphtrail_database_missing",
+            "code graph delta refresh required: graphtrail database missing",
+        )
+    newer_files = _newer_source_files(target, db_path)
+    if newer_files:
+        return _refresh_required_payload(
+            target,
+            db_path,
+            "graphtrail_database_stale",
+            "code graph delta refresh required: graphtrail database is stale",
+            newer_files=newer_files,
+        )
+    return None
+
+
+def _refresh_required_payload(
+    target: Path,
+    db_path: Path,
+    reason: str,
+    summary: str,
+    *,
+    newer_files: list[str] | None = None,
+) -> dict[str, Any]:
+    payload = _status(
+        "refresh_required",
+        summary,
+        target=str(target),
+        db_path=str(db_path),
+        reason=reason,
+        refresh_required=True,
+        refresh_plan_command="brigade search refresh plan",
+        refresh_command=["graphtrail", "sync", str(target)],
+        raw_counts={},
+        changed_symbols=[],
+        changed_symbol_count=0,
+        edge_churn=0,
+    )
+    if newer_files is not None:
+        payload["newer_files"] = newer_files
+        payload["newer_files_truncated"] = len(newer_files) >= STALE_SOURCE_LIMIT
+    return payload
+
+
+def _newer_source_files(target: Path, db_path: Path) -> list[str]:
+    try:
+        db_mtime = db_path.stat().st_mtime
+    except OSError:
+        return []
+    newer: list[str] = []
+    try:
+        walker = os.walk(target)
+        for root, dirs, files in walker:
+            dirs[:] = [dirname for dirname in dirs if dirname not in SKIP_DIRS]
+            root_path = Path(root)
+            for filename in files:
+                path = root_path / filename
+                if path.suffix not in SOURCE_SUFFIXES:
+                    continue
+                try:
+                    if path.stat().st_mtime <= db_mtime:
+                        continue
+                    newer.append(path.relative_to(target).as_posix())
+                except OSError:
+                    continue
+                if len(newer) >= STALE_SOURCE_LIMIT:
+                    return newer
+    except OSError:
+        return []
+    return newer
 
 
 def _run_graphtrail(
@@ -268,7 +357,8 @@ def _failure_payload(
     after_sync: dict[str, Any] | None = None,
     diff: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    return {
+    commands: dict[str, Any] = {}
+    payload: dict[str, Any] = {
         "ok": False,
         "status": status,
         "target": str(target),
@@ -279,13 +369,28 @@ def _failure_payload(
         "changed_symbols": [],
         "changed_symbol_count": 0,
         "edge_churn": 0,
-        "commands": {"before_sync": before.get("sync"), "after_sync": after_sync, "diff": diff},
+        "commands": commands,
         "attestations": {
             "before_snapshot_sha256": before.get("before_snapshot_sha256"),
             "after_snapshot_sha256": None,
             "diff_stdout_sha256": _sha256_text(diff.get("stdout", "")) if isinstance(diff, dict) else None,
         },
     }
+    if after_sync is not None:
+        commands["after_sync"] = after_sync
+    if diff is not None:
+        commands["diff"] = diff
+    for key in (
+        "reason",
+        "refresh_required",
+        "refresh_plan_command",
+        "refresh_command",
+        "newer_files",
+        "newer_files_truncated",
+    ):
+        if key in before:
+            payload[key] = before[key]
+    return payload
 
 
 def _write_and_compact(
@@ -307,7 +412,7 @@ def _write_and_compact(
 
 
 def _compact(payload: dict[str, Any]) -> dict[str, Any]:
-    return {
+    compact = {
         "status": payload.get("status", "unknown"),
         "ok": bool(payload.get("ok")),
         "summary": _compact_summary(payload),
@@ -316,6 +421,10 @@ def _compact(payload: dict[str, Any]) -> dict[str, Any]:
         "changed_symbols": payload.get("changed_symbols") if isinstance(payload.get("changed_symbols"), list) else [],
         "changed_symbol_count": int(payload.get("changed_symbol_count") or 0),
     }
+    for key in ("refresh_required", "refresh_plan_command", "reason"):
+        if key in payload:
+            compact[key] = payload[key]
+    return compact
 
 
 def _status(status: str, summary: str, **extra: Any) -> dict[str, Any]:
