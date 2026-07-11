@@ -15,6 +15,30 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_stations_list = stations_sub.add_parser("list", help="List stations for a built-in profile.")
     p_stations_list.add_argument("--profile", default="repo", help="Built-in profile name or alias to compare against.")
     p_stations_list.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_catalog = stations_sub.add_parser(
+        "catalog",
+        help="Print the normalized managed/external station catalog without installing or executing tools.",
+    )
+    p_catalog.add_argument(
+        "--manifest",
+        action="append",
+        type=Path,
+        default=None,
+        help="Explicit external station.json or containing directory to include (repeatable).",
+    )
+    p_catalog.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_graph = stations_sub.add_parser(
+        "graph",
+        help="Print the deterministic station capability graph without installing or executing tools.",
+    )
+    p_graph.add_argument(
+        "--manifest",
+        action="append",
+        type=Path,
+        default=None,
+        help="Explicit external station.json or containing directory to include (repeatable).",
+    )
+    p_graph.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_discover = stations_sub.add_parser(
         "discover",
         help="Find external station.json catalogs (schema brigade.station.v1) under local roots.",
@@ -52,6 +76,10 @@ def dispatch(args) -> int:
 
     if args.stations_command == "list":
         return stations_cmd.list_stations(profile_name=args.profile, json_output=args.json)
+    if args.stations_command == "catalog":
+        return stations_cmd.catalog(manifests=args.manifest, json_output=args.json)
+    if args.stations_command == "graph":
+        return stations_cmd.graph(manifests=args.manifest, json_output=args.json)
     if args.stations_command == "discover":
         return stations_cmd.discover(roots=args.root, max_depth=args.max_depth, json_output=args.json)
     if args.stations_command == "verify":

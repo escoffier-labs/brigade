@@ -17,6 +17,8 @@ import unicodedata
 
 from . import managed, profiles, registry, station_manifest
 from .install import DEFAULT_WIRED_SKILLS
+from .stations import catalog as station_catalog
+from .stations import graph as station_graph
 
 
 VERIFY_SCHEMA = "brigade.stations.verify.v1"
@@ -49,6 +51,14 @@ def _surface_payload(surface: managed.MachineSurface) -> dict[str, Any]:
         "probe": list(surface.probe),
         "probe_contains": list(surface.probe_contains),
     }
+
+
+def _compatibility_payload(compatibility: station_manifest.Compatibility) -> dict[str, Any]:
+    return station_catalog.compatibility_payload(compatibility)
+
+
+def _requires_payload(requirement: station_manifest.RequiresBrigade) -> dict[str, str | None]:
+    return station_catalog.requires_payload(requirement)
 
 
 def list_stations(*, profile_name: str = "repo", json_output: bool = False) -> int:
@@ -189,6 +199,9 @@ def discover_payload(
                         "command": tool.command,
                         "summary": tool.summary,
                         "install": list(tool.install),
+                        "produces": list(tool.produces),
+                        "consumes": list(tool.consumes),
+                        "dependencies": list(tool.dependencies),
                         "surfaces": [
                             {
                                 "kind": surface.kind,
@@ -212,6 +225,10 @@ def discover_payload(
                     "summary": manifest.summary,
                     "lifecycle": manifest.lifecycle,
                     "owner": manifest.owner,
+                    "contract_version": manifest.contract_version,
+                    "requires_brigade": _requires_payload(manifest.requires_brigade),
+                    "compatibility": _compatibility_payload(manifest.compatibility),
+                    "compatible": manifest.compatibility.compatible,
                     "tools": tools,
                     "add_command": f"brigade add {manifest.path.parent}",
                 }
@@ -264,6 +281,50 @@ def discover(
     if not payload["manifests"]:
         print("next: place a station.json (schema brigade.station.v1) in a sidecar repo, then re-run discover")
     return 0
+
+
+def catalog(
+    *,
+    manifests: list[Path] | None = None,
+    json_output: bool = False,
+) -> int:
+    payload = station_catalog.catalog_payload(external_manifests=manifests or [])
+    if json_output:
+        _json_print(payload)
+        return 0 if not payload["errors"] else 2
+    print(f"brigade stations catalog: {payload['row_count']} row(s)")
+    print(f"sources: managed={payload['source_counts']['managed']} external={payload['source_counts']['external']}")
+    width = max((len(row["tool"]["name"]) for row in payload["rows"]), default=4)
+    for row in payload["rows"]:
+        compat = row.get("compatibility") if isinstance(row.get("compatibility"), dict) else {}
+        compat_status = compat.get("status") or "compatible"
+        print(
+            f"  {row['tool']['name'].ljust(width)}  "
+            f"{row['source']}  station={row['station']['name']}  "
+            f"lifecycle={row['lifecycle']}  compatibility={compat_status}"
+        )
+    for err in payload["errors"]:
+        print(f"error: {err['path']}: {err['error']}")
+    return 0 if not payload["errors"] else 2
+
+
+def graph(
+    *,
+    manifests: list[Path] | None = None,
+    json_output: bool = False,
+) -> int:
+    payload = station_graph.graph_payload(external_manifests=manifests or [])
+    if json_output:
+        _json_print(payload)
+        return 0 if not payload["catalog"]["errors"] else 2
+    print(f"brigade stations graph: {payload['node_count']} node(s), {payload['edge_count']} edge(s)")
+    for node in payload["nodes"]:
+        print(f"  node {node['id']} [{node['kind']}] {node['label']}")
+    for edge in payload["edges"]:
+        print(f"  edge {edge['id']}")
+    for err in payload["catalog"]["errors"]:
+        print(f"error: {err['path']}: {err['error']}")
+    return 0 if not payload["catalog"]["errors"] else 2
 
 
 def _detail(value: str) -> str:
@@ -687,10 +748,27 @@ def verify_payload(ref: str, *, check_managed: bool = False) -> dict[str, Any]:
             "station": manifest.station,
             "lifecycle": manifest.lifecycle,
             "owner": manifest.owner,
+            "contract_version": manifest.contract_version,
+            "requires_brigade": _requires_payload(manifest.requires_brigade),
+            "compatibility": _compatibility_payload(manifest.compatibility),
+            "compatible": manifest.compatibility.compatible,
         },
         "lifecycle_counts": lifecycle_counts,
         "tools": [],
     }
+    if not manifest.compatibility.compatible:
+        base.update(
+            status="incompatible",
+            ok=False,
+            managed_parity={
+                "status": "skipped",
+                "advisory": not check_managed,
+                "checked_tools": [],
+                "drift": [],
+                "exemptions": [],
+            },
+        )
+        return base
     if manifest.lifecycle != "active":
         base.update(
             status=f"{manifest.lifecycle}-skip",
