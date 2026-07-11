@@ -11,7 +11,7 @@ from brigade.stations import graph as station_graph
 
 def _write_station(root, name, *, tool_name=None, station="tokens", lifecycle="active", requires_brigade=None):
     side = root / name
-    side.mkdir()
+    side.mkdir(parents=True)
     payload = {
         "schema": "brigade.station.v1",
         "name": name,
@@ -63,6 +63,23 @@ def test_catalog_payload_keeps_managed_and_external_rows_separate(tmp_path):
     assert external_row["tool"]["dependencies"] == ["python"]
 
 
+def test_duplicate_external_names_keep_distinct_catalog_and_graph_ids(tmp_path):
+    first = _write_station(tmp_path / "first", "same-sidecar", tool_name="same-tool")
+    second = _write_station(tmp_path / "second", "same-sidecar", tool_name="same-tool")
+
+    catalog_payload = station_catalog.catalog_payload(external_manifests=[first, second])
+    rows = [row for row in catalog_payload["rows"] if row["source"] == "external"]
+
+    assert len(rows) == 2
+    assert len({row["id"] for row in rows}) == 2
+    assert {row["manifest"]["path"] for row in rows} == {str(first), str(second)}
+
+    graph_payload = station_graph.graph_payload(external_manifests=[first, second])
+    tool_nodes = [node for node in graph_payload["nodes"] if node["kind"] == "tool" and node["source"] == "external"]
+    assert len(tool_nodes) == 2
+    assert len({node["id"] for node in tool_nodes}) == 2
+
+
 def test_catalog_payload_surfaces_incompatible_external_manifest(tmp_path, monkeypatch):
     monkeypatch.setattr("brigade.station_manifest._BRIGADE_VERSION", "1.2.3")
     external = _write_station(tmp_path, "future-sidecar", requires_brigade={"min_version": "9.0.0"})
@@ -85,10 +102,13 @@ def test_graph_payload_is_deterministic_and_uses_stable_ids(tmp_path):
     node_ids = {node["id"] for node in first["nodes"]}
     edge_ids = {edge["id"] for edge in first["edges"]}
     assert "station:tokens" in node_ids
-    assert "external:usage-sidecar:usage-sidecar" in node_ids
-    assert "surface:external:usage-sidecar:usage-sidecar:summary-json:0" in node_ids
+    external_tool_id = next(
+        node["id"] for node in first["nodes"] if node["kind"] == "tool" and node["source"] == "external"
+    )
+    assert external_tool_id.startswith("external:usage-sidecar:usage-sidecar:")
+    assert f"surface:{external_tool_id}:summary-json:0" in node_ids
     assert "capability:usage-json" in node_ids
-    assert "external:usage-sidecar:usage-sidecar->capability:usage-json:produces" in edge_ids
+    assert f"{external_tool_id}->capability:usage-json:produces" in edge_ids
     assert all(node["id"] == node["id"].lower() for node in first["nodes"])
 
 

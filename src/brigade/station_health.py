@@ -152,7 +152,9 @@ def _health_from_status(status: str) -> str:
         return "ok"
     if status == MANUAL:
         return "missing"
-    if status in {WARN, FAIL}:
+    if status == FAIL:
+        return "fail"
+    if status == WARN:
         return "warn"
     return "warn"
 
@@ -162,10 +164,10 @@ def _station_summary(station: str) -> str:
     return resolved.summary if resolved is not None else ""
 
 
-def collect(target: Path) -> dict[str, Any]:
-    """Collect managed station health in one advisory, read-only payload."""
+def collect(target: Path, *, include_doctors: bool = False) -> dict[str, Any]:
+    """Collect advisory station health, optionally running managed doctors."""
     target = target.expanduser().resolve()
-    ctx = DoctorContext(target=target, selection=None, harnesses=[])
+    ctx = DoctorContext(target=target, selection=None, harnesses=[]) if include_doctors else None
     station_rows: dict[str, dict[str, Any]] = {}
     issues: list[dict[str, Any]] = []
 
@@ -185,10 +187,16 @@ def collect(target: Path) -> dict[str, Any]:
         installed = tool.detect()
         if installed:
             station_row["installed_count"] += 1
-        try:
-            checks = tool.doctor(ctx) if installed else [(MANUAL, tool.name, f"not installed; command={tool.command}")]
-        except Exception as exc:  # pragma: no cover - defensive isolation for third-party adapters
-            checks = [(WARN, tool.name, f"doctor raised {type(exc).__name__}: {exc}")]
+        if not installed:
+            checks = [(MANUAL, tool.name, f"not installed; command={tool.command}")]
+        elif not include_doctors:
+            checks = [(OK, tool.name, "installed; doctor not run")]
+        else:
+            try:
+                assert ctx is not None
+                checks = tool.doctor(ctx)
+            except Exception as exc:  # pragma: no cover - defensive isolation for third-party adapters
+                checks = [(WARN, tool.name, f"doctor raised {type(exc).__name__}: {exc}")]
         check_payloads = [
             {
                 "status": status,
@@ -199,12 +207,17 @@ def collect(target: Path) -> dict[str, Any]:
             for status, name, detail in checks
         ]
         tool_health = "ok"
-        if any(row["health"] == "warn" for row in check_payloads):
+        if any(row["health"] == "fail" for row in check_payloads):
+            tool_health = "fail"
+        elif any(row["health"] == "warn" for row in check_payloads):
             tool_health = "warn"
         elif any(row["health"] == "missing" for row in check_payloads):
             tool_health = "missing"
-        if tool_health in {"warn", "missing"}:
-            top = next((row for row in check_payloads if row["health"] in {"warn", "missing"}), None)
+        if tool_health in {"fail", "warn", "missing"}:
+            top = next(
+                (row for row in check_payloads if row["health"] in {"fail", "warn", "missing"}),
+                None,
+            )
             if top is not None:
                 issues.append(
                     {
@@ -226,7 +239,9 @@ def collect(target: Path) -> dict[str, Any]:
                 "surfaces": [surface.kind for surface in tool.surfaces],
             }
         )
-        if tool_health == "warn":
+        if tool_health == "fail":
+            station_row["health"] = "fail"
+        elif tool_health == "warn" and station_row["health"] != "fail":
             station_row["health"] = "warn"
         elif tool_health == "missing" and station_row["health"] == "ok":
             station_row["health"] = "missing"
@@ -234,7 +249,7 @@ def collect(target: Path) -> dict[str, Any]:
     stations = sorted(station_rows.values(), key=lambda row: row["station"])
     for row in stations:
         row["tools"].sort(key=lambda tool: tool["name"])
-    status = "warn" if issues else "ok"
+    status = "fail" if any(issue["health"] == "fail" for issue in issues) else "warn" if issues else "ok"
     return {
         "schema": "brigade.station.health.v1",
         "target": str(target),

@@ -8,7 +8,35 @@ from brigade import cli, station_health, work_cmd
 from brigade.operator_cmd import lifecycle
 
 
-def test_station_health_collector_rolls_up_managed_tool_doctors(monkeypatch, tmp_path):
+def test_station_health_collector_is_lightweight_by_default(monkeypatch, tmp_path):
+    class FakeTool:
+        name = "fake-tool"
+        station = "tokens"
+        command = "fake-tool"
+        summary = "fake managed tool"
+        surfaces = ()
+
+        def detect(self):
+            return True
+
+        def doctor(self, ctx):
+            raise AssertionError("routine station health must not execute doctors")
+
+    monkeypatch.setattr(station_health.managed, "all_tools", lambda: (FakeTool(),))
+
+    payload = station_health.collect(tmp_path)
+
+    assert payload["schema"] == "brigade.station.health.v1"
+    assert payload["advisory"] is True
+    assert payload["status"] == "ok"
+    assert payload["issue_count"] == 0
+    assert payload["stations"][0]["station"] == "tokens"
+    assert payload["stations"][0]["health"] == "ok"
+    assert payload["stations"][0]["tools"][0]["name"] == "fake-tool"
+    assert payload["top_issue"] is None
+
+
+def test_station_health_explicit_doctors_preserve_fail(monkeypatch, tmp_path):
     class FakeTool:
         name = "fake-tool"
         station = "tokens"
@@ -21,20 +49,37 @@ def test_station_health_collector_rolls_up_managed_tool_doctors(monkeypatch, tmp
 
         def doctor(self, ctx):
             assert ctx.target == tmp_path.resolve()
-            return [("WARN", "fake-tool", "configured with advisory warning")]
+            return [("FAIL", "fake-tool", "broken configuration")]
 
     monkeypatch.setattr(station_health.managed, "all_tools", lambda: (FakeTool(),))
 
-    payload = station_health.collect(tmp_path)
+    payload = station_health.collect(tmp_path, include_doctors=True)
 
-    assert payload["schema"] == "brigade.station.health.v1"
-    assert payload["advisory"] is True
-    assert payload["status"] == "warn"
-    assert payload["issue_count"] == 1
-    assert payload["stations"][0]["station"] == "tokens"
-    assert payload["stations"][0]["health"] == "warn"
-    assert payload["stations"][0]["tools"][0]["name"] == "fake-tool"
-    assert payload["top_issue"]["tool"] == "fake-tool"
+    assert payload["status"] == "fail"
+    assert payload["stations"][0]["health"] == "fail"
+    assert payload["stations"][0]["tools"][0]["health"] == "fail"
+    assert payload["top_issue"]["health"] == "fail"
+
+
+def test_brief_and_checkup_do_not_run_managed_doctors(monkeypatch, tmp_path):
+    class FakeTool:
+        name = "fake-tool"
+        station = "tokens"
+        command = "fake-tool"
+        summary = "fake managed tool"
+        surfaces = ()
+
+        def detect(self):
+            return True
+
+        def doctor(self, ctx):
+            raise AssertionError("routine integration invoked managed doctor")
+
+    monkeypatch.setattr(station_health.managed, "all_tools", lambda: (FakeTool(),))
+    monkeypatch.setattr(station_health.proc, "run", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError()))
+
+    work_cmd._brief_payload(tmp_path)
+    lifecycle.checkup_payload(tmp_path)
 
 
 def test_operator_checkup_includes_station_health_without_blocking(monkeypatch, tmp_path, capsys):

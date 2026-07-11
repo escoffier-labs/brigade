@@ -18,6 +18,7 @@ TOOL_KINDS = ("executable", "skill-roster")
 ALLOWED_PLACEHOLDERS = frozenset({"task", "query"})
 _PLACEHOLDER_RE = re.compile(r"<([^<>]+)>")
 _STRICT_SEMVER_RE = re.compile(r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\Z")
+_LEADING_SEMVER_RE = re.compile(r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)")
 
 
 @dataclass(frozen=True)
@@ -150,8 +151,11 @@ def _parse_semver(value: str, field: str) -> tuple[int, int, int]:
 
 
 def _current_semver() -> tuple[int, int, int]:
-    core = _BRIGADE_VERSION.split("+", 1)[0].split("-", 1)[0]
-    return _parse_semver(core, "requires_brigade.current_version")
+    match = _LEADING_SEMVER_RE.match(_BRIGADE_VERSION)
+    if match is None:
+        raise ValueError("Brigade version must begin with numeric MAJOR.MINOR.PATCH")
+    major, minor, patch = match.groups()
+    return (int(major), int(minor), int(patch))
 
 
 def _contract_version(value: object) -> int:
@@ -179,6 +183,14 @@ def _requires_brigade(value: object) -> RequiresBrigade:
         if not isinstance(max_version, str):
             raise ValueError("station manifest field 'requires_brigade.max_version_exclusive' must be a string")
         _parse_semver(max_version, "requires_brigade.max_version_exclusive")
+    if min_version is not None and max_version is not None:
+        if _parse_semver(min_version, "requires_brigade.min_version") >= _parse_semver(
+            max_version, "requires_brigade.max_version_exclusive"
+        ):
+            raise ValueError(
+                "station manifest field 'requires_brigade.min_version' must be less than "
+                "'requires_brigade.max_version_exclusive'"
+            )
     return RequiresBrigade(min_version=min_version, max_version_exclusive=max_version)
 
 

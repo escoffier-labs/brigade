@@ -106,6 +106,25 @@ def test_manifest_reports_strict_semver_incompatibility(tmp_path, monkeypatch, r
     assert detail in manifest.compatibility.detail
 
 
+def test_manifest_current_version_accepts_pep440_suffix(tmp_path, monkeypatch):
+    monkeypatch.setattr(station_manifest, "_BRIGADE_VERSION", "1.2.3.dev4+local")
+
+    manifest = station_manifest.load(str(_write_manifest(tmp_path, requires_brigade={"min_version": "1.2.3"})))
+
+    assert manifest.compatibility.compatible is True
+    assert manifest.compatibility.current_version == "1.2.3.dev4+local"
+
+
+def test_manifest_rejects_empty_compatibility_range(tmp_path):
+    path = _write_manifest(
+        tmp_path,
+        requires_brigade={"min_version": "2.0.0", "max_version_exclusive": "2.0.0"},
+    )
+
+    with pytest.raises(ValueError, match="min_version.*less than.*max_version_exclusive"):
+        station_manifest.load(str(path))
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     [

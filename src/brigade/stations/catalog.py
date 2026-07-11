@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -164,11 +165,13 @@ def _managed_rows() -> list[dict[str, Any]]:
 def _external_rows(manifests: Iterable[station_manifest.StationManifest]) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for manifest in manifests:
+        source_identity = str(manifest.path.expanduser().resolve())
+        source_id = hashlib.sha256(source_identity.encode()).hexdigest()[:12]
         for tool in manifest.tools:
             tool_payload = manifest_tool_payload(tool)
             rows.append(
                 {
-                    "id": f"external:{manifest.name}:{tool.name}",
+                    "id": f"external:{manifest.name}:{tool.name}:{source_id}",
                     "source": "external",
                     "station": {
                         "name": manifest.station,
@@ -195,7 +198,7 @@ def _external_rows(manifests: Iterable[station_manifest.StationManifest]) -> lis
         if not manifest.tools:
             rows.append(
                 {
-                    "id": f"external:{manifest.name}:station",
+                    "id": f"external:{manifest.name}:station:{source_id}",
                     "source": "external",
                     "station": {
                         "name": manifest.station,
