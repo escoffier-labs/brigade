@@ -134,6 +134,90 @@ def test_notifications_event_record_writes_local_receipt_without_sending(monkeyp
     assert health["latest_event"]["event_type"] == "handoff-waiting"
 
 
+def test_notifications_event_record_same_second_events_get_distinct_receipts(monkeypatch, tmp_target, capsys):
+    tmp_target.mkdir()
+    monkeypatch.setattr(notifications_cmd.proc, "which", lambda cmd: "/usr/bin/agent-notify")
+    monkeypatch.setattr(notifications_cmd, "_now", lambda: "2026-01-01T00:00:00+00:00")
+    suffixes = iter(["suffix-a", "suffix-b"])
+    monkeypatch.setattr(notifications_cmd, "_event_receipt_suffix", lambda: next(suffixes), raising=False)
+
+    payloads = []
+    for message in ("First event.", "Second event."):
+        assert (
+            notifications_cmd.event_record(
+                target=tmp_target,
+                event_type="operator-alert",
+                title="Operator alert",
+                message=message,
+                json_output=True,
+            )
+            == 0
+        )
+        payloads.append(json.loads(capsys.readouterr().out))
+
+    receipts = sorted((tmp_target / ".brigade" / "notifications" / "events").glob("*.json"))
+
+    assert len(payloads) == 2
+    assert payloads[0]["event_id"] != payloads[1]["event_id"]
+    assert len(receipts) == 2
+    assert {json.loads(path.read_text())["message"] for path in receipts} == {"First event.", "Second event."}
+
+
+def test_notifications_event_record_refuses_symlinked_events_dir_without_external_write(
+    monkeypatch, tmp_target, capsys
+):
+    tmp_target.mkdir()
+    external = tmp_target.parent / "external-events"
+    external.mkdir()
+    events_parent = tmp_target / ".brigade" / "notifications"
+    events_parent.mkdir(parents=True)
+    (events_parent / "events").symlink_to(external, target_is_directory=True)
+    monkeypatch.setattr(notifications_cmd.proc, "which", lambda cmd: "/usr/bin/agent-notify")
+    monkeypatch.setattr(notifications_cmd, "_now", lambda: "2026-01-01T00:00:00+00:00")
+    monkeypatch.setattr(notifications_cmd, "_event_receipt_suffix", lambda: "suffix-a", raising=False)
+
+    rc = notifications_cmd.event_record(
+        target=tmp_target,
+        event_type="operator-alert",
+        title="Operator alert",
+        message="Do not write outside target.",
+        json_output=True,
+    )
+
+    assert rc == 2
+    assert not list(external.iterdir())
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["error"] == "unsafe notification receipt path"
+
+
+def test_notifications_event_record_refuses_symlinked_receipt_file_without_external_write(
+    monkeypatch, tmp_target, capsys
+):
+    tmp_target.mkdir()
+    external = tmp_target.parent / "external-receipt.json"
+    external.write_text("external\n")
+    events_root = tmp_target / ".brigade" / "notifications" / "events"
+    events_root.mkdir(parents=True)
+    receipt_name = "2026-01-01T000000+0000-operator-alert-suffix-a.json"
+    (events_root / receipt_name).symlink_to(external)
+    monkeypatch.setattr(notifications_cmd.proc, "which", lambda cmd: "/usr/bin/agent-notify")
+    monkeypatch.setattr(notifications_cmd, "_now", lambda: "2026-01-01T00:00:00+00:00")
+    monkeypatch.setattr(notifications_cmd, "_event_receipt_suffix", lambda: "suffix-a", raising=False)
+
+    rc = notifications_cmd.event_record(
+        target=tmp_target,
+        event_type="operator-alert",
+        title="Operator alert",
+        message="Do not follow receipt symlinks.",
+        json_output=True,
+    )
+
+    assert rc == 2
+    assert external.read_text() == "external\n"
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["error"] == "unsafe notification receipt path"
+
+
 def test_notifications_event_plan_attaches_bounded_local_evidence_without_writing(monkeypatch, tmp_target, capsys):
     tmp_target.mkdir()
     verify_dir = tmp_target / ".brigade" / "work" / "verify-runs" / "verify-one"

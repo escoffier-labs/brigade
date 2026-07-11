@@ -6,7 +6,9 @@ import json
 import os
 import re
 import stat
+import tempfile
 import time
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -50,6 +52,15 @@ def _safe_id(value: str) -> str:
 
 def _now() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime())
+
+
+def _event_receipt_suffix() -> str:
+    return uuid.uuid4().hex
+
+
+def _event_id(created_at: str, event_type: str) -> str:
+    stamp = created_at.replace(":", "").replace("+00:00", "Z")
+    return f"{stamp}-{_safe_id(event_type)}-{_safe_id(_event_receipt_suffix())}"
 
 
 def _profile_args(profile: str | None) -> list[str]:
@@ -537,7 +548,7 @@ def _event_payload(
     evidence: bool,
 ) -> dict[str, Any]:
     created_at = _now()
-    event_id = f"{created_at.replace(':', '').replace('+00:00', 'Z')}-{_safe_id(event_type)}"
+    event_id = _event_id(created_at, event_type)
     argv = [
         "agent-notify",
         "--hook",
@@ -577,6 +588,89 @@ def _event_payload(
         "stores_secrets": False,
         "evidence": _event_evidence(target, enabled=evidence),
     }
+
+
+def _safe_events_root(target: Path) -> tuple[Path | None, str | None]:
+    root = _events_root(target)
+    try:
+        relative = root.relative_to(target)
+    except ValueError:
+        return None, "notification events root escapes target"
+
+    current = target
+    for part in relative.parts:
+        current = current / part
+        try:
+            metadata = current.lstat()
+        except FileNotFoundError:
+            try:
+                current.mkdir()
+                metadata = current.lstat()
+            except OSError as exc:
+                return None, str(exc)
+        except OSError as exc:
+            return None, str(exc)
+        if stat.S_ISLNK(metadata.st_mode):
+            return None, "notification events path contains a symlink"
+        if not stat.S_ISDIR(metadata.st_mode):
+            return None, "notification events path is not a directory"
+        try:
+            current.resolve(strict=True).relative_to(target)
+        except (OSError, ValueError):
+            return None, "notification events path escapes target"
+    return root, None
+
+
+def _safe_event_receipt_path(target: Path, event_id: str) -> tuple[Path | None, str | None]:
+    root, error = _safe_events_root(target)
+    if root is None:
+        return None, error
+    path = root / f"{event_id}.json"
+    try:
+        path.relative_to(root)
+    except ValueError:
+        return None, "notification receipt path escapes events root"
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError:
+        return path, None
+    except OSError as exc:
+        return None, str(exc)
+    if stat.S_ISLNK(metadata.st_mode):
+        return None, "notification receipt path is a symlink"
+    if not stat.S_ISREG(metadata.st_mode):
+        return None, "notification receipt path is not a regular file"
+    return path, None
+
+
+def _write_event_receipt(target: Path, payload: dict[str, Any]) -> tuple[Path | None, str | None]:
+    path, error = _safe_event_receipt_path(target, str(payload["event_id"]))
+    if path is None:
+        return None, error
+    data = json.dumps(payload, indent=2, sort_keys=True) + "\n"
+    tmp_path: Path | None = None
+    try:
+        fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+        tmp_path = Path(tmp_name)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        try:
+            metadata = path.lstat()
+        except FileNotFoundError:
+            pass
+        else:
+            if stat.S_ISLNK(metadata.st_mode):
+                if tmp_path is not None:
+                    tmp_path.unlink(missing_ok=True)
+                return None, "notification receipt path is a symlink"
+        os.replace(tmp_path, path)
+    except OSError as exc:
+        if tmp_path is not None:
+            tmp_path.unlink(missing_ok=True)
+        return None, str(exc)
+    return path, None
 
 
 def event_plan(
@@ -664,10 +758,18 @@ def event_record(
     else:
         payload["sent"] = False
         payload["send_exit_code"] = None
-    path = _events_root(target) / f"{payload['event_id']}.json"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    payload["path"] = str(path)
-    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+    path, write_error = _safe_event_receipt_path(target, str(payload["event_id"]))
+    payload["path"] = str(path) if path is not None else str(_events_root(target) / f"{payload['event_id']}.json")
+    if write_error is None:
+        path, write_error = _write_event_receipt(target, payload)
+    if write_error is not None or path is None:
+        payload["error"] = "unsafe notification receipt path"
+        payload["write_error"] = write_error or "unknown receipt write error"
+        if json_output:
+            _json(payload)
+        else:
+            print(f"error: {payload['error']}: {payload['write_error']}")
+        return 2
     if json_output:
         _json(payload)
         return 0 if not send or payload["sent"] else 1
