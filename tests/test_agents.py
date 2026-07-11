@@ -183,6 +183,19 @@ def test_build_argv_antigravity_read_only_keeps_sandbox_without_write_flags(tmp_
     assert "--dangerously-skip-permissions" not in argv
 
 
+def test_build_argv_cursor_sandbox_read_only_uses_plan_mode():
+    assert agents.build_argv("cursor", "hi", sandbox="read-only") == [
+        "cursor-agent",
+        "-p",
+        "--mode",
+        "plan",
+        "--output-format",
+        "text",
+        "--trust",
+        "hi",
+    ]
+
+
 def test_build_argv_kimi_writable_uses_yolo_and_read_only_keeps_plan():
     assert agents.build_argv("kimi", "hi") == [
         "kimi",
