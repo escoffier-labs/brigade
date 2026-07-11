@@ -314,6 +314,7 @@ SESSION_CHAT_PARTS = {
 }
 
 
+@dataclass(frozen=True)
 class SecurityEnrichmentConfig:
     provider: str | None = None
     misp_url: str | None = None
@@ -322,6 +323,7 @@ class SecurityEnrichmentConfig:
     cache_path: str = ".brigade/security/enrichment-cache.json"
 
 
+@dataclass(frozen=True)
 class SecurityConfig:
     policy: str = "personal"
     scan_profile: str = "local-only-audit"
@@ -337,6 +339,7 @@ class SecurityConfig:
     enrichment: SecurityEnrichmentConfig = field(default_factory=SecurityEnrichmentConfig)
 
 
+@dataclass(frozen=True)
 class EffectivePolicy:
     policy: str
     scan_profile: str
@@ -352,6 +355,7 @@ class EffectivePolicy:
     config_loaded: bool
 
 
+@dataclass(frozen=True)
 class FileClassification:
     surface: str
     confidence: str

@@ -314,7 +314,7 @@ def _clean_reason(reason: str) -> str:
 
 def _gitignore_selection(target: Path):
     from .config import load_config
-    from .selection import Selection
+    from ..selection import Selection
 
     loaded = load_config(target)
     if loaded is not None:
@@ -323,7 +323,7 @@ def _gitignore_selection(target: Path):
 
 
 def fix(*, target: Path, dry_run: bool = False) -> int:
-    from .install import apply_gitignore
+    from ..install import apply_gitignore
 
     target = target.expanduser().resolve()
     if not target.is_dir():

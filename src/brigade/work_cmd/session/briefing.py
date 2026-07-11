@@ -238,7 +238,7 @@ def _compact_repo_fleet_health(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def _brief_payload(target: Path, *, limit: int = 3, include_code_graph: bool = False) -> dict[str, Any]:
-    from .. import (
+    from ... import (
         aboyeur,
         center_cmd,
         chat_cmd,

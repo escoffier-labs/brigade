@@ -314,7 +314,7 @@ def status(*, target: Path, limit: int = 12) -> int:
 
 
 def doctor(*, target: Path) -> int:
-    from .. import (
+    from ... import (
         center_cmd,
         chat_cmd,
         context_cmd,
