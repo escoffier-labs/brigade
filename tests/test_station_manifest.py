@@ -166,6 +166,18 @@ def test_manifest_tool_dependency_arrays_are_optional_strings(tmp_path):
     assert tool.dependencies == ("miseledger",)
 
 
+def test_manifest_rejects_duplicate_tool_names(tmp_path):
+    tool = {
+        "name": "duplicate-tool",
+        "command": "duplicate-tool",
+        "summary": "duplicate tool",
+    }
+    path = _write_manifest(tmp_path, tools=[tool, dict(tool)])
+
+    with pytest.raises(ValueError, match="duplicate tool name.*duplicate-tool"):
+        station_manifest.load(str(path))
+
+
 def test_active_manifest_still_requires_at_least_one_tool(tmp_path):
     path = _write_manifest(tmp_path, tools=[])
 

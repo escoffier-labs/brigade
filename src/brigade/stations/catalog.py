@@ -166,12 +166,13 @@ def _external_rows(manifests: Iterable[station_manifest.StationManifest]) -> lis
     rows: list[dict[str, Any]] = []
     for manifest in manifests:
         source_identity = str(manifest.path.expanduser().resolve())
-        source_id = hashlib.sha256(source_identity.encode()).hexdigest()[:12]
         for tool in manifest.tools:
+            tool_identity = f"{source_identity}\0{tool.name}"
+            tool_id = hashlib.sha256(tool_identity.encode()).hexdigest()[:12]
             tool_payload = manifest_tool_payload(tool)
             rows.append(
                 {
-                    "id": f"external:{manifest.name}:{tool.name}:{source_id}",
+                    "id": f"external:{manifest.name}:{tool.name}:{tool_id}",
                     "source": "external",
                     "station": {
                         "name": manifest.station,
@@ -196,6 +197,7 @@ def _external_rows(manifests: Iterable[station_manifest.StationManifest]) -> lis
                 }
             )
         if not manifest.tools:
+            source_id = hashlib.sha256(source_identity.encode()).hexdigest()[:12]
             rows.append(
                 {
                     "id": f"external:{manifest.name}:station:{source_id}",

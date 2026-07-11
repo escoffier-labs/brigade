@@ -128,6 +128,11 @@ def load(ref: str, *, cwd: Path | None = None) -> StationManifest:
     if lifecycle == "active" and not tools_raw:
         raise ValueError("active station manifest requires at least one tool")
     tools = tuple(_parse_tool(item, index) for index, item in enumerate(tools_raw))
+    tool_names: set[str] = set()
+    for tool in tools:
+        if tool.name in tool_names:
+            raise ValueError(f"station manifest contains duplicate tool name: {tool.name}")
+        tool_names.add(tool.name)
     return StationManifest(
         path=path,
         name=name,

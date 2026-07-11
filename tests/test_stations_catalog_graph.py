@@ -80,6 +80,38 @@ def test_duplicate_external_names_keep_distinct_catalog_and_graph_ids(tmp_path):
     assert len({node["id"] for node in tool_nodes}) == 2
 
 
+def test_catalog_reports_manifest_with_duplicate_tool_names(tmp_path):
+    path = _write_station(tmp_path, "duplicate-tools", tool_name="duplicate-tool")
+    payload = json.loads(path.read_text())
+    payload["tools"].append(dict(payload["tools"][0]))
+    path.write_text(json.dumps(payload))
+
+    catalog_payload = station_catalog.catalog_payload(external_manifests=[path])
+    graph_payload = station_graph.graph_payload(external_manifests=[path])
+
+    assert not [row for row in catalog_payload["rows"] if row["source"] == "external"]
+    assert "duplicate tool name" in catalog_payload["errors"][0]["error"]
+    assert "duplicate tool name" in graph_payload["catalog"]["errors"][0]["error"]
+
+
+def test_distinct_tool_names_with_same_slug_keep_distinct_graph_ids(tmp_path):
+    path = _write_station(tmp_path, "slug-tools", tool_name="same tool")
+    payload = json.loads(path.read_text())
+    second = dict(payload["tools"][0])
+    second["name"] = "same-tool"
+    payload["tools"].append(second)
+    path.write_text(json.dumps(payload))
+
+    catalog_payload = station_catalog.catalog_payload(external_manifests=[path])
+    external_rows = [row for row in catalog_payload["rows"] if row["source"] == "external"]
+    graph_payload = station_graph.graph_payload(external_manifests=[path])
+    tool_nodes = [node for node in graph_payload["nodes"] if node["kind"] == "tool" and node["source"] == "external"]
+
+    assert len({row["id"] for row in external_rows}) == 2
+    assert len(tool_nodes) == 2
+    assert len({node["id"] for node in tool_nodes}) == 2
+
+
 def test_catalog_payload_surfaces_incompatible_external_manifest(tmp_path, monkeypatch):
     monkeypatch.setattr("brigade.station_manifest._BRIGADE_VERSION", "1.2.3")
     external = _write_station(tmp_path, "future-sidecar", requires_brigade={"min_version": "9.0.0"})
