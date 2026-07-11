@@ -11,6 +11,7 @@ import (
 
 	"github.com/escoffier-labs/miseledger/internal/adapter"
 	"github.com/escoffier-labs/miseledger/internal/ingest"
+	"github.com/escoffier-labs/miseledger/internal/toolpath"
 )
 
 // nativeExporter describes a crawler binary that emits miseledger.adapter.v1
@@ -56,6 +57,11 @@ func cmdCrawlExporter(ex nativeExporter, args []string, out, errw io.Writer) int
 	asJSON, dryRun, passArgs := splitWrapperFlags(args)
 	exportArgs := append(append(ex.adapterCmd(), "--out", "-"), passArgs...)
 
+	hint := toolpath.HintCrawler(ex.binary)
+	if err := toolpath.Require(ex.binary, hint); err != nil {
+		return fatalf(errw, "crawl %s: %s", ex.sourceKind, err)
+	}
+
 	if dryRun {
 		records, warnings, err := dryRunExporter(ex.binary, exportArgs)
 		if err != nil {
@@ -85,7 +91,7 @@ func cmdCrawlExporter(ex nativeExporter, args []string, out, errw io.Writer) int
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Start(); err != nil {
-		return fatalf(errw, "crawl %s: %s", ex.sourceKind, err)
+		return fatalf(errw, "crawl %s: %s", ex.sourceKind, toolpath.WrapExecErr(ex.binary, hint, err))
 	}
 	sourceURI := ex.binary + "://" + strings.Join(ex.adapterCmd(), "/")
 	result, importErr := ingest.ImportAdapterReader(db, stdout, sourceURI, ex.sourceKind)
@@ -114,6 +120,10 @@ func cmdCrawlExporter(ex nativeExporter, args []string, out, errw io.Writer) int
 // dryRunExporter runs the export and counts valid adapter records without
 // touching the database, so `crawl <source> --dry-run` is a safe preview.
 func dryRunExporter(binary string, exportArgs []string) (int, []string, error) {
+	hint := toolpath.HintCrawler(binary)
+	if err := toolpath.Require(binary, hint); err != nil {
+		return 0, nil, err
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), externalScannerTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, binary, exportArgs...)
@@ -124,7 +134,7 @@ func dryRunExporter(binary string, exportArgs []string) (int, []string, error) {
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Start(); err != nil {
-		return 0, nil, err
+		return 0, nil, toolpath.WrapExecErr(binary, hint, err)
 	}
 	scanner := bufio.NewScanner(stdout)
 	scanner.Buffer(make([]byte, 0, 64*1024), 10*1024*1024)

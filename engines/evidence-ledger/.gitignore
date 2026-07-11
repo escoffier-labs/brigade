@@ -96,3 +96,4 @@ memory/handoff-inbox/
 .mcp/
 scripts/*.md
 # <<< brigade gitignore block <<<
+.graphtrail/

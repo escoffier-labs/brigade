@@ -19,6 +19,7 @@ import (
 	"github.com/escoffier-labs/miseledger/internal/adapter"
 	"github.com/escoffier-labs/miseledger/internal/ingest"
 	"github.com/escoffier-labs/miseledger/internal/sources"
+	"github.com/escoffier-labs/miseledger/internal/toolpath"
 )
 
 type sourceHarvestSummary struct {
@@ -40,6 +41,9 @@ func cmdImportSourceHarvest(args []string, out, errw io.Writer) int {
 	}
 	if !hasFlag(passArgs, "json") {
 		passArgs = append(passArgs, "--json")
+	}
+	if err := toolpath.Require("sourceharvest", toolpath.HintSourceHarvest); err != nil {
+		return fatalf(errw, "import sourceharvest: %s", err)
 	}
 	if dryRun {
 		records, warnings, err := dryRunSourceHarvest(passArgs)
@@ -69,7 +73,7 @@ func cmdImportSourceHarvest(args []string, out, errw io.Writer) int {
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Start(); err != nil {
-		return fatalf(errw, "import sourceharvest: %s", err)
+		return fatalf(errw, "import sourceharvest: %s", toolpath.WrapExecErr("sourceharvest", toolpath.HintSourceHarvest, err))
 	}
 	result, importErr := ingest.ImportAdapterReader(db, stdout, "sourceharvest://"+strings.Join(passArgs, " "), "")
 	waitErr := cmd.Wait()
@@ -106,6 +110,9 @@ func cmdImportSourceHarvest(args []string, out, errw io.Writer) int {
 }
 
 func dryRunSourceHarvest(args []string) (int, []string, error) {
+	if err := toolpath.Require("sourceharvest", toolpath.HintSourceHarvest); err != nil {
+		return 0, nil, err
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), externalScannerTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "sourceharvest", args...)
@@ -116,7 +123,7 @@ func dryRunSourceHarvest(args []string) (int, []string, error) {
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Start(); err != nil {
-		return 0, nil, err
+		return 0, nil, toolpath.WrapExecErr("sourceharvest", toolpath.HintSourceHarvest, err)
 	}
 	scanner := bufio.NewScanner(stdout)
 	scanner.Buffer(make([]byte, 0, 64*1024), 10*1024*1024)

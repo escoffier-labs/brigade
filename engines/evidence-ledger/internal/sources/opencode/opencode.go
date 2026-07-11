@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -17,6 +16,7 @@ import (
 
 	"github.com/escoffier-labs/miseledger/internal/adapter"
 	"github.com/escoffier-labs/miseledger/internal/sources"
+	"github.com/escoffier-labs/miseledger/internal/toolpath"
 )
 
 const opencodeExportTimeout = 2 * time.Minute
@@ -192,6 +192,10 @@ func readExport(input string) (exportFile, []byte, error) {
 		}
 		return exp, b, nil
 	}
+	hint := toolpath.HintOpenCode(input)
+	if err := toolpath.Require("opencode", hint); err != nil {
+		return exportFile{}, nil, err
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), opencodeExportTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "opencode", "export", input, "--sanitize")
@@ -202,8 +206,8 @@ func readExport(input string) (exportFile, []byte, error) {
 		if ctx.Err() == context.DeadlineExceeded {
 			return exportFile{}, nil, fmt.Errorf("opencode export timed out after %s", opencodeExportTimeout)
 		}
-		if errors.Is(err, exec.ErrNotFound) {
-			return exportFile{}, nil, fmt.Errorf("opencode binary not found on PATH: install opencode to export session ID %q, or pass a sanitized export file path instead", input)
+		if wrap := toolpath.WrapExecErr("opencode", hint, err); wrap != err {
+			return exportFile{}, nil, wrap
 		}
 		msg := strings.TrimSpace(stderr.String())
 		if msg == "" {

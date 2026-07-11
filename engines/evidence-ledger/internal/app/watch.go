@@ -23,6 +23,7 @@ import (
 	"github.com/escoffier-labs/miseledger/internal/sources/hermes"
 	"github.com/escoffier-labs/miseledger/internal/sources/openclaw"
 	"github.com/escoffier-labs/miseledger/internal/sources/opencode"
+	"github.com/escoffier-labs/miseledger/internal/toolpath"
 )
 
 type discoveredRoot struct {
@@ -290,9 +291,9 @@ func importDiscoveredRoot(db *sql.DB, root discoveredRoot, values map[string]str
 		return row
 	}
 	if root.External {
-		if _, err := exec.LookPath("stationtrail"); err != nil {
+		if err := toolpath.Require("stationtrail", toolpath.HintStationTrail); err != nil {
 			row.Skipped = true
-			row.Reason = "stationtrail not on PATH"
+			row.Reason = err.Error()
 			return row
 		}
 		if dryRun {
@@ -358,6 +359,9 @@ func importDiscoveredRoot(db *sql.DB, root discoveredRoot, values map[string]str
 }
 
 func dryRunStationTrail(sourceKind, root string, values map[string]string) (stationTrailSummary, error) {
+	if err := toolpath.Require("stationtrail", toolpath.HintStationTrail); err != nil {
+		return stationTrailSummary{}, err
+	}
 	if err := checkStationTrailCompat(sourceKind); err != nil {
 		return stationTrailSummary{}, err
 	}
@@ -380,6 +384,9 @@ func dryRunStationTrail(sourceKind, root string, values map[string]string) (stat
 	if err != nil {
 		if ctx.Err() == context.DeadlineExceeded {
 			return stationTrailSummary{}, fmt.Errorf("stationtrail timed out after %s", externalScannerTimeout)
+		}
+		if wrap := toolpath.WrapExecErr("stationtrail", toolpath.HintStationTrail, err); wrap != err {
+			return stationTrailSummary{}, wrap
 		}
 		msg := stderr.String()
 		if msg == "" {

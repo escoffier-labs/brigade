@@ -1698,3 +1698,249 @@ func TestEvalStationTrailCompat(t *testing.T) {
 		})
 	}
 }
+
+func TestMissingExternalToolDiagnostics(t *testing.T) {
+	withTempHome(t)
+	runOK(t, "init")
+	statusBefore := runJSON(t, "status", "--json")
+	itemsBefore := statusBefore["items"].(float64)
+	// Empty PATH so LookPath cannot resolve wrapper binaries. miseledger itself
+	// runs in-process, so no shell PATH is required for CLI dispatch.
+	t.Setenv("PATH", t.TempDir())
+
+	cases := []struct {
+		name     string
+		args     []string
+		tool     string
+		context  string
+		hintPart string
+	}{
+		{
+			name:     "sourceharvest import",
+			args:     []string{"import", "sourceharvest", "markdown", filepath.Join(t.TempDir(), "notes.md"), "--source", "notes"},
+			tool:     "sourceharvest",
+			context:  "import sourceharvest",
+			hintPart: "github.com/escoffier-labs/sourceharvest",
+		},
+		{
+			name:     "sourceharvest dry-run",
+			args:     []string{"import", "sourceharvest", "markdown", filepath.Join(t.TempDir(), "notes.md"), "--source", "notes", "--dry-run"},
+			tool:     "sourceharvest",
+			context:  "import sourceharvest",
+			hintPart: "github.com/escoffier-labs/sourceharvest",
+		},
+		{
+			name:     "stationtrail import",
+			args:     []string{"import", "stationtrail", "codex", "fixture"},
+			tool:     "stationtrail",
+			context:  "import stationtrail",
+			hintPart: "github.com/escoffier-labs/stationtrail",
+		},
+		{
+			name:     "stationtrail dry-run",
+			args:     []string{"import", "stationtrail", "codex", "fixture", "--dry-run"},
+			tool:     "stationtrail",
+			context:  "import stationtrail",
+			hintPart: "github.com/escoffier-labs/stationtrail",
+		},
+		{
+			name:     "crawl discord exporter",
+			args:     []string{"crawl", "discord"},
+			tool:     "discrawl",
+			context:  "crawl discord",
+			hintPart: "install discrawl",
+		},
+		{
+			name:     "crawl github dry-run",
+			args:     []string{"crawl", "github", "--dry-run"},
+			tool:     "gitcrawl",
+			context:  "crawl github",
+			hintPart: "install gitcrawl",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			code, stdout, stderr := run(tc.args...)
+			if code == 0 {
+				t.Fatalf("expected non-zero exit, stdout=%s stderr=%s", stdout, stderr)
+			}
+			if strings.Contains(stderr, "\n") && strings.Count(strings.TrimSpace(stderr), "\n") > 0 {
+				// fatalf prints one diagnostic line (may end with newline)
+				lines := strings.Split(strings.TrimSpace(stderr), "\n")
+				if len(lines) != 1 {
+					t.Fatalf("want one-line diagnostic, got %d lines: %q", len(lines), stderr)
+				}
+			}
+			msg := strings.TrimSpace(stderr)
+			for _, want := range []string{tc.tool, "not found on PATH", tc.context, tc.hintPart} {
+				if !strings.Contains(msg, want) {
+					t.Fatalf("stderr %q missing %q", msg, want)
+				}
+			}
+			status := runJSON(t, "status", "--json")
+			if status["items"].(float64) != itemsBefore {
+				t.Fatalf("archive mutated: items before=%v after=%v", itemsBefore, status["items"])
+			}
+		})
+	}
+}
+
+func TestMissingExternalToolPresentBinaryUnchanged(t *testing.T) {
+	// Regression guard: when the binary is on PATH, wrappers still import.
+	// Full happy-path coverage lives in TestImportStationTrailWrapper and
+	// TestImportSourceHarvestWrapper; this asserts the preflight does not
+	// reject a real LookPath hit.
+	withTempHome(t)
+	runOK(t, "init")
+	binDir := t.TempDir()
+	fixture := repoPath(t, "testdata/adapters/agent-session.fixture.jsonl")
+	script := filepath.Join(binDir, "stationtrail")
+	body := "#!/bin/sh\nsummary=''\nwhile [ \"$#\" -gt 0 ]; do\n  if [ \"$1\" = '--summary-out' ]; then shift; summary=\"$1\"; fi\n  shift || true\ndone\nif [ -n \"$summary\" ]; then\n  printf '{\"source\":\"codex\",\"records\":2,\"warnings\":[],\"files\":[]}' > \"$summary\"\nfi\ncat " + shellQuote(fixture) + "\n"
+	if err := os.WriteFile(script, []byte(body), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	out := runJSON(t, "import", "stationtrail", "codex", "fixture", "--json")
+	if out["inserted_items"].(float64) != 2 {
+		t.Fatalf("inserted = %v, want 2 with binary present: %v", out["inserted_items"], out)
+	}
+}
+
+func TestDoctorWrapperTools(t *testing.T) {
+	withTempHome(t)
+	runOK(t, "init")
+
+	binDir := t.TempDir()
+
+	// Create mock binaries for found tools: stationtrail and discrawl
+	for _, bin := range []string{"stationtrail", "discrawl"} {
+		script := filepath.Join(binDir, bin)
+		if err := os.WriteFile(script, []byte("#!/bin/sh\n"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Set PATH to only include binDir, so only stationtrail and discrawl are found
+	t.Setenv("PATH", binDir)
+
+	got := runJSON(t, "doctor", "--json")
+	if got["ok"] != true {
+		t.Fatalf("doctor not ok: %v", got)
+	}
+
+	checks := got["checks"].([]any)
+	var wrapperToolsCheck map[string]any
+
+	for _, raw := range checks {
+		check := raw.(map[string]any)
+		if check["name"] == "wrapper_tools" {
+			wrapperToolsCheck = check
+			break
+		}
+	}
+
+	if wrapperToolsCheck == nil {
+		t.Fatalf("wrapper_tools check not found in doctor output: %v", checks)
+	}
+
+	detail := wrapperToolsCheck["detail"].(string)
+
+	// Should find stationtrail and discrawl
+	if !strings.Contains(detail, "stationtrail") {
+		t.Fatalf("wrapper_tools detail missing stationtrail: %s", detail)
+	}
+	if !strings.Contains(detail, "discrawl") {
+		t.Fatalf("wrapper_tools detail missing discrawl: %s", detail)
+	}
+
+	// Should show as missing for other tools
+	missingTools := []string{"sourceharvest", "opencode", "gitcrawl", "slacrawl", "graincrawl", "notcrawl", "mailcrawl", "telecrawl"}
+	for _, tool := range missingTools {
+		if !strings.Contains(detail, tool) {
+			t.Fatalf("wrapper_tools detail missing %s: %s", tool, detail)
+		}
+	}
+}
+
+func TestDoctorJSONIncludesStructuredWrapperTools(t *testing.T) {
+	withTempHome(t)
+	runOK(t, "init")
+
+	binDir := t.TempDir()
+	stationtrail := filepath.Join(binDir, "stationtrail")
+	if err := os.WriteFile(stationtrail, []byte("#!/bin/sh\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir)
+
+	got := runJSON(t, "doctor", "--json")
+	checks, ok := got["checks"].([]any)
+	if !ok || len(checks) == 0 {
+		t.Fatalf("doctor checks = %v, want non-empty array", got["checks"])
+	}
+	for _, raw := range checks {
+		check, ok := raw.(map[string]any)
+		if !ok {
+			t.Fatalf("doctor check = %T, want object", raw)
+		}
+		for _, field := range []string{"name", "ok", "detail"} {
+			if _, exists := check[field]; !exists {
+				t.Fatalf("doctor check missing %q: %v", field, check)
+			}
+		}
+	}
+
+	tools, ok := got["wrapper_tools"].([]any)
+	if !ok || len(tools) != 10 {
+		t.Fatalf("wrapper_tools = %v, want 10 entries", got["wrapper_tools"])
+	}
+	wantTools := map[string]bool{
+		"stationtrail": true, "sourceharvest": true, "opencode": true,
+		"discrawl": true, "gitcrawl": true, "slacrawl": true,
+		"graincrawl": true, "notcrawl": true, "mailcrawl": true, "telecrawl": true,
+	}
+	seen := map[string]bool{}
+	for _, raw := range tools {
+		tool, ok := raw.(map[string]any)
+		if !ok {
+			t.Fatalf("wrapper tool = %T, want object", raw)
+		}
+		name, _ := tool["name"].(string)
+		if name == "" {
+			t.Fatalf("wrapper tool missing name: %v", tool)
+		}
+		seen[name] = true
+		found, _ := tool["found"].(bool)
+		if found {
+			if path, _ := tool["path"].(string); path != stationtrail {
+				t.Fatalf("found stationtrail path = %q, want %q", path, stationtrail)
+			}
+			if _, exists := tool["hint"]; exists {
+				t.Fatalf("found tool includes hint: %v", tool)
+			}
+			continue
+		}
+		if _, exists := tool["path"]; exists {
+			t.Fatalf("missing tool includes path: %v", tool)
+		}
+		if hint, _ := tool["hint"].(string); hint == "" {
+			t.Fatalf("missing tool has no hint: %v", tool)
+		}
+	}
+	if len(seen) != len(wantTools) {
+		t.Fatalf("wrapper_tools missing expected entries: %v", seen)
+	}
+	for name := range wantTools {
+		if !seen[name] {
+			t.Fatalf("wrapper_tools missing %q: %v", name, seen)
+		}
+	}
+
+	code, plain, errText := run("doctor")
+	if code != 0 || errText != "" {
+		t.Fatalf("plain doctor failed: code=%d err=%q out=%s", code, errText, plain)
+	}
+	if strings.HasPrefix(plain, "{") || !strings.Contains(plain, "wrapper_tools ok=true") {
+		t.Fatalf("plain doctor output changed: %s", plain)
+	}
+}

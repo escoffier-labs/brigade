@@ -31,6 +31,7 @@ import (
 	"github.com/escoffier-labs/miseledger/internal/sources/openclaw"
 	"github.com/escoffier-labs/miseledger/internal/sources/opencode"
 	"github.com/escoffier-labs/miseledger/internal/sources/providerexports"
+	"github.com/escoffier-labs/miseledger/internal/toolpath"
 )
 
 var stdin io.Reader = os.Stdin
@@ -227,6 +228,7 @@ func cmdDoctor(args []string, out, errw io.Writer) int {
 	asJSON := bools["json"]
 	checkMCP := bools["mcp"]
 	checkArchive := bools["archive"]
+	wrapperCheck, wrapperTools := wrapperToolsDoctorCheck()
 	db, paths, err := openMigrated()
 	checks := []map[string]any{}
 	add := func(name string, ok bool, detail string) {
@@ -235,7 +237,7 @@ func cmdDoctor(args []string, out, errw io.Writer) int {
 	add("paths", paths.DBPath != "", paths.DBPath)
 	if err != nil {
 		add("database", false, err.Error())
-		writeJSON(out, map[string]any{"ok": false, "checks": checks, "paths": paths})
+		writeJSON(out, map[string]any{"ok": false, "checks": checks, "paths": paths, "wrapper_tools": wrapperTools})
 		return 1
 	}
 	defer db.Close()
@@ -243,6 +245,7 @@ func cmdDoctor(args []string, out, errw io.Writer) int {
 	add("schema", versionErr == nil && version == archive.SchemaVersion, fmt.Sprintf("version %d", version))
 	add("fts", archive.HasFTS(db), "sqlite fts5")
 	add("permissions", checkPrivate(paths.DataDir) && checkPrivate(paths.CacheDir), "runtime dirs private")
+	add(wrapperCheck.Name, wrapperCheck.OK, wrapperCheck.Detail)
 	if checkArchive {
 		for _, check := range archiveDoctorChecks(db) {
 			add(check.Name, check.OK, check.Detail)
@@ -253,7 +256,7 @@ func cmdDoctor(args []string, out, errw io.Writer) int {
 			add(check.Name, check.OK, check.Detail)
 		}
 	}
-	result := map[string]any{"ok": true, "checks": checks, "paths": paths}
+	result := map[string]any{"ok": true, "checks": checks, "paths": paths, "wrapper_tools": wrapperTools}
 	for _, c := range checks {
 		if c["ok"] == false {
 			result["ok"] = false
@@ -304,6 +307,50 @@ func archiveDoctorChecks(db *sql.DB) []doctorCheck {
 	}
 	add("archive_missing_scan_paths", missingScans == 0, fmt.Sprintf("count=%d", missingScans))
 	return checks
+}
+
+type wrapperToolDoctorEntry struct {
+	Name  string `json:"name"`
+	Found bool   `json:"found"`
+	Path  string `json:"path,omitempty"`
+	Hint  string `json:"hint,omitempty"`
+}
+
+func wrapperToolsDoctorCheck() (doctorCheck, []wrapperToolDoctorEntry) {
+	tools := []struct {
+		name string
+		hint string
+	}{
+		{"stationtrail", toolpath.HintStationTrail},
+		{"sourceharvest", toolpath.HintSourceHarvest},
+		{"opencode", "install the OpenCode CLI (opencode) to export sessions by ID; file-path imports work without it"},
+		{"discrawl", toolpath.HintCrawler("discrawl")},
+		{"gitcrawl", toolpath.HintCrawler("gitcrawl")},
+		{"slacrawl", toolpath.HintCrawler("slacrawl")},
+		{"graincrawl", toolpath.HintCrawler("graincrawl")},
+		{"notcrawl", toolpath.HintCrawler("notcrawl")},
+		{"mailcrawl", toolpath.HintCrawler("mailcrawl")},
+		{"telecrawl", toolpath.HintCrawler("telecrawl")},
+	}
+
+	var details []string
+	entries := make([]wrapperToolDoctorEntry, 0, len(tools))
+	for _, tool := range tools {
+		path, err := exec.LookPath(tool.name)
+		if err == nil {
+			details = append(details, fmt.Sprintf("%s: found at %s", tool.name, path))
+			entries = append(entries, wrapperToolDoctorEntry{Name: tool.name, Found: true, Path: path})
+		} else {
+			details = append(details, fmt.Sprintf("%s: missing (%s)", tool.name, tool.hint))
+			entries = append(entries, wrapperToolDoctorEntry{Name: tool.name, Hint: tool.hint})
+		}
+	}
+
+	return doctorCheck{
+		Name:   "wrapper_tools",
+		OK:     true,
+		Detail: strings.Join(details, "\n"),
+	}, entries
 }
 
 func firstMapValue(m map[string]any) any {
@@ -1006,6 +1053,9 @@ func cmdImportStationTrail(args []string, out, errw io.Writer) int {
 		return fatalf(errw, "usage: miseledger import stationtrail <source> <path-or-session-id> [--json] [--dry-run] [--limit N] [--since DATE] [--redact LIST]")
 	}
 	sourceKind, sourcePath := rest[0], rest[1]
+	if err := toolpath.Require("stationtrail", toolpath.HintStationTrail); err != nil {
+		return fatalf(errw, "import stationtrail: %s", err)
+	}
 	if bools["dry-run"] {
 		cmdArgs := []string{sourceKind, sourcePath, "--dry-run", "--json"}
 		if values["limit"] != "" {
@@ -1027,7 +1077,14 @@ func cmdImportStationTrail(args []string, out, errw io.Writer) int {
 			if ctx.Err() == context.DeadlineExceeded {
 				return fatalf(errw, "import stationtrail: timed out after %s", externalScannerTimeout)
 			}
-			return fatalf(errw, "import stationtrail: %s", strings.TrimSpace(stderr.String()))
+			if wrap := toolpath.WrapExecErr("stationtrail", toolpath.HintStationTrail, err); wrap != err {
+				return fatalf(errw, "import stationtrail: %s", wrap)
+			}
+			msg := strings.TrimSpace(stderr.String())
+			if msg == "" {
+				msg = err.Error()
+			}
+			return fatalf(errw, "import stationtrail: %s", msg)
 		}
 		if bools["json"] {
 			_, _ = out.Write(b)
@@ -1064,7 +1121,8 @@ type stationTrailCapabilities struct {
 
 // stationTrailCaps queries the stationtrail binary's capabilities. ok is false
 // when the binary is too old to support the command (we then proceed without a
-// compatibility guarantee rather than blocking).
+// compatibility guarantee rather than blocking). Missing-binary is handled by
+// toolpath.Require at the import entrypoints before this is consulted.
 func stationTrailCaps() (stationTrailCapabilities, bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -1109,6 +1167,9 @@ func evalStationTrailCompat(caps stationTrailCapabilities, ok bool, sourceKind s
 }
 
 func runStationTrailImport(db *sql.DB, sourceKind, sourcePath string, values map[string]string) (ingest.AdapterResult, stationTrailSummary, error) {
+	if err := toolpath.Require("stationtrail", toolpath.HintStationTrail); err != nil {
+		return ingest.AdapterResult{}, stationTrailSummary{}, err
+	}
 	if err := checkStationTrailCompat(sourceKind); err != nil {
 		return ingest.AdapterResult{}, stationTrailSummary{}, err
 	}
@@ -1139,7 +1200,7 @@ func runStationTrailImport(db *sql.DB, sourceKind, sourcePath string, values map
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Start(); err != nil {
-		return ingest.AdapterResult{}, stationTrailSummary{}, err
+		return ingest.AdapterResult{}, stationTrailSummary{}, toolpath.WrapExecErr("stationtrail", toolpath.HintStationTrail, err)
 	}
 	result, importErr := ingest.ImportAdapterReader(db, stdout, "stationtrail://"+sourceKind+"/"+sourcePath, sourceKind)
 	waitErr := cmd.Wait()

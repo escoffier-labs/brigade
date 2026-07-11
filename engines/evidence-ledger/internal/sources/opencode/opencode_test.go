@@ -234,3 +234,42 @@ func TestGenerateEmptyPathIsError(t *testing.T) {
 		t.Fatalf("expected error for empty path")
 	}
 }
+
+func TestReadExportMissingOpenCodeBinaryDiagnostic(t *testing.T) {
+	// Session IDs are not files, so readExport shells out to `opencode export`.
+	t.Setenv("PATH", t.TempDir())
+	_, _, err := readExport("session-not-a-file-id")
+	if err == nil {
+		t.Fatal("expected error when opencode binary is missing")
+	}
+	msg := err.Error()
+	if strings.Contains(msg, "\n") {
+		t.Fatalf("diagnostic must be one line, got %q", msg)
+	}
+	for _, want := range []string{
+		"opencode",
+		"not found on PATH",
+		"session-not-a-file-id",
+		"sanitized export file path",
+	} {
+		if !strings.Contains(msg, want) {
+			t.Fatalf("error %q missing %q", msg, want)
+		}
+	}
+}
+
+func TestReadExportFilePathDoesNotRequireOpenCodeBinary(t *testing.T) {
+	// File-based imports must keep working with opencode absent from PATH.
+	t.Setenv("PATH", t.TempDir())
+	path := fixturePath("opencode-export.fixture.json")
+	exp, raw, err := readExport(path)
+	if err != nil {
+		t.Fatalf("file export should not require opencode binary: %v", err)
+	}
+	if len(raw) == 0 {
+		t.Fatal("expected fixture bytes")
+	}
+	if len(exp.Messages) == 0 {
+		t.Fatal("expected fixture messages")
+	}
+}
