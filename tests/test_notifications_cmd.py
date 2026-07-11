@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 from brigade import cli
@@ -241,6 +242,65 @@ def test_notifications_event_no_evidence(monkeypatch, tmp_target, capsys):
     )
     payload = json.loads(capsys.readouterr().out)
     assert payload["evidence"] == {"attached": False, "disabled": True}
+
+
+def test_notification_evidence_ignores_external_and_broken_symlinks(tmp_target):
+    tmp_target.mkdir()
+    root = tmp_target / ".brigade" / "work" / "verify-runs"
+    external = tmp_target.parent / "external-receipt.json"
+    external.write_text(json.dumps({"run_id": "external-secret", "status": "completed"}))
+    linked = root / "linked" / "receipt.json"
+    linked.parent.mkdir(parents=True)
+    linked.symlink_to(external)
+    broken = root / "broken" / "receipt.json"
+    broken.parent.mkdir()
+    broken.symlink_to(tmp_target.parent / "missing-receipt.json")
+
+    evidence = notifications_cmd._event_evidence(tmp_target.resolve(), enabled=True)
+
+    assert evidence["sources"]["latest_verify"] is None
+    assert "external-secret" not in json.dumps(evidence)
+
+
+def test_notification_evidence_ignores_oversized_receipt(tmp_target):
+    tmp_target.mkdir()
+    path = tmp_target / ".brigade" / "runs" / "large" / "run.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps({"status": "secret-status", "padding": "x" * 300_000}))
+
+    evidence = notifications_cmd._event_evidence(tmp_target.resolve(), enabled=True)
+
+    assert evidence["sources"]["latest_run"] is None
+    assert "secret-status" not in json.dumps(evidence)
+
+
+def test_notification_evidence_caps_candidates_before_parsing_and_selects_newest_valid(monkeypatch, tmp_target):
+    tmp_target.mkdir()
+    root = tmp_target / ".brigade" / "work" / "verify-runs"
+    for index in range(80):
+        path = root / f"bad-{index:03d}" / "receipt.json"
+        path.parent.mkdir(parents=True)
+        path.write_text("not json")
+        os.utime(path, (index + 1, index + 1))
+    valid = root / "valid" / "receipt.json"
+    valid.parent.mkdir()
+    valid.write_text(json.dumps({"run_id": "newest-valid", "status": "completed"}))
+    os.utime(valid, (1_000, 1_000))
+
+    reads = 0
+    original = notifications_cmd._read_json_object
+
+    def counted_read(path):
+        nonlocal reads
+        reads += 1
+        return original(path)
+
+    monkeypatch.setattr(notifications_cmd, "_read_json_object", counted_read)
+
+    evidence = notifications_cmd._event_evidence(tmp_target.resolve(), enabled=True)
+
+    assert evidence["sources"]["latest_verify"]["run_id"] == "newest-valid"
+    assert reads <= notifications_cmd.EVIDENCE_CANDIDATE_LIMIT
 
 
 def test_notifications_event_record_can_explicitly_send(monkeypatch, tmp_target, capsys):

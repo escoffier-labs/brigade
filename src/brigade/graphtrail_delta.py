@@ -7,6 +7,7 @@ import json
 import os
 import shutil
 import sqlite3
+import stat
 import subprocess
 import tempfile
 from pathlib import Path
@@ -269,8 +270,8 @@ def _refresh_required_payload(
         edge_churn=0,
     )
     if newer_files is not None:
-        payload["newer_files"] = newer_files
-        payload["newer_files_truncated"] = len(newer_files) >= STALE_SOURCE_LIMIT
+        payload["newer_files"] = newer_files[:STALE_SOURCE_LIMIT]
+        payload["newer_files_truncated"] = len(newer_files) > STALE_SOURCE_LIMIT
     return payload
 
 
@@ -290,12 +291,17 @@ def _newer_source_files(target: Path, db_path: Path) -> list[str]:
                 if path.suffix not in SOURCE_SUFFIXES:
                     continue
                 try:
-                    if path.stat().st_mtime <= db_mtime:
+                    metadata = path.lstat()
+                    if not stat.S_ISREG(metadata.st_mode):
+                        continue
+                    resolved = path.resolve(strict=True)
+                    resolved.relative_to(target)
+                    if resolved.stat().st_mtime <= db_mtime:
                         continue
                     newer.append(path.relative_to(target).as_posix())
-                except OSError:
+                except (OSError, ValueError):
                     continue
-                if len(newer) >= STALE_SOURCE_LIMIT:
+                if len(newer) > STALE_SOURCE_LIMIT:
                     return newer
     except OSError:
         return []

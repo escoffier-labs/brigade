@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import stat
 import time
 from pathlib import Path
 from typing import Any
@@ -28,6 +29,8 @@ EVENT_TYPES = (
 )
 EVIDENCE_TEXT_LIMIT = 180
 EVIDENCE_COMMAND_LIMIT = 3
+EVIDENCE_CANDIDATE_LIMIT = 32
+EVIDENCE_RECEIPT_BYTE_LIMIT = 256 * 1024
 
 
 def _json(data: dict[str, Any]) -> None:
@@ -289,19 +292,12 @@ def health(target: Path, profile: str | None = None) -> dict[str, Any]:
 
 def _event_receipts(target: Path) -> list[dict[str, Any]]:
     root = _events_root(target)
-    if not root.is_dir():
-        return []
-    receipts: list[dict[str, Any]] = []
-    for path in sorted(root.glob("*.json")):
-        try:
-            data = json.loads(path.read_text())
-        except (OSError, json.JSONDecodeError):
-            continue
-        if isinstance(data, dict):
+    for path in _receipt_candidates(target, root, "*.json"):
+        data = _read_json_object(path)
+        if data is not None:
             data.setdefault("path", str(path))
-            receipts.append(data)
-    receipts.sort(key=lambda item: str(item.get("created_at") or item.get("event_id") or ""), reverse=True)
-    return receipts
+            return [data]
+    return []
 
 
 def _latest_event_summary(target: Path) -> dict[str, Any] | None:
@@ -327,6 +323,34 @@ def _read_json_object(path: Path) -> dict[str, Any] | None:
     return data if isinstance(data, dict) else None
 
 
+def _receipt_candidates(target: Path, root: Path, pattern: str) -> list[Path]:
+    try:
+        target = target.resolve(strict=True)
+        root = root.resolve(strict=True)
+        root.relative_to(target)
+    except (OSError, ValueError):
+        return []
+    candidates: list[tuple[int, str, Path]] = []
+    try:
+        paths = root.glob(pattern)
+        for path in paths:
+            try:
+                metadata = path.lstat()
+                if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > EVIDENCE_RECEIPT_BYTE_LIMIT:
+                    continue
+                resolved = path.resolve(strict=True)
+                resolved.relative_to(target)
+                if not resolved.is_file():
+                    continue
+            except (OSError, ValueError):
+                continue
+            candidates.append((metadata.st_mtime_ns, path.as_posix(), path))
+    except OSError:
+        return []
+    candidates.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    return [path for _mtime, _name, path in candidates[:EVIDENCE_CANDIDATE_LIMIT]]
+
+
 def _target_path(target: Path, value: object) -> str | None:
     if not isinstance(value, str) or not value:
         return None
@@ -348,21 +372,12 @@ def _sanitize_text(target: Path, value: object, *, limit: int = EVIDENCE_TEXT_LI
     return text
 
 
-def _latest_receipt(root: Path, filename: str) -> tuple[Path, dict[str, Any]] | None:
-    if not root.is_dir():
-        return None
-    receipts: list[tuple[str, Path, dict[str, Any]]] = []
-    for path in root.glob(f"*/{filename}"):
+def _latest_receipt(target: Path, root: Path, filename: str) -> tuple[Path, dict[str, Any]] | None:
+    for path in _receipt_candidates(target, root, f"*/{filename}"):
         data = _read_json_object(path)
-        if data is None:
-            continue
-        stamp = str(data.get("completed_at") or data.get("created_at") or data.get("started_at") or path.parent.name)
-        receipts.append((stamp, path, data))
-    if not receipts:
-        return None
-    receipts.sort(key=lambda item: item[0], reverse=True)
-    _stamp, path, data = receipts[0]
-    return path, data
+        if data is not None:
+            return path, data
+    return None
 
 
 def _verify_summary(target: Path, receipt: dict[str, Any], path: Path) -> dict[str, Any]:
@@ -424,8 +439,8 @@ def _notification_summary(target: Path, receipt: dict[str, Any]) -> dict[str, An
 def _event_evidence(target: Path, *, enabled: bool) -> dict[str, Any]:
     if not enabled:
         return {"attached": False, "disabled": True}
-    verify = _latest_receipt(target / ".brigade" / "work" / "verify-runs", "receipt.json")
-    run = _latest_receipt(target / ".brigade" / "runs", "run.json")
+    verify = _latest_receipt(target, target / ".brigade" / "work" / "verify-runs", "receipt.json")
+    run = _latest_receipt(target, target / ".brigade" / "runs", "run.json")
     latest_notifications = _event_receipts(target)
     sources = {
         "latest_verify": _verify_summary(target, verify[1], verify[0]) if verify is not None else None,
@@ -439,6 +454,8 @@ def _event_evidence(target: Path, *, enabled: bool) -> dict[str, Any]:
             "latest_per_source": 1,
             "command_limit": EVIDENCE_COMMAND_LIMIT,
             "text_limit": EVIDENCE_TEXT_LIMIT,
+            "candidate_limit": EVIDENCE_CANDIDATE_LIMIT,
+            "receipt_byte_limit": EVIDENCE_RECEIPT_BYTE_LIMIT,
             "raw_logs_read": False,
         },
     }

@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from brigade import cli
+from brigade import graphtrail_delta
 from brigade import localio
 from brigade import work_cmd
 
@@ -611,6 +612,35 @@ def test_work_verify_graphtrail_delta_stale_database_fails_open_without_sync(tmp
     assert sidecar["refresh_required"] is True
     assert "newer_files" in sidecar
     assert sidecar["newer_files"] == ["pkg/mod.py"]
+
+
+def test_graphtrail_stale_scan_skips_symlink_sources_outside_target(tmp_path):
+    target = tmp_path / "target"
+    target.mkdir()
+    db = _write_graphtrail_db(target)
+    external = tmp_path / "external.py"
+    external.write_text("secret = 'outside target'\n")
+    os.utime(external, (db.stat().st_mtime + 5, db.stat().st_mtime + 5))
+    linked = target / "linked.py"
+    linked.symlink_to(external)
+
+    assert graphtrail_delta._newer_source_files(target.resolve(), db) == []
+
+
+def test_graphtrail_stale_scan_reports_exact_limit_without_truncation(tmp_path):
+    target = tmp_path / "target"
+    target.mkdir()
+    db = _write_graphtrail_db(target)
+    for index in range(graphtrail_delta.STALE_SOURCE_LIMIT):
+        source = target / f"source-{index:02d}.py"
+        source.write_text("pass\n")
+        os.utime(source, (db.stat().st_mtime + 5, db.stat().st_mtime + 5))
+
+    payload = graphtrail_delta._refresh_required(target.resolve(), db)
+
+    assert payload is not None
+    assert len(payload["newer_files"]) == graphtrail_delta.STALE_SOURCE_LIMIT
+    assert payload["newer_files_truncated"] is False
 
 
 def test_work_verify_graphtrail_delta_malformed_diff_fails_open(tmp_path, capsys, monkeypatch):
