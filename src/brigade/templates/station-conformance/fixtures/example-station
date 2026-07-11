@@ -1,0 +1,18 @@
+#!/usr/bin/env python3
+"""Local executable fixture for Brigade station conformance checks."""
+
+from __future__ import annotations
+
+import sys
+
+
+def main(argv: list[str]) -> int:
+    if argv == ["--version"]:
+        print("example-station 0.1.0")
+        return 0
+    print("usage: example-station --version", file=sys.stderr)
+    return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

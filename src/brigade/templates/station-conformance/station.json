@@ -1,0 +1,29 @@
+{
+  "schema": "brigade.station.v1",
+  "name": "example-station",
+  "station": "evidence",
+  "summary": "Example station conformance fixture",
+  "tools": [
+    {
+      "name": "example-station",
+      "command": "example-station",
+      "summary": "Local fixture executable used by the conformance kit",
+      "install": [
+        "python3",
+        "-c",
+        "raise SystemExit('install must not run during station verification')"
+      ],
+      "surfaces": [
+        {
+          "kind": "verify-exit",
+          "command": [
+            "example-station",
+            "--version"
+          ],
+          "read_only": true,
+          "timeout_seconds": 2
+        }
+      ]
+    }
+  ]
+}
