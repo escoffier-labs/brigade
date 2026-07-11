@@ -91,6 +91,52 @@ func TestDoctorAndEvidenceHelpDoNotCreateArchiveOrCache(t *testing.T) {
 	}
 }
 
+func TestCommandTableDispatchesEveryTopLevelCommand(t *testing.T) {
+	for _, cmd := range commandTable {
+		if cmd.name == "" {
+			t.Fatal("command table contains an empty name")
+		}
+		if cmd.usage == "" {
+			t.Fatalf("%s command is missing usage text", cmd.name)
+		}
+		if cmd.description == "" {
+			t.Fatalf("%s command is missing a description", cmd.name)
+		}
+		if cmd.run == nil {
+			t.Fatalf("%s command is missing a dispatcher", cmd.name)
+		}
+	}
+	if findCommand("missing") != nil {
+		t.Fatal("findCommand returned a command for a missing name")
+	}
+
+	code, _, stderr := run("definitely-not-a-command")
+	if code == 0 {
+		t.Fatal("unknown command unexpectedly succeeded")
+	}
+	if strings.TrimSpace(stderr) != "unknown command: definitely-not-a-command" {
+		t.Fatalf("unknown command stderr = %q", stderr)
+	}
+}
+
+func TestFlagHelpersPreserveWrapperPassthrough(t *testing.T) {
+	args := []string{"--json", "--dry-run", "--repo", "OWNER/NAME", "--unknown=value", "--dry-run=false", "--", "--json"}
+	asJSON, dryRun, pass := splitWrapperFlags(args)
+	if !asJSON || !dryRun {
+		t.Fatalf("splitWrapperFlags json=%v dryRun=%v, want both true", asJSON, dryRun)
+	}
+	wantPass := []string{"--repo", "OWNER/NAME", "--unknown=value", "--dry-run=false", "--"}
+	if fmt.Sprint(pass) != fmt.Sprint(wantPass) {
+		t.Fatalf("pass-through args = %#v, want %#v", pass, wantPass)
+	}
+
+	stripped := stripValueFlag([]string{"--interval", "1s", "--limit=5", "--max-runs=2", "--since", "2026-01-01"}, "max-runs")
+	wantStripped := []string{"--interval", "1s", "--limit=5", "--since", "2026-01-01"}
+	if fmt.Sprint(stripped) != fmt.Sprint(wantStripped) {
+		t.Fatalf("stripValueFlag = %#v, want %#v", stripped, wantStripped)
+	}
+}
+
 func TestAdapterImportSearchShowExportAndIdempotency(t *testing.T) {
 	withTempHome(t)
 	fixture := repoPath(t, "testdata/adapters/discrawl.fixture.jsonl")

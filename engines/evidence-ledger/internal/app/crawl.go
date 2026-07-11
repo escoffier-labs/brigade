@@ -76,27 +76,6 @@ func cmdCrawlSourceHarvest(mode, defaultSource string, args []string, out, errw 
 	return cmdImportSourceHarvest(passArgs, out, errw)
 }
 
-func firstPositional(args []string) string {
-	for i := 0; i < len(args); i++ {
-		arg := args[i]
-		if !strings.HasPrefix(arg, "--") || arg == "--" {
-			return arg
-		}
-		nameVal := strings.TrimPrefix(arg, "--")
-		name := nameVal
-		hasInlineValue := false
-		if idx := strings.IndexByte(nameVal, '='); idx >= 0 {
-			name = nameVal[:idx]
-			hasInlineValue = true
-		}
-		if hasInlineValue || isKnownBoolFlag(name) {
-			continue
-		}
-		i++
-	}
-	return ""
-}
-
 func isKnownBoolFlag(name string) bool {
 	switch name {
 	case "json", "dry-run", "help", "h":

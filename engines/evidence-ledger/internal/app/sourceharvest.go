@@ -217,31 +217,3 @@ func hashSourceHarvestSummary(summary sourceHarvestSummary) string {
 	sum := sha256.Sum256(b)
 	return hex.EncodeToString(sum[:])
 }
-
-func splitWrapperFlags(args []string) (bool, bool, []string) {
-	asJSON := false
-	dryRun := false
-	pass := make([]string, 0, len(args))
-	for _, arg := range args {
-		switch arg {
-		case "--json":
-			asJSON = true
-		case "--dry-run":
-			dryRun = true
-		default:
-			pass = append(pass, arg)
-		}
-	}
-	return asJSON, dryRun, pass
-}
-
-func hasFlag(args []string, name string) bool {
-	long := "--" + name
-	prefix := long + "="
-	for _, arg := range args {
-		if arg == long || strings.HasPrefix(arg, prefix) {
-			return true
-		}
-	}
-	return false
-}

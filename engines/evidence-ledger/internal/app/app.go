@@ -40,70 +40,77 @@ const Version = "0.4.0"
 
 const externalScannerTimeout = 30 * time.Minute
 
+type commandFunc func([]string, io.Writer, io.Writer) int
+
+type commandSpec struct {
+	name        string
+	usage       string
+	description string
+	run         commandFunc
+}
+
+var commandTable = []commandSpec{
+	{name: "version", usage: "version", description: "Print the MiseLedger version.", run: cmdVersion},
+	{name: "init", usage: "init", description: "Initialize the local archive and runtime paths.", run: cmdInit},
+	{name: "status", usage: "status", description: "Show archive status and counts.", run: cmdStatus},
+	{name: "sources", usage: "sources discover", description: "List known evidence sources.", run: cmdSources},
+	{name: "scans", usage: "scans", description: "Inspect source scan manifests.", run: cmdScans},
+	{name: "sessions", usage: "sessions", description: "List and search session records.", run: cmdSessions},
+	{name: "serve", usage: "serve", description: "Serve the loopback HTTP API.", run: cmdServe},
+	{name: "mcp", usage: "mcp", description: "Run the stdio MCP server.", run: cmdMCP},
+	{name: "watch", usage: "watch", description: "Import discovered sources once or in a daemon loop.", run: cmdWatch},
+	{name: "crawl", usage: "crawl", description: "Run native and wrapper crawlers.", run: cmdCrawl},
+	{name: "adapter", usage: "adapter", description: "Generate adapter JSONL from native fixtures.", run: cmdAdapter},
+	{name: "import", usage: "import", description: "Import adapter or native source records.", run: cmdImport},
+	{name: "search", usage: "search", description: "Search archived evidence.", run: cmdSearch},
+	{name: "show", usage: "show", description: "Show one archived item.", run: cmdShow},
+	{name: "evidence", usage: "evidence", description: "Build evidence bundles.", run: cmdEvidence},
+	{name: "explain", usage: "explain", description: "Explain search matches.", run: cmdExplain},
+	{name: "export", usage: "export markdown", description: "Export archive data.", run: cmdExport},
+	{name: "relations", usage: "relations", description: "Inspect and backfill relations.", run: cmdRelations},
+	{name: "stats", usage: "stats", description: "Show archive statistics.", run: cmdStats},
+	{name: "fork", usage: "fork", description: "Create an archive fork.", run: cmdFork},
+	{name: "diff", usage: "diff", description: "Compare archive forks.", run: cmdDiff},
+	{name: "compact", usage: "compact", description: "Compact the SQLite archive.", run: cmdCompact},
+	{name: "prune", usage: "prune", description: "Prune archive data.", run: cmdPrune},
+	{name: "sql", usage: "sql", description: "Run read-only SQL.", run: cmdSQL},
+	{name: "doctor", usage: "doctor", description: "Run diagnostic checks.", run: cmdDoctor},
+}
+
 func Run(args []string, out, errw io.Writer) int {
 	if len(args) == 0 || args[0] == "--help" || args[0] == "-h" || args[0] == "help" {
 		usage(out)
 		return 0
 	}
-	switch args[0] {
-	case "version":
-		fmt.Fprintf(out, "miseledger %s\n", Version)
-		return 0
-	case "init":
-		return cmdInit(args[1:], out, errw)
-	case "status":
-		return cmdStatus(args[1:], out, errw)
-	case "doctor":
-		return cmdDoctor(args[1:], out, errw)
-	case "sources":
-		return cmdSources(args[1:], out, errw)
-	case "scans":
-		return cmdScans(args[1:], out, errw)
-	case "sessions":
-		return cmdSessions(args[1:], out, errw)
-	case "serve":
-		return cmdServe(args[1:], out, errw)
-	case "mcp":
-		return cmdMCP(args[1:], out, errw)
-	case "watch":
-		return cmdWatch(args[1:], out, errw)
-	case "crawl":
-		return cmdCrawl(args[1:], out, errw)
-	case "adapter":
-		return cmdAdapter(args[1:], out, errw)
-	case "import":
-		return cmdImport(args[1:], out, errw)
-	case "search":
-		return cmdSearch(args[1:], out, errw)
-	case "show":
-		return cmdShow(args[1:], out, errw)
-	case "evidence":
-		return cmdEvidence(args[1:], out, errw)
-	case "explain":
-		return cmdExplain(args[1:], out, errw)
-	case "export":
-		return cmdExport(args[1:], out, errw)
-	case "relations":
-		return cmdRelations(args[1:], out, errw)
-	case "stats":
-		return cmdStats(args[1:], out, errw)
-	case "compact":
-		return cmdCompact(args[1:], out, errw)
-	case "prune":
-		return cmdPrune(args[1:], out, errw)
-	case "sql":
-		return cmdSQL(args[1:], out, errw)
-	case "fork":
-		return cmdFork(args[1:], out, errw)
-	case "diff":
-		return cmdDiff(args[1:], out, errw)
-	default:
+	cmd := findCommand(args[0])
+	if cmd == nil {
 		return fatalf(errw, "unknown command: %s", args[0])
 	}
+	return cmd.run(args[1:], out, errw)
 }
 
 func usage(w io.Writer) {
-	fmt.Fprintln(w, "miseledger version | init | status | sources discover | scans | sessions | serve | mcp | watch | crawl | adapter | import | search | show | evidence | explain | export markdown | relations | stats | fork | diff | compact | prune | sql | doctor")
+	parts := make([]string, 0, len(commandTable))
+	for _, cmd := range commandTable {
+		parts = append(parts, cmd.usage)
+	}
+	fmt.Fprintln(w, "miseledger "+strings.Join(parts, " | "))
+}
+
+func findCommand(name string) *commandSpec {
+	for i := range commandTable {
+		if commandTable[i].name == name {
+			return &commandTable[i]
+		}
+	}
+	return nil
+}
+
+func cmdVersion(args []string, out, errw io.Writer) int {
+	_ = args
+	_ = errw
+	fmt.Fprintf(out, "miseledger %s\n", Version)
+	return 0
 }
 
 func openMigrated() (*sql.DB, Paths, error) {
@@ -2685,44 +2692,4 @@ func writeCSV(w io.Writer, rows []map[string]any) {
 		_ = cw.Write(vals)
 	}
 	cw.Flush()
-}
-
-func splitFlags(args []string, valueFlags, boolFlags map[string]bool) (map[string]string, map[string]bool, []string, error) {
-	values := map[string]string{}
-	bools := map[string]bool{}
-	var rest []string
-	for i := 0; i < len(args); i++ {
-		arg := args[i]
-		if !strings.HasPrefix(arg, "--") || arg == "--" {
-			rest = append(rest, arg)
-			continue
-		}
-		nameVal := strings.TrimPrefix(arg, "--")
-		name := nameVal
-		val := ""
-		if idx := strings.IndexByte(nameVal, '='); idx >= 0 {
-			name = nameVal[:idx]
-			val = nameVal[idx+1:]
-		}
-		if valueFlags != nil && valueFlags[name] {
-			if val == "" {
-				i++
-				if i >= len(args) {
-					return nil, nil, nil, fmt.Errorf("--%s requires a value", name)
-				}
-				val = args[i]
-			}
-			values[name] = val
-			continue
-		}
-		if boolFlags != nil && boolFlags[name] {
-			if val != "" {
-				return nil, nil, nil, fmt.Errorf("--%s does not take a value", name)
-			}
-			bools[name] = true
-			continue
-		}
-		return nil, nil, nil, fmt.Errorf("unknown flag --%s", name)
-	}
-	return values, bools, rest, nil
 }

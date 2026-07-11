@@ -11,7 +11,6 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
-	"strings"
 	"syscall"
 	"time"
 
@@ -158,44 +157,6 @@ func shouldImportForChangedScans() (bool, error) {
 		return false, err
 	}
 	return len(changed) > 0, nil
-}
-
-func stripValueFlag(args []string, name string) []string {
-	out := make([]string, 0, len(args))
-	prefix := "--" + name + "="
-	for i := 0; i < len(args); i++ {
-		if args[i] == "--"+name {
-			i++
-			continue
-		}
-		if strings.HasPrefix(args[i], prefix) {
-			continue
-		}
-		out = append(out, args[i])
-	}
-	return out
-}
-
-func stripBoolFlag(args []string, name string) []string {
-	out := make([]string, 0, len(args))
-	long := "--" + name
-	for _, arg := range args {
-		if arg == long {
-			continue
-		}
-		out = append(out, arg)
-	}
-	return out
-}
-
-func hasBoolFlag(args []string, name string) bool {
-	long := "--" + name
-	for _, arg := range args {
-		if arg == long {
-			return true
-		}
-	}
-	return false
 }
 
 func cmdImportDiscovered(args []string, out, errw io.Writer) int {
