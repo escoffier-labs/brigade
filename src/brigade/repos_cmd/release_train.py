@@ -150,7 +150,7 @@ def _latest_review_closeout_ref(repo: Path, repo_id: str, label: str) -> dict[st
     try:
         from .. import release_cmd
 
-        closeout = release_cmd._latest_review_closeout(repo)
+        closeout = release_cmd._latest_review_closeout(repo)  # type: ignore[misc]
     except Exception:
         closeout = None
     return fleet._safe_report_ref(closeout, repo_id, label)
