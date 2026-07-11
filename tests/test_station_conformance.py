@@ -126,6 +126,35 @@ def test_write_conformance_kit_refuses_symlinked_parent_and_broken_destination(t
     assert os.path.lexists(output / "station.json")
 
 
+def test_write_conformance_kit_preflights_non_directory_parent_before_writing(tmp_path):
+    output = tmp_path / "kit"
+    output.mkdir()
+    (output / "fixtures").write_text("occupied\n")
+
+    payload = station_conformance.write_conformance_kit(output, force=True)
+
+    assert payload["ok"] is False
+    assert payload["status"] == "refused"
+    assert payload["written"] == []
+    assert not (output / "README.md").exists()
+    assert not (output / "station.json").exists()
+    assert (output / "fixtures").read_text() == "occupied\n"
+
+
+def test_write_conformance_kit_preflights_directory_destination_before_writing(tmp_path):
+    output = tmp_path / "kit"
+    output.mkdir()
+    (output / "station.json").mkdir()
+
+    payload = station_conformance.write_conformance_kit(output, force=True)
+
+    assert payload["ok"] is False
+    assert payload["status"] == "refused"
+    assert payload["written"] == []
+    assert not (output / "README.md").exists()
+    assert (output / "station.json").is_dir()
+
+
 def test_conformance_template_manifest_has_no_personal_data_or_external_dependencies(tmp_path):
     output = tmp_path / "kit"
     station_conformance.write_conformance_kit(output)

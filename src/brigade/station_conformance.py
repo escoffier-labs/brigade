@@ -139,12 +139,18 @@ def _unsafe_output(output: Path) -> str | None:
     if output.is_dir():
         for relative in FILES:
             current = output
-            for part in Path(relative).parts:
+            parts = Path(relative).parts
+            for index, part in enumerate(parts):
                 current /= part
                 if not os.path.lexists(current):
                     break
                 if current.is_symlink():
                     return f"output contains a symlink: {current}"
+                is_destination = index == len(parts) - 1
+                if not is_destination and not current.is_dir():
+                    return f"output parent is not a directory: {current}"
+                if is_destination and current.is_dir():
+                    return f"file destination is a directory: {current}"
     return None
 
 
