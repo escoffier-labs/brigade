@@ -20,6 +20,8 @@ const maxRequestBody = 1 << 20 // 1 MiB
 // malformed or hostile client cannot drive an unbounded allocation.
 const maxMCPFrame = 8 << 20 // 8 MiB
 
+var serveServerStarted = func(*http.Server) {}
+
 func cmdServe(args []string, out, errw io.Writer) int {
 	values, bools, rest, err := splitFlags(args, map[string]bool{"addr": true}, map[string]bool{"json": true})
 	if err != nil {
@@ -35,11 +37,16 @@ func cmdServe(args []string, out, errw io.Writer) int {
 	if err := validateLocalAddr(addr); err != nil {
 		return fatalf(errw, "serve: %s", err)
 	}
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return fatalf(errw, "serve: bind %s: %s", addr, err)
+	}
 	handler := newHTTPHandler()
+	boundAddr := ln.Addr().String()
 	if bools["json"] {
-		writeJSON(out, map[string]any{"ok": true, "addr": addr})
+		writeJSON(out, map[string]any{"ok": true, "addr": boundAddr})
 	} else {
-		fmt.Fprintf(out, "listening on http://%s\n", addr)
+		fmt.Fprintf(out, "listening on http://%s\n", boundAddr)
 	}
 	srv := &http.Server{
 		Addr:              addr,
@@ -49,7 +56,8 @@ func cmdServe(args []string, out, errw io.Writer) int {
 		WriteTimeout:      60 * time.Second,
 		IdleTimeout:       120 * time.Second,
 	}
-	if err := srv.ListenAndServe(); err != nil {
+	serveServerStarted(srv)
+	if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return fatalf(errw, "serve: %s", err)
 	}
 	return 0
