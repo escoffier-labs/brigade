@@ -3,17 +3,7 @@ name: ci
 on:
   push:
     branches: [main]
-    paths-ignore:
-      - 'docs/**'
-      - '*.md'
-      - 'LICENSE'
-      - '.gitignore'
   pull_request:
-    paths-ignore:
-      - 'docs/**'
-      - '*.md'
-      - 'LICENSE'
-      - '.gitignore'
 
 permissions:
   contents: read

@@ -1,14 +1,15 @@
 #!/bin/bash
 # Single verification entrypoint. CI and AGENTS.md both defer to this file,
 # so the gate lives in exactly one place. Mirrors .github/workflows/ci.yml:
-# ruff lint, ruff format, version sync, pytest.
+# ruff lint, ruff format, mypy, version sync, pytest with coverage.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 PY=${PY:-.venv/bin}
 "$PY/ruff" check .
 "$PY/ruff" format --check .
+"$PY/mypy"
 # Version sync covers __init__.py, template JSONs, and the recorded demo assets.
 # Run `python scripts/version_sync.py --write` to fix drift in one shot.
 "$PY/python" scripts/version_sync.py --check
-"$PY/pytest" -q
+"$PY/pytest" -q --cov=brigade --cov-report=term --cov-fail-under=78

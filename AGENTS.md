@@ -16,8 +16,15 @@ developing Brigade itself; the contributor policy lives in `CONTRIBUTING.md`.
 ```
 
 It runs the same gates CI blocks on: ruff lint, ruff format check, the
-version-sync check, and the full pytest suite. Report the actual result, paste
-any failure verbatim, and never claim success you did not observe.
+version-sync check, mypy, and the full pytest suite with the coverage floor.
+Report the actual result, paste any failure verbatim, and never claim success
+you did not observe.
+
+CI-only jobs still cover work that is slower, platform-oriented, or depends on
+extra checkout/install context: `content-guard`, `repo-metadata`,
+`install-from-source`, and `quickstart-smoke`. The local `./scripts/verify`
+gate is the fast completion gate; do not treat it as a replacement for those
+CI-only release and public-repo checks.
 
 Setup, if `.venv/` is missing:
 
