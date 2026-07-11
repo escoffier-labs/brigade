@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 from pathlib import Path
 from typing import Any
@@ -25,6 +26,8 @@ EVENT_TYPES = (
     "release-ready",
     "operator-alert",
 )
+EVIDENCE_TEXT_LIMIT = 180
+EVIDENCE_COMMAND_LIMIT = 3
 
 
 def _json(data: dict[str, Any]) -> None:
@@ -316,6 +319,131 @@ def _latest_event_summary(target: Path) -> dict[str, Any] | None:
     }
 
 
+def _read_json_object(path: Path) -> dict[str, Any] | None:
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _target_path(target: Path, value: object) -> str | None:
+    if not isinstance(value, str) or not value:
+        return None
+    path = Path(value)
+    try:
+        return path.resolve().relative_to(target).as_posix()
+    except (OSError, ValueError):
+        return path.name
+
+
+def _sanitize_text(target: Path, value: object, *, limit: int = EVIDENCE_TEXT_LIMIT) -> str | None:
+    if not isinstance(value, str) or not value:
+        return None
+    text = " ".join(value.split())
+    text = re.sub(r"(/[A-Za-z0-9._~+-]+)+", "[path]", text)
+    text = text.replace(str(target), "[path]")
+    if len(text) > limit:
+        return text[: limit - 1].rstrip() + "…"
+    return text
+
+
+def _latest_receipt(root: Path, filename: str) -> tuple[Path, dict[str, Any]] | None:
+    if not root.is_dir():
+        return None
+    receipts: list[tuple[str, Path, dict[str, Any]]] = []
+    for path in root.glob(f"*/{filename}"):
+        data = _read_json_object(path)
+        if data is None:
+            continue
+        stamp = str(data.get("completed_at") or data.get("created_at") or data.get("started_at") or path.parent.name)
+        receipts.append((stamp, path, data))
+    if not receipts:
+        return None
+    receipts.sort(key=lambda item: item[0], reverse=True)
+    _stamp, path, data = receipts[0]
+    return path, data
+
+
+def _verify_summary(target: Path, receipt: dict[str, Any], path: Path) -> dict[str, Any]:
+    commands: list[dict[str, Any]] = []
+    raw_commands = receipt.get("commands")
+    command_items: list[Any] = raw_commands if isinstance(raw_commands, list) else []
+    for item in command_items:
+        if not isinstance(item, dict):
+            continue
+        command = {
+            "command": _sanitize_text(target, item.get("command")),
+            "status": item.get("status"),
+            "exit_code": item.get("exit_code"),
+        }
+        stdout = _sanitize_text(target, item.get("stdout_summary"))
+        stderr = _sanitize_text(target, item.get("stderr_summary"))
+        if stdout:
+            command["stdout_summary"] = stdout
+        if stderr:
+            command["stderr_summary"] = stderr
+        commands.append(command)
+        if len(commands) >= EVIDENCE_COMMAND_LIMIT:
+            break
+    return {
+        "run_id": receipt.get("run_id"),
+        "status": receipt.get("status"),
+        "started_at": receipt.get("started_at"),
+        "completed_at": receipt.get("completed_at"),
+        "path": _target_path(target, str(path)),
+        "commands": commands,
+        "command_count": len(command_items),
+    }
+
+
+def _run_summary(target: Path, receipt: dict[str, Any], path: Path) -> dict[str, Any]:
+    task = receipt.get("task")
+    task_text = task.get("text") if isinstance(task, dict) else task
+    return {
+        "status": receipt.get("status"),
+        "task": _sanitize_text(target, task_text),
+        "started_at": receipt.get("started_at"),
+        "completed_at": receipt.get("completed_at"),
+        "path": _target_path(target, str(path)),
+        "artifacts": _target_path(target, receipt.get("artifacts")),
+    }
+
+
+def _notification_summary(target: Path, receipt: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "event_id": receipt.get("event_id"),
+        "event_type": receipt.get("event_type"),
+        "created_at": receipt.get("created_at"),
+        "sent": receipt.get("sent"),
+        "send_exit_code": receipt.get("send_exit_code"),
+        "path": _target_path(target, receipt.get("path")),
+    }
+
+
+def _event_evidence(target: Path, *, enabled: bool) -> dict[str, Any]:
+    if not enabled:
+        return {"attached": False, "disabled": True}
+    verify = _latest_receipt(target / ".brigade" / "work" / "verify-runs", "receipt.json")
+    run = _latest_receipt(target / ".brigade" / "runs", "run.json")
+    latest_notifications = _event_receipts(target)
+    sources = {
+        "latest_verify": _verify_summary(target, verify[1], verify[0]) if verify is not None else None,
+        "latest_run": _run_summary(target, run[1], run[0]) if run is not None else None,
+        "latest_notification": _notification_summary(target, latest_notifications[0]) if latest_notifications else None,
+    }
+    return {
+        "attached": any(value is not None for value in sources.values()),
+        "sources": sources,
+        "limits": {
+            "latest_per_source": 1,
+            "command_limit": EVIDENCE_COMMAND_LIMIT,
+            "text_limit": EVIDENCE_TEXT_LIMIT,
+            "raw_logs_read": False,
+        },
+    }
+
+
 def status(*, target: Path, profile: str | None = None, json_output: bool = False) -> int:
     del target
     payload = _status_payload(profile)
@@ -389,6 +517,7 @@ def _event_payload(
     profile: str | None,
     source: str | None,
     send: bool,
+    evidence: bool,
 ) -> dict[str, Any]:
     created_at = _now()
     event_id = f"{created_at.replace(':', '').replace('+00:00', 'Z')}-{_safe_id(event_type)}"
@@ -421,6 +550,7 @@ def _event_payload(
         "profile": profile,
         "created_at": created_at,
         "planned_argv": argv,
+        "send_policy": "explicit-record-send-only",
         "send_requested": send,
         "configured": bool(health_payload.get("configured")),
         "installed": bool(health_payload.get("installed")),
@@ -428,6 +558,7 @@ def _event_payload(
         "sends_notifications": bool(send),
         "writes_hook_config": False,
         "stores_secrets": False,
+        "evidence": _event_evidence(target, enabled=evidence),
     }
 
 
@@ -440,6 +571,7 @@ def event_plan(
     level: str = "info",
     profile: str | None = None,
     source: str | None = None,
+    evidence: bool = True,
     json_output: bool = False,
 ) -> int:
     target = target.expanduser().resolve()
@@ -455,6 +587,7 @@ def event_plan(
         profile=profile,
         source=source,
         send=False,
+        evidence=evidence,
     )
     payload["would_write"] = False
     payload["receipt_path"] = str(_events_root(target) / f"{payload['event_id']}.json")
@@ -481,6 +614,7 @@ def event_record(
     profile: str | None = None,
     source: str | None = None,
     send: bool = False,
+    evidence: bool = True,
     json_output: bool = False,
 ) -> int:
     target = target.expanduser().resolve()
@@ -496,6 +630,7 @@ def event_record(
         profile=profile,
         source=source,
         send=send,
+        evidence=evidence,
     )
     result = None
     if send:

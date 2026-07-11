@@ -60,6 +60,11 @@ def register(sub: argparse._SubParsersAction) -> None:
         )
         p_event.add_argument("--profile", default=None, help="agent-notify profile to use.")
         p_event.add_argument("--source", default=None, help="Safe source label, such as ci or handoff.")
+        p_event.add_argument(
+            "--no-evidence",
+            action="store_true",
+            help="Do not attach bounded local receipt summaries to the payload.",
+        )
         if event_command == "record":
             p_event.add_argument("--send", action="store_true", help="Also invoke agent-notify explicitly.")
         p_event.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
@@ -86,6 +91,7 @@ def dispatch(args) -> int:
                 level=args.level,
                 profile=args.profile,
                 source=args.source,
+                evidence=not args.no_evidence,
                 json_output=args.json,
             )
         if args.notifications_event_command == "record":
@@ -98,6 +104,7 @@ def dispatch(args) -> int:
                 profile=args.profile,
                 source=args.source,
                 send=args.send,
+                evidence=not args.no_evidence,
                 json_output=args.json,
             )
         args._brigade_parser.error(f"unknown notifications event command: {args.notifications_event_command}")

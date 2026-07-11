@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 from brigade import cli
 from brigade import notifications_cmd
@@ -130,6 +131,116 @@ def test_notifications_event_record_writes_local_receipt_without_sending(monkeyp
 
     health = notifications_cmd.health(tmp_target)
     assert health["latest_event"]["event_type"] == "handoff-waiting"
+
+
+def test_notifications_event_plan_attaches_bounded_local_evidence_without_writing(monkeypatch, tmp_target, capsys):
+    tmp_target.mkdir()
+    verify_dir = tmp_target / ".brigade" / "work" / "verify-runs" / "verify-one"
+    verify_dir.mkdir(parents=True)
+    (verify_dir / "receipt.json").write_text(
+        json.dumps(
+            {
+                "run_id": "verify-one",
+                "status": "completed",
+                "started_at": "2026-01-01T00:00:00+00:00",
+                "completed_at": "2026-01-01T00:00:01+00:00",
+                "path": str(verify_dir),
+                "commands": [
+                    {
+                        "command": "pytest -q",
+                        "status": "completed",
+                        "exit_code": 0,
+                        "stdout_summary": f"ok at {tmp_target}/secret-project/tests/test_example.py " + ("x" * 500),
+                        "stderr_summary": "",
+                    }
+                ],
+            }
+        )
+    )
+    run_dir = tmp_target / ".brigade" / "runs" / "run-one"
+    run_dir.mkdir(parents=True)
+    (run_dir / "run.json").write_text(
+        json.dumps(
+            {
+                "status": "ok",
+                "task": "Inspect local receipts",
+                "started_at": "2026-01-01T00:00:02+00:00",
+                "completed_at": "2026-01-01T00:00:03+00:00",
+                "artifacts": str(run_dir),
+            }
+        )
+    )
+    notification_dir = tmp_target / ".brigade" / "notifications" / "events"
+    notification_dir.mkdir(parents=True)
+    (notification_dir / "notification-one.json").write_text(
+        json.dumps(
+            {
+                "event_id": "notification-one",
+                "event_type": "ci-green",
+                "created_at": "2026-01-01T00:00:04+00:00",
+                "sent": False,
+                "path": str(notification_dir / "notification-one.json"),
+            }
+        )
+    )
+
+    def fake_run(*args, **kwargs):
+        raise AssertionError("event plan must not run outbound commands")
+
+    monkeypatch.setattr(notifications_cmd.proc, "which", lambda cmd: "/usr/bin/agent-notify")
+    monkeypatch.setattr(notifications_cmd.proc, "run", fake_run)
+
+    rc = notifications_cmd.event_plan(
+        target=tmp_target,
+        event_type="operator-alert",
+        title="Review local evidence",
+        message="Evidence is ready.",
+        json_output=True,
+    )
+    payload = json.loads(capsys.readouterr().out)
+
+    assert rc == 0
+    assert payload["send_policy"] == "explicit-record-send-only"
+    assert payload["send_requested"] is False
+    assert payload["sends_notifications"] is False
+    assert not Path(payload["receipt_path"]).exists()
+    evidence = payload["evidence"]
+    assert evidence["attached"] is True
+    assert evidence["sources"]["latest_verify"]["run_id"] == "verify-one"
+    assert evidence["sources"]["latest_run"]["status"] == "ok"
+    assert evidence["sources"]["latest_notification"]["event_id"] == "notification-one"
+    rendered = json.dumps(evidence)
+    assert str(tmp_target) not in rendered
+    assert "secret-project" not in rendered
+    assert len(evidence["sources"]["latest_verify"]["commands"][0]["stdout_summary"]) <= 180
+
+
+def test_notifications_event_no_evidence(monkeypatch, tmp_target, capsys):
+    tmp_target.mkdir()
+    monkeypatch.setattr(notifications_cmd.proc, "which", lambda cmd: "/usr/bin/agent-notify")
+
+    assert (
+        cli.main(
+            [
+                "notifications",
+                "event",
+                "plan",
+                "--target",
+                str(tmp_target),
+                "--type",
+                "operator-alert",
+                "--title",
+                "No evidence",
+                "--message",
+                "Skip receipt summaries.",
+                "--no-evidence",
+                "--json",
+            ]
+        )
+        == 0
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["evidence"] == {"attached": False, "disabled": True}
 
 
 def test_notifications_event_record_can_explicitly_send(monkeypatch, tmp_target, capsys):
