@@ -170,26 +170,11 @@ Writer harnesses leave handoff notes as they work. Brigade lints, guards, and cl
 4. only the ambiguous or risky few wait for your review
 5. future sessions start with better context, and the paper trail shows what happened
 
-```mermaid
-flowchart LR
-    WRITERS["writer harnesses<br/>Codex · Claude Code · OpenCode · ..."]
-    BRIGADE["Brigade<br/>lint · guard · classify · receipts"]
-    OWNER["memory owner<br/>OpenClaw / Hermes / you"]
-    MEM["durable memory<br/>MEMORY.md index · memory cards"]
-    REVIEW["review inbox<br/>ambiguous · risky"]
+<p align="center">
+  <img src="docs/assets/memory-workflow.svg" alt="Brigade memory workflow: writer handoffs pass through linting, guards, classification, and a memory owner before reaching durable memory or review" width="900">
+</p>
 
-    WRITERS -- handoff notes --> BRIGADE --> OWNER
-    OWNER -- safe targeted, auto-filed --> MEM
-    OWNER -. ambiguous or risky .-> REVIEW
-    MEM -. context .-> WRITERS
-
-    classDef brigade fill:#2563eb,stroke:#1d4ed8,color:#fff;
-    classDef memory fill:#ecfdf5,stroke:#059669,color:#064e3b;
-    classDef gate fill:#fff7ed,stroke:#ea580c,color:#7c2d12;
-    class BRIGADE brigade;
-    class OWNER,MEM memory;
-    class REVIEW gate;
-```
+<p align="center"><em>Brigade validates and routes. The memory owner performs canonical writes.</em></p>
 
 Memory has two layers: knowledge cards under `memory/cards/` hold the detail, and `MEMORY.md` stays a slim one-line-per-card index that loads every session. `brigade memory care scan` flags stale, contradictory, or undersourced cards for review instead of letting them rot. Brigade never edits canonical memory itself; the owner does the writing. It all runs on the machine you control: laptop, workstation, or VPS.
 

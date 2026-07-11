@@ -4,47 +4,11 @@ The full tour: every station, diagram, and workflow. The [README](../README.md) 
 
 ## Stack At A Glance
 
-```mermaid
-flowchart TB
-    OWNER["<b>OpenClaw / Hermes</b><br/><i>canonical memory owner</i>"]
-    MEMORY["<b>Durable memory</b><br/>MEMORY.md · cards · project context"]
-    BRIGADE["<b>Brigade CLI</b><br/><i>local wiring · receipts · review queues</i>"]
-    STATE["<b>.brigade/</b><br/>local config · scans · reports · closeouts"]
+<p align="center">
+  <img src="assets/stack-at-a-glance-workflow.svg" alt="Brigade stack at a glance: writer harnesses pass through the Brigade review gate to a memory owner, durable memory, local work sessions, scanners, and release evidence" width="900">
+</p>
 
-    OWNER -->|maintains| MEMORY
-    BRIGADE -->|records| STATE
-    BRIGADE -->|prepares reviewed handoffs for| OWNER
-
-    subgraph WRITERS [" writer harnesses "]
-        CODEX["<b>Codex CLI</b><br/>handoff writer"]
-        CLAUDE["<b>Claude Code</b><br/>handoff writer"]
-        OPEN["<b>OpenCode</b><br/>handoff writer"]
-        MORE["<b>more CLI writers</b><br/>Antigravity · Pi · Cursor<br/>Aider · Goose · Continue<br/>Copilot · Qwen · Kimi · AdaL · OpenHands<br/>Grok · Amp · Crush"]
-        HERMES["<b>Hermes</b><br/>writer or owner"]
-    end
-
-    CODEX & CLAUDE & OPEN & MORE & HERMES == handoff drafts ==> BRIGADE
-    MEMORY -. context .-> CODEX & CLAUDE & OPEN & MORE & HERMES
-
-    subgraph LOCAL [" local operator lanes "]
-        WORK["work sessions<br/>tasks · plans · verification"]
-        SCAN["scanners<br/>security · chat · repo health"]
-        RELEASE["release evidence<br/>candidates · smoke · waivers"]
-    end
-
-    BRIGADE --> WORK
-    BRIGADE --> SCAN
-    BRIGADE --> RELEASE
-
-    classDef owner fill:#ef4444,stroke:#b91c1c,color:#fff;
-    classDef brigade fill:#2563eb,stroke:#1d4ed8,color:#fff;
-    classDef state fill:#fff7ed,stroke:#ea580c,color:#7c2d12;
-    classDef lane fill:#f1f5f9,stroke:#94a3b8,color:#334155;
-    class OWNER owner;
-    class BRIGADE brigade;
-    class MEMORY,STATE state;
-    class WORK,SCAN,RELEASE,CODEX,CLAUDE,OPEN,MORE,HERMES lane;
-```
+<p align="center"><em>Generated from <code>docs/assets/workflows/stack-at-a-glance.json</code> with <code>plating workflow</code>.</em></p>
 
 > Brigade was extracted from the [**solos-cookbook**](https://github.com/escoffier-labs/solos-cookbook), a documented 24/7 multi-agent stack running in production. If you want the full picture of how Brigade fits into a real setup, start there, and a star helps other people find it.
 >

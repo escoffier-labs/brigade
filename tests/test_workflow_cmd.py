@@ -1,7 +1,15 @@
 import hashlib
 import json
+from datetime import datetime, timezone
 
+import pytest
 from brigade import cli
+from brigade import workflow_cmd
+
+
+@pytest.fixture(autouse=True)
+def _freeze_workflow_now(monkeypatch):
+    monkeypatch.setattr(workflow_cmd.work_cmd, "_now", lambda: datetime(2026, 6, 13, tzinfo=timezone.utc))
 
 
 def _write_json(path, payload):
