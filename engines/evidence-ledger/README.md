@@ -98,58 +98,7 @@ For a first archive and agent integration path, see [docs/QUICKSTART.md](docs/QU
 
 ## How It Works
 
-```mermaid
-flowchart TB
-    ADAPTER["<b>Adapter JSONL</b><br/>file, stdin, wrappers"]
-
-    subgraph SOURCES [" source exporters "]
-        SESSIONS["<b>Built-in session crawlers</b><br/>Codex, Claude, OpenClaw, OpenCode, Hermes, Cursor"]
-        LOCAL["<b>Built-in artifact crawlers</b><br/>docs, files, HTML, JSON, JSONL, gitlog"]
-        PROVIDERS["<b>Provider export crawlers</b><br/>ChatGPT, Claude exports"]
-        EXTERNAL["<b>External crawler binaries</b><br/>discrawl, gitcrawl, graincrawl, notcrawl, slacrawl, mailcrawl, telecrawl"]
-    end
-
-    SESSIONS & LOCAL & PROVIDERS & EXTERNAL --> ADAPTER
-
-    subgraph INGEST [" ingest path "]
-        PARSE["<b>Parse and validate</b><br/>miseledger.adapter.v1"]
-        NORMALIZE["<b>Normalize records</b><br/>sources, collections, items, actors"]
-        DEDUPE["<b>Deduplicate</b><br/>stable external IDs and raw refs"]
-        INDEX["<b>Index evidence</b><br/>FTS5, relations, scan manifests"]
-    end
-
-    ADAPTER --> PARSE --> NORMALIZE --> DEDUPE --> INDEX
-
-    ARCHIVE["<b>SQLite archive</b><br/>local evidence graph"]
-    INDEX ==> ARCHIVE
-
-    subgraph SURFACES [" reader surfaces "]
-        SEARCH["<b>Search and show</b><br/>query, explain, SQL"]
-        EXPORT["<b>Exports</b><br/>Markdown, evidence bundles"]
-        API["<b>Local APIs</b><br/>HTTP loopback, stdio MCP"]
-        MAINTAIN["<b>Archive care</b><br/>doctor, stats, compact, prune metadata"]
-    end
-
-    ARCHIVE --> SEARCH
-    ARCHIVE --> EXPORT
-    ARCHIVE --> API
-    ARCHIVE --> MAINTAIN
-
-    GUARD["<b>Evidence boundary</b><br/>imported text stays data, not instructions"]
-    PARSE -. rejects malformed records .-> GUARD
-    EXPORT -. marks untrusted context .-> GUARD
-
-    classDef source fill:#eff6ff,stroke:#2563eb,color:#1e3a8a;
-    classDef process fill:#ecfdf5,stroke:#059669,color:#064e3b;
-    classDef archive fill:#2563eb,stroke:#1d4ed8,color:#fff;
-    classDef surface fill:#f1f5f9,stroke:#94a3b8,color:#334155;
-    classDef guard fill:#fff7ed,stroke:#ea580c,color:#7c2d12;
-    class SESSIONS,LOCAL,PROVIDERS,EXTERNAL,ADAPTER source;
-    class PARSE,NORMALIZE,DEDUPE,INDEX process;
-    class ARCHIVE archive;
-    class SEARCH,EXPORT,API,MAINTAIN surface;
-    class GUARD guard;
-```
+<p align="center"><em>The generated evidence plate above is rebuilt from <code>docs/assets/workflows/evidence.json</code>.</em></p>
 
 MiseLedger follows one ingest path:
 
