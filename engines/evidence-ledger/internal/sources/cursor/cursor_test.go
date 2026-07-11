@@ -42,6 +42,16 @@ func records(t *testing.T, buf *bytes.Buffer) []adapter.Record {
 	return out
 }
 
+func parseRecords(t *testing.T, path string, opts sources.Options) ([]adapter.Record, sources.Result) {
+	t.Helper()
+	var buf bytes.Buffer
+	res, err := Generate(path, opts, &buf)
+	if err != nil {
+		t.Fatalf("Generate(%s): %v", path, err)
+	}
+	return records(t, &buf), res
+}
+
 func TestGeneratePromptHistoryAndSessions(t *testing.T) {
 	root := t.TempDir()
 	writeFile(t, filepath.Join(root, "prompt_history.json"),
@@ -103,6 +113,52 @@ func TestGeneratePromptHistoryAndSessions(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("titled session text not found")
+	}
+}
+
+func TestGenerateFixtureEmitsPromptHistoryAndSessions(t *testing.T) {
+	recs, res := parseRecords(t, "../../../testdata/harnesses/cursor-config.fixture", sources.Options{})
+
+	collections := map[string]bool{}
+	var promptItems, sessionItems int
+	var sawPromptSnippet, sawSessionSnippet bool
+	for _, rec := range recs {
+		if rec.Source.Kind != "cursor" {
+			t.Fatalf("source kind = %q, want cursor", rec.Source.Kind)
+		}
+		collections[rec.Collection.ExternalID] = true
+		switch rec.Collection.Kind {
+		case "prompt_history":
+			promptItems++
+			if strings.Contains(rec.Item.Text, "Summarize demo-project release notes") {
+				sawPromptSnippet = true
+			}
+		case "agent_session":
+			sessionItems++
+			if strings.Contains(rec.Item.Text, "demo-project import plan") {
+				sawSessionSnippet = true
+			}
+		default:
+			t.Fatalf("unexpected collection kind %q", rec.Collection.Kind)
+		}
+	}
+	if len(collections) != 3 {
+		t.Fatalf("collection count = %d, want 3", len(collections))
+	}
+	if promptItems != 3 {
+		t.Fatalf("prompt item count = %d, want 3", promptItems)
+	}
+	if sessionItems != 2 {
+		t.Fatalf("session item count = %d, want 2", sessionItems)
+	}
+	if res.Records != promptItems+sessionItems {
+		t.Fatalf("result.Records=%d, decoded=%d", res.Records, promptItems+sessionItems)
+	}
+	if !sawPromptSnippet {
+		t.Fatal("prompt fixture snippet did not round-trip")
+	}
+	if !sawSessionSnippet {
+		t.Fatal("session fixture snippet did not round-trip")
 	}
 }
 

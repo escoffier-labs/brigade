@@ -1,0 +1,8 @@
+{
+  "id": "demo-chat-001",
+  "title": "demo-project import plan",
+  "createdAt": "2026-06-15T14:30:00Z",
+  "workspace": "/home/user/demo-project",
+  "summary": "Plan a synthetic Cursor fixture that indexes prompt history and session metadata only.",
+  "lastMessage": "Keep all names fake and use qa@example.com as the contact."
+}
