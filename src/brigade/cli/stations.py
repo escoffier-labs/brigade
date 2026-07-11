@@ -68,6 +68,39 @@ def register(sub: argparse._SubParsersAction) -> None:
         action="store_true",
         help="Fail when a matching active executable contract drifts from Brigade's managed catalog.",
     )
+    p_conformance = stations_sub.add_parser(
+        "conformance-kit",
+        help="Write a self-contained local station conformance kit without executing station tools.",
+    )
+    p_conformance.add_argument("output", type=Path, help="Directory where the conformance kit should be written.")
+    p_conformance.add_argument("--force", action="store_true", help="Write kit files into a non-empty directory.")
+    p_conformance.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_scaffold = stations_sub.add_parser(
+        "scaffold",
+        help="Write a station.json scaffold without installing or probing the station tool.",
+    )
+    p_scaffold.add_argument("output", type=Path, help="Directory where station.json and README.md should be written.")
+    p_scaffold.add_argument("--station", required=True, help="Built-in Brigade station name or alias.")
+    p_scaffold.add_argument("--name", required=True, help="Station and tool name to write into station.json.")
+    p_scaffold.add_argument("--summary", required=True, help="Human summary for the station and tool.")
+    p_scaffold.add_argument(
+        "--command",
+        required=True,
+        help="Tool executable command name to write into station.json.",
+    )
+    p_scaffold.add_argument(
+        "--install-arg",
+        action="append",
+        required=True,
+        help="One install argv item to write into station.json (repeatable).",
+    )
+    p_scaffold.add_argument(
+        "--surface-json",
+        action="append",
+        default=None,
+        help="Strict JSON object for one tool surface (repeatable).",
+    )
+    p_scaffold.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_stations.set_defaults(func=dispatch)
 
 
@@ -87,6 +120,23 @@ def dispatch(args) -> int:
             args.path,
             json_output=args.json,
             check_managed=args.check_managed,
+        )
+    if args.stations_command == "conformance-kit":
+        return stations_cmd.conformance_kit(
+            args.output,
+            force=args.force,
+            json_output=args.json,
+        )
+    if args.stations_command == "scaffold":
+        return stations_cmd.scaffold(
+            args.output,
+            station=args.station,
+            name=args.name,
+            summary=args.summary,
+            command=args.command,
+            install=args.install_arg,
+            surface_json=args.surface_json,
+            json_output=args.json,
         )
     args._brigade_parser.error(f"unknown stations command: {args.stations_command}")
     return 2

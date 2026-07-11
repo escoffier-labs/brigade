@@ -15,7 +15,7 @@ import time
 from typing import Any
 import unicodedata
 
-from . import managed, profiles, registry, station_manifest
+from . import managed, profiles, registry, station_conformance, station_manifest, station_scaffold
 from .install import DEFAULT_WIRED_SKILLS
 from .stations import catalog as station_catalog
 from .stations import graph as station_graph
@@ -31,6 +31,24 @@ _SUBCOMMAND_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]*\Z")
 
 def _json_print(payload: dict[str, Any]) -> None:
     print(json.dumps(payload, indent=2, sort_keys=True))
+
+
+def _print_generator_payload(command: str, payload: dict[str, Any]) -> None:
+    print(f"brigade stations {command}: {payload['status']}: {_human_field(payload['detail'])}")
+    print(f"output: {_human_field(payload['output'])}")
+    files = payload.get("written") or [{"path": path} for path in payload.get("files", [])]
+    if files:
+        print("files:")
+        for entry in files:
+            path = entry["path"] if isinstance(entry, dict) else entry
+            size = entry.get("bytes") if isinstance(entry, dict) else None
+            suffix = f" ({size} bytes)" if size is not None else ""
+            print(f"  {path}{suffix}")
+    next_commands = payload.get("next_commands") or []
+    if next_commands:
+        print("next:")
+        for command_line in next_commands:
+            print(f"  {command_line}")
 
 
 def _selection_for(station_name: str, profile: profiles.StationProfile) -> str:
@@ -281,6 +299,87 @@ def discover(
     if not payload["manifests"]:
         print("next: place a station.json (schema brigade.station.v1) in a sidecar repo, then re-run discover")
     return 0
+
+
+def conformance_kit(
+    output: str | os.PathLike[str],
+    *,
+    force: bool = False,
+    json_output: bool = False,
+) -> int:
+    payload = station_conformance.write_conformance_kit(output, force=force)
+    if json_output:
+        _json_print(payload)
+    else:
+        _print_generator_payload("conformance-kit", payload)
+    return 0 if payload["ok"] else 2
+
+
+def _scaffold_cli_error(output: str | os.PathLike[str], detail: str) -> dict[str, Any]:
+    return {
+        "schema": station_scaffold.SCHEMA,
+        "ok": False,
+        "status": "error",
+        "output": str(Path(output)),
+        "files": list(station_scaffold.FILES),
+        "manifest": None,
+        "would_write": False,
+        "wrote": False,
+        "written": [],
+        "safety": {
+            "install_executed": False,
+            "probe_executed": False,
+            "writes_outside_output": None,
+        },
+        "next_commands": [],
+        "detail": detail,
+    }
+
+
+def _parse_surface_json(
+    output: str | os.PathLike[str], values: list[str] | None
+) -> list[dict[str, Any]] | dict[str, Any]:
+    surfaces: list[dict[str, Any]] = []
+    for index, raw in enumerate(values or [], start=1):
+        try:
+            surface = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            return _scaffold_cli_error(output, f"surface-json {index} must be a JSON object: {exc.msg}")
+        if not isinstance(surface, dict):
+            return _scaffold_cli_error(output, f"surface-json {index} must be a JSON object")
+        surfaces.append(surface)
+    return surfaces
+
+
+def scaffold(
+    output: str | os.PathLike[str],
+    *,
+    station: str,
+    name: str,
+    summary: str,
+    command: str,
+    install: list[str],
+    surface_json: list[str] | None = None,
+    json_output: bool = False,
+) -> int:
+    parsed_surfaces = _parse_surface_json(output, surface_json)
+    if isinstance(parsed_surfaces, dict):
+        payload = parsed_surfaces
+    else:
+        payload = station_scaffold.write_scaffold(
+            output,
+            station=station,
+            name=name,
+            summary=summary,
+            command=command,
+            install=install,
+            surfaces=parsed_surfaces or None,
+        )
+    if json_output:
+        _json_print(payload)
+    else:
+        _print_generator_payload("scaffold", payload)
+    return 0 if payload["ok"] else 2
 
 
 def catalog(

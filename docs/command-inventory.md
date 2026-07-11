@@ -58,7 +58,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade search`: 4 command path(s)
 - `brigade security`: 15 command path(s)
 - `brigade skills`: 27 command path(s)
-- `brigade stations`: 5 command path(s)
+- `brigade stations`: 7 command path(s)
 - `brigade status`: 1 command path(s)
 - `brigade tokens`: 3 command path(s)
 - `brigade tools`: 48 command path(s)
@@ -443,9 +443,11 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade skills serve-mcp`
 - `brigade skills uninstall`
 - `brigade stations catalog`
+- `brigade stations conformance-kit`
 - `brigade stations discover`
 - `brigade stations graph`
 - `brigade stations list`
+- `brigade stations scaffold`
 - `brigade stations verify`
 - `brigade status`
 - `brigade tokens doctor`
