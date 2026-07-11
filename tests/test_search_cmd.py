@@ -77,8 +77,10 @@ def test_sync_plan_is_review_only(tmp_path):
 def test_sync_plan_remains_compatible_alias(tmp_path):
     sync_payload = search_cmd.sync_plan_payload(target=tmp_path)
     refresh_payload = search_cmd.refresh_plan_payload(target=tmp_path)
-    assert sync_payload["kind"] == refresh_payload["kind"] == "refresh"
-    assert sync_payload["title"] == refresh_payload["title"] == "search refresh plan"
+    assert refresh_payload["kind"] == "refresh"
+    assert refresh_payload["title"] == "search refresh plan"
+    assert sync_payload["kind"] == "sync"
+    assert sync_payload["title"] == "search sync plan"
     assert sync_payload["commands"] == refresh_payload["commands"]
 
 
@@ -86,6 +88,14 @@ def test_search_refresh_plan_cli(tmp_path, capsys):
     assert cli.main(["search", "refresh", "plan", "--target", str(tmp_path), "--json"]) == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["title"] == "search refresh plan"
+    assert ["graphtrail", "sync", str(tmp_path.resolve())] in payload["commands"]
+
+
+def test_search_sync_plan_cli_preserves_legacy_identity(tmp_path, capsys):
+    assert cli.main(["search", "sync", "plan", "--target", str(tmp_path), "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["kind"] == "sync"
+    assert payload["title"] == "search sync plan"
     assert ["graphtrail", "sync", str(tmp_path.resolve())] in payload["commands"]
 
 

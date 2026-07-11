@@ -743,6 +743,18 @@ def event_record(
         send=send,
         evidence=evidence,
     )
+    path, write_error = _safe_event_receipt_path(target, str(payload["event_id"]))
+    payload["path"] = str(path) if path is not None else str(_events_root(target) / f"{payload['event_id']}.json")
+    if write_error is not None or path is None:
+        payload["sent"] = False
+        payload["send_exit_code"] = None
+        payload["error"] = "unsafe notification receipt path"
+        payload["write_error"] = write_error or "unknown receipt write error"
+        if json_output:
+            _json(payload)
+        else:
+            print(f"error: {payload['error']}: {payload['write_error']}")
+        return 2
     result = None
     if send:
         if not payload["installed"] or not payload["configured"]:
@@ -758,10 +770,7 @@ def event_record(
     else:
         payload["sent"] = False
         payload["send_exit_code"] = None
-    path, write_error = _safe_event_receipt_path(target, str(payload["event_id"]))
-    payload["path"] = str(path) if path is not None else str(_events_root(target) / f"{payload['event_id']}.json")
-    if write_error is None:
-        path, write_error = _write_event_receipt(target, payload)
+    path, write_error = _write_event_receipt(target, payload)
     if write_error is not None or path is None:
         payload["error"] = "unsafe notification receipt path"
         payload["write_error"] = write_error or "unknown receipt write error"

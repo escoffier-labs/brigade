@@ -190,6 +190,59 @@ def test_notifications_event_record_refuses_symlinked_events_dir_without_externa
     assert payload["error"] == "unsafe notification receipt path"
 
 
+def test_notifications_event_record_refuses_symlinked_events_dir_before_external_send(monkeypatch, tmp_target, capsys):
+    tmp_target.mkdir()
+    external = tmp_target.parent / "external-events"
+    external.mkdir()
+    events_parent = tmp_target / ".brigade" / "notifications"
+    events_parent.mkdir(parents=True)
+    (events_parent / "events").symlink_to(external, target_is_directory=True)
+    config_path = tmp_target / ".config" / "agent-notify" / "config.toml"
+    config_path.parent.mkdir(parents=True)
+    config_path.write_text(
+        "\n".join(
+            [
+                "[channels.discord-main]",
+                'type = "discord"',
+                'webhook_url_env = "TEST_DISCORD_WEBHOOK_URL"',
+                "",
+                "[profiles.operator]",
+                'channels = ["discord-main"]',
+                "default = true",
+                "",
+            ]
+        )
+    )
+    seen = {"run_called": False}
+
+    def fake_run(args, **kwargs):
+        seen["run_called"] = True
+        raise AssertionError(args)
+
+    monkeypatch.setattr(notifications_cmd, "CONFIG_PATH", config_path)
+    monkeypatch.setattr(notifications_cmd.proc, "which", lambda cmd: "/usr/bin/agent-notify")
+    monkeypatch.setattr(notifications_cmd.proc, "run", fake_run)
+    monkeypatch.setattr(notifications_cmd, "_now", lambda: "2026-01-01T00:00:00+00:00")
+    monkeypatch.setattr(notifications_cmd, "_event_receipt_suffix", lambda: "suffix-a", raising=False)
+    monkeypatch.setenv("TEST_DISCORD_WEBHOOK_URL", "https://example.invalid/hook")
+
+    rc = notifications_cmd.event_record(
+        target=tmp_target,
+        event_type="operator-alert",
+        title="Operator alert",
+        message="Do not send before proving the receipt path is safe.",
+        profile="operator",
+        send=True,
+        json_output=True,
+    )
+
+    assert rc == 2
+    assert seen["run_called"] is False
+    assert not list(external.iterdir())
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["error"] == "unsafe notification receipt path"
+
+
 def test_notifications_event_record_refuses_symlinked_receipt_file_without_external_write(
     monkeypatch, tmp_target, capsys
 ):

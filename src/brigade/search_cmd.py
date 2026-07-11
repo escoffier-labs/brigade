@@ -212,13 +212,13 @@ def doctor(*, target: Path, json_output: bool = False) -> int:
     return health.doctor_exit(str(payload.get("health") or "missing"))
 
 
-def refresh_plan_payload(*, target: Path) -> dict[str, Any]:
+def _plan_payload(*, target: Path, kind: str, title: str, aliases: list[str]) -> dict[str, Any]:
     target = target.expanduser().resolve()
     return {
         "target": str(target),
         "station": "search",
-        "kind": "refresh",
-        "title": "search refresh plan",
+        "kind": kind,
+        "title": title,
         "created_at": health.now_iso(),
         "installed": {
             "graphtrail": proc.which("graphtrail") is not None,
@@ -226,7 +226,7 @@ def refresh_plan_payload(*, target: Path) -> dict[str, Any]:
             "code-search-mcp": proc.which("code-search-mcp") is not None,
         },
         "compatibility": {"code-search-mcp": {"owner": "code-search-api/mcp"}},
-        "aliases": ["brigade search sync plan"],
+        "aliases": aliases,
         "commands": [
             ["graphtrail", "sync", str(target)],
             ["graphtrail", "doctor", "--json"],
@@ -258,8 +258,22 @@ def refresh_plan_payload(*, target: Path) -> dict[str, Any]:
     }
 
 
+def refresh_plan_payload(*, target: Path) -> dict[str, Any]:
+    return _plan_payload(
+        target=target,
+        kind="refresh",
+        title="search refresh plan",
+        aliases=["brigade search sync plan"],
+    )
+
+
 def sync_plan_payload(*, target: Path) -> dict[str, Any]:
-    return refresh_plan_payload(target=target)
+    return _plan_payload(
+        target=target,
+        kind="sync",
+        title="search sync plan",
+        aliases=["brigade search refresh plan"],
+    )
 
 
 def refresh_plan(*, target: Path, write: bool = False, json_output: bool = False) -> int:
@@ -277,4 +291,14 @@ def refresh_plan(*, target: Path, write: bool = False, json_output: bool = False
 
 
 def sync_plan(*, target: Path, write: bool = False, json_output: bool = False) -> int:
-    return refresh_plan(target=target, write=write, json_output=json_output)
+    payload = sync_plan_payload(target=target)
+    if write:
+        payload = health.write_plan(target, "search", payload)
+    if json_output:
+        health.json_print(payload)
+        return 0
+    if write:
+        print(f"wrote search sync plan: {payload['plan_path']}")
+    else:
+        print(health.render_plan_md("search sync plan", payload), end="")
+    return 0
