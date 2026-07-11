@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 
 from brigade import install as install_mod
@@ -15,6 +16,17 @@ def _repo_selection() -> Selection:
 
 def _read_gi(target: Path) -> str:
     return (target / ".gitignore").read_text()
+
+
+def _git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["git", *args],
+        cwd=repo,
+        check=False,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
 
 
 def test_init_creates_gitignore_when_missing(tmp_target: Path):
@@ -37,6 +49,25 @@ def test_init_creates_gitignore_when_missing(tmp_target: Path):
     assert ".brigade/security/" in gi
     assert ".brigade/chat-memory-sweeps/" in gi
     assert ".brigade/work/" in gi
+
+
+def test_init_gitignore_leaves_mcp_catalog_trackable_but_ignores_local_state(tmp_path: Path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    assert _git(repo, "init").returncode == 0
+
+    rc = install_selection(repo, _repo_selection())
+
+    assert rc == 0
+    assert _git(repo, "check-ignore", ".brigade/mcp.json").returncode == 1
+    for ignored in (
+        ".brigade/mcp/state.json",
+        ".brigade/work/verify-runs/run.json",
+        ".brigade/security/cache.json",
+        ".brigade/runs/session.json",
+    ):
+        result = _git(repo, "check-ignore", ignored)
+        assert result.returncode == 0, result.stderr
 
 
 def test_init_appends_block_to_existing_gitignore(tmp_target: Path):
