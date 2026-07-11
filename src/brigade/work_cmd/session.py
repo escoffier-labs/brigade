@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import inspect
 import re
 import shlex
 import shutil
@@ -15,6 +16,16 @@ from .. import dogfood_cmd, localio
 from ..install import apply_gitignore
 from . import constants, helpers, ledger as ledger_mod, config as config_mod, services as services_mod
 from . import scanners as scanners_mod, reviews as reviews_mod
+
+
+def _security_health_for_brief(security_cmd: Any, target: Path) -> dict[str, Any]:
+    signature = inspect.signature(security_cmd.health)
+    supports_cache_only = "suppression_cache_only" in signature.parameters or any(
+        parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in signature.parameters.values()
+    )
+    if supports_cache_only:
+        return security_cmd.health(target, suppression_cache_only=True)
+    return security_cmd.health(target)
 
 
 def _latest_run_next_metadata(target: Path) -> tuple[str | None, dict[str, Any]]:
@@ -600,7 +611,7 @@ def _brief_payload(target: Path, *, limit: int = 3, include_code_graph: bool = F
     review_health = reviews_mod._review_health(target)
     chat_health = chat_cmd.health(target)
     memory_health = memory_cmd.health(target)
-    security_health = security_cmd.health(target)
+    security_health = _security_health_for_brief(security_cmd, target)
     backup_health = config_mod._backup_health(target)
     tool_health = tools_cmd.health(target)
     roadmap_health = roadmap_cmd.health(target)
@@ -686,6 +697,7 @@ def _brief_payload(target: Path, *, limit: int = 3, include_code_graph: bool = F
             "issue_count": security_health["issue_count"],
             "top_issue": security_health["top_issue"],
             "top_finding": security_health["top_finding"],
+            "suppression_cache": security_health.get("suppression_cache"),
         },
         "backup_health": {
             "config_path": backup_health["config_path"],
@@ -1442,6 +1454,18 @@ def brief(*, target: Path, limit: int = 3, json_output: bool = False) -> int:
         print(f"security_config: {security_health.get('config_path')}")
         issue_count = security_health.get("issue_count")
         print(f"security_health: {helpers._count_status(issue_count)}")
+        suppression_cache = (
+            security_health.get("suppression_cache")
+            if isinstance(security_health.get("suppression_cache"), dict)
+            else None
+        )
+        if suppression_cache and suppression_cache.get("status") != "ok":
+            print(
+                "security_suppressions_cache: "
+                f"{suppression_cache.get('status')} {helpers._short(str(suppression_cache.get('detail', '')))}"
+            )
+            if suppression_cache.get("next_command"):
+                print(f"security_suppressions_next_command: {suppression_cache.get('next_command')}")
         top_security = (
             security_health.get("top_finding") if isinstance(security_health.get("top_finding"), dict) else None
         )

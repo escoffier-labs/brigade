@@ -672,6 +672,102 @@ def test_work_brief_json_reports_recent_sessions(tmp_path, monkeypatch, capsys):
     assert payload["suggested_command"] == 'brigade work end --note "..." --handoff'
 
 
+def test_work_brief_uses_suppression_health_cache_without_full_scan(tmp_path, monkeypatch, capsys):
+    _init_git_repo(tmp_path)
+    dogfood_cmd.init(target=tmp_path)
+    (tmp_path / ".env").write_text("SERVICE_TOKEN=abcd1234abcd1234abcd1234\n")
+    fingerprint = security_cmd.scan_target(tmp_path)["findings"][0]["fingerprint"]
+    config = tmp_path / ".brigade" / "security.toml"
+    config.write_text(
+        "\n".join(
+            [
+                'policy = "personal"',
+                'fail_on = "none"',
+                "include_templates = false",
+                "",
+                "[suppressions]",
+                f'fingerprints = ["{fingerprint}"]',
+                "",
+                "[suppression_reasons]",
+                f'{fingerprint} = "reviewed fake local token"',
+                "",
+            ]
+        )
+    )
+    assert security_cmd.scan(target=tmp_path, json_output=True) == 0
+    capsys.readouterr()
+    calls = 0
+
+    def forbidden_scan(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        raise AssertionError("work brief triggered a full security scan")
+
+    monkeypatch.setattr(security_cmd, "scan_target", forbidden_scan)
+
+    assert work_cmd.brief(target=tmp_path) == 0
+    out = capsys.readouterr().out
+    assert calls == 0
+    assert "security_suppressions_cache:" not in out
+
+    (tmp_path / "new-candidate.txt").write_text("hello\n")
+    assert work_cmd.brief(target=tmp_path) == 0
+    out = capsys.readouterr().out
+    assert calls == 0
+    assert "security_suppressions_cache: stale" in out
+    assert (
+        f"security_suppressions_next_command: brigade security scan --target {tmp_path.resolve()} "
+        f"--output-dir {tmp_path.resolve() / '.brigade' / 'security' / 'latest'}"
+    ) in out
+
+
+def test_work_brief_missing_or_invalid_suppression_cache_fails_open_without_scan(tmp_path, monkeypatch, capsys):
+    _init_git_repo(tmp_path)
+    dogfood_cmd.init(target=tmp_path)
+    config = tmp_path / ".brigade" / "security.toml"
+    config.write_text(
+        "\n".join(
+            [
+                'policy = "personal"',
+                'fail_on = "none"',
+                "include_templates = false",
+                "",
+                "[suppressions]",
+                'fingerprints = ["0123456789abcdef"]',
+                "",
+                "[suppression_reasons]",
+                '0123456789abcdef = "reviewed fake local token"',
+                "",
+            ]
+        )
+    )
+    calls = 0
+
+    def forbidden_scan(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        raise AssertionError("work brief triggered a full security scan")
+
+    monkeypatch.setattr(security_cmd, "scan_target", forbidden_scan)
+
+    assert work_cmd.brief(target=tmp_path) == 0
+    out = capsys.readouterr().out
+    assert calls == 0
+    assert "security_suppressions_cache: missing" in out
+    assert (
+        f"security_suppressions_next_command: brigade security scan --target {tmp_path.resolve()} "
+        f"--output-dir {tmp_path.resolve() / '.brigade' / 'security' / 'latest'}"
+    ) in out
+
+    cache = tmp_path / ".brigade" / "security" / "suppression-health-cache.json"
+    cache.parent.mkdir(parents=True, exist_ok=True)
+    cache.write_text("{not-json")
+    assert work_cmd.brief(target=tmp_path) == 0
+    out = capsys.readouterr().out
+    assert calls == 0
+    assert "security_suppressions_cache: invalid" in out
+
+
 def test_work_brief_json_attaches_graphtrail_context_for_selected_task(tmp_path, monkeypatch, capsys):
     _init_git_repo(tmp_path)
     db = tmp_path / ".graphtrail" / "graphtrail.db"

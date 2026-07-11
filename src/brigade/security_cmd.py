@@ -30,6 +30,8 @@ SEVERITY_ORDER = {
 }
 CONFIG_REL_PATH = ".brigade/security.toml"
 ARTIFACTS_REL_PATH = ".brigade/security/latest"
+SUPPRESSION_HEALTH_CACHE_REL_PATH = ".brigade/security/suppression-health-cache.json"
+SUPPRESSION_HEALTH_CACHE_VERSION = 1
 POLICIES = {
     "personal": {
         "fail_on": "critical",
@@ -265,12 +267,22 @@ class EffectivePolicy:
     config_loaded: bool
 
 
+@dataclass(frozen=True)
+class FileClassification:
+    surface: str
+    confidence: str
+
+
 def config_path(target: Path) -> Path:
     return target / CONFIG_REL_PATH
 
 
 def default_artifacts_dir(target: Path) -> Path:
     return target / ARTIFACTS_REL_PATH
+
+
+def suppression_health_cache_path(target: Path) -> Path:
+    return target / SUPPRESSION_HEALTH_CACHE_REL_PATH
 
 
 def _closeouts_root(target: Path) -> Path:
@@ -1447,6 +1459,181 @@ def unsuppress(*, target: Path, fingerprint: str, json_output: bool = False) -> 
     return 0
 
 
+def _file_sha256(path: Path) -> str | None:
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError:
+        return None
+
+
+def _candidate_file_records(target: Path, effective: EffectivePolicy) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    for path in _iter_scan_files(target, include_paths=effective.include_paths, exclude_paths=effective.exclude_paths):
+        classification = _classification_for(path, target)
+        if not effective.include_templates and classification.confidence == "template":
+            continue
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        records.append(
+            {
+                "path": str(path.relative_to(target)),
+                "size": stat.st_size,
+                "mtime_ns": stat.st_mtime_ns,
+            }
+        )
+    for inbox_rel in sorted(set(WRITER_INBOXES.values())):
+        inbox = target / inbox_rel
+        if not inbox.is_dir():
+            continue
+        for path in sorted(inbox.glob("*.md")):
+            if path.name == "TEMPLATE.md":
+                continue
+            rel = str(path.relative_to(target))
+            if not _scan_path_selected(
+                rel,
+                include_paths=effective.include_paths,
+                exclude_paths=effective.exclude_paths,
+            ):
+                continue
+            try:
+                stat = path.stat()
+            except OSError:
+                continue
+            records.append({"path": rel, "size": stat.st_size, "mtime_ns": stat.st_mtime_ns})
+    return sorted(records, key=lambda item: str(item["path"]))
+
+
+def _candidate_file_fingerprint(target: Path, effective: EffectivePolicy) -> str:
+    records = _candidate_file_records(target, effective)
+    payload = json.dumps(records, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(payload.encode()).hexdigest()[:16]
+
+
+def _suppression_cache_key(target: Path, effective: EffectivePolicy, config: SecurityConfig) -> dict[str, Any]:
+    config_digest = _file_sha256(effective.config_path) if effective.config_path.is_file() else None
+    return {
+        "version": SUPPRESSION_HEALTH_CACHE_VERSION,
+        "config_digest": config_digest,
+        "policy": effective.policy,
+        "scan_profile": effective.scan_profile,
+        "include_templates": effective.include_templates,
+        "enabled_checks": list(effective.enabled_checks),
+        "include_paths": list(effective.include_paths),
+        "exclude_paths": list(effective.exclude_paths),
+        "severity_threshold": effective.severity_threshold,
+        "suppressions": list(effective.suppressions),
+        "suppression_reasons": dict(sorted(config.suppression_reasons.items())),
+        "candidate_fingerprint": _candidate_file_fingerprint(target, effective),
+    }
+
+
+def _suppression_health_from_active(config: SecurityConfig, active: set[str]) -> dict[str, Any]:
+    stale = [fingerprint for fingerprint in config.suppressions if fingerprint not in active]
+    missing_reasons = [
+        fingerprint for fingerprint in config.suppressions if not config.suppression_reasons.get(fingerprint)
+    ]
+    return {
+        "suppression_count": len(config.suppressions),
+        "missing_reasons": missing_reasons,
+        "stale": stale,
+    }
+
+
+def _write_suppression_health_cache(target: Path, effective: EffectivePolicy, health: dict[str, Any]) -> None:
+    config = load_config(target)
+    if config is None or not effective.config_loaded or not effective.suppressions:
+        return
+    payload = {
+        "schema": "brigade.security.suppression-health-cache.v1",
+        "key": _suppression_cache_key(target, effective, config),
+        "health": health,
+    }
+    _write_json(suppression_health_cache_path(target), payload)
+
+
+def _write_suppression_health_cache_from_report(
+    target: Path, effective: EffectivePolicy, report: dict[str, Any]
+) -> None:
+    config = load_config(target)
+    if config is None or not config.suppressions:
+        return
+    active = {
+        str(item.get("fingerprint"))
+        for item in list(report.get("findings") or []) + list(report.get("suppressed_findings") or [])
+        if item.get("fingerprint")
+    }
+    _write_suppression_health_cache(target, effective, _suppression_health_from_active(config, active))
+
+
+def _suppression_full_scan_next_command(target: Path) -> str:
+    return f"brigade security scan --target {target} --output-dir {default_artifacts_dir(target)}"
+
+
+def suppression_health_cache(target: Path) -> dict[str, Any]:
+    target = target.expanduser().resolve()
+    config = load_config(target)
+    if config is None or not config.suppressions:
+        return {
+            "status": "ok",
+            "health": {"suppression_count": 0, "missing_reasons": [], "stale": []},
+            "detail": "no suppressions configured",
+            "next_command": None,
+        }
+    effective = _effective_policy(target, policy=None, fail_on=None, include_templates=None)
+    path = suppression_health_cache_path(target)
+    next_command = _suppression_full_scan_next_command(target)
+    if not path.is_file():
+        return {
+            "status": "missing",
+            "health": None,
+            "detail": f"cache missing; run `{next_command}`",
+            "next_command": next_command,
+        }
+    try:
+        payload = _read_json(path)
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        return {
+            "status": "invalid",
+            "health": None,
+            "detail": f"cache invalid: {exc}; run `{next_command}`",
+            "next_command": next_command,
+        }
+    if not isinstance(payload, dict):
+        return {
+            "status": "invalid",
+            "health": None,
+            "detail": f"cache invalid: expected object; run `{next_command}`",
+            "next_command": next_command,
+        }
+    cache_key = payload.get("key")
+    if not isinstance(cache_key, dict):
+        return {
+            "status": "invalid",
+            "health": None,
+            "detail": f"cache invalid: missing key; run `{next_command}`",
+            "next_command": next_command,
+        }
+    health = payload.get("health")
+    if not isinstance(health, dict):
+        return {
+            "status": "invalid",
+            "health": None,
+            "detail": f"cache invalid: missing health; run `{next_command}`",
+            "next_command": next_command,
+        }
+    expected_key = _suppression_cache_key(target, effective, config)
+    if payload.get("key") != expected_key:
+        return {
+            "status": "stale",
+            "health": None,
+            "detail": f"cache stale; run `{next_command}`",
+            "next_command": next_command,
+        }
+    return {"status": "ok", "health": health, "detail": "cache fresh", "next_command": None}
+
+
 def suppression_health(target: Path) -> dict[str, Any]:
     target = target.expanduser().resolve()
     config = load_config(target)
@@ -1465,15 +1652,9 @@ def suppression_health(target: Path) -> dict[str, Any]:
         severity_threshold=effective.severity_threshold,
     )
     active = {str(item.get("fingerprint")) for item in report["findings"] if item.get("fingerprint")}
-    stale = [fingerprint for fingerprint in config.suppressions if fingerprint not in active]
-    missing_reasons = [
-        fingerprint for fingerprint in config.suppressions if not config.suppression_reasons.get(fingerprint)
-    ]
-    return {
-        "suppression_count": len(config.suppressions),
-        "missing_reasons": missing_reasons,
-        "stale": stale,
-    }
+    health = _suppression_health_from_active(config, active)
+    _write_suppression_health_cache(target, effective, health)
+    return health
 
 
 def _short(text: str, limit: int = 160) -> str:
@@ -1647,7 +1828,13 @@ def harness_wiring_payload(target: Path) -> dict[str, Any]:
         except OSError:
             continue
         scanned_files.append(str(path.relative_to(target)))
-        _scan_harness_wiring_document(findings, target=target, path=path, text=text)
+        _scan_harness_wiring_document(
+            findings,
+            target=target,
+            path=path,
+            text=text,
+            classification=_classification_for(path, target),
+        )
     findings = _filter_findings(
         findings,
         enabled_checks=SECURITY_CHECKS,
@@ -1706,7 +1893,9 @@ def _server_timeout(server: dict[str, Any]) -> object:
     return None
 
 
-def _scan_mcp_document(findings: list[dict[str, Any]], *, target: Path, path: Path, text: str) -> None:
+def _scan_mcp_document(
+    findings: list[dict[str, Any]], *, target: Path, path: Path, text: str, classification: FileClassification
+) -> None:
     if not _is_mcp_document(path, text):
         return
     try:
@@ -1729,6 +1918,7 @@ def _scan_mcp_document(findings: list[dict[str, Any]], *, target: Path, path: Pa
             title="Large MCP server set",
             evidence=f"mcpServers: {len(servers)} configured",
             suggestion="Review whether every MCP server is still needed and disable stale or duplicate servers.",
+            classification=classification,
         )
     for server_name, raw_server in servers.items():
         if not isinstance(server_name, str) or not isinstance(raw_server, dict):
@@ -1749,6 +1939,7 @@ def _scan_mcp_document(findings: list[dict[str, Any]], *, target: Path, path: Pa
                 title="MCP high-risk local command",
                 evidence=f"{server_name}: command={command}",
                 suggestion="Prefer purpose-built MCP binaries with narrow capabilities over direct shell, container, or remote-copy commands.",
+                classification=classification,
             )
         if isinstance(command, str) and command == "npx" and isinstance(args, list):
             package = _first_npx_package(args)
@@ -1763,6 +1954,7 @@ def _scan_mcp_document(findings: list[dict[str, Any]], *, target: Path, path: Pa
                     title="MCP unpinned npx package",
                     evidence=f"{server_name}: npx {package}",
                     suggestion="Pin MCP package versions or install through a reviewed lockfile.",
+                    classification=classification,
                 )
         if isinstance(args, list):
             for arg in args:
@@ -1779,6 +1971,7 @@ def _scan_mcp_document(findings: list[dict[str, Any]], *, target: Path, path: Pa
                         title="MCP shell metacharacter in argument",
                         evidence=f"{server_name}: arg={arg}",
                         suggestion="Remove shell metacharacters from MCP args and pass structured arguments directly.",
+                        classification=classification,
                     )
                 if arg in MCP_BROAD_PATHS:
                     _finding(
@@ -1791,6 +1984,7 @@ def _scan_mcp_document(findings: list[dict[str, Any]], *, target: Path, path: Pa
                         title="MCP broad filesystem argument",
                         evidence=f"{server_name}: arg={arg}",
                         suggestion="Scope MCP filesystem access to explicit project directories instead of home or filesystem roots.",
+                        classification=classification,
                     )
                 if MCP_SENSITIVE_ARG_RE.search(arg):
                     _finding(
@@ -1803,6 +1997,7 @@ def _scan_mcp_document(findings: list[dict[str, Any]], *, target: Path, path: Pa
                         title="MCP sensitive file argument",
                         evidence=f"{server_name}: arg={arg}",
                         suggestion="Avoid passing broad sensitive file paths to MCP servers; scope access to explicit project files.",
+                        classification=classification,
                     )
         env = server.get("env")
         if isinstance(env, dict):
@@ -1820,6 +2015,7 @@ def _scan_mcp_document(findings: list[dict[str, Any]], *, target: Path, path: Pa
                         title="MCP hardcoded environment secret",
                         evidence=_redact_secret_evidence(f"{server_name}.env.{key}={value}"),
                         suggestion="Load MCP secrets from local environment or secret storage instead of checked-in config.",
+                        classification=classification,
                     )
         url = server.get("url")
         if isinstance(url, str) and url.startswith(("http://", "https://")):
@@ -1833,6 +2029,7 @@ def _scan_mcp_document(findings: list[dict[str, Any]], *, target: Path, path: Pa
                 title="Remote MCP transport",
                 evidence=f"{server_name}: url={url}",
                 suggestion="Prefer local MCP servers, pin remote hosts, and document authentication boundaries.",
+                classification=classification,
             )
         if _server_timeout(server) is None:
             _finding(
@@ -1845,6 +2042,7 @@ def _scan_mcp_document(findings: list[dict[str, Any]], *, target: Path, path: Pa
                 title="MCP server missing timeout",
                 evidence=f"{server_name}: timeout unset",
                 suggestion="Set an explicit MCP startup or request timeout so hung servers fail predictably.",
+                classification=classification,
             )
 
 
@@ -1864,14 +2062,24 @@ def _is_harness_wiring_document(path: Path, target: Path) -> bool:
     return False
 
 
-def _scan_harness_wiring_document(findings: list[dict[str, Any]], *, target: Path, path: Path, text: str) -> None:
+def _scan_harness_wiring_document(
+    findings: list[dict[str, Any]], *, target: Path, path: Path, text: str, classification: FileClassification
+) -> None:
     if not _is_harness_wiring_document(path, target):
         return
     try:
         data = json.loads(text)
     except json.JSONDecodeError:
         return
-    _scan_harness_value(findings, target=target, path=path, text=text, value=data, key_path=())
+    _scan_harness_value(
+        findings,
+        target=target,
+        path=path,
+        text=text,
+        value=data,
+        key_path=(),
+        classification=classification,
+    )
 
 
 def _scan_harness_value(
@@ -1882,6 +2090,7 @@ def _scan_harness_value(
     text: str,
     value: object,
     key_path: tuple[str, ...],
+    classification: FileClassification,
 ) -> None:
     if isinstance(value, dict):
         for key, child in value.items():
@@ -1889,14 +2098,36 @@ def _scan_harness_value(
                 continue
             if key.startswith("_"):
                 continue
-            _scan_harness_value(findings, target=target, path=path, text=text, value=child, key_path=key_path + (key,))
+            _scan_harness_value(
+                findings,
+                target=target,
+                path=path,
+                text=text,
+                value=child,
+                key_path=key_path + (key,),
+                classification=classification,
+            )
     elif isinstance(value, list):
         for index, child in enumerate(value):
             _scan_harness_value(
-                findings, target=target, path=path, text=text, value=child, key_path=key_path + (str(index),)
+                findings,
+                target=target,
+                path=path,
+                text=text,
+                value=child,
+                key_path=key_path + (str(index),),
+                classification=classification,
             )
     elif isinstance(value, str):
-        _scan_harness_string(findings, target=target, path=path, text=text, value=value, key_path=key_path)
+        _scan_harness_string(
+            findings,
+            target=target,
+            path=path,
+            text=text,
+            value=value,
+            key_path=key_path,
+            classification=classification,
+        )
 
 
 def _scan_harness_string(
@@ -1907,16 +2138,41 @@ def _scan_harness_string(
     text: str,
     value: str,
     key_path: tuple[str, ...],
+    classification: FileClassification,
 ) -> None:
     if _is_placeholder(value):
         return
     key = _harness_semantic_key(key_path)
     if key in HARNESS_PATH_KEYS:
-        _scan_harness_path_value(findings, target=target, path=path, text=text, value=value, key_path=key_path)
+        _scan_harness_path_value(
+            findings,
+            target=target,
+            path=path,
+            text=text,
+            value=value,
+            key_path=key_path,
+            classification=classification,
+        )
     if key in HARNESS_COMMAND_KEYS:
-        _scan_harness_command_value(findings, target=target, path=path, text=text, value=value, key_path=key_path)
+        _scan_harness_command_value(
+            findings,
+            target=target,
+            path=path,
+            text=text,
+            value=value,
+            key_path=key_path,
+            classification=classification,
+        )
     if key in HARNESS_URL_KEYS or value.startswith(("http://", "https://")):
-        _scan_harness_url_value(findings, target=target, path=path, text=text, value=value, key_path=key_path)
+        _scan_harness_url_value(
+            findings,
+            target=target,
+            path=path,
+            text=text,
+            value=value,
+            key_path=key_path,
+            classification=classification,
+        )
 
 
 def _harness_semantic_key(key_path: tuple[str, ...]) -> str:
@@ -1951,6 +2207,7 @@ def _scan_harness_path_value(
     text: str,
     value: str,
     key_path: tuple[str, ...],
+    classification: FileClassification,
 ) -> None:
     if value.startswith(("http://", "https://")):
         return
@@ -1969,6 +2226,7 @@ def _scan_harness_path_value(
             title="Harness wiring uses broad filesystem path",
             evidence=evidence,
             suggestion="Scope agent and harness paths to explicit repo-local directories or reviewed config files.",
+            classification=classification,
         )
     if Path(value).is_absolute() or TEMPLATE_PRIVATE_PATH_RE.search(value):
         _finding(
@@ -1981,6 +2239,7 @@ def _scan_harness_path_value(
             title="Harness wiring contains host-private absolute path",
             evidence=evidence,
             suggestion="Use repo-relative paths, placeholders, or environment variables instead of host-private absolute paths.",
+            classification=classification,
         )
     if ".." in parts:
         _finding(
@@ -1993,6 +2252,7 @@ def _scan_harness_path_value(
             title="Harness wiring path escapes target",
             evidence=evidence,
             suggestion="Remove '..' path traversal from harness wiring and keep generated paths under the target workspace.",
+            classification=classification,
         )
 
 
@@ -2004,6 +2264,7 @@ def _scan_harness_command_value(
     text: str,
     value: str,
     key_path: tuple[str, ...],
+    classification: FileClassification,
 ) -> None:
     if REMOTE_SHELL_RE.search(value):
         _finding(
@@ -2016,6 +2277,7 @@ def _scan_harness_command_value(
             title="Harness wiring pipes remote content into shell",
             evidence=_harness_evidence(key_path, value),
             suggestion="Replace remote shell bootstrap commands with checked-in, pinned, and reviewed setup steps.",
+            classification=classification,
         )
     elif MCP_SHELL_META_RE.search(value):
         _finding(
@@ -2028,6 +2290,7 @@ def _scan_harness_command_value(
             title="Harness wiring command contains shell metacharacter",
             evidence=_harness_evidence(key_path, value),
             suggestion="Pass structured arguments through harness config instead of shell-expanded command strings.",
+            classification=classification,
         )
 
 
@@ -2039,6 +2302,7 @@ def _scan_harness_url_value(
     text: str,
     value: str,
     key_path: tuple[str, ...],
+    classification: FileClassification,
 ) -> None:
     if not value.startswith(("http://", "https://")):
         return
@@ -2066,6 +2330,7 @@ def _scan_harness_url_value(
         title=title,
         evidence=_harness_evidence(key_path, value),
         suggestion=suggestion,
+        classification=classification,
     )
 
 
@@ -2088,7 +2353,9 @@ def _first_npx_package(args: list[object]) -> str | None:
     return None
 
 
-def _scan_package_json(findings: list[dict[str, Any]], *, target: Path, path: Path, text: str) -> None:
+def _scan_package_json(
+    findings: list[dict[str, Any]], *, target: Path, path: Path, text: str, classification: FileClassification
+) -> None:
     if path.name != "package.json":
         return
     try:
@@ -2116,6 +2383,7 @@ def _scan_package_json(findings: list[dict[str, Any]], *, target: Path, path: Pa
                 title="Package script pipes remote content into shell",
                 evidence=evidence,
                 suggestion="Replace curl-to-shell package scripts with checked-in, pinned, and reviewed installer steps.",
+                classification=classification,
             )
         if DESTRUCTIVE_RE.search(command):
             _finding(
@@ -2128,6 +2396,7 @@ def _scan_package_json(findings: list[dict[str, Any]], *, target: Path, path: Pa
                 title="Package script contains destructive command",
                 evidence=evidence,
                 suggestion="Gate destructive package scripts behind explicit operator approval and document recovery steps.",
+                classification=classification,
             )
         npx_match = UNPINNED_NPX_RE.search(command)
         if npx_match and "@" not in npx_match.group(1):
@@ -2141,6 +2410,7 @@ def _scan_package_json(findings: list[dict[str, Any]], *, target: Path, path: Pa
                 title="Package script uses unpinned npx",
                 evidence=evidence,
                 suggestion="Pin npx package versions or move execution behind a reviewed lockfile.",
+                classification=classification,
             )
         if ENV_DUMP_RE.search(command):
             _finding(
@@ -2153,10 +2423,13 @@ def _scan_package_json(findings: list[dict[str, Any]], *, target: Path, path: Pa
                 title="Package script may leak environment",
                 evidence=evidence,
                 suggestion="Avoid dumping environment variables in package scripts, especially near network or file redirection.",
+                classification=classification,
             )
 
 
-def _scan_github_actions(findings: list[dict[str, Any]], *, target: Path, path: Path, text: str) -> None:
+def _scan_github_actions(
+    findings: list[dict[str, Any]], *, target: Path, path: Path, text: str, classification: FileClassification
+) -> None:
     rel = path.relative_to(target)
     if len(rel.parts) < 3 or rel.parts[0] != ".github" or rel.parts[1] != "workflows":
         return
@@ -2173,6 +2446,7 @@ def _scan_github_actions(findings: list[dict[str, Any]], *, target: Path, path: 
                 title="GitHub Actions uses pull_request_target",
                 evidence=stripped,
                 suggestion="Avoid pull_request_target for untrusted code paths or isolate it from checkout and secret access.",
+                classification=classification,
             )
         if stripped.startswith("permissions: write-all"):
             _finding(
@@ -2185,6 +2459,7 @@ def _scan_github_actions(findings: list[dict[str, Any]], *, target: Path, path: 
                 title="GitHub Actions grants write-all permissions",
                 evidence=stripped,
                 suggestion="Use least-privilege workflow permissions instead of write-all.",
+                classification=classification,
             )
         action_match = UNPINNED_ACTION_RE.search(stripped)
         if action_match:
@@ -2198,6 +2473,7 @@ def _scan_github_actions(findings: list[dict[str, Any]], *, target: Path, path: 
                 title="GitHub Action missing pinned ref",
                 evidence=stripped,
                 suggestion="Pin actions to an immutable commit SHA or a reviewed release ref.",
+                classification=classification,
             )
         pinned_match = PINNED_ACTION_RE.search(stripped)
         if pinned_match:
@@ -2215,10 +2491,13 @@ def _scan_github_actions(findings: list[dict[str, Any]], *, target: Path, path: 
                     title="GitHub Action uses floating ref",
                     evidence=stripped,
                     suggestion="Pin GitHub Actions to immutable commit SHAs for release-sensitive workflows.",
+                    classification=classification,
                 )
 
 
-def _scan_python_project(findings: list[dict[str, Any]], *, target: Path, path: Path, text: str) -> None:
+def _scan_python_project(
+    findings: list[dict[str, Any]], *, target: Path, path: Path, text: str, classification: FileClassification
+) -> None:
     if path.name not in {"pyproject.toml", "setup.cfg", "requirements.txt"}:
         return
     current_section = ""
@@ -2243,6 +2522,7 @@ def _scan_python_project(findings: list[dict[str, Any]], *, target: Path, path: 
                 title="Python dependency uses URL source",
                 evidence=stripped,
                 suggestion="Prefer pinned package versions or reviewed immutable commit URLs for Python dependencies.",
+                classification=classification,
             )
         if "setup_requires" in stripped or "dependency_links" in stripped:
             _finding(
@@ -2255,6 +2535,7 @@ def _scan_python_project(findings: list[dict[str, Any]], *, target: Path, path: 
                 title="Python project uses legacy install hook",
                 evidence=stripped,
                 suggestion="Avoid legacy install-time dependency hooks and move dependencies into static project metadata.",
+                classification=classification,
             )
 
 
@@ -2270,26 +2551,107 @@ def _python_url_dependency_candidate(file_name: str, section: str, stripped: str
     return stripped.startswith(("dependencies", "requires"))
 
 
-def _iter_scan_files(target: Path) -> list[Path]:
-    paths: list[Path] = []
-    for path in target.rglob("*"):
-        if path.is_dir():
+def _scan_path_selected(rel_path: str, *, include_paths: tuple[str, ...], exclude_paths: tuple[str, ...]) -> bool:
+    if include_paths and not _path_matches_any(rel_path, include_paths):
+        return False
+    return not (exclude_paths and _path_matches_any(rel_path, exclude_paths))
+
+
+def _candidate_scan_roots(target: Path, include_paths: tuple[str, ...]) -> list[Path]:
+    if not include_paths:
+        return [target]
+    roots: list[Path] = []
+    seen: set[Path] = set()
+    for pattern in include_paths:
+        clean = pattern.strip().replace("\\", "/").strip("/")
+        if not clean:
             continue
-        rel_parts = path.relative_to(target).parts
-        if any(part in SKIP_DIRS for part in rel_parts):
-            continue
-        if any(rel_parts[: len(prefix)] == prefix for prefix in SKIP_PREFIXES):
-            continue
-        if path.suffix.lower() not in TEXT_SUFFIXES:
-            continue
+        root = (target / clean).resolve()
         try:
-            if path.stat().st_size > 500_000:
-                continue
-        except OSError:
+            root.relative_to(target)
+        except ValueError:
             continue
-        paths.append(path)
+        if root.exists() and root not in seen:
+            roots.append(root)
+            seen.add(root)
+    return sorted(roots)
+
+
+def _should_scan_file(path: Path) -> bool:
+    if path.suffix.lower() not in TEXT_SUFFIXES:
+        return False
+    try:
+        return path.stat().st_size <= 500_000
+    except OSError:
+        return False
+
+
+def _iter_scan_files(
+    target: Path, *, include_paths: tuple[str, ...] = (), exclude_paths: tuple[str, ...] = ()
+) -> list[Path]:
+    paths: list[Path] = []
+    for root in _candidate_scan_roots(target, include_paths):
+        if root.is_file():
+            rel = str(root.relative_to(target))
+            rel_parts = root.relative_to(target).parts
+            if (
+                not _scan_path_selected(rel, include_paths=include_paths, exclude_paths=exclude_paths)
+                or any(part in SKIP_DIRS for part in rel_parts)
+                or any(rel_parts[: len(prefix)] == prefix for prefix in SKIP_PREFIXES)
+                or not _should_scan_file(root)
+            ):
+                continue
+            paths.append(root)
+            continue
+        for dirpath, dirnames, filenames in os.walk(root):
+            current = Path(dirpath)
+            try:
+                rel_current = current.relative_to(target)
+            except ValueError:
+                dirnames[:] = []
+                continue
+            rel_parts = rel_current.parts
+            if rel_parts and (
+                any(part in SKIP_DIRS for part in rel_parts)
+                or any(rel_parts[: len(prefix)] == prefix for prefix in SKIP_PREFIXES)
+                or not _scan_path_selected(str(rel_current), include_paths=include_paths, exclude_paths=exclude_paths)
+            ):
+                dirnames[:] = []
+                continue
+            kept_dirs: list[str] = []
+            for dirname in sorted(dirnames):
+                child = current / dirname
+                try:
+                    child_rel = child.relative_to(target)
+                except ValueError:
+                    continue
+                child_parts = child_rel.parts
+                if (
+                    dirname in SKIP_DIRS
+                    or any(child_parts[: len(prefix)] == prefix for prefix in SKIP_PREFIXES)
+                    or not _scan_path_selected(str(child_rel), include_paths=include_paths, exclude_paths=exclude_paths)
+                ):
+                    continue
+                kept_dirs.append(dirname)
+            dirnames[:] = kept_dirs
+            for filename in sorted(filenames):
+                path = current / filename
+                rel = str(path.relative_to(target))
+                if _scan_path_selected(
+                    rel,
+                    include_paths=include_paths,
+                    exclude_paths=exclude_paths,
+                ) and _should_scan_file(path):
+                    paths.append(path)
     paths.sort()
-    return paths
+    unique_paths: list[Path] = []
+    seen: set[Path] = set()
+    for path in paths:
+        if path in seen:
+            continue
+        unique_paths.append(path)
+        seen.add(path)
+    return unique_paths
 
 
 def _surface_for(path: Path, target: Path) -> str:
@@ -2354,6 +2716,10 @@ def _confidence_for(path: Path, target: Path) -> str:
     return "repo"
 
 
+def _classification_for(path: Path, target: Path) -> FileClassification:
+    return FileClassification(surface=_surface_for(path, target), confidence=_confidence_for(path, target))
+
+
 def _is_session_chat_path(path: Path, target: Path) -> bool:
     try:
         rel = path.relative_to(target)
@@ -2397,8 +2763,10 @@ def _finding(
     evidence: str,
     suggestion: str,
     response_options: list[str] | None = None,
+    classification: FileClassification | None = None,
 ) -> None:
     rel = path.relative_to(target)
+    file_classification = classification or _classification_for(path, target)
     safe_excerpt = _short(evidence)
     fingerprint = _fingerprint(category=category, title=title, rel_path=rel, line=line, evidence=safe_excerpt)
     finding_id = f"security-{fingerprint}"
@@ -2412,8 +2780,8 @@ def _finding(
             "title": title,
             "path": str(rel),
             "line": line,
-            "surface": _surface_for(path, target),
-            "confidence": _confidence_for(path, target),
+            "surface": file_classification.surface,
+            "confidence": file_classification.confidence,
             "evidence": safe_excerpt,
             "safe_excerpt": safe_excerpt,
             "suggestion": suggestion,
@@ -2450,7 +2818,16 @@ def _is_security_scanner_literal(path: Path, line: str) -> bool:
     )
 
 
-def _scan_line(findings: list[dict[str, Any]], *, target: Path, path: Path, line_number: int, line: str) -> None:
+def _scan_line(
+    findings: list[dict[str, Any]],
+    *,
+    target: Path,
+    path: Path,
+    line_number: int,
+    line: str,
+    classification: FileClassification | None = None,
+) -> None:
+    file_classification = classification or _classification_for(path, target)
     if _is_security_scanner_literal(path, line):
         return
     secret_match = SECRET_VALUE_RE.search(line)
@@ -2467,6 +2844,7 @@ def _scan_line(findings: list[dict[str, Any]], *, target: Path, path: Path, line
             title="Plaintext password",
             evidence=_redact_secret_evidence(line),
             suggestion="Move the password into local secret storage or a gitignored environment file, then scrub the raw value from shared files.",
+            classification=file_classification,
             response_options=_secret_response_options(path, target),
         )
     if secret_match and not password_emitted and not _is_placeholder(secret_match.group(2)):
@@ -2486,6 +2864,7 @@ def _scan_line(findings: list[dict[str, Any]], *, target: Path, path: Path, line
                 else "Move the value into local environment or secret storage and commit only a placeholder."
             ),
             response_options=_secret_response_options(path, target),
+            classification=file_classification,
         )
     if _contains_private_key_material(line) or (
         ENV_ASSIGNMENT_RE.search(line) and not password_emitted and not _is_placeholder(line)
@@ -2506,6 +2885,7 @@ def _scan_line(findings: list[dict[str, Any]], *, target: Path, path: Path, line
                 else "Remove secret material from the repo and rotate the credential if it was real."
             ),
             response_options=_secret_response_options(path, target),
+            classification=file_classification,
         )
     if "danger-full-access" in line or "sandbox_permissions" in line and "require_escalated" in line:
         _finding(
@@ -2518,6 +2898,7 @@ def _scan_line(findings: list[dict[str, Any]], *, target: Path, path: Path, line
             title="Broad agent execution permission",
             evidence=line,
             suggestion="Prefer read-only or workspace-scoped execution unless this is an explicitly trusted local path.",
+            classification=file_classification,
         )
     if REMOTE_SHELL_RE.search(line):
         _finding(
@@ -2530,6 +2911,7 @@ def _scan_line(findings: list[dict[str, Any]], *, target: Path, path: Path, line
             title="Remote script piped into shell",
             evidence=line,
             suggestion="Pin and verify downloaded scripts before execution, or replace with a checked-in script.",
+            classification=file_classification,
         )
     if DESTRUCTIVE_RE.search(line):
         _finding(
@@ -2542,6 +2924,7 @@ def _scan_line(findings: list[dict[str, Any]], *, target: Path, path: Path, line
             title="Destructive command pattern",
             evidence=line,
             suggestion="Gate destructive commands behind explicit operator approval and document recovery steps.",
+            classification=file_classification,
         )
     if ENV_DUMP_RE.search(line):
         _finding(
@@ -2554,6 +2937,7 @@ def _scan_line(findings: list[dict[str, Any]], *, target: Path, path: Path, line
             title="Environment dump or exfiltration pattern",
             evidence=_redact_secret_evidence(line),
             suggestion="Avoid dumping environment variables near file redirection or network commands.",
+            classification=file_classification,
             response_options=_secret_response_options(path, target),
         )
     npx_match = UNPINNED_NPX_RE.search(line)
@@ -2568,6 +2952,7 @@ def _scan_line(findings: list[dict[str, Any]], *, target: Path, path: Path, line
             title="Unpinned remote package execution",
             evidence=line,
             suggestion="Pin remote package versions or install through a reviewed lockfile.",
+            classification=file_classification,
         )
     if "mcp" in path.name.lower() or '"mcpServers"' in line:
         if HTTP_MCP_RE.search(line):
@@ -2581,6 +2966,7 @@ def _scan_line(findings: list[dict[str, Any]], *, target: Path, path: Path, line
                 title="Remote MCP transport",
                 evidence=line,
                 suggestion="Prefer local MCP servers, pin remote hosts, and document authentication boundaries.",
+                classification=file_classification,
             )
         if AUTO_APPROVE_RE.search(line):
             _finding(
@@ -2593,8 +2979,9 @@ def _scan_line(findings: list[dict[str, Any]], *, target: Path, path: Path, line
                 title="MCP auto-approval pattern",
                 evidence=line,
                 suggestion="Avoid blanket auto-approval and require review for mutable or networked tools.",
+                classification=file_classification,
             )
-    if _surface_for(path, target) in {
+    if file_classification.surface in {
         "agent-instructions",
         "claude",
         "codex",
@@ -2614,6 +3001,7 @@ def _scan_line(findings: list[dict[str, Any]], *, target: Path, path: Path, line
             title="Prompt-injection style instruction",
             evidence=line,
             suggestion="Keep hostile examples clearly labeled as examples and avoid executable language in trusted instructions.",
+            classification=file_classification,
         )
 
 
@@ -2656,7 +3044,13 @@ def _filter_findings(
     return selected
 
 
-def _scan_handoff_inboxes(findings: list[dict[str, Any]], *, target: Path) -> list[str]:
+def _scan_handoff_inboxes(
+    findings: list[dict[str, Any]],
+    *,
+    target: Path,
+    include_paths: tuple[str, ...] = (),
+    exclude_paths: tuple[str, ...] = (),
+) -> list[str]:
     """Screen pending handoff notes for injection signals.
 
     Handoff inboxes are excluded from the line scanner via SKIP_PREFIXES so
@@ -2673,13 +3067,17 @@ def _scan_handoff_inboxes(findings: list[dict[str, Any]], *, target: Path) -> li
         for path in sorted(inbox.glob("*.md")):
             if path.name == "TEMPLATE.md":
                 continue
+            rel = str(path.relative_to(target))
+            if not _scan_path_selected(rel, include_paths=include_paths, exclude_paths=exclude_paths):
+                continue
             try:
                 text = path.read_text(errors="replace")
             except OSError:
                 continue
-            scanned.append(str(path.relative_to(target)))
+            scanned.append(rel)
             signal = scan_untrusted(text)
             if signal.flagged:
+                classification = _classification_for(path, target)
                 _finding(
                     findings,
                     target=target,
@@ -2690,6 +3088,7 @@ def _scan_handoff_inboxes(findings: list[dict[str, Any]], *, target: Path) -> li
                     title="Pending handoff carries prompt-injection signals",
                     evidence=signal.markers[0] if signal.markers else "injection signal",
                     suggestion="Review this handoff before ingest; do not let an ingester auto-promote it.",
+                    classification=classification,
                 )
     return scanned
 
@@ -2707,9 +3106,17 @@ def scan_target(
     target = target.expanduser().resolve()
     findings: list[dict[str, Any]] = []
     scanned_files: list[str] = []
-    scanned_files.extend(_scan_handoff_inboxes(findings, target=target))
-    for path in _iter_scan_files(target):
-        if not include_templates and _confidence_for(path, target) == "template":
+    scanned_files.extend(
+        _scan_handoff_inboxes(
+            findings,
+            target=target,
+            include_paths=include_paths,
+            exclude_paths=exclude_paths,
+        )
+    )
+    for path in _iter_scan_files(target, include_paths=include_paths, exclude_paths=exclude_paths):
+        classification = _classification_for(path, target)
+        if not include_templates and classification.confidence == "template":
             continue
         try:
             text = path.read_text(errors="replace")
@@ -2717,12 +3124,19 @@ def scan_target(
             continue
         scanned_files.append(str(path.relative_to(target)))
         for line_number, line in enumerate(text.splitlines(), start=1):
-            _scan_line(findings, target=target, path=path, line_number=line_number, line=line)
-        _scan_mcp_document(findings, target=target, path=path, text=text)
-        _scan_harness_wiring_document(findings, target=target, path=path, text=text)
-        _scan_package_json(findings, target=target, path=path, text=text)
-        _scan_github_actions(findings, target=target, path=path, text=text)
-        _scan_python_project(findings, target=target, path=path, text=text)
+            _scan_line(
+                findings,
+                target=target,
+                path=path,
+                line_number=line_number,
+                line=line,
+                classification=classification,
+            )
+        _scan_mcp_document(findings, target=target, path=path, text=text, classification=classification)
+        _scan_harness_wiring_document(findings, target=target, path=path, text=text, classification=classification)
+        _scan_package_json(findings, target=target, path=path, text=text, classification=classification)
+        _scan_github_actions(findings, target=target, path=path, text=text, classification=classification)
+        _scan_python_project(findings, target=target, path=path, text=text, classification=classification)
     findings = _filter_findings(
         findings,
         enabled_checks=enabled_checks,
@@ -3056,7 +3470,7 @@ def show_config(*, target: Path, json_output: bool = False) -> int:
     return 0
 
 
-def health(target: Path) -> dict[str, Any]:
+def health(target: Path, *, suppression_cache_only: bool = False) -> dict[str, Any]:
     target = target.expanduser().resolve()
     checks: list[dict[str, Any]] = []
     closeouts = _read_closeouts(target)
@@ -3133,16 +3547,32 @@ def health(target: Path) -> dict[str, Any]:
                 "detail": f"{harness_wiring['scanned_file_count']} harness wiring file(s) checked",
             }
         )
+    suppression_cache: dict[str, Any] | None = None
     try:
-        suppression = suppression_health(target)
+        if suppression_cache_only:
+            suppression_cache = suppression_health_cache(target)
+            if suppression_cache["status"] == "ok":
+                suppression = suppression_cache["health"]
+            else:
+                checks.append(
+                    {
+                        "status": "warn",
+                        "name": "security_suppressions_cache",
+                        "detail": suppression_cache["detail"],
+                        "next_command": suppression_cache["next_command"],
+                    }
+                )
+                suppression = None
+        else:
+            suppression = suppression_health(target)
     except ValueError as exc:
         checks.append({"status": "fail", "name": "security_suppressions", "detail": str(exc)})
     else:
-        if suppression["stale"]:
+        if suppression is not None and suppression["stale"]:
             checks.append(
                 {"status": "warn", "name": "security_stale_suppressions", "detail": ", ".join(suppression["stale"][:5])}
             )
-        if suppression["missing_reasons"]:
+        if suppression is not None and suppression["missing_reasons"]:
             checks.append(
                 {
                     "status": "warn",
@@ -3150,7 +3580,7 @@ def health(target: Path) -> dict[str, Any]:
                     "detail": ", ".join(suppression["missing_reasons"][:5]),
                 }
             )
-        if not suppression["stale"] and not suppression["missing_reasons"]:
+        if suppression is not None and not suppression["stale"] and not suppression["missing_reasons"]:
             checks.append(
                 {
                     "status": "ok",
@@ -3190,6 +3620,7 @@ def health(target: Path) -> dict[str, Any]:
         "evidence": bundle,
         "template_privacy": template_audit_payload,
         "harness_wiring": harness_wiring,
+        "suppression_cache": suppression_cache,
         "latest_closeout": closeouts[0] if closeouts else None,
     }
 
@@ -3346,6 +3777,7 @@ def scan(
     report["config"] = str(effective.config_path)
     report["config_loaded"] = effective.config_loaded
     report["generated_at"] = _utc_iso()
+    _write_suppression_health_cache_from_report(target, effective, report)
     configured_output_dir = target / effective.output_path
     requested_output_dir = output_dir
     if requested_output_dir is None and (import_findings or effective.config_loaded):
