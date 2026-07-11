@@ -45,6 +45,7 @@ miseledger explain "adapter contract" --json
 Expected results:
 
 - `install.sh` installs release binaries and verifies sha256 checksums against the release `checksums.txt`
+- downloaded release assets can be provenance-checked with `gh attestation verify <asset> --repo escoffier-labs/miseledger`
 - `miseledger doctor --mcp --json` returns `ok: true`
 - `miseledger status --json` reports FTS as `ok`
 - `miseledger stats --json` reports nonzero source and item totals

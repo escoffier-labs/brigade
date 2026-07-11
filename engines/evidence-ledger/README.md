@@ -41,7 +41,7 @@ miseledger search "cookie rotation"
 miseledger evidence --json
 ```
 
-Review `install.sh` before running it. The installer downloads release binaries and verifies their sha256 checksums against the release `checksums.txt`.
+Review `install.sh` before running it. The installer downloads release binaries and verifies their sha256 checksums against the release `checksums.txt`. To verify GitHub artifact provenance for a downloaded release asset, run `gh attestation verify <asset> --repo escoffier-labs/miseledger`.
 
 Or from source:
 
