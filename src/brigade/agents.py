@@ -47,9 +47,13 @@ def _pi_argv(prompt: str, read_only: bool, sandbox: str | None, cwd: Path | None
 
 
 def _cursor_argv(prompt: str, read_only: bool, sandbox: str | None, cwd: Path | None) -> List[str]:
+    # Headless `cursor-agent -p` refuses to run in a workspace it has not
+    # trusted yet, and the refusal exits 0, so an untrusted directory no-ops
+    # while looking like success. `--trust` clears the gate for plan runs;
+    # write runs also need `-f` so command approvals do not stall the worker.
     if read_only or sandbox == "read-only":
-        return ["cursor-agent", "-p", "--mode", "plan", "--output-format", "text", prompt]
-    return ["cursor-agent", "-p", "--output-format", "text", prompt]
+        return ["cursor-agent", "-p", "--mode", "plan", "--output-format", "text", "--trust", prompt]
+    return ["cursor-agent", "-p", "--output-format", "text", "-f", prompt]
 
 
 def _read_only_prompt(prompt: str) -> str:
@@ -226,7 +230,7 @@ _MODEL_PIN: dict[str, tuple[str, Callable[[List[str], str, str], List[str]]]] = 
     "opencode": ("-m", _pin_after_subcmd),  # opencode run -m X <prompt>   (X = provider/model)
     "pi": ("--model", _pin_after_cmd),  # pi --model X [--tools ...] -p <prompt>
     "kimi": ("-m", _pin_after_cmd),  # kimi -m X [--plan] --print -p <prompt> --final-message-only
-    "cursor": ("--model", _pin_after_cmd),  # cursor-agent --model X -p --output-format text <prompt>
+    "cursor": ("--model", _pin_after_cmd),  # cursor-agent --model X -p --output-format text -f <prompt>
     "antigravity": ("--model", _pin_after_cmd),  # agy --model X [--sandbox] --print <prompt>
 }
 

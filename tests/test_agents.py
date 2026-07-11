@@ -18,7 +18,14 @@ def test_build_argv_for_known_clis():
         "hi",
     ]
     assert agents.build_argv("pi", "hi") == ["pi", "-p", "hi"]
-    assert agents.build_argv("cursor", "hi") == ["cursor-agent", "-p", "--output-format", "text", "hi"]
+    assert agents.build_argv("cursor", "hi") == [
+        "cursor-agent",
+        "-p",
+        "--output-format",
+        "text",
+        "-f",
+        "hi",
+    ]
     assert agents.build_argv("aider", "hi") == ["aider", "--yes", "--no-auto-commits", "--message", "hi"]
     assert agents.build_argv("goose", "hi") == ["goose", "run", "--no-session", "-t", "hi"]
     assert agents.build_argv("continue", "hi") == ["cn", "-p", "hi"]
@@ -59,6 +66,7 @@ def test_build_argv_for_read_only_codex():
         "plan",
         "--output-format",
         "text",
+        "--trust",
         "hi",
     ]
     assert agents.build_argv("aider", "hi", read_only=True) == [
