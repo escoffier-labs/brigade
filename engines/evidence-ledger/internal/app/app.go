@@ -218,6 +218,10 @@ func collectStatus(db *sql.DB, paths Paths) (Status, error) {
 }
 
 func cmdDoctor(args []string, out, errw io.Writer) int {
+	if len(args) == 1 && (args[0] == "--help" || args[0] == "-h") {
+		fmt.Fprintln(out, "usage: miseledger doctor [--json] [--mcp] [--archive]")
+		return 0
+	}
 	_, bools, rest, err := splitFlags(args, nil, map[string]bool{"json": true, "mcp": true, "archive": true})
 	if err != nil {
 		return fatalf(errw, "doctor: %s", err)
@@ -1831,6 +1835,10 @@ func cmdShow(args []string, out, errw io.Writer) int {
 }
 
 func cmdEvidence(args []string, out, errw io.Writer) int {
+	if len(args) == 1 && (args[0] == "--help" || args[0] == "-h") {
+		fmt.Fprintln(out, "usage: miseledger evidence <query> [--json] [--markdown] [--include-related] [--include-artifact-text] [--limit N] [--source KIND] [--project NAME] [--from DATE] [--to DATE]")
+		return 0
+	}
 	if len(args) > 0 {
 		switch args[0] {
 		case "show":

@@ -438,6 +438,12 @@ miseledger explain "adapter contract" --source codex --json
 
 Evidence output includes a stable bundle `id`, a `miseledger://evidence/<id>` resource URI, the query, filters, generated timestamp, result item IDs, snippets, FTS scores, source and collection context, actor context, raw refs, artifact refs, source grouping, optional related items, optional artifact text, and warnings. Evidence results dedupe repeated content hashes. Generated bundles are cached under MiseLedger's private cache directory and can be shown later with `miseledger evidence show`.
 
+The root `station.json` advertises bounded Brigade retrieval as
+`miseledger evidence <task> --markdown --limit 5`. That surface is stateful
+because it opens the archive and caches the generated bundle. Its
+`evidence --help` probe returns before either action. Bulk `export markdown`
+remains a separate archive export command.
+
 `explain` uses the same FTS path as `search` and reports the quoted FTS query, filters, result count, source and item-kind counts, and top result IDs/snippets.
 
 ## Relations

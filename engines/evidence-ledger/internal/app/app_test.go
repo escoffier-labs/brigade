@@ -6,6 +6,7 @@ import (
 	"compress/gzip"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -60,6 +61,32 @@ func TestDoctorMCPJSON(t *testing.T) {
 	for _, name := range []string{"mcp_initialize", "mcp_tools"} {
 		if !seen[name] {
 			t.Fatalf("missing passing %s check in %v", name, checks)
+		}
+	}
+}
+
+func TestDoctorAndEvidenceHelpDoNotCreateArchiveOrCache(t *testing.T) {
+	withTempHome(t)
+	paths := ResolvePaths()
+
+	for _, command := range []string{"doctor", "evidence"} {
+		code, stdout, stderr := run(command, "--help")
+		if code != 0 {
+			t.Fatalf("%s --help failed: code=%d stderr=%s", command, code, stderr)
+		}
+		for _, flag := range map[string][]string{
+			"doctor":   {"--json", "--mcp", "--archive"},
+			"evidence": {"--markdown", "--limit"},
+		}[command] {
+			if !strings.Contains(stdout, flag) {
+				t.Fatalf("%s --help missing %s: %q", command, flag, stdout)
+			}
+		}
+	}
+
+	for _, path := range []string{paths.ConfigPath, paths.DataDir, paths.CacheDir, paths.DBPath} {
+		if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("help created runtime state at %s: %v", path, err)
 		}
 	}
 }

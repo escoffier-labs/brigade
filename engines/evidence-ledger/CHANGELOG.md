@@ -8,6 +8,13 @@ Releases before this changelog was started are on the [releases page](https://gi
 
 ## [Unreleased]
 
+### Added
+
+- Added a Brigade `station.json` contract for archive doctor checks, bounded
+  evidence Markdown, and version conformance. `doctor --help` and
+  `evidence --help` now return without opening the archive or creating cache
+  state.
+
 ## [0.4.0] - 2026-07-06
 
 ### Added
