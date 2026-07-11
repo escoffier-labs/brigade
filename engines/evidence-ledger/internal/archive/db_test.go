@@ -77,6 +77,38 @@ func TestMigrateCreatesRelationLookupIndexes(t *testing.T) {
 	}
 }
 
+func TestMigrateCreatesCollectionItemsIndexOnFreshArchive(t *testing.T) {
+	db := openMigrated(t)
+	assertIndexColumns(t, db, "idx_items_collection_created", []string{"collection_id", "created_at", "id"})
+}
+
+func TestMigrateAddsCollectionItemsIndexToExistingArchive(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "miseledger.db")
+	db, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if err := Migrate(db); err != nil {
+		t.Fatalf("Migrate: %v", err)
+	}
+	if _, err := db.Exec("drop index if exists idx_items_collection_created"); err != nil {
+		t.Fatalf("drop simulated missing index: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close before reopen: %v", err)
+	}
+
+	reopened, err := Open(path)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	t.Cleanup(func() { _ = reopened.Close() })
+	if err := Migrate(reopened); err != nil {
+		t.Fatalf("migrate reopened archive: %v", err)
+	}
+	assertIndexColumns(t, reopened, "idx_items_collection_created", []string{"collection_id", "created_at", "id"})
+}
+
 func TestCoreTablesExist(t *testing.T) {
 	db := openMigrated(t)
 	for _, table := range []string{"sources", "collections", "actors", "items", "events", "artifacts", "relations", "imports", "item_fts"} {
@@ -88,6 +120,37 @@ func TestCoreTablesExist(t *testing.T) {
 		if err != nil {
 			t.Fatalf("table %q not found after migrate: %v", table, err)
 		}
+	}
+}
+
+func assertIndexColumns(t *testing.T, db *sql.DB, name string, want []string) {
+	t.Helper()
+	var gotName string
+	err := db.QueryRow(
+		"select name from sqlite_master where type = 'index' and name = ?",
+		name,
+	).Scan(&gotName)
+	if err != nil {
+		t.Fatalf("index %q not found after migrate: %v", name, err)
+	}
+	rows, err := db.Query("select name from pragma_index_info(?) order by seqno", name)
+	if err != nil {
+		t.Fatalf("pragma_index_info(%q) failed: %v", name, err)
+	}
+	defer rows.Close()
+	var cols []string
+	for rows.Next() {
+		var col string
+		if err := rows.Scan(&col); err != nil {
+			t.Fatalf("scan index column: %v", err)
+		}
+		cols = append(cols, col)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate index columns: %v", err)
+	}
+	if !slices.Equal(cols, want) {
+		t.Fatalf("%s columns = %v, want %v", name, cols, want)
 	}
 }
 
