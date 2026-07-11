@@ -7,8 +7,19 @@ This path gets MiseLedger from a fresh install to a local evidence archive that 
 Install MiseLedger:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/escoffier-labs/miseledger/HEAD/install.sh | sh
+MISELEDGER_VERSION=v0.4.0
+curl -fsSLO https://raw.githubusercontent.com/escoffier-labs/miseledger/v0.4.0/install.sh
+cat install.sh  # review before running
+MISELEDGER_VERSION="$MISELEDGER_VERSION" sh install.sh
 miseledger version
+```
+
+Review `install.sh` before running it. The installer downloads release binaries and verifies their sha256 checksums against the release `checksums.txt`.
+
+Convenience alternative, mutable `HEAD` installer:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/escoffier-labs/miseledger/HEAD/install.sh | sh
 ```
 
 Optional domain crawler binaries such as `discrawl`, `slacrawl`, `graincrawl`, `notcrawl`, and `mailcrawl` can feed MiseLedger through `miseledger crawl <domain>` or `miseledger import adapter`. Session logs, local files, Markdown, HTML, JSON, JSONL, and git history are covered by built-in crawl and import commands.

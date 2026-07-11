@@ -13,7 +13,10 @@ export XDG_CACHE_HOME="$tmp_home/.cache"
 export BINDIR="$tmp_home/bin"
 export PATH="$BINDIR:$PATH"
 
-curl -fsSL https://raw.githubusercontent.com/escoffier-labs/miseledger/HEAD/install.sh | sh
+MISELEDGER_VERSION=v0.4.0
+curl -fsSLO https://raw.githubusercontent.com/escoffier-labs/miseledger/v0.4.0/install.sh
+cat install.sh  # review before running
+MISELEDGER_VERSION="$MISELEDGER_VERSION" sh install.sh
 
 miseledger version
 
@@ -41,7 +44,7 @@ miseledger explain "adapter contract" --json
 
 Expected results:
 
-- release binaries install with checksum verification
+- `install.sh` installs release binaries and verifies sha256 checksums against the release `checksums.txt`
 - `miseledger doctor --mcp --json` returns `ok: true`
 - `miseledger status --json` reports FTS as `ok`
 - `miseledger stats --json` reports nonzero source and item totals

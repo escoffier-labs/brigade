@@ -30,13 +30,18 @@
 ## Install
 
 ```bash
-# install from latest release (Linux/macOS)
-curl -fsSL https://raw.githubusercontent.com/escoffier-labs/miseledger/HEAD/install.sh | sh
+# install pinned release 0.4.0 (Linux/macOS)
+MISELEDGER_VERSION=v0.4.0
+curl -fsSLO https://raw.githubusercontent.com/escoffier-labs/miseledger/v0.4.0/install.sh
+cat install.sh  # review before running
+MISELEDGER_VERSION="$MISELEDGER_VERSION" sh install.sh
 miseledger init
 miseledger crawl sessions
 miseledger search "cookie rotation"
 miseledger evidence --json
 ```
+
+Review `install.sh` before running it. The installer downloads release binaries and verifies their sha256 checksums against the release `checksums.txt`.
 
 Or from source:
 
@@ -88,7 +93,7 @@ miseledger search "auth timeout" --json
 miseledger evidence "auth timeout" --markdown
 ```
 
-Install from a release:
+Convenience alternative, mutable `HEAD` installer:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/escoffier-labs/miseledger/HEAD/install.sh | sh
