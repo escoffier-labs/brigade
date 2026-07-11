@@ -40,6 +40,10 @@ def test_legacy_manifest_defaults_to_active_executable(tmp_path):
 
     assert manifest.lifecycle == "active"
     assert manifest.owner == ""
+    assert manifest.contract_version == 1
+    assert manifest.requires_brigade.min_version is None
+    assert manifest.requires_brigade.max_version_exclusive is None
+    assert manifest.compatibility.status == "compatible"
     assert manifest.tools[0].kind == "executable"
     assert manifest.tools[0].command == "example-sidecar"
     assert manifest.tools[0].surfaces[0].probe == ()
@@ -62,6 +66,85 @@ def test_manifest_rejects_unknown_lifecycle(tmp_path):
 
     with pytest.raises(ValueError, match="lifecycle"):
         station_manifest.load(str(path))
+
+
+def test_manifest_accepts_additive_compatibility_fields(tmp_path, monkeypatch):
+    monkeypatch.setattr(station_manifest, "_BRIGADE_VERSION", "1.2.3")
+    manifest = station_manifest.load(
+        str(
+            _write_manifest(
+                tmp_path,
+                contract_version=2,
+                requires_brigade={
+                    "min_version": "1.2.0",
+                    "max_version_exclusive": "2.0.0",
+                },
+            )
+        )
+    )
+
+    assert manifest.contract_version == 2
+    assert manifest.requires_brigade.min_version == "1.2.0"
+    assert manifest.requires_brigade.max_version_exclusive == "2.0.0"
+    assert manifest.compatibility.status == "compatible"
+    assert manifest.compatibility.current_version == "1.2.3"
+
+
+@pytest.mark.parametrize(
+    ("requires", "detail"),
+    [
+        ({"min_version": "9.0.0"}, "requires Brigade >= 9.0.0"),
+        ({"max_version_exclusive": "1.2.3"}, "requires Brigade < 1.2.3"),
+    ],
+)
+def test_manifest_reports_strict_semver_incompatibility(tmp_path, monkeypatch, requires, detail):
+    monkeypatch.setattr(station_manifest, "_BRIGADE_VERSION", "1.2.3")
+    manifest = station_manifest.load(str(_write_manifest(tmp_path, requires_brigade=requires)))
+
+    assert manifest.compatibility.status == "incompatible"
+    assert manifest.compatibility.compatible is False
+    assert detail in manifest.compatibility.detail
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("contract_version", 0),
+        ("contract_version", True),
+        ("requires_brigade", []),
+        ("requires_brigade", {"min_version": "1.2"}),
+        ("requires_brigade", {"max_version_exclusive": "1.2.x"}),
+    ],
+)
+def test_manifest_rejects_invalid_compatibility_fields(tmp_path, field, value):
+    path = _write_manifest(tmp_path, **{field: value})
+
+    with pytest.raises(ValueError, match=field):
+        station_manifest.load(str(path))
+
+
+def test_manifest_tool_dependency_arrays_are_optional_strings(tmp_path):
+    manifest = station_manifest.load(
+        str(
+            _write_manifest(
+                tmp_path,
+                tools=[
+                    {
+                        "name": "example-sidecar",
+                        "command": "example-sidecar",
+                        "produces": ["context"],
+                        "consumes": ["task"],
+                        "dependencies": ["miseledger"],
+                    }
+                ],
+            )
+        )
+    )
+
+    tool = manifest.tools[0]
+    assert tool.produces == ("context",)
+    assert tool.consumes == ("task",)
+    assert tool.dependencies == ("miseledger",)
 
 
 def test_active_manifest_still_requires_at_least_one_tool(tmp_path):

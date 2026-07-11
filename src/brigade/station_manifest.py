@@ -5,9 +5,11 @@ from __future__ import annotations
 import json
 import math
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+from . import __version__ as _BRIGADE_VERSION
 
 
 SCHEMA = "brigade.station.v1"
@@ -15,6 +17,21 @@ LIFECYCLES = ("active", "embedded", "deprecated", "historical")
 TOOL_KINDS = ("executable", "skill-roster")
 ALLOWED_PLACEHOLDERS = frozenset({"task", "query"})
 _PLACEHOLDER_RE = re.compile(r"<([^<>]+)>")
+_STRICT_SEMVER_RE = re.compile(r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\Z")
+
+
+@dataclass(frozen=True)
+class RequiresBrigade:
+    min_version: str | None = None
+    max_version_exclusive: str | None = None
+
+
+@dataclass(frozen=True)
+class Compatibility:
+    status: str
+    compatible: bool
+    current_version: str
+    detail: str = ""
 
 
 @dataclass(frozen=True)
@@ -37,6 +54,9 @@ class ManifestTool:
     install: tuple[str, ...] = ()
     surfaces: tuple[ManifestSurface, ...] = ()
     kind: str = "executable"
+    produces: tuple[str, ...] = ()
+    consumes: tuple[str, ...] = ()
+    dependencies: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -48,6 +68,15 @@ class StationManifest:
     tools: tuple[ManifestTool, ...]
     lifecycle: str = "active"
     owner: str = ""
+    contract_version: int = 1
+    requires_brigade: RequiresBrigade = field(default_factory=RequiresBrigade)
+    compatibility: Compatibility = field(
+        default_factory=lambda: Compatibility(
+            status="compatible",
+            compatible=True,
+            current_version=_BRIGADE_VERSION,
+        )
+    )
 
 
 def manifest_path(ref: str, *, cwd: Path | None = None) -> Path | None:
@@ -82,6 +111,9 @@ def load(ref: str, *, cwd: Path | None = None) -> StationManifest:
     name = _required_str(raw, "name")
     station = _required_str(raw, "station")
     summary = _required_str(raw, "summary")
+    contract_version = _contract_version(raw.get("contract_version", 1))
+    requires_brigade = _requires_brigade(raw.get("requires_brigade", {}))
+    compatibility = _compatibility(requires_brigade)
     lifecycle = _optional_str(raw, "lifecycle", "active")
     if lifecycle not in LIFECYCLES:
         allowed = ", ".join(LIFECYCLES)
@@ -103,7 +135,76 @@ def load(ref: str, *, cwd: Path | None = None) -> StationManifest:
         tools=tools,
         lifecycle=lifecycle,
         owner=owner,
+        contract_version=contract_version,
+        requires_brigade=requires_brigade,
+        compatibility=compatibility,
     )
+
+
+def _parse_semver(value: str, field: str) -> tuple[int, int, int]:
+    match = _STRICT_SEMVER_RE.fullmatch(value)
+    if not match:
+        raise ValueError(f"station manifest field {field!r} must be strict numeric semver MAJOR.MINOR.PATCH")
+    major, minor, patch = match.groups()
+    return (int(major), int(minor), int(patch))
+
+
+def _current_semver() -> tuple[int, int, int]:
+    core = _BRIGADE_VERSION.split("+", 1)[0].split("-", 1)[0]
+    return _parse_semver(core, "requires_brigade.current_version")
+
+
+def _contract_version(value: object) -> int:
+    if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+        raise ValueError("station manifest field 'contract_version' must be a positive integer")
+    return value
+
+
+def _requires_brigade(value: object) -> RequiresBrigade:
+    if value is None:
+        return RequiresBrigade()
+    if not isinstance(value, dict):
+        raise ValueError("station manifest field 'requires_brigade' must be an object")
+    allowed = {"min_version", "max_version_exclusive"}
+    unknown = sorted(set(value) - allowed)
+    if unknown:
+        raise ValueError("station manifest field 'requires_brigade' contains unsupported keys: " + ", ".join(unknown))
+    min_version = value.get("min_version")
+    max_version = value.get("max_version_exclusive")
+    if min_version is not None:
+        if not isinstance(min_version, str):
+            raise ValueError("station manifest field 'requires_brigade.min_version' must be a string")
+        _parse_semver(min_version, "requires_brigade.min_version")
+    if max_version is not None:
+        if not isinstance(max_version, str):
+            raise ValueError("station manifest field 'requires_brigade.max_version_exclusive' must be a string")
+        _parse_semver(max_version, "requires_brigade.max_version_exclusive")
+    return RequiresBrigade(min_version=min_version, max_version_exclusive=max_version)
+
+
+def _compatibility(requirement: RequiresBrigade) -> Compatibility:
+    current = _current_semver()
+    current_label = _BRIGADE_VERSION
+    if requirement.min_version is not None and current < _parse_semver(
+        requirement.min_version, "requires_brigade.min_version"
+    ):
+        return Compatibility(
+            status="incompatible",
+            compatible=False,
+            current_version=current_label,
+            detail=f"requires Brigade >= {requirement.min_version}; current is {current_label}",
+        )
+    if requirement.max_version_exclusive is not None and current >= _parse_semver(
+        requirement.max_version_exclusive,
+        "requires_brigade.max_version_exclusive",
+    ):
+        return Compatibility(
+            status="incompatible",
+            compatible=False,
+            current_version=current_label,
+            detail=f"requires Brigade < {requirement.max_version_exclusive}; current is {current_label}",
+        )
+    return Compatibility(status="compatible", compatible=True, current_version=current_label)
 
 
 def _required_str(data: dict[str, Any], key: str) -> str:
@@ -200,6 +301,9 @@ def _parse_tool(raw: object, index: int) -> ManifestTool:
         raise ValueError("station manifest field 'tool.command' must be omitted for skill-roster tools")
     summary = _optional_str(raw, "summary")
     install = _string_tuple(raw.get("install"), "tool.install")
+    produces = _string_tuple(raw.get("produces"), "tool.produces")
+    consumes = _string_tuple(raw.get("consumes"), "tool.consumes")
+    dependencies = _string_tuple(raw.get("dependencies"), "tool.dependencies")
     surfaces_raw = raw.get("surfaces", [])
     if not isinstance(surfaces_raw, list):
         raise ValueError("station manifest field 'tool.surfaces' must be an array")
@@ -211,4 +315,7 @@ def _parse_tool(raw: object, index: int) -> ManifestTool:
         install=install,
         surfaces=surfaces,
         kind=kind,
+        produces=produces,
+        consumes=consumes,
+        dependencies=dependencies,
     )
