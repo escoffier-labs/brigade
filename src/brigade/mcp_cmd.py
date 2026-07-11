@@ -11,6 +11,7 @@ unless ``--force``); orphans are removed only with ``--prune`` and only when sti
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -23,6 +24,8 @@ STATE_REL = ".brigade/mcp/state.json"
 
 GITIGNORE_SNIPPET = [
     "# brigade mcp: canonical source is shared, sidecar state is machine-local",
+    "!.brigade/",
+    ".brigade/*",
     "!.brigade/mcp.json",
     ".brigade/mcp/",
 ]
@@ -280,12 +283,57 @@ def _public_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
 def _ensure_gitignore(target: Path) -> bool:
     gi = target / ".gitignore"
     existing = gi.read_text() if gi.is_file() else ""
-    if "!.brigade/mcp.json" in existing:
+    if _gitignore_keeps_mcp_catalog_trackable(existing) and _git_keeps_mcp_catalog_trackable(target) is not False:
         return False
     block = "\n".join(GITIGNORE_SNIPPET)
     sep = "" if existing == "" or existing.endswith("\n") else "\n"
     gi.write_text(existing + sep + ("\n" if existing else "") + block + "\n")
     return True
+
+
+def _gitignore_keeps_mcp_catalog_trackable(existing: str) -> bool:
+    lines = existing.splitlines()
+    try:
+        unignore_parent = lines.index("!.brigade/")
+        ignore_children = lines.index(".brigade/*", unignore_parent + 1)
+        unignore_catalog = lines.index("!.brigade/mcp.json", ignore_children + 1)
+    except ValueError:
+        return False
+    return ".brigade/mcp/" in lines[unignore_catalog + 1 :]
+
+
+def _git_keeps_mcp_catalog_trackable(target: Path) -> bool | None:
+    try:
+        repo = subprocess.run(
+            ["git", "-C", str(target), "rev-parse", "--is-inside-work-tree"],
+            check=False,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL,
+            timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if repo.returncode != 0 or repo.stdout.strip() != "true":
+        return None
+
+    try:
+        ignored = subprocess.run(
+            ["git", "-C", str(target), "check-ignore", "-q", CANONICAL_REL],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL,
+            timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if ignored.returncode == 1:
+        return True
+    if ignored.returncode == 0:
+        return False
+    return None
 
 
 def init(*, target: Path, force: bool = False, update_gitignore: bool = True, json_output: bool = False) -> int:

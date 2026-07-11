@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 
 from brigade import mcp_cmd
 
@@ -28,6 +29,17 @@ def _payload(capsys):
     return json.loads(capsys.readouterr().out)
 
 
+def _git(repo, *args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["git", *args],
+        cwd=repo,
+        check=False,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+
+
 def test_init_creates_canonical_and_gitignore(tmp_path, capsys):
     assert mcp_cmd.init(target=tmp_path, json_output=True) == 0
     payload = _payload(capsys)
@@ -35,6 +47,50 @@ def test_init_creates_canonical_and_gitignore(tmp_path, capsys):
     assert payload["gitignore_updated"] is True
     gi = (tmp_path / ".gitignore").read_text()
     assert "!.brigade/mcp.json" in gi and ".brigade/mcp/" in gi
+
+
+def test_init_repairs_parent_brigade_ignore_so_catalog_is_trackable(tmp_path, capsys):
+    assert _git(tmp_path, "init").returncode == 0
+    (tmp_path / ".gitignore").write_text("# user rules\n*.log\n.brigade/\n")
+
+    assert mcp_cmd.init(target=tmp_path, json_output=True) == 0
+
+    payload = _payload(capsys)
+    assert payload["gitignore_updated"] is True
+    gi = (tmp_path / ".gitignore").read_text()
+    assert "# user rules" in gi
+    assert "*.log" in gi
+    assert _git(tmp_path, "check-ignore", ".brigade/mcp.json").returncode == 1
+    assert _git(tmp_path, "check-ignore", ".brigade/mcp/state.json").returncode == 0
+
+
+def test_init_repairs_later_gitignore_rule_shadowing_valid_mcp_snippet(tmp_path, capsys):
+    assert _git(tmp_path, "init").returncode == 0
+    (tmp_path / ".gitignore").write_text(
+        "\n".join(
+            [
+                "# user rules",
+                "!.brigade/",
+                ".brigade/*",
+                "!.brigade/mcp.json",
+                ".brigade/mcp/",
+                "*.json",
+            ]
+        )
+        + "\n"
+    )
+
+    assert _git(tmp_path, "check-ignore", ".brigade/mcp.json").returncode == 0
+
+    assert mcp_cmd.init(target=tmp_path, json_output=True) == 0
+
+    payload = _payload(capsys)
+    assert payload["gitignore_updated"] is True
+    gi = (tmp_path / ".gitignore").read_text()
+    assert gi.startswith("# user rules\n")
+    assert "*.json" in gi
+    assert _git(tmp_path, "check-ignore", ".brigade/mcp.json").returncode == 1
+    assert _git(tmp_path, "check-ignore", ".brigade/mcp/state.json").returncode == 0
 
 
 def test_init_refuses_overwrite_without_force(tmp_path):
