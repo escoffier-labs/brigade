@@ -7,7 +7,7 @@ from io import StringIO
 from pathlib import Path
 from typing import Any
 
-from .. import center_cmd, doctor as core_doctor, handoff_cmd, security_cmd, skills_cmd, tools_cmd
+from .. import center_cmd, doctor as core_doctor, handoff_cmd, security_cmd, skills_cmd, station_health, tools_cmd
 from ..install import install_selection
 from ..selection import KNOWN_HARNESSES, WRITER_INBOXES, Selection, resolve_owner
 from .guide import _steps, _validate_profile, plan_payload
@@ -971,6 +971,7 @@ def checkup_payload(target: Path, *, profile: str = "internal-dogfood") -> dict[
         "surfaces": surfaces,
         "next_command": next_command,
         "loop": _loop_stations_payload(target),
+        "station_health": station_health.collect(target),
     }
 
 
@@ -998,6 +999,22 @@ def checkup(*, target: Path, profile: str = "internal-dogfood", json_output: boo
             detail = row.get("detail") or row.get("status") or ""
             label = "brief_hit_rate" if key == "context_eval" else key
             print(f"  [{mark}] {label}: {detail}")
+    station_health_payload = payload.get("station_health") if isinstance(payload.get("station_health"), dict) else {}
+    if station_health_payload:
+        print(
+            f"station_health: {station_health_payload.get('status')} issues={station_health_payload.get('issue_count')}"
+        )
+        top_station = (
+            station_health_payload.get("top_issue")
+            if isinstance(station_health_payload.get("top_issue"), dict)
+            else None
+        )
+        if top_station:
+            print(
+                "station_top_issue: "
+                f"{top_station.get('station')}/{top_station.get('tool')} "
+                f"{str(top_station.get('detail') or '')[:96]}"
+            )
     print(f"ready: {'yes' if payload['ready'] else 'no'}")
     print(f"blocking_surfaces: {payload['blocking_surface_count']}")
     if payload["next_command"]:

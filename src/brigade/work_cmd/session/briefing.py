@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
-from ... import dogfood_cmd, localio
+from ... import dogfood_cmd, localio, station_health
 from ...install import apply_gitignore
 from .. import constants, helpers, ledger as ledger_mod, config as config_mod, services as services_mod
 from .. import scanners as scanners_mod, reviews as reviews_mod
@@ -301,6 +301,7 @@ def _brief_payload(target: Path, *, limit: int = 3, include_code_graph: bool = F
     daily_health = daily_cmd.health(target)
     phase_health = phases_cmd.health(target)
     outcome_health = outcome_cmd.health(target)
+    station_health_payload = station_health.collect(target)
     handoff_issues = handoff_cmd.collect_issues(target)
     known_handoff_issue_ids = handoff_cmd._known_local_issue_ids(target)
     new_handoff_issues = [issue for issue in handoff_issues if issue.id not in known_handoff_issue_ids]
@@ -497,6 +498,7 @@ def _brief_payload(target: Path, *, limit: int = 3, include_code_graph: bool = F
             "issue_count": outcome_health["issue_count"],
             "top_issue": outcome_health["top_issue"],
         },
+        "station_health": station_health_payload,
         "dogfood": resolved["dogfood"],
         "next_source": resolved["source"],
         "task_id": resolved.get("task_id"),
@@ -590,6 +592,21 @@ def brief(*, target: Path, limit: int = 3, json_output: bool = False) -> int:
         top_outcome = outcome_loop.get("top_issue") if isinstance(outcome_loop.get("top_issue"), dict) else None
         if top_outcome:
             print(f"outcome_loop_issue: {top_outcome.get('name')} {helpers._short(str(top_outcome.get('detail', '')))}")
+
+    station_health_payload = payload.get("station_health") if isinstance(payload.get("station_health"), dict) else {}
+    if station_health_payload:
+        print(f"station_health: {helpers._count_status(station_health_payload.get('issue_count'))}")
+        top_station = (
+            station_health_payload.get("top_issue")
+            if isinstance(station_health_payload.get("top_issue"), dict)
+            else None
+        )
+        if top_station:
+            print(
+                "station_top_issue: "
+                f"{top_station.get('station')}/{top_station.get('tool')} "
+                f"{helpers._short(str(top_station.get('detail', '')))}"
+            )
 
     pantry = payload.get("pantry") if isinstance(payload.get("pantry"), dict) else {}
     if pantry:

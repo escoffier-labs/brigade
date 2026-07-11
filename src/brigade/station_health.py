@@ -12,8 +12,11 @@ import json
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
+from . import managed, registry
+from .doctor import FAIL, MANUAL, OK, WARN
 from . import proc
 from .localio import utc_now_iso as now_iso
+from .station import DoctorContext
 
 # Shared advisory health levels used by station CLIs (never FAIL workspace doctor).
 HEALTH_LEVELS = ("ok", "warn", "fail", "missing", "unwired", "incomplete", "timeout")
@@ -142,3 +145,102 @@ def write_plan(target: Path, station: str, payload: Mapping[str, Any]) -> dict[s
 
 def doctor_exit(health: str, *, fail_levels: Iterable[str] = ("fail", "incomplete", "timeout")) -> int:
     return 1 if health in set(fail_levels) else 0
+
+
+def _health_from_status(status: str) -> str:
+    if status == OK:
+        return "ok"
+    if status == MANUAL:
+        return "missing"
+    if status in {WARN, FAIL}:
+        return "warn"
+    return "warn"
+
+
+def _station_summary(station: str) -> str:
+    resolved = registry.resolve(station)
+    return resolved.summary if resolved is not None else ""
+
+
+def collect(target: Path) -> dict[str, Any]:
+    """Collect managed station health in one advisory, read-only payload."""
+    target = target.expanduser().resolve()
+    ctx = DoctorContext(target=target, selection=None, harnesses=[])
+    station_rows: dict[str, dict[str, Any]] = {}
+    issues: list[dict[str, Any]] = []
+
+    for tool in managed.all_tools():
+        station_row = station_rows.setdefault(
+            tool.station,
+            {
+                "station": tool.station,
+                "summary": _station_summary(tool.station),
+                "health": "ok",
+                "installed_count": 0,
+                "tool_count": 0,
+                "tools": [],
+            },
+        )
+        station_row["tool_count"] += 1
+        installed = tool.detect()
+        if installed:
+            station_row["installed_count"] += 1
+        try:
+            checks = tool.doctor(ctx) if installed else [(MANUAL, tool.name, f"not installed; command={tool.command}")]
+        except Exception as exc:  # pragma: no cover - defensive isolation for third-party adapters
+            checks = [(WARN, tool.name, f"doctor raised {type(exc).__name__}: {exc}")]
+        check_payloads = [
+            {
+                "status": status,
+                "health": _health_from_status(status),
+                "name": name,
+                "detail": detail,
+            }
+            for status, name, detail in checks
+        ]
+        tool_health = "ok"
+        if any(row["health"] == "warn" for row in check_payloads):
+            tool_health = "warn"
+        elif any(row["health"] == "missing" for row in check_payloads):
+            tool_health = "missing"
+        if tool_health in {"warn", "missing"}:
+            top = next((row for row in check_payloads if row["health"] in {"warn", "missing"}), None)
+            if top is not None:
+                issues.append(
+                    {
+                        "station": tool.station,
+                        "tool": tool.name,
+                        "status": top["status"],
+                        "health": top["health"],
+                        "detail": top["detail"],
+                    }
+                )
+        station_row["tools"].append(
+            {
+                "name": tool.name,
+                "command": tool.command,
+                "installed": installed,
+                "health": tool_health,
+                "summary": tool.summary,
+                "checks": check_payloads,
+                "surfaces": [surface.kind for surface in tool.surfaces],
+            }
+        )
+        if tool_health == "warn":
+            station_row["health"] = "warn"
+        elif tool_health == "missing" and station_row["health"] == "ok":
+            station_row["health"] = "missing"
+
+    stations = sorted(station_rows.values(), key=lambda row: row["station"])
+    for row in stations:
+        row["tools"].sort(key=lambda tool: tool["name"])
+    status = "warn" if issues else "ok"
+    return {
+        "schema": "brigade.station.health.v1",
+        "target": str(target),
+        "advisory": True,
+        "status": status,
+        "issue_count": len(issues),
+        "top_issue": issues[0] if issues else None,
+        "stations": stations,
+    }

@@ -22,6 +22,7 @@ from . import (  # noqa: F401
     session,
     verification,
 )
+from .. import station_health  # noqa: F401
 
 # NOTE: the ``sweeps`` submodule is loaded via ``from .sweeps import ...`` below;
 # the package attribute ``sweeps`` is intentionally the command function, not the
