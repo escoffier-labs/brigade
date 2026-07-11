@@ -41,6 +41,10 @@ brigade add notifications
 | **Stay private** | No product telemetry | Your notify path is not an analytics surface |
 | **Opt-in send** | Plan free, send explicit | Brigade status/plan without auto-spam |
 
+![agent-notify routing workflow](docs/assets/routing-workflow.svg)
+
+Generated from [`docs/assets/workflows/routing.json`](docs/assets/workflows/routing.json) with `plating workflow`.
+
 
 ## Install
 
