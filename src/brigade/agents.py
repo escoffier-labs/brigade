@@ -192,6 +192,12 @@ class AgentResult:
     # app-server transport extras; None/"" on the exec path.
     thread_id: str | None = None
     status: str = ""
+    stdout: str | None = None
+    stderr: str | None = None
+    exit_code: int | None = None
+    timed_out: bool = False
+    stdout_log: str | None = None
+    stderr_log: str | None = None
 
 
 def is_known(cli_ref: str) -> bool:
@@ -333,10 +339,34 @@ def run_agent(
     text = result.stdout.strip()
     if result.code != 0:
         detail = result.stderr.strip() or f"exit {result.code}"
-        return AgentResult(text=text, ok=False, detail=detail[:200])
+        return AgentResult(
+            text=text,
+            ok=False,
+            detail=detail[:200],
+            stdout=result.stdout,
+            stderr=result.stderr,
+            exit_code=result.code,
+            timed_out=result.code == 124,
+        )
     if not text:
-        return AgentResult(text="", ok=False, detail="empty output")
-    return AgentResult(text=text, ok=True)
+        detail = "empty output"
+        if cli_ref in {"cursor", "grok"}:
+            detail = f"{cli_ref} exited 0 without output; check trust, permissions, and model availability"
+        return AgentResult(
+            text="",
+            ok=False,
+            detail=detail,
+            stdout=result.stdout,
+            stderr=result.stderr,
+            exit_code=result.code,
+        )
+    return AgentResult(
+        text=text,
+        ok=True,
+        stdout=result.stdout,
+        stderr=result.stderr,
+        exit_code=result.code,
+    )
 
 
 def run_codex_appserver(

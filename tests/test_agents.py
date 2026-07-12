@@ -345,6 +345,10 @@ def test_run_agent_captures_output(monkeypatch):
     res = agents.run_agent("codex", "do it")
     assert res.ok is True
     assert res.text == "answer"
+    assert res.stdout == "  answer  "
+    assert res.stderr == ""
+    assert res.exit_code == 0
+    assert res.timed_out is False
 
 
 def test_run_agent_forwards_model_to_argv(monkeypatch):
@@ -415,6 +419,20 @@ def test_run_agent_nonzero_is_not_ok(monkeypatch):
     res = agents.run_agent("claude", "x")
     assert res.ok is False
     assert "boom" in res.detail
+    assert res.exit_code == 1
+    assert res.stderr == "boom"
+
+
+@pytest.mark.parametrize("cli_ref", ["cursor", "grok"])
+def test_run_agent_classifies_silent_adapter_exit(monkeypatch, cli_ref):
+    monkeypatch.setattr(agents.proc, "which", lambda c: "/x/" + c)
+    monkeypatch.setattr(agents.proc, "run", lambda argv, **kw: agents.proc.Result(0, "", ""))
+
+    result = agents.run_agent(cli_ref, "do it")
+
+    assert result.ok is False
+    assert result.detail == f"{cli_ref} exited 0 without output; check trust, permissions, and model availability"
+    assert result.exit_code == 0
 
 
 class _StubThread:

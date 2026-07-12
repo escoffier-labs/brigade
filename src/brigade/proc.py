@@ -23,6 +23,14 @@ class Result:
             return None
 
 
+def _timeout_text(value: str | bytes | None) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode(errors="replace")
+    return value
+
+
 def which(cmd: str) -> Optional[str]:
     return shutil.which(cmd)
 
@@ -47,5 +55,10 @@ def run(
         return Result(code=cp.returncode, stdout=cp.stdout, stderr=cp.stderr)
     except FileNotFoundError:
         return Result(code=127, stdout="", stderr=f"command not found: {args[0]}")
-    except subprocess.TimeoutExpired:
-        return Result(code=124, stdout="", stderr=f"timeout after {timeout}s")
+    except subprocess.TimeoutExpired as exc:
+        stdout = _timeout_text(exc.stdout)
+        stderr = _timeout_text(exc.stderr)
+        timeout_detail = f"timeout after {timeout}s"
+        if stderr and not stderr.endswith("\n"):
+            stderr += "\n"
+        return Result(code=124, stdout=stdout, stderr=stderr + timeout_detail)
