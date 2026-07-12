@@ -221,6 +221,96 @@ def fingerprint_cohort(record: OutcomeRecord, current_fingerprint: str | None) -
     return "stale"
 
 
+def current_content_records(records: list[OutcomeRecord], current_fingerprint: str | None) -> list[OutcomeRecord]:
+    """Deduped records whose content is current (proven-stale dropped, legacy kept).
+
+    The same predicate ``split_by_fingerprint`` scores its ``current`` cohort over,
+    exposed as the record subset so the capability split can compose on top of it.
+    """
+    deduped = scored_records(records)
+    if not current_fingerprint:
+        return deduped
+    return [r for r in deduped if not r.content_fingerprint or r.content_fingerprint == current_fingerprint]
+
+
+# Shrinkage strength: a capability cohort thinner than ~kappa trials is pulled
+# toward the pooled rate, so a single run under a novel harness cannot swing the
+# estimate. One global constant, documented, never tuned per artifact.
+DEFAULT_SHRINK_KAPPA = 4.0
+
+
+def shrink_rate(helped: int, total: int, prior_rate: float, kappa: float = DEFAULT_SHRINK_KAPPA) -> float:
+    """Deterministic shrinkage toward a prior: (helped + kappa*prior) / (total + kappa).
+
+    With no trials the result is the prior; as trials accumulate it converges on
+    the cohort's own rate. This is the graceful-degradation lever for thin
+    per-capability cohorts, not a confidence bound.
+    """
+    denom = total + kappa
+    if denom <= 0:
+        return prior_rate
+    return (helped + kappa * prior_rate) / denom
+
+
+@dataclass(frozen=True)
+class CapabilityCohorts:
+    """A content-current score split by the CURRENT runtime capability context.
+
+    ``pooled`` is the content-current cohort (the score the ratchet and default
+    rank use, across all capabilities). ``capability`` scores only the
+    content-current records earned under ``current_capability``, with pre-context
+    records (no ``capability_fingerprint``) grandfathered in so the split is
+    non-disruptive at rollout, exactly like content legacy records. ``shrunk_rate``
+    pulls a thin capability cohort toward the pooled rate. When no capability is
+    resolvable ``capability`` equals ``pooled``.
+
+    ``off_capability_records`` counts content-current records earned under a
+    different capability; ``capability_legacy_records`` counts content-current
+    records with no capability fingerprint yet. Phase 2 surfaces this in retrieval
+    (rank/explain); the ratchet still scores ``pooled`` only.
+    """
+
+    current_capability: str | None
+    pooled: OutcomeScore
+    capability: OutcomeScore
+    shrunk_rate: float
+    off_capability_records: int
+    capability_legacy_records: int
+
+    @property
+    def pinned(self) -> bool:
+        return self.current_capability is not None
+
+
+def split_by_capability(
+    artifact_id: str,
+    content_current: list[OutcomeRecord],
+    current_capability: str | None,
+    *,
+    kappa: float = DEFAULT_SHRINK_KAPPA,
+) -> CapabilityCohorts:
+    """Split content-current records by the current capability and shrink the thin cohort.
+
+    ``content_current`` is expected to be the deduped content-current subset
+    (from ``current_content_records``). Pass the current capability fingerprint to
+    score the "will this help under my harness" cohort; pass None (unresolvable)
+    to get the pooled score in both slots.
+    """
+    pooled = score_records(artifact_id, content_current)
+    pooled_total = pooled.helped + pooled.hurt
+    pooled_rate = pooled.helped / pooled_total if pooled_total else 0.0
+    if not current_capability:
+        return CapabilityCohorts(None, pooled, pooled, pooled_rate, 0, 0)
+    on = [r for r in content_current if not r.capability_fingerprint or r.capability_fingerprint == current_capability]
+    capability = score_records(artifact_id, on)
+    off_capability = sum(
+        1 for r in content_current if r.capability_fingerprint and r.capability_fingerprint != current_capability
+    )
+    capability_legacy = sum(1 for r in content_current if not r.capability_fingerprint)
+    shrunk = shrink_rate(capability.helped, capability.helped + capability.hurt, pooled_rate, kappa)
+    return CapabilityCohorts(current_capability, pooled, capability, shrunk, off_capability, capability_legacy)
+
+
 def decide(
     score: OutcomeScore,
     *,

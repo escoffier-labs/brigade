@@ -229,3 +229,63 @@ def test_fingerprint_cohort_names_current_stale_and_legacy():
     # legacy stays a distinct cohort.
     assert outcome.fingerprint_cohort(stale, None) == "current"
     assert outcome.fingerprint_cohort(legacy, None) == "legacy"
+
+
+# --- Phase 2: capability cohorts, shrinkage --------------------------------
+
+
+def _cap_record(fp_content, fp_cap, signal=1, ref="r", ts="2026-06-20T00:00:00+00:00"):
+    return outcome.OutcomeRecord(
+        "s",
+        "skill",
+        "t",
+        "verify",
+        signal,
+        ref,
+        ts,
+        content_fingerprint=fp_content,
+        capability_fingerprint=fp_cap,
+    )
+
+
+def test_shrink_rate_is_prior_with_no_trials_and_converges():
+    assert outcome.shrink_rate(0, 0, 0.5) == 0.5  # no evidence -> the prior
+    assert outcome.shrink_rate(3, 3, 0.5, kappa=4.0) == (3 + 4.0 * 0.5) / (3 + 4.0)
+    near_one = outcome.shrink_rate(50, 50, 0.1)  # many clean trials pull away from a low prior
+    assert near_one > 0.85
+
+
+def test_current_content_records_drops_stale_keeps_legacy():
+    recs = [
+        _cap_record("c1", "capA", ref="r1"),
+        _cap_record("c2", "capA", ref="r2"),  # proven stale content
+        _cap_record(None, "capA", ref="r3"),  # pre-fingerprint content, grandfathered
+    ]
+    keep = {r.evidence_ref for r in outcome.current_content_records(recs, "c1")}
+    assert keep == {"r1", "r3"}
+
+
+def test_split_by_capability_grandfathers_legacy_and_excludes_off_cap():
+    content_current = [
+        _cap_record("c1", "capA", ref="r1"),
+        _cap_record("c1", "capA", ref="r2"),
+        _cap_record("c1", "capB", signal=-1, ref="r3"),  # different capability
+        _cap_record("c1", None, ref="r4"),  # pre-context capability, grandfathered
+    ]
+    ch = outcome.split_by_capability("s", content_current, "capA")
+    assert ch.pinned
+    # capA (2) + legacy (1) count; the capB hurt is off-capability and excluded.
+    assert (ch.capability.helped, ch.capability.hurt) == (3, 0)
+    assert ch.off_capability_records == 1
+    assert ch.capability_legacy_records == 1
+    # pooled still sees all four: 3 helped / 1 hurt.
+    assert (ch.pooled.helped, ch.pooled.hurt) == (3, 1)
+    assert ch.shrunk_rate == outcome.shrink_rate(3, 3, 3 / 4)
+
+
+def test_split_by_capability_unresolved_equals_pooled():
+    content_current = [_cap_record("c1", "capA", ref="r1")]
+    ch = outcome.split_by_capability("s", content_current, None)
+    assert not ch.pinned
+    assert ch.capability == ch.pooled
+    assert ch.off_capability_records == 0

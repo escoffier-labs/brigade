@@ -1706,3 +1706,153 @@ def test_explain_omits_capability_breakdown_for_pre_context_ledger(tmp_path, cap
     assert outcome_cmd.explain(target=tmp_path, artifact_id="skill-x", json_output=True) == 0
     payload = json.loads(capsys.readouterr().out)
     assert "capability_breakdown" not in payload
+
+
+# --- Phase 2: capability-aware rank/explain -----------------------------------
+
+
+def _current_cap_fp(monkeypatch, harness="claude-code", model="claude-opus-4-8"):
+    """Force a known current capability and return its fingerprint."""
+    _neutralize_context_env(monkeypatch)
+    monkeypatch.setenv("BRIGADE_CONTEXT_HARNESS", harness)
+    monkeypatch.setenv("BRIGADE_CONTEXT_MODEL", model)
+    return outcome_cmd.capability_fingerprint(outcome_cmd.context_manifest())
+
+
+def test_rank_json_carries_capability_fields(tmp_path, capsys, monkeypatch):
+    cap = _current_cap_fp(monkeypatch)
+    _seed(
+        tmp_path,
+        [
+            outcome.OutcomeRecord(
+                "skill-x",
+                "skill",
+                f"t{i}",
+                "verify",
+                1,
+                f"r{i}",
+                f"2026-06-20T0{i}:00:00+00:00",
+                capability_fingerprint=cap,
+            )
+            for i in range(2)
+        ],
+    )
+    assert outcome_cmd.rank(target=tmp_path, json_output=True) == 0
+    entry = json.loads(capsys.readouterr().out)["ranking"][0]
+    assert entry["capability_fingerprint"] == cap
+    assert entry["capability_helped"] == 2 and entry["capability_hurt"] == 0
+    assert 0.0 <= entry["capability_score"] <= 1.0
+
+
+def test_rank_by_capability_reorders_to_favor_current_context(tmp_path, capsys, monkeypatch):
+    cap = _current_cap_fp(monkeypatch)
+    other = "deadbeef" * 8  # a different capability fingerprint
+    # skill-a: strong pooled overall, but every signal is from ANOTHER capability.
+    _seed(
+        tmp_path,
+        [
+            outcome.OutcomeRecord(
+                "skill-a",
+                "skill",
+                f"a{i}",
+                "verify",
+                1,
+                f"ra{i}",
+                f"2026-06-20T0{i}:00:00+00:00",
+                capability_fingerprint=other,
+            )
+            for i in range(5)
+        ],
+    )
+    # skill-b: fewer signals, but earned under the CURRENT capability.
+    _seed(
+        tmp_path,
+        [
+            outcome.OutcomeRecord(
+                "skill-b",
+                "skill",
+                f"b{i}",
+                "verify",
+                1,
+                f"rb{i}",
+                f"2026-06-21T0{i}:00:00+00:00",
+                capability_fingerprint=cap,
+            )
+            for i in range(3)
+        ],
+    )
+    # Default order: skill-a first (higher pooled Wilson from 5 clean signals).
+    assert outcome_cmd.rank(target=tmp_path, json_output=True) == 0
+    default_ids = [e["artifact_id"] for e in json.loads(capsys.readouterr().out)["ranking"]]
+    assert default_ids.index("skill-a") < default_ids.index("skill-b")
+    # By capability: skill-b first (skill-a's signals are all off-capability, shrunk toward pooled-of-none).
+    assert outcome_cmd.rank(target=tmp_path, json_output=True, by_capability=True) == 0
+    cap_ids = [e["artifact_id"] for e in json.loads(capsys.readouterr().out)["ranking"]]
+    assert cap_ids.index("skill-b") < cap_ids.index("skill-a")
+
+
+def test_rank_human_output_unchanged_for_precontext_ledger(tmp_path, capsys, monkeypatch):
+    _current_cap_fp(monkeypatch)
+    _seed(tmp_path, _helped("skill-x", 2))  # no capability fingerprints
+    assert outcome_cmd.rank(target=tmp_path, json_output=False) == 0
+    line = next(line for line in capsys.readouterr().out.splitlines() if "skill-x" in line)
+    assert line == "- skill-x score=0.342 helped=2 hurt=0"  # no [cap ...] tail
+
+
+def test_rank_human_shows_capability_tail_when_off_capability_present(tmp_path, capsys, monkeypatch):
+    cap = _current_cap_fp(monkeypatch)
+    _seed(
+        tmp_path,
+        [
+            outcome.OutcomeRecord(
+                "skill-x", "skill", "t1", "verify", 1, "r1", "2026-06-20T00:00:00+00:00", capability_fingerprint=cap
+            ),
+            outcome.OutcomeRecord(
+                "skill-x",
+                "skill",
+                "t2",
+                "verify",
+                -1,
+                "r2",
+                "2026-06-20T01:00:00+00:00",
+                capability_fingerprint="other" * 8,
+            ),
+        ],
+    )
+    assert outcome_cmd.rank(target=tmp_path, json_output=False) == 0
+    line = next(line for line in capsys.readouterr().out.splitlines() if "skill-x" in line)
+    assert f"cap {cap[:12]}" in line and "off_cap=1" in line
+
+
+def test_explain_json_scores_current_capability_cohort(tmp_path, capsys, monkeypatch):
+    cap = _current_cap_fp(monkeypatch)
+    _seed(
+        tmp_path,
+        [
+            outcome.OutcomeRecord(
+                "skill-x", "skill", "t1", "verify", 1, "r1", "2026-06-20T00:00:00+00:00", capability_fingerprint=cap
+            ),
+            outcome.OutcomeRecord(
+                "skill-x",
+                "skill",
+                "t2",
+                "verify",
+                -1,
+                "r2",
+                "2026-06-20T01:00:00+00:00",
+                capability_fingerprint="other" * 8,
+            ),
+        ],
+    )
+    assert outcome_cmd.explain(target=tmp_path, artifact_id="skill-x", json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["current_capability"] == cap
+    assert payload["capability_helped"] == 1 and payload["capability_hurt"] == 0  # off-cap hurt excluded
+    assert payload["off_capability_records"] == 1
+
+
+def test_cli_rank_by_capability_dispatch(tmp_path, capsys, monkeypatch):
+    _current_cap_fp(monkeypatch)
+    _seed(tmp_path, _helped("skill-x", 2))
+    assert cli.main(["outcome", "rank", "--by-capability", "--target", str(tmp_path), "--json"]) == 0
+    assert "skill-x" in capsys.readouterr().out

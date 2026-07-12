@@ -48,6 +48,11 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_rank = outcome_sub.add_parser("rank", help="Rank learned skills by verified outcome, most-proven first.")
     p_rank.add_argument("--target", "-t", type=Path, default=Path("."))
     p_rank.add_argument("--json", action="store_true", help="Emit machine-readable JSON instead of text.")
+    p_rank.add_argument(
+        "--by-capability",
+        action="store_true",
+        help="Sort by the capability-shrunk score for the current runtime context (harness, model, platform).",
+    )
     p_rank.set_defaults(func=_dispatch_rank)
 
     p_doctor = outcome_sub.add_parser("doctor", help="Summarize outcome and receipt digest health.")
@@ -131,7 +136,7 @@ def _dispatch_reconcile(args) -> int:
 def _dispatch_rank(args) -> int:
     from .. import outcome_cmd
 
-    return outcome_cmd.rank(target=args.target, json_output=args.json)
+    return outcome_cmd.rank(target=args.target, json_output=args.json, by_capability=args.by_capability)
 
 
 def _dispatch_doctor(args) -> int:
