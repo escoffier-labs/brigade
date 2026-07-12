@@ -2302,3 +2302,31 @@ def test_run_route_template_reaches_derivation(monkeypatch, tmp_path):
     payload = json.loads((output_dir / "run.json").read_text())
     assert "needs-tests" in payload["route"]["signals"]
     assert "test-author" in payload["route"]["route"]
+
+
+def test_plan_records_unknown_covers(monkeypatch):
+    from brigade.route_catalog import route_brief
+
+    route = route_brief("rename the config loader helper")
+    # plan covers every real stage but also tags a hallucinated one
+    plan_json = json.dumps(
+        {
+            "assignments": [
+                {
+                    "stage": 1,
+                    "worker": "coder",
+                    "task": "do it",
+                    "covers": ["implement", "correctness-review", "verify", "ghost-review"],
+                }
+            ]
+        }
+    )
+
+    def fake_run_agent(cli_ref, prompt, timeout=600.0, cwd=None, read_only=False):
+        return agents.AgentResult(text=plan_json, ok=True)
+
+    monkeypatch.setattr(aboyeur.agents, "run_agent", fake_run_agent)
+    attempts = []
+    aboyeur.plan("rename the config loader helper", _roster(), attempts=attempts, route=route)
+    assert attempts[-1]["unknown_covers"] == ["ghost-review"]
+    assert "coverage_missing" not in attempts[-1]  # real coverage is complete

@@ -219,6 +219,12 @@ _REPO_HINT = re.compile(
     r"\b(in (the|this|our) (repo|codebase|project)|repo file|template|source (code|file)|\.py|\.ts|\.go|\.rs)\b"
 )
 _DOCS_HINT = re.compile(r"\b(readme|changelog|docs?( page| site)?|documentation|typo)\b")
+# A conventional-commit code prefix means the task is code work even when it
+# mentions docs in passing: `fix(install): ... referencing docs` is a code fix,
+# not a docs edit. Prose "fix typo in README" has no colon and stays docs. A
+# docs-ish scope (`fix(docs): broken link`) is genuinely docs, so it is exempt.
+_CODE_COMMIT_PREFIX = re.compile(r"^(feat|fix|refactor|perf)(\(([^)]*)\))?!?:", re.IGNORECASE)
+_DOCS_SCOPE = {"docs", "doc", "readme", "changelog", "guide"}
 _UI_PATH = re.compile(r"\.(tsx|jsx|vue|svelte|css|scss)$")
 # Path surfaces match whole path segments, never substrings: `author.py` must
 # not fire the auth surface, `tokenizer.md` must not fire on token.
@@ -250,13 +256,63 @@ def _path_segments(raw: str) -> set[str]:
 _TESTED_TEMPLATES = {"vertical-slice", "bugfix", "security-follow-up"}
 
 
-def derive_signals(task: str, template: str | None = None, changed_paths=()) -> list[str]:
+def _override_name(raw: str) -> str:
+    """The signal a `+x` / `-x` / `~x` / bare token names, or '' for an empty token."""
+    token = raw.strip()
+    if not token:
+        return ""
+    return token[1:].strip() if token[0] in "+-~" else token
+
+
+def validate_overrides(overrides) -> None:
+    """Reject an override that targets a path signal. The path (code/docs/system)
+    is a derive-time decision driven by the task and --template, not something a
+    signal override may add or delete: suppressing it strips the whole route to a
+    pathless remnant, and adding a second path scrambles the filter. Raises
+    ValueError naming the offending token."""
+    for raw in overrides:
+        name = _override_name(raw)
+        if name in router.PATHS:
+            raise ValueError(
+                f"cannot override the path signal {name!r} with --route-signal; "
+                "the path is set by the task and --template"
+            )
+
+
+def _apply_overrides(signals: list[str], overrides) -> list[str]:
+    """Apply operator overrides in order. `+x` appends x if absent; `-x` or `~x`
+    drops every copy of x (`~` is the argparse-safe suppress form, since a bare
+    `-x` value is read as a flag). A bare token is treated as `+`. Returns a new
+    list, order-preserving and deduped. Rejects path-signal overrides first."""
+    validate_overrides(overrides)
+    result = list(signals)
+    for raw in overrides:
+        token = raw.strip()
+        if not token:
+            continue
+        op, name = (token[0], token[1:].strip()) if token[0] in "+-~" else ("+", token)
+        if not name:
+            continue
+        if op in "-~":
+            result = [s for s in result if s != name]
+        elif name not in result:
+            result.append(name)
+    return result
+
+
+def derive_signals(task: str, template: str | None = None, changed_paths=(), overrides=()) -> list[str]:
     """Map a task description to route signals. Deterministic: same inputs,
-    same signals. The path signal (code/docs/system) is always first."""
+    same signals. The path signal (code/docs/system) is always first.
+
+    `overrides` are operator tokens (`+auth-surface`, `-ship-requested`) applied
+    before the needs-tests derivation, so a forced `+auth-surface` still earns
+    tests and a `-` suppression removes a signal from all downstream logic."""
     text = task.lower()
     signals: list[str] = []
 
-    if template in _DOCS_TEMPLATE_HINTS or (_DOCS_HINT.search(text) and not _code_shaped_hit(text)):
+    if template in _DOCS_TEMPLATE_HINTS or (
+        _DOCS_HINT.search(text) and not _code_shaped_hit(text) and not _code_commit_hit(task)
+    ):
         path = "docs"
     elif _SYSTEM_HINT.search(text) and not _REPO_HINT.search(text):
         path = "system"
@@ -286,7 +342,12 @@ def derive_signals(task: str, template: str | None = None, changed_paths=()) -> 
         if segments & _AUTH_SEGMENTS and "auth-surface" not in signals:
             signals.append("auth-surface")
 
-    if path == "code":
+    # Overrides land before the needs-tests derivation so a forced surface still
+    # pulls its dependents and a suppression is gone before they are computed.
+    if overrides:
+        signals = _apply_overrides(signals, overrides)
+
+    if signals and signals[0] == "code":
         # Auth-surface work always earns tests: security-critical logic is the
         # last place to skip them.
         tested = (
@@ -310,6 +371,17 @@ def _code_shaped_hit(text: str) -> bool:
     return any(re.search(pattern, text) for signal, pattern in _SIGNAL_PATTERNS if signal in _CODE_SHAPED)
 
 
+def _code_commit_hit(task: str) -> bool:
+    """A conventional-commit code prefix (feat/fix/refactor/perf) with a
+    non-docs scope. Matches the raw task, not the lowercased copy, but the
+    pattern is case-insensitive; the scope check is what excludes `fix(docs):`."""
+    match = _CODE_COMMIT_PREFIX.match(task.strip())
+    if match is None:
+        return False
+    scope = (match.group(3) or "").strip().lower()
+    return scope not in _DOCS_SCOPE
+
+
 def _real_auth_hit(text: str) -> bool:
     """`author`/`authored` must not fire the auth surface."""
     stripped = _AUTH_FALSE_POSITIVE.sub("", text)
@@ -324,6 +396,7 @@ class RouteBrief:
     text: str = ""
     signals: tuple[str, ...] = ()
     approvals: tuple[str, ...] = ()
+    overrides: tuple[str, ...] = ()
     route: tuple[str, ...] = ()
     waves: tuple[tuple[str, ...], ...] = ()
     held: dict = field(default_factory=dict)
@@ -331,16 +404,19 @@ class RouteBrief:
     triggered_by: dict = field(default_factory=dict)
 
     def payload(self) -> dict:
-        """Telemetry shape for run.json. Signals plus approvals reproduce the
-        route decision exactly."""
+        """Telemetry shape for run.json. Signals, approvals, and overrides
+        reproduce the route decision exactly; triggered_by names the live
+        signal that pulled each routed stage in."""
         return {
             "attached": self.attached,
             "signals": list(self.signals),
             "approvals": list(self.approvals),
+            "overrides": list(self.overrides),
             "route": list(self.route),
             "waves": [list(w) for w in self.waves],
             "held": dict(self.held),
             "size": self.size,
+            "triggered_by": dict(self.triggered_by),
         }
 
 
@@ -353,9 +429,10 @@ def route_brief(
     changed_paths=(),
     approvals=(),
     catalog: dict | None = None,
+    overrides=(),
 ) -> RouteBrief:
     catalog = catalog or DEFAULT_CATALOG
-    signals = derive_signals(task, template=template, changed_paths=changed_paths)
+    signals = derive_signals(task, template=template, changed_paths=changed_paths, overrides=overrides)
     granted = tuple(a for a in approvals if a in APPROVAL_SIGNALS)
     live = list(signals) + list(granted)
     result = router.compute_route(catalog, live, available=["task"])
@@ -383,6 +460,7 @@ def route_brief(
         text="\n".join(lines) + "\n",
         signals=tuple(signals),
         approvals=granted,
+        overrides=tuple(o.strip() for o in overrides if o.strip()),
         route=tuple(result["route"]),
         waves=tuple(tuple(w) for w in result["waves"]),
         held=result["held"],
@@ -397,3 +475,16 @@ def uncovered_stages(route: RouteBrief, assignments) -> list[str]:
     for assignment in assignments:
         covered.update(getattr(assignment, "covers", ()) or ())
     return [name for name in route.route if name not in covered]
+
+
+def unknown_covers(route: RouteBrief, assignments) -> list[str]:
+    """Covers tags that name no stage in the route: the plan claims to satisfy
+    a stage that was never required, so the claim is hollow. Ordered, deduped.
+    Distinct from uncovered_stages (real stages left uncovered)."""
+    route_set = set(route.route)
+    seen: dict[str, None] = {}
+    for assignment in assignments:
+        for tag in getattr(assignment, "covers", ()) or ():
+            if tag not in route_set:
+                seen.setdefault(tag, None)
+    return list(seen)

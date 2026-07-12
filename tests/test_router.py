@@ -403,3 +403,98 @@ def test_route_brief_payload_records_approvals() -> None:
     assert granted.payload()["approvals"] == ["ship-approved"]
     plain = route_brief("implement the export module and open a PR")
     assert plain.payload()["approvals"] == []
+
+
+# --- docs-misroute fix: conventional-commit code prefix vetoes docs path ---
+
+
+def test_conventional_fix_prefix_routes_code_despite_docs_word() -> None:
+    signals = derive_signals("fix(install): stop bootstrap docs referencing workspace-only files")
+    assert signals[0] == "code"
+
+
+def test_conventional_feat_prefix_routes_code_despite_changelog() -> None:
+    signals = derive_signals("feat(skills): ship skill.json and CHANGELOG.md with bundled templates")
+    assert signals[0] == "code"
+
+
+def test_prose_fix_typo_still_routes_docs() -> None:
+    assert derive_signals("fix typo in README")[0] == "docs"
+
+
+def test_docs_scope_prefix_stays_docs() -> None:
+    assert derive_signals("fix(docs): repair a broken changelog link")[0] == "docs"
+    assert derive_signals("docs: refresh the roadmap")[0] == "docs"
+
+
+def test_bare_conventional_prefix_routes_code() -> None:
+    assert derive_signals("perf: speed up the changelog generator")[0] == "code"
+
+
+# --- unknown covers (hallucinated coverage) ---
+
+
+def test_unknown_covers_flags_bogus_stage_names() -> None:
+    class FakeAssignment:
+        def __init__(self, covers):
+            self.covers = covers
+
+    brief = route_brief("rename the config loader helper")  # route: implement, correctness-review, verify
+    from brigade.route_catalog import unknown_covers
+
+    assert unknown_covers(brief, [FakeAssignment(("implement", "typo-review"))]) == ["typo-review"]
+    assert unknown_covers(brief, [FakeAssignment(("implement", "verify"))]) == []
+    # dedup + order preserved across assignments
+    result = unknown_covers(
+        brief, [FakeAssignment(("ghost-a", "ghost-b")), FakeAssignment(("ghost-a", "correctness-review"))]
+    )
+    assert result == ["ghost-a", "ghost-b"]
+
+
+# --- route-signal overrides + triggered_by telemetry ---
+
+
+def test_override_force_add_pulls_dependents() -> None:
+    # +auth-surface on a plain code task pulls needs-tests and security-review.
+    brief = route_brief("clean up the config loader", overrides=["+auth-surface"])
+    assert "auth-surface" in brief.signals
+    assert "needs-tests" in brief.signals
+    assert "security-review" in brief.route
+    assert brief.overrides == ("+auth-surface",)
+
+
+def test_override_suppress_with_tilde_and_dash() -> None:
+    for token in ("~ship-requested", "-ship-requested"):
+        brief = route_brief("implement export and open a PR", overrides=[token])
+        assert "ship-requested" not in brief.signals
+        assert "ship" not in brief.held
+        assert "ship" not in brief.route
+
+
+def test_override_bare_token_is_add() -> None:
+    brief = route_brief("rename a helper", overrides=["perf-surface"])
+    assert "perf-surface" in brief.signals
+    assert "perf-review" in brief.route
+
+
+def test_payload_carries_triggered_by_and_overrides() -> None:
+    payload = route_brief("add rate limiting to the login endpoint", overrides=["+perf-surface"]).payload()
+    assert payload["triggered_by"]["security-review"] == "auth-surface"
+    assert payload["overrides"] == ["+perf-surface"]
+    assert "triggered_by" in payload
+
+
+def test_override_rejects_path_signal_suppression() -> None:
+    # Found by dogfooding latent-premises on the router diff: ~code stripped the
+    # path and collapsed the route. The path is derive-time, not overridable.
+    import pytest
+
+    for token in ("~code", "-docs", "+system"):
+        with pytest.raises(ValueError, match="path signal"):
+            route_brief("fix the crash when saving", overrides=[token])
+
+
+def test_validate_overrides_allows_non_path_signals() -> None:
+    from brigade.route_catalog import validate_overrides
+
+    validate_overrides(["+auth-surface", "~ship-requested", "perf-surface"])  # no raise

@@ -65,6 +65,22 @@ size: M (6 stages)
   wave 3: verify  (#code)
 ```
 
+## Overriding a signal
+
+When the keyword heuristic is wrong on one task, override a single signal instead
+of turning routing off:
+
+```bash
+brigade run "clean up the config loader" --route-signal +auth-surface
+brigade run "ship the export module" --route-signal "~ship-requested"
+brigade route "..." --route-signal +perf-surface --json
+```
+
+`+x` force-adds a signal, `~x` (or `-x` via the `=` form) suppresses one. A forced
+signal still pulls its dependents: `+auth-surface` earns `needs-tests` and a
+security review. Overrides land in the `run.json` route payload next to the
+derived signals, so the decision stays reproducible.
+
 ## Opting out
 
 `brigade run --no-route` skips signal derivation, the prompt section, and the

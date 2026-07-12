@@ -20,6 +20,14 @@ def register(sub: argparse._SubParsersAction) -> None:
         help="Changed file path to feed surface derivation. Repeatable.",
     )
     p_route.add_argument(
+        "--route-signal",
+        action="append",
+        default=[],
+        dest="route_signals",
+        metavar="+SIG|-SIG",
+        help="Force-add (+auth-surface) or suppress (~ship-requested) a derived signal. Repeatable.",
+    )
+    p_route.add_argument(
         "--approve-ship",
         action="store_true",
         help="Grant the ship approval signal so a requested ship stage is released instead of held.",
@@ -30,15 +38,28 @@ def register(sub: argparse._SubParsersAction) -> None:
 
 def dispatch(args) -> int:
     import json
+    import sys
 
     from ..route_catalog import route_brief
 
     approvals = ("ship-approved",) if args.approve_ship else ()
-    brief = route_brief(args.task, template=args.template, changed_paths=args.changed_paths, approvals=approvals)
+    try:
+        brief = route_brief(
+            args.task,
+            template=args.template,
+            changed_paths=args.changed_paths,
+            approvals=approvals,
+            overrides=tuple(args.route_signals),
+        )
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
     if args.json:
         print(json.dumps(brief.payload(), indent=2))
         return 0
     print(f"signals: {', '.join(brief.signals)}")
+    if brief.overrides:
+        print(f"overrides: {', '.join(brief.overrides)}")
     print(f"size: {brief.size} ({len(brief.route)} stages)")
     for index, wave in enumerate(brief.waves, start=1):
         for name in wave:

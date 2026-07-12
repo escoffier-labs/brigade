@@ -77,6 +77,14 @@ def register(sub: argparse._SubParsersAction) -> None:
         help="Task template hint for route derivation (e.g. vertical-slice, bugfix, docs).",
     )
     p_run.add_argument(
+        "--route-signal",
+        action="append",
+        default=[],
+        dest="route_signals",
+        metavar="+SIG|-SIG",
+        help="Force-add (+auth-surface) or suppress (~ship-requested) a derived route signal. Repeatable.",
+    )
+    p_run.add_argument(
         "--sandbox",
         choices=["read-only", "workspace-write", "danger-full-access"],
         default=None,
@@ -127,11 +135,19 @@ def dispatch(args) -> int:
     from .. import aboyeur as aboyeur_mod
     from .. import runguard
     from .. import roster as roster_mod
+    from ..route_catalog import validate_overrides
 
     run_cwd = args.cwd.expanduser().resolve()
     if not run_cwd.is_dir():
         print(f"error: --cwd is not a directory: {run_cwd}", file=sys.stderr)
         return 2
+    if args.route_signals:
+        # Fail before the run machinery spins up, not deep inside route_brief.
+        try:
+            validate_overrides(args.route_signals)
+        except ValueError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
     if args.detach and args.dry_run:
         print("error: --detach cannot be used with --dry-run", file=sys.stderr)
         return 2
@@ -261,6 +277,8 @@ def dispatch(args) -> int:
                 run_kwargs["route_approvals"] = ("ship-approved",)
             if args.route_template is not None:
                 run_kwargs["route_template"] = args.route_template
+            if args.route_signals:
+                run_kwargs["route_overrides"] = tuple(args.route_signals)
             rc = aboyeur_mod.run(args.task, loaded_roster, **run_kwargs)
             if args.worktree and output_dir is not None:
                 # Until the patch is proven good, the worktree is the only
