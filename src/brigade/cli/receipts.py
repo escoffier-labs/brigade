@@ -33,6 +33,11 @@ def register(sub: argparse._SubParsersAction) -> None:
         "--import", dest="import_miseledger", action="store_true", help="Import the JSONL with miseledger."
     )
     p_miseledger.set_defaults(func=dispatch)
+    for projection in ("otel-genai", "openinference"):
+        parser = export_sub.add_parser(projection, help=f"Export privacy-safe {projection} span JSONL.")
+        parser.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+        parser.add_argument("--out", default="-", help="Output path, or '-' for stdout.")
+        parser.set_defaults(func=dispatch)
 
 
 def dispatch(args) -> int:
@@ -49,6 +54,14 @@ def dispatch(args) -> int:
             limit=args.limit,
             new_only=args.new_only,
             import_miseledger=args.import_miseledger,
+        )
+    if args.receipts_command == "export" and args.receipts_export_command in {"otel-genai", "openinference"}:
+        from .. import telemetry_export
+
+        return telemetry_export.export(
+            target=args.target,
+            projection=args.receipts_export_command,
+            out=args.out,
         )
     args._brigade_parser.error(f"unknown receipts command: {args.receipts_command}")
     return 2

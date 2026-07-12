@@ -18,6 +18,14 @@ def register(sub: argparse._SubParsersAction) -> None:
         action="store_true",
         help="Also scan local Codex and Claude Code session/log directories.",
     )
+    p_friction_scan.add_argument(
+        "--miseledger",
+        type=Path,
+        action="append",
+        default=None,
+        dest="miseledger_paths",
+        help="Explicit miseledger.adapter.v1 JSONL source. Repeatable.",
+    )
     p_friction_scan.add_argument("--max-files", type=int, default=5000, help="Maximum source files to scan.")
     p_friction_scan.add_argument("--max-candidates", type=int, default=200, help="Maximum candidates to record.")
     p_friction_scan.add_argument(
@@ -75,6 +83,7 @@ def dispatch(args) -> int:
             import_candidates=args.import_candidates,
             dry_run=args.dry_run,
             json_output=args.json,
+            miseledger_paths=args.miseledger_paths,
         )
     if args.friction_command == "show":
         return friction_cmd.show(target=args.target, severity=args.severity, json_output=args.json)
