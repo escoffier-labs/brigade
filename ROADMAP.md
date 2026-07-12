@@ -52,6 +52,7 @@ The proving-ground milestone still holds: the maintainer workspace runs Brigade 
 - **Scorecard and lane ops**: per-model orchestrator success rate, clearer DNF vs worker-fail, documented probe protocol for new CLI lanes (file write in cwd, never trust reply text alone).
 - **MCP and harness fidelity**: continue adapter round-trips (empty args, url-only remotes, headless approvals) as harnesses change; prefer fix-the-adapter over more docs.
 - **Evidence quality**: raise brief_hit_rate as a second-class signal only (install/rollback still exit-code only); optional MiseLedger import on capture remain fail-open.
+- **Context-aware outcomes**: the content-fingerprint work closed the "score vouches for text that no longer exists" gap for an artifact's own files, but a hash cannot see the runtime harness (executor model, tools, dependencies) a signal was earned under. Phase 1 stamps a coarse `context` manifest and `capability_fingerprint` on new outcome records and surfaces them in `outcome explain`, no scoring change. Phase 2 adds cohort-aware retrieval scoring (exact -> capability -> pooled fallback, recency half-life, shrinkage) with the ratchet still on the pooled cohort. Phase 3 (optional) adds deterministic paired attribution runs for real uplift. Design and the three-model rationale: [docs/design/context-blind-spot.md](docs/design/context-blind-spot.md).
 
 Chat surface scanners and backup visibility already shipped; remaining slices (scheduler spreading, outbound backup notifications) stay in the archive and under Later notifications.
 

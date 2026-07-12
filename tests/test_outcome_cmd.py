@@ -1555,3 +1555,154 @@ def test_editing_a_linked_card_makes_prior_records_stale_in_rank(tmp_path, capsy
     assert entry["helped"] == 0
     assert entry["lifetime_helped"] == 3
     assert entry["stale_records"] == 3
+
+
+# --- Phase 1: runtime-context manifest + capability fingerprint ---------------
+
+_CTX_ENV_VARS = (
+    "BRIGADE_CONTEXT_HARNESS",
+    "BRIGADE_CONTEXT_MODEL",
+    "CLAUDECODE",
+    "CURSOR_TRACE_ID",
+    "CODEX_SANDBOX",
+    "CODEX_SANDBOX_NETWORK_DISABLED",
+    "AI_AGENT",
+)
+
+
+def _neutralize_context_env(monkeypatch):
+    for var in _CTX_ENV_VARS:
+        monkeypatch.delenv(var, raising=False)
+
+
+def test_context_manifest_computes_trustworthy_fields(monkeypatch):
+    _neutralize_context_env(monkeypatch)
+    m = outcome_cmd.context_manifest()
+    assert m["python"].count(".") == 1
+    assert m["platform"]
+    assert m["brigade_version"]
+    # No harness/model signals -> honestly unknown, not guessed.
+    assert m["harness"] == "unknown" and m["harness_source"] == "unknown"
+    assert m["model"] == "unknown" and m["model_family"] == "unknown"
+
+
+def test_context_manifest_detects_harness_from_env_signal(monkeypatch):
+    _neutralize_context_env(monkeypatch)
+    monkeypatch.setenv("CLAUDECODE", "1")
+    m = outcome_cmd.context_manifest()
+    assert m["harness"] == "claude-code" and m["harness_source"] == "auto"
+
+
+def test_context_manifest_override_and_model_from_env(monkeypatch):
+    _neutralize_context_env(monkeypatch)
+    monkeypatch.setenv("CLAUDECODE", "1")  # auto signal present...
+    monkeypatch.setenv("BRIGADE_CONTEXT_HARNESS", "my-harness")  # ...but override wins
+    monkeypatch.setenv("BRIGADE_CONTEXT_MODEL", "claude-opus-4-8")
+    m = outcome_cmd.context_manifest()
+    assert m["harness"] == "my-harness" and m["harness_source"] == "env"
+    assert m["model"] == "claude-opus-4-8" and m["model_source"] == "env"
+    assert m["model_family"] == "claude"
+
+
+def test_context_manifest_model_from_run_agent(monkeypatch):
+    _neutralize_context_env(monkeypatch)
+    m = outcome_cmd.context_manifest({"cli": "codex", "model": "gpt-5.5"})
+    assert m["model"] == "gpt-5.5" and m["model_source"] == "run-receipt"
+    assert m["model_family"] == "openai"
+
+
+def test_model_family_buckets():
+    assert outcome_cmd._model_family("claude-opus-4-8") == "claude"
+    assert outcome_cmd._model_family("fable-5") == "claude"
+    assert outcome_cmd._model_family("gpt-5.6-sol") == "openai"
+    assert outcome_cmd._model_family("grok-4.5-high") == "xai"
+    assert outcome_cmd._model_family("gemini-3-pro") == "google"
+    assert outcome_cmd._model_family("some-new-llm") == "other"
+    assert outcome_cmd._model_family("unknown") == "unknown"
+
+
+def test_capability_fingerprint_is_coarse_and_deterministic():
+    base = {"harness": "claude-code", "model_family": "claude", "python": "3.12", "platform": "Linux"}
+    same_family = {**base, "model_family": "claude"}
+    diff_family = {**base, "model_family": "openai"}
+    # Exact model slug is NOT in the vector, so two claude models share a cohort.
+    assert outcome_cmd.capability_fingerprint(base) == outcome_cmd.capability_fingerprint(same_family)
+    assert outcome_cmd.capability_fingerprint(base) != outcome_cmd.capability_fingerprint(diff_family)
+
+
+def test_capture_stamps_context_and_capability_fingerprint(tmp_path, capsys, monkeypatch):
+    _neutralize_context_env(monkeypatch)
+    monkeypatch.setenv("BRIGADE_CONTEXT_HARNESS", "claude-code")
+    monkeypatch.setenv("BRIGADE_CONTEXT_MODEL", "claude-opus-4-8")
+    _write_verify_receipt(tmp_path)
+    assert outcome_cmd.capture(target=tmp_path, artifact_id="skill-x", json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    ctx = payload["record"]["context"]
+    assert ctx["harness"] == "claude-code" and ctx["model_family"] == "claude"
+    assert payload["record"]["capability_fingerprint"]
+    # Round-trips through the ledger.
+    loaded = outcome_cmd.load_records(tmp_path)[0]
+    assert loaded.context["model"] == "claude-opus-4-8"
+    assert loaded.capability_fingerprint == payload["record"]["capability_fingerprint"]
+
+
+def test_record_stamps_context(tmp_path, capsys, monkeypatch):
+    _neutralize_context_env(monkeypatch)
+    assert (
+        outcome_cmd.record(
+            target=tmp_path, artifact_id="skill-x", source="friction", status="cleared", json_output=True
+        )
+        == 0
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["record"]["context"]["python"]
+    assert payload["record"]["capability_fingerprint"]
+
+
+def test_legacy_records_without_context_load_as_none(tmp_path):
+    # A pre-context record (no context/capability fields) must load cleanly.
+    _seed(tmp_path, [outcome.OutcomeRecord("skill-x", "skill", "t", "verify", 1, "r", "2026-06-20T00:00:00+00:00")])
+    loaded = outcome_cmd.load_records(tmp_path)[0]
+    assert loaded.context is None and loaded.capability_fingerprint is None
+
+
+def test_explain_surfaces_capability_breakdown(tmp_path, capsys):
+    _seed(
+        tmp_path,
+        [
+            outcome.OutcomeRecord(
+                "skill-x",
+                "skill",
+                "t1",
+                "verify",
+                1,
+                "r1",
+                "2026-06-20T00:00:00+00:00",
+                context={"harness": "claude-code", "model_family": "claude"},
+                capability_fingerprint="capA",
+            ),
+            outcome.OutcomeRecord(
+                "skill-x",
+                "skill",
+                "t2",
+                "verify",
+                -1,
+                "r2",
+                "2026-06-20T01:00:00+00:00",
+                context={"harness": "cursor", "model_family": "openai"},
+                capability_fingerprint="capB",
+            ),
+        ],
+    )
+    assert outcome_cmd.explain(target=tmp_path, artifact_id="skill-x", json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    breakdown = {e["capability_fingerprint"]: e for e in payload["capability_breakdown"]}
+    assert breakdown["capA"]["helped"] == 1 and breakdown["capA"]["label"] == "claude-code/claude"
+    assert breakdown["capB"]["hurt"] == 1
+
+
+def test_explain_omits_capability_breakdown_for_pre_context_ledger(tmp_path, capsys):
+    _seed(tmp_path, [outcome.OutcomeRecord("skill-x", "skill", "t", "verify", 1, "r", "2026-06-20T00:00:00+00:00")])
+    assert outcome_cmd.explain(target=tmp_path, artifact_id="skill-x", json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert "capability_breakdown" not in payload
