@@ -38,6 +38,7 @@ def _roster_from_snapshot(snapshot: dict) -> Roster:
             role=raw.get("role") or "",
             timeout_seconds=raw.get("timeout_seconds"),
             model=raw.get("model"),
+            reasoning=raw.get("reasoning"),
         )
     return Roster(
         orchestrator=snapshot["orchestrator"],
@@ -109,7 +110,14 @@ def resume(run_dir: Path) -> int:
                     model=agent.model if agent else None,
                     sandbox=sandbox if sandbox is not None else ("read-only" if read_only else None),
                 )
-                turn = thread.run_turn(_continuation_prompt(entry.get("task", "")), timeout=timeout)
+                if agent and agent.reasoning is not None:
+                    turn = thread.run_turn(
+                        _continuation_prompt(entry.get("task", "")),
+                        timeout=timeout,
+                        effort=agent.reasoning,
+                    )
+                else:
+                    turn = thread.run_turn(_continuation_prompt(entry.get("task", "")), timeout=timeout)
             except codex_appserver.AppServerError as exc:
                 entry["detail"] = str(exc)[:200]
                 entry["status"] = "failed"
@@ -155,6 +163,7 @@ def resume(run_dir: Path) -> int:
         cwd=cwd,
         read_only=read_only,
         **({"model": orchestrator.model} if orchestrator.model is not None else {}),
+        **({"reasoning": orchestrator.reasoning} if orchestrator.reasoning is not None else {}),
     )
     aboyeur._write_json(
         run_dir / "synthesis.json",

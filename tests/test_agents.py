@@ -365,6 +365,24 @@ def test_run_agent_forwards_model_to_argv(monkeypatch):
     assert captured["argv"] == ["claude", "--model", "claude-fable-5", "-p", "hi"]
 
 
+@pytest.mark.parametrize(
+    ("cli_ref", "expected"),
+    [
+        ("codex", ["codex", "exec", "-c", 'model_reasoning_effort="xhigh"', "hi"]),
+        ("opencode", ["opencode", "run", "--variant", "xhigh", "hi"]),
+        ("pi", ["pi", "--thinking", "xhigh", "-p", "hi"]),
+        ("grok", ["grok", "--reasoning-effort", "xhigh", "-p", "hi", "--always-approve"]),
+    ],
+)
+def test_build_argv_applies_reasoning(cli_ref, expected):
+    assert agents.build_argv(cli_ref, "hi", reasoning="xhigh") == expected
+
+
+def test_build_argv_rejects_reasoning_for_unsupported_adapter():
+    with pytest.raises(ValueError, match="does not support reasoning"):
+        agents.build_argv("claude", "hi", reasoning="high")
+
+
 def test_run_agent_threads_cwd_into_argv_builder(monkeypatch, tmp_path):
     captured = {}
 
@@ -439,9 +457,11 @@ class _StubThread:
     def __init__(self, result):
         self._result = result
         self.prompts = []
+        self.efforts = []
 
-    def run_turn(self, prompt, *, timeout, on_event=None):
+    def run_turn(self, prompt, *, timeout, on_event=None, effort=None):
         self.prompts.append((prompt, timeout))
+        self.efforts.append(effort)
         return self._result
 
 
@@ -478,6 +498,15 @@ def test_run_codex_appserver_read_only_maps_to_sandbox():
     server = _StubServer(turn)
     agents.run_codex_appserver(server, "p", timeout=5.0, cwd=None, read_only=True)
     assert server.calls[0]["sandbox"] == "read-only"
+
+
+def test_run_codex_appserver_passes_reasoning_to_turn():
+    from brigade import codex_appserver
+
+    turn = codex_appserver.TurnResult(text="x", ok=True, status="complete", thread_id="t-1")
+    server = _StubServer(turn)
+    agents.run_codex_appserver(server, "p", timeout=5.0, cwd=None, reasoning="xhigh")
+    assert server.thread.efforts == ["xhigh"]
 
 
 def test_run_codex_appserver_empty_text_not_ok():

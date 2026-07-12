@@ -1135,6 +1135,14 @@ def test_roster_payload_includes_model():
     assert payload["agents"]["builder"]["model"] == "gpt-5.5-codex"
 
 
+def test_roster_payload_includes_reasoning():
+    roster = Roster(
+        orchestrator="chef",
+        agents={"chef": Agent("chef", "codex", "plan", reasoning="xhigh")},
+    )
+    assert aboyeur._roster_payload(roster)["agents"]["chef"]["reasoning"] == "xhigh"
+
+
 def test_roster_payload_includes_sandbox():
     roster = Roster(
         orchestrator="chef",
@@ -1878,11 +1886,10 @@ def test_synthesis_failure_writes_artifact(monkeypatch, tmp_path, capsys):
     assert run_meta["duration_seconds"] >= 0
     synthesis = json.loads((output_dir / "synthesis.json").read_text())
     assert synthesis["orchestrator"] == "chef"
-    assert synthesis["result"] == {
-        "ok": False,
-        "detail": "synthesis failed",
-        "text": "partial synthesis",
-    }
+    assert synthesis["result"]["ok"] is False
+    assert synthesis["result"]["detail"] == "synthesis failed"
+    assert synthesis["result"]["text"] == "partial synthesis"
+    assert synthesis["result"]["duration_seconds"] >= 0
     assert not (output_dir / "final.txt").exists()
 
 

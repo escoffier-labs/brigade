@@ -198,6 +198,7 @@ class AgentResult:
     timed_out: bool = False
     stdout_log: str | None = None
     stderr_log: str | None = None
+    duration_seconds: float | None = None
 
 
 def is_known(cli_ref: str) -> bool:
@@ -249,11 +250,30 @@ _MODEL_PIN: dict[str, tuple[str, Callable[[List[str], str, str], List[str]]]] = 
     "antigravity": ("--model", _pin_after_cmd),  # agy --model X [--sandbox] --print <prompt>
 }
 
+_REASONING_ADAPTERS = frozenset({"codex", "opencode", "pi", "grok"})
+
 
 def supports_model_pinning(cli_ref: str) -> bool:
     """True if cli_ref accepts a per-agent `model=` pin. Ollama refs name their
     own model and return False here."""
     return cli_ref in _MODEL_PIN
+
+
+def supports_reasoning(cli_ref: str) -> bool:
+    return cli_ref in _REASONING_ADAPTERS
+
+
+def _with_reasoning(cli_ref: str, argv: List[str], reasoning: str) -> List[str]:
+    if cli_ref == "codex":
+        return [*argv[:-1], "-c", f'model_reasoning_effort="{reasoning}"', argv[-1]]
+    if cli_ref == "opencode":
+        return [*argv[:-1], "--variant", reasoning, argv[-1]]
+    if cli_ref == "pi":
+        return [argv[0], "--thinking", reasoning, *argv[1:]]
+    if cli_ref == "grok":
+        return [argv[0], "--reasoning-effort", reasoning, *argv[1:]]
+    supported = ", ".join(sorted(_REASONING_ADAPTERS))
+    raise ValueError(f"{cli_ref!r} does not support reasoning pins (supported: {supported})")
 
 
 def _with_model(cli_ref: str, argv: List[str], model: str) -> List[str]:
@@ -271,6 +291,7 @@ def build_argv(
     read_only: bool = False,
     sandbox: str | None = None,
     model: str | None = None,
+    reasoning: str | None = None,
     cwd: Path | None = None,
 ) -> List[str]:
     if cli_ref.startswith(_OLLAMA_PREFIX):
@@ -279,6 +300,8 @@ def build_argv(
             raise ValueError(f"ollama reference needs a model: {cli_ref!r}")
         if model is not None:
             raise ValueError(f"{cli_ref!r} already names a model; drop the separate model setting")
+        if reasoning is not None:
+            raise ValueError(f"{cli_ref!r} does not support reasoning pins")
         return ["ollama", "run", ollama_model, prompt]
 
     if cli_ref.startswith(_CODEX_CLOUD_PREFIX):
@@ -294,6 +317,8 @@ def build_argv(
     argv = builder(prompt, read_only, sandbox, cwd)
     if model is not None:
         argv = _with_model(cli_ref, argv, model)
+    if reasoning is not None:
+        argv = _with_reasoning(cli_ref, argv, reasoning)
     return argv
 
 
@@ -309,6 +334,7 @@ def run_agent(
     read_only: bool = False,
     sandbox: str | None = None,
     model: str | None = None,
+    reasoning: str | None = None,
 ) -> AgentResult:
     if not detect(cli_ref):
         return AgentResult(text="", ok=False, detail=f"{command_for(cli_ref)} not installed")
@@ -332,7 +358,15 @@ def run_agent(
         return codex_cloud.run_cloud_task(prompt, env_id=env_id, timeout=timeout, cwd=cwd)
 
     result = proc.run(
-        build_argv(cli_ref, prompt, read_only=read_only, sandbox=sandbox, model=model, cwd=cwd),
+        build_argv(
+            cli_ref,
+            prompt,
+            read_only=read_only,
+            sandbox=sandbox,
+            model=model,
+            reasoning=reasoning,
+            cwd=cwd,
+        ),
         timeout=timeout,
         cwd=cwd,
     )
@@ -378,6 +412,7 @@ def run_codex_appserver(
     read_only: bool = False,
     sandbox: str | None = None,
     model: str | None = None,
+    reasoning: str | None = None,
     on_event=None,
 ) -> AgentResult:
     """Run one codex worker as a thread + turn on a shared app-server.
@@ -389,7 +424,10 @@ def run_codex_appserver(
     effective_sandbox = sandbox if sandbox is not None else ("read-only" if read_only else None)
     try:
         thread = server.start_thread(cwd=cwd, model=model, sandbox=effective_sandbox)
-        turn = thread.run_turn(prompt, timeout=timeout, on_event=on_event)
+        turn_kwargs = {"timeout": timeout, "on_event": on_event}
+        if reasoning is not None:
+            turn_kwargs["effort"] = reasoning
+        turn = thread.run_turn(prompt, **turn_kwargs)
     except codex_appserver.AppServerError as exc:
         return AgentResult(text="", ok=False, detail=str(exc)[:200], status="failed")
     text = turn.text.strip()

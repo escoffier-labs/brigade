@@ -202,7 +202,7 @@ def dispatch(args) -> int:
         handoff_inbox = args.handoff_inbox or (run_cwd / ".claude" / "memory-handoffs")
     effective_sandbox = args.sandbox if args.sandbox is not None else loaded_roster.sandbox
     if args.read_only:
-        advisory = _read_only_advisory(loaded_roster, effective_sandbox)
+        advisory = _read_only_advisory(loaded_roster, effective_sandbox, worker=args.worker)
         if advisory:
             print("warning: --read-only is best-effort for some agents in this run:", file=sys.stderr)
             for line in advisory:
@@ -438,7 +438,7 @@ def _print_suspected_noop_warning(output_dir: Path) -> None:
         )
 
 
-def _read_only_advisory(roster, effective_sandbox) -> list[str]:
+def _read_only_advisory(roster, effective_sandbox, worker: str | None = None) -> list[str]:
     """Lines describing which worker agents do not hard-enforce read-only.
 
     A writable --sandbox override downgrades even natively-sandboxed CLIs to
@@ -449,9 +449,13 @@ def _read_only_advisory(roster, effective_sandbox) -> list[str]:
 
     sandbox_overrides_native = effective_sandbox in ("workspace-write", "danger-full-access")
     lines: list[str] = []
-    # The orchestrator runs too (it plans), so include it alongside the workers.
-    orchestrator = roster.agents.get(roster.orchestrator)
-    agents_to_check = [orchestrator, *roster_mod.workers(roster)] if orchestrator else roster_mod.workers(roster)
+    if worker is not None:
+        selected = roster.agents.get(worker)
+        agents_to_check = [selected] if selected is not None else []
+    else:
+        # The orchestrator runs too (it plans), so include it alongside the workers.
+        orchestrator = roster.agents.get(roster.orchestrator)
+        agents_to_check = [orchestrator, *roster_mod.workers(roster)] if orchestrator else roster_mod.workers(roster)
     for agent in agents_to_check:
         cli = agent.cli or ""
         enforcement = agents_mod.read_only_enforcement(cli)

@@ -39,6 +39,7 @@ allow_models = ["codex", "ollama:*"]
 
 # Cross-model example: pin a model per agent with `model = ...`
 # (supported: claude, codex, grok, opencode, pi, kimi, cursor, antigravity).
+# Pin reasoning with `reasoning = "high"` for codex, grok, opencode, or pi.
 # A `codex-cloud:<env-id>` seat submits the task to Codex Cloud, polls it to a
 # terminal state, and returns the summary plus unified diff (never auto-applied;
 # land it with `codex cloud apply <task-id>`). Allow it with "codex-cloud:*".
@@ -55,6 +56,7 @@ allow_models = ["codex", "ollama:*"]
 # [agents.builder]
 # cli = "codex"
 # model = "gpt-5.5"
+# reasoning = "xhigh"
 # role = "Make precise code changes and report what changed."
 #
 # [agents.composer]
@@ -171,6 +173,17 @@ def doctor(target: Path, *, roster_path: Path | None = None) -> int:
                         doctor_mod.FAIL,
                         f"agent: {name} model",
                         f"{agent.cli} does not support model pinning; drop model= or switch cli",
+                    )
+                )
+        if agent.reasoning is not None:
+            if agents.supports_reasoning(agent.cli):
+                checks.append((doctor_mod.OK, f"agent: {name} reasoning", f"{agent.reasoning} via {agent.cli}"))
+            else:
+                checks.append(
+                    (
+                        doctor_mod.FAIL,
+                        f"agent: {name} reasoning",
+                        f"{agent.cli} does not support reasoning pins; drop reasoning= or switch cli",
                     )
                 )
 

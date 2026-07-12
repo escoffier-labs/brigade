@@ -46,3 +46,12 @@ def test_writable_sandbox_override_downgrades_hard_agents():
     # the native sandbox is overridden, so even codex is now best-effort
     assert "safe (codex)" in joined
     assert "soft (goose)" in joined
+
+
+def test_direct_worker_advisory_only_checks_selected_seat():
+    lines = run_cli._read_only_advisory(_roster(), None, worker="safe")
+    assert lines == []
+
+    lines = run_cli._read_only_advisory(_roster(), None, worker="open")
+    assert len(lines) == 1
+    assert "open (opencode)" in lines[0]

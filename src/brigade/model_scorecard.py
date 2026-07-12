@@ -52,9 +52,9 @@ class ModelRow:
 
     @property
     def mean_duration_seconds(self) -> float:
-        if self.runs <= 0:
+        if self.seats <= 0:
             return 0.0
-        return self.total_duration_seconds / self.runs
+        return self.total_duration_seconds / self.seats
 
 
 @dataclass(frozen=True)
@@ -79,10 +79,9 @@ class _Acc:
     last_seen: str | None = None
 
     def note_seen(self, started_at: str | None, run_id: str, duration: float | None) -> None:
-        if run_id not in self.run_ids:
-            self.run_ids.add(run_id)
-            if isinstance(duration, (int, float)):
-                self.total_duration_seconds += float(duration)
+        self.run_ids.add(run_id)
+        if isinstance(duration, (int, float)):
+            self.total_duration_seconds += float(duration)
         if not started_at:
             return
         if self.first_seen is None or started_at < self.first_seen:
@@ -283,9 +282,6 @@ def _scan_run_dir(
         if started_dt is None or started_dt < since:
             return False, None
 
-    duration = run_meta.get("duration_seconds")
-    duration_f = float(duration) if isinstance(duration, (int, float)) else None
-
     orchestrator_name = roster.get("orchestrator")
     if not isinstance(orchestrator_name, str):
         orch_meta = run_meta.get("orchestrator")
@@ -301,7 +297,14 @@ def _scan_run_dir(
         if wr_err is not None:
             return False, wr_err
 
-    # All inputs valid — mutate into.
+    synthesis_payload: dict[str, Any] | None = None
+    synthesis_path = run_dir / "synthesis.json"
+    if synthesis_path.is_file():
+        synthesis_payload, synthesis_err = _read_json_object(synthesis_path)
+        if synthesis_err is not None:
+            return False, synthesis_err
+
+    # All inputs valid - map roster identities without counting unused seats.
     for name, agent in agents_raw.items():
         if not isinstance(name, str) or not isinstance(agent, dict):
             continue
@@ -309,13 +312,6 @@ def _scan_run_dir(
         if key is None:
             continue
         agent_keys[name] = key
-        bucket = into.get(key)
-        if bucket is None:
-            bucket = _Acc(cli=key[0], model=key[1])
-            into[key] = bucket
-        bucket.note_seen(started_at, run_id, duration_f)
-        if orchestrator_name is not None and name == orchestrator_name:
-            bucket.orchestrator_seats += 1
 
     results: list[Any] = []
     ground_truth: Any = None
@@ -341,7 +337,9 @@ def _scan_run_dir(
         if bucket is None:
             bucket = _Acc(cli=key[0], model=key[1])
             into[key] = bucket
-            bucket.note_seen(started_at, run_id, duration_f)
+        item_duration = item.get("duration_seconds")
+        duration_f = float(item_duration) if isinstance(item_duration, (int, float)) else None
+        bucket.note_seen(started_at, run_id, duration_f)
         bucket.worker_seats += 1
         if item.get("ok") is True:
             bucket.worker_ok += 1
@@ -350,6 +348,19 @@ def _scan_run_dir(
 
     for key in noop_models:
         into[key].suspected_no_op_runs.add(run_id)
+
+    if synthesis_payload is not None and synthesis_payload.get("mode") != "direct-worker":
+        orchestrator_key = agent_keys.get(orchestrator_name) if orchestrator_name is not None else None
+        synthesis_result = synthesis_payload.get("result")
+        if orchestrator_key is not None and isinstance(synthesis_result, dict):
+            bucket = into.get(orchestrator_key)
+            if bucket is None:
+                bucket = _Acc(cli=orchestrator_key[0], model=orchestrator_key[1])
+                into[orchestrator_key] = bucket
+            duration = synthesis_result.get("duration_seconds")
+            duration_f = float(duration) if isinstance(duration, (int, float)) else None
+            bucket.note_seen(started_at, run_id, duration_f)
+            bucket.orchestrator_seats += 1
 
     return True, None
 
