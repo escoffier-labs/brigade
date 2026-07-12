@@ -11,6 +11,8 @@ from . import toml_compat
 
 SANDBOX_CHOICES = ("read-only", "workspace-write", "danger-full-access")
 CODEX_TRANSPORT_CHOICES = ("exec", "app-server")
+AGENT_TRANSPORT_CHOICES = ("direct", "acpx")
+ACPX_TRANSPORT_VERSION = "0.12.0"
 
 
 @dataclass(frozen=True)
@@ -23,6 +25,8 @@ class Agent:
     model: str | None = None
     headers: dict | None = None
     reasoning: str | None = None
+    transport: str = "direct"
+    transport_version: str | None = None
 
 
 @dataclass(frozen=True)
@@ -146,6 +150,16 @@ def load_roster(path: Path) -> Roster:
         model = _as_str(model_raw, f"agents.{agent_name}.model") if model_raw is not None else None
         reasoning_raw = raw_agent.get("reasoning")
         reasoning = _as_str(reasoning_raw, f"agents.{agent_name}.reasoning") if reasoning_raw is not None else None
+        transport_raw = raw_agent.get("transport", "direct")
+        if not isinstance(transport_raw, str) or transport_raw not in AGENT_TRANSPORT_CHOICES:
+            choices = ", ".join(AGENT_TRANSPORT_CHOICES)
+            raise ValueError(f"agents.{agent_name}.transport must be one of: {choices}")
+        transport_version_raw = raw_agent.get("transport_version")
+        transport_version = (
+            _as_str(transport_version_raw, f"agents.{agent_name}.transport_version")
+            if transport_version_raw is not None
+            else None
+        )
 
         headers_raw = raw_agent.get("headers")
         if headers_raw is not None and not isinstance(headers_raw, dict):
@@ -165,6 +179,23 @@ def load_roster(path: Path) -> Roster:
             if not _allowed(cli, allow_models):
                 raise ValueError(f"agents.{agent_name}.cli is not allowed by limits.allow_models: {cli!r}")
 
+        if transport_raw == "acpx":
+            if cli != "cursor":
+                raise ValueError(f'agents.{agent_name}.transport acpx currently supports cli = "cursor" only')
+            if model is None:
+                raise ValueError(f"agents.{agent_name}.transport acpx requires model")
+            if transport_version is None:
+                raise ValueError(f"agents.{agent_name}.transport acpx requires transport_version")
+            if transport_version != ACPX_TRANSPORT_VERSION:
+                raise ValueError(
+                    f"agents.{agent_name}.transport acpx reviewed version is {ACPX_TRANSPORT_VERSION}; "
+                    f"got {transport_version}"
+                )
+            if agent_name == orchestrator:
+                raise ValueError("acpx Cursor seats are workers only")
+        elif transport_version is not None:
+            raise ValueError(f'agents.{agent_name}.transport_version requires transport = "acpx"')
+
         parsed_agents[agent_name] = Agent(
             name=agent_name,
             cli=cli,
@@ -174,6 +205,8 @@ def load_roster(path: Path) -> Roster:
             model=model,
             headers=headers,
             reasoning=reasoning,
+            transport=transport_raw,
+            transport_version=transport_version,
         )
 
     if orchestrator not in parsed_agents:

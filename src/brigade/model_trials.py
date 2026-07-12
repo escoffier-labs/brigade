@@ -350,6 +350,7 @@ def execute(
             cwd=workspace,
             output_dir=run_dir,
             route_enabled=False,
+            read_only=True,
         )
         try:
             text = (run_dir / "final.txt").read_text()

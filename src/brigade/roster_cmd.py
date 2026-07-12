@@ -40,6 +40,8 @@ allow_models = ["codex", "ollama:*"]
 # Cross-model example: pin a model per agent with `model = ...`
 # (supported: claude, codex, grok, opencode, pi, kimi, cursor, antigravity).
 # Pin reasoning with `reasoning = "high"` for codex, grok, opencode, or pi.
+# Cursor workers may opt into reviewed ACP transport with
+# `transport = "acpx"` and `transport_version = "0.12.0"`.
 # A `codex-cloud:<env-id>` seat submits the task to Codex Cloud, polls it to a
 # terminal state, and returns the summary plus unified diff (never auto-applied;
 # land it with `codex cloud apply <task-id>`). Allow it with "codex-cloud:*".
@@ -186,5 +188,22 @@ def doctor(target: Path, *, roster_path: Path | None = None) -> int:
                         f"{agent.cli} does not support reasoning pins; drop reasoning= or switch cli",
                     )
                 )
+        if agent.transport == "acpx":
+            from . import acpx_adapter
+
+            if agents.proc.which("acpx") is None:
+                checks.append((doctor_mod.WARN, f"agent: {name} acpx", "acpx is not installed"))
+            else:
+                installed, detail = acpx_adapter.installed_version()
+                if installed == agent.transport_version:
+                    checks.append((doctor_mod.OK, f"agent: {name} acpx", f"version {installed}"))
+                else:
+                    checks.append(
+                        (
+                            doctor_mod.FAIL,
+                            f"agent: {name} acpx",
+                            f"requires {agent.transport_version}; found {installed or detail}",
+                        )
+                    )
 
     return doctor_mod._report(checks)

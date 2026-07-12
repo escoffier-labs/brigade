@@ -58,6 +58,16 @@ class WorkerResult:
     stdout_log: str | None = None
     stderr_log: str | None = None
     duration_seconds: float | None = None
+    transport: str = "cli"
+    requested_model: str | None = None
+    effective_model: str | None = None
+    reasoning: str | None = None
+    stop_reason: str | None = None
+    protocol_version: int | None = None
+    session_id: str | None = None
+    request_id: str | None = None
+    acpx_version: str | None = None
+    safe_events: tuple[dict[str, object], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -955,7 +965,15 @@ def _run_codex_appserver_worker(
                 fallback_kwargs["effort"] = agent.reasoning
             turn = thread.run_turn(prompt, **fallback_kwargs)
     except codex_appserver.AppServerError as exc:
-        return agents.AgentResult(text="", ok=False, detail=str(exc)[:200], status="failed")
+        return agents.AgentResult(
+            text="",
+            ok=False,
+            detail=str(exc)[:200],
+            status="failed",
+            transport="codex-app-server",
+            requested_model=agent.model,
+            reasoning=agent.reasoning,
+        )
     finally:
         if registry is not None and active_turn_id is not None:
             registry.unregister(worker, active_turn_id)
@@ -967,12 +985,30 @@ def _run_codex_appserver_worker(
             detail=(turn.detail or f"turn {turn.status}")[:200],
             thread_id=turn.thread_id,
             status=turn.status,
+            transport="codex-app-server",
+            requested_model=agent.model,
+            reasoning=agent.reasoning,
         )
     if not text:
         return agents.AgentResult(
-            text="", ok=False, detail="empty output", thread_id=turn.thread_id, status=turn.status
+            text="",
+            ok=False,
+            detail="empty output",
+            thread_id=turn.thread_id,
+            status=turn.status,
+            transport="codex-app-server",
+            requested_model=agent.model,
+            reasoning=agent.reasoning,
         )
-    return agents.AgentResult(text=text, ok=True, thread_id=turn.thread_id, status=turn.status)
+    return agents.AgentResult(
+        text=text,
+        ok=True,
+        thread_id=turn.thread_id,
+        status=turn.status,
+        transport="codex-app-server",
+        requested_model=agent.model,
+        reasoning=agent.reasoning,
+    )
 
 
 def dispatch(
@@ -990,6 +1026,7 @@ def dispatch(
     control_registry: run_control.LiveTurnRegistry | None = None,
     events_dir: Path | None = None,
     verbose: bool = False,
+    authorized_writable_worktree: bool = False,
 ) -> list[WorkerResult]:
     def run_one(assignment: Assignment, prior_results: list[WorkerResult]) -> WorkerResult:
         agent = roster.agents[assignment.worker]
@@ -1012,7 +1049,19 @@ def dispatch(
             evidence=evidence,
         )
         started = time.monotonic()
-        if agent.cli == "codex" and appserver is not None:
+        if agent.transport == "acpx":
+            from . import acpx_adapter
+
+            result = acpx_adapter.run_cursor(
+                prompt,
+                cwd=cwd or Path.cwd(),
+                timeout=timeout_for(agent, roster),
+                model=agent.model or "",
+                version=agent.transport_version or "",
+                read_only=read_only if sandbox_read_only is None else sandbox_read_only,
+                writable_worktree=authorized_writable_worktree,
+            )
+        elif agent.cli == "codex" and appserver is not None:
             on_event = _worker_event_writer(events_dir, assignment.worker, verbose=verbose)
             result = _run_codex_appserver_worker(
                 appserver,
@@ -1052,6 +1101,16 @@ def dispatch(
             exit_code=result.exit_code,
             timed_out=result.timed_out,
             duration_seconds=max(0.0, round(time.monotonic() - started, 3)),
+            transport=result.transport,
+            requested_model=result.requested_model,
+            effective_model=result.effective_model,
+            reasoning=result.reasoning,
+            stop_reason=result.stop_reason,
+            protocol_version=result.protocol_version,
+            session_id=result.session_id,
+            request_id=result.request_id,
+            acpx_version=result.acpx_version,
+            safe_events=result.safe_events,
         )
 
     if not assignments:
@@ -1191,6 +1250,21 @@ def _worker_payload(results: list[WorkerResult]) -> list[dict[str, object]]:
             entry["stderr_log"] = result.stderr_log
         if result.duration_seconds is not None:
             entry["duration_seconds"] = result.duration_seconds
+        entry["transport"] = result.transport
+        for key, value in (
+            ("requested_model", result.requested_model),
+            ("effective_model", result.effective_model),
+            ("reasoning", result.reasoning),
+            ("stop_reason", result.stop_reason),
+            ("protocol_version", result.protocol_version),
+            ("session_id", result.session_id),
+            ("request_id", result.request_id),
+            ("acpx_version", result.acpx_version),
+        ):
+            if value is not None:
+                entry[key] = value
+        if result.safe_events:
+            entry["events"] = list(result.safe_events)
         payload.append(entry)
     return payload
 
@@ -1277,6 +1351,21 @@ def _agent_result_payload(result: agents.AgentResult) -> dict[str, object]:
         payload["stderr_log"] = result.stderr_log
     if result.duration_seconds is not None:
         payload["duration_seconds"] = result.duration_seconds
+    payload["transport"] = result.transport
+    for key, value in (
+        ("requested_model", result.requested_model),
+        ("effective_model", result.effective_model),
+        ("reasoning", result.reasoning),
+        ("stop_reason", result.stop_reason),
+        ("protocol_version", result.protocol_version),
+        ("session_id", result.session_id),
+        ("request_id", result.request_id),
+        ("acpx_version", result.acpx_version),
+    ):
+        if value is not None:
+            payload[key] = value
+    if result.safe_events:
+        payload["events"] = list(result.safe_events)
     return payload
 
 
@@ -1607,6 +1696,7 @@ def set_artifact_patch_ref(output_dir: Path, patch_ref: str = "changes.patch") -
 
 def _roster_payload(roster: Roster) -> dict[str, object]:
     return {
+        "schema": "brigade.roster_snapshot.v1",
         "orchestrator": roster.orchestrator,
         "max_workers": roster.max_workers,
         "timeout_seconds": roster.timeout_seconds,
@@ -1617,6 +1707,8 @@ def _roster_payload(roster: Roster) -> dict[str, object]:
                 "cli": agent.cli,
                 "model": agent.model,
                 "reasoning": agent.reasoning,
+                "transport": agent.transport,
+                "transport_version": agent.transport_version,
                 "role": agent.role,
                 "timeout_seconds": agent.timeout_seconds,
             }
@@ -1651,6 +1743,7 @@ def _run_payload(
     worker: str | None = None,
 ) -> dict[str, object]:
     payload: dict[str, object] = {
+        "schema": "brigade.run.v1",
         "task": task,
         "cwd": str(cwd) if cwd is not None else None,
         "orchestrator": roster.orchestrator,
@@ -1741,6 +1834,7 @@ def run(
     route_template: str | None = None,
     route_overrides: tuple[str, ...] = (),
     worker: str | None = None,
+    authorized_writable_worktree: bool = False,
 ) -> int:
     started_at = datetime.now(timezone.utc)
     transport_for_payload = codex_transport or roster.codex_transport
@@ -1868,7 +1962,10 @@ def run(
         if direct_worker:
             attempts_payload["mode"] = "direct-worker"
         _write_json(output_dir / "plan-attempts.json", attempts_payload)
-        _write_json(output_dir / "plan.json", {"assignments": _assignment_payload(assignments)})
+        _write_json(
+            output_dir / "plan.json",
+            {"schema": "brigade.run_plan.v1", "assignments": _assignment_payload(assignments)},
+        )
 
     if dry_run:
         payload = {"assignments": _assignment_payload(assignments)}
@@ -1971,6 +2068,7 @@ def run(
             control_registry=control_registry,
             events_dir=(output_dir / "events") if (output_dir is not None and appserver is not None) else None,
             verbose=verbose,
+            authorized_writable_worktree=authorized_writable_worktree,
         )
     finally:
         if control_server is not None:
@@ -1999,7 +2097,11 @@ def run(
         worker_results = _write_worker_logs(output_dir, worker_results)
         _write_json(
             output_dir / "worker-results.json",
-            {"results": _worker_payload(worker_results), "ground_truth": ground_truth},
+            {
+                "schema": "brigade.worker_results.v1",
+                "results": _worker_payload(worker_results),
+                "ground_truth": ground_truth,
+            },
         )
     if verbose:
         _print_worker_status(worker_results)
@@ -2032,6 +2134,16 @@ def run(
             stdout_log=direct_result.stdout_log,
             stderr_log=direct_result.stderr_log,
             duration_seconds=direct_result.duration_seconds,
+            transport=direct_result.transport,
+            requested_model=direct_result.requested_model,
+            effective_model=direct_result.effective_model,
+            reasoning=direct_result.reasoning,
+            stop_reason=direct_result.stop_reason,
+            protocol_version=direct_result.protocol_version,
+            session_id=direct_result.session_id,
+            request_id=direct_result.request_id,
+            acpx_version=direct_result.acpx_version,
+            safe_events=direct_result.safe_events,
         )
     else:
         synthesis_started = time.monotonic()
@@ -2057,6 +2169,7 @@ def run(
             final = _write_agent_logs(output_dir, "synthesis", final)
         synthesis_payload = (
             {
+                "schema": "brigade.synthesis.v1",
                 "mode": "direct-worker",
                 "worker": worker,
                 "orchestrator": None,
@@ -2065,6 +2178,7 @@ def run(
             }
             if direct_worker
             else {
+                "schema": "brigade.synthesis.v1",
                 "orchestrator": roster.orchestrator,
                 "result": _agent_result_payload(final),
                 "ground_truth": ground_truth,

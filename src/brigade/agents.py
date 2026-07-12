@@ -199,6 +199,16 @@ class AgentResult:
     stdout_log: str | None = None
     stderr_log: str | None = None
     duration_seconds: float | None = None
+    transport: str = "cli"
+    requested_model: str | None = None
+    effective_model: str | None = None
+    reasoning: str | None = None
+    stop_reason: str | None = None
+    protocol_version: int | None = None
+    session_id: str | None = None
+    request_id: str | None = None
+    acpx_version: str | None = None
+    safe_events: tuple[dict[str, object], ...] = ()
 
 
 def is_known(cli_ref: str) -> bool:
@@ -381,6 +391,8 @@ def run_agent(
             stderr=result.stderr,
             exit_code=result.code,
             timed_out=result.code == 124,
+            requested_model=model,
+            reasoning=reasoning,
         )
     if not text:
         detail = "empty output"
@@ -393,6 +405,8 @@ def run_agent(
             stdout=result.stdout,
             stderr=result.stderr,
             exit_code=result.code,
+            requested_model=model,
+            reasoning=reasoning,
         )
     return AgentResult(
         text=text,
@@ -400,6 +414,8 @@ def run_agent(
         stdout=result.stdout,
         stderr=result.stderr,
         exit_code=result.code,
+        requested_model=model,
+        reasoning=reasoning,
     )
 
 
@@ -429,7 +445,15 @@ def run_codex_appserver(
             turn_kwargs["effort"] = reasoning
         turn = thread.run_turn(prompt, **turn_kwargs)
     except codex_appserver.AppServerError as exc:
-        return AgentResult(text="", ok=False, detail=str(exc)[:200], status="failed")
+        return AgentResult(
+            text="",
+            ok=False,
+            detail=str(exc)[:200],
+            status="failed",
+            transport="codex-app-server",
+            requested_model=model,
+            reasoning=reasoning,
+        )
     text = turn.text.strip()
     if not turn.ok:
         return AgentResult(
@@ -438,7 +462,27 @@ def run_codex_appserver(
             detail=(turn.detail or f"turn {turn.status}")[:200],
             thread_id=turn.thread_id,
             status=turn.status,
+            transport="codex-app-server",
+            requested_model=model,
+            reasoning=reasoning,
         )
     if not text:
-        return AgentResult(text="", ok=False, detail="empty output", thread_id=turn.thread_id, status=turn.status)
-    return AgentResult(text=text, ok=True, thread_id=turn.thread_id, status=turn.status)
+        return AgentResult(
+            text="",
+            ok=False,
+            detail="empty output",
+            thread_id=turn.thread_id,
+            status=turn.status,
+            transport="codex-app-server",
+            requested_model=model,
+            reasoning=reasoning,
+        )
+    return AgentResult(
+        text=text,
+        ok=True,
+        thread_id=turn.thread_id,
+        status=turn.status,
+        transport="codex-app-server",
+        requested_model=model,
+        reasoning=reasoning,
+    )

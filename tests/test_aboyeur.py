@@ -1129,6 +1129,48 @@ def test_run_passes_agent_models(monkeypatch):
     ]
 
 
+def test_dispatch_uses_acpx_transport(monkeypatch, tmp_path):
+    from brigade import acpx_adapter
+
+    seen = {}
+
+    def fake_cursor(prompt, **kwargs):
+        seen.update(prompt=prompt, **kwargs)
+        return agents.AgentResult(
+            text="through ACP",
+            ok=True,
+            transport="acpx",
+            requested_model="composer-2.5",
+            effective_model="composer-2.5",
+            protocol_version=1,
+        )
+
+    monkeypatch.setattr(acpx_adapter, "run_cursor", fake_cursor)
+    roster = Roster(
+        orchestrator="chef",
+        agents={
+            "chef": Agent("chef", "codex", "plan"),
+            "composer": Agent(
+                "composer",
+                "cursor",
+                "build",
+                model="composer-2.5",
+                transport="acpx",
+                transport_version="0.12.0",
+            ),
+        },
+    )
+    result = aboyeur.dispatch(
+        [aboyeur.Assignment(worker="composer", task="inspect")],
+        roster,
+        cwd=tmp_path,
+        read_only=True,
+    )[0]
+    assert result.ok is True and result.transport == "acpx"
+    assert seen["version"] == "0.12.0"
+    assert seen["read_only"] is True
+
+
 def test_roster_payload_includes_model():
     payload = aboyeur._roster_payload(_model_roster())
     assert payload["agents"]["architect"]["model"] == "claude-fable-5"
