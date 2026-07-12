@@ -19,8 +19,15 @@
 <p align="center">
   <img src="https://shieldcn.dev/github/ci/escoffier-labs/brigade.svg?workflow=ci.yml&branch=main&label=ci&size=xs" alt="CI status">
   <img src="https://shieldcn.dev/pypi/v/brigade-cli.svg?label=pypi&size=xs" alt="PyPI version">
+  <img src="https://shieldcn.dev/pypi/dm/brigade-cli.svg?size=xs" alt="PyPI downloads per month">
   <img src="https://shieldcn.dev/badge/python-3.10+-blue.svg?logo=python&logoColor=white&size=xs" alt="Python 3.10+">
-  <img src="https://shieldcn.dev/badge/license-MIT-green.svg?size=xs" alt="MIT license">
+  <img src="https://shieldcn.dev/badge/license-MIT-4e7247.svg?size=xs" alt="MIT license">
+</p>
+
+<p align="center">
+  <img src="https://shieldcn.dev/badge/agentic_workflows-enabled-e0a45c.svg?size=xs&animate=shimmer&logo=robotframework" alt="Agentic workflows enabled">
+  <img src="https://shieldcn.dev/badge/MCP-native-a8703a.svg?size=xs&logo=modelcontextprotocol&logoColor=white" alt="MCP native">
+  <img src="https://shieldcn.dev/badge/local--first-no_daemon-4e7247.svg?size=xs" alt="Local-first, no daemon">
 </p>
 
 ## Install
