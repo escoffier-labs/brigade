@@ -7,8 +7,8 @@ This path gets MiseLedger from a fresh install to a local evidence archive that 
 Install MiseLedger:
 
 ```bash
-MISELEDGER_VERSION=v0.4.0
-curl -fsSLO https://raw.githubusercontent.com/escoffier-labs/miseledger/v0.4.0/install.sh
+MISELEDGER_VERSION=v0.5.0
+curl -fsSLO https://raw.githubusercontent.com/escoffier-labs/miseledger/v0.5.0/install.sh
 cat install.sh  # review before running
 MISELEDGER_VERSION="$MISELEDGER_VERSION" sh install.sh
 miseledger version

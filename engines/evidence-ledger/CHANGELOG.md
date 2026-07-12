@@ -8,12 +8,50 @@ Releases before this changelog was started are on the [releases page](https://gi
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-07-11
+
 ### Added
 
+- Missing wrapper tools now fail with a one-line diagnostic naming the binary
+  and where to get it, before the archive is opened or touched. Covers crawl
+  exporters, `import sourceharvest`, `import stationtrail`, watch dry-runs, and
+  OpenCode session export (#19, #23).
+- `doctor` reports availability of all external wrapper tools (stationtrail,
+  sourceharvest, opencode, and the seven crawler exporters) and supports
+  `--json` with structured `wrapper_tools` entries (#20, #21, #23).
 - Added a Brigade `station.json` contract for archive doctor checks, bounded
   evidence Markdown, and version conformance. `doctor --help` and
   `evidence --help` now return without opening the archive or creating cache
-  state.
+  state (#24).
+- Release assets now carry GitHub build provenance; verify a download with
+  `gh attestation verify <asset> --repo escoffier-labs/miseledger` (#30).
+- A redacted Cursor fixture under `testdata/harnesses` exercises the cursor
+  adapter the same way the other harness fixtures do (#26).
+- A docs-drift CI check runs on docs-only pushes (which the main CI job
+  deliberately skips) and fails when the MCP tool docs fall out of sync with
+  the registered tools (#31).
+
+### Changed
+
+- Session listing and preview queries use a new collection-leading items index;
+  existing archives pick it up automatically on next open (#25).
+- Relation backfill resolves targets through a dedicated
+  `items(source_id, external_id)` index (#18).
+- Install docs lead with a pinned, checksum-verified path; the mutable-HEAD
+  one-liner is a labeled alternative (#28).
+- The CLI dispatch and top-level help are generated from one command table, and
+  flag parsing is consolidated into shared helpers. Help output and command
+  behavior are unchanged (#29).
+
+### Fixed
+
+- `serve` binds its listener before reporting startup. Bind failures no longer
+  print an `ok: true` line, `--addr 127.0.0.1:0` reports the actual bound
+  address, and shutdown exits cleanly (#27, #32).
+- The release workflow no longer fails when the GitHub release for the tag
+  already exists; it uploads assets to it instead. The v0.4.0 release shipped
+  with no assets for five days because of this failure mode; assets were
+  rebuilt from the tag and re-uploaded (#30).
 
 ## [0.4.0] - 2026-07-06
 

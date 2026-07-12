@@ -30,9 +30,9 @@
 ## Install
 
 ```bash
-# install pinned release 0.4.0 (Linux/macOS)
-MISELEDGER_VERSION=v0.4.0
-curl -fsSLO https://raw.githubusercontent.com/escoffier-labs/miseledger/v0.4.0/install.sh
+# install pinned release 0.5.0 (Linux/macOS)
+MISELEDGER_VERSION=v0.5.0
+curl -fsSLO https://raw.githubusercontent.com/escoffier-labs/miseledger/v0.5.0/install.sh
 cat install.sh  # review before running
 MISELEDGER_VERSION="$MISELEDGER_VERSION" sh install.sh
 miseledger init
@@ -386,7 +386,7 @@ Discovery reports candidate roots and supported file counts only:
 miseledger sources discover --json
 ```
 
-It checks Codex sessions, OpenClaw agents, Claude projects, and Hermes session files without printing private transcript content.
+It checks Codex sessions, OpenClaw agents, Claude projects, OpenCode exports, Hermes session files, and Cursor history without printing private transcript content.
 
 ## Browser UI
 
@@ -421,7 +421,7 @@ miseledger doctor --mcp --json
 Fixture smoke scripts exercise these surfaces without private transcript content:
 
 ```bash
-scripts/bootstrap_local.sh
+scripts/smoke_archive.sh
 scripts/smoke_http.sh
 scripts/smoke_mcp.sh
 ```
