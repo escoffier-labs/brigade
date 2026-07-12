@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- Route derivation no longer misroutes conventional-commit code work as docs: `fix(install): ... referencing docs` and `feat(skills): ship ... CHANGELOG.md` route as code, while prose like `fix typo in README` and `fix(docs): ...` stay docs. A code fix losing its review lenses to a stray "docs" keyword was the one misroute direction that cost coverage.
+
+### Added
+- `brigade run --route-signal +auth-surface` / `~ship-requested` and the same flag on `brigade route` force-add or suppress a derived route signal when the heuristic is wrong on one task, a middle ground short of `--no-route`. Forced signals still pull their dependents (a forced `+auth-surface` earns tests and a security review).
+- `brigade route --json` now carries `triggered_by` (the live signal that pulled each stage in) and `overrides`, alongside the existing signals/approvals/route/waves/held.
+- Property tests fuzz the router over 2,000 random catalogs, asserting the invariants a route must always hold (held stages never route, inputs always satisfiable, waves a strict topological order, cycles raise). Plan attempts now record `unknown_covers`: a `covers` tag naming a stage not in the route is surfaced instead of silently ignored.
+
 ### Added
 - Transitive card-link fingerprints: a card's `content_fingerprint` now folds in the transitive closure of the cards it `[[links]]` (each reachable card's content hash), so editing a linked card invalidates every card that reaches it, the same logic_tracking idea applied to memory cards. The walk is cycle-safe, deterministic, and tolerant of dead links (a `[[missing]]` link contributes nothing until that card exists). A card with no resolvable links hashes to exactly `sha256(card content)`, byte-identical to the prior scheme, so existing single-card records are never invalidated.
 - Skill bundle fingerprints (the ledger's `logic_tracking`): a skill's `content_fingerprint` now covers its whole bundle (every file's path plus content hash, skipping `.DS_Store` and the `skill.json` sidecar), so editing a bundled helper invalidates the skill's signals the same way editing `SKILL.md` does. A skill whose only content file is `SKILL.md` hashes to exactly `sha256(SKILL.md)`, byte-identical to the prior scheme, so existing single-file records are never invalidated. Cards stay single-file; transitive `[[wiki-link]]` tracking remains future work.

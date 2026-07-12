@@ -23,7 +23,7 @@ from . import localio
 from . import proc, runguard
 from . import run_control
 from .roster import Agent, Roster, is_cli_allowed, timeout_for, workers
-from .route_catalog import RouteBrief, route_brief, uncovered_stages
+from .route_catalog import RouteBrief, route_brief, uncovered_stages, unknown_covers
 
 CODE_GRAPH_HEADING = "## Code graph context (GraphTrail, read-only)"
 CODE_GRAPH_LIMIT = 4000
@@ -640,6 +640,7 @@ def _record_plan_attempt(
     parsed: bool = False,
     parse_error: str | None = None,
     coverage_missing: list[str] | None = None,
+    unknown_covers: list[str] | None = None,
 ) -> None:
     if attempts is None:
         return
@@ -654,6 +655,8 @@ def _record_plan_attempt(
         payload["parse_error"] = parse_error
     if coverage_missing:
         payload["coverage_missing"] = list(coverage_missing)
+    if unknown_covers:
+        payload["unknown_covers"] = list(unknown_covers)
     attempts.append(payload)
 
 
@@ -698,6 +701,12 @@ def _coverage_missing(route: RouteBrief | None, assignments: list[Assignment]) -
     return uncovered_stages(route, assignments)
 
 
+def _unknown_covers(route: RouteBrief | None, assignments: list[Assignment]) -> list[str]:
+    if route is None or not route.attached or not route.route:
+        return []
+    return unknown_covers(route, assignments)
+
+
 def plan(
     task: str,
     roster: Roster,
@@ -738,6 +747,7 @@ def plan(
             result=first,
             parsed=True,
             coverage_missing=_coverage_missing(route, assignments),
+            unknown_covers=_unknown_covers(route, assignments),
         )
     except ValueError as exc:
         _record_plan_attempt(attempts, stage="initial", result=first, parse_error=str(exc))
@@ -769,6 +779,7 @@ def plan(
                 result=second,
                 parsed=True,
                 coverage_missing=_coverage_missing(route, assignments),
+                unknown_covers=_unknown_covers(route, assignments),
             )
         except ValueError as second_exc:
             _record_plan_attempt(
@@ -821,6 +832,7 @@ def plan(
         result=revised_result,
         parsed=True,
         coverage_missing=revised_missing,
+        unknown_covers=_unknown_covers(route, revised),
     )
     # A revision that covers strictly more wins; anything else (including an
     # empty plan) keeps the original. Never trade assignments away for tags.
@@ -1653,6 +1665,7 @@ def run(
     route_enabled: bool = True,
     route_approvals: tuple[str, ...] = (),
     route_template: str | None = None,
+    route_overrides: tuple[str, ...] = (),
     worker: str | None = None,
 ) -> int:
     started_at = datetime.now(timezone.utc)
@@ -1686,6 +1699,7 @@ def run(
             template=route_template,
             changed_paths=_route_changed_paths(cwd),
             approvals=route_approvals,
+            overrides=route_overrides,
         )
         if route_enabled
         else None

@@ -77,6 +77,14 @@ def register(sub: argparse._SubParsersAction) -> None:
         help="Task template hint for route derivation (e.g. vertical-slice, bugfix, docs).",
     )
     p_run.add_argument(
+        "--route-signal",
+        action="append",
+        default=[],
+        dest="route_signals",
+        metavar="+SIG|-SIG",
+        help="Force-add (+auth-surface) or suppress (~ship-requested) a derived route signal. Repeatable.",
+    )
+    p_run.add_argument(
         "--sandbox",
         choices=["read-only", "workspace-write", "danger-full-access"],
         default=None,
@@ -261,6 +269,8 @@ def dispatch(args) -> int:
                 run_kwargs["route_approvals"] = ("ship-approved",)
             if args.route_template is not None:
                 run_kwargs["route_template"] = args.route_template
+            if args.route_signals:
+                run_kwargs["route_overrides"] = tuple(args.route_signals)
             rc = aboyeur_mod.run(args.task, loaded_roster, **run_kwargs)
             if args.worktree and output_dir is not None:
                 # Until the patch is proven good, the worktree is the only
