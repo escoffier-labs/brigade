@@ -226,7 +226,11 @@ def _scanner_validate_import_output(
 ) -> tuple[Path | None, list[dict[str, Any]], list[str]]:
     import_path = config_mod._scanner_import_path(target, scanner)
     if import_path is None:
-        return None, [], [f"{scanner.get('id')}: import_path is not configured"]
+        # No import_path means a self-importing scanner: its command appends to
+        # the inbox directly (e.g. `brigade work import memory-refresh`,
+        # `brigade handoff sync-issues`), so there is no JSONL file for the sweep
+        # to ingest. Skip it silently rather than failing the whole sweep.
+        return None, [], []
     if scanner.get("import_format", "jsonl") != "jsonl":
         return import_path, [], [f"{scanner.get('id')}: import_format must be jsonl"]
     if not import_path.is_file():
@@ -436,6 +440,23 @@ def _scanner_plan_payload(target: Path) -> dict[str, Any]:
     }
 
 
+def _required_scanner_ids(target: Path) -> tuple[str, ...]:
+    """Required local-producer scanner ids for this target.
+
+    chat-memory-sweep only matters when the repo actually has an enabled chat
+    surface. A code repo with every surface disabled (or no chat-surfaces.toml
+    at all) has nothing to sweep, so it should not be nagged to enable it.
+    """
+    from .. import chat_cmd
+
+    surfaces = chat_cmd.health(target).get("surfaces")
+    surfaces = surfaces if isinstance(surfaces, list) else []
+    chat_active = any(isinstance(surface, dict) and surface.get("enabled") for surface in surfaces)
+    return tuple(
+        scanner_id for scanner_id in constants.SCANNER_REQUIRED_IDS if scanner_id != "chat-memory-sweep" or chat_active
+    )
+
+
 def _scanner_health(target: Path) -> dict[str, Any]:
     target = target.expanduser().resolve()
     plan = _scanner_plan_payload(target)
@@ -455,10 +476,11 @@ def _scanner_health(target: Path) -> dict[str, Any]:
         checks.append({"status": constants.FAIL, "name": "scanner_config", "detail": "; ".join(plan.get("errors", []))})
 
     by_id = {scanner.get("id"): scanner for scanner in scanners if isinstance(scanner, dict)}
-    missing_required = [scanner_id for scanner_id in constants.SCANNER_REQUIRED_IDS if scanner_id not in by_id]
+    required_ids = _required_scanner_ids(target)
+    missing_required = [scanner_id for scanner_id in required_ids if scanner_id not in by_id]
     disabled_required = [
         scanner_id
-        for scanner_id in constants.SCANNER_REQUIRED_IDS
+        for scanner_id in required_ids
         if isinstance(by_id.get(scanner_id), dict) and not by_id[scanner_id].get("enabled", True)
     ]
     if missing_required or disabled_required:
