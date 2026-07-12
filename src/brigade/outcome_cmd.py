@@ -868,6 +868,10 @@ def explain(*, target: Path, artifact_id: str, json_output: bool = False) -> int
         for record in sorted(records, key=lambda record: record.ts)
     ]
     capability_breakdown = _capability_breakdown(records)
+    current_capability = capability_fingerprint(context_manifest())
+    cap_cohorts = core.split_by_capability(
+        artifact_id, core.current_content_records(records, cohorts.current_fingerprint), current_capability
+    )
     if json_output:
         payload = {
             "target": str(target),
@@ -877,6 +881,12 @@ def explain(*, target: Path, artifact_id: str, json_output: bool = False) -> int
             "lifetime_score": dataclasses.asdict(cohorts.lifetime),
             "stale_records": cohorts.stale_records,
             "legacy_records": cohorts.legacy_records,
+            "current_capability": cap_cohorts.current_capability,
+            "capability_score": cap_cohorts.shrunk_rate,
+            "capability_helped": cap_cohorts.capability.helped,
+            "capability_hurt": cap_cohorts.capability.hurt,
+            "off_capability_records": cap_cohorts.off_capability_records,
+            "capability_legacy_records": cap_cohorts.capability_legacy_records,
             "trail": trail,
         }
         if capability_breakdown is not None:
@@ -900,8 +910,16 @@ def explain(*, target: Path, artifact_id: str, json_output: bool = False) -> int
         print(
             f"score: {score_obj.score:.3f} helped={score_obj.helped} hurt={score_obj.hurt} neutral={score_obj.neutral}"
         )
+    if cap_cohorts.current_capability is not None and cap_cohorts.off_capability_records:
+        cap = cap_cohorts.capability
+        print(
+            f"capability [{cap_cohorts.current_capability[:12]}]: {cap_cohorts.shrunk_rate:.3f} "
+            f"helped={cap.helped} hurt={cap.hurt} "
+            f"(off_cap={cap_cohorts.off_capability_records} cap_legacy={cap_cohorts.capability_legacy_records}, "
+            f"shrunk toward pooled; retrieval only, not scored by the ratchet)"
+        )
     if capability_breakdown is not None:
-        print("capability cohorts (display-only, not scored in phase 1):")
+        print("capability cohorts (records seen per context):")
         for entry in capability_breakdown:
             print(
                 f"- {entry['capability_fingerprint'][:12]} {entry['label']} "
@@ -1194,7 +1212,40 @@ def reconcile(
     return 0
 
 
-def rank(*, target: Path, json_output: bool = False) -> int:
+def _capability_cohorts_by_artifact(
+    records_by_artifact: dict[str, list[core.OutcomeRecord]],
+    fingerprint_cohorts: dict[str, core.FingerprintCohorts],
+    current_capability: str | None,
+) -> dict[str, core.CapabilityCohorts]:
+    """Split each artifact's content-current records by the current capability.
+
+    Reuses the content fingerprints already resolved for the fingerprint cohorts,
+    so capability scoring composes on top of content scoring without re-hashing.
+    """
+    out: dict[str, core.CapabilityCohorts] = {}
+    for artifact_id, fpc in fingerprint_cohorts.items():
+        content_current = core.current_content_records(records_by_artifact[artifact_id], fpc.current_fingerprint)
+        out[artifact_id] = core.split_by_capability(artifact_id, content_current, current_capability)
+    return out
+
+
+def _capability_human_suffix(cohorts: core.CapabilityCohorts) -> str:
+    """Human tail showing the current-capability score, only when it diverges.
+
+    Empty unless records under a different capability were actually set aside, so
+    a pre-context ledger (or one run under a single capability) keeps the
+    pre-phase-2 one-line output.
+    """
+    if cohorts.current_capability is None or not cohorts.off_capability_records:
+        return ""
+    cap = cohorts.capability
+    return (
+        f" [cap {cohorts.current_capability[:12]}: {cohorts.shrunk_rate:.3f} "
+        f"helped={cap.helped} hurt={cap.hurt}, off_cap={cohorts.off_capability_records}]"
+    )
+
+
+def rank(*, target: Path, json_output: bool = False, by_capability: bool = False) -> int:
     """Rank learned artifacts by verified outcome, most-proven first.
 
     The blended retrieval score (rank_score) leaves room for confidence and
@@ -1208,10 +1259,21 @@ def rank(*, target: Path, json_output: bool = False) -> int:
     fingerprint matches the artifact's current text, so an edited skill earns
     its rank back instead of coasting on signals for text that no longer
     exists. Lifetime counts stay visible alongside.
+
+    Capability-aware (Phase 2): the current runtime capability (harness, model
+    family, interpreter, platform) is resolved once, and each artifact also
+    carries a capability-shrunk score over the content-current records earned
+    under that capability, thin cohorts pulled toward the pooled rate. With
+    ``by_capability`` the ranking sorts by that score instead; by default the
+    pooled content score still orders the list and the ratchet is untouched.
     """
     target = target.expanduser().resolve()
     records = load_records(target)
     cohorts_by_artifact = _fingerprint_cohorts_by_artifact(target, records)
+    current_capability = capability_fingerprint(context_manifest())
+    capability_cohorts = _capability_cohorts_by_artifact(
+        _records_by_artifact(records), cohorts_by_artifact, current_capability
+    )
     graph_counts = _graph_delta_counts_by_artifact(records)
     brief_stats = _brief_hit_stats_by_artifact(records)
 
@@ -1223,6 +1285,14 @@ def rank(*, target: Path, json_output: bool = False) -> int:
         stats = brief_stats.get(artifact_id)
         # Missing brief samples sort after measured ones at the same Wilson score.
         hit = float(stats["brief_hit_rate"]) if stats is not None else -1.0
+        if by_capability:
+            # Order by the current-capability estimate, then by how much evidence
+            # was actually earned under this capability (so a skill demonstrated
+            # here outranks one only demonstrated elsewhere at an equal shrunk
+            # estimate), then pooled, then brief hit.
+            cap = capability_cohorts[artifact_id]
+            on_capability = cap.capability.helped + cap.capability.hurt
+            return (-cap.shrunk_rate, -on_capability, -blended(cohorts), -hit, artifact_id)
         return (-blended(cohorts), -hit, artifact_id)
 
     ordered = sorted(cohorts_by_artifact.items(), key=sort_key)
@@ -1230,6 +1300,7 @@ def rank(*, target: Path, json_output: bool = False) -> int:
     for artifact_id, cohorts in ordered:
         current = cohorts.current
         lifetime = cohorts.lifetime
+        cap = capability_cohorts[artifact_id]
         entry = {
             "artifact_id": artifact_id,
             "score": current.score,
@@ -1242,6 +1313,12 @@ def rank(*, target: Path, json_output: bool = False) -> int:
             "lifetime_hurt": lifetime.hurt,
             "stale_records": cohorts.stale_records,
             "legacy_records": cohorts.legacy_records,
+            "capability_fingerprint": cap.current_capability,
+            "capability_score": cap.shrunk_rate,
+            "capability_helped": cap.capability.helped,
+            "capability_hurt": cap.capability.hurt,
+            "off_capability_records": cap.off_capability_records,
+            "capability_legacy_records": cap.capability_legacy_records,
         }
         counts = graph_counts.get(artifact_id)
         if counts is not None:
@@ -1257,7 +1334,7 @@ def rank(*, target: Path, json_output: bool = False) -> int:
     if json_output:
         print(json.dumps(payload, indent=2, sort_keys=True))
         return 0
-    print(f"outcome rank: {target}")
+    print(f"outcome rank: {target}" + (" (by capability)" if by_capability else ""))
     if not ordered:
         print("ranking: none")
         return 0
@@ -1265,6 +1342,7 @@ def rank(*, target: Path, json_output: bool = False) -> int:
         current = cohorts.current
         graph_tail = _graph_delta_human_suffix(graph_counts.get(artifact_id))
         brief_tail = _brief_hit_human_suffix(brief_stats.get(artifact_id))
+        capability_tail = _capability_human_suffix(capability_cohorts[artifact_id])
         fingerprint_tail = ""
         rank_fp = cohorts.current_fingerprint
         # Only a PROVEN-stale cohort earns the tail: at rollout (legacy records
@@ -1279,7 +1357,7 @@ def rank(*, target: Path, json_output: bool = False) -> int:
             )
         print(
             f"- {artifact_id} score={current.score:.3f} helped={current.helped} "
-            f"hurt={current.hurt}{fingerprint_tail}{graph_tail}{brief_tail}"
+            f"hurt={current.hurt}{fingerprint_tail}{capability_tail}{graph_tail}{brief_tail}"
         )
     return 0
 

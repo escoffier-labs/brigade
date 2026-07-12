@@ -45,9 +45,11 @@ Captured, and honest about provenance:
 
 `capability_fingerprint` is the sha256 of the coarse vector `{harness, model_family, python, platform}`.
 
-### Phase 2: cohort-aware scoring (retrieval only)
+### Phase 2 (shipped): cohort-aware scoring (retrieval only)
 
-Once records carry capability fingerprints, `outcome rank` and `outcome explain` compute a current-capability score with the exact -> capability -> pooled fallback, plus a global recency half-life and shrinkage toward the pooled rate for thin cohorts. Install and rollback thresholds still use the pooled current-fingerprint cohort. The one ratchet-safety change worth making (Opus): never *globally* demote an artifact for a regression isolated to one novel capability cohort; quarantine it there, because a false rollback destroys a verified signal.
+`outcome rank` and `outcome explain` resolve the current runtime capability once and score each artifact's content-current records earned under it. A thin capability cohort is pulled toward the pooled rate by deterministic shrinkage, `(helped + kappa*pooled_rate) / (total + kappa)` with a single documented `kappa` (4.0), so one run under a novel harness cannot swing the estimate and an unresolvable capability falls back to the pooled score. Records with no capability fingerprint are grandfathered into the current-capability cohort, so a pre-context ledger's rank output stays byte-identical until signals under a different capability actually accumulate. `outcome rank --by-capability` sorts by "what worked under my current context" (capability-shrunk estimate, then on-capability sample size, then pooled); the default sort and the promotion ratchet are unchanged, the ratchet still scores the pooled current-fingerprint cohort only.
+
+Deferred from Phase 2, tracked as follow-ups: a global recency half-life (so credit earned under a drifted-away environment fades), and Opus's regression-attribution guard (never *globally* demote for a regression isolated to one novel capability cohort; quarantine it there, because a false rollback destroys a verified signal). Both touch scoring more deeply than retrieval display and are sequenced after the capability cohorts prove out.
 
 ### Phase 3 (optional): paired attribution runs
 
