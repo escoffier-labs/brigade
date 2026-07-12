@@ -167,7 +167,7 @@
       "source": {
         "manifest_sha256": "0e8d9f7a962d5f20857713e39698b567cce7a9e9043db732cf6ab266f3f47176",
         "repository": "graphtrail",
-        "revision": "e51ed5d22fd0f1f11803c356fdb5b932892a094b"
+        "revision": "8a5e15c8e73cb077aa2222b884273d4b8db5fa80"
       }
     },
     {
@@ -288,7 +288,7 @@
       "source": {
         "manifest_sha256": "f09f9a43eb4e1baea1afd9e23b813e0b9966e5fe25517670390a89904f26a6e7",
         "repository": "skillet",
-        "revision": "74520a2b8e40c1959de1044d39e2555b33c6c4cd"
+        "revision": "10b68a9eb70a48fa28242f78e0a43ae06155c18b"
       }
     },
     {
