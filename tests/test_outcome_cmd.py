@@ -1337,3 +1337,105 @@ def test_fork_projection_uses_the_current_fingerprint_cohort(tmp_path, capsys):
     entry = projection["artifacts"]["skill-x"]
     assert entry["new_status"] != "promoted"
     assert entry["helped"] == 0  # current cohort, not the 2 stale lifetime signals
+
+
+def _registry_skill_dir(target, skill_id):
+    d = target / ".brigade" / "skills" / "registry" / skill_id
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def test_bundle_fingerprint_reduces_to_skill_md_hash_for_a_lone_file(tmp_path):
+    # Backward-compat guarantee: a skill whose only content file is SKILL.md must
+    # fingerprint byte-identically to the pre-bundle sha256(SKILL.md), or every
+    # existing single-file record would be invalidated on upgrade.
+    skill_md = _write_registry_skill(tmp_path, "skill-x", "# body\n")
+    assert outcome_cmd.artifact_fingerprint(tmp_path, "skill-x", "skill") == _sha256_of(skill_md)
+
+
+def test_bundle_fingerprint_ignores_skill_json_and_ds_store(tmp_path):
+    # The install-time metadata sidecar and OS cruft are not skill logic, so a
+    # skill with SKILL.md plus only those still reduces to the lone-file hash.
+    d = _registry_skill_dir(tmp_path, "skill-x")
+    skill_md = d / "SKILL.md"
+    skill_md.write_text("# body\n")
+    (d / "skill.json").write_text('{"id": "skill-x"}')
+    (d / ".DS_Store").write_text("junk")
+    assert outcome_cmd.artifact_fingerprint(tmp_path, "skill-x", "skill") == _sha256_of(skill_md)
+
+
+def test_bundle_fingerprint_covers_a_bundled_helper(tmp_path):
+    # A real multi-file bundle takes the composite path: its fingerprint differs
+    # from sha256(SKILL.md) because it also folds in the helper.
+    d = _registry_skill_dir(tmp_path, "skill-x")
+    skill_md = d / "SKILL.md"
+    skill_md.write_text("# body\n")
+    (d / "helper.sh").write_text("echo v1\n")
+    fp = outcome_cmd.artifact_fingerprint(tmp_path, "skill-x", "skill")
+    assert fp is not None
+    assert fp != _sha256_of(skill_md)
+
+
+def test_bundle_fingerprint_changes_when_only_the_helper_changes(tmp_path):
+    # The core win: editing a bundled helper while SKILL.md is untouched must move
+    # the fingerprint, so signals for the old bundle become proven stale.
+    d = _registry_skill_dir(tmp_path, "skill-x")
+    (d / "SKILL.md").write_text("# body\n")
+    helper = d / "helper.sh"
+    helper.write_text("echo v1\n")
+    before = outcome_cmd.artifact_fingerprint(tmp_path, "skill-x", "skill")
+    helper.write_text("echo v2\n")
+    after = outcome_cmd.artifact_fingerprint(tmp_path, "skill-x", "skill")
+    assert before is not None and after is not None
+    assert before != after
+
+
+def test_bundle_fingerprint_changes_when_a_file_is_added(tmp_path):
+    d = _registry_skill_dir(tmp_path, "skill-x")
+    (d / "SKILL.md").write_text("# body\n")
+    before = outcome_cmd.artifact_fingerprint(tmp_path, "skill-x", "skill")
+    (d / "reference.md").write_text("# extra context\n")
+    after = outcome_cmd.artifact_fingerprint(tmp_path, "skill-x", "skill")
+    assert before != after
+
+
+def test_editing_a_bundled_helper_makes_prior_records_proven_stale_in_rank(tmp_path, capsys):
+    # End to end: a skill's signals were captured against a bundle whose helper has
+    # since changed. Rank must drop them from the current score even though SKILL.md
+    # never moved.
+    d = _registry_skill_dir(tmp_path, "skill-x")
+    (d / "SKILL.md").write_text("# body\n")
+    helper = d / "helper.sh"
+    helper.write_text("echo v1\n")
+    old_fp = outcome_cmd.artifact_fingerprint(tmp_path, "skill-x", "skill")
+    _seed(
+        tmp_path,
+        [
+            outcome.OutcomeRecord(
+                "skill-x",
+                "skill",
+                f"t{i}",
+                "verify",
+                1,
+                f"ref{i}",
+                f"2026-06-20T0{i}:00:00+00:00",
+                content_fingerprint=old_fp,
+            )
+            for i in range(3)
+        ],
+    )
+    helper.write_text("echo v2\n")  # only the helper changes
+
+    assert outcome_cmd.rank(target=tmp_path, json_output=True) == 0
+    entry = json.loads(capsys.readouterr().out)["ranking"][0]
+    assert entry["helped"] == 0  # current bundle has no signals of its own
+    assert entry["lifetime_helped"] == 3
+    assert entry["stale_records"] == 3
+    assert entry["content_fingerprint"] == outcome_cmd.artifact_fingerprint(tmp_path, "skill-x", "skill")
+
+
+def test_card_fingerprint_stays_single_file(tmp_path):
+    card = tmp_path / "memory" / "cards" / "card-x.md"
+    card.parent.mkdir(parents=True)
+    card.write_text("# card body\n")
+    assert outcome_cmd.artifact_fingerprint(tmp_path, "card-x", "card") == _sha256_of(card)
