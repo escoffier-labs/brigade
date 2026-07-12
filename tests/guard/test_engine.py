@@ -366,3 +366,45 @@ class KnownHostsTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AllowCommentDisplayFormTests(unittest.TestCase):
+    """Findings print as `category/rule-id`; copying that id into an allow
+    comment must work, not silently fail (the pre-2026-07 behavior)."""
+
+    def test_line_scoped_allow_accepts_displayed_category_id_form(self) -> None:
+        text = "// content-guard: allow secret/bearer-token\nconst header = 'Bearer super-secret-token-value-123456';\n"
+        result = scan_text(text)
+        bearer = [f for f in result.findings if f.rule_id == "bearer-token"]
+        self.assertEqual(len(bearer), 1)
+        self.assertEqual(bearer[0].action, "allow")
+        self.assertFalse(result.blocked)
+
+    def test_file_scoped_allow_accepts_displayed_category_id_form(self) -> None:
+        text = (
+            "// content-guard: allow secret/bearer-token file\n"
+            "line two\n"
+            "line three\n"
+            "const header = 'Bearer super-secret-token-value-123456';\n"
+        )
+        result = scan_text(text)
+        bearer = [f for f in result.findings if f.rule_id == "bearer-token"]
+        self.assertEqual(len(bearer), 1)
+        self.assertEqual(bearer[0].action, "allow")
+        self.assertFalse(result.blocked)
+
+    def test_bare_rule_id_still_works(self) -> None:
+        text = "// content-guard: allow bearer-token file\nconst header = 'Bearer super-secret-token-value-123456';\n"
+        result = scan_text(text)
+        bearer = [f for f in result.findings if f.rule_id == "bearer-token"]
+        self.assertEqual(len(bearer), 1)
+        self.assertEqual(bearer[0].action, "allow")
+
+    def test_wrong_category_prefix_does_not_allow(self) -> None:
+        text = (
+            "// content-guard: allow pii/bearer-token file\nconst header = 'Bearer super-secret-token-value-123456';\n"
+        )
+        result = scan_text(text)
+        bearer = [f for f in result.findings if f.rule_id == "bearer-token"]
+        self.assertEqual(len(bearer), 1)
+        self.assertNotEqual(bearer[0].action, "allow")

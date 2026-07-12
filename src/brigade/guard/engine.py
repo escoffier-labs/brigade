@@ -7,7 +7,9 @@ from .detectors.opf import run_opf
 from .policy import Policy
 from .types import Finding, GuardResult, Rule, ScanOptions, TextEdit
 
-ALLOW_RE = re.compile(r"content-guard:\s*allow\s+([A-Za-z0-9_.:-]+|all)(?:\s+(file))?")
+# The token class includes `/` because findings are displayed as
+# `category/rule-id` and users copy that form into allow comments.
+ALLOW_RE = re.compile(r"content-guard:\s*allow\s+([A-Za-z0-9_./:-]+|all)(?:\s+(file))?")
 
 
 def scan_text(text: str, policy: Policy | None = None, options: ScanOptions | None = None) -> GuardResult:
@@ -38,7 +40,7 @@ def scan_text(text: str, policy: Policy | None = None, options: ScanOptions | No
                 continue
 
             line = _line_for_offset(line_starts, start)
-            allowed_by = _allowed_by(rule.id, line, allow_by_line, file_allows)
+            allowed_by = _allowed_by(rule.id, rule.category, line, allow_by_line, file_allows)
             # A known-public literal exact-matches the whole finding text. This
             # reaches history scans of old diffs where no inline marker exists.
             if allowed_by is None and match.group(0) in allow_values:
@@ -221,19 +223,26 @@ def _allow_comments_by_line(text: str) -> tuple[dict[int, set[str]], set[str]]:
 
 def _allowed_by(
     rule_id: str,
+    category: str,
     line: int,
     allow_by_line: dict[int, set[str]],
     file_allows: set[str],
 ) -> str | None:
+    # Findings are displayed as `category/rule-id` (e.g. `secret/bearer-token`),
+    # so accept that form alongside the bare rule id - a copied display id must
+    # not produce a silently dead allow comment.
+    accepted = (rule_id, f"{category}/{rule_id}")
     if "all" in file_allows:
         return "all"
-    if rule_id in file_allows:
-        return rule_id
+    for token in accepted:
+        if token in file_allows:
+            return token
     tokens = allow_by_line.get(line, set())
     if "all" in tokens:
         return "all"
-    if rule_id in tokens:
-        return rule_id
+    for token in accepted:
+        if token in tokens:
+            return token
     return None
 
 
