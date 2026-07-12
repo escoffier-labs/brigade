@@ -67,18 +67,25 @@ def _artifact_known(target: Path, artifact_id: str, kind: str) -> bool:
 
 
 def _artifact_content_path(target: Path, artifact_id: str, kind: str) -> Path | None:
-    """Locate the artifact text a fingerprint should pin: registry copy first, then harness installs."""
+    """Locate the artifact text a fingerprint should pin.
+
+    Harness-installed copy first: a verified run exercises the installed skill,
+    not the registry master, so when the two drift the installed text is what
+    the signal is evidence about. The registry copy is the fallback for skills
+    known but not yet installed. capture and rank/explain both resolve through
+    here, so "current cohort" always means the text that actually runs.
+    """
     if kind == "card":
         card = target / "memory" / "cards" / f"{artifact_id}.md"
         return card if card.is_file() else None
+    for skill_md in sorted(target.glob(f".*/skills/{artifact_id}/SKILL.md")):
+        if skill_md.is_file():
+            return skill_md
     from . import skills_cmd
 
     registry_md = skills_cmd._skill_md_path(skills_cmd._skill_path(target, artifact_id))
     if registry_md.is_file():
         return registry_md
-    for skill_md in sorted(target.glob(f".*/skills/{artifact_id}/SKILL.md")):
-        if skill_md.is_file():
-            return skill_md
     return None
 
 
@@ -574,8 +581,9 @@ def explain(*, target: Path, artifact_id: str, json_output: bool = False) -> int
         print(json.dumps(payload, indent=2, sort_keys=True))
         return 0
     print(f"outcome explain: {artifact_id}")
-    if cohorts.pinned:
-        print(f"fingerprint: {cohorts.current_fingerprint[:12]}")
+    current_fp = cohorts.current_fingerprint
+    if current_fp is not None:
+        print(f"fingerprint: {current_fp[:12]}")
         print(
             f"score: {score_obj.score:.3f} helped={score_obj.helped} hurt={score_obj.hurt} "
             f"neutral={score_obj.neutral} (current fingerprint)"
@@ -928,10 +936,14 @@ def rank(*, target: Path, json_output: bool = False) -> int:
         graph_tail = _graph_delta_human_suffix(graph_counts.get(artifact_id))
         brief_tail = _brief_hit_human_suffix(brief_stats.get(artifact_id))
         fingerprint_tail = ""
-        if cohorts.pinned and (cohorts.stale_records or cohorts.legacy_records):
+        rank_fp = cohorts.current_fingerprint
+        # Only a PROVEN-stale cohort earns the tail: at rollout (legacy records
+        # only, nothing edited) the line stays byte-identical to the
+        # pre-fingerprint output.
+        if rank_fp is not None and cohorts.stale_records:
             lifetime = cohorts.lifetime
             fingerprint_tail = (
-                f" [rev {cohorts.current_fingerprint[:12]}; lifetime score={lifetime.score:.3f} "
+                f" [rev {rank_fp[:12]}; lifetime score={lifetime.score:.3f} "
                 f"helped={lifetime.helped} hurt={lifetime.hurt}, "
                 f"stale={cohorts.stale_records} legacy={cohorts.legacy_records}]"
             )

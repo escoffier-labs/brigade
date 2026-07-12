@@ -179,7 +179,7 @@ def _fp_record(evidence_ref, ts, fingerprint, signal=1):
     )
 
 
-def test_split_by_fingerprint_scores_only_the_current_revision():
+def test_split_by_fingerprint_grandfathers_legacy_and_drops_proven_stale():
     records = [
         _fp_record("r1", "2026-07-01T00:00:00+00:00", "old-rev"),
         _fp_record("r2", "2026-07-02T00:00:00+00:00", "old-rev", signal=-1),
@@ -188,7 +188,9 @@ def test_split_by_fingerprint_scores_only_the_current_revision():
     ]
     cohorts = outcome.split_by_fingerprint("skill-x", records, "new-rev")
     assert cohorts.pinned
-    assert (cohorts.current.helped, cohorts.current.hurt) == (1, 0)
+    # new-rev (+1) plus the legacy record (+1, unprovable either way); the two
+    # old-rev signals are proven stale and drop out.
+    assert (cohorts.current.helped, cohorts.current.hurt) == (2, 0)
     assert (cohorts.lifetime.helped, cohorts.lifetime.hurt) == (3, 1)
     assert cohorts.stale_records == 2
     assert cohorts.legacy_records == 1

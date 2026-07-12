@@ -977,6 +977,17 @@ def test_capture_fingerprint_falls_back_to_harness_install(tmp_path, capsys):
     assert payload["record"]["content_fingerprint"] == _sha256_of(skill_md)
 
 
+def test_fingerprint_prefers_the_installed_copy_over_a_drifted_registry(tmp_path):
+    # The verified run exercises the installed skill; when the registry master
+    # has drifted ahead, the signal is evidence about the installed text.
+    installed = tmp_path / ".claude" / "skills" / "skill-x" / "SKILL.md"
+    installed.parent.mkdir(parents=True)
+    installed.write_text("# installed v1\n")
+    _write_registry_skill(tmp_path, "skill-x", "# registry v2, not yet reinstalled\n")
+
+    assert outcome_cmd.artifact_fingerprint(tmp_path, "skill-x", "skill") == _sha256_of(installed)
+
+
 def test_capture_without_local_artifact_omits_fingerprint(tmp_path, capsys):
     _write_verify_receipt(tmp_path)
     assert outcome_cmd.capture(target=tmp_path, artifact_id="skill-x", json_output=True) == 0
@@ -1123,16 +1134,22 @@ def test_rank_edited_skill_earns_its_rank_back(tmp_path, capsys):
     assert "lifetime score=" in b_line and "stale=6" in b_line
 
 
-def test_rank_legacy_records_are_a_distinct_cohort(tmp_path, capsys):
+def test_rank_grandfathers_legacy_records_and_keeps_rollout_output_identical(tmp_path, capsys):
     _write_registry_skill(tmp_path, "skill-x")
     _seed(tmp_path, _helped("skill-x", 3))  # pre-fingerprint captures
     assert outcome_cmd.rank(target=tmp_path, json_output=True) == 0
     payload = json.loads(capsys.readouterr().out)
     entry = payload["ranking"][0]
-    assert entry["helped"] == 0
+    # Legacy records cannot be proven stale, so a never-edited skill keeps its
+    # score at rollout instead of collapsing to zero.
+    assert entry["helped"] == 3
     assert entry["lifetime_helped"] == 3
     assert entry["legacy_records"] == 3
     assert entry["stale_records"] == 0
+    assert entry["score"] == outcome.wilson_lower_bound(3, 3)
+    assert outcome_cmd.rank(target=tmp_path, json_output=False) == 0
+    line = next(line for line in capsys.readouterr().out.splitlines() if "skill-x" in line)
+    assert line == f"- skill-x score={outcome.wilson_lower_bound(3, 3):.3f} helped=3 hurt=0"
 
 
 def test_rank_without_local_artifact_keeps_lifetime_score_and_output_shape(tmp_path, capsys):
@@ -1186,7 +1203,7 @@ def test_explain_splits_current_and_lifetime_and_tags_cohorts(tmp_path, capsys):
     assert outcome_cmd.explain(target=tmp_path, artifact_id="skill-x", json_output=True) == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["content_fingerprint"] == new_fp
-    assert payload["score"]["helped"] == 0 and payload["score"]["hurt"] == 1
+    assert payload["score"]["helped"] == 1 and payload["score"]["hurt"] == 1
     assert payload["lifetime_score"]["helped"] == 2 and payload["lifetime_score"]["hurt"] == 1
     assert payload["stale_records"] == 1 and payload["legacy_records"] == 1
     assert [t["cohort"] for t in payload["trail"]] == ["legacy", "stale", "current"]

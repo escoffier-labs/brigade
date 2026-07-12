@@ -154,16 +154,19 @@ def score_records(artifact_id: str, records: list[OutcomeRecord]) -> OutcomeScor
 class FingerprintCohorts:
     """An artifact's score split against its current content fingerprint.
 
-    ``current`` scores only the records whose ``content_fingerprint`` matches the
-    artifact's content as it exists right now, so an edited skill earns its score
-    back instead of inheriting signals earned by text that no longer exists.
-    ``lifetime`` is the fold over every record, unchanged. When the artifact's
-    content cannot be resolved (``current_fingerprint`` is None) the split is
-    unavailable and ``current`` equals ``lifetime``.
+    ``current`` drops records that are PROVEN stale: fingerprinted against a
+    different revision of the artifact's text. An edited skill therefore earns
+    its score back instead of inheriting signals earned by text that no longer
+    exists. Records captured before fingerprints existed (``content_fingerprint``
+    is None) cannot be proven stale either way, so they are grandfathered into
+    ``current``: a never-edited skill keeps its score across the rollout instead
+    of collapsing to zero. ``lifetime`` is the fold over every record, unchanged.
+    When the artifact's content cannot be resolved (``current_fingerprint`` is
+    None) the split is unavailable and ``current`` equals ``lifetime``.
 
     ``stale_records`` counts scored records fingerprinted against a different
-    revision; ``legacy_records`` counts scored records captured before
-    fingerprints existed. Legacy is a distinct cohort, never rewritten to match.
+    revision; ``legacy_records`` counts scored pre-fingerprint records. Legacy
+    is surfaced as a count but never rewritten.
     """
 
     current_fingerprint: str | None
@@ -191,7 +194,10 @@ def split_by_fingerprint(
     if not current_fingerprint:
         return FingerprintCohorts(None, lifetime, lifetime, 0, 0)
     deduped = scored_records(records)
-    current = score_records(artifact_id, [r for r in deduped if r.content_fingerprint == current_fingerprint])
+    current = score_records(
+        artifact_id,
+        [r for r in deduped if not r.content_fingerprint or r.content_fingerprint == current_fingerprint],
+    )
     stale = sum(1 for r in deduped if r.content_fingerprint and r.content_fingerprint != current_fingerprint)
     legacy = sum(1 for r in deduped if not r.content_fingerprint)
     return FingerprintCohorts(current_fingerprint, current, lifetime, stale, legacy)
