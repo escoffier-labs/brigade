@@ -373,10 +373,7 @@ class AllowCommentDisplayFormTests(unittest.TestCase):
     comment must work, not silently fail (the pre-2026-07 behavior)."""
 
     def test_line_scoped_allow_accepts_displayed_category_id_form(self) -> None:
-        text = (
-            "// content-guard: allow secret/bearer-token\n"
-            "const header = 'Bearer super-secret-token-value-123456';\n"
-        )
+        text = "// content-guard: allow secret/bearer-token\nconst header = 'Bearer super-secret-token-value-123456';\n"
         result = scan_text(text)
         bearer = [f for f in result.findings if f.rule_id == "bearer-token"]
         self.assertEqual(len(bearer), 1)
@@ -397,10 +394,7 @@ class AllowCommentDisplayFormTests(unittest.TestCase):
         self.assertFalse(result.blocked)
 
     def test_bare_rule_id_still_works(self) -> None:
-        text = (
-            "// content-guard: allow bearer-token file\n"
-            "const header = 'Bearer super-secret-token-value-123456';\n"
-        )
+        text = "// content-guard: allow bearer-token file\nconst header = 'Bearer super-secret-token-value-123456';\n"
         result = scan_text(text)
         bearer = [f for f in result.findings if f.rule_id == "bearer-token"]
         self.assertEqual(len(bearer), 1)
@@ -408,8 +402,7 @@ class AllowCommentDisplayFormTests(unittest.TestCase):
 
     def test_wrong_category_prefix_does_not_allow(self) -> None:
         text = (
-            "// content-guard: allow pii/bearer-token file\n"
-            "const header = 'Bearer super-secret-token-value-123456';\n"
+            "// content-guard: allow pii/bearer-token file\nconst header = 'Bearer super-secret-token-value-123456';\n"
         )
         result = scan_text(text)
         bearer = [f for f in result.findings if f.rule_id == "bearer-token"]
