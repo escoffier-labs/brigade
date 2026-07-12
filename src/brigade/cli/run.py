@@ -57,6 +57,16 @@ def register(sub: argparse._SubParsersAction) -> None:
         help="Do not attach MiseLedger run evidence context to brigade run prompts.",
     )
     p_run.add_argument(
+        "--no-route",
+        action="store_true",
+        help="Do not compute the deterministic route brief or check plan coverage against it.",
+    )
+    p_run.add_argument(
+        "--approve-ship",
+        action="store_true",
+        help="Release a ship stage the route would otherwise hold for approval.",
+    )
+    p_run.add_argument(
         "--sandbox",
         choices=["read-only", "workspace-write", "danger-full-access"],
         default=None,
@@ -228,6 +238,10 @@ def dispatch(args) -> int:
                 run_kwargs["code_graph_enabled"] = False
             if args.no_evidence:
                 run_kwargs["evidence_enabled"] = False
+            if args.no_route:
+                run_kwargs["route_enabled"] = False
+            if args.approve_ship:
+                run_kwargs["route_approvals"] = ("ship-approved",)
             rc = aboyeur_mod.run(args.task, loaded_roster, **run_kwargs)
             if args.worktree and output_dir is not None:
                 # Until the patch is proven good, the worktree is the only

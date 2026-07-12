@@ -23,6 +23,7 @@ from . import localio
 from . import proc, runguard
 from . import run_control
 from .roster import Agent, Roster, is_cli_allowed, timeout_for, workers
+from .route_catalog import RouteBrief, route_brief, uncovered_stages
 
 CODE_GRAPH_HEADING = "## Code graph context (GraphTrail, read-only)"
 CODE_GRAPH_LIMIT = 4000
@@ -37,6 +38,7 @@ class Assignment:
     worker: str
     task: str
     stage: int = 1
+    covers: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -368,6 +370,7 @@ def build_plan_prompt(
     code_graph: CodeGraphBrief | None = None,
     drift_impact: DriftImpactBrief | None = None,
     evidence: EvidenceBrief | None = None,
+    route: RouteBrief | None = None,
 ) -> str:
     worker_lines = "\n".join(f"- {agent.name}: cli={agent.cli}; role={agent.role}" for agent in workers(roster))
     if not worker_lines:
@@ -375,19 +378,29 @@ def build_plan_prompt(
 
     note = f"\nCorrection needed: {corrective_note}\n" if corrective_note else ""
     policy = f"\n\n{_read_only_rules()}\n" if read_only else ""
+    route_section = ""
+    route_rule = ""
+    if route is not None and route.attached and route.text:
+        route_section = f"\n{route.text}"
+        route_rule = (
+            '\n- Tag each assignment with "covers": ["<stage>", ...] naming the route '
+            "stages it satisfies; every required route stage must be covered."
+        )
     prompt = (
         "You are the Brigade aboyeur. Split the user's task across the available workers.\n"
         "Return exactly one JSON object, with no prose outside JSON:\n"
-        '{"assignments":[{"stage":1,"worker":"<worker-name>","task":"<specific sub-task>"}]}\n'
+        '{"assignments":[{"stage":1,"worker":"<worker-name>","task":"<specific sub-task>","covers":["<route-stage>"]}]}\n'
         f"{note}\n"
         f"User task:\n{task}\n\n"
-        f"Available workers, excluding you:\n{worker_lines}\n\n"
+        f"Available workers, excluding you:\n{worker_lines}\n"
+        f"{route_section}\n"
         f"Rules:\n- Use at most {roster.max_workers} assignments per stage.\n"
         "- Stage must be a positive integer starting at stage 1.\n"
         "- Assignments in the same stage run in parallel; later stages receive earlier-stage worker results.\n"
         "- Omit stage only for backwards-compatible stage 1 assignments.\n"
         "- Assign only listed workers.\n"
         "- Use zero assignments only if no worker is useful."
+        f"{route_rule}"
         f"{policy}"
     )
     return _prepend_optional_briefs(prompt, code_graph=code_graph, drift_impact=drift_impact, evidence=evidence)
@@ -594,12 +607,24 @@ def parse_plan(text: str, roster: Roster) -> list[Assignment]:
             raise ValueError("assignment cannot target the orchestrator")
         if not isinstance(subtask, str) or not subtask.strip():
             raise ValueError("assignment.task must be a non-empty string")
-        assignment = Assignment(worker=worker, task=subtask.strip(), stage=stage)
+        raw_covers = item.get("covers", [])
+        if not isinstance(raw_covers, list) or any(not isinstance(c, str) or not c.strip() for c in raw_covers):
+            raise ValueError("assignment.covers must be a list of non-empty strings")
+        covers = tuple(dict.fromkeys(c.strip() for c in raw_covers))
+        assignment = Assignment(worker=worker, task=subtask.strip(), stage=stage, covers=covers)
         key = (assignment.stage, assignment.worker, assignment.task)
         if key not in seen:
             assignments.append(assignment)
             seen.add(key)
             stage_counts[assignment.stage] = stage_counts.get(assignment.stage, 0) + 1
+        elif covers:
+            # Duplicates merge their covers instead of dropping them, so a plan
+            # that tags the same assignment twice still counts as covering both.
+            for index, existing in enumerate(assignments):
+                if (existing.stage, existing.worker, existing.task) == key:
+                    merged = tuple(dict.fromkeys(existing.covers + covers))
+                    assignments[index] = replace(existing, covers=merged)
+                    break
 
     for stage, count in stage_counts.items():
         if count > roster.max_workers:
@@ -614,6 +639,7 @@ def _record_plan_attempt(
     result: agents.AgentResult,
     parsed: bool = False,
     parse_error: str | None = None,
+    coverage_missing: list[str] | None = None,
 ) -> None:
     if attempts is None:
         return
@@ -626,6 +652,8 @@ def _record_plan_attempt(
     }
     if parse_error is not None:
         payload["parse_error"] = parse_error
+    if coverage_missing:
+        payload["coverage_missing"] = list(coverage_missing)
     attempts.append(payload)
 
 
@@ -656,6 +684,12 @@ def _run_orchestrator(
     return agents.run_agent(orchestrator.cli, prompt, **kwargs)
 
 
+def _coverage_missing(route: RouteBrief | None, assignments: list[Assignment]) -> list[str]:
+    if route is None or not route.attached or not route.route:
+        return []
+    return uncovered_stages(route, assignments)
+
+
 def plan(
     task: str,
     roster: Roster,
@@ -667,6 +701,7 @@ def plan(
     code_graph: CodeGraphBrief | None = None,
     drift_impact: DriftImpactBrief | None = None,
     evidence: EvidenceBrief | None = None,
+    route: RouteBrief | None = None,
 ) -> list[Assignment]:
     first = _run_orchestrator(
         roster,
@@ -677,6 +712,7 @@ def plan(
             code_graph=code_graph,
             drift_impact=drift_impact,
             evidence=evidence,
+            route=route,
         ),
         cwd=cwd,
         read_only=read_only,
@@ -688,8 +724,13 @@ def plan(
         raise RuntimeError(f"orchestrator failed during plan: {first.detail}")
     try:
         assignments = parse_plan(first.text, roster)
-        _record_plan_attempt(attempts, stage="initial", result=first, parsed=True)
-        return assignments
+        _record_plan_attempt(
+            attempts,
+            stage="initial",
+            result=first,
+            parsed=True,
+            coverage_missing=_coverage_missing(route, assignments),
+        )
     except ValueError as exc:
         _record_plan_attempt(attempts, stage="initial", result=first, parse_error=str(exc))
         second = _run_orchestrator(
@@ -702,6 +743,7 @@ def plan(
                 code_graph=code_graph,
                 drift_impact=drift_impact,
                 evidence=evidence,
+                route=route,
             ),
             cwd=cwd,
             read_only=read_only,
@@ -713,8 +755,13 @@ def plan(
             raise RuntimeError(f"orchestrator failed during plan correction: {second.detail}") from exc
         try:
             assignments = parse_plan(second.text, roster)
-            _record_plan_attempt(attempts, stage="correction", result=second, parsed=True)
-            return assignments
+            _record_plan_attempt(
+                attempts,
+                stage="correction",
+                result=second,
+                parsed=True,
+                coverage_missing=_coverage_missing(route, assignments),
+            )
         except ValueError as second_exc:
             _record_plan_attempt(
                 attempts,
@@ -723,6 +770,55 @@ def plan(
                 parse_error=str(second_exc),
             )
             raise RuntimeError(f"orchestrator returned an invalid plan: {second_exc}") from second_exc
+
+    missing = _coverage_missing(route, assignments)
+    if not missing:
+        return assignments
+    # The plan parses but skips required route stages: one corrective retry, then
+    # keep whichever plan covers more. Advisory, never fatal - a deterministic
+    # constraint must not brick a run the orchestrator can finish.
+    revised_result = _run_orchestrator(
+        roster,
+        build_plan_prompt(
+            task,
+            roster,
+            corrective_note=(
+                "the plan does not cover required route stages: "
+                + ", ".join(missing)
+                + '. Add or tag assignments with "covers" so every required stage is covered.'
+            ),
+            read_only=read_only,
+            code_graph=code_graph,
+            drift_impact=drift_impact,
+            evidence=evidence,
+            route=route,
+        ),
+        cwd=cwd,
+        read_only=read_only,
+        sandbox_read_only=sandbox_read_only,
+        sandbox=sandbox,
+    )
+    if not revised_result.ok:
+        _record_plan_attempt(attempts, stage="coverage-correction", result=revised_result)
+        return assignments
+    try:
+        revised = parse_plan(revised_result.text, roster)
+    except ValueError as exc:
+        _record_plan_attempt(attempts, stage="coverage-correction", result=revised_result, parse_error=str(exc))
+        return assignments
+    revised_missing = _coverage_missing(route, revised)
+    _record_plan_attempt(
+        attempts,
+        stage="coverage-correction",
+        result=revised_result,
+        parsed=True,
+        coverage_missing=revised_missing,
+    )
+    # A revision that covers strictly more wins; anything else (including an
+    # empty plan) keeps the original. Never trade assignments away for tags.
+    if revised and len(revised_missing) < len(missing):
+        return revised
+    return assignments
 
 
 def _render_prior_results(results: list[WorkerResult]) -> str:
@@ -1008,9 +1104,17 @@ def _print_worker_status(results: list[WorkerResult]) -> None:
 
 
 def _assignment_payload(assignments: list[Assignment]) -> list[dict[str, object]]:
-    return [
-        {"stage": assignment.stage, "worker": assignment.worker, "task": assignment.task} for assignment in assignments
-    ]
+    payload: list[dict[str, object]] = []
+    for assignment in assignments:
+        entry: dict[str, object] = {
+            "stage": assignment.stage,
+            "worker": assignment.worker,
+            "task": assignment.task,
+        }
+        if assignment.covers:
+            entry["covers"] = list(assignment.covers)
+        payload.append(entry)
+    return payload
 
 
 def _worker_payload(results: list[WorkerResult]) -> list[dict[str, object]]:
@@ -1418,6 +1522,7 @@ def _run_payload(
     code_graph_delta: dict[str, object] | None = None,
     context_eval_payload: dict[str, object] | None = None,
     suspected_noop: bool = False,
+    route: RouteBrief | None = None,
 ) -> dict[str, object]:
     payload: dict[str, object] = {
         "task": task,
@@ -1446,6 +1551,8 @@ def _run_payload(
             "attached": list(brief_set.attached) if brief_set is not None else [],
         },
     }
+    if route is not None:
+        payload["route"] = route.payload()
     git = _receipt_git_snapshot(cwd)
     if git is not None:
         payload["git"] = git
@@ -1488,6 +1595,8 @@ def run(
     drift_impact: DriftImpactBrief | None = None,
     evidence: EvidenceBrief | None = None,
     codex_transport: str | None = None,
+    route_enabled: bool = True,
+    route_approvals: tuple[str, ...] = (),
 ) -> int:
     started_at = datetime.now(timezone.utc)
     transport_for_payload = codex_transport or roster.codex_transport
@@ -1508,6 +1617,7 @@ def run(
     code_graph = brief_set.code_graph
     drift_impact = brief_set.drift_impact
     evidence = brief_set.evidence
+    route = route_brief(task, approvals=route_approvals) if route_enabled else None
     code_graph_delta = _initial_code_graph_delta(
         code_graph_enabled=code_graph_enabled,
         dry_run=dry_run,
@@ -1537,6 +1647,7 @@ def run(
                 evidence=evidence,
                 brief_set=brief_set,
                 codex_transport=transport_for_payload,
+                route=route,
                 code_graph_delta=code_graph_delta,
             ),
         )
@@ -1555,6 +1666,7 @@ def run(
             code_graph=code_graph,
             drift_impact=drift_impact,
             evidence=evidence,
+            route=route,
         )
     except RuntimeError as exc:
         if output_dir is not None:
@@ -1578,6 +1690,7 @@ def run(
                     evidence=evidence,
                     brief_set=brief_set,
                     codex_transport=transport_for_payload,
+                    route=route,
                     control_socket=control_socket,
                     code_graph_delta=code_graph_delta,
                 ),
@@ -1610,6 +1723,7 @@ def run(
                     evidence=evidence,
                     brief_set=brief_set,
                     codex_transport=transport_for_payload,
+                    route=route,
                     code_graph_delta=code_graph_delta,
                 ),
             )
@@ -1665,6 +1779,7 @@ def run(
                 evidence=evidence,
                 brief_set=brief_set,
                 codex_transport=transport_for_payload,
+                route=route,
                 control_socket=control_socket,
                 code_graph_delta=code_graph_delta,
             ),
@@ -1765,6 +1880,7 @@ def run(
                     evidence=evidence,
                     brief_set=brief_set,
                     codex_transport=transport_for_payload,
+                    route=route,
                     code_graph_delta=code_graph_delta,
                     context_eval_payload=context_eval_payload,
                     suspected_noop=suspected_noop,
@@ -1792,6 +1908,7 @@ def run(
                 evidence=evidence,
                 brief_set=brief_set,
                 codex_transport=transport_for_payload,
+                route=route,
                 control_socket=control_socket,
                 code_graph_delta=code_graph_delta,
                 context_eval_payload=context_eval_payload,
@@ -1832,6 +1949,7 @@ def run(
                         evidence=evidence,
                         brief_set=brief_set,
                         codex_transport=transport_for_payload,
+                        route=route,
                         control_socket=control_socket,
                         code_graph_delta=code_graph_delta,
                         context_eval_payload=context_eval_payload,
@@ -1862,6 +1980,7 @@ def run(
                     evidence=evidence,
                     brief_set=brief_set,
                     codex_transport=transport_for_payload,
+                    route=route,
                     control_socket=control_socket,
                     code_graph_delta=code_graph_delta,
                     context_eval_payload=context_eval_payload,
