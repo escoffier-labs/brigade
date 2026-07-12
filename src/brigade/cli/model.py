@@ -44,6 +44,24 @@ def register(sub: argparse._SubParsersAction) -> None:
     )
     p_scorecard.set_defaults(func=_dispatch_scorecard)
 
+    p_trial = model_sub.add_parser("trial", help="Plan and run resumable model evaluation cells.")
+    trial_sub = p_trial.add_subparsers(dest="trial_command", metavar="<trial-command>")
+    trial_sub.required = True
+    for command in ("plan", "run", "resume"):
+        parser = trial_sub.add_parser(command, help=f"{command.title()} a model trial manifest.")
+        parser.add_argument("manifest", type=Path, help="brigade.eval_manifest.v1 JSON file.")
+        parser.add_argument("--target", "-t", type=Path, default=Path("."), help="Workspace used by trial runs.")
+        parser.add_argument(
+            "--roster", type=Path, default=None, help="Roster path. Uses normal workspace/user fallback."
+        )
+        parser.add_argument("--output-dir", type=Path, default=None, help="Trial artifact directory.")
+        parser.set_defaults(func=_dispatch_trial)
+    for command in ("show", "summary"):
+        parser = trial_sub.add_parser(command, help=f"{command.title()} trial artifacts.")
+        parser.add_argument("output_dir", type=Path, help="Trial artifact directory.")
+        parser.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+        parser.set_defaults(func=_dispatch_trial)
+
 
 def _dispatch_scorecard(args) -> int:
     from .. import model_scorecard
@@ -54,4 +72,44 @@ def _dispatch_scorecard(args) -> int:
         since=args.since,
         json_output=args.json,
         verbose=args.verbose,
+    )
+
+
+def _dispatch_trial(args) -> int:
+    import json
+    import sys
+
+    from .. import model_trials
+    from .. import roster as roster_mod
+
+    if args.trial_command in {"show", "summary"}:
+        if args.trial_command == "show":
+            return model_trials.show(args.output_dir, json_output=args.json)
+        payload = model_trials.summarize(args.output_dir)
+        if args.json:
+            print(json.dumps(payload, indent=2, sort_keys=True))
+        else:
+            for state, count in payload["counts"].items():
+                print(f"{state}: {count}")
+        return 0
+
+    target = args.target.expanduser().resolve()
+    try:
+        roster_path = roster_mod.resolve_roster_path(target, args.roster)
+        roster = roster_mod.load_roster(roster_path)
+        manifest = model_trials.load_manifest(args.manifest)
+        output_dir = args.output_dir or target / ".brigade" / "evals" / manifest["name"]
+        plan, cells = model_trials.build_plan(args.manifest, roster, output_dir)
+    except (FileNotFoundError, ValueError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    if args.trial_command == "plan":
+        print(json.dumps(plan, indent=2, sort_keys=True))
+        return 0
+    return model_trials.execute(
+        args.manifest,
+        roster,
+        workspace=target,
+        output_dir=output_dir,
+        resume=args.trial_command == "resume",
     )
