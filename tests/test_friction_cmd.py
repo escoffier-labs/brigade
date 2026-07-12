@@ -228,3 +228,96 @@ def test_friction_add_creates_manual_import(tmp_path, monkeypatch, capsys):
     assert metadata["source_fingerprint"]
     assert "source_key" not in metadata
     assert "fingerprint" not in metadata
+
+
+def test_friction_scan_ignores_passing_verify_receipt(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(
+        friction_cmd,
+        "_now",
+        lambda: datetime(2026, 6, 11, 12, 0, 0, tzinfo=timezone.utc),
+    )
+    run_dir = tmp_path / ".brigade" / "work" / "verify-runs" / "20260610-run"
+    run_dir.mkdir(parents=True)
+    (run_dir / "receipt.json").write_text(
+        json.dumps(
+            {
+                "status": "completed",
+                "commands": [{"command": "./scripts/verify", "exit_code": 0, "status": "completed"}],
+                "evidence": {"handoff_drafts": {"counts": {"failed": 0}}},
+                "timeouts": {"timeout": 900},
+            },
+            indent=2,
+        )
+    )
+
+    code = cli.main(["friction", "scan", "--target", str(tmp_path), "--json"])
+
+    assert code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["candidate_count"] == 0
+
+
+def test_friction_scan_reports_failing_verify_receipt(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(
+        friction_cmd,
+        "_now",
+        lambda: datetime(2026, 6, 11, 12, 0, 0, tzinfo=timezone.utc),
+    )
+    run_dir = tmp_path / ".brigade" / "work" / "verify-runs" / "20260610-run"
+    run_dir.mkdir(parents=True)
+    (run_dir / "receipt.json").write_text(
+        json.dumps(
+            {
+                "status": "completed",
+                "commands": [
+                    {
+                        "command": "pytest -q",
+                        "exit_code": 1,
+                        "status": "completed",
+                        "stderr_summary": "2 failed, 310 passed",
+                    },
+                    {
+                        "command": "slow-check",
+                        "exit_code": None,
+                        "status": "timeout",
+                        "stderr_summary": "",
+                    },
+                ],
+            },
+            indent=2,
+        )
+    )
+
+    code = cli.main(["friction", "scan", "--target", str(tmp_path), "--json"])
+
+    assert code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["candidate_count"] == 2
+    by_type = {c["friction_type"]: c for c in payload["candidates"]}
+    failure = by_type["tool_failure"]
+    assert failure["severity"] == "high"
+    assert "pytest -q" in failure["evidence"]["snippet"]
+    assert "2 failed" in failure["evidence"]["snippet"]
+    timeout = by_type["network_timeout"]
+    assert timeout["severity"] == "medium"
+    assert "slow-check" in timeout["evidence"]["snippet"]
+
+
+def test_friction_scan_ignores_numeric_json_fields(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(
+        friction_cmd,
+        "_now",
+        lambda: datetime(2026, 6, 11, 12, 0, 0, tzinfo=timezone.utc),
+    )
+    learnings = tmp_path / ".learnings"
+    learnings.mkdir()
+    (learnings / "stats.json").write_text(
+        '{\n  "failed": 0,\n  "timeout": 900,\n  "note": "everything blocked because auth expired"\n}\n'
+    )
+
+    code = cli.main(["friction", "scan", "--target", str(tmp_path), "--json"])
+
+    assert code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["candidate_count"] == 1
+    assert payload["candidates"][0]["friction_type"] == "blocked"

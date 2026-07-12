@@ -95,6 +95,10 @@ PATTERNS: tuple[tuple[str, str, str, str], ...] = (
 )
 SECRET_RE = re.compile(r"(?i)\b(api[_-]?key|token|secret|password|authorization|bearer)\b\s*[:=]\s*['\"]?[^'\"\s]+")
 IGNORED_ATTACHMENT_TYPES = {"hook_success", "hook_additional_context", "skill_listing"}
+# A JSON field whose value is a bare number is configuration or a counter
+# ('"timeout": 900', '"failed": 0'), never friction evidence in itself. Real
+# friction always carries textual evidence (an error string, a status word).
+JSON_NUMERIC_FIELD_RE = re.compile(r'^"[^"\n]+"\s*:\s*-?\d+(?:\.\d+)?\s*,?$')
 
 
 @dataclass(frozen=True)
@@ -247,6 +251,8 @@ def _scan_file(path: Path, *, max_line_length: int = 5000) -> list[Match]:
             if not line:
                 continue
             line = line[:max_line_length]
+            if JSON_NUMERIC_FIELD_RE.match(line):
+                continue
             lowered = line.lower()
             for friction_type, severity, title, pattern in PATTERNS:
                 if re.search(pattern, lowered):
@@ -261,6 +267,66 @@ def _scan_file(path: Path, *, max_line_length: int = 5000) -> list[Match]:
                         )
                     )
                     break
+    return matches
+
+
+def _is_verify_receipt(path: Path) -> bool:
+    return path.name == "receipt.json" and "verify-runs" in path.parts
+
+
+def _scan_receipt(path: Path) -> list[Match]:
+    """Parse a verify-run receipt structurally instead of keyword-matching it.
+
+    Receipts are machine-written JSON where words like "failed" and "timeout"
+    appear as field names and configured budgets; keyword scanning them yields
+    false positives on passing runs. Only real failure evidence counts: a
+    non-zero command exit code, a command that did not complete, or a run
+    whose top-level status is not completed.
+    """
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8", errors="ignore"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    if not isinstance(payload, dict):
+        return []
+    matches: list[Match] = []
+    commands = payload.get("commands")
+    for command in commands if isinstance(commands, list) else []:
+        if not isinstance(command, dict):
+            continue
+        exit_code = command.get("exit_code")
+        status = str(command.get("status") or "")
+        failed = (isinstance(exit_code, int) and exit_code != 0) or status not in ("", "completed")
+        if not failed:
+            continue
+        rendered = str(command.get("command") or "verification command")
+        stderr_summary = " ".join(str(command.get("stderr_summary") or "").split())
+        detail = f"verify command failed: {rendered} (exit={exit_code}, status={status or 'unknown'})"
+        if stderr_summary:
+            detail += f" stderr: {stderr_summary}"
+        timed_out = "timeout" in status or "timed out" in stderr_summary.lower()
+        matches.append(
+            Match(
+                path=path,
+                line_number=1,
+                line=detail,
+                friction_type="network_timeout" if timed_out else "tool_failure",
+                severity="medium" if timed_out else "high",
+                title="network or timeout friction" if timed_out else "tool or command failure",
+            )
+        )
+    run_status = str(payload.get("status") or "completed")
+    if not matches and run_status != "completed":
+        matches.append(
+            Match(
+                path=path,
+                line_number=1,
+                line=f"verify run did not complete: status={run_status}",
+                friction_type="blocked",
+                severity="high",
+                title="blocked workflow",
+            )
+        )
     return matches
 
 
@@ -340,7 +406,8 @@ def scan_payload(
     severity_counts: dict[str, int] = {}
     workflow_counts: dict[str, int] = {}
     for path in files:
-        for match in _scan_file(path):
+        matches = _scan_receipt(path) if _is_verify_receipt(path) else _scan_file(path)
+        for match in matches:
             candidate = _make_candidate(target, match)
             if candidate["id"] in seen_ids:
                 continue
