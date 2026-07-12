@@ -2,30 +2,38 @@
   "schema": "brigade.station.v1",
   "name": "graphtrail",
   "station": "search",
-  "summary": "local code graph context, impact, and optional semantic plus evidence join layer",
+  "summary": "local code-graph CLI: callers, callees, impact, context briefs, and structural diffs",
+  "lifecycle": "active",
   "tools": [
     {
       "name": "graphtrail",
+      "kind": "executable",
       "command": "graphtrail",
-      "summary": "read-only code graph CLI and context pack renderer",
-      "install": ["cargo", "install", "--path", "."],
+      "summary": "local code-graph CLI: callers, callees, impact, context briefs, and structural diffs",
+      "install": ["cargo", "install", "graphtrail"],
       "surfaces": [
         {
           "kind": "brief-markdown",
           "command": ["graphtrail", "context", "<task>", "--markdown"],
+          "read_only": true,
           "timeout_seconds": 10,
-          "max_chars": 4000
+          "max_chars": 4000,
+          "probe": ["graphtrail", "context", "--help"],
+          "probe_contains": ["--markdown"]
         },
         {
           "kind": "verify-exit",
-          "command": ["graphtrail", "stats", "--json"],
+          "command": ["graphtrail", "--version"],
+          "read_only": true,
           "timeout_seconds": 10
         },
         {
-          "kind": "brief-markdown",
-          "command": ["graphtrail", "context", "<task>", "--markdown", "--blend-code-search", "--evidence"],
-          "timeout_seconds": 10,
-          "max_chars": 4000
+          "kind": "doctor-json",
+          "command": ["graphtrail", "doctor", "--json"],
+          "read_only": true,
+          "timeout_seconds": 30,
+          "probe": ["graphtrail", "doctor", "--help"],
+          "probe_contains": ["--json"]
         }
       ]
     }

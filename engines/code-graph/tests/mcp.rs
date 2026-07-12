@@ -825,6 +825,28 @@ fn tools_call_invalid_new_args_return_invalid_params() {
     )
     .unwrap();
     assert_eq!(resp["error"]["code"], -32602);
+
+    let resp = handle_request(
+        &db,
+        &json!({"jsonrpc":"2.0","id":45,"method":"tools/call",
+        "params":{"name":"context","arguments":{
+            "task":"helper",
+            "personalized":"yes"
+        }}}),
+    )
+    .unwrap();
+    assert_eq!(resp["error"]["code"], -32602);
+
+    let resp = handle_request(
+        &db,
+        &json!({"jsonrpc":"2.0","id":46,"method":"tools/call",
+        "params":{"name":"context","arguments":{
+            "task":"helper",
+            "max_chars":"4000"
+        }}}),
+    )
+    .unwrap();
+    assert_eq!(resp["error"]["code"], -32602);
 }
 
 #[test]

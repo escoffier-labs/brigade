@@ -13,8 +13,8 @@ use crate::query::{
     build_context_pack,
     context::{edge_location, symbol_location},
     cycles, dead_code, diff_graphs, doctor, export_graph, file_neighbors, graph_edges_with_depth,
-    impact_edges, missing_db_report, normalize_depth, render_markdown, search_symbols_with_path,
-    stats,
+    impact_edges, missing_db_report, normalize_depth, personalize_context_pack, render_markdown,
+    render_markdown_budgeted, search_symbols_with_path, stats,
 };
 use crate::store::{
     db_path, init_schema, open_db, open_default_read_only, open_read_only, sync_repo_force,
@@ -87,6 +87,12 @@ enum Command {
         /// Render the pack as Brigade-friendly markdown.
         #[arg(long)]
         markdown: bool,
+        /// Rank files from task-specific seeds through the resolved call graph.
+        #[arg(long)]
+        personalized: bool,
+        /// Maximum markdown characters when --personalized is enabled.
+        #[arg(long, default_value_t = 4000)]
+        max_chars: usize,
         /// Use Code Search semantic hits as entry points, then rank them with graph centrality.
         #[cfg(feature = "codesearch")]
         #[arg(long)]
@@ -305,6 +311,8 @@ pub fn run(cli: Cli) -> Result<()> {
             limit,
             json,
             markdown,
+            personalized,
+            max_chars,
             #[cfg(feature = "codesearch")]
             blend_code_search,
             #[cfg(feature = "codesearch")]
@@ -331,14 +339,30 @@ pub fn run(cli: Cli) -> Result<()> {
             };
             #[cfg(not(feature = "codesearch"))]
             let pack = build_context_pack(&conn, task.clone(), limit)?;
+            let mut pack = pack;
+            if personalized {
+                personalize_context_pack(&conn, &mut pack)?;
+            }
             if json {
                 println!("{}", serde_json::to_string_pretty(&pack)?);
             } else if markdown {
-                print!("{}", render_markdown(&pack));
+                let output = if personalized {
+                    render_markdown_budgeted(&pack, max_chars)
+                } else {
+                    render_markdown(&pack)
+                };
+                #[cfg(feature = "miseledger")]
+                let mut output = output;
                 #[cfg(feature = "miseledger")]
                 if evidence {
-                    print!("{}", render_evidence_links(&task, &pack, limit)?);
+                    let evidence = render_evidence_links(&task, &pack, limit)?;
+                    if personalized {
+                        append_markdown_with_budget(&mut output, &evidence, max_chars);
+                    } else {
+                        output.push_str(&evidence);
+                    }
                 }
+                print!("{output}");
             } else {
                 print!("{}", render_context(&pack));
                 #[cfg(feature = "miseledger")]
@@ -801,6 +825,20 @@ fn render_diff(diff: &GraphDiff) -> String {
     text
 }
 
+#[cfg(any(feature = "miseledger", test))]
+fn append_markdown_with_budget(output: &mut String, addition: &str, max_chars: usize) {
+    let mut used_chars = output.chars().count();
+    for line in addition.lines() {
+        let candidate = format!("{line}\n");
+        let candidate_chars = candidate.chars().count();
+        if used_chars + candidate_chars > max_chars {
+            break;
+        }
+        output.push_str(&candidate);
+        used_chars += candidate_chars;
+    }
+}
+
 #[cfg(feature = "miseledger")]
 fn render_evidence_links(task: &str, pack: &ContextPack, limit: usize) -> Result<String> {
     use std::collections::BTreeSet;
@@ -924,5 +962,20 @@ mod tests {
         assert!(text.contains("- function `run` at app.py:5-7"));
         assert!(text.contains("- `main` calls `run` at cli.py:12 -> app.py"));
         assert!(text.contains("- `run` calls `helper` at app.py:6 -> lib.py"));
+    }
+
+    #[test]
+    fn appended_markdown_respects_the_total_character_budget() {
+        let mut output = "# Context\n\n- src/app.rs\n".to_string();
+
+        append_markdown_with_budget(
+            &mut output,
+            "\n## Evidence links\n\n- first\n- second\n",
+            45,
+        );
+
+        assert!(output.chars().count() <= 45);
+        assert!(output.ends_with('\n'));
+        assert!(!output.contains("- second"));
     }
 }

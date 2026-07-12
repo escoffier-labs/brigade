@@ -27,7 +27,8 @@ use crate::query::build_context_pack_from_entry_points;
 use crate::query::{
     DEFAULT_AFFECTED_DEPTH, DEFAULT_IMPACT_DEPTH, affected, build_context_pack, cycles, dead_code,
     diff_graphs, doctor, file_neighbors, graph_edges_with_depth, impact_edges, normalize_depth,
-    render_markdown, search_symbols_with_path, stats,
+    personalize_context_pack, render_markdown, render_markdown_budgeted, search_symbols_with_path,
+    stats,
 };
 use crate::store::{init_schema, open_db, open_read_only, sync_repo};
 
@@ -263,8 +264,17 @@ fn call_tool(default_db: &Path, name: &str, args: &Value) -> Result<String> {
             };
             #[cfg(not(feature = "codesearch"))]
             let pack = build_context_pack(&conn, task.clone(), limit)?;
+            let mut pack = pack;
+            let personalized = bool_arg(args, "personalized", false);
+            if personalized {
+                personalize_context_pack(&conn, &mut pack)?;
+            }
             match str_arg(args, "format").as_str() {
                 "" | "json" => to_pretty(&pack),
+                "markdown" if personalized => Ok(render_markdown_budgeted(
+                    &pack,
+                    usize_arg(args, "max_chars", 4000),
+                )),
                 "markdown" => Ok(render_markdown(&pack)),
                 other => Err(anyhow!("unknown context format '{other}'")),
             }
@@ -320,6 +330,8 @@ fn validate_tool_args(name: &str, args: &Value) -> std::result::Result<(), Strin
             require_string(args, "task")?;
             require_usize(args, "limit")?;
             require_format(args)?;
+            optional_bool(args, "personalized")?;
+            require_usize(args, "max_chars")?;
             #[cfg(feature = "codesearch")]
             {
                 optional_bool(args, "blend_code_search")?;
@@ -394,7 +406,7 @@ fn build_tool_specs() -> Vec<ToolSpec> {
             json!(["symbol"]),
         )
     };
-    let context_props = json!({
+    let mut context_props = json!({
         "task": { "type": "string", "description": "Task or feature description to gather context for." },
         "limit": { "type": "integer", "description": "Max entry points (default 12)." },
         "format": {
@@ -403,8 +415,16 @@ fn build_tool_specs() -> Vec<ToolSpec> {
             "description": "Response format (default json)."
         }
     });
-    #[cfg(feature = "codesearch")]
-    let mut context_props = context_props;
+    if let Some(props) = context_props.as_object_mut() {
+        props.insert(
+            "personalized".to_string(),
+            json!({ "type": "boolean", "description": "Default false; rank context from task-specific file seeds." }),
+        );
+        props.insert(
+            "max_chars".to_string(),
+            json!({ "type": "integer", "description": "Markdown character budget when personalized (default 4000)." }),
+        );
+    }
     #[cfg(feature = "codesearch")]
     if let Some(props) = context_props.as_object_mut() {
         props.insert(

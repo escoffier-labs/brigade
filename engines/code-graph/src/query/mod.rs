@@ -15,7 +15,10 @@ pub mod stats;
 
 pub use affected::{AffectedReport, DEFAULT_AFFECTED_DEPTH, affected};
 pub use blend::{ExternalHit, blend};
-pub use context::{build_context_pack, build_context_pack_from_entry_points, render_markdown};
+pub use context::{
+    build_context_pack, build_context_pack_from_entry_points, personalize_context_pack,
+    render_markdown, render_markdown_budgeted,
+};
 pub use diff::diff_graphs;
 pub use doctor::{DoctorReport, doctor, missing_db_report};
 pub use export::{ExportFormat, ExportScope, export_graph};
