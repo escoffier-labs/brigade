@@ -28,6 +28,28 @@ pub(super) struct SyncWalk {
     pub(super) ignored: IgnoredSummary,
 }
 
+/// One file the sync walk would index, exposed for read-only consumers
+/// (`evaluate`) that parse without touching a database.
+pub struct IndexablePath {
+    pub path: PathBuf,
+    pub rel: String,
+    pub lang: Lang,
+}
+
+/// The files a sync of `root` would consider, honoring the same gitignore and
+/// hardcoded-floor rules, without opening or writing any database.
+pub fn list_indexable(root: &Path) -> Result<Vec<IndexablePath>> {
+    Ok(collect_sync_walk(root, false)?
+        .entries
+        .into_iter()
+        .map(|entry| IndexablePath {
+            path: entry.path,
+            rel: entry.rel,
+            lang: entry.lang,
+        })
+        .collect())
+}
+
 pub(super) fn collect_sync_walk(root: &Path, count_ignored: bool) -> Result<SyncWalk> {
     let ignored = IgnoredSummary {
         hardcoded_floor: 0,

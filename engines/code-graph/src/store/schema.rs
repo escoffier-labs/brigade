@@ -4,7 +4,7 @@ use anyhow::Result;
 use rusqlite::Connection;
 
 /// Bumped when the on-disk schema changes; surfaced in JSON packs from Phase 2 on.
-pub const SCHEMA_VERSION: u32 = 6;
+pub const SCHEMA_VERSION: u32 = 7;
 
 /// What sync must redo after a schema upgrade, from nothing to everything.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -145,7 +145,72 @@ pub fn upgrade_for_sync(conn: &Connection) -> Result<SchemaUpgrade> {
         conn.execute("ALTER TABLE edges ADD COLUMN confidence REAL", [])?;
         upgrade = upgrade.max(SchemaUpgrade::RebuildEdges);
     }
+    // v7 dropped start_line from symbol identity. New ids derive entirely from
+    // columns the symbols table already stores, so the migration rewrites ids
+    // in place (symbols, pending_calls, FTS) and re-resolves edges, re-parsing
+    // nothing. Pre-v5 databases skip this: their FullReindex regenerates ids.
+    if stored_schema_version(conn)?.is_some_and(|version| (5..7).contains(&version)) {
+        rewrite_symbol_ids_v7(conn)?;
+        upgrade = upgrade.max(SchemaUpgrade::RebuildEdges);
+    }
     Ok(upgrade)
+}
+
+/// Rewrite every symbol id to the v7 line-independent form.
+///
+/// Occurrence ordinals for same-named symbols are assigned in
+/// `(start_line, old id)` order, which matches extraction's traversal order
+/// except for exotic same-line duplicates; those converge to traversal order
+/// the next time their file re-extracts, and edges rebuild either way.
+fn rewrite_symbol_ids_v7(conn: &Connection) -> Result<()> {
+    use crate::extractors::common::symbol_id;
+    use std::collections::HashMap;
+
+    let tx = conn.unchecked_transaction()?;
+    let mut mapping: Vec<(String, String)> = Vec::new();
+    {
+        let mut stmt = tx.prepare(
+            "SELECT id, file_path, qualified_name, kind FROM symbols
+             ORDER BY file_path, start_line, id",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })?;
+        let mut occurrences: HashMap<String, usize> = HashMap::new();
+        for row in rows {
+            let (old_id, file_path, qualified_name, kind) = row?;
+            let counter = occurrences
+                .entry(format!("{file_path}:{qualified_name}:{kind}"))
+                .or_insert(0);
+            let new_id = symbol_id(&file_path, &qualified_name, &kind, *counter);
+            *counter += 1;
+            if new_id != old_id {
+                mapping.push((old_id, new_id));
+            }
+        }
+    }
+    // Edges are derived state and the caller rebuilds them; dropping them
+    // first keeps the id rewrite free of dangling references mid-flight.
+    tx.execute("DELETE FROM edges", [])?;
+    {
+        let mut update_symbol = tx.prepare("UPDATE symbols SET id = ?2 WHERE id = ?1")?;
+        let mut update_calls =
+            tx.prepare("UPDATE pending_calls SET source_id = ?2 WHERE source_id = ?1")?;
+        let mut update_fts =
+            tx.prepare("UPDATE symbols_fts SET symbol_id = ?2 WHERE symbol_id = ?1")?;
+        for (old_id, new_id) in &mapping {
+            update_symbol.execute(rusqlite::params![old_id, new_id])?;
+            update_calls.execute(rusqlite::params![old_id, new_id])?;
+            update_fts.execute(rusqlite::params![old_id, new_id])?;
+        }
+    }
+    tx.commit()?;
+    Ok(())
 }
 
 fn stored_schema_version(conn: &Connection) -> Result<Option<u32>> {

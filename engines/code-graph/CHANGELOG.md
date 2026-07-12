@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `graphtrail evaluate <path>`: dry-run extraction that prints what a sync would store (symbols, imports, calls) for a file or tree, writing nothing. Pair with an extractor-fingerprint bump to diff extractor changes before they touch an index.
+- `graphtrail explain <source> <target>` and a matching MCP `explain` tool: how each stored call from a source symbol to a called name resolved, with the resolution-path label, its confidence, the exact import that satisfied the call, and the resolved targets. Unresolved calls report their reason (`no-candidates`, `unresolved-external`, `unresolved-qualified`) instead of hiding.
+- `graphtrail export --format dot|graphml|jsonl --scope files|symbols [--out <path>]`: read-only graph export for visualization. File scope aggregates cross-file calls with counts; symbol scope carries line and confidence per edge.
+- `graphtrail watch <root>` (cargo feature `watch`, on by default): a foreground file watcher that runs the incremental sync after a debounced quiet period. Not a daemon: you start it and Ctrl-C it, and the advisory sync lock keeps it from duplicating timer or MCP-refresh syncs.
 - Schema v5 persists pending calls so an incremental sync can rebuild all derived edges when definitions change in another file. Databases from before v5 reindex once to populate the new table.
 - Schema v6 stores confidence on call edges and rebuilds existing derived edges from persisted pending calls without re-parsing source files.
 - `dead-code`, `cycles`, and `affected` analysis commands over the CLI, with matching `dead_code`, `cycles`, and `affected` MCP tools.
@@ -17,11 +21,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Shared Code Search index manifest support for `codesearch` builds. GraphTrail now discovers the manifest, matches the canonical repo root, falls back to `semantic_api_url` when `CODE_SEARCH_URL` is unset, scopes requests with `code_search_project`, and strips `code_search_file_prefix` from returned hits.
 
 ### Changed
+- Symbol identity is line-independent (schema v7): a symbol's id now derives from `(file_path, qualified_name, kind)` plus an occurrence ordinal for same-named duplicates, so moving a function down the file no longer changes its id. Existing v5/v6 databases migrate on the next sync by rewriting ids in place from stored rows (symbols, pending calls, FTS) and re-resolving edges, re-parsing no files. Pre-v5 databases keep their one-time full reindex.
 - MCP tool names, schemas, refresh policy, validation, and dispatch now come from one registry. The public tool names and response shapes are unchanged.
 
 ### Fixed
 - `sync` now refuses to index the filesystem root or the user's home directory instead of walking every cache, toolchain, and vendored source tree on the machine, which held the whole pending graph in memory and could exhaust system RAM. The CLI rejects the root before creating `.graphtrail/`, and the same guard covers the MCP `refresh: true` path. Set `GRAPHTRAIL_ALLOW_UNSAFE_ROOT=1` to override.
-- `sync` disambiguates distinct same-named symbols that begin on one line, avoiding primary-key collisions in generated JavaScript bundles while preserving the first declaration's existing ID.
+- `sync` disambiguates distinct same-named symbols (including several beginning on one line) with occurrence ordinals, avoiding primary-key collisions in generated JavaScript bundles while keeping the first declaration's id stable.
 - Docker builds copy only the manifests and source tree they need, while `.dockerignore` excludes Brigade receipts, local agent state, memory handoffs, MCP configuration, environment files, and key material.
 - Code Search responses above 8 MiB are rejected before JSON decoding, preventing an oversized response from being buffered without a bound.
 

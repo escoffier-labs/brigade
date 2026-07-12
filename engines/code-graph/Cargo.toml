@@ -26,15 +26,20 @@ tree-sitter-javascript = "0.25.0"
 tree-sitter-python = "0.25.0"
 tree-sitter-rust = "0.24.2"
 tree-sitter-typescript = "0.23.2"
+notify = { version = "8", optional = true }
 ureq = { version = "2", features = ["json"], optional = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
 [features]
+default = ["watch"]
 # Optional, no-network-by-default integrations.
 codesearch = ["dep:ureq"]
 miseledger = []
+# Foreground file watcher driving debounced incremental syncs. On by default;
+# disable with --no-default-features for the smallest binary.
+watch = ["dep:notify"]
 
 [dev-dependencies]
 tempfile = "3"

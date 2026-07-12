@@ -53,6 +53,7 @@ enum ToolId {
     DeadCode,
     Cycles,
     Affected,
+    Explain,
     Diff,
     Repos,
 }
@@ -276,6 +277,11 @@ fn call_tool(default_db: &Path, name: &str, args: &Value) -> Result<String> {
             &files_arg(args),
             usize_arg(args, "depth", DEFAULT_AFFECTED_DEPTH),
         )?),
+        ToolId::Explain => to_pretty(&crate::store::explain_calls(
+            &conn,
+            &str_arg(args, "source"),
+            &str_arg(args, "target"),
+        )?),
         ToolId::Stats => to_pretty(&stats(&conn)?),
         ToolId::Doctor => to_pretty(&doctor(&conn, &doctor_root(default_db, args, &db), &db)?),
         ToolId::Diff | ToolId::Repos => unreachable!("special tools return before opening one db"),
@@ -330,6 +336,10 @@ fn validate_tool_args(name: &str, args: &Value) -> std::result::Result<(), Strin
         ToolId::Affected => {
             require_files(args)?;
             require_usize(args, "depth")?;
+        }
+        ToolId::Explain => {
+            require_string(args, "source")?;
+            require_string(args, "target")?;
         }
         ToolId::Diff => {
             require_string(args, "before")?;
@@ -535,6 +545,19 @@ fn build_tool_specs() -> Vec<ToolSpec> {
                     "depth": { "type": "integer", "description": "Caller-BFS depth, clamped to 1..5 (default 3)." }
                 })),
                 json!(["files"]),
+            ),
+            true,
+        ),
+        tool(
+            ToolId::Explain,
+            "explain",
+            "Explain how call edges from a source symbol to a called name resolved: resolution path, confidence, matched import, and targets. Exact name match, unlike the fuzzy symbol tools.",
+            with_location(
+                with_refresh(json!({
+                    "source": { "type": "string", "description": "Calling symbol, by exact name or qualified name." },
+                    "target": { "type": "string", "description": "Called symbol name, as written at the call site." }
+                })),
+                json!(["source", "target"]),
             ),
             true,
         ),
@@ -952,6 +975,7 @@ mod tests {
             "dead_code",
             "cycles",
             "affected",
+            "explain",
             "diff",
             "repos",
         ]);
@@ -970,6 +994,7 @@ mod tests {
             "dead_code",
             "cycles",
             "affected",
+            "explain",
         ]);
         #[cfg(feature = "codesearch")]
         refresh_tools.insert("semantic_search");

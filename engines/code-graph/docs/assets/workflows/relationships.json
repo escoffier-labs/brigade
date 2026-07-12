@@ -1,0 +1,65 @@
+{
+  "title": "Follow the edges around a symbol",
+  "eyebrow": "THE GRAPH",
+  "description": "Incoming and outgoing tree-sitter call edges define the neighborhood of serve.",
+  "meta": "symbol: serve · depth 1",
+  "columns": [
+    {
+      "title": "CALLERS · WHO REACHES ME",
+      "nodes": [
+        {
+          "id": "main",
+          "label": "main",
+          "detail": "graphtrail-mcp.rs",
+          "kind": "default"
+        },
+        {
+          "id": "tests",
+          "label": "serve_returns_error",
+          "detail": "tests/mcp.rs",
+          "kind": "muted"
+        }
+      ]
+    },
+    {
+      "title": "FOCUS",
+      "nodes": [
+        {
+          "id": "serve",
+          "label": "serve",
+          "detail": "src/mcp.rs",
+          "kind": "focus",
+          "badge": "impact"
+        }
+      ]
+    },
+    {
+      "title": "CALLEES · WHO I REACH",
+      "nodes": [
+        {
+          "id": "handle",
+          "label": "handle_request",
+          "detail": "hops=1 · mcp.rs",
+          "kind": "accent"
+        },
+        {
+          "id": "dispatch",
+          "label": "call_tool",
+          "detail": "hops=2 from handle_request",
+          "kind": "default"
+        }
+      ]
+    }
+  ],
+  "edges": [
+    {"from": "main", "to": "serve"},
+    {"from": "tests", "to": "serve"},
+    {"from": "serve", "to": "handle"},
+    {"from": "serve", "to": "dispatch"}
+  ],
+  "context": {
+    "title": "CONTEXT PACK",
+    "body": "entry points + callers + callees + related files",
+    "detail": "An agent loads this neighborhood before editing the focus symbol."
+  }
+}

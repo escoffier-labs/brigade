@@ -6,7 +6,7 @@ use std::path::Path;
 use std::thread::sleep;
 use std::time::Duration;
 
-use graphtrail::extractors::common::{hex_hash, symbol_id};
+use graphtrail::extractors::common::symbol_id;
 use graphtrail::extractors::{python, rust};
 use graphtrail::query::doctor;
 use graphtrail::store::{SCHEMA_VERSION, init_schema, meta, open_db, sync_repo};
@@ -86,15 +86,13 @@ fn sync_disambiguates_same_named_javascript_functions_on_one_line() {
         .unwrap()
         .collect::<Result<_, _>>()
         .unwrap();
-    let legacy_id = symbol_id("bundle.js", "duplicate", 1, "function");
-    let second_start_byte = source.match_indices("function duplicate").nth(1).unwrap().0;
-    let second_id =
-        hex_hash(format!("bundle.js:duplicate:1:function:{second_start_byte}").as_bytes());
+    let first_id = symbol_id("bundle.js", "duplicate", "function", 0);
+    let second_id = symbol_id("bundle.js", "duplicate", "function", 1);
 
     assert_eq!(summary.symbols, 2);
     assert_eq!(ids.len(), 2);
     assert_ne!(ids[0], ids[1]);
-    assert_eq!(calls["first"], legacy_id);
+    assert_eq!(calls["first"], first_id);
     assert_eq!(calls["second"], second_id);
 }
 
