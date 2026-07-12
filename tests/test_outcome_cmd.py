@@ -1222,3 +1222,118 @@ def test_explain_without_local_artifact_keeps_pre_fingerprint_output(tmp_path, c
     assert "fingerprint:" not in out
     assert "lifetime:" not in out
     assert "[legacy]" not in out
+
+
+def _fp_helped(artifact_id, n, fingerprint, start_hour=0):
+    return [
+        outcome.OutcomeRecord(
+            artifact_id,
+            "skill",
+            f"t{i}",
+            "verify",
+            1,
+            f"ref-{fingerprint}-{i}",
+            f"2026-06-20T{start_hour + i:02d}:00:00+00:00",
+            content_fingerprint=fingerprint,
+        )
+        for i in range(n)
+    ]
+
+
+def test_reconcile_does_not_promote_a_candidate_on_proven_stale_evidence(tmp_path, capsys, monkeypatch):
+    # Two helped signals for the old text would cross install_min_helped, but the
+    # skill was edited afterward: the old signals are proven stale, so the ratchet
+    # must NOT promote text that has no verified evidence of its own.
+    _stub_execute(monkeypatch)
+    skill_md = _write_registry_skill(tmp_path, "skill-x", "# old text\n")
+    old_fp = _sha256_of(skill_md)
+    _seed(tmp_path, _fp_helped("skill-x", 2, old_fp))
+    skill_md.write_text("# rewritten text\n")
+
+    assert outcome_cmd.reconcile(target=tmp_path, apply=True, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["decisions"] == []  # held, not installed
+    assert payload["applied"] == []
+    assert not _status_file(tmp_path).exists()
+
+
+def test_reconcile_still_promotes_a_never_edited_skill_grandfathered(tmp_path, capsys, monkeypatch):
+    # Grandfathering safety: a registry skill with only pre-fingerprint (legacy)
+    # signals promotes exactly as the pre-fingerprint ratchet did. No proven-stale
+    # records, so the decision and its receipt stay byte-identical.
+    _stub_execute(monkeypatch)
+    _write_registry_skill(tmp_path, "skill-x")
+    _seed(tmp_path, _helped("skill-x", 2))  # legacy, no fingerprint
+
+    assert outcome_cmd.reconcile(target=tmp_path, apply=True, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["applied"] == ["skill-x"]
+    decision = {d["artifact_id"]: d for d in payload["decisions"]}["skill-x"]
+    assert decision["action"] == "install"
+    # No stale evidence dropped, so no fingerprint audit fields leak into the receipt.
+    assert "stale_records" not in decision
+    assert "content_fingerprint" not in decision
+
+
+def test_reconcile_lets_an_edited_skill_re_earn_promotion_on_fresh_signals(tmp_path, capsys, monkeypatch):
+    _stub_execute(monkeypatch)
+    skill_md = _write_registry_skill(tmp_path, "skill-x", "# old text\n")
+    old_fp = _sha256_of(skill_md)
+    _seed(tmp_path, _fp_helped("skill-x", 2, old_fp, start_hour=0))
+    skill_md.write_text("# rewritten text\n")
+    new_fp = _sha256_of(skill_md)
+    _seed(tmp_path, _fp_helped("skill-x", 2, new_fp, start_hour=5))
+
+    assert outcome_cmd.reconcile(target=tmp_path, apply=True, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["applied"] == ["skill-x"]
+    decision = {d["artifact_id"]: d for d in payload["decisions"]}["skill-x"]
+    assert decision["action"] == "install"
+    # The decision was scored on the current text; the audit fields record what it dropped.
+    assert decision["content_fingerprint"] == new_fp
+    assert decision["stale_records"] == 2
+    assert decision["lifetime_helped"] == 4
+
+
+def test_reconcile_human_output_notes_a_fingerprint_narrowed_decision(tmp_path, capsys, monkeypatch):
+    _stub_execute(monkeypatch)
+    skill_md = _write_registry_skill(tmp_path, "skill-x", "# old text\n")
+    old_fp = _sha256_of(skill_md)
+    _seed(tmp_path, _fp_helped("skill-x", 2, old_fp, start_hour=0))
+    skill_md.write_text("# rewritten text\n")
+    new_fp = _sha256_of(skill_md)
+    _seed(tmp_path, _fp_helped("skill-x", 2, new_fp, start_hour=5))
+
+    assert outcome_cmd.reconcile(target=tmp_path, apply=True, json_output=False) == 0
+    line = next(line for line in capsys.readouterr().out.splitlines() if "skill-x" in line)
+    assert "scored current text only" in line
+    assert f"rev {new_fp[:12]}" in line
+    assert "stale=2" in line
+
+
+def test_reconcile_output_byte_identical_for_unedited_skill(tmp_path, capsys, monkeypatch):
+    # The teeth must not disturb the common case: a skill with no proven-stale
+    # records produces exactly the pre-fingerprint one-line output.
+    _stub_execute(monkeypatch)
+    _write_registry_skill(tmp_path, "skill-x")
+    _seed(tmp_path, _helped("skill-x", 2))
+    assert outcome_cmd.reconcile(target=tmp_path, apply=False, json_output=False) == 0
+    line = next(line for line in capsys.readouterr().out.splitlines() if "skill-x" in line)
+    assert line == "- skill-x candidate -> promoted [install] verified helped, no regressions"
+
+
+def test_fork_projection_uses_the_current_fingerprint_cohort(tmp_path, capsys):
+    # Lifetime would cross install_min_helped (2 helped), but all of it is proven
+    # stale, so the fork must project a hold, not a promotion.
+    skill_md = _write_registry_skill(tmp_path, "skill-x", "# old text\n")
+    old_fp = _sha256_of(skill_md)
+    _seed(tmp_path, _fp_helped("skill-x", 2, old_fp))
+    skill_md.write_text("# rewritten text\n")
+    out = tmp_path / "fork.json"
+
+    assert outcome_cmd.fork(target=tmp_path, out=out, json_output=True) == 0
+    capsys.readouterr()
+    projection = json.loads(out.read_text())
+    entry = projection["artifacts"]["skill-x"]
+    assert entry["new_status"] != "promoted"
+    assert entry["helped"] == 0  # current cohort, not the 2 stale lifetime signals
