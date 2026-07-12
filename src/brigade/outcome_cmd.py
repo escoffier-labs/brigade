@@ -89,19 +89,62 @@ def _artifact_content_path(target: Path, artifact_id: str, kind: str) -> Path | 
     return None
 
 
+# Files inside a skill bundle that are not part of its logic: OS cruft and the
+# install-time metadata sidecar (which changes on every install, not on edit).
+_BUNDLE_IGNORED_NAMES = frozenset({".DS_Store", "skill.json"})
+
+
+def _bundle_fingerprint(skill_dir: Path) -> str | None:
+    """sha256 over a skill's whole bundle, reducing to sha256(SKILL.md) for a lone file.
+
+    CocoIndex's logic_tracking walks the fingerprint through nested calls so
+    editing a helper invalidates its callers. A skill is a directory, not just
+    SKILL.md, so a bundled helper is that skill's "helper": hashing only SKILL.md
+    leaves a signal vouching for a bundle whose script has since changed. This
+    folds every bundle file (path + content) into the fingerprint.
+
+    A skill whose only content file is SKILL.md hashes to *exactly*
+    ``sha256(SKILL.md)`` - byte-identical to the pre-bundle fingerprint - so
+    existing single-file records are never invalidated. Only a genuinely
+    multi-file bundle takes the composite path.
+    """
+    files = sorted(p for p in skill_dir.rglob("*") if p.is_file() and p.name not in _BUNDLE_IGNORED_NAMES)
+    if not files:
+        return None
+    skill_md = skill_dir / "SKILL.md"
+    try:
+        if files == [skill_md]:
+            return hashlib.sha256(skill_md.read_bytes()).hexdigest()
+        digest = hashlib.sha256()
+        for path in files:
+            rel = path.relative_to(skill_dir).as_posix()
+            digest.update(rel.encode("utf-8"))
+            digest.update(b"\0")
+            digest.update(hashlib.sha256(path.read_bytes()).hexdigest().encode("ascii"))
+            digest.update(b"\0")
+        return digest.hexdigest()
+    except OSError:
+        return None
+
+
 def artifact_fingerprint(target: Path, artifact_id: str, kind: str) -> str | None:
     """sha256 of the artifact's current content, or None when it cannot be resolved.
 
-    The fingerprint sees the artifact's text only, not the harness around it
-    (the same caveat CocoIndex documents for undecorated helpers).
+    For a skill the fingerprint covers the whole installed (or registry) bundle,
+    not just SKILL.md, so editing a bundled helper invalidates the skill's signals
+    the same way editing SKILL.md does. For a card it is the single file's hash.
+    The fingerprint still sees only the artifact's own files, not the runtime
+    harness around it, the caveat CocoIndex documents for undecorated helpers.
     """
     path = _artifact_content_path(target, artifact_id, kind)
     if path is None:
         return None
-    try:
-        return hashlib.sha256(path.read_bytes()).hexdigest()
-    except OSError:
-        return None
+    if kind == "card":
+        try:
+            return hashlib.sha256(path.read_bytes()).hexdigest()
+        except OSError:
+            return None
+    return _bundle_fingerprint(path.parent)
 
 
 def _fingerprint_cohorts_by_artifact(
