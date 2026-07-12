@@ -23,6 +23,8 @@ Sweep with each lens. With parallel subagents available, one finder per lens; ot
 
 Focus finders on code that is reachable and load-bearing: entry points, hot paths, recently changed files (`git log --since` is a good prior). A bug in dead code is info, not a finding.
 
+Two deep lenses live as their own skills: [latent-premises](../latent-premises/SKILL.md) for unguarded assumptions that hold today with no trigger yet, and [retry-safety](../retry-safety/SKILL.md) for side effects that double-apply on a re-run. Reach for them when the sweep keeps surfacing "could break later" candidates that fail the trigger rule.
+
 ## Verification (mandatory)
 
 Every candidate gets an adversarial pass before it may appear in the report. The verifier's job is to REFUTE the finding, default skeptical:

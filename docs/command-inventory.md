@@ -51,6 +51,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade research` (extras): 11 command path(s)
 - `brigade roadmap` (extras): 4 command path(s)
 - `brigade roster`: 2 command path(s)
+- `brigade route`: 1 command path(s)
 - `brigade run`: 1 command path(s)
 - `brigade runbook` (extras): 5 command path(s)
 - `brigade runs`: 7 command path(s)
@@ -382,6 +383,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade roadmap patterns` (extras)
 - `brigade roster doctor`
 - `brigade roster init`
+- `brigade route`
 - `brigade run`
 - `brigade runbook closeout` (extras)
 - `brigade runbook pin` (extras)

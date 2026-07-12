@@ -37,7 +37,7 @@ npx shadcn@latest add @brigade/check
 ```
 
 This writes `.claude/skills/check/SKILL.md`. Claude Code discovers it on the
-next session. Available skills: `check`, `refire`, `bug-hunt`, `reduce`,
+next session. Available skills: `check`, `refire`, `bug-hunt`, `latent-premises`, `retry-safety`, `reduce`,
 `taste`.
 
 If you run Brigade, project the skill into other harnesses afterward:

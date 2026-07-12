@@ -2,3 +2,4 @@ recursive-include src/brigade/templates *
 include README.md
 include QUICKSTART.md
 include LICENSE
+include THIRD_PARTY_NOTICES.md

@@ -60,6 +60,7 @@ from . import (
     research as _research_group,
     center as _center_group,
     run as _run_group,
+    route as _route_group,
     roster as _roster_group,
     runs as _runs_group,
     guard as _guard_group,
@@ -160,6 +161,7 @@ def _build_parser() -> argparse.ArgumentParser:
     _register_extras(sub, "research", extras_enabled)
     _register_extras(sub, "center", extras_enabled)
     _run_group.register(sub)
+    _route_group.register(sub)
     _roster_group.register(sub)
 
     _runs_group.register(sub)

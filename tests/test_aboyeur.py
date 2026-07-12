@@ -653,7 +653,7 @@ def test_code_graph_context_is_prepended_once_to_plan_worker_and_synthesis(monke
 
     monkeypatch.setattr(aboyeur.agents, "run_agent", fake_run_agent)
 
-    assert aboyeur.run("build feature", _roster(), code_graph=brief) == 0
+    assert aboyeur.run("build feature", _roster(), code_graph=brief, route_enabled=False) == 0
     assert len(calls) == 3
 
 
@@ -682,7 +682,7 @@ def test_evidence_context_is_prepended_once_to_plan_worker_and_synthesis(monkeyp
 
     monkeypatch.setattr(aboyeur.agents, "run_agent", fake_run_agent)
 
-    assert aboyeur.run("build feature", _roster(), evidence=evidence) == 0
+    assert aboyeur.run("build feature", _roster(), evidence=evidence, route_enabled=False) == 0
     assert len(calls) == 3
 
 
@@ -857,7 +857,7 @@ def test_run_dry_run_stops_after_plan(monkeypatch, capsys):
         )
 
     monkeypatch.setattr(aboyeur.agents, "run_agent", fake_run_agent)
-    rc = aboyeur.run("build feature", _roster(), dry_run=True)
+    rc = aboyeur.run("build feature", _roster(), dry_run=True, route_enabled=False)
     out = capsys.readouterr().out
     assert rc == 0
     assert "implement it" in out
@@ -913,7 +913,7 @@ def test_run_dispatches_and_synthesizes(monkeypatch, capsys):
         return agents.AgentResult(text="final answer", ok=True)
 
     monkeypatch.setattr(aboyeur.agents, "run_agent", fake_run_agent)
-    rc = aboyeur.run("build feature", _roster())
+    rc = aboyeur.run("build feature", _roster(), route_enabled=False)
     out = capsys.readouterr().out
     assert rc == 0
     assert out.strip() == "final answer"
@@ -971,7 +971,7 @@ def test_run_uses_roster_timeouts(monkeypatch):
         return agents.AgentResult(text="final answer", ok=True)
 
     monkeypatch.setattr(aboyeur.agents, "run_agent", fake_run_agent)
-    assert aboyeur.run("build feature", _timeout_roster()) == 0
+    assert aboyeur.run("build feature", _timeout_roster(), route_enabled=False) == 0
     assert calls == [("codex", 45.0), ("ollama:llama3.3", 12.0), ("codex", 45.0)]
 
 
@@ -990,7 +990,7 @@ def test_run_passes_agent_models(monkeypatch):
         return agents.AgentResult(text="final answer", ok=True)
 
     monkeypatch.setattr(aboyeur.agents, "run_agent", fake_run_agent)
-    assert aboyeur.run("build feature", _model_roster()) == 0
+    assert aboyeur.run("build feature", _model_roster(), route_enabled=False) == 0
     assert calls == [
         ("claude", "claude-fable-5"),
         ("codex", "gpt-5.5-codex"),
@@ -1848,7 +1848,7 @@ def test_disallowed_worker_is_recorded_not_run(monkeypatch):
         return agents.AgentResult(text="final answer", ok=True)
 
     monkeypatch.setattr(aboyeur.agents, "run_agent", fake_run_agent)
-    assert aboyeur.run("build feature", _restricted_roster()) == 0
+    assert aboyeur.run("build feature", _restricted_roster(), route_enabled=False) == 0
     assert [call[0] for call in calls] == ["codex", "codex"]
     assert "not allowed by limits.allow_models" in calls[-1][1]
 
@@ -1972,3 +1972,237 @@ def test_run_falls_back_to_exec_when_appserver_unavailable(monkeypatch, tmp_path
     assert "falling back to exec" in capsys.readouterr().err
     run_json = json.loads((out / "run.json").read_text())
     assert run_json["codex_transport"] == "exec"
+
+
+# --- deterministic route brief (router integration) ---
+
+
+def _route_plan(covers_map):
+    return json.dumps(
+        {"assignments": [{"stage": 1, "worker": "coder", "task": "do it", "covers": covers} for covers in covers_map]}
+    )
+
+
+def test_build_plan_prompt_carries_route_brief():
+    from brigade.route_catalog import ROUTE_HEADING, route_brief
+
+    route = route_brief("rename the config loader helper")
+    prompt = aboyeur.build_plan_prompt("rename the config loader helper", _roster(), route=route)
+    assert ROUTE_HEADING in prompt
+    assert '"covers"' in prompt
+    assert "correctness-review" in prompt
+
+
+def test_build_plan_prompt_without_route_is_unchanged_shape():
+    prompt = aboyeur.build_plan_prompt("build feature", _roster())
+    from brigade.route_catalog import ROUTE_HEADING
+
+    assert ROUTE_HEADING not in prompt
+
+
+def test_parse_plan_accepts_and_dedupes_covers():
+    text = json.dumps(
+        {
+            "assignments": [
+                {"stage": 1, "worker": "coder", "task": "do it", "covers": ["implement", "implement", "verify"]}
+            ]
+        }
+    )
+    assignments = aboyeur.parse_plan(text, _roster())
+    assert assignments[0].covers == ("implement", "verify")
+
+
+def test_parse_plan_rejects_malformed_covers():
+    text = json.dumps({"assignments": [{"stage": 1, "worker": "coder", "task": "do it", "covers": [1]}]})
+    try:
+        aboyeur.parse_plan(text, _roster())
+    except ValueError as exc:
+        assert "covers" in str(exc)
+    else:
+        raise AssertionError("expected ValueError")
+
+
+def test_plan_coverage_retry_fires_once_and_accepts_revision(monkeypatch):
+    from brigade.route_catalog import route_brief
+
+    route = route_brief("rename the config loader helper")
+    assert route.route == ("implement", "correctness-review", "verify")
+    calls = []
+
+    def fake_run_agent(cli_ref, prompt, timeout=600.0, cwd=None, read_only=False):
+        calls.append(prompt)
+        if len(calls) == 1:
+            return agents.AgentResult(text=_route_plan([["implement"]]), ok=True)
+        return agents.AgentResult(text=_route_plan([["implement", "correctness-review", "verify"]]), ok=True)
+
+    monkeypatch.setattr(aboyeur.agents, "run_agent", fake_run_agent)
+    attempts = []
+    assignments = aboyeur.plan("rename the config loader helper", _roster(), attempts=attempts, route=route)
+    assert len(calls) == 2
+    assert "does not cover required route stages" in calls[1]
+    assert assignments[0].covers == ("implement", "correctness-review", "verify")
+    assert attempts[0]["coverage_missing"] == ["correctness-review", "verify"]
+    assert attempts[1]["stage"] == "coverage-correction"
+    assert "coverage_missing" not in attempts[1]
+
+
+def test_plan_covered_first_try_makes_one_call(monkeypatch):
+    from brigade.route_catalog import route_brief
+
+    route = route_brief("rename the config loader helper")
+    calls = []
+
+    def fake_run_agent(cli_ref, prompt, timeout=600.0, cwd=None, read_only=False):
+        calls.append(prompt)
+        return agents.AgentResult(text=_route_plan([["implement", "correctness-review", "verify"]]), ok=True)
+
+    monkeypatch.setattr(aboyeur.agents, "run_agent", fake_run_agent)
+    assignments = aboyeur.plan("rename the config loader helper", _roster(), route=route)
+    assert len(calls) == 1
+    assert assignments[0].covers == ("implement", "correctness-review", "verify")
+
+
+def test_plan_coverage_retry_falls_back_to_first_plan_on_bad_revision(monkeypatch):
+    from brigade.route_catalog import route_brief
+
+    route = route_brief("rename the config loader helper")
+    calls = []
+
+    def fake_run_agent(cli_ref, prompt, timeout=600.0, cwd=None, read_only=False):
+        calls.append(prompt)
+        if len(calls) == 1:
+            return agents.AgentResult(text=_route_plan([["implement"]]), ok=True)
+        return agents.AgentResult(text="not json at all", ok=True)
+
+    monkeypatch.setattr(aboyeur.agents, "run_agent", fake_run_agent)
+    attempts = []
+    assignments = aboyeur.plan("rename the config loader helper", _roster(), attempts=attempts, route=route)
+    assert len(calls) == 2
+    assert assignments[0].covers == ("implement",)
+    assert attempts[-1]["stage"] == "coverage-correction"
+    assert "parse_error" in attempts[-1]
+
+
+def test_run_records_route_in_run_json(monkeypatch, tmp_path):
+    def fake_run_agent(cli_ref, prompt, timeout=600.0, cwd=None, read_only=False):
+        return agents.AgentResult(text=_route_plan([["implement", "correctness-review", "verify"]]), ok=True)
+
+    monkeypatch.setattr(aboyeur.agents, "run_agent", fake_run_agent)
+    output_dir = tmp_path / "out"
+    assert aboyeur.run("rename the config loader helper", _roster(), output_dir=output_dir) == 0
+    payload = json.loads((output_dir / "run.json").read_text())
+    assert payload["route"]["signals"] == ["code"]
+    assert payload["route"]["route"] == ["implement", "correctness-review", "verify"]
+    assert payload["route"]["size"] == "S"
+
+
+def test_parse_plan_merges_covers_on_duplicate_assignments():
+    text = json.dumps(
+        {
+            "assignments": [
+                {"stage": 1, "worker": "coder", "task": "do it", "covers": ["implement"]},
+                {"stage": 1, "worker": "coder", "task": "do it", "covers": ["verify"]},
+            ]
+        }
+    )
+    assignments = aboyeur.parse_plan(text, _roster())
+    assert len(assignments) == 1
+    assert assignments[0].covers == ("implement", "verify")
+
+
+def test_plan_keeps_original_when_revision_covers_less(monkeypatch):
+    from brigade.route_catalog import route_brief
+
+    route = route_brief("rename the config loader helper")
+    calls = []
+
+    def fake_run_agent(cli_ref, prompt, timeout=600.0, cwd=None, read_only=False):
+        calls.append(prompt)
+        if len(calls) == 1:
+            return agents.AgentResult(text=_route_plan([["implement", "verify"]]), ok=True)
+        return agents.AgentResult(text=json.dumps({"assignments": []}), ok=True)
+
+    monkeypatch.setattr(aboyeur.agents, "run_agent", fake_run_agent)
+    attempts = []
+    assignments = aboyeur.plan("rename the config loader helper", _roster(), attempts=attempts, route=route)
+    assert len(calls) == 2
+    assert len(assignments) == 1
+    assert assignments[0].covers == ("implement", "verify")
+    assert attempts[-1]["coverage_missing"] == ["implement", "correctness-review", "verify"]
+
+
+def test_plan_json_repair_path_still_gets_coverage_retry(monkeypatch):
+    from brigade.route_catalog import route_brief
+
+    route = route_brief("rename the config loader helper")
+    calls = []
+
+    def fake_run_agent(cli_ref, prompt, timeout=600.0, cwd=None, read_only=False):
+        calls.append(prompt)
+        if len(calls) == 1:
+            return agents.AgentResult(text="not json", ok=True)
+        if len(calls) == 2:
+            return agents.AgentResult(text=_route_plan([["implement"]]), ok=True)
+        return agents.AgentResult(text=_route_plan([["implement", "correctness-review", "verify"]]), ok=True)
+
+    monkeypatch.setattr(aboyeur.agents, "run_agent", fake_run_agent)
+    attempts = []
+    assignments = aboyeur.plan("rename the config loader helper", _roster(), attempts=attempts, route=route)
+    assert len(calls) == 3
+    assert "does not cover required route stages" in calls[2]
+    assert assignments[0].covers == ("implement", "correctness-review", "verify")
+    assert [a["stage"] for a in attempts] == ["initial", "correction", "coverage-correction"]
+
+
+def test_route_changed_paths_from_git(tmp_path):
+    _init_git_repo(tmp_path)
+    (tmp_path / "auth").mkdir()
+    (tmp_path / "auth" / "session.py").write_text("x = 1\n")
+    paths = aboyeur._route_changed_paths(tmp_path)
+    assert "auth/session.py" in paths
+    assert aboyeur._route_changed_paths(None) == ()
+    assert aboyeur._route_changed_paths(tmp_path / "not-a-repo") == ()
+
+
+def test_run_route_picks_up_dirty_auth_surface(monkeypatch, tmp_path, capsys):
+    _init_git_repo(tmp_path)
+    (tmp_path / "auth").mkdir()
+    (tmp_path / "auth" / "session.py").write_text("x = 1\n")
+
+    def fake_run_agent(cli_ref, prompt, timeout=600.0, cwd=None, read_only=False):
+        return agents.AgentResult(
+            text=_route_plan(
+                [["test-author", "implement", "correctness-review", "security-review", "test-gap-review", "verify"]]
+            ),
+            ok=True,
+        )
+
+    monkeypatch.setattr(aboyeur.agents, "run_agent", fake_run_agent)
+    output_dir = tmp_path / "out"
+    assert aboyeur.run("tidy the session helper", _roster(), cwd=tmp_path, output_dir=output_dir) == 0
+    payload = json.loads((output_dir / "run.json").read_text())
+    assert "auth-surface" in payload["route"]["signals"]
+    assert "security-review" in payload["route"]["route"]
+
+
+def test_run_route_template_reaches_derivation(monkeypatch, tmp_path):
+    def fake_run_agent(cli_ref, prompt, timeout=600.0, cwd=None, read_only=False):
+        return agents.AgentResult(
+            text=_route_plan([["test-author", "implement", "correctness-review", "test-gap-review", "verify"]]),
+            ok=True,
+        )
+
+    monkeypatch.setattr(aboyeur.agents, "run_agent", fake_run_agent)
+    output_dir = tmp_path / "out"
+    assert (
+        aboyeur.run(
+            "add pagination to the list endpoint",
+            _roster(),
+            output_dir=output_dir,
+            route_template="vertical-slice",
+        )
+        == 0
+    )
+    payload = json.loads((output_dir / "run.json").read_text())
+    assert "needs-tests" in payload["route"]["signals"]
+    assert "test-author" in payload["route"]["route"]

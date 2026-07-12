@@ -67,6 +67,32 @@
           "target": ".claude/skills/taste/SKILL.md"
         }
       ]
+    },
+    {
+      "name": "latent-premises",
+      "type": "registry:item",
+      "title": "latent-premises",
+      "description": "Use when reviewing a diff or module for hidden assumptions - things the code takes for granted that nothing guarantees - or when asked \"what could break this later\", \"what does this assume\", or to harden code that works today. Complements bug-hunt: bug-hunt finds defects with triggers today; this finds the ones waiting for tomorrow.",
+      "files": [
+        {
+          "path": "registry/skills/latent-premises/SKILL.md",
+          "type": "registry:file",
+          "target": ".claude/skills/latent-premises/SKILL.md"
+        }
+      ]
+    },
+    {
+      "name": "retry-safety",
+      "type": "registry:item",
+      "title": "retry-safety",
+      "description": "Use when a diff carries side effects - database writes, migrations, file mutations, network calls, payments, queue messages - to check whether running it twice is safe. Also when reviewing retry logic, crash recovery, or anything a scheduler, queue, or impatient caller might re-run. Silent when the diff touches no side-effecting surface.",
+      "files": [
+        {
+          "path": "registry/skills/retry-safety/SKILL.md",
+          "type": "registry:file",
+          "target": ".claude/skills/retry-safety/SKILL.md"
+        }
+      ]
     }
   ]
 }
