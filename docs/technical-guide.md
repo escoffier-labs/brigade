@@ -1108,6 +1108,22 @@ GraphTrail raw diff counts are preserved under `raw_counts`. Brigade also comput
 
 Known blind spots remain GraphTrail blind spots: unsupported languages, parse failures, dynamic dispatch, generated code, import-time side effects, reflection, and runtime wiring can be missed or approximated. A clean delta means the captured static graph did not report meaningful churn, not that the behavior is unchanged.
 
+### Skill content fingerprints
+
+The ledger keys signals on artifact id, but an id names a file whose text changes. Without fingerprints, a skill edited ten times keeps the score its earliest text earned, and `outcome rank` vouches for words that no longer exist. The fix borrows CocoIndex's memo key (input hash plus logic hash), applied to the ratchet as a content hash per signal.
+
+`brigade outcome capture` and `brigade outcome record` stamp each new record with `content_fingerprint`: the SHA-256 of the artifact's content at capture time. For a skill that is the harness-installed copy first (`.*/skills/<id>/SKILL.md`), falling back to the registry master under `.brigade/skills/registry/<id>/SKILL.md`. A verified run exercises the installed skill, so when the registry drifts ahead the signal pins the text that actually ran. For a card it is `memory/cards/<id>.md`. When no local content resolves, the record carries no fingerprint. The field rides the existing tamper-evident digest chain; nothing rewrites old records.
+
+`brigade outcome rank` and `brigade outcome explain` then read the ledger in three cohorts per artifact:
+
+- `current`: the default score. It drops only records that are *proven stale* (fingerprinted against a different revision of the text). Records captured before fingerprints existed are grandfathered in, because a pre-fingerprint signal cannot be proven stale either way.
+- `stale`: fingerprinted records for a different revision. These are the only records the current score removes.
+- `legacy`: pre-fingerprint records, surfaced as a count but scored with `current`.
+
+An edited skill therefore earns its score back: once signals for the new text start landing, the old-revision signals become proven-stale and drop out of `current`, while `lifetime` still holds every signal. `rank` shows `score=0.566 helped=5 hurt=0 [rev <fingerprint>; lifetime score=0.818 helped=109 hurt=14, stale=118 legacy=3]` (here the 5 current signals are 2 for the new text plus 3 grandfathered pre-fingerprint records). Grandfathering keeps the rollout non-disruptive: until a skill is actually edited, no record is proven stale, so `current` equals the pre-fingerprint score and the `rank` line stays byte-identical (no `[rev ...]` tail). `explain` prints both scores plus a per-signal cohort tag (`[current]`, `[stale]`, `[legacy]`). When the artifact's content cannot be resolved locally, the split is unavailable and the default score falls back to lifetime, in the pre-fingerprint output shape.
+
+The fingerprint sees the artifact's text only, not the harness around it, the same caveat CocoIndex documents for undecorated helpers. Install, rollback, and cooldown decisions in `outcome reconcile` are unchanged: they still fold over the full ledger with verified exit-code signals only.
+
 ### Context eval metric
 
 When a non-read-only aboyeur run has both a pre-run code graph brief and a successful GraphTrail delta sidecar with changed file paths, Brigade records `context_eval` in the run artifacts and synthesis ground truth.

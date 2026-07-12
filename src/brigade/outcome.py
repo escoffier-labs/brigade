@@ -37,7 +37,13 @@ NEUTRAL_SOURCES = frozenset({"aboyeur", "replay"})
 
 @dataclass(frozen=True)
 class OutcomeRecord:
-    """One verified (or neutral) signal for an artifact on a single task."""
+    """One verified (or neutral) signal for an artifact on a single task.
+
+    ``content_fingerprint`` is the sha256 of the artifact's content at capture
+    time (CocoIndex's memo-key idea applied to the ratchet: a signal vouches for
+    the exact text that earned it, not the name). ``None`` on records captured
+    before fingerprints existed - the legacy cohort.
+    """
 
     artifact_id: str
     artifact_kind: str  # "card" | "skill"
@@ -48,6 +54,7 @@ class OutcomeRecord:
     ts: str
     code_graph_delta: dict[str, Any] | None = None
     context_eval: dict[str, Any] | None = None
+    content_fingerprint: str | None = None
 
 
 @dataclass(frozen=True)
@@ -141,6 +148,68 @@ def score_records(artifact_id: str, records: list[OutcomeRecord]) -> OutcomeScor
         score=wilson_lower_bound(helped, total),
         last_signal_ts=last_ts,
     )
+
+
+@dataclass(frozen=True)
+class FingerprintCohorts:
+    """An artifact's score split against its current content fingerprint.
+
+    ``current`` drops records that are PROVEN stale: fingerprinted against a
+    different revision of the artifact's text. An edited skill therefore earns
+    its score back instead of inheriting signals earned by text that no longer
+    exists. Records captured before fingerprints existed (``content_fingerprint``
+    is None) cannot be proven stale either way, so they are grandfathered into
+    ``current``: a never-edited skill keeps its score across the rollout instead
+    of collapsing to zero. ``lifetime`` is the fold over every record, unchanged.
+    When the artifact's content cannot be resolved (``current_fingerprint`` is
+    None) the split is unavailable and ``current`` equals ``lifetime``.
+
+    ``stale_records`` counts scored records fingerprinted against a different
+    revision; ``legacy_records`` counts scored pre-fingerprint records. Legacy
+    is surfaced as a count but never rewritten.
+    """
+
+    current_fingerprint: str | None
+    current: OutcomeScore
+    lifetime: OutcomeScore
+    stale_records: int
+    legacy_records: int
+
+    @property
+    def pinned(self) -> bool:
+        return self.current_fingerprint is not None
+
+
+def split_by_fingerprint(
+    artifact_id: str,
+    records: list[OutcomeRecord],
+    current_fingerprint: str | None,
+) -> FingerprintCohorts:
+    """Split an artifact's records into current/stale/legacy cohorts and score them.
+
+    Pure fold, same dedup rules as ``score_records``: cohort counts are over
+    scored (deduped) records so a re-captured receipt cannot inflate any cohort.
+    """
+    lifetime = score_records(artifact_id, records)
+    if not current_fingerprint:
+        return FingerprintCohorts(None, lifetime, lifetime, 0, 0)
+    deduped = scored_records(records)
+    current = score_records(
+        artifact_id,
+        [r for r in deduped if not r.content_fingerprint or r.content_fingerprint == current_fingerprint],
+    )
+    stale = sum(1 for r in deduped if r.content_fingerprint and r.content_fingerprint != current_fingerprint)
+    legacy = sum(1 for r in deduped if not r.content_fingerprint)
+    return FingerprintCohorts(current_fingerprint, current, lifetime, stale, legacy)
+
+
+def fingerprint_cohort(record: OutcomeRecord, current_fingerprint: str | None) -> str:
+    """Name the cohort one record belongs to: "current", "stale", or "legacy"."""
+    if not record.content_fingerprint:
+        return "legacy"
+    if current_fingerprint is None or record.content_fingerprint == current_fingerprint:
+        return "current"
+    return "stale"
 
 
 def decide(

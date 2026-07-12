@@ -171,3 +171,61 @@ def test_rank_score_prefers_verified_outcome_when_other_signals_tie():
     proven = outcome.rank_score(confidence=0.3, outcome=0.8, keyword=0.5)
     unproven = outcome.rank_score(confidence=0.3, outcome=0.1, keyword=0.5)
     assert proven > unproven
+
+
+def _fp_record(evidence_ref, ts, fingerprint, signal=1):
+    return outcome.OutcomeRecord(
+        "skill-x", "skill", "t", "verify", signal, evidence_ref, ts, content_fingerprint=fingerprint
+    )
+
+
+def test_split_by_fingerprint_grandfathers_legacy_and_drops_proven_stale():
+    records = [
+        _fp_record("r1", "2026-07-01T00:00:00+00:00", "old-rev"),
+        _fp_record("r2", "2026-07-02T00:00:00+00:00", "old-rev", signal=-1),
+        _fp_record("r3", "2026-07-03T00:00:00+00:00", "new-rev"),
+        _fp_record("r4", "2026-07-04T00:00:00+00:00", None),  # pre-fingerprint capture
+    ]
+    cohorts = outcome.split_by_fingerprint("skill-x", records, "new-rev")
+    assert cohorts.pinned
+    # new-rev (+1) plus the legacy record (+1, unprovable either way); the two
+    # old-rev signals are proven stale and drop out.
+    assert (cohorts.current.helped, cohorts.current.hurt) == (2, 0)
+    assert (cohorts.lifetime.helped, cohorts.lifetime.hurt) == (3, 1)
+    assert cohorts.stale_records == 2
+    assert cohorts.legacy_records == 1
+
+
+def test_split_by_fingerprint_unpinned_falls_back_to_lifetime():
+    # Without a resolvable current fingerprint the split is unavailable, so the
+    # default score must not silently drop to zero.
+    records = [
+        _fp_record("r1", "2026-07-01T00:00:00+00:00", "old-rev"),
+        _fp_record("r2", "2026-07-02T00:00:00+00:00", None),
+    ]
+    cohorts = outcome.split_by_fingerprint("skill-x", records, None)
+    assert not cohorts.pinned
+    assert cohorts.current == cohorts.lifetime
+    assert cohorts.current.helped == 2
+    assert (cohorts.stale_records, cohorts.legacy_records) == (0, 0)
+
+
+def test_split_by_fingerprint_dedups_before_counting_cohorts():
+    # The same physical receipt re-captured must not inflate any cohort.
+    duplicate = _fp_record("r1", "2026-07-01T00:00:00+00:00", "old-rev")
+    cohorts = outcome.split_by_fingerprint("skill-x", [duplicate, duplicate], "new-rev")
+    assert cohorts.stale_records == 1
+    assert cohorts.lifetime.helped == 1
+
+
+def test_fingerprint_cohort_names_current_stale_and_legacy():
+    current = _fp_record("r1", "2026-07-01T00:00:00+00:00", "new-rev")
+    stale = _fp_record("r2", "2026-07-02T00:00:00+00:00", "old-rev")
+    legacy = _fp_record("r3", "2026-07-03T00:00:00+00:00", None)
+    assert outcome.fingerprint_cohort(current, "new-rev") == "current"
+    assert outcome.fingerprint_cohort(stale, "new-rev") == "stale"
+    assert outcome.fingerprint_cohort(legacy, "new-rev") == "legacy"
+    # Unpinned: fingerprinted records count as current (lifetime fallback), but
+    # legacy stays a distinct cohort.
+    assert outcome.fingerprint_cohort(stale, None) == "current"
+    assert outcome.fingerprint_cohort(legacy, None) == "legacy"
