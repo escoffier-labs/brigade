@@ -943,3 +943,265 @@ def test_cli_outcome_rank_and_record_dispatch(tmp_path, capsys):
     capsys.readouterr()
     assert cli.main(["outcome", "rank", "--target", str(tmp_path), "--json"]) == 0
     assert "skill-x" in capsys.readouterr().out
+
+
+def _write_registry_skill(target, skill_id, text="# skill body v1\n"):
+    skill_dir = target / ".brigade" / "skills" / "registry" / skill_id
+    skill_dir.mkdir(parents=True, exist_ok=True)
+    (skill_dir / "SKILL.md").write_text(text)
+    return skill_dir / "SKILL.md"
+
+
+def _sha256_of(path):
+    import hashlib
+
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def test_capture_stamps_content_fingerprint_of_registry_skill(tmp_path, capsys):
+    skill_md = _write_registry_skill(tmp_path, "skill-x")
+    _write_verify_receipt(tmp_path)
+    assert outcome_cmd.capture(target=tmp_path, artifact_id="skill-x", json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["record"]["content_fingerprint"] == _sha256_of(skill_md)
+    assert outcome_cmd.load_records(tmp_path)[0].content_fingerprint == _sha256_of(skill_md)
+
+
+def test_capture_fingerprint_falls_back_to_harness_install(tmp_path, capsys):
+    skill_md = tmp_path / ".claude" / "skills" / "skill-x" / "SKILL.md"
+    skill_md.parent.mkdir(parents=True)
+    skill_md.write_text("# harness copy\n")
+    _write_verify_receipt(tmp_path)
+    assert outcome_cmd.capture(target=tmp_path, artifact_id="skill-x", json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["record"]["content_fingerprint"] == _sha256_of(skill_md)
+
+
+def test_capture_without_local_artifact_omits_fingerprint(tmp_path, capsys):
+    _write_verify_receipt(tmp_path)
+    assert outcome_cmd.capture(target=tmp_path, artifact_id="skill-x", json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert "content_fingerprint" not in payload["record"]
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "memory" / "outcome" / "records.jsonl").read_text().splitlines()
+        if line.strip()
+    ]
+    assert "content_fingerprint" not in rows[0]
+    assert outcome_cmd.load_records(tmp_path)[0].content_fingerprint is None
+
+
+def test_record_stamps_card_content_fingerprint(tmp_path, capsys):
+    card = tmp_path / "memory" / "cards" / "card-x.md"
+    card.parent.mkdir(parents=True)
+    card.write_text("# card body\n")
+    assert (
+        outcome_cmd.record(
+            target=tmp_path,
+            artifact_id="card-x",
+            source="friction",
+            status="cleared",
+            artifact_kind="card",
+            json_output=True,
+        )
+        == 0
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["record"]["content_fingerprint"] == _sha256_of(card)
+
+
+def test_fingerprinted_records_keep_the_digest_chain_verifiable(tmp_path, capsys):
+    _write_registry_skill(tmp_path, "skill-x")
+    _write_verify_receipt(tmp_path)
+    assert outcome_cmd.capture(target=tmp_path, artifact_id="skill-x", json_output=True) == 0
+    capsys.readouterr()
+    assert receipts_cmd.verify(target=tmp_path, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["summary"]["mismatch"] == 0
+    ledger_items = [item for item in payload["artifacts"] if item["artifact_type"] == "outcome-ledger-record"]
+    assert ledger_items and all(item["status"] == "OK" for item in ledger_items)
+
+
+def test_rank_scores_current_fingerprint_cohort_and_shows_lifetime(tmp_path, capsys):
+    skill_md = _write_registry_skill(tmp_path, "skill-x", "# original text\n")
+    old_fp = _sha256_of(skill_md)
+    _seed(
+        tmp_path,
+        [
+            outcome.OutcomeRecord(
+                "skill-x",
+                "skill",
+                f"t{i}",
+                "verify",
+                1,
+                f"ref{i}",
+                f"2026-06-20T0{i}:00:00+00:00",
+                content_fingerprint=old_fp,
+            )
+            for i in range(4)
+        ],
+    )
+    # Edit the skill: the accumulated score must not keep vouching for old text.
+    skill_md.write_text("# rewritten text\n")
+    new_fp = _sha256_of(skill_md)
+    _seed(
+        tmp_path,
+        [
+            outcome.OutcomeRecord(
+                "skill-x",
+                "skill",
+                "t9",
+                "verify",
+                1,
+                "ref9",
+                "2026-06-20T09:00:00+00:00",
+                content_fingerprint=new_fp,
+            )
+        ],
+    )
+    assert outcome_cmd.rank(target=tmp_path, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    entry = payload["ranking"][0]
+    assert entry["content_fingerprint"] == new_fp
+    assert entry["helped"] == 1  # current revision only
+    assert entry["lifetime_helped"] == 5
+    assert entry["stale_records"] == 4
+    assert entry["legacy_records"] == 0
+    assert entry["score"] == outcome.wilson_lower_bound(1, 1)
+    assert entry["lifetime_score"] == outcome.wilson_lower_bound(5, 5)
+
+
+def test_rank_edited_skill_earns_its_rank_back(tmp_path, capsys):
+    # skill-b has the bigger lifetime score, but its text changed after every
+    # signal; skill-a's smaller score is all for its current text, so it ranks first.
+    a_md = _write_registry_skill(tmp_path, "skill-a", "# a text\n")
+    b_md = _write_registry_skill(tmp_path, "skill-b", "# b text v1\n")
+    a_fp = _sha256_of(a_md)
+    b_old_fp = _sha256_of(b_md)
+    _seed(
+        tmp_path,
+        [
+            outcome.OutcomeRecord(
+                "skill-a",
+                "skill",
+                f"ta{i}",
+                "verify",
+                1,
+                f"ra{i}",
+                f"2026-06-20T0{i}:00:00+00:00",
+                content_fingerprint=a_fp,
+            )
+            for i in range(2)
+        ],
+    )
+    _seed(
+        tmp_path,
+        [
+            outcome.OutcomeRecord(
+                "skill-b",
+                "skill",
+                f"tb{i}",
+                "verify",
+                1,
+                f"rb{i}",
+                f"2026-06-20T0{i}:00:00+00:00",
+                content_fingerprint=b_old_fp,
+            )
+            for i in range(6)
+        ],
+    )
+    b_md.write_text("# b text v2\n")
+    assert outcome_cmd.rank(target=tmp_path, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    ids = [item["artifact_id"] for item in payload["ranking"]]
+    assert ids.index("skill-a") < ids.index("skill-b")
+    out_lines = None
+    assert outcome_cmd.rank(target=tmp_path, json_output=False) == 0
+    out_lines = capsys.readouterr().out.splitlines()
+    b_line = next(line for line in out_lines if "skill-b" in line)
+    assert "score=0.000 helped=0 hurt=0" in b_line
+    assert "lifetime score=" in b_line and "stale=6" in b_line
+
+
+def test_rank_legacy_records_are_a_distinct_cohort(tmp_path, capsys):
+    _write_registry_skill(tmp_path, "skill-x")
+    _seed(tmp_path, _helped("skill-x", 3))  # pre-fingerprint captures
+    assert outcome_cmd.rank(target=tmp_path, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    entry = payload["ranking"][0]
+    assert entry["helped"] == 0
+    assert entry["lifetime_helped"] == 3
+    assert entry["legacy_records"] == 3
+    assert entry["stale_records"] == 0
+
+
+def test_rank_without_local_artifact_keeps_lifetime_score_and_output_shape(tmp_path, capsys):
+    _seed(tmp_path, _helped("skill-x", 2))
+    assert outcome_cmd.rank(target=tmp_path, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    entry = payload["ranking"][0]
+    assert entry["content_fingerprint"] is None
+    assert entry["helped"] == 2 and entry["lifetime_helped"] == 2
+    assert outcome_cmd.rank(target=tmp_path, json_output=False) == 0
+    line = next(line for line in capsys.readouterr().out.splitlines() if "skill-x" in line)
+    assert line == "- skill-x score=0.342 helped=2 hurt=0"
+
+
+def test_explain_splits_current_and_lifetime_and_tags_cohorts(tmp_path, capsys):
+    skill_md = _write_registry_skill(tmp_path, "skill-x", "# v1\n")
+    old_fp = _sha256_of(skill_md)
+    _seed(
+        tmp_path,
+        [
+            outcome.OutcomeRecord("skill-x", "skill", "t0", "verify", 1, "ref0", "2026-06-20T00:00:00+00:00"),
+            outcome.OutcomeRecord(
+                "skill-x",
+                "skill",
+                "t1",
+                "verify",
+                1,
+                "ref1",
+                "2026-06-20T01:00:00+00:00",
+                content_fingerprint=old_fp,
+            ),
+        ],
+    )
+    skill_md.write_text("# v2\n")
+    new_fp = _sha256_of(skill_md)
+    _seed(
+        tmp_path,
+        [
+            outcome.OutcomeRecord(
+                "skill-x",
+                "skill",
+                "t2",
+                "verify",
+                -1,
+                "ref2",
+                "2026-06-20T02:00:00+00:00",
+                content_fingerprint=new_fp,
+            )
+        ],
+    )
+    assert outcome_cmd.explain(target=tmp_path, artifact_id="skill-x", json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["content_fingerprint"] == new_fp
+    assert payload["score"]["helped"] == 0 and payload["score"]["hurt"] == 1
+    assert payload["lifetime_score"]["helped"] == 2 and payload["lifetime_score"]["hurt"] == 1
+    assert payload["stale_records"] == 1 and payload["legacy_records"] == 1
+    assert [t["cohort"] for t in payload["trail"]] == ["legacy", "stale", "current"]
+    assert outcome_cmd.explain(target=tmp_path, artifact_id="skill-x", json_output=False) == 0
+    out = capsys.readouterr().out
+    assert f"fingerprint: {new_fp[:12]}" in out
+    assert "(current fingerprint)" in out
+    assert "lifetime:" in out and "stale=1 legacy=1" in out
+    assert "[legacy]" in out and "[stale]" in out and "[current]" in out
+
+
+def test_explain_without_local_artifact_keeps_pre_fingerprint_output(tmp_path, capsys):
+    _seed(tmp_path, _helped("skill-x", 1))
+    assert outcome_cmd.explain(target=tmp_path, artifact_id="skill-x", json_output=False) == 0
+    out = capsys.readouterr().out
+    assert "fingerprint:" not in out
+    assert "lifetime:" not in out
+    assert "[legacy]" not in out

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import contextlib
 import dataclasses
+import hashlib
 import io
 import json
 import sys
@@ -65,9 +66,55 @@ def _artifact_known(target: Path, artifact_id: str, kind: str) -> bool:
     return artifact_id in _known_skill_names(target)
 
 
+def _artifact_content_path(target: Path, artifact_id: str, kind: str) -> Path | None:
+    """Locate the artifact text a fingerprint should pin: registry copy first, then harness installs."""
+    if kind == "card":
+        card = target / "memory" / "cards" / f"{artifact_id}.md"
+        return card if card.is_file() else None
+    from . import skills_cmd
+
+    registry_md = skills_cmd._skill_md_path(skills_cmd._skill_path(target, artifact_id))
+    if registry_md.is_file():
+        return registry_md
+    for skill_md in sorted(target.glob(f".*/skills/{artifact_id}/SKILL.md")):
+        if skill_md.is_file():
+            return skill_md
+    return None
+
+
+def artifact_fingerprint(target: Path, artifact_id: str, kind: str) -> str | None:
+    """sha256 of the artifact's current content, or None when it cannot be resolved.
+
+    The fingerprint sees the artifact's text only, not the harness around it
+    (the same caveat CocoIndex documents for undecorated helpers).
+    """
+    path = _artifact_content_path(target, artifact_id, kind)
+    if path is None:
+        return None
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError:
+        return None
+
+
+def _fingerprint_cohorts_by_artifact(
+    target: Path, records: list[core.OutcomeRecord]
+) -> dict[str, core.FingerprintCohorts]:
+    kinds: dict[str, str] = {}
+    for record in records:
+        kinds.setdefault(record.artifact_id, record.artifact_kind or "skill")
+    return {
+        artifact_id: core.split_by_fingerprint(
+            artifact_id, recs, artifact_fingerprint(target, artifact_id, kinds.get(artifact_id, "skill"))
+        )
+        for artifact_id, recs in _records_by_artifact(records).items()
+    }
+
+
 def _record_from_dict(payload: dict) -> core.OutcomeRecord | None:
     code_graph_delta = payload.get("code_graph_delta")
     context_eval = payload.get("context_eval")
+    content_fingerprint = payload.get("content_fingerprint")
     try:
         return core.OutcomeRecord(
             artifact_id=str(payload["artifact_id"]),
@@ -79,6 +126,9 @@ def _record_from_dict(payload: dict) -> core.OutcomeRecord | None:
             ts=str(payload.get("ts", "")),
             code_graph_delta=code_graph_delta if isinstance(code_graph_delta, dict) else None,
             context_eval=context_eval if isinstance(context_eval, dict) else None,
+            content_fingerprint=content_fingerprint
+            if isinstance(content_fingerprint, str) and content_fingerprint
+            else None,
         )
     except (KeyError, TypeError, ValueError):
         return None
@@ -104,6 +154,8 @@ def _record_payload(record: core.OutcomeRecord) -> dict:
         row.pop("code_graph_delta", None)
     if row.get("context_eval") is None:
         row.pop("context_eval", None)
+    if row.get("content_fingerprint") is None:
+        row.pop("content_fingerprint", None)
     return row
 
 
@@ -484,9 +536,18 @@ def score(*, target: Path, artifact_id: str | None = None, json_output: bool = F
 
 
 def explain(*, target: Path, artifact_id: str, json_output: bool = False) -> int:
+    """Show the per-signal trail behind an artifact's score, fingerprint-aware.
+
+    The default score covers only records whose content fingerprint matches the
+    artifact's current text; the lifetime fold is still shown. Without a
+    resolvable current fingerprint the two are identical and the output stays in
+    its pre-fingerprint shape.
+    """
     target = target.expanduser().resolve()
     records = [record for record in load_records(target) if record.artifact_id == artifact_id]
-    score_obj = core.score_records(artifact_id, records)
+    kind = next((r.artifact_kind for r in records if r.artifact_kind), "skill")
+    cohorts = core.split_by_fingerprint(artifact_id, records, artifact_fingerprint(target, artifact_id, kind))
+    score_obj = cohorts.current
     trail = [
         {
             "ts": record.ts,
@@ -494,6 +555,8 @@ def explain(*, target: Path, artifact_id: str, json_output: bool = False) -> int
             "signal_value": record.signal_value,
             "evidence_ref": record.evidence_ref,
             "task_id": record.task_id,
+            "content_fingerprint": record.content_fingerprint,
+            "cohort": core.fingerprint_cohort(record, cohorts.current_fingerprint),
         }
         for record in sorted(records, key=lambda record: record.ts)
     ]
@@ -501,18 +564,37 @@ def explain(*, target: Path, artifact_id: str, json_output: bool = False) -> int
         payload = {
             "target": str(target),
             "artifact_id": artifact_id,
+            "content_fingerprint": cohorts.current_fingerprint,
             "score": dataclasses.asdict(score_obj),
+            "lifetime_score": dataclasses.asdict(cohorts.lifetime),
+            "stale_records": cohorts.stale_records,
+            "legacy_records": cohorts.legacy_records,
             "trail": trail,
         }
         print(json.dumps(payload, indent=2, sort_keys=True))
         return 0
     print(f"outcome explain: {artifact_id}")
-    print(f"score: {score_obj.score:.3f} helped={score_obj.helped} hurt={score_obj.hurt} neutral={score_obj.neutral}")
+    if cohorts.pinned:
+        print(f"fingerprint: {cohorts.current_fingerprint[:12]}")
+        print(
+            f"score: {score_obj.score:.3f} helped={score_obj.helped} hurt={score_obj.hurt} "
+            f"neutral={score_obj.neutral} (current fingerprint)"
+        )
+        lifetime = cohorts.lifetime
+        print(
+            f"lifetime: {lifetime.score:.3f} helped={lifetime.helped} hurt={lifetime.hurt} "
+            f"neutral={lifetime.neutral} (stale={cohorts.stale_records} legacy={cohorts.legacy_records})"
+        )
+    else:
+        print(
+            f"score: {score_obj.score:.3f} helped={score_obj.helped} hurt={score_obj.hurt} neutral={score_obj.neutral}"
+        )
     if not trail:
         print("trail: none")
         return 0
     for item in trail:
-        print(f"- {item['ts']} {item['source']} {item['signal_value']:+d} ({item['evidence_ref']})")
+        tag = f" [{item['cohort']}]" if cohorts.pinned else ""
+        print(f"- {item['ts']} {item['source']} {item['signal_value']:+d} ({item['evidence_ref']}){tag}")
     return 0
 
 
@@ -583,6 +665,7 @@ def capture(
         ts=ts,
         code_graph_delta=code_graph_delta,
         context_eval=context_eval,
+        content_fingerprint=artifact_fingerprint(target, artifact_id, artifact_kind),
     )
     append_records(target, [record])
     if json_output:
@@ -591,6 +674,8 @@ def capture(
     print(f"outcome capture: {artifact_id}")
     print(f"source: {source} [{effective_status}] signal={record.signal_value:+d}")
     print(f"evidence: {record.evidence_ref}")
+    if record.content_fingerprint:
+        print(f"fingerprint: {record.content_fingerprint[:12]}")
     return 0
 
 
@@ -780,36 +865,50 @@ def rank(*, target: Path, json_output: bool = False) -> int:
     mean brief_hit_rate is a secondary quality key so skills whose pre-run
     context named the files they actually touched rise among equal scores.
     Install/rollback thresholds still use verified exit-code signals only.
+
+    Fingerprint-aware: the default score covers only records whose content
+    fingerprint matches the artifact's current text, so an edited skill earns
+    its rank back instead of coasting on signals for text that no longer
+    exists. Lifetime counts stay visible alongside.
     """
     target = target.expanduser().resolve()
     records = load_records(target)
-    scores = _scores_by_artifact(records)
+    cohorts_by_artifact = _fingerprint_cohorts_by_artifact(target, records)
     graph_counts = _graph_delta_counts_by_artifact(records)
     brief_stats = _brief_hit_stats_by_artifact(records)
 
-    def blended(item: core.OutcomeScore) -> float:
-        return core.rank_score(confidence=0.0, outcome=item.score, keyword=0.0)
+    def blended(cohorts: core.FingerprintCohorts) -> float:
+        return core.rank_score(confidence=0.0, outcome=cohorts.current.score, keyword=0.0)
 
-    def sort_key(item: core.OutcomeScore) -> tuple:
-        stats = brief_stats.get(item.artifact_id)
+    def sort_key(item: tuple[str, core.FingerprintCohorts]) -> tuple:
+        artifact_id, cohorts = item
+        stats = brief_stats.get(artifact_id)
         # Missing brief samples sort after measured ones at the same Wilson score.
         hit = float(stats["brief_hit_rate"]) if stats is not None else -1.0
-        return (-blended(item), -hit, item.artifact_id)
+        return (-blended(cohorts), -hit, artifact_id)
 
-    ordered = sorted(scores.values(), key=sort_key)
+    ordered = sorted(cohorts_by_artifact.items(), key=sort_key)
     ranking_payload = []
-    for item in ordered:
+    for artifact_id, cohorts in ordered:
+        current = cohorts.current
+        lifetime = cohorts.lifetime
         entry = {
-            "artifact_id": item.artifact_id,
-            "score": item.score,
-            "rank_score": blended(item),
-            "helped": item.helped,
-            "hurt": item.hurt,
+            "artifact_id": artifact_id,
+            "score": current.score,
+            "rank_score": blended(cohorts),
+            "helped": current.helped,
+            "hurt": current.hurt,
+            "content_fingerprint": cohorts.current_fingerprint,
+            "lifetime_score": lifetime.score,
+            "lifetime_helped": lifetime.helped,
+            "lifetime_hurt": lifetime.hurt,
+            "stale_records": cohorts.stale_records,
+            "legacy_records": cohorts.legacy_records,
         }
-        counts = graph_counts.get(item.artifact_id)
+        counts = graph_counts.get(artifact_id)
         if counts is not None:
             entry.update(counts)
-        stats = brief_stats.get(item.artifact_id)
+        stats = brief_stats.get(artifact_id)
         if stats is not None:
             entry.update(stats)
         ranking_payload.append(entry)
@@ -824,11 +923,21 @@ def rank(*, target: Path, json_output: bool = False) -> int:
     if not ordered:
         print("ranking: none")
         return 0
-    for item in ordered:
-        graph_tail = _graph_delta_human_suffix(graph_counts.get(item.artifact_id))
-        brief_tail = _brief_hit_human_suffix(brief_stats.get(item.artifact_id))
+    for artifact_id, cohorts in ordered:
+        current = cohorts.current
+        graph_tail = _graph_delta_human_suffix(graph_counts.get(artifact_id))
+        brief_tail = _brief_hit_human_suffix(brief_stats.get(artifact_id))
+        fingerprint_tail = ""
+        if cohorts.pinned and (cohorts.stale_records or cohorts.legacy_records):
+            lifetime = cohorts.lifetime
+            fingerprint_tail = (
+                f" [rev {cohorts.current_fingerprint[:12]}; lifetime score={lifetime.score:.3f} "
+                f"helped={lifetime.helped} hurt={lifetime.hurt}, "
+                f"stale={cohorts.stale_records} legacy={cohorts.legacy_records}]"
+            )
         print(
-            f"- {item.artifact_id} score={item.score:.3f} helped={item.helped} hurt={item.hurt}{graph_tail}{brief_tail}"
+            f"- {artifact_id} score={current.score:.3f} helped={current.helped} "
+            f"hurt={current.hurt}{fingerprint_tail}{graph_tail}{brief_tail}"
         )
     return 0
 
@@ -864,6 +973,7 @@ def record(
         signal_value=core.signal_value(source, status),
         evidence_ref=evidence_ref,
         ts=localio.utc_now_iso(),
+        content_fingerprint=artifact_fingerprint(target, artifact_id, artifact_kind),
     )
     append_records(target, [new_record])
     if json_output:
