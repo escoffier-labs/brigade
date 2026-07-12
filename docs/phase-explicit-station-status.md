@@ -22,7 +22,7 @@ Key tech: Python mappings, lazy imports to avoid cycles, pytest monkeypatch fixt
 - Modify: `src/brigade/status.py`
 - Modify: `tests/test_status.py`
 
-- [ ] Add failing mapping tests:
+- [x] Add failing mapping tests:
 
 ```python
 import pytest
@@ -63,13 +63,13 @@ def test_health_from_doctor_checks(checks, expected):
     assert status_mod._health_from_checks(checks) == expected
 ```
 
-- [ ] Run the two tests and watch them fail because the helpers do not exist:
+- [x] Run the two tests and watch them fail because the helpers do not exist:
 
 ```bash
 /home/clawdbot/repos/brigade/.venv/bin/pytest tests/test_status.py -q
 ```
 
-- [ ] Add the canonical state tuple and pure mapping helpers to `status.py`:
+- [x] Add the canonical state tuple and pure mapping helpers to `status.py`:
 
 ```python
 STATUS_STATES = (
@@ -110,7 +110,7 @@ def _health_from_checks(checks: list[_doctor.CheckResult]) -> str:
     return "unchecked"
 ```
 
-- [ ] Add a lazy optional-station dispatcher:
+- [x] Add a lazy optional-station dispatcher:
 
 ```python
 def _optional_station_payload(station: str, target: Path) -> dict[str, object] | None:
@@ -132,13 +132,13 @@ def _optional_station_payload(station: str, target: Path) -> dict[str, object] |
     return None
 ```
 
-- [ ] Add a failing dispatcher test that patches `_optional_station_payload`, limits `all_stations()` to `registry.SEARCH`, returns `{"installed": True, "health": "ok", "summary": "graph ok"}`, and asserts JSON health is `ok` with summary `graph ok`.
+- [x] Add a failing dispatcher test that patches `_optional_station_payload`, limits `all_stations()` to `registry.SEARCH`, returns `{"installed": True, "health": "ok", "summary": "graph ok"}`, and asserts JSON health is `ok` with summary `graph ok`.
 
-- [ ] Rewrite the `status.run()` row loop. Optional payloads supply health and summary. Other stations retain doctor counts and use `_health_from_checks`. Set optional-row counts to `ok=1` only for `ok`, `warn=1` only for `degraded`, and `fail=1` only for `failed`.
+- [x] Rewrite the `status.run()` row loop. Optional payloads supply health and summary. Other stations retain doctor counts and use `_health_from_checks`. Set optional-row counts to `ok=1` only for `ok`, `warn=1` only for `degraded`, and `fail=1` only for `failed`.
 
-- [ ] Add a warning regression using one fake station doctor with one `WARN` result. Assert the row health is `degraded`, not `ok` or `empty`.
+- [x] Add a warning regression using one fake station doctor with one `WARN` result. Assert the row health is `degraded`, not `ok` or `empty`.
 
-- [ ] Run `tests/test_status.py` to green through Brigade.
+- [x] Run `tests/test_status.py` to green through Brigade.
 
 ## Task 2: Keep summary probes read-only and bounded
 
@@ -149,9 +149,9 @@ def _optional_station_payload(station: str, target: Path) -> dict[str, object] |
 - Modify: `tests/test_evidence_cmd.py`
 - Modify: `tests/test_tokens_cmd.py`
 
-- [ ] Add a failing MiseLedger test that patches `evidence_brief._miseledger_bin` and `_run_json`, calls `status_payload(tmp_path, include_doctor=False, timeout=5.0)`, and asserts the only command is `["miseledger", "status", "--json"]` with timeout `5.0`.
+- [x] Add a failing MiseLedger test that patches `evidence_brief._miseledger_bin` and `_run_json`, calls `status_payload(tmp_path, include_doctor=False, timeout=5.0)`, and asserts the only command is `["miseledger", "status", "--json"]` with timeout `5.0`.
 
-- [ ] Change the signature to:
+- [x] Change the signature to:
 
 ```python
 def status_payload(
@@ -164,15 +164,15 @@ def status_payload(
 
 Use `timeout` for status and doctor calls. When `include_doctor` is false, do not call doctor. Derive `ok` from exit 0 with a JSON object, `unwired` from exit 2, `timeout` from exit 124, and `incomplete` for any other result. Preserve the existing detailed behavior when `include_doctor` is true.
 
-- [ ] Add a failing Token Glace test that captures the usage-tracker argv and expects:
+- [x] Add a failing Token Glace test that captures the usage-tracker argv and expects:
 
 ```python
 [tracker, "export", "--since", "30d", "--summary-json", "--no-write"]
 ```
 
-- [ ] Replace the current usage-tracker summary argv with that exact command.
+- [x] Replace the current usage-tracker summary argv with that exact command.
 
-- [ ] Run the focused status suites through Brigade:
+- [x] Run the focused status suites through Brigade:
 
 ```bash
 /home/clawdbot/repos/brigade/.venv/bin/brigade work verify run --target . --command "/home/clawdbot/repos/brigade/.venv/bin/pytest tests/test_status.py tests/test_evidence_cmd.py tests/test_tokens_cmd.py tests/test_search_cmd.py tests/test_pantry_cmd.py -q" --capture brigade-work
@@ -180,13 +180,13 @@ Use `timeout` for status and doctor calls. When `include_doctor` is false, do no
 
 Expected: all selected tests pass.
 
-- [ ] Run the full gate through Brigade:
+- [x] Run the full gate through Brigade:
 
 ```bash
 /home/clawdbot/repos/brigade/.venv/bin/brigade work verify run --target . --command "env PY=/home/clawdbot/repos/brigade/.venv/bin ./scripts/verify" --capture brigade-work
 ```
 
-- [ ] Commit:
+- [x] Commit:
 
 ```bash
 git add src/brigade/status.py src/brigade/evidence_cmd.py src/brigade/tokens_cmd.py tests/test_status.py tests/test_evidence_cmd.py tests/test_tokens_cmd.py docs/phase-explicit-station-status.md

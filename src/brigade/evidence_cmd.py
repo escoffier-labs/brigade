@@ -44,7 +44,12 @@ def _cursor_path(target: Path) -> Path:
     return target / ".brigade" / "work" / "miseledger-export-cursor.json"
 
 
-def status_payload(target: Path) -> dict[str, Any]:
+def status_payload(
+    target: Path,
+    *,
+    include_doctor: bool = True,
+    timeout: float = 120.0,
+) -> dict[str, Any]:
     target = target.expanduser().resolve()
     binary = evidence_brief._miseledger_bin()
     installed = binary is not None
@@ -84,11 +89,44 @@ def status_payload(target: Path) -> dict[str, Any]:
     if not installed or binary is None:
         return payload
 
-    status_result = _run_json([binary, "status", "--json"], timeout=120.0)
-    doctor_result = _run_json([binary, "doctor", "--json"], timeout=120.0)
+    status_result = _run_json([binary, "status", "--json"], timeout=timeout)
+    payload["status"] = status_result
+    status_json = status_result.get("stdout_json")
+    status_data: dict[str, Any] = status_json if isinstance(status_json, dict) else {}
+
+    if not include_doctor:
+        exit_code = status_result.get("exit_code")
+        if exit_code == 124:
+            payload["health"] = "timeout"
+            payload["summary"] = "miseledger status timed out"
+        elif exit_code == 2:
+            payload["health"] = "unwired"
+            payload["summary"] = "miseledger installed but archive not initialized"
+        elif exit_code == 0 and status_data:
+            payload["health"] = "ok"
+            item_count = next(
+                (
+                    status_data[key]
+                    for key in ("items", "item_count", "total_items", "count")
+                    if isinstance(status_data.get(key), int)
+                ),
+                None,
+            )
+            payload["summary"] = "miseledger status ok" + (f", items={item_count}" if item_count is not None else "")
+        else:
+            payload["health"] = "incomplete"
+            payload["summary"] = f"miseledger status unreadable (exit {exit_code})"
+        payload["next_commands"] = [
+            "miseledger status",
+            "brigade evidence doctor",
+            "brigade receipts export miseledger --target . --new-only --import",
+        ]
+        return payload
+
+    doctor_result = _run_json([binary, "doctor", "--json"], timeout=timeout)
     # doctor may not support --json on older builds; fall back to plain doctor exit
     if doctor_result.get("stdout_json") is None and doctor_result.get("exit_code") not in (0, 1):
-        plain = proc.run([binary, "doctor"], timeout=120.0)
+        plain = proc.run([binary, "doctor"], timeout=timeout)
         doctor_result = {
             "command": [binary, "doctor"],
             "exit_code": plain.code,
@@ -96,12 +134,9 @@ def status_payload(target: Path) -> dict[str, Any]:
             "stdout_unparsed": (plain.stdout or "")[:500],
             "stderr": (plain.stderr or "")[:500],
         }
-    payload["status"] = status_result
     payload["doctor"] = doctor_result
 
-    status_json = status_result.get("stdout_json")
     doctor_json = doctor_result.get("stdout_json")
-    status_data: dict[str, Any] = status_json if isinstance(status_json, dict) else {}
     doctor_data: dict[str, Any] = doctor_json if isinstance(doctor_json, dict) else {}
 
     if status_result.get("exit_code") == 124 or doctor_result.get("exit_code") == 124:

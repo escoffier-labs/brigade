@@ -86,7 +86,10 @@ def status_payload(target: Path) -> dict[str, Any]:
     tracker_summary = "usage-tracker not installed"
     if tracker:
         # Prefer compact summary surface when present; fall back to --help probe.
-        summary = health.run_json([tracker, "export", "--summary-json"], timeout=30.0)
+        summary = health.run_json(
+            [tracker, "export", "--since", "30d", "--summary-json", "--no-write"],
+            timeout=30.0,
+        )
         tools["usage-tracker"]["summary_probe"] = summary
         if summary.get("exit_code") == 0 and isinstance(summary.get("stdout_json"), dict):
             data = summary["stdout_json"]
