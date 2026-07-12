@@ -851,6 +851,7 @@ def _worker_prompt(
     *,
     prior_results: list[WorkerResult] | None = None,
     read_only: bool = False,
+    direct: bool = False,
     code_graph: CodeGraphBrief | None = None,
     drift_impact: DriftImpactBrief | None = None,
     evidence: EvidenceBrief | None = None,
@@ -859,11 +860,16 @@ def _worker_prompt(
     if prior_results:
         prior_context = f"\n\nEarlier-stage context:\n{_render_prior_results(prior_results)}"
     policy = f"\n\n{_read_only_rules()}" if read_only else ""
+    return_instruction = (
+        "Return a concise, complete final user-visible result."
+        if direct
+        else "Return a concise, complete result for the orchestrator to synthesize."
+    )
     prompt = (
         f"You are Brigade worker {agent.name}.\n"
         f"Role:\n{agent.role}\n\n"
         f"Sub-task:\n{assignment.task}\n\n"
-        "Return a concise, complete result for the orchestrator to synthesize."
+        f"{return_instruction}"
         f"{prior_context}"
         f"{policy}"
     )
@@ -948,6 +954,7 @@ def dispatch(
     read_only: bool = False,
     sandbox_read_only: bool | None = None,
     sandbox: str | None = None,
+    direct: bool = False,
     code_graph: CodeGraphBrief | None = None,
     drift_impact: DriftImpactBrief | None = None,
     evidence: EvidenceBrief | None = None,
@@ -971,6 +978,7 @@ def dispatch(
             assignment,
             prior_results=prior_results,
             read_only=read_only,
+            direct=direct,
             code_graph=code_graph,
             drift_impact=drift_impact,
             evidence=evidence,
@@ -1554,6 +1562,7 @@ def _run_payload(
     context_eval_payload: dict[str, object] | None = None,
     suspected_noop: bool = False,
     route: RouteBrief | None = None,
+    worker: str | None = None,
 ) -> dict[str, object]:
     payload: dict[str, object] = {
         "task": task,
@@ -1584,6 +1593,8 @@ def _run_payload(
     }
     if route is not None:
         payload["route"] = route.payload()
+    if worker is not None:
+        payload["worker"] = worker
     git = _receipt_git_snapshot(cwd)
     if git is not None:
         payload["git"] = git
@@ -1605,6 +1616,19 @@ def _run_payload(
     if control_socket is not None:
         payload["control_socket"] = str(control_socket)
     return payload
+
+
+def _direct_worker_error(worker: str, roster: Roster) -> str | None:
+    agent = roster.agents.get(worker)
+    if agent is None:
+        return f"unknown worker: {worker}"
+    if worker == roster.orchestrator:
+        return f"--worker cannot target orchestrator seat: {worker}"
+    if agent.cli is None:
+        return f"worker has no CLI adapter: {worker}"
+    if not is_cli_allowed(agent.cli, roster):
+        return f"{agent.cli} is not allowed by limits.allow_models"
+    return None
 
 
 def run(
@@ -1629,12 +1653,19 @@ def run(
     route_enabled: bool = True,
     route_approvals: tuple[str, ...] = (),
     route_template: str | None = None,
+    worker: str | None = None,
 ) -> int:
     started_at = datetime.now(timezone.utc)
     transport_for_payload = codex_transport or roster.codex_transport
     cwd = cwd.expanduser().resolve() if cwd is not None else None
     output_dir = output_dir.expanduser() if output_dir is not None else None
     handoff_inbox = handoff_inbox.expanduser() if handoff_inbox is not None else None
+    direct_worker = worker is not None
+    if worker is not None:
+        worker_error = _direct_worker_error(worker, roster)
+        if worker_error is not None:
+            print(f"error: {worker_error}", file=sys.stderr)
+            return 2
     if code_graph is None:
         code_graph = code_graph_brief(cwd, task) if code_graph_enabled else CodeGraphBrief(attached=False)
     if drift_impact is None:
@@ -1690,57 +1721,65 @@ def run(
                 codex_transport=transport_for_payload,
                 route=route,
                 code_graph_delta=code_graph_delta,
+                worker=worker,
             ),
         )
 
     control_socket = None
     plan_attempts: list[dict[str, object]] | None = [] if output_dir is not None else None
-    try:
-        assignments = plan(
-            task,
-            roster,
-            cwd=cwd,
-            read_only=read_only,
-            sandbox_read_only=sandbox_read_only,
-            sandbox=sandbox,
-            attempts=plan_attempts,
-            code_graph=code_graph,
-            drift_impact=drift_impact,
-            evidence=evidence,
-            route=route,
-        )
-    except RuntimeError as exc:
-        if output_dir is not None:
-            finished_at = datetime.now(timezone.utc)
-            _write_json(output_dir / "plan-attempts.json", {"attempts": plan_attempts or []})
-            _write_json(
-                output_dir / "run.json",
-                _run_payload(
-                    task=task,
-                    cwd=cwd,
-                    roster=roster,
-                    dry_run=dry_run,
-                    read_only=read_only,
-                    status="failed",
-                    started_at=started_at,
-                    finished_at=finished_at,
-                    output_dir=output_dir,
-                    error=str(exc),
-                    code_graph=code_graph,
-                    drift_impact=drift_impact,
-                    evidence=evidence,
-                    brief_set=brief_set,
-                    codex_transport=transport_for_payload,
-                    route=route,
-                    control_socket=control_socket,
-                    code_graph_delta=code_graph_delta,
-                ),
+    if worker is not None:
+        assignments = [Assignment(worker=worker, task=task, stage=1)]
+    else:
+        try:
+            assignments = plan(
+                task,
+                roster,
+                cwd=cwd,
+                read_only=read_only,
+                sandbox_read_only=sandbox_read_only,
+                sandbox=sandbox,
+                attempts=plan_attempts,
+                code_graph=code_graph,
+                drift_impact=drift_impact,
+                evidence=evidence,
+                route=route,
             )
-        print(f"error: {exc}", file=sys.stderr)
-        return 2
+        except RuntimeError as exc:
+            if output_dir is not None:
+                finished_at = datetime.now(timezone.utc)
+                _write_json(output_dir / "plan-attempts.json", {"attempts": plan_attempts or []})
+                _write_json(
+                    output_dir / "run.json",
+                    _run_payload(
+                        task=task,
+                        cwd=cwd,
+                        roster=roster,
+                        dry_run=dry_run,
+                        read_only=read_only,
+                        status="failed",
+                        started_at=started_at,
+                        finished_at=finished_at,
+                        output_dir=output_dir,
+                        error=str(exc),
+                        code_graph=code_graph,
+                        drift_impact=drift_impact,
+                        evidence=evidence,
+                        brief_set=brief_set,
+                        codex_transport=transport_for_payload,
+                        route=route,
+                        control_socket=control_socket,
+                        code_graph_delta=code_graph_delta,
+                        worker=worker,
+                    ),
+                )
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
 
     if output_dir is not None:
-        _write_json(output_dir / "plan-attempts.json", {"attempts": plan_attempts or []})
+        attempts_payload: dict[str, object] = {"attempts": plan_attempts or []}
+        if direct_worker:
+            attempts_payload["mode"] = "direct-worker"
+        _write_json(output_dir / "plan-attempts.json", attempts_payload)
         _write_json(output_dir / "plan.json", {"assignments": _assignment_payload(assignments)})
 
     if dry_run:
@@ -1766,6 +1805,7 @@ def run(
                     codex_transport=transport_for_payload,
                     route=route,
                     code_graph_delta=code_graph_delta,
+                    worker=worker,
                 ),
             )
         print(json.dumps(payload, indent=2))
@@ -1823,6 +1863,7 @@ def run(
                 route=route,
                 control_socket=control_socket,
                 code_graph_delta=code_graph_delta,
+                worker=worker,
             ),
         )
 
@@ -1834,6 +1875,7 @@ def run(
             read_only=read_only,
             sandbox_read_only=sandbox_read_only,
             sandbox=sandbox,
+            direct=direct_worker,
             code_graph=code_graph,
             drift_impact=drift_impact,
             evidence=evidence,
@@ -1872,37 +1914,68 @@ def run(
         )
     if verbose:
         _print_worker_status(worker_results)
-        print("synthesis:")
-        print(f"  -> {roster.orchestrator}")
+        if not direct_worker:
+            print("synthesis:")
+            print(f"  -> {roster.orchestrator}")
 
-    final = _run_orchestrator(
-        roster,
-        build_synth_prompt(
-            task,
-            worker_results,
+    if direct_worker:
+        direct_result = (
+            worker_results[0]
+            if worker_results
+            else WorkerResult(
+                worker=worker or "",
+                task=task,
+                text="",
+                ok=False,
+                detail="direct worker produced no result",
+            )
+        )
+        final = agents.AgentResult(
+            text=direct_result.text,
+            ok=direct_result.ok,
+            detail=direct_result.detail,
+            thread_id=direct_result.thread_id,
+            status=direct_result.status,
+        )
+    else:
+        final = _run_orchestrator(
+            roster,
+            build_synth_prompt(
+                task,
+                worker_results,
+                read_only=read_only,
+                ground_truth=ground_truth,
+                code_graph=code_graph,
+                drift_impact=drift_impact,
+                evidence=evidence,
+            ),
+            cwd=cwd,
             read_only=read_only,
-            ground_truth=ground_truth,
-            code_graph=code_graph,
-            drift_impact=drift_impact,
-            evidence=evidence,
-        ),
-        cwd=cwd,
-        read_only=read_only,
-        sandbox_read_only=sandbox_read_only,
-        sandbox=sandbox,
-    )
+            sandbox_read_only=sandbox_read_only,
+            sandbox=sandbox,
+        )
     if output_dir is not None:
-        _write_json(
-            output_dir / "synthesis.json",
+        synthesis_payload = (
             {
+                "mode": "direct-worker",
+                "worker": worker,
+                "orchestrator": None,
+                "result": _agent_result_payload(final),
+                "ground_truth": ground_truth,
+            }
+            if direct_worker
+            else {
                 "orchestrator": roster.orchestrator,
                 "result": _agent_result_payload(final),
                 "ground_truth": ground_truth,
-            },
+            }
         )
+        _write_json(output_dir / "synthesis.json", synthesis_payload)
     if not final.ok:
         if output_dir is not None:
             finished_at = datetime.now(timezone.utc)
+            if direct_worker:
+                (output_dir / "final.txt").write_text(final.text + "\n")
             _write_json(
                 output_dir / "run.json",
                 _run_payload(
@@ -1925,9 +1998,15 @@ def run(
                     code_graph_delta=code_graph_delta,
                     context_eval_payload=context_eval_payload,
                     suspected_noop=suspected_noop,
+                    worker=worker,
                 ),
             )
-        print(f"error: orchestrator failed during synthesis: {final.detail}", file=sys.stderr)
+        if direct_worker:
+            print(f"error: worker failed: {final.detail}", file=sys.stderr)
+            if final.text:
+                print(final.text)
+        else:
+            print(f"error: orchestrator failed during synthesis: {final.detail}", file=sys.stderr)
         return 2
     if output_dir is not None:
         finished_at = datetime.now(timezone.utc)
@@ -1954,6 +2033,7 @@ def run(
                 code_graph_delta=code_graph_delta,
                 context_eval_payload=context_eval_payload,
                 suspected_noop=suspected_noop,
+                worker=worker,
             ),
         )
     if handoff_inbox is not None:
@@ -1995,6 +2075,7 @@ def run(
                         code_graph_delta=code_graph_delta,
                         context_eval_payload=context_eval_payload,
                         suspected_noop=suspected_noop,
+                        worker=worker,
                     ),
                 )
             print(f"error: {detail}", file=sys.stderr)
@@ -2026,6 +2107,7 @@ def run(
                     code_graph_delta=code_graph_delta,
                     context_eval_payload=context_eval_payload,
                     suspected_noop=suspected_noop,
+                    worker=worker,
                 ),
             )
     print(final.text)
