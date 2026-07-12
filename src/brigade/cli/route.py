@@ -13,6 +13,13 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_route.add_argument("task", help="Task description to route.")
     p_route.add_argument("--template", default=None, help="Task template hint (e.g. vertical-slice, docs).")
     p_route.add_argument(
+        "--changed-path",
+        action="append",
+        default=[],
+        dest="changed_paths",
+        help="Changed file path to feed surface derivation. Repeatable.",
+    )
+    p_route.add_argument(
         "--approve-ship",
         action="store_true",
         help="Grant the ship approval signal so a requested ship stage is released instead of held.",
@@ -27,7 +34,7 @@ def dispatch(args) -> int:
     from ..route_catalog import route_brief
 
     approvals = ("ship-approved",) if args.approve_ship else ()
-    brief = route_brief(args.task, template=args.template, approvals=approvals)
+    brief = route_brief(args.task, template=args.template, changed_paths=args.changed_paths, approvals=approvals)
     if args.json:
         print(json.dumps(brief.payload(), indent=2))
         return 0

@@ -67,6 +67,11 @@ def register(sub: argparse._SubParsersAction) -> None:
         help="Release a ship stage the route would otherwise hold for approval.",
     )
     p_run.add_argument(
+        "--route-template",
+        default=None,
+        help="Task template hint for route derivation (e.g. vertical-slice, bugfix, docs).",
+    )
+    p_run.add_argument(
         "--sandbox",
         choices=["read-only", "workspace-write", "danger-full-access"],
         default=None,
@@ -242,6 +247,8 @@ def dispatch(args) -> int:
                 run_kwargs["route_enabled"] = False
             if args.approve_ship:
                 run_kwargs["route_approvals"] = ("ship-approved",)
+            if args.route_template is not None:
+                run_kwargs["route_template"] = args.route_template
             rc = aboyeur_mod.run(args.task, loaded_roster, **run_kwargs)
             if args.worktree and output_dir is not None:
                 # Until the patch is proven good, the worktree is the only

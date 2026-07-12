@@ -1239,6 +1239,29 @@ def _git_stdout(cwd: Path, *args: str) -> tuple[str, str | None]:
     return "", detail
 
 
+_ROUTE_CHANGED_PATHS_CAP = 200
+
+
+def _route_changed_paths(cwd: Path | None) -> tuple[str, ...]:
+    """Tracked-modified plus untracked paths, for route surface derivation.
+    Best-effort per source: a repo with no commits still yields its untracked
+    files, and any git failure means fewer path signals, never a failed run."""
+    if cwd is None:
+        return ()
+    paths: list[str] = []
+    try:
+        changed, error = _git_stdout(cwd, "diff", "--name-only", "HEAD")
+        if error is None:
+            paths.extend(line.strip() for line in changed.splitlines() if line.strip())
+    except Exception:
+        pass
+    try:
+        paths.extend(runguard._untracked_files(cwd))
+    except Exception:
+        pass
+    return tuple(paths[:_ROUTE_CHANGED_PATHS_CAP])
+
+
 def _receipt_git_snapshot(cwd: Path | None) -> dict[str, object] | None:
     if cwd is None:
         return None
@@ -1597,6 +1620,7 @@ def run(
     codex_transport: str | None = None,
     route_enabled: bool = True,
     route_approvals: tuple[str, ...] = (),
+    route_template: str | None = None,
 ) -> int:
     started_at = datetime.now(timezone.utc)
     transport_for_payload = codex_transport or roster.codex_transport
@@ -1617,7 +1641,16 @@ def run(
     code_graph = brief_set.code_graph
     drift_impact = brief_set.drift_impact
     evidence = brief_set.evidence
-    route = route_brief(task, approvals=route_approvals) if route_enabled else None
+    route = (
+        route_brief(
+            task,
+            template=route_template,
+            changed_paths=_route_changed_paths(cwd),
+            approvals=route_approvals,
+        )
+        if route_enabled
+        else None
+    )
     code_graph_delta = _initial_code_graph_delta(
         code_graph_enabled=code_graph_enabled,
         dry_run=dry_run,

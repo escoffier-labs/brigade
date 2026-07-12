@@ -2152,3 +2152,57 @@ def test_plan_json_repair_path_still_gets_coverage_retry(monkeypatch):
     assert "does not cover required route stages" in calls[2]
     assert assignments[0].covers == ("implement", "correctness-review", "verify")
     assert [a["stage"] for a in attempts] == ["initial", "correction", "coverage-correction"]
+
+
+def test_route_changed_paths_from_git(tmp_path):
+    _init_git_repo(tmp_path)
+    (tmp_path / "auth").mkdir()
+    (tmp_path / "auth" / "session.py").write_text("x = 1\n")
+    paths = aboyeur._route_changed_paths(tmp_path)
+    assert "auth/session.py" in paths
+    assert aboyeur._route_changed_paths(None) == ()
+    assert aboyeur._route_changed_paths(tmp_path / "not-a-repo") == ()
+
+
+def test_run_route_picks_up_dirty_auth_surface(monkeypatch, tmp_path, capsys):
+    _init_git_repo(tmp_path)
+    (tmp_path / "auth").mkdir()
+    (tmp_path / "auth" / "session.py").write_text("x = 1\n")
+
+    def fake_run_agent(cli_ref, prompt, timeout=600.0, cwd=None, read_only=False):
+        return agents.AgentResult(
+            text=_route_plan(
+                [["test-author", "implement", "correctness-review", "security-review", "test-gap-review", "verify"]]
+            ),
+            ok=True,
+        )
+
+    monkeypatch.setattr(aboyeur.agents, "run_agent", fake_run_agent)
+    output_dir = tmp_path / "out"
+    assert aboyeur.run("tidy the session helper", _roster(), cwd=tmp_path, output_dir=output_dir) == 0
+    payload = json.loads((output_dir / "run.json").read_text())
+    assert "auth-surface" in payload["route"]["signals"]
+    assert "security-review" in payload["route"]["route"]
+
+
+def test_run_route_template_reaches_derivation(monkeypatch, tmp_path):
+    def fake_run_agent(cli_ref, prompt, timeout=600.0, cwd=None, read_only=False):
+        return agents.AgentResult(
+            text=_route_plan([["test-author", "implement", "correctness-review", "test-gap-review", "verify"]]),
+            ok=True,
+        )
+
+    monkeypatch.setattr(aboyeur.agents, "run_agent", fake_run_agent)
+    output_dir = tmp_path / "out"
+    assert (
+        aboyeur.run(
+            "add pagination to the list endpoint",
+            _roster(),
+            output_dir=output_dir,
+            route_template="vertical-slice",
+        )
+        == 0
+    )
+    payload = json.loads((output_dir / "run.json").read_text())
+    assert "needs-tests" in payload["route"]["signals"]
+    assert "test-author" in payload["route"]["route"]

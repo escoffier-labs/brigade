@@ -11,7 +11,10 @@ plans it.
    template hint and changed paths) to signals: the path (`code`, `docs`, `system`)
    plus surfaces like `auth-surface`, `ui-touched`, `perf-surface`, `migration`,
    `bug`, `needs-tests`, `destructive-op`, `ship-requested`. Keyword and path
-   heuristics only, no model call.
+   heuristics only, no model call. At run time the changed paths come from git
+   (tracked modifications plus untracked files, capped at 200), matched on whole
+   path segments so `author.py` never fires the auth surface. Pass a template
+   hint with `brigade run --route-template vertical-slice`.
 2. **Route.** `brigade/router.py` composes the stages those signals pull in from
    `route_catalog.DEFAULT_CATALOG`. Stages declare what they subscribe to, the
    artifacts they need and produce, and optional while/until locks. The router
@@ -46,6 +49,7 @@ did not push" is a designed hold, not a worker forgetting.
 brigade route "add rate limiting to the login endpoint"
 brigade route "implement the export module and open a PR" --json
 brigade route "add pagination" --template vertical-slice
+brigade route "polish the settings screen" --changed-path web/src/Settings.tsx
 ```
 
 Sample output:
