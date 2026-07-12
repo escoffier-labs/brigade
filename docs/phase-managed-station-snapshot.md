@@ -18,17 +18,17 @@ Key tech: Python standard library, canonical JSON, SHA-256, immutable dataclass 
 
 ## Task 1: Define the missing runtime contract
 
-- [ ] Add failing tests that expect:
+- [x] Add failing tests that expect:
   - `managed_snapshot.load_snapshot()` returns schema `brigade.managed_snapshot.v1`.
   - names are GraphTrail, MiseLedger, Agent Pantry, Token Glace, Skillet, and Content Guard.
   - Content Guard is `embedded` with owner `brigade-cli`.
   - Skillet stays a `skill-roster` and is not added to `managed.all_tools()`.
   - the 4 active executable tools match `managed.resolve()` for station, command, install, and every surface field.
-- [ ] Run `tests/test_managed_snapshot.py` and watch it fail because the module and bundle do not exist.
+- [x] Run `tests/test_managed_snapshot.py` and watch it fail because the module and bundle do not exist.
 
 ## Task 2: Build and load canonical snapshots
 
-- [ ] Add `src/brigade/managed_snapshot.py` with these public functions:
+- [x] Add `src/brigade/managed_snapshot.py` with these public functions:
 
 ```python
 SCHEMA = "brigade.managed_snapshot.v1"
@@ -133,22 +133,22 @@ def executable_contracts(payload: Mapping[str, Any] | None = None) -> dict[str, 
 
 ## Task 3: Generate the reviewed bundle
 
-- [ ] Add `scripts/managed_snapshot.py` with:
+- [x] Add `scripts/managed_snapshot.py` with:
   - `--write` with one or more manifest path arguments to build and atomically write the bundle.
   - `--check` to load the current bundle and require byte-for-byte canonical rendering.
   - no default network or sibling-repo discovery.
-- [ ] Generate from the 6 explicit worktree or repository paths:
+- [x] Generate from the 6 explicit worktree or repository paths:
   - GraphTrail
   - MiseLedger
   - Agent Pantry
   - Token Glace
   - Skillet
   - Content Guard
-- [ ] Assert the output contains the exact commits recorded in the station-manifest plan.
+- [x] Assert the output contains the exact commits recorded in the station-manifest plan.
 
 ## Task 4: Consume the snapshot at runtime
 
-- [ ] In `managed.py`, add a pure conversion from one snapshot surface:
+- [x] In `managed.py`, add a pure conversion from one snapshot surface:
 
 ```python
 def _surface_from_snapshot(raw: dict[str, object]) -> MachineSurface:
@@ -163,13 +163,13 @@ def _surface_from_snapshot(raw: dict[str, object]) -> MachineSurface:
     )
 ```
 
-- [ ] Add `_apply_snapshot(tool, contract)` using `dataclasses.replace`. Replace only station, command, summary, install args, and surfaces. Preserve `wire` and `doctor`.
-- [ ] After the existing `_TOOLS` literal, load `managed_snapshot.executable_contracts()` and replace matching tools. A missing bundled snapshot is a package error and must not fail open.
-- [ ] Prove the snapshot controls runtime data by changing one temporary snapshot field in a unit test and asserting the converted tool uses it while retaining the original callables.
+- [x] Add `_apply_snapshot(tool, contract)` using `dataclasses.replace`. Replace only station, command, summary, install args, and surfaces. Preserve `wire` and `doctor`.
+- [x] After the existing `_TOOLS` literal, load `managed_snapshot.executable_contracts()` and replace matching tools. A missing bundled snapshot is a package error and must not fail open.
+- [x] Prove the snapshot controls runtime data by changing one temporary snapshot field in a unit test and asserting the converted tool uses it while retaining the original callables.
 
 ## Task 5: Gate drift
 
-- [ ] Add `managed_snapshot.py --check` to `scripts/verify` immediately after version sync.
-- [ ] Run the focused tests through Brigade.
-- [ ] Run the full Brigade gate through Brigade.
-- [ ] Commit `feat(stations): load reviewed managed snapshot`.
+- [x] Add `managed_snapshot.py --check` to `scripts/verify` immediately after version sync.
+- [x] Run the focused tests through Brigade.
+- [x] Run the full Brigade gate through Brigade.
+- [x] Commit `feat(stations): load reviewed managed snapshot`.

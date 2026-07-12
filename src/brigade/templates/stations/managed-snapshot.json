@@ -1,0 +1,369 @@
+{
+  "records": [
+    {
+      "manifest": {
+        "lifecycle": "active",
+        "name": "agentpantry",
+        "schema": "brigade.station.v1",
+        "station": "pantry",
+        "summary": "browser session auth sync through a process-boundary Go binary",
+        "tools": [
+          {
+            "command": "agentpantry",
+            "install": [
+              "go",
+              "install",
+              "github.com/escoffier-labs/agentpantry/cmd/agentpantry@latest"
+            ],
+            "kind": "executable",
+            "name": "agentpantry",
+            "summary": "browser session auth sync from source to sink",
+            "surfaces": [
+              {
+                "command": [
+                  "agentpantry",
+                  "doctor",
+                  "--json",
+                  "--no-net"
+                ],
+                "kind": "doctor-json",
+                "probe": [
+                  "agentpantry",
+                  "doctor",
+                  "--help"
+                ],
+                "probe_contains": [
+                  "-json",
+                  "-no-net"
+                ],
+                "read_only": false,
+                "timeout_seconds": 10
+              },
+              {
+                "command": [
+                  "agentpantry",
+                  "inventory",
+                  "--json"
+                ],
+                "kind": "summary-json",
+                "max_chars": 4000,
+                "probe": [
+                  "agentpantry",
+                  "inventory",
+                  "--help"
+                ],
+                "probe_contains": [
+                  "-json"
+                ],
+                "read_only": true,
+                "timeout_seconds": 10
+              },
+              {
+                "command": [
+                  "agentpantry",
+                  "version",
+                  "--json"
+                ],
+                "kind": "verify-exit",
+                "read_only": true,
+                "timeout_seconds": 10
+              }
+            ]
+          }
+        ]
+      },
+      "source": {
+        "manifest_sha256": "5bf46de283063affbd1e3fbabf131fa283b6f8ecc8194f5b873e1861e4932c6a",
+        "repository": "agentpantry",
+        "revision": "d9470b1e29125eaad214b71e96969ceebd0925a6"
+      }
+    },
+    {
+      "manifest": {
+        "lifecycle": "embedded",
+        "name": "content-guard",
+        "owner": "brigade-cli",
+        "schema": "brigade.station.v1",
+        "station": "guard",
+        "summary": "historical standalone package now maintained inside brigade-cli",
+        "tools": []
+      },
+      "source": {
+        "manifest_sha256": "5d488d470c5fb7ac62cae8c3fe774673d5fad1d1d107bc09a7f9d628fde5b6fe",
+        "repository": "content-guard",
+        "revision": "87e095e07fef1f925903f1cce28b5152c58a22b8"
+      }
+    },
+    {
+      "manifest": {
+        "lifecycle": "active",
+        "name": "graphtrail",
+        "schema": "brigade.station.v1",
+        "station": "search",
+        "summary": "local code-graph CLI: callers, callees, impact, context briefs, and structural diffs",
+        "tools": [
+          {
+            "command": "graphtrail",
+            "install": [
+              "cargo",
+              "install",
+              "graphtrail"
+            ],
+            "kind": "executable",
+            "name": "graphtrail",
+            "summary": "local code-graph CLI: callers, callees, impact, context briefs, and structural diffs",
+            "surfaces": [
+              {
+                "command": [
+                  "graphtrail",
+                  "context",
+                  "<task>",
+                  "--markdown"
+                ],
+                "kind": "brief-markdown",
+                "max_chars": 4000,
+                "probe": [
+                  "graphtrail",
+                  "context",
+                  "--help"
+                ],
+                "probe_contains": [
+                  "--markdown"
+                ],
+                "read_only": true,
+                "timeout_seconds": 10
+              },
+              {
+                "command": [
+                  "graphtrail",
+                  "--version"
+                ],
+                "kind": "verify-exit",
+                "read_only": true,
+                "timeout_seconds": 10
+              },
+              {
+                "command": [
+                  "graphtrail",
+                  "doctor",
+                  "--json"
+                ],
+                "kind": "doctor-json",
+                "probe": [
+                  "graphtrail",
+                  "doctor",
+                  "--help"
+                ],
+                "probe_contains": [
+                  "--json"
+                ],
+                "read_only": true,
+                "timeout_seconds": 30
+              }
+            ]
+          }
+        ]
+      },
+      "source": {
+        "manifest_sha256": "0e8d9f7a962d5f20857713e39698b567cce7a9e9043db732cf6ab266f3f47176",
+        "repository": "graphtrail",
+        "revision": "e51ed5d22fd0f1f11803c356fdb5b932892a094b"
+      }
+    },
+    {
+      "manifest": {
+        "lifecycle": "active",
+        "name": "miseledger",
+        "schema": "brigade.station.v1",
+        "station": "evidence",
+        "summary": "local evidence archive, bounded retrieval, and untrusted context bundles",
+        "tools": [
+          {
+            "command": "miseledger",
+            "install": [
+              "go",
+              "install",
+              "github.com/escoffier-labs/miseledger/cmd/miseledger@latest"
+            ],
+            "kind": "executable",
+            "name": "miseledger",
+            "summary": "local-first SQLite archive for agent sessions and imported evidence",
+            "surfaces": [
+              {
+                "command": [
+                  "miseledger",
+                  "doctor",
+                  "--json"
+                ],
+                "kind": "doctor-json",
+                "probe": [
+                  "miseledger",
+                  "doctor",
+                  "--help"
+                ],
+                "probe_contains": [
+                  "--json",
+                  "--mcp",
+                  "--archive"
+                ],
+                "read_only": false,
+                "timeout_seconds": 120
+              },
+              {
+                "command": [
+                  "miseledger",
+                  "evidence",
+                  "<task>",
+                  "--markdown",
+                  "--limit",
+                  "5"
+                ],
+                "kind": "brief-markdown",
+                "max_chars": 4000,
+                "probe": [
+                  "miseledger",
+                  "evidence",
+                  "--help"
+                ],
+                "probe_contains": [
+                  "--markdown",
+                  "--limit"
+                ],
+                "read_only": false,
+                "timeout_seconds": 10
+              },
+              {
+                "command": [
+                  "miseledger",
+                  "version"
+                ],
+                "kind": "verify-exit",
+                "read_only": true,
+                "timeout_seconds": 10
+              }
+            ]
+          }
+        ]
+      },
+      "source": {
+        "manifest_sha256": "fe41dcad9536bbd23832501f20b1cbd1afd60af79e6a9672a36fdd6235cebfe1",
+        "repository": "miseledger",
+        "revision": "87c563dcb6bd1950ac0c28542de47c1556b9f7ea"
+      }
+    },
+    {
+      "manifest": {
+        "lifecycle": "active",
+        "name": "skillet",
+        "schema": "brigade.station.v1",
+        "station": "skills",
+        "summary": "reviewed portable agent skill roster",
+        "tools": [
+          {
+            "install": [
+              "npx",
+              "skills",
+              "add",
+              "escoffier-labs/skillet"
+            ],
+            "kind": "skill-roster",
+            "name": "skillet",
+            "summary": "portable skill packages for supported coding harnesses",
+            "surfaces": [
+              {
+                "kind": "verify-exit",
+                "probe": [
+                  "bash",
+                  "tests/lint-skills.sh"
+                ],
+                "probe_contains": [
+                  "[ok] catalog (36 skills)"
+                ],
+                "timeout_seconds": 60
+              }
+            ]
+          }
+        ]
+      },
+      "source": {
+        "manifest_sha256": "f09f9a43eb4e1baea1afd9e23b813e0b9966e5fe25517670390a89904f26a6e7",
+        "repository": "skillet",
+        "revision": "74520a2b8e40c1959de1044d39e2555b33c6c4cd"
+      }
+    },
+    {
+      "manifest": {
+        "lifecycle": "active",
+        "name": "token-glace",
+        "schema": "brigade.station.v1",
+        "station": "tokens",
+        "summary": "output compaction and token-use summaries",
+        "tools": [
+          {
+            "command": "token-glace",
+            "install": [
+              "npm",
+              "install",
+              "-g",
+              "https://github.com/escoffier-labs/token-glace/releases/download/v0.8.3/token-glace-v0.8.3.tar.gz"
+            ],
+            "kind": "executable",
+            "name": "token-glace",
+            "summary": "output compaction through host hooks",
+            "surfaces": [
+              {
+                "command": [
+                  "token-glace",
+                  "doctor",
+                  "hooks",
+                  "--format",
+                  "json"
+                ],
+                "kind": "doctor-json",
+                "read_only": true,
+                "timeout_seconds": 30
+              },
+              {
+                "command": [
+                  "token-glace",
+                  "stats",
+                  "--format",
+                  "json",
+                  "--timezone",
+                  "utc"
+                ],
+                "kind": "summary-json",
+                "max_chars": 4000,
+                "probe": [
+                  "token-glace",
+                  "--help"
+                ],
+                "probe_contains": [
+                  "--format",
+                  "--timezone"
+                ],
+                "read_only": true,
+                "timeout_seconds": 30
+              },
+              {
+                "command": [
+                  "token-glace",
+                  "verify"
+                ],
+                "kind": "verify-exit",
+                "read_only": true,
+                "timeout_seconds": 60
+              }
+            ]
+          }
+        ]
+      },
+      "source": {
+        "manifest_sha256": "2f3d7f05a159a664c5a020e285c3c05ca91cbda93c981af5f1b8a1df0fd2c45e",
+        "repository": "token-glace",
+        "revision": "44db23dcd0605780de1b2fbb30d99dbecf6ce6c4"
+      }
+    }
+  ],
+  "schema": "brigade.managed_snapshot.v1"
+}
