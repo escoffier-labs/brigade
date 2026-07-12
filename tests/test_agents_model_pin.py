@@ -100,11 +100,22 @@ def test_pins_model_for_cursor():
         "-p",
         "--output-format",
         "text",
+        "-f",
         "P",
     ]
     read_only = agents.build_argv("cursor", "P", read_only=True, model="gpt-5")
-    assert read_only[:3] == ["cursor-agent", "--model", "gpt-5"]
-    assert read_only[-1] == "P"
+    assert read_only == [
+        "cursor-agent",
+        "--model",
+        "gpt-5",
+        "-p",
+        "--mode",
+        "plan",
+        "--output-format",
+        "text",
+        "--trust",
+        "P",
+    ]
 
 
 def test_pins_model_for_antigravity():

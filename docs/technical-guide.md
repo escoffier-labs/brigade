@@ -371,7 +371,7 @@ brigade runs interrupt latest
 Both commands are local Unix socket requests. They refuse exec-transport runs, completed runs whose socket has been cleaned up, and app-server runs that have no active matching turn.
 
 The `cli` values are adapters for installed command-line tools:
-`codex`, `claude`, `opencode`, `antigravity`, `pi`, `cursor`, and `ollama:<model>`. Brigade shells out to those tools and keeps no provider keys. The Antigravity adapter uses the installed `agy --print` non-interactive CLI path, the Pi adapter uses `pi -p`, and the Cursor adapter uses `cursor-agent -p --output-format text`.
+`codex`, `claude`, `opencode`, `antigravity`, `pi`, `cursor`, and `ollama:<model>`. Brigade shells out to those tools and keeps no provider keys. The Antigravity adapter uses the installed `agy --print` non-interactive CLI path, the Pi adapter uses `pi -p`, and the Cursor adapter uses `cursor-agent -p --output-format text -f` (`--trust` plus `--mode plan` on read-only runs; without a trust flag, headless cursor-agent refuses untrusted workspaces and exits 0).
 Run `brigade roster doctor` to validate roster syntax and check which CLIs are on `PATH`.
 When `--roster` is omitted, `brigade run` first reads `--cwd/.brigade/roster.toml`;
 if that file is missing, it falls back to `Path.home()/.brigade/roster.toml`.

@@ -18,7 +18,14 @@ def test_build_argv_for_known_clis():
         "hi",
     ]
     assert agents.build_argv("pi", "hi") == ["pi", "-p", "hi"]
-    assert agents.build_argv("cursor", "hi") == ["cursor-agent", "-p", "--output-format", "text", "hi"]
+    assert agents.build_argv("cursor", "hi") == [
+        "cursor-agent",
+        "-p",
+        "--output-format",
+        "text",
+        "-f",
+        "hi",
+    ]
     assert agents.build_argv("aider", "hi") == ["aider", "--yes", "--no-auto-commits", "--message", "hi"]
     assert agents.build_argv("goose", "hi") == ["goose", "run", "--no-session", "-t", "hi"]
     assert agents.build_argv("continue", "hi") == ["cn", "-p", "hi"]
@@ -59,6 +66,7 @@ def test_build_argv_for_read_only_codex():
         "plan",
         "--output-format",
         "text",
+        "--trust",
         "hi",
     ]
     assert agents.build_argv("aider", "hi", read_only=True) == [
@@ -173,6 +181,19 @@ def test_build_argv_antigravity_read_only_keeps_sandbox_without_write_flags(tmp_
     assert argv == ["agy", "--sandbox", "--print", "hi"]
     assert "--add-dir" not in argv
     assert "--dangerously-skip-permissions" not in argv
+
+
+def test_build_argv_cursor_sandbox_read_only_uses_plan_mode():
+    assert agents.build_argv("cursor", "hi", sandbox="read-only") == [
+        "cursor-agent",
+        "-p",
+        "--mode",
+        "plan",
+        "--output-format",
+        "text",
+        "--trust",
+        "hi",
+    ]
 
 
 def test_build_argv_kimi_writable_uses_yolo_and_read_only_keeps_plan():
