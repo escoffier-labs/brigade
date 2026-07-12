@@ -189,7 +189,8 @@ _SIGNAL_PATTERNS: list[tuple[str, str]] = [
     ),
     (
         "ui-touched",
-        r"\b(ui|frontend|front-end|component|css|styling|layout|button|modal|form|page|screen|responsive)s?\b",
+        r"\b(ui|frontend|front-end|component|css|styling|layout|button|modal|dialog|form|page|screen|responsive"
+        r"|panel|dashboard|widget|sidebar|navbar|nav menu|tooltip|view)s?\b",
     ),
     (
         "perf-surface",
@@ -218,7 +219,10 @@ _SYSTEM_HINT = re.compile(
 _REPO_HINT = re.compile(
     r"\b(in (the|this|our) (repo|codebase|project)|repo file|template|source (code|file)|\.py|\.ts|\.go|\.rs)\b"
 )
-_DOCS_HINT = re.compile(r"\b(readme|changelog|docs?( page| site)?|documentation|typo)\b")
+_DOCS_HINT = re.compile(
+    r"\b(readme|changelog|docs?( page| site)?|documentation|typo|quickstart|quick start"
+    r"|guide|tutorial|contributing)\b"
+)
 # A conventional-commit code prefix means the task is code work even when it
 # mentions docs in passing: `fix(install): ... referencing docs` is a code fix,
 # not a docs edit. Prose "fix typo in README" has no colon and stays docs. A
@@ -348,13 +352,14 @@ def derive_signals(task: str, template: str | None = None, changed_paths=(), ove
         signals = _apply_overrides(signals, overrides)
 
     if signals and signals[0] == "code":
-        # Auth-surface work always earns tests: security-critical logic is the
-        # last place to skip them.
+        # Auth-surface and migration work always earn tests: security-critical
+        # logic and a data backfill are the last places to skip them.
         tested = (
             template in _TESTED_TEMPLATES
             or "significant-build" in signals
             or "bug" in signals
             or "auth-surface" in signals
+            or "migration" in signals
         )
         if tested and "needs-tests" not in signals:
             signals.append("needs-tests")
@@ -362,9 +367,13 @@ def derive_signals(task: str, template: str | None = None, changed_paths=(), ove
     return signals
 
 
-# Signals that mark a task as code work even when a docs hint is present.
-# `bug` and `ship-requested` are excluded: "fix typo in README" stays docs.
-_CODE_SHAPED = {"auth-surface", "ui-touched", "perf-surface", "migration", "significant-build"}
+# Signals that mark a task as code work even when a docs hint is present:
+# concrete code surfaces. `bug` and `ship-requested` are excluded ("fix typo in
+# README" stays docs), and so is `significant-build` - "rewrite" and "redesign"
+# describe a docs rewrite as readily as a code one, so a docs hint should win.
+# "rewrite the QUICKSTART" is docs; "rewrite the auth module" stays code on its
+# auth-surface hit.
+_CODE_SHAPED = {"auth-surface", "ui-touched", "perf-surface", "migration"}
 
 
 def _code_shaped_hit(text: str) -> bool:

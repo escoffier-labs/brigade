@@ -498,3 +498,37 @@ def test_validate_overrides_allows_non_path_signals() -> None:
     from brigade.route_catalog import validate_overrides
 
     validate_overrides(["+auth-surface", "~ship-requested", "perf-surface"])  # no raise
+
+
+# --- calibration pass (2026-07-12): real misroutes found by routing task corpus ---
+
+
+def test_calibration_docs_rewrite_not_code() -> None:
+    # "rewrite the QUICKSTART" routed code because "rewrite" fired significant-build
+    # and QUICKSTART was not a docs hint. A docs hint now beats a bare rewrite.
+    assert derive_signals("rewrite the QUICKSTART to lead with the operator flow")[0] == "docs"
+    assert derive_signals("update the contributing guide")[0] == "docs"
+
+
+def test_calibration_significant_build_alone_does_not_force_code_over_docs() -> None:
+    # significant-build is a depth signal, not a "this is code" surface.
+    assert derive_signals("redesign the tutorial")[0] == "docs"
+    # but a concrete code surface still wins over a docs word:
+    assert derive_signals("rewrite the auth module described in the README")[0] == "code"
+    # and a plain rewrite with no docs hint stays code:
+    assert derive_signals("rewrite the export module end to end")[0] == "code"
+
+
+def test_calibration_ui_surface_covers_common_words() -> None:
+    for task in (
+        "polish the run-status panel in the web dashboard",
+        "fix the sidebar widget alignment",
+        "add a tooltip to the settings view",
+    ):
+        assert "ui-touched" in derive_signals(task), task
+
+
+def test_calibration_migration_pulls_tests() -> None:
+    signals = derive_signals("add a nullable owner_id column to the receipts table and backfill it")
+    assert "migration" in signals
+    assert "needs-tests" in signals
