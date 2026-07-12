@@ -196,9 +196,7 @@ class AgentResult:
 
 def is_known(cli_ref: str) -> bool:
     # a bare "codex-cloud:" with no environment id is not a valid seat
-    has_cloud_env = (
-        cli_ref.startswith(_CODEX_CLOUD_PREFIX) and len(cli_ref) > len(_CODEX_CLOUD_PREFIX)
-    )
+    has_cloud_env = cli_ref.startswith(_CODEX_CLOUD_PREFIX) and len(cli_ref) > len(_CODEX_CLOUD_PREFIX)
     return cli_ref in _ADAPTERS or cli_ref.startswith(_OLLAMA_PREFIX) or has_cloud_env
 
 
@@ -310,15 +308,17 @@ def run_agent(
         return AgentResult(text="", ok=False, detail=f"{command_for(cli_ref)} not installed")
 
     if cli_ref.startswith(_CODEX_CLOUD_PREFIX):
-        env_id = cli_ref[len(_CODEX_CLOUD_PREFIX):]
+        env_id = cli_ref[len(_CODEX_CLOUD_PREFIX) :]
         if not env_id:
             return AgentResult(
-                text="", ok=False,
+                text="",
+                ok=False,
                 detail="codex-cloud reference needs an environment id: codex-cloud:<env-id>",
             )
         if model is not None:
             return AgentResult(
-                text="", ok=False,
+                text="",
+                ok=False,
                 detail="codex-cloud does not take a model pin; the cloud environment sets the model",
             )
         from . import codex_cloud

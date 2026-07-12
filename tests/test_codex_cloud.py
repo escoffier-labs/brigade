@@ -53,9 +53,9 @@ def test_run_agent_rejects_model_pin(monkeypatch):
 
 
 def test_parse_task_id_variants():
-    assert codex_cloud.parse_task_id(
-        "Created https://chatgpt.com/codex/tasks/task_e_abc123 for review"
-    ) == "task_e_abc123"
+    assert (
+        codex_cloud.parse_task_id("Created https://chatgpt.com/codex/tasks/task_e_abc123 for review") == "task_e_abc123"
+    )
     assert codex_cloud.parse_task_id("Task ID: 9f8e7d6c5b") == "9f8e7d6c5b"
     assert codex_cloud.parse_task_id("submitted task_abc-42 ok") == "task_abc-42"
     assert codex_cloud.parse_task_id("task_xyz9\n") == "task_xyz9"
@@ -81,19 +81,26 @@ def _result(code=0, stdout="", stderr=""):
 
 
 def test_run_cloud_task_happy_path(monkeypatch):
-    fake = FakeRuns({
-        "exec": [_result(stdout="Submitted https://chatgpt.com/codex/tasks/task_ok1")],
-        "status": [
-            _result(stdout="status: queued"),
-            _result(stdout="status: running"),
-            _result(stdout="status: completed"),
-        ],
-        "diff": [_result(stdout="diff --git a/f b/f\n+fixed")],
-    })
+    fake = FakeRuns(
+        {
+            "exec": [_result(stdout="Submitted https://chatgpt.com/codex/tasks/task_ok1")],
+            "status": [
+                _result(stdout="status: queued"),
+                _result(stdout="status: running"),
+                _result(stdout="status: completed"),
+            ],
+            "diff": [_result(stdout="diff --git a/f b/f\n+fixed")],
+        }
+    )
     monkeypatch.setattr(codex_cloud.proc, "run", fake)
     result = codex_cloud.run_cloud_task(
-        "fix it", env_id="env-123", timeout=600, cwd=Path("."),
-        poll_interval=0, sleep=lambda s: None, clock=lambda: 0,
+        "fix it",
+        env_id="env-123",
+        timeout=600,
+        cwd=Path("."),
+        poll_interval=0,
+        sleep=lambda s: None,
+        clock=lambda: 0,
     )
     assert result.ok
     assert result.thread_id == "task_ok1"
@@ -104,13 +111,20 @@ def test_run_cloud_task_happy_path(monkeypatch):
 
 
 def test_run_cloud_task_failure_status(monkeypatch):
-    fake = FakeRuns({
-        "exec": [_result(stdout="task_bad1")],
-        "status": [_result(stdout="status: failed (environment setup)")],
-    })
+    fake = FakeRuns(
+        {
+            "exec": [_result(stdout="task_bad1")],
+            "status": [_result(stdout="status: failed (environment setup)")],
+        }
+    )
     monkeypatch.setattr(codex_cloud.proc, "run", fake)
     result = codex_cloud.run_cloud_task(
-        "x", env_id="e", timeout=600, poll_interval=0, sleep=lambda s: None, clock=lambda: 0,
+        "x",
+        env_id="e",
+        timeout=600,
+        poll_interval=0,
+        sleep=lambda s: None,
+        clock=lambda: 0,
     )
     assert not result.ok
     assert result.status == "failed"
@@ -118,27 +132,39 @@ def test_run_cloud_task_failure_status(monkeypatch):
 
 
 def test_run_cloud_task_submit_error(monkeypatch):
-    fake = FakeRuns({
-        "exec": [_result(code=1, stderr="Error: no cloud environments are available")],
-    })
+    fake = FakeRuns(
+        {
+            "exec": [_result(code=1, stderr="Error: no cloud environments are available")],
+        }
+    )
     monkeypatch.setattr(codex_cloud.proc, "run", fake)
     result = codex_cloud.run_cloud_task(
-        "x", env_id="e", timeout=600, sleep=lambda s: None, clock=lambda: 0,
+        "x",
+        env_id="e",
+        timeout=600,
+        sleep=lambda s: None,
+        clock=lambda: 0,
     )
     assert not result.ok
     assert "no cloud environments" in result.detail
 
 
 def test_run_cloud_task_timeout_reports_task_id(monkeypatch):
-    fake = FakeRuns({
-        "exec": [_result(stdout="task_slow1")],
-        "status": [_result(stdout="status: running")],
-    })
+    fake = FakeRuns(
+        {
+            "exec": [_result(stdout="task_slow1")],
+            "status": [_result(stdout="status: running")],
+        }
+    )
     monkeypatch.setattr(codex_cloud.proc, "run", fake)
     ticks = iter([0, 1, 700, 701, 702])
     result = codex_cloud.run_cloud_task(
-        "x", env_id="e", timeout=600, poll_interval=0,
-        sleep=lambda s: None, clock=lambda: next(ticks),
+        "x",
+        env_id="e",
+        timeout=600,
+        poll_interval=0,
+        sleep=lambda s: None,
+        clock=lambda: next(ticks),
     )
     assert not result.ok
     assert result.status == "pending"
@@ -146,18 +172,24 @@ def test_run_cloud_task_timeout_reports_task_id(monkeypatch):
 
 
 def test_run_cloud_task_polls_past_incidental_failure_words(monkeypatch):
-    fake = FakeRuns({
-        "exec": [_result(stdout="task_title1")],
-        "status": [
-            _result(stdout="Task: fix failed tests\nStatus: running"),
-            _result(stdout="Task: fix failed tests\nStatus: completed"),
-        ],
-        "diff": [_result(stdout="")],
-    })
+    fake = FakeRuns(
+        {
+            "exec": [_result(stdout="task_title1")],
+            "status": [
+                _result(stdout="Task: fix failed tests\nStatus: running"),
+                _result(stdout="Task: fix failed tests\nStatus: completed"),
+            ],
+            "diff": [_result(stdout="")],
+        }
+    )
     monkeypatch.setattr(codex_cloud.proc, "run", fake)
     result = codex_cloud.run_cloud_task(
-        "fix failed tests", env_id="e", timeout=600,
-        poll_interval=0, sleep=lambda s: None, clock=lambda: 0,
+        "fix failed tests",
+        env_id="e",
+        timeout=600,
+        poll_interval=0,
+        sleep=lambda s: None,
+        clock=lambda: 0,
     )
     assert result.ok
     assert result.status == "completed"
@@ -165,14 +197,21 @@ def test_run_cloud_task_polls_past_incidental_failure_words(monkeypatch):
 
 
 def test_run_cloud_task_surfaces_diff_failure(monkeypatch):
-    fake = FakeRuns({
-        "exec": [_result(stdout="task_dferr1")],
-        "status": [_result(stdout="Status: completed")],
-        "diff": [_result(code=1, stderr="network unreachable")],
-    })
+    fake = FakeRuns(
+        {
+            "exec": [_result(stdout="task_dferr1")],
+            "status": [_result(stdout="Status: completed")],
+            "diff": [_result(code=1, stderr="network unreachable")],
+        }
+    )
     monkeypatch.setattr(codex_cloud.proc, "run", fake)
     result = codex_cloud.run_cloud_task(
-        "x", env_id="e", timeout=600, poll_interval=0, sleep=lambda s: None, clock=lambda: 0,
+        "x",
+        env_id="e",
+        timeout=600,
+        poll_interval=0,
+        sleep=lambda s: None,
+        clock=lambda: 0,
     )
     assert result.ok
     assert "WARNING" in result.text
@@ -193,8 +232,12 @@ def test_run_cloud_task_caps_poll_timeout_to_remaining(monkeypatch):
     monkeypatch.setattr(codex_cloud.proc, "run", fake_run)
     ticks = iter([0, 595, 596, 597, 598])  # 5s left when polling starts
     codex_cloud.run_cloud_task(
-        "x", env_id="e", timeout=600, poll_interval=0,
-        sleep=lambda s: None, clock=lambda: next(ticks),
+        "x",
+        env_id="e",
+        timeout=600,
+        poll_interval=0,
+        sleep=lambda s: None,
+        clock=lambda: next(ticks),
     )
     status_timeouts = [t for sub, t in captured if sub == "status"]
     assert all(t <= codex_cloud.POLL_TIMEOUT for t in status_timeouts)
@@ -202,12 +245,18 @@ def test_run_cloud_task_caps_poll_timeout_to_remaining(monkeypatch):
 
 
 def test_run_cloud_task_unparseable_submit_output(monkeypatch):
-    fake = FakeRuns({
-        "exec": [_result(stdout="some prose without any identifier tokens here")],
-    })
+    fake = FakeRuns(
+        {
+            "exec": [_result(stdout="some prose without any identifier tokens here")],
+        }
+    )
     monkeypatch.setattr(codex_cloud.proc, "run", fake)
     result = codex_cloud.run_cloud_task(
-        "x", env_id="e", timeout=600, sleep=lambda s: None, clock=lambda: 0,
+        "x",
+        env_id="e",
+        timeout=600,
+        sleep=lambda s: None,
+        clock=lambda: 0,
     )
     assert not result.ok
     assert "could not parse" in result.detail

@@ -55,10 +55,7 @@ def _scan_status(text: str) -> str | None:
     if brackets:
         scope = "\n".join(brackets)
     else:
-        status_lines = [
-            line for line in text.splitlines()
-            if re.match(r"\s*(task\s+)?(status|state)\b", line, re.I)
-        ]
+        status_lines = [line for line in text.splitlines() if re.match(r"\s*(task\s+)?(status|state)\b", line, re.I)]
         scope = "\n".join(status_lines) if status_lines else text
     lowered = scope.lower()
     for word in TERMINAL_FAIL + TERMINAL_OK:
@@ -129,8 +126,7 @@ def run_cloud_task(
                 text=status_text[:DIFF_CAP],
                 ok=False,
                 detail=(
-                    f"cloud task {task_id} still pending after {int(timeout)}s; "
-                    f"check `codex cloud status {task_id}`"
+                    f"cloud task {task_id} still pending after {int(timeout)}s; check `codex cloud status {task_id}`"
                 )[:200],
                 thread_id=task_id,
                 status="pending",
