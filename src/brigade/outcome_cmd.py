@@ -346,10 +346,14 @@ def fork(
     per-artifact projection to ``out``. It never reads or writes the live
     status.json, so two forks under different configs can be compared with
     ``outcome diff`` to see how a rule change would move promotions.
+
+    Uses the same current-fingerprint cohort score as ``reconcile``, so a fork
+    projection previews the ratchet the live command would actually run.
     """
     target = target.expanduser().resolve()
     config = config or core.ReconcileConfig()
-    scores = _scores_by_artifact(load_records(target))
+    cohorts_by_artifact = _fingerprint_cohorts_by_artifact(target, load_records(target))
+    scores = {artifact_id: cohorts.current for artifact_id, cohorts in cohorts_by_artifact.items()}
     decisions = core.project_statuses(scores, config=config, now=localio.utc_now())
     artifacts = {
         artifact_id: {
@@ -519,6 +523,43 @@ def _brief_hit_human_suffix(stats: dict[str, float | int] | None) -> str:
     if stats is None:
         return ""
     return f" brief_hit: {stats['brief_hit_rate']:.3f} (n={stats['brief_hit_samples']})"
+
+
+def _fingerprint_decision_fields(cohorts: core.FingerprintCohorts) -> dict[str, Any]:
+    """Audit fields recording how fingerprinting narrowed a ratchet decision.
+
+    Empty unless the current cohort actually dropped proven-stale evidence, so a
+    never-edited artifact's decision receipt and JSON stay byte-identical to the
+    pre-fingerprint ratchet.
+    """
+    fingerprint = cohorts.current_fingerprint
+    if fingerprint is None or not cohorts.stale_records:
+        return {}
+    return {
+        "content_fingerprint": fingerprint,
+        "lifetime_score": cohorts.lifetime.score,
+        "lifetime_helped": cohorts.lifetime.helped,
+        "lifetime_hurt": cohorts.lifetime.hurt,
+        "stale_records": cohorts.stale_records,
+        "legacy_records": cohorts.legacy_records,
+    }
+
+
+def _fingerprint_decision_suffix(cohorts: core.FingerprintCohorts) -> str:
+    """Human tail noting a decision scored the current revision, not lifetime.
+
+    Empty unless proven-stale evidence was dropped, so unedited artifacts keep
+    the pre-fingerprint one-line output.
+    """
+    fingerprint = cohorts.current_fingerprint
+    if fingerprint is None or not cohorts.stale_records:
+        return ""
+    lifetime = cohorts.lifetime
+    return (
+        f" [rev {fingerprint[:12]}; scored current text only, "
+        f"lifetime score={lifetime.score:.3f} helped={lifetime.helped} hurt={lifetime.hurt}, "
+        f"stale={cohorts.stale_records} legacy={cohorts.legacy_records}]"
+    )
 
 
 def score(*, target: Path, artifact_id: str | None = None, json_output: bool = False) -> int:
@@ -747,11 +788,19 @@ def reconcile(
     roll back without writing. With ``apply`` it writes a decision receipt per
     transition, advances the persisted status, and performs the physical skill
     install/rollback. No human approval is consulted.
+
+    Fingerprint-aware: the promote/rollback decision scores the CURRENT-fingerprint
+    cohort, not the lifetime ledger, so an edited skill must re-earn its promotion
+    against the text that now ships instead of coasting on signals for text that no
+    longer exists. Grandfathering keeps this non-disruptive: a never-edited artifact
+    has no proven-stale records, so ``current`` equals lifetime and the decision is
+    byte-identical to the pre-fingerprint ratchet. The decision RULES (thresholds,
+    cooldown, forward-only ratchet) are untouched; only the score fed in narrows.
     """
     target = target.expanduser().resolve()
     config = config or core.ReconcileConfig()
     records = load_records(target)
-    scores = _scores_by_artifact(records)
+    cohorts_by_artifact = _fingerprint_cohorts_by_artifact(target, records)
     graph_counts = _graph_delta_counts_by_artifact(records)
     brief_stats = _brief_hit_stats_by_artifact(records)
     kinds: dict[str, str] = {}
@@ -760,26 +809,27 @@ def reconcile(
     status_map = load_status(target)
     now = localio.utc_now()
 
-    results: list[tuple[core.Decision, core.OutcomeScore, str]] = []
-    for artifact_id, score_obj in sorted(scores.items()):
+    results: list[tuple[core.Decision, core.FingerprintCohorts, str]] = []
+    for artifact_id, cohorts in sorted(cohorts_by_artifact.items()):
         entry = status_map.get(artifact_id) or {}
         prior_status = entry.get("status", "candidate")
         last_action_ts = localio.parse_iso_datetime(entry.get("last_action_ts"))
         decision = core.decide(
-            score_obj,
+            cohorts.current,
             current_status=prior_status,
             last_action_ts=last_action_ts,
             now=now,
             config=config,
         )
         if decision.action != "hold":
-            results.append((decision, score_obj, prior_status))
+            results.append((decision, cohorts, prior_status))
 
     applied: list[str] = []
     executions: dict[str, str] = {}
     effective_status: dict[str, str] = {}
     if apply and results:
-        for decision, score_obj, prior_status in results:
+        for decision, cohorts, prior_status in results:
+            score_obj = cohorts.current
             execution = "noop"
             if decision.action in ("install", "rollback"):
                 if kinds.get(decision.artifact_id, "skill") == "skill":
@@ -811,6 +861,7 @@ def reconcile(
                 "execution": execution,
                 "created_at": now.isoformat(),
             }
+            receipt.update(_fingerprint_decision_fields(cohorts))
             localio.write_json(_decision_path(target, now, decision.artifact_id), receipt)
             status_map[decision.artifact_id] = {"status": new_status, "last_action_ts": now.isoformat()}
             if not install_failed:
@@ -818,7 +869,7 @@ def reconcile(
         localio.write_json(_status_path(target), {"version": 1, "artifacts": status_map})
 
     decisions_payload = []
-    for decision, score_obj, prior_status in results:
+    for decision, cohorts, prior_status in results:
         item = {
             "artifact_id": decision.artifact_id,
             "action": decision.action,
@@ -826,9 +877,10 @@ def reconcile(
             "new_status": effective_status.get(decision.artifact_id, decision.new_status),
             "decided_status": decision.new_status,
             "reason": decision.reason,
-            "score": score_obj.score,
+            "score": cohorts.current.score,
             "execution": executions.get(decision.artifact_id, "dry-run"),
         }
+        item.update(_fingerprint_decision_fields(cohorts))
         counts = graph_counts.get(decision.artifact_id)
         if counts is not None:
             item.update(counts)
@@ -850,16 +902,17 @@ def reconcile(
     if not results:
         print("decisions: none")
         return 0
-    for decision, _score_obj, prior_status in results:
+    for decision, cohorts, prior_status in results:
         shown_status = effective_status.get(decision.artifact_id, decision.new_status)
         # On --apply, surface the physical execution so the output is never
         # byte-identical to a dry-run that did nothing.
         tail = f" -> {executions[decision.artifact_id]}" if apply and decision.artifact_id in executions else ""
+        fingerprint_tail = _fingerprint_decision_suffix(cohorts)
         graph_tail = _graph_delta_human_suffix(graph_counts.get(decision.artifact_id))
         brief_tail = _brief_hit_human_suffix(brief_stats.get(decision.artifact_id))
         print(
             f"- {decision.artifact_id} {prior_status} -> {shown_status} "
-            f"[{decision.action}] {decision.reason}{graph_tail}{brief_tail}{tail}"
+            f"[{decision.action}] {decision.reason}{fingerprint_tail}{graph_tail}{brief_tail}{tail}"
         )
     return 0
 
