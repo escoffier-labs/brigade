@@ -115,13 +115,13 @@ def init(
 
 def doctor(target: Path, *, roster_path: Path | None = None) -> int:
     target = target.expanduser()
-    path = roster_path.expanduser() if roster_path is not None else target / DEFAULT_ROSTER_REL
 
     checks: list[doctor_mod.CheckResult] = []
     try:
+        path = roster_mod.resolve_roster_path(target, roster_path)
         loaded = roster_mod.load_roster(path)
-    except FileNotFoundError:
-        checks.append((doctor_mod.FAIL, "roster: file", f"missing at {path}; run `brigade roster init`"))
+    except FileNotFoundError as exc:
+        checks.append((doctor_mod.FAIL, "roster: file", f"{exc}; run `brigade roster init`"))
         return doctor_mod._report(checks)
     except ValueError as exc:
         checks.append((doctor_mod.FAIL, "roster: file", f"invalid {path}: {exc}"))

@@ -1,34 +1,34 @@
 # Roster Resolution Parity Plan
 
-Goal: make \`brigade run\` and \`brigade roster doctor\` resolve explicit, workspace, and user roster paths through one tested helper.
+Goal: make `brigade run` and `brigade roster doctor` resolve explicit, workspace, and user roster paths through one tested helper.
 
-Architecture: \`src/brigade/roster.py\` owns path selection and missing-path diagnostics. The run CLI and roster doctor call that helper before loading the TOML. Explicit \`--roster\` paths never fall back, workspace rosters win over user rosters, and a missing implicit roster names both checked paths.
+Architecture: `src/brigade/roster.py` owns path selection and missing-path diagnostics. The run CLI and roster doctor call that helper before loading the TOML. Explicit `--roster` paths never fall back, workspace rosters win over user rosters, and a missing implicit roster names both checked paths.
 
-Key tech: Python \`pathlib\`, pytest, existing Brigade doctor reporting. Execute the task in order, keep the checkbox state current, run the failing test before production edits, and commit only after the focused and full gates pass.
+Key tech: Python `pathlib`, pytest, existing Brigade doctor reporting. Execute the task in order, keep the checkbox state current, run the failing test before production edits, and commit only after the focused and full gates pass.
 
 ## File Map
 
-- \`src/brigade/roster.py\`: resolve one roster path and raise a stable missing-path error.
-- \`src/brigade/cli/run.py\`: replace the inline fallback block with the shared resolver.
-- \`src/brigade/roster_cmd.py\`: use the same resolver before loading and reporting the selected path.
-- \`tests/test_roster.py\`: unit coverage for precedence, explicit-path behavior, and missing diagnostics.
-- \`tests/test_roster_cmd.py\`: doctor regression for user fallback and an isolated missing-roster test.
-- \`tests/test_run_cli.py\`: existing CLI regressions remain the compatibility gate.
+- `src/brigade/roster.py`: resolve one roster path and raise a stable missing-path error.
+- `src/brigade/cli/run.py`: replace the inline fallback block with the shared resolver.
+- `src/brigade/roster_cmd.py`: use the same resolver before loading and reporting the selected path.
+- `tests/test_roster.py`: unit coverage for precedence, explicit-path behavior, and missing diagnostics.
+- `tests/test_roster_cmd.py`: doctor regression for user fallback and an isolated missing-roster test.
+- `tests/test_run_cli.py`: existing CLI regressions remain the compatibility gate.
 
 ## Task 1: Centralize roster path selection
 
 **Files:**
 
-- Modify: \`src/brigade/roster.py\`
-- Modify: \`src/brigade/cli/run.py\`
-- Modify: \`src/brigade/roster_cmd.py\`
-- Modify: \`tests/test_roster.py\`
-- Modify: \`tests/test_roster_cmd.py\`
-- Test: \`tests/test_run_cli.py\`
+- Modify: `src/brigade/roster.py`
+- Modify: `src/brigade/cli/run.py`
+- Modify: `src/brigade/roster_cmd.py`
+- Modify: `tests/test_roster.py`
+- Modify: `tests/test_roster_cmd.py`
+- Test: `tests/test_run_cli.py`
 
-- [ ] Add the failing doctor regression to \`tests/test_roster_cmd.py\`:
+- [x] Add the failing doctor regression to `tests/test_roster_cmd.py`:
 
-\`\`\`python
+```python
 def test_roster_doctor_falls_back_to_home_roster(monkeypatch, tmp_target, tmp_path, capsys):
     home = tmp_path / "home"
     path = home / ".brigade" / "roster.toml"
@@ -44,21 +44,21 @@ def test_roster_doctor_falls_back_to_home_roster(monkeypatch, tmp_target, tmp_pa
 
     assert roster_cmd.doctor(tmp_target) == 0
     assert str(path) in capsys.readouterr().out
-\`\`\`
+```
 
-- [ ] Isolate \`test_roster_doctor_missing_file_fails\` from the real user roster by adding \`monkeypatch\` and \`tmp_path\`, setting \`Path.home()\` to \`tmp_path / "empty-home"\`, and retaining its existing failure assertions.
+- [x] Isolate `test_roster_doctor_missing_file_fails` from the real user roster by adding `monkeypatch` and `tmp_path`, setting `Path.home()` to `tmp_path / "empty-home"`, and retaining its existing failure assertions.
 
-- [ ] Run the new regression and watch it fail:
+- [x] Run the new regression and watch it fail:
 
-\`\`\`bash
+```bash
 /home/clawdbot/repos/brigade/.venv/bin/pytest tests/test_roster_cmd.py::test_roster_doctor_falls_back_to_home_roster -q
-\`\`\`
+```
 
-Expected: FAIL because \`roster_cmd.doctor()\` checks only \`tmp_target/.brigade/roster.toml\`.
+Expected: FAIL because `roster_cmd.doctor()` checks only `tmp_target/.brigade/roster.toml`.
 
-- [ ] Add resolver unit tests to \`tests/test_roster.py\`:
+- [x] Add resolver unit tests to `tests/test_roster.py`:
 
-\`\`\`python
+```python
 def test_resolve_roster_path_prefers_workspace(monkeypatch, tmp_path):
     home = tmp_path / "home"
     workspace = tmp_path / "workspace"
@@ -101,11 +101,11 @@ def test_resolve_roster_path_missing_names_both_candidates(monkeypatch, tmp_path
     message = str(exc.value)
     assert str(workspace / ".brigade" / "roster.toml") in message
     assert str(home / ".brigade" / "roster.toml") in message
-\`\`\`
+```
 
-- [ ] Add the minimal resolver to \`src/brigade/roster.py\` above \`load_roster()\`:
+- [x] Add the minimal resolver to `src/brigade/roster.py` above `load_roster()`:
 
-\`\`\`python
+```python
 def resolve_roster_path(target: Path, explicit: Path | None = None) -> Path:
     if explicit is not None:
         path = explicit.expanduser()
@@ -120,52 +120,52 @@ def resolve_roster_path(target: Path, explicit: Path | None = None) -> Path:
     if user_path.exists():
         return user_path
     raise FileNotFoundError(f"roster not found: checked {workspace_path} and {user_path}")
-\`\`\`
+```
 
-- [ ] Replace the inline roster-selection block in \`src/brigade/cli/run.py\` with:
+- [x] Replace the inline roster-selection block in `src/brigade/cli/run.py` with:
 
-\`\`\`python
+```python
 try:
     roster_path = roster_mod.resolve_roster_path(run_cwd, args.roster)
 except FileNotFoundError as exc:
     print(f"error: {exc}. Create .brigade/roster.toml or pass --roster.", file=sys.stderr)
     return 2
-\`\`\`
+```
 
-Keep the existing \`load_roster()\` error handling directly after this block.
+Keep the existing `load_roster()` error handling directly after this block.
 
-- [ ] In \`src/brigade/roster_cmd.py::doctor\`, resolve the path before \`load_roster()\`:
+- [x] In `src/brigade/roster_cmd.py::doctor`, resolve the path before `load_roster()`:
 
-\`\`\`python
+```python
 try:
     path = roster_mod.resolve_roster_path(target, roster_path)
     loaded = roster_mod.load_roster(path)
 except FileNotFoundError as exc:
-    checks.append((doctor_mod.FAIL, "roster: file", f"{exc}; run \`brigade roster init\`"))
+    checks.append((doctor_mod.FAIL, "roster: file", f"{exc}; run `brigade roster init`"))
     return doctor_mod._report(checks)
-\`\`\`
+```
 
 Retain the existing invalid-roster branch and all agent diagnostics.
 
-- [ ] Run the focused suite through Brigade:
+- [x] Run the focused suite through Brigade:
 
-\`\`\`bash
+```bash
 /home/clawdbot/repos/brigade/.venv/bin/brigade work verify run --target . --command "/home/clawdbot/repos/brigade/.venv/bin/pytest tests/test_roster.py tests/test_roster_cmd.py tests/test_run_cli.py -q" --capture brigade-work
-\`\`\`
+```
 
 Expected: all selected tests pass.
 
-- [ ] Run the full gate through Brigade:
+- [x] Run the full gate through Brigade:
 
-\`\`\`bash
+```bash
 /home/clawdbot/repos/brigade/.venv/bin/brigade work verify run --target . --command "env PY=/home/clawdbot/repos/brigade/.venv/bin ./scripts/verify" --capture brigade-work
-\`\`\`
+```
 
 Expected: exit 0 with the coverage floor met.
 
-- [ ] Commit:
+- [x] Commit:
 
-\`\`\`bash
+```bash
 git add src/brigade/roster.py src/brigade/cli/run.py src/brigade/roster_cmd.py tests/test_roster.py tests/test_roster_cmd.py docs/phase-roster-resolution-parity.md
 git commit -m "fix(roster): align user fallback resolution"
-\`\`\`
+```

@@ -73,6 +73,22 @@ def _allowed(cli_ref: str, patterns: tuple[str, ...]) -> bool:
     return any(fnmatch.fnmatchcase(cli_ref, pattern) for pattern in patterns)
 
 
+def resolve_roster_path(target: Path, explicit: Path | None = None) -> Path:
+    if explicit is not None:
+        path = explicit.expanduser()
+        if path.exists():
+            return path
+        raise FileNotFoundError(f"roster not found: {path}")
+
+    workspace_path = target.expanduser() / ".brigade" / "roster.toml"
+    user_path = Path.home() / ".brigade" / "roster.toml"
+    if workspace_path.exists():
+        return workspace_path
+    if user_path.exists():
+        return user_path
+    raise FileNotFoundError(f"roster not found: checked {workspace_path} and {user_path}")
+
+
 def load_roster(path: Path) -> Roster:
     if not path.exists():
         raise FileNotFoundError(f"roster not found: {path}")
