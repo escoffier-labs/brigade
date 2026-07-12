@@ -25,6 +25,11 @@ def register(sub: argparse._SubParsersAction) -> None:
     )
     p_run.add_argument("--dry-run", action="store_true", help="Print the plan without dispatching workers.")
     p_run.add_argument(
+        "--worker",
+        default=None,
+        help="Dispatch the full task directly to one worker seat, skipping planning and synthesis.",
+    )
+    p_run.add_argument(
         "--detach",
         action="store_true",
         help="Start the run in a detached child process and return after run metadata is written.",
@@ -179,6 +184,11 @@ def dispatch(args) -> int:
     except ValueError as exc:
         print(f"error: invalid roster: {exc}", file=sys.stderr)
         return 2
+    if args.worker is not None:
+        worker_error = _direct_worker_error(args.worker, loaded_roster, roster_mod)
+        if worker_error is not None:
+            print(f"error: {worker_error}", file=sys.stderr)
+            return 2
     output_dir = None
     if not args.no_artifacts:
         output_dir = args.output_dir or aboyeur_mod.make_run_dir(run_cwd / ".brigade" / "runs")
@@ -237,6 +247,8 @@ def dispatch(args) -> int:
                 "read_only": args.read_only,
                 "sandbox": effective_sandbox,
             }
+            if args.worker is not None:
+                run_kwargs["worker"] = args.worker
             if args.codex_transport is not None:
                 run_kwargs["codex_transport"] = args.codex_transport
             if args.no_code_graph:
@@ -357,6 +369,8 @@ def _detached_child_argv(args, *, run_cwd: Path, roster_path: Path, output_dir: 
         argv.append("--verbose")
     if args.read_only:
         argv.append("--read-only")
+    if args.worker is not None:
+        argv.extend(["--worker", args.worker])
     if args.no_code_graph:
         argv.append("--no-code-graph")
     if args.no_evidence:
@@ -370,6 +384,19 @@ def _detached_child_argv(args, *, run_cwd: Path, roster_path: Path, output_dir: 
     if args.handoff_inbox is not None:
         argv.extend(["--handoff-inbox", str(args.handoff_inbox.expanduser().resolve())])
     return argv
+
+
+def _direct_worker_error(worker: str, loaded_roster, roster_mod) -> str | None:
+    agent = loaded_roster.agents.get(worker)
+    if agent is None:
+        return f"unknown worker: {worker}"
+    if worker == loaded_roster.orchestrator:
+        return f"--worker cannot target orchestrator seat: {worker}"
+    if agent.cli is None:
+        return f"worker has no CLI adapter: {worker}"
+    if not roster_mod.is_cli_allowed(agent.cli, loaded_roster):
+        return f"{agent.cli} is not allowed by limits.allow_models"
+    return None
 
 
 def _poll_detached_start(proc: Popen, output_dir: Path) -> int | None:

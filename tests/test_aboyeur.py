@@ -920,6 +920,102 @@ def test_run_dispatches_and_synthesizes(monkeypatch, capsys):
     assert [call[0] for call in calls] == ["codex", "ollama:llama3.3", "codex"]
 
 
+def test_run_direct_worker_skips_plan_and_synthesis(monkeypatch, capsys, tmp_path):
+    calls = []
+
+    def fake_run_agent(cli_ref, prompt, timeout=600.0, cwd=None, read_only=False):
+        calls.append((cli_ref, prompt))
+        return agents.AgentResult(text="worker final output", ok=True)
+
+    output_dir = tmp_path / "run"
+    monkeypatch.setattr(aboyeur.agents, "run_agent", fake_run_agent)
+
+    rc = aboyeur.run(
+        "do exactly this",
+        _roster(),
+        worker="coder",
+        output_dir=output_dir,
+        route_enabled=False,
+    )
+
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert out.strip() == "worker final output"
+    assert len(calls) == 1
+    assert calls[0][0] == "ollama:llama3.3"
+    assert "Sub-task:\ndo exactly this" in calls[0][1]
+    assert "Return a concise, complete result for the orchestrator to synthesize." not in calls[0][1]
+    assert "final user-visible result" in calls[0][1].lower()
+    plan = json.loads((output_dir / "plan.json").read_text())
+    assert plan["assignments"] == [{"stage": 1, "worker": "coder", "task": "do exactly this"}]
+    synthesis = json.loads((output_dir / "synthesis.json").read_text())
+    assert synthesis["mode"] == "direct-worker"
+    assert synthesis["orchestrator"] is None
+    assert synthesis["result"]["text"] == "worker final output"
+    assert (output_dir / "final.txt").read_text().strip() == "worker final output"
+    run_meta = json.loads((output_dir / "run.json").read_text())
+    assert run_meta["status"] == "ok"
+
+
+
+def test_run_direct_worker_failure_reports_and_records(monkeypatch, capsys, tmp_path):
+    def fake_run_agent(cli_ref, prompt, timeout=600.0, cwd=None, read_only=False):
+        return agents.AgentResult(text="partial output", ok=False, detail="boom")
+
+    output_dir = tmp_path / "run"
+    monkeypatch.setattr(aboyeur.agents, "run_agent", fake_run_agent)
+
+    rc = aboyeur.run(
+        "do exactly this",
+        _roster(),
+        worker="coder",
+        output_dir=output_dir,
+        route_enabled=False,
+    )
+
+    assert rc != 0
+    assert (output_dir / "final.txt").read_text().strip() == "partial output"
+    run_payload = json.loads((output_dir / "run.json").read_text())
+    assert run_payload["worker"] == "coder"
+    synthesis = json.loads((output_dir / "synthesis.json").read_text())
+    assert synthesis["mode"] == "direct-worker"
+    assert synthesis["result"]["ok"] is False
+
+def test_run_direct_worker_dry_run_skips_agents_and_writes_synthetic_plan(monkeypatch, tmp_path, capsys):
+    calls = []
+
+    def fake_run_agent(cli_ref, prompt, timeout=600.0, cwd=None, read_only=False):
+        calls.append((cli_ref, prompt))
+        raise AssertionError("run_agent should not be called in direct dry-run")
+
+    output_dir = tmp_path / "run"
+    monkeypatch.setattr(aboyeur.agents, "run_agent", fake_run_agent)
+
+    rc = aboyeur.run(
+        "fix the bug",
+        _roster(),
+        worker="coder",
+        dry_run=True,
+        output_dir=output_dir,
+        route_enabled=False,
+    )
+
+    assert rc == 0
+    assert calls == []
+    out = capsys.readouterr().out
+    assert "coder" in out
+    assert "fix the bug" in out
+    plan = json.loads((output_dir / "plan.json").read_text())
+    assert plan["assignments"] == [{"stage": 1, "worker": "coder", "task": "fix the bug"}]
+    attempts = json.loads((output_dir / "plan-attempts.json").read_text())
+    assert attempts["attempts"] == []
+    assert attempts["mode"] == "direct-worker"
+    run_meta = json.loads((output_dir / "run.json").read_text())
+    assert run_meta["status"] == "dry-run"
+    assert not (output_dir / "worker-results.json").exists()
+    assert not (output_dir / "synthesis.json").exists()
+
+
 def test_run_dispatches_stages_in_order_with_earlier_context(monkeypatch):
     calls = []
 

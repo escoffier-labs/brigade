@@ -1,3 +1,4 @@
+import argparse
 import json
 from pathlib import Path
 
@@ -93,3 +94,33 @@ def test_run_detach_reports_early_child_exit(tmp_path, monkeypatch, capsys):
     assert "detached child exited before run metadata was written: exit 7" in captured.err
     assert f"log: {run_dir / 'detached.log'}" in captured.err
     assert (run_dir / "detached.log").read_text() == "boom\n"
+
+
+def test_run_detach_child_argv_preserves_worker(tmp_path):
+    args = argparse.Namespace(
+        task="do work",
+        allow_dirty=False,
+        worktree=False,
+        show_plan=False,
+        verbose=False,
+        read_only=False,
+        no_code_graph=False,
+        no_evidence=False,
+        sandbox=None,
+        codex_transport=None,
+        handoff=False,
+        handoff_inbox=None,
+        worker="coder",
+    )
+    roster_path = tmp_path / "roster.toml"
+    output_dir = tmp_path / "run"
+
+    argv = run_cli._detached_child_argv(
+        args,
+        run_cwd=tmp_path,
+        roster_path=roster_path,
+        output_dir=output_dir,
+    )
+
+    assert "--worker" in argv
+    assert argv[argv.index("--worker") + 1] == "coder"

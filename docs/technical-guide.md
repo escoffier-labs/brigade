@@ -339,6 +339,7 @@ Common `brigade run` flags:
 - `--worktree` runs agents in a detached git worktree and captures `changes.patch`.
 - `--show-plan` prints assignments before a normal run.
 - `--verbose` prints the plan, worker statuses, and synthesis status.
+- `--worker <seat>` sends the full task directly to one non-orchestrator roster seat, skipping planning and synthesis.
 - `--cwd` sets the working directory for agent CLI calls.
 - `--handoff` writes a Memory Handoff for a successful non-dry run.
 - `--inspect` prints the same artifact summary as `brigade runs show`.
@@ -348,6 +349,11 @@ Common `brigade run` flags:
 For `codex` agents, `--read-only` also passes `codex exec --sandbox read-only`.
 Combine `--sandbox` with `--read-only` to keep prompt-level read-only rules while overriding native sandbox behavior.
 Other adapters receive the prompt policy only.
+
+Direct worker runs still write normal run artifacts. The synthetic `plan.json`
+contains one assignment with the full task text, `worker-results.json` records
+the selected worker output, `final.txt` is that worker's text, and
+`synthesis.json` is marked with `mode: direct-worker`.
 
 Detached runs require artifacts, so `--detach` cannot be combined with `--no-artifacts`.
 It also refuses `--dry-run` and `--inspect`, because the parent process exits before it can print a plan or inspect final artifacts.

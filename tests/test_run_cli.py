@@ -1023,3 +1023,81 @@ def test_run_cli_codex_transport_default_is_none(tmp_path, monkeypatch):
     rc = cli.main(["run", "t", "--roster", str(roster_path), "--cwd", str(tmp_path), "--no-artifacts"])
     assert rc == 0
     assert "codex_transport" not in seen
+
+
+def _worker_roster_toml() -> str:
+    return """
+orchestrator = "chef"
+
+[agents.chef]
+cli = "codex"
+role = "plan"
+
+[agents.coder]
+cli = "codex"
+role = "code"
+"""
+
+
+def test_run_cli_forwards_worker_to_aboyeur(tmp_path, monkeypatch):
+    roster_path = tmp_path / "roster.toml"
+    roster_path.write_text(_worker_roster_toml())
+    seen = {}
+
+    def fake_run(task, loaded_roster, **kwargs):
+        seen["task"] = task
+        seen["worker"] = kwargs.get("worker")
+        return 0
+
+    monkeypatch.setattr(aboyeur, "run", fake_run)
+    rc = cli.main(
+        [
+            "run",
+            "do something",
+            "--roster",
+            str(roster_path),
+            "--cwd",
+            str(tmp_path),
+            "--worker",
+            "coder",
+            "--no-artifacts",
+        ]
+    )
+    assert rc == 0
+    assert seen == {"task": "do something", "worker": "coder"}
+
+
+def test_run_cli_rejects_unknown_worker(tmp_path, monkeypatch, capsys):
+    config_dir = tmp_path / ".brigade"
+    config_dir.mkdir()
+    (config_dir / "roster.toml").write_text(_worker_roster_toml())
+
+    def fail_run(*args, **kwargs):
+        raise AssertionError("aboyeur.run should not be called")
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(aboyeur, "run", fail_run)
+
+    rc = cli.main(["run", "x", "--worker", "missing", "--no-artifacts"])
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "missing" in err
+    assert "worker" in err.lower()
+
+
+def test_run_cli_rejects_orchestrator_as_worker(tmp_path, monkeypatch, capsys):
+    config_dir = tmp_path / ".brigade"
+    config_dir.mkdir()
+    (config_dir / "roster.toml").write_text(_worker_roster_toml())
+
+    def fail_run(*args, **kwargs):
+        raise AssertionError("aboyeur.run should not be called")
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(aboyeur, "run", fail_run)
+
+    rc = cli.main(["run", "x", "--worker", "chef", "--no-artifacts"])
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "chef" in err
+    assert "orchestrator" in err.lower()
