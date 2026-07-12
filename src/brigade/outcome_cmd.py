@@ -127,23 +127,92 @@ def _bundle_fingerprint(skill_dir: Path) -> str | None:
         return None
 
 
+def _link_target_slug(raw: str) -> str:
+    """Reduce a raw ``[[wiki-link]]`` body to the card stem it points at.
+
+    Strips an Obsidian-style ``|alias`` and ``#section`` and a trailing ``.md``.
+    (``extract_wiki_links`` has already stripped any ``cards/`` prefix.)
+    """
+    return raw.split("|", 1)[0].split("#", 1)[0].strip().removesuffix(".md")
+
+
+def _linked_card_closure(cards_dir: Path, root_id: str) -> list[str]:
+    """Existing cards reachable from ``root_id`` through ``[[links]]``, transitively.
+
+    CocoIndex's logic_tracking walks nested calls; a card's ``[[links]]`` are its
+    "calls", so a card depends on the cards it links, and on the cards those link,
+    and so on. Returns the sorted set of reachable card stems, excluding the root
+    itself. Cycle-safe (a shared visited set), deterministic (sorted output), and
+    tolerant of dead links (a ``[[missing]]`` contributes nothing until the card
+    exists). Case-insensitive resolution to the actual on-disk stem.
+    """
+    from brigade.memory_doctor.parsing import extract_wiki_links
+
+    stem_by_lower = {p.stem.lower(): p.stem for p in cards_dir.glob("*.md")}
+    visited = {root_id.lower()}
+    queue = [root_id]
+    reached: set[str] = set()
+    while queue:
+        current = queue.pop()
+        card_path = cards_dir / f"{current}.md"
+        if not card_path.is_file():
+            continue
+        for raw in extract_wiki_links(card_path.read_text(errors="replace")):
+            slug = _link_target_slug(raw).lower()
+            if not slug or slug in visited:
+                continue
+            visited.add(slug)
+            actual = stem_by_lower.get(slug)
+            if actual is not None:
+                reached.add(actual)
+                queue.append(actual)
+    return sorted(reached)
+
+
+def _card_fingerprint(card_path: Path) -> str | None:
+    """Fingerprint a card over itself plus the transitive closure of its links.
+
+    A card with no resolvable ``[[links]]`` hashes to *exactly*
+    ``sha256(card content)`` - byte-identical to the pre-link scheme - so existing
+    single-card records are never invalidated. A card that links others folds each
+    linked card's content hash into the fingerprint, so editing a linked card
+    invalidates the referrer the way editing the card itself does.
+    """
+    cards_dir = card_path.parent
+    try:
+        self_bytes = card_path.read_bytes()
+        closure = _linked_card_closure(cards_dir, card_path.stem)
+        if not closure:
+            return hashlib.sha256(self_bytes).hexdigest()
+        digest = hashlib.sha256()
+        digest.update(hashlib.sha256(self_bytes).hexdigest().encode("ascii"))
+        digest.update(b"\0")
+        for stem in closure:
+            digest.update(stem.encode("utf-8"))
+            digest.update(b"\0")
+            digest.update(hashlib.sha256((cards_dir / f"{stem}.md").read_bytes()).hexdigest().encode("ascii"))
+            digest.update(b"\0")
+        return digest.hexdigest()
+    except OSError:
+        return None
+
+
 def artifact_fingerprint(target: Path, artifact_id: str, kind: str) -> str | None:
     """sha256 of the artifact's current content, or None when it cannot be resolved.
 
     For a skill the fingerprint covers the whole installed (or registry) bundle,
     not just SKILL.md, so editing a bundled helper invalidates the skill's signals
-    the same way editing SKILL.md does. For a card it is the single file's hash.
-    The fingerprint still sees only the artifact's own files, not the runtime
-    harness around it, the caveat CocoIndex documents for undecorated helpers.
+    the same way editing SKILL.md does. For a card it covers the card plus the
+    transitive closure of the cards it ``[[links]]``, so editing a linked card
+    invalidates the referrer too. The fingerprint still sees only card/skill files,
+    not the runtime harness around them, the caveat CocoIndex documents for
+    undecorated helpers.
     """
     path = _artifact_content_path(target, artifact_id, kind)
     if path is None:
         return None
     if kind == "card":
-        try:
-            return hashlib.sha256(path.read_bytes()).hexdigest()
-        except OSError:
-            return None
+        return _card_fingerprint(path)
     return _bundle_fingerprint(path.parent)
 
 
