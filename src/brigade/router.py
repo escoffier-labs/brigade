@@ -5,10 +5,11 @@ no LLM: routing decisions are code, so they are testable and reproducible. The
 orchestrator agent still writes the plan; the route constrains what the plan must
 cover and records why each stage joined.
 
-Algorithm adapted from alp-river (https://github.com/alp82/alp-river, MIT,
-(c) 2026 Alper Ortac): signal subscriptions with family-prefix matching, path
-filtering, unsatisfiable-input drops, while/until scheduling locks, and a
-topological sort into parallel waves.
+Derived from alp-river's hooks/route.py (https://github.com/alp82/alp-river),
+Copyright (c) 2026 Alper Ortac, MIT license - full notice in
+THIRD_PARTY_NOTICES.md at the repo root. Brigade divergences: a stage cannot
+satisfy its own required input, a dependency cycle raises instead of emitting
+a final wave, and the sticky-stage merge is not ported (no recompose loop yet).
 
 Catalog shape (see route_catalog.DEFAULT_CATALOG):
 
