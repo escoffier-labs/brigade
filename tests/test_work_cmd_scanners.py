@@ -717,3 +717,125 @@ def test_work_scanners_cli(tmp_path, monkeypatch):
         ("runs", {"target": tmp_path, "json_output": True, "limit": 5}),
         ("run-show", {"target": tmp_path, "run_id": "run-1", "json_output": True}),
     ]
+
+
+def _required_scanner_config(tmp_path: Path, *, chat_enabled: bool) -> None:
+    config = tmp_path / ".brigade" / "scanners.toml"
+    config.parent.mkdir(parents=True, exist_ok=True)
+    chat = "true" if chat_enabled else "false"
+    config.write_text(
+        f"""
+[[scanner]]
+id = "chat-memory-sweep"
+source = "chat-memory-sweep"
+command = "brigade work import chat-sweep --json"
+cadence = "daily@02:15"
+enabled = {chat}
+timeout = 300
+output_path = ".brigade/chat-memory-sweeps/latest.json"
+conflict_window = "02:00-02:30"
+
+[[scanner]]
+id = "memory-refresh"
+source = "memory-refresh"
+command = "brigade work import memory-refresh --json"
+cadence = "daily@02:45"
+enabled = true
+timeout = 300
+output_path = "memory/cards/decay/refresh-queue.json"
+conflict_window = "02:30-03:00"
+
+[[scanner]]
+id = "handoff-ingest"
+source = "handoff-ingest"
+command = "brigade handoff sync-issues --json"
+cadence = "hourly@15"
+enabled = true
+timeout = 180
+output_path = ".brigade/handoff-sources.json"
+conflict_window = "00:10-00:25"
+"""
+    )
+
+
+def _scanner_required_check(tmp_path: Path, capsys) -> dict:
+    assert work_cmd.scanners_doctor(target=tmp_path, json_output=True) in (0, 1)
+    payload = json.loads(capsys.readouterr().out)
+    return next(check for check in payload["checks"] if check["name"] == "scanner_required")
+
+
+def test_scanner_required_ignores_chat_sweep_without_enabled_surface(tmp_path, capsys):
+    _init_git_repo(tmp_path)
+    _required_scanner_config(tmp_path, chat_enabled=False)
+
+    # No chat-surfaces.toml at all: chat-memory-sweep has nothing to sweep, so a
+    # disabled chat-memory-sweep must not raise scanner_required.
+    check = _scanner_required_check(tmp_path, capsys)
+    assert check["status"] == "ok"
+
+
+def test_scanner_required_flags_chat_sweep_when_surface_enabled(tmp_path, capsys):
+    _init_git_repo(tmp_path)
+    _required_scanner_config(tmp_path, chat_enabled=False)
+    surfaces = tmp_path / ".brigade" / "chat-surfaces.toml"
+    surfaces.write_text(
+        """
+[[surface]]
+id = "discord-export"
+provider = "discord-export"
+enabled = true
+"""
+    )
+
+    # With a live chat surface, a disabled chat-memory-sweep is a real gap.
+    check = _scanner_required_check(tmp_path, capsys)
+    assert check["status"] == "warn"
+    assert "disabled=chat-memory-sweep" in check["detail"]
+
+
+def test_scanners_run_ingest_skips_self_importing_scanner(tmp_path, capsys):
+    _init_git_repo(tmp_path)
+    script = tmp_path / "self_import.py"
+    script.write_text(
+        """
+import json
+from pathlib import Path
+
+inbox = Path.cwd() / ".brigade" / "work" / "imports" / "inbox.jsonl"
+inbox.parent.mkdir(parents=True, exist_ok=True)
+record = {
+    "id": "self-import-1",
+    "kind": "task",
+    "source": "self-import",
+    "text": "self-imported work",
+    "status": "pending",
+    "created_at": "2026-05-28T12:00:00+00:00",
+    "updated_at": "2026-05-28T12:00:00+00:00",
+}
+inbox.write_text(json.dumps(record) + "\\n")
+print("self import complete")
+"""
+    )
+    config = tmp_path / ".brigade" / "scanners.toml"
+    config.parent.mkdir(parents=True, exist_ok=True)
+    # No import_path: this scanner appends to the inbox itself. The ingest step
+    # must skip it, not fail the whole sweep.
+    config.write_text(
+        f"""
+[[scanner]]
+id = "self-import"
+source = "self-import"
+command = "{sys.executable} {script}"
+cadence = "daily@02:00"
+enabled = true
+timeout = 30
+output_path = ".brigade/self-import-output.json"
+conflict_window = "02:00-02:10"
+"""
+    )
+
+    assert work_cmd.scanners_run(target=tmp_path, scanner_id="self-import", ingest_output=True, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["completed"] == 1
+    assert payload["failed"] == 0
+    assert payload["ingest_errors"] == []

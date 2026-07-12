@@ -524,6 +524,23 @@ def _deferred_item_checks(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     ]
 
 
+def _target_owns_brigade_cli(target: Path) -> bool:
+    """True when the target repo ships the brigade CLI itself.
+
+    The brigade-catalog checks (is every brigade CLI command documented, is
+    docs/command-inventory.md current against the full command surface) only
+    make sense for the repo that owns and documents the CLI. A consumer repo
+    that merely uses brigade as a library or work-loop tool should not be
+    audited against brigade's own command surface, which otherwise reports
+    hundreds of "undocumented" commands it never owned.
+    """
+    try:
+        text = (target / "pyproject.toml").read_text()
+    except OSError:
+        return False
+    return re.search(r'(?m)^\s*name\s*=\s*"brigade-cli"\s*$', text) is not None
+
+
 def audit_payload(target: Path) -> dict[str, Any]:
     target = target.expanduser().resolve()
     roadmap = _parse_roadmap(target)
@@ -534,6 +551,7 @@ def audit_payload(target: Path) -> dict[str, Any]:
         checks.append({"status": OK, "name": "roadmap_exists", "detail": roadmap["path"]})
     checks.extend(_section_stale_checks(roadmap["sections"]))
 
+    owns_cli = _target_owns_brigade_cli(target)
     documented = _documented_brigade_commands(target)
     cli_commands = _cli_command_paths()
     cli_prefixes = _cli_command_prefixes(cli_commands)
@@ -545,7 +563,7 @@ def audit_payload(target: Path) -> dict[str, Any]:
         for command in documented
         if "..." not in command and _normalize_documented_command(command, cli_prefixes) not in cli_prefixes
     )
-    missing_docs = sorted(command for command in cli_set if command not in documented_set)
+    # A bogus `brigade ...` command in the docs is worth flagging in any repo.
     checks.append(
         {
             "status": WARN if missing_cli else OK,
@@ -554,21 +572,25 @@ def audit_payload(target: Path) -> dict[str, Any]:
             "commands": missing_cli[:20],
         }
     )
-    checks.append(
-        {
-            "status": WARN if missing_docs else OK,
-            "name": "roadmap_cli_command_missing_docs",
-            "detail": f"{len(missing_docs)} CLI command(s) missing from public docs" if missing_docs else "none",
-            "commands": missing_docs[:20],
-        }
-    )
-    command_contract = command_contract_payload(target)
-    inventory_check = next(
-        (check for check in command_contract["checks"] if check.get("name") == "roadmap_command_inventory_current"),
-        None,
-    )
-    if inventory_check:
-        checks.append(dict(inventory_check))
+    # The reverse checks (every CLI command must be documented, the command
+    # inventory must be current) only apply to the repo that owns the CLI.
+    missing_docs = sorted(command for command in cli_set if command not in documented_set) if owns_cli else []
+    if owns_cli:
+        checks.append(
+            {
+                "status": WARN if missing_docs else OK,
+                "name": "roadmap_cli_command_missing_docs",
+                "detail": f"{len(missing_docs)} CLI command(s) missing from public docs" if missing_docs else "none",
+                "commands": missing_docs[:20],
+            }
+        )
+        command_contract = command_contract_payload(target)
+        inventory_check = next(
+            (check for check in command_contract["checks"] if check.get("name") == "roadmap_command_inventory_current"),
+            None,
+        )
+        if inventory_check:
+            checks.append(dict(inventory_check))
     deferred_items = _active_queue_items()
     archived_items = _archived_items()
     checks.extend(_deferred_item_checks(deferred_items))
