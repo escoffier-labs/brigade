@@ -957,7 +957,6 @@ def test_run_direct_worker_skips_plan_and_synthesis(monkeypatch, capsys, tmp_pat
     assert run_meta["status"] == "ok"
 
 
-
 def test_run_direct_worker_failure_reports_and_records(monkeypatch, capsys, tmp_path):
     def fake_run_agent(cli_ref, prompt, timeout=600.0, cwd=None, read_only=False):
         return agents.AgentResult(text="partial output", ok=False, detail="boom")
@@ -980,6 +979,7 @@ def test_run_direct_worker_failure_reports_and_records(monkeypatch, capsys, tmp_
     synthesis = json.loads((output_dir / "synthesis.json").read_text())
     assert synthesis["mode"] == "direct-worker"
     assert synthesis["result"]["ok"] is False
+
 
 def test_run_direct_worker_dry_run_skips_agents_and_writes_synthetic_plan(monkeypatch, tmp_path, capsys):
     calls = []
