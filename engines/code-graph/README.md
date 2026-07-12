@@ -78,7 +78,7 @@ main --calls@19 hops=1--> serve  (src/bin/graphtrail-mcp.rs -> src/mcp.rs)
 | | Job | What you get |
 |---|---|---|
 | **Index** | Parse the repo with tree-sitter | Symbols, imports, and call edges in `.graphtrail/graphtrail.db` |
-| **Ask** | Query structure, not text | `search`, `callers`, `callees`, `impact`, `file_neighbors`, `dead_code`, `cycles`, `affected`, `diff` |
+| **Ask** | Query structure, not text | `search`, `callers`, `callees`, `impact`, `file_neighbors`, `dead_code`, `cycles`, `affected`, `diff`, `explain` |
 | **Brief** | Pack neighborhood for agents | `context` over CLI or MCP. Brigade can attach it to runs |
 
 <p align="center">
@@ -112,7 +112,7 @@ Register it with an MCP client. For Claude Code, add to `.mcp.json` (project sco
 
 ### Tools
 
-The server exposes thirteen tools. This list is verified against the live `tools/list` response from `graphtrail-mcp`:
+The server exposes fourteen tools. This list is verified against the live `tools/list` response from `graphtrail-mcp`:
 
 | Tool | Required args | What it returns |
 |---|---|---|
@@ -127,6 +127,7 @@ The server exposes thirteen tools. This list is verified against the live `tools
 | `dead_code` | none (`limit` optional, default 100) | Callables with no incoming call edges. A candidate list, not proof: dynamic dispatch, exports, and entry points are invisible to call edges. |
 | `cycles` | none | File-level dependency cycles from cross-file call edges, grouped into strongly connected components. |
 | `affected` | `files` (`depth` optional, default 3, clamped to 1..5) | Tests statically attributed to the changed files via incoming call edges, plus impacted source files. A lower bound on what to run, not coverage. |
+| `explain` | `source`, `target` | How call edges from `source` to `target` resolved: resolution path, confidence, matched import, and targets. Exact name match, unlike the fuzzy symbol tools. |
 | `repos` | none (`roots` optional) | Default database metadata plus optional one-level scans for `.graphtrail/graphtrail.db` under root directories. |
 | `diff` | `before`, `after` | Structural diff of two indexed graph DBs: added, removed, and changed symbols plus added and removed call edges. |
 
@@ -205,7 +206,7 @@ Internally the code is split into focused modules: `model` (shared types), `extr
 
 GraphTrail is a sidecar, not a platform. It does not:
 
-- run a daemon, install hooks, or watch your filesystem
+- run a daemon, install hooks, or watch your filesystem (the opt-in `watch` command is a foreground process you start and stop yourself)
 - make network calls in the default build
 - own memory, receipts, publishing, or scheduling (those stay in Brigade and MiseLedger)
 - keep semantic chunks, summaries, or embeddings (Code Search owns those)

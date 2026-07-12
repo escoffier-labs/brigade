@@ -1,8 +1,6 @@
 //! Shared extraction scaffolding: a single tree-sitter traversal that yields a file's symbols,
 //! imports, and call edges together, parameterized by a per-language [`LangSpec`].
 
-use std::collections::HashSet;
-
 use anyhow::{Result, anyhow};
 use sha2::{Digest, Sha256};
 use tree_sitter::{Language, Node as TsNode, Parser as TsParser};
@@ -30,7 +28,9 @@ struct Frame {
 
 #[derive(Default)]
 struct SymbolState {
-    ids: HashSet<String>,
+    /// Occurrences seen per identity key, for ordinal disambiguation of
+    /// same-named symbols of the same kind in one file.
+    occurrences: std::collections::HashMap<String, usize>,
     symbols: Vec<Symbol>,
 }
 
@@ -134,21 +134,16 @@ fn visit<L: LangSpec>(
             let qualified_name = container
                 .as_ref()
                 .map_or_else(|| name.clone(), |parent| format!("{parent}.{name}"));
-            let base_id = symbol_id(ctx.path, &qualified_name, start_line, kind);
-            let id = if symbol_state.ids.insert(base_id.clone()) {
-                base_id
-            } else {
-                let disambiguated = symbol_id_at_byte(
-                    ctx.path,
-                    &qualified_name,
-                    start_line,
-                    kind,
-                    node.start_byte(),
-                );
-                let is_new = symbol_state.ids.insert(disambiguated.clone());
-                debug_assert!(is_new, "source byte must disambiguate symbol ids");
-                disambiguated
+            let occurrence = {
+                let counter = symbol_state
+                    .occurrences
+                    .entry(format!("{}:{qualified_name}:{kind}", ctx.path))
+                    .or_insert(0);
+                let current = *counter;
+                *counter += 1;
+                current
             };
+            let id = symbol_id(ctx.path, &qualified_name, kind, occurrence);
             symbol_state.symbols.push(Symbol {
                 id: id.clone(),
                 kind: kind.to_string(),
@@ -225,18 +220,16 @@ pub fn string_literal_text(node: TsNode<'_>, source: &[u8]) -> Option<String> {
     )
 }
 
-pub fn symbol_id(path: &str, qualified_name: &str, line: usize, kind: &str) -> String {
-    hex_hash(format!("{path}:{qualified_name}:{line}:{kind}").as_bytes())
-}
-
-fn symbol_id_at_byte(
-    path: &str,
-    qualified_name: &str,
-    line: usize,
-    kind: &str,
-    start_byte: usize,
-) -> String {
-    hex_hash(format!("{path}:{qualified_name}:{line}:{kind}:{start_byte}").as_bytes())
+/// Line-independent symbol identity (schema v7): a symbol keeps its id when it
+/// only moves lines. Same-named symbols of the same kind in one file take an
+/// occurrence ordinal in traversal (source) order; the first occurrence has no
+/// suffix so the common case stays stable when a duplicate appears later.
+pub fn symbol_id(path: &str, qualified_name: &str, kind: &str, occurrence: usize) -> String {
+    if occurrence == 0 {
+        hex_hash(format!("{path}:{qualified_name}:{kind}").as_bytes())
+    } else {
+        hex_hash(format!("{path}:{qualified_name}:{kind}#{occurrence}").as_bytes())
+    }
 }
 
 pub fn hex_hash(bytes: &[u8]) -> String {

@@ -9,10 +9,12 @@ use crate::model::{ContextPack, Direction, EdgeRow, GraphDiff, SearchRow};
 #[cfg(feature = "codesearch")]
 use crate::query::build_context_pack_from_entry_points;
 use crate::query::{
-    DEFAULT_AFFECTED_DEPTH, DEFAULT_IMPACT_DEPTH, affected, build_context_pack,
+    DEFAULT_AFFECTED_DEPTH, DEFAULT_IMPACT_DEPTH, ExportFormat, ExportScope, affected,
+    build_context_pack,
     context::{edge_location, symbol_location},
-    cycles, dead_code, diff_graphs, doctor, file_neighbors, graph_edges_with_depth, impact_edges,
-    missing_db_report, normalize_depth, render_markdown, search_symbols_with_path, stats,
+    cycles, dead_code, diff_graphs, doctor, export_graph, file_neighbors, graph_edges_with_depth,
+    impact_edges, missing_db_report, normalize_depth, render_markdown, search_symbols_with_path,
+    stats,
 };
 use crate::store::{
     db_path, init_schema, open_db, open_default_read_only, open_read_only, sync_repo_force,
@@ -121,6 +123,41 @@ enum Command {
         depth: usize,
         #[arg(long)]
         json: bool,
+    },
+    /// Dry-run extraction: print what a sync of the path WOULD store, writing nothing.
+    Evaluate {
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Explain how call edges between two symbols resolved (path, confidence, import).
+    Explain {
+        /// Calling symbol, by name or qualified name.
+        source: String,
+        /// Called symbol name, as written at the call site.
+        target: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Export the graph for visualization: Graphviz dot, GraphML, or JSON Lines.
+    Export {
+        #[arg(long, value_enum, default_value_t = ExportFormat::Dot)]
+        format: ExportFormat,
+        #[arg(long, value_enum, default_value_t = ExportScope::Files)]
+        scope: ExportScope,
+        /// Write to a file instead of stdout.
+        #[arg(long, value_name = "PATH")]
+        out: Option<PathBuf>,
+    },
+    /// Watch a repository and run an incremental sync when source files change.
+    #[cfg(feature = "watch")]
+    Watch {
+        #[arg(default_value = ".")]
+        root: PathBuf,
+        /// Quiet period after the last change before a sync runs.
+        #[arg(long, default_value_t = 400)]
+        debounce_ms: u64,
     },
     Stats {
         #[arg(long)]
@@ -382,6 +419,82 @@ pub fn run(cli: Cli) -> Result<()> {
                     println!("- {} hops={}", row.file_path, row.min_hops);
                 }
             }
+        }
+        Command::Evaluate { path, json } => {
+            let report = crate::evaluate::evaluate_path(&path)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                println!(
+                    "evaluated files={} symbols={} imports={} calls={} (no database touched)",
+                    report.totals.files,
+                    report.totals.symbols,
+                    report.totals.imports,
+                    report.totals.calls
+                );
+                for file in &report.files {
+                    println!(
+                        "{} ({}): symbols={} imports={} calls={}",
+                        file.path,
+                        file.language,
+                        file.symbols.len(),
+                        file.imports.len(),
+                        file.calls.len()
+                    );
+                }
+            }
+        }
+        Command::Explain {
+            source,
+            target,
+            json,
+        } => {
+            let conn = open_default_read_only(cli.db)?;
+            let rows = crate::store::explain_calls(&conn, &source, &target)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&rows)?);
+            } else if rows.is_empty() {
+                println!("no calls from '{source}' to '{target}' in the index");
+            } else {
+                for row in &rows {
+                    println!(
+                        "{} calls {} at {}:{} [{}]",
+                        row.source_qualified_name,
+                        row.target_name,
+                        row.source_file,
+                        row.line,
+                        row.kind
+                    );
+                    println!("  resolution: {}", row.resolution);
+                    if let Some(import) = &row.matched_import {
+                        println!("  via import: {} (line {})", import.module, import.line);
+                    }
+                    for target in &row.targets {
+                        println!(
+                            "  -> {} {}:{} confidence={}",
+                            target.qualified_name,
+                            target.file_path,
+                            target.start_line,
+                            target.confidence
+                        );
+                    }
+                }
+            }
+        }
+        Command::Export { format, scope, out } => {
+            let conn = open_default_read_only(cli.db)?;
+            let text = export_graph(&conn, format, scope)?;
+            match out {
+                Some(path) => {
+                    std::fs::write(&path, text)?;
+                    println!("wrote {}", path.display());
+                }
+                None => print!("{text}"),
+            }
+        }
+        #[cfg(feature = "watch")]
+        Command::Watch { root, debounce_ms } => {
+            crate::watch::watch(cli.db, &root, std::time::Duration::from_millis(debounce_ms))?;
         }
         Command::Stats { json } => {
             let conn = open_default_read_only(cli.db)?;

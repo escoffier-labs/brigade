@@ -3,8 +3,11 @@
 
 pub mod adapters;
 pub mod cli;
+pub mod evaluate;
 pub mod extractors;
 pub mod mcp;
 pub mod model;
 pub mod query;
 pub mod store;
+#[cfg(feature = "watch")]
+pub mod watch;

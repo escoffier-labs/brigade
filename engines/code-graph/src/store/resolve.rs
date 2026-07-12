@@ -8,10 +8,10 @@ use rusqlite::{Connection, params};
 use crate::model::{CallKind, Import, PendingCall};
 
 #[derive(Clone)]
-struct SymbolCandidate {
-    id: String,
-    file_path: String,
-    container: Option<String>,
+pub(super) struct SymbolCandidate {
+    pub(super) id: String,
+    pub(super) file_path: String,
+    pub(super) container: Option<String>,
 }
 
 enum ImportResolution {
@@ -87,7 +87,7 @@ pub(super) fn rebuild_edges(tx: &Connection) -> Result<()> {
 }
 
 /// Map symbol name -> candidates, used to resolve call targets.
-fn load_name_index(conn: &Connection) -> Result<HashMap<String, Vec<SymbolCandidate>>> {
+pub(super) fn load_name_index(conn: &Connection) -> Result<HashMap<String, Vec<SymbolCandidate>>> {
     let mut stmt = conn.prepare("SELECT name, id, file_path, container FROM symbols")?;
     let rows = stmt.query_map([], |row| {
         Ok((
@@ -114,7 +114,7 @@ fn load_name_index(conn: &Connection) -> Result<HashMap<String, Vec<SymbolCandid
     Ok(map)
 }
 
-fn load_symbol_id_index(conn: &Connection) -> Result<HashMap<String, SymbolCandidate>> {
+pub(super) fn load_symbol_id_index(conn: &Connection) -> Result<HashMap<String, SymbolCandidate>> {
     let mut stmt = conn.prepare("SELECT id, file_path, container FROM symbols")?;
     let rows = stmt.query_map([], |row| {
         Ok(SymbolCandidate {
@@ -131,7 +131,7 @@ fn load_symbol_id_index(conn: &Connection) -> Result<HashMap<String, SymbolCandi
     Ok(map)
 }
 
-fn load_file_index(conn: &Connection) -> Result<HashSet<String>> {
+pub(super) fn load_file_index(conn: &Connection) -> Result<HashSet<String>> {
     let mut stmt = conn.prepare("SELECT path FROM files")?;
     let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
     let mut files = HashSet::new();
@@ -141,7 +141,7 @@ fn load_file_index(conn: &Connection) -> Result<HashSet<String>> {
     Ok(files)
 }
 
-fn load_import_index(conn: &Connection) -> Result<HashMap<String, Vec<Import>>> {
+pub(super) fn load_import_index(conn: &Connection) -> Result<HashMap<String, Vec<Import>>> {
     let mut stmt = conn.prepare(
         "SELECT file_path, module, local_name, imported_name, alias, line FROM imports
          ORDER BY file_path, line, module, local_name",
@@ -177,18 +177,101 @@ struct ScoredTarget {
     confidence: f64,
 }
 
-/// Import matched and the target's file agrees with the imported module.
-const CONFIDENCE_IMPORT_STRICT: f64 = 0.9;
-/// Same file, and the qualifier matched the candidate's container.
-const CONFIDENCE_SAME_FILE_QUALIFIED: f64 = 0.85;
-/// Same file, bare call.
-const CONFIDENCE_SAME_FILE_BARE: f64 = 0.8;
-/// Cross-file bare call and exactly one symbol has this name.
-const CONFIDENCE_NAME_UNIQUE: f64 = 0.7;
-/// Import matched but the module could not be pinned to indexed files.
-const CONFIDENCE_IMPORT_FALLBACK: f64 = 0.55;
-/// Cross-file bare call with several same-named candidates.
-const CONFIDENCE_NAME_AMBIGUOUS: f64 = 0.5;
+/// How a call resolved (or failed to). One call resolves through exactly one
+/// path; every target it produced shares that path and its confidence.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum ResolutionPath {
+    /// Import matched and the target's file agrees with the imported module.
+    ImportStrict,
+    /// Same file, and the qualifier matched the candidate's container.
+    SameFileQualified,
+    /// Same file, bare call.
+    SameFileBare,
+    /// Cross-file bare call and exactly one symbol has this name.
+    NameUnique,
+    /// Import matched but the module could not be pinned to indexed files.
+    ImportFallback,
+    /// Cross-file bare call with several same-named candidates.
+    NameAmbiguous,
+    /// An import matched but points outside the index (stdlib, third party).
+    UnresolvedExternal,
+    /// No indexed symbol carries the called name.
+    NoCandidates,
+    /// Qualified call with no import match and no same-file container match.
+    UnresolvedQualified,
+}
+
+impl ResolutionPath {
+    pub(crate) fn confidence(&self) -> Option<f64> {
+        match self {
+            ResolutionPath::ImportStrict => Some(0.9),
+            ResolutionPath::SameFileQualified => Some(0.85),
+            ResolutionPath::SameFileBare => Some(0.8),
+            ResolutionPath::NameUnique => Some(0.7),
+            ResolutionPath::ImportFallback => Some(0.55),
+            ResolutionPath::NameAmbiguous => Some(0.5),
+            ResolutionPath::UnresolvedExternal
+            | ResolutionPath::NoCandidates
+            | ResolutionPath::UnresolvedQualified => None,
+        }
+    }
+
+    pub(crate) fn label(&self) -> &'static str {
+        match self {
+            ResolutionPath::ImportStrict => "import-strict",
+            ResolutionPath::SameFileQualified => "same-file-qualified",
+            ResolutionPath::SameFileBare => "same-file-bare",
+            ResolutionPath::NameUnique => "unique-name",
+            ResolutionPath::ImportFallback => "import-fallback",
+            ResolutionPath::NameAmbiguous => "ambiguous-name",
+            ResolutionPath::UnresolvedExternal => "unresolved-external",
+            ResolutionPath::NoCandidates => "no-candidates",
+            ResolutionPath::UnresolvedQualified => "unresolved-qualified",
+        }
+    }
+
+    pub(crate) fn describe(&self) -> &'static str {
+        match self {
+            ResolutionPath::ImportStrict => {
+                "an import matched the call and the target lives in the imported module"
+            }
+            ResolutionPath::SameFileQualified => {
+                "the target is in the calling file and the qualifier matched its container"
+            }
+            ResolutionPath::SameFileBare => "a bare call matched a symbol in the calling file",
+            ResolutionPath::NameUnique => {
+                "exactly one indexed symbol carries this name, in another file"
+            }
+            ResolutionPath::ImportFallback => {
+                "an import matched but its module could not be pinned to indexed files"
+            }
+            ResolutionPath::NameAmbiguous => {
+                "several indexed symbols carry this name; all candidates kept"
+            }
+            ResolutionPath::UnresolvedExternal => {
+                "an import matched but points outside the index (stdlib or third party); no edge"
+            }
+            ResolutionPath::NoCandidates => "no indexed symbol carries this name; no edge",
+            ResolutionPath::UnresolvedQualified => {
+                "qualified call with no import match and no same-file container match; no edge"
+            }
+        }
+    }
+}
+
+/// The full outcome of resolving one pending call: the path taken and the
+/// targets it produced (empty on the unresolved paths).
+pub(crate) struct ResolvedCall {
+    pub(crate) path: ResolutionPath,
+    targets: Vec<SymbolCandidate>,
+}
+
+impl ResolvedCall {
+    /// The candidates the resolver produced, for explanation rendering.
+    pub(super) fn targets_for_explain(&self) -> &[SymbolCandidate] {
+        &self.targets
+    }
+}
 
 fn resolve_call(
     call: &PendingCall,
@@ -197,58 +280,89 @@ fn resolve_call(
     source_index: &HashMap<String, SymbolCandidate>,
     file_index: &HashSet<String>,
 ) -> Vec<ScoredTarget> {
-    let import_resolution = resolve_imported_call(call, name_index, import_index, file_index);
-    let use_name_fallback = match import_resolution {
-        ImportResolution::Resolved(import_targets) => {
-            return scored(import_targets, CONFIDENCE_IMPORT_STRICT);
-        }
-        ImportResolution::Unresolved => return Vec::new(),
-        ImportResolution::Fallback => true,
-        ImportResolution::NoImport => false,
-    };
-
-    let Some(candidates) = name_index.get(&call.target_name) else {
+    let resolved = resolve_call_explained(call, name_index, import_index, source_index, file_index);
+    let Some(confidence) = resolved.path.confidence() else {
         return Vec::new();
     };
-
-    if use_name_fallback {
-        return scored(
-            candidates.iter().take(8).cloned().collect(),
-            CONFIDENCE_IMPORT_FALLBACK,
-        );
-    }
-
-    if let Some(same_file) =
-        resolve_same_file_call(call, candidates, source_index).filter(|matches| !matches.is_empty())
-    {
-        let confidence = if call.kind == CallKind::Bare {
-            CONFIDENCE_SAME_FILE_BARE
-        } else {
-            CONFIDENCE_SAME_FILE_QUALIFIED
-        };
-        return scored(same_file, confidence);
-    }
-
-    if call.kind != CallKind::Bare {
-        return Vec::new();
-    }
-
-    let confidence = if candidates.len() == 1 {
-        CONFIDENCE_NAME_UNIQUE
-    } else {
-        CONFIDENCE_NAME_AMBIGUOUS
-    };
-    scored(candidates.iter().take(8).cloned().collect(), confidence)
-}
-
-fn scored(candidates: Vec<SymbolCandidate>, confidence: f64) -> Vec<ScoredTarget> {
-    candidates
+    resolved
+        .targets
         .into_iter()
         .map(|candidate| ScoredTarget {
             candidate,
             confidence,
         })
         .collect()
+}
+
+pub(crate) fn resolve_call_explained(
+    call: &PendingCall,
+    name_index: &HashMap<String, Vec<SymbolCandidate>>,
+    import_index: &HashMap<String, Vec<Import>>,
+    source_index: &HashMap<String, SymbolCandidate>,
+    file_index: &HashSet<String>,
+) -> ResolvedCall {
+    let import_resolution = resolve_imported_call(call, name_index, import_index, file_index);
+    let use_name_fallback = match import_resolution {
+        ImportResolution::Resolved(import_targets) => {
+            return ResolvedCall {
+                path: ResolutionPath::ImportStrict,
+                targets: import_targets,
+            };
+        }
+        ImportResolution::Unresolved => {
+            return ResolvedCall {
+                path: ResolutionPath::UnresolvedExternal,
+                targets: Vec::new(),
+            };
+        }
+        ImportResolution::Fallback => true,
+        ImportResolution::NoImport => false,
+    };
+
+    let Some(candidates) = name_index.get(&call.target_name) else {
+        return ResolvedCall {
+            path: ResolutionPath::NoCandidates,
+            targets: Vec::new(),
+        };
+    };
+
+    if use_name_fallback {
+        return ResolvedCall {
+            path: ResolutionPath::ImportFallback,
+            targets: candidates.iter().take(8).cloned().collect(),
+        };
+    }
+
+    if let Some(same_file) =
+        resolve_same_file_call(call, candidates, source_index).filter(|matches| !matches.is_empty())
+    {
+        let path = if call.kind == CallKind::Bare {
+            ResolutionPath::SameFileBare
+        } else {
+            ResolutionPath::SameFileQualified
+        };
+        return ResolvedCall {
+            path,
+            targets: same_file,
+        };
+    }
+
+    if call.kind != CallKind::Bare {
+        return ResolvedCall {
+            path: ResolutionPath::UnresolvedQualified,
+            targets: Vec::new(),
+        };
+    }
+
+    let path = if candidates.len() == 1 {
+        ResolutionPath::NameUnique
+    } else {
+        ResolutionPath::NameAmbiguous
+    };
+    ResolvedCall {
+        path,
+        targets: candidates.iter().take(8).cloned().collect(),
+    }
 }
 
 fn resolve_same_file_call(
@@ -301,14 +415,7 @@ fn resolve_imported_call(
     let Some(imports) = import_index.get(&call.source_file) else {
         return ImportResolution::NoImport;
     };
-    let matched_import = imports.iter().find(|import| match call.kind {
-        CallKind::Bare => import.local_name.as_deref() == Some(call.target_name.as_str()),
-        CallKind::Member | CallKind::Scoped => call
-            .qualifier
-            .as_deref()
-            .is_some_and(|qualifier| import_matches_qualifier(import, qualifier)),
-    });
-    let Some(matched_import) = matched_import else {
+    let Some(matched_import) = matched_import_for(call, imports) else {
         return ImportResolution::NoImport;
     };
 
@@ -348,6 +455,20 @@ fn unresolved_import_resolution(
     } else {
         ImportResolution::Fallback
     }
+}
+
+/// The import a call would resolve through, shared by resolution and explain.
+pub(super) fn matched_import_for<'i>(
+    call: &PendingCall,
+    imports: &'i [Import],
+) -> Option<&'i Import> {
+    imports.iter().find(|import| match call.kind {
+        CallKind::Bare => import.local_name.as_deref() == Some(call.target_name.as_str()),
+        CallKind::Member | CallKind::Scoped => call
+            .qualifier
+            .as_deref()
+            .is_some_and(|qualifier| import_matches_qualifier(import, qualifier)),
+    })
 }
 
 fn import_matches_qualifier(import: &Import, qualifier: &str) -> bool {

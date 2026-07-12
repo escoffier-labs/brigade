@@ -87,6 +87,7 @@ fn tools_list_exposes_the_query_tools_with_location_args() {
         "dead_code",
         "cycles",
         "affected",
+        "explain",
         "diff",
         "repos",
     ];
