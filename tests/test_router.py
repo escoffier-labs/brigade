@@ -482,3 +482,19 @@ def test_payload_carries_triggered_by_and_overrides() -> None:
     assert payload["triggered_by"]["security-review"] == "auth-surface"
     assert payload["overrides"] == ["+perf-surface"]
     assert "triggered_by" in payload
+
+
+def test_override_rejects_path_signal_suppression() -> None:
+    # Found by dogfooding latent-premises on the router diff: ~code stripped the
+    # path and collapsed the route. The path is derive-time, not overridable.
+    import pytest
+
+    for token in ("~code", "-docs", "+system"):
+        with pytest.raises(ValueError, match="path signal"):
+            route_brief("fix the crash when saving", overrides=[token])
+
+
+def test_validate_overrides_allows_non_path_signals() -> None:
+    from brigade.route_catalog import validate_overrides
+
+    validate_overrides(["+auth-surface", "~ship-requested", "perf-surface"])  # no raise

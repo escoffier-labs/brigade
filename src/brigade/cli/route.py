@@ -38,17 +38,22 @@ def register(sub: argparse._SubParsersAction) -> None:
 
 def dispatch(args) -> int:
     import json
+    import sys
 
     from ..route_catalog import route_brief
 
     approvals = ("ship-approved",) if args.approve_ship else ()
-    brief = route_brief(
-        args.task,
-        template=args.template,
-        changed_paths=args.changed_paths,
-        approvals=approvals,
-        overrides=tuple(args.route_signals),
-    )
+    try:
+        brief = route_brief(
+            args.task,
+            template=args.template,
+            changed_paths=args.changed_paths,
+            approvals=approvals,
+            overrides=tuple(args.route_signals),
+        )
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
     if args.json:
         print(json.dumps(brief.payload(), indent=2))
         return 0

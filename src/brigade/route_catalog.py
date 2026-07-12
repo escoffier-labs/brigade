@@ -256,11 +256,35 @@ def _path_segments(raw: str) -> set[str]:
 _TESTED_TEMPLATES = {"vertical-slice", "bugfix", "security-follow-up"}
 
 
+def _override_name(raw: str) -> str:
+    """The signal a `+x` / `-x` / `~x` / bare token names, or '' for an empty token."""
+    token = raw.strip()
+    if not token:
+        return ""
+    return token[1:].strip() if token[0] in "+-~" else token
+
+
+def validate_overrides(overrides) -> None:
+    """Reject an override that targets a path signal. The path (code/docs/system)
+    is a derive-time decision driven by the task and --template, not something a
+    signal override may add or delete: suppressing it strips the whole route to a
+    pathless remnant, and adding a second path scrambles the filter. Raises
+    ValueError naming the offending token."""
+    for raw in overrides:
+        name = _override_name(raw)
+        if name in router.PATHS:
+            raise ValueError(
+                f"cannot override the path signal {name!r} with --route-signal; "
+                "the path is set by the task and --template"
+            )
+
+
 def _apply_overrides(signals: list[str], overrides) -> list[str]:
     """Apply operator overrides in order. `+x` appends x if absent; `-x` or `~x`
     drops every copy of x (`~` is the argparse-safe suppress form, since a bare
     `-x` value is read as a flag). A bare token is treated as `+`. Returns a new
-    list, order-preserving and deduped."""
+    list, order-preserving and deduped. Rejects path-signal overrides first."""
+    validate_overrides(overrides)
     result = list(signals)
     for raw in overrides:
         token = raw.strip()

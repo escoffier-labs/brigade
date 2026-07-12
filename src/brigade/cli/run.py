@@ -135,11 +135,19 @@ def dispatch(args) -> int:
     from .. import aboyeur as aboyeur_mod
     from .. import runguard
     from .. import roster as roster_mod
+    from ..route_catalog import validate_overrides
 
     run_cwd = args.cwd.expanduser().resolve()
     if not run_cwd.is_dir():
         print(f"error: --cwd is not a directory: {run_cwd}", file=sys.stderr)
         return 2
+    if args.route_signals:
+        # Fail before the run machinery spins up, not deep inside route_brief.
+        try:
+            validate_overrides(args.route_signals)
+        except ValueError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
     if args.detach and args.dry_run:
         print("error: --detach cannot be used with --dry-run", file=sys.stderr)
         return 2
