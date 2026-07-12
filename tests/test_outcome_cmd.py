@@ -1439,3 +1439,119 @@ def test_card_fingerprint_stays_single_file(tmp_path):
     card.parent.mkdir(parents=True)
     card.write_text("# card body\n")
     assert outcome_cmd.artifact_fingerprint(tmp_path, "card-x", "card") == _sha256_of(card)
+
+
+def _write_card(target, card_id, text):
+    card = target / "memory" / "cards" / f"{card_id}.md"
+    card.parent.mkdir(parents=True, exist_ok=True)
+    card.write_text(text)
+    return card
+
+
+def test_card_with_no_links_hashes_to_its_own_content(tmp_path):
+    # Backward-compat: a link-free card must fingerprint to exactly sha256(content),
+    # so existing single-card records are never invalidated.
+    card = _write_card(tmp_path, "solo", "# solo card, no links\n")
+    assert outcome_cmd.artifact_fingerprint(tmp_path, "solo", "card") == _sha256_of(card)
+
+
+def test_card_fingerprint_folds_in_a_linked_card(tmp_path):
+    a = _write_card(tmp_path, "a", "# a\nsee [[b]] for details\n")
+    _write_card(tmp_path, "b", "# b v1\n")
+    fp = outcome_cmd.artifact_fingerprint(tmp_path, "a", "card")
+    assert fp is not None
+    assert fp != _sha256_of(a)  # composite, not the lone-file hash
+
+
+def test_editing_a_linked_card_invalidates_the_referrer(tmp_path):
+    # The core win: card a's own text never changes, but editing the card it links
+    # must move a's fingerprint.
+    _write_card(tmp_path, "a", "# a\nsee [[b]]\n")
+    b = _write_card(tmp_path, "b", "# b v1\n")
+    before = outcome_cmd.artifact_fingerprint(tmp_path, "a", "card")
+    b.write_text("# b v2, rewritten\n")
+    after = outcome_cmd.artifact_fingerprint(tmp_path, "a", "card")
+    assert before is not None and after is not None
+    assert before != after
+
+
+def test_card_link_tracking_is_transitive(tmp_path):
+    # a -> b -> c. Editing c (two hops away) must move a's fingerprint.
+    _write_card(tmp_path, "a", "# a\n[[b]]\n")
+    _write_card(tmp_path, "b", "# b\n[[c]]\n")
+    c = _write_card(tmp_path, "c", "# c v1\n")
+    before = outcome_cmd.artifact_fingerprint(tmp_path, "a", "card")
+    c.write_text("# c v2\n")
+    after = outcome_cmd.artifact_fingerprint(tmp_path, "a", "card")
+    assert before != after
+
+
+def test_card_link_cycle_is_safe_and_deterministic(tmp_path):
+    # a <-> b cycle must not hang and must fingerprint deterministically.
+    _write_card(tmp_path, "a", "# a\n[[b]]\n")
+    _write_card(tmp_path, "b", "# b\n[[a]]\n")
+    first = outcome_cmd.artifact_fingerprint(tmp_path, "a", "card")
+    second = outcome_cmd.artifact_fingerprint(tmp_path, "a", "card")
+    assert first is not None
+    assert first == second
+
+
+def test_dead_card_link_contributes_nothing_until_the_card_exists(tmp_path):
+    # A [[missing]] link is inert: a still hashes to its own content. Creating the
+    # target later flips the fingerprint (the dependency now resolves).
+    a = _write_card(tmp_path, "a", "# a\nsee [[future]]\n")
+    assert outcome_cmd.artifact_fingerprint(tmp_path, "a", "card") == _sha256_of(a)
+    _write_card(tmp_path, "future", "# now it exists\n")
+    assert outcome_cmd.artifact_fingerprint(tmp_path, "a", "card") != _sha256_of(a)
+
+
+def test_card_link_resolves_alias_section_and_cards_prefix(tmp_path):
+    # [[name|alias]], [[name#section]], and [[cards/name]] all point at the card.
+    _write_card(tmp_path, "b", "# b\n")
+    for body in ("[[b|the B card]]", "[[b#some-section]]", "[[cards/b]]"):
+        _write_card(tmp_path, "a", f"# a\n{body}\n")
+        fp = outcome_cmd.artifact_fingerprint(tmp_path, "a", "card")
+        assert fp != _sha256_of(tmp_path / "memory" / "cards" / "a.md"), body
+
+
+def test_editing_an_unlinked_card_does_not_move_the_fingerprint(tmp_path):
+    # Isolation: only cards in a's closure matter. An unrelated card's edits are invisible.
+    _write_card(tmp_path, "a", "# a\n[[b]]\n")
+    _write_card(tmp_path, "b", "# b\n")
+    unrelated = _write_card(tmp_path, "z", "# z v1\n")
+    before = outcome_cmd.artifact_fingerprint(tmp_path, "a", "card")
+    unrelated.write_text("# z v2\n")
+    after = outcome_cmd.artifact_fingerprint(tmp_path, "a", "card")
+    assert before == after
+
+
+def test_editing_a_linked_card_makes_prior_records_stale_in_rank(tmp_path, capsys):
+    # End to end through rank: a's signals were captured while [[b]] read v1; editing
+    # b drops them from a's current score even though a's own text never moved.
+    _write_card(tmp_path, "a", "# a\n[[b]]\n")
+    b = _write_card(tmp_path, "b", "# b v1\n")
+    old_fp = outcome_cmd.artifact_fingerprint(tmp_path, "a", "card")
+    _seed(
+        tmp_path,
+        [
+            outcome.OutcomeRecord(
+                "a",
+                "card",
+                f"t{i}",
+                "verify",
+                1,
+                f"ref{i}",
+                f"2026-06-20T0{i}:00:00+00:00",
+                content_fingerprint=old_fp,
+            )
+            for i in range(3)
+        ],
+    )
+    b.write_text("# b v2\n")
+
+    assert outcome_cmd.rank(target=tmp_path, json_output=True) == 0
+    entry = json.loads(capsys.readouterr().out)["ranking"][0]
+    assert entry["artifact_id"] == "a"
+    assert entry["helped"] == 0
+    assert entry["lifetime_helped"] == 3
+    assert entry["stale_records"] == 3
