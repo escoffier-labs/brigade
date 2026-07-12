@@ -24,6 +24,15 @@ def test_status_scan_ignores_incidental_words_outside_status_lines():
     assert codex_cloud._scan_status("the run has finished") == "finished"
 
 
+def test_status_scan_reads_bracket_token_first():
+    # real installed-CLI format: [STATUS] <task title>, then repo/age lines
+    assert codex_cloud._scan_status("[PENDING] fix failed tests\nbrigade  -  12s ago\nno diff") is None
+    assert codex_cloud._scan_status("[COMPLETED] fix failed tests\nbrigade  -  2m ago") == "completed"
+    assert codex_cloud._scan_status("[FAILED] harmless title\nbrigade") == "failed"
+    # bracket token is authoritative even if prose elsewhere says otherwise
+    assert codex_cloud._scan_status("[RUNNING] task\nnote: previous attempt failed") is None
+
+
 def test_build_argv_rejects_codex_cloud():
     with pytest.raises(ValueError, match="run_agent"):
         agents.build_argv("codex-cloud:env-123", "hi")

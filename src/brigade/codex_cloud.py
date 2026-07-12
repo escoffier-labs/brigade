@@ -45,15 +45,21 @@ def parse_task_id(text: str) -> str | None:
 def _scan_status(text: str) -> str | None:
     """Return the terminal status keyword from status output.
 
-    Only lines that look like a status field are scanned, so incidental words
-    in a task title ("fix failed tests") cannot terminate polling. When no
-    status-shaped line exists, fall back to scanning the whole output.
+    The installed CLI prints `[STATUS] <task title>` as the first line, so a
+    leading bracket token is authoritative when present. Otherwise scan only
+    status-shaped lines (`Status: ...`), so incidental words in a task title
+    ("fix failed tests") cannot terminate polling. Whole-text scanning is the
+    last resort for unrecognized formats.
     """
-    status_lines = [
-        line for line in text.splitlines()
-        if re.match(r"\s*(task\s+)?(status|state)\b", line, re.I)
-    ]
-    scope = "\n".join(status_lines) if status_lines else text
+    brackets = re.findall(r"^\s*\[([A-Za-z_ -]+)\]", text, re.M)
+    if brackets:
+        scope = "\n".join(brackets)
+    else:
+        status_lines = [
+            line for line in text.splitlines()
+            if re.match(r"\s*(task\s+)?(status|state)\b", line, re.I)
+        ]
+        scope = "\n".join(status_lines) if status_lines else text
     lowered = scope.lower()
     for word in TERMINAL_FAIL + TERMINAL_OK:
         if re.search(rf"\b{word}\b", lowered):
