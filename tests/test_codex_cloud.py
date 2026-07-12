@@ -1,0 +1,135 @@
+from pathlib import Path
+
+import pytest
+
+from brigade import agents, codex_cloud, proc
+
+
+def test_codex_cloud_ref_is_known_and_maps_to_codex():
+    assert agents.is_known("codex-cloud:env-123")
+    assert agents.command_for("codex-cloud:env-123") == "codex"
+    assert agents.read_only_enforcement("codex-cloud:env-123") == "hard"
+
+
+def test_build_argv_rejects_codex_cloud():
+    with pytest.raises(ValueError, match="run_agent"):
+        agents.build_argv("codex-cloud:env-123", "hi")
+
+
+def test_run_agent_requires_env_id(monkeypatch):
+    monkeypatch.setattr(agents.proc, "which", lambda c: "/x/" + c)
+    result = agents.run_agent("codex-cloud:", "hi")
+    assert not result.ok
+    assert "environment id" in result.detail
+
+
+def test_run_agent_rejects_model_pin(monkeypatch):
+    monkeypatch.setattr(agents.proc, "which", lambda c: "/x/" + c)
+    result = agents.run_agent("codex-cloud:env-123", "hi", model="gpt-5.5")
+    assert not result.ok
+    assert "model" in result.detail
+
+
+def test_parse_task_id_variants():
+    assert codex_cloud.parse_task_id(
+        "Created https://chatgpt.com/codex/tasks/task_e_abc123 for review"
+    ) == "task_e_abc123"
+    assert codex_cloud.parse_task_id("Task ID: 9f8e7d6c5b") == "9f8e7d6c5b"
+    assert codex_cloud.parse_task_id("submitted task_abc-42 ok") == "task_abc-42"
+    assert codex_cloud.parse_task_id("task_xyz9\n") == "task_xyz9"
+    assert codex_cloud.parse_task_id("no ids in this prose at all") is None
+
+
+class FakeRuns:
+    """Queue of proc.Result objects keyed by the subcommand (exec/status/diff)."""
+
+    def __init__(self, script):
+        self.script = {k: list(v) for k, v in script.items()}
+        self.calls = []
+
+    def __call__(self, argv, timeout=30.0, env=None, cwd=None):
+        sub = argv[2]  # codex cloud <sub>
+        self.calls.append(argv)
+        queue = self.script[sub]
+        return queue.pop(0) if len(queue) > 1 else queue[0]
+
+
+def _result(code=0, stdout="", stderr=""):
+    return proc.Result(code=code, stdout=stdout, stderr=stderr)
+
+
+def test_run_cloud_task_happy_path(monkeypatch):
+    fake = FakeRuns({
+        "exec": [_result(stdout="Submitted https://chatgpt.com/codex/tasks/task_ok1")],
+        "status": [
+            _result(stdout="status: queued"),
+            _result(stdout="status: running"),
+            _result(stdout="status: completed"),
+        ],
+        "diff": [_result(stdout="diff --git a/f b/f\n+fixed")],
+    })
+    monkeypatch.setattr(codex_cloud.proc, "run", fake)
+    result = codex_cloud.run_cloud_task(
+        "fix it", env_id="env-123", timeout=600, cwd=Path("."),
+        poll_interval=0, sleep=lambda s: None, clock=lambda: 0,
+    )
+    assert result.ok
+    assert result.thread_id == "task_ok1"
+    assert result.status == "completed"
+    assert "diff --git" in result.text
+    assert "NOT applied locally" in result.text
+    assert fake.calls[0][:5] == ["codex", "cloud", "exec", "--env", "env-123"]
+
+
+def test_run_cloud_task_failure_status(monkeypatch):
+    fake = FakeRuns({
+        "exec": [_result(stdout="task_bad1")],
+        "status": [_result(stdout="status: failed (environment setup)")],
+    })
+    monkeypatch.setattr(codex_cloud.proc, "run", fake)
+    result = codex_cloud.run_cloud_task(
+        "x", env_id="e", timeout=600, poll_interval=0, sleep=lambda s: None, clock=lambda: 0,
+    )
+    assert not result.ok
+    assert result.status == "failed"
+    assert "task_bad1" in result.detail
+
+
+def test_run_cloud_task_submit_error(monkeypatch):
+    fake = FakeRuns({
+        "exec": [_result(code=1, stderr="Error: no cloud environments are available")],
+    })
+    monkeypatch.setattr(codex_cloud.proc, "run", fake)
+    result = codex_cloud.run_cloud_task(
+        "x", env_id="e", timeout=600, sleep=lambda s: None, clock=lambda: 0,
+    )
+    assert not result.ok
+    assert "no cloud environments" in result.detail
+
+
+def test_run_cloud_task_timeout_reports_task_id(monkeypatch):
+    fake = FakeRuns({
+        "exec": [_result(stdout="task_slow1")],
+        "status": [_result(stdout="status: running")],
+    })
+    monkeypatch.setattr(codex_cloud.proc, "run", fake)
+    ticks = iter([0, 1, 700, 701, 702])
+    result = codex_cloud.run_cloud_task(
+        "x", env_id="e", timeout=600, poll_interval=0,
+        sleep=lambda s: None, clock=lambda: next(ticks),
+    )
+    assert not result.ok
+    assert result.status == "pending"
+    assert "task_slow1" in result.detail
+
+
+def test_run_cloud_task_unparseable_submit_output(monkeypatch):
+    fake = FakeRuns({
+        "exec": [_result(stdout="some prose without any identifier tokens here")],
+    })
+    monkeypatch.setattr(codex_cloud.proc, "run", fake)
+    result = codex_cloud.run_cloud_task(
+        "x", env_id="e", timeout=600, sleep=lambda s: None, clock=lambda: 0,
+    )
+    assert not result.ok
+    assert "could not parse" in result.detail

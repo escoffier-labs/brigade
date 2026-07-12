@@ -13,6 +13,7 @@ from typing import Callable, List
 from . import proc
 
 _OLLAMA_PREFIX = "ollama:"
+_CODEX_CLOUD_PREFIX = "codex-cloud:"
 
 
 def _claude_argv(prompt: str, read_only: bool, sandbox: str | None, cwd: Path | None) -> List[str]:
@@ -176,6 +177,10 @@ def read_only_enforcement(cli_ref: str) -> str:
     """Return how strongly cli_ref enforces read-only: 'hard', 'soft', or 'none'."""
     if cli_ref.startswith(_OLLAMA_PREFIX):
         return "none"
+    if cli_ref.startswith(_CODEX_CLOUD_PREFIX):
+        # Cloud tasks run in an isolated remote environment; the local tree is
+        # never modified (diffs are only applied via `codex cloud apply`).
+        return "hard"
     return READ_ONLY_ENFORCEMENT.get(cli_ref, "none")
 
 
@@ -190,12 +195,18 @@ class AgentResult:
 
 
 def is_known(cli_ref: str) -> bool:
-    return cli_ref in _ADAPTERS or cli_ref.startswith(_OLLAMA_PREFIX)
+    return (
+        cli_ref in _ADAPTERS
+        or cli_ref.startswith(_OLLAMA_PREFIX)
+        or cli_ref.startswith(_CODEX_CLOUD_PREFIX)
+    )
 
 
 def command_for(cli_ref: str) -> str:
     if cli_ref.startswith(_OLLAMA_PREFIX):
         return "ollama"
+    if cli_ref.startswith(_CODEX_CLOUD_PREFIX):
+        return "codex"
     if cli_ref == "antigravity":
         return "agy"
     if cli_ref == "cursor":
@@ -266,12 +277,15 @@ def build_argv(
             raise ValueError(f"{cli_ref!r} already names a model; drop the separate model setting")
         return ["ollama", "run", ollama_model, prompt]
 
+    if cli_ref.startswith(_CODEX_CLOUD_PREFIX):
+        raise ValueError("codex-cloud seats run a submit/poll flow; call run_agent, not build_argv")
     builder = _ADAPTERS.get(cli_ref)
     if builder is None:
         raise ValueError(
             f"unknown agent cli: {cli_ref!r} "
             "(known: claude, codex, opencode, antigravity, pi, cursor, aider, goose, continue, "
-            "copilot, qwen, kimi, adal, openhands, grok, amp, crush, ollama:<model>)"
+            "copilot, qwen, kimi, adal, openhands, grok, amp, crush, ollama:<model>, "
+            "codex-cloud:<env-id>)"
         )
     argv = builder(prompt, read_only, sandbox, cwd)
     if model is not None:
@@ -294,6 +308,22 @@ def run_agent(
 ) -> AgentResult:
     if not detect(cli_ref):
         return AgentResult(text="", ok=False, detail=f"{command_for(cli_ref)} not installed")
+
+    if cli_ref.startswith(_CODEX_CLOUD_PREFIX):
+        env_id = cli_ref[len(_CODEX_CLOUD_PREFIX):]
+        if not env_id:
+            return AgentResult(
+                text="", ok=False,
+                detail="codex-cloud reference needs an environment id: codex-cloud:<env-id>",
+            )
+        if model is not None:
+            return AgentResult(
+                text="", ok=False,
+                detail="codex-cloud does not take a model pin; the cloud environment sets the model",
+            )
+        from . import codex_cloud
+
+        return codex_cloud.run_cloud_task(prompt, env_id=env_id, timeout=timeout, cwd=cwd)
 
     result = proc.run(
         build_argv(cli_ref, prompt, read_only=read_only, sandbox=sandbox, model=model, cwd=cwd),

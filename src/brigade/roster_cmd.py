@@ -39,6 +39,9 @@ allow_models = ["codex", "ollama:*"]
 
 # Cross-model example: pin a model per agent with `model = ...`
 # (supported: claude, codex, grok, opencode, pi, kimi, cursor, antigravity).
+# A `codex-cloud:<env-id>` seat submits the task to Codex Cloud, polls it to a
+# terminal state, and returns the summary plus unified diff (never auto-applied;
+# land it with `codex cloud apply <task-id>`). Allow it with "codex-cloud:*".
 # Fable 5 plans and synthesizes, GPT 5.5 executes, the handoff records the run.
 # Use a model id your CLI account supports (ChatGPT-account codex takes "gpt-5.5").
 #
