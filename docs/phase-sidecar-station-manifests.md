@@ -18,9 +18,9 @@ Key tech: JSON, existing `brigade.station.v1` parsing, repository-local lint gat
 
 ## Task 1: Capture the failing contract state
 
-- [ ] Run GraphTrail parity through Brigade and expect exit 1 with drift in `install` and `surfaces`.
-- [ ] Run Agent Pantry, Token Glace, Skillet, and Content Guard verification through Brigade and expect exit 2 because `station.json` is absent.
-- [ ] Run MiseLedger verification with `--check-managed` and expect exit 0.
+- [x] Run GraphTrail parity through Brigade and expect exit 1 with drift in `install` and `surfaces`.
+- [x] Run Agent Pantry, Token Glace, Skillet, and Content Guard verification through Brigade and expect exit 2 because `station.json` is absent.
+- [x] Run MiseLedger verification with `--check-managed` and expect exit 0.
 
 Use the installed Brigade development CLI:
 
@@ -34,7 +34,7 @@ Use the installed Brigade development CLI:
 
 - Modify: `/home/clawdbot/.cache/codex/worktrees/upstream-integration/graphtrail/station.json`
 
-- [ ] Replace the manifest with:
+- [x] Replace the manifest with:
 
 ```json
 {
@@ -80,8 +80,8 @@ Use the installed Brigade development CLI:
 }
 ```
 
-- [ ] Run `brigade stations verify . --check-managed` through Brigade and expect exit 0.
-- [ ] Run the GraphTrail completion gate and commit `fix: align Brigade station contract`.
+- [x] Run `brigade stations verify . --check-managed` through Brigade and expect exit 0.
+- [x] Run the GraphTrail completion gate and commit `fix: align Brigade station contract`.
 
 ## Task 3: Add Agent Pantry
 
@@ -89,7 +89,7 @@ Use the installed Brigade development CLI:
 
 - Create: `/home/clawdbot/.cache/codex/worktrees/upstream-integration/agentpantry/station.json`
 
-- [ ] Add:
+- [x] Add:
 
 ```json
 {
@@ -135,8 +135,8 @@ Use the installed Brigade development CLI:
 }
 ```
 
-- [ ] Run parity through Brigade and expect exit 0.
-- [ ] Run `./scripts/verify` through Brigade and commit `feat: add Brigade station contract`.
+- [x] Run parity through Brigade and expect exit 0.
+- [x] Run `./scripts/verify` through Brigade and commit `feat: add Brigade station contract`.
 
 ## Task 4: Add Token Glace
 
@@ -144,7 +144,7 @@ Use the installed Brigade development CLI:
 
 - Create: `/home/clawdbot/.cache/codex/worktrees/upstream-integration/token-glace/station.json`
 
-- [ ] Add:
+- [x] Add:
 
 ```json
 {
@@ -193,8 +193,8 @@ Use the installed Brigade development CLI:
 }
 ```
 
-- [ ] Run parity through Brigade and expect exit 0.
-- [ ] Run `pnpm verify` through Brigade and commit `feat: add Brigade station contract`.
+- [x] Run parity through Brigade and expect exit 0.
+- [x] Run `pnpm verify` through Brigade and commit `feat: add Brigade station contract`.
 
 ## Task 5: Add Skillet
 
@@ -203,7 +203,7 @@ Use the installed Brigade development CLI:
 - Create: `/home/clawdbot/.cache/codex/worktrees/upstream-integration/skillet/station.json`
 - Modify: `/home/clawdbot/.cache/codex/worktrees/upstream-integration/skillet/tests/lint-skills.sh`
 
-- [ ] Add a failing static linter check that requires:
+- [x] Add a failing static linter check that requires:
   - schema `brigade.station.v1`
   - name `skillet`
   - station `skills`
@@ -212,9 +212,9 @@ Use the installed Brigade development CLI:
   - install `npx skills add escoffier-labs/skillet`
   - one `verify-exit` probe targeting `tests/lint-skills.sh`
 
-- [ ] Run `./tests/lint-skills.sh` through Brigade and watch it fail because the manifest is absent.
+- [x] Run `./tests/lint-skills.sh` through Brigade and watch it fail because the manifest is absent.
 
-- [ ] Add this manifest:
+- [x] Add this manifest:
 
 ```json
 {
@@ -244,8 +244,8 @@ Use the installed Brigade development CLI:
 
 The linter validates static JSON only. It must not invoke `brigade stations verify`, because that verifier executes the linter as the skill-roster probe.
 
-- [ ] Run the linter and Brigade parity to green.
-- [ ] Commit `feat: add Brigade station contract`.
+- [x] Run the linter and Brigade parity to green.
+- [x] Commit `feat: add Brigade station contract`.
 
 ## Task 6: Mark Content Guard embedded
 
@@ -253,7 +253,7 @@ The linter validates static JSON only. It must not invoke `brigade stations veri
 
 - Create: `/home/clawdbot/.cache/codex/worktrees/upstream-integration/content-guard/station.json`
 
-- [ ] Add:
+- [x] Add:
 
 ```json
 {
@@ -267,11 +267,22 @@ The linter validates static JSON only. It must not invoke `brigade stations veri
 }
 ```
 
-- [ ] Run Brigade verification and expect `embedded-skip` with exit 0.
-- [ ] Run `./scripts/verify` through Brigade and commit `docs: record embedded Brigade lifecycle`.
+- [x] Run Brigade verification and expect `embedded-skip` with exit 0.
+- [x] Run `./scripts/verify` through Brigade and commit `docs: record embedded Brigade lifecycle`.
 
 ## Task 7: Cross-repo closeout
 
-- [ ] Re-run `brigade stations verify . --check-managed` for GraphTrail, MiseLedger, Agent Pantry, Token Glace, and Skillet. All 5 active contracts must exit 0.
-- [ ] Re-run Content Guard verification. It must exit 0 with `embedded-skip`.
-- [ ] Record exact repository commits and verification receipts in the ecosystem closeout.
+- [x] Re-run `brigade stations verify . --check-managed` for GraphTrail, MiseLedger, Agent Pantry, Token Glace, and Skillet. All 5 active contracts must exit 0.
+- [x] Re-run Content Guard verification. It must exit 0 with `embedded-skip`.
+- [x] Record exact repository commits and verification receipts in the ecosystem closeout.
+
+## Execution Evidence
+
+| Repository | Commit | Contract receipt | Repository gate receipt |
+| --- | --- | --- | --- |
+| GraphTrail | `e51ed5d` | `20260712-210024-work-verify-6afabd` | `20260712-210040-work-verify-589fea`, `20260712-210058-work-verify-a35c15`, `20260712-210109-work-verify-696bb4`, `20260712-210118-work-verify-45e304` |
+| MiseLedger | unchanged | `20260712-205916-work-verify-b208bd` | unchanged |
+| Agent Pantry | `d9470b1` | `20260712-210024-work-verify-efbc13` | `20260712-210039-work-verify-361c94` |
+| Token Glace | `44db23d` | `20260712-210024-work-verify-ae323b` | `20260712-210040-work-verify-1ecf42` |
+| Skillet | `74520a2` | `20260712-210024-work-verify-d1f2db` | `20260712-210040-work-verify-0e53d6` |
+| Content Guard | `87e095e` | `20260712-210024-work-verify-9b81e9` | `20260712-210039-work-verify-888db3` |
