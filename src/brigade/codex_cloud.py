@@ -43,8 +43,18 @@ def parse_task_id(text: str) -> str | None:
 
 
 def _scan_status(text: str) -> str | None:
-    """Return the first terminal status keyword found in status output."""
-    lowered = text.lower()
+    """Return the terminal status keyword from status output.
+
+    Only lines that look like a status field are scanned, so incidental words
+    in a task title ("fix failed tests") cannot terminate polling. When no
+    status-shaped line exists, fall back to scanning the whole output.
+    """
+    status_lines = [
+        line for line in text.splitlines()
+        if re.match(r"\s*(task\s+)?(status|state)\b", line, re.I)
+    ]
+    scope = "\n".join(status_lines) if status_lines else text
+    lowered = scope.lower()
     for word in TERMINAL_FAIL + TERMINAL_OK:
         if re.search(rf"\b{word}\b", lowered):
             return word
@@ -84,10 +94,17 @@ def run_cloud_task(
         head = submit.stdout.strip()[:150]
         return AgentResult(text="", ok=False, detail=f"could not parse cloud task id from: {head}")
 
+    def remaining(floor: float = 5.0) -> float:
+        return max(floor, deadline - clock())
+
     status_text = ""
     status_word = None
     while True:
-        st = proc.run(["codex", "cloud", "status", task_id], timeout=POLL_TIMEOUT, cwd=cwd)
+        st = proc.run(
+            ["codex", "cloud", "status", task_id],
+            timeout=min(POLL_TIMEOUT, remaining()),
+            cwd=cwd,
+        )
         status_text = (st.stdout + "\n" + st.stderr).strip()
         if st.code == 0:
             status_word = _scan_status(status_text)
@@ -114,12 +131,21 @@ def run_cloud_task(
             )
         sleep(poll_interval)
 
-    diff = proc.run(["codex", "cloud", "diff", task_id], timeout=DIFF_TIMEOUT, cwd=cwd)
+    diff = proc.run(
+        ["codex", "cloud", "diff", task_id],
+        timeout=min(DIFF_TIMEOUT, remaining(floor=30.0)),
+        cwd=cwd,
+    )
     parts = [f"codex cloud task {task_id} [{status_word}]", status_text]
-    if diff.code == 0 and diff.stdout.strip():
+    if diff.code != 0:
+        err = diff.stderr.strip() or f"exit {diff.code}"
+        parts.append(f"WARNING: `codex cloud diff {task_id}` failed: {err[:300]}")
+    elif diff.stdout.strip():
         parts += [
             f"Unified diff (NOT applied locally; apply with `codex cloud apply {task_id}`):",
             diff.stdout.strip()[:DIFF_CAP],
         ]
+    else:
+        parts.append("No diff produced (research or no-change task).")
     text = "\n\n".join(p for p in parts if p)
     return AgentResult(text=text, ok=True, thread_id=task_id, status=status_word or "")

@@ -672,6 +672,14 @@ def _run_orchestrator(
             ok=False,
             detail=f"{orchestrator.cli} is not allowed by limits.allow_models",
         )
+    if orchestrator.cli.startswith("codex-cloud:"):
+        # A cloud task returns a status report plus diff, not a plan or a
+        # synthesis; the orchestrator seat must be a conversational CLI.
+        return agents.AgentResult(
+            text="",
+            ok=False,
+            detail="codex-cloud seats are workers only; pick a local CLI for the orchestrator",
+        )
     kwargs: dict[str, object] = {
         "timeout": timeout_for(orchestrator, roster),
         "cwd": cwd,

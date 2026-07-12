@@ -195,11 +195,11 @@ class AgentResult:
 
 
 def is_known(cli_ref: str) -> bool:
-    return (
-        cli_ref in _ADAPTERS
-        or cli_ref.startswith(_OLLAMA_PREFIX)
-        or cli_ref.startswith(_CODEX_CLOUD_PREFIX)
+    # a bare "codex-cloud:" with no environment id is not a valid seat
+    has_cloud_env = (
+        cli_ref.startswith(_CODEX_CLOUD_PREFIX) and len(cli_ref) > len(_CODEX_CLOUD_PREFIX)
     )
+    return cli_ref in _ADAPTERS or cli_ref.startswith(_OLLAMA_PREFIX) or has_cloud_env
 
 
 def command_for(cli_ref: str) -> str:
