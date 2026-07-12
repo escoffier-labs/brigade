@@ -43,6 +43,13 @@ class OutcomeRecord:
     time (CocoIndex's memo-key idea applied to the ratchet: a signal vouches for
     the exact text that earned it, not the name). ``None`` on records captured
     before fingerprints existed - the legacy cohort.
+
+    ``context`` is a coarse manifest of the runtime harness the signal was earned
+    under (Brigade version, interpreter, platform, best-effort harness and model),
+    and ``capability_fingerprint`` is the sha256 of its low-cardinality capability
+    vector. Both are ``None`` on records captured before context tracking existed.
+    Phase 1 records them but does not score on them; see
+    docs/design/context-blind-spot.md.
     """
 
     artifact_id: str
@@ -55,6 +62,8 @@ class OutcomeRecord:
     code_graph_delta: dict[str, Any] | None = None
     context_eval: dict[str, Any] | None = None
     content_fingerprint: str | None = None
+    context: dict[str, Any] | None = None
+    capability_fingerprint: str | None = None
 
 
 @dataclass(frozen=True)

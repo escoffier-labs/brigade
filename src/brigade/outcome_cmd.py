@@ -13,6 +13,8 @@ import dataclasses
 import hashlib
 import io
 import json
+import os
+import platform as platform_mod
 import sys
 from pathlib import Path
 from typing import Any
@@ -216,6 +218,111 @@ def artifact_fingerprint(target: Path, artifact_id: str, kind: str) -> str | Non
     return _bundle_fingerprint(path.parent)
 
 
+# --- Runtime context manifest (Phase 1: capture and surface, no scoring) -------
+# See docs/design/context-blind-spot.md. A content hash sees an artifact's files,
+# not the harness it ran inside. We stamp a coarse, honestly-sourced manifest onto
+# each new record so cohort-aware scoring (Phase 2) has data to work with. Nothing
+# here changes a score or a ratchet decision.
+
+# Ordered (env var -> harness name) auto-detection. An explicit
+# BRIGADE_CONTEXT_HARNESS override wins; otherwise a known signal implies a name.
+_HARNESS_SIGNALS: tuple[tuple[str, str], ...] = (
+    ("CLAUDECODE", "claude-code"),
+    ("CURSOR_TRACE_ID", "cursor"),
+    ("CODEX_SANDBOX", "codex"),
+    ("CODEX_SANDBOX_NETWORK_DISABLED", "codex"),
+)
+
+# Coarse model-family buckets, matched as substrings in priority order. Low
+# cardinality on purpose: the family is what plausibly flips an exit code, and
+# coarse buckets are what let a capability cohort ever accumulate samples.
+_MODEL_FAMILIES: tuple[tuple[str, str], ...] = (
+    ("opus", "claude"),
+    ("sonnet", "claude"),
+    ("haiku", "claude"),
+    ("fable", "claude"),
+    ("claude", "claude"),
+    ("codex", "openai"),
+    ("gpt", "openai"),
+    ("grok", "xai"),
+    ("gemini", "google"),
+)
+
+
+def _detect_harness() -> tuple[str, str]:
+    """Return (harness, source). Best-effort: env override, then known signals."""
+    override = os.environ.get("BRIGADE_CONTEXT_HARNESS", "").strip()
+    if override:
+        return localio.slugify(override, fallback="harness"), "env"
+    for var, name in _HARNESS_SIGNALS:
+        if os.environ.get(var):
+            return name, "auto"
+    generic = os.environ.get("AI_AGENT", "").strip()
+    if generic:
+        return localio.slugify(generic, fallback="harness"), "auto"
+    return "unknown", "unknown"
+
+
+def _detect_model(run_agent: dict[str, Any] | None) -> tuple[str, str]:
+    """Return (model, source). The run receipt's agent is the strongest signal."""
+    if isinstance(run_agent, dict):
+        model = run_agent.get("model")
+        if isinstance(model, str) and model:
+            return model, "run-receipt"
+    override = os.environ.get("BRIGADE_CONTEXT_MODEL", "").strip()
+    if override:
+        return override, "env"
+    return "unknown", "unknown"
+
+
+def _model_family(model: str) -> str:
+    lowered = model.lower()
+    if lowered in ("", "unknown"):
+        return "unknown"
+    for needle, family in _MODEL_FAMILIES:
+        if needle in lowered:
+            return family
+    return "other"
+
+
+def context_manifest(run_agent: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Assemble the coarse runtime-context manifest stamped onto a new record.
+
+    Brigade-computed fields (version, interpreter, platform) carry the same
+    trust as an exit code. The harness and model are best-effort and tagged with
+    a ``*_source`` so a reader can tell an attested value from a declared one.
+    """
+    from . import __version__
+
+    harness, harness_source = _detect_harness()
+    model, model_source = _detect_model(run_agent)
+    return {
+        "brigade_version": __version__,
+        "python": f"{sys.version_info.major}.{sys.version_info.minor}",
+        "platform": platform_mod.system() or "unknown",
+        "harness": harness,
+        "harness_source": harness_source,
+        "model": model,
+        "model_family": _model_family(model),
+        "model_source": model_source,
+    }
+
+
+def capability_fingerprint(manifest: dict[str, Any]) -> str:
+    """sha256 of the low-cardinality capability vector the manifest reduces to.
+
+    Coarse on purpose (family not slug, major.minor not patch) so a capability
+    cohort can accumulate samples where an exact-context cohort would be n=1.
+    """
+    vector = {
+        "harness": manifest.get("harness", "unknown"),
+        "model_family": manifest.get("model_family", "unknown"),
+        "python": manifest.get("python", "unknown"),
+        "platform": manifest.get("platform", "unknown"),
+    }
+    return localio.canonical_json_digest(vector)
+
+
 def _fingerprint_cohorts_by_artifact(
     target: Path, records: list[core.OutcomeRecord]
 ) -> dict[str, core.FingerprintCohorts]:
@@ -234,6 +341,8 @@ def _record_from_dict(payload: dict) -> core.OutcomeRecord | None:
     code_graph_delta = payload.get("code_graph_delta")
     context_eval = payload.get("context_eval")
     content_fingerprint = payload.get("content_fingerprint")
+    context = payload.get("context")
+    capability_fingerprint_value = payload.get("capability_fingerprint")
     try:
         return core.OutcomeRecord(
             artifact_id=str(payload["artifact_id"]),
@@ -247,6 +356,10 @@ def _record_from_dict(payload: dict) -> core.OutcomeRecord | None:
             context_eval=context_eval if isinstance(context_eval, dict) else None,
             content_fingerprint=content_fingerprint
             if isinstance(content_fingerprint, str) and content_fingerprint
+            else None,
+            context=context if isinstance(context, dict) else None,
+            capability_fingerprint=capability_fingerprint_value
+            if isinstance(capability_fingerprint_value, str) and capability_fingerprint_value
             else None,
         )
     except (KeyError, TypeError, ValueError):
@@ -275,6 +388,10 @@ def _record_payload(record: core.OutcomeRecord) -> dict:
         row.pop("context_eval", None)
     if row.get("content_fingerprint") is None:
         row.pop("content_fingerprint", None)
+    if row.get("context") is None:
+        row.pop("context", None)
+    if row.get("capability_fingerprint") is None:
+        row.pop("capability_fingerprint", None)
     return row
 
 
@@ -674,6 +791,36 @@ def _fingerprint_decision_suffix(cohorts: core.FingerprintCohorts) -> str:
     )
 
 
+def _capability_breakdown(records: list[core.OutcomeRecord]) -> list[dict] | None:
+    """Group an artifact's scored records by capability cohort (Phase 1, display-only).
+
+    Returns None when no record carries a capability fingerprint, so the output of
+    a pre-context ledger is unchanged. Records without one fall into an "unknown"
+    bucket rather than being dropped, so the counts always reconcile with the
+    lifetime fold. This is informational: Phase 1 does not score on these cohorts.
+    """
+    scored = core.scored_records(records)
+    if not any(r.capability_fingerprint for r in scored):
+        return None
+    groups: dict[str, dict] = {}
+    for record in scored:
+        fp = record.capability_fingerprint or "unknown"
+        manifest = record.context if isinstance(record.context, dict) else {}
+        label = f"{manifest.get('harness', 'unknown')}/{manifest.get('model_family', 'unknown')}"
+        entry = groups.setdefault(
+            fp, {"capability_fingerprint": fp, "label": label, "helped": 0, "hurt": 0, "neutral": 0}
+        )
+        if record.signal_value > 0:
+            entry["helped"] += 1
+        elif record.signal_value < 0:
+            entry["hurt"] += 1
+        else:
+            entry["neutral"] += 1
+    return sorted(
+        groups.values(), key=lambda e: (e["capability_fingerprint"] != "unknown", e["capability_fingerprint"])
+    )
+
+
 def score(*, target: Path, artifact_id: str | None = None, json_output: bool = False) -> int:
     target = target.expanduser().resolve()
     scores = _scores_by_artifact(load_records(target))
@@ -720,6 +867,7 @@ def explain(*, target: Path, artifact_id: str, json_output: bool = False) -> int
         }
         for record in sorted(records, key=lambda record: record.ts)
     ]
+    capability_breakdown = _capability_breakdown(records)
     if json_output:
         payload = {
             "target": str(target),
@@ -731,6 +879,8 @@ def explain(*, target: Path, artifact_id: str, json_output: bool = False) -> int
             "legacy_records": cohorts.legacy_records,
             "trail": trail,
         }
+        if capability_breakdown is not None:
+            payload["capability_breakdown"] = capability_breakdown
         print(json.dumps(payload, indent=2, sort_keys=True))
         return 0
     print(f"outcome explain: {artifact_id}")
@@ -750,6 +900,13 @@ def explain(*, target: Path, artifact_id: str, json_output: bool = False) -> int
         print(
             f"score: {score_obj.score:.3f} helped={score_obj.helped} hurt={score_obj.hurt} neutral={score_obj.neutral}"
         )
+    if capability_breakdown is not None:
+        print("capability cohorts (display-only, not scored in phase 1):")
+        for entry in capability_breakdown:
+            print(
+                f"- {entry['capability_fingerprint'][:12]} {entry['label']} "
+                f"helped={entry['helped']} hurt={entry['hurt']} neutral={entry['neutral']}"
+            )
     if not trail:
         print("trail: none")
         return 0
@@ -794,6 +951,7 @@ def capture(
     ts = localio.utc_now_iso()
     code_graph_delta: dict[str, Any] | None = None
     context_eval: dict[str, Any] | None = None
+    run_agent: dict[str, Any] | None = None
     if run_receipt is not None:
         receipt, run_json, error = _resolve_run_receipt(target, run_receipt)
         if receipt is None or run_json is None:
@@ -805,6 +963,8 @@ def capture(
         ts = str(receipt.get("completed_at") or receipt.get("started_at") or localio.utc_now_iso())
         code_graph_delta = _compact_code_graph_delta(receipt)
         context_eval = _compact_context_eval(receipt)
+        agent = receipt.get("agent")
+        run_agent = agent if isinstance(agent, dict) else None
     else:
         from .work_cmd import verification as verify_mod
 
@@ -816,6 +976,7 @@ def capture(
         evidence_ref = str(Path(str(receipt.get("path", ""))) / "receipt.json")
         ts = str(receipt.get("completed_at") or receipt.get("started_at") or localio.utc_now_iso())
         code_graph_delta = _compact_code_graph_delta(receipt)
+    manifest = context_manifest(run_agent)
     record = core.OutcomeRecord(
         artifact_id=artifact_id,
         artifact_kind=artifact_kind,
@@ -827,6 +988,8 @@ def capture(
         code_graph_delta=code_graph_delta,
         context_eval=context_eval,
         content_fingerprint=artifact_fingerprint(target, artifact_id, artifact_kind),
+        context=manifest,
+        capability_fingerprint=capability_fingerprint(manifest),
     )
     append_records(target, [record])
     if json_output:
@@ -837,6 +1000,8 @@ def capture(
     print(f"evidence: {record.evidence_ref}")
     if record.content_fingerprint:
         print(f"fingerprint: {record.content_fingerprint[:12]}")
+    if record.capability_fingerprint:
+        print(f"capability: {record.capability_fingerprint[:12]} ({manifest['harness']}/{manifest['model_family']})")
     return 0
 
 
@@ -1142,6 +1307,7 @@ def record(
     real signal without an LLM judging it.
     """
     target = target.expanduser().resolve()
+    manifest = context_manifest()
     new_record = core.OutcomeRecord(
         artifact_id=artifact_id,
         artifact_kind=artifact_kind,
@@ -1151,6 +1317,8 @@ def record(
         evidence_ref=evidence_ref,
         ts=localio.utc_now_iso(),
         content_fingerprint=artifact_fingerprint(target, artifact_id, artifact_kind),
+        context=manifest,
+        capability_fingerprint=capability_fingerprint(manifest),
     )
     append_records(target, [new_record])
     if json_output:
