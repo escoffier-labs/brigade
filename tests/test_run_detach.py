@@ -111,6 +111,7 @@ def test_run_detach_child_argv_preserves_worker(tmp_path):
         handoff=False,
         handoff_inbox=None,
         worker="coder",
+        wait=2.5,
     )
     roster_path = tmp_path / "roster.toml"
     output_dir = tmp_path / "run"
@@ -124,3 +125,4 @@ def test_run_detach_child_argv_preserves_worker(tmp_path):
 
     assert "--worker" in argv
     assert argv[argv.index("--worker") + 1] == "coder"
+    assert argv[argv.index("--wait") + 1] == "2.5"

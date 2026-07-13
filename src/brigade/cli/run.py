@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import math
 import sys
 import time
 from pathlib import Path
@@ -11,6 +12,17 @@ from subprocess import DEVNULL, STDOUT, Popen
 
 _DETACH_START_TIMEOUT_SECONDS = 30.0
 _DETACH_POLL_INTERVAL_SECONDS = 0.05
+_DEFAULT_RUN_LOCK_WAIT_SECONDS = 600.0
+
+
+def _non_negative_seconds(value: str) -> float:
+    try:
+        parsed = float(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("must be a number of seconds") from exc
+    if not math.isfinite(parsed) or parsed < 0:
+        raise argparse.ArgumentTypeError("must be a finite non-negative number of seconds")
+    return parsed
 
 
 def register(sub: argparse._SubParsersAction) -> None:
@@ -33,6 +45,18 @@ def register(sub: argparse._SubParsersAction) -> None:
         "--detach",
         action="store_true",
         help="Start the run in a detached child process and return after run metadata is written.",
+    )
+    p_run.add_argument(
+        "--wait",
+        nargs="?",
+        const=_DEFAULT_RUN_LOCK_WAIT_SECONDS,
+        default=0.0,
+        type=_non_negative_seconds,
+        metavar="SECONDS",
+        help=(
+            "Wait up to SECONDS for an active run lock instead of failing immediately "
+            f"(default with no value: {_DEFAULT_RUN_LOCK_WAIT_SECONDS:g}s)."
+        ),
     )
     p_run.add_argument(
         "--allow-dirty",
@@ -237,7 +261,7 @@ def dispatch(args) -> int:
     effective_cwd = run_cwd
     keep_worktree = False
     try:
-        with runguard.run_lock(run_cwd):
+        with runguard.run_lock(run_cwd, wait_seconds=args.wait):
             if args.worktree:
                 worktree_cwd = _worktree_checkout_path(runguard.git_root(run_cwd), output_dir)
                 effective_cwd = runguard.create_detached_worktree(run_cwd, worktree_cwd)
@@ -380,6 +404,8 @@ def _detached_child_argv(args, *, run_cwd: Path, roster_path: Path, output_dir: 
         argv.append("--read-only")
     if args.worker is not None:
         argv.extend(["--worker", args.worker])
+    if args.wait > 0:
+        argv.extend(["--wait", f"{args.wait:g}"])
     if args.no_code_graph:
         argv.append("--no-code-graph")
     if args.no_evidence:

@@ -327,6 +327,7 @@ brigade run "review this repo" --read-only --inspect
 brigade run "make the change" --allow-dirty
 brigade run "make the change" --worktree
 brigade run "make the change" --detach
+brigade run "serialize behind an active run" --wait=120
 ```
 
 The examples above all drive the same `brigade run` command to show its main flags. Brigade's full surface (work loop, scanners, handoffs, tools, release gates, repo fleet, and more) is documented section by section below. For the complete, auto-generated list of every command, see [`docs/command-inventory.md`](command-inventory.md), and regenerate it with `BRIGADE_EXTRAS=1 brigade roadmap commands --write`.
@@ -335,6 +336,7 @@ Common `brigade run` flags:
 
 - `--dry-run` prints planned assignments as JSON and stops before worker dispatch.
 - `--detach` starts the run in a child process, writes child output to `detached.log`, and returns after `run.json` appears.
+- `--wait[=SECONDS]` waits for the target's active run lock instead of failing immediately. A bare `--wait` waits up to 600 seconds. Without this flag, lock conflicts remain fail-fast.
 - `--allow-dirty` bypasses the default dirty-git-worktree guard.
 - `--worktree` runs agents in a detached git worktree and captures `changes.patch`.
 - `--show-plan` prints assignments before a normal run.
