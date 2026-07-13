@@ -37,13 +37,24 @@ def _ids(run_id: str, seat: str, ordinal: int) -> tuple[str, str]:
 
 
 def _provider(cli: str) -> str | None:
-    if cli in {"codex", "opencode", "pi"}:
+    if cli == "codex":
         return "openai"
     if cli == "claude":
         return "anthropic"
     if cli == "grok":
         return "x_ai"
     return None
+
+
+def _error_type(result: dict[str, Any]) -> str | None:
+    if result.get("ok") is True:
+        return None
+    if result.get("timed_out") is True:
+        return "timeout"
+    exit_code = result.get("exit_code")
+    if isinstance(exit_code, int) and not isinstance(exit_code, bool):
+        return "process_error"
+    return "worker_error"
 
 
 def _base(run_id: str, run: dict[str, Any], seat: str, result: dict[str, Any], ordinal: int) -> dict[str, Any]:
@@ -56,7 +67,7 @@ def _base(run_id: str, run: dict[str, Any], seat: str, result: dict[str, Any], o
         "end_time": run.get("finished_at"),
         "duration_seconds": result.get("duration_seconds"),
         "status": "OK" if result.get("ok") is True else "ERROR",
-        "error_type": None if result.get("ok") is True else str(result.get("detail") or "worker_error")[:120],
+        "error_type": _error_type(result),
         "seat": seat,
         "adapter": result.get("transport") or "cli",
         "requested_model": result.get("requested_model"),

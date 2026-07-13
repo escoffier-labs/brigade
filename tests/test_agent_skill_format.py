@@ -38,6 +38,7 @@ def test_strict_rejects_unknown_and_lenient_retains_diagnostic(tmp_path):
     assert "unknown frontmatter field: future-field" in strict.errors
     assert lenient.errors == ()
     assert lenient.diagnostics == ("unknown frontmatter field retained: future-field",)
+    assert lenient.fields["future-field"] == "value"
 
 
 def test_name_description_and_exact_casing_are_enforced(tmp_path):

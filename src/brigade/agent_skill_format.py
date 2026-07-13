@@ -54,7 +54,7 @@ def validate(skill_dir: Path, *, mode: str) -> Validation:
             return Validation({}, (), (framing_error or "invalid frontmatter",))
         return Validation({}, (framing_error or "invalid frontmatter",), ())
     fields: dict[str, object] = {}
-    unknown: list[str] = []
+    unknown: dict[str, str] = {}
     metadata: dict[str, str] = {}
     current_map: str | None = None
     errors: list[str] = []
@@ -79,7 +79,7 @@ def validate(skill_dir: Path, *, mode: str) -> Validation:
         key, raw = line.split(":", 1)
         key = key.strip()
         if key not in KNOWN_FIELDS:
-            unknown.append(key)
+            unknown[key] = _scalar(raw)
             continue
         if key == "metadata":
             current_map = key
@@ -120,6 +120,5 @@ def validate(skill_dir: Path, *, mode: str) -> Validation:
         fields["allowed-tools"] = tuple(item for item in re.split(r"[\s,]+", allowed) if item)
     elif allowed is not None:
         errors.append("frontmatter allowed-tools must be a string declaration")
-    for key in unknown:
-        fields[key] = "retained"
+    fields.update(unknown)
     return Validation(fields, tuple(dict.fromkeys(errors)), tuple(diagnostics))
