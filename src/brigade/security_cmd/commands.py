@@ -62,6 +62,19 @@ def health(target: Path, *, suppression_cache_only: bool = False) -> dict[str, A
     target = target.expanduser().resolve()
     checks: list[dict[str, Any]] = []
     closeouts = _read_closeouts(target)
+    latest_closeout = closeouts[0] if closeouts else None
+    accepted_fingerprints = (
+        {
+            str(fingerprint)
+            for fingerprint in latest_closeout.get("source_fingerprints", [])
+            if isinstance(fingerprint, str) and fingerprint
+        }
+        if isinstance(latest_closeout, dict)
+        and latest_closeout.get("status") == "accepted-risk"
+        and isinstance(latest_closeout.get("policy_pack"), dict)
+        and latest_closeout["policy_pack"].get("accepted_risk") is True
+        else set()
+    )
     config_ok = True
     try:
         loaded = load_config(target)
@@ -117,14 +130,42 @@ def health(target: Path, *, suppression_cache_only: bool = False) -> dict[str, A
                 "detail": f"{template_audit_payload['scanned_file_count']} public file(s) checked",
             }
         )
-    harness_wiring = harness_wiring_payload(target)
-    if harness_wiring["finding_count"]:
-        top_harness = harness_wiring["top_finding"] if isinstance(harness_wiring.get("top_finding"), dict) else {}
+    raw_harness_wiring = harness_wiring_payload(target)
+    raw_harness_findings = [item for item in raw_harness_wiring.get("findings", []) if isinstance(item, dict)]
+    include_templates = (
+        bool(
+            loaded.include_templates
+            if loaded.include_templates is not None
+            else POLICIES[loaded.policy]["include_templates"]
+        )
+        if loaded is not None
+        else False
+    )
+    eligible_harness_findings = [
+        item for item in raw_harness_findings if include_templates or item.get("confidence") != "template"
+    ]
+    active_harness_findings = [
+        item for item in eligible_harness_findings if str(item.get("fingerprint") or "") not in accepted_fingerprints
+    ]
+    quieted_harness_findings = [
+        item for item in eligible_harness_findings if str(item.get("fingerprint") or "") in accepted_fingerprints
+    ]
+    harness_wiring = {
+        **raw_harness_wiring,
+        "active_findings": active_harness_findings,
+        "active_finding_count": len(active_harness_findings),
+        "active_top_finding": active_harness_findings[0] if active_harness_findings else None,
+        "quieted_findings": quieted_harness_findings,
+        "quieted_finding_count": len(quieted_harness_findings),
+        "ignored_template_finding_count": len(raw_harness_findings) - len(eligible_harness_findings),
+    }
+    if active_harness_findings:
+        top_harness = active_harness_findings[0]
         checks.append(
             {
                 "status": "warn",
                 "name": "security_harness_wiring",
-                "detail": f"{harness_wiring['finding_count']} harness wiring finding(s), top={top_harness.get('path')}:{top_harness.get('line')}",
+                "detail": f"{len(active_harness_findings)} harness wiring finding(s), top={top_harness.get('path')}:{top_harness.get('line')}",
             }
         )
     else:
@@ -132,7 +173,11 @@ def health(target: Path, *, suppression_cache_only: bool = False) -> dict[str, A
             {
                 "status": "ok",
                 "name": "security_harness_wiring",
-                "detail": f"{harness_wiring['scanned_file_count']} harness wiring file(s) checked",
+                "detail": (
+                    f"{harness_wiring['scanned_file_count']} harness wiring file(s) checked; "
+                    f"quieted={len(quieted_harness_findings)} "
+                    f"templates-excluded={harness_wiring['ignored_template_finding_count']}"
+                ),
             }
         )
     suppression_cache: dict[str, Any] | None = None
@@ -177,14 +222,22 @@ def health(target: Path, *, suppression_cache_only: bool = False) -> dict[str, A
                 }
             )
     top_finding: dict[str, Any] | None = None
+    raw_open_findings: list[dict[str, Any]] = []
+    quieted_findings: list[dict[str, Any]] = []
     if bundle.get("ready"):
         try:
             report = _load_report(default_artifacts_dir(target))
-            records = [
+            raw_open_findings = [
                 item for item in _report_findings_for_review(target, report) if item.get("status") != "suppressed"
             ]
         except (OSError, ValueError, json.JSONDecodeError):
-            records = []
+            raw_open_findings = []
+        quieted_findings = [
+            item for item in raw_open_findings if str(item.get("fingerprint") or "") in accepted_fingerprints
+        ]
+        records = [
+            item for item in raw_open_findings if str(item.get("fingerprint") or "") not in accepted_fingerprints
+        ]
         if records:
             top_finding = records[0]
             checks.append(
@@ -209,7 +262,11 @@ def health(target: Path, *, suppression_cache_only: bool = False) -> dict[str, A
         "template_privacy": template_audit_payload,
         "harness_wiring": harness_wiring,
         "suppression_cache": suppression_cache,
-        "latest_closeout": closeouts[0] if closeouts else None,
+        "raw_open_finding_count": len(raw_open_findings),
+        "quieted_findings": quieted_findings,
+        "quieted_finding_count": len(quieted_findings),
+        "changed_fingerprint_count": len(raw_open_findings) - len(quieted_findings) if accepted_fingerprints else 0,
+        "latest_closeout": latest_closeout,
     }
 
 
@@ -303,7 +360,7 @@ def closeout(
         "finding_count": len(records),
         "open_count": len(opened),
         "suppressed_count": len(suppressed),
-        "source_fingerprints": [str(item.get("fingerprint")) for item in records if item.get("fingerprint")],
+        "source_fingerprints": [str(item.get("fingerprint")) for item in opened if item.get("fingerprint")],
         "findings": finding_records,
         "path": str(_closeouts_root(target) / closeout_id / "closeout.json"),
     }

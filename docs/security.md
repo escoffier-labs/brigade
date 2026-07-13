@@ -80,7 +80,7 @@ Guardrail surfaces distinguish repo guidance, Claude command files, Codex skills
 
 Session and chat transcript paths such as `.codex/sessions/`, `.claude/chats/`, or transcript folders are classified as `surface: session-chat`. API keys, tokens, passwords, private keys, and plaintext password assignments found there are reported as high-severity secret findings with transcript-specific scrub guidance.
 
-Security closeouts include policy-pack evidence: policy name, fail threshold, template inclusion, blocker count, warning count, and whether open findings were accepted as local risk. Release readiness and release candidates include the latest closeout.
+Security closeouts include policy-pack evidence: policy name, fail threshold, template inclusion, blocker count, warning count, and whether open findings were accepted as local risk. An accepted-risk closeout quiets only findings with the same stable fingerprints. A later scan activates new or changed fingerprints. Harness-wiring health follows the configured template-inclusion policy, so excluded template findings remain visible in raw counts without becoming active health issues. Release readiness and release candidates include the latest closeout.
 
 ## Inbox Flow
 
