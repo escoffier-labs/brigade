@@ -71,9 +71,11 @@ What this run actually showed:
 - **Regex-only answer keys under-credit.** One seat in the pilot initially
   scored 50 on bug-hunt from phrasing variance alone. The cross-model judge
   pass corrected it to 90. Keep regexes for precision and judge the misses.
-- **Cursor composer models return empty text in plan mode** (issue #206), so
-  benchmark them in write mode with do-not-modify instructions, or their
-  read-only cells score a false 0.
+- **Direct Cursor plan mode cannot return Composer findings as assistant text**
+  (issue #206). Use a roster seat with `transport = "acpx"` and the reviewed
+  `transport_version` for read-only Composer cells. Direct Grok 4.5 Cursor
+  cells have also returned exit 0 with empty assistant text (issue #231), so
+  keep those failures in the adapter bucket instead of scoring them as model 0s.
 - **Adapter gaps are not model gaps.** The plain `claude -p` adapter cannot
   edit files headless. Give the model the same permissions the other seats get
   when you benchmark, then note the adapter limit in your roster instead.

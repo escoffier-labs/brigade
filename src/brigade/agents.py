@@ -173,15 +173,37 @@ READ_ONLY_ENFORCEMENT: dict[str, str] = {
 }
 
 
-def read_only_enforcement(cli_ref: str) -> str:
+def read_only_enforcement(cli_ref: str, *, sandbox: str | None = None, transport: str = "direct") -> str:
     """Return how strongly cli_ref enforces read-only: 'hard', 'soft', or 'none'."""
+    if transport == "acpx":
+        return "hard"
     if cli_ref.startswith(_OLLAMA_PREFIX):
         return "none"
     if cli_ref.startswith(_CODEX_CLOUD_PREFIX):
         # Cloud tasks run in an isolated remote environment; the local tree is
         # never modified (diffs are only applied via `codex cloud apply`).
         return "hard"
+    if cli_ref == "codex" and sandbox in {"workspace-write", "danger-full-access"}:
+        # Codex gives an explicit sandbox precedence over read_only. Other hard
+        # adapters select their native read-only mode before consulting sandbox.
+        return "soft"
     return READ_ONLY_ENFORCEMENT.get(cli_ref, "none")
+
+
+def direct_cursor_read_only_limitation(model: str | None) -> str | None:
+    """Describe a model-specific direct Cursor plan-mode output limitation."""
+    normalized = (model or "").strip().lower()
+    if normalized.startswith("composer-"):
+        return (
+            "direct Cursor plan mode does not return Composer findings as assistant text; "
+            'use transport = "acpx" with the reviewed transport_version'
+        )
+    if normalized.startswith("grok-"):
+        return (
+            "direct Cursor plan mode returned no assistant text for this Grok model; "
+            'retry with transport = "acpx" and the reviewed transport_version'
+        )
+    return None
 
 
 @dataclass(frozen=True)
@@ -367,6 +389,17 @@ def run_agent(
 
         return codex_cloud.run_cloud_task(prompt, env_id=env_id, timeout=timeout, cwd=cwd)
 
+    cursor_limitation = None
+    if cli_ref == "cursor" and (read_only or sandbox == "read-only"):
+        cursor_limitation = direct_cursor_read_only_limitation(model)
+        if cursor_limitation is not None and (model or "").strip().lower().startswith("composer-"):
+            return AgentResult(
+                text="",
+                ok=False,
+                detail=cursor_limitation,
+                requested_model=model,
+            )
+
     result = proc.run(
         build_argv(
             cli_ref,
@@ -396,7 +429,9 @@ def run_agent(
         )
     if not text:
         detail = "empty output"
-        if cli_ref in {"cursor", "grok"}:
+        if cursor_limitation is not None:
+            detail = cursor_limitation
+        elif cli_ref in {"cursor", "grok"}:
             detail = f"{cli_ref} exited 0 without output; check trust, permissions, and model availability"
         return AgentResult(
             text="",

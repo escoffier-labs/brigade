@@ -203,6 +203,7 @@ def dispatch(args) -> int:
     effective_sandbox = args.sandbox if args.sandbox is not None else loaded_roster.sandbox
     if args.read_only:
         advisory = _read_only_advisory(loaded_roster, effective_sandbox, worker=args.worker)
+        output_warnings = _read_only_output_warnings(loaded_roster, worker=args.worker)
         if advisory:
             print("warning: --read-only is best-effort for some agents in this run:", file=sys.stderr)
             for line in advisory:
@@ -211,13 +212,22 @@ def dispatch(args) -> int:
                 "  brigade cannot guarantee these agents leave the tree untouched; review the run output.",
                 file=sys.stderr,
             )
-            if output_dir is not None:
-                from .. import localio
+        if output_warnings:
+            print("warning: direct Cursor read-only output is model-limited:", file=sys.stderr)
+            for line in output_warnings:
+                print(f"  - {line}", file=sys.stderr)
+        if output_dir is not None and (advisory or output_warnings):
+            from .. import localio
 
-                localio.write_json(
-                    output_dir / "read-only-enforcement.json",
-                    {"read_only": True, "sandbox": effective_sandbox, "best_effort_agents": advisory},
-                )
+            localio.write_json(
+                output_dir / "read-only-enforcement.json",
+                {
+                    "read_only": True,
+                    "sandbox": effective_sandbox,
+                    "best_effort_agents": advisory,
+                    "output_warnings": output_warnings,
+                },
+            )
     # The dirty guard protects write runs from mixing agent edits with uncommitted
     # work. Dry, read-only, and worktree runs never edit the tree, so reviewing
     # uncommitted changes stays possible without --allow-dirty.
@@ -443,13 +453,12 @@ def _print_suspected_noop_warning(output_dir: Path) -> None:
 def _read_only_advisory(roster, effective_sandbox, worker: str | None = None) -> list[str]:
     """Lines describing which worker agents do not hard-enforce read-only.
 
-    A writable --sandbox override downgrades even natively-sandboxed CLIs to
-    prompt-only, so the advisory reflects the sandbox actually in effect.
+    Enforcement follows each adapter's actual read-only versus sandbox
+    precedence rather than treating every hard adapter like Codex.
     """
     from .. import agents as agents_mod
     from .. import roster as roster_mod
 
-    sandbox_overrides_native = effective_sandbox in ("workspace-write", "danger-full-access")
     lines: list[str] = []
     if worker is not None:
         selected = roster.agents.get(worker)
@@ -460,11 +469,34 @@ def _read_only_advisory(roster, effective_sandbox, worker: str | None = None) ->
         agents_to_check = [orchestrator, *roster_mod.workers(roster)] if orchestrator else roster_mod.workers(roster)
     for agent in agents_to_check:
         cli = agent.cli or ""
-        enforcement = agents_mod.read_only_enforcement(cli)
-        if sandbox_overrides_native and enforcement == "hard":
-            enforcement = "soft"
+        enforcement = agents_mod.read_only_enforcement(
+            cli,
+            sandbox=effective_sandbox,
+            transport=agent.transport,
+        )
         if enforcement == "hard":
             continue
         how = "prompt-only (the model may ignore it)" if enforcement == "soft" else "not applied for this CLI"
         lines.append(f"{agent.name} ({cli or 'unknown'}): read-only is {how}")
+    return lines
+
+
+def _read_only_output_warnings(roster, worker: str | None = None) -> list[str]:
+    """Warnings for direct adapters whose read-only mode can lose assistant text."""
+    from .. import agents as agents_mod
+    from .. import roster as roster_mod
+
+    if worker is not None:
+        selected = roster.agents.get(worker)
+        agents_to_check = [selected] if selected is not None else []
+    else:
+        orchestrator = roster.agents.get(roster.orchestrator)
+        agents_to_check = [orchestrator, *roster_mod.workers(roster)] if orchestrator else roster_mod.workers(roster)
+    lines: list[str] = []
+    for agent in agents_to_check:
+        if agent.cli != "cursor" or agent.transport != "direct":
+            continue
+        limitation = agents_mod.direct_cursor_read_only_limitation(agent.model)
+        if limitation is not None:
+            lines.append(f"{agent.name} (cursor/{agent.model}): {limitation}")
     return lines

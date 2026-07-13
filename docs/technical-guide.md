@@ -347,8 +347,7 @@ Common `brigade run` flags:
 - `--sandbox {read-only,workspace-write,danger-full-access}` overrides the native Codex sandbox mode from the roster.
 
 For `codex` agents, `--read-only` also passes `codex exec --sandbox read-only`.
-Combine `--sandbox` with `--read-only` to keep prompt-level read-only rules while overriding native sandbox behavior.
-Other adapters receive the prompt policy only.
+Combine `--sandbox` with `--read-only` to keep prompt-level read-only rules while overriding native Codex sandbox behavior. This override does not weaken adapters whose read-only flag takes precedence, including Cursor plan mode, Antigravity's sandbox, Kimi's plan mode, Aider's dry run, and Codex Cloud's remote isolation. Brigade's warning follows the command each adapter will execute.
 
 Direct worker runs still write normal run artifacts. The synthetic `plan.json`
 contains one assignment with the full task text, `worker-results.json` records
@@ -378,7 +377,22 @@ Both commands are local Unix socket requests. They refuse exec-transport runs, c
 
 The `cli` values are adapters for installed command-line tools:
 `codex`, `claude`, `opencode`, `antigravity`, `pi`, `cursor`, and `ollama:<model>`. Brigade shells out to those tools and keeps no provider keys.
-A `codex-cloud:<env-id>` seat is different: it submits the task to Codex Cloud with `codex cloud exec`, polls `codex cloud status` until the task reaches a terminal state (bounded by the seat timeout), and returns the final status plus the unified diff as the worker text. The diff is never applied to the local tree. Land it deliberately with `codex cloud apply <task-id>`; the task id is recorded on the worker result. Environment ids come from your Codex Cloud workspace (browse with `codex cloud`). Allow the seat with a `"codex-cloud:*"` entry in `limits.allow_models`. Model pins are rejected because the cloud environment decides the model. The Antigravity adapter uses the installed `agy --print` non-interactive CLI path, the Pi adapter uses `pi -p`, and the Cursor adapter uses `cursor-agent -p --output-format text -f` (`--trust` plus `--mode plan` on read-only runs; without a trust flag, headless cursor-agent refuses untrusted workspaces and exits 0).
+A `codex-cloud:<env-id>` seat is different: it submits the task to Codex Cloud with `codex cloud exec`, polls `codex cloud status` until the task reaches a terminal state (bounded by the seat timeout), and returns the final status plus the unified diff as the worker text. The diff is never applied to the local tree. Land it deliberately with `codex cloud apply <task-id>`; the task id is recorded on the worker result. Environment ids come from your Codex Cloud workspace (browse with `codex cloud`). Allow the seat with a `"codex-cloud:*"` entry in `limits.allow_models`. Model pins are rejected because the cloud environment decides the model.
+
+The local adapters use explicit non-interactive execution modes. Writable Antigravity runs pass `--add-dir <cwd> --dangerously-skip-permissions`; read-only runs pass `--sandbox` without either write flag. Writable Kimi runs pass `--yolo`; read-only runs pass `--plan`. Cursor write runs use `cursor-agent -p --output-format text -f`. Direct read-only Cursor runs use `--trust --mode plan`, which keeps the workspace read-only but has model-specific output limits: Composer 2.5 findings go to Cursor's plan artifact instead of assistant stdout, so Brigade rejects that combination before spawning the process. Grok 4.5 has also returned exit 0 with empty assistant text in this mode. Brigade preserves the process stdout, stderr, and exit code, then reports the ACP alternative.
+
+Use the reviewed ACP transport when a Cursor model needs read-only findings on stdout:
+
+```toml
+[agents.cursor_reviewer]
+cli = "cursor"
+model = "composer-2.5-fast"
+transport = "acpx"
+transport_version = "0.12.0"
+role = "Inspect the change and report concrete defects."
+```
+
+This path requires user-installed `acpx 0.12.0` and `cursor-agent acp`. Read-only calls use `--approve-reads`, reject interactive permission requests, disable terminal capability, and parse strict ACP protocol 1 NDJSON. Brigade never falls back from ACP to direct Cursor. Writable ACP calls require `brigade run --worktree`, so approval applies only inside a Brigade-created detached worktree.
 Run `brigade roster doctor` to validate roster syntax and check which CLIs are on `PATH`.
 To decide which model belongs in which seat with receipt-backed evidence instead of reputation, see [model ratings](model-ratings.md).
 When `--roster` is omitted, `brigade run` first reads `--cwd/.brigade/roster.toml`;
