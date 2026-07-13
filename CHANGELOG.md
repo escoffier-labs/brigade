@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- Security health and release readiness now honor the latest accepted-risk closeout by exact finding fingerprint, while new or changed findings become active again. Harness-wiring health also follows the configured template-inclusion policy instead of blocking a release on excluded managed-template URLs.
 - Route calibration from a task corpus: a docs rewrite (`rewrite the QUICKSTART`) no longer takes the full code route (a bare `rewrite`/`redesign` no longer beats a docs hint), UI words `panel`/`dashboard`/`sidebar`/`widget`/`view`/`tooltip` now pull the UI review lenses, and a migration earns tests the way an auth change does.
 - Route derivation no longer misroutes conventional-commit code work as docs: `fix(install): ... referencing docs` and `feat(skills): ship ... CHANGELOG.md` route as code, while prose like `fix typo in README` and `fix(docs): ...` stay docs. A code fix losing its review lenses to a stray "docs" keyword was the one misroute direction that cost coverage.
 
