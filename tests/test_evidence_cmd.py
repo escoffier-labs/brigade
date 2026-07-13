@@ -39,6 +39,29 @@ def test_evidence_status_ok_with_status_json(monkeypatch, tmp_path):
     assert any("receipts export miseledger" in cmd for cmd in payload["next_commands"])
 
 
+def test_evidence_summary_status_skips_doctor(monkeypatch, tmp_path):
+    monkeypatch.setattr(evidence_cmd.evidence_brief, "_miseledger_bin", lambda: "/x/miseledger")
+    calls = []
+
+    def fake_run_json(args, *, timeout):
+        calls.append((args, timeout))
+        return {
+            "command": args,
+            "exit_code": 0,
+            "stdout_json": {"items": 12},
+            "stdout_unparsed": None,
+            "stderr": "",
+        }
+
+    monkeypatch.setattr(evidence_cmd, "_run_json", fake_run_json)
+
+    payload = evidence_cmd.status_payload(tmp_path, include_doctor=False, timeout=5.0)
+
+    assert payload["health"] == "ok"
+    assert calls == [(["/x/miseledger", "status", "--json"], 5.0)]
+    assert payload["doctor"] is None
+
+
 def test_evidence_doctor_exits_nonzero_on_fail(monkeypatch, tmp_path):
     monkeypatch.setattr(evidence_cmd.evidence_brief, "_miseledger_bin", lambda: "/x/miseledger")
 

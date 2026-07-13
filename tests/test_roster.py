@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import pytest
 
 from brigade import cli
@@ -51,6 +53,50 @@ def test_load_roster_fallback_parser(monkeypatch, tmp_path):
     r = roster_mod.load_roster(_write(tmp_path, VALID))
     assert r.orchestrator == "chef"
     assert r.allow_models == ("codex", "ollama:*")
+
+
+def test_resolve_roster_path_prefers_workspace(monkeypatch, tmp_path):
+    home = tmp_path / "home"
+    workspace = tmp_path / "workspace"
+    local = workspace / ".brigade" / "roster.toml"
+    user = home / ".brigade" / "roster.toml"
+    local.parent.mkdir(parents=True)
+    user.parent.mkdir(parents=True)
+    local.write_text(VALID)
+    user.write_text(VALID)
+    monkeypatch.setattr(Path, "home", lambda: home)
+    assert roster_mod.resolve_roster_path(workspace) == local
+
+
+def test_resolve_roster_path_uses_user_fallback(monkeypatch, tmp_path):
+    home = tmp_path / "home"
+    user = home / ".brigade" / "roster.toml"
+    user.parent.mkdir(parents=True)
+    user.write_text(VALID)
+    monkeypatch.setattr(Path, "home", lambda: home)
+    assert roster_mod.resolve_roster_path(tmp_path / "workspace") == user
+
+
+def test_resolve_roster_path_explicit_never_falls_back(monkeypatch, tmp_path):
+    home = tmp_path / "home"
+    user = home / ".brigade" / "roster.toml"
+    user.parent.mkdir(parents=True)
+    user.write_text(VALID)
+    missing = tmp_path / "missing.toml"
+    monkeypatch.setattr(Path, "home", lambda: home)
+    with pytest.raises(FileNotFoundError, match=str(missing)):
+        roster_mod.resolve_roster_path(tmp_path / "workspace", missing)
+
+
+def test_resolve_roster_path_missing_names_both_candidates(monkeypatch, tmp_path):
+    home = tmp_path / "home"
+    workspace = tmp_path / "workspace"
+    monkeypatch.setattr(Path, "home", lambda: home)
+    with pytest.raises(FileNotFoundError) as exc:
+        roster_mod.resolve_roster_path(workspace)
+    message = str(exc.value)
+    assert str(workspace / ".brigade" / "roster.toml") in message
+    assert str(home / ".brigade" / "roster.toml") in message
 
 
 def test_workers_excludes_orchestrator(tmp_path):

@@ -12,4 +12,5 @@ PY=${PY:-.venv/bin}
 # Version sync covers __init__.py, template JSONs, and the recorded demo assets.
 # Run `python scripts/version_sync.py --write` to fix drift in one shot.
 "$PY/python" scripts/version_sync.py --check
+"$PY/python" scripts/managed_snapshot.py --check
 "$PY/pytest" -q --cov=brigade --cov-report=term --cov-fail-under=78

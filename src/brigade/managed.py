@@ -11,10 +11,10 @@ import json
 import os
 import urllib.error
 import urllib.request
-from dataclasses import dataclass
-from typing import Callable, List, Optional, Tuple
+from dataclasses import dataclass, replace
+from typing import Any, Callable, List, Optional, Tuple
 
-from . import proc
+from . import managed_snapshot, proc
 from .doctor import OK, WARN, FAIL, MANUAL
 from .station import CheckResult, DoctorContext
 
@@ -70,6 +70,33 @@ def _surface(
         max_chars=max_chars,
         probe=probe,
         probe_contains=probe_contains,
+    )
+
+
+def _surface_from_snapshot(raw: dict[str, Any]) -> MachineSurface:
+    return MachineSurface(
+        kind=str(raw["kind"]),
+        command=tuple(str(part) for part in raw.get("command", [])),
+        read_only=bool(raw.get("read_only", True)),
+        timeout_seconds=float(raw["timeout_seconds"]) if raw.get("timeout_seconds") is not None else None,
+        max_chars=int(raw["max_chars"]) if raw.get("max_chars") is not None else None,
+        probe=tuple(str(part) for part in raw.get("probe", [])),
+        probe_contains=tuple(str(part) for part in raw.get("probe_contains", [])),
+    )
+
+
+def _apply_snapshot(tool: ManagedTool, contract: dict[str, Any]) -> ManagedTool:
+    install = contract.get("install")
+    surfaces = contract.get("surfaces")
+    if not isinstance(install, list) or not isinstance(surfaces, list):
+        raise ValueError(f"managed snapshot contract is incomplete: {tool.name}")
+    return replace(
+        tool,
+        station=str(contract["station"]),
+        command=str(contract["command"]),
+        summary=str(contract.get("summary") or ""),
+        install_args=[str(part) for part in install],
+        surfaces=tuple(_surface_from_snapshot(surface) for surface in surfaces if isinstance(surface, dict)),
     )
 
 
@@ -537,6 +564,12 @@ _TOOLS: Tuple[ManagedTool, ...] = (
             _surface("verify-exit", ("plating", "scan", "--help"), timeout_seconds=10.0),
         ),
     ),
+)
+
+_SNAPSHOT_CONTRACTS = managed_snapshot.executable_contracts()
+_TOOLS = tuple(
+    _apply_snapshot(tool, _SNAPSHOT_CONTRACTS[tool.name]) if tool.name in _SNAPSHOT_CONTRACTS else tool
+    for tool in _TOOLS
 )
 
 

@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from brigade import agents
 from brigade import cli
 from brigade import roster
@@ -39,12 +41,30 @@ def test_roster_init_force_overwrites_with_options(tmp_target):
     assert "max_workers = 2" in text
 
 
-def test_roster_doctor_missing_file_fails(tmp_target, capsys):
+def test_roster_doctor_missing_file_fails(monkeypatch, tmp_target, tmp_path, capsys):
+    monkeypatch.setattr(Path, "home", lambda: tmp_path / "empty-home")
     rc = roster_cmd.doctor(tmp_target)
     out = capsys.readouterr().out
     assert rc == 1
     assert "[fail]" in out
     assert "brigade roster init" in out
+
+
+def test_roster_doctor_falls_back_to_home_roster(monkeypatch, tmp_target, tmp_path, capsys):
+    home = tmp_path / "home"
+    path = home / ".brigade" / "roster.toml"
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        'orchestrator = "chef"\n'
+        "[agents.chef]\n"
+        'endpoint = "https://example.test/v1/chat"\n'
+        'model = "some-hosted-model"\n'
+        'role = "plan"\n'
+    )
+    monkeypatch.setattr(Path, "home", lambda: home)
+
+    assert roster_cmd.doctor(tmp_target) == 0
+    assert str(path) in capsys.readouterr().out
 
 
 def test_roster_doctor_validates_agents(monkeypatch, tmp_target, capsys):
