@@ -7,7 +7,6 @@ import os
 import re
 import sys
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from json import JSONDecoder
@@ -23,6 +22,15 @@ from . import graphtrail_delta
 from . import localio
 from . import proc, runguard
 from . import run_control
+from .run_receipts import (
+    agent_result_from_worker as _agent_result_from_worker,
+    agent_result_payload as _agent_result_payload,
+    assignment_payload as _assignment_payload,
+    worker_payload as _worker_payload,
+    write_agent_logs as _write_agent_logs,
+    write_worker_logs as _write_worker_logs,
+)
+from .run_transport import Assignment, WorkerResult
 from .roster import Agent, Roster, is_cli_allowed, timeout_for, workers
 from .route_catalog import RouteBrief, route_brief, uncovered_stages, unknown_covers
 
@@ -32,42 +40,6 @@ DRIFT_IMPACT_HEADING = "## Upstream drift impact (Upstream Drift + GraphTrail, r
 DRIFT_IMPACT_LIMIT = 4000
 BRIEF_BUDGET_BYTES = 6000
 NOOP_DETAIL = "no-op"
-
-
-@dataclass(frozen=True)
-class Assignment:
-    worker: str
-    task: str
-    stage: int = 1
-    covers: tuple[str, ...] = ()
-
-
-@dataclass(frozen=True)
-class WorkerResult:
-    worker: str
-    task: str
-    text: str
-    ok: bool
-    detail: str = ""
-    thread_id: str | None = None
-    status: str = ""
-    stdout: str | None = None
-    stderr: str | None = None
-    exit_code: int | None = None
-    timed_out: bool = False
-    stdout_log: str | None = None
-    stderr_log: str | None = None
-    duration_seconds: float | None = None
-    transport: str = "cli"
-    requested_model: str | None = None
-    effective_model: str | None = None
-    reasoning: str | None = None
-    stop_reason: str | None = None
-    protocol_version: int | None = None
-    session_id: str | None = None
-    request_id: str | None = None
-    acpx_version: str | None = None
-    safe_events: tuple[dict[str, object], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -1028,122 +1000,28 @@ def dispatch(
     verbose: bool = False,
     authorized_writable_worktree: bool = False,
 ) -> list[WorkerResult]:
-    def run_one(assignment: Assignment, prior_results: list[WorkerResult]) -> WorkerResult:
-        agent = roster.agents[assignment.worker]
-        if not is_cli_allowed(agent.cli, roster):
-            return WorkerResult(
-                worker=assignment.worker,
-                task=assignment.task,
-                text="",
-                ok=False,
-                detail=f"{agent.cli} is not allowed by limits.allow_models",
-            )
-        prompt = _worker_prompt(
-            agent,
-            assignment,
-            prior_results=prior_results,
-            read_only=read_only,
-            direct=direct,
-            code_graph=code_graph,
-            drift_impact=drift_impact,
-            evidence=evidence,
-        )
-        started = time.monotonic()
-        if agent.transport == "acpx":
-            from . import acpx_adapter
+    from . import run_transport
 
-            result = acpx_adapter.run_cursor(
-                prompt,
-                cwd=cwd or Path.cwd(),
-                timeout=timeout_for(agent, roster),
-                model=agent.model or "",
-                version=agent.transport_version or "",
-                read_only=read_only if sandbox_read_only is None else sandbox_read_only,
-                writable_worktree=authorized_writable_worktree,
-            )
-        elif agent.cli == "codex" and appserver is not None:
-            on_event = _worker_event_writer(events_dir, assignment.worker, verbose=verbose)
-            result = _run_codex_appserver_worker(
-                appserver,
-                agent,
-                assignment.worker,
-                prompt,
-                timeout=timeout_for(agent, roster),
-                cwd=cwd,
-                read_only=read_only if sandbox_read_only is None else sandbox_read_only,
-                sandbox=sandbox,
-                registry=control_registry,
-                on_event=on_event,
-            )
-        else:
-            kwargs: dict[str, object] = {
-                "timeout": timeout_for(agent, roster),
-                "cwd": cwd,
-                "read_only": read_only if sandbox_read_only is None else sandbox_read_only,
-            }
-            if sandbox is not None:
-                kwargs["sandbox"] = sandbox
-            if agent.model is not None:
-                kwargs["model"] = agent.model
-            if agent.reasoning is not None:
-                kwargs["reasoning"] = agent.reasoning
-            result = agents.run_agent(agent.cli, prompt, **kwargs)
-        return WorkerResult(
-            worker=assignment.worker,
-            task=assignment.task,
-            text=result.text,
-            ok=result.ok,
-            detail=result.detail,
-            thread_id=result.thread_id,
-            status=result.status,
-            stdout=result.stdout,
-            stderr=result.stderr,
-            exit_code=result.exit_code,
-            timed_out=result.timed_out,
-            duration_seconds=max(0.0, round(time.monotonic() - started, 3)),
-            transport=result.transport,
-            requested_model=result.requested_model,
-            effective_model=result.effective_model,
-            reasoning=result.reasoning,
-            stop_reason=result.stop_reason,
-            protocol_version=result.protocol_version,
-            session_id=result.session_id,
-            request_id=result.request_id,
-            acpx_version=result.acpx_version,
-            safe_events=result.safe_events,
-        )
-
-    if not assignments:
-        return []
-
-    all_results: list[WorkerResult] = []
-    stages = sorted({assignment.stage for assignment in assignments})
-    for stage in stages:
-        stage_assignments = [assignment for assignment in assignments if assignment.stage == stage]
-        stage_results_by_index: dict[int, WorkerResult] = {}
-        prior_results = list(all_results)
-        max_workers = min(roster.max_workers, len(stage_assignments))
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            future_to_index = {
-                executor.submit(run_one, assignment, prior_results): index
-                for index, assignment in enumerate(stage_assignments)
-            }
-            for future in as_completed(future_to_index):
-                index = future_to_index[future]
-                try:
-                    stage_results_by_index[index] = future.result()
-                except Exception as exc:  # pragma: no cover - defensive boundary
-                    assignment = stage_assignments[index]
-                    stage_results_by_index[index] = WorkerResult(
-                        worker=assignment.worker,
-                        task=assignment.task,
-                        text="",
-                        ok=False,
-                        detail=str(exc)[:200],
-                    )
-        all_results.extend(stage_results_by_index[index] for index in range(len(stage_assignments)))
-
-    return all_results
+    return run_transport.dispatch(
+        assignments,
+        roster,
+        build_prompt=_worker_prompt,
+        run_appserver_worker=_run_codex_appserver_worker,
+        event_writer=_worker_event_writer,
+        cwd=cwd,
+        read_only=read_only,
+        sandbox_read_only=sandbox_read_only,
+        sandbox=sandbox,
+        direct=direct,
+        code_graph=code_graph,
+        drift_impact=drift_impact,
+        evidence=evidence,
+        appserver=appserver,
+        control_registry=control_registry,
+        events_dir=events_dir,
+        verbose=verbose,
+        authorized_writable_worktree=authorized_writable_worktree,
+    )
 
 
 def build_synth_prompt(
@@ -1214,91 +1092,6 @@ def _print_worker_status(results: list[WorkerResult]) -> None:
         print(f"  [{marker}] {result.worker}{detail}")
 
 
-def _assignment_payload(assignments: list[Assignment]) -> list[dict[str, object]]:
-    payload: list[dict[str, object]] = []
-    for assignment in assignments:
-        entry: dict[str, object] = {
-            "stage": assignment.stage,
-            "worker": assignment.worker,
-            "task": assignment.task,
-        }
-        if assignment.covers:
-            entry["covers"] = list(assignment.covers)
-        payload.append(entry)
-    return payload
-
-
-def _worker_payload(results: list[WorkerResult]) -> list[dict[str, object]]:
-    payload: list[dict[str, object]] = []
-    for result in results:
-        entry: dict[str, object] = {
-            "worker": result.worker,
-            "task": result.task,
-            "ok": result.ok,
-            "detail": result.detail,
-            "text": result.text,
-        }
-        if result.thread_id is not None:
-            entry["thread_id"] = result.thread_id
-            entry["status"] = result.status
-        if result.exit_code is not None:
-            entry["exit_code"] = result.exit_code
-            entry["timed_out"] = result.timed_out
-        if result.stdout_log is not None:
-            entry["stdout_log"] = result.stdout_log
-        if result.stderr_log is not None:
-            entry["stderr_log"] = result.stderr_log
-        if result.duration_seconds is not None:
-            entry["duration_seconds"] = result.duration_seconds
-        entry["transport"] = result.transport
-        for key, value in (
-            ("requested_model", result.requested_model),
-            ("effective_model", result.effective_model),
-            ("reasoning", result.reasoning),
-            ("stop_reason", result.stop_reason),
-            ("protocol_version", result.protocol_version),
-            ("session_id", result.session_id),
-            ("request_id", result.request_id),
-            ("acpx_version", result.acpx_version),
-        ):
-            if value is not None:
-                entry[key] = value
-        if result.safe_events:
-            entry["events"] = list(result.safe_events)
-        payload.append(entry)
-    return payload
-
-
-def _write_worker_logs(output_dir: Path, results: list[WorkerResult]) -> list[WorkerResult]:
-    logs_dir = output_dir / "logs"
-    recorded: list[WorkerResult] = []
-    for index, result in enumerate(results, start=1):
-        if result.stdout is None and result.stderr is None:
-            recorded.append(result)
-            continue
-        logs_dir.mkdir(parents=True, exist_ok=True)
-        worker = re.sub(r"[^A-Za-z0-9_.-]+", "-", result.worker).strip("-") or "worker"
-        prefix = f"worker-{index:03d}-{worker}"
-        stdout_ref = f"logs/{prefix}.stdout.log"
-        stderr_ref = f"logs/{prefix}.stderr.log"
-        localio.write_text_atomic(output_dir / stdout_ref, result.stdout or "")
-        localio.write_text_atomic(output_dir / stderr_ref, result.stderr or "")
-        recorded.append(replace(result, stdout_log=stdout_ref, stderr_log=stderr_ref))
-    return recorded
-
-
-def _write_agent_logs(output_dir: Path, label: str, result: agents.AgentResult) -> agents.AgentResult:
-    if result.stdout is None and result.stderr is None:
-        return result
-    logs_dir = output_dir / "logs"
-    logs_dir.mkdir(parents=True, exist_ok=True)
-    stdout_ref = f"logs/{label}.stdout.log"
-    stderr_ref = f"logs/{label}.stderr.log"
-    localio.write_text_atomic(output_dir / stdout_ref, result.stdout or "")
-    localio.write_text_atomic(output_dir / stderr_ref, result.stderr or "")
-    return replace(result, stdout_log=stdout_ref, stderr_log=stderr_ref)
-
-
 def _is_brigade_path(value: str) -> bool:
     normalized = value.replace("\\", "/").strip("/")
     return normalized == ".brigade" or normalized.startswith(".brigade/")
@@ -1334,39 +1127,6 @@ def _mark_noop_worker_results(worker_results: list[WorkerResult], suspected_noop
     if not suspected_noop:
         return worker_results
     return [replace(result, detail=NOOP_DETAIL) if result.ok else result for result in worker_results]
-
-
-def _agent_result_payload(result: agents.AgentResult) -> dict[str, object]:
-    payload: dict[str, object] = {
-        "ok": result.ok,
-        "detail": result.detail,
-        "text": result.text,
-    }
-    if result.exit_code is not None:
-        payload["exit_code"] = result.exit_code
-        payload["timed_out"] = result.timed_out
-    if result.stdout_log is not None:
-        payload["stdout_log"] = result.stdout_log
-    if result.stderr_log is not None:
-        payload["stderr_log"] = result.stderr_log
-    if result.duration_seconds is not None:
-        payload["duration_seconds"] = result.duration_seconds
-    payload["transport"] = result.transport
-    for key, value in (
-        ("requested_model", result.requested_model),
-        ("effective_model", result.effective_model),
-        ("reasoning", result.reasoning),
-        ("stop_reason", result.stop_reason),
-        ("protocol_version", result.protocol_version),
-        ("session_id", result.session_id),
-        ("request_id", result.request_id),
-        ("acpx_version", result.acpx_version),
-    ):
-        if value is not None:
-            payload[key] = value
-    if result.safe_events:
-        payload["events"] = list(result.safe_events)
-    return payload
 
 
 def _code_graph_delta_skip(status: str) -> dict[str, object]:
@@ -2121,30 +1881,7 @@ def run(
                 detail="direct worker produced no result",
             )
         )
-        final = agents.AgentResult(
-            text=direct_result.text,
-            ok=direct_result.ok,
-            detail=direct_result.detail,
-            thread_id=direct_result.thread_id,
-            status=direct_result.status,
-            stdout=direct_result.stdout,
-            stderr=direct_result.stderr,
-            exit_code=direct_result.exit_code,
-            timed_out=direct_result.timed_out,
-            stdout_log=direct_result.stdout_log,
-            stderr_log=direct_result.stderr_log,
-            duration_seconds=direct_result.duration_seconds,
-            transport=direct_result.transport,
-            requested_model=direct_result.requested_model,
-            effective_model=direct_result.effective_model,
-            reasoning=direct_result.reasoning,
-            stop_reason=direct_result.stop_reason,
-            protocol_version=direct_result.protocol_version,
-            session_id=direct_result.session_id,
-            request_id=direct_result.request_id,
-            acpx_version=direct_result.acpx_version,
-            safe_events=direct_result.safe_events,
-        )
+        final = _agent_result_from_worker(direct_result)
     else:
         synthesis_started = time.monotonic()
         final = _run_orchestrator(
