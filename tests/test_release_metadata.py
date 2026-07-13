@@ -1,18 +1,20 @@
 from pathlib import Path
 
+from brigade import __version__
+
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def _unreleased_changelog() -> str:
+def _release_changelog(version: str) -> str:
     text = (ROOT / "CHANGELOG.md").read_text()
-    start = text.index("## [Unreleased]")
+    start = text.index(f"## [{version}]")
     end = text.index("\n## [", start + 1)
     return text[start:end]
 
 
-def test_unreleased_has_one_added_section_with_recent_release_notes():
-    text = _unreleased_changelog()
+def test_current_release_has_one_added_section_with_recent_release_notes():
+    text = _release_changelog(__version__)
 
     assert text.count("### Added") == 1
     for expected in (

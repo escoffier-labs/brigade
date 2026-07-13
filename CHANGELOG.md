@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.22.0] - 2026-07-13
+
 ### Fixed
 - Security health and release readiness now honor the latest accepted-risk closeout by exact finding fingerprint, while new or changed findings become active again. Harness-wiring health also follows the configured template-inclusion policy instead of blocking a release on excluded managed-template URLs.
 - Route calibration from a task corpus: a docs rewrite (`rewrite the QUICKSTART`) no longer takes the full code route (a bare `rewrite`/`redesign` no longer beats a docs hint), UI words `panel`/`dashboard`/`sidebar`/`widget`/`view`/`tooltip` now pull the UI review lenses, and a migration earns tests the way an auth change does.
