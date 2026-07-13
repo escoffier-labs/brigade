@@ -280,9 +280,9 @@ The linter validates static JSON only. It must not invoke `brigade stations veri
 
 | Repository | Commit | Contract receipt | Repository gate receipt |
 | --- | --- | --- | --- |
-| GraphTrail | `e51ed5d` | `20260712-210024-work-verify-6afabd` | `20260712-210040-work-verify-589fea`, `20260712-210058-work-verify-a35c15`, `20260712-210109-work-verify-696bb4`, `20260712-210118-work-verify-45e304` |
+| GraphTrail | merged `54e2972` | `20260712-210024-work-verify-6afabd` | `20260712-210040-work-verify-589fea`, `20260712-210058-work-verify-a35c15`, `20260712-210109-work-verify-696bb4`, `20260712-210118-work-verify-45e304` |
 | MiseLedger | unchanged | `20260712-205916-work-verify-b208bd` | unchanged |
-| Agent Pantry | `d9470b1` | `20260712-210024-work-verify-efbc13` | `20260712-210039-work-verify-361c94` |
-| Token Glace | `44db23d` | `20260712-210024-work-verify-ae323b` | `20260712-210040-work-verify-1ecf42` |
-| Skillet | `74520a2` | `20260712-210024-work-verify-d1f2db` | `20260712-210040-work-verify-0e53d6` |
-| Content Guard | `87e095e` | `20260712-210024-work-verify-9b81e9` | `20260712-210039-work-verify-888db3` |
+| Agent Pantry | merged `9d904c3` | `20260712-210024-work-verify-efbc13` | `20260712-210039-work-verify-361c94` |
+| Token Glace | merged `efb7c85` | `20260712-210024-work-verify-ae323b` | `20260712-210040-work-verify-1ecf42` |
+| Skillet | merged `1f871dd` | `20260712-210024-work-verify-d1f2db` | `20260712-210040-work-verify-0e53d6` |
+| Content Guard | archived remote main `d93468b`; lifecycle assertion owned by Brigade | `20260712-210024-work-verify-9b81e9` | `20260712-210039-work-verify-888db3` |

@@ -94,6 +94,13 @@ def load_snapshot(path: Path | None = None) -> dict[str, Any]:
             raise ValueError("managed snapshot contains an invalid manifest")
         if not isinstance(source, dict) or source.get("manifest_sha256") != _manifest_digest(manifest):
             raise ValueError("managed snapshot manifest digest mismatch")
+        if source.get("kind") == "lifecycle-assertion":
+            if (
+                source.get("asserted_by") != "brigade-cli"
+                or not isinstance(source.get("observed_repository"), str)
+                or not isinstance(source.get("observed_revision"), str)
+            ):
+                raise ValueError("managed snapshot lifecycle assertion provenance is invalid")
         name = manifest.get("name")
         if not isinstance(name, str) or not name or name in names:
             raise ValueError(f"managed snapshot duplicate or invalid name: {name!r}")

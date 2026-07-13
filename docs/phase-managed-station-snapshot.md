@@ -2,7 +2,7 @@
 
 Goal: make the reviewed sidecar manifests the declarative runtime source for first-class managed tools while keeping Brigade offline and dependency-free.
 
-Architecture: a bundled `brigade.managed_snapshot.v1` JSON file stores the 6 reviewed manifest records with source revision and digest. A standard-library loader validates the bundle. `managed.py` keeps Python wire and doctor callables but replaces declarative fields for matching executable tools from the snapshot. A release script regenerates the bundle from explicit local manifest paths and checks the committed file without network access.
+Architecture: a bundled `brigade.managed_snapshot.v1` JSON file stores the 6 reviewed manifest records with provenance and digest. Active sidecar manifests name their source revision. Content Guard is a Brigade-owned lifecycle assertion that separately records the archived repository revision it describes. A standard-library loader validates the bundle. `managed.py` keeps Python wire and doctor callables but replaces declarative fields for matching executable tools from the snapshot. A release script regenerates the bundle from explicit local manifest paths and checks the committed file without network access.
 
 Key tech: Python standard library, canonical JSON, SHA-256, immutable dataclass replacement, and packaged template data.
 
@@ -21,7 +21,8 @@ Key tech: Python standard library, canonical JSON, SHA-256, immutable dataclass 
 - [x] Add failing tests that expect:
   - `managed_snapshot.load_snapshot()` returns schema `brigade.managed_snapshot.v1`.
   - names are GraphTrail, MiseLedger, Agent Pantry, Token Glace, Skillet, and Content Guard.
-  - Content Guard is `embedded` with owner `brigade-cli`.
+  - Content Guard is `embedded` with owner `brigade-cli` and lifecycle-assertion
+    provenance that references archived remote main `d93468ba05485635e252c0fd4129063c750e2cce`.
   - Skillet stays a `skill-roster` and is not added to `managed.all_tools()`.
   - the 4 active executable tools match `managed.resolve()` for station, command, install, and every surface field.
 - [x] Run `tests/test_managed_snapshot.py` and watch it fail because the module and bundle do not exist.
@@ -143,7 +144,7 @@ def executable_contracts(payload: Mapping[str, Any] | None = None) -> dict[str, 
   - Agent Pantry
   - Token Glace
   - Skillet
-  - Content Guard
+  - Content Guard (lifecycle assertion, not a source-manifest revision)
 - [x] Assert the output contains the exact commits recorded in the station-manifest plan.
 
 ## Task 4: Consume the snapshot at runtime

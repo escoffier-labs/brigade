@@ -23,8 +23,19 @@ def test_bundled_snapshot_covers_first_class_sidecars():
     assert {record["manifest"]["name"] for record in records} == EXPECTED_NAMES
 
     by_name = {record["manifest"]["name"]: record["manifest"] for record in records}
+    records_by_name = {record["manifest"]["name"]: record for record in records}
     assert by_name["content-guard"]["lifecycle"] == "embedded"
     assert by_name["content-guard"]["owner"] == "brigade-cli"
+    content_guard_source = records_by_name["content-guard"]["source"]
+    assert content_guard_source["kind"] == "lifecycle-assertion"
+    assert content_guard_source["asserted_by"] == "brigade-cli"
+    assert content_guard_source["observed_repository"] == "content-guard"
+    assert content_guard_source["observed_revision"] == "d93468ba05485635e252c0fd4129063c750e2cce"
+    assert "revision" not in content_guard_source
+    assert records_by_name["agentpantry"]["source"]["revision"] == ("9d904c3777f116c3a62d5ab2e7e20849d02c114a")
+    assert records_by_name["token-glace"]["source"]["revision"] == ("efb7c8544014d1bdd0df436c741d9d0ef20a090e")
+    assert records_by_name["skillet"]["source"]["revision"] == "1f871dd44be70b0e912f832d448436a4a0fcc7b3"
+    assert records_by_name["graphtrail"]["source"]["revision"] == ("54e29726e186bfef6226635146e65b9793531fa8")
     assert by_name["skillet"]["tools"][0]["kind"] == "skill-roster"
     assert managed.resolve("skillet") is None
 

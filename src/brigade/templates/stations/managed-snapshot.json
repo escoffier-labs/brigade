@@ -75,7 +75,7 @@
       "source": {
         "manifest_sha256": "5bf46de283063affbd1e3fbabf131fa283b6f8ecc8194f5b873e1861e4932c6a",
         "repository": "agentpantry",
-        "revision": "d9470b1e29125eaad214b71e96969ceebd0925a6"
+        "revision": "9d904c3777f116c3a62d5ab2e7e20849d02c114a"
       }
     },
     {
@@ -89,9 +89,11 @@
         "tools": []
       },
       "source": {
+        "asserted_by": "brigade-cli",
+        "kind": "lifecycle-assertion",
         "manifest_sha256": "5d488d470c5fb7ac62cae8c3fe774673d5fad1d1d107bc09a7f9d628fde5b6fe",
-        "repository": "content-guard",
-        "revision": "87e095e07fef1f925903f1cce28b5152c58a22b8"
+        "observed_repository": "content-guard",
+        "observed_revision": "d93468ba05485635e252c0fd4129063c750e2cce"
       }
     },
     {
@@ -167,7 +169,7 @@
       "source": {
         "manifest_sha256": "0e8d9f7a962d5f20857713e39698b567cce7a9e9043db732cf6ab266f3f47176",
         "repository": "graphtrail",
-        "revision": "8a5e15c8e73cb077aa2222b884273d4b8db5fa80"
+        "revision": "54e29726e186bfef6226635146e65b9793531fa8"
       }
     },
     {
@@ -277,7 +279,7 @@
                   "tests/lint-skills.sh"
                 ],
                 "probe_contains": [
-                  "[ok] catalog (36 skills)"
+                  "[ok] catalog (35 skills)"
                 ],
                 "timeout_seconds": 60
               }
@@ -286,9 +288,9 @@
         ]
       },
       "source": {
-        "manifest_sha256": "f09f9a43eb4e1baea1afd9e23b813e0b9966e5fe25517670390a89904f26a6e7",
+        "manifest_sha256": "77e898d106fdc20cedb4e5efa3d95550f1962287a27ffc77b4e61de54f04c31f",
         "repository": "skillet",
-        "revision": "10b68a9eb70a48fa28242f78e0a43ae06155c18b"
+        "revision": "1f871dd44be70b0e912f832d448436a4a0fcc7b3"
       }
     },
     {
@@ -361,7 +363,7 @@
       "source": {
         "manifest_sha256": "2f3d7f05a159a664c5a020e285c3c05ca91cbda93c981af5f1b8a1df0fd2c45e",
         "repository": "token-glace",
-        "revision": "44db23dcd0605780de1b2fbb30d99dbecf6ce6c4"
+        "revision": "efb7c8544014d1bdd0df436c741d9d0ef20a090e"
       }
     }
   ],
