@@ -66,7 +66,7 @@ def test_health_from_doctor_checks(checks, expected):
 - [x] Run the two tests and watch them fail because the helpers do not exist:
 
 ```bash
-/home/clawdbot/repos/brigade/.venv/bin/pytest tests/test_status.py -q
+.venv/bin/pytest tests/test_status.py -q
 ```
 
 - [x] Add the canonical state tuple and pure mapping helpers to `status.py`:
@@ -175,7 +175,7 @@ Use `timeout` for status and doctor calls. When `include_doctor` is false, do no
 - [x] Run the focused status suites through Brigade:
 
 ```bash
-/home/clawdbot/repos/brigade/.venv/bin/brigade work verify run --target . --command "/home/clawdbot/repos/brigade/.venv/bin/pytest tests/test_status.py tests/test_evidence_cmd.py tests/test_tokens_cmd.py tests/test_search_cmd.py tests/test_pantry_cmd.py -q" --capture brigade-work
+.venv/bin/brigade work verify run --target . --command ".venv/bin/pytest tests/test_status.py tests/test_evidence_cmd.py tests/test_tokens_cmd.py tests/test_search_cmd.py tests/test_pantry_cmd.py -q" --capture brigade-work
 ```
 
 Expected: all selected tests pass.
@@ -183,7 +183,7 @@ Expected: all selected tests pass.
 - [x] Run the full gate through Brigade:
 
 ```bash
-/home/clawdbot/repos/brigade/.venv/bin/brigade work verify run --target . --command "env PY=/home/clawdbot/repos/brigade/.venv/bin ./scripts/verify" --capture brigade-work
+.venv/bin/brigade work verify run --target . --command "env PY=.venv/bin ./scripts/verify" --capture brigade-work
 ```
 
 - [x] Commit:

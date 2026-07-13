@@ -25,14 +25,14 @@ Key tech: JSON, existing `brigade.station.v1` parsing, repository-local lint gat
 Use the installed Brigade development CLI:
 
 ```bash
-/home/clawdbot/repos/brigade/.venv/bin/brigade stations verify . --check-managed
+.venv/bin/brigade stations verify . --check-managed
 ```
 
 ## Task 2: Repair GraphTrail
 
 **Files:**
 
-- Modify: `/home/clawdbot/.cache/codex/worktrees/upstream-integration/graphtrail/station.json`
+- Modify: `../graphtrail/station.json`
 
 - [x] Replace the manifest with:
 
@@ -87,7 +87,7 @@ Use the installed Brigade development CLI:
 
 **Files:**
 
-- Create: `/home/clawdbot/.cache/codex/worktrees/upstream-integration/agentpantry/station.json`
+- Create: `../agentpantry/station.json`
 
 - [x] Add:
 
@@ -142,7 +142,7 @@ Use the installed Brigade development CLI:
 
 **Files:**
 
-- Create: `/home/clawdbot/.cache/codex/worktrees/upstream-integration/token-glace/station.json`
+- Create: `../token-glace/station.json`
 
 - [x] Add:
 
@@ -200,8 +200,8 @@ Use the installed Brigade development CLI:
 
 **Files:**
 
-- Create: `/home/clawdbot/.cache/codex/worktrees/upstream-integration/skillet/station.json`
-- Modify: `/home/clawdbot/.cache/codex/worktrees/upstream-integration/skillet/tests/lint-skills.sh`
+- Create: `../skillet/station.json`
+- Modify: `../skillet/tests/lint-skills.sh`
 
 - [x] Add a failing static linter check that requires:
   - schema `brigade.station.v1`
@@ -251,7 +251,7 @@ The linter validates static JSON only. It must not invoke `brigade stations veri
 
 **Files:**
 
-- Create: `/home/clawdbot/.cache/codex/worktrees/upstream-integration/content-guard/station.json`
+- Create: `../content-guard/station.json`
 
 - [x] Add:
 

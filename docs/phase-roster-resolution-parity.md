@@ -51,7 +51,7 @@ def test_roster_doctor_falls_back_to_home_roster(monkeypatch, tmp_target, tmp_pa
 - [x] Run the new regression and watch it fail:
 
 ```bash
-/home/clawdbot/repos/brigade/.venv/bin/pytest tests/test_roster_cmd.py::test_roster_doctor_falls_back_to_home_roster -q
+.venv/bin/pytest tests/test_roster_cmd.py::test_roster_doctor_falls_back_to_home_roster -q
 ```
 
 Expected: FAIL because `roster_cmd.doctor()` checks only `tmp_target/.brigade/roster.toml`.
@@ -150,7 +150,7 @@ Retain the existing invalid-roster branch and all agent diagnostics.
 - [x] Run the focused suite through Brigade:
 
 ```bash
-/home/clawdbot/repos/brigade/.venv/bin/brigade work verify run --target . --command "/home/clawdbot/repos/brigade/.venv/bin/pytest tests/test_roster.py tests/test_roster_cmd.py tests/test_run_cli.py -q" --capture brigade-work
+.venv/bin/brigade work verify run --target . --command ".venv/bin/pytest tests/test_roster.py tests/test_roster_cmd.py tests/test_run_cli.py -q" --capture brigade-work
 ```
 
 Expected: all selected tests pass.
@@ -158,7 +158,7 @@ Expected: all selected tests pass.
 - [x] Run the full gate through Brigade:
 
 ```bash
-/home/clawdbot/repos/brigade/.venv/bin/brigade work verify run --target . --command "env PY=/home/clawdbot/repos/brigade/.venv/bin ./scripts/verify" --capture brigade-work
+.venv/bin/brigade work verify run --target . --command "env PY=.venv/bin ./scripts/verify" --capture brigade-work
 ```
 
 Expected: exit 0 with the coverage floor met.
