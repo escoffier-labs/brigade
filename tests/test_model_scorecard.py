@@ -457,7 +457,7 @@ def test_models_sorted_ok_rate_desc_then_seats_desc(tmp_path):
             {"worker": "w2", "task": "t", "ok": False, "detail": "e", "text": ""},
         ],
     )
-    # model C: 100% ok, 2 seats — should rank above A (same rate, more seats)
+    # model C: 100% ok, 2 seats - should rank above A (same rate, more seats)
     agents_c = {
         "chef": {"cli": "codex", "model": None, "role": "plan"},
         "w1": {"cli": "claude", "model": "high-seats", "role": "code"},
