@@ -6,6 +6,20 @@ fn repository_file(path: impl AsRef<Path>) -> String {
 }
 
 #[test]
+fn personalized_ranking_has_a_checked_in_benchmark_contract() {
+    for path in [
+        "benchmarks/context-ranking/corpus.json",
+        "tests/context_ranking_benchmark.rs",
+        "docs/context-ranking-benchmark.md",
+    ] {
+        assert!(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join(path).is_file(),
+            "personalized ranking benchmark contract must include {path}"
+        );
+    }
+}
+
+#[test]
 fn sync_orchestration_is_split_into_focused_modules() {
     for module in ["walk", "persist", "repo_policy", "resolve"] {
         let path = format!("src/store/{module}.rs");

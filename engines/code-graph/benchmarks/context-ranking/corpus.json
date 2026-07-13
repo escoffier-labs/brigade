@@ -1,0 +1,64 @@
+{
+  "schema_version": 1,
+  "thresholds": {
+    "minimum_cases": 3,
+    "minimum_personalized_mrr": 0.8,
+    "minimum_mrr_gain": 0.65,
+    "maximum_personalized_p95_us": 10000,
+    "maximum_p95_overhead_us": 10000,
+    "warmup_iterations": 10,
+    "measured_iterations": 100
+  },
+  "cases": [
+    {
+      "id": "named-path-beats-unrelated-hub",
+      "task": "change src/target.rs",
+      "nodes": [
+        { "id": "seed", "path": "src/target.rs" },
+        { "id": "hub", "path": "src/hub.rs" },
+        { "id": "a", "path": "src/a.rs" },
+        { "id": "b", "path": "src/b.rs" },
+        { "id": "c", "path": "src/c.rs" }
+      ],
+      "edges": [
+        ["hub", "a"],
+        ["hub", "b"],
+        ["hub", "c"]
+      ],
+      "entry_points": ["hub", "seed"],
+      "relevant_file": "src/target.rs"
+    },
+    {
+      "id": "connected-caller-beats-alphabetical-order",
+      "task": "change target",
+      "nodes": [
+        { "id": "target", "path": "src/target.rs" },
+        { "id": "low", "path": "src/a-low.rs" },
+        { "id": "high", "path": "src/z-high.rs" },
+        { "id": "leaf1", "path": "src/leaf1.rs" },
+        { "id": "leaf2", "path": "src/leaf2.rs" },
+        { "id": "leaf3", "path": "src/leaf3.rs" }
+      ],
+      "edges": [
+        ["low", "target"],
+        ["high", "target"],
+        ["high", "leaf1"],
+        ["high", "leaf2"],
+        ["high", "leaf3"]
+      ],
+      "entry_points": ["target"],
+      "relevant_file": "src/z-high.rs"
+    },
+    {
+      "id": "mentioned-disconnected-file-is-retained",
+      "task": "change src/mentioned.rs",
+      "nodes": [
+        { "id": "entry", "path": "src/entry.rs" },
+        { "id": "mentioned", "path": "src/mentioned.rs" }
+      ],
+      "edges": [],
+      "entry_points": ["entry"],
+      "relevant_file": "src/mentioned.rs"
+    }
+  ]
+}
