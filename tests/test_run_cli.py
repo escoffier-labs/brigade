@@ -1,4 +1,5 @@
 import json
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
@@ -760,6 +761,26 @@ def test_run_cli_lock_conflict_errors(tmp_path, monkeypatch, capsys):
 
     assert rc == 2
     assert "another brigade run appears active" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(("wait_arg", "expected"), [("--wait=0.25", 0.25), ("--wait", 600.0)])
+def test_run_cli_passes_bounded_wait_to_run_lock(tmp_path, monkeypatch, wait_arg, expected):
+    repo = _git_repo_with_roster(tmp_path)
+    seen = {}
+
+    @contextmanager
+    def fake_lock(cwd, *, wait_seconds=0.0):
+        seen["cwd"] = cwd
+        seen["wait_seconds"] = wait_seconds
+        yield
+
+    monkeypatch.setattr(runguard, "run_lock", fake_lock)
+    monkeypatch.setattr(aboyeur, "run", lambda *args, **kwargs: 0)
+
+    rc = cli.main(["run", "x", "--cwd", str(repo), wait_arg, "--no-artifacts"])
+
+    assert rc == 0
+    assert seen == {"cwd": repo, "wait_seconds": expected}
 
 
 def test_run_cli_worktree_passes_detached_cwd_and_writes_changes_patch(tmp_path, monkeypatch):

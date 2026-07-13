@@ -67,6 +67,45 @@ def test_run_lock_rejects_lock_held_by_live_process(tmp_path):
             pass
 
 
+def test_run_lock_waits_until_live_lock_clears(tmp_path, monkeypatch):
+    repo = _repo(tmp_path)
+    lock_path = runguard.lock_path(repo)
+    lock_path.mkdir(parents=True)
+    (lock_path / "pid").write_text(f"{os.getpid()}\n")
+    sleeps = []
+
+    def release_lock(delay):
+        sleeps.append(delay)
+        (lock_path / "pid").unlink()
+        lock_path.rmdir()
+
+    monkeypatch.setattr(runguard.time, "sleep", release_lock)
+
+    with runguard.run_lock(repo, wait_seconds=1.0, poll_interval=0.05):
+        assert (lock_path / "pid").read_text().strip() == str(os.getpid())
+
+    assert sleeps == [0.05]
+    assert not lock_path.exists()
+
+
+def test_run_lock_wait_timeout_is_bounded(tmp_path, monkeypatch):
+    repo = _repo(tmp_path)
+    lock_path = runguard.lock_path(repo)
+    lock_path.mkdir(parents=True)
+    (lock_path / "pid").write_text(f"{os.getpid()}\n")
+    monotonic = iter((10.0, 10.0, 10.25))
+    sleeps = []
+    monkeypatch.setattr(runguard.time, "monotonic", lambda: next(monotonic))
+    monkeypatch.setattr(runguard.time, "sleep", sleeps.append)
+
+    with pytest.raises(runguard.RunLockError, match=r"timed out after 0.2s waiting for run lock"):
+        with runguard.run_lock(repo, wait_seconds=0.2, poll_interval=0.05):
+            pass
+
+    assert sleeps == [0.05]
+    assert lock_path.is_dir()
+
+
 def test_run_lock_replaces_lock_with_dead_pid(tmp_path):
     repo = _repo(tmp_path)
     lock_path = runguard.lock_path(repo)

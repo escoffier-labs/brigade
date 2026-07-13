@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import os
 import shutil
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -117,10 +118,25 @@ def _acquire_lock(path: Path) -> None:
 
 
 @contextlib.contextmanager
-def run_lock(cwd: Path):
+def run_lock(cwd: Path, *, wait_seconds: float = 0.0, poll_interval: float = 0.1):
+    if wait_seconds < 0:
+        raise ValueError("run lock wait_seconds must be non-negative")
+    if poll_interval <= 0:
+        raise ValueError("run lock poll_interval must be positive")
     path = lock_path(cwd)
     path.parent.mkdir(parents=True, exist_ok=True)
-    _acquire_lock(path)
+    deadline = time.monotonic() + wait_seconds
+    while True:
+        try:
+            _acquire_lock(path)
+            break
+        except RunLockError as exc:
+            if wait_seconds == 0:
+                raise
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise RunLockError(f"timed out after {wait_seconds:g}s waiting for run lock: {path}") from exc
+            time.sleep(min(poll_interval, remaining))
     try:
         yield path
     finally:
