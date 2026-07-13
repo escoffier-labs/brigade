@@ -234,6 +234,33 @@ def test_cli_agent_accepts_reasoning_pin(tmp_path):
     assert loaded.agents["chef"].reasoning == "max"
 
 
+def test_cursor_worker_accepts_pinned_acpx_transport(tmp_path):
+    text = (
+        'orchestrator = "chef"\n'
+        '[agents.chef]\ncli = "codex"\nrole = "plan"\n'
+        '[agents.composer]\ncli = "cursor"\nmodel = "composer-2.5"\n'
+        'transport = "acpx"\ntransport_version = "0.12.0"\nrole = "build"\n'
+    )
+    loaded = roster_mod.load_roster(_write(tmp_path, text))
+    assert loaded.agents["composer"].transport == "acpx"
+    assert loaded.agents["composer"].transport_version == "0.12.0"
+
+
+def test_acpx_transport_rejects_wrong_cli_or_unreviewed_version(tmp_path):
+    wrong_cli = (
+        'orchestrator = "chef"\n'
+        '[agents.chef]\ncli = "codex"\nrole = "plan"\n'
+        '[agents.worker]\ncli = "grok"\nmodel = "grok-4.5"\n'
+        'transport = "acpx"\ntransport_version = "0.12.0"\nrole = "build"\n'
+    )
+    with pytest.raises(ValueError, match="cursor"):
+        roster_mod.load_roster(_write(tmp_path, wrong_cli))
+
+    wrong_version = wrong_cli.replace('cli = "grok"', 'cli = "cursor"').replace("0.12.0", "0.13.0")
+    with pytest.raises(ValueError, match="reviewed version"):
+        roster_mod.load_roster(_write(tmp_path, wrong_version))
+
+
 def test_cli_agent_still_requires_cli_or_endpoint(tmp_path):
     text = 'orchestrator = "chef"\n[agents.chef]\nrole = "plan"\n'
     with pytest.raises(ValueError):

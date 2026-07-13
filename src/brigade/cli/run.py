@@ -252,6 +252,8 @@ def dispatch(args) -> int:
                 "read_only": args.read_only,
                 "sandbox": effective_sandbox,
             }
+            if args.worktree and any(agent.transport == "acpx" for agent in loaded_roster.agents.values()):
+                run_kwargs["authorized_writable_worktree"] = True
             if args.worker is not None:
                 run_kwargs["worker"] = args.worker
             if args.codex_transport is not None:

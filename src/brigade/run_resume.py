@@ -39,6 +39,8 @@ def _roster_from_snapshot(snapshot: dict) -> Roster:
             timeout_seconds=raw.get("timeout_seconds"),
             model=raw.get("model"),
             reasoning=raw.get("reasoning"),
+            transport=raw.get("transport", "direct"),
+            transport_version=raw.get("transport_version"),
         )
     return Roster(
         orchestrator=snapshot["orchestrator"],
@@ -144,7 +146,11 @@ def resume(run_dir: Path) -> int:
     ground_truth = worker_data.get("ground_truth") or {}
     aboyeur._write_json(
         run_dir / "worker-results.json",
-        {"results": aboyeur._worker_payload(worker_results), "ground_truth": ground_truth},
+        {
+            "schema": "brigade.worker_results.v1",
+            "results": aboyeur._worker_payload(worker_results),
+            "ground_truth": ground_truth,
+        },
     )
 
     task = run_meta.get("task", "")
@@ -168,6 +174,7 @@ def resume(run_dir: Path) -> int:
     aboyeur._write_json(
         run_dir / "synthesis.json",
         {
+            "schema": "brigade.synthesis.v1",
             "orchestrator": roster.orchestrator,
             "result": {"ok": final.ok, "detail": final.detail, "text": final.text},
             "ground_truth": ground_truth,

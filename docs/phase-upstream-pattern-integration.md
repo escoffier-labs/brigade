@@ -110,9 +110,10 @@ An evaluation manifest defines:
 - A roster or selected seat IDs.
 - Default trial count and per-case overrides.
 - Grader definitions.
+- Execution mode: `read-only` or `writable-worktree`.
 - Operational limits such as timeout and concurrency.
 
-Experiment conditions are separated from operational settings. A cell ID is the SHA-256 digest of normalized case content, normalized seat execution spec, trial index, grader contract, and schema version. Array position and wall-clock time do not enter the identity.
+Experiment conditions are separated from operational settings. A cell ID is the SHA-256 digest of normalized case content, normalized seat execution spec, execution mode, trial index, grader contract, and schema version. The seat execution spec includes the adapter transport, reviewed transport version, and Codex exec or app-server transport. Array position and wall-clock time do not enter the identity.
 
 A resume operation:
 
@@ -122,7 +123,7 @@ A resume operation:
 4. Reports stale cells when case, seat, transport, reasoning, or grader identity changed.
 5. Appends retries and keeps the earlier attempts.
 
-The summary counts scored, unscored, execution error, adapter error, grader error, rejected, and accepted cells separately. Trial statistics include raw values, count, mean, median, minimum, maximum, and standard deviation using the Python standard library.
+The summary counts scored, unscored, execution error, adapter error, grader error, rejected, and accepted cells separately for the current plan. Stored cells outside the current plan are reported under separate stale counts and never affect current statistics. Trial statistics include raw values, count, mean, median, minimum, maximum, and standard deviation using the Python standard library.
 
 ## Contract 3: Mechanical Graders and Acceptance
 
