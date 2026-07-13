@@ -453,6 +453,36 @@ def test_run_agent_classifies_silent_adapter_exit(monkeypatch, cli_ref):
     assert result.exit_code == 0
 
 
+def test_run_agent_rejects_direct_read_only_cursor_composer_before_spawn(monkeypatch):
+    calls = []
+    monkeypatch.setattr(agents.proc, "which", lambda c: "/x/" + c)
+    monkeypatch.setattr(agents.proc, "run", lambda argv, **kw: calls.append(argv))
+
+    result = agents.run_agent("cursor", "inspect", read_only=True, model="composer-2.5-fast")
+
+    assert result.ok is False
+    assert result.exit_code is None
+    assert result.requested_model == "composer-2.5-fast"
+    assert "direct Cursor plan mode does not return Composer findings" in result.detail
+    assert 'transport = "acpx"' in result.detail
+    assert calls == []
+
+
+def test_run_agent_classifies_grok_cursor_empty_output_with_process_evidence(monkeypatch):
+    monkeypatch.setattr(agents.proc, "which", lambda c: "/x/" + c)
+    monkeypatch.setattr(agents.proc, "run", lambda argv, **kw: agents.proc.Result(0, "\n", "provider note"))
+
+    result = agents.run_agent("cursor", "inspect", read_only=True, model="grok-4.5-xhigh")
+
+    assert result.ok is False
+    assert result.exit_code == 0
+    assert result.stdout == "\n"
+    assert result.stderr == "provider note"
+    assert result.requested_model == "grok-4.5-xhigh"
+    assert "direct Cursor plan mode returned no assistant text" in result.detail
+    assert 'transport = "acpx"' in result.detail
+
+
 class _StubThread:
     def __init__(self, result):
         self._result = result
