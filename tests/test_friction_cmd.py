@@ -168,6 +168,7 @@ def test_friction_scan_json_dry_run_does_not_write(tmp_path, monkeypatch, capsys
     assert code == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["candidate_count"] == 1
+    assert payload["candidates"][0]["friction_type"] == "blocked"
     assert payload["output"]["dry_run"] is True
     assert not (tmp_path / ".brigade" / "friction" / "latest.json").exists()
 
@@ -320,4 +321,72 @@ def test_friction_scan_ignores_numeric_json_fields(tmp_path, monkeypatch, capsys
     assert code == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["candidate_count"] == 1
-    assert payload["candidates"][0]["friction_type"] == "blocked"
+
+
+def test_friction_v2_preserves_each_typed_source_family_before_truncation(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(
+        friction_cmd,
+        "_now",
+        lambda: datetime(2026, 6, 11, 12, 0, 0, tzinfo=timezone.utc),
+    )
+    verify = tmp_path / ".brigade" / "work" / "verify-runs" / "v1"
+    verify.mkdir(parents=True)
+    (verify / "receipt.json").write_text(
+        json.dumps({"status": "failed", "commands": [{"command": "check", "exit_code": 1, "status": "failed"}]})
+    )
+    run = tmp_path / ".brigade" / "runs" / "r1"
+    run.mkdir(parents=True)
+    (run / "worker-results.json").write_text(
+        json.dumps({"results": [{"worker": "composer", "ok": False, "detail": "empty output"}]})
+    )
+    cell = tmp_path / ".brigade" / "evals" / "e1" / "cells" / "c1"
+    cell.mkdir(parents=True)
+    (cell / "cell.json").write_text(
+        json.dumps({"cell_id": "c1", "case_id": "case", "seat": "composer", "state": "rejected"})
+    )
+    ledger = tmp_path / "ledger.jsonl"
+    ledger.write_text(json.dumps({"status": "failed", "operation": "archive", "error": "locked"}) + "\n")
+    notes = tmp_path / "notes"
+    notes.mkdir()
+    (notes / "issue.md").write_text("Manual workflow was blocked because docs were missing.\n")
+
+    rc = cli.main(
+        [
+            "friction",
+            "scan",
+            "--target",
+            str(tmp_path),
+            "--miseledger",
+            str(ledger),
+            "--max-candidates",
+            "5",
+            "--json",
+        ]
+    )
+
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert {item["source_family"] for item in payload["candidates"]} == {
+        "verification",
+        "run",
+        "evaluation",
+        "miseledger",
+        "regex",
+    }
+    assert payload["structured_hits"] == 4
+    assert payload["regex_hits"] == 1
+    assert all(value == 1 for value in payload["quota_use"].values())
+
+
+def test_structured_recurrence_dedupes_across_receipt_paths(tmp_path, capsys):
+    for run_id in ("r1", "r2"):
+        run = tmp_path / ".brigade" / "runs" / run_id
+        run.mkdir(parents=True)
+        (run / "worker-results.json").write_text(
+            json.dumps({"results": [{"worker": "composer", "ok": False, "detail": "same failure"}]})
+        )
+
+    assert cli.main(["friction", "scan", "--target", str(tmp_path), "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["candidate_count"] == 1
+    assert payload["duplicates"] == 1

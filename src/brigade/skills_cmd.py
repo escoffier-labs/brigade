@@ -424,7 +424,7 @@ def _registry_import_payload(
     )
     metadata["fingerprint"] = _fingerprint(dest)
     _write_json(_metadata_path(dest), metadata)
-    lint_payload = _lint_payload(target, resolved_id)
+    lint_payload = _lint_payload(target, resolved_id, mode="lenient")
     return (
         {"target": str(target), "skill_id": resolved_id, "skill_dir": str(dest), "lint": lint_payload},
         None,
@@ -443,7 +443,11 @@ def _load_skill(target: Path, skill_or_path: str) -> tuple[Path, dict[str, Any]]
     return skill_dir, metadata
 
 
-def _lint_payload(target: Path, skill_or_path: str, harness: str | None = None) -> dict[str, Any]:
+def _lint_payload(
+    target: Path, skill_or_path: str, harness: str | None = None, *, mode: str = "lenient"
+) -> dict[str, Any]:
+    from . import agent_skill_format
+
     skill_dir, metadata = _load_skill(target, skill_or_path)
     skill_md = _skill_md_path(skill_dir)
     errors: list[str] = []
@@ -467,6 +471,9 @@ def _lint_payload(target: Path, skill_or_path: str, harness: str | None = None) 
     for key in ("required_tools", "required_mcp_servers", "supported_harnesses", "tests"):
         if key in metadata and not isinstance(metadata[key], list):
             errors.append(f"metadata {key} must be a list")
+    format_result = agent_skill_format.validate(skill_dir, mode=mode)
+    errors.extend(format_result.errors)
+    warnings.extend(format_result.diagnostics)
     if harness is not None:
         adapters = _adapter_map(target)
         adapter = adapters.get(harness)
@@ -499,6 +506,12 @@ def _lint_payload(target: Path, skill_or_path: str, harness: str | None = None) 
             "markers": injection.markers,
         },
         "metadata": metadata,
+        "agent_skills": {
+            "mode": mode,
+            "fields": format_result.fields,
+            "diagnostics": list(format_result.diagnostics),
+            "allowed_tools_are_permissions": False,
+        },
         "fingerprint": _fingerprint(skill_dir) if skill_dir.is_dir() else None,
     }
     payload["changelog"] = (
@@ -586,9 +599,11 @@ def import_skill(
     return rc
 
 
-def lint(*, target: Path, skill: str, harness: str | None = None, json_output: bool = False) -> int:
+def lint(
+    *, target: Path, skill: str, harness: str | None = None, mode: str = "lenient", json_output: bool = False
+) -> int:
     target = target.expanduser().resolve()
-    payload = _lint_payload(target, skill, harness=harness)
+    payload = _lint_payload(target, skill, harness=harness, mode=mode)
     if json_output:
         print(json.dumps(payload, indent=2, sort_keys=True))
         return 0 if payload["valid"] else 1

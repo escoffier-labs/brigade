@@ -25,6 +25,9 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_skills_lint.add_argument("skill", help="Skill id, path, or directory.")
     p_skills_lint.add_argument("--target", "-t", type=Path, default=Path("."), help="Workspace registry to inspect.")
     p_skills_lint.add_argument("--harness", default=None, help="Optional harness adapter to validate rendered output.")
+    p_skills_lint.add_argument(
+        "--mode", choices=["strict", "lenient"], default="strict", help="Agent Skills validation mode."
+    )
     p_skills_lint.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_skills_doctor = skills_sub.add_parser("doctor", help="Check reviewed skill registry health.")
     p_skills_doctor.add_argument("--target", "-t", type=Path, default=Path("."), help="Workspace registry to inspect.")
@@ -186,7 +189,9 @@ def dispatch(args) -> int:
             json_output=args.json,
         )
     if args.skills_command == "lint":
-        return skills_cmd.lint(target=args.target, skill=args.skill, harness=args.harness, json_output=args.json)
+        return skills_cmd.lint(
+            target=args.target, skill=args.skill, harness=args.harness, mode=args.mode, json_output=args.json
+        )
     if args.skills_command == "doctor":
         return skills_cmd.doctor(target=args.target, json_output=args.json)
     if args.skills_command == "import-issues":
