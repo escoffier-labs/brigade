@@ -225,6 +225,15 @@ def test_cli_agent_accepts_model_pin(tmp_path):
     assert loaded.agents["builder"].model == "gpt-5.5-codex"
 
 
+def test_cli_agent_accepts_reasoning_pin(tmp_path):
+    text = (
+        'orchestrator = "chef"\n'
+        '[agents.chef]\ncli = "opencode"\nmodel = "openai/gpt-5.6"\nreasoning = "max"\nrole = "plan"\n'
+    )
+    loaded = roster_mod.load_roster(_write(tmp_path, text))
+    assert loaded.agents["chef"].reasoning == "max"
+
+
 def test_cli_agent_still_requires_cli_or_endpoint(tmp_path):
     text = 'orchestrator = "chef"\n[agents.chef]\nrole = "plan"\n'
     with pytest.raises(ValueError):

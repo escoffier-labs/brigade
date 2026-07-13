@@ -22,6 +22,7 @@ class Agent:
     endpoint: str | None = None
     model: str | None = None
     headers: dict | None = None
+    reasoning: str | None = None
 
 
 @dataclass(frozen=True)
@@ -143,6 +144,8 @@ def load_roster(path: Path) -> Roster:
         model_raw = raw_agent.get("model")
         endpoint = _as_str(endpoint_raw, f"agents.{agent_name}.endpoint") if endpoint_raw is not None else None
         model = _as_str(model_raw, f"agents.{agent_name}.model") if model_raw is not None else None
+        reasoning_raw = raw_agent.get("reasoning")
+        reasoning = _as_str(reasoning_raw, f"agents.{agent_name}.reasoning") if reasoning_raw is not None else None
 
         headers_raw = raw_agent.get("headers")
         if headers_raw is not None and not isinstance(headers_raw, dict):
@@ -153,6 +156,8 @@ def load_roster(path: Path) -> Roster:
         has_endpoint = endpoint is not None and model is not None
         if cli_raw is None and has_endpoint:
             cli = None
+            if reasoning is not None:
+                raise ValueError(f"agents.{agent_name}.reasoning requires a CLI adapter")
         else:
             cli = _as_str(cli_raw, f"agents.{agent_name}.cli")
             if not agent_adapters.is_known(cli):
@@ -168,6 +173,7 @@ def load_roster(path: Path) -> Roster:
             endpoint=endpoint,
             model=model,
             headers=headers,
+            reasoning=reasoning,
         )
 
     if orchestrator not in parsed_agents:

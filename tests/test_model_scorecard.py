@@ -28,6 +28,8 @@ def _write_run(
     results: list | None = None,
     ground_truth: dict | None = None,
     include_worker_results: bool = True,
+    include_synthesis: bool = True,
+    direct_worker: bool = False,
 ) -> Path:
     """Write a realistic run artifact tree under run_dir."""
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -57,8 +59,8 @@ def _write_run(
         },
     )
     if include_worker_results:
-        payload: dict = {
-            "results": results
+        result_items = (
+            results
             if results is not None
             else [
                 {
@@ -68,7 +70,13 @@ def _write_run(
                     "detail": "",
                     "text": "done",
                 }
-            ],
+            ]
+        )
+        result_items = [
+            dict(item, duration_seconds=item.get("duration_seconds", duration_seconds)) for item in result_items
+        ]
+        payload: dict = {
+            "results": result_items,
         }
         if ground_truth is not None:
             payload["ground_truth"] = ground_truth
@@ -82,6 +90,14 @@ def _write_run(
                 "patch_ref": "changes.patch",
             }
         _write_json(run_dir / "worker-results.json", payload)
+    if include_synthesis:
+        synthesis: dict = {
+            "orchestrator": orchestrator,
+            "result": {"ok": True, "detail": "", "text": "done", "duration_seconds": duration_seconds},
+        }
+        if direct_worker:
+            synthesis["mode"] = "direct-worker"
+        _write_json(run_dir / "synthesis.json", synthesis)
     return run_dir
 
 
@@ -265,6 +281,37 @@ def test_duration_total_and_mean_for_participated_runs(tmp_path):
     assert coder.runs == 2
 
 
+def test_ignores_roster_seats_that_did_not_participate(tmp_path):
+    runs = _runs_root(tmp_path)
+    _write_run(
+        runs / "r1",
+        agents={
+            "chef": {"cli": "codex", "model": "gpt-5", "role": "plan"},
+            "used": {"cli": "pi", "model": "openai/gpt-5.6", "role": "code"},
+            "idle": {"cli": "grok", "model": "grok-4.5", "role": "review"},
+        },
+        results=[{"worker": "used", "task": "code", "ok": True, "text": "done", "duration_seconds": 4.5}],
+    )
+
+    labels = {row.label for row in model_scorecard.build_scorecard(target=tmp_path).models}
+    assert labels == {"codex/gpt-5", "pi/openai/gpt-5.6"}
+
+
+def test_direct_worker_does_not_attribute_orchestrator_seat(tmp_path):
+    runs = _runs_root(tmp_path)
+    _write_run(
+        runs / "r1",
+        agents={
+            "chef": {"cli": "codex", "model": "gpt-5", "role": "plan"},
+            "coder": {"cli": "pi", "model": "openai/gpt-5.6", "role": "code"},
+        },
+        direct_worker=True,
+    )
+
+    labels = {row.label for row in model_scorecard.build_scorecard(target=tmp_path).models}
+    assert labels == {"pi/openai/gpt-5.6"}
+
+
 def test_first_and_last_seen_timestamps(tmp_path):
     runs = _runs_root(tmp_path)
     agents = {
@@ -410,7 +457,7 @@ def test_models_sorted_ok_rate_desc_then_seats_desc(tmp_path):
             {"worker": "w2", "task": "t", "ok": False, "detail": "e", "text": ""},
         ],
     )
-    # model C: 100% ok, 2 seats — should rank above A (same rate, more seats)
+    # model C: 100% ok, 2 seats - should rank above A (same rate, more seats)
     agents_c = {
         "chef": {"cli": "codex", "model": None, "role": "plan"},
         "w1": {"cli": "claude", "model": "high-seats", "role": "code"},

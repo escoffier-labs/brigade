@@ -981,6 +981,41 @@ def test_run_direct_worker_failure_reports_and_records(monkeypatch, capsys, tmp_
     assert synthesis["result"]["ok"] is False
 
 
+def test_run_direct_worker_writes_complete_process_logs(monkeypatch, tmp_path):
+    def fake_run_agent(cli_ref, prompt, **kwargs):
+        return agents.AgentResult(
+            text="answer",
+            ok=True,
+            stdout="answer\n",
+            stderr="adapter diagnostic\n",
+            exit_code=0,
+            timed_out=False,
+        )
+
+    output_dir = tmp_path / "run"
+    monkeypatch.setattr(aboyeur.agents, "run_agent", fake_run_agent)
+
+    rc = aboyeur.run(
+        "do exactly this",
+        _roster(),
+        worker="coder",
+        output_dir=output_dir,
+        route_enabled=False,
+    )
+
+    assert rc == 0
+    worker_payload = json.loads((output_dir / "worker-results.json").read_text())["results"][0]
+    assert worker_payload["exit_code"] == 0
+    assert worker_payload["timed_out"] is False
+    assert worker_payload["stdout_log"] == "logs/worker-001-coder.stdout.log"
+    assert worker_payload["stderr_log"] == "logs/worker-001-coder.stderr.log"
+    assert (output_dir / worker_payload["stdout_log"]).read_text() == "answer\n"
+    assert (output_dir / worker_payload["stderr_log"]).read_text() == "adapter diagnostic\n"
+    synthesis = json.loads((output_dir / "synthesis.json").read_text())["result"]
+    assert synthesis["stdout_log"] == worker_payload["stdout_log"]
+    assert synthesis["stderr_log"] == worker_payload["stderr_log"]
+
+
 def test_run_direct_worker_dry_run_skips_agents_and_writes_synthetic_plan(monkeypatch, tmp_path, capsys):
     calls = []
 
@@ -1098,6 +1133,14 @@ def test_roster_payload_includes_model():
     payload = aboyeur._roster_payload(_model_roster())
     assert payload["agents"]["architect"]["model"] == "claude-fable-5"
     assert payload["agents"]["builder"]["model"] == "gpt-5.5-codex"
+
+
+def test_roster_payload_includes_reasoning():
+    roster = Roster(
+        orchestrator="chef",
+        agents={"chef": Agent("chef", "codex", "plan", reasoning="xhigh")},
+    )
+    assert aboyeur._roster_payload(roster)["agents"]["chef"]["reasoning"] == "xhigh"
 
 
 def test_roster_payload_includes_sandbox():
@@ -1843,11 +1886,10 @@ def test_synthesis_failure_writes_artifact(monkeypatch, tmp_path, capsys):
     assert run_meta["duration_seconds"] >= 0
     synthesis = json.loads((output_dir / "synthesis.json").read_text())
     assert synthesis["orchestrator"] == "chef"
-    assert synthesis["result"] == {
-        "ok": False,
-        "detail": "synthesis failed",
-        "text": "partial synthesis",
-    }
+    assert synthesis["result"]["ok"] is False
+    assert synthesis["result"]["detail"] == "synthesis failed"
+    assert synthesis["result"]["text"] == "partial synthesis"
+    assert synthesis["result"]["duration_seconds"] >= 0
     assert not (output_dir / "final.txt").exists()
 
 

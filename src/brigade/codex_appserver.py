@@ -275,11 +275,15 @@ class CodexThread:
         timeout: float,
         on_event: Callable[[dict], None] | None = None,
         on_turn_start: Callable[[str], None] | None = None,
+        effort: str | None = None,
     ) -> TurnResult:
+        params: dict = {"threadId": self.thread_id, "input": [{"type": "text", "text": prompt}]}
+        if effort is not None:
+            params["effort"] = effort
         try:
             result = self._server.request(
                 "turn/start",
-                {"threadId": self.thread_id, "input": [{"type": "text", "text": prompt}]},
+                params,
             )
         except AppServerError as exc:
             return TurnResult(text="", ok=False, status="failed", thread_id=self.thread_id, detail=str(exc)[:200])

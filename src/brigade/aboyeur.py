@@ -6,6 +6,7 @@ import json
 import os
 import re
 import sys
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
@@ -50,6 +51,13 @@ class WorkerResult:
     detail: str = ""
     thread_id: str | None = None
     status: str = ""
+    stdout: str | None = None
+    stderr: str | None = None
+    exit_code: int | None = None
+    timed_out: bool = False
+    stdout_log: str | None = None
+    stderr_log: str | None = None
+    duration_seconds: float | None = None
 
 
 @dataclass(frozen=True)
@@ -692,6 +700,8 @@ def _run_orchestrator(
         kwargs["sandbox"] = sandbox
     if orchestrator.model is not None:
         kwargs["model"] = orchestrator.model
+    if orchestrator.reasoning is not None:
+        kwargs["reasoning"] = orchestrator.reasoning
     return agents.run_agent(orchestrator.cli, prompt, **kwargs)
 
 
@@ -933,11 +943,17 @@ def _run_codex_appserver_worker(
                 registry.register(worker, thread, turn_id)
 
         try:
-            turn = thread.run_turn(prompt, timeout=timeout, on_event=on_event, on_turn_start=on_turn_start)
+            turn_kwargs = {"timeout": timeout, "on_event": on_event, "on_turn_start": on_turn_start}
+            if agent.reasoning is not None:
+                turn_kwargs["effort"] = agent.reasoning
+            turn = thread.run_turn(prompt, **turn_kwargs)
         except TypeError as exc:
             if "on_turn_start" not in str(exc):
                 raise
-            turn = thread.run_turn(prompt, timeout=timeout, on_event=on_event)
+            fallback_kwargs = {"timeout": timeout, "on_event": on_event}
+            if agent.reasoning is not None:
+                fallback_kwargs["effort"] = agent.reasoning
+            turn = thread.run_turn(prompt, **fallback_kwargs)
     except codex_appserver.AppServerError as exc:
         return agents.AgentResult(text="", ok=False, detail=str(exc)[:200], status="failed")
     finally:
@@ -995,6 +1011,7 @@ def dispatch(
             drift_impact=drift_impact,
             evidence=evidence,
         )
+        started = time.monotonic()
         if agent.cli == "codex" and appserver is not None:
             on_event = _worker_event_writer(events_dir, assignment.worker, verbose=verbose)
             result = _run_codex_appserver_worker(
@@ -1019,6 +1036,8 @@ def dispatch(
                 kwargs["sandbox"] = sandbox
             if agent.model is not None:
                 kwargs["model"] = agent.model
+            if agent.reasoning is not None:
+                kwargs["reasoning"] = agent.reasoning
             result = agents.run_agent(agent.cli, prompt, **kwargs)
         return WorkerResult(
             worker=assignment.worker,
@@ -1028,6 +1047,11 @@ def dispatch(
             detail=result.detail,
             thread_id=result.thread_id,
             status=result.status,
+            stdout=result.stdout,
+            stderr=result.stderr,
+            exit_code=result.exit_code,
+            timed_out=result.timed_out,
+            duration_seconds=max(0.0, round(time.monotonic() - started, 3)),
         )
 
     if not assignments:
@@ -1158,8 +1182,47 @@ def _worker_payload(results: list[WorkerResult]) -> list[dict[str, object]]:
         if result.thread_id is not None:
             entry["thread_id"] = result.thread_id
             entry["status"] = result.status
+        if result.exit_code is not None:
+            entry["exit_code"] = result.exit_code
+            entry["timed_out"] = result.timed_out
+        if result.stdout_log is not None:
+            entry["stdout_log"] = result.stdout_log
+        if result.stderr_log is not None:
+            entry["stderr_log"] = result.stderr_log
+        if result.duration_seconds is not None:
+            entry["duration_seconds"] = result.duration_seconds
         payload.append(entry)
     return payload
+
+
+def _write_worker_logs(output_dir: Path, results: list[WorkerResult]) -> list[WorkerResult]:
+    logs_dir = output_dir / "logs"
+    recorded: list[WorkerResult] = []
+    for index, result in enumerate(results, start=1):
+        if result.stdout is None and result.stderr is None:
+            recorded.append(result)
+            continue
+        logs_dir.mkdir(parents=True, exist_ok=True)
+        worker = re.sub(r"[^A-Za-z0-9_.-]+", "-", result.worker).strip("-") or "worker"
+        prefix = f"worker-{index:03d}-{worker}"
+        stdout_ref = f"logs/{prefix}.stdout.log"
+        stderr_ref = f"logs/{prefix}.stderr.log"
+        localio.write_text_atomic(output_dir / stdout_ref, result.stdout or "")
+        localio.write_text_atomic(output_dir / stderr_ref, result.stderr or "")
+        recorded.append(replace(result, stdout_log=stdout_ref, stderr_log=stderr_ref))
+    return recorded
+
+
+def _write_agent_logs(output_dir: Path, label: str, result: agents.AgentResult) -> agents.AgentResult:
+    if result.stdout is None and result.stderr is None:
+        return result
+    logs_dir = output_dir / "logs"
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    stdout_ref = f"logs/{label}.stdout.log"
+    stderr_ref = f"logs/{label}.stderr.log"
+    localio.write_text_atomic(output_dir / stdout_ref, result.stdout or "")
+    localio.write_text_atomic(output_dir / stderr_ref, result.stderr or "")
+    return replace(result, stdout_log=stdout_ref, stderr_log=stderr_ref)
 
 
 def _is_brigade_path(value: str) -> bool:
@@ -1200,11 +1263,21 @@ def _mark_noop_worker_results(worker_results: list[WorkerResult], suspected_noop
 
 
 def _agent_result_payload(result: agents.AgentResult) -> dict[str, object]:
-    return {
+    payload: dict[str, object] = {
         "ok": result.ok,
         "detail": result.detail,
         "text": result.text,
     }
+    if result.exit_code is not None:
+        payload["exit_code"] = result.exit_code
+        payload["timed_out"] = result.timed_out
+    if result.stdout_log is not None:
+        payload["stdout_log"] = result.stdout_log
+    if result.stderr_log is not None:
+        payload["stderr_log"] = result.stderr_log
+    if result.duration_seconds is not None:
+        payload["duration_seconds"] = result.duration_seconds
+    return payload
 
 
 def _code_graph_delta_skip(status: str) -> dict[str, object]:
@@ -1543,6 +1616,7 @@ def _roster_payload(roster: Roster) -> dict[str, object]:
             name: {
                 "cli": agent.cli,
                 "model": agent.model,
+                "reasoning": agent.reasoning,
                 "role": agent.role,
                 "timeout_seconds": agent.timeout_seconds,
             }
@@ -1922,6 +1996,7 @@ def run(
     ground_truth["suspected_noop"] = suspected_noop
     worker_results = _mark_noop_worker_results(worker_results, suspected_noop)
     if output_dir is not None:
+        worker_results = _write_worker_logs(output_dir, worker_results)
         _write_json(
             output_dir / "worker-results.json",
             {"results": _worker_payload(worker_results), "ground_truth": ground_truth},
@@ -1950,8 +2025,16 @@ def run(
             detail=direct_result.detail,
             thread_id=direct_result.thread_id,
             status=direct_result.status,
+            stdout=direct_result.stdout,
+            stderr=direct_result.stderr,
+            exit_code=direct_result.exit_code,
+            timed_out=direct_result.timed_out,
+            stdout_log=direct_result.stdout_log,
+            stderr_log=direct_result.stderr_log,
+            duration_seconds=direct_result.duration_seconds,
         )
     else:
+        synthesis_started = time.monotonic()
         final = _run_orchestrator(
             roster,
             build_synth_prompt(
@@ -1968,7 +2051,10 @@ def run(
             sandbox_read_only=sandbox_read_only,
             sandbox=sandbox,
         )
+        final = replace(final, duration_seconds=max(0.0, round(time.monotonic() - synthesis_started, 3)))
     if output_dir is not None:
+        if not direct_worker:
+            final = _write_agent_logs(output_dir, "synthesis", final)
         synthesis_payload = (
             {
                 "mode": "direct-worker",
