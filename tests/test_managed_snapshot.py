@@ -35,7 +35,7 @@ def test_bundled_snapshot_covers_first_class_sidecars():
     assert records_by_name["agentpantry"]["source"]["revision"] == ("9d904c3777f116c3a62d5ab2e7e20849d02c114a")
     assert records_by_name["token-glace"]["source"]["revision"] == ("efb7c8544014d1bdd0df436c741d9d0ef20a090e")
     assert records_by_name["skillet"]["source"]["revision"] == "1f871dd44be70b0e912f832d448436a4a0fcc7b3"
-    assert records_by_name["graphtrail"]["source"]["revision"] == ("54e29726e186bfef6226635146e65b9793531fa8")
+    assert records_by_name["graphtrail"]["source"]["revision"] == ("e2c7868c8fe0471469f66e90b020845fb56a7ca6")
     assert by_name["skillet"]["tools"][0]["kind"] == "skill-roster"
     assert managed.resolve("skillet") is None
 
