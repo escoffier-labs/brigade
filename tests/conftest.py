@@ -46,10 +46,11 @@ def _no_managed_tools_on_path(monkeypatch, request):
     the documented bare-`$HOME` condition. Tests that exercise installed tools
     re-patch `managed.proc.which` in their own body, which overrides this.
 
-    `tests/test_proc.py` validates `proc.which` against real binaries, so it
-    opts out (patching `managed.proc.which` would patch the same function).
+    `tests/test_proc.py` validates `proc.which` against real binaries, and the
+    opt-in adapter write probes must detect their real CLIs. Both modules opt
+    out because patching `managed.proc.which` patches the shared function.
     """
-    if request.module.__name__.rsplit(".", 1)[-1] == "test_proc":
+    if request.module.__name__.rsplit(".", 1)[-1] in {"test_proc", "test_agent_write_probes"}:
         return
     from brigade import managed
 
