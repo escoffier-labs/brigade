@@ -11,6 +11,7 @@ permissions:
 
 jobs:
   build-and-publish:
+    if: github.ref_type == 'tag' && startsWith(github.ref_name, 'v')
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
@@ -24,7 +25,6 @@ jobs:
           python-version: "3.12"
 
       - name: Verify tag matches every declared version
-        if: startsWith(github.ref, 'refs/tags/v')
         run: |
           set -e
           python - "${GITHUB_REF_NAME#v}" <<'EOF'

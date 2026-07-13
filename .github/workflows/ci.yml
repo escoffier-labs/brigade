@@ -28,6 +28,8 @@ jobs:
         run: python -m mypy
       - name: Version sync
         run: python scripts/version_sync.py --check
+      - name: Managed snapshot
+        run: python scripts/managed_snapshot.py --check
 
   test:
     runs-on: ubuntu-latest
