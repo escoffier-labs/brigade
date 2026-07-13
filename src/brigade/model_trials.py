@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import aboyeur, localio
+from . import aboyeur, localio, runguard
 from .roster import Roster
 
 MANIFEST_SCHEMA = "brigade.eval_manifest.v1"
@@ -31,6 +31,7 @@ class CellSpec:
     seat: str
     trial: int
     graders: tuple[dict[str, Any], ...]
+    execution_mode: str
 
     def payload(self) -> dict[str, Any]:
         return {
@@ -41,6 +42,7 @@ class CellSpec:
             "seat": self.seat,
             "trial": self.trial,
             "graders": list(self.graders),
+            "execution_mode": self.execution_mode,
         }
 
 
@@ -93,6 +95,12 @@ def expand_cells(manifest: dict[str, Any], roster: Roster, *, base_dir: Path = P
     default_trials = manifest.get("trials", 1)
     if not isinstance(default_trials, int) or isinstance(default_trials, bool) or default_trials < 1:
         raise ValueError("manifest trials must be a positive integer")
+    execution = manifest.get("execution", {"mode": "read-only"})
+    if not isinstance(execution, dict):
+        raise ValueError("manifest execution must be an object")
+    execution_mode = execution.get("mode", "read-only")
+    if execution_mode not in {"read-only", "writable-worktree"}:
+        raise ValueError("manifest execution.mode must be read-only or writable-worktree")
     cells: list[CellSpec] = []
     seen_cases: set[str] = set()
     for raw_case in manifest["cases"]:
@@ -123,6 +131,8 @@ def expand_cells(manifest: dict[str, Any], roster: Roster, *, base_dir: Path = P
                 "model": agent.model,
                 "reasoning": agent.reasoning,
                 "transport": getattr(agent, "transport", None),
+                "transport_version": getattr(agent, "transport_version", None),
+                "codex_transport": roster.codex_transport if agent.cli == "codex" else None,
             }
             for trial in range(1, trials + 1):
                 coordinate = f"{case_id}:{seat}:{trial}"
@@ -132,6 +142,7 @@ def expand_cells(manifest: dict[str, Any], roster: Roster, *, base_dir: Path = P
                     "seat": seat_spec,
                     "trial": trial,
                     "graders": graders,
+                    "execution_mode": execution_mode,
                 }
                 cells.append(
                     CellSpec(
@@ -142,6 +153,7 @@ def expand_cells(manifest: dict[str, Any], roster: Roster, *, base_dir: Path = P
                         seat=seat,
                         trial=trial,
                         graders=tuple(dict(item) for item in graders),
+                        execution_mode=execution_mode,
                     )
                 )
     return cells
@@ -154,10 +166,12 @@ def _grader_result(kind: str, index: int, started: float, *, status: str, score:
         "grader_type": kind,
         "version": 1,
         "status": status,
+        "exit_code": 0 if status == "scored" else None,
         "score": score,
         "score_min": 0.0,
         "score_max": 1.0,
         "detail": detail,
+        "component_checks": ([{"name": kind, "passed": score == 1.0, "detail": detail}] if status == "scored" else []),
         "duration_seconds": max(0.0, round(time.monotonic() - started, 6)),
     }
 
@@ -266,14 +280,44 @@ def grade_output(
     return results
 
 
-def _state(exit_code: int, graders: list[dict[str, Any]]) -> str:
+def _worker_result(run_dir: Path) -> dict[str, Any] | None:
+    payload = _load_json(run_dir / "worker-results.json")
+    if payload is None:
+        return None
+    results = payload.get("results")
+    if not isinstance(results, list) or not results or not isinstance(results[0], dict):
+        return None
+    return results[0]
+
+
+def _state(exit_code: int, graders: list[dict[str, Any]], worker_result: dict[str, Any] | None = None) -> str:
     if exit_code != 0:
+        if worker_result is not None and worker_result.get("ok") is False:
+            adapter_exit = worker_result.get("exit_code")
+            if adapter_exit is None or adapter_exit == 0:
+                return "adapter_error"
         return "execution_error"
     if not graders:
         return "unscored"
     if any(item["status"] == "grader_error" for item in graders):
         return "grader_error"
     return "accepted" if all(item["score"] == item["score_max"] for item in graders) else "rejected"
+
+
+def _trial_worktree_path(
+    workspace: Path,
+    output_dir: Path,
+    cell: CellSpec,
+    attempt: int,
+) -> Path:
+    experiment = hashlib.sha256(str(output_dir).encode()).hexdigest()[:12]
+    return (
+        Path.home()
+        / ".cache"
+        / "brigade"
+        / "worktrees"
+        / f"eval-{workspace.name}-{experiment}-{cell.cell_id[:12]}-{attempt:03d}"
+    )
 
 
 def _attempt_number(cell_dir: Path) -> int:
@@ -334,6 +378,10 @@ def execute(
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
+    writable = any(cell.execution_mode == "writable-worktree" for cell in cells)
+    if writable and not runguard.is_git_worktree(workspace):
+        print("error: writable-worktree trials require a git worktree target", file=sys.stderr)
+        return 2
     localio.write_json(output_dir / "plan.json", plan)
     failures = 0
     for cell in cells:
@@ -343,31 +391,46 @@ def execute(
             continue
         attempt = _attempt_number(cell_dir)
         run_dir = cell_dir / "attempts" / f"attempt-{attempt:03d}" / "run"
-        rc = aboyeur.run(
-            cell.prompt,
-            roster,
-            worker=cell.seat,
-            cwd=workspace,
-            output_dir=run_dir,
-            route_enabled=False,
-            read_only=True,
-        )
+        cell_workspace = workspace
+        worktree_path: Path | None = None
+        if cell.execution_mode == "writable-worktree":
+            worktree_path = _trial_worktree_path(workspace, output_dir, cell, attempt)
+            try:
+                cell_workspace = runguard.create_detached_worktree(workspace, worktree_path)
+            except runguard.RunGuardError as exc:
+                print(f"error: {exc}", file=sys.stderr)
+                return 2
         try:
-            text = (run_dir / "final.txt").read_text()
-        except OSError:
-            text = ""
-        graders = grade_output(
-            graders=cell.graders,
-            text=text,
-            exit_code=rc,
-            workspace=workspace,
-            run_dir=run_dir,
-        )
+            rc = aboyeur.run(
+                cell.prompt,
+                roster,
+                worker=cell.seat,
+                cwd=cell_workspace,
+                output_dir=run_dir,
+                route_enabled=False,
+                read_only=cell.execution_mode == "read-only",
+                authorized_writable_worktree=cell.execution_mode == "writable-worktree",
+            )
+            try:
+                text = (run_dir / "final.txt").read_text()
+            except OSError:
+                text = ""
+            graders = grade_output(
+                graders=cell.graders,
+                text=text,
+                exit_code=rc,
+                workspace=cell_workspace,
+                run_dir=run_dir,
+            )
+        finally:
+            if worktree_path is not None:
+                runguard.remove_worktree(workspace, worktree_path)
         output_digest = hashlib.sha256(text.encode()).hexdigest()
         for grader in graders:
             grader["cell_id"] = cell.cell_id
             grader["output_digest"] = f"sha256:{output_digest}"
-        state = _state(rc, graders)
+            grader["output_refs"] = [{"path": "run/final.txt", "sha256": grader["output_digest"]}]
+        state = _state(rc, graders, _worker_result(run_dir))
         run_meta = _load_json(run_dir / "run.json") or {}
         payload = {
             "schema": CELL_SCHEMA,
@@ -405,15 +468,26 @@ def _stats(values: list[float]) -> dict[str, Any]:
 
 def summarize(output_dir: Path) -> dict[str, Any]:
     counts: dict[str, int] = {}
+    stale_counts: dict[str, int] = {}
     scores: list[float] = []
     durations: list[float] = []
     cells_dir = output_dir / "cells"
     paths = sorted(cells_dir.glob("*/cell.json")) if cells_dir.is_dir() else []
+    plan = _load_json(output_dir / "plan.json")
+    current_ids = {
+        item["cell_id"]
+        for item in (plan or {}).get("cells", [])
+        if isinstance(item, dict) and isinstance(item.get("cell_id"), str)
+    }
     for path in paths:
         cell = _load_json(path)
         if cell is None:
             continue
         state = str(cell.get("state", "unknown"))
+        cell_id = cell.get("cell_id")
+        if current_ids and cell_id not in current_ids:
+            stale_counts[state] = stale_counts.get(state, 0) + 1
+            continue
         counts[state] = counts.get(state, 0) + 1
         if isinstance(cell.get("duration_seconds"), (int, float)):
             durations.append(float(cell["duration_seconds"]))
@@ -423,6 +497,7 @@ def summarize(output_dir: Path) -> dict[str, Any]:
     return {
         "schema": SUMMARY_SCHEMA,
         "counts": dict(sorted(counts.items())),
+        "stale_counts": dict(sorted(stale_counts.items())),
         "scores": _stats(scores),
         "durations": _stats(durations),
     }
