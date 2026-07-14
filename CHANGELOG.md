@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Recency-weighted outcome ranking (context-aware outcomes follow-up): `outcome rank --recency` (default half-life 45 days, `--recency-half-life DAYS` to override) weights the score it sorts by over recency-weighted counts, so a signal's weight halves every half-life and credit earned under a drifted-away environment fades without rewriting the append-only log. It applies to the pooled score by default and the capability-shrunk score with `--by-capability`; the two flags compose. Off by default, so rank output stays byte-identical. The Wilson bound and shrinkage prior now accept fractional counts; the promotion ratchet never uses recency. See [docs/design/context-blind-spot.md](docs/design/context-blind-spot.md).
+
 ## [0.22.0] - 2026-07-13
 
 ### Fixed
