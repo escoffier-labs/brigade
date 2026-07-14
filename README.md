@@ -118,7 +118,7 @@ brigade add tokens
 brigade status --target .
 ```
 
-Station pages: [GraphTrail](https://brigade.tools/graphtrail) · [MiseLedger](https://brigade.tools/miseledger) · [Agent Pantry](https://brigade.tools/agentpantry) · [Content Guard](https://brigade.tools/content-guard) · [Skillet](https://brigade.tools/skillet) · [Token Glace](https://brigade.tools/token-glace). Full matrix: [Sidecars](#sidecars).
+Station pages: [GraphTrail](https://brigade.tools/graphtrail) · [MiseLedger](https://brigade.tools/miseledger) · [Agent Pantry](https://brigade.tools/agentpantry) · [Content Guard](https://brigade.tools/content-guard) · [Skillet](https://brigade.tools/skillet) · [Token Glace](https://brigade.tools/token-glace). Full station reference (install, profiles, `brigade add`, contract): [docs/station-contract.md](docs/station-contract.md).
 
 ## One MCP catalog, synced into every tool
 
@@ -205,33 +205,6 @@ Skip this and Brigade is installed-but-dormant: the brief is empty and `outcome 
 - `brigade outcome explain` prints the full signal trail behind any decision: which run produced each result, the threshold it crossed, and the reversible action taken.
 
 The whole ledger is plain JSON and markdown under `memory/outcome/`, tracked in git and readable without Brigade. Schedule `brigade outcome reconcile` in your own cron to run it hands-off; Brigade still installs no daemon.
-
-## Sidecars
-
-Brigade is the hub. Most stations wire an optional standalone tool, installed with `brigade add <station>` and health-checked by `brigade status` and `brigade doctor`. Each external tool is its own repo, independently installable, with no library coupling back into Brigade.
-
-Use `brigade profiles list` to see built-in station bundles and `brigade stations list` to see which stations are selected by the default repo profile before installing any sidecar tools. `brigade stations list --json` also shows each managed tool's machine surfaces: doctor JSON, markdown briefs, summary JSON, and verify commands where the tool supports them.
-
-Fresh repo installs use the `repo` profile: core, skills, memory, guard, security, tokens, evidence, and search are selected up front. `brigade init` wires the built-in skills immediately, including `brigade-work` and `ultra-work-scout`, so new Codex users can run the Brigade work loop and broad Scout scoping from the start. External sidecars stay in their own repos and install only when you run `brigade add <station>`.
-
-External station repos can publish the same contract in a local `station.json`. Point `brigade add` at that repo to inspect its install command and surfaces without editing Brigade source:
-
-```bash
-brigade add ../agentpantry          # inspect station.json
-brigade add ../agentpantry --install # run the manifest install command
-```
-
-Before installing a sidecar you can verify its `station.json` contract without running its installer: `brigade stations verify <path>` runs only declared read-only probes, sandboxed and bounded, and returns a machine-readable status. Full isolation model, manifest rules, and exit-code semantics live in [docs/station-contract.md](docs/station-contract.md).
-
-| `brigade add` | Tool | What it does |
-|---|---|---|
-| `skills` | built-in Scout skills; optional Skillet roster | wires `brigade-work` and `ultra-work-scout` on init; use `skills add escoffier-labs/skillet` after installing the sidecar CLI for the full roster |
-| `guard` | embedded content guard, with an optional external checkout override | scans handoffs and content for secrets and PII before anything leaves the machine |
-| `tokens` | token-glace | tracks token spend across your harnesses and compacts noisy output |
-| `memory` | bootstrap-doctor (optional); memory maintenance is built in | `brigade memory status|lint|compact` plus memory-care for card freshness |
-| `pantry` | agentpantry (Go sidecar) | plans and health-checks sealed browser-session sync; never starts source/sink |
-| `search` | code-search, graphtrail | local semantic search plus a code-graph CLI for callers, impact, and structural diffs |
-| `evidence` | miseledger (Go sidecar) | plans crawl/export and health-checks the local evidence ledger; does not crawl for you |
 
 ## Harness support
 
