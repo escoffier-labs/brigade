@@ -105,11 +105,11 @@ Brigade is the hub. Optional tools stay in their own repos; `brigade add <statio
 
 | | Station | Install | Plugs into | Role |
 |---|---|---|---|---|
-| <a href="https://brigade.tools/graphtrail"><img src="docs/assets/marks/graphtrail-circle.svg" width="28" height="28" alt="GraphTrail"></a> | **[GraphTrail](https://brigade.tools/graphtrail)** | `brigade add search` | **Prove** | Code graph; `brigade run` prepends a context pack when a graph exists |
+| <a href="https://brigade.tools/graphtrail"><img src="docs/assets/marks/graphtrail-circle.svg" width="28" height="28" alt="GraphTrail"></a> | **[GraphTrail](https://brigade.tools/graphtrail)** | `brigade add search` (bundle: code-search + GraphTrail) | **Prove** | Code graph; `brigade run` prepends a context pack when a graph exists |
 | <a href="https://brigade.tools/miseledger"><img src="docs/assets/marks/miseledger-circle.svg" width="28" height="28" alt="MiseLedger"></a> | **[MiseLedger](https://brigade.tools/miseledger)** | `brigade add evidence` | **Prove** / **Remember** | Evidence ledger; export briefs into the next work context |
 | <a href="https://brigade.tools/agentpantry"><img src="docs/assets/marks/agentpantry-circle.svg" width="28" height="28" alt="Agent Pantry"></a> | **[Agent Pantry](https://brigade.tools/agentpantry)** | `brigade add pantry` | **Share** | Encrypted browser-session / secret sync across machines |
 | <a href="https://brigade.tools/content-guard"><img src="docs/assets/marks/content-guard-circle.svg" width="28" height="28" alt="Content Guard"></a> | **[Content Guard](https://brigade.tools/content-guard)** | built in (`guard` / `scrub`) | **Share** / **Remember** | Secrets and PII scan before publish ([docs](docs/security.md)) |
-| <a href="https://brigade.tools/skillet"><img src="docs/assets/marks/skillet-circle.svg" width="28" height="28" alt="Skillet"></a> | **[Skills / Skillet](https://brigade.tools/skillet)** | built-in on init | **Improve** | Portable skills; reconcile promotes or rolls them back |
+| <a href="https://brigade.tools/skillet"><img src="docs/assets/marks/skillet-circle.svg" width="28" height="28" alt="Skillet"></a> | **[Skills / Skillet](https://brigade.tools/skillet)** | built-in on init; Skillet roster optional | **Improve** | Portable skills; reconcile promotes or rolls them back |
 | <a href="https://brigade.tools/token-glace"><img src="docs/assets/marks/token-glace-circle.svg" width="28" height="28" alt="Token Glace"></a> | **[Token Glace](https://brigade.tools/token-glace)** | `brigade add tokens` | **Prove** | Compact noisy tool output before it burns context |
 
 ```bash
@@ -221,19 +221,7 @@ brigade add ../agentpantry          # inspect station.json
 brigade add ../agentpantry --install # run the manifest install command
 ```
 
-Verify a station contract before installing it by passing the local repository or manifest path explicitly:
-
-```bash
-brigade stations verify ../agentpantry
-brigade stations verify ../agentpantry/station.json --json
-brigade stations verify ../agentpantry --check-managed
-```
-
-Discovery stays passive. `stations verify` never runs a manifest's install argv and executes only declared read-only commands or safe support probes. On POSIX, each process runs without a shell, from the manifest directory, with temporary `HOME` and XDG directories. Brigade terminates the process group on timeout or when combined stdout and stderr exceed 64 KiB. Windows verification fails closed with `unsupported-platform` before process creation because Brigade does not yet provide Job Object containment and a Windows pipe reader. JSON results contain status, exit code, duration, byte counts, timeout and overflow flags, and a bounded detail. They do not contain raw child output.
-
-Active executable manifests must resolve every declared binary and verify every surface. A stateful or templated surface needs a support probe with exact `probe_contains` assertions. Executable probes accept only top-level `--help`, `-h`, `--version`, or `version`, plus ASCII subcommand paths ending in `--help` or `-h`. A `skill-roster` uses a manifest-local `verify-exit` probe instead of executable detection. Embedded, deprecated, and historical manifests skip external execution and name their maintained owner. Older v1 manifests still load and appear in discovery, but strict verification fails when required finite timeouts, presentation caps, or probes are absent. JSON surface output uses strict JSON and rejects `NaN` and infinity values.
-
-Exit 0 means the station contract passed or a non-active lifecycle was skipped. Exit 1 means an active station is unavailable, failed, unbounded, unverified, unsupported on the current platform, or drifted under `--check-managed`. Missing, unreadable, or malformed manifests and CLI misuse exit 2. Managed-catalog drift is advisory without `--check-managed`, so an independently updated sidecar can still prove its local contract. Human-readable output quotes manifest-controlled fields and removes terminal, control, bidi, and format characters from details.
+Before installing a sidecar you can verify its `station.json` contract without running its installer: `brigade stations verify <path>` runs only declared read-only probes, sandboxed and bounded, and returns a machine-readable status. Full isolation model, manifest rules, and exit-code semantics live in [docs/station-contract.md](docs/station-contract.md).
 
 | `brigade add` | Tool | What it does |
 |---|---|---|
@@ -338,6 +326,7 @@ I run an always-on OpenClaw agent next to daily Codex and Claude Code sessions. 
 - [Security and Content Guard](docs/security.md): scanner policies, handoff guards, import flow.
 - [Handoff promotion](docs/handoff-promotion.md): how notes move toward memory.
 - [Repo fleet](docs/repo-fleet.md) and [Tool catalog](docs/tool-catalog.md).
+- [Station contract](docs/station-contract.md): how `brigade stations verify` checks a sidecar's `station.json` (isolation, manifest rules, exit codes).
 - [Command inventory](docs/command-inventory.md): every public CLI command.
 - [Maintainers](MAINTAINERS.md), [Governance](GOVERNANCE.md), [Security](SECURITY.md), and [Contributing](CONTRIBUTING.md).
 - [Roadmap](ROADMAP.md) and [roadmap archive](docs/roadmap-archive.md).
