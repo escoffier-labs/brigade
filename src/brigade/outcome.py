@@ -50,6 +50,14 @@ class OutcomeRecord:
     vector. Both are ``None`` on records captured before context tracking existed.
     Phase 1 records them but does not score on them; see
     docs/design/context-blind-spot.md.
+
+    ``route`` is a coarse manifest of the deterministic route the owning
+    ``brigade run`` followed (``followed``, ``path``, ``size``, sorted
+    ``signals``, ``coverage``), and ``route_fingerprint`` is the sha256 of its
+    low-cardinality vector (path + size + signals, never the stage sequence).
+    Both are ``None`` on a bare verify-capture with no owning run, and on records
+    captured before route tracking existed. The third cohort axis, recorded but
+    not scored in Phase 1; see docs/design/route-outcome-cohort.md.
     """
 
     artifact_id: str
@@ -64,6 +72,8 @@ class OutcomeRecord:
     content_fingerprint: str | None = None
     context: dict[str, Any] | None = None
     capability_fingerprint: str | None = None
+    route: dict[str, Any] | None = None
+    route_fingerprint: str | None = None
 
 
 @dataclass(frozen=True)
