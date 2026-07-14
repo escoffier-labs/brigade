@@ -53,6 +53,18 @@ def register(sub: argparse._SubParsersAction) -> None:
         action="store_true",
         help="Sort by the capability-shrunk score for the current runtime context (harness, model, platform).",
     )
+    p_rank.add_argument(
+        "--recency",
+        action="store_true",
+        help="Weight recent signals more (default half-life 45 days), so stale credit fades.",
+    )
+    p_rank.add_argument(
+        "--recency-half-life",
+        type=float,
+        default=None,
+        metavar="DAYS",
+        help="Recency half-life in days (implies --recency). A signal's weight halves every DAYS.",
+    )
     p_rank.set_defaults(func=_dispatch_rank)
 
     p_doctor = outcome_sub.add_parser("doctor", help="Summarize outcome and receipt digest health.")
@@ -134,9 +146,17 @@ def _dispatch_reconcile(args) -> int:
 
 
 def _dispatch_rank(args) -> int:
-    from .. import outcome_cmd
+    from .. import outcome, outcome_cmd
 
-    return outcome_cmd.rank(target=args.target, json_output=args.json, by_capability=args.by_capability)
+    half_life = args.recency_half_life
+    if half_life is None and args.recency:
+        half_life = outcome.DEFAULT_RECENCY_HALF_LIFE_DAYS
+    return outcome_cmd.rank(
+        target=args.target,
+        json_output=args.json,
+        by_capability=args.by_capability,
+        recency_half_life_days=half_life,
+    )
 
 
 def _dispatch_doctor(args) -> int:

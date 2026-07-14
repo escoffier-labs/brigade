@@ -93,11 +93,12 @@ class Decision:
     reason: str
 
 
-def wilson_lower_bound(helped: int, total: int, z: float = 1.96) -> float:
+def wilson_lower_bound(helped: float, total: float, z: float = 1.96) -> float:
     """Lower bound of the Wilson score interval for helped/total.
 
     Returns 0.0 with no trials so unproven artifacts never out-rank vetted ones,
-    and grows toward the naive rate as confirming trials accumulate.
+    and grows toward the naive rate as confirming trials accumulate. Counts may be
+    fractional (recency-weighted); the interval math is identical.
     """
     if total <= 0:
         return 0.0
@@ -239,17 +240,75 @@ def current_content_records(records: list[OutcomeRecord], current_fingerprint: s
 DEFAULT_SHRINK_KAPPA = 4.0
 
 
-def shrink_rate(helped: int, total: int, prior_rate: float, kappa: float = DEFAULT_SHRINK_KAPPA) -> float:
+def shrink_rate(helped: float, total: float, prior_rate: float, kappa: float = DEFAULT_SHRINK_KAPPA) -> float:
     """Deterministic shrinkage toward a prior: (helped + kappa*prior) / (total + kappa).
 
     With no trials the result is the prior; as trials accumulate it converges on
     the cohort's own rate. This is the graceful-degradation lever for thin
-    per-capability cohorts, not a confidence bound.
+    per-capability cohorts, not a confidence bound. Counts may be fractional
+    (recency-weighted).
     """
     denom = total + kappa
     if denom <= 0:
         return prior_rate
     return (helped + kappa * prior_rate) / denom
+
+
+# Recency half-life: a signal's weight halves every this-many days, so credit
+# earned under an environment that has since drifted fades without rewriting the
+# append-only log. One global constant, documented, never tuned per artifact.
+# 45 days sits between the 30 and 60 the model panel proposed.
+DEFAULT_RECENCY_HALF_LIFE_DAYS = 45.0
+
+
+def recency_weight(age_seconds: float, half_life_seconds: float) -> float:
+    """Exponential decay weight for a signal ``age_seconds`` old: ``0.5 ** (age/half_life)``.
+
+    A signal at age 0 (or a future timestamp) weighs 1.0; one a half-life old
+    weighs 0.5. A non-positive half-life disables decay (every weight is 1.0).
+    """
+    if half_life_seconds <= 0 or age_seconds <= 0:
+        return 1.0
+    return 0.5 ** (age_seconds / half_life_seconds)
+
+
+def _record_age_seconds(now: dt.datetime, ts: str) -> float:
+    """Seconds between ``now`` (tz-aware UTC) and a record's ISO timestamp, clamped >= 0."""
+    try:
+        stamp = dt.datetime.fromisoformat(ts)
+    except ValueError:
+        return 0.0
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=dt.timezone.utc)
+    return max(0.0, (now - stamp).total_seconds())
+
+
+def recency_weighted_counts(
+    records: list[OutcomeRecord], now: dt.datetime, half_life_seconds: float
+) -> tuple[float, float]:
+    """Recency-weighted (helped, total) over deduped, non-neutral records.
+
+    ``total`` is helped + hurt in weight units; neutral signals never counted
+    toward a rate here, matching ``score_records``.
+    """
+    weighted_helped = 0.0
+    weighted_total = 0.0
+    for record in scored_records(records):
+        if record.signal_value == 0:
+            continue
+        weight = recency_weight(_record_age_seconds(now, record.ts), half_life_seconds)
+        weighted_total += weight
+        if record.signal_value > 0:
+            weighted_helped += weight
+    return weighted_helped, weighted_total
+
+
+def recency_weighted_wilson(
+    records: list[OutcomeRecord], now: dt.datetime, half_life_seconds: float, z: float = 1.96
+) -> float:
+    """Wilson lower bound over recency-weighted counts (retrieval display, not the ratchet)."""
+    weighted_helped, weighted_total = recency_weighted_counts(records, now, half_life_seconds)
+    return wilson_lower_bound(weighted_helped, weighted_total, z)
 
 
 @dataclass(frozen=True)
@@ -288,6 +347,8 @@ def split_by_capability(
     current_capability: str | None,
     *,
     kappa: float = DEFAULT_SHRINK_KAPPA,
+    now: dt.datetime | None = None,
+    half_life_seconds: float | None = None,
 ) -> CapabilityCohorts:
     """Split content-current records by the current capability and shrink the thin cohort.
 
@@ -295,10 +356,20 @@ def split_by_capability(
     (from ``current_content_records``). Pass the current capability fingerprint to
     score the "will this help under my harness" cohort; pass None (unresolvable)
     to get the pooled score in both slots.
+
+    When ``now`` and ``half_life_seconds`` are both given, ``shrunk_rate`` is
+    computed from recency-weighted counts (recent signals weigh more, so credit
+    under a drifted-away environment fades). The integer ``helped``/``hurt`` on the
+    returned scores stay the raw auditable counts either way.
     """
+    weighting = now if half_life_seconds is not None else None
     pooled = score_records(artifact_id, content_current)
-    pooled_total = pooled.helped + pooled.hurt
-    pooled_rate = pooled.helped / pooled_total if pooled_total else 0.0
+    if weighting is not None and half_life_seconds is not None:
+        pooled_helped, pooled_total_w = recency_weighted_counts(content_current, weighting, half_life_seconds)
+    else:
+        pooled_helped = float(pooled.helped)
+        pooled_total_w = float(pooled.helped + pooled.hurt)
+    pooled_rate = pooled_helped / pooled_total_w if pooled_total_w else 0.0
     if not current_capability:
         return CapabilityCohorts(None, pooled, pooled, pooled_rate, 0, 0)
     on = [r for r in content_current if not r.capability_fingerprint or r.capability_fingerprint == current_capability]
@@ -307,7 +378,12 @@ def split_by_capability(
         1 for r in content_current if r.capability_fingerprint and r.capability_fingerprint != current_capability
     )
     capability_legacy = sum(1 for r in content_current if not r.capability_fingerprint)
-    shrunk = shrink_rate(capability.helped, capability.helped + capability.hurt, pooled_rate, kappa)
+    if weighting is not None and half_life_seconds is not None:
+        cap_helped, cap_total = recency_weighted_counts(on, weighting, half_life_seconds)
+    else:
+        cap_helped = float(capability.helped)
+        cap_total = float(capability.helped + capability.hurt)
+    shrunk = shrink_rate(cap_helped, cap_total, pooled_rate, kappa)
     return CapabilityCohorts(current_capability, pooled, capability, shrunk, off_capability, capability_legacy)
 
 

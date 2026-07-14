@@ -289,3 +289,42 @@ def test_split_by_capability_unresolved_equals_pooled():
     assert not ch.pinned
     assert ch.capability == ch.pooled
     assert ch.off_capability_records == 0
+
+
+# --- Phase 2b: recency weighting -------------------------------------------
+
+
+def test_recency_weight_halves_at_half_life():
+    hl = 45 * 86400
+    assert outcome.recency_weight(0, hl) == 1.0
+    assert outcome.recency_weight(-100, hl) == 1.0  # a future timestamp weighs full
+    assert abs(outcome.recency_weight(45 * 86400, hl) - 0.5) < 1e-9
+    assert abs(outcome.recency_weight(90 * 86400, hl) - 0.25) < 1e-9
+    assert outcome.recency_weight(10 * 86400, 0) == 1.0  # no half-life disables decay
+
+
+def test_recency_weighted_counts_favors_recent():
+    now = dt.datetime(2026, 7, 1, tzinfo=dt.timezone.utc)
+    hl = 45 * 86400
+    recs = [
+        outcome.OutcomeRecord("s", "skill", "t1", "verify", 1, "r1", "2026-06-30T00:00:00+00:00"),  # ~1 day
+        outcome.OutcomeRecord("s", "skill", "t2", "verify", -1, "r2", "2026-01-01T00:00:00+00:00"),  # ~181 days
+    ]
+    wh, wt = outcome.recency_weighted_counts(recs, now, hl)
+    assert wh > 0.9  # the recent +1 keeps almost full weight
+    assert wt - wh < 0.1  # the old -1 barely counts
+    # weighted Wilson rewards the recent success over the stale failure.
+    assert outcome.recency_weighted_wilson(recs, now, hl) > outcome.score_records("s", recs).score
+
+
+def test_split_by_capability_recency_shifts_the_estimate():
+    now = dt.datetime(2026, 7, 1, tzinfo=dt.timezone.utc)
+    hl = 45 * 86400
+    content_current = [
+        outcome.OutcomeRecord("s", "skill", "t1", "verify", 1, "r1", "2026-06-30T00:00:00+00:00"),
+        outcome.OutcomeRecord("s", "skill", "t2", "verify", -1, "r2", "2026-01-01T00:00:00+00:00"),
+    ]
+    plain = outcome.split_by_capability("s", content_current, None)
+    weighted = outcome.split_by_capability("s", content_current, None, now=now, half_life_seconds=hl)
+    assert plain.shrunk_rate == 0.5  # 1 helped / 1 hurt, unweighted
+    assert weighted.shrunk_rate > 0.9  # recent success dominates

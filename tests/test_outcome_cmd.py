@@ -1,3 +1,4 @@
+import datetime as dt
 import json
 
 from brigade import cli, localio, outcome, outcome_cmd, receipts_cmd, work_cmd
@@ -1856,3 +1857,72 @@ def test_cli_rank_by_capability_dispatch(tmp_path, capsys, monkeypatch):
     _seed(tmp_path, _helped("skill-x", 2))
     assert cli.main(["outcome", "rank", "--by-capability", "--target", str(tmp_path), "--json"]) == 0
     assert "skill-x" in capsys.readouterr().out
+
+
+# --- Phase 2b: recency-weighted rank ------------------------------------------
+
+
+def test_rank_recency_reorders_toward_recent_signals(tmp_path, capsys):
+    now = dt.datetime(2026, 7, 1, tzinfo=dt.timezone.utc)
+    # skill-old: 5 clean signals, all ~half a year ago.
+    _seed(
+        tmp_path,
+        [
+            outcome.OutcomeRecord(
+                "skill-old", "skill", f"o{i}", "verify", 1, f"ro{i}", f"2026-01-0{i + 1}T00:00:00+00:00"
+            )
+            for i in range(5)
+        ],
+    )
+    # skill-new: 3 clean signals, all in the last few days.
+    _seed(
+        tmp_path,
+        [
+            outcome.OutcomeRecord(
+                "skill-new", "skill", f"n{i}", "verify", 1, f"rn{i}", f"2026-06-2{7 + i}T00:00:00+00:00"
+            )
+            for i in range(3)
+        ],
+    )
+    # Default (no recency): skill-old ranks first (5 clean signals, higher Wilson).
+    assert outcome_cmd.rank(target=tmp_path, json_output=True, now=now) == 0
+    default_ids = [e["artifact_id"] for e in json.loads(capsys.readouterr().out)["ranking"]]
+    assert default_ids.index("skill-old") < default_ids.index("skill-new")
+    # With a short half-life, the old signals decay and skill-new rises.
+    assert outcome_cmd.rank(target=tmp_path, json_output=True, recency_half_life_days=30.0, now=now) == 0
+    payload = json.loads(capsys.readouterr().out)
+    recency_ids = [e["artifact_id"] for e in payload["ranking"]]
+    assert recency_ids.index("skill-new") < recency_ids.index("skill-old")
+    assert all("recency_score" in e and e["recency_half_life_days"] == 30.0 for e in payload["ranking"])
+
+
+def test_rank_default_omits_recency_fields_and_stays_identical(tmp_path, capsys):
+    _seed(tmp_path, _helped("skill-x", 2))
+    assert outcome_cmd.rank(target=tmp_path, json_output=True) == 0
+    entry = json.loads(capsys.readouterr().out)["ranking"][0]
+    assert "recency_score" not in entry
+    assert outcome_cmd.rank(target=tmp_path, json_output=False) == 0
+    line = next(line for line in capsys.readouterr().out.splitlines() if "skill-x" in line)
+    assert line == "- skill-x score=0.342 helped=2 hurt=0"  # no recency tail
+
+
+def test_rank_recency_human_output_shows_tail_and_header(tmp_path, capsys):
+    now = dt.datetime(2026, 7, 1, tzinfo=dt.timezone.utc)
+    _seed(
+        tmp_path,
+        [outcome.OutcomeRecord("skill-x", "skill", "t1", "verify", 1, "r1", "2026-06-30T00:00:00+00:00")],
+    )
+    assert outcome_cmd.rank(target=tmp_path, json_output=False, recency_half_life_days=45.0, now=now) == 0
+    out = capsys.readouterr().out
+    assert "recency 45d" in out
+    assert "recency=" in next(line for line in out.splitlines() if "skill-x" in line)
+
+
+def test_cli_rank_recency_flag_dispatch(tmp_path, capsys):
+    _seed(tmp_path, _helped("skill-x", 2))
+    assert cli.main(["outcome", "rank", "--recency", "--target", str(tmp_path), "--json"]) == 0
+    entry = json.loads(capsys.readouterr().out)["ranking"][0]
+    assert entry["recency_half_life_days"] == outcome.DEFAULT_RECENCY_HALF_LIFE_DAYS
+    assert cli.main(["outcome", "rank", "--recency-half-life", "10", "--target", str(tmp_path), "--json"]) == 0
+    entry = json.loads(capsys.readouterr().out)["ranking"][0]
+    assert entry["recency_half_life_days"] == 10.0

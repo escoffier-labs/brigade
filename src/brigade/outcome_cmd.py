@@ -1212,23 +1212,6 @@ def reconcile(
     return 0
 
 
-def _capability_cohorts_by_artifact(
-    records_by_artifact: dict[str, list[core.OutcomeRecord]],
-    fingerprint_cohorts: dict[str, core.FingerprintCohorts],
-    current_capability: str | None,
-) -> dict[str, core.CapabilityCohorts]:
-    """Split each artifact's content-current records by the current capability.
-
-    Reuses the content fingerprints already resolved for the fingerprint cohorts,
-    so capability scoring composes on top of content scoring without re-hashing.
-    """
-    out: dict[str, core.CapabilityCohorts] = {}
-    for artifact_id, fpc in fingerprint_cohorts.items():
-        content_current = core.current_content_records(records_by_artifact[artifact_id], fpc.current_fingerprint)
-        out[artifact_id] = core.split_by_capability(artifact_id, content_current, current_capability)
-    return out
-
-
 def _capability_human_suffix(cohorts: core.CapabilityCohorts) -> str:
     """Human tail showing the current-capability score, only when it diverges.
 
@@ -1245,7 +1228,14 @@ def _capability_human_suffix(cohorts: core.CapabilityCohorts) -> str:
     )
 
 
-def rank(*, target: Path, json_output: bool = False, by_capability: bool = False) -> int:
+def rank(
+    *,
+    target: Path,
+    json_output: bool = False,
+    by_capability: bool = False,
+    recency_half_life_days: float | None = None,
+    now: Any = None,
+) -> int:
     """Rank learned artifacts by verified outcome, most-proven first.
 
     The blended retrieval score (rank_score) leaves room for confidence and
@@ -1266,22 +1256,53 @@ def rank(*, target: Path, json_output: bool = False, by_capability: bool = False
     under that capability, thin cohorts pulled toward the pooled rate. With
     ``by_capability`` the ranking sorts by that score instead; by default the
     pooled content score still orders the list and the ratchet is untouched.
+
+    Recency-aware: with ``recency_half_life_days`` set, the score rank sorts by
+    (pooled by default, capability with ``by_capability``) is computed over
+    recency-weighted counts, so a signal's weight halves every half-life and
+    credit under a drifted-away environment fades. Off by default (byte-identical
+    output). The ratchet never uses recency; this is retrieval only.
     """
     target = target.expanduser().resolve()
     records = load_records(target)
     cohorts_by_artifact = _fingerprint_cohorts_by_artifact(target, records)
     current_capability = capability_fingerprint(context_manifest())
-    capability_cohorts = _capability_cohorts_by_artifact(
-        _records_by_artifact(records), cohorts_by_artifact, current_capability
-    )
+    now = now or localio.utc_now()
+    half_life_seconds = recency_half_life_days * 86400.0 if recency_half_life_days else None
+    weighting_now = now if half_life_seconds is not None else None
+    records_by_artifact = _records_by_artifact(records)
+    content_current_by_artifact = {
+        artifact_id: core.current_content_records(records_by_artifact[artifact_id], fpc.current_fingerprint)
+        for artifact_id, fpc in cohorts_by_artifact.items()
+    }
+    capability_cohorts = {
+        artifact_id: core.split_by_capability(
+            artifact_id,
+            content_current_by_artifact[artifact_id],
+            current_capability,
+            now=weighting_now,
+            half_life_seconds=half_life_seconds,
+        )
+        for artifact_id in cohorts_by_artifact
+    }
+    # The pooled score the default sort uses: recency-weighted when enabled, else
+    # the plain content-current Wilson (so default output stays byte-identical).
+    pooled_sort_score = {
+        artifact_id: (
+            core.recency_weighted_wilson(content_current_by_artifact[artifact_id], now, half_life_seconds)
+            if half_life_seconds is not None
+            else cohorts_by_artifact[artifact_id].current.score
+        )
+        for artifact_id in cohorts_by_artifact
+    }
     graph_counts = _graph_delta_counts_by_artifact(records)
     brief_stats = _brief_hit_stats_by_artifact(records)
 
-    def blended(cohorts: core.FingerprintCohorts) -> float:
-        return core.rank_score(confidence=0.0, outcome=cohorts.current.score, keyword=0.0)
+    def blended(artifact_id: str) -> float:
+        return core.rank_score(confidence=0.0, outcome=pooled_sort_score[artifact_id], keyword=0.0)
 
     def sort_key(item: tuple[str, core.FingerprintCohorts]) -> tuple:
-        artifact_id, cohorts = item
+        artifact_id, _cohorts = item
         stats = brief_stats.get(artifact_id)
         # Missing brief samples sort after measured ones at the same Wilson score.
         hit = float(stats["brief_hit_rate"]) if stats is not None else -1.0
@@ -1292,8 +1313,8 @@ def rank(*, target: Path, json_output: bool = False, by_capability: bool = False
             # estimate), then pooled, then brief hit.
             cap = capability_cohorts[artifact_id]
             on_capability = cap.capability.helped + cap.capability.hurt
-            return (-cap.shrunk_rate, -on_capability, -blended(cohorts), -hit, artifact_id)
-        return (-blended(cohorts), -hit, artifact_id)
+            return (-cap.shrunk_rate, -on_capability, -blended(artifact_id), -hit, artifact_id)
+        return (-blended(artifact_id), -hit, artifact_id)
 
     ordered = sorted(cohorts_by_artifact.items(), key=sort_key)
     ranking_payload = []
@@ -1304,7 +1325,7 @@ def rank(*, target: Path, json_output: bool = False, by_capability: bool = False
         entry = {
             "artifact_id": artifact_id,
             "score": current.score,
-            "rank_score": blended(cohorts),
+            "rank_score": blended(artifact_id),
             "helped": current.helped,
             "hurt": current.hurt,
             "content_fingerprint": cohorts.current_fingerprint,
@@ -1320,6 +1341,9 @@ def rank(*, target: Path, json_output: bool = False, by_capability: bool = False
             "off_capability_records": cap.off_capability_records,
             "capability_legacy_records": cap.capability_legacy_records,
         }
+        if half_life_seconds is not None:
+            entry["recency_half_life_days"] = recency_half_life_days
+            entry["recency_score"] = pooled_sort_score[artifact_id]
         counts = graph_counts.get(artifact_id)
         if counts is not None:
             entry.update(counts)
@@ -1334,7 +1358,12 @@ def rank(*, target: Path, json_output: bool = False, by_capability: bool = False
     if json_output:
         print(json.dumps(payload, indent=2, sort_keys=True))
         return 0
-    print(f"outcome rank: {target}" + (" (by capability)" if by_capability else ""))
+    mode = ""
+    if by_capability:
+        mode += " (by capability)"
+    if half_life_seconds is not None:
+        mode += f" (recency {recency_half_life_days:g}d)"
+    print(f"outcome rank: {target}{mode}")
     if not ordered:
         print("ranking: none")
         return 0
@@ -1343,6 +1372,7 @@ def rank(*, target: Path, json_output: bool = False, by_capability: bool = False
         graph_tail = _graph_delta_human_suffix(graph_counts.get(artifact_id))
         brief_tail = _brief_hit_human_suffix(brief_stats.get(artifact_id))
         capability_tail = _capability_human_suffix(capability_cohorts[artifact_id])
+        recency_tail = f" recency={pooled_sort_score[artifact_id]:.3f}" if half_life_seconds is not None else ""
         fingerprint_tail = ""
         rank_fp = cohorts.current_fingerprint
         # Only a PROVEN-stale cohort earns the tail: at rollout (legacy records
@@ -1357,7 +1387,7 @@ def rank(*, target: Path, json_output: bool = False, by_capability: bool = False
             )
         print(
             f"- {artifact_id} score={current.score:.3f} helped={current.helped} "
-            f"hurt={current.hurt}{fingerprint_tail}{capability_tail}{graph_tail}{brief_tail}"
+            f"hurt={current.hurt}{recency_tail}{fingerprint_tail}{capability_tail}{graph_tail}{brief_tail}"
         )
     return 0
 
