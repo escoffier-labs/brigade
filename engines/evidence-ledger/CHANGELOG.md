@@ -10,6 +10,8 @@ Releases before this changelog was started are on the [releases page](https://gi
 
 ### Added
 
+- `miseledger schedule run|daemon` for repeatable local crawler schedules from a
+  small TOML config, plus a schedule smoke script.
 - Native Grok session discovery, adapter generation, import, watch, and crawl
   support for `summary.json` and `chat_history.jsonl` under `~/.grok/sessions`.
 - Current Cursor conversation ingestion from the read-only

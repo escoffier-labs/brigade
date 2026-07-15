@@ -362,6 +362,31 @@ Discord, Slack, Granola, Notion, and Gmail call each crawler's adapter exporter.
 
 Gmail remains explicit about account selection. Gog may have configured accounts, but MiseLedger requires `--account` so a crawl cannot silently pick a mailbox. Use `--metadata-only`, a narrow `--query`, and `--dry-run` first; `scripts/smoke_gmail_metadata.sh` does exactly that with the first configured Gog account and does not import mail.
 
+Scheduled crawls use the same commands as manual crawls. Put the jobs in a local config file:
+
+```toml
+interval = "15m"
+
+[[jobs]]
+name = "discord"
+command = "crawl"
+args = ["discord", "--limit", "100", "--json"]
+
+[[jobs]]
+name = "sessions"
+command = "crawl"
+args = ["sessions", "--json"]
+```
+
+Then run once, or run a foreground daemon that a systemd user service, cron wrapper, or Brigade job can supervise:
+
+```bash
+miseledger schedule run ~/.config/miseledger/schedule.toml --json
+miseledger schedule daemon ~/.config/miseledger/schedule.toml --interval 15m --json
+```
+
+Schedule jobs are in-process MiseLedger commands, not shell strings. Supported scheduled commands are `crawl`, `import`, `watch`, `adapter`, `relations`, and `compact`.
+
 For adapter files that already carry a source kind, leave `--source` off. If you must override it, use the wrapper's canonical kind: `discord`, `github`, `slack`, `granola`, `notion`, `gmail`, or `telegram`. MiseLedger warns when the override disagrees with embedded record kinds because that creates a separate dedupe namespace.
 
 ## Scan Manifests
@@ -494,7 +519,7 @@ MiseLedger is not a hosted service, a memory daemon, or an agent framework.
 It does not:
 
 - make network calls in its core path or send your transcripts anywhere
-- run in the background, watch files continuously, or install schedulers
+- install system schedulers or background services for you
 - execute imported text; every imported record is treated as untrusted evidence, not instructions
 - replace upstream crawler binaries for domain-specific sync and query behavior
 - embed, rank with a model, or call an LLM to answer a query

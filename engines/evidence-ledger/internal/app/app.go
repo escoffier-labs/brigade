@@ -60,6 +60,7 @@ var commandTable = []commandSpec{
 	{name: "serve", usage: "serve", description: "Serve the loopback HTTP API.", run: cmdServe},
 	{name: "mcp", usage: "mcp", description: "Run the stdio MCP server.", run: cmdMCP},
 	{name: "watch", usage: "watch", description: "Import discovered sources once or in a daemon loop.", run: cmdWatch},
+	{name: "schedule", usage: "schedule", description: "Run configured crawler jobs once or on an interval.", run: cmdSchedule},
 	{name: "crawl", usage: "crawl", description: "Run native and wrapper crawlers.", run: cmdCrawl},
 	{name: "adapter", usage: "adapter", description: "Generate adapter JSONL from native fixtures.", run: cmdAdapter},
 	{name: "import", usage: "import", description: "Import adapter or native source records.", run: cmdImport},

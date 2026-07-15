@@ -138,6 +138,38 @@ Rules that keep re-ingestion clean when the same records can arrive by more than
 4. Wiring Brigade next to MiseLedger adds no dedupe risk: Brigade's memory cards and handoffs are a separate store, and its evidence bundles only read from the archive.
 5. `crawl discord|github|slack|granola|notion|gmail` needs a crawler build with the `export adapter` subcommand. `crawl telegram` uses `telecrawl --json messages`, including Telecrawl 0.1.0.
 
+## Schedule Repeated Crawls
+
+Create a private config such as `~/.config/miseledger/schedule.toml`:
+
+```toml
+interval = "15m"
+
+[[jobs]]
+name = "discord"
+command = "crawl"
+args = ["discord", "--limit", "100", "--json"]
+
+[[jobs]]
+name = "sessions"
+command = "crawl"
+args = ["sessions", "--json"]
+```
+
+Run the jobs once:
+
+```bash
+miseledger schedule run ~/.config/miseledger/schedule.toml --json
+```
+
+Or keep them running in the foreground for a service wrapper to supervise:
+
+```bash
+miseledger schedule daemon ~/.config/miseledger/schedule.toml --interval 15m --json
+```
+
+Jobs are not shell commands. `command` must be one of MiseLedger's scheduled command allowlist: `crawl`, `import`, `watch`, `adapter`, `relations`, or `compact`.
+
 ## Inspect Archive State
 
 ```bash
