@@ -16,6 +16,7 @@ from typing import Any
 from .. import scrub
 from ..budgets import HANDOFF_BACKLOG_STALE_SECONDS
 from ..config import load_config as load_brigade_config
+from ..handoff_content import normalize_suggested_card_content
 from ..localio import write_json as _write_json
 from ..selection import WRITER_INBOXES as _WRITER_INBOX_MAP
 
@@ -314,7 +315,7 @@ def _lint_card_action(
     elif not CARD_TARGET_PATTERN.fullmatch(target_card.splitlines()[0].strip()):
         errors.append("Target card must be a filename like project-context.md with no path separators")
 
-    suggested_card = _section_value(sections, "Suggested card content")
+    suggested_card = normalize_suggested_card_content(_section_value(sections, "Suggested card content"))
     if not suggested_card:
         errors.append("card handoffs require Suggested card content")
     elif not suggested_card.startswith("---"):

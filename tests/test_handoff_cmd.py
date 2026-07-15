@@ -108,6 +108,24 @@ def test_handoff_lint_accepts_card_handoff_without_document_sections(tmp_path, c
     assert "(create-card)" in out
 
 
+def test_handoff_lint_accepts_fenced_card_content(tmp_path, capsys):
+    path = tmp_path / "note.md"
+    path.write_text(
+        CARD_HANDOFF.replace(
+            "## Suggested card content\n---\n",
+            "## Suggested card content\n```markdown\n---\n",
+        )
+        + "\n```\n"
+    )
+
+    assert handoff_cmd.lint(target=tmp_path, paths=[path]) == 0
+
+    out = capsys.readouterr().out
+    assert "[ok]" in out
+    assert "(create-card)" in out
+    assert "Suggested card content must start with YAML frontmatter" not in out
+
+
 def test_handoff_lint_allows_level_three_card_headings_without_warning(tmp_path, capsys):
     path = tmp_path / "note.md"
     path.write_text(CARD_HANDOFF + "\n### Details\n\nMore durable context.\n")

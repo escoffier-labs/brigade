@@ -66,6 +66,48 @@ def test_create_card_handoff_promotes_to_memory_cards(tmp_target: Path):
     assert processed.is_file()
 
 
+def test_fenced_create_card_handoff_promotes_without_fences(tmp_target: Path):
+    inbox = _seed(tmp_target)
+    _write_handoff(
+        inbox,
+        "2026-05-13-1000-promote-fenced.md",
+        """\
+        # Memory Handoff
+
+        ## Type
+        decision
+
+        ## Title
+        Promote fenced card
+
+        ## Recommended memory action
+        create-card
+
+        ## Target card
+        promote-fenced.md
+
+        ## Suggested card content
+        ```markdown
+        ---
+        topic: promote-fenced
+        category: test
+        tags: [test]
+        ---
+
+        # Promote fenced card
+
+        Body line.
+        ```
+        """,
+    )
+
+    assert ingest_mod.run(target=tmp_target, dry_run=False, promote_cards=True, route_documents=True) == 0
+
+    card = tmp_target / "memory" / "cards" / "promote-fenced.md"
+    assert card.read_text().startswith("---\ntopic: promote-fenced\n")
+    assert "```" not in card.read_text()
+
+
 def test_default_run_does_not_mutate_without_flags(tmp_target: Path):
     """Conservative default: no flags = everything routes to inbox."""
     inbox = _seed(tmp_target)
