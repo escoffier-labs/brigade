@@ -358,6 +358,27 @@ def detect(cli_ref: str) -> bool:
     return proc.which(command_for(cli_ref)) is not None
 
 
+def ollama_model_present(model: str) -> tuple[bool, str]:
+    """Check whether an ollama model is already pulled locally.
+
+    `ollama run` on a missing model silently auto-pulls it (tens of GB for
+    large models), so callers must refuse to dispatch instead of letting the
+    pull start. Returns (present, detail); detail explains a False result.
+    """
+    listing = proc.run(["ollama", "list"], timeout=15.0)
+    if listing.code != 0:
+        reason = listing.stderr.strip() or f"exit {listing.code}"
+        return False, f"could not list local ollama models ({reason[:120]}); is the ollama server running?"
+    names = {line.split()[0] for line in listing.stdout.splitlines()[1:] if line.strip()}
+    wanted = {model} if ":" in model else {model, f"{model}:latest"}
+    if names & wanted:
+        return True, ""
+    return False, (
+        f"ollama model {model!r} is not pulled locally; brigade never auto-pulls. "
+        f"Run `ollama pull {model}` yourself or point the seat at an installed model"
+    )
+
+
 def run_agent(
     cli_ref: str,
     prompt: str,
@@ -388,6 +409,13 @@ def run_agent(
         from . import codex_cloud
 
         return codex_cloud.run_cloud_task(prompt, env_id=env_id, timeout=timeout, cwd=cwd)
+
+    if cli_ref.startswith(_OLLAMA_PREFIX):
+        ollama_model = cli_ref[len(_OLLAMA_PREFIX) :]
+        if ollama_model:
+            present, missing_detail = ollama_model_present(ollama_model)
+            if not present:
+                return AgentResult(text="", ok=False, detail=missing_detail)
 
     cursor_limitation = None
     if cli_ref == "cursor" and (read_only or sandbox == "read-only"):
