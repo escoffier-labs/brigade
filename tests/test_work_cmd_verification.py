@@ -248,6 +248,94 @@ def test_work_verify_run_argv_json_bypasses_metacharacter_heuristic(tmp_path, ca
     assert Path(receipt["path"], "receipt.json").is_file()
 
 
+@pytest.mark.parametrize(
+    ("option", "value"),
+    [
+        ("--command", "./scripts/verify"),
+        ("--argv-json", json.dumps(["./scripts/verify"])),
+    ],
+)
+def test_work_verify_run_resolves_relative_executable_from_target(tmp_path, monkeypatch, capsys, option, value):
+    target = tmp_path / "repo"
+    caller = tmp_path / "caller"
+    target.mkdir()
+    caller.mkdir()
+    _init_git_repo(target)
+    script = target / "scripts" / "verify"
+    script.parent.mkdir()
+    script.write_text("#!/bin/sh\nprintf 'target-ok\\n'\n")
+    script.chmod(0o755)
+    monkeypatch.chdir(caller)
+
+    rc = cli.main(
+        [
+            "work",
+            "verify",
+            "run",
+            "--target",
+            str(target),
+            option,
+            value,
+            "--json",
+        ]
+    )
+
+    receipt = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert receipt["status"] == "completed"
+    assert receipt["commands"][0]["argv"] == ["./scripts/verify"]
+    assert receipt["commands"][0]["stdout_summary"] == "target-ok"
+
+
+def test_work_verify_execution_argv_uses_resolved_target_path(tmp_path):
+    from brigade.work_cmd import verification
+
+    target = tmp_path / "repo"
+    script = target / "scripts" / "verify"
+    script.parent.mkdir(parents=True)
+    script.write_text("#!/bin/sh\n")
+    relative_argv = ["./scripts/verify", "--quick"]
+
+    assert verification._verify_execution_argv(relative_argv, target) == [str(script), "--quick"]
+    assert relative_argv == ["./scripts/verify", "--quick"]
+    assert verification._verify_execution_argv([str(script), "--quick"], target) == [str(script), "--quick"]
+    assert verification._verify_execution_argv(["python3", "-V"], target) == ["python3", "-V"]
+
+
+def test_work_verify_run_records_target_relative_process_start_failure(tmp_path, monkeypatch, capsys):
+    target = tmp_path / "repo"
+    caller = tmp_path / "caller"
+    target.mkdir()
+    caller.mkdir()
+    _init_git_repo(target)
+    script = target / "scripts" / "verify"
+    script.parent.mkdir()
+    script.write_text("#!/bin/sh\n")
+    monkeypatch.chdir(caller)
+
+    rc = cli.main(
+        [
+            "work",
+            "verify",
+            "run",
+            "--target",
+            str(target),
+            "--command",
+            "./scripts/verify",
+            "--json",
+        ]
+    )
+
+    receipt = json.loads(capsys.readouterr().out)
+    command = receipt["commands"][0]
+    assert rc == 127
+    assert receipt["status"] == "failed"
+    assert command["status"] == "failed"
+    assert command["exit_code"] == 127
+    assert command["stderr_summary"]
+    assert Path(command["stderr_log_path"]).is_file()
+
+
 def test_work_verify_run_command_still_rejects_shell_metacharacters(tmp_path, capsys):
     _init_git_repo(tmp_path)
 

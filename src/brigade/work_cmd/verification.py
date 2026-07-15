@@ -41,7 +41,7 @@ def _receipt_git_snapshot(target: Path) -> dict[str, Any] | None:
     return {"head": head, "branch": branch, "dirty_files": len(status.stdout.splitlines())}
 
 
-def _verify_parse_command(command: str) -> tuple[list[str] | None, dict[str, str], str | None]:
+def _verify_parse_command(command: str, target: Path) -> tuple[list[str] | None, dict[str, str], str | None]:
     try:
         parts = shlex.split(command)
     except ValueError as exc:
@@ -68,14 +68,17 @@ def _verify_parse_command(command: str) -> tuple[list[str] | None, dict[str, str
             ),
         )
     if "/" in argv[0]:
-        if not Path(argv[0]).expanduser().exists():
+        executable_path = Path(argv[0]).expanduser()
+        if not executable_path.is_absolute():
+            executable_path = target / executable_path
+        if not executable_path.exists():
             return None, env, f"verification command is not resolvable: {argv[0]}"
     elif shutil.which(argv[0]) is None:
         return None, env, f"verification command is not resolvable: {argv[0]}"
     return argv, env, None
 
 
-def _verify_parse_argv(argv: list[str]) -> tuple[list[str] | None, dict[str, str], str | None]:
+def _verify_parse_argv(argv: list[str], target: Path) -> tuple[list[str] | None, dict[str, str], str | None]:
     """Resolve a pre-parsed verification argv (e.g. from --argv-json).
 
     The argv arrived pre-split (no shlex/shell parsing happens on it), so the
@@ -88,11 +91,24 @@ def _verify_parse_argv(argv: list[str]) -> tuple[list[str] | None, dict[str, str
     if executable in constants.SCANNER_HIGH_RISK_COMMANDS:
         return None, {}, f"high-risk verification command: {executable}"
     if "/" in argv[0]:
-        if not Path(argv[0]).expanduser().exists():
+        executable_path = Path(argv[0]).expanduser()
+        if not executable_path.is_absolute():
+            executable_path = target / executable_path
+        if not executable_path.exists():
             return None, {}, f"verification command is not resolvable: {argv[0]}"
     elif shutil.which(argv[0]) is None:
         return None, {}, f"verification command is not resolvable: {argv[0]}"
     return list(argv), {}, None
+
+
+def _verify_execution_argv(argv: list[str], target: Path) -> list[str]:
+    execution_argv = list(argv)
+    if "/" in execution_argv[0]:
+        executable_path = Path(execution_argv[0]).expanduser()
+        if not executable_path.is_absolute():
+            executable_path = target / executable_path
+        execution_argv[0] = str(executable_path)
+    return execution_argv
 
 
 VERIFY_RUNS_KEEP = 50
@@ -230,7 +246,7 @@ def _verify_plan_payload(target: Path, commands: list[str] | None = None) -> dic
     if not planned_commands:
         blockers.append("no verification commands found; pass --command")
     for command in planned_commands:
-        _, _, error = _verify_parse_command(command)
+        _, _, error = _verify_parse_command(command, target)
         if error:
             blockers.append(f"{command}: {error}")
     return {
@@ -295,10 +311,10 @@ def _run_verify_commands(target: Path, commands: list[str | list[str]], timeout:
     rc = 0
     for index, command in enumerate(commands, start=1):
         if isinstance(command, list):
-            argv, env_assignments, error = _verify_parse_argv(command)
+            argv, env_assignments, error = _verify_parse_argv(command, target)
             display_command = shlex.join(command)
         else:
-            argv, env_assignments, error = _verify_parse_command(command)
+            argv, env_assignments, error = _verify_parse_command(command, target)
             display_command = command
         command_result: dict[str, Any] = {
             "command": display_command,
@@ -331,10 +347,11 @@ def _run_verify_commands(target: Path, commands: list[str | list[str]], timeout:
             continue
         run_env = os.environ.copy()
         run_env.update(env_assignments)
+        execution_argv = _verify_execution_argv(argv, target)
         command_started = helpers._now()
         try:
             completed = subprocess.run(
-                argv,
+                execution_argv,
                 cwd=target,
                 env=run_env,
                 check=False,
@@ -384,6 +401,26 @@ def _run_verify_commands(target: Path, commands: list[str | list[str]], timeout:
                 }
             )
             rc = 124
+        except OSError as exc:
+            command_completed = helpers._now()
+            stderr = str(exc)
+            stdout_path.write_text("")
+            stderr_path.write_text(stderr + "\n")
+            command_result.update(
+                {
+                    "status": "failed",
+                    "exit_code": 127,
+                    "completed_at": command_completed.isoformat(),
+                    "duration_seconds": (command_completed - command_started).total_seconds(),
+                    "argv": argv,
+                    "stdout_summary": "",
+                    "stderr_summary": scanners_mod._scanner_run_summary(stderr),
+                    "stdout_log_path": str(stdout_path),
+                    "stderr_log_path": str(stderr_path),
+                }
+            )
+            if rc == 0:
+                rc = 127
         receipt["commands"].append(command_result)
     receipt["code_graph_delta"] = graphtrail_delta.capture_after_and_diff(target, run_dir, graph_delta_before)
     completed_at = helpers._now()
