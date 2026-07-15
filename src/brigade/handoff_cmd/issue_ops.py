@@ -315,8 +315,10 @@ def _lint_card_action(
     elif not CARD_TARGET_PATTERN.fullmatch(target_card.splitlines()[0].strip()):
         errors.append("Target card must be a filename like project-context.md with no path separators")
 
-    suggested_card = normalize_suggested_card_content(_section_value(sections, "Suggested card content"))
-    if not suggested_card:
+    suggested_card, fence_error = normalize_suggested_card_content(sections.get("Suggested card content", ""))
+    if fence_error:
+        errors.append(fence_error)
+    elif not suggested_card:
         errors.append("card handoffs require Suggested card content")
     elif not suggested_card.startswith("---"):
         errors.append("Suggested card content must start with YAML frontmatter")
