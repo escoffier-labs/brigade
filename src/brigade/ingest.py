@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Dict, List
 
 from . import budgets
+from .handoff_content import normalize_suggested_card_content
 from .selection import WRITER_INBOXES
 from .untrusted import scan_untrusted
 
@@ -181,6 +182,8 @@ def parse(path: Path) -> Dict[str, str]:
         last_pos = m.end()
     if last_name is not None:
         sections[last_name.lower()] = body[last_pos:].strip()
+    if "suggested card content" in sections:
+        sections["suggested card content"], _ = normalize_suggested_card_content(sections["suggested card content"])
     return sections
 
 
@@ -224,8 +227,11 @@ def decide(
     if action in ("create-card", "update-card") and promote_cards:
         card = sections.get("target card", "").strip()
         content = sections.get("suggested card content", "")
+        content, fence_error = normalize_suggested_card_content(content)
         if not SAFE_CARD_NAME_RE.match(card):
             return Outcome("inboxed", reason=f"target card name unsafe: {card!r}")
+        if fence_error:
+            return Outcome("inboxed", reason=fence_error)
         if not content.lstrip().startswith("---"):
             return Outcome("inboxed", reason="card content missing YAML frontmatter")
         sig = scan_untrusted(content)
