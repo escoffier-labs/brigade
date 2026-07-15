@@ -1,9 +1,8 @@
-// Package cursor imports local Cursor Agent CLI history into the archive.
+// Package cursor imports local Cursor history into the archive.
 //
-// The Cursor Agent CLI keeps its data under a config root (WI() in the
-// upstream bundle), which resolves to $XDG_CONFIG_HOME/cursor or
-// ~/.config/cursor on Linux and ~/.cursor on macOS. Two surfaces there are
-// stable, plain JSON, and worth indexing for "find the session I want":
+// Current Cursor releases keep searchable conversation text in
+// User/globalStorage/conversation-search.db. Older Cursor Agent CLI releases
+// also exposed two plain JSON surfaces that remain supported:
 //
 //   - prompt_history.json: a deduplicated JSON array of the prompts the user
 //     typed. This is the primary Ctrl+F surface for recalling a session.
@@ -11,37 +10,114 @@
 //     metadata (title, timestamps, workspace). Each becomes an agent_session
 //     collection so it shows up in `miseledger sessions`.
 //
-// The per-session store.db holds message bodies as binary blobs (a versioned
+// Legacy per-session store.db files hold message bodies as binary blobs (a versioned
 // internal encoding), so message text is intentionally NOT decoded here. A
 // chat directory that has a store.db but no meta.json is still surfaced as a
 // discoverable session (so the user can resume it) with a warning.
 package cursor
 
 import (
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/escoffier-labs/miseledger/internal/adapter"
 	"github.com/escoffier-labs/miseledger/internal/sources"
+	_ "modernc.org/sqlite"
 )
 
 // DefaultRoot returns the Cursor Agent config root for the current OS,
 // matching the upstream WI() resolution. It does not check existence.
 func DefaultRoot() string {
-	if xdg := strings.TrimSpace(os.Getenv("XDG_CONFIG_HOME")); xdg != "" {
-		return filepath.Join(xdg, "cursor")
-	}
 	home, err := os.UserHomeDir()
 	if err != nil || home == "" {
 		home = os.Getenv("HOME")
 	}
-	return filepath.Join(home, ".config", "cursor")
+	return defaultRoot(runtime.GOOS, home, strings.TrimSpace(os.Getenv("XDG_CONFIG_HOME")), strings.TrimSpace(os.Getenv("APPDATA")))
+}
+
+func defaultRoot(goos, home, xdg, appData string) string {
+	switch goos {
+	case "darwin":
+		return filepath.Join(home, "Library", "Application Support", "Cursor", "User")
+	case "windows":
+		if appData == "" {
+			appData = filepath.Join(home, "AppData", "Roaming")
+		}
+		return filepath.Join(appData, "Cursor", "User")
+	}
+	if xdg != "" {
+		return filepath.Join(xdg, "Cursor", "User")
+	}
+	return filepath.Join(home, ".config", "Cursor", "User")
+}
+
+// CountSessions returns the number of discoverable current conversations and
+// legacy prompt/session surfaces without reading conversation titles or bodies.
+func CountSessions(path string) (int, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return 0, err
+	}
+	if !info.IsDir() {
+		if filepath.Base(path) != "conversation-search.db" {
+			return 0, nil
+		}
+		return countConversationRows(path)
+	}
+
+	count := 0
+	if dbPath := filepath.Join(path, "globalStorage", "conversation-search.db"); fileExists(dbPath) {
+		n, err := countConversationRows(dbPath)
+		if err != nil {
+			return 0, err
+		}
+		count += n
+	}
+	if fileExists(filepath.Join(path, "prompt_history.json")) {
+		count++
+	}
+	for _, sub := range []string{"chats", "acp-sessions"} {
+		entries, err := os.ReadDir(filepath.Join(path, sub))
+		if err != nil {
+			continue
+		}
+		for _, entry := range entries {
+			if entry.IsDir() {
+				count++
+			}
+		}
+	}
+	return count, nil
+}
+
+func countConversationRows(dbPath string) (int, error) {
+	u := &url.URL{Scheme: "file", Path: dbPath}
+	query := u.Query()
+	query.Set("mode", "ro")
+	u.RawQuery = query.Encode()
+	db, err := sql.Open("sqlite", u.String())
+	if err != nil {
+		return 0, err
+	}
+	defer db.Close()
+	db.SetMaxOpenConns(1)
+	var count int
+	if err := db.QueryRow(`select count(*) from conversations`).Scan(&count); err != nil {
+		if strings.Contains(strings.ToLower(err.Error()), "no such table") {
+			return 0, nil
+		}
+		return 0, err
+	}
+	return count, nil
 }
 
 // Generate walks a Cursor config root (or a direct prompt_history.json file)
@@ -57,14 +133,22 @@ func Generate(path string, opts sources.Options, w io.Writer) (sources.Result, e
 	}
 	gen := &generator{opts: opts, since: since, hasSince: hasSince, w: w}
 	if !info.IsDir() {
-		// A direct file is treated as a prompt_history.json.
-		if err := gen.emitPromptHistory(path); err != nil {
+		if filepath.Base(path) == "conversation-search.db" {
+			if err := gen.emitConversationSearch(path); err != nil {
+				return gen.result, err
+			}
+		} else if err := gen.emitPromptHistory(path); err != nil {
 			return gen.result, err
 		}
 		gen.result.Files = gen.scans
 		return gen.result, nil
 	}
 	root := path
+	if dbPath := filepath.Join(root, "globalStorage", "conversation-search.db"); fileExists(dbPath) {
+		if err := gen.emitConversationSearch(dbPath); err != nil {
+			return gen.result, err
+		}
+	}
 	if hp := filepath.Join(root, "prompt_history.json"); fileExists(hp) {
 		if err := gen.emitPromptHistory(hp); err != nil {
 			return gen.result, err
@@ -78,6 +162,108 @@ func Generate(path string, opts sources.Options, w io.Writer) (sources.Result, e
 	}
 	gen.result.Files = gen.scans
 	return gen.result, nil
+}
+
+func (g *generator) emitConversationSearch(dbPath string) error {
+	scanPath := dbPath
+	if fileExists(dbPath + "-wal") {
+		scanPath = dbPath + "-wal"
+	}
+	scan, skip, err := g.openScan(scanPath)
+	if err != nil {
+		return err
+	}
+	if skip {
+		return g.afterFile(*scan)
+	}
+
+	u := &url.URL{Scheme: "file", Path: dbPath}
+	query := u.Query()
+	query.Set("mode", "ro")
+	u.RawQuery = query.Encode()
+	db, err := sql.Open("sqlite", u.String())
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	db.SetMaxOpenConns(1)
+	rows, err := db.Query(`
+		select c.id, c.title, c.updated_at, c.is_archived, c.scope,
+		       coalesce(c.root_fingerprint, ''), coalesce(f.body, '')
+		from conversations c
+		join conversation_fts f on f.rowid = c.fts_rowid
+		order by c.updated_at, c.id`)
+	if err != nil {
+		if strings.Contains(strings.ToLower(err.Error()), "no such table") {
+			g.warn(scan, fmt.Sprintf("%s: required conversation tables are missing: %s", dbPath, err))
+			g.scans = append(g.scans, *scan)
+			return g.afterFile(*scan)
+		}
+		return err
+	}
+	defer rows.Close()
+	var ordinal int64
+	for rows.Next() {
+		var id, title, scope, rootFingerprint, body string
+		var updatedAt int64
+		var archived int
+		if err := rows.Scan(&id, &title, &updatedAt, &archived, &scope, &rootFingerprint, &body); err != nil {
+			return err
+		}
+		if g.limited() {
+			continue
+		}
+		timestamp := epochString(float64(updatedAt))
+		if !sources.KeepTimestamp(timestamp, g.since, g.hasSince) {
+			continue
+		}
+		text := strings.TrimSpace(title + "\n" + body)
+		if text == "" {
+			continue
+		}
+		ordinal++
+		rec := adapter.Record{
+			Schema: adapter.SchemaV1,
+			Source: adapter.Source{Kind: "cursor", Name: "Cursor"},
+			Collection: adapter.Collection{
+				ExternalID: "cursor:conversation:" + id,
+				Kind:       "agent_session",
+				Name:       firstNonEmpty(title, id),
+				Metadata: sources.Metadata(map[string]any{
+					"harness": "cursor", "session_id": id, "scope": scope,
+					"root_fingerprint": rootFingerprint, "archived": archived != 0,
+				}),
+			},
+			Item: adapter.Item{
+				ExternalID: "cursor:conversation-body:" + id,
+				Kind:       "message",
+				UpdatedAt:  timestamp,
+				Text:       text,
+				Tags:       []string{"cursor", "agent-session"},
+				Metadata: sources.Metadata(map[string]any{
+					"harness": "cursor", "session_id": id, "surface": "conversation_search",
+					"scope": scope, "root_fingerprint": rootFingerprint, "archived": archived != 0,
+					"bodies_indexed": true, "source_file": dbPath, "ordinal": ordinal,
+				}),
+			},
+			Actor: sources.ActorFromRole("cursor", "assistant", "conversation"),
+			Raw: adapter.RawRef{
+				Format: "sqlite", Hash: "sha256:" + sources.HashBytes([]byte(id+"\x00"+text)),
+				Path: dbPath, Ordinal: &ordinal,
+			},
+		}
+		sources.ApplyRedaction(&rec, g.opts)
+		if err := sources.WriteRecord(g.w, rec); err != nil {
+			return err
+		}
+		g.result.Records++
+		scan.Records++
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	g.scans = append(g.scans, *scan)
+	return g.afterFile(*scan)
 }
 
 type generator struct {

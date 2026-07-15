@@ -28,8 +28,12 @@ func cmdCrawl(args []string, out, errw io.Writer) int {
 		return cmdImportAdapter(args[1:], out, errw)
 	case "cursor":
 		return cmdCrawlCursor(args[1:], out, errw)
-	case "discord", "github", "slack", "granola", "notion", "gmail", "telegram":
+	case "discord", "slack", "granola", "notion", "gmail":
 		return cmdCrawlExporter(nativeExporters[args[0]], args[1:], out, errw)
+	case "github":
+		return cmdCrawlGitcrawl(args[1:], out, errw)
+	case "telegram":
+		return cmdCrawlTelecrawl(args[1:], out, errw)
 	case "chatgpt-export", "claude-export":
 		return cmdImport(args, out, errw)
 	default:

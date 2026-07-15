@@ -8,6 +8,24 @@ Releases before this changelog was started are on the [releases page](https://gi
 
 ## [Unreleased]
 
+### Added
+
+- Native Grok session discovery, adapter generation, import, watch, and crawl
+  support for `summary.json` and `chat_history.jsonl` under `~/.grok/sessions`.
+- Current Cursor conversation ingestion from the read-only
+  `User/globalStorage/conversation-search.db` search database, including WAL
+  scan tracking and body search. Legacy Cursor Agent JSON remains supported.
+- Contract tests for all six source-owned adapter exporters: Discrawl,
+  Gitcrawl, Slacrawl, Graincrawl, Notcrawl, and Mailcrawl.
+
+### Fixed
+
+- `crawl github` now supports current Gitcrawl releases that expose
+  `sync` and `threads --json` but not `export adapter`.
+- `crawl telegram` now converts Telecrawl's public `--json messages` output to
+  adapter records. This supports installed Telecrawl 0.1.0 builds that do not
+  provide an `export adapter` command.
+
 ## [0.5.0] - 2026-07-11
 
 ### Added

@@ -21,12 +21,13 @@ MiseLedger is different:
 
 Each source system is best at its native domain:
 
-- Built-in `miseledger crawl sessions`: Codex, Claude, OpenClaw, OpenCode, Hermes, and Cursor local history
+- Built-in `miseledger crawl sessions`: Codex, Claude, OpenClaw, OpenCode, Hermes, Cursor, and Grok local history
 - Built-in `miseledger crawl docs/files/html/json/jsonl/gitlog`: local files, Markdown, HTML, JSON, JSONL, and git history
 - `discrawl`: Discord messages
 - `gitcrawl`: GitHub issues and pull requests
 - `notcrawl`: Notion pages
-- `slacrawl`, `graincrawl`, `mailcrawl`, and `telecrawl`: domain-specific archives that can emit adapter JSONL
+- `slacrawl`, `graincrawl`, and `mailcrawl`: domain-specific archives that emit adapter JSONL
+- `telecrawl`: Telegram archive queried through its public JSON message command, then converted by MiseLedger
 
 ## Boundary
 

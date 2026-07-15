@@ -3,6 +3,7 @@ package cursor
 import (
 	"bufio"
 	"bytes"
+	"database/sql"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/escoffier-labs/miseledger/internal/adapter"
 	"github.com/escoffier-labs/miseledger/internal/sources"
+	_ "modernc.org/sqlite"
 )
 
 func writeFile(t *testing.T, path, body string) {
@@ -187,7 +189,139 @@ func TestGenerateMissingRoot(t *testing.T) {
 
 func TestDefaultRootRespectsXDG(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", "/tmp/xdg")
-	if got := DefaultRoot(); got != filepath.Join("/tmp/xdg", "cursor") {
+	if got := DefaultRoot(); got != filepath.Join("/tmp/xdg", "Cursor", "User") {
 		t.Fatalf("DefaultRoot=%q", got)
+	}
+}
+
+func buildConversationFixture(t *testing.T) string {
+	t.Helper()
+	sqlText, err := os.ReadFile("../../../testdata/harnesses/cursor-conversations.fixture.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	dbPath := filepath.Join(root, "globalStorage", "conversation-search.db")
+	if err := os.MkdirAll(filepath.Dir(dbPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(string(sqlText)); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return root
+}
+
+func TestGenerateConversationSearchDatabase(t *testing.T) {
+	root := buildConversationFixture(t)
+	recs, res := parseRecords(t, root, sources.Options{})
+	if res.Records != 2 || len(recs) != 2 {
+		t.Fatalf("records=%d decoded=%d", res.Records, len(recs))
+	}
+	var text string
+	for _, rec := range recs {
+		text += rec.Item.Text
+		if rec.Collection.Kind != "agent_session" {
+			t.Fatalf("kind=%q", rec.Collection.Kind)
+		}
+		if rec.Raw.Path != filepath.Join(root, "globalStorage", "conversation-search.db") {
+			t.Fatalf("raw=%q", rec.Raw.Path)
+		}
+	}
+	if !strings.Contains(text, "synthetic migration checklist") {
+		t.Fatal("conversation body was not indexed")
+	}
+}
+
+func TestGenerateConversationSearchDirectPathLimitAndSince(t *testing.T) {
+	root := buildConversationFixture(t)
+	dbPath := filepath.Join(root, "globalStorage", "conversation-search.db")
+	recs, res := parseRecords(t, dbPath, sources.Options{Limit: 1, Since: "2026-07-15T12:30:00Z"})
+	if res.Records != 1 || len(recs) != 1 {
+		t.Fatalf("records=%d decoded=%d", res.Records, len(recs))
+	}
+	if !strings.Contains(recs[0].Item.Text, "crawler review") {
+		t.Fatalf("unexpected record text=%q", recs[0].Item.Text)
+	}
+}
+
+func TestCountSessionsUsesCurrentDatabaseWithoutBodies(t *testing.T) {
+	root := buildConversationFixture(t)
+	got, err := CountSessions(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != 2 {
+		t.Fatalf("CountSessions=%d want 2", got)
+	}
+}
+
+func TestGenerateConversationSearchMissingTablesWarns(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "conversation-search.db")
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`CREATE TABLE placeholder (id INTEGER)`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	_, res := parseRecords(t, dbPath, sources.Options{})
+	if res.Records != 0 || len(res.Warnings) != 1 || !strings.Contains(res.Warnings[0], "required conversation tables") {
+		t.Fatalf("result=%+v", res)
+	}
+}
+
+func TestGenerateConversationSearchReadOnlyAndWALScan(t *testing.T) {
+	root := buildConversationFixture(t)
+	dbPath := filepath.Join(root, "globalStorage", "conversation-search.db")
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(`PRAGMA journal_mode=WAL`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO conversations VALUES (3,'local','','cursor-fixture-003','WAL fixture',1784124000000,0,'fixture-root-c',NULL)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO conversation_fts(rowid,title,body) VALUES (3,'WAL fixture','Cursor WAL scan target')`); err != nil {
+		t.Fatal(err)
+	}
+	var scanned string
+	var buf bytes.Buffer
+	res, err := Generate(root, sources.Options{AfterFile: func(scan sources.FileScan) error {
+		scanned = scan.Path
+		return nil
+	}}, &buf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Records != 3 || scanned != dbPath+"-wal" {
+		t.Fatalf("records=%d scanned=%q", res.Records, scanned)
+	}
+}
+
+func TestDefaultRootForPlatform(t *testing.T) {
+	cases := []struct {
+		goos, home, xdg, appData, want string
+	}{
+		{"linux", "/users/demo", "/config", "", "/config/Cursor/User"},
+		{"darwin", "/users/demo", "", "", "/users/demo/Library/Application Support/Cursor/User"},
+		{"windows", `C:\\Users\\demo`, "", `C:\\Data`, `C:\\Data/Cursor/User`},
+	}
+	for _, tc := range cases {
+		if got := defaultRoot(tc.goos, tc.home, tc.xdg, tc.appData); got != filepath.Clean(tc.want) {
+			t.Fatalf("defaultRoot(%s)=%q want %q", tc.goos, got, filepath.Clean(tc.want))
+		}
 	}
 }

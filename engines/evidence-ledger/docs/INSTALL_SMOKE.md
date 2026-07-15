@@ -30,6 +30,7 @@ miseledger import openclaw "$repo/testdata/harnesses/openclaw-session.fixture.js
 miseledger import claude "$repo/testdata/harnesses/claude-project.fixture.jsonl" --json
 miseledger import hermes "$repo/testdata/harnesses/session_hermes-demo.fixture.json" --json
 miseledger import hermes "$repo/testdata/harnesses/hermes-trajectory.fixture.jsonl" --json
+miseledger import grok "$repo/testdata/harnesses/grok-sessions.fixture" --json
 
 miseledger status --json
 miseledger stats --json
@@ -54,3 +55,5 @@ Expected results:
 - search returns at least one result
 - evidence returns `untrusted_context: true` and a stable bundle ID
 - evidence result `artifacts` fields encode as arrays, including empty arrays
+
+The archive smoke covers Cursor's current SQLite reader in Go tests because the shell smoke does not require the external `sqlite3` program. The fixture database is created in a temporary test directory from `testdata/harnesses/cursor-conversations.fixture.sql`.

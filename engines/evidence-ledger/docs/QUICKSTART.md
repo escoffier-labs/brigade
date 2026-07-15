@@ -22,7 +22,7 @@ Convenience alternative, mutable `HEAD` installer:
 curl -fsSL https://raw.githubusercontent.com/escoffier-labs/miseledger/HEAD/install.sh | sh
 ```
 
-Optional domain crawler binaries such as `discrawl`, `slacrawl`, `graincrawl`, `notcrawl`, and `mailcrawl` can feed MiseLedger through `miseledger crawl <domain>` or `miseledger import adapter`. Session logs, local files, Markdown, HTML, JSON, JSONL, and git history are covered by built-in crawl and import commands.
+Optional domain crawler binaries such as `discrawl`, `gitcrawl`, `slacrawl`, `graincrawl`, `notcrawl`, `mailcrawl`, and `telecrawl` can feed MiseLedger through `miseledger crawl <domain>`. Adapter-emitting crawlers can also produce files for `miseledger import adapter`. Current Gitcrawl releases are read through `gitcrawl sync` plus `gitcrawl threads --json`. Session logs, local files, Markdown, HTML, JSON, JSONL, and git history are covered by built-in crawl and import commands.
 
 ## Initialize
 
@@ -53,7 +53,8 @@ miseledger import openclaw ~/.openclaw/agents --json
 miseledger import claude ~/.claude/projects --json
 miseledger import opencode ~/.local/share/opencode --json
 miseledger import hermes ~/.hermes/sessions --json
-miseledger import cursor ~/.config/cursor --json
+miseledger import cursor ~/.config/Cursor/User --json
+miseledger import grok ~/.grok/sessions --json
 ```
 
 Already-generated adapter JSONL from older exporter tools can still be imported with `miseledger import adapter`.
@@ -135,7 +136,7 @@ Rules that keep re-ingestion clean when the same records can arrive by more than
 2. Do not rename kinds with `--source` (see above). This is the one way to create duplicates from a single crawler.
 3. Pick one redaction posture per source. The content hash is part of the item identity, so importing the same session once raw and once with `--redact paths,secrets` stores two near-identical items. Redact everywhere or nowhere for a given source.
 4. Wiring Brigade next to MiseLedger adds no dedupe risk: Brigade's memory cards and handoffs are a separate store, and its evidence bundles only read from the archive.
-5. `crawl discord|github|slack|granola|notion|gmail|telegram` needs a crawler build with the `export adapter` subcommand.
+5. `crawl discord|github|slack|granola|notion|gmail` needs a crawler build with the `export adapter` subcommand. `crawl telegram` uses `telecrawl --json messages`, including Telecrawl 0.1.0.
 
 ## Inspect Archive State
 

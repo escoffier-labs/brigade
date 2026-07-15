@@ -32,6 +32,7 @@ fi
 "$MISELEDGER" import claude "$ROOT/testdata/harnesses/claude-project.fixture.jsonl" --json >"$TMP_WORK/import-claude.json"
 "$MISELEDGER" import hermes "$ROOT/testdata/harnesses/session_hermes-demo.fixture.json" --json >"$TMP_WORK/import-hermes-snapshot.json"
 "$MISELEDGER" import hermes "$ROOT/testdata/harnesses/hermes-trajectory.fixture.jsonl" --json >"$TMP_WORK/import-hermes-trajectory.json"
+"$MISELEDGER" import grok "$ROOT/testdata/harnesses/grok-sessions.fixture" --json >"$TMP_WORK/import-grok.json"
 "$MISELEDGER" relations backfill --json >"$TMP_WORK/relations.json"
 "$MISELEDGER" stats --json >"$TMP_WORK/stats.json"
 "$MISELEDGER" compact --json >"$TMP_WORK/compact.json"
@@ -40,6 +41,7 @@ fi
 "$MISELEDGER" prune scans --missing --dry-run --json >"$TMP_WORK/prune-scans.json"
 "$MISELEDGER" prune --policy default --dry-run --json >"$TMP_WORK/prune-policy.json"
 "$MISELEDGER" search "Hermes snapshots" --source hermes --json >"$TMP_WORK/search-hermes.json"
+"$MISELEDGER" search "fixture crawl contract" --source grok --json >"$TMP_WORK/search-grok.json"
 "$SESSIONFIND" search "exec_command" --source codex --json >"$TMP_WORK/sessionfind-codex.json"
 "$MISELEDGER" evidence "Hermes snapshots" --source hermes --json >"$TMP_WORK/evidence-hermes.json"
 "$MISELEDGER" explain "Hermes snapshots" --source hermes --json >"$TMP_WORK/explain-hermes.json"
@@ -66,7 +68,7 @@ assert doctor["ok"] is True, doctor
 stats = load("stats.json")
 totals = stats["totals"]
 assert totals["items"] >= 20, stats
-assert totals["sources"] >= 5, stats
+assert totals["sources"] >= 6, stats
 assert totals["unresolved_relations"] == 0, stats
 
 compact = load("compact.json")
@@ -82,6 +84,9 @@ assert load("prune-policy.json")["dry_run"] is True
 
 search = load("search-hermes.json")
 assert len(search["results"]) >= 1, search
+
+grok_search = load("search-grok.json")
+assert len(grok_search["results"]) >= 1, grok_search
 
 sessionfind = load("sessionfind-codex.json")
 assert len(sessionfind["sessions"]) >= 1, sessionfind

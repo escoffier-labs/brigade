@@ -47,6 +47,8 @@ miseledger adapter openclaw <path-or-dir> --out <file|->
 miseledger adapter claude <path-or-dir> --out <file|->
 miseledger adapter hermes <path-or-dir> --out <file|->
 miseledger adapter opencode <path-or-dir> --out <file|->
+miseledger adapter cursor <path-or-dir> --out <file|->
+miseledger adapter grok <path-or-dir> --out <file|->
 ```
 
 They emit the same `miseledger.adapter.v1` JSONL contract as external tools. Native import commands generate adapter records and reuse the adapter import path internally:
@@ -57,6 +59,8 @@ miseledger import openclaw <path-or-dir> --json
 miseledger import claude <path-or-dir> --json
 miseledger import hermes <path-or-dir> --json
 miseledger import opencode <path-or-dir> --json
+miseledger import cursor <path-or-dir> --json
+miseledger import grok <path-or-dir> --json
 miseledger import discovered --json
 miseledger watch once --json
 miseledger watch once --if-changed --json
@@ -78,6 +82,8 @@ Scanner rules:
 Claude support targets `~/.claude/projects/**/*.jsonl` style project logs. The MVP scanner imports ordinary project session JSONL and does not special-case subagents yet; subagent lines are treated as normal agent-session evidence unless a future fixture shows a safer split.
 
 Hermes support targets `~/.hermes/sessions/session_*.json` snapshots and trajectory JSONL. MiseLedger does not parse Hermes `state.db` directly.
+
+Grok support targets `~/.grok/sessions/**/summary.json` and `chat_history.jsonl`. Cursor support targets the current read-only `User/globalStorage/conversation-search.db` search database and retains the older prompt-history and chat-metadata JSON layout.
 
 ## Built-In Crawlers
 
@@ -106,6 +112,7 @@ External crawler binaries can emit adapter JSONL directly or run through MiseLed
 ```bash
 miseledger crawl discord --limit 100 --json
 miseledger crawl github --repo escoffier-labs/miseledger --json
+miseledger crawl github --repo escoffier-labs/miseledger --numbers 34,35 --limit 2 --json
 miseledger crawl slack --workspace T123 --json
 miseledger crawl granola --json
 miseledger crawl notion --json
@@ -113,6 +120,8 @@ miseledger crawl gmail --account me@example.com --query "subject:miseledger" --j
 miseledger crawl telegram --chat "MiseLedger" --json
 miseledger import adapter discrawl.adapter.jsonl --json
 ```
+
+The Discord, Slack, Granola, Notion, and Gmail wrappers consume adapter JSONL emitted by their crawler binaries. GitHub is a current-Gitcrawl compatibility route: MiseLedger calls `gitcrawl sync` and `gitcrawl threads --json`, then converts returned issue and pull-request rows locally. Telegram is also a compatibility route: MiseLedger calls `telecrawl --json messages` and converts the public message array to adapter records locally.
 
 The archived StationTrail and SourceHarvest repositories previously emitted this same adapter contract. Already-generated adapter JSONL files from those tools remain importable with `miseledger import adapter`.
 

@@ -13,6 +13,8 @@ StationTrail was a separate local harness exporter. Its adapter JSONL output rem
 | OpenClaw sessions and trajectories | covered | yes | Use `miseledger crawl sessions` or `miseledger import openclaw`. |
 | OpenCode sessions | covered | yes | Use `miseledger crawl sessions` or `miseledger import opencode` with sanitized export JSON. |
 | Hermes sessions | covered | yes | Use `miseledger crawl sessions` or `miseledger import hermes`. MiseLedger does not parse Hermes `state.db` directly. |
+| Cursor sessions | partial historical coverage | yes | Use `miseledger crawl cursor` for the current conversation search database or a legacy Cursor Agent root. |
+| Grok sessions | not covered | yes | Use `miseledger crawl sessions` or `miseledger import grok`. |
 | Future harnesses | historical reference | sample-gated | Add native support only after redacted sample shapes exist. |
 
 ## Practical Split
@@ -55,6 +57,8 @@ miseledger import claude ~/.claude/projects --json
 miseledger import openclaw ~/.openclaw/agents --json
 miseledger import opencode ~/.local/share/opencode --json
 miseledger import hermes ~/.hermes/sessions --json
+miseledger import cursor ~/.config/Cursor/User --json
+miseledger import grok ~/.grok/sessions --json
 ```
 
 Archived StationTrail adapter JSONL:

@@ -123,7 +123,7 @@ flowchart TB
     MISELEDGER -->|owns| SQLITE
 
     subgraph AGENTS [" agent-session crawlers "]
-        SESSIONS["<b>miseledger crawl sessions</b><br/>Codex, Claude, OpenClaw, OpenCode, Hermes, Cursor"]
+        SESSIONS["<b>miseledger crawl sessions</b><br/>Codex, Claude, OpenClaw, OpenCode, Hermes, Cursor, Grok"]
         COMPAT["<b>Native imports</b><br/>source-specific compatibility commands"]
     end
 
@@ -173,7 +173,7 @@ flowchart TB
 
 MiseLedger owns local agent-session crawling, local artifact crawling, archive ingest, SQLite, FTS, relations, scan manifests, reader APIs, and evidence bundles.
 
-External crawler tools keep their native sync and query behavior. Their adapter JSONL exports can flow directly into MiseLedger through `miseledger crawl <domain>` wrappers or `miseledger import adapter`.
+External crawler tools keep their native sync and query behavior. Six wrappers consume source-owned adapter JSONL. The Telegram wrapper converts Telecrawl's public JSON message output into the same adapter contract.
 
 ## Runtime Paths
 
@@ -230,7 +230,8 @@ miseledger adapter openclaw ~/.openclaw/agents --out openclaw.adapter.jsonl --si
 miseledger adapter claude ~/.claude/projects --out claude.adapter.jsonl --limit 100
 miseledger adapter hermes ~/.hermes/sessions --out hermes.adapter.jsonl --limit 100
 miseledger adapter opencode ~/.local/share/opencode --out opencode.adapter.jsonl --limit 100
-miseledger adapter cursor ~/.config/cursor --out cursor.adapter.jsonl
+miseledger adapter cursor ~/.config/Cursor/User --out cursor.adapter.jsonl
+miseledger adapter grok ~/.grok/sessions --out grok.adapter.jsonl
 ```
 
 Native import commands stream generated adapter records into the same adapter ingest path:
@@ -241,7 +242,8 @@ miseledger import openclaw ~/.openclaw/agents --json
 miseledger import claude ~/.claude/projects --json
 miseledger import hermes ~/.hermes/sessions --json
 miseledger import opencode ~/.local/share/opencode --json
-miseledger import cursor ~/.config/cursor --json
+miseledger import cursor ~/.config/Cursor/User --json
+miseledger import grok ~/.grok/sessions --json
 miseledger import codex testdata/harnesses/malformed-unknown.fixture.jsonl --dry-run --json
 miseledger import discovered --json
 miseledger watch once --json
@@ -269,17 +271,27 @@ miseledger import claude-export conversations.json --json
 
 These imports normalize provider conversations into local `conversation` collections with `message` items tagged as `ai-chat`.
 
-## Cursor Agent
+## Cursor
 
-MiseLedger imports local Cursor Agent CLI history from its config root (`$XDG_CONFIG_HOME/cursor` or `~/.config/cursor` on Linux, `~/.cursor` on macOS):
+MiseLedger imports current Cursor conversation search data from its user-data root (`$XDG_CONFIG_HOME/Cursor/User` or `~/.config/Cursor/User` on Linux, `~/Library/Application Support/Cursor/User` on macOS, and `%APPDATA%/Cursor/User` on Windows):
 
 ```bash
 miseledger crawl cursor --json            # defaults to the standard Cursor root
-miseledger crawl cursor ~/.config/cursor --json
-miseledger import cursor ~/.config/cursor --json
+miseledger crawl cursor ~/.config/Cursor/User --json
+miseledger import cursor ~/.config/Cursor/User --json
 ```
 
-Two stable, plain-JSON surfaces are indexed: `prompt_history.json` (the prompts you typed, the primary "what did I ask?" lookup) and each chat's `meta.json` (title, timestamps, workspace), which becomes an `agent_session` collection so it appears in `miseledger sessions`. Cursor message bodies live in a per-chat binary `store.db` and are intentionally not decoded; a chat that has a `store.db` but no `meta.json` is still surfaced as a resumable session with a warning. `miseledger crawl sessions` and `miseledger import discovered` pick Cursor up automatically alongside the other native sources.
+The current reader opens `globalStorage/conversation-search.db` in read-only mode and indexes conversation titles and FTS bodies as agent sessions. When a WAL exists, its metadata is used for change tracking while raw references stay on the main database. The older Cursor Agent `prompt_history.json`, chat `meta.json`, and store-only session layout remains supported for explicit legacy roots. Binary legacy `store.db` message bodies are not decoded.
+
+## Grok Sessions
+
+Grok sessions are discovered under `~/.grok/sessions`. MiseLedger reads each session's `summary.json` and `chat_history.jsonl` without importing unrelated files:
+
+```bash
+miseledger crawl sessions --json
+miseledger import grok ~/.grok/sessions --json
+miseledger sessions search "crawler review" --source grok --json
+```
 
 ## Session Locator
 
@@ -295,7 +307,7 @@ sessionfind "release audit" --source codex --json
 
 `sessions search` groups matching item hits by session/conversation collection and returns the source kind, collection ID, item count, match count, sample item ID, raw source path, raw ordinal, and a snippet. It is meant for quickly finding the local harness session to inspect or resume.
 
-The scanners accept a file or directory, walk relevant JSON and JSONL files recursively, skip obvious backups and sidecars, preserve raw refs, and warn rather than crash on malformed or unknown events. Hermes native support covers `session_*.json` snapshots and trajectory JSONL under `~/.hermes/sessions`; Hermes `state.db` is not parsed directly. OpenCode native support reads sanitized `opencode export` JSON files under `~/.local/share/opencode` by default.
+The scanners accept a file or directory, walk relevant source files recursively, skip obvious backups and sidecars, preserve raw refs, and warn rather than crash on malformed or unknown events. Hermes native support covers `session_*.json` snapshots and trajectory JSONL under `~/.hermes/sessions`; Hermes `state.db` is not parsed directly. OpenCode native support reads sanitized `opencode export` JSON files under `~/.local/share/opencode` by default. Cursor is the one native source that also reads a known SQLite search database.
 
 ## Built-In Crawlers
 
@@ -316,6 +328,7 @@ miseledger import claude ~/.claude/projects --json
 miseledger import openclaw ~/.openclaw/agents --json
 miseledger import opencode ~/.local/share/opencode --json
 miseledger import hermes ~/.hermes/sessions --json
+miseledger import grok ~/.grok/sessions --json
 ```
 
 Local artifact crawls add defaults for common archive sources:
@@ -334,6 +347,7 @@ External crawler binaries can be called through domain wrappers when installed o
 ```bash
 miseledger crawl discord --limit 100 --json
 miseledger crawl github --repo escoffier-labs/miseledger --json
+miseledger crawl github --repo escoffier-labs/miseledger --numbers 34,35 --limit 2 --json
 miseledger crawl slack --workspace T123 --json
 miseledger crawl granola --json
 miseledger crawl notion --json
@@ -343,6 +357,10 @@ miseledger import adapter discrawl.adapter.jsonl --json
 ```
 
 Archived StationTrail and SourceHarvest exports are still ordinary `miseledger.adapter.v1` JSONL, so already-generated files can be imported with `miseledger import adapter`.
+
+Discord, Slack, Granola, Notion, and Gmail call each crawler's adapter exporter. GitHub calls current Gitcrawl's `sync` and `threads --json` commands, then converts those thread rows locally. Telegram calls `telecrawl --json messages`; MiseLedger converts the returned message array locally and maps `--since` to Telecrawl's `--after` flag.
+
+Gmail remains explicit about account selection. Gog may have configured accounts, but MiseLedger requires `--account` so a crawl cannot silently pick a mailbox. Use `--metadata-only`, a narrow `--query`, and `--dry-run` first; `scripts/smoke_gmail_metadata.sh` does exactly that with the first configured Gog account and does not import mail.
 
 For adapter files that already carry a source kind, leave `--source` off. If you must override it, use the wrapper's canonical kind: `discord`, `github`, `slack`, `granola`, `notion`, `gmail`, or `telegram`. MiseLedger warns when the override disagrees with embedded record kinds because that creates a separate dedupe namespace.
 
@@ -386,7 +404,7 @@ Discovery reports candidate roots and supported file counts only:
 miseledger sources discover --json
 ```
 
-It checks Codex sessions, OpenClaw agents, Claude projects, OpenCode exports, Hermes session files, and Cursor history without printing private transcript content.
+It checks Codex sessions, OpenClaw agents, Claude projects, OpenCode exports, Hermes session files, Cursor history, and Grok sessions without printing private transcript content.
 
 ## Browser UI
 
@@ -464,7 +482,7 @@ If a target is not present yet, MiseLedger preserves `target_external_id` for la
 ## Why not something else?
 
 - **A cloud memory service (mem0, Letta, and friends)** is built for apps you ship, usually behind an API or a server, and your history lives on someone else's machine. MiseLedger is for the local agent CLIs and exports you already have. The archive is a plain SQLite file on your disk, queryable with `sqlite3` and the read-only `sql` command even without MiseLedger.
-- **A single tool's built-in history** (Codex, Claude, OpenCode, Cursor, ChatGPT export) is a silo. It does not cross harnesses, and there is no shared search. MiseLedger normalizes every source into one `adapter.v1` contract and one FTS5 index, so one query spans Codex, Claude, OpenClaw, OpenCode, Cursor, chat exports, notes, and git history at once.
+- **A single tool's built-in history** (Codex, Claude, OpenCode, Cursor, Grok, ChatGPT export) is a silo. It does not cross harnesses, and there is no shared search. MiseLedger normalizes every source into one `adapter.v1` contract and one FTS5 index, so one query spans Codex, Claude, OpenClaw, OpenCode, Cursor, Grok, chat exports, notes, and git history at once.
 - **`grep` over raw session folders** works until the formats diverge, the JSONL nests, and binary stores like Cursor's `store.db` are unreadable. MiseLedger parses each harness, dedupes by stable external IDs, preserves raw refs for audit, and warns rather than crashing on malformed records.
 - **A vector database or RAG stack** adds embeddings, a server, and a model dependency for what is mostly an exact-recall problem. MiseLedger stays lexical and deterministic: FTS5 search, shallow relations, and reproducible evidence bundles, with no embeddings, no model calls, and no network.
 - **The archived StationTrail and SourceHarvest repos** were earlier source-exporter experiments. Their adapter JSONL output still imports cleanly, but the day-to-day crawler paths now live under `miseledger crawl` and native `miseledger import` commands.

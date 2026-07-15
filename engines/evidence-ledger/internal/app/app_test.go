@@ -464,26 +464,27 @@ printf '{"source":"%s","path":"%s","records":1,"files":1,"warnings":[],"generate
 	}
 }
 
-func TestCrawlExternalExporterWrappersIncludeGithubAndTelegram(t *testing.T) {
+func TestCrawlExternalExporterWrappers(t *testing.T) {
 	withTempHome(t)
 	runOK(t, "init")
 	binDir := t.TempDir()
 	for _, tc := range []struct {
-		binary string
-		source string
-		text   string
+		binary, command, source, prefix, text string
 	}{
-		{"gitcrawl", "github", "gitcrawl wrapper fixture"},
-		{"telecrawl", "telegram", "telecrawl wrapper fixture"},
+		{"discrawl", "discord", "discord", "export adapter --out -", "discrawl wrapper fixture"},
+		{"slacrawl", "slack", "slack", "export adapter --out -", "slacrawl wrapper fixture"},
+		{"graincrawl", "granola", "granola", "export adapter --out -", "graincrawl wrapper fixture"},
+		{"notcrawl", "notion", "notion", "export adapter --out -", "notcrawl wrapper fixture"},
+		{"mailcrawl", "gmail", "gmail", "gmail export --out -", "mailcrawl wrapper fixture"},
 	} {
 		script := filepath.Join(binDir, tc.binary)
 		body := fmt.Sprintf(`#!/bin/sh
-if [ "$1" != "export" ] || [ "$2" != "adapter" ] || [ "$3" != "--out" ] || [ "$4" != "-" ]; then
+if [ "$*" != %q ]; then
   echo "bad adapter export args: $*" >&2
   exit 1
 fi
 printf '{"schema":"miseledger.adapter.v1","source":{"kind":%q,"name":"Fixture"},"collection":{"external_id":%q,"kind":"messages","name":"Fixture"},"item":{"external_id":%q,"kind":"message","created_at":"2026-06-03T00:00:00Z","text":%q,"tags":["wrapper"]},"actor":{"external_id":%q,"type":"system","name":"fixture"},"artifacts":[],"links":[],"relations":[],"raw":{"format":"json","path":%q,"ordinal":1}}\n'
-`, tc.source, tc.source+":collection", tc.source+":item:1", tc.text, tc.source+":actor", tc.binary+".jsonl")
+`, tc.prefix, tc.source, tc.source+":collection", tc.source+":item:1", tc.text, tc.source+":actor", tc.binary+".jsonl")
 		if err := os.WriteFile(script, []byte(body), 0o700); err != nil {
 			t.Fatal(err)
 		}
@@ -491,13 +492,12 @@ printf '{"schema":"miseledger.adapter.v1","source":{"kind":%q,"name":"Fixture"},
 	oldPath := os.Getenv("PATH")
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+oldPath)
 
-	for _, tc := range []struct {
-		command string
-		source  string
-		query   string
-	}{
-		{"github", "github", "gitcrawl wrapper"},
-		{"telegram", "telegram", "telecrawl wrapper"},
+	for _, tc := range []struct{ command, source, query string }{
+		{"discord", "discord", "discrawl wrapper"},
+		{"slack", "slack", "slacrawl wrapper"},
+		{"granola", "granola", "graincrawl wrapper"},
+		{"notion", "notion", "notcrawl wrapper"},
+		{"gmail", "gmail", "mailcrawl wrapper"},
 	} {
 		out := runJSON(t, "crawl", tc.command, "--json")
 		if out["source_kind"] != tc.source || out["inserted_items"].(float64) != 1 {
@@ -507,6 +507,130 @@ printf '{"schema":"miseledger.adapter.v1","source":{"kind":%q,"name":"Fixture"},
 		if len(search["results"].([]any)) != 1 {
 			t.Fatalf("crawl %s search failed: %v", tc.command, search)
 		}
+	}
+}
+
+func TestCrawlGithubCurrentGitcrawlCompatibility(t *testing.T) {
+	withTempHome(t)
+	runOK(t, "init")
+	binDir := t.TempDir()
+	argsFile := filepath.Join(t.TempDir(), "gitcrawl-args")
+	t.Setenv("GITCRAWL_ARGS_FILE", argsFile)
+	script := filepath.Join(binDir, "gitcrawl")
+	body := `#!/bin/sh
+printf '%s\n' "$*" >> "$GITCRAWL_ARGS_FILE"
+case "$*" in
+  "sync escoffier-labs/miseledger --state all --numbers 34 --json")
+    printf '{"repository":"escoffier-labs/miseledger","threads_synced":1,"pull_requests_synced":1,"numbers":[34]}\n'
+    exit 0
+    ;;
+  "threads escoffier-labs/miseledger --include-closed --numbers 34 --limit 1 --json")
+    printf '{"repository":"escoffier-labs/miseledger","threads":[{"number":34,"kind":"pull_request","state":"open","title":"Add Grok Cursor and crawler ingestion coverage","body":"gitcrawl current compatibility fixture","author_login":"fixture-user","author_type":"User","html_url":"https://github.com/escoffier-labs/miseledger/pull/34","is_draft":true,"created_at_gh":"2026-07-15T20:06:17Z","updated_at_gh":"2026-07-15T20:06:24Z"}]}\n'
+    exit 0
+    ;;
+  "export adapter --out - --repo escoffier-labs/miseledger --state all --numbers 34 --limit 1")
+    echo 'unknown command "export"' >&2
+    exit 1
+    ;;
+  *)
+    echo "unexpected gitcrawl args: $*" >&2
+    exit 1
+    ;;
+esac
+`
+	if err := os.WriteFile(script, []byte(body), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	dry := runJSON(t, "crawl", "github", "--repo", "escoffier-labs/miseledger", "--state", "all", "--numbers", "34", "--limit", "1", "--dry-run", "--json")
+	if dry["generated_records"].(float64) != 1 {
+		t.Fatalf("crawl github dry-run = %v, want one generated record", dry)
+	}
+
+	out := runJSON(t, "crawl", "github", "--repo", "escoffier-labs/miseledger", "--state", "all", "--numbers", "34", "--limit", "1", "--json")
+	if out["source_kind"] != "github" || out["inserted_items"].(float64) != 1 {
+		t.Fatalf("crawl github import = %v, want one github item", out)
+	}
+	search := runJSON(t, "search", "gitcrawl current compatibility", "--source", "github", "--json")
+	if len(search["results"].([]any)) != 1 {
+		t.Fatalf("crawl github search failed: %v", search)
+	}
+	gotArgs, err := os.ReadFile(argsFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"sync escoffier-labs/miseledger --state all --numbers 34 --json",
+		"threads escoffier-labs/miseledger --include-closed --numbers 34 --limit 1 --json",
+	} {
+		if !strings.Contains(string(gotArgs), want) {
+			t.Fatalf("gitcrawl args missing %q in:\n%s", want, gotArgs)
+		}
+	}
+}
+
+func writeFakeTelecrawl(t *testing.T, binDir, body string) {
+	t.Helper()
+	script := filepath.Join(binDir, "telecrawl")
+	if err := os.WriteFile(script, []byte(body), 0o700); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCrawlTelegramCompatibilityImportDryRunAndFlags(t *testing.T) {
+	withTempHome(t)
+	runOK(t, "init")
+	binDir := t.TempDir()
+	argsFile := filepath.Join(t.TempDir(), "args")
+	t.Setenv("TELECRAWL_ARGS_FILE", argsFile)
+	writeFakeTelecrawl(t, binDir, `#!/bin/sh
+printf '%s\n' "$*" > "$TELECRAWL_ARGS_FILE"
+if [ "$1" != "--json" ] || [ "$2" != "messages" ]; then
+  echo "unexpected telecrawl args: $*" >&2
+  exit 1
+fi
+printf '%s\n' '[{"source_pk":41,"chat_jid":"fixture-chat","chat_name":"Fixture Telegram Chat","message_id":"fixture-message-41","sender_jid":"fixture-sender","sender_name":"Fixture Sender","timestamp":"2026-07-15T12:00:00Z","from_me":false,"text":"telecrawl compatibility fixture","raw_type":1,"message_type":"text","media_type":"","media_title":""},{"source_pk":42,"chat_jid":"fixture-chat","chat_name":"Fixture Telegram Chat","message_id":"fixture-message-42","timestamp":"2026-07-15T12:01:00Z","from_me":true,"text":"","media_type":"","media_title":""}]'
+`)
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	out := runJSON(t, "crawl", "telegram", "--since", "2026-07-01", "--limit", "7", "--chat", "Fixture", "--json")
+	if out["source_kind"] != "telegram" || out["inserted_items"].(float64) != 1 {
+		t.Fatalf("crawl telegram = %v", out)
+	}
+	search := runJSON(t, "search", "compatibility fixture", "--source", "telegram", "--json")
+	if len(search["results"].([]any)) != 1 {
+		t.Fatalf("telegram search = %v", search)
+	}
+	args, err := os.ReadFile(argsFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotArgs := string(args)
+	for _, want := range []string{"--json messages", "--after 2026-07-01", "--limit 7", "--chat Fixture"} {
+		if !strings.Contains(gotArgs, want) {
+			t.Fatalf("telecrawl args %q missing %q", gotArgs, want)
+		}
+	}
+	if strings.Contains(gotArgs, "--since") {
+		t.Fatalf("telecrawl received unmapped --since: %q", gotArgs)
+	}
+
+	dry := runJSON(t, "crawl", "telegram", "--dry-run", "--json")
+	if dry["dry_run"] != true || dry["generated_records"].(float64) != 1 {
+		t.Fatalf("telegram dry run = %v", dry)
+	}
+}
+
+func TestCrawlTelegramPropagatesExporterStderr(t *testing.T) {
+	withTempHome(t)
+	runOK(t, "init")
+	binDir := t.TempDir()
+	writeFakeTelecrawl(t, binDir, "#!/bin/sh\necho 'fixture telecrawl failure' >&2\nexit 23\n")
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	code, _, stderr := run("crawl", "telegram", "--dry-run")
+	if code == 0 || !strings.Contains(stderr, "fixture telecrawl failure") {
+		t.Fatalf("code=%d stderr=%q", code, stderr)
 	}
 }
 
@@ -571,27 +695,60 @@ func TestSessionsListAndSearch(t *testing.T) {
 func TestCrawlCursorImportsFromDefaultRoot(t *testing.T) {
 	withTempHome(t)
 	runOK(t, "init")
-	// withTempHome points XDG_CONFIG_HOME at <home>/.config, so the default
-	// Cursor root is <home>/.config/cursor; `crawl cursor` finds it with no path.
-	root := filepath.Join(os.Getenv("XDG_CONFIG_HOME"), "cursor")
-	mustWrite(t, filepath.Join(root, "prompt_history.json"), `["fix the auth timeout bug","release audit checklist"]`)
-	mustWrite(t, filepath.Join(root, "chats", "abc123", "meta.json"), `{"id":"abc123","title":"Auth timeout investigation","createdAt":"2026-06-01T00:00:00Z"}`)
+	root := filepath.Join(os.Getenv("XDG_CONFIG_HOME"), "Cursor", "User")
+	dbPath := filepath.Join(root, "globalStorage", "conversation-search.db")
+	if err := os.MkdirAll(filepath.Dir(dbPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture, err := os.ReadFile(repoPath(t, "testdata/harnesses/cursor-conversations.fixture.sql"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(string(fixture)); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
 
 	runOK(t, "crawl", "cursor", "--json")
 
-	sessions := runJSON(t, "sessions", "search", "auth timeout", "--source", "cursor", "--json")
+	sessions := runJSON(t, "sessions", "search", "migration checklist", "--source", "cursor", "--json")
 	hits := sessions["sessions"].([]any)
 	if len(hits) != 1 {
 		t.Fatalf("cursor session search = %v", sessions)
 	}
 	hit := hits[0].(map[string]any)
-	if hit["raw_path"] == "" || !strings.Contains(hit["snippet"].(string), "Auth") {
+	if hit["raw_path"] != dbPath || !strings.Contains(hit["snippet"].(string), "migration") {
 		t.Fatalf("cursor session hit missing locator/snippet: %v", hit)
 	}
 
-	prompts := runJSON(t, "search", "release audit", "--source", "cursor", "--json")
-	if len(prompts["results"].([]any)) == 0 {
-		t.Fatalf("cursor prompt-history search returned nothing: %v", prompts)
+}
+
+func TestCrawlSessionsImportsGrokFromDefaultRoot(t *testing.T) {
+	withTempHome(t)
+	runOK(t, "init")
+	fixtureRoot := repoPath(t, "testdata/harnesses/grok-sessions.fixture/%2Fworkspaces%2Fdemo-project/demo-session-001")
+	root := filepath.Join(os.Getenv("HOME"), ".grok", "sessions", "%2Fworkspaces%2Fdemo-project", "demo-session-001")
+	for _, name := range []string{"summary.json", "chat_history.jsonl"} {
+		raw, err := os.ReadFile(filepath.Join(fixtureRoot, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		mustWrite(t, filepath.Join(root, name), string(raw))
+	}
+
+	out := runJSON(t, "crawl", "sessions", "--json")
+	if out["inserted_items"].(float64) != 6 {
+		t.Fatalf("grok discovered import = %v", out)
+	}
+	got := runJSON(t, "sessions", "search", "fixture crawl contract", "--source", "grok", "--json")
+	if len(got["sessions"].([]any)) != 1 {
+		t.Fatalf("grok session search = %v", got)
 	}
 }
 
@@ -1825,10 +1982,17 @@ func TestMissingExternalToolDiagnostics(t *testing.T) {
 		},
 		{
 			name:     "crawl github dry-run",
-			args:     []string{"crawl", "github", "--dry-run"},
+			args:     []string{"crawl", "github", "--repo", "escoffier-labs/miseledger", "--dry-run"},
 			tool:     "gitcrawl",
 			context:  "crawl github",
 			hintPart: "install gitcrawl",
+		},
+		{
+			name:     "crawl telegram dry-run",
+			args:     []string{"crawl", "telegram", "--dry-run"},
+			tool:     "telecrawl",
+			context:  "crawl telegram",
+			hintPart: "install telecrawl",
 		},
 	}
 	for _, tc := range cases {
