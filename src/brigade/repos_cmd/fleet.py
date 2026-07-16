@@ -797,9 +797,19 @@ def _repo_checks(summary: dict[str, Any]) -> list[dict[str, Any]]:
     return checks
 
 
-def scan_payload(target: Path) -> dict[str, Any]:
+def scan_payload(
+    target: Path,
+    *,
+    entries: list[constants.RepoEntry] | None = None,
+    errors: list[str] | None = None,
+    config_loaded: bool | None = None,
+) -> dict[str, Any]:
     target = target.expanduser().resolve()
-    entries, errors, config_loaded = _load_config(target)
+    if entries is None:
+        entries, errors, config_loaded = _load_config(target)
+    else:
+        errors = list(errors or [])
+        config_loaded = bool(config_loaded)
     repos = _repo_summaries(entries)
     checks: list[dict[str, Any]] = []
     if errors:

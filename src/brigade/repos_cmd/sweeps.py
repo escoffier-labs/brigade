@@ -8,9 +8,10 @@ import re
 import shutil
 import subprocess
 import sys
+from collections.abc import Iterable
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import redirect_stdout
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from io import StringIO
 from pathlib import Path
@@ -109,17 +110,103 @@ def _list_or_empty(value: object) -> list[Any]:
     return value if isinstance(value, list) else []
 
 
-def _sweeps(target: Path) -> list[dict[str, Any]]:
+def _list_sweep_dirs_newest_first(target: Path) -> list[Path]:
     root = _sweeps_root(target)
+    if not root.is_dir():
+        return []
+    dirs = [child for child in root.iterdir() if child.is_dir()]
+    dirs.sort(key=lambda path: path.name, reverse=True)
+    return dirs
+
+
+def _has_timestamp_sweep_name(path: Path) -> bool:
+    return re.match(r"^\d{8}-\d{6}(?:-|$)", path.name) is not None
+
+
+def _sweeps(target: Path) -> list[dict[str, Any]]:
     sweeps: list[dict[str, Any]] = []
-    if root.is_dir():
-        for child in root.iterdir():
-            if child.is_dir():
-                payload = _read_sweep(child)
-                if payload is not None:
-                    sweeps.append(payload)
+    for child in _list_sweep_dirs_newest_first(target):
+        payload = _read_sweep(child)
+        if payload is not None:
+            sweeps.append(payload)
     sweeps.sort(key=lambda item: str(item.get("started_at") or item.get("sweep_id") or ""), reverse=True)
     return sweeps
+
+
+@dataclass
+class HealthSweepSnapshot:
+    latest: dict[str, Any] | None = None
+    receipt_index: dict[tuple[str, str], dict[str, Any]] = field(default_factory=dict)
+
+
+def _required_health_receipt_keys(entries: list[constants.RepoEntry]) -> set[tuple[str, str]]:
+    keys: set[tuple[str, str]] = set()
+    for entry in entries:
+        if not entry.enabled:
+            continue
+        for command in entry.health_commands:
+            keys.add((entry.repo_id, command.label))
+    return keys
+
+
+def _index_sweep_health_receipts(
+    sweep: dict[str, Any],
+    receipt_index: dict[tuple[str, str], dict[str, Any]],
+    required: set[tuple[str, str]],
+) -> None:
+    sweep_id = sweep.get("sweep_id")
+    sweep_status = sweep.get("status")
+    sweep_path_label = sweep.get("path_label") or sweep_id
+    for repo in _list_or_empty(sweep.get("repos")):
+        if not isinstance(repo, dict):
+            continue
+        repo_id = str(repo.get("repo_id") or "")
+        if not repo_id:
+            continue
+        for command in _list_or_empty(repo.get("commands")):
+            if not isinstance(command, dict):
+                continue
+            label = str(command.get("label") or "")
+            if not label:
+                continue
+            key = (repo_id, label)
+            if key not in required or key in receipt_index:
+                continue
+            receipt_index[key] = {
+                "sweep_id": sweep_id,
+                "sweep_status": sweep_status,
+                "sweep_path_label": sweep_path_label,
+                "repo_id": repo_id,
+                "label": label,
+                "status": command.get("status"),
+                "exit_code": command.get("exit_code"),
+                "timed_out": command.get("timed_out"),
+                "started_at": command.get("started_at"),
+                "completed_at": command.get("completed_at"),
+                "stdout_log_label": command.get("stdout_log_label"),
+                "stderr_log_label": command.get("stderr_log_label"),
+            }
+
+
+def _health_sweep_snapshot(target: Path, entries: list[constants.RepoEntry]) -> HealthSweepSnapshot:
+    required = _required_health_receipt_keys(entries)
+    latest: dict[str, Any] | None = None
+    receipt_index: dict[tuple[str, str], dict[str, Any]] = {}
+    sweep_dirs = _list_sweep_dirs_newest_first(target)
+    ordered_sweeps: Iterable[dict[str, Any] | None]
+    if all(_has_timestamp_sweep_name(path) for path in sweep_dirs):
+        ordered_sweeps = (_read_sweep(path) for path in sweep_dirs)
+    else:
+        ordered_sweeps = _sweeps(target)
+    for sweep in ordered_sweeps:
+        if sweep is None:
+            continue
+        if latest is None:
+            latest = sweep
+        _index_sweep_health_receipts(sweep, receipt_index, required)
+        if not required or required.issubset(receipt_index):
+            break
+    return HealthSweepSnapshot(latest=latest, receipt_index=receipt_index)
 
 
 def latest_sweep(target: Path) -> dict[str, Any] | None:
@@ -155,35 +242,21 @@ def _commands_for_entry(entry: constants.RepoEntry) -> list[constants.SweepComma
     return [*_sweep_commands(), *entry.health_commands]
 
 
-def _latest_command_receipt(target: Path, repo_id: str, label: str) -> dict[str, Any] | None:
-    for sweep in _sweeps(target):
-        repos = _list_or_empty(sweep.get("repos"))
-        for repo in repos:
-            if not isinstance(repo, dict) or repo.get("repo_id") != repo_id:
-                continue
-            commands = _list_or_empty(repo.get("commands"))
-            for command in commands:
-                if isinstance(command, dict) and command.get("label") == label:
-                    return {
-                        "sweep_id": sweep.get("sweep_id"),
-                        "sweep_status": sweep.get("status"),
-                        "sweep_path_label": sweep.get("path_label") or sweep.get("sweep_id"),
-                        "repo_id": repo_id,
-                        "label": label,
-                        "status": command.get("status"),
-                        "exit_code": command.get("exit_code"),
-                        "timed_out": command.get("timed_out"),
-                        "started_at": command.get("started_at"),
-                        "completed_at": command.get("completed_at"),
-                        "stdout_log_label": command.get("stdout_log_label"),
-                        "stderr_log_label": command.get("stderr_log_label"),
-                    }
-    return None
-
-
-def _health_command_registry_payload(target: Path) -> dict[str, Any]:
+def _health_command_registry_payload(
+    target: Path,
+    *,
+    entries: list[constants.RepoEntry] | None = None,
+    errors: list[str] | None = None,
+    config_loaded: bool | None = None,
+    health_snapshot: HealthSweepSnapshot | None = None,
+) -> dict[str, Any]:
     target = target.expanduser().resolve()
-    entries, errors, config_loaded = fleet._load_config(target)
+    if entries is None:
+        entries, errors, config_loaded = fleet._load_config(target)
+    else:
+        errors = list(errors or [])
+        config_loaded = bool(config_loaded)
+    snapshot = health_snapshot or _health_sweep_snapshot(target, entries)
     checks: list[dict[str, Any]] = []
     repos: list[dict[str, Any]] = []
     if errors:
@@ -199,6 +272,7 @@ def _health_command_registry_payload(target: Path) -> dict[str, Any]:
         checks.append(
             {"status": constants.OK, "name": "repo_health_command_config", "detail": constants.CONFIG_REL_PATH}
         )
+    receipt_index = snapshot.receipt_index
     for entry in entries:
         if not entry.enabled:
             continue
@@ -209,7 +283,7 @@ def _health_command_registry_payload(target: Path) -> dict[str, Any]:
             if command.label in seen_labels:
                 duplicate_labels.add(command.label)
             seen_labels.add(command.label)
-            receipt = _latest_command_receipt(target, entry.repo_id, command.label)
+            receipt = receipt_index.get((entry.repo_id, command.label))
             stale = False
             age_hours: float | None = None
             if receipt is None:
@@ -691,9 +765,13 @@ def sweep_closeout(
     return emit(payload, json_output, text_lines, 0)
 
 
-def sweep_health(target: Path) -> dict[str, Any]:
+def sweep_health(
+    target: Path,
+    *,
+    health_snapshot: HealthSweepSnapshot | None = None,
+) -> dict[str, Any]:
     target = target.expanduser().resolve()
-    latest = latest_sweep(target)
+    latest = health_snapshot.latest if health_snapshot is not None else latest_sweep(target)
     checks: list[dict[str, Any]] = []
     if latest is None:
         checks.append(
