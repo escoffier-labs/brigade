@@ -1,5 +1,7 @@
 # CLAUDE.md - Claude Code Rules
 
+@AGENTS.md
+
 ## Project rules
 
 - Follow repo-local `AGENTS.md` when present.

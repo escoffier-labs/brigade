@@ -60,6 +60,19 @@ def test_verify_run_capture_records_outcome_in_one_step(tmp_path, capsys):
     assert records[0].artifact_id == "skill-x" and records[0].signal_value == 1
 
 
+def test_verify_run_stamps_valid_claude_session_fingerprint(tmp_path, capsys, monkeypatch):
+    from brigade.claude_hooks.runtime import _session_fingerprint
+
+    _init_git_repo(tmp_path)
+    fingerprint = _session_fingerprint("session-from-runtime")
+    monkeypatch.setenv("BRIGADE_CLAUDE_SESSION", fingerprint)
+
+    assert work_cmd.verify_run(target=tmp_path, commands=["python3 -c \"print('ok')\""], json_output=True) == 0
+
+    receipt = json.loads(capsys.readouterr().out)
+    assert receipt["harness_session"] == {"harness": "claude", "fingerprint": fingerprint}
+
+
 def test_prune_verify_runs_keeps_newest(tmp_path):
     from brigade.work_cmd import helpers, verification
 

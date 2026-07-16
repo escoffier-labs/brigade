@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Project-scoped Claude Code work-loop hooks can brief once per session and repository, route direct verification commands through Brigade, and check completion receipts after write work. `brigade work hooks install|update|status|uninstall` manages the package without replacing unrelated Claude settings or hooks.
 - Route as a third outcome-ledger cohort axis (Phase 1: record and surface, no scoring change). `brigade outcome capture` stamps a coarse route manifest (`followed`, `path`, `size`, sorted `signals`, `coverage`) and a `route_fingerprint` on each record, resolved from the owning `brigade run`'s route. A bare verify-capture with no owning run is the honest unrouted cohort. `brigade outcome explain` splits records into routed-vs-unrouted cohorts with a help-rate, so the ledger can finally answer whether runs that followed a composed route verify greener. Ratchet unchanged; see `docs/design/route-outcome-cohort.md`.
 
 ### Added

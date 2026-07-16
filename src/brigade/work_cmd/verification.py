@@ -308,6 +308,9 @@ def _run_verify_commands(target: Path, commands: list[str | list[str]], timeout:
         "evidence": _verification_evidence_payload(target),
         "commands": [],
     }
+    claude_session = os.environ.get("BRIGADE_CLAUDE_SESSION")
+    if claude_session and re.fullmatch(r"[0-9a-f]{16}", claude_session):
+        receipt["harness_session"] = {"harness": "claude", "fingerprint": claude_session}
     rc = 0
     for index, command in enumerate(commands, start=1):
         if isinstance(command, list):
