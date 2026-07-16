@@ -56,6 +56,45 @@ def test_list_bundles_sorts_newest_first(tmp_path: Path):
     assert [b["report_id"] for b in bundles] == ["new", "old"]
 
 
+def test_latest_bundles_sorts_newest_first_when_dir_names_diverge(tmp_path: Path):
+    _bundle(tmp_path, "old", {"report_id": "old", "created_at": "2026-01-01"})
+    _bundle(tmp_path, "new", {"report_id": "new", "created_at": "2026-06-01"})
+    bundles = reportstore.latest_bundles([tmp_path], _read, id_field="report_id", limit=1)
+    assert [b["report_id"] for b in bundles] == ["new"]
+
+
+def test_latest_bundles_limit_preserves_newest_first_order(tmp_path: Path):
+    _bundle(tmp_path, "old", {"report_id": "old", "created_at": "2026-01-01"})
+    _bundle(tmp_path, "mid", {"report_id": "mid", "created_at": "2026-03-01"})
+    _bundle(tmp_path, "new", {"report_id": "new", "created_at": "2026-06-01"})
+    bundles = reportstore.latest_bundles([tmp_path], _read, id_field="report_id", limit=2)
+    assert [b["report_id"] for b in bundles] == ["new", "mid"]
+
+
+def test_latest_bundles_timestamp_prefixed_decodes_only_limit_payloads(tmp_path: Path):
+    decode_count = 0
+
+    def counting_read(child: Path) -> dict | None:
+        nonlocal decode_count
+        decode_count += 1
+        return _read(child)
+
+    history_count = 30
+    limit = 2
+    for index in range(history_count):
+        minute = index % 60
+        hour = 12 + index // 60
+        report_id = f"20260716-{hour:02d}{minute:02d}00-operator-report-{index:03d}"
+        created_at = f"2026-07-16T{hour:02d}:{minute:02d}:00+00:00"
+        _bundle(tmp_path, report_id, {"report_id": report_id, "created_at": created_at})
+
+    bundles = reportstore.latest_bundles([tmp_path], counting_read, id_field="report_id", limit=limit)
+
+    assert decode_count == limit
+    assert len(bundles) == limit
+    assert bundles[0]["report_id"].endswith(f"-{history_count - 1:03d}")
+
+
 def test_list_bundles_skips_missing_roots_and_skip_child(tmp_path: Path):
     _bundle(tmp_path, "keep", {"report_id": "keep", "created_at": "2026-01-01"})
     _bundle(tmp_path, "drop", {"report_id": "drop", "created_at": "2026-01-02"})

@@ -464,8 +464,12 @@ def _notification_candidates(target: Path) -> list[dict[str, Any]]:
     ]
 
 
-def _report_candidate(target: Path) -> list[dict[str, Any]]:
-    health = center_cmd.report_health(target)
+def _report_candidate(
+    target: Path,
+    *,
+    operator_report_health: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    health = operator_report_health if operator_report_health is not None else center_cmd.report_health(target)
     top = health.get("top_issue") if isinstance(health.get("top_issue"), dict) else None
     if not top:
         return []
@@ -684,7 +688,12 @@ def _phase_session_candidates(target: Path) -> list[dict[str, Any]]:
     return candidates
 
 
-def _all_candidates(target: Path, diagnostics: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
+def _all_candidates(
+    target: Path,
+    diagnostics: list[dict[str, Any]] | None = None,
+    *,
+    operator_report_health: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
     config, _ = _load_config(target)
     candidates: list[dict[str, Any]] = []
     sections = [
@@ -701,7 +710,14 @@ def _all_candidates(target: Path, diagnostics: list[dict[str, Any]] | None = Non
         ("operator-report", _report_candidate),
     ]
     for label, builder in sections:
-        result, check = _bounded_status_call(label, lambda builder=builder: builder(target), [])
+        if label == "operator-report":
+            result, check = _bounded_status_call(
+                label,
+                lambda builder=builder: builder(target, operator_report_health=operator_report_health),
+                [],
+            )
+        else:
+            result, check = _bounded_status_call(label, lambda builder=builder: builder(target), [])
         if diagnostics is not None:
             diagnostics.append(check)
         if isinstance(result, list):

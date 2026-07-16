@@ -22,6 +22,7 @@ write_json because the train CLOSEOUT.json intentionally carries no
 
 from __future__ import annotations
 
+import re
 import shutil
 from pathlib import Path
 from typing import Any, Callable, Iterable
@@ -29,6 +30,7 @@ from typing import Any, Callable, Iterable
 from .localio import read_json_dict, write_json
 
 CLOSEOUT_STATUSES = frozenset({"reviewed", "deferred", "superseded", "archived"})
+_TIMESTAMP_PREFIXED_DIR = re.compile(r"^\d{8}-\d{6}")
 
 
 def bundle_json_path(path: Path, evidence_name: str) -> Path:
@@ -45,6 +47,26 @@ def read_bundle(path: Path, evidence_name: str) -> dict[str, Any] | None:
     return payload
 
 
+def _bundle_dirs(
+    roots: Iterable[Path],
+    *,
+    skip_child: Callable[[str], bool] | None = None,
+) -> list[Path]:
+    children: list[Path] = []
+    for root in roots:
+        if not root.is_dir():
+            continue
+        for child in root.iterdir():
+            if child.is_dir() and (skip_child is None or not skip_child(child.name)):
+                children.append(child)
+    children.sort(key=lambda path: path.name, reverse=True)
+    return children
+
+
+def _dir_names_are_timestamp_prefixed(children: list[Path]) -> bool:
+    return bool(children) and all(_TIMESTAMP_PREFIXED_DIR.match(child.name) for child in children)
+
+
 def list_bundles(
     roots: Iterable[Path],
     read: Callable[[Path], dict[str, Any] | None],
@@ -54,16 +76,53 @@ def list_bundles(
 ) -> list[dict[str, Any]]:
     """Read the bundle dirs under roots via read, newest first by created_at then id_field."""
     bundles: list[dict[str, Any]] = []
-    for root in roots:
-        if not root.is_dir():
-            continue
-        for child in root.iterdir():
-            if not child.is_dir() or (skip_child is not None and skip_child(child.name)):
-                continue
+    for child in _bundle_dirs(roots, skip_child=skip_child):
+        payload = read(child)
+        if payload is not None:
+            bundles.append(payload)
+    bundles.sort(key=lambda item: str(item.get("created_at") or item.get(id_field) or ""), reverse=True)
+    return bundles
+
+
+def latest_bundles(
+    roots: Iterable[Path],
+    read: Callable[[Path], dict[str, Any] | None],
+    *,
+    id_field: str,
+    limit: int = 1,
+    skip_child: Callable[[str], bool] | None = None,
+) -> list[dict[str, Any]]:
+    """Read up to limit newest bundles without decoding the full history when possible.
+
+    Production bundle dirs are timestamp-prefixed and sortable by name; in that case
+    only the newest ``limit`` dirs are decoded. Legacy or arbitrary dir names fall
+    back to created_at ordering, which may require decoding every bundle.
+    """
+    if limit < 1:
+        return []
+
+    def sort_key(item: dict[str, Any]) -> str:
+        return str(item.get("created_at") or item.get(id_field) or "")
+
+    children = _bundle_dirs(roots, skip_child=skip_child)
+    bundles: list[dict[str, Any]] = []
+    if _dir_names_are_timestamp_prefixed(children):
+        for child in children:
             payload = read(child)
             if payload is not None:
                 bundles.append(payload)
-    bundles.sort(key=lambda item: str(item.get("created_at") or item.get(id_field) or ""), reverse=True)
+            if len(bundles) >= limit:
+                break
+    else:
+        for child in children:
+            payload = read(child)
+            if payload is None:
+                continue
+            bundles.append(payload)
+            if len(bundles) > limit:
+                bundles.sort(key=sort_key, reverse=True)
+                del bundles[limit:]
+    bundles.sort(key=sort_key, reverse=True)
     return bundles
 
 

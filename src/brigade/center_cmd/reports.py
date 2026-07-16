@@ -77,8 +77,26 @@ def _reports(target: Path, *, include_archived: bool = False) -> list[dict[str, 
     )
 
 
+def _latest_reports(
+    target: Path,
+    *,
+    limit: int = 1,
+    include_archived: bool = False,
+) -> list[dict[str, Any]]:
+    roots = [_reports_root(target)]
+    if include_archived:
+        roots.append(_reports_archive_root(target))
+    return reportstore.latest_bundles(
+        roots,
+        _read_report,
+        id_field="report_id",
+        limit=limit,
+        skip_child=lambda name: name.endswith("archive"),
+    )
+
+
 def latest_report(target: Path) -> dict[str, Any] | None:
-    reports = _reports(target)
+    reports = _latest_reports(target, limit=1)
     return reports[0] if reports else None
 
 
@@ -409,10 +427,14 @@ def _write_report_bundle(report_dir: Path, payload: dict[str, Any]) -> None:
     )
 
 
-def report_health(target: Path) -> dict[str, Any]:
+def report_health(
+    target: Path,
+    *,
+    reports: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     target = target.expanduser().resolve()
-    latest = latest_report(target)
-    reports = _reports(target)
+    loaded_reports = reports if reports is not None else _latest_reports(target, limit=2)
+    latest = loaded_reports[0] if loaded_reports else None
     checks: list[dict[str, Any]] = []
     if latest is None:
         checks.append(
@@ -483,9 +505,9 @@ def report_health(target: Path) -> dict[str, Any]:
             }
         )
     latest_diff = latest_report_diff(target)
-    if len(reports) >= 2:
-        compare_report = reports[0]
-        base_report = reports[1]
+    if len(loaded_reports) >= 2:
+        compare_report = loaded_reports[0]
+        base_report = loaded_reports[1]
         if latest_diff is None:
             checks.append(
                 {
