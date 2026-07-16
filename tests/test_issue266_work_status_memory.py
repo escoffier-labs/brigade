@@ -155,8 +155,7 @@ def test_health_sweep_snapshot_retains_only_required_receipts(tmp_path):
     sweep = repos_sweeps._read_sweep(sweep_dir)
     assert sweep is not None
     sweep["repos"][0]["commands"].extend(
-        {"label": f"removed-health-{index}", "status": "completed", "exit_code": 0}
-        for index in range(20)
+        {"label": f"removed-health-{index}", "status": "completed", "exit_code": 0} for index in range(20)
     )
     write_json(sweep_dir / "sweep.json", sweep)
     entries, issues, _config = repos_fleet._load_config(target)
