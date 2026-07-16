@@ -489,7 +489,14 @@ def _compact_code_graph_delta(receipt: dict) -> dict | None:
         return None
     compact = {
         key: delta[key]
-        for key in ("status", "summary", "changed_symbol_count", "edge_churn", "raw_counts")
+        for key in (
+            "status",
+            "summary",
+            "changed_symbol_count",
+            "edge_churn",
+            "raw_counts",
+            "stale_graph_used",
+        )
         if key in delta
     }
     return compact or None
