@@ -197,7 +197,7 @@ def test_repos_friction_agent_association_requires_repo_path_boundary(tmp_path, 
     service_api.mkdir()
     _write_config(
         tmp_path,
-        [("service", "service", service), ("service-api", "service api", service_api)],
+        [("root", "service", service), ("api", "service api", service_api)],
     )
 
     def fake_scan_payload(**kwargs):
@@ -236,7 +236,9 @@ def test_repos_friction_agent_association_requires_repo_path_boundary(tmp_path, 
     assert repos_cmd.friction_scan(target=tmp_path, include_agent_logs=True, json_output=True) == 0
     payload = json.loads(capsys.readouterr().out)
     signature = next(item for item in payload["signatures"] if item["id"] == "agent-prefix-failure")
-    assert [repo["repo_id"] for repo in signature["repos"]] == ["service-api"]
+    assert [repo["repo_id"] for repo in signature["repos"]] == ["api"]
+    assert "api/src/worker.py" in signature["safe_summary"]
+    assert "root-api" not in signature["safe_summary"]
 
 
 def test_repos_friction_sanitizes_global_agent_log_roots(tmp_path, monkeypatch, capsys):
@@ -415,4 +417,57 @@ def test_repos_friction_marks_unassociated_history_unknown_when_agent_scan_fails
     second = json.loads(capsys.readouterr().out)
 
     assert {item["friction_type"] for item in second["comparison"]["unknown"]} == {"auth"}
+    assert second["comparison"]["cleared"] == []
+
+
+def test_repos_friction_keeps_agent_associated_history_unknown_when_next_scan_omits_logs(tmp_path, monkeypatch, capsys):
+    alpha = tmp_path / "repo-alpha"
+    beta = tmp_path / "repo-beta"
+    alpha.mkdir()
+    beta.mkdir()
+    _write_config(tmp_path, [("alpha", "service alpha", alpha), ("beta", "service beta", beta)])
+
+    def fake_scan_payload(**kwargs):
+        families = {
+            family: {"accepted": 0, "grouped": 0, "rejected": 0, "truncated": 0}
+            for family in friction_cmd.SOURCE_FAMILIES
+        }
+        candidates = []
+        if kwargs.get("include_agent_logs"):
+            candidates.append(
+                {
+                    "id": "shared-agent-failure",
+                    "friction_type": "tool_failure",
+                    "source_family": "regex",
+                    "evidence": {
+                        "path": "agent-log",
+                        "line": 1,
+                        "snippet": f"one command failed in {alpha} and {beta}",
+                    },
+                }
+            )
+        return (
+            {
+                "generated_at": "2026-07-16T12:00:00+00:00",
+                "files_scanned": 1 if candidates else 0,
+                "files_skipped": 0,
+                "candidate_count": len(candidates),
+                "counts": {"by_source_family": families},
+                "candidates": candidates,
+            },
+            0,
+        )
+
+    monkeypatch.setattr(friction_cmd, "scan_payload", fake_scan_payload)
+
+    assert repos_cmd.friction_scan(target=tmp_path, include_agent_logs=True, json_output=True) == 0
+    first = json.loads(capsys.readouterr().out)
+    signature = next(item for item in first["signatures"] if item["id"] == "shared-agent-failure")
+    assert signature["occurrence_count"] == 1
+    assert [repo["occurrence_count"] for repo in signature["repos"]] == [1, 1]
+    assert signature["agent_evidence"] is True
+
+    assert repos_cmd.friction_scan(target=tmp_path, include_agent_logs=False, json_output=True) == 0
+    second = json.loads(capsys.readouterr().out)
+    assert {item["friction_type"] for item in second["comparison"]["unknown"]} == {"tool_failure"}
     assert second["comparison"]["cleared"] == []

@@ -136,7 +136,10 @@ def _haystack_mentions_repo_path(haystack: str, repo_path: str) -> bool:
         if pos == -1:
             return False
         end = pos + len(repo_path)
-        if end == len(haystack) or haystack[end] in "/\\":
+        if end == len(haystack):
+            return True
+        next_char = haystack[end]
+        if next_char in "/\\" or not (next_char.isalnum() or next_char in "._-"):
             return True
         start = pos + 1
 
@@ -156,6 +159,8 @@ def _aggregate_signatures(
         entry: constants.RepoEntry,
         *,
         generated_at: str | None,
+        agent_evidence: bool = False,
+        count_signature: bool = True,
     ) -> None:
         key = _signature_key(candidate)
         count = _occurrence_count(candidate)
@@ -167,10 +172,13 @@ def _aggregate_signatures(
                 "occurrence_count": 0,
                 "repos": {},
                 "latest_evidence_at": generated_at,
+                "agent_evidence": False,
             }
             order.append(key)
         bucket = grouped[key]
-        bucket["occurrence_count"] += count
+        if count_signature:
+            bucket["occurrence_count"] += count
+        bucket["agent_evidence"] = bool(bucket["agent_evidence"] or agent_evidence)
         if generated_at and (bucket.get("latest_evidence_at") is None or generated_at > bucket["latest_evidence_at"]):
             bucket["latest_evidence_at"] = generated_at
         if entry.repo_id not in bucket["repo_ids"]:
@@ -214,17 +222,25 @@ def _aggregate_signatures(
                             "occurrence_count": 0,
                             "repos": {},
                             "latest_evidence_at": generated_at or None,
+                            "agent_evidence": True,
                         }
                         order.append(key)
                     bucket = grouped[key]
                     bucket["occurrence_count"] += count
+                    bucket["agent_evidence"] = True
                     if generated_at and (
                         bucket.get("latest_evidence_at") is None or generated_at > bucket["latest_evidence_at"]
                     ):
                         bucket["latest_evidence_at"] = generated_at
                     continue
-                for entry in matched:
-                    _touch(candidate, entry, generated_at=generated_at or None)
+                for index, entry in enumerate(matched):
+                    _touch(
+                        candidate,
+                        entry,
+                        generated_at=generated_at or None,
+                        agent_evidence=True,
+                        count_signature=index == 0,
+                    )
 
     signatures: list[dict[str, Any]] = []
     for key in sorted(order):
@@ -238,6 +254,7 @@ def _aggregate_signatures(
                 "repo_count": len(bucket["repo_ids"]),
                 "occurrence_count": bucket["occurrence_count"],
                 "latest_evidence_at": bucket.get("latest_evidence_at"),
+                "agent_evidence": bool(bucket["agent_evidence"]),
                 "repos": repos,
             }
         )
@@ -271,6 +288,7 @@ def _signature_record_fields(signature: dict[str, Any]) -> dict[str, Any]:
         "repo_count": signature.get("repo_count"),
         "occurrence_count": signature.get("occurrence_count"),
         "latest_evidence_at": signature.get("latest_evidence_at"),
+        "agent_evidence": signature.get("agent_evidence") is True,
     }
     repos = signature.get("repos")
     if isinstance(repos, list):
@@ -320,7 +338,9 @@ def _classify_trends(
         if isinstance(prior_repos, list):
             repo_ids = [str(repo.get("repo_id") or "") for repo in prior_repos if isinstance(repo, dict)]
         bucket = _signature_record_fields(previous_signature)
-        if repo_ids:
+        if previous_signature.get("agent_evidence") is True and agent_logs_status != "completed":
+            comparison["unknown"].append(bucket)
+        elif repo_ids:
             unresolved = any(repo_status.get(repo_id) != "completed" for repo_id in repo_ids if repo_id)
             if unresolved:
                 comparison["unknown"].append(bucket)
@@ -363,7 +383,7 @@ def _path_safe_value(value: object, *, target: Path, entries: list[constants.Rep
         replacements.append((str(entry.path), entry.repo_id))
         replacements.append((str(entry.path.resolve()), entry.repo_id))
     replacements.extend(_agent_log_root_replacements())
-    for private, label in replacements:
+    for private, label in sorted(replacements, key=lambda item: len(item[0]), reverse=True):
         if private:
             rendered = rendered.replace(private, label)
     return rendered
