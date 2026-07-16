@@ -980,7 +980,7 @@ def test_work_verify_graphtrail_delta_rejects_invalid_per_invocation_timeout_ove
 
     assert rc == 2
     assert "error:" in err
-    assert "graphtrail_delta_timeout_seconds must be a positive number" in err
+    assert "--graphtrail-timeout must be a positive number" in err
     assert "Traceback" not in err
     assert _count_verify_run_dirs(tmp_path) == 0
 

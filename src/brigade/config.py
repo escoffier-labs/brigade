@@ -36,7 +36,10 @@ def validate_graphtrail_delta_timeout(value: Any) -> float:
 
 def resolve_graphtrail_delta_timeout(target: Path, cli_override: float | None = None) -> float:
     if cli_override is not None:
-        return validate_graphtrail_delta_timeout(cli_override)
+        try:
+            return validate_graphtrail_delta_timeout(cli_override)
+        except ValueError:
+            raise ValueError("--graphtrail-timeout must be a positive number") from None
     cfg = load_config(target)
     if cfg is not None:
         return cfg.graphtrail_delta_timeout_seconds
