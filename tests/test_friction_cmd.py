@@ -1,5 +1,6 @@
 import json
-from datetime import datetime, timezone
+import os
+from datetime import datetime, timedelta, timezone
 
 from brigade import cli
 from brigade import friction_cmd
@@ -516,3 +517,34 @@ def test_friction_scan_groups_regex_cascade_from_one_command_log(tmp_path, capsy
     assert candidate["source_family"] == "regex"
     assert len(candidate["evidence"]["children"]) == 2
     assert payload["counts"]["by_source_family"]["regex"]["grouped"] == 1
+
+
+def test_friction_scan_excludes_structured_receipts_older_than_days(tmp_path, monkeypatch, capsys):
+    now = datetime(2026, 7, 16, 12, 0, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(friction_cmd, "_now", lambda: now)
+    run = tmp_path / ".brigade" / "work" / "verify-runs" / "old-failure"
+    run.mkdir(parents=True)
+    receipt = run / "receipt.json"
+    receipt.write_text(
+        json.dumps(
+            {
+                "status": "failed",
+                "commands": [
+                    {
+                        "command": "pytest -q",
+                        "exit_code": 1,
+                        "status": "failed",
+                        "stderr_summary": "compiler failed",
+                    }
+                ],
+            }
+        )
+    )
+    old = (now - timedelta(days=90)).timestamp()
+    os.utime(receipt, (old, old))
+
+    assert cli.main(["friction", "scan", "--target", str(tmp_path), "--days", "1", "--json"]) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["candidate_count"] == 0
+    assert payload["counts"]["by_source_family"]["verification"]["accepted"] == 0

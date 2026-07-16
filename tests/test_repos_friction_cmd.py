@@ -190,6 +190,99 @@ def test_repos_friction_scans_global_agent_logs_once(tmp_path, monkeypatch, caps
     assert payload["agent_logs"]["candidate_count"] == 2
 
 
+def test_repos_friction_agent_association_requires_repo_path_boundary(tmp_path, monkeypatch, capsys):
+    service = tmp_path / "private-svc"
+    service_api = tmp_path / "private-svc-api"
+    service.mkdir()
+    service_api.mkdir()
+    _write_config(
+        tmp_path,
+        [("service", "service", service), ("service-api", "service api", service_api)],
+    )
+
+    def fake_scan_payload(**kwargs):
+        families = {
+            family: {"accepted": 0, "grouped": 0, "rejected": 0, "truncated": 0}
+            for family in friction_cmd.SOURCE_FAMILIES
+        }
+        candidates = []
+        if kwargs.get("include_agent_logs"):
+            candidates.append(
+                {
+                    "id": "agent-prefix-failure",
+                    "friction_type": "tool_failure",
+                    "source_family": "regex",
+                    "evidence": {
+                        "path": "agent-log",
+                        "line": 1,
+                        "snippet": f"command failed in {service_api / 'src' / 'worker.py'}",
+                    },
+                }
+            )
+        return (
+            {
+                "generated_at": "2026-07-16T12:00:00+00:00",
+                "files_scanned": 1 if candidates else 0,
+                "files_skipped": 0,
+                "candidate_count": len(candidates),
+                "counts": {"by_source_family": families},
+                "candidates": candidates,
+            },
+            0,
+        )
+
+    monkeypatch.setattr(friction_cmd, "scan_payload", fake_scan_payload)
+
+    assert repos_cmd.friction_scan(target=tmp_path, include_agent_logs=True, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    signature = next(item for item in payload["signatures"] if item["id"] == "agent-prefix-failure")
+    assert [repo["repo_id"] for repo in signature["repos"]] == ["service-api"]
+
+
+def test_repos_friction_sanitizes_global_agent_log_roots(tmp_path, monkeypatch, capsys):
+    alpha = tmp_path / "repo-alpha"
+    alpha.mkdir()
+    _write_config(tmp_path, [("alpha", "service alpha", alpha)])
+    private_agent_root = Path(friction_cmd.DEFAULT_AGENT_LOG_DIRS[0]).expanduser().resolve()
+
+    def fake_scan_payload(**kwargs):
+        families = {
+            family: {"accepted": 0, "grouped": 0, "rejected": 0, "truncated": 0}
+            for family in friction_cmd.SOURCE_FAMILIES
+        }
+        candidates = []
+        if kwargs.get("include_agent_logs"):
+            candidates.append(
+                {
+                    "id": "agent-private-path",
+                    "friction_type": "auth",
+                    "source_family": "regex",
+                    "evidence": {
+                        "path": str(private_agent_root / "sessions" / "run.jsonl"),
+                        "line": 1,
+                        "snippet": f"permission denied in {private_agent_root / 'sessions'}",
+                    },
+                }
+            )
+        return (
+            {
+                "generated_at": "2026-07-16T12:00:00+00:00",
+                "files_scanned": 1 if candidates else 0,
+                "files_skipped": 0,
+                "candidate_count": len(candidates),
+                "counts": {"by_source_family": families},
+                "candidates": candidates,
+            },
+            0,
+        )
+
+    monkeypatch.setattr(friction_cmd, "scan_payload", fake_scan_payload)
+
+    assert repos_cmd.friction_scan(target=tmp_path, include_agent_logs=True, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert str(private_agent_root) not in json.dumps(payload)
+
+
 def test_repos_friction_catches_one_repo_scanner_exception(tmp_path, monkeypatch, capsys):
     alpha = tmp_path / "repo-alpha"
     beta = tmp_path / "repo-beta"

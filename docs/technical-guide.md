@@ -708,6 +708,8 @@ Friction-log commands:
 - `brigade friction scan --include-agent-logs` also scans local Codex and Claude Code session/log directories.
 - `brigade friction scan --import-candidates` appends candidates to the work import inbox with `source=friction-scan`.
 - `brigade friction add "..."` manually captures a friction item as a reviewable work import.
+- The scanner rejects matches from documentation, generated suggestion files, processed handoffs, successful verification logs, and passing output with zero failures. Repeated evidence from one source is grouped under one candidate with child evidence.
+- JSON output reports accepted, rejected, grouped, and truncated counts for regex, verification, run, evaluation, and MiseLedger source families. The `--days` cutoff applies to each family.
 - `brigade repos friction scan` runs the same scanner across enabled entries in `.brigade/repos.toml`, keeps scanning when one repository fails, and groups matching signatures across repositories.
 - `brigade repos friction scan --include-agent-logs` scans the configured global agent-log roots once, then associates evidence with a repository only when its full path appears in the evidence.
 - `brigade repos friction show` reads the latest fleet report. Each scan also keeps a dated JSON and Markdown report under `.brigade/repos/friction/` for new, recurring, cleared, and unknown comparisons.

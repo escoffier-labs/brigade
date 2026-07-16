@@ -546,15 +546,30 @@ def _read_object(path: Path) -> dict[str, Any] | None:
     return value if isinstance(value, dict) else None
 
 
-def _structured_families(target: Path, miseledger_paths: list[Path] | None) -> dict[str, list[dict[str, Any]]]:
+def _structured_families(
+    target: Path,
+    miseledger_paths: list[Path] | None,
+    *,
+    since: datetime,
+) -> dict[str, list[dict[str, Any]]]:
     families: dict[str, list[dict[str, Any]]] = {
         "verification": [],
         "run": [],
         "evaluation": [],
         "miseledger": [],
     }
+    cutoff = since.timestamp()
+
+    def _skip_old(path: Path) -> bool:
+        try:
+            return path.stat().st_mtime < cutoff
+        except OSError:
+            return True
+
     verify_root = target / ".brigade" / "work" / "verify-runs"
     for path in sorted(verify_root.glob("*/receipt.json")) if verify_root.is_dir() else []:
+        if _skip_old(path):
+            continue
         for match in _scan_receipt(path):
             families["verification"].append(
                 _structured_candidate(
@@ -571,6 +586,8 @@ def _structured_families(target: Path, miseledger_paths: list[Path] | None) -> d
             )
     runs_root = target / ".brigade" / "runs"
     for path in sorted(runs_root.glob("*/worker-results.json")) if runs_root.is_dir() else []:
+        if _skip_old(path):
+            continue
         payload = _read_object(path)
         for result in payload.get("results", []) if payload is not None else []:
             if not isinstance(result, dict) or result.get("ok") is True:
@@ -592,6 +609,8 @@ def _structured_families(target: Path, miseledger_paths: list[Path] | None) -> d
             )
     eval_root = target / ".brigade" / "evals"
     for path in sorted(eval_root.glob("*/cells/*/cell.json")) if eval_root.is_dir() else []:
+        if _skip_old(path):
+            continue
         payload = _read_object(path)
         if payload is None:
             continue
@@ -614,6 +633,8 @@ def _structured_families(target: Path, miseledger_paths: list[Path] | None) -> d
         )
     for path in miseledger_paths or []:
         resolved = path.expanduser().resolve()
+        if _skip_old(resolved):
+            continue
         try:
             lines = resolved.read_text(errors="replace").splitlines()
         except OSError:
@@ -710,7 +731,9 @@ def scan_payload(
     roots = _iter_source_roots(target, include_agent_logs=include_agent_logs, agent_logs_only=agent_logs_only)
     files, skipped_files = _iter_files(roots, since=since, max_files=max_files)
     families = (
-        {name: [] for name in SOURCE_FAMILIES} if agent_logs_only else _structured_families(target, miseledger_paths)
+        {name: [] for name in SOURCE_FAMILIES}
+        if agent_logs_only
+        else _structured_families(target, miseledger_paths, since=since)
     )
     dispositions = _empty_family_dispositions()
     successful_verify_logs = _collect_successful_verify_log_paths(target)

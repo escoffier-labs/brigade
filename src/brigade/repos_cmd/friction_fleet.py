@@ -1,4 +1,3 @@
-# ruff: noqa: F401
 from __future__ import annotations
 
 import json
@@ -123,9 +122,23 @@ def _candidate_mentions_repo(candidate: dict[str, Any], entry: constants.RepoEnt
                         haystacks.append(value)
     repo_path = str(entry.path.resolve())
     for haystack in haystacks:
-        if repo_path in haystack:
+        if _haystack_mentions_repo_path(haystack, repo_path):
             return True
     return False
+
+
+def _haystack_mentions_repo_path(haystack: str, repo_path: str) -> bool:
+    if not repo_path:
+        return False
+    start = 0
+    while True:
+        pos = haystack.find(repo_path, start)
+        if pos == -1:
+            return False
+        end = pos + len(repo_path)
+        if end == len(haystack) or haystack[end] in "/\\":
+            return True
+        start = pos + 1
 
 
 def _aggregate_signatures(
@@ -325,6 +338,18 @@ def _sanitize_config_errors(errors: list[str], target: Path) -> list[str]:
     return [fleet._safe_text(error, target, "repo-fleet", "repo fleet") for error in errors]
 
 
+def _agent_log_root_replacements() -> list[tuple[str, str]]:
+    labels = ("agent-logs/codex", "agent-logs/claude")
+    replacements: list[tuple[str, str]] = []
+    for agent_dir, label in zip(friction_cmd.DEFAULT_AGENT_LOG_DIRS, labels, strict=True):
+        try:
+            resolved = str(Path(agent_dir).expanduser().resolve())
+        except OSError:
+            continue
+        replacements.append((resolved, label))
+    return replacements
+
+
 def _path_safe_value(value: object, *, target: Path, entries: list[constants.RepoEntry]) -> object:
     if isinstance(value, dict):
         return {key: _path_safe_value(item, target=target, entries=entries) for key, item in value.items()}
@@ -337,6 +362,7 @@ def _path_safe_value(value: object, *, target: Path, entries: list[constants.Rep
     for entry in entries:
         replacements.append((str(entry.path), entry.repo_id))
         replacements.append((str(entry.path.resolve()), entry.repo_id))
+    replacements.extend(_agent_log_root_replacements())
     for private, label in replacements:
         if private:
             rendered = rendered.replace(private, label)
