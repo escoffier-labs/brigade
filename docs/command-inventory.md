@@ -429,6 +429,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade skills compatibility`
 - `brigade skills diff`
 - `brigade skills doctor`
+- `brigade skills fleet status`
 - `brigade skills history`
 - `brigade skills import`
 - `brigade skills import-issues`
