@@ -47,6 +47,23 @@ def _model_roster():
     )
 
 
+def _grok_roster():
+    return Roster(
+        orchestrator="chef",
+        agents={
+            "chef": Agent("chef", "codex", "plan and synthesize"),
+            "grok_cli": Agent(
+                "grok_cli",
+                "grok",
+                "review focused code changes",
+                model="grok-4.5",
+                reasoning="high",
+            ),
+        },
+        max_workers=1,
+    )
+
+
 def _restricted_roster():
     return Roster(
         orchestrator="chef",
@@ -979,6 +996,74 @@ def test_run_direct_worker_failure_reports_and_records(monkeypatch, capsys, tmp_
     synthesis = json.loads((output_dir / "synthesis.json").read_text())
     assert synthesis["mode"] == "direct-worker"
     assert synthesis["result"]["ok"] is False
+
+
+def test_run_direct_grok_progress_only_output_fails_with_honest_artifacts(monkeypatch, tmp_path):
+    output = (
+        "Reviewing the README.md and tools/brigade.md diffs against Brigade 0.22.0. "
+        "Gathering the git diffs and current file content first."
+    )
+    monkeypatch.setattr(agents.proc, "which", lambda command: "/x/" + command)
+    monkeypatch.setattr(agents.proc, "run", lambda argv, **kwargs: agents.proc.Result(0, output + "\n", ""))
+    output_dir = tmp_path / "run"
+
+    rc = aboyeur.run(
+        "Review the current documentation diff and report only actionable findings.",
+        _grok_roster(),
+        cwd=tmp_path,
+        worker="grok_cli",
+        output_dir=output_dir,
+        read_only=True,
+        route_enabled=False,
+    )
+
+    assert rc == 2
+    run_payload = json.loads((output_dir / "run.json").read_text())
+    assert run_payload["status"] == "failed"
+    assert run_payload["error"] == "grok exited 0 without a structured final response"
+    assert run_payload["suspected_noop"] is False
+    worker = json.loads((output_dir / "worker-results.json").read_text())["results"][0]
+    assert worker["ok"] is False
+    assert worker["detail"] == "grok exited 0 without a structured final response"
+    assert worker["exit_code"] == 0
+    assert (output_dir / worker["stdout_log"]).read_text() == output + "\n"
+    assert (output_dir / "final.txt").read_text().strip() == output
+
+
+def test_run_direct_grok_structured_final_succeeds_with_honest_artifacts(monkeypatch, tmp_path):
+    answer = "No actionable findings."
+    structured = {"kind": "answer", "answer": answer}
+    stdout = json.dumps(
+        {
+            "text": json.dumps(structured),
+            "stopReason": "EndTurn",
+            "sessionId": "019f0000-0000-7000-8000-000000000001",
+            "requestId": "00000000-0000-4000-8000-000000000001",
+            "structuredOutput": structured,
+        }
+    )
+    monkeypatch.setattr(agents.proc, "which", lambda command: "/x/" + command)
+    monkeypatch.setattr(agents.proc, "run", lambda argv, **kwargs: agents.proc.Result(0, stdout + "\n", ""))
+    output_dir = tmp_path / "run"
+
+    rc = aboyeur.run(
+        "Review the current documentation diff and report only actionable findings.",
+        _grok_roster(),
+        cwd=tmp_path,
+        worker="grok_cli",
+        output_dir=output_dir,
+        read_only=True,
+        route_enabled=False,
+    )
+
+    assert rc == 0
+    assert json.loads((output_dir / "run.json").read_text())["status"] == "ok"
+    worker = json.loads((output_dir / "worker-results.json").read_text())["results"][0]
+    assert worker["ok"] is True
+    assert worker["text"] == answer
+    assert worker["exit_code"] == 0
+    assert (output_dir / worker["stdout_log"]).read_text() == stdout + "\n"
+    assert (output_dir / "final.txt").read_text().strip() == answer
 
 
 def test_run_direct_worker_writes_complete_process_logs(monkeypatch, tmp_path):
