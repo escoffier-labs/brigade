@@ -423,6 +423,34 @@ role = "code"
     assert seen["orchestrator"] == "chef"
 
 
+def test_run_cli_identifies_fallback_roster_in_validation_error(tmp_path, monkeypatch, capsys):
+    home = tmp_path / "home"
+    roster_path = home / ".brigade" / "roster.toml"
+    roster_path.parent.mkdir(parents=True)
+    roster_path.write_text(
+        """
+orchestrator = "chef"
+
+[agents.chef]
+cli = "claude"
+role = "plan"
+
+[limits]
+allow_models = ["codex"]
+"""
+    )
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(Path, "home", lambda: home)
+
+    rc = cli.main(["run", "x", "--dry-run", "--no-artifacts"])
+
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert f"invalid roster at {roster_path}" in err
+    assert "agents.chef.cli is not allowed by limits.allow_models" in err
+
+
 def test_run_cli_explicit_roster_does_not_fall_back_to_home(tmp_path, monkeypatch, capsys):
     home = tmp_path / "home"
     config_dir = home / ".brigade"

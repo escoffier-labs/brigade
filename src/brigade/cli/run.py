@@ -211,7 +211,7 @@ def dispatch(args) -> int:
         )
         return 2
     except ValueError as exc:
-        print(f"error: invalid roster: {exc}", file=sys.stderr)
+        print(f"error: invalid roster at {roster_path}: {exc}", file=sys.stderr)
         return 2
     if args.worker is not None:
         worker_error = _direct_worker_error(args.worker, loaded_roster, roster_mod)
