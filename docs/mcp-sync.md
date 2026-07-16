@@ -59,6 +59,7 @@ tool expands at launch.
 | OpenCode | `opencode.json` | JSON `mcp`; `{type:"local",command:[cmd,...args],environment}` |
 | Antigravity | `~/.gemini/config/mcp_config.json` | JSON `mcpServers`; remote uses `serverUrl`. **User-scoped** (`--user-scope`) |
 | Claude user | `~/.claude.json` | JSON `mcpServers`. **User-scoped** (`--user-scope`) |
+| Cursor user | `~/.cursor/mcp.json` | JSON `mcpServers`. **User-scoped** (`--harness cursor --user-scope`) |
 | Codex user | `~/.codex/config.toml` | TOML `[mcp_servers.<name>]`. **User-scoped** (`--user-scope`) |
 | Grok user | `~/.grok/config.toml` | TOML `[mcp_servers.<name>]`. **User-scoped** (`--user-scope`) |
 | OpenClaw | `~/.openclaw/openclaw.json` | JSON `mcp.servers`. **User-scoped** (`--user-scope`) |
@@ -81,11 +82,17 @@ brigade mcp list                       # show the catalog
 brigade mcp plan                       # preview what a sync would do (read-only)
 brigade mcp sync                       # dry-run across every configured tool
 brigade mcp sync --write               # actually merge into each tool's config
-brigade mcp sync --write --user-scope  # also write Antigravity's user-global config
+brigade mcp sync --write --user-scope  # also write configured user-global targets
+brigade mcp sync --harness cursor --user-scope --write  # write ~/.cursor/mcp.json
 brigade mcp doctor                     # validate the catalog, report unsupported tools
 brigade mcp import --harness cursor --merge   # read an existing config into the catalog
 brigade operator sync-mcp --write      # validate -> sync -> summary, one receipt
 ```
+
+Cursor stays project-scoped unless both `--harness cursor` and `--user-scope`
+are present. A user-scoped Cursor projection drops a GraphTrail `--db` argument
+when that database resolves inside the source repository, so the global client
+does not pin every workspace to one repository.
 
 ## Merge and ownership
 
