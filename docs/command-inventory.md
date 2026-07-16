@@ -34,7 +34,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade ingest`: 1 command path(s)
 - `brigade init`: 1 command path(s)
 - `brigade learn` (extras): 13 command path(s)
-- `brigade mcp`: 7 command path(s)
+- `brigade mcp`: 8 command path(s)
 - `brigade memory`: 14 command path(s)
 - `brigade model`: 6 command path(s)
 - `brigade notifications` (extras): 4 command path(s)
@@ -197,6 +197,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade mcp list`
 - `brigade mcp plan`
 - `brigade mcp sync`
+- `brigade mcp verify`
 - `brigade memory care backfill`
 - `brigade memory care closeout`
 - `brigade memory care doctor`
