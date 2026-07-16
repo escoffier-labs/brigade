@@ -8,6 +8,8 @@ import threading
 import time
 from pathlib import Path
 
+import pytest
+
 from brigade import aboyeur, agents, cli, codex_appserver, run_control
 from brigade.roster import Agent, Roster
 
@@ -80,6 +82,54 @@ def test_control_socket_round_trip_with_fake_registry(tmp_path):
         ("interrupt", "turn-1", ""),
     ]
     assert not (tmp_path / "control.sock").exists()
+
+
+def test_control_server_start_cleans_up_after_thread_start_failure(tmp_path, monkeypatch):
+    path = tmp_path / "control.sock"
+    server = run_control.ControlServer(path, run_control.LiveTurnRegistry())
+    startup_error = RuntimeError("forced thread start failure")
+
+    def fail_start(_thread):
+        raise startup_error
+
+    monkeypatch.setattr(run_control.threading.Thread, "start", fail_start)
+
+    with pytest.raises(run_control.ControlError, match="forced thread start failure") as exc_info:
+        server.start()
+
+    assert exc_info.value.__cause__ is startup_error
+    assert not path.exists()
+    assert server._sock is None
+    assert server._thread is None
+
+
+def test_control_server_start_does_not_unlink_socket_owned_by_bind_race(tmp_path, monkeypatch):
+    path = tmp_path / "control.sock"
+    server = run_control.ControlServer(path, run_control.LiveTurnRegistry())
+    real_socket = run_control.socket.socket
+    competing_socket = real_socket(run_control.socket.AF_UNIX, run_control.socket.SOCK_STREAM)
+    bind_error = OSError("address already in use")
+
+    class BindRaceSocket:
+        def bind(self, socket_path):
+            competing_socket.bind(socket_path)
+            competing_socket.listen()
+            raise bind_error
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(run_control.socket, "socket", lambda *_args: BindRaceSocket())
+
+    try:
+        with pytest.raises(run_control.ControlError, match="address already in use") as exc_info:
+            server.start()
+
+        assert exc_info.value.__cause__ is bind_error
+        assert path.exists()
+    finally:
+        competing_socket.close()
+        path.unlink(missing_ok=True)
 
 
 def test_run_turn_reports_turn_start_callback():

@@ -101,16 +101,29 @@ class ControlServer:
         except FileNotFoundError:
             pass
         sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        bound = False
         try:
             sock.bind(str(self.path))
+            bound = True
             sock.listen()
             sock.settimeout(0.1)
-        except OSError as exc:
-            sock.close()
+            thread = threading.Thread(target=self._serve, name="brigade-run-control", daemon=True)
+            self._sock = sock
+            self._thread = thread
+            thread.start()
+        except (OSError, RuntimeError) as exc:
+            self._sock = None
+            self._thread = None
+            try:
+                sock.close()
+            except OSError:
+                pass
+            if bound:
+                try:
+                    self.path.unlink()
+                except OSError:
+                    pass
             raise ControlError(f"failed to start control socket: {exc}") from exc
-        self._sock = sock
-        self._thread = threading.Thread(target=self._serve, name="brigade-run-control", daemon=True)
-        self._thread.start()
 
     def close(self) -> None:
         self._stop.set()
