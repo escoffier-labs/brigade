@@ -264,6 +264,25 @@ def test_skills_compatibility_does_not_count_partial_install_directory(tmp_path,
     assert cursor["drift"]["overall"] == "missing"
 
 
+def test_skills_compatibility_hides_fields_from_malformed_receipt(tmp_path, capsys):
+    assert skills_cmd.install(workspace=tmp_path, skill="brigade-work", harness="cursor", json_output=True) == 0
+    capsys.readouterr()
+    receipt_path = tmp_path / ".brigade" / "skills" / "installs" / "brigade-work-cursor.json"
+    receipt = json.loads(receipt_path.read_text())
+    receipt["source"].pop("kind")
+    receipt_path.write_text(json.dumps(receipt))
+
+    payload = skills_cmd._compatibility_payload(tmp_path, "brigade-work")
+    cursor = next(row for row in payload["adapters"] if row["id"] == "cursor")
+
+    assert cursor["drift"]["receipt_known"] is False
+    assert cursor["installed_at"] is None
+    assert cursor["installed_version"] is None
+    assert cursor["installed_source_fingerprint"] is None
+    assert cursor["installed_render_fingerprint"] is None
+    assert cursor["version_drift"] is False
+
+
 def test_skills_compatibility_human_output_lists_adapters(tmp_path, capsys):
     source = _write_skill(tmp_path / "source")
     assert skills_cmd.import_skill(target=tmp_path, source=source, json_output=True) == 0
@@ -691,6 +710,41 @@ def test_skills_fleet_rejects_malformed_renderer_contract(tmp_path, capsys):
     assert row["status"] == "unknown"
     assert row["drift"]["receipt_known"] is False
     assert row["update_command"] is None
+
+
+def test_skills_fleet_suppresses_removal_for_malformed_receipt(tmp_path, capsys):
+    source = _write_skill(tmp_path / "source", name="malformed-unsupported")
+    metadata_path = source / "skill.json"
+    metadata = json.loads(metadata_path.read_text())
+    metadata["supported_harnesses"] = ["cursor"]
+    metadata_path.write_text(json.dumps(metadata))
+    assert skills_cmd.import_skill(target=tmp_path, source=source, json_output=True) == 0
+    capsys.readouterr()
+    assert (
+        skills_cmd.install(
+            workspace=tmp_path,
+            skill="registry:malformed-unsupported",
+            harness="cursor",
+            json_output=True,
+        )
+        == 0
+    )
+    capsys.readouterr()
+    receipt_path = tmp_path / ".brigade" / "skills" / "installs" / "malformed-unsupported-cursor.json"
+    receipt = json.loads(receipt_path.read_text())
+    receipt["render"].pop("format")
+    receipt_path.write_text(json.dumps(receipt))
+    registry_metadata = tmp_path / ".brigade" / "skills" / "registry" / "malformed-unsupported" / "skill.json"
+    metadata = json.loads(registry_metadata.read_text())
+    metadata["supported_harnesses"] = ["codex"]
+    registry_metadata.write_text(json.dumps(metadata))
+
+    payload = skills_cmd._fleet_status_payload(tmp_path)
+    row = next(item for item in payload["copies"] if item["skill_id"] == "malformed-unsupported")
+
+    assert row["drift"]["receipt_known"] is False
+    assert row["status"] == "unknown"
+    assert row["remove_command"] is None
 
 
 def test_skills_fleet_status_is_stable_and_emits_one_update_per_stale_copy(tmp_path, capsys):
