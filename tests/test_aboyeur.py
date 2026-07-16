@@ -345,6 +345,26 @@ def test_context_eval_reports_sorted_hits_misses_and_rate():
     }
 
 
+def test_context_eval_for_run_returns_none_when_stale_graph_used(tmp_path):
+    brief = aboyeur.CodeGraphBrief(
+        attached=True,
+        text="## Code graph context (GraphTrail, read-only)\n\n- `tests/test_aboyeur.py:10`\n",
+        bytes=80,
+    )
+    sidecar = tmp_path / "graph-delta.json"
+    sidecar.write_text(json.dumps({"ok": True, "changed_nodes": [{"file_path": "tests/test_aboyeur.py"}]}) + "\n")
+    delta = {
+        "ok": True,
+        "status": "ok",
+        "stale_graph_used": True,
+        "sidecar_path": str(sidecar),
+        "changed_symbol_count": 1,
+        "edge_churn": 0,
+    }
+
+    assert aboyeur._context_eval_for_run(brief, delta) is None
+
+
 def test_ground_truth_facts_surface_context_eval_metric_once():
     facts = aboyeur._ground_truth_facts(
         {

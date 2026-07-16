@@ -668,6 +668,45 @@ def test_rank_json_includes_graph_delta_counters_for_mixed_records(tmp_path, cap
     assert "graph_no_op" not in ranking["skill-y"]
 
 
+def test_graph_delta_counts_excludes_stale_graph_used_deltas():
+    records = [
+        outcome.OutcomeRecord(
+            "skill-x",
+            "skill",
+            "t1",
+            "verify",
+            1,
+            "ref1",
+            "2026-06-20T00:00:00+00:00",
+            code_graph_delta={
+                "status": "ok",
+                "ok": True,
+                "changed_symbol_count": 2,
+                "edge_churn": 0,
+                "stale_graph_used": True,
+            },
+        ),
+        outcome.OutcomeRecord(
+            "skill-x",
+            "skill",
+            "t2",
+            "verify",
+            1,
+            "ref2",
+            "2026-06-20T01:00:00+00:00",
+            code_graph_delta={
+                "status": "ok",
+                "ok": True,
+                "changed_symbol_count": 0,
+                "edge_churn": 0,
+                "stale_graph_used": True,
+            },
+        ),
+    ]
+
+    assert outcome_cmd._graph_delta_counts(records) == {"graph_changing": 0, "graph_no_op": 0}
+
+
 def test_rank_and_reconcile_count_verify_and_run_receipt_graph_deltas_identically(tmp_path, capsys):
     _write_verify_receipt(
         tmp_path,
