@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/assets/graphtrail-social-preview.jpg" alt="GraphTrail banner" width="900">
+  <img src="docs/assets/graphtrail-social-preview.jpg?v=20260716" alt="GraphTrail banner" width="900">
 </p>
 
 <h1 align="center">GraphTrail</h1>
