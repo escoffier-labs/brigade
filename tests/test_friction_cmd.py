@@ -548,3 +548,29 @@ def test_friction_scan_excludes_structured_receipts_older_than_days(tmp_path, mo
     payload = json.loads(capsys.readouterr().out)
     assert payload["candidate_count"] == 0
     assert payload["counts"]["by_source_family"]["verification"]["accepted"] == 0
+
+
+def test_friction_scan_keeps_real_failure_on_mixed_zero_failure_line(tmp_path, capsys):
+    notes = tmp_path / "notes"
+    notes.mkdir()
+    (notes / "build.log").write_text("Build failed. Unit tests: 27 passed; 0 failed.\n")
+
+    assert cli.main(["friction", "scan", "--target", str(tmp_path), "--json"]) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["candidate_count"] == 1
+    assert payload["candidates"][0]["friction_type"] == "blocked"
+    assert payload["counts"]["by_source_family"]["regex"]["rejected"] == 0
+
+
+def test_friction_scan_rejects_exact_ok_zero_failure_summary(tmp_path, capsys):
+    notes = tmp_path / "notes"
+    notes.mkdir()
+    (notes / "tests.log").write_text("test result: ok. 0 failed\n")
+
+    assert cli.main(["friction", "scan", "--target", str(tmp_path), "--json"]) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["candidate_count"] == 0
+    assert payload["rejected_noise"] == 1
+    assert payload["counts"]["by_source_family"]["regex"]["rejected"] == 1

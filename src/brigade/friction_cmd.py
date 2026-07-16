@@ -100,7 +100,8 @@ IGNORED_ATTACHMENT_TYPES = {"hook_success", "hook_additional_context", "skill_li
 # friction always carries textual evidence (an error string, a status word).
 JSON_NUMERIC_FIELD_RE = re.compile(r'^"[^"\n]+"\s*:\s*-?\d+(?:\.\d+)?\s*,?$')
 PASSING_ZERO_FAILURE_RE = re.compile(
-    r"(?i)(?:test result:\s*ok|\d+\s+passed)\b[^.\n]*\b0\s+failed\b|\b(?:all|tests?)\s+passed\b[^.\n]*\b0\s+failed\b"
+    r"(?i)(?:test result:\s*ok\.?\s*(?:\d+\s+passed\s*[,;]?\s*)?0\s+failed|"
+    r"\d+\s+passed\s*[,;]?\s*0\s+failed|(?:all|tests?)\s+passed\s*[,;]?\s*0\s+failed)"
 )
 DOCUMENTATION_NAMES = frozenset(
     {
@@ -266,7 +267,10 @@ def _extract_text(value: object) -> list[str]:
 
 
 def _is_passing_zero_failure_line(line: str) -> bool:
-    return bool(PASSING_ZERO_FAILURE_RE.search(line))
+    if PASSING_ZERO_FAILURE_RE.search(line) is None:
+        return False
+    residual = PASSING_ZERO_FAILURE_RE.sub(" ", line).lower()
+    return not any(re.search(pattern, residual) for _friction_type, _severity, _title, pattern in PATTERNS)
 
 
 def _scan_file(path: Path, *, max_line_length: int = 5000) -> list[Match]:

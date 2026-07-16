@@ -712,6 +712,7 @@ Friction-log commands:
 - JSON output reports accepted, rejected, grouped, and truncated counts for regex, verification, run, evaluation, and MiseLedger source families. The `--days` cutoff applies to each family.
 - `brigade repos friction scan` runs the same scanner across enabled entries in `.brigade/repos.toml`, keeps scanning when one repository fails, and groups matching signatures across repositories.
 - `brigade repos friction scan --include-agent-logs` scans the configured global agent-log roots once, then associates evidence with a repository only when its full path appears as a complete path token rather than a sibling-path prefix.
+- Fleet JSON reports include agent-log candidate and file counts, truncation state, rejected-noise count, and source-family dispositions so capped global scans remain visible.
 - `brigade repos friction show` reads the latest fleet report. Each scan also keeps a dated JSON and Markdown report under `.brigade/repos/friction/` for new, recurring, cleared, and unknown comparisons.
 
 Friction scan output is local and review-first. It writes `.brigade/friction/latest.json` and `.brigade/friction/latest.md`, and it does not create GitHub issues, edit memory, publish reports, or promote findings automatically.

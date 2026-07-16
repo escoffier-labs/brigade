@@ -144,6 +144,7 @@ def test_repos_friction_scans_global_agent_logs_once(tmp_path, monkeypatch, caps
         }
         candidates = []
         if kwargs.get("include_agent_logs"):
+            families["regex"] = {"accepted": 2, "grouped": 1, "rejected": 3, "truncated": 4}
             candidates.extend(
                 [
                     {
@@ -166,6 +167,8 @@ def test_repos_friction_scans_global_agent_logs_once(tmp_path, monkeypatch, caps
                 "files_scanned": 1 if candidates else 0,
                 "files_skipped": 0,
                 "candidate_count": len(candidates),
+                "truncated": bool(candidates),
+                "rejected_noise": 3 if candidates else 0,
                 "counts": {"by_source_family": families},
                 "candidates": candidates,
             },
@@ -188,6 +191,15 @@ def test_repos_friction_scans_global_agent_logs_once(tmp_path, monkeypatch, caps
     assert payload["unassociated_occurrence_count"] == 1
     assert payload["agent_logs"]["status"] == "completed"
     assert payload["agent_logs"]["candidate_count"] == 2
+    assert payload["agent_logs"]["truncated"] is True
+    assert payload["agent_logs"]["rejected_noise"] == 3
+    assert payload["agent_logs"]["source_families"]["regex"] == {
+        "accepted": 2,
+        "grouped": 1,
+        "rejected": 3,
+        "skipped": 7,
+        "truncated": 4,
+    }
 
 
 def test_repos_friction_agent_association_requires_repo_path_boundary(tmp_path, monkeypatch, capsys):

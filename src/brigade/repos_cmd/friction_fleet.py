@@ -493,7 +493,15 @@ def friction_scan(
     agent_scan: dict[str, Any] | None = None
     agent_logs_meta: dict[str, Any] | None = None
     if include_agent_logs:
-        agent_logs_meta = {"status": "failed"}
+        agent_logs_meta = {
+            "status": "failed",
+            "candidate_count": 0,
+            "files_scanned": 0,
+            "files_skipped": 0,
+            "truncated": False,
+            "rejected_noise": 0,
+            "source_families": _empty_source_families(),
+        }
         try:
             agent_payload, agent_code = friction_cmd.scan_payload(
                 target=target,
@@ -510,6 +518,9 @@ def friction_scan(
                     "candidate_count": int(agent_payload.get("candidate_count") or 0),
                     "files_scanned": int(agent_payload.get("files_scanned") or 0),
                     "files_skipped": int(agent_payload.get("files_skipped") or 0),
+                    "truncated": bool(agent_payload.get("truncated")),
+                    "rejected_noise": int(agent_payload.get("rejected_noise") or 0),
+                    "source_families": _source_families_from_scan(agent_payload),
                 }
         except Exception:
             agent_scan = None
