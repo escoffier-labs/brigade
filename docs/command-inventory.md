@@ -58,7 +58,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade scrub`: 1 command path(s)
 - `brigade search`: 3 command path(s)
 - `brigade security`: 15 command path(s)
-- `brigade skills`: 27 command path(s)
+- `brigade skills`: 28 command path(s)
 - `brigade stations`: 3 command path(s)
 - `brigade status`: 1 command path(s)
 - `brigade tokens`: 3 command path(s)
@@ -429,6 +429,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade skills compatibility`
 - `brigade skills diff`
 - `brigade skills doctor`
+- `brigade skills fleet status`
 - `brigade skills history`
 - `brigade skills import`
 - `brigade skills import-issues`

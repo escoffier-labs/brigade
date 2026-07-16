@@ -62,6 +62,16 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_skills_diff.add_argument("--target", "-t", type=Path, default=Path("."), help="Workspace registry to inspect.")
     p_skills_diff.add_argument("--harness", required=True, help="Harness target to compare.")
     p_skills_diff.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_skills_fleet = skills_sub.add_parser("fleet", help="Inspect installed skill copies across harnesses.")
+    skills_fleet_sub = p_skills_fleet.add_subparsers(dest="skills_fleet_command", metavar="<skills-fleet-command>")
+    skills_fleet_sub.required = True
+    p_skills_fleet_status = skills_fleet_sub.add_parser(
+        "status", help="Report current, stale, missing, and unknown installed skill copies."
+    )
+    p_skills_fleet_status.add_argument(
+        "--target", "-t", type=Path, default=Path("."), help="Workspace skill fleet to inspect."
+    )
+    p_skills_fleet_status.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_skills_uninstall = skills_sub.add_parser("uninstall", help="Remove an installed skill from one or all harnesses.")
     p_skills_uninstall.add_argument("skill", help="Installed skill id.")
     p_skills_uninstall.add_argument("--workspace", type=Path, default=Path("."), help="Workspace to update.")
@@ -223,6 +233,11 @@ def dispatch(args) -> int:
         )
     if args.skills_command == "diff":
         return skills_cmd.diff(target=args.target, skill=args.skill, harness=args.harness, json_output=args.json)
+    if args.skills_command == "fleet":
+        if args.skills_fleet_command == "status":
+            return skills_cmd.fleet_status(target=args.target, json_output=args.json)
+        args._brigade_parser.error(f"unknown skills fleet command: {args.skills_fleet_command}")
+        return 2
     if args.skills_command == "rollback":
         return skills_cmd.rollback(
             workspace=args.workspace, skill=args.skill, harness=args.install_target, json_output=args.json

@@ -47,6 +47,15 @@ brigade skills import .claude/skills/check
 brigade skills install check --target all
 ```
 
+Brigade's own bundled skills use a separate canonical source identity. A named
+install such as `brigade skills install brigade-work --target cursor` resolves
+the current template shipped by the installed Brigade package. Use
+`registry:brigade-work` or an explicit path only when you intend to select a
+same-named local registry copy. `brigade skills fleet status` reports stale
+harness copies and the exact update command for each supported copy. If current
+metadata no longer supports an installed harness, it reports an uninstall
+command instead of recommending another install.
+
 ## What gets installed
 
 One markdown file per skill, byte-identical to its source in
