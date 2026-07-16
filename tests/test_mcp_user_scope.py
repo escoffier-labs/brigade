@@ -19,16 +19,23 @@ def _stdio():
 
 
 def test_user_scope_adapters_registered():
-    for name in ("codex-user", "claude-user", "openclaw", "grok-user", "hermes"):
+    for name in ("codex-user", "claude-user", "cursor-user", "openclaw", "grok-user", "hermes"):
         a = A.ADAPTERS[name]
         assert a.user_scope is True
         assert a.path.startswith("~")
-    assert {"codex-user", "claude-user", "openclaw", "grok-user", "hermes"} <= set(A.MCP_TARGETS)
+    assert {"codex-user", "claude-user", "cursor-user", "openclaw", "grok-user", "hermes"} <= set(A.MCP_TARGETS)
 
 
 def test_codex_user_is_toml_codex_shape():
     a = A.ADAPTERS["codex-user"]
     assert a.fmt == "toml" and a.path == "~/.codex/config.toml"
+
+
+def test_cursor_user_is_global_json_shape():
+    a = A.ADAPTERS["cursor-user"]
+    assert a.fmt == "json"
+    assert a.path == "~/.cursor/mcp.json"
+    assert a.top_key == "mcpServers"
 
 
 def test_grok_user_is_toml_grok_shape():
