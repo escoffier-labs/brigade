@@ -250,6 +250,20 @@ def test_skills_compatibility_reports_installed_and_planned_adapters(tmp_path, c
     assert by_id["cursor"]["render_valid"] is True
 
 
+def test_skills_compatibility_does_not_count_partial_install_directory(tmp_path, capsys):
+    source = _write_skill(tmp_path / "source")
+    assert skills_cmd.import_skill(target=tmp_path, source=source, json_output=True) == 0
+    capsys.readouterr()
+    partial = tmp_path / ".cursor" / "skills" / "security-review"
+    partial.mkdir(parents=True)
+
+    payload = skills_cmd._compatibility_payload(tmp_path, "registry:security-review")
+    cursor = next(row for row in payload["adapters"] if row["id"] == "cursor")
+
+    assert cursor["installed"] is False
+    assert cursor["drift"]["overall"] == "missing"
+
+
 def test_skills_compatibility_human_output_lists_adapters(tmp_path, capsys):
     source = _write_skill(tmp_path / "source")
     assert skills_cmd.import_skill(target=tmp_path, source=source, json_output=True) == 0
@@ -475,6 +489,33 @@ def test_skills_rollback_consumes_snapshots_in_receipt_order(tmp_path, capsys):
     assert receipt["installed"]["skill_fingerprint"] == skills_cmd._text_fingerprint(installed.read_text())
 
 
+def test_skills_rollback_uses_snapshot_bound_to_current_receipt(tmp_path, capsys):
+    source = _write_skill(tmp_path / "source", name="bound")
+    installed = tmp_path / ".cursor" / "skills" / "bound" / "SKILL.md"
+    (source / "SKILL.md").write_text("# A\n")
+    assert skills_cmd.install(workspace=tmp_path, skill=str(source), harness="cursor", json_output=True) == 0
+    capsys.readouterr()
+    (source / "SKILL.md").write_text("# B\n")
+    assert (
+        skills_cmd.install(workspace=tmp_path, skill=str(source), harness="cursor", force=True, json_output=True) == 0
+    )
+    capsys.readouterr()
+    receipt_path = tmp_path / ".brigade" / "skills" / "installs" / "bound-cursor.json"
+    receipt = json.loads(receipt_path.read_text())
+    recorded_snapshot = Path(receipt["rollback_snapshot"])
+    orphan = recorded_snapshot.parent / "zzzz-orphan"
+    orphan.mkdir()
+    (orphan / "SKILL.md").write_text("# orphan\n")
+
+    assert skills_cmd.rollback(workspace=tmp_path, skill="bound", harness="cursor", json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+
+    assert installed.read_text() == "# A\n"
+    assert Path(payload["snapshot"]) == recorded_snapshot
+    assert not recorded_snapshot.exists()
+    assert orphan.exists()
+
+
 def test_skills_history_and_diff_report_install_drift(tmp_path, capsys):
     source = _write_skill(tmp_path / "source")
     assert skills_cmd.import_skill(target=tmp_path, source=source, json_output=True) == 0
@@ -627,6 +668,22 @@ def test_skills_fleet_does_not_guess_source_for_malformed_v2_receipt(tmp_path, c
     receipt_path.write_text(json.dumps(receipt))
     installed = tmp_path / ".cursor" / "skills" / "brigade-work" / "SKILL.md"
     installed.write_text(installed.read_text() + "\nlocal edit\n")
+
+    payload = skills_cmd._fleet_status_payload(tmp_path)
+    row = next(item for item in payload["copies"] if item["skill_id"] == "brigade-work")
+
+    assert row["status"] == "unknown"
+    assert row["drift"]["receipt_known"] is False
+    assert row["update_command"] is None
+
+
+def test_skills_fleet_rejects_malformed_renderer_contract(tmp_path, capsys):
+    assert skills_cmd.install(workspace=tmp_path, skill="brigade-work", harness="cursor", json_output=True) == 0
+    capsys.readouterr()
+    receipt_path = tmp_path / ".brigade" / "skills" / "installs" / "brigade-work-cursor.json"
+    receipt = json.loads(receipt_path.read_text())
+    receipt["render"]["format"] = "tampered-format"
+    receipt_path.write_text(json.dumps(receipt))
 
     payload = skills_cmd._fleet_status_payload(tmp_path)
     row = next(item for item in payload["copies"] if item["skill_id"] == "brigade-work")
@@ -838,6 +895,8 @@ def test_skills_pack_build_show_import_and_archive(tmp_path, capsys):
     pack = json.loads(capsys.readouterr().out)
     pack_path = pack["path"]
     assert pack["skill_count"] == 1
+    assert pack["skills"][0]["trust_score"]["provenance"]["kind"] == "registry"
+    assert pack["skills"][0]["trust_score"]["provenance"]["identity"] == "registry://skills/security-review"
     assert (
         tmp_path / ".brigade" / "skills" / "packs" / pack["pack_id"] / "skills" / "security-review" / "SKILL.md"
     ).is_file()
