@@ -505,11 +505,7 @@ def run_agent(
     )
     structured_grok = cli_ref == "grok" and (read_only or sandbox == "read-only")
     if structured_grok:
-        try:
-            plan_index = argv.index("--permission-mode")
-        except ValueError:
-            plan_index = -1
-        if plan_index < 0 or argv[plan_index : plan_index + 2] != ["--permission-mode", "plan"]:
+        if argv[-2:] != ["--permission-mode", "plan"]:
             return AgentResult(
                 text="",
                 ok=False,
@@ -517,7 +513,7 @@ def run_agent(
                 requested_model=model,
                 reasoning=reasoning,
             )
-        argv[plan_index : plan_index + 2] = ["--sandbox", "read-only", "--always-approve"]
+        argv[-2:] = ["--sandbox", "read-only", "--always-approve"]
         argv.extend(["--json-schema", _GROK_RESULT_SCHEMA])
     result = proc.run(
         argv,

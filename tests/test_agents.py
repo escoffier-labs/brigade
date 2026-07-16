@@ -643,6 +643,30 @@ def test_run_agent_accepts_concise_grok_no_findings(monkeypatch):
     ]
 
 
+def test_run_agent_keeps_permission_mode_prompt_separate_from_grok_flags(monkeypatch):
+    output = _grok_json_output("No actionable findings.")
+    seen = {}
+    monkeypatch.setattr(agents.proc, "which", lambda command: "/x/" + command)
+
+    def fake_run(argv, **kwargs):
+        seen["argv"] = argv
+        return agents.proc.Result(0, output + "\n", "")
+
+    monkeypatch.setattr(agents.proc, "run", fake_run)
+
+    result = agents.run_agent("grok", "--permission-mode", read_only=True, model="grok-4.5")
+
+    assert result.ok is True
+    assert result.text == "No actionable findings."
+    assert seen["argv"][seen["argv"].index("-p") + 1] == "--permission-mode"
+    assert seen["argv"].count("--permission-mode") == 1
+    assert seen["argv"][seen["argv"].index("--sandbox") : seen["argv"].index("--json-schema")] == [
+        "--sandbox",
+        "read-only",
+        "--always-approve",
+    ]
+
+
 def test_run_agent_keeps_writable_grok_plain_output(monkeypatch):
     output = "Implemented the requested change."
     monkeypatch.setattr(agents.proc, "which", lambda command: "/x/" + command)
