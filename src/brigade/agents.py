@@ -6,6 +6,7 @@ does not store provider keys or import provider SDKs.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, List
@@ -14,6 +15,18 @@ from . import proc
 
 _OLLAMA_PREFIX = "ollama:"
 _CODEX_CLOUD_PREFIX = "codex-cloud:"
+_GROK_RESULT_SCHEMA = json.dumps(
+    {
+        "type": "object",
+        "properties": {
+            "kind": {"type": "string", "enum": ["answer"]},
+            "answer": {"type": "string", "minLength": 1},
+        },
+        "required": ["kind", "answer"],
+        "additionalProperties": False,
+    },
+    separators=(",", ":"),
+)
 
 
 def _claude_argv(prompt: str, read_only: bool, sandbox: str | None, cwd: Path | None) -> List[str]:
@@ -108,8 +121,8 @@ def _openhands_argv(prompt: str, read_only: bool, sandbox: str | None, cwd: Path
 
 
 def _grok_argv(prompt: str, read_only: bool, sandbox: str | None, cwd: Path | None) -> List[str]:
-    # Headless `grok -p` stops silently (exit 0) at the first tool-approval
-    # gate, so a write task without an approval flag no-ops after its preamble.
+    # run_agent replaces plan mode with the native read-only filesystem sandbox
+    # before dispatch. Keep this base shape stable for argv construction callers.
     if read_only or sandbox == "read-only":
         return ["grok", "-p", prompt, "--permission-mode", "plan"]
     return ["grok", "-p", prompt, "--always-approve"]
@@ -204,6 +217,59 @@ def direct_cursor_read_only_limitation(model: str | None) -> str | None:
             'retry with transport = "acpx" and the reviewed transport_version'
         )
     return None
+
+
+def _parse_grok_final_output(stdout: str) -> tuple[str, str]:
+    """Extract a schema-constrained final answer from Grok's JSON envelope."""
+    base_error = "grok exited 0 without a structured final response"
+    raw = stdout.strip()
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        return raw, base_error
+    if not isinstance(payload, dict):
+        return raw, base_error
+
+    diagnostic_parts: list[str] = []
+    stop_reason = payload.get("stopReason")
+    if isinstance(stop_reason, str) and stop_reason:
+        diagnostic_parts.append(f"stopReason={stop_reason}")
+    structured_output_error = payload.get("structuredOutputError")
+    structured_error_present = "structuredOutputError" in payload and structured_output_error is not None
+    if structured_error_present:
+        if isinstance(structured_output_error, str) and structured_output_error:
+            diagnostic_parts.append(structured_output_error)
+        else:
+            diagnostic_parts.append("structuredOutputError was present")
+
+    display_text = payload.get("text")
+    fallback = display_text.strip() if isinstance(display_text, str) else raw
+    if isinstance(display_text, str):
+        try:
+            nested = json.loads(display_text)
+        except json.JSONDecodeError:
+            nested = None
+        if isinstance(nested, dict) and isinstance(nested.get("answer"), str):
+            fallback = nested["answer"].strip()
+
+    structured = payload.get("structuredOutput")
+    answer = structured.get("answer") if isinstance(structured, dict) else None
+    exact_shape = (
+        isinstance(structured, dict)
+        and set(structured) == {"kind", "answer"}
+        and structured.get("kind") == "answer"
+        and isinstance(answer, str)
+        and bool(answer.strip())
+    )
+    if not exact_shape and not structured_error_present:
+        diagnostic_parts.append("structured output did not match expected schema")
+    successful_stop = stop_reason == "EndTurn"
+    no_structured_error = not structured_error_present
+    if not successful_stop or not no_structured_error or not exact_shape:
+        detail = f"{base_error} ({'; '.join(diagnostic_parts)})" if diagnostic_parts else base_error
+        return fallback, detail[:200]
+    assert isinstance(answer, str)
+    return answer.strip(), ""
 
 
 @dataclass(frozen=True)
@@ -428,20 +494,40 @@ def run_agent(
                 requested_model=model,
             )
 
+    argv = build_argv(
+        cli_ref,
+        prompt,
+        read_only=read_only,
+        sandbox=sandbox,
+        model=model,
+        reasoning=reasoning,
+        cwd=cwd,
+    )
+    structured_grok = cli_ref == "grok" and (read_only or sandbox == "read-only")
+    if structured_grok:
+        try:
+            plan_index = argv.index("--permission-mode")
+        except ValueError:
+            plan_index = -1
+        if plan_index < 0 or argv[plan_index : plan_index + 2] != ["--permission-mode", "plan"]:
+            return AgentResult(
+                text="",
+                ok=False,
+                detail="internal error: grok read-only argv missing --permission-mode plan",
+                requested_model=model,
+                reasoning=reasoning,
+            )
+        argv[plan_index : plan_index + 2] = ["--sandbox", "read-only", "--always-approve"]
+        argv.extend(["--json-schema", _GROK_RESULT_SCHEMA])
     result = proc.run(
-        build_argv(
-            cli_ref,
-            prompt,
-            read_only=read_only,
-            sandbox=sandbox,
-            model=model,
-            reasoning=reasoning,
-            cwd=cwd,
-        ),
+        argv,
         timeout=timeout,
         cwd=cwd,
     )
     text = result.stdout.strip()
+    structured_error = ""
+    if structured_grok:
+        text, structured_error = _parse_grok_final_output(result.stdout)
     if result.code != 0:
         detail = result.stderr.strip() or f"exit {result.code}"
         return AgentResult(
@@ -452,6 +538,17 @@ def run_agent(
             stderr=result.stderr,
             exit_code=result.code,
             timed_out=result.code == 124,
+            requested_model=model,
+            reasoning=reasoning,
+        )
+    if structured_error:
+        return AgentResult(
+            text=text,
+            ok=False,
+            detail=structured_error,
+            stdout=result.stdout,
+            stderr=result.stderr,
+            exit_code=result.code,
             requested_model=model,
             reasoning=reasoning,
         )

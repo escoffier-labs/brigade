@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import pytest
@@ -507,6 +508,164 @@ def test_run_agent_classifies_silent_adapter_exit(monkeypatch, cli_ref):
     assert result.ok is False
     assert result.detail == f"{cli_ref} exited 0 without output; check trust, permissions, and model availability"
     assert result.exit_code == 0
+
+
+def _grok_json_output(answer: str, *, structured: bool = True, stop_reason: str = "EndTurn") -> str:
+    result = {"kind": "answer", "answer": answer}
+    return json.dumps(
+        {
+            "text": json.dumps(result),
+            "stopReason": stop_reason,
+            "sessionId": "019f0000-0000-7000-8000-000000000001",
+            "requestId": "00000000-0000-4000-8000-000000000001",
+            "structuredOutput": result if structured else None,
+            "structuredOutputError": None if structured else "model did not produce structured output",
+        }
+    )
+
+
+def test_run_agent_rejects_grok_progress_without_structured_final_output(monkeypatch):
+    output = (
+        "Reviewing the README.md and tools/brigade.md diffs against Brigade 0.22.0. "
+        "Gathering the git diffs and current file content first."
+    )
+    monkeypatch.setattr(agents.proc, "which", lambda command: "/x/" + command)
+    monkeypatch.setattr(agents.proc, "run", lambda argv, **kwargs: agents.proc.Result(0, output + "\n", ""))
+
+    result = agents.run_agent("grok", "review it", read_only=True, model="grok-4.5")
+
+    assert result.ok is False
+    assert result.detail == "grok exited 0 without a structured final response"
+    assert result.text == output
+    assert result.stdout == output + "\n"
+    assert result.exit_code == 0
+
+
+def test_run_agent_rejects_grok_json_without_structured_final_output(monkeypatch):
+    output = "Reviewing the diff and gathering the relevant files first."
+    stdout = _grok_json_output(output, structured=False, stop_reason="Cancelled")
+    monkeypatch.setattr(agents.proc, "which", lambda command: "/x/" + command)
+    monkeypatch.setattr(agents.proc, "run", lambda argv, **kwargs: agents.proc.Result(0, stdout + "\n", ""))
+
+    result = agents.run_agent("grok", "review it", read_only=True, model="grok-4.5")
+
+    assert result.ok is False
+    assert result.detail == (
+        "grok exited 0 without a structured final response "
+        "(stopReason=Cancelled; model did not produce structured output)"
+    )
+    assert result.text == output
+    assert result.stdout == stdout + "\n"
+
+
+@pytest.mark.parametrize("case", ["cancelled", "extra-property", "structured-error"])
+def test_run_agent_rejects_invalid_grok_structured_final_output(monkeypatch, case):
+    payload = json.loads(_grok_json_output("No actionable findings."))
+    if case == "cancelled":
+        payload["stopReason"] = "Cancelled"
+    elif case == "extra-property":
+        payload["structuredOutput"]["extra"] = True
+    else:
+        payload["structuredOutputError"] = "model reported an invalid structured result"
+    stdout = json.dumps(payload)
+    monkeypatch.setattr(agents.proc, "which", lambda command: "/x/" + command)
+    monkeypatch.setattr(agents.proc, "run", lambda argv, **kwargs: agents.proc.Result(0, stdout + "\n", ""))
+
+    result = agents.run_agent("grok", "review it", read_only=True, model="grok-4.5")
+
+    assert result.ok is False
+    assert "grok exited 0 without a structured final response" in result.detail
+    assert result.text == "No actionable findings."
+    assert result.stdout == stdout + "\n"
+
+
+@pytest.mark.parametrize("error_value", ["", False, 0, {}])
+def test_run_agent_rejects_falsey_present_grok_structured_error(monkeypatch, error_value):
+    payload = json.loads(_grok_json_output("No actionable findings."))
+    payload["structuredOutputError"] = error_value
+    stdout = json.dumps(payload)
+    monkeypatch.setattr(agents.proc, "which", lambda command: "/x/" + command)
+    monkeypatch.setattr(agents.proc, "run", lambda argv, **kwargs: agents.proc.Result(0, stdout + "\n", ""))
+
+    result = agents.run_agent("grok", "review it", read_only=True, model="grok-4.5")
+
+    assert result.ok is False
+    assert "structuredOutputError was present" in result.detail
+    assert result.text == "No actionable findings."
+    assert result.stdout == stdout + "\n"
+    assert result.exit_code == 0
+
+
+def test_run_agent_accepts_structured_grok_finding_with_progress_opening(monkeypatch):
+    output = "Reviewing the diff: missing bounds check in foo."
+    stdout = _grok_json_output(output)
+    monkeypatch.setattr(agents.proc, "which", lambda command: "/x/" + command)
+    monkeypatch.setattr(agents.proc, "run", lambda argv, **kwargs: agents.proc.Result(0, stdout + "\n", ""))
+
+    result = agents.run_agent("grok", "review it", read_only=True, model="grok-4.5")
+
+    assert result.ok is True
+    assert result.text == output
+    assert result.stdout == stdout + "\n"
+
+
+def test_run_agent_accepts_concise_grok_no_findings(monkeypatch):
+    output = _grok_json_output("No actionable findings.")
+    seen = {}
+    monkeypatch.setattr(agents.proc, "which", lambda command: "/x/" + command)
+
+    def fake_run(argv, **kwargs):
+        seen["argv"] = argv
+        return agents.proc.Result(0, output + "\n", "")
+
+    monkeypatch.setattr(agents.proc, "run", fake_run)
+
+    result = agents.run_agent("grok", "review it", read_only=True, model="grok-4.5")
+
+    assert result.ok is True
+    assert result.text == "No actionable findings."
+    assert result.exit_code == 0
+    assert seen["argv"][-2:] == [
+        "--json-schema",
+        (
+            '{"type":"object","properties":{"kind":{"type":"string","enum":["answer"]},'
+            '"answer":{"type":"string","minLength":1}},"required":["kind","answer"],'
+            '"additionalProperties":false}'
+        ),
+    ]
+    assert "--permission-mode" not in seen["argv"]
+    assert seen["argv"][seen["argv"].index("--sandbox") :] == [
+        "--sandbox",
+        "read-only",
+        "--always-approve",
+        "--json-schema",
+        seen["argv"][-1],
+    ]
+
+
+def test_run_agent_keeps_writable_grok_plain_output(monkeypatch):
+    output = "Implemented the requested change."
+    monkeypatch.setattr(agents.proc, "which", lambda command: "/x/" + command)
+    monkeypatch.setattr(agents.proc, "run", lambda argv, **kwargs: agents.proc.Result(0, output + "\n", ""))
+
+    result = agents.run_agent("grok", "implement it", read_only=False, model="grok-4.5")
+
+    assert result.ok is True
+    assert result.text == output
+
+
+def test_run_agent_reports_invalid_internal_grok_read_only_argv(monkeypatch):
+    calls = []
+    monkeypatch.setattr(agents.proc, "which", lambda command: "/x/" + command)
+    monkeypatch.setattr(agents, "build_argv", lambda *args, **kwargs: ["grok", "-p", "review it"])
+    monkeypatch.setattr(agents.proc, "run", lambda argv, **kwargs: calls.append(argv))
+
+    result = agents.run_agent("grok", "review it", read_only=True, model="grok-4.5")
+
+    assert result.ok is False
+    assert result.detail == "internal error: grok read-only argv missing --permission-mode plan"
+    assert result.requested_model == "grok-4.5"
+    assert calls == []
 
 
 def test_run_agent_rejects_direct_read_only_cursor_composer_before_spawn(monkeypatch):
