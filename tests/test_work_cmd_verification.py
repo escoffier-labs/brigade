@@ -549,12 +549,23 @@ def _seed_graphtrail_db(tmp_path: Path) -> Path:
     return db_path
 
 
+def _count_verify_run_dirs(target: Path) -> int:
+    from brigade.work_cmd import helpers
+
+    root = helpers._verify_runs_root(target)
+    if not root.is_dir():
+        return 0
+    return sum(1 for entry in root.iterdir() if entry.is_dir())
+
+
 def _write_fake_graphtrail(
     tmp_path,
     *,
     mode: str = "ok",
     sync_delay_seconds: float = 0.0,
     diff_delay_seconds: float = 0.0,
+    create_db_before_delay: bool = False,
+    sync_delay_from_call: int = 1,
 ) -> Path:
     script = tmp_path / "fake-graphtrail.py"
     script.write_text(
@@ -573,6 +584,8 @@ command = args[args.index(str(db)) + 1] if str(db) in args and args.index(str(db
 mode = os.environ.get("FAKE_GRAPHTRAIL_MODE", "ok")
 sync_delay_seconds = float(os.environ.get("FAKE_GRAPHTRAIL_SYNC_SECONDS", "0"))
 diff_delay_seconds = float(os.environ.get("FAKE_GRAPHTRAIL_DIFF_SECONDS", "0"))
+create_db_before_delay = os.environ.get("FAKE_GRAPHTRAIL_CREATE_DB_BEFORE_DELAY", "") == "1"
+sync_delay_from_call = int(os.environ.get("FAKE_GRAPHTRAIL_SYNC_DELAY_FROM_CALL", "1"))
 
 # Mirror the real clap CLI strictly: `sync` rejects --json, `diff` requires
 # --before/--after/--json. JSON shape follows graphtrail's diff golden fixture.
@@ -580,7 +593,16 @@ if command == "sync":
     if "--json" in args:
         print("error: unexpected argument '--json' found", file=sys.stderr)
         raise SystemExit(2)
-    if sync_delay_seconds > 0:
+    counter_path = db.parent / ".fake-graphtrail-sync-count"
+    sync_call = int(counter_path.read_text()) if counter_path.is_file() else 0
+    sync_call += 1
+    counter_path.parent.mkdir(parents=True, exist_ok=True)
+    counter_path.write_text(str(sync_call))
+    if create_db_before_delay:
+        db.parent.mkdir(parents=True, exist_ok=True)
+        with sqlite3.connect(db) as con:
+            con.execute("create table if not exists symbols (name text)")
+    if sync_delay_seconds > 0 and sync_call >= sync_delay_from_call:
         time.sleep(sync_delay_seconds)
     if mode == "sync-fail":
         print("sync failed", file=sys.stderr)
@@ -654,7 +676,10 @@ raise SystemExit(9)
         f"FAKE_GRAPHTRAIL_MODE={mode}\n"
         f"FAKE_GRAPHTRAIL_SYNC_SECONDS={sync_delay_seconds}\n"
         f"FAKE_GRAPHTRAIL_DIFF_SECONDS={diff_delay_seconds}\n"
-        f"export FAKE_GRAPHTRAIL_MODE FAKE_GRAPHTRAIL_SYNC_SECONDS FAKE_GRAPHTRAIL_DIFF_SECONDS\n"
+        f"FAKE_GRAPHTRAIL_CREATE_DB_BEFORE_DELAY={'1' if create_db_before_delay else '0'}\n"
+        f"FAKE_GRAPHTRAIL_SYNC_DELAY_FROM_CALL={sync_delay_from_call}\n"
+        "export FAKE_GRAPHTRAIL_MODE FAKE_GRAPHTRAIL_SYNC_SECONDS FAKE_GRAPHTRAIL_DIFF_SECONDS "
+        "FAKE_GRAPHTRAIL_CREATE_DB_BEFORE_DELAY FAKE_GRAPHTRAIL_SYNC_DELAY_FROM_CALL\n"
         f'exec {os.environ.get("PYTHON", "python3")} {script} "$@"\n'
     )
     wrapper.chmod(0o755)
@@ -851,6 +876,113 @@ def test_work_verify_graphtrail_delta_timeout_evidence_and_verify_exit_unchanged
     assert compact_before_sync["timed_out"] is True
     assert compact_before_sync["duration_seconds"] >= 0.05
     assert compact_before_sync["stderr"]
+    assert before_sync["stage"] == "initial-index"
+
+
+def test_work_verify_graphtrail_delta_cold_initial_early_db_timeout_stays_sync_timed_out(tmp_path, capsys, monkeypatch):
+    _init_git_repo(tmp_path)
+    graphtrail = _write_fake_graphtrail(
+        tmp_path,
+        sync_delay_seconds=0.2,
+        create_db_before_delay=True,
+    )
+    monkeypatch.setenv("GRAPHTRAIL_BIN", str(graphtrail))
+
+    assert (
+        work_cmd.verify_run(
+            target=tmp_path,
+            commands=["python3 -c \"print('ok')\""],
+            graphtrail_timeout=0.05,
+            json_output=True,
+        )
+        == 0
+    )
+    receipt = json.loads(capsys.readouterr().out)
+    sidecar = json.loads((Path(receipt["path"]) / "graph-delta.json").read_text())
+    before_sync = sidecar["commands"]["before_sync"]
+    compact_delta = receipt["code_graph_delta"]
+
+    assert receipt["commands"][0]["exit_code"] == 0
+    assert compact_delta["status"] == "sync_timed_out"
+    assert sidecar["status"] == "sync_timed_out"
+    assert "stale_graph_used" not in compact_delta
+    assert "stale_graph_used" not in sidecar
+    assert before_sync["stage"] == "initial-index"
+    assert before_sync["timed_out"] is True
+    assert sidecar["commands"]["after_sync"] is None
+
+
+def test_work_verify_graphtrail_delta_invalid_config_timeout_returns_2_without_orphan_run(tmp_path, capsys):
+    _init_git_repo(tmp_path)
+    _write_brigade_config(tmp_path, graphtrail_delta_timeout_seconds=0)
+    assert _count_verify_run_dirs(tmp_path) == 0
+
+    rc = work_cmd.verify_run(
+        target=tmp_path,
+        commands=["python3 -c \"print('ok')\""],
+        json_output=True,
+    )
+    err = capsys.readouterr().err
+
+    assert rc == 2
+    assert "error:" in err
+    assert "graphtrail_delta_timeout_seconds must be a positive number" in err
+    assert "Traceback" not in err
+    assert _count_verify_run_dirs(tmp_path) == 0
+
+
+def test_work_verify_graphtrail_delta_post_sync_timeout_after_successful_pre_sync(tmp_path, capsys, monkeypatch):
+    _init_git_repo(tmp_path)
+    graphtrail = _write_fake_graphtrail(
+        tmp_path,
+        sync_delay_seconds=0.2,
+        sync_delay_from_call=2,
+    )
+    monkeypatch.setenv("GRAPHTRAIL_BIN", str(graphtrail))
+
+    assert (
+        work_cmd.verify_run(
+            target=tmp_path,
+            commands=["python3 -c \"print('ok')\""],
+            graphtrail_timeout=0.05,
+            json_output=True,
+        )
+        == 0
+    )
+    receipt = json.loads(capsys.readouterr().out)
+    sidecar = json.loads((Path(receipt["path"]) / "graph-delta.json").read_text())
+    before_sync = sidecar["commands"]["before_sync"]
+    after_sync = sidecar["commands"]["after_sync"]
+
+    assert receipt["commands"][0]["status"] == "completed"
+    assert receipt["commands"][0]["exit_code"] == 0
+    assert receipt["code_graph_delta"]["status"] == "sync_timed_out"
+    assert sidecar["status"] == "sync_timed_out"
+    assert before_sync["timed_out"] is False
+    assert after_sync["stage"] == "incremental-sync"
+    assert after_sync["timed_out"] is True
+
+
+@pytest.mark.parametrize(
+    "bad_timeout",
+    [0, -1, True, float("nan"), float("inf")],
+    ids=["zero", "negative", "boolean", "nan", "infinity"],
+)
+def test_work_verify_graphtrail_delta_rejects_invalid_per_invocation_timeout_override(tmp_path, capsys, bad_timeout):
+    _init_git_repo(tmp_path)
+
+    rc = work_cmd.verify_run(
+        target=tmp_path,
+        commands=["python3 -c \"print('ok')\""],
+        graphtrail_timeout=bad_timeout,
+    )
+    err = capsys.readouterr().err
+
+    assert rc == 2
+    assert "error:" in err
+    assert "graphtrail_delta_timeout_seconds must be a positive number" in err
+    assert "Traceback" not in err
+    assert _count_verify_run_dirs(tmp_path) == 0
 
 
 def test_work_verify_graphtrail_delta_preexisting_db_timeout_uses_stale_baseline(tmp_path, capsys, monkeypatch):

@@ -39,10 +39,11 @@ def capture_before(target: Path, run_dir: Path, *, timeout: float = 10.0) -> dic
         if binary is None:
             return _status("unavailable", "code graph delta unavailable: graphtrail binary not found")
         db_path = target / ".graphtrail" / "graphtrail.db"
-        sync_stage = "incremental-sync" if db_path.is_file() else "initial-index"
+        db_existed_before_sync = db_path.is_file()
+        sync_stage = "incremental-sync" if db_existed_before_sync else "initial-index"
         sync = _run_graphtrail(binary, db_path, "sync", timeout=timeout, stage=sync_stage)
         if sync.get("timed_out"):
-            if db_path.is_file():
+            if db_existed_before_sync:
                 snapshot_path = run_dir / SNAPSHOT_NAME
                 _backup_sqlite(db_path, snapshot_path)
                 return {
@@ -81,6 +82,7 @@ def capture_before(target: Path, run_dir: Path, *, timeout: float = 10.0) -> dic
                 binary=binary,
                 db_path=str(db_path),
                 sync=sync,
+                graphtrail_timeout_seconds=timeout,
             )
         snapshot_path = run_dir / SNAPSHOT_NAME
         _backup_sqlite(db_path, snapshot_path)

@@ -297,14 +297,13 @@ def _run_verify_commands(
     commands: list[str | list[str]],
     timeout: int,
     *,
-    graphtrail_timeout: float | None = None,
+    graphtrail_timeout: float,
 ) -> tuple[dict[str, Any], int]:
     started = helpers._now()
     run_id = f"{started.strftime('%Y%m%d-%H%M%S')}-work-verify-{uuid4().hex[:6]}"
     run_dir = helpers._verify_runs_root(target) / run_id
     run_dir.mkdir(parents=True, exist_ok=False)
-    effective_graphtrail_timeout = config.resolve_graphtrail_delta_timeout(target, graphtrail_timeout)
-    graph_delta_before = graphtrail_delta.capture_before(target, run_dir, timeout=effective_graphtrail_timeout)
+    graph_delta_before = graphtrail_delta.capture_before(target, run_dir, timeout=graphtrail_timeout)
     receipt: dict[str, Any] = {
         "run_id": run_id,
         "target": str(target),
@@ -430,7 +429,7 @@ def _run_verify_commands(
                 rc = 127
         receipt["commands"].append(command_result)
     receipt["code_graph_delta"] = graphtrail_delta.capture_after_and_diff(
-        target, run_dir, graph_delta_before, timeout=effective_graphtrail_timeout
+        target, run_dir, graph_delta_before, timeout=graphtrail_timeout
     )
     completed_at = helpers._now()
     receipt["completed_at"] = completed_at.isoformat()
@@ -678,17 +677,16 @@ def verify_run(
     if timeout < 1:
         print("error: --timeout must be a positive integer", file=sys.stderr)
         return 2
-    if graphtrail_timeout is not None:
-        try:
-            graphtrail_timeout = config._validate_graphtrail_delta_timeout(graphtrail_timeout)
-        except ValueError as exc:
-            print(f"error: {exc}", file=sys.stderr)
-            return 2
+    try:
+        effective_graphtrail_timeout = config.resolve_graphtrail_delta_timeout(target, graphtrail_timeout)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
     planned = commands if commands is not None else _default_verify_commands(target)
     if not planned:
         print("error: no verification commands found; pass --command", file=sys.stderr)
         return 2
-    receipt, rc = _run_verify_commands(target, planned, timeout, graphtrail_timeout=graphtrail_timeout)
+    receipt, rc = _run_verify_commands(target, planned, timeout, graphtrail_timeout=effective_graphtrail_timeout)
     if json_output:
         if capture:
             # Record the outcome in the same command (closes the loop without a

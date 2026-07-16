@@ -25,7 +25,7 @@ class Config:
     graphtrail_delta_timeout_seconds: float = DEFAULT_GRAPHTRAIL_DELTA_TIMEOUT_SECONDS
 
 
-def _validate_graphtrail_delta_timeout(value: Any) -> float:
+def validate_graphtrail_delta_timeout(value: Any) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise ValueError("graphtrail_delta_timeout_seconds must be a positive number")
     timeout = float(value)
@@ -36,7 +36,7 @@ def _validate_graphtrail_delta_timeout(value: Any) -> float:
 
 def resolve_graphtrail_delta_timeout(target: Path, cli_override: float | None = None) -> float:
     if cli_override is not None:
-        return _validate_graphtrail_delta_timeout(cli_override)
+        return validate_graphtrail_delta_timeout(cli_override)
     cfg = load_config(target)
     if cfg is not None:
         return cfg.graphtrail_delta_timeout_seconds
@@ -49,7 +49,7 @@ def config_path(target: Path) -> Path:
 
 def write_config(target: Path, cfg: Config) -> None:
     cfg.selection.validate()
-    graphtrail_timeout = _validate_graphtrail_delta_timeout(cfg.graphtrail_delta_timeout_seconds)
+    graphtrail_timeout = validate_graphtrail_delta_timeout(cfg.graphtrail_delta_timeout_seconds)
     path = config_path(target)
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
@@ -86,5 +86,5 @@ def load_config(target: Path) -> Optional[Config]:
     )
     sel.validate()
     timeout_raw = data.get("graphtrail_delta_timeout_seconds", DEFAULT_GRAPHTRAIL_DELTA_TIMEOUT_SECONDS)
-    timeout = _validate_graphtrail_delta_timeout(timeout_raw)
+    timeout = validate_graphtrail_delta_timeout(timeout_raw)
     return Config(version=version, selection=sel, graphtrail_delta_timeout_seconds=timeout)
