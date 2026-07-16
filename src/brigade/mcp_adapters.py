@@ -270,7 +270,7 @@ def _json_write_file(
     reject_invalid_existing: bool = False,
 ) -> str:
     doc: dict[str, Any] = {}
-    if text:
+    if text is not None:
         try:
             loaded = json.loads(text)
             if isinstance(loaded, dict):
