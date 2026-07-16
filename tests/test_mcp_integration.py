@@ -216,6 +216,10 @@ def test_cursor_user_scope_preserves_remote_graphtrail_shape(tmp_path, monkeypat
     ("invalid", "error"),
     [
         (
+            "",
+            "existing JSON configuration is invalid; refusing to overwrite",
+        ),
+        (
             '{"mcpServers": {"private": {"command": "private-mcp"}},}',
             "existing JSON configuration is invalid; refusing to overwrite",
         ),
