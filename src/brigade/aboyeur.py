@@ -1763,10 +1763,38 @@ def run(
     has_codex_workers = any(
         (roster.agents.get(a.worker) is not None and roster.agents[a.worker].cli == "codex") for a in assignments
     )
+    if effective_transport == "app-server" and not has_codex_workers:
+        effective_transport = "exec"
+    elif effective_transport == "app-server" and output_dir is not None:
+        control_socket = output_dir / "control.sock"
+    transport_for_payload = effective_transport
+    if output_dir is not None:
+        _write_json(
+            output_dir / "run.json",
+            _run_payload(
+                task=task,
+                cwd=cwd,
+                roster=roster,
+                dry_run=dry_run,
+                read_only=read_only,
+                status="dispatching",
+                started_at=started_at,
+                output_dir=output_dir,
+                code_graph=code_graph,
+                drift_impact=drift_impact,
+                evidence=evidence,
+                brief_set=brief_set,
+                codex_transport=transport_for_payload,
+                route=route,
+                control_socket=control_socket,
+                code_graph_delta=code_graph_delta,
+                worker=worker,
+            ),
+        )
     appserver = None
     control_registry = None
     control_server = None
-    if effective_transport == "app-server" and has_codex_workers:
+    if effective_transport == "app-server":
         try:
             appserver = codex_appserver.AppServer(cwd=cwd)
             appserver.start()
@@ -1774,9 +1802,9 @@ def run(
             print(f"warning: codex app-server unavailable ({exc}); falling back to exec", file=sys.stderr)
             appserver = None
             effective_transport = "exec"
+            control_socket = None
         if appserver is not None and output_dir is not None:
             control_registry = run_control.LiveTurnRegistry()
-            control_socket = output_dir / "control.sock"
             control_server = run_control.ControlServer(control_socket, control_registry)
             try:
                 control_server.start()
@@ -1785,10 +1813,8 @@ def run(
                 control_registry = None
                 control_server = None
                 control_socket = None
-    elif effective_transport == "app-server":
-        effective_transport = "exec"
     transport_for_payload = effective_transport
-    if output_dir is not None and control_socket is not None:
+    if output_dir is not None:
         _write_json(
             output_dir / "run.json",
             _run_payload(

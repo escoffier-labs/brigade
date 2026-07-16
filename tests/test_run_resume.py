@@ -85,6 +85,19 @@ def test_resume_reattaches_and_resynthesizes(tmp_path, monkeypatch, capsys):
             },
         ],
     )
+    recovered = json.loads((run_dir / "run.json").read_text())
+    recovered.update(
+        {
+            "error": "run owner process 99999999 is no longer active",
+            "failure_phase": "stale-lock-recovery",
+            "failure": {
+                "phase": "stale-lock-recovery",
+                "kind": "owner-process-exited",
+                "owner_pid": 99999999,
+            },
+        }
+    )
+    (run_dir / "run.json").write_text(json.dumps(recovered))
     monkeypatch.setattr(run_resume.codex_appserver, "AppServer", _StubServer)
     monkeypatch.setattr(
         run_resume.agents,
@@ -100,6 +113,9 @@ def test_resume_reattaches_and_resynthesizes(tmp_path, monkeypatch, capsys):
     run_json = json.loads((run_dir / "run.json").read_text())
     assert run_json["status"] == "ok"
     assert run_json["resumed_at"]
+    assert run_json["recovery_history"] == [recovered["failure"]]
+    assert "failure_phase" not in run_json
+    assert "failure" not in run_json
 
 
 def test_resume_with_nothing_resumable_reports_and_exits_2(tmp_path, capsys):

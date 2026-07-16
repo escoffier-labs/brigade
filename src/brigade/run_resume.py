@@ -191,6 +191,14 @@ def resume(run_dir: Path) -> int:
     (run_dir / "final.txt").write_text(final.text + "\n")
     run_meta["status"] = "ok"
     run_meta.pop("error", None)
+    recovered_failure = run_meta.pop("failure", None)
+    run_meta.pop("failure_phase", None)
+    if isinstance(recovered_failure, dict):
+        history = run_meta.get("recovery_history")
+        if not isinstance(history, list):
+            history = []
+            run_meta["recovery_history"] = history
+        history.append(recovered_failure)
     aboyeur._write_json(run_dir / "run.json", run_meta)
     print(final.text)
     return 0

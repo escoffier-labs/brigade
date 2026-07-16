@@ -2,7 +2,7 @@ import argparse
 import json
 from pathlib import Path
 
-from brigade import cli
+from brigade import aboyeur, cli
 from brigade.cli import run as run_cli
 
 
@@ -94,6 +94,37 @@ def test_run_detach_reports_early_child_exit(tmp_path, monkeypatch, capsys):
     assert "detached child exited before run metadata was written: exit 7" in captured.err
     assert f"log: {run_dir / 'detached.log'}" in captured.err
     assert (run_dir / "detached.log").read_text() == "boom\n"
+
+
+def test_run_detach_child_records_artifact_identity_in_lock(tmp_path, monkeypatch):
+    _write_roster(tmp_path)
+    seen = {}
+
+    def fake_run(*args, output_dir=None, **kwargs):
+        owner_path = tmp_path / ".brigade" / "run.lock" / "owner.json"
+        seen.update(json.loads(owner_path.read_text()))
+        output_dir.mkdir(parents=True, exist_ok=True)
+        (output_dir / "run.json").write_text(json.dumps({"status": "ok"}) + "\n")
+        return 0
+
+    class FakeProcess:
+        pid = 4321
+
+        def __init__(self, argv, **kwargs):
+            assert cli.main(argv[3:]) == 0
+
+        def poll(self):
+            return None
+
+    monkeypatch.setattr(aboyeur, "run", fake_run)
+    monkeypatch.setattr(run_cli, "Popen", FakeProcess)
+
+    assert cli.main(["run", "do work", "--cwd", str(tmp_path), "--detach"]) == 0
+
+    run_dir = next((tmp_path / ".brigade" / "runs").iterdir())
+    assert seen["run_dir"] == str(run_dir.resolve())
+    assert isinstance(seen["owner_token"], str) and seen["owner_token"]
+    assert not (tmp_path / ".brigade" / "run.lock").exists()
 
 
 def test_run_detach_child_argv_preserves_worker(tmp_path):

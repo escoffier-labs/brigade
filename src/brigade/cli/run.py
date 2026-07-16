@@ -271,7 +271,7 @@ def dispatch(args) -> int:
     effective_cwd = run_cwd
     keep_worktree = False
     try:
-        with runguard.run_lock(run_cwd, wait_seconds=args.wait):
+        with runguard.run_lock(run_cwd, run_dir=output_dir, wait_seconds=args.wait):
             if args.worktree:
                 worktree_cwd = _worktree_checkout_path(runguard.git_root(run_cwd), output_dir)
                 effective_cwd = runguard.create_detached_worktree(run_cwd, worktree_cwd)

@@ -1,4 +1,6 @@
 import json
+import os
+from pathlib import Path
 
 from brigade import cli
 from brigade import runs_cmd
@@ -71,6 +73,23 @@ def _write_minimal_run(run_dir, *, task, status, started_at, duration=1.0, read_
     )
 
 
+def _write_lock_owner(workspace, run_dir, *, pid=99999999, owner_token="owner"):
+    lock_path = workspace / ".brigade" / "run.lock"
+    lock_path.mkdir(parents=True)
+    (lock_path / "pid").write_text(f"{pid}\n")
+    _write_json(
+        lock_path / "owner.json",
+        {
+            "schema": "brigade.run_lock.v1",
+            "owner_token": owner_token,
+            "pid": pid,
+            "run_dir": str(run_dir.resolve()),
+            "acquired_at": "2026-07-16T00:00:00+00:00",
+        },
+    )
+    return lock_path
+
+
 def test_runs_show_prints_summary(tmp_path, capsys):
     run_dir = tmp_path / "run"
     _write_run_artifacts(run_dir)
@@ -117,6 +136,324 @@ def test_runs_show_cli(tmp_path, capsys):
 
     assert cli.main(["runs", "show", str(run_dir)]) == 0
     assert "status: ok" in capsys.readouterr().out
+
+
+def test_runs_recover_cli_dispatches_resolved_run(tmp_path, monkeypatch):
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    seen = {}
+    monkeypatch.setattr(
+        runs_cmd,
+        "recover",
+        lambda run, **kwargs: seen.update(run=run, **kwargs) or 0,
+        raising=False,
+    )
+
+    rc = cli.main(["runs", "recover", str(run_dir), "--cwd", str(tmp_path)])
+
+    assert rc == 0
+    assert seen == {"run": str(run_dir), "cwd": tmp_path, "runs_dir": None}
+
+
+def test_runs_recover_marks_dead_owner_run_terminal(tmp_path, capsys):
+    workspace = tmp_path / "workspace"
+    run_dir = workspace / ".brigade" / "runs" / "orphan"
+    _write_minimal_run(
+        run_dir,
+        task="orphaned task",
+        status="dispatching",
+        started_at="2026-07-16T00:00:00Z",
+    )
+    run_meta = json.loads((run_dir / "run.json").read_text())
+    run_meta["cwd"] = str(workspace)
+    _write_json(run_dir / "run.json", run_meta)
+    lock_path = _write_lock_owner(workspace, run_dir)
+
+    rc = runs_cmd.recover(str(run_dir), cwd=workspace)
+
+    assert rc == 0
+    recovered = json.loads((run_dir / "run.json").read_text())
+    assert recovered["status"] == "failed"
+    assert recovered["failure_phase"] == "stale-lock-recovery"
+    assert not lock_path.exists()
+    out = capsys.readouterr().out
+    assert f"recovered: {run_dir}" in out
+    assert "resume: unavailable" in out
+
+
+def test_runs_recover_reconstructs_missing_run_json_from_matching_dead_lock(tmp_path, capsys):
+    workspace = tmp_path / "workspace"
+    run_dir = workspace / ".brigade" / "runs" / "orphan"
+    run_dir.mkdir(parents=True)
+    _write_lock_owner(workspace, run_dir)
+
+    rc = runs_cmd.recover(str(run_dir), cwd=workspace)
+
+    assert rc == 0
+    recovered = json.loads((run_dir / "run.json").read_text())
+    assert recovered["status"] == "failed"
+    assert recovered["failure"]["prior_status"] == "artifact-unavailable"
+    assert f"recovered: {run_dir}" in capsys.readouterr().out
+
+
+def test_runs_recover_preserves_and_reconstructs_corrupt_run_json(tmp_path, capsys):
+    workspace = tmp_path / "workspace"
+    run_dir = workspace / ".brigade" / "runs" / "orphan"
+    run_dir.mkdir(parents=True)
+    (run_dir / "run.json").write_text("not json")
+    _write_lock_owner(workspace, run_dir)
+
+    rc = runs_cmd.recover(str(run_dir), cwd=workspace)
+
+    assert rc == 0
+    recovered = json.loads((run_dir / "run.json").read_text())
+    preserved = Path(recovered["recovery_preserved_artifact"])
+    assert preserved.read_text() == "not json"
+    assert f"recovered: {run_dir}" in capsys.readouterr().out
+
+
+def test_runs_recover_refuses_live_owner_without_changing_artifacts(tmp_path, capsys):
+    workspace = tmp_path / "workspace"
+    run_dir = workspace / ".brigade" / "runs" / "active"
+    _write_minimal_run(
+        run_dir,
+        task="active task",
+        status="dispatching",
+        started_at="2026-07-16T00:00:00Z",
+    )
+    run_meta = json.loads((run_dir / "run.json").read_text())
+    run_meta["cwd"] = str(workspace)
+    _write_json(run_dir / "run.json", run_meta)
+    lock_path = _write_lock_owner(workspace, run_dir, pid=os.getpid())
+
+    rc = runs_cmd.recover(str(run_dir), cwd=workspace)
+
+    assert rc == 2
+    assert json.loads((run_dir / "run.json").read_text())["status"] == "dispatching"
+    assert lock_path.is_dir()
+    assert "run owner process is still active" in capsys.readouterr().err
+
+
+def test_runs_recover_refuses_lock_for_different_run(tmp_path, capsys):
+    workspace = tmp_path / "workspace"
+    requested = workspace / ".brigade" / "runs" / "requested"
+    recorded = workspace / ".brigade" / "runs" / "recorded"
+    _write_minimal_run(
+        requested,
+        task="requested task",
+        status="dispatching",
+        started_at="2026-07-16T00:00:00Z",
+    )
+    run_meta = json.loads((requested / "run.json").read_text())
+    run_meta["cwd"] = str(workspace)
+    _write_json(requested / "run.json", run_meta)
+    lock_path = _write_lock_owner(workspace, recorded)
+
+    rc = runs_cmd.recover(str(requested), cwd=workspace)
+
+    assert rc == 2
+    assert json.loads((requested / "run.json").read_text())["status"] == "dispatching"
+    assert lock_path.is_dir()
+    assert "run lock belongs to a different run" in capsys.readouterr().err
+
+
+def test_runs_recover_is_idempotent_for_terminal_run(tmp_path, capsys):
+    workspace = tmp_path / "workspace"
+    run_dir = workspace / ".brigade" / "runs" / "failed"
+    _write_minimal_run(
+        run_dir,
+        task="failed task",
+        status="failed",
+        started_at="2026-07-16T00:00:00Z",
+    )
+
+    rc = runs_cmd.recover(str(run_dir), cwd=workspace)
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert f"already terminal: {run_dir} [failed]" in out
+    assert "resume: unavailable" in out
+
+
+def test_runs_recover_terminal_run_ignores_foreign_workspace_lock(tmp_path, capsys):
+    workspace = tmp_path / "workspace"
+    run_dir = workspace / ".brigade" / "runs" / "failed"
+    foreign_run = workspace / ".brigade" / "runs" / "other"
+    _write_minimal_run(
+        run_dir,
+        task="failed task",
+        status="failed",
+        started_at="2026-07-16T00:00:00Z",
+    )
+    run_meta = json.loads((run_dir / "run.json").read_text())
+    run_meta.update({"cwd": str(workspace), "failure_phase": "stale-lock-recovery"})
+    _write_json(run_dir / "run.json", run_meta)
+    lock_path = _write_lock_owner(workspace, foreign_run)
+
+    rc = runs_cmd.recover(str(run_dir), cwd=workspace)
+
+    assert rc == 0
+    assert lock_path.is_dir()
+    assert f"already terminal: {run_dir} [failed]" in capsys.readouterr().out
+
+
+def test_runs_recover_clears_matching_dead_lock_after_artifact_was_already_terminal(tmp_path, capsys):
+    workspace = tmp_path / "workspace"
+    run_dir = workspace / ".brigade" / "runs" / "failed"
+    _write_minimal_run(
+        run_dir,
+        task="failed task",
+        status="failed",
+        started_at="2026-07-16T00:00:00Z",
+    )
+    run_meta = json.loads((run_dir / "run.json").read_text())
+    run_meta.update({"cwd": str(workspace), "failure_phase": "stale-lock-recovery"})
+    _write_json(run_dir / "run.json", run_meta)
+    lock_path = _write_lock_owner(workspace, run_dir)
+
+    rc = runs_cmd.recover(str(run_dir), cwd=workspace)
+
+    assert rc == 0
+    assert not lock_path.exists()
+    assert f"already terminal: {run_dir} [failed]" in capsys.readouterr().out
+
+
+def test_runs_recover_reports_app_server_resume_when_available(tmp_path, capsys):
+    workspace = tmp_path / "workspace"
+    run_dir = workspace / ".brigade" / "runs" / "failed"
+    _write_minimal_run(
+        run_dir,
+        task="failed task",
+        status="failed",
+        started_at="2026-07-16T00:00:00Z",
+    )
+    _write_json(
+        run_dir / "worker-results.json",
+        {
+            "results": [
+                {
+                    "worker": "coder",
+                    "ok": False,
+                    "status": "failed",
+                    "thread_id": "thread-123",
+                }
+            ]
+        },
+    )
+
+    rc = runs_cmd.recover(str(run_dir), cwd=workspace)
+
+    assert rc == 0
+    assert f"resume: brigade runs resume {run_dir}" in capsys.readouterr().out
+
+
+def test_runs_show_surfaces_stale_lock_recovery_and_returns_nonzero(tmp_path, capsys):
+    run_dir = tmp_path / "run"
+    _write_minimal_run(
+        run_dir,
+        task="orphaned task",
+        status="failed",
+        started_at="2026-07-16T00:00:00Z",
+    )
+    run_meta = json.loads((run_dir / "run.json").read_text())
+    run_meta.update(
+        {
+            "cwd": str(tmp_path),
+            "finished_at": "2026-07-16T00:01:00Z",
+            "failure_phase": "stale-lock-recovery",
+            "failure": {
+                "phase": "stale-lock-recovery",
+                "kind": "owner-process-exited",
+                "detail": "run owner process 99999999 is no longer active",
+            },
+        }
+    )
+    _write_json(run_dir / "run.json", run_meta)
+
+    rc = runs_cmd.show(run_dir)
+
+    assert rc == 1
+    out = capsys.readouterr().out
+    assert "failure phase: stale-lock-recovery" in out
+    assert "failure kind: owner-process-exited" in out
+    assert f"inspect: brigade runs show {run_dir}" in out
+    assert "recover: completed (stale lock cleared)" in out
+    assert "resume: unavailable" in out
+
+
+def test_runs_watch_surfaces_stale_lock_recovery_and_returns_nonzero(tmp_path, capsys):
+    run_dir = tmp_path / "run"
+    _write_minimal_run(
+        run_dir,
+        task="orphaned task",
+        status="failed",
+        started_at="2026-07-16T00:00:00Z",
+    )
+    run_meta = json.loads((run_dir / "run.json").read_text())
+    run_meta.update(
+        {
+            "cwd": str(tmp_path),
+            "finished_at": "2026-07-16T00:01:00Z",
+            "failure_phase": "stale-lock-recovery",
+            "failure": {
+                "phase": "stale-lock-recovery",
+                "kind": "owner-process-exited",
+                "detail": "run owner process 99999999 is no longer active",
+            },
+        }
+    )
+    _write_json(run_dir / "run.json", run_meta)
+
+    rc = runs_cmd.watch(run_dir, cwd=tmp_path, interval=0.0)
+
+    assert rc == 1
+    out = capsys.readouterr().out
+    assert "failure phase: stale-lock-recovery" in out
+    assert f"inspect: brigade runs show {run_dir}" in out
+    assert "recover: completed (stale lock cleared)" in out
+    assert "resume: unavailable" in out
+
+
+def test_runs_show_does_not_claim_stale_lock_was_cleared_while_matching_lock_remains(tmp_path, capsys):
+    workspace = tmp_path / "workspace"
+    run_dir = workspace / ".brigade" / "runs" / "orphan"
+    _write_minimal_run(
+        run_dir,
+        task="orphaned task",
+        status="failed",
+        started_at="2026-07-16T00:00:00Z",
+    )
+    run_meta = json.loads((run_dir / "run.json").read_text())
+    run_meta.update({"cwd": str(workspace), "failure_phase": "stale-lock-recovery"})
+    _write_json(run_dir / "run.json", run_meta)
+    _write_lock_owner(workspace, run_dir)
+
+    assert runs_cmd.show(run_dir) == 1
+    out = capsys.readouterr().out
+    assert "recover: required (stale lock remains)" in out
+    assert "recover: completed (stale lock cleared)" not in out
+
+
+def test_runs_watch_does_not_claim_stale_lock_was_cleared_while_matching_claim_remains(tmp_path, capsys):
+    workspace = tmp_path / "workspace"
+    run_dir = workspace / ".brigade" / "runs" / "orphan"
+    _write_minimal_run(
+        run_dir,
+        task="orphaned task",
+        status="failed",
+        started_at="2026-07-16T00:00:00Z",
+    )
+    run_meta = json.loads((run_dir / "run.json").read_text())
+    run_meta.update({"cwd": str(workspace), "failure_phase": "stale-lock-recovery"})
+    _write_json(run_dir / "run.json", run_meta)
+    lock_path = _write_lock_owner(workspace, run_dir)
+    claimed = lock_path.with_name(f".{lock_path.name}.crashed.stale")
+    lock_path.rename(claimed)
+
+    assert runs_cmd.watch(run_dir, cwd=workspace, interval=0.0) == 1
+    out = capsys.readouterr().out
+    assert "recover: required (stale lock remains)" in out
+    assert "recover: completed (stale lock cleared)" not in out
 
 
 def test_runs_list_prints_recent_runs(tmp_path, capsys):
