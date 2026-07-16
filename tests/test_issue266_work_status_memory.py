@@ -13,6 +13,7 @@ from tests.issue266_fixture import (
     OPERATOR_REPORT_HISTORY_COUNT,
     build_daily_status_workspace,
     build_fleet_workspace,
+    write_json,
 )
 
 
@@ -84,6 +85,36 @@ def test_repos_health_decodes_shared_fleet_sweep_once(tmp_path, monkeypatch):
         "(expected root cause: _health_command_registry_payload calls _latest_command_receipt per "
         "repo-command and each call reloads all sweep JSON via _sweeps)"
     )
+
+
+def test_repos_health_falls_back_for_receipt_missing_from_newest_sweep(tmp_path, monkeypatch):
+    target = build_fleet_workspace(
+        tmp_path / "fleet-fallback-ws",
+        repo_count=2,
+        sweep_history_count=3,
+    )
+    newest_dir, fallback_dir, unused_dir = repos_sweeps._list_sweep_dirs_newest_first(target)
+    newest = repos_sweeps._read_sweep(newest_dir)
+    assert newest is not None
+    newest["repos"][1]["commands"] = []
+    write_json(newest_dir / "sweep.json", newest)
+    counter = {"sweep_json_decodes": 0}
+    monkeypatch.setattr(
+        repos_sweeps,
+        "_read_sweep",
+        _counting_wrapper(repos_sweeps._read_sweep, counter, "sweep_json_decodes"),
+    )
+
+    payload = repos_cmd.health(target)
+
+    assert counter["sweep_json_decodes"] == 2
+    assert payload["sweep"]["latest"]["sweep_id"] == newest_dir.name
+    health_by_repo = {
+        repo["repo_id"]: repo["health_commands"][0]["latest_receipt"] for repo in payload["health_commands"]["repos"]
+    }
+    assert health_by_repo["fake-repo-001"]["sweep_id"] == newest_dir.name
+    assert health_by_repo["fake-repo-002"]["sweep_id"] == fallback_dir.name
+    assert all(receipt["sweep_id"] != unused_dir.name for receipt in health_by_repo.values())
 
 
 def test_operator_report_health_does_not_decode_full_report_history(tmp_path, monkeypatch):
