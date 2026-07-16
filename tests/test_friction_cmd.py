@@ -390,3 +390,111 @@ def test_structured_recurrence_dedupes_across_receipt_paths(tmp_path, capsys):
     payload = json.loads(capsys.readouterr().out)
     assert payload["candidate_count"] == 1
     assert payload["duplicates"] == 1
+
+
+def test_friction_scan_rejects_documentation_and_reports_family_dispositions(tmp_path, capsys):
+    notes = tmp_path / "notes"
+    notes.mkdir()
+    (notes / "README.md").write_text("The fallback is blocked when a timeout occurs.\n")
+    (notes / "SKILL.md").write_text("Use a fallback if the command is blocked or times out.\n")
+    (notes / "suggestions.md").write_text("Suggested workaround: retry the failed command manually.\n")
+    (notes / "auth.log").write_text("permission denied while refreshing the session\n")
+    (notes / "network.log").write_text("connection refused by the local service\n")
+    processed = tmp_path / ".claude" / "memory-handoffs" / "processed"
+    processed.mkdir(parents=True)
+    (processed / "resolved.md").write_text("The previous timeout was fixed with a fallback.\n")
+
+    assert (
+        cli.main(
+            [
+                "friction",
+                "scan",
+                "--target",
+                str(tmp_path),
+                "--max-candidates",
+                "1",
+                "--json",
+            ]
+        )
+        == 0
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["candidate_count"] == 1
+    assert payload["rejected_noise"] == 4
+    assert payload["counts"]["by_source_family"]["regex"] == {
+        "accepted": 1,
+        "grouped": 0,
+        "rejected": 4,
+        "truncated": 1,
+    }
+
+
+def test_friction_scan_does_not_reemit_failure_text_from_successful_verify_run(tmp_path, capsys):
+    run = tmp_path / ".brigade" / "work" / "verify-runs" / "v1"
+    run.mkdir(parents=True)
+    (run / "receipt.json").write_text(
+        json.dumps(
+            {
+                "status": "completed",
+                "commands": [
+                    {
+                        "command": "pytest -q",
+                        "exit_code": 0,
+                        "status": "completed",
+                        "stdout_log_path": str(run / "command-1-stdout.log"),
+                    }
+                ],
+            }
+        )
+    )
+    (run / "command-1-stdout.log").write_text(
+        "The prior run failed because the MCP fallback timed out. Current result: 27 passed, 0 failed.\n"
+    )
+
+    assert cli.main(["friction", "scan", "--target", str(tmp_path), "--json"]) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["candidate_count"] == 0
+    assert payload["rejected_noise"] == 1
+    assert payload["counts"]["by_source_family"]["regex"]["rejected"] == 1
+
+
+def test_friction_scan_groups_repeated_timeout_warnings_with_child_evidence(tmp_path, capsys):
+    run = tmp_path / ".brigade" / "work" / "verify-runs" / "v1"
+    run.mkdir(parents=True)
+    (run / "receipt.json").write_text(
+        json.dumps(
+            {
+                "status": "failed",
+                "commands": [
+                    {
+                        "command": "brigade mcp doctor",
+                        "exit_code": 124,
+                        "status": "timed_out",
+                        "stderr_summary": "MCP server alpha timed out",
+                    },
+                    {
+                        "command": "brigade mcp doctor",
+                        "exit_code": 124,
+                        "status": "timed_out",
+                        "stderr_summary": "MCP server beta timed out",
+                    },
+                ],
+            }
+        )
+    )
+
+    assert cli.main(["friction", "scan", "--target", str(tmp_path), "--json"]) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["candidate_count"] == 1
+    candidate = payload["candidates"][0]
+    assert candidate["source_family"] == "verification"
+    assert len(candidate["evidence"]["children"]) == 2
+    assert payload["counts"]["by_source_family"]["verification"] == {
+        "accepted": 1,
+        "grouped": 1,
+        "rejected": 0,
+        "truncated": 0,
+    }
