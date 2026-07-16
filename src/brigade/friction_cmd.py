@@ -386,7 +386,8 @@ def _group_candidates(items: list[dict[str, Any]]) -> tuple[list[dict[str, Any]]
             continue
         grouped += len(bucket) - 1
         primary = dict(bucket[0])
-        evidence = dict(primary.get("evidence") if isinstance(primary.get("evidence"), dict) else {})
+        raw_evidence = primary.get("evidence")
+        evidence = dict(raw_evidence) if isinstance(raw_evidence, dict) else {}
         evidence["children"] = [_evidence_child(occurrence) for occurrence in bucket]
         primary["evidence"] = evidence
         result.append(primary)
@@ -744,9 +745,9 @@ def scan_payload(
         selected = quota_use.get(name, 0)
         dispositions[name]["accepted"] = selected
         dispositions[name]["truncated"] = max(0, len(families.get(name, [])) - selected)
-    type_counts = {}
-    severity_counts = {}
-    workflow_counts = {}
+    type_counts: dict[str, int] = {}
+    severity_counts: dict[str, int] = {}
+    workflow_counts: dict[str, int] = {}
     for candidate in candidates:
         type_counts[str(candidate["friction_type"])] = type_counts.get(str(candidate["friction_type"]), 0) + 1
         severity_counts[str(candidate["severity"])] = severity_counts.get(str(candidate["severity"]), 0) + 1
