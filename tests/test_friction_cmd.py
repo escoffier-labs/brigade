@@ -574,3 +574,31 @@ def test_friction_scan_rejects_exact_ok_zero_failure_summary(tmp_path, capsys):
     assert payload["candidate_count"] == 0
     assert payload["rejected_noise"] == 1
     assert payload["counts"]["by_source_family"]["regex"]["rejected"] == 1
+
+
+def test_friction_scan_rejects_pure_zero_failure_summary_variants(tmp_path, capsys):
+    notes = tmp_path / "notes"
+    notes.mkdir()
+    (notes / "pytest.log").write_text("27 passed and 0 failed\n")
+    (notes / "suite.log").write_text("All tests passed with 0 failed\n")
+    (notes / "timed.log").write_text("12 passed in 3s 0 failed\n")
+
+    assert cli.main(["friction", "scan", "--target", str(tmp_path), "--json"]) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["candidate_count"] == 0
+    assert payload["rejected_noise"] == 3
+    assert payload["counts"]["by_source_family"]["regex"]["rejected"] == 3
+
+
+def test_friction_scan_mixed_network_and_zero_failure_line_has_no_blocked_duplicate(tmp_path, capsys):
+    notes = tmp_path / "notes"
+    notes.mkdir()
+    (notes / "network.log").write_text("connection refused by service. 27 passed; 0 failed.\n")
+
+    assert cli.main(["friction", "scan", "--target", str(tmp_path), "--json"]) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["candidate_count"] == 1
+    assert payload["counts"]["by_type"] == {"network_timeout": 1}
+    assert payload["candidates"][0]["friction_type"] == "network_timeout"

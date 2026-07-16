@@ -100,8 +100,8 @@ IGNORED_ATTACHMENT_TYPES = {"hook_success", "hook_additional_context", "skill_li
 # friction always carries textual evidence (an error string, a status word).
 JSON_NUMERIC_FIELD_RE = re.compile(r'^"[^"\n]+"\s*:\s*-?\d+(?:\.\d+)?\s*,?$')
 PASSING_ZERO_FAILURE_RE = re.compile(
-    r"(?i)(?:test result:\s*ok\.?\s*(?:\d+\s+passed\s*[,;]?\s*)?0\s+failed|"
-    r"\d+\s+passed\s*[,;]?\s*0\s+failed|(?:all|tests?)\s+passed\s*[,;]?\s*0\s+failed)"
+    r"(?i)(?:test result:\s*ok\.?[^.\n]*\b0\s+failed\b|"
+    r"\d+\s+passed\b[^.\n]*\b0\s+failed\b|(?:all\s+tests?|tests?)\s+passed\b[^.\n]*\b0\s+failed\b)"
 )
 DOCUMENTATION_NAMES = frozenset(
     {
