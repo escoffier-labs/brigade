@@ -267,26 +267,35 @@ def _json_write_file(
     top_key: str,
     *,
     collect_inputs: bool = False,
+    reject_invalid_existing: bool = False,
 ) -> str:
     doc: dict[str, Any] = {}
-    if text:
+    if text is not None:
         try:
             loaded = json.loads(text)
             if isinstance(loaded, dict):
                 doc = loaded
-        except json.JSONDecodeError:
+            elif reject_invalid_existing:
+                raise ValueError("existing JSON configuration must be an object; refusing to overwrite")
+        except json.JSONDecodeError as exc:
+            if reject_invalid_existing:
+                raise ValueError("existing JSON configuration is invalid; refusing to overwrite") from exc
             doc = {}
     # Navigate/create the (possibly nested) server map, preserving every sibling key.
     parts = top_key.split(".")
     node = doc
     for part in parts[:-1]:
         child = node.get(part)
+        if reject_invalid_existing and part in node and not isinstance(child, dict):
+            raise ValueError(f"existing {top_key} section must be an object; refusing to overwrite")
         if not isinstance(child, dict):
             child = {}
             node[part] = child
         node = child
     leaf = parts[-1]
     section = node.get(leaf)
+    if reject_invalid_existing and leaf in node and not isinstance(section, dict):
+        raise ValueError(f"existing {top_key} section must be an object; refusing to overwrite")
     if not isinstance(section, dict):
         section = {}
     for name in remove:
@@ -903,7 +912,12 @@ def _openclaw_from_provider(
 
 
 def _make_json_mcpservers(
-    harness: str, path: str, *, user_scope: bool = False, remote_url_key: str = "url"
+    harness: str,
+    path: str,
+    *,
+    user_scope: bool = False,
+    remote_url_key: str = "url",
+    reject_invalid_existing: bool = False,
 ) -> McpAdapter:
     env_style = "expand"
     return McpAdapter(
@@ -919,7 +933,13 @@ def _make_json_mcpservers(
             n, r, remote_url_key=remote_url_key, keep_secrets=keep_secrets
         ),
         read_file=lambda t: _json_read_file(t, "mcpServers"),
-        write_file=lambda t, o, r: _json_write_file(t, o, r, "mcpServers"),
+        write_file=lambda t, o, r: _json_write_file(
+            t,
+            o,
+            r,
+            "mcpServers",
+            reject_invalid_existing=reject_invalid_existing,
+        ),
     )
 
 
@@ -984,6 +1004,12 @@ ADAPTERS: dict[str, McpAdapter] = {
     # User-global scopes: these write the per-user config the tool reads everywhere,
     # not a per-repo file. Gated behind --user-scope. Used to sync a machine's daily tools.
     "claude-user": _make_json_mcpservers("claude-user", "~/.claude.json", user_scope=True),
+    "cursor-user": _make_json_mcpservers(
+        "cursor-user",
+        "~/.cursor/mcp.json",
+        user_scope=True,
+        reject_invalid_existing=True,
+    ),
     "codex-user": McpAdapter(
         harness="codex-user",
         path="~/.codex/config.toml",

@@ -100,10 +100,17 @@ def _configured_harnesses(target: Path) -> set[str] | None:
     return set(cfg.selection.harnesses)
 
 
+def _scoped_harness(harness: str, *, user_scope: bool) -> str:
+    if harness == "cursor" and user_scope:
+        return "cursor-user"
+    return harness
+
+
 def active_targets(target: Path, *, harness: str | None, user_scope: bool) -> tuple[list[str], list[str]]:
     """Resolve which adapters this run touches. Returns (harnesses, notes)."""
     notes: list[str] = []
     if harness is not None:
+        harness = _scoped_harness(harness, user_scope=user_scope)
         if harness not in ADAPTERS:
             return [], [f"unknown MCP target {harness!r} (known: {', '.join(MCP_TARGETS)})"]
         adapter = ADAPTERS[harness]
@@ -116,6 +123,10 @@ def active_targets(target: Path, *, harness: str | None, user_scope: bool) -> tu
     for name in MCP_TARGETS:
         adapter = ADAPTERS[name]
         if adapter.user_scope and not user_scope:
+            continue
+        if name == "cursor-user":
+            # Cursor's global config is selected only by the explicit
+            # --harness cursor --user-scope combination.
             continue
         if name == "vscode":
             # vscode is not a Brigade harness. Only include it when the repo
@@ -136,7 +147,59 @@ def active_targets(target: Path, *, harness: str | None, user_scope: bool) -> tu
 
 
 def _server_targets_harness(server: CanonicalServer, harness: str) -> bool:
-    return server.targets is None or harness in server.targets
+    if server.targets is None:
+        return True
+    if harness == "cursor-user":
+        return "cursor" in server.targets or "cursor-user" in server.targets
+    return harness in server.targets
+
+
+def _repo_local_path(target: Path, value: str) -> bool:
+    path = Path(value).expanduser()
+    if not path.is_absolute():
+        return False
+    resolved = path.resolve()
+    try:
+        resolved.relative_to(target.resolve())
+    except ValueError:
+        return False
+    return True
+
+
+def _without_repo_graphtrail_db_pin(target: Path, args: tuple[str, ...]) -> tuple[str, ...]:
+    cleaned: list[str] = []
+    index = 0
+    while index < len(args):
+        arg = args[index]
+        if arg == "--db" and index + 1 < len(args) and _repo_local_path(target, args[index + 1]):
+            index += 2
+            continue
+        if arg.startswith("--db=") and _repo_local_path(target, arg.split("=", 1)[1]):
+            index += 1
+            continue
+        cleaned.append(arg)
+        index += 1
+    return tuple(cleaned)
+
+
+def _project_server(target: Path, harness: str, server: CanonicalServer) -> dict[str, Any]:
+    adapter = ADAPTERS[harness]
+    projected = adapter.to_provider(server)
+    command_name = Path(server.command or "").name.lower()
+    if (
+        harness != "cursor-user"
+        or server.is_remote
+        or (server.name.lower() != "graphtrail" and "graphtrail" not in command_name)
+    ):
+        return projected
+    args = _without_repo_graphtrail_db_pin(target, server.args)
+    if args == server.args:
+        return projected
+    if args:
+        projected["args"] = list(args)
+    else:
+        projected.pop("args", None)
+    return projected
 
 
 def _plan_for_harness(
@@ -166,7 +229,7 @@ def _plan_for_harness(
     for name, server in sorted(desired.items()):
         if name_filter is not None and name != name_filter:
             continue
-        provider_dict = adapter.to_provider(server)
+        provider_dict = _project_server(target, harness, server)
         desired_fp = localio.stable_hash(provider_dict)
         canon_fp = localio.stable_hash(mcp_adapters.server_to_dict(server))
         record = owned.get(name)
@@ -457,16 +520,22 @@ def plan(
             _plan_for_harness(target, h, servers, state, force=False, prune=True, adopt=False, name_filter=name)
         )
     counts = _counts(items)
+    source_catalog = str(canonical_path(target))
+    destination_files = [str(mcp_adapters.resolve_path(ADAPTERS[h], target)) for h in harnesses]
     payload = {
         "target": str(target),
+        "source_catalog": source_catalog,
+        "destination_files": destination_files,
         "harnesses": harnesses,
         "notes": notes,
         "items": _public_items(items),
         "counts": counts,
     }
-    lines = [f"{i['harness']:<12} {i['server']:<20} {i['status']:<14} -> {i['action']}" for i in items] or [
-        "(nothing to plan)"
-    ]
+    lines = [f"source: {source_catalog}"]
+    lines.extend(f"destination: {path}" for path in destination_files)
+    lines.extend(f"{i['harness']:<12} {i['server']:<20} {i['status']:<14} -> {i['action']}" for i in items)
+    if not items:
+        lines.append("(nothing to plan)")
     lines.extend(notes)
     rc = 1 if counts["conflict"] else 0
     return _emit(payload, json_output, lines, rc)
@@ -509,7 +578,7 @@ def sync(
             server_name = item["server"]
             action, status = item["action"], item["status"]
             if action in ("create", "update"):
-                to_write[server_name] = adapter.to_provider(servers[server_name])
+                to_write[server_name] = _project_server(target, h, servers[server_name])
                 owner_map[server_name] = {
                     "canonical_fingerprint": item["_canon_fp"],
                     "projected_fingerprint": item["_proj_fp"],
@@ -522,14 +591,18 @@ def sync(
             elif status == "current":
                 # Owned + matching (or reconciled after state loss): re-assert ownership and
                 # keep it present in the file. Identical content, so not a "change".
-                to_write[server_name] = adapter.to_provider(servers[server_name])
+                to_write[server_name] = _project_server(target, h, servers[server_name])
                 owner_map[server_name] = {
                     "canonical_fingerprint": item["_canon_fp"],
                     "projected_fingerprint": item["_proj_fp"],
                 }
         if write and (changed or any(i.get("_reconciled") for i in items)):
             existing = path.read_text() if path.is_file() else None
-            new_text = adapter.write_file(existing, to_write, to_remove)
+            try:
+                new_text = adapter.write_file(existing, to_write, to_remove)
+            except ValueError as exc:
+                message = f"{path}: {exc}"
+                return _emit({"errors": [message]}, json_output, [f"error: {message}"], 2)
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(new_text)
             files_written.append(str(path))
@@ -537,8 +610,12 @@ def sync(
     if write:
         _save_state(target, state)
     counts = _counts(all_items)
+    source_catalog = str(canonical_path(target))
+    destination_files = [str(mcp_adapters.resolve_path(ADAPTERS[h], target)) for h in harnesses]
     payload = {
         "target": str(target),
+        "source_catalog": source_catalog,
+        "destination_files": destination_files,
         "harnesses": harnesses,
         "wrote": write,
         "files_written": files_written,
@@ -547,7 +624,8 @@ def sync(
         "counts": counts,
     }
     verb = "wrote" if write else "would"
-    lines = [f"brigade mcp sync ({'write' if write else 'dry-run'}): {target}"]
+    lines = [f"brigade mcp sync ({'write' if write else 'dry-run'}): {target}", f"source: {source_catalog}"]
+    lines += [f"destination: {path}" for path in destination_files]
     lines += [f"{i['harness']:<12} {i['server']:<20} {i['status']:<14} -> {i['action']}" for i in all_items]
     lines += [f"{verb}: {f}" for f in files_written]
     lines += notes
@@ -592,6 +670,7 @@ def import_servers(
     json_output: bool = False,
 ) -> int:
     target = target.expanduser().resolve()
+    harness = _scoped_harness(harness, user_scope=user_scope)
     adapter = ADAPTERS.get(harness)
     if adapter is None:
         return _emit(
