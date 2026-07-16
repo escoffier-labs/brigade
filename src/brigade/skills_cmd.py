@@ -1108,6 +1108,9 @@ def rollback(*, workspace: Path, skill: str, harness: str, json_output: bool = F
     dest = _install_dir(workspace, harness, skill_id)
     canonical_receipt_path = _installs_root(workspace) / f"{skill_id}-{harness}.json"
     current_receipt = _read_json(canonical_receipt_path) if canonical_receipt_path.is_file() else {}
+    if not _valid_receipt_contract(current_receipt, skill_id=skill_id, harness=harness):
+        print(f"error: invalid rollback receipt for {skill_id} on {harness}", file=sys.stderr)
+        return 1
     snapshot_value = current_receipt.get("rollback_snapshot")
     if not isinstance(snapshot_value, str) or not snapshot_value:
         print(f"error: no receipt-bound rollback snapshot for {skill_id} on {harness}", file=sys.stderr)
@@ -1121,8 +1124,14 @@ def rollback(*, workspace: Path, skill: str, harness: str, json_output: bool = F
     if len(relative_snapshot.parts) != 1 or not snapshot.is_dir():
         print(f"error: invalid receipt-bound rollback snapshot for {skill_id} on {harness}", file=sys.stderr)
         return 1
-    previous_receipt = current_receipt.get("previous_receipt")
-    previous_receipt = previous_receipt if isinstance(previous_receipt, dict) else {}
+    previous_receipt_value = current_receipt.get("previous_receipt")
+    if previous_receipt_value is not None and (
+        not isinstance(previous_receipt_value, dict)
+        or not _valid_receipt_contract(previous_receipt_value, skill_id=skill_id, harness=harness)
+    ):
+        print(f"error: invalid previous rollback receipt for {skill_id} on {harness}", file=sys.stderr)
+        return 1
+    previous_receipt = previous_receipt_value or {}
     if dest.exists():
         shutil.rmtree(dest)
     dest.parent.mkdir(parents=True, exist_ok=True)
