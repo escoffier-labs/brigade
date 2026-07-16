@@ -2048,7 +2048,7 @@ def _fleet_status_payload(target: Path) -> dict[str, Any]:
         )
         if not drift["receipt_known"]:
             status = "unknown"
-        elif installed_dir.exists() and not supported_state:
+        elif _skill_md_path(installed_dir).is_file() and not supported_state:
             status = "unsupported"
         elif drift["overall"] == "missing":
             status = "missing"
